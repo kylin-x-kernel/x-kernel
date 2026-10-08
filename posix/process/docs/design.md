@@ -54,21 +54,31 @@ across its exit cleanup.
 
 The loop alternates user execution, trap handling, kernel CPU accounting and
 signal checks. The loop clears the previous trap's interrupt flag before the
-normal pending-signal check. It must not clear that flag after checking signals:
-a concurrent group-exit sender could otherwise queue SIGKILL and set the flag
-in between, then lose its notification before the target enters a futex wait.
+normal pending-signal check. A later clear happens only when another scan
+will follow it. Clearing after the last scan would let a concurrent group-exit
+sender queue SIGKILL and set the flag in between, then lose that notification
+before the target enters a futex wait.
 Signal return still runs the pending-signal check. The handled signal was
 dequeued before the handler ran, so the check delivers only a signal queued
 while that handler blocked it and made deliverable when the previous mask is
 restored. Restart of the interrupted syscall is not applied again on this path.
-For other traps, only installation of a user handler resolves restart state
-through the handler's flags. Consuming a default continue action does not:
-after the full signal scan, an unresolved restart code follows the no-handler
-restart path. Internal restart codes must not become user-visible errno values.
-Before reentering userspace, the loop polls CPU timers and checks
-preemption; an interrupt raised since the clear causes another signal check.
-Signals arriving after that final check retain their interrupt notification for
-the next interruptible wait or trap.
+For other traps, the return records the restart code and drains pending
+signals before it polls CPU timers and checks preemption. An interrupt raised
+by that poll or by preemption causes one more signal scan, not a loop on the
+interrupt flag. A peer that keeps posting signals must not pin the thread in
+the kernel: the first handler ends the drain so userspace runs it, and
+non-handler signals are capped, with one yield when the cap is hit while the
+task is still interrupted. Signals left pending keep their notification.
+The no-handler rewrite runs only after those scans. A handler installed by
+either of them turns `ERESTART_RESTARTBLOCK` into `EINTR` and drops that
+restart-block; rewriting the code first would hide it from the later handler,
+so the timed wait would resume after the handler returned. Consuming a default
+continue action does not count as a handler. Internal restart codes must not
+become user-visible errno values. `ERESTARTSYS` rolls the syscall back, and
+`ERESTART_RESTARTBLOCK` (timed futex wait) becomes `restart_syscall` so the
+stored deadline is kept.
+Signals that arrive after that single rescan keep their interrupt notification
+for the next interruptible wait or trap.
 
 `do_exit` performs the following order:
 

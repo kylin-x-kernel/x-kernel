@@ -140,8 +140,9 @@ pub(crate) fn run_user_thread_loop(
         }
 
         // Consume the previous trap's interrupt before checking pending signals.
-        // A concurrent sender after this point must leave its notification set
-        // until we handle the signal or an interruptible syscall observes it.
+        // A later clear is paired with another scan. Clearing after the last
+        // scan would drop a group-exit notification queued in between, and the
+        // following futex wait would not observe it.
         curr.clear_interrupt();
 
         // The handler path dequeues a signal before entering userspace, so this
@@ -151,21 +152,15 @@ pub(crate) fn run_user_thread_loop(
         // later trap, and an interruptible wait in between never notices it.
         // Restart was already applied or discarded when the signal frame was
         // built, so signal return must not roll the restored context back.
-        let mut has_installed_handler = false;
-        while let Some(action) = check_signals(&thr, &mut uctx, None) {
-            has_installed_handler |= matches!(action, SignalOSAction::Handler);
-        }
-        restart_syscall_without_handler(&mut uctx, runtime_action, has_installed_handler);
-
-        poll_cpu_timers();
-        ktask::check_preempt_pending();
-        // `interrupt()` may have queued a signal in `poll_cpu_timers` (CPU-time
-        // timer) or while this task was preempted (for example `alarm_task`).
-        // Re-handle before `uctx.run()`; a NOHZ lone runner may never trap again.
-        // This path only runs when a new interrupt arrived after `clear_interrupt`.
-        if curr.is_interrupted() {
-            while check_signals(&thr, &mut uctx, None).is_some() {}
-        }
+        // CPU-time timers and preemption run between the signal drains, and the
+        // no-handler rewrite waits until those drains finish. A handler that
+        // arrives in the gap must still see the restart code. The rescan is one
+        // shot: a sender that keeps posting signals must not pin this thread in
+        // the kernel before the handler runs.
+        apply_syscall_restart(&thr, &mut uctx, runtime_action, || {
+            poll_cpu_timers();
+            ktask::check_preempt_pending();
+        });
     }
 }
 
@@ -445,6 +440,13 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
 /// core file.
 /// This may block and must not run in interrupt context.
 /// Exited threads do not dequeue signals or construct further user frames.
+///
+/// # Returns
+///
+/// The OS action just performed, or `None` when nothing was delivered.
+/// [`SignalOSAction::Handler`] means a user handler folded any restart code.
+/// [`SignalOSAction::Continue`] means default `SIGCONT` was consumed and the
+/// restart code is still the caller's to rewrite.
 pub fn check_signals(
     thr: &Thread,
     uctx: &mut UserContext,
@@ -467,14 +469,116 @@ pub fn check_signals(
     Some(os_action)
 }
 
+/// Drains pending signals around `between_scans`, then applies syscall restart.
+///
+/// The restart code is recorded before either drain. Every drain in this call
+/// shares one handler flag. That flag drops the restart-block when the recorded
+/// code is [`LinuxError::ERESTART_RESTARTBLOCK`]. The no-handler rewrite runs
+/// only after those drains, so signal delivery still sees the code and can
+/// publish `EINTR` into the handler frame. Default `SIGCONT` does not install
+/// a handler, so the no-handler rewrite still runs.
+///
+/// `between_scans` is the timer poll and preemption check on the real return
+/// path. One rescan then delivers a signal queued there. A handler ends the
+/// drain so userspace runs it; further signals stay pending for the next return.
+fn apply_syscall_restart(
+    thr: &Thread,
+    uctx: &mut UserContext,
+    runtime_action: UserThreadRuntimeAction,
+    between_scans: impl FnOnce(),
+) {
+    let restart_error = uctx.syscall_restart_error();
+    let mut has_installed_handler = scan_installed_handler(thr, uctx);
+    between_scans();
+    // One rescan, not a loop on the interrupt flag. A peer that keeps posting
+    // signals would otherwise hold this thread in the kernel: the flag never
+    // stays clear, the handler never runs, and the CPU is never yielded.
+    if !has_installed_handler && current().is_interrupted() {
+        let curr = current();
+        // Clear only because this scan follows. A sender that races it keeps
+        // the notification for the next return.
+        curr.clear_interrupt();
+        has_installed_handler = scan_installed_handler(thr, uctx);
+    }
+    if has_installed_handler && matches!(restart_error, Some(LinuxError::ERESTART_RESTARTBLOCK)) {
+        current_user_thread().clear_restart_block();
+    }
+    restart_syscall_without_handler(uctx, runtime_action, has_installed_handler);
+}
+
+/// Non-handler signals one drain may consume before it stops.
+///
+/// A handler stops the drain immediately. This cap bounds the rest, so a sender
+/// that re-queues signals between dequeues cannot spin the return path.
+const MAX_NONHANDLER_SIGNALS_PER_DRAIN: usize = 8;
+
+/// Returns whether this drain installed a user handler.
+fn scan_installed_handler(thr: &Thread, uctx: &mut UserContext) -> bool {
+    let mut delivered = 0;
+    while delivered < MAX_NONHANDLER_SIGNALS_PER_DRAIN {
+        let Some(action) = check_signals(thr, uctx, None) else {
+            return false;
+        };
+        if matches!(action, SignalOSAction::Handler) {
+            return true;
+        }
+        delivered += 1;
+    }
+    // The queue is still being refilled. Yield once so a same-CPU sender can
+    // run, then leave the rest pending for a later return.
+    if current().is_interrupted() {
+        ktask::yield_now();
+    }
+    false
+}
+
+/// Replays one user-return restart decision without entering the trap loop.
+#[cfg(unittest)]
+pub fn replay_user_return_restart_for_test(
+    thr: &Thread,
+    uctx: &mut UserContext,
+    skip_restart: bool,
+) {
+    replay_user_return_restart_with_gap_for_test(thr, uctx, skip_restart, || {});
+}
+
+/// Replays the return path with a hook between the first drain and the rescan.
+///
+/// Queue the late signal inside `between_scans`, then `interrupt()` the current
+/// task. A queued signal left with a clear interrupt flag is not scanned again
+/// before the restart rewrite.
+#[cfg(unittest)]
+pub fn replay_user_return_restart_with_gap_for_test(
+    thr: &Thread,
+    uctx: &mut UserContext,
+    skip_restart: bool,
+    between_scans: impl FnOnce(),
+) {
+    let runtime_action = if skip_restart {
+        UserThreadRuntimeAction::SkipSyscallRestart
+    } else {
+        UserThreadRuntimeAction::Continue
+    };
+    apply_syscall_restart(thr, uctx, runtime_action, between_scans);
+}
+
+/// Rewinds a restartable syscall when no user handler was installed.
+///
+/// Timed futex wait uses [`LinuxError::ERESTART_RESTARTBLOCK`]: the syscall
+/// number becomes `restart_syscall` so the stored absolute deadline still
+/// applies. `SA_RESTART` is not consulted here. That flag only affects
+/// [`LinuxError::ERESTARTSYS`] when a userspace handler actually runs, and a
+/// delivered handler turns `ERESTART_RESTARTBLOCK` into `EINTR`. The caller
+/// drops the restart-block in that case.
+///
+/// Consuming a default `SIGCONT` does not install a handler. The caller waits
+/// until the signal scan finishes so a later handler can still reject restart.
+/// `sigreturn` has already restored a context whose restart was decided.
 fn restart_syscall_without_handler(
     uctx: &mut UserContext,
     runtime_action: UserThreadRuntimeAction,
     has_installed_handler: bool,
 ) {
-    // Consuming a default SIGCONT does not install a handler. Wait until the
-    // entire signal scan finishes so a later handler can still reject restart.
-    // sigreturn has already restored a context whose restart was decided.
     if has_installed_handler || runtime_action == UserThreadRuntimeAction::SkipSyscallRestart {
         return;
     }

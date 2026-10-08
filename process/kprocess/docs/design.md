@@ -28,7 +28,7 @@ The analysis covers the entire crate, including feature-gated code and tests.
 | `src/lib.rs` | Public facade, task construction/publication and current-resource helpers. |
 | `src/process.rs`, `src/process/exit.rs`, `src/process/tree.rs`, `src/process/thread_membership.rs`, `src/process/runtime_access.rs` | Stable identity, exit/wait, tree/group membership, thread membership and runtime capabilities. |
 | `src/process_runtime/mod.rs`, `src/process_runtime/posix_state.rs`, `src/process_runtime/runtime_state.rs` | Runtime construction/fork, exec metadata, mm-user ownership, heap and timers. |
-| `src/thread/mod.rs`, `src/thread/core.rs`, `src/thread/current.rs`, `src/thread/cpu_time.rs`, `src/thread/task_ext.rs` | Task-bound thread state, credentials, current-context access and task-runtime hooks. |
+| `src/thread/mod.rs`, `src/thread/core.rs`, `src/thread/current.rs`, `src/thread/cpu_time.rs`, `src/thread/restart.rs`, `src/thread/task_ext.rs` | Task-bound thread state, credentials, restart-block slot, current-context access and task-runtime hooks. |
 | `src/publication.rs`, `src/process_domain.rs`, `src/lookup.rs`, `src/lifecycle.rs` | Directory slots, relation transaction lock, lookup and exit events/CPU totals. |
 | `src/process_group.rs`, `src/session.rs` | Group member slots, session groups and controlling terminal. |
 | `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/pidfd.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
@@ -147,7 +147,11 @@ caller's current parent and exit-signal contract, rechecking it under the domain
 lock. Runtime preparation then clones/shares mm, signal actions and fd table;
 `AttachedForkProcess` rolls back the attached relation if preparation fails.
 The new thread starts from the caller's subjective credential snapshot and
-inherits no-new-privileges. A sibling clone shares the existing runtime.
+inherits no-new-privileges. Its restart-block starts empty; clone does not
+copy a parent's armed continuation. `exec` clears the slot because the payload
+addresses the previous image. The payload type belongs to the syscall adapter.
+Only `CurrentThread` may arm or take it, so a sibling `Thread` cannot read
+another thread's wait. A sibling clone shares the existing runtime.
 Both clone preparation paths copy the calling thread's blocked signal mask
 before returning the child for publication, including when the caller is not
 the process leader. Subsequent mask changes remain thread-local. New private

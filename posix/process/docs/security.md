@@ -99,3 +99,11 @@ are simplified, and PI robust-futex cleanup is skipped.
 - Check optional TEE/TIPC teardown in its configured build.
 - Keep the LoongArch context precondition tied to the actual trap result.
 - Verify fault signal mapping and the post-timer interrupt recheck when changing the loop.
+  That recheck must run once, before the no-handler restart rewrite, and every scan in the
+  return must share one handler flag with the restart-block clear. A handler ends the
+  drain so userspace runs it. Do not loop on the interrupt flag; cap non-handler
+  delivery so a continuous sender cannot pin the return path.
+- Do not treat `SignalOSAction::Continue` as a delivered handler when applying
+  syscall restart. Clear an `ERESTART_RESTARTBLOCK` slot in the same return
+  that publishes `EINTR`, including when the later scan is the one that installs
+  the handler.

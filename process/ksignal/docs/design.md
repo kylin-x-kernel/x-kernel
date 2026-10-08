@@ -140,9 +140,11 @@ arguments, sets the restorer return path (x86_64 pushes it on the stack,
 others use the return register), applies the handler mask plus the signal
 itself unless `SA_NODEFER`, and resets the action to default on
 `SA_RESETHAND`. Syscall-restart error codes in the trap context are folded
-into either a rollback (restart) or `-EINTR` before the handler runs;
-`restart_syscall_without_signal` in the posix runtime covers the no-signal
-return path. `restore` reads the frame back on `rt_sigreturn`, restores the
+into either a rollback (restart) or `-EINTR` before the handler runs.
+Default `SIGCONT` (`SignalOSAction::Continue`) does not fold those codes.
+The posix return path rewrites them when no handler ran, and drops the
+thread restart-block when a handler publishes `EINTR` for
+`ERESTART_RESTARTBLOCK`. `restore` reads the frame back on `rt_sigreturn`, restores the
 blocked set from `uc_sigmask`, and re-arms the pending flag.
 
 Child-exit notification is split into `prepare_child_exit_signal` (decision)

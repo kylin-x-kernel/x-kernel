@@ -215,7 +215,15 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 - `sync/futex.rs`: `futex` / `get_robust_list` / `set_robust_list`;
   compound operations (`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`) resolve both
   keys under a single `address_space` lock; the robust-list walk lives in
-  `posix/process`.
+  `posix/process`. An untimed wait interrupted by a signal returns
+  `ERESTARTSYS`. A timed wait returns `ERESTART_RESTARTBLOCK` and records
+  the monotonic deadline in a futex payload owned by this crate; `kprocess`
+  only stores that payload in an opaque current-thread slot. A delivered
+  handler turns that code into `EINTR` and drops the slot (`SA_RESTART` does
+  not restart timed futex wait). No handler, including default `SIGCONT`,
+  rewrites the syscall to `restart_syscall` and leaves the slot armed.
+- `task/restart.rs`: `restart_syscall` takes the futex payload from the
+  current thread. An empty or unrecognized slot returns `EINTR`.
 
 ## Container-related adapters
 

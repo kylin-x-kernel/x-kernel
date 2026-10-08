@@ -40,3 +40,7 @@ mod init_process;
 mod runtime;
 pub use init_process::spawn_init_process;
 pub use runtime::{check_signals, do_exit, new_user_task, raise_signal_fatal};
+#[cfg(unittest)]
+pub use runtime::{
+    replay_user_return_restart_for_test, replay_user_return_restart_with_gap_for_test,
+};

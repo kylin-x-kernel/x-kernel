@@ -207,3 +207,7 @@ exit readiness and CPU accounting. Test source existence is not execution proof.
 - Preserve objective/subjective credential lock order and override assertion.
 - Check signal preparation retry safety and commit-before-wakeup ordering.
 - Document and validate optional TEE/TIPC callbacks and architecture MM hooks.
+- A restart-block must stay on the current `Thread`, start empty on clone,
+  and be cleared on exec. Arm and take it only through `CurrentThread`.
+  The payload type stays in the syscall adapter. Do not store it in the futex
+  waiter table.

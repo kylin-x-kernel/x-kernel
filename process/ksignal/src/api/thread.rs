@@ -447,6 +447,9 @@ fn prepare_syscall_restart_for_signal(uctx: &mut UserContext, flags: SignalActio
         LinuxError::ERESTARTSYS
         | LinuxError::ERESTARTNOHAND
         | LinuxError::ERESTART_RESTARTBLOCK => {
+            // `ERESTART_RESTARTBLOCK` also armed a thread restart-block. This
+            // crate does not own that slot; the user-return path clears it
+            // when it publishes `EINTR`.
             uctx.set_retval(-(LinuxError::EINTR.into_raw() as isize) as usize);
         }
         _ => {}

@@ -16,7 +16,10 @@ use ktime_types::TimeSpan;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
 
-use super::cpu_time::{CpuTimeState, CpuTimeStatistics};
+use super::{
+    cpu_time::{CpuTimeState, CpuTimeStatistics},
+    restart::RestartSlot,
+};
 use crate::{
     Pid, Process, ProcessForkConfig, ProcessRuntime, Tid, allocate_thread_task_number,
     fork_process_runtime, process_runtime::ExitAddressSpace,
@@ -168,6 +171,7 @@ pub struct Thread {
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
     accessing_user_memory: AtomicBool,
+    pub(super) restart_block: Mutex<RestartSlot>,
     no_new_privileges: AtomicBool,
     cgroup: TaskMembership,
     #[cfg(feature = "tee")]
@@ -218,6 +222,7 @@ impl Thread {
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
+            restart_block: Mutex::new(RestartSlot::empty()),
             no_new_privileges: AtomicBool::new(no_new_privileges),
             cgroup,
             #[cfg(feature = "tee")]
@@ -359,6 +364,7 @@ impl Thread {
     pub fn reset_user_state_after_exec(&self) {
         self.set_clear_child_tid(0);
         self.set_robust_list_head(0);
+        self.clear_restart_block();
         self.signal.set_stack(SignalStack::default());
     }
 

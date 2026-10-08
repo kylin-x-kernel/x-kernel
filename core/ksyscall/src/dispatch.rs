@@ -617,6 +617,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg4() as _,
         ),
         Sysno::sigaltstack => sys_sigaltstack(uctx, uctx.arg0().into(), uctx.arg1().into()),
+        Sysno::restart_syscall => sys_restart_syscall(),
         Sysno::futex => sys_futex(
             uctx.arg0().into(),
             uctx.arg1() as _,

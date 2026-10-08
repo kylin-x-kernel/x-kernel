@@ -90,9 +90,9 @@ Errors surface as `KError` (`EFAULT` for inaccessible words, `EAGAIN`
 interruptible wait). No panics are reachable from user input: the two
 `expect`s in requeue/drain loop invariants are backed by the lock-held
 length snapshot and are not user-triggerable. Timed waits interrupted by
-signals return `EINTR`; the syscall layer maps untimed interrupted waits to
-`ERESTARTSYS`. Restart-block (`restart_syscall`) handling is not yet
-implemented at that layer.
+signals return `EINTR`. The syscall layer maps an untimed interrupted wait
+to `ERESTARTSYS` and a timed one to `ERESTART_RESTARTBLOCK`, then resumes
+it through `restart_syscall`. This crate does not own that restart-block.
 
 ## Thread safety
 
@@ -110,8 +110,8 @@ No user data beyond 32-bit futex words is read; nothing is logged.
 - Realtime absolute waits are converted once at syscall entry to a
   monotonic-relative duration; wall-clock jumps during the wait do not
   re-adjust an already-queued deadline.
-- Timed waits interrupted by a signal return `EINTR`; restart-block is not
-  implemented yet.
+- Timed waits interrupted by a signal still return `EINTR` from this crate.
+  `ERESTART_RESTARTBLOCK` and `restart_syscall` belong to `ksyscall`.
 
 ## Audit checklist
 

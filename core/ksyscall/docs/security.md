@@ -149,6 +149,11 @@ registered wakeups rather than polling or a timer.
   architecture owner instead of ad-hoc probing in the adapter?
 - When owner routing changes, are this crate's and the owner's documents
   updated together?
+- A new `ERESTART_RESTARTBLOCK` path must arm the current thread's
+  restart-block and route `restart_syscall`, not only change the errno.
+  Default `SIGCONT` is not a handler and must not leave `-516` in the user
+  return value. Publishing `EINTR` for a handler must clear the slot in that
+  same return.
 
 The exec and exit-tail regressions in `src/task/tests/` cover the exec
 boundaries above. Synthetic-image and injected-error cases do not establish

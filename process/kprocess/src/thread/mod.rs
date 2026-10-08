@@ -5,6 +5,7 @@
 mod core;
 mod cpu_time;
 mod current;
+mod restart;
 mod task_ext;
 
 pub use core::{CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters, Thread};
