@@ -104,6 +104,11 @@ registered wakeups rather than polling or a timer.
 
 ## Known limitations
 
+- `sched_setscheduler` and `sched_setparam` retain their baseline process-target
+  lookup and do not enforce a complete owner/capability/RT authorization policy.
+  The worker-TID query helper is read-only and is not used by either setter;
+  accepting published worker TIDs for reads must not expand this write scope.
+  A complete setter authorization change needs a separate review.
 - Exec supports only a live single-threaded process. Independent CLONE_VM peers
   retain their old MM; this is not a de_thread or vfork implementation.
 - `ioctl` first asks `posix-net::handle_net_ioctl` for exact commands, then

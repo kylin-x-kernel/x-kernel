@@ -128,9 +128,18 @@ pub fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, tcache: usize) -> KResu
     Ok(0)
 }
 
-/// Returns the current scheduler policy.
+/// Returns the policy for a thread ID, or the calling thread when `pid` is zero.
+///
+/// A positive process PID denotes its leader TID, even from a worker caller.
+/// There is no fallback to another process member if that TID is unpublished.
+/// This read-only contract intentionally differs from the baseline setters.
+///
+/// # Errors
+///
+/// Returns [`KError::InvalidInput`] for a negative identifier and
+/// [`KError::NoSuchProcess`] for an absent or unpublished positive TID.
 pub fn sys_sched_getscheduler(pid: i32) -> KResult<isize> {
-    let task = scheduler_target(pid)?;
+    let task = scheduler_query_target(pid)?;
 
     Ok(task
         .as_thread()
@@ -150,9 +159,19 @@ pub fn sys_sched_setscheduler(pid: i32, policy: i32, param: UserConstPtr<()>) ->
     Ok(0)
 }
 
-/// Returns scheduler parameters.
+/// Returns parameters for a thread ID, or the calling thread when `pid` is zero.
+///
+/// A positive process PID denotes its leader TID, even from a worker caller.
+/// There is no fallback to another process member if that TID is unpublished.
+/// This read-only contract intentionally differs from the baseline setters.
+///
+/// # Errors
+///
+/// Returns [`KError::InvalidInput`] for a negative identifier and
+/// [`KError::NoSuchProcess`] for an absent or unpublished positive TID.
+/// A failure to write `param` propagates the user-memory access error.
 pub fn sys_sched_getparam(pid: i32, param: UserPtr<()>) -> KResult<isize> {
-    let task = scheduler_target(pid)?;
+    let task = scheduler_query_target(pid)?;
     let param = param.cast::<SchedParam>();
 
     param.write_vm(SchedParam {
@@ -292,6 +311,21 @@ fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
     kprocess::scheduler::target_task(pid)
 }
 
+fn scheduler_query_target(pid: i32) -> KResult<KtaskRef> {
+    // pthread_getschedparam queries worker TIDs. Keep this read-only lookup
+    // separate so the setters retain their existing process-target scope.
+    // Do not fall back to a representative thread: getpid() denotes the leader
+    // TID, and an unpublished leader remains ESRCH. Negative getter IDs return
+    // EINVAL; the baseline setters' ESRCH deviation is outside this query fix.
+    if pid < 0 {
+        return Err(KError::InvalidInput);
+    }
+    if pid == 0 {
+        return Ok(current().clone());
+    }
+    kprocess::scheduler::task_by_tid(pid as u32)
+}
+
 fn configured_scheduler_policy() -> u32 {
     SCHED_NORMAL
 }
@@ -409,6 +443,204 @@ fn update_min_nice(min_nice: &mut Option<NiceValue>, nice: Option<NiceValue>) {
         return;
     };
     *min_nice = Some(min_nice.map_or(nice, |current| current.min(nice)));
+}
+
+#[cfg(unittest)]
+mod scheduler_query_tests {
+    use alloc::sync::Arc;
+
+    use kerrno::KError;
+    use kprocess::AsThread;
+    use kspin::SpinNoPreempt;
+    use ktask::{TaskInner, current};
+    use linux_raw_sys::general::{SCHED_FIFO, SCHED_NORMAL};
+    use posix_types::{UserConstPtr, UserPtr};
+    use unittest::{TestResult, assert, assert_eq, def_test};
+    use unittest_support::TestUserValue;
+
+    use super::{
+        SchedParam, scheduler_target, sys_sched_getparam, sys_sched_getscheduler,
+        sys_sched_setparam, sys_sched_setscheduler,
+    };
+
+    fn run_worker(check_fn: fn() -> TestResult) -> TestResult {
+        let prepared = kprocess::current_user_thread()
+            .prepare_thread_clone()
+            .expect("prepare scheduler query worker");
+        let page_table_root = prepared.page_table_root();
+        let (thread, task_number) = prepared.into_parts();
+        let result = Arc::new(SpinNoPreempt::new(None));
+        let worker_result = result.clone();
+        let mut task = TaskInner::new_user(
+            move || {
+                let outcome = check_fn();
+                *worker_result.lock() = Some(outcome);
+                // Remove this fixture's published TID before its task exits.
+                posix_process::do_exit(0, false);
+            },
+            "scheduler-query-worker".into(),
+            task_number,
+            thread,
+        );
+        task.ctx_mut().set_page_table_root(page_table_root);
+        task.set_cpumask(current().cpumask());
+        let worker = kprocess::start_user_task(task);
+        worker.join();
+        let outcome = result.lock().take().unwrap_or(TestResult::Failed);
+        drop(worker);
+        outcome
+    }
+
+    fn check_worker_queries() -> TestResult {
+        let caller = current();
+        let thread = caller.as_thread();
+        let tid = thread.tid() as i32;
+        assert!(tid != thread.pid() as i32, "fixture must be a non-leader");
+        // Distinct fixture metadata makes a wrong representative observable.
+        thread.set_scheduler(SCHED_FIFO, 7);
+        let mut output = TestUserValue::from_value(SchedParam { sched_priority: -1 }).unwrap();
+        for pid in [0, tid] {
+            assert_eq!(sys_sched_getscheduler(pid), Ok(SCHED_FIFO as isize));
+            output.write(SchedParam { sched_priority: -1 });
+            assert_eq!(
+                sys_sched_getparam(pid, UserPtr::from(output.as_user_ptr()).cast()),
+                Ok(0)
+            );
+            assert_eq!(output.read().sched_priority, 7);
+        }
+        TestResult::Ok
+    }
+
+    fn check_worker_setter_process_pid() -> TestResult {
+        let caller = current();
+        let thread = caller.as_thread();
+        let pid = thread.pid() as i32;
+        let tid = thread.tid() as i32;
+        assert!(tid != pid, "fixture must be a non-leader");
+        let mut param = TestUserValue::from_value(SchedParam { sched_priority: 7 }).unwrap();
+        for target in [0, pid] {
+            let resolved = scheduler_target(target).expect("baseline caller target");
+            assert!(caller.ptr_eq(&resolved));
+            assert_eq!(
+                sys_sched_setscheduler(
+                    target,
+                    SCHED_FIFO as i32,
+                    UserConstPtr::from(param.as_user_ptr().addr()),
+                ),
+                Ok(0)
+            );
+            assert_eq!(sys_sched_getscheduler(tid), Ok(SCHED_FIFO as isize));
+            param.write(SchedParam { sched_priority: 8 });
+            assert_eq!(
+                sys_sched_setparam(target, UserConstPtr::from(param.as_user_ptr().addr())),
+                Ok(0)
+            );
+            assert_eq!(thread.scheduler_priority(), 8);
+            param.write(SchedParam { sched_priority: 7 });
+        }
+        // The caller's own worker TID still is not a process PID for setters.
+        assert_eq!(
+            sys_sched_setparam(tid, UserConstPtr::from(param.as_user_ptr().addr())),
+            Err(KError::NoSuchProcess)
+        );
+        assert_eq!(
+            sys_sched_setscheduler(
+                tid,
+                SCHED_FIFO as i32,
+                UserConstPtr::from(param.as_user_ptr().addr()),
+            ),
+            Err(KError::NoSuchProcess)
+        );
+        assert_eq!(thread.scheduler_priority(), 8);
+        TestResult::Ok
+    }
+
+    #[def_test(user, serial)]
+    fn scheduler_queries_reject_negative_and_missing_ids() {
+        for pid in [-1, i32::MIN] {
+            assert_eq!(sys_sched_getscheduler(pid), Err(KError::InvalidInput));
+            assert_eq!(
+                sys_sched_getparam(pid, UserPtr::default()),
+                Err(KError::InvalidInput)
+            );
+        }
+        assert_eq!(sys_sched_getscheduler(i32::MAX), Err(KError::NoSuchProcess));
+        assert_eq!(
+            sys_sched_getparam(i32::MAX, UserPtr::default()),
+            Err(KError::NoSuchProcess)
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn scheduler_worker_queries_resolve_zero_and_current_tid() -> TestResult {
+        run_worker(check_worker_queries)
+    }
+
+    #[def_test(user, serial)]
+    fn scheduler_query_worker_tid_does_not_expand_setter_targets() -> TestResult {
+        let prepared = kprocess::current_user_thread()
+            .prepare_thread_clone()
+            .expect("prepare published scheduler query worker");
+        let tid = prepared.tid() as i32;
+        let page_table_root = prepared.page_table_root();
+        let (thread, task_number) = prepared.into_parts();
+        thread.set_scheduler(SCHED_FIFO, 7);
+        let mut task = TaskInner::new_user(
+            || {},
+            "scheduler-inactive-worker".into(),
+            task_number,
+            thread,
+        );
+        task.ctx_mut().set_page_table_root(page_table_root);
+        let published = kprocess::publish_user_task(task).unwrap();
+        // This owned publication stays live deterministically until abort;
+        // assertion returns still drop the handle and roll back publication.
+        let outcome = (|| -> TestResult {
+            assert!(tid != kprocess::current_user_thread().pid() as i32);
+            let param = TestUserValue::from_value(SchedParam { sched_priority: 0 }).unwrap();
+            let output = TestUserValue::from_value(SchedParam { sched_priority: -1 }).unwrap();
+            assert_eq!(sys_sched_getscheduler(tid), Ok(SCHED_FIFO as isize));
+            assert_eq!(
+                sys_sched_getparam(tid, UserPtr::from(output.as_user_ptr()).cast()),
+                Ok(0)
+            );
+            assert_eq!(output.read().sched_priority, 7);
+            for pid in [tid, -1, i32::MIN, i32::MAX] {
+                assert_eq!(
+                    sys_sched_setscheduler(
+                        pid,
+                        SCHED_NORMAL as i32,
+                        UserConstPtr::from(param.as_user_ptr().addr()),
+                    ),
+                    Err(KError::NoSuchProcess)
+                );
+                assert_eq!(
+                    sys_sched_setparam(pid, UserConstPtr::from(param.as_user_ptr().addr())),
+                    Err(KError::NoSuchProcess)
+                );
+            }
+            assert_eq!(sys_sched_getscheduler(tid), Ok(SCHED_FIFO as isize));
+            assert_eq!(
+                sys_sched_getparam(tid, UserPtr::from(output.as_user_ptr()).cast()),
+                Ok(0)
+            );
+            assert_eq!(output.read().sched_priority, 7);
+            TestResult::Ok
+        })();
+        published.abort();
+        // An unpublished worker TID must no longer be a query target.
+        assert_eq!(sys_sched_getscheduler(tid), Err(KError::NoSuchProcess));
+        assert_eq!(
+            sys_sched_getparam(tid, UserPtr::default()),
+            Err(KError::NoSuchProcess)
+        );
+        outcome
+    }
+
+    #[def_test(user, serial)]
+    fn scheduler_setters_keep_current_worker_process_pid_resolution() -> TestResult {
+        run_worker(check_worker_setter_process_pid)
+    }
 }
 
 #[cfg(unittest)]

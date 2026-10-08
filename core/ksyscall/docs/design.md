@@ -195,6 +195,12 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 - `task/sched.rs`: `sched_yield` / `sched_*affinity` / `sched_*scheduler` /
   `getcpu` / `getpriority` / `setpriority`; owners in `ktask` scheduling
   interfaces, `kprocess` process/thread state, and `khal` CPU queries.
+  `sched_getscheduler` and `sched_getparam` resolve positive published TIDs
+  through a separate read-only helper; zero selects the current thread and
+  negative IDs return EINVAL. The two policy/parameter setters retain
+  `kprocess::scheduler::target_task`: zero and the caller's process PID select
+  the caller; other positive process PIDs select a representative task;
+  non-process worker TIDs and negative IDs remain ESRCH.
   `PRIO_PROCESS` selects one task by TID; `PRIO_PGRP` and `PRIO_USER`
   iterate every published task — a process representative thread must not
   stand in for per-thread nice or real UID. `setpriority` compares the
