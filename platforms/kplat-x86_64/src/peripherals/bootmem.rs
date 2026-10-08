@@ -36,6 +36,11 @@ pub fn ap_trampoline_page_paddr() -> usize {
         .expect("x86 AP trampoline page is not initialized")
 }
 
+/// Calls `f` for every usable RAM region reported by the boot protocol.
+///
+/// Call only during primary boot, before `memspace::init_memory_management`
+/// replaces the boot stub's identity mapping; the protocol tables are read
+/// through their physical addresses. See [`for_each_memory_region`].
 pub fn for_each_ram_region<F>(boot_info: &BootInfo, mut f: F)
 where
     F: FnMut(usize, usize),
@@ -47,6 +52,13 @@ where
     });
 }
 
+/// Calls `f` for every memory region reported by the boot protocol.
+///
+/// The Multiboot2 information block and the Linux zeropage are read through
+/// their physical addresses, which is only valid while the boot stub's
+/// identity mapping of low memory is active and the page allocator has not
+/// reused those pages. Call this only from the `prepare_boot_memory` boot hook
+/// that `khal::mem::init` runs during primary boot.
 pub fn for_each_memory_region<F>(boot_info: &BootInfo, f: F)
 where
     F: FnMut(BootMemoryKind, usize, usize),
@@ -126,7 +138,16 @@ fn for_each_linuxboot_region<F>(params_addr: usize, mut f: F)
 where
     F: FnMut(BootMemoryKind, usize, usize),
 {
-    let Some(params) = LinuxBootParams::new(params_addr) else {
+    // SAFETY: the x86_64 boot stub is the only producer of
+    // `BootProtocol::LinuxBoot`, and it sets `protocol_info_addr` to the
+    // physical address of the 4 KiB zeropage it already validated. Its only
+    // caller path is `prepare_boot_memory` from `khal::mem::init` during
+    // primary boot, which runs before `memspace::init_memory_management`
+    // replaces the stub's page table (which identity-maps the low 512 GiB) and
+    // before the page allocator can hand out that memory, so the zeropage
+    // stays mapped and unmodified while `params` is used. `params` does not
+    // escape and `cmdline()` is not called.
+    let Some(params) = (unsafe { LinuxBootParams::new(params_addr) }) else {
         return;
     };
 

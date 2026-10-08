@@ -183,7 +183,23 @@ fn load_linuxboot_kernel(
     usize,
     Option<BootCmdline>,
 ) {
-    let params = LinuxBootParams::new(boot_params_paddr).expect("missing linux boot params");
+    // SAFETY: `boot.S` reaches this path in two ways, and both hand over a
+    // complete 4 KiB zeropage at `boot_params_paddr`:
+    // - with the explicit `LINUX_BOOT_MAGIC`, `ebx` comes from our own
+    //   `x86_64-linuxboot/setup.S`, which zeroes the 4 KiB at
+    //   `BOOT_PARAMS_ADDR` and then fills in the setup header, the e820 table
+    //   and the RSDP before jumping here; this branch does not check "HdrS";
+    // - otherwise `boot.S` accepts `esi` from a Linux bootloader only after
+    //   checking the "HdrS" setup-header signature at `+0x202`.
+    // The temporary page table identity-maps the low 512 GiB, so that address
+    // and the 32-bit `cmd_line_ptr` are readable as-is. The stub does not write
+    // the zeropage after this point, and `load_linuxboot_elf_image` keeps the
+    // kernel load range off both the zeropage page and the pages holding the
+    // command-line bytes `cmdline()` reads, so they stay unmodified while
+    // `params` and the string borrowed from it are used, which ends before the
+    // kernel jump.
+    let params =
+        unsafe { LinuxBootParams::new(boot_params_paddr) }.expect("missing linux boot params");
     let payload_offset = params
         .payload_offset()
         .expect("missing linux payload offset");
@@ -337,11 +353,18 @@ fn load_linuxboot_elf_image(
     let linked_image_start = &raw const __image_start as u64;
     let linked_image_end = &raw const __image_end as u64;
     let source_image_end = payload_end;
+    // An empty range never overlaps a candidate, so a missing command line
+    // reserves nothing.
+    let cmdline_pages = params.cmdline_range().map_or((0, 0), |(start, len)| {
+        let start = start as u64;
+        (start & !0xfff, align_up(start + len as u64, 0x1000))
+    });
     let reserved = [
         (
             boot_params_paddr,
             align_up(boot_params_paddr + 0x1000, 0x1000),
         ),
+        cmdline_pages,
         (payload_start, align_up(payload_end, 0x1000)),
         (linked_image_start, align_up(linked_image_end, 0x1000)),
         (source_image_paddr, align_up(source_image_end, 0x1000)),

@@ -365,8 +365,32 @@ pub struct LinuxBootParams {
 }
 
 impl LinuxBootParams {
+    /// Creates a view over the zeropage at `addr`, or returns `None` when
+    /// `addr` is zero.
+    ///
+    /// # Safety
+    ///
+    /// If `addr` is nonzero, the caller must guarantee that:
+    ///
+    /// - `addr` is an address in the current address space at which a Linux
+    ///   x86 boot-params blob (`struct boot_params`, the "zeropage") is
+    ///   readable and initialized for at least its first `0xed0` bytes, i.e.
+    ///   through the end of the 128-entry e820 table at offset `0x2d0`. A full
+    ///   4 KiB zeropage satisfies this. No alignment is required; every field
+    ///   is read with an unaligned load.
+    /// - those bytes stay mapped and readable, and are not written, for as
+    ///   long as the returned value or any copy of it is used. The type is
+    ///   `Copy`, so this covers every copy the caller makes.
+    /// - if [`Self::cmdline`] is called while the `cmd_line_ptr` field (offset
+    ///   `0x228`) is nonzero, that 32-bit value is usable as an address in the
+    ///   current address space, the `cmdline_size + 1` bytes there (256 bytes
+    ///   when `cmdline_size` at offset `0x238` is zero) are readable and
+    ///   initialized, and they stay mapped and unwritten for as long as the
+    ///   returned value or any copy of it is used. The string
+    ///   [`Self::cmdline`] returns borrows the view it was called on, so it
+    ///   cannot outlive that window.
     #[inline]
-    pub const fn new(addr: usize) -> Option<Self> {
+    pub const unsafe fn new(addr: usize) -> Option<Self> {
         if addr == 0 { None } else { Some(Self { addr }) }
     }
 
@@ -377,14 +401,17 @@ impl LinuxBootParams {
 
     #[inline]
     pub fn acpi_rsdp_addr(self) -> u64 {
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x70..0x78` lie inside the zeropage prefix that the
+        // caller of `LinuxBootParams::new` guaranteed readable and unmodified
+        // while `self` is in use.
         unsafe { self.read_u64(X86_LINUX_BOOT_PARAMS_ACPI_RSDP_ADDR_OFFSET) }
     }
 
     #[inline]
     pub fn e820_entries(self) -> usize {
         usize::min(
-            // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+            // SAFETY: byte `0x1e8` lies inside the zeropage prefix guaranteed
+            // readable by the `LinuxBootParams::new` contract.
             unsafe { self.read_u8(X86_LINUX_BOOT_PARAMS_E820_ENTRIES_OFFSET) as usize },
             X86_LINUX_BOOT_E820_MAX_ENTRIES,
         )
@@ -399,34 +426,49 @@ impl LinuxBootParams {
             + X86_LINUX_BOOT_PARAMS_E820_TABLE_OFFSET
             + index * mem::size_of::<X86LinuxE820Entry>())
             as *const X86LinuxE820Entry;
-        // SAFETY: `index < e820_entries()` bounds the entry inside the boot
-        // params e820 table, and the Linux boot protocol permits unaligned
-        // field access from the zeropage blob.
+        // SAFETY: `e820_entries()` clamps the count to 128, so `index < 128`
+        // keeps the 24-byte entry inside `0x2d0..0xed0`, the zeropage prefix
+        // guaranteed readable and unmodified by the `LinuxBootParams::new`
+        // contract. Every bit pattern is a valid `X86LinuxE820Entry`, and the
+        // read is unaligned.
         Some(unsafe { ptr::read_unaligned(entry_ptr) })
     }
 
     #[inline]
     pub fn cmdline_ptr(self) -> Option<usize> {
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x228..0x22c` lie inside the zeropage prefix
+        // guaranteed readable by the `LinuxBootParams::new` contract.
         let ptr = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_CMD_LINE_PTR_OFFSET) } as usize;
         (ptr != 0).then_some(ptr)
     }
 
     #[inline]
     pub fn cmdline_size(self) -> Option<usize> {
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x238..0x23c` lie inside the zeropage prefix
+        // guaranteed readable by the `LinuxBootParams::new` contract.
         let size = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_CMDLINE_SIZE_OFFSET) } as usize;
         (size != 0).then_some(size)
     }
 
-    pub fn cmdline(self) -> Option<&'static str> {
+    /// Returns the start address and length of the bytes [`Self::cmdline`]
+    /// reads: `cmdline_size + 1` bytes at `cmd_line_ptr` (256 when
+    /// `cmdline_size` is zero), or `None` when `cmd_line_ptr` is zero.
+    pub fn cmdline_range(self) -> Option<(usize, usize)> {
         let ptr = self.cmdline_ptr()?;
         let max_len = self
             .cmdline_size()
             .unwrap_or(X86_LINUX_BOOT_LEGACY_CMDLINE_MAX);
-        let scan_len = max_len.checked_add(1)?;
-        // SAFETY: `ptr..ptr + scan_len` is the bootloader-provided command-line
-        // buffer, and the extra byte allows scanning for the terminating NUL.
+        Some((ptr, max_len.checked_add(1)?))
+    }
+
+    pub fn cmdline(&self) -> Option<&str> {
+        let (ptr, scan_len) = self.cmdline_range()?;
+        // SAFETY: `ptr` is the nonzero `cmd_line_ptr` field and `scan_len` is
+        // `cmdline_size + 1` (or 256 when that field is zero). The
+        // `LinuxBootParams::new` contract requires exactly that many bytes at
+        // `ptr` to be readable, initialized, and unwritten for as long as this
+        // view or any copy of it is used. The returned string borrows `self`,
+        // so every use of it falls inside that window.
         let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, scan_len) };
         let nul_pos = bytes.iter().position(|&byte| byte == 0)?;
         core::str::from_utf8(&bytes[..nul_pos]).ok()
@@ -434,9 +476,11 @@ impl LinuxBootParams {
 
     #[inline]
     pub fn payload_offset(self) -> Option<u32> {
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x248..0x24c` lie inside the zeropage prefix
+        // guaranteed readable by the `LinuxBootParams::new` contract.
         let payload_offset = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET) };
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x24c..0x250` lie inside the zeropage prefix
+        // guaranteed readable by the `LinuxBootParams::new` contract.
         let payload_length = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET) };
         if payload_offset == 0 || payload_length == 0 {
             None
@@ -447,9 +491,11 @@ impl LinuxBootParams {
 
     #[inline]
     pub fn payload_length(self) -> Option<u32> {
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x248..0x24c` lie inside the zeropage prefix
+        // guaranteed readable by the `LinuxBootParams::new` contract.
         let payload_offset = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_OFFSET_OFFSET) };
-        // SAFETY: reads a fixed protocol-defined field from the zeropage blob.
+        // SAFETY: bytes `0x24c..0x250` lie inside the zeropage prefix
+        // guaranteed readable by the `LinuxBootParams::new` contract.
         let payload_length = unsafe { self.read_u32(X86_LINUX_BOOT_PARAMS_PAYLOAD_LENGTH_OFFSET) };
         if payload_offset == 0 || payload_length == 0 {
             None
@@ -458,23 +504,39 @@ impl LinuxBootParams {
         }
     }
 
+    /// # Safety
+    ///
+    /// `offset` must lie inside the zeropage prefix that the
+    /// [`Self::new`] contract guarantees readable.
     #[inline]
     unsafe fn read_u8(self, offset: usize) -> u8 {
-        // SAFETY: `LinuxBootParams` is a typed view over the boot protocol blob
-        // rooted at `self.addr`; callers only use fixed protocol-defined
-        // offsets, and x86 zeropage fields permit unaligned reads.
+        // SAFETY: the caller keeps `offset` inside the zeropage prefix that the
+        // `LinuxBootParams::new` contract keeps readable and unmodified; the
+        // load is unaligned, so `self.addr` needs no alignment.
         unsafe { ptr::read_unaligned((self.addr + offset) as *const u8) }
     }
 
+    /// # Safety
+    ///
+    /// `offset..offset + 8` must lie inside the zeropage prefix that the
+    /// [`Self::new`] contract guarantees readable.
     #[inline]
     unsafe fn read_u64(self, offset: usize) -> u64 {
-        // SAFETY: see `read_u8`; the same zeropage invariant applies here.
+        // SAFETY: the caller keeps the 8 bytes at `offset` inside the zeropage
+        // prefix covered by the `LinuxBootParams::new` contract; the load is
+        // unaligned, and every bit pattern is a valid `u64`.
         unsafe { ptr::read_unaligned((self.addr + offset) as *const u64) }
     }
 
+    /// # Safety
+    ///
+    /// `offset..offset + 4` must lie inside the zeropage prefix that the
+    /// [`Self::new`] contract guarantees readable.
     #[inline]
     unsafe fn read_u32(self, offset: usize) -> u32 {
-        // SAFETY: see `read_u8`; the same zeropage invariant applies here.
+        // SAFETY: the caller keeps the 4 bytes at `offset` inside the zeropage
+        // prefix covered by the `LinuxBootParams::new` contract; the load is
+        // unaligned, and every bit pattern is a valid `u32`.
         unsafe { ptr::read_unaligned((self.addr + offset) as *const u32) }
     }
 }
@@ -610,6 +672,12 @@ const _: () = {
     assert!(core::mem::align_of::<BootInfo>() == 8);
     assert!(core::mem::size_of::<BootProtocol>() == 1);
     assert!(core::mem::size_of::<X86LinuxE820Entry>() == 24);
+    // `LinuxBootParams::new` documents this readable zeropage prefix length.
+    assert!(
+        X86_LINUX_BOOT_PARAMS_E820_TABLE_OFFSET
+            + X86_LINUX_BOOT_E820_MAX_ENTRIES * core::mem::size_of::<X86LinuxE820Entry>()
+            == 0xed0
+    );
 };
 
 #[cfg(unittest)]
@@ -760,7 +828,7 @@ mod unittest_tests {
                 attr: 2,
             },
         ];
-        let params = LinuxBootParams::new(build_linux_boot_blob(
+        let blob = build_linux_boot_blob(
             0x8877_6655_4433_2211,
             e820.len() as u8,
             0x1200,
@@ -768,8 +836,12 @@ mod unittest_tests {
             0x1234_5678,
             32,
             &e820,
-        ))
-        .unwrap();
+        );
+        // SAFETY: `blob` is a leaked allocation of `0xed0` initialized bytes,
+        // so it stays mapped and is not written while `params` is used. The
+        // fake `cmd_line_ptr` is never dereferenced because this test does not
+        // call `cmdline()`.
+        let params = unsafe { LinuxBootParams::new(blob) }.unwrap();
 
         assert!(params.addr() != 0);
         assert_eq!(params.acpi_rsdp_addr(), 0x8877_6655_4433_2211);
@@ -780,6 +852,7 @@ mod unittest_tests {
         assert!(params.e820_entry(2).is_none());
         assert_eq!(params.cmdline_ptr(), Some(0x1234_5678));
         assert_eq!(params.cmdline_size(), Some(32));
+        assert_eq!(params.cmdline_range(), Some((0x1234_5678, 33)));
         assert_eq!(params.payload_offset(), Some(0x1200));
         assert_eq!(params.payload_length(), Some(0x3400));
         assert!(format!("{params:?}").contains("payload_offset"));
@@ -787,9 +860,10 @@ mod unittest_tests {
 
     #[def_test]
     fn linux_boot_params_handle_legacy_and_invalid_cases() {
-        assert!(LinuxBootParams::new(0).is_none());
+        // SAFETY: a zero address imposes no obligations and yields `None`.
+        assert!(unsafe { LinuxBootParams::new(0) }.is_none());
 
-        let params = LinuxBootParams::new(build_linux_boot_blob(
+        let blob = build_linux_boot_blob(
             0,
             (X86_LINUX_BOOT_E820_MAX_ENTRIES as u16 + 5) as u8,
             0,
@@ -797,11 +871,16 @@ mod unittest_tests {
             0x2000_0000,
             0,
             &[],
-        ))
-        .unwrap();
+        );
+        // SAFETY: `blob` is a leaked allocation of `0xed0` initialized bytes,
+        // so it stays mapped and is not written while `params` is used. The
+        // fake `cmd_line_ptr` is never dereferenced because this test does not
+        // call `cmdline()`.
+        let params = unsafe { LinuxBootParams::new(blob) }.unwrap();
         assert_eq!(params.e820_entries(), X86_LINUX_BOOT_E820_MAX_ENTRIES);
         assert_eq!(params.cmdline_ptr(), Some(0x2000_0000));
         assert_eq!(params.cmdline_size(), None);
+        assert_eq!(params.cmdline_range(), Some((0x2000_0000, 256)));
         assert_eq!(params.payload_offset(), None);
         assert_eq!(params.payload_length(), None);
     }

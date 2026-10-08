@@ -45,6 +45,12 @@ pub fn memory_regions() -> impl Iterator<Item = MemoryRegion> {
 }
 
 /// Initializes physical memory regions.
+///
+/// Call exactly once during primary boot, before
+/// `memspace::init_memory_management` replaces the boot page table: the
+/// platform hook and the firmware memory description read boot-protocol
+/// tables (for example the x86 Linux zeropage) through their physical
+/// addresses, which the early identity mapping makes readable.
 pub fn init(boot_info: &boot_info::BootInfo) {
     kplat::boot::prepare_boot_memory(boot_info);
     if !has_described_regions() {

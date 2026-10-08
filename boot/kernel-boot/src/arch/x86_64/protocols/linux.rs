@@ -13,7 +13,20 @@
 
 use boot_info::LinuxBootParams;
 
+/// Returns a view over the zeropage at `protocol_info_addr`, or `None` when it
+/// is zero.
+///
+/// # Safety
+///
+/// `protocol_info_addr` must satisfy the [`LinuxBootParams::new`] contract.
+/// In particular, call this only while the zeropage at that address is still
+/// mapped in the current address space, normally by the boot stub's temporary
+/// identity mapping of low memory, and is not being written. Once the kernel
+/// page table replaces that mapping, a raw physical zeropage address no longer
+/// meets the contract.
 #[inline]
-pub fn boot_params(protocol_info_addr: usize) -> Option<LinuxBootParams> {
-    LinuxBootParams::new(protocol_info_addr)
+pub unsafe fn boot_params(protocol_info_addr: usize) -> Option<LinuxBootParams> {
+    // SAFETY: this function's caller upholds the `LinuxBootParams::new`
+    // contract for `protocol_info_addr`, as required by its `# Safety` section.
+    unsafe { LinuxBootParams::new(protocol_info_addr) }
 }
