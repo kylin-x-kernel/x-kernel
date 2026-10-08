@@ -23,6 +23,14 @@ pub(super) struct MappingPagesState {
     pub(super) writeback_marks: BTreeSet<PageIndex>,
 }
 
+impl MappingPagesState {
+    pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Mutex<Folio>>) -> bool {
+        self.entries
+            .get(&index)
+            .is_some_and(|current| Arc::ptr_eq(current, candidate))
+    }
+}
+
 /// Resident folios and dirty/writeback marks embedded in one inode address space.
 ///
 /// This is the mapping's page index, corresponding to Linux `i_pages`.
@@ -50,16 +58,13 @@ impl MappingPages {
         self.state.lock().entries.len() as u64
     }
 
-    pub(super) fn reconcile_dirty_folio(&self, index: PageIndex, folio: &Arc<Mutex<Folio>>) {
+    pub(super) fn reconcile_dirty_folio(&self, candidate: &Arc<Mutex<Folio>>, folio: &Folio) {
         let mut state = self.state.lock();
-        let is_current = state
-            .entries
-            .get(&index)
-            .is_some_and(|current| Arc::ptr_eq(current, folio));
-        if !is_current {
+        let index = folio.index();
+        if !state.is_current(index, candidate) {
             return;
         }
-        if folio.lock().is_dirty() {
+        if folio.is_dirty() {
             state.dirty_marks.insert(index);
         } else {
             state.dirty_marks.remove(&index);

@@ -30,9 +30,9 @@ struct PrefixRetryWritebackOps {
 }
 
 impl AddressSpaceOperations for PrefixRetryWritebackOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         folio.data().fill(0);
-        Ok(folio.data().len())
+        Ok(())
     }
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {

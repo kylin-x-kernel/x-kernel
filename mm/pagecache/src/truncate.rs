@@ -4,8 +4,6 @@
 
 //! Cached folio resize and final teardown.
 
-use alloc::sync::Arc;
-
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
 
@@ -81,12 +79,7 @@ impl MappingPages {
                 let Some(mut folio) = candidate.try_lock() else {
                     continue;
                 };
-                if !folio.is_under_writeback()
-                    && state
-                        .entries
-                        .get(&folio.index())
-                        .is_some_and(|current| Arc::ptr_eq(current, candidate))
-                {
+                if !folio.is_under_writeback() && state.is_current(folio.index(), candidate) {
                     Self::discard_folio(&mut state, &mut folio);
                 }
             }
@@ -107,13 +100,9 @@ impl MappingPages {
             for candidate in batch.iter() {
                 loop {
                     wait_on_writeback(candidate);
-                    let mut state = self.state.lock();
                     let mut folio = candidate.lock();
-                    if !state
-                        .entries
-                        .get(&folio.index())
-                        .is_some_and(|current| Arc::ptr_eq(current, candidate))
-                    {
+                    let mut state = self.state.lock();
+                    if !state.is_current(folio.index(), candidate) {
                         break;
                     }
                     // Writeback may have restarted between waiting and taking
@@ -128,7 +117,7 @@ impl MappingPages {
         }
     }
 
-    fn discard_folio(state: &mut MappingPagesState, folio: &mut Folio) {
+    pub(super) fn discard_folio(state: &mut MappingPagesState, folio: &mut Folio) {
         let index = folio.index();
         folio.clear_dirty();
         state.entries.remove(&index);
@@ -143,16 +132,25 @@ impl MappingPages {
         }
         let index = old_len / PAGE_SIZE_4K as u64;
         let end = (new_len - index * PAGE_SIZE_4K as u64).min(PAGE_SIZE_4K as u64) as usize;
-        let mut state = self.state.lock();
-        let Some(candidate) = state.entries.get(&index).cloned() else {
+        loop {
+            let Some(candidate) = self.state.lock().entries.get(&index).cloned() else {
+                return;
+            };
+            // Growth retains the folio. Writeback already owns its snapshot.
+            let mut folio = candidate.lock();
+            let state = self.state.lock();
+            if !state.is_current(index, &candidate) {
+                continue;
+            }
+            if !folio.is_uptodate() {
+                return;
+            }
+            drop(state);
+            folio.data()[offset..end].fill(0);
+            folio.mark_dirty();
+            self.reconcile_dirty_folio(&candidate, &folio);
             return;
-        };
-        // Growth retains the folio. Batch I/O owns a data snapshot, so dirtying
-        // the new bytes can overlap it; completion preserves this dirty state.
-        let mut folio = candidate.lock();
-        folio.data()[offset..end].fill(0);
-        folio.mark_dirty();
-        state.dirty_marks.insert(index);
+        }
     }
 
     fn truncate_partial_folio(&self, index: PageIndex, offset: usize) {
@@ -161,19 +159,18 @@ impl MappingPages {
                 return;
             };
             wait_on_writeback(&candidate);
-            let mut state = self.state.lock();
             let mut folio = candidate.lock();
-            if !state
-                .entries
-                .get(&index)
-                .is_some_and(|current| Arc::ptr_eq(current, &candidate))
-                || folio.is_under_writeback()
-            {
+            let state = self.state.lock();
+            if !state.is_current(index, &candidate) || folio.is_under_writeback() {
                 continue;
             }
+            if !folio.is_uptodate() {
+                return;
+            }
+            drop(state);
             folio.data()[offset..].fill(0);
             folio.mark_dirty();
-            state.dirty_marks.insert(index);
+            self.reconcile_dirty_folio(&candidate, &folio);
             return;
         }
     }
@@ -185,7 +182,13 @@ impl Drop for MappingPages {
         // borrows this container through completion. I/O waits belong to the
         // explicit truncate_final path, not field destruction. As with other
         // mapping operations, accessing these mutexes requires task context.
-        for folio in self.state.lock().entries.values() {
+        let entries = {
+            let mut state = self.state.lock();
+            state.dirty_marks.clear();
+            state.writeback_marks.clear();
+            core::mem::take(&mut state.entries)
+        };
+        for folio in entries.values() {
             let mut folio = folio.lock();
             debug_assert!(!folio.is_under_writeback());
             // External references may outlive the container. Clear discarded

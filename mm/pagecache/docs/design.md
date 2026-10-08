@@ -28,10 +28,10 @@ runtime 不能直接引用它。
 实现按职责分为私有模块，crate root 只导出领域类型：
 
 - `mapping_pages.rs`：容器、锁内 resident tree/dirty marks 与 dirty reconciliation；
-- `folio.rs`：页分配、数据访问、dirty/writeback 状态和释放；
+- `folio.rs`：页分配、数据访问、uptodate/dirty/writeback 状态和释放；
 - `folio_batch.rs`：有界、有序的 folio 引用集合；
 - `filemap.rs`：lookup、materialize 和 insert-if-absent；
-- `readahead.rs`：连续 cached run 查询；
+- `readahead.rs`：有界缺页段查询、页保留和同步读入协调；
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
 - `tests/`：resident storage、truncate 和 writeback 测试。
@@ -68,10 +68,10 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 
 ### Materialize
 
-1. 查询 folio tree。
-2. 命中时复用现有 folio。
-3. 缺失时调用 owner 提供的 materialize closure。
-4. 在同一 index 已被并发插入时保留先到达的 folio。
+1. 查询 folio tree，缺失时在索引锁外分配，再持锁复核并插入非 uptodate folio；竞争失败的候选在锁外释放。
+2. 索引锁下仅尝试非阻塞取页锁；竞争时释放 state 锁等待，醒来后重新查找。
+3. 释放 state 锁；仅非 uptodate 页调用 owner 的读入闭包，成功后标记 uptodate。
+4. 初始化失败不暴露部分数据，后续读取可重试；持页锁更新 dirty index 后再解锁。
 
 ### Resize cached folios
 
@@ -82,9 +82,8 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 - shrink：清除并删除新 EOF 之后的整页；
 - partial EOF：清零 surviving folio 的尾部并标记 dirty。
 
-growth 和 shrink 都直接在 MappingPages state lock → folio lock 下修改 cached folio，
-不经过 `with_folio`/`with_folio_or_create`。因此 `resize_cached_folios` 必须在同一
-state-lock 临界区内同步 dirty tag，不能依赖 folio access 的 reconciliation。
+growth 和 shrink 在索引锁下取得候选引用，释放索引锁后锁页，再取索引锁复核身份。
+尾部清零在页锁内、索引锁外完成；解锁页之前通过共享 reconciliation 更新 dirty tag。
 
 该方法不更新任何可见长度，也不产生 VM invalidation。Linux
 `i_size_write -> unmap -> truncate page cache -> unmap` 的事务由
@@ -103,16 +102,16 @@ state-lock 临界区内同步 dirty tag，不能依赖 folio access 的 reconcil
 
 writeback 从独立的 dirty folio index 枚举目标范围，不扫描全部 resident folio。
 dirty tag 只产生候选 `(index, Arc<Folio>)`。真正开始写回前，writeback 在
-MappingPages state lock → folio lock 的同一临界区内重新确认：
+folio lock → MappingPages state lock 的同一临界区内重新确认：
 
 1. `state.entries[index]` 仍与候选 `Arc` 相同；
 2. 当前 folio 仍然 dirty；
 3. 当前 folio 尚未 under writeback。
 
-缺失、已替换或 clean 的候选不会写回，并会根据当前 resident folio 修正 dirty tag。
+缺失或已替换的候选不会写回，也无权修改新 resident 的 marks；同身份 clean 候选清除 dirty tag。
 通过校验后，writeback 在同一临界区内清 dirty、设置 under-writeback 并删除 dirty
 tag。I/O 期间发生 redirty 时，folio access 会重新插入 tag；I/O 失败时，当前 resident
-folio 会恢复 dirty 并重新插入 tag。完成阶段在 MappingPages state lock → folio lock 的同一临界区再次核对
+folio 会恢复 dirty 并重新插入 tag。完成阶段在 folio lock → MappingPages state lock 的同一临界区再次核对
 mapping identity；只有仍是当前 resident folio 的失败写回才能重新标脏并修改 dirty tag，
 已移除或替换的 folio 只结束 under-writeback。batch writeback 同时核对最终 dirty 状态；
 单页同步 writeback 在持有 folio lock 的 callback 成功后保持 clean，后续 writer 会在
@@ -129,13 +128,16 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 - 一个 mutex 保护 resident folio tree 和 dirty index；
 - 每个 folio 的 mutex 保护数据和 dirty/writeback 状态；
 - 同时核对 resident tree、dirty index 与 folio 状态时，锁顺序固定为
-  MappingPages state lock → folio lock；folio access closure 释放 folio lock 后才能重新取得
-  MappingPages state lock；
+  folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败后释放索引锁再等待。
+  folio access closure 持页锁完成 dirty index reconciliation；
 - 本 crate 不拥有 inode data lock、mapped-view lock 或 MM lock；
-- writeback 的文件系统 I/O 在 folio-tree mutex 外执行；
-- 现有 `with_folio_or_create` 在 tree mutex 下调用 materialize closure，owner 的
-  `read_folio` 可能执行 backing I/O；该 closure 不得重入同一容器。这是保留的
-  同步读入行为，目录与所有权重构不改变其锁范围；
+- 文件系统 I/O 在 folio-tree mutex 外执行；读入前将非 uptodate folio 纳入 resident tree，
+  页锁串行化初始化，等待者释放索引锁睡眠并在醒来后重新查找身份；
+- `with_folio` 仅暴露 uptodate 数据；初始化失败保留非 uptodate 页供重试，
+  truncate 不将其部分内容标脏；`readahead_folios` 使用固定容量 FolioBatch 保留并锁定缺页段，
+  回调返回后保持页锁，取得索引锁复核身份并摘除未消费后缀，再释放页锁；
+  等待者醒来后重新查找 resident，不初始化已摘除的旧预留页；
+- `filemap_add_folio` 仍用于移交完整 Folio，冲突时原样归还所有权；
 - `writeback_until` 为保持候选在单页同步 I/O 期间稳定，会持有 folio lock 调用
   backend callback；该 callback 不得重入同一个 `MappingPages`；
 - `write_cache_pages` 在锁内完成状态过渡和数据复制，释放 folio lock 后才调用 batch

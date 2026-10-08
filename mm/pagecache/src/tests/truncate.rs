@@ -37,8 +37,8 @@ fn shrink_drops_full_folios_and_zeros_surviving_tail() {
 fn growth_zeros_cached_tail_and_marks_it_dirty() {
     let cache = new_cache();
     cache
-        .filemap_add_folio(0, 0, &vec![0x5a; PAGE_SIZE_4K])
-        .unwrap();
+        .filemap_add_folio(super::folio_from_bytes(0, &vec![0x5a; PAGE_SIZE_4K]))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
     let old_len = (PAGE_SIZE_4K / 4) as u64;
     let new_len = (PAGE_SIZE_4K / 2) as u64;
     assert!(dirty_indices(&cache).is_empty());
@@ -80,7 +80,9 @@ fn shrink_and_final_teardown_remove_multiple_sparse_batches() {
     }
     // Teardown uses page indices directly and must handle the maximum index
     // without wrapping a traversal cursor back to zero.
-    cache.filemap_add_folio(u64::MAX, 0, b"last").unwrap();
+    cache
+        .filemap_add_folio(super::folio_from_bytes(u64::MAX, b"last"))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
     let retained = cache.state.lock().entries[&((count - 1) as u64 * 2)].clone();
     let new_len = (crate::FolioBatch::CAPACITY * 2 * PAGE_SIZE_4K + 1) as u64;
     cache.resize_cached_folios((count * 2 * PAGE_SIZE_4K) as u64, new_len);
@@ -212,6 +214,7 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
         if mode == 3 {
             let mut replacement = crate::Folio::new_zeroed(0).unwrap();
             replacement.data().fill(0x33);
+            replacement.mark_uptodate();
             replacement.mark_dirty();
             let mut state = cache.state.lock();
             state

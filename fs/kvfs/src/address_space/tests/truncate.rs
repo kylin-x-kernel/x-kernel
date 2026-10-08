@@ -54,9 +54,9 @@ struct PanicWritebackOps;
 static PANIC_WRITEBACK_OPERATIONS: PanicWritebackOps = PanicWritebackOps;
 
 impl AddressSpaceOperations for PanicWritebackOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         folio.data().fill(0);
-        Ok(folio.data().len())
+        Ok(())
     }
 
     fn writepages(
@@ -72,7 +72,16 @@ impl AddressSpaceOperations for PanicWritebackOps {
 /// without forcing ordinary writeback.
 #[def_test]
 fn evict_discards_dirty_folios_without_writeback() {
-    let address_space = AddressSpace::new(Weak::new(), &PANIC_WRITEBACK_OPERATIONS);
+    let inode = VfsInode::new_file_with_address_space(
+        Arc::new(CacheOnlyFileOps),
+        &PANIC_WRITEBACK_OPERATIONS,
+        VfsInodeInit::new(
+            1,
+            11,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let address_space = inode.address_space();
     address_space
         .write_cached_bytes(0, b"hello world")
         .expect("page-cache write should succeed");
@@ -138,8 +147,8 @@ fn truncate_publishes_i_size_before_two_mapping_invalidations() {
     let address_space = inode.address_space();
     address_space
         .i_pages
-        .filemap_add_folio(1, 0, b"cached tail")
-        .expect("cache tail page");
+        .filemap_add_folio(super::folio_from_bytes(1, b"cached tail"))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
     let notifier = Arc::new(RecordingNotifier {
         address_space: Arc::downgrade(&address_space),
         observed_sizes: Mutex::new(Vec::new()),
@@ -178,12 +187,12 @@ fn truncate_shrink_then_regrow_does_not_reveal_discarded_cache() {
     let stale = vec![0x5a; PAGE_SIZE_4K];
     address_space
         .i_pages
-        .filemap_add_folio(0, 0, &stale)
-        .expect("cache first page");
+        .filemap_add_folio(super::folio_from_bytes(0, &stale))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
     address_space
         .i_pages
-        .filemap_add_folio(1, 0, &stale)
-        .expect("cache second page");
+        .filemap_add_folio(super::folio_from_bytes(1, &stale))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
 
     inode.set_len(0).expect("shrink succeeds");
     assert_eq!(inode.size(), 0);
@@ -218,8 +227,8 @@ fn truncate_partial_page_growth_zeros_cached_old_eof() {
     let stale = vec![0x5a; PAGE_SIZE_4K];
     address_space
         .i_pages
-        .filemap_add_folio(0, 0, &stale)
-        .expect("cache partial EOF page");
+        .filemap_add_folio(super::folio_from_bytes(0, &stale))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
 
     inode
         .set_len(new_len)

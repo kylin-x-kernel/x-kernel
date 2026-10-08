@@ -17,6 +17,8 @@ mod read;
 mod truncate;
 mod writeback;
 
+pub(super) use read::observe_readahead_run;
+
 struct TruncateOps;
 
 static TRUNCATE_OPERATIONS: TruncateOps = TruncateOps;
@@ -29,9 +31,9 @@ impl InodeOperations for TruncateOps {
 impl FileOperations for TruncateOps {}
 
 impl AddressSpaceOperations for TruncateOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         folio.data().fill(0);
-        Ok(folio.data().len())
+        Ok(())
     }
 }
 
@@ -64,4 +66,10 @@ impl AddressSpace {
         }
         Ok(written)
     }
+}
+
+fn folio_from_bytes(index: u64, data: &[u8]) -> pagecache::Folio {
+    let mut folio = pagecache::Folio::new_zeroed(index).unwrap();
+    folio.data()[..data.len()].copy_from_slice(data);
+    folio
 }

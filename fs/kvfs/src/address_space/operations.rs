@@ -78,8 +78,23 @@ impl WriteEndRequest {
 /// Implementations should be tied to the owning inode/superblock state, not to
 /// one open file instance.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
-    /// Reads backing storage into a newly materialized folio.
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<usize> {
+    /// Initializes a locked resident folio from backing storage synchronously.
+    ///
+    /// The folio may be newly allocated or retained after an earlier failed
+    /// read. Initialize its entire contents on every successful attempt;
+    /// do not rely on contents left by a failed attempt.
+    ///
+    /// Success means the entire folio is initialized, including zeroes for
+    /// holes, unwritten extents and the tail beyond EOF. The filesystem owns
+    /// the read boundary and must report incomplete backing reads as errors;
+    /// a later EOF sample must not reinterpret an already completed read.
+    /// The cache marks the folio uptodate only after success. On failure it
+    /// remains non-uptodate for retry, without exposing partial contents.
+    ///
+    /// Runs with the folio locked and the cache index lock released. Do not
+    /// reenter the mapping or acquire inode data or invalidate exclusive locks:
+    /// callers may already hold them or the invalidate shared lock.
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
         Err(VfsError::NoSuchDevice)
     }
 
@@ -102,9 +117,19 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         Ok(!was_dirty)
     }
 
-    /// Starts readahead for the supplied folio window.
-    fn readahead(&self, _mapping: &AddressSpace, _control: ReadaheadControl) -> VfsResult<()> {
-        Ok(())
+    /// Initializes a locked resident run synchronously, completing folios in order.
+    ///
+    /// The invalidate shared lock covers reservation and initialization.
+    /// Folios are already locked; do not reenter their mapping or acquire
+    /// the inode data lock or invalidate exclusive lock here.
+    /// Consumed failures remain non-uptodate for demand `read_folio` retry;
+    /// unconsumed reservations are removed when the callback returns.
+    ///
+    /// The default consumes all reservations through `read_folio`, marking
+    /// successful pages uptodate and continuing after errors. It returns the
+    /// first error after attempting the entire run.
+    fn readahead(&self, control: &mut ReadaheadControl<'_, '_>) -> VfsResult<()> {
+        control.read_folios(|mapping, folio| self.read_folio(mapping, folio))
     }
 
     /// Prepares a buffered write.
@@ -169,10 +194,10 @@ static IN_MEMORY_ADDRESS_SPACE_OPERATIONS: InMemoryAddressSpaceOperations =
     InMemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         let page = folio.data();
         page.fill(0);
-        Ok(page.len())
+        Ok(())
     }
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
@@ -195,7 +220,7 @@ struct EmptyAddressSpaceOperations;
 static EMPTY_ADDRESS_SPACE_OPERATIONS: EmptyAddressSpaceOperations = EmptyAddressSpaceOperations;
 
 impl AddressSpaceOperations for EmptyAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
 

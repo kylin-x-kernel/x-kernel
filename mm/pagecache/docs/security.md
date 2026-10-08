@@ -33,7 +33,7 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 - `Folio::writeback` 是状态源，writeback index 只承担等待枚举；
 - 对外 folio 操作返回时，dirty 状态变化已反映到当前 resident folio 的 dirty tag；
   已从 resident tree 移除的 index 不得残留在 dirty index；
-- dirty tag 命中不构成写回许可；开始 I/O 前必须在 MappingPages state lock → folio lock
+- dirty tag 命中不构成写回许可；开始 I/O 前必须在 folio lock → MappingPages state lock
   的同一临界区重新校验 mapping identity、dirty 和 writeback 状态；
 - writeback 完成时必须按相同锁序重新校验 mapping identity；失败只重新标脏当前
   resident folio，已脱离 mapping 的 folio 只结束 writeback；
@@ -44,10 +44,13 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 ## 线程安全
 
 folio tree/dirty index 与 folio data 分层加锁。需要同时核对两层状态时，锁顺序固定为
-MappingPages state lock → folio lock；folio access closure 释放 folio lock 后再执行 dirty
-index reconciliation。writeback 的文件系统 I/O 在 tree lock 外执行。
-现有 materialize closure 在 tree lock 下运行，可能调用 backing read；禁止重入同一
-容器。该读入路径的锁范围没有在本次结构重构中改变。`writeback_until` 会在 folio lock 下调用 backend
+folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败必须释放
+索引锁再等待。folio access closure 持页锁完成 dirty index reconciliation。writeback 和缓冲缺页读取的文件系统 I/O 在 tree lock 外执行。
+缓冲读 owner 用 invalidate shared lock 协调 EOF、页保留和初始化，避免迟到读入恢复
+被截断的数据。读入前 folio 已进入 resident tree，I/O 期间持页锁而不持 tree lock；
+只有完整初始化的页可标记 uptodate，失败页不暴露部分数据。等待页锁后重新查找 resident，
+不使用等待期间已脱离缓存的引用。读入 callback 不得重入映射或获取截断所需锁。
+`writeback_until` 会在 folio lock 下调用 backend
 callback，该 callback 不得重入同一个 `MappingPages`；batch writeback 则在调用 backend
 前释放 folio lock，但回调不得等待或截断自身提交批次的 folio，否则完成路径无法执行。
 
@@ -64,7 +67,7 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 | T-07 | writeback 完成覆盖并发 redirty | batch 完成阶段重新读取最终状态；单页写回后的 clean → dirty writer 重新设置 tag |
 | T-08 | truncate/replace 后写回已脱离 mapping 的旧 folio | 开始与完成写回时均在固定锁序下校验当前 `Arc` identity；失败不重新标脏旧 folio |
 | T-10 | 大映射写回或 truncate 整段收集引用耗尽临时内存 | 固定容量 FolioBatch；dirty 游标前进；删除后复用 batch |
-| T-09 | 文件增长后 cached tail 的清零结果未进入 writeback | growth 在 state lock → folio lock 下同时设置 dirty bit 和 dirty tag |
+| T-09 | 文件增长后 cached tail 的清零结果未进入 writeback | growth 在 folio lock → state lock 下同时设置 dirty bit 和 dirty tag |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -98,7 +101,7 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 - dirty 状态变化返回前是否更新 dirty index，并发 redirty 后索引是否继续保留；
 - dirty tag 候选是否在开始写回前重新校验当前 mapping identity 和 folio 状态；
 - shrink 和 final teardown 是否同步删除对应 dirty index；
-- MappingPages/folio 双锁路径是否保持 MappingPages state → folio 顺序；
+- MappingPages/folio 双锁路径是否保持 folio → MappingPages state 顺序，索引锁下是否只允许非阻塞 try_lock；
 - `writeback_until` backend callback 是否避免重入同一个 `MappingPages`；
 - writeback 是否在 tree lock 外调用 backend，materialize closure 是否避免重入；
 - `MappingPagesState` 是否保持 crate 内部可见，容器是否始终由 AddressSpace 直接持有。

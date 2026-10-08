@@ -8,7 +8,6 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kerrno::KError;
-use ksync::Mutex;
 use ktask::WaitQueue;
 use memaddr::PAGE_SIZE_4K;
 use unittest::{assert_eq, def_test};
@@ -82,7 +81,9 @@ fn failed_writeback_restores_dirty_state() {
 #[def_test]
 fn clean_folio_with_stale_dirty_tag_is_not_written() {
     let cache = new_cache();
-    cache.filemap_add_folio(0, 0, b"clean").unwrap();
+    cache
+        .filemap_add_folio(super::folio_from_bytes(0, b"clean"))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
     cache.state.lock().dirty_marks.insert(0);
     let mut writes = 0usize;
 
@@ -143,48 +144,54 @@ fn writeback_until_respects_dirty_index_and_page_budget() {
 
 #[def_test]
 fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
-    let cache = new_cache();
-    write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
-    write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
-    let cache_during_io = &cache;
-    let mut write_offsets = Vec::new();
+    for replacement_dirty in [false, true] {
+        let cache = new_cache();
+        write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K]).unwrap();
+        write_cached(&cache, PAGE_SIZE_4K as u64, &vec![2; PAGE_SIZE_4K]).unwrap();
+        let cache_during_io = &cache;
+        let mut write_offsets = Vec::new();
 
-    let initial_budget = usize::MAX;
-    let mut nr_to_write = initial_budget;
-    let mut pages_skipped = 0;
-    cache
-        .write_cache_pages(
-            (PAGE_SIZE_4K * 2) as u64,
-            0..u64::MAX,
-            &mut nr_to_write,
-            &mut pages_skipped,
-            PAGE_SIZE_4K,
-            &mut |offset, data| {
-                write_offsets.push(offset);
-                if offset == 0 {
-                    let replacement = Arc::new(Mutex::new(
-                        Folio::new_zeroed(1).map_err(|error| (0, error))?,
-                    ));
-                    let old = cache_during_io
-                        .state
-                        .lock()
-                        .entries
-                        .insert(1, replacement)
-                        .expect("collected folio");
-                    old.lock().clear_dirty();
-                }
-                Ok(data.len())
-            },
-        )
-        .unwrap();
+        let initial_budget = usize::MAX;
+        let mut nr_to_write = initial_budget;
+        let mut pages_skipped = 0;
+        cache
+            .write_cache_pages(
+                (PAGE_SIZE_4K * 2) as u64,
+                0..u64::MAX,
+                &mut nr_to_write,
+                &mut pages_skipped,
+                PAGE_SIZE_4K,
+                &mut |offset, data| {
+                    write_offsets.push(offset);
+                    if offset == 0 {
+                        let mut replacement = Folio::new_zeroed(1).map_err(|error| (0, error))?;
+                        if replacement_dirty {
+                            replacement.mark_dirty();
+                        }
+                        // Replacement owns the index transition and its marks;
+                        // a previously collected candidate must not repair them.
+                        cache_during_io
+                            .resize_cached_folios((PAGE_SIZE_4K * 2) as u64, PAGE_SIZE_4K as u64);
+                        cache_during_io
+                            .filemap_add_folio(replacement)
+                            .unwrap_or_else(|_| panic!("vacant replacement index"));
+                    }
+                    Ok(data.len())
+                },
+            )
+            .unwrap();
 
-    assert_eq!(write_offsets, vec![0]);
-    assert!(dirty_indices(&cache).is_empty());
-    let replacement_state = cache.with_folio(1, |folio| {
-        let folio = folio.expect("replacement folio");
-        (folio.is_dirty(), folio.is_under_writeback())
-    });
-    assert_eq!(replacement_state, (false, false));
+        assert_eq!(write_offsets, vec![0]);
+        assert_eq!(
+            dirty_indices(&cache),
+            if replacement_dirty { vec![1] } else { vec![] }
+        );
+        let replacement_state = cache.with_folio(1, |folio| {
+            let folio = folio.expect("replacement folio");
+            (folio.is_dirty(), folio.is_under_writeback())
+        });
+        assert_eq!(replacement_state, (replacement_dirty, false));
+    }
 }
 
 #[def_test]

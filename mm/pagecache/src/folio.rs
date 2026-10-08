@@ -17,12 +17,13 @@ use crate::PageIndex;
 pub struct Folio {
     index: PageIndex,
     addr: VirtAddr,
+    uptodate: bool,
     dirty: bool,
     writeback: bool,
 }
 
 impl Folio {
-    /// Allocates a zero-filled folio with a stable index, retained after detach.
+    /// Allocates a non-uptodate, zero-filled folio with a stable index.
     pub fn new_zeroed(index: PageIndex) -> KResult<Self> {
         let addr = global_allocator()
             .alloc_pages(1, PAGE_SIZE_4K, UsageKind::PageCache)
@@ -34,9 +35,20 @@ impl Folio {
         Ok(Self {
             index,
             addr,
+            uptodate: false,
             dirty: false,
             writeback: false,
         })
+    }
+
+    /// Returns whether backing data has been initialized successfully.
+    pub fn is_uptodate(&self) -> bool {
+        self.uptodate
+    }
+
+    /// Makes a completely initialized folio available to cache readers.
+    pub fn mark_uptodate(&mut self) {
+        self.uptodate = true;
     }
 
     /// Returns the immutable page index; this does not prove mapping residency.

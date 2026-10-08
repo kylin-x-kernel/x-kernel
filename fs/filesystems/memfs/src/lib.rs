@@ -820,10 +820,10 @@ struct MemoryAddressSpaceOperations;
 static MEMORY_ADDRESS_SPACE_OPERATIONS: MemoryAddressSpaceOperations = MemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for MemoryAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         let data = folio.data();
         data.fill(0);
-        Ok(data.len())
+        Ok(())
     }
 
     fn writepages(

@@ -122,13 +122,10 @@ impl MappingPages {
     }
 
     fn finish_writeback(&self, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
-        let mut state = self.state.lock();
         let mut locked = folio.lock();
+        let mut state = self.state.lock();
         let index = locked.index();
-        let is_current = state
-            .entries
-            .get(&index)
-            .is_some_and(|current| Arc::ptr_eq(current, folio));
+        let is_current = state.is_current(index, folio);
         if is_current && !is_complete {
             locked.mark_dirty();
         }
@@ -141,13 +138,13 @@ impl MappingPages {
                 state.dirty_marks.remove(&index);
             }
         }
-        drop(locked);
         drop(state);
+        drop(locked);
         writeback_waiters(folio).notify_all(false);
     }
 
     // A dirty tag only selects a candidate. Mapping identity and folio state
-    // must be checked in one state -> folio critical section before I/O owns
+    // must be checked in one folio -> state critical section before I/O owns
     // the folio, otherwise truncate or replacement can detach a collected Arc.
     fn start_writeback_for_candidate<'a>(
         &self,
@@ -155,23 +152,13 @@ impl MappingPages {
         candidate: &'a Arc<Mutex<Folio>>,
         pages_skipped: &mut usize,
     ) -> Option<MutexGuard<'a, Folio>> {
+        let mut folio = candidate.lock();
         let mut state = self.state.lock();
-        let Some(current) = state.entries.get(&index).cloned() else {
-            state.dirty_marks.remove(&index);
-            return None;
-        };
-
-        if !Arc::ptr_eq(&current, candidate) {
-            let is_current_dirty = current.lock().is_dirty();
-            if is_current_dirty {
-                state.dirty_marks.insert(index);
-            } else {
-                state.dirty_marks.remove(&index);
-            }
+        if !state.is_current(index, candidate) {
+            // Replacement and detach update their own marks under the index
+            // lock. This stale candidate has no authority over those marks.
             return None;
         }
-
-        let mut folio = candidate.lock();
         if !folio.is_dirty() {
             state.dirty_marks.remove(&index);
             return None;

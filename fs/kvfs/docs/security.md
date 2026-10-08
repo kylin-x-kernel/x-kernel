@@ -364,12 +364,14 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - `FsContext` 能承载 binary mountdata bytes，但不负责具体 representation 的解析或
   filesystem-specific remount parsing。
 
-### Buffered read 窗口提示的有效性
+### Buffered read 与预读发布
 
-`prepared_end` 仅控制预读窗口准备的频率，不表示该区间仍驻留，不授权绕过 folio 查找、
-锁定或按需加载。窗口批量准备不新增裸页引用、长期 pin、用户复制期间的索引锁或
-invalidate lock；不改变原有读取的文件长度快照和并发 truncate 语义。短复制必须立即
-停止，复制和 readahead 的错误继续传播，不能因为窗口准备成功而忽略它们。
+同步预读控制对象只在 invalidate shared lock 覆盖的 callback 内借用；完整数据通过
+游标顺序发布，长度不足不会生成有效缓存页，已有 resident 不被 backing 数据覆盖。
+缺页读取同样在该锁内检查 EOF 并完成发布，truncate exclusive 排除迟到的旧数据。
+用户复制不持 invalidate lock，每页锁定后重新检查 EOF；`prepared_end` 只抑制重复
+预读，不授权跳过缓存查找。预读失败可由按需读重试；按需读或复制失败时优先返回
+已完成前缀，没有前缀才报告错误。
 
 ## 审计清单
 

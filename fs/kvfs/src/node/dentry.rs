@@ -1738,7 +1738,7 @@ mod tests_dentry {
     static MOCK_ADDRESS_SPACE_OPERATIONS: MockAddressSpaceOperations = MockAddressSpaceOperations;
 
     impl AddressSpaceOperations for MockAddressSpaceOperations {
-        fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<usize> {
+        fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
             let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
             let data = inode.private::<MockFileOps>()?.data.lock();
             let start = folio
@@ -1747,12 +1747,14 @@ mod tests_dentry {
                 .and_then(|offset| usize::try_from(offset).ok())
                 .ok_or(VfsError::InvalidInput)?;
             if start >= data.len() {
-                return Ok(0);
+                folio.data().fill(0);
+                return Ok(());
             }
             let buf = folio.data();
             let count = buf.len().min(data.len() - start);
             buf[..count].copy_from_slice(&data[start..start + count]);
-            Ok(count)
+            buf[count..].fill(0);
+            Ok(())
         }
 
         fn writepages(
