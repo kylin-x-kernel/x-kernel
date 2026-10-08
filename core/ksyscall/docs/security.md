@@ -67,6 +67,9 @@ copy wrappers.
    in registers unused by an older ABI must not be trusted as extension
    flags.
 
+The obsolete `getcpu` cache argument is ignored and never dereferenced. CPU
+and NUMA-node output pointers still go through `UserPtr` and retain copyout errors.
+
 ## Threat analysis
 
 | ID | Threat | Severity | Trigger | Response |

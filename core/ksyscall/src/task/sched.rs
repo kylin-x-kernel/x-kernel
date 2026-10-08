@@ -112,11 +112,14 @@ fn affinity_target(pid: i32) -> KResult<KtaskRef> {
 }
 
 /// Returns the CPU and NUMA node on which the calling thread is running.
-pub fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, tcache: usize) -> KResult<isize> {
-    if tcache != 0 {
-        return Err(KError::InvalidInput);
-    }
-
+///
+/// The legacy cache argument is ignored, matching Linux since 2.6.24.
+/// Either output pointer may be null.
+///
+/// # Errors
+///
+/// Propagates user-copy errors for non-null CPU or NUMA-node output pointers.
+pub fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, _tcache: usize) -> KResult<isize> {
     if let Some(cpu) = cpu.check_non_null() {
         cpu.write_vm(this_cpu_id().as_usize() as u32)?;
     }
@@ -661,6 +664,20 @@ mod tests {
             Err(err) if err == expected => {}
             Err(err) => panic!("expected {expected:?}, got {err:?}"),
             Ok(_) => panic!("expected {expected:?}, got Ok"),
+        }
+    }
+
+    #[def_test]
+    fn getcpu_ignores_legacy_cache_with_null_outputs() {
+        for cache in [0, 1, usize::MAX] {
+            assert_eq!(
+                super::sys_getcpu(
+                    posix_types::UserPtr::default(),
+                    posix_types::UserPtr::default(),
+                    cache,
+                ),
+                Ok(0)
+            );
         }
     }
 

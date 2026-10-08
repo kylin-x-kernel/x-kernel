@@ -195,6 +195,8 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 - `task/sched.rs`: `sched_yield` / `sched_*affinity` / `sched_*scheduler` /
   `getcpu` / `getpriority` / `setpriority`; owners in `ktask` scheduling
   interfaces, `kprocess` process/thread state, and `khal` CPU queries.
+  `getcpu` ignores its obsolete third cache argument without reading it.
+  Null CPU/node outputs are allowed; non-null outputs use the existing user-copy wrappers.
   `sched_getscheduler` and `sched_getparam` resolve positive published TIDs
   through a separate read-only helper; zero selects the current thread and
   negative IDs return EINVAL. The two policy/parameter setters retain
