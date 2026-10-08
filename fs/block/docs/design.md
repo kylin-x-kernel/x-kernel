@@ -22,9 +22,12 @@ driver operations -> block::Gendisk -> block::BlockDevice
 
 ## SeekableDisk 算法
 
-完整 block 直接提交给 `BlockDeviceOperations`。首尾非对齐访问使用一个 read buffer 和
+完整 block 直接提交给 canonical `BlockDevice`。首尾非对齐访问使用一个 read buffer 和
 一个 write buffer；改变游标、读取或显式 flush 前先提交 pending partial write，保持写后
 读顺序。游标状态由独占 `&mut self` 保护，共享介质并发由文件系统负责。
+
+设备总长度直接读取 `BlockDevice::size()` 的 sector-derived byte capacity，不再从 logical
+block count 反算，因此末尾不足一个 logical block 的容量也不会被静默截断。
 
 普通 drop 不隐式吞掉 flush 错误；文件系统必须在 sync/unmount 路径显式调用 `flush()`。
 

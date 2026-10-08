@@ -33,8 +33,8 @@ impl DeviceDriver for BcmSdhciDriver {
             Ok(dev) => {
                 let (index, first_minor) = super::allocate_mmc_disk()?;
                 let name = format!("{}{}", dev.name(), index);
-                let disk = block::Gendisk::new(name, 179, first_minor, 8, Box::new(dev))?;
-                kclass::publish_block(device, Arc::new(disk)).map(drop)
+                let disk = block::Gendisk::alloc(name, 179, first_minor, 8, Box::new(dev))?;
+                kclass::publish_block(device, disk).map(drop)
             }
             Err(_) => Err(DriverError::Io),
         }

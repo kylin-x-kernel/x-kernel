@@ -6,7 +6,7 @@
 
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 
-use block::{Gendisk, completion::BlockCompletionOperations};
+use block::{Gendisk, GendiskRef, completion::BlockCompletionOperations};
 use device_res::{Irq, IrqHandler, IrqOp, IrqResource, IrqTrigger};
 use driver_base::{Device, DriverError, DriverResult};
 use kdevice::{DeviceId, DeviceObject};
@@ -27,7 +27,7 @@ struct BlockActivation<H: VirtIoHal, T: Transport> {
     device: Arc<VirtIoBlkDev<H, T>>,
     irq: Option<Irq>,
     reclaimer: Arc<BlockIoReclaimer>,
-    disk: Option<Arc<Gendisk>>,
+    disk: Option<GendiskRef>,
 }
 
 impl<H: VirtIoHal, T: Transport> Drop for BlockActivation<H, T> {
@@ -37,9 +37,7 @@ impl<H: VirtIoHal, T: Transport> Drop for BlockActivation<H, T> {
         let mut drain = block_completion::prepare_block_wait().expect("block close task context");
         let mut stop = block_completion::prepare_block_wait().expect("block close task context");
         self.device.begin_close(drain.signals());
-        if let Some(disk) = &self.disk
-            && disk.part0().is_some()
-        {
+        if let Some(disk) = &self.disk {
             block::del_gendisk(disk.device_number());
         }
         drain.wait_completion();
@@ -94,13 +92,13 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
         )
         .map_err(crate::resource::map_res_err)?,
     );
-    let disk = Arc::new(Gendisk::new(
+    let disk = Gendisk::alloc(
         device.name().into(),
         virtio::VIRTIO_BLK_MAJOR,
         device.index() << virtio::VIRTIO_BLK_PART_BITS,
         1 << virtio::VIRTIO_BLK_PART_BITS,
         Box::new(device.clone()),
-    )?);
+    )?;
     activation.disk = Some(disk.clone());
     device.enable_interrupts();
     let id = parent.id();

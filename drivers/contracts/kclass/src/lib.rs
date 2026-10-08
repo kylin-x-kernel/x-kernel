@@ -242,7 +242,7 @@ macro_rules! class_registries {
 pub type NetDeviceImpl = Box<dyn NetDevice + Send + Sync>;
 /// Concrete runtime type for registered generic disks.
 #[cfg(feature = "block")]
-pub type BlockDeviceImpl = Arc<block::Gendisk>;
+pub type BlockDeviceImpl = block::GendiskRef;
 /// Concrete runtime type for character devices.
 #[cfg(feature = "char")]
 pub type CharDeviceImpl = Box<dyn CharDevice + Send + Sync>;

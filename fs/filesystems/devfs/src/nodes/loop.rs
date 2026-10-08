@@ -271,7 +271,7 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
     (0..16)
         .map(|number| {
             let device = Arc::new(LoopDevice::new(number));
-            let disk = block::Gendisk::new(
+            let disk = block::Gendisk::alloc(
                 format!("loop{number}"),
                 7,
                 number,
@@ -279,7 +279,7 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
                 Box::new(device.clone()),
             )
             .expect("valid loop gendisk");
-            block::add_disk(Arc::new(disk)).expect("loop device number must be unique");
+            block::add_disk(disk).expect("loop device number must be unique");
             device
         })
         .collect()

@@ -15,7 +15,8 @@ extern crate alloc;
 use alloc::{boxed::Box, sync::Arc, vec};
 use core::mem;
 
-use block::{BlockDevice, BlockDeviceOperations, DriverResult};
+use block::{BlockDevice, DriverResult};
+
 /// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
     let (first, rem) = buf.split_at(cnt);
@@ -65,7 +66,7 @@ impl SeekableDisk {
 
     /// Returns the disk size in bytes.
     pub fn size(&self) -> u64 {
-        self.dev.num_blocks() << self.block_size_log2
+        self.dev.size()
     }
 
     /// Returns the block size in bytes.

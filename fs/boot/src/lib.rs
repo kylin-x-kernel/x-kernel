@@ -342,7 +342,7 @@ fn mount_root_file_system(boot: &BootVfs) {
 
     let mut block_devs = block::block_devices()
         .into_iter()
-        .filter(|device| device.num_blocks() != 0)
+        .filter(|device| device.num_sectors() != 0)
         .collect();
     let handle = select_root_block(&mut block_devs);
     let source = format!("/dev/{}", handle.name());

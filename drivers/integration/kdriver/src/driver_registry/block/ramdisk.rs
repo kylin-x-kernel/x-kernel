@@ -42,8 +42,8 @@ impl DeviceDriver for RamdiskDriver {
         let dev = block::ramdisk::RamDisk::new(0x100_0000); // 16 MiB
 
         let name = dev.name().into();
-        let disk = block::Gendisk::new(name, 1, 0, 1, Box::new(dev))?;
-        kclass::publish_block(device, Arc::new(disk)).map(drop)
+        let disk = block::Gendisk::alloc(name, 1, 0, 1, Box::new(dev))?;
+        kclass::publish_block(device, disk).map(drop)
     }
 }
 

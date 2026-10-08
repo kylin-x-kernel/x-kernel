@@ -128,16 +128,14 @@ fn close_drains_pending_and_submitted_calls_before_destroying_retained_disk() {
         reclaimer.clone(),
     )
     .unwrap();
-    let disk = Arc::new(
-        Gendisk::new(
-            device.name().into(),
-            virtio::VIRTIO_BLK_MAJOR,
-            device.index() << virtio::VIRTIO_BLK_PART_BITS,
-            16,
-            Box::new(device.clone()),
-        )
-        .unwrap(),
-    );
+    let disk = Gendisk::alloc(
+        device.name().into(),
+        virtio::VIRTIO_BLK_MAJOR,
+        device.index() << virtio::VIRTIO_BLK_PART_BITS,
+        16,
+        Box::new(device.clone()),
+    )
+    .unwrap();
     let retained = block::add_disk(disk.clone()).unwrap();
     let number = disk.device_number();
     let activation = BlockActivation {

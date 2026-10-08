@@ -240,6 +240,10 @@ class is the lifecycle publication entry point; I/O consumers obtain the
 canonical `BlockDevice` from the block core, so the full set of block
 operations is deliberately not re-implemented for
 `ClassDevice<BlockDeviceImpl>`.
+`BlockDeviceImpl` uses `block::GendiskRef` to keep the disk alive through
+canonical part0. Class publication and removal only register or release that
+owning reference; device references keep the complete disk alive after class
+removal.
 
 ```rust
 impl NetDevice for ClassDevice<NetDeviceImpl> {
