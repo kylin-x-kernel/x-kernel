@@ -13,7 +13,7 @@
 
 use alloc::{format, sync::Arc};
 
-use console_driver::runtime::active_console_id;
+use console_driver::runtime::stdout_console_id;
 use driver_base::DriverError;
 use kclass::{CharDevice, CharDeviceImpl, ClassDevice, char_devices};
 use kerrno::KError;
@@ -86,7 +86,7 @@ fn map_err(err: DriverError) -> KError {
 /// the auxiliary UARTs are present.
 pub fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut serials = DirMapping::new();
-    let stdout_id = active_console_id();
+    let stdout_id = stdout_console_id();
     let mut idx = 0u32;
     for device in char_devices() {
         // Only the unified serial driver's per-instance UARTs.

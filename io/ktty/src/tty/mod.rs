@@ -13,10 +13,12 @@ use ktask::future::block_on;
 use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode, poll_file_io};
 use osvm::{VirtMutPtr, VirtPtr};
 
-use crate::terminal::{
-    Terminal, WindowSize,
-    ldisc::{LineDiscipline, ProcessMode, TtyConfig, TtyRead, TtyWrite},
-    termios::{Termios, Termios2},
+use crate::{
+    port::{TtyConfig, TtyPort, TtyRead, TtyWrite},
+    terminal::{
+        Terminal, WindowSize,
+        termios::{Termios, Termios2},
+    },
 };
 
 mod ntty;
@@ -63,22 +65,27 @@ fn tty_file_private(file: &VfsFile) -> KResult<Arc<TtyFilePrivate>> {
 pub struct Tty<R, W> {
     this: Weak<Self>,
     terminal: Arc<Terminal>,
-    ldisc: Mutex<LineDiscipline<R, W>>,
+    input: Mutex<TtyPort<R, W>>,
     writer: W,
-    is_ptm: bool,
+    kind: TtyKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TtyKind {
+    Terminal,
+    PtyMaster,
 }
 
 impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
-    fn new(terminal: Arc<Terminal>, config: TtyConfig<R, W>) -> Arc<Self> {
+    fn new(terminal: Arc<Terminal>, kind: TtyKind, config: TtyConfig<R, W>) -> Arc<Self> {
         let writer = config.writer.clone();
-        let is_ptm = matches!(&config.process_mode, ProcessMode::None(_));
-        let ldisc = Mutex::new(LineDiscipline::new(terminal.clone(), config));
+        let input = Mutex::new(TtyPort::new(terminal.clone(), config));
         Arc::new_cyclic(|this| Self {
             this: this.clone(),
             terminal,
-            ldisc,
+            input,
             writer,
-            is_ptm,
+            kind,
         })
     }
 }
@@ -95,7 +102,7 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     /// the terminal or the session is already associated elsewhere, or the
     /// foreground-group error if the final state transition cannot complete.
     pub fn bind_to(self: &Arc<Self>, proc: &Process) -> KResult<()> {
-        if self.is_ptm {
+        if self.kind == TtyKind::PtyMaster {
             return Err(KError::NotATty);
         }
         let _association = self.terminal.association.lock();
@@ -168,7 +175,9 @@ impl<R: TtyRead, W: TtyWrite> ControllingTerminal for Tty<R, W> {
 
 impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
     fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> KResult<()> {
-        if self.is_ptm || file.requests_no_controlling_tty() {
+        // A blocked reader must not serialize writers sharing this open file.
+        file.stream_open();
+        if self.kind == TtyKind::PtyMaster || file.requests_no_controlling_tty() {
             return Ok(());
         }
 
@@ -222,8 +231,10 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
             IoEvents::IN,
             file.is_nonblocking(),
             || {
-                if self.is_ptm || self.terminal.job_control.current_in_foreground() {
-                    self.ldisc.lock().read(buf)
+                if self.kind == TtyKind::PtyMaster
+                    || self.terminal.job_control.current_in_foreground()
+                {
+                    self.input.lock().read(buf)
                 } else {
                     // TODO: a background process group reading the controlling
                     // terminal should receive SIGTTIN (or `EIO` when SIGTTIN is
@@ -254,13 +265,13 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                 *self.terminal.termios.lock() =
                     Arc::new(Termios2::new((arg as *const Termios).read_vm()?));
                 if cmd == TCSETSF {
-                    self.ldisc.lock().drain_input();
+                    self.input.lock().drain_input();
                 }
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
                 *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).read_vm()?);
                 if cmd == TCSETSF2 {
-                    self.ldisc.lock().drain_input();
+                    self.input.lock().drain_input();
                 }
             }
             // TCSBRK: send break / drain output. This virtual terminal has no
@@ -268,19 +279,19 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
             // intentional no-op (including the `arg == 0` drain-output case).
             TCSBRK => {}
             TCFLSH => match arg as u32 {
-                linux_raw_sys::general::TCIFLUSH => self.ldisc.lock().drain_input(),
+                linux_raw_sys::general::TCIFLUSH => self.input.lock().drain_input(),
                 linux_raw_sys::general::TCIOFLUSH => {
                     // TCIOFLUSH drains input and output; with no kernel output
                     // buffer (writes go straight to hardware) only input is
                     // flushed here.
-                    self.ldisc.lock().drain_input();
+                    self.input.lock().drain_input();
                 }
                 // No kernel output buffer to flush (writes go to hardware).
                 linux_raw_sys::general::TCOFLUSH => {}
                 _ => return Err(KError::InvalidInput),
             },
             TIOCGPGRP => {
-                let foreground = if self.is_ptm {
+                let foreground = if self.kind == TtyKind::PtyMaster {
                     self.terminal
                         .job_control
                         .foreground()
@@ -292,7 +303,7 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                 (arg as *mut i32).write_vm(foreground.pgid() as i32)?;
             }
             TIOCGSID => {
-                let session = if self.is_ptm {
+                let session = if self.kind == TtyKind::PtyMaster {
                     self.terminal.job_control.session().ok_or(KError::NotATty)?
                 } else {
                     let caller_session = kprocess::current_user_process().group().session();
@@ -373,8 +384,8 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
 impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
     fn poll(&self) -> IoEvents {
         let mut events = IoEvents::OUT | self.terminal.job_control.poll();
-        if self.is_ptm || events.contains(IoEvents::IN) {
-            events.set(IoEvents::IN, self.ldisc.lock().poll_read());
+        if self.kind == TtyKind::PtyMaster || events.contains(IoEvents::IN) {
+            events.set(IoEvents::IN, self.input.lock().poll_read());
         }
         events
     }
@@ -384,11 +395,11 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if !self.is_ptm {
+        if self.kind != TtyKind::PtyMaster {
             self.terminal.job_control.register(context, events)?;
         }
         if events.contains(IoEvents::IN) {
-            self.ldisc.lock().register_rx(context)?;
+            self.input.lock().register_rx(context)?;
         }
         Ok(())
     }
@@ -399,6 +410,7 @@ pub struct CurrentTty;
 impl DeviceFileOps for CurrentTty {
     fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> KResult<()> {
         let tty = current_tty_ops()?;
+        file.stream_open();
         file.set_nonblocking(true);
         file.set_private_data(Arc::new(TtyFilePrivate::new(tty)));
         Ok(())
@@ -450,16 +462,47 @@ impl DeviceFileOps for CurrentTty {
 
 #[cfg(unittest)]
 mod tests {
+    use alloc::sync::Arc;
+
     use kerrno::KError;
     use unittest::def_test;
 
-    use super::pty::create_pty_pair;
+    use super::{Tty, TtyKind, pty::create_pty_pair};
+    use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
+
+    #[derive(Clone)]
+    struct EmptyIo;
+
+    impl TtyRead for EmptyIo {
+        fn read(&mut self, _buf: &mut [u8]) -> usize {
+            0
+        }
+    }
+
+    impl TtyWrite for EmptyIo {
+        fn write(&self, _buf: &[u8]) {}
+    }
 
     #[def_test(user, serial)]
     fn pty_master_cannot_become_controlling_terminal() {
         let (master, _) = create_pty_pair();
         let process = kprocess::current_user_process();
 
+        assert_eq!(master.bind_to(&process), Err(KError::NotATty));
+    }
+
+    #[def_test(user, serial)]
+    fn master_identity_does_not_depend_on_input_processing() {
+        let master = Tty::new(
+            Arc::default(),
+            TtyKind::PtyMaster,
+            TtyConfig {
+                reader: EmptyIo,
+                writer: EmptyIo,
+                process_mode: ProcessMode::Manual,
+            },
+        );
+        let process = kprocess::current_user_process();
         assert_eq!(master.bind_to(&process), Err(KError::NotATty));
     }
 }

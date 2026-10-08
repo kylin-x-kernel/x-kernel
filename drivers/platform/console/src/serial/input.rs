@@ -4,9 +4,9 @@
 
 //! Bounded UART receive storage, exclusively accessed under the port lock.
 
-use alloc::collections::TryReserveError;
+use alloc::{collections::TryReserveError, sync::Arc};
+use core::task::Waker;
 
-use kcpu_id_map::LogicalCpuId;
 use ringbuf::{
     LocalRb,
     storage::Heap,
@@ -19,7 +19,7 @@ pub(super) const RECEIVE_BUDGET_BYTES: usize = 256;
 pub(super) struct SerialInput {
     bytes: LocalRb<Heap<u8>>,
     pub(super) dropped_bytes: u64,
-    pub(super) work: Option<(super::InputWork, LogicalCpuId)>,
+    pub(super) waker: Option<Arc<Waker>>,
 }
 
 impl SerialInput {
@@ -27,7 +27,7 @@ impl SerialInput {
         Ok(Self {
             bytes: LocalRb::try_new(INPUT_CAPACITY_BYTES)?,
             dropped_bytes: 0,
-            work: None,
+            waker: None,
         })
     }
 

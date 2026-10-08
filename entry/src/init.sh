@@ -26,7 +26,9 @@ fi
 # which intentionally did not claim a controlling terminal. Reopen the console
 # from user context so the session leader acquires it before starting an
 # interactive fallback shell. The OpenRC path above remains free for getty.
-exec </dev/console >/dev/console 2>&1
+# Keep all three descriptors readable and writable: pagers read keys from
+# stderr when stdin is a pipe.
+exec 0<>/dev/console 1>&0 2>&0
 
 # Use bash if available, otherwise fall back to sh
 if [ -x /bin/bash ]; then

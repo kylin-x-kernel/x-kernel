@@ -3,128 +3,149 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::task::Waker;
 
-use console_driver::runtime::{active_console_id, read_active_console, write_active_console};
+use char_driver::CharDevice;
+use console_driver::{
+    runtime::stdout_console,
+    serial::{self, SerialPort},
+};
+use kclass::{CharDeviceImpl, ClassDevice};
 use klazy::lazy_static;
+use kspin::SpinNoPreempt;
 
-use super::Tty;
-use crate::terminal::ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
+use super::{Tty, TtyKind};
+use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
 
-/// Native TTY driver using console I/O
-pub type NTtyDriver = Tty<Console, Console>;
+/// Native TTY whose I/O and input notification share one stdout connection.
+pub type NTtyDriver = Tty<Arc<ConsoleConnection>, Arc<ConsoleConnection>>;
 
-/// Console reader/writer for native TTY
-#[derive(Clone, Copy)]
-pub struct Console;
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConsoleBackendState {
-    BootDirect      = 0,
-    HandoverPending = 1,
-    RuntimeOwned    = 2,
-}
-
-static CONSOLE_BACKEND_STATE: AtomicU8 = AtomicU8::new(ConsoleBackendState::BootDirect as u8);
-
-fn set_backend_state(state: ConsoleBackendState) {
-    CONSOLE_BACKEND_STATE.store(state as u8, Ordering::Release);
-}
-
-fn backend_state() -> ConsoleBackendState {
-    match CONSOLE_BACKEND_STATE.load(Ordering::Acquire) {
-        0 => ConsoleBackendState::BootDirect,
-        1 => ConsoleBackendState::HandoverPending,
-        2 => ConsoleBackendState::RuntimeOwned,
-        _ => ConsoleBackendState::BootDirect,
-    }
-}
-
-/// Try to attach one runtime console device discovered by the driver core.
+/// The native terminal's boot port and optional runtime access to that same port.
 ///
-/// If no suitable console handle is found, the native TTY continues to use
-/// the direct `khal::console` path.
-/// Called in late-init task context after ordinary worker pools are ready.
-pub fn try_handoff_console() {
-    // Connect input even when userspace has not opened the TTY yet. IRQs before
-    // this point only collect bytes in the shared stdout port's receive ring.
-    let _tty = &*N_TTY;
-    if backend_state() == ConsoleBackendState::RuntimeOwned {
-        return;
-    }
-
-    set_backend_state(ConsoleBackendState::HandoverPending);
-
-    if let Some(id) = active_console_id() {
-        set_backend_state(ConsoleBackendState::RuntimeOwned);
-        info!(
-            "tty: runtime console handoff attached via console subsystem ({:?})",
-            id
-        );
-        return;
-    }
-
-    set_backend_state(ConsoleBackendState::BootDirect);
-    debug!("tty: no runtime console handoff candidate, keep boot-direct backend");
+/// Runtime access is adopted in task context. Global console selection does not
+/// redirect this established connection. The early port is kernel-lifetime;
+/// retaining its runtime wrapper does not provide general hot-unplug support.
+pub struct ConsoleConnection {
+    boot_port: Option<Arc<SerialPort>>,
+    runtime: SpinNoPreempt<Option<ClassDevice<CharDeviceImpl>>>,
 }
 
-fn read_from_runtime_console(buf: &mut [u8]) -> Option<usize> {
-    if backend_state() != ConsoleBackendState::RuntimeOwned {
-        return None;
+impl ConsoleConnection {
+    fn new() -> Self {
+        Self {
+            boot_port: serial::stdout_port(),
+            runtime: SpinNoPreempt::new(None),
+        }
     }
 
-    match read_active_console(buf)? {
-        Ok(n) => Some(n),
-        Err(err) => {
-            warn!(
-                "tty: runtime console read failed ({:?}), fallback to boot-direct backend",
-                err
-            );
-            set_backend_state(ConsoleBackendState::BootDirect);
+    fn attach_input(&self, waker: Waker) {
+        self.boot_port
+            .as_ref()
+            .expect("console input IRQ requires a stdout port")
+            .attach_input_waker(waker)
+            .expect("failed to connect console input notification");
+    }
+
+    fn try_handoff(&self) {
+        if self.boot_port.is_none() || self.runtime.lock().is_some() {
+            return;
+        }
+        // Serial publication guarantees this wrapper adopts the early stdout
+        // instance. The active console is not evidence of that identity.
+        let Some(handle) = stdout_console() else {
+            return;
+        };
+        let id = handle.id();
+        let mut runtime = self.runtime.lock();
+        if runtime.is_none() {
+            *runtime = Some(handle);
+            drop(runtime);
+            info!("tty: runtime stdout attached ({id:?})");
+        }
+    }
+
+    fn runtime_handle(&self) -> Option<ClassDevice<CharDeviceImpl>> {
+        let handle = self.runtime.lock().clone()?;
+        if handle.is_available() {
+            Some(handle)
+        } else {
+            self.fallback(&handle);
             None
         }
     }
-}
 
-fn write_to_runtime_console(buf: &[u8]) -> bool {
-    if backend_state() != ConsoleBackendState::RuntimeOwned {
-        return false;
+    fn fallback(&self, failed: &ClassDevice<CharDeviceImpl>) {
+        let removed = {
+            let mut runtime = self.runtime.lock();
+            if runtime
+                .as_ref()
+                .is_some_and(|current| current.id() == failed.id())
+            {
+                runtime.take()
+            } else {
+                None
+            }
+        };
+        drop(removed);
     }
 
-    let Some(result) = write_active_console(buf) else {
-        set_backend_state(ConsoleBackendState::BootDirect);
-        return false;
-    };
-
-    match result {
-        Ok(_) => true,
-        Err(err) => {
-            warn!(
-                "tty: runtime console write failed ({:?}), fallback to boot-direct backend",
-                err
-            );
-            set_backend_state(ConsoleBackendState::BootDirect);
-            false
+    fn read(&self, buf: &mut [u8]) -> usize {
+        if let Some(handle) = self.runtime_handle() {
+            match handle.read(buf) {
+                Ok(count) => return count,
+                Err(error) => {
+                    self.fallback(&handle);
+                    warn!("tty: runtime stdout read failed ({error:?}), using boot port");
+                }
+            }
+        }
+        if let Some(port) = &self.boot_port {
+            port.read_data(buf)
+        } else {
+            khal::console::read_data(buf)
         }
     }
 }
 
-impl TtyRead for Console {
+impl TtyRead for Arc<ConsoleConnection> {
     fn read(&mut self, buf: &mut [u8]) -> usize {
-        if let Some(n) = read_from_runtime_console(buf) {
-            return n;
+        let count = ConsoleConnection::read(self, buf);
+        if let Some(port) = &self.boot_port {
+            let dropped = port.take_input_dropped_bytes();
+            if dropped != 0 {
+                warn!("tty: console receive buffer dropped {dropped} input bytes");
+            }
         }
-        khal::console::read_data(buf)
+        count
     }
 }
-impl TtyWrite for Console {
+
+impl TtyWrite for Arc<ConsoleConnection> {
     fn write(&self, buf: &[u8]) {
-        if write_to_runtime_console(buf) {
-            return;
+        if let Some(handle) = self.runtime_handle() {
+            match handle.write(buf) {
+                Ok(_) => return,
+                Err(error) => {
+                    self.fallback(&handle);
+                    warn!("tty: runtime stdout write failed ({error:?}), using boot port");
+                }
+            }
         }
-        khal::console::write_data(buf);
+        if let Some(port) = &self.boot_port {
+            port.write_data(buf);
+        } else {
+            khal::console::write_data(buf);
+        }
     }
+}
+
+/// Connects native input and adopts runtime access to the same boot stdout port.
+///
+/// Called in late-init task context after normal workers and device discovery.
+/// No runtime candidate leaves direct boot access intact; repeated calls are
+/// harmless. Input already collected before attachment receives an initial wake.
+pub fn try_handoff_console() {
+    N_TTY.writer.try_handoff();
 }
 
 lazy_static! {
@@ -134,11 +155,13 @@ lazy_static! {
 
 fn new_n_tty() -> Arc<NTtyDriver> {
     let has_input_irq = khal::console::interrupt_id().is_some();
+    let connection = Arc::new(ConsoleConnection::new());
     let tty = Tty::new(
         Arc::default(),
+        TtyKind::Terminal,
         TtyConfig {
-            reader: Console,
-            writer: Console,
+            reader: connection.clone(),
+            writer: connection.clone(),
             process_mode: if has_input_irq {
                 ProcessMode::Work(khal::percpu::this_cpu_id())
             } else {
@@ -147,11 +170,12 @@ fn new_n_tty() -> Arc<NTtyDriver> {
         },
     );
     if has_input_irq {
-        let (work, cpu_id) = tty.ldisc.lock().input_work().unwrap();
-        console_driver::serial::stdout_port()
-            .expect("console input IRQ requires a stdout port")
-            .attach_input_work(work, cpu_id)
-            .expect("failed to connect console input work");
+        let waker = tty.input.lock().input_waker().unwrap();
+        connection.attach_input(waker);
     }
     tty
 }
+
+#[cfg(unittest)]
+#[path = "../tests/connection.rs"]
+mod tests;

@@ -869,12 +869,15 @@ impl VfsFile {
 
     /// Reads from this open file and advances `f_pos` when applicable.
     pub fn read(&self, buf: &mut [u8]) -> VfsResult<usize> {
-        let mut pos = self.position_lock();
-        self.read_from(buf, &mut pos)
+        let mut iter = iov_iter_kvec_dest(buf);
+        self.read_iter(&mut iter)
     }
 
-    /// Reads from this open file into an iterator destination and advances `f_pos`.
+    /// Reads into an iterator, locking and advancing `f_pos` only for non-streams.
     pub fn read_iter(&self, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
+        if self.is_stream() {
+            return self.read_iter_from(iter, &mut 0);
+        }
         let mut pos = self.position_lock();
         self.read_iter_from(iter, &mut pos)
     }
@@ -902,8 +905,8 @@ impl VfsFile {
 
     /// Writes to this open file and advances `f_pos` when applicable.
     pub fn write(&self, buf: &[u8]) -> VfsResult<usize> {
-        let mut pos = self.position_lock();
-        self.write_from(buf, &mut pos)
+        let mut iter = iov_iter_kvec_source(buf);
+        self.write_iter(&mut iter)
     }
 
     /// Writes to this open file using a caller-owned position.
@@ -912,8 +915,11 @@ impl VfsFile {
         self.write_iter_from(&mut iter, pos)
     }
 
-    /// Writes to this open file from an iterator source and advances `f_pos`.
+    /// Writes from an iterator, locking and advancing `f_pos` only for non-streams.
     pub fn write_iter(&self, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
+        if self.is_stream() {
+            return self.write_iter_from(iter, &mut 0);
+        }
         let mut pos = self.position_lock();
         self.write_iter_from(iter, &mut pos)
     }
@@ -1146,11 +1152,28 @@ mod tests {
 
     use super::*;
 
+    struct TestInodeOperations;
+
+    impl crate::InodeOperations for TestInodeOperations {}
+
     fn sync_test_file(operations: Arc<dyn FileOperations>, mode: FMode) -> Arc<VfsFile> {
         let super_block = crate::nullfs::new_superblock();
-        let root = crate::Mount::new_root(&super_block).root_path();
+        let mount = crate::Mount::new_root(&super_block);
+        let inode = VfsInode::new_file_with_operations(
+            Arc::new(()),
+            Arc::new(TestInodeOperations),
+            operations.clone(),
+            NodeFlags::PRIVATE,
+            crate::VfsInodeInit::new(
+                2,
+                0,
+                crate::Umode::new(NodeType::RegularFile, crate::NodePermission::default()),
+            ),
+        );
+        let dentry = crate::Dentry::new_file_from_inode(inode, None, "sync-test".into());
+        dentry.bind_super_block(&super_block);
         VfsFileBuilder::from_path_state(
-            root,
+            crate::Path::new(mount, dentry),
             mode,
             OpenFlags::empty(),
             operations,
@@ -1158,6 +1181,83 @@ mod tests {
         )
         .finish()
         .unwrap()
+    }
+
+    struct PositionLockOperations {
+        is_stream: bool,
+        offsets: Mutex<Vec<u64>>,
+    }
+
+    impl PositionLockOperations {
+        fn check_position_lock(&self, file: &VfsFile, offset: u64) {
+            core::assert_eq!(file.position.try_lock().is_some(), self.is_stream);
+            self.offsets.lock().push(offset);
+        }
+    }
+
+    impl FileOperations for PositionLockOperations {
+        fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+            self.check_position_lock(file, offset);
+            buf.copy_from_slice(b"io!");
+            Ok(buf.len())
+        }
+
+        fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
+            self.check_position_lock(file, offset);
+            core::assert_eq!(buf, b"io!");
+            Ok(buf.len())
+        }
+    }
+
+    fn check_sequential_io_position_contract(is_stream: bool) {
+        let operations = Arc::new(PositionLockOperations {
+            is_stream,
+            offsets: Mutex::new(Vec::new()),
+        });
+        let mut mode = FMode::READ | FMode::WRITE | FMode::CAN_READ | FMode::CAN_WRITE;
+        if is_stream {
+            mode |= FMode::STREAM;
+        }
+        let file = sync_test_file(operations.clone(), mode);
+        file.set_position(17);
+
+        let mut bytes = [0; 3];
+        core::assert_eq!(file.read(&mut bytes), Ok(3));
+        core::assert_eq!(&bytes, b"io!");
+        core::assert_eq!(file.position(), if is_stream { 17 } else { 20 });
+
+        bytes.fill(0);
+        let mut dest = iov_iter_kvec_dest(&mut bytes);
+        core::assert_eq!(file.read_iter(&mut dest), Ok(3));
+        core::assert_eq!(dest.count(), 0);
+        core::assert_eq!(&bytes, b"io!");
+        core::assert_eq!(file.position(), if is_stream { 17 } else { 23 });
+
+        core::assert_eq!(file.write(b"io!"), Ok(3));
+        core::assert_eq!(file.position(), if is_stream { 17 } else { 26 });
+
+        let mut source = iov_iter_kvec_source(b"io!");
+        core::assert_eq!(file.write_iter(&mut source), Ok(3));
+        core::assert_eq!(source.count(), 0);
+        core::assert_eq!(file.position(), if is_stream { 17 } else { 29 });
+        core::assert_eq!(
+            *operations.offsets.lock(),
+            if is_stream {
+                vec![0; 4]
+            } else {
+                vec![17, 20, 23, 26]
+            }
+        );
+    }
+
+    #[def_test]
+    fn stream_io_does_not_lock_or_advance_file_position() {
+        check_sequential_io_position_contract(true);
+    }
+
+    #[def_test]
+    fn nonstream_io_serializes_and_advances_file_position() {
+        check_sequential_io_position_contract(false);
     }
 
     struct PollCaptureOperations(kpoll::PollSet);

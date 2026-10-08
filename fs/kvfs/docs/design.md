@@ -672,6 +672,8 @@ superblock 时发布后不再改变。一个 live dentry
 这对应 Linux dcache 中 child 引用 parent、零外部引用的 hashed dentry 仍可驻留缓存的
 生命周期，同时避免父子强引用环。`DentryKey` 通过持有 parent 的弱引用稳定对象身份，
 不需要为每个 dentry 分配额外 ID。`VfsFile` 的 position 和 private data 使用 mutex，
+流式文件的普通读写入口不获取 position mutex，也不推进文件偏移，避免阻塞读
+把同一 open-file 上的写操作串行化；非流式文件仍锁定并更新共享偏移。
 `f_flags` 与 `f_mode` 使用原子整数存储，inode `write_count` 由打开与释放
 路径原子更新。bitflags 类型是按值复制的语义快照，不额外引入锁或分配。`VfsFile::f_cred` 是创建后不变的 `Arc<Cred>`，无需额外锁。
 FIEMAP writer 只在一次同步调用中借用，不由 VFS 或文件系统保存。inode capability 持有

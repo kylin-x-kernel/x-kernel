@@ -16,31 +16,29 @@
 mod emergency;
 mod input;
 
-use alloc::{boxed::Box, collections::TryReserveError, sync::Arc};
+/// Isolated byte-oriented ports for cross-crate unit tests.
+#[cfg(unittest)]
+pub mod test_support;
+
+use alloc::{collections::TryReserveError, sync::Arc};
+use core::task::Waker;
 
 #[cfg(feature = "pl011")]
 use arm_pl011::Pl011Uart;
 use driver_base::DriverError;
 use emergency::EmergencyTx;
 use input::SerialInput;
-use kcpu_id_map::LogicalCpuId;
 use khal::mem::PhysAddr;
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::VirtAddr;
 use kirq::{IrqDesc, IrqEvent};
 use kspin::SpinNoIrq;
-use kworkng::{SubmitError, WorkHandle};
 use lazyinit::LazyInit;
 #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
 use uart_16550::SerialPort as SerialPort16550;
 
 #[cfg(feature = "ns16550-mmio")]
 use crate::ns16550_mmio::{Port as Ns16550MmioPort, SerialRegWidth};
-
-/// Prepared normal-worker input processing shared by the TTY and its UART.
-/// The outer Arc permits weak self-requeue without a callback ownership cycle.
-/// Prepare after worker startup; detach and shutdown before releasing resources.
-pub type InputWork = Arc<WorkHandle<Box<dyn Fn() + Send + Sync>>>;
 
 /// Physical identity of a UART.
 ///
@@ -66,6 +64,8 @@ pub enum SerialRole {
 /// Underlying UART hardware, fixed at construction time. More than one variant
 /// may be compiled in so a single image can carry several UART families.
 enum Backend {
+    #[cfg(unittest)]
+    Test(alloc::boxed::Box<test_support::TestBackend>),
     #[cfg(feature = "pl011")]
     Pl011(Pl011Uart),
     #[cfg(feature = "ns16550-mmio")]
@@ -80,6 +80,8 @@ impl Backend {
     /// preserves its historical raw behavior.
     fn send_byte(&mut self, c: u8) {
         match self {
+            #[cfg(unittest)]
+            Backend::Test(port) => port.send_byte(c),
             #[cfg(feature = "pl011")]
             Backend::Pl011(uart) => pl011_putchar(uart, c),
             #[cfg(feature = "ns16550-mmio")]
@@ -91,6 +93,8 @@ impl Backend {
 
     fn try_receive(&mut self) -> Option<u8> {
         match self {
+            #[cfg(unittest)]
+            Backend::Test(port) => port.try_receive(),
             #[cfg(feature = "pl011")]
             Backend::Pl011(uart) => uart.getchar(),
             #[cfg(feature = "ns16550-mmio")]
@@ -102,6 +106,8 @@ impl Backend {
 
     fn ack_interrupt(&mut self) -> bool {
         match self {
+            #[cfg(unittest)]
+            Backend::Test(_) => false,
             #[cfg(feature = "pl011")]
             Backend::Pl011(uart) => {
                 if uart.is_receive_interrupt() {
@@ -316,8 +322,17 @@ impl SerialPort {
         read_len
     }
 
-    pub fn ack_interrupt(&self) {
-        self.io.lock().backend.ack_interrupt();
+    /// Returns and clears the number of buffered-input bytes lost since the
+    /// previous report. The count saturates at `u64::MAX` between reports.
+    ///
+    /// The input consumer reports this in task context after releasing the port lock;
+    /// collection itself never logs from IRQ context. Not NMI-safe.
+    pub fn take_input_dropped_bytes(&self) -> u64 {
+        self.io
+            .lock()
+            .input
+            .as_mut()
+            .map_or(0, |input| core::mem::take(&mut input.dropped_bytes))
     }
 
     /// Prepares receive storage before enabling buffered IRQ input.
@@ -352,12 +367,12 @@ impl SerialPort {
             .map_or(0, |input| input.collect(|| backend.try_receive()))
     }
 
-    /// Collects this port's receive event and queues its existing input work.
+    /// Collects this port's receive event and notifies its input consumer.
     ///
     /// IRQ-safe, not NMI-safe. Hardware sampling is bounded and serialized with
-    /// task reads; worker submission happens after releasing the port lock.
+    /// task reads; notification happens after releasing the port lock.
     pub(crate) fn handle_input_irq(&self) -> IrqEvent {
-        let (has_input_event, work) = {
+        let (has_input_event, waker) = {
             let mut io = self.io.lock();
             let SerialIo { backend, input } = &mut *io;
             let Some(input) = input else {
@@ -365,56 +380,57 @@ impl SerialPort {
             };
             let is_receive_pending = backend.ack_interrupt();
             let received = input.collect(|| backend.try_receive());
-            (is_receive_pending || received > 0, input.work.clone())
+            (is_receive_pending || received > 0, input.waker.clone())
         };
         if !has_input_event {
             return IrqEvent::NOT_HANDLED;
         }
-        if let Some((work, cpu_id)) = work {
-            queue_input_work(&work, cpu_id);
+        if let Some(waker) = waker {
+            waker.wake_by_ref();
         }
         IrqEvent::HANDLED
     }
 
-    /// Connects the sole input processor and requests an initial receive pass.
+    /// Connects the sole input consumer and sends an initial notification.
     ///
     /// Task context only, serialized with detach by the owner. Receive storage
-    /// must already be prepared and the target CPU's worker pool initialized.
-    /// The callback must not strongly own this port. Duplicate binding is an
+    /// must already be prepared. The waker must be allocation-free and
+    /// non-sleeping in hardirq and task context, and must not strongly own this
+    /// port. Duplicate binding is an
     /// error, not replacement; input collected before binding is preserved.
-    /// Successful attachment records the binding, not completion of the pass.
-    /// Unexpected queue rejection is logged; this API does not retry it.
+    /// Successful attachment records the binding, not completion of processing.
+    /// Notification means input should be checked, not that a line is ready.
     ///
     /// # Errors
     /// Returns `BadState` without prepared storage, or `AlreadyExists` when
     /// another processor is attached.
-    pub fn attach_input_work(
-        &self,
-        work: InputWork,
-        cpu_id: LogicalCpuId,
-    ) -> Result<(), DriverError> {
+    pub fn attach_input_waker(&self, waker: Waker) -> Result<(), DriverError> {
+        // IRQ snapshots must not invoke a user-defined Waker clone under io.
+        let waker = Arc::new(waker);
         {
             let mut io = self.io.lock();
             let input = io.input.as_mut().ok_or(DriverError::BadState)?;
-            if input.work.is_some() {
+            if input.waker.is_some() {
                 return Err(DriverError::AlreadyExists);
             }
-            input.work = Some((work.clone(), cpu_id));
+            input.waker = Some(waker.clone());
         }
         // Also check bytes received before the connection and sub-threshold
         // FIFO tails; neither necessarily produces another interrupt.
-        queue_input_work(&work, cpu_id);
+        waker.wake_by_ref();
         Ok(())
     }
 
-    /// Removes the input-work binding without waiting or discarding bytes.
+    /// Removes the input notification without waiting or discarding bytes.
     ///
-    /// Task context only, serialized with attach by the owner. Detach, then call
-    /// shutdown outside port/TTY locks before releasing callback resources.
-    /// Earlier IRQ clones may submit until shutdown closes and drains the work.
+    /// Task context only, serialized with attach by the owner. Earlier IRQ
+    /// clones may still notify; the consumer must stop and drain its processing
+    /// outside port locks before releasing resources used by that processing.
     /// Destroying the port additionally requires synchronizing its IRQ action.
-    pub fn detach_input_work(&self) -> Option<(InputWork, LogicalCpuId)> {
-        self.io.lock().input.as_mut()?.work.take()
+    pub fn detach_input_waker(&self) -> Option<Waker> {
+        let waker = self.io.lock().input.as_mut()?.waker.take()?;
+        // Clone and release the potentially last Waker owner outside io.
+        Some(waker.as_ref().clone())
     }
 
     /// Physical identity, for matching against a device-model node.
@@ -425,13 +441,6 @@ impl SerialPort {
     /// Functional role of this port.
     pub fn role(&self) -> SerialRole {
         self.role
-    }
-}
-
-fn queue_input_work(work: &InputWork, cpu_id: LogicalCpuId) {
-    match work.queue_default(Some(cpu_id)) {
-        Ok(_) | Err(SubmitError::AlreadyQueued | SubmitError::Closed) => {}
-        result => log::warn!("console: input work submission failed: {result:?}"),
     }
 }
 
@@ -480,12 +489,83 @@ mod tests {
     #[cfg(feature = "pl011")]
     #[def_test]
     fn input_irq_binding_initial_pass_duplicate_and_stop() {
-        use core::sync::atomic::{AtomicUsize, Ordering};
+        use alloc::{sync::Weak, task::Wake};
+        use core::{
+            sync::atomic::{AtomicUsize, Ordering},
+            task::{RawWaker, RawWakerVTable},
+        };
+
+        struct InputObserver {
+            port: Weak<SerialPort>,
+            passes: AtomicUsize,
+        }
+        impl Wake for InputObserver {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                // A consumer may access the port while delivering notification.
+                core::assert!(self.port.upgrade().unwrap().io.try_lock().is_some());
+                self.passes.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        /// # Safety
+        /// `data` must come from `Arc::into_raw` for a live `InputObserver`.
+        /// The caller retains its strong reference; the result owns a new one.
+        /// Invoke outside the observed port lock; the callback checks reentry.
+        unsafe fn clone_observer(data: *const ()) -> RawWaker {
+            // SAFETY: each live RawWaker owns one strong InputObserver reference.
+            let observer = unsafe { &*data.cast::<InputObserver>() };
+            core::assert!(observer.port.upgrade().unwrap().io.try_lock().is_some());
+            // SAFETY: retain a new strong reference for the returned RawWaker.
+            unsafe { Arc::increment_strong_count(data.cast::<InputObserver>()) };
+            RawWaker::new(data, &OBSERVER_VTABLE)
+        }
+
+        /// # Safety
+        /// `data` must own one `Arc::into_raw` reference to `InputObserver`.
+        /// This call consumes it exactly once. Invoke outside the port lock.
+        unsafe fn wake_observer(data: *const ()) {
+            // SAFETY: wake consumes the RawWaker's single owned strong reference.
+            let observer = unsafe { Arc::from_raw(data.cast::<InputObserver>()) };
+            observer.wake();
+        }
+
+        /// # Safety
+        /// `data` must point to a live `InputObserver` from `Arc::into_raw`;
+        /// its owned reference must remain live and is not consumed here.
+        /// Invoke outside the observed port lock.
+        unsafe fn wake_observer_by_ref(data: *const ()) {
+            // SAFETY: borrow the RawWaker's reference without consuming it.
+            let observer = core::mem::ManuallyDrop::new(unsafe {
+                Arc::from_raw(data.cast::<InputObserver>())
+            });
+            observer.wake_by_ref();
+        }
+
+        /// # Safety
+        /// `data` must own one `Arc::into_raw` reference to `InputObserver`.
+        /// This call consumes it exactly once. Invoke outside the port lock.
+        unsafe fn drop_observer(data: *const ()) {
+            // SAFETY: drop consumes the RawWaker's single owned strong reference.
+            let observer = unsafe { Arc::from_raw(data.cast::<InputObserver>()) };
+            core::assert!(observer.port.upgrade().unwrap().io.try_lock().is_some());
+            drop(observer);
+        }
+
+        static OBSERVER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+            clone_observer,
+            wake_observer,
+            wake_observer_by_ref,
+            drop_observer,
+        );
 
         let mut registers = [0u32; 18];
         registers[6] = 1 << 4;
         // SAFETY: the aligned window covers PL011 registers and outlives the
-        // port and work. Only this test accesses registers; the work callback
+        // port and waker. Only this test accesses registers; the waker
         // tests the lock but does not access hardware.
         let port = Arc::new(unsafe {
             SerialPort::new_mmio_pl011(
@@ -495,23 +575,29 @@ mod tests {
                 SerialRole::Auxiliary,
             )
         });
-        let passes = Arc::new(AtomicUsize::new(0));
-        let count = passes.clone();
-        let weak_port = Arc::downgrade(&port);
-        let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            // Reentering the port is required for real TTY reads and echo.
-            // It must not run inline while IRQ/attach holds that lock.
-            core::assert!(weak_port.upgrade().unwrap().io.try_lock().is_some());
-            count.fetch_add(1, Ordering::Release);
+        let observer = Arc::new(InputObserver {
+            port: Arc::downgrade(&port),
+            passes: AtomicUsize::new(0),
         });
-        let work = Arc::new(WorkHandle::new(callback).unwrap());
-        let cpu_id = khal::percpu::this_cpu_id();
+        // SAFETY: the vtable balances Arc ownership; all observer operations
+        // are thread-safe and the test keeps the port alive until Waker drop.
+        let waker = unsafe {
+            Waker::from_raw(RawWaker::new(
+                Arc::into_raw(observer.clone()).cast(),
+                &OBSERVER_VTABLE,
+            ))
+        };
+        let passes = &observer.passes;
         assert_eq!(
-            port.attach_input_work(work.clone(), cpu_id),
+            port.attach_input_waker(waker.clone()),
             Err(DriverError::BadState)
         );
         assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
         port.prepare_irq_input().unwrap();
+        assert_eq!(port.take_input_dropped_bytes(), 0);
+        port.io.lock().input.as_mut().unwrap().dropped_bytes = 7;
+        assert_eq!(port.take_input_dropped_bytes(), 7);
+        assert_eq!(port.take_input_dropped_bytes(), 0);
         registers[0] = 7;
         registers[6] = 0;
         // The emulated register window does not implement FIFO popping.
@@ -519,11 +605,10 @@ mod tests {
         assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
         registers[6] = 1 << 4;
         assert_eq!(passes.load(Ordering::Acquire), 0);
-        port.attach_input_work(work.clone(), cpu_id).unwrap();
-        work.flush().unwrap();
+        port.attach_input_waker(waker.clone()).unwrap();
         assert_eq!(passes.load(Ordering::Acquire), 1);
         assert_eq!(
-            port.attach_input_work(work.clone(), cpu_id),
+            port.attach_input_waker(waker.clone()),
             Err(DriverError::AlreadyExists)
         );
         assert_eq!(port.handle_input_irq(), IrqEvent::NOT_HANDLED);
@@ -536,19 +621,15 @@ mod tests {
         // the FIFO first. That is still this port's event on a shared IRQ.
         registers[16] = 1 << 4;
         assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
-        work.flush().unwrap();
         assert_eq!(passes.load(Ordering::Acquire), 2);
-        let stale = port.io.lock().input.as_ref().unwrap().work.clone().unwrap();
-        let detached = port.detach_input_work().unwrap();
-        detached.0.shutdown().unwrap();
-        assert!(port.detach_input_work().is_none());
-        assert_eq!(
-            stale.0.queue_default(Some(stale.1)),
-            Err(SubmitError::Closed)
-        );
+        let stale = port.detach_input_waker().unwrap();
+        assert!(port.detach_input_waker().is_none());
         assert_eq!(port.handle_input_irq(), IrqEvent::HANDLED);
         assert_eq!(passes.load(Ordering::Acquire), 2);
         assert_eq!(registers[17], 0x7ff);
+        // Detach stops future lookups, not notification clones already issued.
+        stale.wake();
+        assert_eq!(passes.load(Ordering::Acquire), 3);
     }
 
     #[def_test]

@@ -11,10 +11,10 @@ use ringbuf::{
     traits::{Consumer, Producer},
 };
 
-use super::Tty;
-use crate::terminal::{
-    Terminal,
-    ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite},
+use super::{Tty, TtyKind};
+use crate::{
+    port::{ProcessMode, TtyConfig, TtyRead, TtyWrite},
+    terminal::Terminal,
 };
 
 const PTY_BUF_SIZE: usize = 4096;
@@ -69,6 +69,7 @@ pub fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
 
     let master = Tty::new(
         terminal.clone(),
+        TtyKind::PtyMaster,
         TtyConfig {
             reader: PtyReader::new(slave_to_master.clone()),
             writer: PtyWriter::new(master_to_slave.clone(), poll_rx_slave.clone()),
@@ -78,6 +79,7 @@ pub fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
 
     let slave = Tty::new(
         terminal,
+        TtyKind::Terminal,
         TtyConfig {
             reader: PtyReader::new(master_to_slave),
             writer: PtyWriter::new(slave_to_master, poll_rx_master),

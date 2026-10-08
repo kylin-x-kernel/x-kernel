@@ -16,6 +16,8 @@ const TX_POLL_LIMIT: usize = 100_000;
 /// Immutable addresses captured by `SerialPort` after mapping the device.
 /// All variants share the existing UART mapping and never reinitialize it.
 pub(super) enum EmergencyTx {
+    #[cfg(unittest)]
+    Test,
     #[cfg(feature = "pl011")]
     Pl011 { base: usize },
     #[cfg(feature = "ns16550-mmio")]
@@ -30,6 +32,10 @@ pub(super) enum EmergencyTx {
 
 impl EmergencyTx {
     pub(super) fn write_data(&self, bytes: &[u8]) {
+        #[cfg(unittest)]
+        if matches!(self, Self::Test) {
+            panic!("unexpected emergency output on a test serial port");
+        }
         for &byte in bytes {
             let raw_bytes = match byte {
                 b'\n' => &b"\r\n"[..],
@@ -46,6 +52,8 @@ impl EmergencyTx {
 
     fn expands_backspace(&self) -> bool {
         match self {
+            #[cfg(unittest)]
+            Self::Test => panic!("unexpected emergency output on a test serial port"),
             #[cfg(feature = "pl011")]
             Self::Pl011 { .. } => false,
             #[cfg(feature = "ns16550-mmio")]
@@ -67,6 +75,8 @@ impl EmergencyTx {
 
     fn try_send_raw(&self, byte: u8) -> bool {
         match self {
+            #[cfg(unittest)]
+            Self::Test => panic!("unexpected emergency output on a test serial port"),
             #[cfg(feature = "pl011")]
             Self::Pl011 { base } => {
                 // A local handle over the same register window; no reference

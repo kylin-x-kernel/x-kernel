@@ -2,7 +2,7 @@
 
 ## Scope
 
-This analysis covers the entire `ktty` crate: `src/lib.rs`,
+This analysis covers the entire `ktty` crate: `src/lib.rs`, `src/port.rs`,
 `src/tty/` (`mod.rs` ioctl boundary, `ntty.rs` console backend,
 `pty.rs` PTY backend), and `src/terminal/` (`job.rs` job control,
 `ldisc.rs` line discipline, `termios.rs` attribute layout). No modules
@@ -36,17 +36,42 @@ references to `Session` and `ProcessGroup` objects.
 
 ## Thread Safety
 
+The port retains each backend batch until ldisc reports the consumed prefix.
+Output-full is not permission to discard the suffix. Canonical pending output
+and read policy remain in ldisc; worker budget, wake and retry remain in the
+port. Both source and output budgets are preserved across this interface.
+Backend readers must return a count no greater than the supplied buffer length
+and must not wait for input. The interface is internal kernel code, not a
+user-controlled length boundary.
+
+The constructor assigns terminal or PTY-master identity independently of input
+processing. Controlling-terminal and foreground checks use this identity, so
+changing the processing policy does not change those access rules.
+
+Native console reads collect and reset pending software-drop accounting and
+report loss from task context, after releasing the UART lock. Reports count
+lost bytes only; input contents are not logged. This is not a hardware-overrun
+counter or a lossless-input guarantee.
+
 Native input work is prepared after kworkng startup in sleepable context.
-IRQ producers only collect UART data and submit prepared work; they never parse,
+IRQ producers collect UART data and wake a prepared notification that submits
+existing work; they never parse,
 echo or signal inline. Reader mutation is serialized by a sleepable mutex;
 port locks are released before submission and reader locks before notification.
 Bounded input and output work prevents a single round from draining indefinitely.
 Full output waits for reader consumption instead of busy requeueing.
 
-Self-requeue uses Weak ownership. Teardown must detach the producer then call
+Self-requeue and the device's input Waker use Weak work ownership, avoiding a
+cycle through the reader's retained backend. Teardown must detach the producer then call
 shutdown outside port/TTY locks, preserving callback resources until successful
 drain. Shutdown rejects stale producer handles. Dropping one clone is not a
 completion barrier. The native console remains kernel-lifetime.
+
+Native read/write/echo use one connection, including its selected source for
+loss accounting. Runtime adoption is limited to the registered early stdout
+identity. Handle availability is checked before I/O, but this check is not a
+general hot-unplug guarantee. Failure falls back only to the retained boot port;
+connection locks are released before I/O, logging, or dropping removed handles.
 
 termios, window size, session, and foreground state are each protected by
 spin locks. No user-memory access or process-table lookup happens inside

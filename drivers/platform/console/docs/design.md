@@ -11,25 +11,22 @@ It separates normal and NMI emergency output and owns optional bounded input sto
 - `src/serial/emergency.rs`: Transmits emergency output without taking ordinary locks.
 - `src/serial/input.rs`: Stores bounded input and counts software overflow under the port lock.
 - `src/ns16550_mmio.rs`: Accesses NS16550 MMIO registers using the stride and width specified by the device tree.
-- `src/runtime.rs`: Selects the runtime console and adapts it to a character device.
+- `src/runtime.rs`: Tracks runtime console devices and the adopted stdout identity.
 
 ## Architecture and Algorithms
 
-The runtime-level public entries are `runtime::write_active_console` and
-`runtime::read_active_console`: each takes the subsystem lock only to
-snapshot the active console handle (`ClassDevice<CharDeviceImpl>`),
-releases it, and then calls the handle's `CharDevice::write` /
-`CharDevice::read` delegation, which forwards into the owning driver's
-`SerialPort::write_data` / `read_data` (driver -> UART). Keeping the
-subsystem lock and the per-device lock non-nested is deliberate
-(`read_active_console` drops the subsystem lock before the IO call).
+`runtime::stdout_console` snapshots the adopted stdout handle
+(`ClassDevice<CharDeviceImpl>`) under the subsystem lock. Native TTY retains
+that handle and performs I/O without holding the registry lock. The owning
+serial driver's character-device implementation forwards to the same early
+`SerialPort`. The established TTY remains connected to that port.
+Kernel normal/emergency output uses the early port through `ConsoleIf`, not
+the runtime registry.
 
 ```text
-runtime::write_active_console -> active_handle -> CharDevice::write
-                              -> SerialPort::write_data  -> io: SpinNoIrq<SerialIo> -> UART
+TTY connection -> CharDevice::write -> SerialPort::write_data -> io: SpinNoIrq<SerialIo> -> UART
 Emergency output -> SerialPort::write_data_atomic -> EmergencyTx              -> UART
-runtime::read_active_console  -> active_handle -> CharDevice::read
-                              -> SerialPort::read_data   -> UART
+TTY connection -> CharDevice::read -> SerialPort::read_data -> UART
 ```
 
 Port construction initializes the device and saves its virtual address or I/O-port
@@ -64,24 +61,40 @@ bytes first and, when necessary, samples at most one further hardware batch.
 An empty output slice neither consumes input nor reads hardware. Boot and runtime
 handles share this state; `getchar` cannot bypass older buffered input.
 
+Software overflow accounting saturates between reports. The native TTY input
+consumer calls `take_input_dropped_bytes()` and logs nonzero losses in task
+context, outside the UART lock. Reading the report clears only the count, not
+buffered data. Before attachment the count accumulates for the initial pass.
+
 The stdout IRQ registration path prepares storage before publishing its action.
 The action acknowledges and collects a receive batch under the port lock, then
-submits the bound `InputWork` after unlocking. An unrelated IRQ reports unhandled.
+wakes the bound input `Waker` after unlocking. An unrelated IRQ reports unhandled.
 Ports without prepared IRQ input retain direct hardware reads.
 
-`InputWork` is a shared prepared `kworkng::WorkHandle`. Its outer Arc allows the
-TTY callback to hold a Weak for self-requeue rather than form an ownership cycle.
-The binding records a fixed normal-worker CPU, not hardware IRQ affinity.
-TTY late-init attaches the work after normal workers are ready and submits an
-initial pass to process pre-attachment bytes and sub-threshold FIFO tails.
-Callbacks never execute inline in the submitting IRQ.
+The port owns only an optional input `Waker`, not a work handle or CPU routing.
+The consumer must supply a non-sleeping, allocation-free IRQ-safe implementation.
+TTY supplies a weak notification adapter to its prepared work, so character
+processing never executes inline in IRQ. Attachment immediately notifies outside
+the port lock to cover pre-attachment bytes and sub-threshold FIFO tails.
 
 Attachment rejects duplicates. Owners serialize attach/detach, detach the
-producer, then call shutdown without port or TTY locks. Retained IRQ clones can
-submit until shutdown closes admission; successful shutdown also drains callbacks.
+producer, then stop and drain their processing without port or TTY locks. Retained
+IRQ clones can still notify after detach; detach alone is not a completion barrier.
 Callback resources remain live through this barrier. Last-handle Drop is not a
 synchronous barrier. Callbacks must not strongly own their port. The native
 console is permanent; dynamic switching and UART hot-unplug are not implemented.
+
+## Stdout Runtime Identity
+
+`register_stdout_console` records the adopted early stdout device ID in the
+existing console subsystem. The character-availability bridge recognizes this
+ID even before activation. Auxiliary serial devices remain ordinary character
+devices. Removal clears the stdout association as well as the console view.
+`stdout_console` snapshots this specific available device. Native TTY retains
+that snapshot for access to its original port. Snapshot ownership is not a
+hot-unplug barrier.
+Devfs uses `stdout_console_id` to exclude this port from auxiliary serial
+enumeration. The subsystem exposes no active/default console selection API.
 
 ## Calling Constraints and Concurrency
 

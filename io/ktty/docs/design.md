@@ -5,11 +5,12 @@
 Native consoles with an input IRQ use `ProcessMode::Work` and a prepared
 `kworkng::WorkHandle`; they do not subscribe to generic IRQ notifications.
 Preparation requires sleepable context after normal-worker initialization.
-Late-init attaches the work to the stdout port even before userspace opens TTY.
+Late-init attaches an input Waker to the stdout port before userspace opens TTY.
 Consoles without an IRQ retain Manual mode; PTY processing is unchanged.
 
-The callback owns `Mutex<InputReader>` and a readable PollSet, but no strong
-reference back to the line discipline or its work. Weak self-requeue shares
+The port callback owns `Mutex<InputReader>` (backend prefetch and its line
+discipline) and a readable PollSet, but no strong reference back to `TtyPort`
+or its work. Weak self-requeue shares
 the producer's fixed CPU binding. Each round consumes at most 256 input bytes
 or publishes at most 256 output bytes, including partial canonical-line delivery.
 Incomplete canonical input consumes budget even without output. Input-empty and
@@ -23,6 +24,63 @@ Canonical input retains command spaces and tabs. Discarding a pending canonical
 line also resets its delivery offset. The existing canonical-line Vec policy
 is unchanged; a per-round budget is not a maximum line length.
 
+## Input Port And Line Discipline
+
+`TtyPort<R, W>` owns the backend reader, one 80-byte prefetch batch, processing
+mode, prepared work or external wake registration, and readable notifications.
+Existing UART/PTY queues remain the raw-input storage; there is no additional
+4 KiB queue at the TTY boundary. `InputReader` retains a partially consumed batch.
+
+`LineDiscipline<W>` owns canonical editing and partial-line delivery state. Its
+`receive(bytes, input_budget, output_budget)` consumes a prefix and reports both
+consumed and published byte counts and the stopping reason. Pending canonical
+output can be delivered with an empty input slice. The line discipline neither
+reads a device nor selects a CPU, creates work or waits for backend readiness.
+Terminal read policy (canonical/VMIN/VTIME interpretation) also stays in ldisc;
+the port controls when to retry processing and notify waiters.
+
+```text
+UART / PTY raw queue -> port prefetch -> ldisc.receive -> cooked queue -> read
+                             ^                              |
+                             +------ output-space retry ----+
+```
+
+The current adapters remain pull-based: `TtyRead` returns immediately with at
+most the supplied slice length. `TtyWrite` handles task-context output/echo.
+Native console binding is host integration in `tty/ntty.rs`; `WorkHandle` is
+not exposed to the serial driver. A private `InputWake` holds a weak work reference
+and its fixed CPU route. The standard Waker is prepared in task context, queues
+existing work without processing inline, and becomes harmless after shutdown.
+PTY slave External mode and master bypass mode
+retain their previous behavior, including the existing external-task lifetime
+and PTY overflow limitations. No backend switching or hot-unplug is implemented.
+TTY endpoint identity is selected separately at construction: a native terminal
+or PTY slave has terminal semantics, while a PTY master has master semantics.
+Job-control and controlling-terminal checks use that identity, not the input
+processing mode; choosing bypass processing alone does not make a TTY a master.
+Console, PTY endpoints and `/dev/tty` open as non-seekable streams. VFS does
+not hold the file-position mutex across stream I/O, so a blocked read cannot
+prevent writes through a duplicated descriptor of the same open file.
+A future push adapter can feed the same receive/progress interface without
+changing terminal parsing, but must own its queue and connection shutdown.
+
+## Native Backend Connection
+
+The native reader, writer and echo share `Arc<ConsoleConnection>`. It owns the
+selected early SerialPort and an optional runtime character-device handle for
+that same stdout identity. Notification attaches to this selected port. Per-I/O
+global active-console lookup and the separate atomic handover-state enum are
+removed; global console selection no longer redirects an established native TTY.
+
+Late-init adopts the registered stdout runtime handle, not whichever console is
+active. Missing runtime registration leaves boot access usable. Runtime errors
+or unavailability clear the optional handle and fall back to the same port;
+later explicit handoff can retry. Connection locking only snapshots/replaces
+handles; device I/O, loss reporting and resource destruction occur outside it.
+An in-flight snapshot may complete while another caller falls back, but both
+access paths share the same port and receive queue. The no-port case retains HAL
+fallback and manual processing. No dynamic rebinding or hot-unplug is added.
+
 ## Terminal Layer
 
 `ktty` implements the X-Kernel terminal layer: terminal devices, the line
@@ -35,8 +93,10 @@ this crate; process, process-group, and session identity stay owned by
 
 - `src/terminal/job.rs`: controlling-terminal session association, the
   foreground process group, and foreground-change notification.
-- `src/terminal/ldisc.rs`: input processing, canonical mode, and signal
-  character handling.
+- `src/port.rs`: backend contracts, prefetch, processing modes, work and wakeup.
+- `src/terminal/ldisc.rs`: supplied-byte processing, canonical mode, terminal
+  read policy, echo and signal character handling.
+- `src/tests/port.rs`: terminal semantics and input transport regression tests.
 - `src/terminal/termios.rs`: the `Termios` terminal attribute layout and
   flag/character constants shared by the ioctl boundary.
 - `src/tty/mod.rs`: TTY file operations and the `TC*`/`TIOC*` ioctl

@@ -11,5 +11,6 @@ extern crate klogger;
 
 extern crate alloc;
 
+pub mod port;
 pub mod terminal;
 pub mod tty;

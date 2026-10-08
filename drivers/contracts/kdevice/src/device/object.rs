@@ -61,6 +61,28 @@ pub struct DeviceObject {
 }
 
 impl DeviceObject {
+    /// Creates an unpublished, bound but inactive device for class-layer tests.
+    ///
+    /// No registry entry, event or hardware resource is created. The caller
+    /// owns the fixture's lifetime and must not publish its synthetic identity.
+    #[cfg(unittest)]
+    pub fn new_bound_for_test(id: DeviceId, kind: DeviceKind) -> Self {
+        let device = Self::new(
+            id,
+            BusId::new(0),
+            DeviceLocation::PlatformStatic { id: 0 },
+            DiscoveryOrigin::PlatformStatic,
+            DeviceIdentity::Platform(crate::PlatformIdentity {
+                alias: Some("test-device"),
+                firmware_id: None,
+            }),
+            None,
+            ResourceSet::new(),
+        );
+        device.bind_driver(DriverId::new(0), "test-driver", kind);
+        device
+    }
+
     /// Create a newly discovered device object.
     pub fn new(
         id: DeviceId,

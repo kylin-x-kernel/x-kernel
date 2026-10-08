@@ -4,7 +4,7 @@
 
 This analysis covers the entire crate: `src/lib.rs` (IRQ handler
 registration and console state), `src/runtime.rs` (console adoption and
-the active-console runtime), and `src/serial.rs` (PL011/NS16550 UART
+the adopted stdout runtime identity), and `src/serial.rs` (PL011/NS16550 UART
 drivers). No modules are excluded; the emergency-output path is
 reachable from the audited entry points.
 
@@ -55,15 +55,25 @@ Bounded sampling cannot recover from a faulting or stalled individual MMIO acces
 Preparation can fail allocation without installing partial state, and allocation
 or disposal of an unused preparation occurs outside the port lock. Receive
 methods never call wake callbacks or acquire task locks under that lock.
+The port retains an Arc-wrapped Waker so IRQ snapshots only adjust the Arc
+count under the lock; custom Waker clone/drop callbacks run outside it.
+Software-drop accounting is consumed through `take_input_dropped_bytes()`;
+native TTY reports nonzero counts outside the UART lock in task context, never
+from collection in hardirq. Counts saturate between reports and do not include
+unobservable hardware FIFO losses. No received contents are logged.
 The stdout IRQ path enables storage before action registration. Allocation
 failure prevents publishing an unprepared receiver. Early IRQs may collect bytes
-before the TTY work is attached; attachment schedules an initial drain.
+before the TTY input notification is attached; attachment sends an initial wake.
 
-Prepared kworkng publication does not allocate or sleep and happens outside the
-port lock. AlreadyQueued coalesces input notifications; Closed is expected after
-shutdown. Unexpected rejection is logged, not retried in IRQ context. Owners
-must detach and successfully shutdown before releasing callback resources;
-shutdown closes admission for stale clones and waits for execution to end.
+Input notification uses a prepared Waker outside the port lock. The provider
+must guarantee IRQ-safe, non-sleeping, allocation-free wake behavior and avoid
+strong ownership cycles with the port. Waker's type alone does not enforce those
+requirements. Owners must detach and drain their processing before releasing its
+resources; already cloned notifications can still fire after detachment.
+TTY handles those stale notifications through weak work ownership and shutdown.
+Runtime stdout publication trusts the serial adapter to wrap the adopted early
+port. The retained class handle does not by itself prevent removal; only the
+kernel-lifetime boot port is used for native terminal fallback.
 
 | Risk | Trigger | Mitigation and Residual Limitations |
 |------|---------|------------------------------------|

@@ -6,29 +6,23 @@
 //!
 //! This crate owns the dedicated boot console path that runs before the
 //! bus manager and driver registry exist. `serial` provides PL011 and
-//! NS16550 (MMIO or IO-port) UART drivers; `runtime` owns console
-//! adoption, the emergency output sink, and handoff to later users.
+//! NS16550 (MMIO or IO-port) UART drivers; `runtime` tracks the runtime
+//! identity of the adopted stdout port, without a console-selection API.
 //!
 //! # Example
 //!
-//! Console use is mediated by the runtime entry points rather than the
-//! UART objects directly — platform init registers the adopted device
-//! ([`runtime::register_console_runtime`]), and later subsystems emit
-//! output through the active console
-//! ([`runtime::write_active_console`]) or read it via
-//! [`runtime::read_active_console`]. A production call site is the
-//! emergency-output path in `core/kruntime` (panic/early-print
-//! handling), which drives `write_active_console` after console
-//! adoption completes.
+//! Serial integration publishes the adopted boot port through
+//! [`runtime::register_stdout_console`]. The native TTY obtains its runtime
+//! handle through [`runtime::stdout_console`] and keeps that connection fixed.
+//! Normal and emergency kernel output use the early port through `ConsoleIf`,
+//! independently of runtime device publication.
 //!
 //! ```ignore
-//! // Kernel code only: the console must have been adopted during
-//! // platform init (register_console_runtime) before these calls.
+//! use kclass::CharDevice;
 //! use console_driver::runtime;
 //!
-//! runtime::write_active_console(b"[kinit] starting services\n");
-//! if let Some(Ok(n)) = runtime::read_active_console(&mut buf) {
-//!     // `n` bytes of console input are available in `buf`.
+//! if let Some(console) = runtime::stdout_console() {
+//!     console.write(b"[kinit] starting services\n")?;
 //! }
 //! ```
 #![no_std]

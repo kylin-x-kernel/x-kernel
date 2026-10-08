@@ -123,13 +123,13 @@ fn resolve_port(device: &DeviceObject, kind: SerialKind) -> DriverResult<Arc<Ser
 
 /// Publish a resolved port: the stdout UART is registered as the active console
 /// (so the TTY handoff adopts it); any other UART becomes a standalone char
-/// device. `register_console_runtime` adds only that one device to the console
+/// device. `register_stdout_console` adds only that one device to the console
 /// subsystem, so an auxiliary UART can never displace the real stdout UART.
 fn publish(device: Arc<DeviceObject>, port: Arc<SerialPort>) -> DriverResult<()> {
     let role = port.role();
     let dev = Box::new(SerialCharDev(port));
     match role {
-        SerialRole::Stdout => runtime::register_console_runtime(device, dev),
+        SerialRole::Stdout => runtime::register_stdout_console(device, dev),
         SerialRole::Auxiliary => publish_char(device, dev).map(drop),
     }
 }
