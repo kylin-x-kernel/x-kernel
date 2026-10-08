@@ -28,8 +28,9 @@ use crate::{
     buf::PacketBuf,
     device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
     ip::{self, IpAddress},
+    network::router::Rule,
     poller::{PollBudget, PollProgress},
-    router::{NeighborUpdatePolicy, Router, Rule},
+    router::{NeighborUpdatePolicy, Router},
     stack::{
         ingress::{IngressProcessor, prepare_smoltcp_ingress},
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
@@ -1089,7 +1090,8 @@ mod tests {
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
         ipv4,
-        router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST},
+        network::router::ROUTE_SCOPE_HOST,
+        router::Ipv4AddrEntry,
     };
 
     const TEST_POLL_BUDGET: PollBudget = PollBudget {

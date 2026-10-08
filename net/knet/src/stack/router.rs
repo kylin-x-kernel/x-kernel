@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Routing table and route selection.
+//! Router state and packet dispatch.
+
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
@@ -14,12 +15,8 @@ use smoltcp::{
     wire::Ipv6Packet,
 };
 
-pub(crate) use crate::netlink::{
-    RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
-    RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_MAIN as ROUTE_TABLE_MAIN,
-    RTN_UNICAST as ROUTE_TYPE_UNICAST, RTPROT_BOOT as ROUTE_PROTOCOL_BOOT,
-    RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
-};
+#[cfg(unittest)]
+use crate::network::router::ROUTE_PROTOCOL_KERNEL;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
@@ -27,145 +24,24 @@ use crate::{
         LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
-    network::ipv4::{self, Ipv4Error, Ipv4Header},
+    network::{
+        ipv4::{self, Ipv4Error, Ipv4Header},
+        router::{
+            ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TABLE_MAIN,
+            ROUTE_TYPE_UNICAST, RouteTable, Rule,
+        },
+    },
     runtime::tx_queue::DataTxQueue,
 };
 
 const CONTROL_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 const DATA_TX_QUEUE_SIZE: usize = SOCKET_BUFFER_SIZE;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Ipv4AddressRouteKind {
-    Local,
-    Connected,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RuleSource {
-    DevicePrimary,
-    Fixed(IpAddress),
-}
-
 /// Conditions under which a control-plane neighbor update may be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NeighborUpdatePolicy {
     pub(crate) can_create: bool,
     pub(crate) can_replace: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RuleOrigin {
-    Configured,
-    Ipv4Address {
-        owner_dev: usize,
-        addr: Ipv4Cidr,
-        kind: Ipv4AddressRouteKind,
-    },
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Rule {
-    pub filter: IpCidr,
-    pub via: Option<IpAddress>,
-    pub dev: usize,
-    pub src: IpAddress,
-    pub table: u8,
-    pub protocol: u8,
-    pub scope: u8,
-    pub route_type: u8,
-    #[expect(dead_code)]
-    pub prefsrc: Option<IpAddress>,
-    source: RuleSource,
-    origin: RuleOrigin,
-}
-
-impl Rule {
-    pub fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
-        Self {
-            filter,
-            via,
-            dev,
-            src,
-            table: ROUTE_TABLE_MAIN,
-            protocol: ROUTE_PROTOCOL_BOOT,
-            scope: ROUTE_SCOPE_UNIVERSE,
-            route_type: ROUTE_TYPE_UNICAST,
-            prefsrc: Some(src),
-            source: RuleSource::Fixed(src),
-            origin: RuleOrigin::Configured,
-        }
-    }
-
-    pub fn with_route_attrs(
-        filter: IpCidr,
-        via: Option<IpAddress>,
-        dev: usize,
-        src: IpAddress,
-        attrs: RouteAttrs,
-    ) -> Self {
-        Self {
-            filter,
-            via,
-            dev,
-            src,
-            table: attrs.table,
-            protocol: attrs.protocol,
-            scope: attrs.scope,
-            route_type: attrs.route_type,
-            prefsrc: attrs.prefsrc,
-            source: attrs
-                .prefsrc
-                .map_or(RuleSource::DevicePrimary, RuleSource::Fixed),
-            origin: RuleOrigin::Configured,
-        }
-    }
-
-    fn for_ipv4_address(
-        filter: Ipv4Cidr,
-        dev: usize,
-        owner: Ipv4AddrEntry,
-        kind: Ipv4AddressRouteKind,
-        scope: u8,
-    ) -> Self {
-        let source = IpAddress::Ipv4(owner.addr.address());
-        Self {
-            filter: filter.into(),
-            via: None,
-            dev,
-            src: source,
-            table: ROUTE_TABLE_MAIN,
-            protocol: ROUTE_PROTOCOL_KERNEL,
-            scope,
-            route_type: ROUTE_TYPE_UNICAST,
-            prefsrc: Some(source),
-            source: RuleSource::Fixed(source),
-            origin: RuleOrigin::Ipv4Address {
-                owner_dev: owner.dev,
-                addr: owner.addr,
-                kind,
-            },
-        }
-    }
-
-    pub(crate) fn preferred_source(self) -> Option<IpAddress> {
-        match self.source {
-            RuleSource::DevicePrimary => None,
-            RuleSource::Fixed(source) => Some(source),
-        }
-    }
-
-    pub(crate) fn is_configured(self) -> bool {
-        matches!(self.origin, RuleOrigin::Configured)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct RouteAttrs {
-    pub table: u8,
-    pub protocol: u8,
-    pub scope: u8,
-    pub route_type: u8,
-    pub prefsrc: Option<IpAddress>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,91 +63,6 @@ impl Ipv4AddrEntry {
 pub(crate) struct Ipv4AddrSnapshot {
     pub entry: Ipv4AddrEntry,
     pub label: String,
-}
-
-// TODO(mivik): optimize
-pub struct RouteTable {
-    rules: Vec<Rule>,
-}
-impl RouteTable {
-    pub fn new() -> Self {
-        Self { rules: Vec::new() }
-    }
-
-    pub fn add_rule(&mut self, rule: Rule) {
-        let rank = (
-            rule.filter.prefix_len(),
-            matches!(
-                rule.origin,
-                RuleOrigin::Ipv4Address {
-                    kind: Ipv4AddressRouteKind::Local,
-                    ..
-                }
-            ) as u8,
-        );
-        let idx = self.rules.partition_point(|existing| {
-            let existing_rank = (
-                existing.filter.prefix_len(),
-                matches!(
-                    existing.origin,
-                    RuleOrigin::Ipv4Address {
-                        kind: Ipv4AddressRouteKind::Local,
-                        ..
-                    }
-                ) as u8,
-            );
-            existing_rank >= rank
-        });
-        self.rules.insert(idx, rule);
-    }
-
-    pub fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
-        self.rules
-            .iter()
-            .find(|rule| rule.filter.contains_addr(dst))
-    }
-
-    pub fn rules(&self) -> &[Rule] {
-        &self.rules
-    }
-
-    pub fn remove_exact_rule(&mut self, route: Rule) {
-        self.rules.retain(|rule| {
-            !matches!(rule.origin, RuleOrigin::Configured) || !same_route_rule(*rule, route)
-        });
-    }
-
-    fn remove_ipv4_address_routes(&mut self) {
-        self.rules
-            .retain(|rule| matches!(rule.origin, RuleOrigin::Configured));
-    }
-
-    fn remove_configured_routes_with_source(&mut self, source: IpAddress) {
-        self.rules.retain(|rule| {
-            !matches!(rule.origin, RuleOrigin::Configured)
-                || rule.preferred_source() != Some(source)
-        });
-    }
-
-    pub fn remove_device(&mut self, dev: usize) {
-        self.rules.retain(|rule| {
-            rule.dev != dev
-                && !matches!(
-                    rule.origin,
-                    RuleOrigin::Ipv4Address { owner_dev, .. } if owner_dev == dev
-                )
-        });
-        for rule in &mut self.rules {
-            if rule.dev > dev {
-                rule.dev -= 1;
-            }
-            if let RuleOrigin::Ipv4Address { owner_dev, .. } = &mut rule.origin
-                && *owner_dev > dev
-            {
-                *owner_dev -= 1;
-            }
-        }
-    }
 }
 
 pub struct Router {
@@ -354,9 +145,9 @@ impl Router {
         if !device.is_link_up() {
             return Err(LinuxError::ENETUNREACH.into());
         }
-        match rule.source {
-            RuleSource::Fixed(source) => Ok(source),
-            RuleSource::DevicePrimary => self
+        match rule.preferred_source() {
+            Some(source) => Ok(source),
+            None => self
                 .select_ipv4_source(rule.dev, &rule.via.unwrap_or(*dst), rule.scope)
                 .map(IpAddress::Ipv4)
                 .ok_or(KError::from(LinuxError::ENETUNREACH)),
@@ -941,12 +732,10 @@ impl Router {
         let mut connected = Vec::new();
         for entry in entries {
             if let Some(loopback_dev) = loopback_dev {
-                self.table.add_rule(Rule::for_ipv4_address(
-                    Ipv4Cidr::new(entry.addr.address(), 32).unwrap(),
+                self.table.add_rule(Rule::for_local_ipv4_address(
                     loopback_dev,
-                    entry,
-                    Ipv4AddressRouteKind::Local,
-                    ROUTE_SCOPE_HOST,
+                    entry.dev,
+                    entry.addr,
                 ));
             }
 
@@ -964,12 +753,8 @@ impl Router {
             } else {
                 ROUTE_SCOPE_LINK
             };
-            self.table.add_rule(Rule::for_ipv4_address(
-                network,
-                entry.dev,
-                entry,
-                Ipv4AddressRouteKind::Connected,
-                scope,
+            self.table.add_rule(Rule::for_connected_ipv4_address(
+                entry.dev, entry.addr, scope,
             ));
         }
     }
@@ -1257,17 +1042,6 @@ impl Router {
 fn next_device_index(dev_index: usize, device_count: usize) -> usize {
     debug_assert!(device_count > 0);
     (dev_index + 1) % device_count
-}
-
-fn same_route_rule(lhs: Rule, rhs: Rule) -> bool {
-    lhs.filter == rhs.filter
-        && lhs.via == rhs.via
-        && lhs.dev == rhs.dev
-        && lhs.table == rhs.table
-        && lhs.protocol == rhs.protocol
-        && lhs.scope == rhs.scope
-        && lhs.route_type == rhs.route_type
-        && lhs.preferred_source() == rhs.preferred_source()
 }
 
 fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {

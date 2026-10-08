@@ -26,7 +26,8 @@ use crate::{
         NeighborUpdate,
     },
     ip::{IpAddress as KernelIpAddress, IpCidr, Ipv4Cidr},
-    router::{Ipv4AddrEntry, NeighborUpdatePolicy, RouteAttrs as RouterRouteAttrs, Rule},
+    network::router::{RouteAttrs as RouterRouteAttrs, Rule},
+    router::{Ipv4AddrEntry, NeighborUpdatePolicy},
     service::ExistingIpv4AddrAction,
 };
 

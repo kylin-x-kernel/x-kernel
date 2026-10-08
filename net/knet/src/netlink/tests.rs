@@ -32,7 +32,8 @@ use crate::{
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
         LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
     },
-    router::{Ipv4AddrEntry, Router, Rule},
+    network::router::Rule,
+    router::{Ipv4AddrEntry, Router},
     service::Service,
     socket::{
         SocketOps,

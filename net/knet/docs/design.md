@@ -39,7 +39,8 @@ net/knet/
     │   │   ├── mod.rs
     │   │   └── process.rs
     │   ├── fragment.rs
-    │   └── mod.rs
+    │   ├── mod.rs
+    │   └── router.rs
     ├── runtime/
     │   ├── mod.rs
     │   ├── poller.rs
@@ -813,7 +814,7 @@ Readable, writable, and connection-state events use separate `PollSet` instances
 
 ### Control Plane and RX Wakeups
 
-The Router owns configured routes, address-derived routes, and dynamic source-selection state. Each device owns its neighbor table. Netlink handles protocol parsing and live-snapshot encoding, then calls the appropriate owner.
+The Router owns configured routes, address-derived routes, and dynamic source-selection state. Route rules, attributes, and table lookup are defined in `network/router.rs`; Router state remains in `stack/router.rs`. Each device owns its neighbor table. Netlink handles protocol parsing and live-snapshot encoding, then calls the appropriate owner.
 
 `control::network_config_lock` serializes control-plane mutations across sockets, legacy socket-ioctl mutations, and `unregister_netdev`. Each netlink socket has mutexes for its send transaction and RX queue and an `RwLock` for its local address. The global `UEVENT_SUBSCRIBERS` mutex protects weak subscriber references, and `UEVENT_SEQNUM` atomically allocates event sequence numbers. The send-transaction lock covers capacity preflight, mutation execution, and response enqueueing for one socket. Responses are generated outside the RX-queue lock; that lock is taken only to check capacity and enqueue the result. The fixed acquisition order is the send-transaction lock, `network_config_lock`, Router, ingress, Interface, and netlink RX queue, omitting any lock that the operation does not use.
 

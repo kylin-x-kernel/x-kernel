@@ -14,10 +14,11 @@ use crate::{
     SERVICE,
     device::{ARPHRD_ETHER, ARPHRD_LOOPBACK, LINK_FLAG_UP, LinkConfigUpdate, LinkKind},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
-    router::{
-        Ipv4AddrEntry, ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE,
-        ROUTE_TABLE_MAIN, ROUTE_TYPE_UNICAST, RouteAttrs, Rule,
+    network::router::{
+        ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TABLE_MAIN,
+        ROUTE_TYPE_UNICAST, RouteAttrs, Rule,
     },
+    router::Ipv4AddrEntry,
 };
 
 static_lock! {

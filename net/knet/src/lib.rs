@@ -65,7 +65,8 @@ use crate::{
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
-    router::{Ipv4AddrEntry, ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Router, Rule},
+    network::router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
+    router::{Ipv4AddrEntry, Router},
     service::Service,
     socket_set::SocketSetWrapper,
 };
