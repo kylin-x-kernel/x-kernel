@@ -119,7 +119,14 @@ registered wakeups rather than polling or a timer.
   `ioctl`, so SIOC* still hangs on the syscall adapter instead of the Linux
   `sock_ioctl` shape.
 - Capability, seccomp, and `no_new_privileges` security ABIs must not
-  return success inconsistent with actual enforcement (currently `ENOSYS`).
+  return success inconsistent with actual enforcement. `PR_SET_SECCOMP`
+  rejects unknown modes with `EINVAL` and strict/filter installation with
+  `ENOSYS`. `seccomp(2)` rejects unknown operations with `EINVAL` and
+  recognized operations with `ENOSYS`. Neither path accesses the supplied
+  pointer or changes task state. This is explicit rejection, not seccomp
+  enforcement; flags, filters, and query buffers remain unimplemented.
+  `PR_SET_NO_NEW_PRIVS` retains its existing `ENOSYS` result for a valid
+  request; no-new-privileges enforcement is outside this change.
 
 ## Audit checklist
 

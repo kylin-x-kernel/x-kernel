@@ -306,9 +306,82 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> KResult<isize> {
     Ok(written as _)
 }
 
-/// Secure computing syscall for sandboxing (not fully implemented)
-pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
+// Linux UAPI operation numbers; these differ from the prctl mode numbers.
+const SECCOMP_SET_MODE_STRICT: u32 = 0;
+const SECCOMP_SET_MODE_FILTER: u32 = 1;
+const SECCOMP_GET_ACTION_AVAIL: u32 = 2;
+const SECCOMP_GET_NOTIF_SIZES: u32 = 3;
+
+/// Rejects seccomp requests until enforcement and queries are implemented.
+///
+/// # Errors
+///
+/// Unknown `op` values return `EINVAL`. Recognized Linux operations return
+/// `ENOSYS`, this kernel's unimplemented-feature policy. Flags and pointed-to
+/// arguments are not inspected, and no task state or user memory is changed.
+/// `op` and flags retain Linux's `unsigned int` ABI width at dispatch.
+pub fn sys_seccomp(op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
+    if !matches!(
+        op,
+        SECCOMP_SET_MODE_STRICT
+            | SECCOMP_SET_MODE_FILTER
+            | SECCOMP_GET_ACTION_AVAIL
+            | SECCOMP_GET_NOTIF_SIZES
+    ) {
+        return Err(KError::InvalidInput);
+    }
     Err(KError::from(kerrno::LinuxError::ENOSYS))
+}
+
+#[cfg(unittest)]
+mod tests_seccomp {
+    use kerrno::KError;
+    use linux_raw_sys::prctl::{PR_GET_NO_NEW_PRIVS, PR_GET_SECCOMP};
+    use unittest::{assert_eq, def_test};
+
+    use super::{
+        SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES, SECCOMP_SET_MODE_FILTER,
+        SECCOMP_SET_MODE_STRICT, sys_seccomp,
+    };
+    use crate::task::sys_prctl;
+
+    // These tests call the handlers directly; they do not exercise syscall dispatch.
+    #[def_test(user, serial)]
+    fn seccomp_rejects_unknown_operations_without_accessing_args() {
+        let nnp_before = sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
+        for op in [4, 999, 1 << 31, u32::MAX] {
+            for flags in [0, 1, u32::MAX] {
+                for addr in [0, 1, usize::MAX] {
+                    assert_eq!(
+                        sys_seccomp(op, flags, addr as *const ()),
+                        Err(KError::InvalidInput)
+                    );
+                    assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+                    assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), nnp_before);
+                }
+            }
+        }
+    }
+
+    #[def_test(user, serial)]
+    fn seccomp_known_operations_require_implementation() {
+        let nnp_before = sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
+        for op in [
+            SECCOMP_SET_MODE_STRICT,
+            SECCOMP_SET_MODE_FILTER,
+            SECCOMP_GET_ACTION_AVAIL,
+            SECCOMP_GET_NOTIF_SIZES,
+        ] {
+            for addr in [0, 1, usize::MAX] {
+                assert_eq!(
+                    sys_seccomp(op, 0, addr as *const ()),
+                    Err(KError::from(kerrno::LinuxError::ENOSYS))
+                );
+                assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+                assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), nnp_before);
+            }
+        }
+    }
 }
 
 #[cfg(unittest)]

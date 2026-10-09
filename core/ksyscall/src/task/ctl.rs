@@ -20,6 +20,8 @@ use posix_types::UserPtr;
 
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
 const CAP_LAST_CAP: usize = 40;
+const SECCOMP_MODE_STRICT: usize = 1;
+const SECCOMP_MODE_FILTER: usize = 2;
 
 fn validate_cap_header(header_ptr: UserPtr<__user_cap_header_struct>) -> KResult<()> {
     let mut header = header_ptr.read_vm()?;
@@ -71,7 +73,7 @@ pub fn sys_get_mempolicy(
 /// The first argument can be:
 /// - PR_SET_NAME: set the name of the calling thread, using the value pointed to by `arg2`
 /// - PR_GET_NAME: get the name of the calling
-/// - PR_SET_SECCOMP: enable seccomp mode, with the mode specified in `arg2`
+/// - PR_SET_SECCOMP: reject strict/filter installation until seccomp is enforced
 /// - PR_CAPBSET_READ: return whether a capability is in the bounding set
 /// - PR_GET_KEEPCAPS / PR_SET_KEEPCAPS: query or set the keep-capabilities flag
 /// - PR_MCE_KILL: set the machine check exception policy
@@ -83,6 +85,11 @@ pub fn sys_get_mempolicy(
 /// accepted as no-ops. This matches the behavior user space expects from a
 /// Linux-like kernel on these (often merely probed) options, and avoids noisy
 /// warnings for each unimplemented option.
+///
+/// Security restrictions are not successful no-ops: `PR_SET_SECCOMP` returns
+/// `ENOSYS` for strict/filter mode and `EINVAL` for any other mode. The mode
+/// retains its full `unsigned long` ABI width. No filter pointer is accessed
+/// and no seccomp or no-new-privileges state is changed on this path.
 pub fn sys_prctl(
     option: u32,
     arg2: usize,
@@ -106,7 +113,14 @@ pub fn sys_prctl(
             buf[..len].copy_from_slice(&name.as_bytes()[..len]);
             write_vm_mem(arg2 as _, &buf)?;
         }
-        PR_SET_SECCOMP => {}
+        PR_SET_SECCOMP => {
+            if !matches!(arg2, SECCOMP_MODE_STRICT | SECCOMP_MODE_FILTER) {
+                return Err(KError::InvalidInput);
+            }
+            // Reporting success would let callers trust a restriction that
+            // the syscall dispatch path does not enforce.
+            return Err(KError::from(LinuxError::ENOSYS));
+        }
         PR_GET_SECCOMP => {
             // Seccomp is not enforced, so mode 0 (disabled). Linux returns the
             // mode directly as the prctl return value and never writes user
@@ -214,7 +228,7 @@ mod tests {
     use linux_raw_sys::prctl::*;
     use unittest::{assert_eq, def_test};
 
-    use super::sys_prctl;
+    use super::{SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT, sys_prctl};
 
     #[def_test(user, serial)]
     fn test_prctl_keep_caps_set_get() {
@@ -235,6 +249,49 @@ mod tests {
             Err(KError::InvalidInput)
         );
         assert_eq!(sys_prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_set_seccomp_requires_enforcement() {
+        let nnp_before = sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
+        for mode in [SECCOMP_MODE_STRICT, SECCOMP_MODE_FILTER] {
+            for filter_addr in [0, 1, usize::MAX] {
+                assert_eq!(
+                    sys_prctl(PR_SET_SECCOMP, mode, filter_addr, 0, 0),
+                    Err(KError::from(LinuxError::ENOSYS))
+                );
+                assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+                assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), nnp_before);
+            }
+        }
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_set_seccomp_rejects_invalid_modes() {
+        let nnp_before = sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
+        for mode in [0, 3, 999, u32::MAX as usize, usize::MAX] {
+            for filter_addr in [0, 1, usize::MAX] {
+                assert_eq!(
+                    sys_prctl(PR_SET_SECCOMP, mode, filter_addr, 0, 0),
+                    Err(KError::InvalidInput)
+                );
+                assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+                assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), nnp_before);
+            }
+        }
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_set_seccomp_preserves_unsigned_long_mode_width() {
+        // Unlike seccomp(2)'s operation, this argument must not truncate to u32.
+        if let Some(high) = 1usize.checked_shl(32) {
+            for mode in [high, high | SECCOMP_MODE_STRICT, high | SECCOMP_MODE_FILTER] {
+                assert_eq!(
+                    sys_prctl(PR_SET_SECCOMP, mode, usize::MAX, 0, 0),
+                    Err(KError::InvalidInput)
+                );
+            }
+        }
     }
 
     #[def_test(user, serial)]

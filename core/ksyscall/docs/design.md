@@ -234,8 +234,23 @@ Until unified user-namespace capability authorization exists, `clone` /
 namespace-creation permission with UID checks. The exec credential path
 does not yet enforce `no_new_privileges` promotion constraints, so
 `PR_SET_NO_NEW_PRIVS` returns `ENOSYS` and `PR_GET_NO_NEW_PRIVS` reports
-unset. seccomp likewise has no execution engine yet: `seccomp(2)` and
-`PR_SET_SECCOMP` return `ENOSYS` rather than faking success.
+unset. seccomp likewise has no execution engine yet. `PR_SET_SECCOMP`
+recognizes only the strict/filter mode identifiers (1/2), returning `ENOSYS`
+instead of claiming installation; all other modes return `EINVAL`.
+`seccomp(2)` recognizes the Linux strict/filter and action/notification-size
+query operations (0/1/2/3), returning `ENOSYS`; unknown operations return
+`EINVAL`. Neither rejection path accesses user memory or changes task state.
+The prctl mode has `unsigned long` width; the syscall operation has
+`unsigned int` width, as in Linux's syscall boundary.
+
+Recognizing an identifier does not implement its operation. Flags, filter
+contents, and query buffers are not validated. `ENOSYS` is this kernel's
+explicit unimplemented-feature policy, not a claim of Linux errno parity
+for recognized requests: Linux can reject an unsupported mode/configuration
+with `EINVAL`. Callers requiring confinement must handle failure; this
+rejection is not a sandbox. See Linux's
+[seccomp entry points](https://github.com/torvalds/linux/blob/v6.12/kernel/seccomp.c#L2064-L2127)
+and [PR_SET_SECCOMP(2const)](https://man7.org/linux/man-pages/man2/PR_SET_SECCOMP.2const.html).
 
 ## Non-goals
 
