@@ -47,6 +47,14 @@ length it fills an owned kernel buffer and copies through `write_vm_mem`; an
 invalid destination returns status `1`, while a successful checked copy
 returns `0`.
 
+`EVIOCSCLOCKID` reads one signed 32-bit clock id through `UserConstPtr`.
+An invalid user pointer returns `EFAULT` before changing the client. Unsupported
+ids return `EINVAL` without changing the selected clock or pending records.
+Only the exact ioctl command is accepted. The client mutex serializes clock
+selection, queue discard, enqueue, read, and detach; no global clock is changed.
+A clock-change loss marker alone is hidden from both read and poll until an
+actual synchronization report arrives. A peer open's queue is never cleared.
+
 ## Unsafe code and FFI inventory
 
 The crate contains two unsafe memory operations and two exported C ABI entry
@@ -112,6 +120,15 @@ and wakes client-owned poll registrations.
 | T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev checks class availability before read/poll and returns `ENODEV` or poll error/hangup even before client detach; DRM checks `ClassDevice::is_available`. |
 | T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
 | T-07 | One slow reader exhausts input buffers | Medium — another reader loses events or the VirtIO queue stalls | A process leaves its event file open without reading | Each file has a 256-event cap; overflow emits `SYN_DROPPED`; inputdev continues draining the hardware queue. |
+
+Queued input records retain the clock selected when they were enqueued.
+The timekeeper supplies a correlated pair at event receipt, preventing delayed
+reads or subsequent wall-clock updates from mixing clock domains. Clock changes
+flush that client's unread records and signal loss before new-domain events.
+The client-to-timekeeper lock order has no reverse path: inputdev releases the
+timekeeper and endpoint locks before invoking clients. The BOOTTIME mapping
+currently lacks separate suspend accounting, matching `clock_gettime`; this
+limitation must not be presented as a complete suspend-aware clock.
 
 ## Failure modes and effects
 

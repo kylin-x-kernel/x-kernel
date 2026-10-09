@@ -22,7 +22,7 @@ use kclass::{
 };
 use kdevice::{DeviceId, subscribe_device_removed};
 use ksync::Mutex;
-use ktime_types::SystemTime;
+use ktime_types::{MonotonicInstant, SystemTime};
 use kworkng::{SubmitError, WorkHandle};
 use lazyinit::LazyInit;
 
@@ -39,8 +39,11 @@ type FrameDelivery = (Vec<TimedInputEvent>, Vec<Arc<dyn InputEventListener>>);
 /// An input event timestamped when the input layer receives it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimedInputEvent {
-    /// Event arrival time.
+    /// Realtime sampled when the input layer received this event.
     pub time: SystemTime,
+    /// Monotonic timestamp from the same sample, retained across delayed reads
+    /// and subsequent wall-clock changes.
+    pub monotonic: MonotonicInstant,
     /// Driver-provided event.
     pub event: Event,
 }
@@ -105,6 +108,7 @@ impl EndpointState {
             self.is_discarding_frame = false;
             self.frame.push(TimedInputEvent {
                 time: timed.time,
+                monotonic: timed.monotonic,
                 event: Event::new(EventType::Synchronization as u16, SYN_DROPPED, 0),
             });
         } else if self.frame.len() == MAX_FRAME_EVENTS {
@@ -117,6 +121,7 @@ impl EndpointState {
             self.is_discarding_frame = false;
             self.frame.push(TimedInputEvent {
                 time: timed.time,
+                monotonic: timed.monotonic,
                 event: Event::new(EventType::Synchronization as u16, SYN_DROPPED, 0),
             });
         }
@@ -228,10 +233,14 @@ impl InputEndpoint {
                 return false;
             }
             match self.device.read_event() {
-                Ok(event) => self.accept_event(TimedInputEvent {
-                    time: ktime::realtime(),
-                    event,
-                }),
+                Ok(event) => {
+                    let (time, monotonic) = ktime::realtime_and_monotonic();
+                    self.accept_event(TimedInputEvent {
+                        time,
+                        monotonic,
+                        event,
+                    });
+                }
                 Err(kclass::prelude::DriverError::WouldBlock) => {
                     return false;
                 }
@@ -424,6 +433,7 @@ mod tests {
     fn timed(event_type: u16, code: u16, value: u32) -> TimedInputEvent {
         TimedInputEvent {
             time: SystemTime::UNIX_EPOCH,
+            monotonic: MonotonicInstant::ORIGIN,
             event: Event::new(event_type, code, value),
         }
     }
@@ -498,8 +508,16 @@ mod tests {
         for _ in 0..=MAX_FRAME_EVENTS {
             assert!(state.accept(timed(EventType::Key as u16, 30, 1)).is_none());
         }
-        let (frame, _) = state.accept(report()).unwrap();
+        let mut sync = report();
+        sync.time = SystemTime::from_unix_seconds(1_700_000_000);
+        sync.monotonic =
+            MonotonicInstant::from_span_since_origin(ktime_types::TimeSpan::from_secs(45));
+        let (frame, _) = state.accept(sync).unwrap();
         assert_eq!(frame.len(), 2);
+        for event in &frame {
+            assert_eq!(event.time, sync.time);
+            assert_eq!(event.monotonic, sync.monotonic);
+        }
         assert_eq!(frame[0].event.code, SYN_DROPPED);
         assert_eq!(frame[1].event.code, SYN_REPORT);
         assert!(state.key_state.get(30));

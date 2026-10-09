@@ -31,6 +31,8 @@ khal -> ktime_types
 - `set_realtime_checked`：运行时把墙钟重新关联到当前单调时刻
   （settimeofday 路径）。范围校验失败返回 `RealtimeOutOfRange` 错误
   （墙钟早于 `CLOCK_MONOTONIC` 或超过上界），由调用方映射为 `EINVAL`。
+- `realtime_and_monotonic`：在同一关联读锁内采样一次单调时钟，返回对应的
+  realtime/monotonic 值对；用于需要保留事件发生时刻两套时间的消费者。
 - `realtime`：当前墙钟时间；未初始化时回退为 Unix epoch 加单调流逝时间。
 - `realtime_deadline_to_monotonic`：把 realtime 截止时间换算到单调时钟域。
 

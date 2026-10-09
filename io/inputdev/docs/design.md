@@ -45,6 +45,17 @@ the endpoint discards the malformed frame until its next report and delivers
 `EV_SYN/SYN_DROPPED` followed by `SYN_REPORT`. Device-wide pressed-key state
 still tracks valid key transitions while events are drained.
 
+## Event timestamps
+
+Each successful driver read captures one `ktime::realtime_and_monotonic`
+sample. `TimedInputEvent` carries both values through frame assembly and
+broadcast, including synthetic overflow markers. These are input-layer receipt
+times, not hardware-provided timestamps. A delayed listener must use the saved
+values rather than reading the current clock or reconstructing an earlier
+monotonic time from a later realtime correlation. Selecting an evdev file's
+clock and converting to its userspace record remain devfs responsibilities.
+The additional timestamp is bounded by the existing 256-event frame limit.
+
 ## Execution context and concurrency
 
 `InputEventNotifier::notify_events` can run in hard IRQ context and only calls

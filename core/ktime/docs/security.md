@@ -26,6 +26,10 @@ sample 执行内置范围校验：墙钟不得早于 `CLOCK_MONOTONIC` 当前值
 `REALTIME_CORRELATION` 由读写锁保护，可在多 CPU 与 IRQ 上下文安全访问；
 `REALTIME_INITIALIZED` 原子标记保证初始化只生效一次。
 
+`realtime_and_monotonic` 返回自有值而非锁守卫。采样与关联换算都在同一
+读临界区，后续墙钟更新不能改变已经缓存的值对。该只读接口不添加授权
+或用户内存边界，也不写全局时间。
+
 ## 威胁分析
 
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |

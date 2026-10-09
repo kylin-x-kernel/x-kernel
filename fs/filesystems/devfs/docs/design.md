@@ -139,6 +139,27 @@ another client's events or hold the hardware queue. Explicit removal calls
 `EventDev::detach`, which stops the endpoint and detaches its clients. A read
 after detach returns `ENODEV`, including a zero-length read.
 
+`EVIOCSCLOCKID` selects `CLOCK_REALTIME` (the default), `CLOCK_MONOTONIC`,
+or `CLOCK_BOOTTIME` for that open-file client. Duplicated descriptors share the
+selection and queue; independent opens retain separate choices. `inputdev`
+provides a capture-time realtime/monotonic pair, and devfs selects and converts
+it when enqueueing each `InputEvent`. Reads only copy those cached records.
+BOOTTIME follows this kernel's existing `clock_gettime` behavior: it currently
+shares the monotonic origin because separate suspend accounting is absent.
+The selections remain distinct; suspend accounting must be updated consistently
+with the system clock API if added later.
+
+Changing to a different clock clears a nonempty client queue and inserts one
+`SYN_DROPPED` timestamped in the new domain. That marker alone is not readable
+and does not wake waiters. `is_waiting_for_report` represents only this state:
+inputdev already delivers complete frames, so the next actual frame's
+`SYN_REPORT` makes the queued marker and new frame readable together. The
+existing overflow-generated `SYN_DROPPED`/`SYN_REPORT` pair also completes it.
+Repeating the same clock or changing an empty queue emits no marker. Normal
+frame delivery, partial reads, the 256-event cap, and removal retain their
+previous semantics. This follows Linux v6.12 `evdev_set_clk_type` and its
+pending-packet behavior without introducing a general packet-buffer rewrite.
+
 Variable-length evdev string ioctls follow Linux `str_to_user` behavior. The
 terminating NUL is copied when it fits; a shorter user buffer receives the
 requested string prefix without reserving one byte for a terminator.

@@ -18,6 +18,12 @@ or hardware registers directly and contains no unsafe code.
 - A detached endpoint cannot accept new listeners or distribute new frames.
 - Removal stops the notifier before waiting for the poller to finish.
 
+A timestamp pair is sampled before taking the endpoint state lock. The
+underlying timekeeper releases its correlation lock before endpoint or listener
+locks are acquired. Once captured, neither later wall-clock changes nor a slow
+listener can alter either timestamp. Synthesized loss records copy the report's
+pair, so resynchronization does not silently change clock domains.
+
 ## Threat analysis
 
 | ID | Threat | Impact | Trigger | Control |

@@ -159,6 +159,18 @@ fn snapshot() -> ClockSnapshot {
     }
 }
 
+/// Samples realtime and monotonic time at the same instant.
+///
+/// Both values use one monotonic sample under the timekeeper read lock, so
+/// concurrent wall-clock updates cannot tear the pair. The owned timestamps
+/// remain valid after later updates. This does not sleep or require a process
+/// context and is also valid in interrupt context and during early boot.
+#[inline]
+pub fn realtime_and_monotonic() -> (SystemTime, MonotonicInstant) {
+    let now = snapshot();
+    (now.realtime, now.monotonic)
+}
+
 /// Returns the current realtime timestamp.
 ///
 /// Before a persistent clock initializes realtime, the result falls back to
