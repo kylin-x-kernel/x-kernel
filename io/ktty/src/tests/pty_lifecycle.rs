@@ -10,6 +10,38 @@ use super::*;
 struct Inode;
 impl InodeOperations for Inode {}
 
+struct TestPtyRange(DeviceId);
+
+impl Drop for TestPtyRange {
+    fn drop(&mut self) {
+        drop(kvfs::cdev_del(self.0, UNIX98_PTY_MINOR_COUNT));
+    }
+}
+
+#[def_test(serial)]
+fn pty_slave_registration_conflict_rolls_back_only_its_master() {
+    // Dedicated test majors avoid unregistering the live Unix98 drivers.
+    let master = DeviceId::new(243, 0);
+    let slave = DeviceId::new(244, 0);
+    let occupied: Arc<dyn DeviceFileOps> = Arc::new(UnboundPty);
+    kvfs::cdev_add(slave, UNIX98_PTY_MINOR_COUNT, occupied.clone()).unwrap();
+    let _slave_cleanup = TestPtyRange(slave);
+    let _master_cleanup = TestPtyRange(master);
+
+    assert_eq!(
+        register_pty_ranges(master, slave),
+        Err(KError::ResourceBusy)
+    );
+    assert!(kvfs::cdev_del(master, UNIX98_PTY_MINOR_COUNT).is_none());
+    let retained = kvfs::cdev_del(slave, UNIX98_PTY_MINOR_COUNT).unwrap();
+    assert!(Arc::ptr_eq(&retained, &occupied));
+
+    // The failed attempt must not prevent either range being registered later.
+    assert_eq!(register_pty_ranges(master, slave), Ok(()));
+    assert!(kvfs::cdev_del(master, UNIX98_PTY_MINOR_COUNT).is_some());
+    assert!(kvfs::cdev_del(slave, UNIX98_PTY_MINOR_COUNT).is_some());
+}
+
 fn slave_inode() -> Arc<VfsInode> {
     VfsInode::new_file_with_inode_operations(
         Arc::new(()),

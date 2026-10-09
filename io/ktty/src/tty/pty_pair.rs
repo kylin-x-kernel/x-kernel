@@ -46,8 +46,14 @@ impl DeviceFileOps for UnboundPty {
 /// Masters must use PTMX; slaves must use a node bound to their original pair.
 /// A registration conflict rolls back only the ranges installed by this call.
 pub fn register_pty_drivers() -> KResult<()> {
-    let master = DeviceId::new(UNIX98_PTY_MASTER_MAJOR, 0);
-    let slave = DeviceId::new(UNIX98_PTY_SLAVE_MAJOR, 0);
+    register_pty_ranges(
+        DeviceId::new(UNIX98_PTY_MASTER_MAJOR, 0),
+        DeviceId::new(UNIX98_PTY_SLAVE_MAJOR, 0),
+    )
+}
+
+// Keep rollback shared with tests using isolated numbers, not boot-owned ranges.
+fn register_pty_ranges(master: DeviceId, slave: DeviceId) -> KResult<()> {
     let operations: Arc<dyn DeviceFileOps> = Arc::new(UnboundPty);
     kvfs::cdev_add(master, UNIX98_PTY_MINOR_COUNT, operations.clone())?;
     if let Err(error) = kvfs::cdev_add(slave, UNIX98_PTY_MINOR_COUNT, operations) {

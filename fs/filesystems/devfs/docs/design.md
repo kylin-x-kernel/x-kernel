@@ -64,6 +64,18 @@ hides the node and prevents old inode opens; existing slave files can outlive
 the name. Pair reservation and builder-held master use own failure rollback.
 The pts directory disables both positive and negative dentry caching: each name
 lookup consults current pair visibility, while retained dentries keep old identity.
+This deliberately pays for a lookup and a new dentry on each path resolution.
+Unlike Linux devpts, which explicitly publishes and removes dentries with PTY
+lifecycle changes, this projection does not maintain a synchronized cache
+invalidation protocol. Enabling caching requires such a protocol for creation,
+retirement and number reuse, including concurrent lookups; invalidation alone
+must not introduce a stale positive or negative entry.
+
+Unix98 range registration is a required, one-time boot invariant. Failure stops
+initialization before publishing PTMX, rather than exposing a multiplexer without
+its numeric-alias rejection ranges. This matches Linux's fatal registration
+failure policy in `drivers/tty/pty.c:unix98_pty_init`; it is distinct from omitting
+an optional device node whose registration conflicts with an existing owner.
 
 ```text
 kclass input/display activation

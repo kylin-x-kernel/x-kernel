@@ -46,7 +46,7 @@ fn retained_slave_node_does_not_own_pair_or_number() {
 
     impl FileOperations for FailedNodeConstruction {
         fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-            open_ptmx(inode, file, |pair| {
+            tty::open_ptmx(inode, file, |pair| {
                 let inode = SlaveNode::inode(self.fs.clone(), pair);
                 assert_eq!(inode.rdev(), pair.slave_device_id());
                 self.retained.lock().push(RetainedSlave {

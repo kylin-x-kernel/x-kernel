@@ -13,7 +13,7 @@ use alloc::{
 
 use inherit_methods_macro::inherit_methods;
 use kerrno::{KError, KResult};
-use ktty::tty::{PtyPair, open_ptmx, pty_slave_inode, pty_slave_numbers};
+use ktty::tty::{self, PtyPair};
 use kvfs::{
     Dentry, DeviceFileOps, FileOperations, InodeOperations, Metadata, MetadataUpdate, NodeFlags,
     NodePermission, NodeType, SimpleDirLookup, SimpleDirOps, SimpleFs, SimpleFsNode,
@@ -76,7 +76,7 @@ pub struct Ptmx(pub Arc<SimpleFs>);
 
 impl DeviceFileOps for Ptmx {
     fn open(&self, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        open_ptmx(inode, file, |pair| {
+        tty::open_ptmx(inode, file, |pair| {
             Ok(SlaveNode::inode(self.0.clone(), pair))
         })
     }
@@ -94,7 +94,7 @@ impl SimpleDirOps for PtsDir {
 
     fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         Ok(Box::new(
-            pty_slave_numbers()
+            tty::pty_slave_numbers()
                 .into_iter()
                 .map(|id| Cow::Owned(id.to_string())),
         ))
@@ -102,7 +102,7 @@ impl SimpleDirOps for PtsDir {
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> KResult<Dentry> {
         let number = name.parse::<u32>().map_err(|_| KError::NotFound)?;
-        let inode = pty_slave_inode(number).ok_or(KError::NotFound)?;
+        let inode = tty::pty_slave_inode(number).ok_or(KError::NotFound)?;
         Ok(lookup.file_from_inode(name, inode))
     }
 }
