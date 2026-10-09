@@ -27,13 +27,22 @@ Do not use a bare `cargo check -p <crate>` as the main kernel validation path.
 
 - the Rust toolchain and targets from `rust-toolchain.toml`;
 - `cargo-binutils` and `rust-objcopy`;
-- the target architecture's musl cross toolchain;
+- the target architecture's musl cross toolchain (`<arch>-linux-musl-gcc`) for
+  user apps, TEE tests and harness guest cases; the kernel build itself does
+  not compile C;
 - the matching QEMU system emulator for `make run`;
 - `cargo-shear 1.13.2` and `licensure 0.8.1` for repository hygiene checks;
 - an ext4 `disk.img` when the configured virtio block device is enabled.
 - for unit-test coverage: `debugfs`, `rust-profdata`, and `rust-cov`;
-- for x86_64 boot media: `mkfs.fat`, mtools (`mmd` and `mcopy`), and OVMF/EDK2
+- for x86_64 boot media: a GNU toolchain for the i386 LinuxBoot setup code
+  (the native `gcc`, `ld` and `objcopy` on x86_64 hosts, `x86_64-linux-gnu-*`
+  on other hosts), `mkfs.fat`, mtools (`mmd` and `mcopy`), and OVMF/EDK2
   firmware for UEFI execution.
+
+The CI builder image provides all of the above except the project toolchain,
+which CI installs at setup. Its Dockerfiles and the local build commands are
+in `scripts/ci/docker/`; the image version CI uses is the one referenced in
+`Jenkinsfile`. Run commands in that image to reproduce a CI-only failure.
 
 Install the pinned repository hygiene tools with:
 

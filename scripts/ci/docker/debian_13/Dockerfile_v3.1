@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1
+#
+# X-Kernel CI builder image, Debian 13 (trixie), incremental on top of v3.0.
+# Adds everything the Dylint lint check needs besides the lint library's own
+# crates: cargo-dylint and dylint-link, the lint toolchain and a prebuilt
+# Dylint driver for it.
+
+ARG BASE_IMAGE=kennard/x-kernel-builder:v3.0@sha256:155cb6b23090a4f0cc8b2279f245ac83190c0a67029942463da23cd34097a797
+ARG RUST_IMAGE=rust:1.95.0-slim-trixie@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0
+
+ARG DYLINT_VERSION=6.0.4
+# Toolchain of the Dylint lint library, with the targets of the kernel
+# platforms it scans plus the ones the CI setup adds to the auxiliary nightly.
+ARG LINT_TOOLCHAIN=nightly-2026-03-08
+ARG LINT_TARGETS="aarch64-unknown-none-softfloat x86_64-unknown-none x86_64-unknown-linux-musl aarch64-unknown-linux-musl riscv64gc-unknown-linux-musl"
+
+FROM ${BASE_IMAGE} AS base
+
+# Same install root as the v3.0 cargo tools, seeded with their receipts so the
+# merged .crates.toml lists every tool in /usr/local/cargo/bin.
+FROM ${RUST_IMAGE} AS cargo-tools
+ARG DYLINT_VERSION
+COPY --from=base /usr/local/cargo/.crates.toml /usr/local/cargo/.crates2.json /opt/cargo-tools/
+RUN cargo install --locked --root /opt/cargo-tools \
+        "cargo-dylint@${DYLINT_VERSION}" \
+        "dylint-link@${DYLINT_VERSION}"
+
+FROM base
+ARG LINT_TOOLCHAIN
+ARG LINT_TARGETS
+ARG DYLINT_VERSION
+USER root
+
+# Headers for host-side -sys crates (openssl-sys, libz-sys), so a fallback
+# `cargo install` of the Dylint tools on a CI node can still compile.
+RUN <<EOF
+apt-get update
+apt-get install -y --no-install-recommends libssl-dev zlib1g-dev
+rm -rf /var/lib/apt/lists/*
+EOF
+
+COPY --link --from=cargo-tools /opt/cargo-tools/bin/cargo-dylint /opt/cargo-tools/bin/dylint-link /usr/local/cargo/bin/
+COPY --link --from=cargo-tools --chmod=0644 /opt/cargo-tools/.crates.toml /opt/cargo-tools/.crates2.json /usr/local/cargo/
+
+# Prebuilt drivers live outside the cache volumes, so every container sees the
+# ones that match this image's cargo-dylint.
+ENV DYLINT_DRIVER_PATH=/usr/local/lib/dylint/drivers
+RUN install -d -o jenkins -g jenkins -m 0755 "${DYLINT_DRIVER_PATH}"
+
+# Install as the CI user: the toolchains directory is a volume mount point,
+# and Docker seeds a new volume with these files and their ownership.
+USER jenkins
+RUN <<EOF
+targets=()
+for target in ${LINT_TARGETS}; do
+    targets+=(--target "${target}")
+done
+rustup toolchain install "${LINT_TOOLCHAIN}" --profile minimal --no-self-update \
+    --component rustc-dev --component llvm-tools --component rustfmt "${targets[@]}"
+
+# Dylint builds the driver before it loads the first library for a toolchain,
+# so listing an empty library with a matching file name is enough. Loading
+# that library then fails; only the driver matters.
+host="$(rustc +"${LINT_TOOLCHAIN}" -vV | sed -n 's/^host: //p')"
+work="$(mktemp -d)"
+probe="${work}/libprobe@${LINT_TOOLCHAIN}-${host}.so"
+touch "${probe}"
+CARGO_HOME="${work}/cargo" cargo-dylint dylint list --lib-path "${probe}" >"${work}/log" 2>&1 || true
+driver="${DYLINT_DRIVER_PATH}/${LINT_TOOLCHAIN}-${host}/dylint-driver"
+if ! "${driver}" -V | grep -q " ${DYLINT_VERSION}\$"; then
+    cat "${work}/log" >&2
+    exit 1
+fi
+rm -rf "${work}"
+
+# rustup made the toolchain the default because there was none. Restore v3.0's
+# "no default", so cargo outside a rust-toolchain.toml directory fails loudly.
+rustup default none
+EOF
+
+ARG IMAGE_VERSION=v3.1
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}"

@@ -9,8 +9,9 @@ pipeline {
     agent {
         docker {
             label 'xkernel-agent && docker && vhost-vsock && container-vsock'
-            image 'yeanwang/x-kernel-builder:v2.0.0-rc.4@sha256:7773cf86f9cc84638a8e83d11c6e04a111c98fe36a9d5a823379bc46ce13b660'
-            args '--dns 223.5.5.5 --mount type=volume,dst=/xkernel-target --mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo --mount type=volume,src=xkernel-rustup-toolchains-v2,dst=/usr/local/rustup/toolchains --mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs --device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 --security-opt seccomp=unconfined --security-opt no-new-privileges=true'
+            // Agents preload the platform image with docker load, which preserves the tag but not the manifest digest.
+            image 'kennard/x-kernel-builder:v3.1'
+            args '--dns 223.5.5.5 --mount type=volume,dst=/xkernel-target --mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo --mount type=volume,src=xkernel-rustup-toolchains-v3,dst=/usr/local/rustup/toolchains --mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs --device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 --security-opt seccomp=unconfined --security-opt no-new-privileges=true'
         }
     }
 

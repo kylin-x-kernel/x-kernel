@@ -80,7 +80,7 @@ impl X86BootInputs {
         let setup_elf = work_dir.join("linuxboot-setup.elf");
         let setup_bin = work_dir.join("linuxboot-setup.bin");
         let boot_stub_bin = work_dir.join("x86_64-boot-stub.bin");
-        let tool_prefix = context.config.arch().cross_compile_prefix();
+        let tool_prefix = setup_tool_prefix();
 
         run(context, format!("{tool_prefix}gcc"))
             .args(["-m32", "-c", "-nostdlib", "-o"])
@@ -274,6 +274,18 @@ fn update_latest(path: &Path, latest: &mut Option<SystemTime>) -> Result<()> {
         *latest = Some(modified);
     }
     Ok(())
+}
+
+/// GNU tool prefix for the bare-metal i386 LinuxBoot setup code.
+///
+/// x86_64 hosts assemble and link it with their native toolchain; other hosts
+/// use the Debian-style x86_64 cross toolchain.
+const fn setup_tool_prefix() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        ""
+    } else {
+        "x86_64-linux-gnu-"
+    }
 }
 
 fn write_linuxboot_image(

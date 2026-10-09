@@ -1,0 +1,135 @@
+# syntax=docker/dockerfile:1
+#
+# X-Kernel CI builder image, Debian 13 (trixie), full build.
+# Build with scripts/ci/docker/build.sh; the build context is this directory.
+
+ARG DEBIAN_IMAGE=debian:trixie-20260918@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c
+ARG RUST_IMAGE=rust:1.95.0-slim-trixie@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0
+
+# trixie-backports package versions; bump them when backports moves on.
+ARG QEMU_DEB_VERSION=1:11.0.2+ds-2~bpo13+1
+ARG GDB_DEB_VERSION=17.2-1~bpo13+1
+
+ARG CARGO_BINUTILS_VERSION=0.4.0
+ARG CARGO_SHEAR_VERSION=1.13.2
+ARG LICENSURE_VERSION=0.8.1
+
+ARG CI_UID=1000
+ARG CI_GID=1000
+
+# Cargo tools the pipeline expects in /usr/local/cargo/bin.
+FROM ${RUST_IMAGE} AS cargo-tools
+ARG CARGO_BINUTILS_VERSION
+ARG CARGO_SHEAR_VERSION
+ARG LICENSURE_VERSION
+# cargo-shear embeds SHEAR_VERSION at build time and otherwise reports "dev",
+# which xkmake's pinned-version check rejects.
+RUN SHEAR_VERSION="${CARGO_SHEAR_VERSION}" cargo install --locked --root /opt/cargo-tools \
+        "cargo-binutils@${CARGO_BINUTILS_VERSION}" \
+        "cargo-shear@${CARGO_SHEAR_VERSION}" \
+        "licensure@${LICENSURE_VERSION}"
+
+FROM ${DEBIAN_IMAGE}
+ARG TARGETARCH
+ARG QEMU_DEB_VERSION
+ARG GDB_DEB_VERSION
+ARG CI_UID
+ARG CI_GID
+ENV DEBIAN_FRONTEND=noninteractive
+# Heredoc RUN scripts use this shell, so every step fails fast.
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+COPY files/backports.sources /etc/apt/sources.list.d/backports.sources
+# Debian's musl-dev for each guest architecture provides a real
+# <arch>-linux-musl-gcc cross compiler on either host.
+RUN <<EOF
+musl=()
+for arch in amd64 arm64 riscv64; do
+    if [ "${arch}" != "${TARGETARCH}" ]; then
+        dpkg --add-architecture "${arch}"
+    fi
+    musl+=("musl-dev:${arch}")
+done
+apt-get update
+apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    curl \
+    dosfstools \
+    e2fsprogs \
+    file \
+    git \
+    lcov \
+    mtools \
+    musl-tools \
+    ovmf \
+    pkg-config \
+    python3 \
+    rsync \
+    wget \
+    xz-utils \
+    "${musl[@]}"
+apt-get install -y --no-install-recommends -t trixie-backports \
+    "gdb-multiarch=${GDB_DEB_VERSION}" \
+    "qemu-system-arm=${QEMU_DEB_VERSION}" \
+    "qemu-system-misc=${QEMU_DEB_VERSION}" \
+    "qemu-system-riscv=${QEMU_DEB_VERSION}" \
+    "qemu-system-x86=${QEMU_DEB_VERSION}" \
+    "qemu-utils=${QEMU_DEB_VERSION}"
+rm -rf /var/lib/apt/lists/*
+EOF
+
+# Install rustup the regular way so it creates its own proxies (cargo, rustc,
+# ...). Toolchains are installed at CI time into the toolchains volume.
+COPY --from=cargo-tools /usr/local/cargo/bin/rustup /tmp/rustup-init
+RUN <<EOF
+CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+rm /tmp/rustup-init
+EOF
+COPY --link --from=cargo-tools /opt/cargo-tools/bin/ /usr/local/cargo/bin/
+COPY --link --from=cargo-tools --chmod=0644 /opt/cargo-tools/.crates.toml /opt/cargo-tools/.crates2.json /usr/local/cargo/
+# Cargo reads /.cargo/config.toml from every working directory. Keeping it out
+# of CARGO_HOME means a new image updates it even on existing cache volumes.
+COPY --link files/cargo-config.toml /.cargo/config.toml
+
+RUN <<EOF
+groupadd --gid "${CI_GID}" jenkins
+useradd --uid "${CI_UID}" --gid "${CI_GID}" \
+    --create-home --home-dir /home/jenkins --shell /bin/bash jenkins
+
+# Mount points must already belong to the CI user: Docker seeds a new volume
+# from the image directory, including its ownership. rustup also writes its
+# settings under RUSTUP_HOME.
+install -d -o "${CI_UID}" -g "${CI_GID}" -m 0755 \
+    /xkernel-target \
+    /xkernel-cache \
+    /xkernel-cache/cargo \
+    /xkernel-cache/rootfs \
+    /usr/local/rustup/toolchains
+chown -R "${CI_UID}:${CI_GID}" /usr/local/rustup
+EOF
+
+ARG IMAGE_VERSION=v3.0
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.title="X-Kernel CI builder" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.source="https://gitee.com/openkylin/x-kernel/tree/main/scripts/ci/docker" \
+      org.opencontainers.image.revision="${VCS_REF}"
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/xkernel-cache/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/home/jenkins \
+    USER=jenkins \
+    LOGNAME=jenkins \
+    GDB=gdb-multiarch
+# bindgen-based -sys crates (mbedtls-sys in rust-libutee) take header paths from
+# `$CC --print-sysroot`, which Debian's musl-gcc wrappers do not report. Point
+# clang at the musl headers instead of the host glibc ones.
+ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="-nostdlibinc -isystem /usr/include/x86_64-linux-musl" \
+    BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="-nostdlibinc -isystem /usr/include/aarch64-linux-musl" \
+    BINDGEN_EXTRA_CLANG_ARGS_riscv64gc_unknown_linux_musl="-nostdlibinc -isystem /usr/include/riscv64-linux-musl"
+USER jenkins
+CMD ["bash"]

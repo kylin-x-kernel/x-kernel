@@ -325,19 +325,7 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
         .env("K_IP", context.guest_ip.to_string())
         .env("K_GW", context.gateway.to_string())
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env(
-            "CC",
-            format!("{}gcc", context.config.arch().cross_compile_prefix()),
-        )
-        .env(
-            "AR",
-            format!("{}ar", context.config.arch().cross_compile_prefix()),
-        )
-        .env(
-            "RANLIB",
-            format!("{}ranlib", context.config.arch().cross_compile_prefix()),
-        );
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
 
     if context.config.profile() == BuildProfile::Release {
         command.arg("--release");
@@ -353,9 +341,6 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
         _ => {
             command.arg("-vv");
         }
-    }
-    if context.config.arch() == KernelArch::X86_64 {
-        command.env("CFLAGS_x86_64_unknown_none", "-mcmodel=large -mno-red-zone");
     }
     if let Some(unittest_crate) = &context.unittest_crate {
         command.env("UNITTEST_CRATE", unittest_crate);
