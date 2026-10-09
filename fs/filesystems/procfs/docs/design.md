@@ -31,6 +31,14 @@ buffering, and offsets. `kprocess` owns process resources and live-MM capture;
 `memspace` owns VMA metadata and MM-user teardown rules. Procfs consumes these
 interfaces without introducing a separate MM lifecycle.
 
+`sys/kernel/pty/max` and `sys/kernel/pty/nr` expose decimal values followed by
+a newline through read-only `SimpleFile` closures with mode `0444`. The `ktty`
+provider owns both the fixed limit and reservation accounting. `nr` includes
+unpublished reservations and pairs retained by surviving slave opens; it is not
+a count of visible pts entries. Each read samples the provider without retaining
+a PTY resource. Unlike Linux's writable `pty/max`, this interface reports a fixed
+limit of 16 pairs and does not support runtime resizing.
+
 ## Calling Constraints and Execution Context
 
 Normal lookup, open, read, write, and release paths require task context with

@@ -738,7 +738,10 @@ impl<'a> Nameidata<'a> {
 
         let containing_dir = self.path.clone();
         let path = path.resolve_final_mount();
-        if d_is_symlink(path.dentry()) && flags.lookup_flags().follows_final() {
+        if d_is_symlink(path.dentry())
+            && flags.lookup_flags().follows_final()
+            && d_inode(path.dentry()).magic_link().is_none()
+        {
             self.reserve_link_follow()?;
             let target = d_inode(path.dentry()).read_link(path.dentry())?;
             if target.is_empty() {
@@ -2131,6 +2134,60 @@ mod tests {
         assert!(followed.ptr_eq(&tree.target));
         assert_eq!(tree.magic_file.last_intent(), Some(LookupIntent::Exec));
         assert_eq!(tree.magic_file.follow_count(), 1);
+    }
+
+    #[def_test]
+    fn open_magic_link_uses_captured_path_not_display_name() {
+        let tree = test_tree();
+        // The display name is not a path in this tree. Following the link must
+        // use its retained Path, just as procfd retains an unlinked inode.
+        let file = Filename::new("/magic")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_RDONLY,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert!(file.path().ptr_eq(&tree.target));
+        assert_eq!(tree.magic_file.last_intent(), Some(LookupIntent::Open));
+        assert_eq!(tree.magic_file.follow_count(), 1);
+    }
+
+    #[def_test]
+    fn open_magic_link_preserves_no_follow_and_exclusive_create() {
+        let tree = test_tree();
+        for (flags, expected) in [
+            (linux_raw_sys::general::O_NOFOLLOW, VfsError::FilesystemLoop),
+            (
+                linux_raw_sys::general::O_CREAT | linux_raw_sys::general::O_EXCL,
+                VfsError::AlreadyExists,
+            ),
+        ] {
+            let result = Filename::new("/magic").open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                flags,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            );
+            assert_eq!(result.err(), Some(expected));
+        }
+        let file = Filename::new("/magic")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                linux_raw_sys::general::O_PATH | linux_raw_sys::general::O_NOFOLLOW,
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert_eq!(file.inode().node_type(), NodeType::Symlink);
+        assert_eq!(tree.magic_file.follow_count(), 0);
     }
 
     #[def_test]

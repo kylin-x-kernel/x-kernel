@@ -4,13 +4,15 @@
 
 use alloc::{collections::VecDeque, sync::Arc, task::Wake, vec, vec::Vec};
 use core::{
+    future::poll_fn,
     mem,
     sync::atomic::{AtomicBool, Ordering},
-    task::{Context, Waker},
+    task::{Context, Poll, Waker},
 };
 
 use kpoll::{PollRegistrations, PollSet};
 use kspin::SpinNoIrq;
+use ktask::future::block_on;
 use linux_raw_sys::general::{
     ECHO, ICANON, IGNCR, ISIG, IXON, ONLCR, OPOST, VEOF, VERASE, VKILL, VMIN, speed_t, tcflag_t,
 };
@@ -419,7 +421,7 @@ fn work_drains_multiple_budgets_and_resumes_after_read_space() {
                 process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
             },
         );
-        let (work, cpu_id) = ldisc.input_work().unwrap();
+        let work = ldisc.input_work().unwrap();
         let input_waker = ldisc.input_waker().unwrap();
         let weak = Arc::downgrade(&work);
         input_waker.wake_by_ref();
@@ -430,11 +432,11 @@ fn work_drains_multiple_budgets_and_resumes_after_read_space() {
             let count = ldisc.read(&mut bytes).unwrap();
             received.extend_from_slice(&bytes[..count]);
         }
-        work.shutdown().unwrap();
+        work.shutdown();
         input_waker.wake_by_ref();
         assert_eq!(received, data);
         ldisc.drain_input();
-        assert_eq!(work.queue_default(Some(cpu_id)), Err(SubmitError::Closed));
+        assert!(work.work.lock().is_none());
         assert!(!ldisc.poll_read());
         drop(ldisc);
         drop(work);
@@ -503,7 +505,7 @@ fn running_empty_read_keeps_a_concurrent_submission() {
             process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
     );
-    let (work, _) = ldisc.input_work().unwrap();
+    let work = ldisc.input_work().unwrap();
     let input_waker = ldisc.input_waker().unwrap();
     input_waker.wake_by_ref();
     gate.wait_until(|| entered.load(Ordering::Acquire));
@@ -513,7 +515,7 @@ fn running_empty_read_keeps_a_concurrent_submission() {
     await_input(&mut ldisc);
     let mut bytes = [0; 8];
     let count = ldisc.read(&mut bytes).unwrap();
-    work.shutdown().unwrap();
+    work.shutdown();
     assert_eq!(&bytes[..count], b"z\n");
 }
 
@@ -531,8 +533,8 @@ fn input_notifications_stay_with_their_source() {
     };
     let mut a = make_port(b"a\n");
     let mut b = make_port(b"b\n");
-    let (work_a, _) = a.input_work().unwrap();
-    let (work_b, _) = b.input_work().unwrap();
+    let work_a = a.input_work().unwrap();
+    let work_b = b.input_work().unwrap();
     let wake_a = a.input_waker().unwrap();
     let wake_b = b.input_waker().unwrap();
     wake_b.wake_by_ref();
@@ -545,6 +547,81 @@ fn input_notifications_stay_with_their_source() {
     await_input(&mut a);
     let count = a.read(&mut bytes).unwrap();
     assert_eq!(&bytes[..count], b"a\n");
-    work_a.shutdown().unwrap();
-    work_b.shutdown().unwrap();
+    work_a.shutdown();
+    work_b.shutdown();
+}
+
+#[def_test]
+fn closing_input_reclaims_idle_pending_and_running_readers() {
+    struct Reader {
+        entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+        gate: Arc<ktask::WaitQueue>,
+        should_pause: bool,
+    }
+
+    impl TtyRead for Reader {
+        fn read(&mut self, buf: &mut [u8]) -> usize {
+            if self.should_pause {
+                self.entered.store(true, Ordering::Release);
+                self.gate.notify_all(false);
+                self.gate
+                    .wait_until(|| self.release.load(Ordering::Acquire));
+            }
+            // Force budget exhaustion so the running-close case also tries requeue.
+            buf.fill(b'x');
+            buf.len()
+        }
+    }
+
+    impl Drop for Reader {
+        fn drop(&mut self) {
+            assert!(ktask::is_sleepable_context());
+            assert!(!self.dropped.swap(true, Ordering::AcqRel));
+            self.gate.notify_all(false);
+        }
+    }
+
+    for mode in 0..3 {
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(ktask::WaitQueue::new());
+        let port = TtyPort::new(
+            Arc::default(),
+            TtyConfig {
+                reader: Reader {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                    dropped: dropped.clone(),
+                    gate: gate.clone(),
+                    should_pause: mode == 2,
+                },
+                writer: MockWriter::default(),
+                process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
+            },
+        );
+        let work = port.input_work().unwrap();
+        let waker = port.input_waker().unwrap();
+        if mode == 2 {
+            waker.wake_by_ref();
+            gate.wait_until(|| entered.load(Ordering::Acquire));
+        }
+        {
+            let _irq = kspin::NoPreemptIrqSave::new();
+            if mode == 1 {
+                waker.wake_by_ref();
+            }
+            drop(port);
+            assert!(work.work.lock().is_none());
+            waker.wake_by_ref();
+            work.queue();
+        }
+        release.store(true, Ordering::Release);
+        gate.notify_all(false);
+        gate.wait_until(|| dropped.load(Ordering::Acquire));
+        waker.wake_by_ref();
+        assert!(work.work.lock().is_none());
+    }
 }

@@ -9,16 +9,15 @@ use alloc::{
     sync::{Arc, Weak},
 };
 use core::{
-    future::poll_fn,
     ops::Range,
     sync::atomic::{AtomicBool, Ordering},
-    task::{Poll, Waker},
+    task::Waker,
 };
 
 use kcpu_id_map::LogicalCpuId;
 use kerrno::{KError, KResult};
-use kpoll::{PollContext, PollRegisterError, PollRegistrations, PollSet};
-use ktask::future::block_on;
+use kpoll::{PollContext, PollRegisterError, PollSet};
+use kspin::SpinNoIrq;
 use kworkng::{SubmitError, WorkHandle};
 use ringbuf::{
     CachingCons, CachingProd,
@@ -35,9 +34,6 @@ const INPUT_WORK_BUDGET_BYTES: usize = 256;
 
 pub(crate) type ReadBuf = Arc<ringbuf::StaticRb<u8, BUF_SIZE>>;
 
-type ExternalRegisterFn =
-    Box<dyn for<'a> Fn(&'a mut PollContext<'_>) -> Result<(), PollRegisterError> + Send + Sync>;
-
 /// How should we process inputs?
 pub enum ProcessMode {
     /// Process inputs only on call to `read`
@@ -47,18 +43,12 @@ pub enum ProcessMode {
     /// `read` call to the terminal, since the signal is emitted only when
     /// inputs are being processed.
     Manual,
-    /// Spawns task for processing inputs, relying on external events to wake
-    /// up.
-    ///
-    /// In this mode a dedicated task processes inputs. When there's
-    /// nothing to read the argument is invoked to register rx waker.
-    External(ExternalRegisterFn),
     /// Processes input in finite task-context work rounds on a ready CPU.
     ///
     /// Construct in sleepable context after normal-worker startup.
     /// The owner must connect the
-    /// input notification to its source, request an initial check, and stop submissions
-    /// before permanently shutting down the work at teardown.
+    /// input notification to its source and request an initial check. Dropping
+    /// the port closes submissions; kworkng reclaims callback state asynchronously.
     Work(LogicalCpuId),
     /// Do not process inputs.
     ///
@@ -90,12 +80,45 @@ pub trait TtyWrite: Send + Sync + 'static {
     fn write(&self, buf: &[u8]);
 }
 
-/// Owned processing work; device input sources receive only its weak Waker.
-type InputWork = Arc<WorkHandle<Box<dyn Fn() + Send + Sync>>>;
+type InputWorkHandle = WorkHandle<Box<dyn Fn() + Send + Sync>>;
+
+/// Owns the input submission gate independently of the sleeping reader lock.
+pub(crate) struct InputWork {
+    work: SpinNoIrq<Option<InputWorkHandle>>,
+    cpu_id: LogicalCpuId,
+}
+
+impl InputWork {
+    fn queue(&self) {
+        let result = {
+            let work = self.work.lock();
+            let Some(work) = work.as_ref() else { return };
+            work.queue_default(Some(self.cpu_id))
+        };
+        match result {
+            Ok(_) | Err(SubmitError::AlreadyQueued | SubmitError::Closed) => {}
+            error => warn!("TTY input work could not be queued: {error:?}"),
+        }
+    }
+
+    /// Closes admission without waiting, including when called from an IRQ.
+    /// An executing batch may finish; callback captures are reclaimed by kworkng.
+    pub(crate) fn close(&self) {
+        let work = self.work.lock().take();
+        drop(work);
+    }
+
+    #[cfg(unittest)]
+    fn shutdown(&self) {
+        let work = self.work.lock().take();
+        if let Some(work) = work {
+            work.shutdown().unwrap();
+        }
+    }
+}
 
 struct InputWake {
-    work: Weak<WorkHandle<Box<dyn Fn() + Send + Sync>>>,
-    cpu_id: LogicalCpuId,
+    work: Weak<InputWork>,
 }
 
 impl alloc::task::Wake for InputWake {
@@ -105,7 +128,7 @@ impl alloc::task::Wake for InputWake {
 
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(work) = self.work.upgrade() {
-            queue_input_work(self.cpu_id, &work);
+            work.queue();
         }
     }
 }
@@ -179,21 +202,12 @@ impl<R: TtyRead> SimpleReader<R> {
 
 enum Processor<R, W> {
     Manual(InputReader<R, W>),
-    External(Arc<PollSet>),
     Work {
-        work: InputWork,
-        cpu_id: LogicalCpuId,
+        work: Arc<InputWork>,
         poll_rx: Arc<PollSet>,
         input_waker: Waker,
     },
     None(SimpleReader<R>, Arc<PollSet>),
-}
-
-fn queue_input_work(cpu_id: LogicalCpuId, work: &InputWork) {
-    match work.queue_default(Some(cpu_id)) {
-        Ok(_) | Err(SubmitError::AlreadyQueued | SubmitError::Closed) => {}
-        error => warn!("TTY input work could not be queued: {error:?}"),
-    }
 }
 
 /// Connects a backend to terminal input processing and readable notifications.
@@ -203,7 +217,6 @@ fn queue_input_work(cpu_id: LogicalCpuId, work: &InputWork) {
 pub struct TtyPort<R, W> {
     terminal: Arc<Terminal>,
     buf_rx: CachingCons<ReadBuf>,
-    poll_tx: Arc<PollSet>,
     clear_line_buf: Arc<AtomicBool>,
     processor: Processor<R, W>,
 }
@@ -218,7 +231,7 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
         let (buf_tx, buf_rx) = ReadBuf::default().split();
 
         let clear_line_buf = Arc::new(AtomicBool::new(false));
-        let mut reader = InputReader {
+        let reader = InputReader {
             reader: config.reader,
             discipline: LineDiscipline::new(
                 terminal.clone(),
@@ -230,70 +243,41 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
             read_range: 0..0,
         };
 
-        let poll_tx = Arc::new(PollSet::new());
         let processor = match config.process_mode {
             ProcessMode::Manual => Processor::Manual(reader),
-            ProcessMode::External(register) => {
-                let poll_rx = Arc::new(PollSet::new());
-                ktask::spawn_with_name(
-                    {
-                        let poll_rx = poll_rx.clone();
-                        let poll_tx = poll_tx.clone();
-                        move || {
-                            let mut registrations = PollRegistrations::new();
-                            block_on(poll_fn(|cx| {
-                                while reader.poll() {
-                                    poll_rx.wake();
-                                }
-                                let mut context = registrations.context(cx);
-                                if let Err(error) = context
-                                    .register(&poll_tx)
-                                    .and_then(|()| register(&mut context))
-                                {
-                                    warn!("Failed to register TTY input waiter: {error}");
-                                    // Retry after scheduler yields; do not exit the reader.
-                                    context.wake_by_ref();
-                                    return Poll::Pending;
-                                }
-                                drop(context);
-                                while reader.poll() {
-                                    poll_rx.wake();
-                                }
-                                Poll::Pending
-                            }))
-                        }
-                    },
-                    "tty-reader".into(),
-                );
-                Processor::External(poll_rx)
-            }
             ProcessMode::Work(cpu_id) => {
                 let poll_rx = Arc::new(PollSet::new());
                 let ready = poll_rx.clone();
                 let reader = ksync::Mutex::new(reader);
-                let work: InputWork = Arc::new_cyclic(|weak| {
+                let work: Arc<InputWork> = Arc::new_cyclic(|weak: &Weak<InputWork>| {
                     // Requeue must not keep the callback's owner alive forever.
                     let weak = weak.clone();
-                    let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                    let callback_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                        let Some(work) = weak.upgrade() else { return };
+                        if work.work.lock().is_none() {
+                            return;
+                        }
                         let progress = reader.lock().process_budget(INPUT_WORK_BUDGET_BYTES);
                         if progress.bytes_published > 0 {
                             ready.wake();
                         }
-                        if progress.stop == InputStop::BudgetExhausted
-                            && let Some(work) = weak.upgrade()
-                        {
-                            queue_input_work(cpu_id, &work);
+                        if progress.stop == InputStop::BudgetExhausted {
+                            work.queue();
                         }
                     });
-                    WorkHandle::new(callback).expect("TTY input requires normal workers")
+                    InputWork {
+                        work: SpinNoIrq::new(Some(
+                            WorkHandle::new(callback_fn)
+                                .expect("TTY input requires normal workers"),
+                        )),
+                        cpu_id,
+                    }
                 });
                 Processor::Work {
                     input_waker: Waker::from(Arc::new(InputWake {
                         work: Arc::downgrade(&work),
-                        cpu_id,
                     })),
                     work,
-                    cpu_id,
                     poll_rx,
                 }
             }
@@ -312,7 +296,6 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
         Self {
             terminal,
             buf_rx,
-            poll_tx,
             clear_line_buf,
             processor,
         }
@@ -323,8 +306,8 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
     pub fn drain_input(&mut self) {
         self.buf_rx.clear();
         self.clear_line_buf.store(true, Ordering::Relaxed);
-        if let Processor::Work { cpu_id, work, .. } = &self.processor {
-            queue_input_work(*cpu_id, work);
+        if let Processor::Work { work, .. } = &self.processor {
+            work.queue();
         }
     }
 
@@ -338,11 +321,10 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
         }
     }
 
-    /// Test-only access for waiting on and closing owned processing work.
-    #[cfg(unittest)]
-    pub(crate) fn input_work(&self) -> Option<(InputWork, LogicalCpuId)> {
+    /// Shares the submission owner so PTY retirement need not lock the reader.
+    pub(crate) fn input_work(&self) -> Option<Arc<InputWork>> {
         match &self.processor {
-            Processor::Work { work, cpu_id, .. } => Some((work.clone(), *cpu_id)),
+            Processor::Work { work, .. } => Some(work.clone()),
             _ => None,
         }
     }
@@ -369,9 +351,7 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
                 // recheck by waking the current waiter.
                 context.wake_by_ref();
             }
-            Processor::External(set)
-            | Processor::None(_, set)
-            | Processor::Work { poll_rx: set, .. } => {
+            Processor::None(_, set) | Processor::Work { poll_rx: set, .. } => {
                 context.register(set)?;
             }
         }
@@ -396,12 +376,18 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
         }
 
         let read = crate::terminal::ldisc::read_processed(&self.terminal, &mut self.buf_rx, buf)?;
-        if let Processor::Work { cpu_id, work, .. } = &self.processor {
-            queue_input_work(*cpu_id, work);
-        } else {
-            self.poll_tx.wake();
+        if let Processor::Work { work, .. } = &self.processor {
+            work.queue();
         }
         Ok(read)
+    }
+}
+
+impl<R, W> Drop for TtyPort<R, W> {
+    fn drop(&mut self) {
+        if let Processor::Work { work, .. } = &self.processor {
+            work.close();
+        }
     }
 }
 

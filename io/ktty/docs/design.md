@@ -6,7 +6,10 @@ Native consoles with an input IRQ use `ProcessMode::Work` and a prepared
 `kworkng::WorkHandle`; they do not subscribe to generic IRQ notifications.
 Preparation requires sleepable context after normal-worker initialization.
 Late-init attaches an input Waker to the stdout port before userspace opens TTY.
-Consoles without an IRQ retain Manual mode; PTY processing is unchanged.
+Consoles without an IRQ retain Manual mode. PTY slaves use the same Work mode;
+master writes notify slave input, while slave output notifies master readability.
+Creation connects both directions before an initial input check. No dedicated
+per-PTY input task is spawned.
 
 The port callback owns `Mutex<InputReader>` (backend prefetch and its line
 discipline) and a readable PollSet, but no strong reference back to `TtyPort`
@@ -27,7 +30,7 @@ is unchanged; a per-round budget is not a maximum line length.
 ## Input Port And Line Discipline
 
 `TtyPort<R, W>` owns the backend reader, one 80-byte prefetch batch, processing
-mode, prepared work or external wake registration, and readable notifications.
+mode, prepared work, and readable notifications.
 Existing UART/PTY queues remain the raw-input storage; there is no additional
 4 KiB queue at the TTY boundary. `InputReader` retains a partially consumed batch.
 
@@ -48,12 +51,20 @@ UART / PTY raw queue -> port prefetch -> ldisc.receive -> cooked queue -> read
 The current adapters remain pull-based: `TtyRead` returns immediately with at
 most the supplied slice length. `TtyWrite` handles task-context output/echo.
 Native console binding is host integration in `tty/ntty.rs`; `WorkHandle` is
-not exposed to the serial driver. A private `InputWake` holds a weak work reference
-and its fixed CPU route. The standard Waker is prepared in task context, queues
-existing work without processing inline, and becomes harmless after shutdown.
-PTY slave External mode and master bypass mode
-retain their previous behavior, including the existing external-task lifetime
-and PTY overflow limitations. No backend switching or hot-unplug is implemented.
+not exposed to the serial driver. A private `InputWake` weakly references
+`InputWork`, which owns the fixed CPU route and an optional prepared work handle.
+Source notifications, initial kicks, output-space retries and budget requeues
+submit through that owner's short IRQ-safe gate. Closing takes the handle out
+under the same gate and drops it after unlocking. Stale notifications cannot
+restart processing, even if the owner object remains referenced.
+
+Dropping the port closes its input owner without waiting. A running batch may
+finish against its original transport; kworkng drains and destroys captures in
+task context. No synchronous wait occurs in port destruction. Master bypass
+processing and existing PTY overflow limitations remain unchanged. Device-node
+and open-file lifecycle must release or explicitly close processing owners;
+work reclamation alone does not return an allocated PTY number.
+No backend switching or hot-unplug is implemented.
 TTY endpoint identity is selected separately at construction: a native terminal
 or PTY slave has terminal semantics, while a PTY master has master semantics.
 Job-control and controlling-terminal checks use that identity, not the input
@@ -89,6 +100,54 @@ device-file layer forwards `/dev/console`, `/dev/tty`, and PTY requests to
 this crate; process, process-group, and session identity stay owned by
 `kprocess`.
 
+## PTY Ownership
+
+`open_ptmx` owns allocation, master open and slave publication as one operation.
+The filesystem supplies only an unpublished inode constructor, called without
+PTY locks held; it must retain the pair weakly. Allocation, master open and
+publication helpers are private so callers cannot reorder the lifecycle.
+`register_pty_drivers` owns the Unix98 device ranges and rejects numeric aliases
+with EIO: masters require PTMX, and slaves require an original-pair node.
+devfs invokes registration at initialization but does not implement PTY policy.
+
+`PtyPair` owns the original master/slave endpoints, a persistent slave inode,
+input submission owner and a reserved number. The registry uses an intrusive
+tree for published pairs and a bitmap for all reservations, including pairs
+under construction. The system-wide capacity is fixed at 16 pairs; no build-time
+configuration or runtime setter is provided. Exhaustion returns ENOSPC without
+waiting for another close. Allocation and node construction happen outside the
+registry lock. A fixed bitmap records reservations; usage is counted directly
+from that bitmap under the same lock, without a separate accounting state.
+
+`pty_limit` and `pty_allocated_count` supply procfs read-only decimal queries at
+`/proc/sys/kernel/pty/max` and `nr`. Occupancy includes unpublished reservations
+and master-closed pairs with surviving slave files. It is a snapshot, not a promise
+that a later allocation will succeed. Unlike Linux's writable max, both X-Kernel
+nodes are read-only, including writes by root.
+
+One `PtyOpen` in file-private data owns each open-file use. Builder failure and
+final VfsFile destruction release that use; dup/fork share the same VfsFile.
+`/dev/tty` captures an endpoint but must independently acquire a use through the
+same pair admission check. Neither session references nor inode references are
+open-file uses. Endpoints and slave-node openers weakly refer to their original
+pair, never selecting a new pair by a reused number.
+
+Final master release hides the slave from directory lookup/enumeration and
+rejects subsequent opens with EIO, including opens through retained nodes.
+Existing slave files retain the number. Final endpoint-use release detaches the
+pair from the registry, closes input submissions and clears its matching session
+association; detached endpoints/inode are released before returning the number.
+Keeping a snapshot of the old pair does not restore admission or reserve its
+old number. A running input round may finish against old buffers; work storage
+reclamation is delegated to kworkng rather than delaying future allocation.
+
+Pair state uses a sleeping mutex. Its only nested registry operation takes the
+short SpinNoPreempt registry lock; lookup drops the registry lock before taking
+pair state. Backend callbacks, wakeups and final resource destruction occur
+outside both locks. Open, lookup and final file-use release require sleepable
+task context, consistent with VFS inode destruction. The nonblocking input-owner
+close operation does not make destruction of a retained inode IRQ-safe.
+
 ## Scope
 
 - `src/terminal/job.rs`: controlling-terminal session association, the
@@ -102,6 +161,7 @@ this crate; process, process-group, and session identity stay owned by
 - `src/tty/mod.rs`: TTY file operations and the `TC*`/`TIOC*` ioctl
   boundary.
 - `src/tty/ntty.rs`, `src/tty/pty.rs`: the console TTY and PTY backends.
+- `src/tty/pty_pair.rs`: PTY admission, open-file uses, registry and number ownership.
 
 ## Non-Responsibilities
 
@@ -110,9 +170,8 @@ this crate; process, process-group, and session identity stay owned by
 - No process, session, or credential ownership: sessions and process
   groups live in `kprocess`; `ktty` only holds weak references and asks
   it to resolve PGIDs.
-- No pseudo-terminal allocation policy: `/dev/ptmx` open-path decisions
-  belong to the devfs/pty layers; `ktty` implements the master/slave
-  data path and job-control semantics.
+- No devfs node construction: devfs projects each PTY as a persistent slave inode;
+  ktty owns allocation/admission and retains the inode without constructing it.
 - No signal delivery policy: control characters that generate signals
   are turned into `ksignal` requests by the line discipline; `ktty`
   does not decide delivery.

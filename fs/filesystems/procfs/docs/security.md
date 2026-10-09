@@ -13,6 +13,12 @@ separately read process fields describe the same image.
 
 Source paths below are relative to `fs/filesystems/procfs/` unless stated otherwise.
 
+`sys/kernel/pty/max` and `sys/kernel/pty/nr` are read-only observations of `ktty`
+state. Their `0444` mode is not the sole write barrier: the `SimpleFile` closure
+backend rejects writes even when a privileged opener bypasses mode checks.
+Reading does not reserve a slot or keep a pair alive; the reported reservation
+count can change immediately after observation and grants no admission guarantee.
+
 - Filesystem names, PID/TID/FD components, offsets, and write bytes are external
   inputs. Numeric lookup components are parsed, task-directory membership is
   checked, and unsupported names fail lookup (`src/task_nodes/root.rs`).

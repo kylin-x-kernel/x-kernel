@@ -14,7 +14,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         add_device_entry(
             root,
             device.name(),
-            DeviceFile::new_block(fs.clone(), device.device_number()),
+            Ok(DeviceFile::new_block(fs.clone(), device.device_number())),
         );
     }
 }

@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::{Arc, Weak};
+use core::task::Waker;
 
 use kpoll::PollSet;
 use kspin::SpinNoPreempt;
@@ -11,7 +12,7 @@ use ringbuf::{
     traits::{Consumer, Producer},
 };
 
-use super::{Tty, TtyKind};
+use super::{PtyPair, Tty, TtyKind};
 use crate::{
     port::{ProcessMode, TtyConfig, TtyRead, TtyWrite},
     terminal::Terminal,
@@ -41,53 +42,88 @@ impl TtyRead for PtyReader {
 
 /// PTY writer producing data into ring buffer
 #[derive(Clone)]
-pub struct PtyWriter(Arc<SpinNoPreempt<Prod<Buffer>>>, Arc<PollSet>);
+pub struct PtyWriter(Arc<SpinNoPreempt<Prod<Buffer>>>, PtyNotification);
+
+#[derive(Clone)]
+enum PtyNotification {
+    Input(Waker),
+    Readable(Arc<PollSet>),
+}
 
 impl PtyWriter {
-    pub fn new(buffer: Buffer, poll_rx: Arc<PollSet>) -> Self {
-        Self(Arc::new(SpinNoPreempt::new(Prod::new(buffer))), poll_rx)
+    fn new(buffer: Buffer, notification: PtyNotification) -> Self {
+        Self(
+            Arc::new(SpinNoPreempt::new(Prod::new(buffer))),
+            notification,
+        )
     }
 }
 
 impl TtyWrite for PtyWriter {
     fn write(&self, buf: &[u8]) {
         let read = self.0.lock().push_slice(buf);
-        self.1.wake();
+        match &self.1 {
+            PtyNotification::Input(waker) => waker.wake_by_ref(),
+            PtyNotification::Readable(poll_rx) => {
+                poll_rx.wake();
+            }
+        }
         if read < buf.len() {
             warn!("Discarding {} bytes written to pty", buf.len() - read);
         }
     }
 }
 
-pub fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
+/// Creates connected master/slave endpoints with task-context slave input work.
+///
+/// Requires sleepable context after normal workqueue initialization. Device-node
+/// publication and open-file lifetime are owned by the caller.
+///
+/// # Panics
+/// Panics if work preparation is unavailable or allocation fails.
+#[cfg(unittest)]
+pub(super) fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
+    create_endpoints(None)
+}
+
+pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, Arc<PtyDriver>) {
     let master_to_slave = Arc::new(HeapRb::new(PTY_BUF_SIZE));
     let slave_to_master = Arc::new(HeapRb::new(PTY_BUF_SIZE));
-    let poll_rx_slave = Arc::new(PollSet::new());
     let poll_rx_master = Arc::new(PollSet::new());
 
     let terminal = Arc::new(Terminal::default());
 
-    let master = Tty::new(
+    let slave = Tty::new_with_pair(
         terminal.clone(),
-        TtyKind::PtyMaster,
-        TtyConfig {
-            reader: PtyReader::new(slave_to_master.clone()),
-            writer: PtyWriter::new(master_to_slave.clone(), poll_rx_slave.clone()),
-            process_mode: ProcessMode::None(poll_rx_master.clone()),
-        },
-    );
-
-    let slave = Tty::new(
-        terminal,
         TtyKind::Terminal,
         TtyConfig {
-            reader: PtyReader::new(master_to_slave),
-            writer: PtyWriter::new(slave_to_master, poll_rx_master),
-            process_mode: ProcessMode::External(Box::new(
-                move |context: &mut kpoll::PollContext<'_>| context.register(&poll_rx_slave),
-            )),
+            reader: PtyReader::new(master_to_slave.clone()),
+            writer: PtyWriter::new(
+                slave_to_master.clone(),
+                PtyNotification::Readable(poll_rx_master.clone()),
+            ),
+            process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
+        pair.clone(),
     );
 
+    let input_waker = slave
+        .input
+        .lock()
+        .input_waker()
+        .expect("PTY slave uses input work");
+    let master = Tty::new_with_pair(
+        terminal,
+        TtyKind::PtyMaster,
+        TtyConfig {
+            reader: PtyReader::new(slave_to_master),
+            writer: PtyWriter::new(master_to_slave, PtyNotification::Input(input_waker.clone())),
+            process_mode: ProcessMode::None(poll_rx_master),
+        },
+        pair,
+    );
+
+    // Close the notification-attachment window even if input already arrived.
+    input_waker.wake_by_ref();
     (master, slave)
 }

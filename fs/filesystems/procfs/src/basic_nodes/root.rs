@@ -84,6 +84,23 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 "pid_max",
                 SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
             );
+            kernel.add("pty", {
+                let mut pty = DirMapping::new();
+                let permission = NodePermission::from_bits_truncate(0o444);
+                pty.add(
+                    "max",
+                    SimpleFile::new_regular_with_permission(fs.clone(), permission, || {
+                        Ok(format!("{}\n", ktty::tty::pty_limit()))
+                    }),
+                );
+                pty.add(
+                    "nr",
+                    SimpleFile::new_regular_with_permission(fs.clone(), permission, || {
+                        Ok(format!("{}\n", ktty::tty::pty_allocated_count()))
+                    }),
+                );
+                SimpleDir::new_maker(fs.clone(), Arc::new(pty))
+            });
             // Runtime log-level control: `cat` shows the current level as a
             // number in X-Kernel's own level order (0=off, 1=error, 2=warn,
             // 3=info, 4=debug, 5=trace); a privileged write (`echo 4 >
@@ -131,16 +148,54 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
 
 #[cfg(unittest)]
 mod tests {
-    use alloc::sync::Arc;
+    use alloc::{format, sync::Arc};
 
     use kvfs::{
-        DirMapping, FileSystemType, Filename, Mount, NodePermission, OpenFlags, SimpleDir, SimpleFs,
+        DirMapping, FileSystemType, Filename, Mount, NodePermission, OpenFlags, SimpleDir,
+        SimpleFs, VfsError,
     };
     use unittest::{assert, assert_eq, def_test};
 
     use super::add_root_entries;
 
     static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::internal("procfs-printk-test");
+
+    #[def_test(serial)]
+    fn pty_nodes_report_limits_and_reject_root_writes() {
+        let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+            let mut root = DirMapping::new();
+            add_root_entries(&mut root, fs.clone());
+            SimpleDir::new_maker(fs, Arc::new(root))
+        });
+        let root = Mount::new_root(&super_block).root_path();
+        for (path, expected) in [
+            ("/sys/kernel/pty/max", ktty::tty::pty_limit()),
+            ("/sys/kernel/pty/nr", ktty::tty::pty_allocated_count()),
+        ] {
+            // Root bypasses mode checks, so writes exercise the read-only backend.
+            let file = Filename::new(path)
+                .open_with_flags_at(
+                    &root,
+                    &root,
+                    OpenFlags::READ_WRITE.bits(),
+                    NodePermission::empty(),
+                    NodePermission::empty(),
+                    kcred::initial_cred(),
+                )
+                .unwrap();
+            assert!(file.cred().is_privileged());
+            assert_eq!(
+                file.path().getattr().unwrap().mode.permission().bits(),
+                0o444
+            );
+            let expected = format!("{expected}\n");
+            let mut buf = [0u8; 32];
+            let mut pos = 0;
+            let count = file.read_from(&mut buf, &mut pos).unwrap();
+            assert_eq!(&buf[..count], expected.as_bytes());
+            assert_eq!(file.write(b"0\n"), Err(VfsError::BadFileDescriptor));
+        }
+    }
 
     #[def_test]
     fn printk_node_reads_and_writes_runtime_log_level() {

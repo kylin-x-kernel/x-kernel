@@ -59,13 +59,15 @@ fn input_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
     id: CoreDeviceId,
-) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
-    let device = find_input_device(id)?;
+) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
+    let Some(device) = find_input_device(id) else {
+        return Ok(None);
+    };
     let endpoint = match inputdev::input_endpoint(device.clone()) {
         Ok(endpoint) => endpoint,
         Err(error) => {
             warn!("devtmpfs: input endpoint for {id:?} failed: {error:?}");
-            return None;
+            return Ok(None);
         }
     };
     let event = Arc::new(EventDev::new(device, endpoint));
@@ -75,15 +77,20 @@ fn input_file(
             event.detach();
         }
     });
-    Some((DeviceFile::new_character(fs, number, event), on_remove))
+    Ok(Some((
+        DeviceFile::new_character(fs, number, event)?,
+        on_remove,
+    )))
 }
 
 fn display_file(
     fs: Arc<SimpleFs>,
     number: DeviceId,
     id: CoreDeviceId,
-) -> Option<(Arc<DeviceFile>, DeviceRemovalCallback)> {
-    let device = find_display_device(id)?;
+) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
+    let Some(device) = find_display_device(id) else {
+        return Ok(None);
+    };
     let card = drmdevice::DrmCard::new(device);
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
@@ -91,7 +98,10 @@ fn display_file(
             card.notify_removed();
         }
     });
-    Some((DeviceFile::new_character(fs, number, card), on_remove))
+    Ok(Some((
+        DeviceFile::new_character(fs, number, card)?,
+        on_remove,
+    )))
 }
 
 fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
@@ -104,8 +114,18 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
         #[cfg(feature = "input")]
         DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.core_id()),
         #[cfg(not(feature = "input"))]
-        DeviceNodeKind::Input => None,
+        DeviceNodeKind::Input => Ok(None),
         DeviceNodeKind::Drm => display_file(projection.fs.clone(), number, node.core_id()),
+    };
+    let file = match file {
+        Ok(file) => file,
+        Err(error) => {
+            warn!(
+                "devtmpfs: cannot register device {:?}: {error:?}",
+                node.core_id()
+            );
+            return;
+        }
     };
     let Some((file, on_remove)) = file else {
         warn!(
@@ -140,7 +160,7 @@ fn remove_device(node: &DeviceNode) {
     };
     (record.on_remove)();
     let number = node.device_number();
-    if cdev_del(DeviceId::new(number.major(), number.minor())).is_none() {
+    if cdev_del(DeviceId::new(number.major(), number.minor()), 1).is_none() {
         warn!("devtmpfs: missing character device during removal: {number:?}");
     }
 }

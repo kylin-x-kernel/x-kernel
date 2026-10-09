@@ -12,6 +12,16 @@ its temporary source owner is released, so conflicting outer locks are forbidden
 
 ## 信任模型
 
+magic link 的普通 open 跟随其持有的 Path，而不是重新解析用于 readlink 的
+展示名称。目标仍接受 magic-link 跟随策略、链接次数以及 may_open 权限检查；
+这保证保留的旧路径不会因同名对象重新创建而被替换。
+
+字符设备范围只接受内核注册；空范围、minor 溢出和同 major 的任何重叠在
+注册边界拒绝。注销只接受完整范围，不允许切割其它注册。注册对象的退役
+标记只从有效变为无效；inode 弱缓存不能使旧注册或后端永久存活。
+缓存命中与注销并发时，已选定的后端可能继续执行 open；注销不是同步 drain，
+后端必须自行检查实例准入。回调、失败注册和注销后的最终后端析构均在表锁外。
+
 用户提供的路径、open flags、rename flags、mount flags 和 mount data 不可信。POSIX syscall 层
 负责复制用户内存并完成 ABI 初步校验；`kvfs` 只接收内核拥有的路径字符串、opaque mount-data
 byte slice 和类型化 flags。

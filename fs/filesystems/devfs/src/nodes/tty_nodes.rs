@@ -11,6 +11,7 @@ use super::pts::{Ptmx, PtsDir};
 use crate::{DeviceFile, add_device_entry};
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    ktty::tty::register_pty_drivers().expect("Unix98 drivers register once");
     add_device_entry(
         root,
         "tty",

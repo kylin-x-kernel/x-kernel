@@ -41,11 +41,29 @@ fs/filesystems/devfs/src/
 `DeviceFile` projects special-device identity and inode flags; it is not an
 open-file operations adapter. KVFS owns character-device dispatch, including
 capabilities, I/O, poll registration and open/release forwarding.
-PTMX creates the pair and installs the master through `kvfs::open_character_device`,
+The PTMX node delegates creation to `ktty::tty::open_ptmx`, supplying only a
+slave inode constructor. ktty controls allocation, opening, publication and
+rollback, and installs the master through `kvfs::open_character_device`,
 the same adapter used by registry-based opens. It opens the master once during
 the multiplexer callback; VFS does not reopen the replacement table. Final file
-drop releases the selected master, not the multiplexer. Master device-number
-registration and the slave PTS table retain their existing lifetime policy.
+drop releases the selected master, not the multiplexer. ktty owns PTY allocation
+and open-file lifetime; devfs does not keep an allocation table or per-pair cdev
+registrations. Slave lookup returns one persistent inode per original pair,
+preserving chmod/chown state. Its opener holds only a weak original-pair reference
+and uses the same KVFS adapter after successful admission.
+
+Device-node construction propagates character registration conflicts instead
+of replacing an existing driver. Static directory construction logs and omits
+failed nodes; dynamic projection publishes a record only after registration
+succeeds. Device removal unregisters the full single-device range. Unix98 master
+and slave drivers each register one numeric range through ktty at devfs
+initialization. The ranges and numeric-alias rejection policy belong to ktty.
+Independently created numbered nodes have no PTY binding and fail open with EIO;
+ordinary symlinks to a live slave resolve its bound inode. Final master close
+hides the node and prevents old inode opens; existing slave files can outlive
+the name. Pair reservation and builder-held master use own failure rollback.
+The pts directory disables both positive and negative dentry caching: each name
+lookup consults current pair visibility, while retained dentries keep old identity.
 
 ```text
 kclass input/display activation

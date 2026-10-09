@@ -19,9 +19,19 @@ kernel object identities and does not allocate identifiers itself.
 
 `DeviceFile` supplies inode identity, not open-file dispatch. Both registered
 character opens and PTMX master replacement use KVFS's single character adapter.
+
+Character registration conflicts do not replace another device's backend or
+publish a node/record for the failed registration. PTY nodes weakly reference
+their original ktty pair, not a reusable device-number lookup. A numeric master
+or slave alias has no such binding and is rejected by ktty's registered driver
+with EIO. The persistent inode does not keep
+the pair or its number allocated. ktty owns admission and reclamation; no devfs
+table or per-pair driver registration retains closed endpoints.
 VFS derives capabilities from the final backend and file open mode; poll results,
 event masks and registration errors remain the backend's responsibility.
-PTMX installs and opens its master once, outside the PTS table lock. Successful
+devfs supplies only an unpublished, weakly bound slave inode to `open_ptmx`;
+ktty controls allocation, master opening and publication. PTMX installs and
+opens its master once, without holding registry locks. Successful
 open transfers release responsibility to the final file; a failed backend open
 must roll back its own incomplete setup. Path permissions remain unchanged.
 

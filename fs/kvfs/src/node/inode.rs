@@ -25,9 +25,8 @@ use ktask::WaitQueue;
 use ktime_types::SystemTime;
 
 use super::{
-    DeviceFileOps,
     dentry::DentryAlias,
-    device::{block_device_file_operations, character_device_file_operations},
+    device::{ChrdevEntry, block_device_file_operations, character_device_file_operations},
 };
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
@@ -1111,7 +1110,7 @@ impl InodeAttributes {
 }
 
 struct InodeSpecialState {
-    character_device: Mutex<Option<Arc<dyn DeviceFileOps>>>,
+    character_device: Mutex<Weak<ChrdevEntry>>,
     fifo_pipe: Mutex<Option<Arc<PipeObject>>>,
     cached_link: Once<String>,
 }
@@ -1119,28 +1118,18 @@ struct InodeSpecialState {
 impl InodeSpecialState {
     fn new() -> Self {
         Self {
-            character_device: Mutex::new(None),
+            character_device: Mutex::new(Weak::new()),
             fifo_pipe: Mutex::new(None),
             cached_link: Once::new(),
         }
     }
 
-    fn character_device(&self) -> Option<Arc<dyn DeviceFileOps>> {
-        self.character_device.lock().clone()
+    fn character_device(&self) -> Option<Arc<ChrdevEntry>> {
+        self.character_device.lock().upgrade()
     }
 
-    fn set_character_device(&self, ops: Arc<dyn DeviceFileOps>) {
-        *self.character_device.lock() = Some(ops);
-    }
-
-    fn clear_character_device(&self, ops: &Arc<dyn DeviceFileOps>) {
-        let mut character_device = self.character_device.lock();
-        if character_device
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, ops))
-        {
-            *character_device = None;
-        }
+    fn set_character_device(&self, entry: Weak<ChrdevEntry>) {
+        *self.character_device.lock() = entry;
     }
 
     fn set_cached_link(&self, link: String) {
@@ -2024,16 +2013,12 @@ impl VfsInode {
         self.attributes.rdev()
     }
 
-    pub(crate) fn character_device(&self) -> Option<Arc<dyn DeviceFileOps>> {
+    pub(super) fn character_device(&self) -> Option<Arc<ChrdevEntry>> {
         self.special_state.character_device()
     }
 
-    pub(crate) fn set_character_device(&self, ops: Arc<dyn DeviceFileOps>) {
-        self.special_state.set_character_device(ops);
-    }
-
-    pub(crate) fn clear_character_device(&self, ops: &Arc<dyn DeviceFileOps>) {
-        self.special_state.clear_character_device(ops);
+    pub(super) fn set_character_device(&self, entry: Weak<ChrdevEntry>) {
+        self.special_state.set_character_device(entry);
     }
 
     /// Store a cached symbolic-link target.

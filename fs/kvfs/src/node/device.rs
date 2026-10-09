@@ -4,13 +4,10 @@
 
 //! Device file operations trait and memory mapping callback.
 
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use block::{BlockDevice, BlockOpenMode, DriverError};
-use hashbrown::HashMap;
 use kerrno::{KError, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::static_lock;
@@ -23,88 +20,129 @@ use crate::{
     VfsResult,
 };
 
-struct ChrdevEntry {
+/// One registration identity; inode caches hold only weak references to it.
+pub(super) struct ChrdevEntry {
+    first: DeviceId,
+    last_minor: u32,
     ops: Arc<dyn DeviceFileOps>,
-    inodes: Vec<Weak<VfsInode>>,
+    is_registered: AtomicBool,
 }
 
 impl ChrdevEntry {
-    fn new(ops: Arc<dyn DeviceFileOps>) -> Self {
-        Self {
+    fn new(first: DeviceId, count: u32, ops: Arc<dyn DeviceFileOps>) -> VfsResult<Self> {
+        let last_minor = count
+            .checked_sub(1)
+            .and_then(|offset| first.minor().checked_add(offset))
+            .ok_or(VfsError::InvalidInput)?;
+        Ok(Self {
+            first,
+            last_minor,
             ops,
-            inodes: Vec::new(),
+            is_registered: AtomicBool::new(true),
+        })
+    }
+
+    fn live_operations(&self) -> Option<Arc<dyn DeviceFileOps>> {
+        // Removal publishes retirement before the range can be reused. The bit
+        // never returns to true: a subsequent registration has a new identity.
+        self.is_registered
+            .load(Ordering::Acquire)
+            .then(|| self.ops.clone())
+    }
+}
+
+struct ChrdevRegistry {
+    entries: BTreeMap<(u32, u32), Arc<ChrdevEntry>>,
+}
+
+impl ChrdevRegistry {
+    const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
         }
     }
 
-    fn clear_inodes(&self) {
-        for inode in &self.inodes {
-            if let Some(inode) = inode.upgrade() {
-                inode.clear_character_device(&self.ops);
-            }
+    fn add(&mut self, entry: &Arc<ChrdevEntry>) -> VfsResult<()> {
+        let major = entry.first.major();
+        if self
+            .entries
+            .range(..=(major, entry.last_minor))
+            .next_back()
+            .is_some_and(|(_, previous)| {
+                previous.first.major() == major && previous.last_minor >= entry.first.minor()
+            })
+        {
+            return Err(VfsError::ResourceBusy);
         }
+        self.entries
+            .insert((major, entry.first.minor()), entry.clone());
+        Ok(())
+    }
+
+    fn del(&mut self, first: DeviceId, count: u32) -> Option<Arc<ChrdevEntry>> {
+        let last_minor = first.minor().checked_add(count.checked_sub(1)?)?;
+        let key = (first.major(), first.minor());
+        if self.entries.get(&key)?.last_minor != last_minor {
+            return None;
+        }
+        let entry = self.entries.remove(&key)?;
+        entry.is_registered.store(false, Ordering::Release);
+        Some(entry)
+    }
+
+    fn get(&self, device: DeviceId) -> Option<Arc<ChrdevEntry>> {
+        let (_, entry) = self
+            .entries
+            .range(..=(device.major(), device.minor()))
+            .next_back()?;
+        (entry.first.major() == device.major() && device.minor() <= entry.last_minor)
+            .then(|| entry.clone())
     }
 }
 
 static_lock! {
-    static CHRDEV_MAP: Mutex<Option<HashMap<u64, ChrdevEntry>>> = Mutex::new(None);
+    static CHRDEV_MAP: Mutex<ChrdevRegistry> = Mutex::new(ChrdevRegistry::new());
 }
 
-struct ChrdevRegistry;
-
-impl ChrdevRegistry {
-    fn with<R>(&self, f: impl FnOnce(&mut HashMap<u64, ChrdevEntry>) -> R) -> R {
-        let mut registry = CHRDEV_MAP.lock();
-        f(registry.get_or_insert_with(HashMap::new))
+fn character_operations(inode: &VfsInode) -> Option<Arc<dyn DeviceFileOps>> {
+    if let Some(entry) = inode.character_device()
+        && let Some(ops) = entry.live_operations()
+    {
+        return Some(ops);
     }
-
-    fn add(&self, device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
-        if let Some(old) = self.with(|registry| registry.insert(device.0, ChrdevEntry::new(ops))) {
-            old.clear_inodes();
-        }
-    }
-
-    fn del(&self, device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
-        self.with(|registry| registry.remove(&device.0))
-            .map(|entry| {
-                entry.clear_inodes();
-                entry.ops
-            })
-    }
-
-    fn get(&self, inode: &Arc<VfsInode>) -> Option<Arc<dyn DeviceFileOps>> {
-        if let Some(ops) = inode.character_device() {
-            return Some(ops);
-        }
-
-        self.with(|registry| {
-            let entry = registry.get_mut(&inode.rdev().0)?;
-            let ops = entry.ops.clone();
-            inode.set_character_device(ops.clone());
-            entry.inodes.push(Arc::downgrade(inode));
-            Some(ops)
-        })
-    }
-
-    fn open(&self, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let f_inode = file.inode()?;
-        debug_assert!(core::ptr::eq(inode, f_inode.as_ref()));
-        let ops = self
-            .get(f_inode)
-            .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
-        open_character_device(inode, file, ops)
-    }
+    // Selection linearizes under the registry lock. Removal does not revoke an
+    // already selected backend; drivers enforce their own open-admission rules.
+    let entry = CHRDEV_MAP.lock().get(inode.rdev())?;
+    inode.set_character_device(Arc::downgrade(&entry));
+    Some(entry.ops.clone())
 }
 
-static CHRDEV_REGISTRY: ChrdevRegistry = ChrdevRegistry;
-
-/// Register a character-device operation table for a device number.
-pub fn cdev_add(device: DeviceId, ops: Arc<dyn DeviceFileOps>) {
-    CHRDEV_REGISTRY.add(device, ops);
+/// Registers a driver for a nonempty minor range within one major.
+///
+/// Requires sleepable task context. A single device uses `count == 1`.
+/// No registration replaces or overrides another. The caller owns the range
+/// until a matching `cdev_del(first, count)`; device-node lifetime is separate.
+///
+/// # Errors
+/// Returns `InvalidInput` for an empty or overflowing minor range, and
+/// `ResourceBusy` for any overlap, including a duplicate registration.
+pub fn cdev_add(first: DeviceId, count: u32, ops: Arc<dyn DeviceFileOps>) -> VfsResult<()> {
+    let entry = Arc::new(ChrdevEntry::new(first, count, ops)?);
+    let result = CHRDEV_MAP.lock().add(&entry);
+    // In particular, a rejected backend's destructor runs after unlocking.
+    drop(entry);
+    result
 }
 
-/// Remove a character-device operation table for a device number.
-pub fn cdev_del(device: DeviceId) -> Option<Arc<dyn DeviceFileOps>> {
-    CHRDEV_REGISTRY.del(device)
+/// Removes exactly the registered range and returns its backend.
+///
+/// Requires sleepable task context. Only the range owner may unregister it;
+/// a mismatched start/count leaves the registry unchanged and returns `None`.
+/// Cached inode registrations become invalid before the number can be reused.
+/// Already selected/open backends remain owned by their callers and files.
+pub fn cdev_del(first: DeviceId, count: u32) -> Option<Arc<dyn DeviceFileOps>> {
+    let entry = CHRDEV_MAP.lock().del(first, count)?;
+    Some(entry.ops.clone())
 }
 
 /// Installs character-device dispatch and opens the selected backend once.
@@ -194,7 +232,11 @@ struct DefaultBlkdevFileOperations;
 
 impl FileOperations for DefaultChrdevFileOperations {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        CHRDEV_REGISTRY.open(inode, file)
+        let file_inode = file.inode()?;
+        debug_assert!(core::ptr::eq(inode, file_inode.as_ref()));
+        let ops =
+            character_operations(file_inode).ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
+        open_character_device(inode, file, ops)
     }
 }
 
@@ -708,8 +750,8 @@ mod tests {
     }
 
     fn open_test_character(ops: Arc<dyn DeviceFileOps>) -> VfsResult<Arc<VfsFile>> {
-        // An inode-local backend exercises registry dispatch without publishing
-        // a test device number or disturbing another test's registration.
+        // An inode-local registration exercises cached dispatch without
+        // publishing a number or disturbing another test's registration.
         let device = DeviceId::default();
         let init = VfsInodeInit::new(
             99,
@@ -721,7 +763,8 @@ mod tests {
             NodeFlags::empty(),
             init,
         );
-        inode.set_character_device(ops);
+        let entry = Arc::new(ChrdevEntry::new(device, 1, ops).unwrap());
+        inode.set_character_device(Arc::downgrade(&entry));
         let mount = crate::Mount::new_root(&crate::nullfs::new_superblock());
         let dentry = crate::Dentry::new_file_from_inode(inode, None, String::from("device"));
         let path = crate::Path::new(mount, dentry);
@@ -804,16 +847,9 @@ mod tests {
         );
     }
 
-    #[def_test]
-    fn cdev_del_clears_inode_cdev() {
-        let device = DeviceId::new(240, 1);
-        let _ = cdev_del(device);
-
-        let ops: Arc<dyn DeviceFileOps> = Arc::new(TestDeviceOps);
-        cdev_add(device, ops.clone());
-        let node = Arc::new(TestChrdevInode { rdev: device });
+    fn test_character_inode(device: DeviceId) -> Arc<VfsInode> {
         let init = VfsInodeInit::new(
-            99,
+            crate::get_next_ino(),
             0,
             Umode::new(
                 NodeType::CharacterDevice,
@@ -821,17 +857,177 @@ mod tests {
             ),
         )
         .with_owner_links_and_rdev(0, 0, 1, device);
-        let inode = VfsInode::new_special(node, NodeFlags::empty(), init);
+        VfsInode::new_special(
+            Arc::new(TestChrdevInode { rdev: device }),
+            NodeFlags::empty(),
+            init,
+        )
+    }
 
-        let cached = CHRDEV_REGISTRY
-            .get(&inode)
-            .expect("registered cdev is found");
-        assert!(Arc::ptr_eq(&cached, &ops));
-        assert!(inode.character_device().is_some());
+    fn add_test_range(
+        registry: &mut ChrdevRegistry,
+        first: DeviceId,
+        count: u32,
+        ops: &Arc<dyn DeviceFileOps>,
+    ) -> VfsResult<()> {
+        let entry = Arc::new(ChrdevEntry::new(first, count, ops.clone())?);
+        registry.add(&entry)
+    }
 
-        let removed = cdev_del(device).expect("registered cdev is removed");
-        assert!(Arc::ptr_eq(&removed, &ops));
+    #[def_test]
+    fn cdev_ranges_validate_bounds_overlap_and_exact_removal() {
+        let mut registry = ChrdevRegistry::new();
+        let ops: Arc<dyn DeviceFileOps> = Arc::new(TestDeviceOps);
+        assert_eq!(
+            add_test_range(&mut registry, DeviceId::new(240, 10), 0, &ops),
+            Err(VfsError::InvalidInput)
+        );
+        assert_eq!(
+            add_test_range(&mut registry, DeviceId::new(240, u32::MAX), 2, &ops),
+            Err(VfsError::InvalidInput)
+        );
+        add_test_range(&mut registry, DeviceId::new(240, u32::MAX), 1, &ops).unwrap();
+        assert!(registry.get(DeviceId::new(240, u32::MAX)).is_some());
+        add_test_range(&mut registry, DeviceId::new(240, 10), 3, &ops).unwrap();
+        for minor in [10, 11, 12] {
+            assert!(Arc::ptr_eq(
+                &registry.get(DeviceId::new(240, minor)).unwrap().ops,
+                &ops
+            ));
+        }
+        for minor in [9, 13] {
+            assert!(registry.get(DeviceId::new(240, minor)).is_none());
+        }
+        assert!(registry.get(DeviceId::new(241, 10)).is_none());
+        for (first, count) in [(9, 2), (10, 3), (11, 1), (12, 2), (9, 5)] {
+            assert_eq!(
+                add_test_range(&mut registry, DeviceId::new(240, first), count, &ops),
+                Err(VfsError::ResourceBusy)
+            );
+        }
+        add_test_range(&mut registry, DeviceId::new(240, 13), 1, &ops).unwrap();
+        add_test_range(&mut registry, DeviceId::new(241, 10), 3, &ops).unwrap();
+        for (first, count) in [(10, 0), (10, 2), (10, 4), (11, 2)] {
+            assert!(registry.del(DeviceId::new(240, first), count).is_none());
+        }
+        let entry = registry.get(DeviceId::new(240, 11)).unwrap();
+        drop(registry.del(DeviceId::new(240, 10), 3).unwrap());
+        assert!(entry.live_operations().is_none());
+        assert!(registry.get(DeviceId::new(240, 11)).is_none());
+        assert!(registry.get(DeviceId::new(240, 13)).is_some());
+        assert!(registry.get(DeviceId::new(241, 11)).is_some());
+    }
+
+    struct TestRegistration {
+        first: DeviceId,
+        count: u32,
+    }
+
+    impl TestRegistration {
+        fn new(first: DeviceId, count: u32, ops: Arc<dyn DeviceFileOps>) -> Self {
+            cdev_add(first, count, ops).unwrap();
+            Self { first, count }
+        }
+    }
+
+    impl Drop for TestRegistration {
+        fn drop(&mut self) {
+            drop(cdev_del(self.first, self.count));
+        }
+    }
+
+    #[def_test(serial)]
+    fn cdev_inode_cache_distinguishes_registrations_of_the_same_backend() {
+        let first = DeviceId::new(242, 10);
+        let ops: Arc<dyn DeviceFileOps> = Arc::new(TestDeviceOps);
+        let _registration = TestRegistration::new(first, 3, ops.clone());
+        let inode = test_character_inode(DeviceId::new(242, 11));
+        assert!(Arc::ptr_eq(&character_operations(&inode).unwrap(), &ops));
+        let old_entry = inode.character_device().unwrap();
+        drop(cdev_del(first, 3).unwrap());
+        assert!(old_entry.live_operations().is_none());
+        assert!(character_operations(&inode).is_none());
+
+        // Even reusing the same backend Arc must create a distinct registration.
+        cdev_add(first, 3, ops.clone()).unwrap();
+        assert!(Arc::ptr_eq(&character_operations(&inode).unwrap(), &ops));
+        let new_entry = inode.character_device().unwrap();
+        assert!(!Arc::ptr_eq(&old_entry, &new_entry));
+        assert!(old_entry.live_operations().is_none());
+        drop(old_entry);
+        assert!(Arc::ptr_eq(&character_operations(&inode).unwrap(), &ops));
+    }
+
+    #[def_test(serial)]
+    fn cdev_removal_preserves_open_files_but_not_inode_backend_ownership() {
+        let first = DeviceId::new(242, 20);
+        let backend = CharacterBackend::new(true, true, false);
+        let weak = Arc::downgrade(&backend);
+        let registration = TestRegistration::new(first, 2, backend.clone());
+        let inode = test_character_inode(DeviceId::new(242, 21));
+        let mount = crate::Mount::new_root(&crate::nullfs::new_superblock());
+        let dentry = crate::Dentry::new_file_from_inode(inode.clone(), None, String::from("range"));
+        let path = crate::Path::new(mount, dentry);
+        let file = VfsFileBuilder::allocate(crate::OpenFlags::READ_WRITE, kcred::initial_cred())
+            .unwrap()
+            .vfs_open(path.clone())
+            .unwrap();
+        assert_eq!(backend.opens.load(Ordering::Relaxed), 1);
+        drop(registration);
+        assert!(character_operations(&inode).is_none());
+        assert_eq!(
+            VfsFileBuilder::allocate(crate::OpenFlags::READ_WRITE, kcred::initial_cred())
+                .unwrap()
+                .vfs_open(path)
+                .err(),
+            Some(VfsError::from(LinuxError::ENXIO))
+        );
+        backend.is_ready.store(true, Ordering::Relaxed);
+        assert!(file.poll().contains(IoEvents::IN));
+        drop(file);
+        assert_eq!(backend.releases.load(Ordering::Relaxed), 1);
+        drop(backend);
+        assert!(weak.upgrade().is_none());
+        // A live inode does not retain either a retired backend or its strong entry.
         assert!(inode.character_device().is_none());
+    }
+
+    #[def_test(serial)]
+    fn cdev_callbacks_and_backend_destruction_run_without_registry_lock() {
+        struct Backend;
+        impl DeviceFileOps for Backend {
+            fn open(&self, _: &VfsInode, _: &mut VfsFileBuilder) -> VfsResult<()> {
+                assert!(CHRDEV_MAP.try_lock().is_some());
+                Err(VfsError::Io)
+            }
+        }
+        impl Drop for Backend {
+            fn drop(&mut self) {
+                assert!(CHRDEV_MAP.try_lock().is_some());
+            }
+        }
+        let first = DeviceId::new(242, 30);
+        let registration = TestRegistration::new(first, 1, Arc::new(Backend));
+        assert_eq!(
+            cdev_add(first, 1, Arc::new(Backend)),
+            Err(VfsError::ResourceBusy)
+        );
+        assert_eq!(
+            cdev_add(first, 0, Arc::new(Backend)),
+            Err(VfsError::InvalidInput)
+        );
+        let inode = test_character_inode(first);
+        let mount = crate::Mount::new_root(&crate::nullfs::new_superblock());
+        let dentry = crate::Dentry::new_file_from_inode(inode, None, String::from("range"));
+        let path = crate::Path::new(mount, dentry);
+        assert_eq!(
+            VfsFileBuilder::allocate(crate::OpenFlags::READ_WRITE, kcred::initial_cred())
+                .unwrap()
+                .vfs_open(path)
+                .err(),
+            Some(VfsError::Io)
+        );
+        drop(registration);
     }
 
     struct MemoryBlockDevice {

@@ -23,11 +23,18 @@ use crate::{
 
 mod ntty;
 mod pty;
+mod pty_pair;
 
 pub use ntty::{N_TTY, NTtyDriver, try_handoff_console};
-pub use pty::{PtyDriver, create_pty_pair};
+pub use pty::PtyDriver;
+#[cfg(unittest)]
+use pty::create_pty_pair;
+pub use pty_pair::{
+    PtyPair, open_ptmx, pty_allocated_count, pty_limit, pty_slave_inode, pty_slave_numbers,
+    register_pty_drivers,
+};
 
-fn current_tty_ops() -> KResult<Arc<dyn DeviceFileOps>> {
+fn current_tty_ops(file: &mut VfsFileBuilder) -> KResult<Arc<dyn DeviceFileOps>> {
     let term = kprocess::current_user_thread()
         .process()
         .group()
@@ -41,7 +48,10 @@ fn current_tty_ops() -> KResult<Arc<dyn DeviceFileOps>> {
         Err(term) => term,
     };
     match term.downcast::<PtyDriver>() {
-        Ok(term) => Ok(term),
+        Ok(term) => {
+            term.hold_pty_open(file)?;
+            Ok(term)
+        }
         Err(_) => Err(KError::OperationNotSupported),
     }
 }
@@ -68,6 +78,7 @@ pub struct Tty<R, W> {
     input: Mutex<TtyPort<R, W>>,
     writer: W,
     kind: TtyKind,
+    pty_pair: Option<Weak<PtyPair>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,6 +89,15 @@ enum TtyKind {
 
 impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
     fn new(terminal: Arc<Terminal>, kind: TtyKind, config: TtyConfig<R, W>) -> Arc<Self> {
+        Self::new_with_pair(terminal, kind, config, None)
+    }
+
+    fn new_with_pair(
+        terminal: Arc<Terminal>,
+        kind: TtyKind,
+        config: TtyConfig<R, W>,
+        pty_pair: Option<Weak<PtyPair>>,
+    ) -> Arc<Self> {
         let writer = config.writer.clone();
         let input = Mutex::new(TtyPort::new(terminal.clone(), config));
         Arc::new_cyclic(|this| Self {
@@ -86,11 +106,20 @@ impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
             input,
             writer,
             kind,
+            pty_pair,
         })
     }
 }
 
 impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
+    fn hold_pty_open(&self, file: &mut VfsFileBuilder) -> KResult<()> {
+        if let Some(pair) = &self.pty_pair {
+            let pair = pair.upgrade().ok_or(KError::Io)?;
+            file.set_private_data(Arc::new(pair.acquire_open(self.kind)?));
+        }
+        Ok(())
+    }
+
     /// Binds this TTY as `proc`'s controlling terminal.
     ///
     /// The process must be a session leader. A successful bind also initializes
@@ -162,7 +191,7 @@ impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
     }
 
     /// Set the pseudo-terminal slave number.
-    pub fn set_pty_number(&self, n: u32) {
+    fn set_pty_number(&self, n: u32) {
         self.terminal.pty_number.store(n, Ordering::Release);
     }
 }
@@ -175,6 +204,7 @@ impl<R: TtyRead, W: TtyWrite> ControllingTerminal for Tty<R, W> {
 
 impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
     fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> KResult<()> {
+        self.hold_pty_open(file)?;
         // A blocked reader must not serialize writers sharing this open file.
         file.stream_open();
         if self.kind == TtyKind::PtyMaster || file.requests_no_controlling_tty() {
@@ -409,7 +439,7 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
 pub struct CurrentTty;
 impl DeviceFileOps for CurrentTty {
     fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> KResult<()> {
-        let tty = current_tty_ops()?;
+        let tty = current_tty_ops(file)?;
         file.stream_open();
         file.set_nonblocking(true);
         file.set_private_data(Arc::new(TtyFilePrivate::new(tty)));
@@ -459,6 +489,10 @@ impl DeviceFileOps for CurrentTty {
         }
     }
 }
+
+#[cfg(unittest)]
+#[path = "../tests/pty.rs"]
+mod tests_pty;
 
 #[cfg(unittest)]
 mod tests {

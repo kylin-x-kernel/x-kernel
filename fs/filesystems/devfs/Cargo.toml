@@ -30,7 +30,6 @@ inherit-methods-macro = "0.1.0"
 klogger.workspace = true
 knet.workspace = true
 kpoll.workspace = true
-kspin.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 kprocess.workspace = true
@@ -48,7 +47,6 @@ drmdevice.workspace = true
 bitmaps = { version = "3.2.1", default-features = false }
 zerocopy = { version = "0.8.26", features = ["derive"] }
 lazyinit.workspace = true
-flatten_objects = "0.2.4"
 backtrace.workspace = true
 gimli = { version = "*", default-features = false, optional = true }
 dice_driver = { workspace = true, optional = true }

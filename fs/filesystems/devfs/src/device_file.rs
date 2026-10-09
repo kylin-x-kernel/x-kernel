@@ -25,20 +25,23 @@ pub struct DeviceFile {
 
 impl DeviceFile {
     /// Creates a character-device node and installs its operations table.
+    ///
+    /// Returns the registry error without publishing a node if the number is
+    /// already registered. A zero number leaves the node unregistered.
     pub fn new_character(
         fs: Arc<SimpleFs>,
         device_id: DeviceId,
         ops: Arc<dyn DeviceFileOps>,
-    ) -> Arc<Self> {
+    ) -> VfsResult<Arc<Self>> {
         let node = SimpleFsNode::new(fs, NodeType::CharacterDevice, NodePermission::default());
         node.set_rdev(device_id);
         if device_id.0 != 0 {
-            cdev_add(device_id, ops.clone());
+            cdev_add(device_id, 1, ops.clone())?;
         }
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             node,
             character_operations: Some(ops),
-        })
+        }))
     }
 
     /// Creates a block-device node that resolves through the block core.
@@ -49,16 +52,6 @@ impl DeviceFile {
             node,
             character_operations: None,
         })
-    }
-
-    /// Updates the device ID.
-    pub fn set_device_id(&self, device_id: DeviceId) {
-        self.node.set_rdev(device_id);
-        if device_id.0 != 0
-            && let Some(operations) = &self.character_operations
-        {
-            cdev_add(device_id, operations.clone());
-        }
     }
 
     /// Returns `inode::i_flags` for this device inode.
@@ -106,8 +99,16 @@ pub(crate) fn device_dentry(
 pub(crate) fn add_device_entry(
     root: &mut DirMapping,
     name: impl Into<String>,
-    device: Arc<DeviceFile>,
+    device: VfsResult<Arc<DeviceFile>>,
 ) {
+    let name = name.into();
+    let device = match device {
+        Ok(device) => device,
+        Err(error) => {
+            warn!("devtmpfs: cannot publish device {name}: {error:?}");
+            return;
+        }
+    };
     root.add_child(name, move |lookup, name| {
         Ok(device_dentry(lookup, name, device.clone()))
     });

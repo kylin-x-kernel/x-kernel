@@ -4,7 +4,7 @@
 
 This analysis covers the entire `ktty` crate: `src/lib.rs`, `src/port.rs`,
 `src/tty/` (`mod.rs` ioctl boundary, `ntty.rs` console backend,
-`pty.rs` PTY backend), and `src/terminal/` (`job.rs` job control,
+`pty.rs` PTY backend, `pty_pair.rs` pair lifetime), and `src/terminal/` (`job.rs` job control,
 `ldisc.rs` line discipline, `termios.rs` attribute layout). No modules
 are excluded; the trust boundary toward `kprocess` and the user ABI is
 described in the sections below.
@@ -53,19 +53,26 @@ report loss from task context, after releasing the UART lock. Reports count
 lost bytes only; input contents are not logged. This is not a hardware-overrun
 counter or a lossless-input guarantee.
 
-Native input work is prepared after kworkng startup in sleepable context.
+Native and PTY input work is prepared after kworkng startup in sleepable context.
 IRQ producers collect UART data and wake a prepared notification that submits
 existing work; they never parse,
 echo or signal inline. Reader mutation is serialized by a sleepable mutex;
-port locks are released before submission and reader locks before notification.
+reader locks are released before notification or self-requeue. Prepared submission
+does not wait or execute the reader inline, including output-space retries issued
+while the caller owns the port lock.
 Bounded input and output work prevents a single round from draining indefinitely.
 Full output waits for reader consumption instead of busy requeueing.
 
-Self-requeue and the device's input Waker use Weak work ownership, avoiding a
-cycle through the reader's retained backend. Teardown must detach the producer then call
-shutdown outside port/TTY locks, preserving callback resources until successful
-drain. Shutdown rejects stale producer handles. Dropping one clone is not a
-completion barrier. The native console remains kernel-lifetime.
+Self-requeue and source Wakers weakly reference a shared input owner, avoiding
+a cycle through the reader's backend. The owner serializes submission and removal
+of its optional work handle. No production caller receives a strong handle clone
+that could bypass the gate. Port destruction closes the gate and releases the
+handle outside it, without waiting; kworkng drains work before destroying captures
+in task context. Already executing input may finish, so closure is not a
+synchronous signal/echo completion barrier. Stale Wakers cannot resurrect work.
+The native console remains kernel-lifetime. PTY callbacks retain original buffers,
+never resolve peers by number, and do not own their TTY endpoints. PTY allocation
+retirement is separate from safe input-work destruction.
 
 Native read/write/echo use one connection, including its selected source for
 loss accounting. Runtime adoption is limited to the registered early stdout
@@ -79,6 +86,32 @@ a lock, keeping the critical sections small. Poll waiters are woken only
 after a foreground update completes.
 
 ## Threat Analysis
+
+The filesystem callback passed to `open_ptmx` constructs an unpublished
+inode outside PTY locks and must hold only a weak pair reference. ktty alone
+orders master opening and publication; callback errors release the reservation.
+Numeric-alias rejection is enforced by ktty's registered Unix98 operations.
+
+The fixed capacity is 16 pairs. Reservation rejects numbers beyond that limit;
+allocation and release update the bitmap under the registry lock. Read-only
+usage snapshots expose no reservation capability. Endpoint allocation retains
+the kernel's existing OOM policy.
+
+PTY numbers remain reserved from construction through final open-file-use
+release. The bitmap and published tree are protected by a short registry lock;
+removed pair Arcs and concrete resources are dropped outside it. Pair admission
+is serialized with close under a sleeping mutex. The registry never acquires
+the pair mutex while locked, avoiding inversion with publication/retirement.
+`PtyOpen` is not duplicated for dup/fork, and no release callback also decrements
+its count. Construction failure drops the reservation; failure after publication
+closes the master use without discarding independently opened slave uses.
+
+An old inode has a weak original-pair reference; retirement makes that identity
+permanently unopenable even while snapshots survive or its number is reused.
+Session-held endpoint references cannot bypass `/dev/tty` admission. Final
+file-use release may destroy an inode and must run in sleepable VFS context,
+not in IRQ context or under caller spinlocks. Input closure is nonblocking;
+it is not a synchronous barrier against an already running signal/echo batch.
 
 | ID | Threat | Impact | Trigger | Existing control |
 |------|----------|----------|----------|----------|
@@ -99,6 +132,11 @@ after a foreground update completes.
 | F-04 | Fallback shell inherits stdio without a controlling TTY | stdio pre-opened by a PID-less kernel thread | Bash disables job control | Interactive shell degraded | 3 | The fallback path re-opens the console in the PID 1 user context, triggering standard TTY-open binding |
 
 ## Known Limitations
+
+PTY capacity is fixed; no per-mount quota or runtime resizing is supplied.
+Complete Linux master-close hangup,
+SIGHUP delivery and peer read/write EOF/EIO semantics are not supplied by pair
+reclamation; existing data-path limitations remain separate.
 
 When a background process group reads the controlling terminal, the
 current implementation waits for it to reach the foreground; Linux's full
