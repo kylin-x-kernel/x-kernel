@@ -243,7 +243,11 @@ impl DeviceDesc {
     /// a runtime `DeviceObject` (either through the probe path or boot
     /// adoption). Backends use this to publish endpoints as children of a
     /// controller they already adopted.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one device \
+                  descriptor from its identity, parent, resources and matching metadata"
+    )]
     pub fn new_with_parent(
         id: DeviceDescId,
         bus_id: BusId,
@@ -398,7 +402,7 @@ pub struct DeviceRecord {
     pub state: DeviceState,
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

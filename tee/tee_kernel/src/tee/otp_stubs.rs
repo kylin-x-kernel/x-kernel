@@ -8,12 +8,12 @@ use super::utee_defines::HW_UNIQUE_KEY_LENGTH;
 use crate::tee::TeeResult;
 
 #[repr(C)]
-pub struct TeeHwUniqueKey {
+pub(super) struct TeeHwUniqueKey {
     pub data: [u8; HW_UNIQUE_KEY_LENGTH],
 }
 
 // TODO: need to be implement
-pub fn tee_otp_get_hw_unique_key(hwkey: &mut TeeHwUniqueKey) -> TeeResult {
+pub(super) fn tee_otp_get_hw_unique_key(hwkey: &mut TeeHwUniqueKey) -> TeeResult {
     hwkey.data.fill(0xAA);
     info!("tee_otp_get_hw_unique_key");
     cfg_if! {

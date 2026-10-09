@@ -2,6 +2,18 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): missing generated build \
+              configuration must terminate this host build script"
+)]
+#![allow(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): this host build script \
+              intentionally fails the build when Cargo environment or repository layout is \
+              unavailable"
+)]
+
 use std::{env, fs, path::Path};
 
 fn main() {

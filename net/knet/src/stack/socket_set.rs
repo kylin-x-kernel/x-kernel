@@ -36,14 +36,14 @@ pub(crate) struct SocketSetState<'a> {
 }
 
 impl SocketSetState<'_> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sockets: SocketSet::new(vec![]),
             deferred_tcp_closes: Vec::new(),
         }
     }
 
-    pub fn defer_tcp_close(&mut self, handle: SocketHandle) {
+    pub(crate) fn defer_tcp_close(&mut self, handle: SocketHandle) {
         debug_assert!(
             self.deferred_tcp_closes
                 .iter()
@@ -55,14 +55,14 @@ impl SocketSetState<'_> {
         });
     }
 
-    pub fn deferred_tcp_close_deadline(&self) -> Option<Instant> {
+    pub(crate) fn deferred_tcp_close_deadline(&self) -> Option<Instant> {
         self.deferred_tcp_closes
             .iter()
             .filter_map(|entry| entry.fin_wait2_deadline)
             .min()
     }
 
-    pub fn reap_deferred_tcp_closes(&mut self, current: Instant) -> Option<Instant> {
+    pub(crate) fn reap_deferred_tcp_closes(&mut self, current: Instant) -> Option<Instant> {
         let Self {
             sockets,
             deferred_tcp_closes,
@@ -115,20 +115,20 @@ pub(crate) struct SocketSetWrapper<'a> {
 }
 
 impl<'a> SocketSetWrapper<'a> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(SocketSetState::new()),
             new_socket: Event::new(),
         }
     }
 
-    pub fn add<T: AnySocket<'a>>(&self, socket: T) -> SocketHandle {
+    pub(crate) fn add<T: AnySocket<'a>>(&self, socket: T) -> SocketHandle {
         let handle = self.inner.lock().add(socket);
         self.new_socket.notify(1);
         handle
     }
 
-    pub fn with_socket_mut<T: AnySocket<'a>, R, F>(&self, handle: SocketHandle, f: F) -> R
+    pub(crate) fn with_socket_mut<T: AnySocket<'a>, R, F>(&self, handle: SocketHandle, f: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
@@ -137,12 +137,12 @@ impl<'a> SocketSetWrapper<'a> {
         f(socket)
     }
 
-    pub fn remove(&self, handle: SocketHandle) {
+    pub(crate) fn remove(&self, handle: SocketHandle) {
         self.inner.lock().remove(handle);
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use smoltcp::{socket::tcp, time::Instant};
     use unittest::{assert_eq, def_test};

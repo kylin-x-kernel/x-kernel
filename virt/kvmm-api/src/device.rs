@@ -240,6 +240,11 @@ fn boot_linux(rest: &str) -> VfsResult<Vm<CurrentArch>> {
 }
 
 #[cfg(target_arch = "riscv64")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split image/DTB/initrd loading, virtual \
+              device wiring and vCPU0 start into helpers"
+)]
 fn build_and_start_rv64(
     vm_id: u32,
     base: u64,
@@ -488,6 +493,11 @@ fn setup_rv64_devices(vm: &Vm<CurrentArch>, console: &Arc<vdev_uart16550::Uart16
 /// (emulated GICD + GICC→GICV passthrough + host-only GICH), and the aarch64
 /// vCPU entry state (`elr`/`spsr`/`x0=dtb`).
 #[cfg(target_arch = "aarch64")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split image/DTB/initrd loading, virtual \
+              device wiring and vCPU0 start into helpers"
+)]
 fn build_and_start_aarch64(
     vm_id: u32,
     base: u64,
@@ -703,7 +713,7 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
     // (before create_vcpu clones it), since guest_mem_mut needs Arc::get_mut.
     match vm.guest_mem_mut() {
         Some(gm) => {
-            if !gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRW) {
+            if !gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRw) {
                 log::error!("[kvmm-api] GICC→GICV map_region failed");
                 return Err(VfsError::NoSuchDevice);
             }

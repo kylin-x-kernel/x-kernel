@@ -348,6 +348,11 @@ fn translate_compat_algo(algo: u32) -> u32 {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: linear algorithm-to-key-type table: one short match arm \
+              per algorithm class"
+)]
 fn tee_svc_cryp_check_key_type(o: &TeeObj, algo: u32, mode: TEE_OperationMode) -> TeeResult {
     let req_key_type;
     let mut req_key_type2: u32 = 0;
@@ -568,7 +573,7 @@ fn tee_cryp_asymm_require_key_initialized(cs: &TeeCrypState) -> TeeResult {
 }
 
 // 创建一个TeeCrypState
-pub fn tee_cryp_state_alloc(
+pub(super) fn tee_cryp_state_alloc(
     algo: u32,
     mode: TEE_OperationMode,
     key1: Option<u32>,
@@ -690,7 +695,7 @@ pub fn tee_cryp_state_alloc(
     res
 }
 
-pub fn syscall_cryp_state_alloc(
+pub(super) fn syscall_cryp_state_alloc(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -721,7 +726,7 @@ pub fn syscall_cryp_state_alloc(
 }
 
 // 复制一个TeeCrypState
-pub fn tee_cryp_state_copy(dst_id: u32, src_id: u32) -> TeeResult {
+pub(super) fn tee_cryp_state_copy(dst_id: u32, src_id: u32) -> TeeResult {
     let cs_dst = tee_cryp_state_get(dst_id)?;
     let cs_src = tee_cryp_state_get(src_id)?;
 
@@ -750,13 +755,13 @@ pub fn tee_cryp_state_copy(dst_id: u32, src_id: u32) -> TeeResult {
     Ok(())
 }
 
-pub fn syscall_cryp_state_copy(arg0: usize, arg1: usize) -> TeeResult {
+pub(super) fn syscall_cryp_state_copy(arg0: usize, arg1: usize) -> TeeResult {
     tee_cryp_state_copy(arg0 as _, arg1 as _)
 }
 
 // 删除一个TeeCrypState：先丢弃运算上下文（内含轮密钥等副本），再移除状态节点，最后清零并关闭密钥对象。
 // GP FreeOperation is void / must succeed: clean up best-effort and surface the first error.
-pub fn tee_cryp_state_free(id: u32) -> TeeResult {
+pub(super) fn tee_cryp_state_free(id: u32) -> TeeResult {
     let cs = tee_cryp_state_get(id)?;
     let (key1, key2) = {
         let mut g = cs.lock();
@@ -806,12 +811,12 @@ pub fn tee_cryp_state_free(id: u32) -> TeeResult {
     }
 }
 
-pub fn syscall_cryp_state_free(arg0: usize) -> TeeResult {
+pub(super) fn syscall_cryp_state_free(arg0: usize) -> TeeResult {
     tee_cryp_state_free(arg0 as _)
 }
 
 /// Close all crypto operation states owned by the current TEE session.
-pub fn tee_cryp_state_close_all() -> TeeResult {
+pub(super) fn tee_cryp_state_close_all() -> TeeResult {
     let ids: Vec<u32> =
         with_tee_session_ctx(|ctx| Ok(ctx.cryp_state.iter().map(|(id, _)| id as u32).collect()))?;
     for id in ids {
@@ -823,7 +828,7 @@ pub fn tee_cryp_state_close_all() -> TeeResult {
 }
 
 // 根据id获取一个TeeCrypState
-pub fn tee_cryp_state_get(id: u32) -> TeeResult<Arc<Mutex<TeeCrypState>>> {
+pub(super) fn tee_cryp_state_get(id: u32) -> TeeResult<Arc<Mutex<TeeCrypState>>> {
     with_tee_session_ctx(|ctx| match ctx.cryp_state.get(id as _) {
         Some(cs) => Ok(Arc::clone(cs)),
         None => Err(TEE_ERROR_ITEM_NOT_FOUND),
@@ -844,7 +849,7 @@ fn cryp_state_free(id: u32) -> TeeResult {
     Ok(())
 }
 
-pub fn tee_cryp_hash_init(id: u32) -> TeeResult {
+pub(super) fn tee_cryp_hash_init(id: u32) -> TeeResult {
     let cs = tee_cryp_state_get(id)?;
     let cs_guard = cs.lock();
     let algo = cs_guard.algo;
@@ -873,11 +878,11 @@ pub fn tee_cryp_hash_init(id: u32) -> TeeResult {
     }
 }
 
-pub fn syscall_hash_init(arg0: usize) -> TeeResult {
+pub(super) fn syscall_hash_init(arg0: usize) -> TeeResult {
     tee_cryp_hash_init(arg0 as _)
 }
 
-pub fn tee_cryp_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
+pub(super) fn tee_cryp_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
     memtag_strip_tag_const()?;
     vm_check_access_rights(0, 0, 0)?;
 
@@ -897,12 +902,12 @@ pub fn tee_cryp_hash_update(id: u32, chunk: &[u8]) -> TeeResult {
     }
 }
 
-pub fn syscall_hash_update(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
+pub(super) fn syscall_hash_update(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let chunk = read_required_user_bytes(arg1, arg2)?;
     tee_cryp_hash_update(arg0 as _, &chunk)
 }
 
-pub fn tee_cryp_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<usize> {
+pub(super) fn tee_cryp_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -949,7 +954,7 @@ pub fn tee_cryp_hash_final(id: u32, chunk: &[u8], hash: &mut [u8]) -> TeeResult<
     }
 }
 
-pub fn syscall_hash_final(
+pub(super) fn syscall_hash_final(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -967,7 +972,7 @@ pub fn syscall_hash_final(
 
 /// GP 中只支持 NoPad，此处实现了 Padding 模式的拓展
 /// 实际使用中，若要保持ALG类型一致，请使用CipherPaddingMode::None作为参数
-pub fn tee_cryp_cipher_init(
+pub(super) fn tee_cryp_cipher_init(
     id: u32,
     iv: Option<&[u8]>,
     padding_mode: CipherPaddingMode,
@@ -1020,7 +1025,7 @@ pub fn tee_cryp_cipher_init(
     crypto_cipher_init(cs.clone(), key.as_slice(), iv, padding_mode)
 }
 
-pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
+pub(super) fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let iv = read_optional_user_bytes(arg1, arg2)?;
     let iv = if iv.is_empty() { None } else { Some(iv) };
     tee_cryp_cipher_init(arg0 as _, iv.as_deref(), CipherPaddingMode::None)
@@ -1028,7 +1033,7 @@ pub fn syscall_cipher_init(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
 
 /// 不足一块的输入会缓存在 `TeeCipherCtx::pending`（GP 语义）；
 /// `output` 须能容纳本次可能写出的密文字节数（可能为 0）。
-pub fn tee_cryp_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
+pub(super) fn tee_cryp_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1050,7 +1055,7 @@ pub fn tee_cryp_cipher_update(id: u32, input: &[u8], output: &mut [u8]) -> TeeRe
     crypto_cipher_update(cs.clone(), input, output)
 }
 
-pub fn syscall_cipher_update(
+pub(super) fn syscall_cipher_update(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1061,7 +1066,7 @@ pub fn syscall_cipher_update(
 }
 
 /// 用于处理最后一个数据块的填充和加密
-pub fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
+pub(super) fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeResult<usize> {
     memtag_strip_tag_const()?;
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
@@ -1092,7 +1097,7 @@ pub fn tee_cryp_cipher_final(id: u32, input: &[u8], output: &mut [u8]) -> TeeRes
     Ok(len + tail)
 }
 
-pub fn syscall_cipher_final(
+pub(super) fn syscall_cipher_final(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1109,14 +1114,14 @@ pub fn syscall_cipher_final(
     Ok(())
 }
 
-pub fn syscall_cryp_random_number_generate(arg0: usize, arg1: usize) -> TeeResult {
+pub(super) fn syscall_cryp_random_number_generate(arg0: usize, arg1: usize) -> TeeResult {
     let mut buf = read_user_output(arg0, arg1)?;
     crypto_rng_read(&mut buf)?;
     write_user_bytes(arg0, &buf)?;
     Ok(())
 }
 
-pub fn tee_cryp_authenc_init(
+pub(super) fn tee_cryp_authenc_init(
     id: u32,
     nonce: &[u8],
     aad_len: Option<usize>,
@@ -1159,7 +1164,7 @@ pub fn tee_cryp_authenc_init(
     )
 }
 
-pub fn syscall_authenc_init(
+pub(super) fn syscall_authenc_init(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1175,7 +1180,7 @@ pub fn syscall_authenc_init(
     tee_cryp_authenc_init(arg0 as _, &nonce, aad_len, tag_len, payload_len)
 }
 
-pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
+pub(super) fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
     memtag_strip_tag()?;
     vm_check_access_rights(0, 0, 0)?;
 
@@ -1194,12 +1199,12 @@ pub fn tee_cryp_authenc_update_aad(id: u32, aad: &[u8]) -> TeeResult {
     crypto_authenc_update_aad(cs.clone(), aad)
 }
 
-pub fn syscall_authenc_update_aad(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
+pub(super) fn syscall_authenc_update_aad(arg0: usize, arg1: usize, arg2: usize) -> TeeResult {
     let aad = read_required_user_bytes(arg1, arg2)?;
     tee_cryp_authenc_update_aad(arg0 as _, &aad)
 }
 
-pub fn tee_cryp_authenc_update_payload(
+pub(super) fn tee_cryp_authenc_update_payload(
     id: u32,
     input: &[u8],
     output: &mut [u8],
@@ -1224,7 +1229,7 @@ pub fn tee_cryp_authenc_update_payload(
     crypto::crypto::crypto_authenc_update_payload(cs, input, output)
 }
 
-pub fn syscall_authenc_update_payload(
+pub(super) fn syscall_authenc_update_payload(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1242,7 +1247,7 @@ pub fn syscall_authenc_update_payload(
 }
 
 #[cfg(unittest)]
-pub fn tee_cryp_authenc_enc_final(
+pub(super) fn tee_cryp_authenc_enc_final(
     id: u32,
     input: Option<&[u8]>,
     output: &mut [u8],
@@ -1283,7 +1288,7 @@ fn tee_cryp_authenc_enc_final_with_required(
     crypto_authenc_enc_final(cs, input, output, tag, required_dst, required_tag)
 }
 
-pub fn syscall_authenc_enc_final(
+pub(super) fn syscall_authenc_enc_final(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1343,7 +1348,7 @@ pub fn syscall_authenc_enc_final(
 }
 
 #[cfg(unittest)]
-pub fn tee_cryp_authenc_dec_final(
+pub(super) fn tee_cryp_authenc_dec_final(
     id: u32,
     input: Option<&[u8]>,
     output: &mut [u8],
@@ -1375,7 +1380,7 @@ fn tee_cryp_authenc_dec_final_with_required(
     crypto_authenc_dec_final(cs, input, output, tag, required_dst)
 }
 
-pub fn syscall_authenc_dec_final(
+pub(super) fn syscall_authenc_dec_final(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1427,7 +1432,7 @@ pub fn syscall_authenc_dec_final(
 }
 
 #[cfg(unittest)]
-pub fn tee_cryp_asymm_operate(
+pub(super) fn tee_cryp_asymm_operate(
     id: u32,
     input: &[u8],
     output: &mut [u8],
@@ -1437,7 +1442,7 @@ pub fn tee_cryp_asymm_operate(
     tee_cryp_asymm_operate_with_required(id, input, output, label, None, None, &mut required)
 }
 
-pub fn tee_cryp_asymm_operate_with_required(
+pub(super) fn tee_cryp_asymm_operate_with_required(
     id: u32,
     input: &[u8],
     output: &mut [u8],
@@ -1531,7 +1536,7 @@ pub fn tee_cryp_asymm_operate_with_required(
 
 /// 与 GP `syscall_asymm_operate` 一致：`arg1` 为 `utee_attribute` 数组指针，`arg2` 为元素个数。
 /// 用于 RSA-OAEP 的 `TEE_ATTR_RSA_OAEP_LABEL` 等 memref 参数（从用户态拷入内核后再参与运算）。
-pub fn syscall_asymm_operate(
+pub(super) fn syscall_asymm_operate(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1622,7 +1627,7 @@ pub fn syscall_asymm_operate(
 /// Corresponds to the crypto dispatch in OP-TEE `syscall_asymm_verify` after user
 /// parameters and attributes have been copied in. `params` carries optional
 /// algorithm-specific attributes (Ed25519 prehash/context, RSA-PSS salt length, etc.).
-pub fn tee_cryp_asymm_verify(
+pub(super) fn tee_cryp_asymm_verify(
     id: u32,
     data: &[u8],
     signature: &[u8],
@@ -1678,7 +1683,7 @@ pub fn tee_cryp_asymm_verify(
 ///
 /// OP-TEE keeps the user/kernel boundary in the syscall; algorithm dispatch lives in
 /// [`tee_cryp_asymm_verify`].
-pub fn syscall_asymm_verify(
+pub(super) fn syscall_asymm_verify(
     arg0: usize,
     arg1: usize,
     arg2: usize,
@@ -1708,7 +1713,7 @@ pub fn syscall_asymm_verify(
 }
 
 #[unittest::mod_test]
-pub mod tests_cryp {
+pub(super) mod tests_cryp {
     use core::ffi::{c_uint, c_ulong};
 
     use unittest::{TestResult, assert, assert_eq, assert_ne};

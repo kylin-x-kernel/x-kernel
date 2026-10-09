@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(dead_code)]
-
 //! Tee Unit Test Framework
 //!
 //! This module implements a custom unit test framework for Rust code.
@@ -98,16 +96,6 @@ impl<T: Copy> TestExecutorSlot<T> {
 
     fn store(&self, executor: T, _ordering: Ordering) {
         self.with_lock(|slot| *slot = Some(executor));
-    }
-
-    #[cfg(unittest)]
-    fn replace(&self, value: Option<T>, _ordering: Ordering) -> Option<T> {
-        self.with_lock(|slot| core::mem::replace(slot, value))
-    }
-
-    #[cfg(unittest)]
-    fn store_raw(&self, value: Option<T>, _ordering: Ordering) {
-        self.with_lock(|slot| *slot = value);
     }
 
     fn load(&self, _ordering: Ordering) -> Option<T> {
@@ -287,6 +275,11 @@ impl StringWriter {
     pub fn clear(&mut self) {
         self.pos = 0;
     }
+
+    fn write_best_effort(&mut self, args: Arguments<'_>) {
+        // A reporting failure must not change test execution or recorded results.
+        let _ = self.write_fmt(args);
+    }
 }
 
 impl Write for StringWriter {
@@ -328,13 +321,11 @@ impl TestRunner {
         self.output.clear();
 
         // Print test start information with module path
-        write!(
-            self.output,
+        self.output.write_best_effort(format_args!(
             "  Running test: {}:{}",
             test.module(),
             test.name()
-        )
-        .ok();
+        ));
         crate::ktest_println!("{}", self.output.as_str());
 
         // Run the test
@@ -344,31 +335,25 @@ impl TestRunner {
         self.output.clear();
         match result {
             TestResult::Ok => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "  test {}::{} ... ok",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
             TestResult::Failed => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "  test {}::{} failed: test function returned TestResult::Failed",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
             TestResult::Ignored => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "  test {}::{} ... ignored",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
         }
         crate::ktest_println!("{}", self.output.as_str());
@@ -443,17 +428,20 @@ impl TestRunner {
 
     fn print_failed_test(&mut self, test: &TestDescriptor, result: TestResult) {
         self.output.clear();
-        write!(self.output, "    {}", test.name()).ok();
+        self.output
+            .write_best_effort(format_args!("    {}", test.name()));
         crate::ktest_println!("{}", self.output.as_str());
 
         self.output.clear();
         match result {
             TestResult::Failed => {
-                write!(self.output, "      => FAILED").ok();
+                self.output
+                    .write_best_effort(format_args!("      => FAILED"));
                 crate::ktest_println!("{}", self.output.as_str());
             }
             TestResult::Ignored => {
-                write!(self.output, "      => IGNORED").ok();
+                self.output
+                    .write_best_effort(format_args!("      => IGNORED"));
                 crate::ktest_println!("{}", self.output.as_str());
             }
             TestResult::Ok => {}
@@ -461,11 +449,13 @@ impl TestRunner {
     }
 
     /// Run a single test without printing module info (for grouped output)
+    #[cfg(unittest)]
     fn run_test_simple(&mut self, test: &TestDescriptor) -> TestResult {
         self.output.clear();
 
         // Print test name only
-        write!(self.output, "    {}", test.name()).ok();
+        self.output
+            .write_best_effort(format_args!("    {}", test.name()));
         crate::ktest_println!("{}", self.output.as_str());
 
         // Run the test
@@ -475,19 +465,19 @@ impl TestRunner {
         self.output.clear();
         match result {
             TestResult::Ok => {
-                write!(self.output, "      {} ... ok", test.name()).ok();
+                self.output
+                    .write_best_effort(format_args!("      {} ... ok", test.name()));
             }
             TestResult::Failed => {
-                write!(
-                    self.output,
+                self.output.write_best_effort(format_args!(
                     "      {}::{} failed: test function returned TestResult::Failed",
                     test.module(),
                     test.name()
-                )
-                .ok();
+                ));
             }
             TestResult::Ignored => {
-                write!(self.output, "      {} ... ignored", test.name()).ok();
+                self.output
+                    .write_best_effort(format_args!("      {} ... ignored", test.name()));
             }
         }
         crate::ktest_println!("{}", self.output.as_str());
@@ -500,12 +490,10 @@ impl TestRunner {
 
     pub fn print_final_stats(&mut self) {
         self.output.clear();
-        write!(
-            self.output,
+        self.output.write_best_effort(format_args!(
             "  >>> Test results: {} passed, {} failed, {} ignored, {} total",
             self.stats.passed, self.stats.failed, self.stats.ignored, self.stats.total
-        )
-        .ok();
+        ));
         crate::ktest_println!("{}", self.output.as_str());
         crate::ktest_println!(
             "  >>> Unit tests {}",
@@ -650,6 +638,11 @@ macro_rules! tests {
 #[macro_export]
 macro_rules! tests_name {
     ($suite_name:ident; $module_name:ident; $($test_name:ident),* $(,)?) => {
+        #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module")]
+        #[allow(
+            unreachable_pub,
+            reason = "CG-027-narrow-visibility: the exported macro publishes a suite for caller-selected registration paths; reachability depends on the expansion module"
+        )]
         pub static $suite_name: &[$crate::TestDescriptor] = &[
             $(
                 $crate::TestDescriptor::new(
@@ -684,7 +677,7 @@ pub fn tests_failed() -> bool {
     TEST_FAILED_FLAG.load(Ordering::Relaxed)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_test_framework {
     use alloc::{collections::BTreeMap, vec};
 
@@ -705,11 +698,6 @@ mod tests_test_framework {
         crate::assert!(true);
         crate::assert_eq!(1_u32, 1_u32);
         crate::assert_ne!(1_u32, 2_u32);
-        TestResult::Ok
-    }
-
-    fn assert_fail_test() -> TestResult {
-        crate::assert_eq!(1_u32, 2_u32);
         TestResult::Ok
     }
 

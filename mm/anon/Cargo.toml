@@ -14,3 +14,6 @@ kspin = { workspace = true }
 ksync = { workspace = true }
 unittest = { workspace = true }
 vmobj = { workspace = true }
+
+[lints]
+workspace = true

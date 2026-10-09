@@ -482,7 +482,7 @@ fn extension_bit(ext: &str) -> u64 {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

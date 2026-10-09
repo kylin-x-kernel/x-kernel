@@ -9,6 +9,6 @@ compile_error!(
 );
 
 #[cfg(feature = "dice_huk_key")]
-pub mod dice;
+pub(crate) mod dice;
 #[cfg(feature = "virtcca_huk_key")]
-pub mod virtcca;
+pub(crate) mod virtcca;

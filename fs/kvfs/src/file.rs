@@ -111,11 +111,11 @@ impl FMode {
 pub(crate) struct EmptyFileOperations;
 
 /// `SEEK_SET`.
-pub const SEEK_SET: i32 = 0;
+pub(crate) const SEEK_SET: i32 = 0;
 /// `SEEK_CUR`.
-pub const SEEK_CUR: i32 = 1;
+pub(crate) const SEEK_CUR: i32 = 1;
 /// `SEEK_END`.
-pub const SEEK_END: i32 = 2;
+pub(crate) const SEEK_END: i32 = 2;
 
 /// Directory iteration operations installed on opened directory files.
 pub trait FileDirOperations: Send + Sync {
@@ -1029,6 +1029,7 @@ impl VfsFile {
     pub fn replace_flags(&self, mask: OpenFlags, flags: OpenFlags) {
         let mask = mask.bits();
         let flags = flags.bits();
+        // The closure always returns Some; callers need only the updated flags.
         let _ = self
             .flags
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -1144,7 +1145,7 @@ impl Drop for VfsFile {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{vec, vec::Vec};
 

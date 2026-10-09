@@ -63,16 +63,15 @@ impl<T: Fn() + Send + Sync + 'static> From<T> for MulticastCallback {
 }
 
 /// An IPI event sent from a source CPU to the target CPU.
-pub struct IpiEvent {
+pub(crate) struct IpiEvent {
     /// The source CPU ID that sent this IPI event.
     pub src_cpu_id: LogicalCpuId,
     /// The callback function to execute when this IPI event is dispatched.
     pub callback: Callback,
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
-pub mod tests_event {
+#[unittest::mod_test]
+pub(crate) mod tests_event {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use unittest::def_test;

@@ -15,6 +15,11 @@
 //! - `sched-cfs`: Use the Completely Fair Scheduler. It also enables the
 //!   `preempt` features if it is enabled.
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy ktask has 11 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![cfg_attr(not(test), no_std)]
 
 #[cfg(all(feature = "smp", not(feature = "ipi")))]

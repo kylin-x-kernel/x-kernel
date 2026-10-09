@@ -4,8 +4,6 @@
 
 //! SD/MMC driver based on SDIO.
 
-#![allow(unsafe_op_in_unsafe_fn)]
-
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use simple_sdmmc::SdMmc;
@@ -29,12 +27,12 @@ impl SdMmcDriver {
     ///
     /// The caller must ensure that `base` is a valid pointer to the SD/MMC controller's
     /// register block and that no other code is concurrently accessing the same hardware.
-    /// # Safety
-    ///
-    /// The caller must ensure that `base` is a valid pointer to the SD/MMC controller's
-    /// register block and that no other code is concurrently accessing the same hardware.
     pub unsafe fn new(base: usize) -> Self {
-        let sdmmc = SdMmc::new(base);
+        // SAFETY: the caller upholds the `# Safety` contract of this function:
+        // `base` points to the SD/MMC controller's register block and no other
+        // code accesses that hardware concurrently, which is exactly the
+        // contract `simple_sdmmc::SdMmc::new` requires.
+        let sdmmc = unsafe { SdMmc::new(base) };
         let num_blocks = sdmmc.num_blocks();
         Self {
             inner: SpinNoIrq::new(sdmmc),
@@ -97,7 +95,7 @@ impl BlockDeviceOperations for SdMmcDriver {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_sdmmc {
     use unittest::def_test;
 

@@ -333,6 +333,12 @@ const fn compose_context_id(asid: u16, generation: u64) -> u64 {
     generation | asid as u64
 }
 
+/// # Safety
+///
+/// `ctx` must be the aligned pointer to a live `Aarch64UserAsidContext`
+/// registered by `install_page_table_asid_provider`. Its owner must keep the
+/// context alive throughout this callback and synchronize mutation through
+/// the context's atomics and ASID allocator.
 unsafe fn page_table_user_asid(ctx: NonNull<()>) -> u16 {
     // SAFETY:
     // - callers pass the `Aarch64UserAsidContext` pointer originally registered
@@ -342,7 +348,7 @@ unsafe fn page_table_user_asid(ctx: NonNull<()>) -> u16 {
     ctx.current_asid()
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

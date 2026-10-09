@@ -24,7 +24,7 @@ use super::{
 /// - `hash`: hash of the file, used to pass to `tee_fs_htree_open()`
 /// - `idx`: index of the file handle in dirfile
 #[derive(Debug, Copy, Clone, Default)]
-pub struct TeeFsDirfileFileh {
+pub(super) struct TeeFsDirfileFileh {
     pub file_number: u32,
     /// hash of the file, used to pass to `tee_fs_htree_open()`
     ///
@@ -39,7 +39,7 @@ pub struct TeeFsDirfileFileh {
 /// entry of dirfile dirfile_entry
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct DirFileEntry {
+pub(super) struct DirFileEntry {
     uuid: TEE_UUID,
     oid: [u8; TEE_OBJECT_ID_MAX_LEN as _],
     oid_len: u32,
@@ -58,10 +58,10 @@ impl Default for DirFileEntry {
         }
     }
 }
-pub const OID_EMPTY_NAME: u8 = 1;
+pub(super) const OID_EMPTY_NAME: u8 = 1;
 
 #[derive(Debug, Default)]
-pub struct TeeFsDirfileDirh {
+pub(super) struct TeeFsDirfileDirh {
     fops: ReeDirfOps,
     fh: TeeFileHandle,
     pub nbits: usize,
@@ -118,14 +118,14 @@ fn test_file(dirh: &mut TeeFsDirfileDirh, idx: usize) -> bool {
     false
 }
 
-pub fn set_file(dirh: &mut TeeFsDirfileDirh, idx: usize) -> TeeResult {
+pub(super) fn set_file(dirh: &mut TeeFsDirfileDirh, idx: usize) -> TeeResult {
     maybe_grow_files(dirh, idx)?;
     bit_set(&mut dirh.files, idx);
 
     Ok(())
 }
 
-pub fn tee_fs_dirfile_fileh_to_fname(
+pub(super) fn tee_fs_dirfile_fileh_to_fname(
     dfh: Option<&TeeFsDirfileFileh>,
     fname_buffer: &mut [u8],
 ) -> TeeResult<usize> {
@@ -150,7 +150,7 @@ pub fn tee_fs_dirfile_fileh_to_fname(
     Ok(required_len)
 }
 
-pub fn tee_fs_dirfile_rename(
+pub(super) fn tee_fs_dirfile_rename(
     dirh: &mut TeeFsDirfileDirh,
     uuid: &TEE_UUID,
     dfh: &mut TeeFsDirfileFileh,
@@ -186,7 +186,11 @@ pub fn tee_fs_dirfile_rename(
     write_dent(dirh, dfh.idx as usize, &dent)
 }
 
-pub fn read_dent(dirh: &mut TeeFsDirfileDirh, idx: usize, dent: &mut DirFileEntry) -> TeeResult {
+pub(super) fn read_dent(
+    dirh: &mut TeeFsDirfileDirh,
+    idx: usize,
+    dent: &mut DirFileEntry,
+) -> TeeResult {
     let entry_size = core::mem::size_of::<DirFileEntry>();
     let offset = entry_size * idx;
     let mut len = entry_size;
@@ -207,7 +211,7 @@ pub fn read_dent(dirh: &mut TeeFsDirfileDirh, idx: usize, dent: &mut DirFileEntr
     Ok(())
 }
 
-pub fn write_dent(dirh: &mut TeeFsDirfileDirh, n: usize, dent: &DirFileEntry) -> TeeResult {
+pub(super) fn write_dent(dirh: &mut TeeFsDirfileDirh, n: usize, dent: &DirFileEntry) -> TeeResult {
     let entry_size = core::mem::size_of::<DirFileEntry>();
 
     let dent_bytes = bytes_of(dent);
@@ -220,7 +224,7 @@ pub fn write_dent(dirh: &mut TeeFsDirfileDirh, n: usize, dent: &DirFileEntry) ->
     Ok(())
 }
 
-pub fn tee_fs_dirfile_open(
+pub(super) fn tee_fs_dirfile_open(
     create: bool,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
     fops: &ReeDirfOps,
@@ -286,7 +290,7 @@ pub fn tee_fs_dirfile_open(
     }
 }
 
-pub fn tee_fs_dirfile_find(
+pub(super) fn tee_fs_dirfile_find(
     dirh: &mut TeeFsDirfileDirh,
     uuid: &TEE_UUID,
     oid: &[u8],
@@ -350,7 +354,10 @@ fn find_empty_idx(dirh: &mut TeeFsDirfileDirh) -> TeeResult<i32> {
     Ok(n)
 }
 
-pub fn tee_fs_dirfile_remove(dirh: &mut TeeFsDirfileDirh, dfh: &TeeFsDirfileFileh) -> TeeResult {
+pub(super) fn tee_fs_dirfile_remove(
+    dirh: &mut TeeFsDirfileDirh,
+    dfh: &TeeFsDirfileFileh,
+) -> TeeResult {
     let mut dent: DirFileEntry = DirFileEntry::default();
     read_dent(dirh, dfh.idx as usize, &mut dent)?;
 
@@ -379,7 +386,7 @@ pub fn tee_fs_dirfile_remove(dirh: &mut TeeFsDirfileDirh, dfh: &TeeFsDirfileFile
     Ok(())
 }
 
-pub fn tee_fs_dirfile_update_hash(
+pub(super) fn tee_fs_dirfile_update_hash(
     dirh: &mut TeeFsDirfileDirh,
     dfh: &TeeFsDirfileFileh,
 ) -> TeeResult {
@@ -399,7 +406,7 @@ pub fn tee_fs_dirfile_update_hash(
     write_dent(dirh, dfh.idx as usize, &dent)
 }
 
-pub fn tee_fs_dirfile_close(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
+pub(super) fn tee_fs_dirfile_close(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
     dirh.fops.close(&mut dirh.fh);
 
     // drop(dirh.files);
@@ -407,7 +414,7 @@ pub fn tee_fs_dirfile_close(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
     Ok(())
 }
 
-pub fn tee_fs_dirfile_commit_writes(
+pub(super) fn tee_fs_dirfile_commit_writes(
     dirh: &mut TeeFsDirfileDirh,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
 ) -> TeeResult {
@@ -419,7 +426,7 @@ pub fn tee_fs_dirfile_commit_writes(
     dirh.fops.commit_writes(&mut dirh.fh, hash)
 }
 
-pub fn tee_fs_dirfile_get_tmp(
+pub(super) fn tee_fs_dirfile_get_tmp(
     dirh: &mut TeeFsDirfileDirh,
     dfh: &mut TeeFsDirfileFileh,
 ) -> TeeResult {
@@ -438,7 +445,7 @@ pub fn tee_fs_dirfile_get_tmp(
     Ok(())
 }
 
-pub fn tee_fs_dirfile_get_next(
+pub(super) fn tee_fs_dirfile_get_next(
     dirh: &mut TeeFsDirfileDirh,
     uuid: &TEE_UUID,
     idx: &mut i32,
@@ -475,7 +482,7 @@ pub fn tee_fs_dirfile_get_next(
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_fs_dirfile {
+pub(super) mod tests_tee_fs_dirfile {
     use unittest::{assert, assert_eq};
 
     use super::*;

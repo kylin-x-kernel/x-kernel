@@ -21,3 +21,6 @@ memaddr = { workspace = true }
 memspace = { workspace = true }
 unittest = { workspace = true }
 vmobj = { workspace = true }
+
+[lints]
+workspace = true

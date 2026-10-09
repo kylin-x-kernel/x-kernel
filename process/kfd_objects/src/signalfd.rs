@@ -83,7 +83,11 @@ impl SignalfdSiginfo {
                 // SAFETY: sigval_t is a public C union whose sival_int and
                 // sival_ptr members occupy the same storage; reading either is
                 // valid regardless of which variant was written.
-                unsafe { (value.sival_int, value.sival_ptr as u64) }
+                let integer = unsafe { value.sival_int };
+                // SAFETY: sigval_t's pointer member overlays the same initialized
+                // C-union storage; this copies its bits without dereferencing it.
+                let pointer = unsafe { value.sival_ptr };
+                (integer, pointer as u64)
             })
             .unwrap_or((0, 0));
 
@@ -299,7 +303,7 @@ impl FileOperations for SignalfdFops {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::{
         sync::atomic::{AtomicUsize, Ordering},

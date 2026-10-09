@@ -42,7 +42,7 @@ device callbacks, user pointers, or network/file inputs in this crate):
 | Entry | Pointer-bearing parameters | Source | Checked properties and failure results |
 |---|---|---|---|
 | `allocate_dma_memory(layout)` | none (size/align only) | driver, at probe/init | page allocation, flag update, platform `prepare` must succeed → `AllocError::NoMemory` |
-| `deallocate_dma_memory(dma, layout)` | `DMAInfo.cpu_addr: NonNull<u8>` | returned by a prior `allocate_dma_memory` | exact-once, layout must match; mismatched frees detected and skipped under `dma-trace` |
+| `deallocate_dma_memory(dma, layout)` | `DmaInfo.cpu_addr: NonNull<u8>` | returned by a prior `allocate_dma_memory` | exact-once, layout must match; mismatched frees detected and skipped under `dma-trace` |
 | `map_dma_buffer(buffer, direction)` | `buffer: NonNull<[u8]>` | driver-owned kernel buffer (TX/RX staging) | non-zero length; bus address not already active → `AllocError::InvalidInput`; pool capacity → `AllocError::NoMemory` |
 | `unmap_dma_buffer(dma_addr, buffer, direction)` | `dma_addr: DmaBusAddress`, `buffer: NonNull<[u8]>` | must match a prior `map_dma_buffer` result | mapping must be active and length must match — panics otherwise |
 

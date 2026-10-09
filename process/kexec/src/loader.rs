@@ -9,7 +9,7 @@ use core::{ffi::CStr, iter};
 
 use filemap::new_file_private_vma;
 use kcred::Cred;
-use kernel_elf_parser::{AuxEntry, AuxType, ELFHeaders, ELFHeadersBuilder, app_stack_region};
+use kernel_elf_parser::{AuxEntry, AuxType, ElfHeaders, ElfHeadersBuilder, app_stack_region};
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
@@ -327,7 +327,7 @@ struct ElfCacheEntry {
     data: Vec<u8>,
     #[borrows(data)]
     #[covariant]
-    elf: ELFHeaders<'this>,
+    elf: ElfHeaders<'this>,
 }
 
 impl ElfCacheEntry {
@@ -337,7 +337,7 @@ impl ElfCacheEntry {
         let mut data = vec![0; initial_size];
         read_exact_at(&file, &mut data, 0)?;
         match ElfCacheEntry::try_new_or_recover::<KError>(file.clone(), data, |data| {
-            let builder = ELFHeadersBuilder::new(data).map_err(map_elf_error)?;
+            let builder = ElfHeadersBuilder::new(data).map_err(map_elf_error)?;
             let range = builder.ph_range().map_err(map_elf_error)?;
             if range.end > file.size() {
                 return Err(KError::InvalidExecutable);
@@ -715,13 +715,10 @@ pub fn load_prepared_user_app(
     map_prepared_image(uspace, &prepared)?;
     #[cfg(unittest)]
     if let Some(probe) = &prepared.partial_probe {
-        assert!(
-            uspace
-                .find_vma(prepared.entry)
-                .unwrap()
-                .flags()
+        assert!(uspace.find_vma(prepared.entry).is_some_and(|vma| {
+            vma.flags()
                 .contains(MappingFlags::USER | MappingFlags::EXECUTE)
-        );
+        }));
         assert!(uspace.find_vma(prepared.user_sp).is_none());
         assert!(
             uspace
@@ -769,7 +766,7 @@ pub fn load_prepared_user_app(
     Ok((prepared.entry, user_sp))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 

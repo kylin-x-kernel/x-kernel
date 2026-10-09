@@ -13,3 +13,6 @@ categories.workspace = true
 
 [dependencies]
 log.workspace = true
+
+[lints]
+workspace = true

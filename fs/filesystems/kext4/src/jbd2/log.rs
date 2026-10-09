@@ -637,7 +637,7 @@ fn checked_offset(offset: usize, len: usize) -> Ext4Result<usize> {
     offset.checked_add(len).ok_or(Ext4Error::Overflow)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::collections::BTreeMap;
 

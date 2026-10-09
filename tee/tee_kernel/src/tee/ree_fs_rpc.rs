@@ -56,7 +56,7 @@ fn operation_open_dfh(oflag: u32, dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<
 ///
 /// # Returns
 /// * `TeeResult<FileVariant>` - the file variant
-pub fn tee_fs_rpc_open_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileVariant> {
+pub(super) fn tee_fs_rpc_open_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileVariant> {
     operation_open_dfh(FS_OFLAG_RW, dfh)
 }
 
@@ -67,7 +67,7 @@ pub fn tee_fs_rpc_open_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileVar
 ///
 /// # Returns
 /// * `TeeResult<FileVariant>` - the file variant
-pub fn tee_fs_rpc_create_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileVariant> {
+pub(super) fn tee_fs_rpc_create_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileVariant> {
     operation_open_dfh(FS_OFLAG_DEFAULT, dfh)
 }
 
@@ -78,10 +78,10 @@ pub fn tee_fs_rpc_create_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult<FileV
 ///
 /// # Returns
 /// * `TeeResult<()>` - the result of the operation
-pub fn tee_fs_rpc_close(_fd: &FileVariant) -> TeeResult {
+pub(super) fn tee_fs_rpc_close(fd: &FileVariant) -> TeeResult {
     // FileVariant is Copy; closing a copied handle is enough to remove the fd
     // entry from the global fd table, mirroring GP's rpc close semantics.
-    let mut fd = *_fd;
+    let mut fd = *fd;
     fd.close()
 }
 
@@ -92,7 +92,7 @@ pub fn tee_fs_rpc_close(_fd: &FileVariant) -> TeeResult {
 ///
 /// # Returns
 /// * `TeeResult<()>` - the result of the operation
-pub fn tee_fs_rpc_remove_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult {
+pub(super) fn tee_fs_rpc_remove_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult {
     let f_name = create_filename_from_dfh(dfh)?;
 
     tee_debug!("tee_fs_rpc_remove_dfh: f_name: {}", f_name);
@@ -124,6 +124,6 @@ pub fn tee_fs_rpc_remove_dfh(dfh: Option<&TeeFsDirfileFileh>) -> TeeResult {
 ///
 /// # Returns
 /// * `TeeResult<()>` - the result of the operation
-pub fn tee_fs_rpc_truncate(fd: &mut FileVariant, len: usize) -> TeeResult {
+pub(super) fn tee_fs_rpc_truncate(fd: &mut FileVariant, len: usize) -> TeeResult {
     fd.ftruncate(len).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
 }

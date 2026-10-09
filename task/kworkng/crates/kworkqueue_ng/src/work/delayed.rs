@@ -280,6 +280,7 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
         let (guard, revoked) = self.work.disable();
         // The held disable prevents any start while ordinary cancellation and
         // this physical attempt run. No management lock spans cleanup above.
+        // A Running result is harmless; final synchronized cancellation drains it.
         let _ = self.timer.try_cancel();
         (guard, revoked)
     }
@@ -384,6 +385,12 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
             Ok(_) | Err(SubmitError::Disabled | SubmitError::Closed) => {}
             // Accepted work cannot silently disappear on an impossible accounting
             // overflow. Other errors are not produced by the transfer transaction.
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: The transfer transaction fails \
+                          only as Disabled or Closed; any other error is an impossible accounting \
+                          overflow, and accepted work must not silently disappear"
+            )]
             Err(error) => panic!("delayed transfer invariant failed: {error:?}"),
         }
     }

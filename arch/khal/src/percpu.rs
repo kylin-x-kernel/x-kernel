@@ -43,8 +43,7 @@ pub unsafe fn set_current_task_ptr<T>(ptr: *const T) {
 pub use kplat::cpu::ap_cpu_init as init_secondary;
 pub use kplat::cpu::{boot_cpu_init as init_primary, id as this_cpu_id};
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_percpu {
     use unittest::def_test;
 

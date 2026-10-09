@@ -156,6 +156,12 @@ impl CMsg {
                 }
                 let mut fds = Vec::new();
                 for fd in data.chunks_exact(size_of::<i32>()) {
+                    #[expect(
+                        clippy::unwrap_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: \
+                                  chunks_exact(size_of::<i32>()) yields exactly the four bytes \
+                                  required by i32::from_ne_bytes"
+                    )]
                     let fd = i32::from_ne_bytes(fd.try_into().unwrap());
                     if fd < 0 {
                         return Err(KError::BadFileDescriptor);
@@ -224,7 +230,7 @@ impl<'a> CMsgBuilder<'a> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

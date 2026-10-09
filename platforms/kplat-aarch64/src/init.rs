@@ -23,9 +23,20 @@ impl BootHandler {
     }
 
     fn early_driver_init() {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the required ARM timer \
+                      node is missing or invalid; early_driver_init has no error return or \
+                      recovery"
+        )]
         let timer_config = timer_driver::arm_generic::config_from_device_tree()
             .expect("ARM generic timer DT node is required on aarch64");
         timer_driver::arm_generic::init(timer_config);
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
+                      cannot be parsed; early_driver_init has no error return or recovery"
+        )]
         console_driver::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
         #[cfg(feature = "rtc")]

@@ -19,7 +19,7 @@ use alloc::{sync::Arc, vec::Vec};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::VfsFile;
 
-pub use self::{epoll::*, poll::*, select::*};
+pub(crate) use self::{epoll::*, poll::*, select::*};
 
 struct FdPollSet(pub Vec<(Arc<VfsFile>, IoEvents)>);
 impl Pollable for FdPollSet {

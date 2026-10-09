@@ -52,8 +52,8 @@ riscv = "0.14"
 loongArch64 = "0.2.4"
 page_table = { workspace = true }
 
-[lints.clippy]
-new_without_default = "allow"
+[lints]
+workspace = true
 
 [package.metadata.docs.rs]
 all-features = true

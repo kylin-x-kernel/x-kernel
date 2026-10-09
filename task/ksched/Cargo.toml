@@ -16,3 +16,6 @@ default = []
 intrusive-collections.workspace = true
 kbuild_config = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

@@ -22,7 +22,7 @@ pub(crate) struct IdleClass<T> {
 }
 
 impl<T> IdleClass<T> {
-    pub fn new(idle: Arc<SchedTask<T>>) -> Self {
+    pub(crate) fn new(idle: Arc<SchedTask<T>>) -> Self {
         Self { idle }
     }
 
@@ -47,6 +47,12 @@ impl<T> ClassOps<T> for IdleClass<T> {
 
     fn advance(&mut self, _clk: &RqClock, _tok: RqLocked) {}
 
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Each run queue installs its idle task \
+                  directly and never enqueues it; the SCHED_IDLE policy maps to the Fair class, \
+                  not this one"
+    )]
     fn enqueue(
         &mut self,
         _task: Arc<SchedTask<T>>,

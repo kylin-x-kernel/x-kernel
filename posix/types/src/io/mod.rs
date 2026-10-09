@@ -28,7 +28,6 @@ pub use vector_buf::*;
 #[cfg_attr(target_arch = "x86_64", repr(C, packed))]
 #[cfg_attr(not(target_arch = "x86_64"), repr(C))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, UserRead, UserWrite)]
-#[allow(non_camel_case_types)]
 pub struct k_epoll_event {
     events: u32,
     #[cfg(not(target_arch = "x86_64"))]

@@ -24,3 +24,6 @@ ksync.workspace = true
 kvfs.workspace = true
 slab.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

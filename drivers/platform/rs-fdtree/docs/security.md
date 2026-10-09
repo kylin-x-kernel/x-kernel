@@ -13,16 +13,16 @@ the iterators they produce.
 
 The DTB blob is external, untrusted input until validated. This crate is
 the structural validation gate for the whole device-tree stack: once
-`LinuxFdt::new` accepts a blob (magic, declared size versus buffer), all
-later reads are bounds-checked against that clamped view. Callers
-(`of`, boot code) are trusted to keep the blob alive as long as borrowed
-views exist.
+`LinuxFdt::new` accepts a blob, its container ranges, reservation terminator,
+node tokens, property headers, name offsets, UTF-8 names, and payload ranges
+have been checked. Callers (`of`, boot code) must keep the blob alive and
+immutable as long as borrowed views exist.
 
 ## External Boundaries
 
 - `LinuxFdt::new(&[u8])` — safe entry: validates header magic
-  (`0xd00dfeed`) and clamps the working slice to the declared
-  `totalsize`.
+  (`0xd00dfeed`), clamps the working slice to the declared `totalsize`,
+  and validates all container and structural data before publishing views.
 - `LinuxFdt::from_ptr(*const u8)` — unsafe boot entry: reads a header-
   sized view, then the header-declared total size. The precondition (see
   Unsafe Code) covers pointer validity and lifetime.
@@ -36,14 +36,13 @@ One unsafe function: `LinuxFdt::from_ptr`, containing two
 
 1. header-sized view (`size_of::<FdtHeader>()` bytes) — used to read
    `totalsize`;
-2. full view (`totalsize` bytes) — handed to the safe `new` for magic and
-   size validation.
+2. full view (`totalsize` bytes) — handed to the safe `new` for the complete structural validation.
 
 Preconditions: `ptr` is non-null (checked, `FdtError::BadPtr`), points to
-a readable FDT, and the header plus total-size range remain accessible
-for the returned lifetime. A blob shorter than its own declared
-`totalsize` is rejected (`FdtError::BufferTooSmall`) — but note the
-memory-safety burden for those bytes stays with the caller, since the
+a readable FDT, and the header plus total-size range remain accessible and immutable
+for the returned lifetime. The safe slice constructor rejects a blob shorter than its declared
+`totalsize`; the raw-pointer constructor cannot discover the allocation length.
+The memory-safety burden for those bytes stays with its caller because the
 slice is formed before validation.
 
 ## Invariants
@@ -54,6 +53,10 @@ slice is formed before validation.
 - Iterators terminate: node walking stops at the structure-block end
   token; `MemReserveIter` stops at the `0,0` terminator pair; every
   scalar read checks remaining length first.
+- Complete properties and NUL-terminated UTF-8 names are constructor invariants;
+  traversal assertions do not accept unchecked firmware data.
+- Nesting is at most 63 nodes, including the root, keeping traversal within its
+  fixed parent array and bounding recursive lookup stack use.
 - The crate keeps no global state; safety never depends on call ordering.
 
 ## Threat Analysis
@@ -61,9 +64,9 @@ slice is formed before validation.
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
 | T-01 | `from_ptr` on a short or unmapped buffer | High — out-of-bounds read while reading the header/size | Boot pointer to truncated or freed memory | Owned by the caller via the `# Safety` contract; the crate cannot probe length safely. Residual risk accepted at the boot boundary. |
-| T-02 | Header offsets pointing inside the blob but at garbage | Low — nonsense nodes/properties, never unsafety | Corrupted structure block | All reads clamp to the validated slice; garbage decodes to odd values that `of` rejects semantically. |
+| T-02 | Malformed block ranges, node tokens, or properties | Rejected tree | Corrupted firmware input | Construction returns `ParseError` before exposing traversal; semantic hardware claims remain caller-owned. |
 | T-03 | Declared `totalsize` exceeding the real blob | High — OOB slice formation | Forged header | `new` checks `data.len() >= totalsize` and rejects (`BufferTooSmall`); for `from_ptr` the caller owns the real length. |
-| T-04 | Infinite loop on a malformed node stream | Medium — boot hang | Structure block without an end token | Node walking is driven by the block range derived from the validated header; the end-token check terminates iteration. |
+| T-04 | Infinite loop on a malformed node stream | Medium — boot hang | Structure block without an end token | Validation requires balanced delimiters, a terminal `FDT_END`, bounded depth, and progress within the declared structure range. |
 
 ## Failure Modes
 
@@ -71,12 +74,19 @@ slice is formed before validation.
 |----|--------------|--------------|---------------|----------|----------|
 | F-01 | Bad magic | `FdtError::BadMagic` | Caller aborts DTB path | 3 | Explicit error at construction. |
 | F-02 | Buffer smaller than declared size | `FdtError::BufferTooSmall` | Caller aborts or re-slices | 3 | Size check before slicing. |
-| F-03 | Truncated property mid-read | `None` from the accessor | Property treated as absent | 3 | Cursor returns `Option`; no panic, no OOB. |
+| F-03 | Malformed structure, invalid range/name, or excessive nesting | `FdtError::ParseError` | Caller rejects DTB before lookup | 3 | Complete constructor validation; corruption is distinct from absence. |
+
+Host regressions cover invalid tokens, property headers, name offsets and UTF-8,
+block bounds and overlap, reservation termination, nesting limits, truncations,
+raw-pointer validation, and single-byte mutations followed by traversal.
 
 ## Known Limitations
 
 - The crate validates structure, not semantics: it cannot detect a
   well-formed tree describing wrong hardware.
+- Padding bytes are bounded but their contents are ignored for compatibility
+  with the existing crosvm fixture. This is structural traversal validation, not
+  complete device-binding or reserved physical-region semantic validation.
 - `from_ptr` necessarily trusts the header before it can validate it; the
   initial header-sized read is the irreducible trusted step.
 

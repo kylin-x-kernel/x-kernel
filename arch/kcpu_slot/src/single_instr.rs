@@ -84,7 +84,16 @@ pub trait SingleInstructionStore {
     unsafe fn store(offset: usize, val: Self);
 }
 
-#[allow(unused_macros)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: IRQ-save fallback macros are used only on architectures \
+              lacking the corresponding single instruction"
+)]
+#[allow(
+    unused_macros,
+    reason = "CG-024-lint-exceptions: unused_macros: IRQ-save fallback macros are used only on \
+              architectures lacking the corresponding single instruction"
+)]
 /// Generates the arithmetic `SingleInstruction*` impls with the IRQ-save
 /// fallback for the listed integer types.
 macro_rules! impl_single_instr_fallback_arith {
@@ -147,7 +156,16 @@ macro_rules! impl_single_instr_fallback_arith {
     )*};
 }
 
-#[allow(unused_macros)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: IRQ-save fallback macros are used only on architectures \
+              lacking the corresponding single instruction"
+)]
+#[allow(
+    unused_macros,
+    reason = "CG-024-lint-exceptions: unused_macros: IRQ-save fallback macros are used only on \
+              architectures lacking the corresponding single instruction"
+)]
 /// Generates the `load`/`store` impls with the IRQ-save fallback.
 macro_rules! impl_single_instr_fallback_load_store {
     ($($ty:ty),* $(,)?) => {$(
@@ -175,7 +193,7 @@ macro_rules! impl_single_instr_fallback_load_store {
     )*};
 }
 
-#[allow(unused_imports)]
+#[cfg(not(target_arch = "x86_64"))]
 pub(crate) use impl_single_instr_fallback_arith;
-#[allow(unused_imports)]
+#[cfg(not(target_arch = "x86_64"))]
 pub(crate) use impl_single_instr_fallback_load_store;

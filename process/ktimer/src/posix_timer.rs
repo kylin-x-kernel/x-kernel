@@ -139,6 +139,11 @@ impl PosixTimerClock {
                 MonotonicInstant::from_span_since_origin(deadline.span_since_origin()),
             ),
             (Self::ProcessCpu, TimerInstant::ProcessCpu(_)) => None,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: A POSIX timer's deadline is built \
+                          from its own clock id, so the clock and deadline domains match"
+            )]
             _ => panic!("POSIX timer deadline clock-domain mismatch"),
         }
     }
@@ -338,7 +343,7 @@ impl PosixTimer {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

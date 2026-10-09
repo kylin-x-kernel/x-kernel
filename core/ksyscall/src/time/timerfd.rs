@@ -18,7 +18,7 @@ use linux_raw_sys::general::{
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
 
 /// Creates a timerfd file descriptor.
-pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
+pub(crate) fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
     debug!("sys_timerfd_create <= clock_id: {clock_id}, flags: {flags:#x}");
 
     match clock_id as u32 {
@@ -43,7 +43,7 @@ pub fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
 }
 
 /// Arms or disarms the timer referred to by `fd`.
-pub fn sys_timerfd_settime(
+pub(crate) fn sys_timerfd_settime(
     fd: i32,
     flags: u32,
     new_value: UserConstPtr<itimerspec>,
@@ -77,7 +77,7 @@ pub fn sys_timerfd_settime(
 }
 
 /// Returns the current setting of the timer referred to by `fd`.
-pub fn sys_timerfd_gettime(fd: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
+pub(crate) fn sys_timerfd_gettime(fd: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
     debug!("sys_timerfd_gettime <= fd: {fd}");
 
     let file = kprocess::current_resources().get_file(fd)?;

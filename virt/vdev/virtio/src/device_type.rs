@@ -7,7 +7,7 @@ use core::fmt;
 /// VirtIO device types (simplified version)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u32)]
-pub enum VirtioDeviceID {
+pub enum VirtioDeviceId {
     /// Invalid/Unknown device type
     #[default]
     Invalid = 0,
@@ -22,7 +22,7 @@ pub enum VirtioDeviceID {
     Console = 3,
 }
 
-impl VirtioDeviceID {
+impl VirtioDeviceId {
     /// Convert device ID to device type
     pub fn from_device_id(device_id: u32) -> Self {
         match device_id {
@@ -35,8 +35,8 @@ impl VirtioDeviceID {
     }
 
     /// Convert device type to device ID
-    pub fn to_device_id(&self) -> u32 {
-        *self as u32
+    pub fn to_device_id(self) -> u32 {
+        self as u32
     }
 
     /// Get the human-readable name of the device type
@@ -55,24 +55,24 @@ impl VirtioDeviceID {
     }
 
     /// Get all supported device types
-    pub fn all_types() -> &'static [VirtioDeviceID] {
+    pub fn all_types() -> &'static [VirtioDeviceId] {
         &[Self::Network, Self::Block, Self::Console]
     }
 }
 
-impl From<u32> for VirtioDeviceID {
+impl From<u32> for VirtioDeviceId {
     fn from(value: u32) -> Self {
         Self::from_device_id(value)
     }
 }
 
-impl From<usize> for VirtioDeviceID {
+impl From<usize> for VirtioDeviceId {
     fn from(value: usize) -> Self {
         Self::from_device_id(value as u32)
     }
 }
 
-impl fmt::Display for VirtioDeviceID {
+impl fmt::Display for VirtioDeviceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.name(), self.to_device_id())
     }

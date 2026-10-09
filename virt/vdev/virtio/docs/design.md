@@ -26,7 +26,7 @@ virt/vdev/virtio/
 │   ├── lib.rs            # crate 入口与公共类型 re-export
 │   ├── addr.rs           # GuestPhysAddr / PhysAddr / AccessWidth
 │   ├── config.rs         # 设备配置空间视图
-│   ├── device_type.rs    # VirtioDeviceID
+│   ├── device_type.rs    # VirtioDeviceId
 │   ├── dma.rs            # vdev_core::GuestDma → GuestMemory 适配器
 │   ├── error.rs          # VirtioError / VirtioResult
 │   ├── memory.rs         # GuestMemory / GuestMemoryAccessor

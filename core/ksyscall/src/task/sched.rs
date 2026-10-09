@@ -23,13 +23,13 @@ struct SchedParam {
 }
 
 /// Yields the processor voluntarily.
-pub fn sys_sched_yield() -> KResult<isize> {
+pub(crate) fn sys_sched_yield() -> KResult<isize> {
     ktask::yield_now();
     Ok(0)
 }
 
 /// Returns the CPU affinity mask for `pid` (0 = caller; otherwise tid/tgid).
-pub fn sys_sched_getaffinity(
+pub(crate) fn sys_sched_getaffinity(
     pid: i32,
     cpusetsize: usize,
     user_mask: UserPtr<u8>,
@@ -46,7 +46,7 @@ pub fn sys_sched_getaffinity(
 }
 
 /// Updates the CPU affinity mask for `pid` (0 = caller; otherwise tid/tgid).
-pub fn sys_sched_setaffinity(
+pub(crate) fn sys_sched_setaffinity(
     pid: i32,
     cpusetsize: usize,
     user_mask: UserConstPtr<u8>,
@@ -119,7 +119,7 @@ fn affinity_target(pid: i32) -> KResult<KtaskRef> {
 /// # Errors
 ///
 /// Propagates user-copy errors for non-null CPU or NUMA-node output pointers.
-pub fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, _tcache: usize) -> KResult<isize> {
+pub(crate) fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, _tcache: usize) -> KResult<isize> {
     if let Some(cpu) = cpu.check_non_null() {
         cpu.write_vm(this_cpu_id().as_usize() as u32)?;
     }
@@ -141,7 +141,7 @@ pub fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, _tcache: usize) -> KRes
 ///
 /// Returns [`KError::InvalidInput`] for a negative identifier and
 /// [`KError::NoSuchProcess`] for an absent or unpublished positive TID.
-pub fn sys_sched_getscheduler(pid: i32) -> KResult<isize> {
+pub(crate) fn sys_sched_getscheduler(pid: i32) -> KResult<isize> {
     let task = scheduler_query_target(pid)?;
 
     Ok(task
@@ -151,7 +151,11 @@ pub fn sys_sched_getscheduler(pid: i32) -> KResult<isize> {
 }
 
 /// Sets the scheduler policy.
-pub fn sys_sched_setscheduler(pid: i32, policy: i32, param: UserConstPtr<()>) -> KResult<isize> {
+pub(crate) fn sys_sched_setscheduler(
+    pid: i32,
+    policy: i32,
+    param: UserConstPtr<()>,
+) -> KResult<isize> {
     let task = scheduler_target(pid)?;
     let policy = validate_scheduler_policy(policy)?;
     let param = param.cast::<SchedParam>().read_vm()?;
@@ -173,7 +177,7 @@ pub fn sys_sched_setscheduler(pid: i32, policy: i32, param: UserConstPtr<()>) ->
 /// Returns [`KError::InvalidInput`] for a negative identifier and
 /// [`KError::NoSuchProcess`] for an absent or unpublished positive TID.
 /// A failure to write `param` propagates the user-memory access error.
-pub fn sys_sched_getparam(pid: i32, param: UserPtr<()>) -> KResult<isize> {
+pub(crate) fn sys_sched_getparam(pid: i32, param: UserPtr<()>) -> KResult<isize> {
     let task = scheduler_query_target(pid)?;
     let param = param.cast::<SchedParam>();
 
@@ -185,7 +189,7 @@ pub fn sys_sched_getparam(pid: i32, param: UserPtr<()>) -> KResult<isize> {
 }
 
 /// Updates scheduler parameters without changing the scheduler policy.
-pub fn sys_sched_setparam(pid: i32, param: UserConstPtr<()>) -> KResult<isize> {
+pub(crate) fn sys_sched_setparam(pid: i32, param: UserConstPtr<()>) -> KResult<isize> {
     let task = scheduler_target(pid)?;
     let thread = task.as_thread();
     let param = param.cast::<SchedParam>().read_vm()?;
@@ -200,7 +204,7 @@ pub fn sys_sched_setparam(pid: i32, param: UserConstPtr<()>) -> KResult<isize> {
 }
 
 /// Returns the current nice priority for the selected target.
-pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
+pub(crate) fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
     debug!("sys_getpriority <= which: {which}, who: {who}");
 
     match which {
@@ -255,7 +259,7 @@ pub fn sys_getpriority(which: u32, who: u32) -> KResult<isize> {
 }
 
 /// Updates the current nice priority for the selected target.
-pub fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
+pub(crate) fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize> {
     debug!("sys_setpriority <= which: {which}, who: {who}, prio: {prio}");
 
     let nice = NiceValue::new_clamped(prio);
@@ -448,7 +452,7 @@ fn update_min_nice(min_nice: &mut Option<NiceValue>, nice: Option<NiceValue>) {
     *min_nice = Some(min_nice.map_or(nice, |current| current.min(nice)));
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod scheduler_query_tests {
     use alloc::sync::Arc;
 
@@ -646,7 +650,7 @@ mod scheduler_query_tests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kcred::Cred;
     use kerrno::KError;

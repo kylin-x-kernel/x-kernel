@@ -69,7 +69,10 @@ impl NormalQueue {
         // providers, so arbitrary safe callbacks execute in task context. Work
         // retains the queue during asynchronous use; no Drop/drain is needed
         // to keep this permanently retained Work and its captures alive.
-        unsafe { self.0.queue_work(Pin::new_unchecked(work), target) }
+        let work = unsafe { Pin::new_unchecked(work) };
+        // SAFETY: This static work and its captures remain live forever; the normal
+        // queue runs callbacks in task context and retains its provider during use.
+        unsafe { self.0.queue_work(work, target) }
     }
 
     /// Waits for the queue's captured ordinary-work batch without closing admission.
@@ -129,5 +132,8 @@ pub fn queue_static_work<H: Fn() + Send + Sync + 'static>(
     // SAFETY: static shared storage/captures remain stable and live forever.
     // The fixed Normal selector resolves initialized kernel-lifetime providers
     // and cannot execute this callback under the BH execution contract.
-    unsafe { crate::DefaultQueue::Normal.queue_work(Pin::new_unchecked(work), target) }
+    let work = unsafe { Pin::new_unchecked(work) };
+    // SAFETY: This static work and its captures remain live forever; the normal
+    // queue runs callbacks in task context and retains its provider during use.
+    unsafe { crate::DefaultQueue::Normal.queue_work(work, target) }
 }

@@ -14,7 +14,7 @@ use crate::abi::layout::IPVK_NUM_KINDS;
 pub(crate) struct NameRef(pub u64);
 
 impl NameRef {
-    pub fn raw(self) -> u64 {
+    pub(crate) fn raw(self) -> u64 {
         self.0
     }
 }
@@ -24,7 +24,7 @@ impl NameRef {
 pub(crate) struct FunctionHash(pub u64);
 
 impl FunctionHash {
-    pub fn raw(self) -> u64 {
+    pub(crate) fn raw(self) -> u64 {
         self.0
     }
 }
@@ -50,7 +50,7 @@ pub(crate) struct ValueSiteRanges {
 
 impl ValueSiteRanges {
     /// Returns the total number of value sites across all kinds.
-    pub fn total_sites(&self) -> usize {
+    pub(crate) fn total_sites(&self) -> usize {
         self.num_sites_per_kind.iter().map(|&n| n as usize).sum()
     }
 }

@@ -129,13 +129,14 @@ pub unsafe fn init_mmu(
     tlbrehi::set_ps(page_size_shift);
     tlbrentry::set_tlbrentry(tlbrentry_addr);
 
-    // SAFETY: the caller provides validated roots and walk configuration for
-    // the current CPU; this is the one-time MMU programming sequence before enabling paging.
-    unsafe {
-        write_pwc(pwcl, pwch);
-        write_kernel_page_table(root);
-        write_user_page_table(user_root);
-    }
+    // SAFETY: The caller supplies valid page-walk widths for the current CPU before paging
+    // activation.
+    unsafe { write_pwc(pwcl, pwch) };
+    // SAFETY: The caller supplies the initialized kernel root, retained across MMU activation on
+    // this CPU.
+    unsafe { write_kernel_page_table(root) };
+    // SAFETY: The caller supplies the valid user root for this CPU before paging activation.
+    unsafe { write_user_page_table(user_root) };
     crate::flush_tlb(None);
     crmd::set_pg(true);
 }

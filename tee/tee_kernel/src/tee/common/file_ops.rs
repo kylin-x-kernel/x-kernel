@@ -19,9 +19,9 @@ use crate::{
     tee::TeeResult,
 };
 
-pub const FS_MODE_644: u32 = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-pub const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
-pub const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
+pub(crate) const FS_MODE_644: u32 = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+pub(crate) const FS_OFLAG_DEFAULT: u32 = O_CREAT | O_RDWR | O_SYNC;
+pub(crate) const FS_OFLAG_RW: u32 = O_RDWR | O_SYNC;
 
 lazy_static! {
     /// Global open-object table for TEE file descriptors.
@@ -46,7 +46,7 @@ fn open_path(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct FileVariant {
+pub(crate) struct FileVariant {
     pub fd: isize,
 }
 
@@ -82,7 +82,7 @@ where
 }
 
 impl FileVariant {
-    pub fn open(path: &str, flags: u32, mode: u32) -> Result<Self, VfsError> {
+    pub(crate) fn open(path: &str, flags: u32, mode: u32) -> Result<Self, VfsError> {
         tee_debug!(
             "FileVariant::open: path: {}, flags: {}, mode: {}",
             path,
@@ -109,7 +109,7 @@ impl FileVariant {
     ///   - `Ok(())` - file successfully removed
     ///   - `Err(TEE_ERROR_ITEM_NOT_FOUND)` - file does not exist
     ///   - `Err(TEE_ERROR_GENERIC)` - other errors
-    pub fn remove_file(path: &str) -> TeeResult {
+    pub(crate) fn remove_file(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove file with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let cred = kprocess::current_cred();
@@ -135,7 +135,7 @@ impl FileVariant {
     /// # Returns
     /// * `TeeResult` - the result of the operation
     #[cfg(unittest)]
-    pub fn remove_dir(path: &str) -> TeeResult {
+    pub(crate) fn remove_dir(path: &str) -> TeeResult {
         tee_debug!("FileVariant::remove dir with path: {}", path);
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let cred = kprocess::current_cred();
@@ -161,7 +161,7 @@ impl FileVariant {
     /// This function does not create parent directories. If the parent directory
     /// doesn't exist, the function will return an error.
     /// If the directory already exists, the function returns success (idempotent behavior).
-    pub fn create_dir(path: &str) -> TeeResult {
+    pub(crate) fn create_dir(path: &str) -> TeeResult {
         let path = validate_tee_path(path).map_err(|_| TEE_ERROR_GENERIC)?;
         let mode = NodePermission::from_bits_truncate(0o755);
         let cred = kprocess::current_cred();
@@ -190,7 +190,7 @@ impl FileVariant {
 }
 
 impl FileVariant {
-    pub fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize> {
+    pub(crate) fn pread(&self, buf: &mut [u8], offset: usize) -> TeeResult<usize> {
         tee_debug!(
             "FileVariant::pread = fd: {}, offset: 0x{:X?}, buf_len: 0x{:X?}",
             self.fd,
@@ -205,7 +205,7 @@ impl FileVariant {
         })
     }
 
-    pub fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize> {
+    pub(crate) fn pwrite(&self, buf: &[u8], offset: usize) -> TeeResult<usize> {
         with_file(self, |file| {
             let mut pos = offset as u64;
             let len = file
@@ -221,7 +221,7 @@ impl FileVariant {
         })
     }
 
-    pub fn ftruncate(&mut self, len: usize) -> TeeResult<()> {
+    pub(crate) fn ftruncate(&mut self, len: usize) -> TeeResult<()> {
         with_file(self, |file| {
             file.truncate(len as _)
                 .inspect_err(|e| error!("set len failed: {:?}", e))
@@ -229,7 +229,7 @@ impl FileVariant {
         })
     }
 
-    pub fn close(&mut self) -> TeeResult<()> {
+    pub(crate) fn close(&mut self) -> TeeResult<()> {
         if self.fd < 0 {
             return Ok(()); // already closed
         }
@@ -246,7 +246,7 @@ impl FileVariant {
 }
 
 #[unittest::mod_test]
-pub mod tests_file_ops {
+pub(crate) mod tests_file_ops {
     use unittest::{assert, assert_eq};
 
     use super::*;

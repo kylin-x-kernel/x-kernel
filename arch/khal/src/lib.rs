@@ -26,17 +26,18 @@
 //! - `tls`: Enable kernel space thread-local storage support.
 //! - User space support is always enabled.
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy khal has 18 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![no_std]
-#![allow(rustdoc::broken_intra_doc_links)]
 
 extern crate alloc;
 
-#[allow(unused_imports)]
 #[macro_use]
 extern crate log;
 
-#[allow(unused_imports)]
-#[macro_use]
 extern crate memaddr;
 
 // mod dummy;
@@ -66,19 +67,19 @@ pub use firmware::cmdline;
 /// In addition, this module exposes helpers to *observe* the currently active
 /// trap context on the current CPU:
 ///
-/// - [`active_exception_context`]: Returns a best-effort reference to the trapframe
+/// - [`active_exception_context`](context::active_exception_context): Returns a best-effort reference to the trapframe
 ///   that is currently active on this CPU, if any.
 ///   The returned reference is **short-lived** and only valid while the CPU
 ///   remains in the corresponding trap context. It must not be stored.
 ///
-/// - [`with_active_exception_context`]: Executes a closure with the currently active
+/// - [`with_active_exception_context`](context::with_active_exception_context): Executes a closure with the currently active
 ///   trapframe (or `None` if not in a trap). This is intended for diagnostic
 ///   paths such as watchdogs or backtrace collection.
 ///
-/// - [`in_exception_context`]: Returns whether the current CPU is still inside
+/// - [`in_exception_context`](context::in_exception_context): Returns whether the current CPU is still inside
 ///   an exception context without exposing the trapframe itself.
 ///
-/// - [`suspend_active_exception_context`] and [`resume_active_exception_context`]:
+/// - [`suspend_active_exception_context`](context::suspend_active_exception_context) and [`resume_active_exception_context`](context::resume_active_exception_context):
 ///   Temporarily remove and later restore the current CPU marker across a task
 ///   switch, so a sleepable trap backend does not leave a stale marker on the
 ///   old CPU and still resumes with the marker on the new CPU.

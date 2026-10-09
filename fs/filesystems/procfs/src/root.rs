@@ -8,7 +8,7 @@ use kvfs::{DirMaker, DirMapping, NodeType, SimpleDir, SimpleDirOps, SimpleFile, 
 
 use crate::{basic_nodes, device_nodes, irq_nodes, mem_nodes, task_nodes, trace_nodes};
 
-pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
+pub(crate) fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     let mut root = DirMapping::new();
 
     basic_nodes::root::add_root_entries(&mut root, fs.clone());

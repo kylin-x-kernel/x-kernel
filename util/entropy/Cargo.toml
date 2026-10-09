@@ -35,5 +35,5 @@ unittest.workspace = true
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 kplat-aarch64 = { workspace = true, default-features = false, optional = true }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
+[lints]
+workspace = true

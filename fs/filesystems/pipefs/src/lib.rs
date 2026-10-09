@@ -41,6 +41,11 @@ impl PipeFs {
     }
 
     fn global() -> &'static Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Boot installs the permanent pseudo \
+                      filesystem before any anonymous-file or pipe creation"
+        )]
         PIPE_FS
             .get()
             .expect("pipe filesystem must be initialized before use")
@@ -118,7 +123,7 @@ impl DentryOperations for PipeDentryOperations {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use kpoll::IoEvents;

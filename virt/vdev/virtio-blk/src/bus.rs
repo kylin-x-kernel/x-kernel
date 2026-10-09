@@ -148,6 +148,11 @@ impl VirtioBlkDevice {
         // The constructor only fails on queue-size validation; the ported
         // defaults (256 entries) are always valid, so this is an impossible
         // state rather than a recoverable runtime error.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: VirtioMmioBlockDevice::new fails only \
+                      on queue-size validation, and the default 256-entry queues are valid"
+        )]
         let model = Arc::new(
             VirtioMmioBlockDevice::new(
                 GuestPhysAddr::from_usize(VIRTIO_BLK_BASE as usize),

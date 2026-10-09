@@ -629,7 +629,7 @@ fn put_u16_at(input: &mut [u8], offset: usize, value: u16) -> Ext4Result<()> {
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

@@ -305,7 +305,7 @@ fn packet_type(dst_addr: MacAddress, local_addr: MacAddress) -> PacketType {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

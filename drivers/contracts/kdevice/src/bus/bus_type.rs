@@ -62,9 +62,9 @@ pub trait BusType: Send + Sync {
 ///
 /// Restricts probe candidates to descriptors located on PCI buses and then
 /// delegates the match decision to `driver.matcher()`.
+#[derive(Default)]
 pub struct PciBusTypeMatcher;
 
-#[allow(clippy::new_without_default)]
 impl PciBusTypeMatcher {
     /// Create a new PCI bus type matcher.
     pub fn new() -> Self {
@@ -98,9 +98,9 @@ impl BusType for PciBusTypeMatcher {
 /// Restricts probe candidates to descriptors located on platform buses
 /// (firmware-described, platform-static, MMIO) and then delegates the match
 /// decision to `driver.matcher()`.
+#[derive(Default)]
 pub struct PlatformBusTypeMatcher;
 
-#[allow(clippy::new_without_default)]
 impl PlatformBusTypeMatcher {
     /// Create a new platform bus type matcher.
     pub fn new() -> Self {
@@ -165,6 +165,12 @@ impl BusTypeObject {
     ///
     /// Panics for a bus type id that has no built-in matcher (only PCI
     /// and platform are built in).
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Callers pass a built-in BusTypeId \
+                  constant (PCI or PLATFORM); other bus types are created with new() and their \
+                  own matcher, as the Panics section documents"
+    )]
     pub fn new_builtin(id: BusTypeId) -> Self {
         if id == BusTypeId::PCI {
             Self::new(Arc::new(PciBusTypeMatcher::new()))

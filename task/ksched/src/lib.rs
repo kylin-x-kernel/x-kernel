@@ -11,8 +11,14 @@ mod config;
 mod entity;
 mod policy;
 mod scheduler;
-#[cfg(unittest)]
-mod tests;
+/// Kernel unit tests for Fair/Idle arbitration and EEVDF.
+///
+/// Stop, Deadline, and RT cases stay on `refactor_ksched` until those
+/// classes are wired here.
+#[unittest::mod_test]
+mod tests {
+    include!("tests.rs");
+}
 
 extern crate alloc;
 

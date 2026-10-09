@@ -13,3 +13,6 @@ description = "Kernel identity number-space owner for scheduler and POSIX task I
 lazyinit.workspace = true
 kerrno.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

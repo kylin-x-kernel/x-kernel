@@ -43,6 +43,12 @@ fn read_family(addr: UserConstPtr<sockaddr>, addrlen: socklen_t) -> KResult<u16>
     Ok(family)
 }
 /// Cast a reference to a byte slice
+///
+/// # Safety
+///
+/// Every byte of `value`, including any padding, must be initialized and
+/// remain immutable for the returned borrow. A valid `T` alone does not
+/// guarantee initialized padding or exclude mutation through `UnsafeCell`.
 unsafe fn cast_to_slice<T>(value: &T) -> &[u8] {
     // SAFETY: `value` is a live reference, and reborrowing its contiguous
     // storage as a same-sized byte slice preserves layout and lifetime.
@@ -225,10 +231,9 @@ impl SocketAddrExt for NetlinkAddr {
     }
 }
 
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct sockaddr_ll {
+pub(crate) struct sockaddr_ll {
     pub sll_family: __kernel_sa_family_t,
     pub sll_protocol: u16,
     pub sll_ifindex: i32,

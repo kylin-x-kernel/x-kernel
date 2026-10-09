@@ -54,8 +54,10 @@ impl GStage {
         let root_va = self.root_page.as_ptr() as *const u64;
         // Only first L2_ENTRIES (4) are populated, but scan all valid entries.
         for i in 0..L2_ENTRIES {
-            // SAFETY: root_va points to 16 KiB; i < 2048.
-            let entry = unsafe { root_va.add(i).read() };
+            // SAFETY: i < L2_ENTRIES (4), inside the owned 16 KiB root table.
+            let entry_ptr = unsafe { root_va.add(i) };
+            // SAFETY: entry_ptr is an aligned, initialized root PTE.
+            let entry = unsafe { entry_ptr.read() };
             // Non-leaf table entry: V=1, R=W=X=0
             if entry & PTE_V != 0 && (entry & (PTE_R | PTE_W | PTE_X)) == 0 {
                 let l1_pa = (entry >> 10) << 12;
@@ -96,10 +98,10 @@ impl GuestMem for GStage {
 
             // Root entry: non-leaf (V=1, R=W=X=0) pointing to L1
             let root_pte = ((l1_pa >> 12) << 10) | PTE_V;
-            // SAFETY: root_va is valid; i < 2048.
-            unsafe {
-                root_va.add(i).write(root_pte);
-            }
+            // SAFETY: i < L2_ENTRIES (4), inside the owned 16 KiB root table.
+            let root_entry_ptr = unsafe { root_va.add(i) };
+            // SAFETY: root_entry_ptr is aligned in the unpublished root table we own.
+            unsafe { root_entry_ptr.write(root_pte) };
 
             // Fill L1 with 2MB superpage entries (V+R+W+X+A+D = leaf)
             for j in 0..L1_ENTRIES {
@@ -116,10 +118,10 @@ impl GuestMem for GStage {
                     gpa
                 };
                 let pte = ((hpa >> 12) << 10) | flags;
-                // SAFETY: l1_va is valid; j < 512.
-                unsafe {
-                    l1_va.add(j).write(pte);
-                }
+                // SAFETY: j < L1_ENTRIES, so the offset stays inside this L1 page.
+                let entry_ptr = unsafe { l1_va.add(j) };
+                // SAFETY: entry_ptr is aligned in an unpublished L1 page we own.
+                unsafe { entry_ptr.write(pte) };
             }
         }
 
@@ -178,8 +180,11 @@ impl GuestMem for GStage {
                 return false;
             }
 
-            // SAFETY: root_va is valid; root_idx < L2_ENTRIES.
-            let root_pte = unsafe { root_va.add(root_idx).read() };
+            // SAFETY: root_idx < L2_ENTRIES was checked above, inside the owned
+            // root table.
+            let root_pte_ptr = unsafe { root_va.add(root_idx) };
+            // SAFETY: root_pte_ptr is an aligned, initialized root PTE.
+            let root_pte = unsafe { root_pte_ptr.read() };
             if root_pte & PTE_V == 0 {
                 addr += block_size;
                 continue;
@@ -187,10 +192,12 @@ impl GuestMem for GStage {
 
             let l1_pa = (root_pte >> 10) << 12;
             let l1_va = kaddr_layout::p2v(l1_pa as usize) as *mut u64;
-            // SAFETY: l1_va is valid; l1_idx < 512.
-            unsafe {
-                l1_va.add(l1_idx).write(0);
-            }
+            // SAFETY: l1_idx is a 9-bit index (< L1_ENTRIES), inside the L1 page
+            // referenced by the valid root PTE.
+            let entry_ptr = unsafe { l1_va.add(l1_idx) };
+            // SAFETY: entry_ptr is an aligned PTE in a live L1 page owned by this
+            // GStage; &mut self serializes table updates.
+            unsafe { entry_ptr.write(0) };
 
             addr += block_size;
         }

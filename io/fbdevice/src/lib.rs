@@ -150,6 +150,11 @@ pub fn fb_available() -> bool {
 /// Panics if fbdev emulation is not available; callers must gate on
 /// [`fb_available`].
 pub fn fb_info() -> DisplayInfo {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: fb_info requires fb_available; the \
+                  initialized framebuffer is retained for kernel lifetime"
+    )]
     FB.lock()
         .as_ref()
         .expect("fb_info called without fb_available")

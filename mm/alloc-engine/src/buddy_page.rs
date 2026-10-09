@@ -22,6 +22,12 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
 
 impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {
     fn init_region(&mut self, start: usize, size: usize) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Buddy initialization resets the \
+                      allocator and requires a non-null, page-aligned usable region whose address \
+                      range fits usize"
+        )]
         self.inner
             .init_region(start, size)
             .expect("buddy allocator init failed");

@@ -13,7 +13,7 @@ use virtio_drivers::{
     Hal, PAGE_SIZE,
     config::{ReadOnly, WriteOnly, read_config},
     queue::VirtQueue,
-    transport::{InterruptStatus, Transport},
+    transport::Transport,
 };
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
@@ -169,11 +169,6 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
             return Err(virtio_drivers::Error::IoError);
         }
         Ok((display_info.rect.width, display_info.rect.height))
-    }
-
-    #[allow(dead_code)]
-    fn ack_interrupt(&mut self) -> InterruptStatus {
-        self.transport.ack_interrupt()
     }
 
     fn create_resource(
@@ -447,6 +442,11 @@ struct ResourceCreate2D {
 #[repr(u32)]
 #[derive(Debug, Immutable, IntoBytes, KnownLayout)]
 enum Format {
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "CG-032-camel-case-types: pixel format name mirrors the virtio GPU hardware \
+                  format B8G8R8A8_UNORM"
+    )]
     B8G8R8A8UNORM = 1,
 }
 

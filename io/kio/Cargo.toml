@@ -20,3 +20,6 @@ unittest = { workspace = true }
 
 [build-dependencies]
 autocfg = "1"
+
+[lints]
+workspace = true

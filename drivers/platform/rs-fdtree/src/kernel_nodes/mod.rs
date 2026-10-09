@@ -3,9 +3,9 @@
 // See LICENSES for license details.
 
 //! Minimal Linux kernel nodes
-pub mod chosen;
-pub mod dice;
-pub mod interrupt;
+pub(crate) mod chosen;
+pub(crate) mod dice;
+pub(crate) mod interrupt;
 
 pub use chosen::Chosen;
 pub use dice::Dice;

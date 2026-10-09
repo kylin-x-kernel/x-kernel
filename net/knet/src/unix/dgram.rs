@@ -30,7 +30,7 @@ struct Channel {
     poll: Arc<PollSet>,
 }
 
-pub struct Bind {
+pub(crate) struct Bind {
     tx: async_channel::Sender<Datagram>,
     poll: Arc<PollSet>,
 }

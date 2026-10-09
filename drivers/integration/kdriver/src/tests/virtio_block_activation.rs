@@ -41,6 +41,11 @@ impl IrqOp for TestProvider {
         Ok(IrqHandlerToken::shared_action(token))
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: the mock IRQ provider \
+                  accepts only the shared-action tokens it issued to the block driver"
+    )]
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
         let IrqHandlerToken::SharedAction(token) = token else {
             panic!("shared action expected")
@@ -48,6 +53,11 @@ impl IrqOp for TestProvider {
         core::assert!(ACTIONS.lock().remove(&(irq.number, token)).is_some());
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: masking the shared line is \
+                  the regression this mock IRQ provider reports"
+    )]
     fn set_irq_enabled(&self, _: IrqResource, _: bool) {
         panic!("block close must not mask the shared line");
     }

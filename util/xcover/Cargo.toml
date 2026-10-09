@@ -21,3 +21,6 @@ portable-atomic = { version = "1.13", default-features = false, features = ["req
 [[test]]
 name = "ffi_equivalence"
 path = "tests/ffi_equivalence.rs"
+
+[lints]
+workspace = true

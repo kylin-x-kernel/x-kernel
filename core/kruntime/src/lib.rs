@@ -227,6 +227,12 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         // Returns only after every present secondary CPU has registered its
         // run queue, so cross-CPU spawn during the driver/subsystem init
         // below cannot land on an unregistered CPU.
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the platform cannot start \
+                      a present secondary CPU (boot_ap error); CPU readiness and task placement \
+                      assume every present CPU runs, and late init has no error return or recovery"
+        )]
         self::mp::start_secondary_cpus(cpu_id).unwrap_or_else(|err| {
             panic!(
                 "failed to start secondary CPUs after boot CPU {} init: {err:?}",
@@ -242,11 +248,28 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     // All target CPUs can now receive notifications and run worker tasks.
     // Publish services before exposing any work-producing drivers.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: 64 is a nonzero fixed workqueue batch \
+                  limit"
+    )]
+    let batch_limit = core::num::NonZeroUsize::new(64).unwrap();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: system worker services cannot \
+                  initialize; the runtime entry has no error return and cannot start drivers \
+                  without workers"
+    )]
     kworkng::runtime::init(
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Kconfig constrains \
+                      WORKQUEUE_WORKERS_PER_POOL to a positive value"
+        )]
         core::num::NonZeroUsize::new(kbuild_config::WORKQUEUE_WORKERS_PER_POOL)
             .expect("positive configured worker limit"),
         ktime_types::TimeSpan::from_secs(30),
-        core::num::NonZeroUsize::new(64).unwrap(),
+        batch_limit,
     )
     .expect("system workqueue services must be ready before driver initialization");
 
@@ -367,6 +390,11 @@ fn register_boot_console_runtime_region(boot_info: &boot_info::BootInfo) {
     let start = paddr.align_down_4k();
     let size = (paddr.align_offset_4k() + boot_info.boot_console_size).align_up(PAGE_SIZE_4K);
     let mapped = vaddr.align_down_4k();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the boot UART runtime mapping \
+                  cannot be registered; runtime initialization has no error return or recovery"
+    )]
     memspace::register_fixed_device_region(start, size, "boot-uart", mapped)
         .expect("failed to register boot console runtime region");
 }
@@ -482,11 +510,22 @@ impl PrimaryKernelEntry {
 #[cfg(not(feature = "smp"))]
 #[kiface::provide]
 impl SecondaryKernelEntry {
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: A uniprocessor build never calls boot_ap, \
+                  so no secondary CPU is released into this entry; it has no per-CPU runtime to \
+                  join"
+    )]
     fn enter(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> ! {
         panic!("secondary CPU entered a uniprocessor kernel")
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy memory-region logger; split summary \
+              collection and printing"
+)]
 fn log_memory_regions() {
     use heapless::Vec;
 
@@ -536,6 +575,12 @@ fn log_memory_regions() {
             summary.first_start = summary.first_start.min(start);
             summary.last_end = summary.last_end.max(end);
         } else {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: more than 64 distinct \
+                          memory-region groups exhaust early diagnostic storage; boot memory \
+                          reporting has no error return or recovery"
+            )]
             summaries
                 .push(RegionLogSummary {
                     name: region.name,
@@ -551,6 +596,11 @@ fn log_memory_regions() {
 
     info!("Found physcial memory regions:");
     for region in khal::mem::memory_regions() {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The preceding pass inserted a summary \
+                      for every group in the unchanged memory-region list"
+        )]
         let summary = summaries
             .iter()
             .find(|summary| {
@@ -601,6 +651,12 @@ fn init_allocator() {
         kalloc::global_init(p2v(region.paddr).as_usize(), region.size);
     }
     for region in free_regions {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: a free memory region \
+                      cannot be added to the allocator; allocator initialization has no error \
+                      return or recovery"
+        )]
         kalloc::global_add_memory(p2v(region.paddr).as_usize(), region.size)
             .expect("failed to add free region to allocator");
     }

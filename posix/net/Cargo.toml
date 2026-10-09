@@ -30,3 +30,6 @@ linux-raw-sys.workspace = true
 osvm.workspace = true
 posix-types.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

@@ -39,7 +39,7 @@
 //!
 //! For persistent device-reachable memory (descriptor rings, shared
 //! queues), use [`allocate_dma_memory`] instead, which returns a
-//! [`DMAInfo`] whose bus address stays valid until
+//! [`DmaInfo`] whose bus address stays valid until
 //! [`deallocate_dma_memory`].
 #![no_std]
 
@@ -83,7 +83,7 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// - `layout`: The memory layout, which describes the size and alignment
 ///   requirements of the requested memory.
 ///
-/// Returns an [`DMAInfo`] structure containing details about the allocated
+/// Returns an [`DmaInfo`] structure containing details about the allocated
 /// memory, such as the starting address and size. If it's not possible to
 /// allocate memory meeting the criteria, returns [`None`].
 ///
@@ -98,7 +98,7 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// [`deallocate_dma_memory`] using the same `layout`, and must only expose the
 /// returned bus address to devices that are allowed to DMA that buffer.
 #[track_caller]
-pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
+pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
     unsafe { ALLOCATOR.lock().allocate_dma_memory(layout) }
 }
@@ -109,7 +109,7 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
 /// marked as coherent. It ensures proper deallocation and management of resources
 /// associated with the memory block.
 ///
-/// - `dma_info`: An instance of [`DMAInfo`] containing the details of the memory
+/// - `dma_info`: An instance of [`DmaInfo`] containing the details of the memory
 ///   block to be freed, such as its starting address and size.
 ///
 /// # Safety
@@ -117,7 +117,7 @@ pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DMAInfo> {
 /// `dma` must come from a prior successful [`allocate_dma_memory`] call, and
 /// `layout` must exactly match that allocation.
 #[track_caller]
-pub unsafe fn deallocate_dma_memory(dma: DMAInfo, layout: Layout) {
+pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
     // SAFETY: forwards the caller's matching deallocation contract to the global DMA allocator.
     unsafe { ALLOCATOR.lock().deallocate_dma_memory(dma, layout) }
 }
@@ -155,7 +155,7 @@ pub enum DmaDirection {
 pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
-) -> AllocResult<DMAInfo> {
+) -> AllocResult<DmaInfo> {
     // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
     unsafe { ALLOCATOR.lock().map_dma_buffer(buffer, direction) }
 }
@@ -226,7 +226,7 @@ impl core::fmt::Debug for DmaBusAddress {
 
 /// Represents information related to a DMA operation.
 #[derive(Debug, Clone, Copy)]
-pub struct DMAInfo {
+pub struct DmaInfo {
     /// The address at which the CPU accesses this memory region. This address
     /// is a virtual memory address used by the CPU to access memory.
     pub cpu_addr: NonNull<u8>,

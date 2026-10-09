@@ -10,3 +10,6 @@ repository.workspace = true
 [dependencies]
 memaddr = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

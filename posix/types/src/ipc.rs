@@ -44,7 +44,6 @@ pub struct IpcPerm {
 }
 
 /// A System V message queue descriptor.
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Clone, Copy, UserWrite, UserRead)]
 pub struct msqid_ds {
@@ -69,7 +68,6 @@ pub struct msqid_ds {
 }
 
 /// A System V shared-memory descriptor.
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Clone, Copy, UserWrite, UserRead)]
 pub struct shmid_ds {
@@ -94,7 +92,6 @@ pub struct shmid_ds {
 }
 
 /// A System V message payload header.
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct msgbuf {
@@ -105,7 +102,6 @@ pub struct msgbuf {
 }
 
 /// A Linux `msgctl(IPC_INFO)` result carrier.
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct msginfo {

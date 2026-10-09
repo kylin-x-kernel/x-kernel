@@ -153,7 +153,7 @@ impl DerefMut for Termios2 {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod termios_tests {
     use unittest::def_test;
 

@@ -12,3 +12,6 @@ description = "Virtual 16550A UART device"
 klogger.workspace = true
 ksync.workspace = true
 vdev-core.workspace = true
+
+[lints]
+workspace = true

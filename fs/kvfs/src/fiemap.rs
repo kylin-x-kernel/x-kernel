@@ -185,7 +185,7 @@ impl<'a> FiemapExtentInfo<'a> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec::Vec;
 

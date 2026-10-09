@@ -44,3 +44,6 @@ targets = [
     "riscv64gc-unknown-none-elf",
     "loongarch64-unknown-none-softfloat",
 ]
+
+[lints]
+workspace = true

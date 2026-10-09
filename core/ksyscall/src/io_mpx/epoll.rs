@@ -26,7 +26,7 @@ bitflags! {
 }
 
 /// Creates an epoll instance.
-pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
+pub(crate) fn sys_epoll_create1(flags: u32) -> KResult<isize> {
     let flags = EpollCreateFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_epoll_create1 <= flags: {flags:?}");
 
@@ -39,7 +39,7 @@ pub fn sys_epoll_create1(flags: u32) -> KResult<isize> {
 }
 
 /// Adds, modifies, or removes an epoll interest.
-pub fn sys_epoll_ctl(
+pub(crate) fn sys_epoll_ctl(
     epfd: i32,
     op: u32,
     fd: i32,
@@ -125,7 +125,7 @@ fn do_epoll_wait(
 }
 
 /// Waits for epoll events with a millisecond timeout.
-pub fn sys_epoll_pwait(
+pub(crate) fn sys_epoll_pwait(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
     maxevents: i32,
@@ -142,7 +142,7 @@ pub fn sys_epoll_pwait(
 }
 
 /// Waits for epoll events with a high-precision timeout.
-pub fn sys_epoll_pwait2(
+pub(crate) fn sys_epoll_pwait2(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
     maxevents: i32,
@@ -159,7 +159,7 @@ pub fn sys_epoll_pwait2(
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_epoll_padding {
     use alloc::vec;
     use core::mem::size_of;

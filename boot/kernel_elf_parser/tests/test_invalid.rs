@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::ELFHeadersBuilder;
+use kernel_elf_parser::ElfHeadersBuilder;
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: u16 = 56;
@@ -26,7 +26,7 @@ fn elf_header(program_header_offset: u64, entry_size: u16, entry_count: u16) -> 
 #[test]
 fn program_header_range_rejects_end_overflow() {
     let data = elf_header(u64::MAX - 7, PROGRAM_HEADER_SIZE, 1);
-    let builder = ELFHeadersBuilder::new(&data).expect("ELF header must parse");
+    let builder = ElfHeadersBuilder::new(&data).expect("ELF header must parse");
 
     assert_eq!(
         builder.ph_range(),
@@ -37,7 +37,7 @@ fn program_header_range_rejects_end_overflow() {
 #[test]
 fn program_header_range_rejects_wrong_entry_size() {
     let data = elf_header(ELF_HEADER_SIZE as u64, PROGRAM_HEADER_SIZE - 1, 1);
-    let builder = ELFHeadersBuilder::new(&data).expect("ELF header must parse");
+    let builder = ElfHeadersBuilder::new(&data).expect("ELF header must parse");
 
     assert_eq!(builder.ph_range(), Err("Invalid program-header entry size"));
 }
@@ -45,7 +45,7 @@ fn program_header_range_rejects_wrong_entry_size() {
 #[test]
 fn build_rejects_incomplete_program_header_table() {
     let data = elf_header(ELF_HEADER_SIZE as u64, PROGRAM_HEADER_SIZE, 1);
-    let builder = ELFHeadersBuilder::new(&data).expect("ELF header must parse");
+    let builder = ElfHeadersBuilder::new(&data).expect("ELF header must parse");
 
     assert!(builder.build(&[0; 8]).is_err());
 }

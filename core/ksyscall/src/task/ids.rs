@@ -7,12 +7,12 @@
 use kerrno::{KError, KResult};
 
 /// Returns the process ID of the current process.
-pub fn sys_getpid() -> KResult<isize> {
+pub(crate) fn sys_getpid() -> KResult<isize> {
     Ok(kprocess::current_user_thread().pid() as _)
 }
 
 /// Returns the parent process ID of the current process.
-pub fn sys_getppid() -> KResult<isize> {
+pub(crate) fn sys_getppid() -> KResult<isize> {
     let current_thread = kprocess::current_user_thread();
     current_thread
         .process()

@@ -12,3 +12,6 @@ description = "Virtual virtio-mmio network device"
 log.workspace = true
 knet.workspace = true
 vdev-core.workspace = true
+
+[lints]
+workspace = true

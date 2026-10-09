@@ -26,7 +26,7 @@ use crate::{
 ///
 /// The caller must ensure compatibility (same version, same records)
 /// before calling this function.
-pub fn merge(image: &ProfileImage, parsed: &ParsedProfraw) -> Result<(), ProfileError> {
+pub(crate) fn merge(image: &ProfileImage, parsed: &ParsedProfraw) -> Result<(), ProfileError> {
     check_counter_lengths(&image.counters, &parsed.counters)?;
 
     image.counters.merge_from(&parsed.counters);
@@ -68,7 +68,7 @@ fn check_counter_lengths(dst: &AtomicCounterStore, src: &CounterStore) -> Result
 /// Mirrors `lprofGetLoadModuleSignature` from LLVM compiler-rt:
 ///   (NamesSize << 40) + (NumCounters << 30) + (NumData << 20) +
 ///   (NumVnodes << 10) + FirstD->NameRef + Version + Magic
-pub fn get_load_module_signature(image: &ProfileImage) -> u64 {
+pub(crate) fn get_load_module_signature(image: &ProfileImage) -> u64 {
     let names_size = image.names.len() as u64;
     let num_counters = image.counters.len() as u64;
     let num_data = image.records.len() as u64;

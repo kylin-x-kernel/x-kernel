@@ -4,7 +4,7 @@
 
 //! Run-queue unittests.
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_blocked_resched {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -387,7 +387,7 @@ mod tests_wake_affinity {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_interrupt_kick {
     use unittest::{assert, def_test};
 

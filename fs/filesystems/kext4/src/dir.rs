@@ -135,7 +135,7 @@ struct ScannedDirectoryEntry<'a> {
 
 impl Ext4SbInfo {
     /// Reads all supported directory entries from a directory inode.
-    pub fn read_dir(&self, inode: &Ext4Inode) -> Ext4Result<Vec<DirectoryEntry>> {
+    pub(crate) fn read_dir(&self, inode: &Ext4Inode) -> Ext4Result<Vec<DirectoryEntry>> {
         let mut entries = Vec::new();
         self.scan_directory_from(inode, Ext4DirPos::new(0), |entry| {
             entries.push(DirectoryEntry::from_scanned(entry));
@@ -145,7 +145,7 @@ impl Ext4SbInfo {
     }
 
     /// Streams supported directory entries starting at an ext4 directory byte position.
-    pub fn read_dir_from(
+    pub(crate) fn read_dir_from(
         &self,
         inode: &Ext4Inode,
         pos: Ext4DirPos,
@@ -170,12 +170,16 @@ impl Ext4SbInfo {
     }
 
     /// Finds one UTF-8 entry name in a supported directory.
-    pub fn lookup(&self, directory: &Ext4Inode, name: &str) -> Ext4Result<Option<DirectoryEntry>> {
+    pub(crate) fn lookup(
+        &self,
+        directory: &Ext4Inode,
+        name: &str,
+    ) -> Ext4Result<Option<DirectoryEntry>> {
         self.lookup_bytes(directory, name.as_bytes())
     }
 
     /// Finds one raw byte entry name in a supported directory.
-    pub fn lookup_bytes(
+    pub(crate) fn lookup_bytes(
         &self,
         directory: &Ext4Inode,
         name: &[u8],
@@ -759,7 +763,7 @@ fn scan_directory_block(
     Ok(true)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

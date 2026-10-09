@@ -8,4 +8,4 @@ use core::default::Default;
 /// NOTE: NEVER USE THIS STRUCT IN YOUR CODE
 #[repr(C)]
 #[derive(Default)]
-pub struct user_ta_ctx {}
+pub(super) struct user_ta_ctx {}

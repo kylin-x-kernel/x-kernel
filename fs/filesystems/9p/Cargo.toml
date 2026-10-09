@@ -19,3 +19,6 @@ kerrno.workspace = true
 ktime_types.workspace = true
 kvfs.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

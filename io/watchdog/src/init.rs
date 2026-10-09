@@ -77,6 +77,12 @@ fn init_nmi_watchdog() {
     // delivery works even without the hardlockup watchdog.
     if !khal::nmi::enable_periodic_nmi(
         crate::lockup_detection::DEFAULT_HARDLOCKUP_THRESHOLD.as_nanos() as u64,
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: The hard-lockup watchdog's contract \
+                      is to stop the system once the cause CPU has dumped all CPUs for a failed \
+                      watchdog-task check; there is no recovery path"
+        )]
         || {
             // Every NMI checks whether watchdog tasks on THIS CPU are healthy.
             // If a failure is detected, THIS CPU becomes the cause CPU and
@@ -197,6 +203,12 @@ pub fn init_softlockup_detection() {
         let slot = unsafe { SOFTLOCKUP_TIMER.get_mut_unchecked(&guard) };
         assert!(slot.is_none(), "softlockup timer already initialized");
         let timer = slot.insert(timer);
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the watchdog sampling \
+                      timer cannot start; this CPU initialization entry has no error return or \
+                      recovery"
+        )]
         // SAFETY: the local scheduler/IRQ service is initialized. The per-CPU
         // slot retains storage forever; the handler preserves IRQ context and
         // only performs the existing IRQ-safe local watchdog check/report.
@@ -256,7 +268,7 @@ pub fn init_secondary() {
     init_common();
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod timer_irq_tests {
     //! Runtime integration probes, not timing benchmarks. Boot-created owners
     //! are intentionally permanent; this test only observes their IRQ progress.

@@ -37,7 +37,7 @@ pub enum DefaultSignalAction {
 /// These represent the actions the kernel should take after signal
 /// processing, distinct from user-defined signal handlers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignalOSAction {
+pub enum SignalOsAction {
     /// Terminate the process immediately.
     Terminate,
     /// Generate a core dump and terminate the process.

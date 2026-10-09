@@ -9,6 +9,12 @@
 //! builds without `xkmake` (e.g. plain `cargo check`) fall back to an empty
 //! blob, which disables symbol annotations without breaking compilation.
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): missing Cargo environment or \
+              unwritable symbol output must terminate this host build script"
+)]
+
 use std::{env, fs, path::Path};
 
 fn main() {

@@ -29,9 +29,16 @@ impl DmaOp for XKernelResourceProvider {
         let Ok(layout) = Layout::from_size_align(alloc.spec.len, alloc.spec.align) else {
             return;
         };
-        let info = kdma::DMAInfo {
-            cpu_addr: NonNull::new(alloc.cpu_addr as *mut u8)
-                .expect("coherent DMA allocation stored a null CPU address"),
+        let info = kdma::DmaInfo {
+            cpu_addr: {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: The resource handle returns \
+                              the original non-null CPU address supplied by this DMA provider"
+                )]
+                NonNull::new(alloc.cpu_addr as *mut u8)
+                    .expect("coherent DMA allocation stored a null CPU address")
+            },
             bus_addr: kdma::DmaBusAddress::new(alloc.bus_addr),
         };
         // SAFETY: `info` and `layout` describe a coherent buffer previously
@@ -66,6 +73,11 @@ impl DmaOp for XKernelResourceProvider {
             return;
         }
 
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The resource handle returns the \
+                      original non-null CPU address supplied by this DMA provider"
+        )]
         let cpu_addr = NonNull::new(mapping.cpu_addr as *mut u8)
             .expect("streaming DMA mapping stored a null CPU address");
         let buffer = NonNull::slice_from_raw_parts(cpu_addr, mapping.len);

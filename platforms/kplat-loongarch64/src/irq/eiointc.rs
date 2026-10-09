@@ -56,7 +56,7 @@ impl EiointcRegs for IocsrEiointc {
     }
 }
 
-pub fn init() {
+pub(super) fn init() {
     let mut regs = IocsrEiointc;
     let misc = regs.read_d(LOONGARCH_IOCSR_MISC_FUNC);
     regs.write_d(LOONGARCH_IOCSR_MISC_FUNC, misc | IOCSR_MISC_FUNC_EXT_IOI_EN);
@@ -126,19 +126,19 @@ fn complete_irq_impl<R: EiointcRegs>(regs: &mut R, irq: usize) {
     regs.write_d(EIOINTC_REG_ISR + offset, bit);
 }
 
-pub fn enable_irq(irq: usize) {
+pub(super) fn enable_irq(irq: usize) {
     enable_irq_impl(&mut IocsrEiointc, irq);
 }
 
-pub fn disable_irq(irq: usize) {
+pub(super) fn disable_irq(irq: usize) {
     disable_irq_impl(&mut IocsrEiointc, irq);
 }
 
-pub fn complete_irq(irq: usize) {
+pub(super) fn complete_irq(irq: usize) {
     complete_irq_impl(&mut IocsrEiointc, irq);
 }
 
-pub fn claim_irq() -> Option<usize> {
+pub(super) fn claim_irq() -> Option<usize> {
     for i in 0..(VEC_COUNT / 64) {
         let flags = iocsr_read_d(EIOINTC_REG_ISR + i * 8);
         if flags != 0 {
@@ -148,7 +148,7 @@ pub fn claim_irq() -> Option<usize> {
     None
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

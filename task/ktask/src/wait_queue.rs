@@ -110,6 +110,7 @@ impl WaitQueue {
                     return true;
                 }
                 listener!(self.event => listener);
+                // Notification and timeout both resume the loop, which rechecks the deadline.
                 let _ = timeout_at(Some(deadline), listener).await;
             }
         })

@@ -30,9 +30,6 @@ allocation behavior, copying, ownership, or cleanup.
   `ksched` ready queues and `kprocess`; intrusive linkage gives O(1)
   unlink at a known element, stable element addresses while queued, and
   no per-node allocation or relocation;
-- fall back to `alloc::collections::LinkedList` only when elements
-  cannot own their linkage (for example the list must outlive or be
-  decoupled from element ownership);
 - on IRQ-safe or otherwise allocation-free paths, prefer fixed-capacity
   storage (bounded rings or preallocated slots) over any growable
   container; growth implies allocation, element copying, and contiguous

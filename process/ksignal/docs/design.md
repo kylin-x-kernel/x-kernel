@@ -9,7 +9,7 @@ construction/restoration of user handler frames. `kprocess` embeds its
 managers into process/thread runtimes; `kexec` maps the signal trampoline
 during exec; `ktimer` produces timer `siginfo` payloads and depends on
 `ksignal` types; `ksyscall` and the posix process runtime own ABI decoding,
-permission checks, and the teardown actions behind `SignalOSAction`.
+permission checks, and the teardown actions behind `SignalOsAction`.
 
 ## Scope
 
@@ -141,7 +141,7 @@ others use the return register), applies the handler mask plus the signal
 itself unless `SA_NODEFER`, and resets the action to default on
 `SA_RESETHAND`. Syscall-restart error codes in the trap context are folded
 into either a rollback (restart) or `-EINTR` before the handler runs.
-Default `SIGCONT` (`SignalOSAction::Continue`) does not fold those codes.
+Default `SIGCONT` (`SignalOsAction::Continue`) does not fold those codes.
 The posix return path rewrites them when no handler ran, and drops the
 thread restart-block when a handler publishes `EINTR` for
 `ERESTART_RESTARTBLOCK`. `restore` reads the frame back on `rt_sigreturn`, restores the
@@ -162,7 +162,7 @@ and `SA_NOCLDWAIT` request autoreap.
   user memory through `osvm` checked access (`write_vm`), so it may fail on
   an unmapped stack, which is reported as `CoreDump`.
 - Handler invocation itself never happens here: the caller observing
-  `SignalOSAction::Terminate/CoreDump/Stop/Continue` performs teardown in
+  `SignalOsAction::Terminate/CoreDump/Stop/Continue` performs teardown in
   the posix process runtime, which may sleep.
 - Dequeue observers run synchronously inside the dequeue path; observers
   must only rely on properties guaranteed by every path that can dequeue

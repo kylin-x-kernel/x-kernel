@@ -4,4 +4,4 @@
 
 //! VFS and path-based syscall adapters.
 
-pub use posix_fs::*;
+pub(crate) use posix_fs::*;

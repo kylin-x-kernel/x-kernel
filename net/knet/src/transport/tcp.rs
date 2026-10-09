@@ -180,6 +180,73 @@ impl TcpSocket {
         Ok(endpoint)
     }
 
+    /// Copies the next chunk of `src` into the socket's transmit buffer.
+    ///
+    /// Returns `BrokenPipe` after the send side is closed, the state error when
+    /// the connection cannot send, and `WouldBlock` while the buffer is full.
+    fn send_to_socket(&self, socket: &mut smol::Socket<'_>, src: &mut impl Read) -> KResult<usize> {
+        if self.tx_closed.load(Ordering::Acquire) {
+            return Err(KError::BrokenPipe);
+        }
+        if !socket.may_send() {
+            return Err(Self::send_state_error(socket.state()));
+        }
+        if !socket.can_send() {
+            return Err(KError::WouldBlock);
+        }
+        socket
+            .send(|buffer| {
+                let result = src.read(buffer);
+                let len = result.as_ref().map_or(0, |len| *len);
+                (len, result)
+            })
+            .map_err(|_| k_err_type!(NotConnected, "not connected?"))?
+    }
+
+    /// Copies queued data from the socket into `dst`, or peeks it when `peek`.
+    ///
+    /// Sets `should_poll_rx_window` when a dequeue reopens enough receive
+    /// window to be worth advertising. Returns `Ok(0)` at end of stream and
+    /// `WouldBlock` while no data is queued.
+    fn recv_from_socket(
+        socket: &mut smol::Socket<'_>,
+        dst: &mut (impl Write + IoBufMut),
+        peek: bool,
+        should_poll_rx_window: &mut bool,
+    ) -> KResult<usize> {
+        if !socket.can_recv() {
+            return if socket.may_recv() {
+                Err(KError::WouldBlock)
+            } else {
+                Ok(0)
+            };
+        }
+        if peek {
+            return dst.write(
+                socket
+                    .peek(dst.remaining_mut())
+                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
+            );
+        }
+        let receive_capacity_bytes = socket.recv_capacity();
+        let available_before_bytes = receive_capacity_bytes.saturating_sub(socket.recv_queue());
+        let result = socket
+            .recv(|buf| {
+                let result = dst.write(buf);
+                let len = result.unwrap_or(0);
+                (len, result)
+            })
+            .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
+        if let Ok(received) = result {
+            *should_poll_rx_window = should_poll_receive_window(
+                receive_capacity_bytes,
+                available_before_bytes,
+                received,
+            );
+        }
+        result
+    }
+
     fn send_state_error(state: smol::State) -> KError {
         match state {
             smol::State::Listen | smol::State::SynSent | smol::State::SynReceived => {
@@ -496,24 +563,7 @@ impl SocketOps for TcpSocket {
             let result = self
                 .general
                 .send_poller_with_nonblocking(self, nonblocking, || {
-                    self.with_smol_socket(|socket| {
-                        if self.tx_closed.load(Ordering::Acquire) {
-                            Err(KError::BrokenPipe)
-                        } else if !socket.may_send() {
-                            Err(Self::send_state_error(socket.state()))
-                        } else if !socket.can_send() {
-                            Err(KError::WouldBlock)
-                        } else {
-                            let len = socket
-                                .send(|buffer| {
-                                    let result = src.read(buffer);
-                                    let len = result.as_ref().map_or(0, |len| *len);
-                                    (len, result)
-                                })
-                                .map_err(|_| k_err_type!(NotConnected, "not connected?"))??;
-                            Ok(len)
-                        }
-                    })
+                    self.with_smol_socket(|socket| self.send_to_socket(socket, &mut src))
                 });
 
             match result {
@@ -540,38 +590,12 @@ impl SocketOps for TcpSocket {
                 .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                     network_poller().assist_once();
                     self.with_smol_socket(|socket| {
-                        if socket.can_recv() {
-                            if options.flags.contains(RecvFlags::PEEK) {
-                                dst.write(
-                                    socket
-                                        .peek(dst.remaining_mut())
-                                        .map_err(|_| k_err_type!(NotConnected, "not connected?"))?,
-                                )
-                            } else {
-                                let receive_capacity_bytes = socket.recv_capacity();
-                                let available_before_bytes =
-                                    receive_capacity_bytes.saturating_sub(socket.recv_queue());
-                                let result = socket
-                                    .recv(|buf| {
-                                        let result = dst.write(buf);
-                                        let len = result.unwrap_or(0);
-                                        (len, result)
-                                    })
-                                    .map_err(|_| k_err_type!(NotConnected, "not connected?"))?;
-                                if let Ok(received) = result {
-                                    should_poll_rx_window = should_poll_receive_window(
-                                        receive_capacity_bytes,
-                                        available_before_bytes,
-                                        received,
-                                    );
-                                }
-                                result
-                            }
-                        } else if !socket.may_recv() {
-                            Ok(0)
-                        } else {
-                            Err(KError::WouldBlock)
-                        }
+                        Self::recv_from_socket(
+                            socket,
+                            &mut dst,
+                            options.flags.contains(RecvFlags::PEEK),
+                            &mut should_poll_rx_window,
+                        )
                     })
                 })?;
         if should_poll_rx_window {
@@ -810,7 +834,7 @@ fn get_ephemeral_port(local_addr: smoltcp::wire::IpAddress) -> KResult<u16> {
     k_bail!(AddrInUse, "no available ports");
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
     use core::net::Ipv4Addr;

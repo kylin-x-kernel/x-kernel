@@ -10,12 +10,12 @@
 
 /// Saves and disables local interrupts, returning the saved state.
 #[inline]
-pub fn save_disable() -> usize {
+pub(super) fn save_disable() -> usize {
     karch::save_irq_and_disable()
 }
 
 /// Restores local interrupt state from the saved flags.
 #[inline]
-pub fn restore(flags: usize) {
+pub(super) fn restore(flags: usize) {
     karch::restore_irq(flags)
 }

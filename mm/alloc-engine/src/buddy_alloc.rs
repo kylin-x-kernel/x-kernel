@@ -57,7 +57,10 @@ impl FreeHeadBitmap {
             // SAFETY: Region indexes this bitmap only for its usable pages.
             // add_region reserved and zeroed enough aligned words for every
             // registered page, and callers cannot allocate the bitmap prefix.
-            unsafe { (self.storage as *const usize).add(index).read() }
+            let word = unsafe { (self.storage as *const usize).add(index) };
+            // SAFETY: add_region initialized this aligned bitmap word; Region's
+            // shared borrow prevents concurrent bitmap mutation.
+            unsafe { word.read() }
         }
     }
 
@@ -74,7 +77,10 @@ impl FreeHeadBitmap {
         } else {
             // SAFETY: The index is within the reserved, initialized bitmap;
             // exclusive Region access serializes bitmap and list transitions.
-            unsafe { (self.storage as *mut usize).add(index).write(word) };
+            let destination = unsafe { (self.storage as *mut usize).add(index) };
+            // SAFETY: This word is within the reserved bitmap and &mut self
+            // excludes other bitmap accesses for the write.
+            unsafe { destination.write(word) };
         }
     }
 
@@ -146,8 +152,11 @@ impl Region {
                 link: LinkedListAtomicLink::new(),
                 order,
             });
-            self.free_lists[order].push_front(UnsafeRef::from_raw(addr as *const FreeNode));
         }
+        // SAFETY: The node was initialized above in the exclusively owned free
+        // chunk, and remains at this address until it is removed from the list.
+        let node = unsafe { UnsafeRef::from_raw(addr as *const FreeNode) };
+        self.free_lists[order].push_front(node);
         self.free_heads.set(page, true);
         self.free_pages += order_pages(order);
     }
@@ -635,8 +644,7 @@ pub fn split_to_chunks<const PAGE_SIZE: usize>(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use core::ptr::NonNull;
 
@@ -825,10 +833,12 @@ mod tests {
                 for (index, addr) in addrs.into_iter().enumerate() {
                     // SAFETY: This page has not yet been freed. Other frees must
                     // neither merge it nor overwrite its live payload.
-                    unsafe {
-                        assert_eq!(*(addr as *const u8), 0xa5);
-                        assert_eq!(*((addr + PAGE - 1) as *const u8), 0xa5);
-                    }
+                    let first = unsafe { *(addr as *const u8) };
+                    // SAFETY: This is the last initialized byte of the same live
+                    // page; the allocation has not yet been returned to b.
+                    let last = unsafe { *((addr + PAGE - 1) as *const u8) };
+                    assert_eq!(first, 0xa5);
+                    assert_eq!(last, 0xa5);
                     b.deallocate_pages(addr, 1);
                     assert_eq!(b.free_pages(), index + 1);
                 }

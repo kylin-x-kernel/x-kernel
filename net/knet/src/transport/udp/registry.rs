@@ -521,7 +521,7 @@ fn listen_addrs_overlap(a: Option<IpAddress>, b: Option<IpAddress>) -> bool {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{sync::Arc, vec};
 

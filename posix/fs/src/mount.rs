@@ -328,7 +328,7 @@ pub fn sys_umount2(target: UserConstPtr<c_char>, flags: i32) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kvfs::{MountFlags, SuperBlockFlags};
     use unittest::{assert, assert_eq, def_test};

@@ -4,6 +4,12 @@
 
 //! ACPI firmware description and table helpers.
 
+#![allow(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 16 legacy panics on absent or \
+              malformed firmware tables (RSDP, XSDT/RSDT, MADT and SDT headers) need one parser \
+              failure contract rather than per-site judgement; new code remains reviewed"
+)]
 #![no_std]
 
 use core::{mem, slice, str};
@@ -852,6 +858,6 @@ const _: () = {
     assert!(mem::size_of::<MadtHeader>() == 8);
     assert!(mem::size_of::<MadtLocalApic>() == 8);
     assert!(mem::size_of::<MadtIoApic>() == 12);
-    let _ = str::from_utf8(b"MCFG");
-    let _ = str::from_utf8(b"APIC");
+    assert!(str::from_utf8(b"MCFG").is_ok());
+    assert!(str::from_utf8(b"APIC").is_ok());
 };

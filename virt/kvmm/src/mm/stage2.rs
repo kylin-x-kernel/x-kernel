@@ -67,16 +67,20 @@ impl Stage2 {
     fn destroy(&mut self) {
         let l1_va = self.l1_page.as_ptr() as *const u64;
         for i in 0..L1_ENTRIES {
-            // SAFETY: l1_va is valid; i < L1_ENTRIES.
-            let entry = unsafe { l1_va.add(i).read() };
+            // SAFETY: i < L1_ENTRIES, so the offset stays inside the owned L1 page.
+            let entry_ptr = unsafe { l1_va.add(i) };
+            // SAFETY: entry_ptr is an aligned, initialized descriptor in the L1 page.
+            let entry = unsafe { entry_ptr.read() };
             if entry & LPAE_VALID != 0 && entry & LPAE_TABLE != 0 {
                 let l2_pa = entry & LPAE_ADDR_MASK;
                 let l2_va = kaddr_layout::p2v(l2_pa as usize) as *const u64;
 
                 // Free any L3 tables split out of this L2 (e.g. GICC→GICV).
                 for j in 0..L2_ENTRIES {
-                    // SAFETY: l2_va is valid; j < L2_ENTRIES.
-                    let l2_entry = unsafe { l2_va.add(j).read() };
+                    // SAFETY: j < L2_ENTRIES, so the offset stays inside this L2 page.
+                    let l2_entry_ptr = unsafe { l2_va.add(j) };
+                    // SAFETY: l2_entry_ptr is an aligned, initialized L2 descriptor.
+                    let l2_entry = unsafe { l2_entry_ptr.read() };
                     if l2_entry & LPAE_VALID != 0 && l2_entry & LPAE_TABLE != 0 {
                         let l3_pa = l2_entry & LPAE_ADDR_MASK;
                         // SAFETY: l3_pa was allocated by ensure_l3_table.
@@ -97,16 +101,22 @@ impl Stage2 {
     /// zeroed (all-invalid) L3 table. Returns null on allocation failure.
     fn ensure_l3_table(&mut self, l1_idx: usize, l2_idx: usize) -> *mut u64 {
         let l1_va = self.l1_page.as_ptr() as *const u64;
-        // SAFETY: l1_va valid, l1_idx < L1_ENTRIES (checked by caller).
-        let l1_entry = unsafe { l1_va.add(l1_idx).read() };
+        // SAFETY: the caller checked l1_idx < L1_ENTRIES, so the offset stays
+        // inside the owned L1 page.
+        let l1_entry_ptr = unsafe { l1_va.add(l1_idx) };
+        // SAFETY: l1_entry_ptr is an aligned, initialized L1 descriptor.
+        let l1_entry = unsafe { l1_entry_ptr.read() };
         if l1_entry & LPAE_VALID == 0 {
             return core::ptr::null_mut();
         }
 
         let l2_pa = l1_entry & LPAE_ADDR_MASK;
         let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
-        // SAFETY: l2_va valid, l2_idx < L2_ENTRIES.
-        let l2_entry = unsafe { l2_va.add(l2_idx).read() };
+        // SAFETY: l2_idx is a 9-bit index (< L2_ENTRIES), so the offset stays
+        // inside the L2 page referenced by the valid L1 table descriptor.
+        let l2_entry_ptr = unsafe { l2_va.add(l2_idx) };
+        // SAFETY: l2_entry_ptr is an aligned, initialized L2 descriptor.
+        let l2_entry = unsafe { l2_entry_ptr.read() };
 
         if l2_entry & LPAE_VALID != 0 && l2_entry & LPAE_TABLE != 0 {
             let l3_pa = l2_entry & LPAE_ADDR_MASK;
@@ -128,23 +138,24 @@ impl Stage2 {
             let block_attr = l2_entry & !LPAE_ADDR_MASK & !0x3u64;
             for i in 0..L3_ENTRIES {
                 let page_pa = block_pa + (i as u64) * 4096;
-                // SAFETY: l3_va is a freshly-allocated zeroed page.
-                unsafe {
-                    l3_va
-                        .add(i)
-                        .write(page_pa | block_attr | LPAE_VALID | LPAE_TABLE);
-                }
+                // SAFETY: i < L3_ENTRIES, so the offset stays inside the fresh L3 page.
+                let entry_ptr = unsafe { l3_va.add(i) };
+                // SAFETY: entry_ptr is aligned in the freshly allocated, still
+                // unpublished L3 page, so this write cannot race the table walker.
+                unsafe { entry_ptr.write(page_pa | block_attr | LPAE_VALID | LPAE_TABLE) };
             }
         }
         // else: invalid L2 → leave the L3 all-invalid (region keeps trapping).
 
         flush_pt_page(l3_va as *const u8);
 
-        // SAFETY: install the L3 table into the L2 slot after it is flushed.
-        unsafe {
-            l2_va.add(l2_idx).write(l3_pa | LPAE_VALID | LPAE_TABLE);
-            core::arch::asm!("dc civac, {}", in(reg) l2_va.add(l2_idx));
-        }
+        // SAFETY: l2_idx < L2_ENTRIES, so the offset stays inside the L2 page.
+        let l2_slot = unsafe { l2_va.add(l2_idx) };
+        // SAFETY: install the L3 table into the aligned L2 slot after it is flushed.
+        unsafe { l2_slot.write(l3_pa | LPAE_VALID | LPAE_TABLE) };
+        // SAFETY: cleaning the cache line of a mapped page-table entry at EL2
+        // has no memory-safety effect beyond making the write visible.
+        unsafe { core::arch::asm!("dc civac, {}", in(reg) l2_slot) };
         aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
         flush_stage2_tlb();
         l3_va
@@ -177,10 +188,10 @@ impl GuestMem for Stage2 {
 
         // Fill L1 → L2 table entries
         for (i, &l2_pa) in l2_pas.iter().enumerate() {
-            // SAFETY: l1_va is a valid 4KB-aligned page we own.
-            unsafe {
-                l1_va.add(i).write(l2_pa | LPAE_VALID | LPAE_TABLE);
-            }
+            // SAFETY: i < L1_ENTRIES, so the offset stays inside the owned L1 page.
+            let entry_ptr = unsafe { l1_va.add(i) };
+            // SAFETY: entry_ptr is aligned in the unpublished L1 page we own.
+            unsafe { entry_ptr.write(l2_pa | LPAE_VALID | LPAE_TABLE) };
         }
 
         // Fill L2 block entries. Only guest RAM is mapped (Normal, RW).
@@ -199,10 +210,10 @@ impl GuestMem for Stage2 {
                 } else {
                     0 // invalid → Stage-2 fault → trap to VMM MMIO emulation
                 };
-                // SAFETY: l2_va is a valid 4KB-aligned page; i2 < 512.
-                unsafe {
-                    l2_va.add(i2).write(entry);
-                }
+                // SAFETY: i2 < L2_ENTRIES, so the offset stays inside this L2 page.
+                let entry_ptr = unsafe { l2_va.add(i2) };
+                // SAFETY: entry_ptr is aligned in an unpublished L2 page we own.
+                unsafe { entry_ptr.write(entry) };
             }
         }
 
@@ -244,8 +255,8 @@ impl GuestMem for Stage2 {
         let end = (gpa + size + 0xFFF) & !0xFFF;
 
         let attr = match perm {
-            GuestPerm::RamRW => LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW,
-            GuestPerm::DeviceRW => LPAE_AF | LPAE_MATTR_DEV | LPAE_S2AP_RW | LPAE_XN,
+            GuestPerm::RamRw => LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW,
+            GuestPerm::DeviceRw => LPAE_AF | LPAE_MATTR_DEV | LPAE_S2AP_RW | LPAE_XN,
         };
 
         let mut offset: u64 = 0;
@@ -266,12 +277,15 @@ impl GuestMem for Stage2 {
                 return false;
             }
 
-            // SAFETY: l3_va points to a valid L3 page; l3_idx < 512.
-            unsafe {
-                let entry_ptr = l3_va.add(l3_idx);
-                entry_ptr.write(cur_hpa | attr | LPAE_VALID | LPAE_TABLE);
-                core::arch::asm!("dc civac, {}", in(reg) entry_ptr);
-            }
+            // SAFETY: l3_idx is a 9-bit index (< L3_ENTRIES), so the offset stays
+            // inside the L3 page returned by ensure_l3_table.
+            let entry_ptr = unsafe { l3_va.add(l3_idx) };
+            // SAFETY: entry_ptr is an aligned descriptor in a live L3 page owned
+            // by this Stage2; &mut self serializes table updates.
+            unsafe { entry_ptr.write(cur_hpa | attr | LPAE_VALID | LPAE_TABLE) };
+            // SAFETY: cleaning the cache line of a mapped page-table entry at EL2
+            // has no memory-safety effect beyond making the write visible.
+            unsafe { core::arch::asm!("dc civac, {}", in(reg) entry_ptr) };
 
             offset += 4096;
         }
@@ -335,8 +349,11 @@ impl GuestMem for Stage2 {
                 return false;
             }
 
-            // SAFETY: l1_va is valid; l1_idx < L1_ENTRIES.
-            let l1_entry = unsafe { l1_va.add(l1_idx).read() };
+            // SAFETY: l1_idx < L1_ENTRIES was checked above, so the offset stays
+            // inside the owned L1 page.
+            let l1_entry_ptr = unsafe { l1_va.add(l1_idx) };
+            // SAFETY: l1_entry_ptr is an aligned, initialized L1 descriptor.
+            let l1_entry = unsafe { l1_entry_ptr.read() };
             if l1_entry & LPAE_VALID == 0 {
                 addr += block_size;
                 continue;
@@ -344,13 +361,16 @@ impl GuestMem for Stage2 {
 
             let l2_pa = l1_entry & LPAE_ADDR_MASK;
             let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
-            // SAFETY: l2_va points to a valid L2 page; l2_idx < 512.
-            unsafe {
-                let entry_ptr = l2_va.add(l2_idx);
-                entry_ptr.write(0);
-                // Flush the cache line so the table walker sees the invalidation.
-                core::arch::asm!("dc civac, {}", in(reg) entry_ptr);
-            }
+            // SAFETY: l2_idx is a 9-bit index (< L2_ENTRIES), so the offset stays
+            // inside the L2 page referenced by the valid L1 descriptor.
+            let entry_ptr = unsafe { l2_va.add(l2_idx) };
+            // SAFETY: entry_ptr is an aligned descriptor in a live L2 page owned
+            // by this Stage2; &mut self serializes table updates.
+            unsafe { entry_ptr.write(0) };
+            // Flush the cache line so the table walker sees the invalidation.
+            // SAFETY: cleaning the cache line of a mapped page-table entry at EL2
+            // has no memory-safety effect beyond making the write visible.
+            unsafe { core::arch::asm!("dc civac, {}", in(reg) entry_ptr) };
             aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ISH);
 
             addr += block_size;

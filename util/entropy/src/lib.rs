@@ -359,7 +359,7 @@ fn format_source_list(sources: &[&'static str]) -> alloc::string::String {
     sources.join(", ")
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, assert_ne, def_test};
 

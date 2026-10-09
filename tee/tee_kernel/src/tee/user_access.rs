@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 #[unittest::mod_test]
-pub mod tests_user_access {
+pub(super) mod tests_user_access {
     use alloc::{boxed::Box, vec};
 
     use unittest::{assert, assert_eq};

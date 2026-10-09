@@ -67,6 +67,12 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
         Trap::Exception(Exception::AddressNotAligned) => unsafe {
             // SAFETY: Called within a trap handler for an AddressNotAligned exception.
             // `tf` is a valid ExceptionContext with `era` pointing to the faulting instruction.
+            #[expect(
+                clippy::unwrap_used,
+                reason = "CG-021-no-panic-on-reachable-failure: this handler runs only for kernel \
+                          PLV0 traps; kernel unaligned accesses must use supported instructions \
+                          on valid memory"
+            )]
             tf.emulate_unaligned().unwrap();
         },
         Trap::Interrupt(_) => {

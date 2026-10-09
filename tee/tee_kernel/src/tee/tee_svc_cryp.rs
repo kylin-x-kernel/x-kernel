@@ -52,20 +52,20 @@ fn map_user_mem_error(err: MemError) -> u32 {
     }
 }
 
-pub const TEE_TYPE_ATTR_REQUIRED: u32 = bit(1);
-pub const TEE_TYPE_ATTR_OPTIONAL_GROUP: u32 = bit(2);
-pub const TEE_TYPE_ATTR_SIZE_INDICATOR: u32 = bit(3);
-pub const TEE_TYPE_ATTR_GEN_KEY_OPT: u32 = bit(4);
-pub const TEE_TYPE_ATTR_GEN_KEY_REQ: u32 = bit(5);
-pub const TEE_TYPE_ATTR_BIGNUM_MAXBITS: u32 = bit(6);
+pub(super) const TEE_TYPE_ATTR_REQUIRED: u32 = bit(1);
+pub(super) const TEE_TYPE_ATTR_OPTIONAL_GROUP: u32 = bit(2);
+pub(super) const TEE_TYPE_ATTR_SIZE_INDICATOR: u32 = bit(3);
+pub(super) const TEE_TYPE_ATTR_GEN_KEY_OPT: u32 = bit(4);
+pub(super) const TEE_TYPE_ATTR_GEN_KEY_REQ: u32 = bit(5);
+pub(super) const TEE_TYPE_ATTR_BIGNUM_MAXBITS: u32 = bit(6);
 
 // Handle storing of generic secret keys of varying lengths
-pub const ATTR_OPS_INDEX_SECRET: u32 = 0;
+pub(super) const ATTR_OPS_INDEX_SECRET: u32 = 0;
 // Convert to/from big-endian byte array and provider-specific bignum
-pub const ATTR_OPS_INDEX_BIGNUM: u32 = 1;
+pub(super) const ATTR_OPS_INDEX_BIGNUM: u32 = 1;
 // Convert to/from value attribute depending on direction
 // Convert to/from big-endian byte array and provider-specific bignum
-pub const ATTR_OPS_INDEX_VALUE: u32 = 2;
+pub(super) const ATTR_OPS_INDEX_VALUE: u32 = 2;
 
 #[repr(C)]
 /// GP: `struct tee_cryp_obj_type_attrs`
@@ -105,7 +105,7 @@ impl KernelAttribute {
     }
 }
 
-pub trait TeeCryptObjAttrOps {
+pub(super) trait TeeCryptObjAttrOps {
     fn import_from_bytes(&mut self, buffer: &[u8]) -> TeeResult;
 
     fn export_to_bytes(&self) -> TeeResult<Box<[u8]>>;
@@ -190,7 +190,7 @@ impl AsMut<u32> for AttrValue {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub enum TeeCryptObjAttr {
+pub(super) enum TeeCryptObjAttr {
     /// GP: `secret_value`
     SecretValue(TeeCrypObjSecretWrapper),
     /// GP: `bignum`
@@ -200,7 +200,7 @@ pub enum TeeCryptObjAttr {
 }
 
 /// 用于包装不同类型的属性值引用
-pub enum CryptoAttrRef<'a> {
+pub(super) enum CryptoAttrRef<'a> {
     BigNum(&'a mut BigNum),
     U32(&'a mut u32),
     SecretValue(&'a mut TeeCrypObjSecretWrapper),
@@ -320,7 +320,7 @@ impl TeeCryptObjAttrOps for CryptoAttrRef<'_> {
 
 impl<'a> CryptoAttrRef<'a> {
     /// 尝试转换为 &BigNum，如果不是 BigNum 类型则返回 None
-    pub fn as_bignum(&self) -> Option<&BigNum> {
+    pub(super) fn as_bignum(&self) -> Option<&BigNum> {
         match self {
             CryptoAttrRef::BigNum(bn) => Some(bn),
             _ => None,
@@ -329,7 +329,7 @@ impl<'a> CryptoAttrRef<'a> {
 }
 
 /// GP: `tee_crypto_ops`
-pub trait TeeCryptoOps {
+pub(super) trait TeeCryptoOps {
     // const TEE_TYPE : u32;
     fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self>
     where
@@ -344,7 +344,7 @@ pub trait TeeCryptoOps {
 ///
 /// 对应类型 TEE_TYPE_*
 #[derive(Default)]
-pub enum TeeCryptObj {
+pub(super) enum TeeCryptObj {
     /// GP: `rsa_keypair`
     RsaKeypair(RsaKeypair),
     /// GP: `rsa_public_key`
@@ -757,7 +757,7 @@ impl TeeCryptObjAttrOps for TeeCrypObjSecretWrapper {
 }
 
 /// GP: `tee_cryp_obj_ecc_pub_key_attrs`
-pub const TEE_CRYP_OBJ_ECC_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_ECC_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_ECC_PUBLIC_VALUE_X,
         flags: TEE_TYPE_ATTR_REQUIRED as _,
@@ -776,7 +776,7 @@ pub const TEE_CRYP_OBJ_ECC_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_rsa_pub_key_attrs`
-pub const TEE_CRYP_OBJ_RSA_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_RSA_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_RSA_MODULUS,
         flags: (TEE_TYPE_ATTR_REQUIRED | TEE_TYPE_ATTR_SIZE_INDICATOR) as _,
@@ -790,7 +790,7 @@ pub const TEE_CRYP_OBJ_RSA_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_rsa_keypair_attrs`
-pub const TEE_CRYP_OBJ_RSA_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_RSA_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_RSA_MODULUS,
         flags: (TEE_TYPE_ATTR_REQUIRED | TEE_TYPE_ATTR_SIZE_INDICATOR) as _,
@@ -834,7 +834,7 @@ pub const TEE_CRYP_OBJ_RSA_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_ecc_keypair_attrs`
-pub const TEE_CRYP_OBJ_ECC_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_ECC_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_ECC_PRIVATE_VALUE,
         flags: TEE_TYPE_ATTR_REQUIRED as _,
@@ -859,7 +859,7 @@ pub const TEE_CRYP_OBJ_ECC_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_sm2_keypair_attrs`
-pub const TEE_CRYP_OBJ_SM2_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_SM2_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_ECC_PRIVATE_VALUE,
         flags: TEE_TYPE_ATTR_REQUIRED as _,
@@ -878,7 +878,7 @@ pub const TEE_CRYP_OBJ_SM2_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_sm2_pub_key_attrs`
-pub const TEE_CRYP_OBJ_SM2_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_SM2_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_ECC_PUBLIC_VALUE_X,
         flags: TEE_TYPE_ATTR_REQUIRED as _,
@@ -892,7 +892,7 @@ pub const TEE_CRYP_OBJ_SM2_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_ed25519_keypair_attrs`
-pub const TEE_CRYP_OBJ_ED25519_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
+pub(super) const TEE_CRYP_OBJ_ED25519_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
     TeeCrypObjTypeAttrs {
         attr_id: TEE_ATTR_ED25519_PRIVATE_VALUE,
         flags: TEE_TYPE_ATTR_REQUIRED as _,
@@ -906,15 +906,16 @@ pub const TEE_CRYP_OBJ_ED25519_KEYPAIR_ATTRS: &[TeeCrypObjTypeAttrs] = &[
 ];
 
 /// GP: `tee_cryp_obj_ed25519_pub_key_attrs`
-pub const TEE_CRYP_OBJ_ED25519_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] = &[TeeCrypObjTypeAttrs {
-    attr_id: TEE_ATTR_ED25519_PUBLIC_VALUE,
-    flags: TEE_TYPE_ATTR_REQUIRED as _,
-    ops_index: ATTR_OPS_INDEX_25519 as _,
-}];
+pub(super) const TEE_CRYP_OBJ_ED25519_PUB_KEY_ATTRS: &[TeeCrypObjTypeAttrs] =
+    &[TeeCrypObjTypeAttrs {
+        attr_id: TEE_ATTR_ED25519_PUBLIC_VALUE,
+        flags: TEE_TYPE_ATTR_REQUIRED as _,
+        ops_index: ATTR_OPS_INDEX_25519 as _,
+    }];
 
 #[repr(C)]
 /// GP: `struct tee_cryp_obj_type_props`
-pub struct TeeCrypObjTypeProps {
+pub(super) struct TeeCrypObjTypeProps {
     pub obj_type: TEE_ObjectType,
     pub min_size: u16,
     pub max_size: u16,
@@ -954,7 +955,7 @@ pub(crate) struct TeeCrypObjSecret {
 }
 
 /// GP: `struct tee_cryp_obj_secret` (wrapper with key material buffer)
-pub struct TeeCrypObjSecretWrapper {
+pub(super) struct TeeCrypObjSecretWrapper {
     secret: TeeCrypObjSecret,
     data: Box<[u8]>,
 }
@@ -971,7 +972,7 @@ impl Debug for TeeCrypObjSecretWrapper {
 }
 
 impl TeeCrypObjSecretWrapper {
-    pub fn new(alloc_size: usize) -> Self {
+    pub(super) fn new(alloc_size: usize) -> Self {
         Self {
             secret: TeeCrypObjSecret {
                 key_size: 0,
@@ -981,28 +982,28 @@ impl TeeCrypObjSecretWrapper {
         }
     }
 
-    pub fn secret(&self) -> &TeeCrypObjSecret {
+    pub(super) fn secret(&self) -> &TeeCrypObjSecret {
         &self.secret
     }
 
-    pub fn secret_mut(&mut self) -> &mut TeeCrypObjSecret {
+    pub(super) fn secret_mut(&mut self) -> &mut TeeCrypObjSecret {
         &mut self.secret
     }
 
-    pub fn data_mut(&mut self) -> &mut [u8] {
+    pub(super) fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
 
-    pub fn data(&self) -> &[u8] {
+    pub(super) fn data(&self) -> &[u8] {
         &self.data
     }
 
-    pub fn key(&self) -> &[u8] {
+    pub(super) fn key(&self) -> &[u8] {
         &self.data[..self.secret.key_size as usize]
     }
 
     #[cfg(unittest)]
-    pub fn set_secret_data(&mut self, data: &[u8]) -> TeeResult {
+    pub(super) fn set_secret_data(&mut self, data: &[u8]) -> TeeResult {
         if data.len() > self.secret().alloc_size as usize {
             return Err(TEE_ERROR_BAD_PARAMETERS);
         }
@@ -1012,7 +1013,7 @@ impl TeeCrypObjSecretWrapper {
         Ok(())
     }
 
-    pub fn from(&mut self, secret: &TeeCrypObjSecretWrapper) -> TeeResult {
+    pub(super) fn from(&mut self, secret: &TeeCrypObjSecretWrapper) -> TeeResult {
         let key = self.secret();
         let src_key = secret.secret();
         let src_key_size = src_key.key_size;
@@ -1060,13 +1061,14 @@ impl TeeCryptoOps for TeeCrypObjSecretWrapper {
     }
 }
 
-pub static TEE_CRYP_OBJ_SECRET_VALUE_ATTRS: [TeeCrypObjTypeAttrs; 1] = [TeeCrypObjTypeAttrs {
-    attr_id: TEE_ATTR_SECRET_VALUE,
-    flags: (TEE_TYPE_ATTR_REQUIRED | TEE_TYPE_ATTR_SIZE_INDICATOR) as _,
-    ops_index: ATTR_OPS_INDEX_SECRET as _,
-}];
+pub(super) static TEE_CRYP_OBJ_SECRET_VALUE_ATTRS: [TeeCrypObjTypeAttrs; 1] =
+    [TeeCrypObjTypeAttrs {
+        attr_id: TEE_ATTR_SECRET_VALUE,
+        flags: (TEE_TYPE_ATTR_REQUIRED | TEE_TYPE_ATTR_SIZE_INDICATOR) as _,
+        ops_index: ATTR_OPS_INDEX_SECRET as _,
+    }];
 
-pub const fn prop(
+pub(super) const fn prop(
     obj_type: TEE_ObjectType,
     quanta: u8,
     min_size: u16,
@@ -1085,7 +1087,7 @@ pub const fn prop(
     }
 }
 
-pub static TEE_CRYP_OBJ_PROPS: [TeeCrypObjTypeProps; 21] = [
+pub(super) static TEE_CRYP_OBJ_PROPS: [TeeCrypObjTypeProps; 21] = [
     // AES
     prop(
         TEE_TYPE_AES,
@@ -1268,7 +1270,11 @@ pub static TEE_CRYP_OBJ_PROPS: [TeeCrypObjTypeProps; 21] = [
     ),
 ];
 
-pub fn tee_obj_set_type(obj: &mut TeeObj, obj_type: u32, max_key_size: size_t) -> TeeResult<isize> {
+pub(super) fn tee_obj_set_type(
+    obj: &mut TeeObj,
+    obj_type: u32,
+    max_key_size: size_t,
+) -> TeeResult<isize> {
     // Can only set type for newly allocated objs
     if !obj.attr.is_empty() {
         return Err(TEE_ERROR_BAD_STATE);
@@ -1345,7 +1351,7 @@ pub(crate) fn syscall_cryp_obj_alloc(
 /// * `obj_id` - the object id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_close(obj_id: c_ulong) -> TeeResult {
+pub(super) fn syscall_cryp_obj_close(obj_id: c_ulong) -> TeeResult {
     {
         let o = tee_obj_get(obj_id as TeeObjIdType)?;
         let o_guard = o.lock();
@@ -1366,7 +1372,7 @@ pub fn syscall_cryp_obj_close(obj_id: c_ulong) -> TeeResult {
 /// * `obj_id` - the object id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_reset(obj_id: c_ulong) -> TeeResult {
+pub(super) fn syscall_cryp_obj_reset(obj_id: c_ulong) -> TeeResult {
     let o_arc = tee_obj_get(obj_id as TeeObjIdType)?;
     let mut o = o_arc.lock();
 
@@ -1393,7 +1399,9 @@ fn tee_svc_cryp_obj_find_type_attr_idx(attr_id: u32, type_props: &TeeCrypObjType
     -1
 }
 
-pub fn tee_svc_find_type_props(obj_type: TEE_ObjectType) -> Option<&'static TeeCrypObjTypeProps> {
+pub(super) fn tee_svc_find_type_props(
+    obj_type: TEE_ObjectType,
+) -> Option<&'static TeeCrypObjTypeProps> {
     TEE_CRYP_OBJ_PROPS
         .iter()
         .find(|&props| props.obj_type == obj_type)
@@ -1586,7 +1594,11 @@ fn op_attr_value_from_binary(attr: &mut [u8], data: &[u8], offs: &mut size_t) ->
 ///
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_obj_attr_to_binary(o: &mut TeeObj, data: &mut [u8], data_len: &mut size_t) -> TeeResult {
+pub(super) fn tee_obj_attr_to_binary(
+    o: &mut TeeObj,
+    data: &mut [u8],
+    data_len: &mut size_t,
+) -> TeeResult {
     if o.info.objectType == TEE_TYPE_DATA {
         *data_len = 0;
         return Ok(()); /* pure data object */
@@ -1622,7 +1634,7 @@ pub fn tee_obj_attr_to_binary(o: &mut TeeObj, data: &mut [u8], data_len: &mut si
 ///
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_obj_attr_from_binary(o: &mut TeeObj, data: &[u8]) -> TeeResult {
+pub(super) fn tee_obj_attr_from_binary(o: &mut TeeObj, data: &[u8]) -> TeeResult {
     if o.info.objectType == TEE_TYPE_DATA {
         return Ok(()); /* pure data object */
     }
@@ -1645,7 +1657,7 @@ pub fn tee_obj_attr_from_binary(o: &mut TeeObj, data: &[u8]) -> TeeResult {
     Ok(())
 }
 
-pub fn tee_obj_attr_copy_from(dst: &mut TeeObj, src: &mut TeeObj) -> TeeResult {
+pub(super) fn tee_obj_attr_copy_from(dst: &mut TeeObj, src: &mut TeeObj) -> TeeResult {
     let have_atts: u32;
     if dst.info.objectType == TEE_TYPE_DATA {
         return Ok(());
@@ -1723,7 +1735,7 @@ pub fn tee_obj_attr_copy_from(dst: &mut TeeObj, src: &mut TeeObj) -> TeeResult {
     Ok(())
 }
 
-pub fn is_gp_legacy_des_key_size(obj_type: TEE_ObjectType, sz: size_t) -> bool {
+pub(super) fn is_gp_legacy_des_key_size(obj_type: TEE_ObjectType, sz: size_t) -> bool {
     CFG_COMPAT_GP10_DES
         && ((obj_type == TEE_TYPE_DES && sz == 56)
             || (obj_type == TEE_TYPE_DES3 && (sz == 112 || sz == 168)))
@@ -1761,7 +1773,7 @@ fn check_key_size(props: &TeeCrypObjTypeProps, key_size: size_t) -> TeeResult {
 /// * `info` - the information to store the object information
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_get_info(obj_id: c_ulong, info: *mut utee_object_info) -> TeeResult {
+pub(super) fn syscall_cryp_obj_get_info(obj_id: c_ulong, info: *mut utee_object_info) -> TeeResult {
     tee_debug!(
         "syscall_cryp_obj_get_info: obj_id: {:#010X?}, info: {:#010X?}",
         obj_id,
@@ -1805,7 +1817,7 @@ pub fn syscall_cryp_obj_get_info(obj_id: c_ulong, info: *mut utee_object_info) -
 /// * `usage` - the usage to restrict
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_restrict_usage(obj_id: c_ulong, usage: c_ulong) -> TeeResult {
+pub(super) fn syscall_cryp_obj_restrict_usage(obj_id: c_ulong, usage: c_ulong) -> TeeResult {
     let _o_info = utee_object_info::default();
 
     let o_arc = tee_obj_get(obj_id as TeeObjIdType)?;
@@ -1849,7 +1861,7 @@ pub fn syscall_cryp_obj_restrict_usage(obj_id: c_ulong, usage: c_ulong) -> TeeRe
 /// * `size` - the size of the attribute
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_get_attr(
+pub(super) fn syscall_cryp_obj_get_attr(
     obj_id: c_ulong,
     attr_id: c_ulong,
     buffer: *mut c_void,
@@ -1925,7 +1937,7 @@ pub fn syscall_cryp_obj_get_attr(
     Ok(())
 }
 
-pub fn tee_obj_attr_clear(o: &mut TeeObj) -> TeeResult {
+pub(super) fn tee_obj_attr_clear(o: &mut TeeObj) -> TeeResult {
     let tp = tee_svc_find_type_props(o.info.objectType).ok_or(TEE_ERROR_BAD_STATE)?;
     if o.attr.is_empty() {
         return Ok(());
@@ -2192,7 +2204,7 @@ fn tee_svc_cryp_obj_populate_type(
 /// * `attr_count` - the number of attributes
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_populate(
+pub(super) fn syscall_cryp_obj_populate(
     obj_id: c_ulong,
     user_attrs: *mut utee_attribute,
     attr_count: c_ulong,
@@ -2238,7 +2250,7 @@ pub fn syscall_cryp_obj_populate(
 /// * `src` - the source object id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_cryp_obj_copy(dst: c_ulong, src: c_ulong) -> TeeResult {
+pub(super) fn syscall_cryp_obj_copy(dst: c_ulong, src: c_ulong) -> TeeResult {
     let dst_o_arc = tee_obj_get(dst as TeeObjIdType)?;
     let mut dst_o = dst_o_arc.lock();
     let src_o_arc = tee_obj_get(src as TeeObjIdType)?;
@@ -2311,7 +2323,7 @@ fn check_pub_rsa_key(e: &BigNum) -> TeeResult {
     Ok(())
 }
 
-pub fn tee_svc_obj_generate_key_rsa(
+pub(super) fn tee_svc_obj_generate_key_rsa(
     o: &mut TeeObj,
     type_props: &TeeCrypObjTypeProps,
     key_size: u32,
@@ -2348,7 +2360,7 @@ pub fn tee_svc_obj_generate_key_rsa(
     Ok(())
 }
 
-pub fn tee_svc_obj_generate_key_ecc(
+pub(super) fn tee_svc_obj_generate_key_ecc(
     o: &mut TeeObj,
     type_props: &TeeCrypObjTypeProps,
     key_size: u32,
@@ -2376,7 +2388,7 @@ pub fn tee_svc_obj_generate_key_ecc(
     Ok(())
 }
 
-pub fn tee_svc_obj_generate_key_ed25519(
+pub(super) fn tee_svc_obj_generate_key_ed25519(
     o: &mut TeeObj,
     type_props: &TeeCrypObjTypeProps,
     key_size: u32,
@@ -2411,7 +2423,11 @@ pub fn tee_svc_obj_generate_key_ed25519(
 ///
 /// # Returns
 /// Returns a `TeeResult` indicating success or failure.
-pub fn syscall_obj_generate_key(
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy key generation; split per key type"
+)]
+pub(super) fn syscall_obj_generate_key(
     obj: c_ulong,
     key_size: c_ulong,
     usr_params: *const utee_attribute,
@@ -2513,10 +2529,20 @@ pub fn syscall_obj_generate_key(
                 tee_debug!("tee_svc_obj_generate_key_rsa error: {:X?}", e);
             })?;
         }
+        #[expect(
+            clippy::todo,
+            reason = "CG-023-unfinished-implementations: TODO(cg): DSA key-pair generation is not \
+                      implemented; the mbedtls backend provides no DSA key generation"
+        )]
         TEE_TYPE_DSA_KEYPAIR => {
             // mbedtls do not support DSA key generation
             todo!()
         }
+        #[expect(
+            clippy::todo,
+            reason = "CG-023-unfinished-implementations: TODO(cg): DH key-pair generation is not \
+                      implemented; the mbedtls backend provides no DH key generation"
+        )]
         TEE_TYPE_DH_KEYPAIR => {
             // mbedtls do not support DH key generation
             todo!()
@@ -2534,9 +2560,19 @@ pub fn syscall_obj_generate_key(
                 object_type,
             )?;
         }
+        #[expect(
+            clippy::todo,
+            reason = "CG-023-unfinished-implementations: TODO(cg): X25519 key-pair generation is \
+                      not implemented"
+        )]
         TEE_TYPE_X25519_KEYPAIR => {
             todo!()
         }
+        #[expect(
+            clippy::todo,
+            reason = "CG-023-unfinished-implementations: TODO(cg): X448 key-pair generation is \
+                      not implemented"
+        )]
         TEE_TYPE_X448_KEYPAIR => {
             todo!()
         }
@@ -2581,6 +2617,11 @@ fn long2byte(value: u64, ch: &mut [u8]) -> u32 {
 }
 
 #[cfg(unittest)]
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: unittest-only helper that \
+              rejects a value-attribute id passed as a reference attribute"
+)]
 pub(crate) fn tee_init_ref_attribute(
     attr: &mut utee_attribute,
     attribute_id: u32,
@@ -2596,7 +2637,7 @@ pub(crate) fn tee_init_ref_attribute(
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_svc_cryp {
+pub(super) mod tests_tee_svc_cryp {
     use unittest::{TestResult, assert, assert_eq};
     use zerocopy::IntoBytes;
 

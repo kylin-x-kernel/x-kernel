@@ -649,7 +649,7 @@ pub fn clone_private_object_pages_for_fork(
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::{ptr, slice};
 

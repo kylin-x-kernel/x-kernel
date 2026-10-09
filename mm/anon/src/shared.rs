@@ -143,7 +143,7 @@ impl AnonSharedObject {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
     use vmobj::{MappingViewKind, MappingViewSpec, VmObjectId};

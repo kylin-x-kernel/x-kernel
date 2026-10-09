@@ -239,3 +239,6 @@ tee_kernel = { workspace = true, optional = true }
 tee_task_iface = { workspace = true, optional = true }
 ktracing = { workspace = true, optional = true }
 kbpf = { workspace = true, optional = true }
+
+[lints]
+workspace = true

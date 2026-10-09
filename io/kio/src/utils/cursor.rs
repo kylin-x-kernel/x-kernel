@@ -248,12 +248,11 @@ fn reserve_and_pad(pos_mut: &mut u64, vec: &mut Vec<u8>, buf_len: usize) -> Resu
         // SAFETY: reserve above ensures capacity through pos. The exclusive
         // spare slice is only written, and zero-fill initializes the entire
         // gap before set_len exposes it.
-        unsafe {
-            spare
-                .get_unchecked_mut(..diff)
-                .fill(core::mem::MaybeUninit::new(0));
-            vec.set_len(pos);
-        }
+        let gap = unsafe { spare.get_unchecked_mut(..diff) };
+        gap.fill(core::mem::MaybeUninit::new(0));
+        // SAFETY: reserve established capacity through pos, and zero-filling
+        // gap initialized every byte that set_len will expose.
+        unsafe { vec.set_len(pos) };
     }
 
     Ok(pos)
@@ -271,7 +270,10 @@ unsafe fn vec_write_all_unchecked(pos: usize, vec: &mut Vec<u8>, buf: &[u8]) -> 
     debug_assert!(vec.capacity() >= pos + buf.len());
     // SAFETY: the caller guarantees `buf.len()` bytes of spare capacity at
     // `pos`, so the copy stays within the allocated vector buffer.
-    unsafe { vec.as_mut_ptr().add(pos).copy_from(buf.as_ptr(), buf.len()) };
+    let dst = unsafe { vec.as_mut_ptr().add(pos) };
+    // SAFETY: The caller guarantees buf.len() writable bytes at dst, no overlap
+    // with buf, and exclusive access to the live vector allocation.
+    unsafe { dst.copy_from(buf.as_ptr(), buf.len()) };
     pos + buf.len()
 }
 
@@ -292,12 +294,12 @@ fn vec_write_all(pos_mut: &mut u64, vec: &mut Vec<u8>, buf: &[u8]) -> Result<usi
     // SAFETY: reserve_and_pad establishes capacity and initializes any gap
     // up to pos. The input does not alias the exclusively borrowed vector.
     // The copy initializes the remaining bytes before the length is extended.
-    unsafe {
-        pos = vec_write_all_unchecked(pos, vec, buf);
-        if pos > vec.len() {
-            vec.set_len(pos);
-        }
-    };
+    pos = unsafe { vec_write_all_unchecked(pos, vec, buf) };
+    if pos > vec.len() {
+        // SAFETY: reserve_and_pad initialized the gap and the copy initialized
+        // the tail through pos, all within the reserved allocation.
+        unsafe { vec.set_len(pos) };
+    }
 
     *pos_mut += buf_len as u64;
     Ok(buf_len)

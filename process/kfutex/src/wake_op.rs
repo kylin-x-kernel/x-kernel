@@ -114,7 +114,7 @@ fn sign_extend_12(value: u32) -> i32 {
     ((value << 20) as i32) >> 20
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use linux_raw_sys::general::{
         FUTEX_OP_ADD, FUTEX_OP_CMP_EQ, FUTEX_OP_CMP_LT, FUTEX_OP_OPARG_SHIFT, FUTEX_OP_XOR,

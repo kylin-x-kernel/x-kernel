@@ -20,7 +20,7 @@ const PLIC_MMIO_SIZE: usize = 0x0400_0000;
 const PLIC_IOMAP_NAME: &str = "plic";
 pub const PLIC_DOMAIN: kirq::IrqDomainId = kirq::PLIC_ROOT_DOMAIN;
 pub const INTC_IRQ_BASE: usize = 1 << (usize::BITS - 1);
-#[allow(unused)]
+
 pub const S_SOFT: usize = INTC_IRQ_BASE + 1;
 pub const S_TIMER: usize = INTC_IRQ_BASE + 5;
 pub const S_EXT: usize = INTC_IRQ_BASE + 9;
@@ -35,6 +35,11 @@ pub const fn plic_irq_desc(hwirq: usize) -> kirq::IrqDesc {
 }
 
 fn plic() -> &'static SpinNoIrq<Plic> {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Primary interrupt initialization installs \
+                  the permanent PLIC before per-CPU setup or interrupt dispatch"
+    )]
     PLIC.get().expect("PLIC is not initialized")
 }
 
@@ -57,8 +62,19 @@ fn plic_region_from_device_tree() -> Option<(PhysAddr, usize)> {
 pub fn init_primary() {
     let (paddr, size) = plic_region_from_device_tree()
         .unwrap_or((PhysAddr::from_usize(PLIC_PADDR), PLIC_MMIO_SIZE));
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PLIC register window \
+                  cannot be mapped; interrupt-controller initialization has no error return or \
+                  recovery"
+    )]
     let plic_base = iomap_device(paddr, size, PLIC_IOMAP_NAME)
         .unwrap_or_else(|err| panic!("failed to iomap PLIC: {err:?}"));
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: iomap_device succeeded and returned the \
+                  live non-null PLIC MMIO mapping"
+    )]
     // SAFETY: `plic_base` comes from a successful `iomap_device` of the PLIC
     // MMIO window, so the pointer is non-null and references the live register
     // block for the duration of the driver.
@@ -68,6 +84,11 @@ pub fn init_primary() {
 
 fn this_context() -> usize {
     let logical_cpu_id = this_cpu_id();
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: The current CPU's logical id was assigned \
+                  from the present-CPU map at entry, so it has a raw hart id"
+    )]
     let hart_id = raw_cpu_id(logical_cpu_id)
         .unwrap_or_else(|| {
             panic!(
@@ -95,13 +116,14 @@ pub fn init_current_cpu_context() {
 }
 
 pub fn init_percpu() {
-    // SAFETY: these CSR writes only affect interrupt-enable bits on the
-    // current hart during local interrupt-controller initialization.
-    unsafe {
-        sie::set_ssoft();
-        sie::set_stimer();
-        sie::set_sext();
-    }
+    // SAFETY: Local interrupt initialization runs in supervisor mode; SSIE belongs to this hart.
+    unsafe { sie::set_ssoft() };
+    // SAFETY: The current hart owns its supervisor timer-enable CSR bit during local
+    // initialization.
+    unsafe { sie::set_stimer() };
+    // SAFETY: The current hart owns its supervisor external-enable CSR bit during local
+    // initialization.
+    unsafe { sie::set_sext() };
     init_current_cpu_context();
 }
 
@@ -138,12 +160,14 @@ impl kirq::IntrManagerIf {
             @S_TIMER => {
                 // SAFETY: these CSR writes only toggle the current hart's
                 // supervisor-timer enable bit.
-                unsafe {
-                    if enabled {
-                        sie::set_stimer();
-                    } else {
-                        sie::clear_stimer();
-                    }
+                if enabled {
+                    // SAFETY: Running in supervisor mode; this changes only
+                    // the current hart's timer interrupt-enable bit.
+                    unsafe { sie::set_stimer() };
+                } else {
+                    // SAFETY: Running in supervisor mode; this masks only the
+                    // current hart's supervisor timer interrupt.
+                    unsafe { sie::clear_stimer() };
                 }
             },
             @S_SOFT => {},
@@ -224,6 +248,12 @@ impl kirq::IntrManagerIf {
         match target {
             TargetCpu::Self_ => {
                 let logical_cpu_id = this_cpu_id();
+                #[expect(
+                    clippy::panic,
+                    reason = "CG-021-no-panic-on-reachable-failure: The current CPU's logical id \
+                              was assigned from the present-CPU map at entry, so it has a raw \
+                              hart id"
+                )]
                 let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
                     panic!(
                         "missing raw CPU id mapping for current logical CPU {}",
@@ -259,17 +289,17 @@ impl kirq::IntrManagerIf {
         }
     }
 
-    fn set_prio(_irq: usize, _priority: u8) {
+    fn set_prio(irq: usize, priority: u8) {
         with_cause!(
-            _irq,
+            irq,
             @S_TIMER => {},
             @S_SOFT => {},
             @S_EXT => {},
             @EX_IRQ => {
-                let Some(irq) = NonZeroU32::new(_irq as _) else {
+                let Some(irq) = NonZeroU32::new(irq as _) else {
                     return;
                 };
-                plic().lock().set_priority(irq, _priority.into());
+                plic().lock().set_priority(irq, priority.into());
             }
         );
     }

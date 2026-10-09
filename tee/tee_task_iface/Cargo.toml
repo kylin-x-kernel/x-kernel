@@ -42,3 +42,6 @@ ksync = { workspace = true, optional = true }
 klazy = { workspace = true, optional = true }
 tasign = { workspace = true, optional = true, features = ["kernel-verify"] }
 tee_raw_sys.workspace = true
+
+[lints]
+workspace = true

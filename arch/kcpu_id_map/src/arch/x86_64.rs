@@ -5,7 +5,7 @@
 use crate::cpu_id::{RawCpuId, cpu_map_initialized, load_cpu_id_map_from_madt};
 
 #[inline]
-pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
+pub(crate) const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
     raw_cpu_id
 }
 

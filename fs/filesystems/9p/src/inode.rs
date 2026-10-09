@@ -404,7 +404,7 @@ impl InodeDirOperations for V9fsInode {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::boxed::Box;
     use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};

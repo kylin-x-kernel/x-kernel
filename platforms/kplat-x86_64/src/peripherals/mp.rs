@@ -14,6 +14,13 @@ use x86_apic as apic;
 
 use crate::peripherals::bootmem::ap_trampoline_page_paddr;
 
+/// # Safety
+///
+/// The reserved AP trampoline page must be mapped writable and exclusively
+/// owned while copying and patching; no AP may still execute or read it.
+/// The linker symbols must delimit the trampoline image and its in-bounds
+/// patch slots. `stack_top` must be the aligned top of a live AP stack
+/// reachable through the AP bootstrap mappings until it leaves that stack.
 unsafe fn setup_startup_page(stack_top: PhysAddr) {
     unsafe extern "C" {
         fn ap_entry32();
@@ -56,16 +63,15 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
     // SAFETY: both patch offsets are computed from symbols inside the copied AP
     // trampoline image, so the writes land within `start_page` at the expected
     // unaligned u32 patch slots.
-    unsafe {
-        start_page_ptr
-            .add(protected_entry_off)
-            .cast::<u32>()
-            .write_unaligned(protected_entry as u32);
-        start_page_ptr
-            .add(gdt_base_off)
-            .cast::<u32>()
-            .write_unaligned(gdt_base as u32);
-    }
+    let entry_slot = unsafe { start_page_ptr.add(protected_entry_off).cast::<u32>() };
+    // SAFETY: The linker-defined entry patch reserves four writable bytes in
+    // the exclusively owned trampoline page; unaligned access matches its layout.
+    unsafe { entry_slot.write_unaligned(protected_entry as u32) };
+    // SAFETY: gdt_base_off comes from a symbol inside the copied trampoline image.
+    let gdt_slot = unsafe { start_page_ptr.add(gdt_base_off).cast::<u32>() };
+    // SAFETY: The GDT patch likewise reserves four writable, possibly unaligned
+    // bytes in the exclusively owned trampoline page.
+    unsafe { gdt_slot.write_unaligned(gdt_base as u32) };
 
     start_page[PAGE_SIZE_4K - 16..PAGE_SIZE_4K - 8]
         .copy_from_slice(&(stack_top.as_usize() as u64).to_le_bytes());
@@ -74,7 +80,7 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
 }
 
 /// Starts a secondary CPU with the given raw APIC ID and stack.
-pub fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
+pub(crate) fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
     // SAFETY: the caller passes the stack top for the target AP, and this helper
     // prepares the reserved trampoline page before any SIPI is sent.
     unsafe { setup_startup_page(stack_top) };

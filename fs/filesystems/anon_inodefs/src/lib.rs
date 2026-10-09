@@ -58,6 +58,11 @@ impl AnonInodeFs {
     ///
     /// Panics when boot has not called [`init_anon_inodefs`].
     pub fn global() -> &'static Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Boot installs the permanent pseudo \
+                      filesystem before any anonymous-file or pipe creation"
+        )]
         ANON_INODE_FS
             .get()
             .expect("anonymous inode filesystem must be initialized before use")
@@ -164,7 +169,7 @@ impl DentryOperations for AnonInodeDentryOperations {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

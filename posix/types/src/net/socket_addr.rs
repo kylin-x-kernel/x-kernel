@@ -16,7 +16,6 @@ unsafe impl UserRead for sockaddr_in {}
 unsafe impl UserRead for sockaddr_in6 {}
 
 /// Linux netlink socket address; semantic validation belongs to the network adapter.
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Copy, Clone, UserRead)]
 pub struct sockaddr_nl {
@@ -33,7 +32,6 @@ pub struct sockaddr_nl {
 // This type should be provided by `linux_raw_sys` but it's missing.
 // See <https://github.com/sunfishcode/linux-raw-sys/issues/169>.
 /// Linux virtual socket address with explicit reserved bytes.
-#[allow(non_camel_case_types)]
 #[repr(C)]
 #[derive(Copy, Clone, UserRead)]
 pub struct sockaddr_vm {

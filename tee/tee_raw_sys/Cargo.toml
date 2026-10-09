@@ -23,3 +23,6 @@ reason = "Rust FFI bindings for GlobalPlatform TEE standard API. Type definition
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
 posix-types.workspace = true
+
+[lints]
+workspace = true

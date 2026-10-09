@@ -18,7 +18,7 @@ mod mmap;
 
 pub use self::{brk::*, memfd::*, mincore::*, mmap::*};
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use khal::paging::{MappingFlags, PageSize};
     use linux_raw_sys::general::*;

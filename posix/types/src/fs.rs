@@ -19,7 +19,6 @@ use crate::{UserRead, UserWrite};
 /// caller's bytes in them, as Linux does when it writes the lock back.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, UserRead, UserWrite)]
-#[allow(non_camel_case_types)]
 pub struct k_flock64 {
     /// Lock type: `F_RDLCK`, `F_WRLCK`, or `F_UNLCK`.
     pub l_type: i16,

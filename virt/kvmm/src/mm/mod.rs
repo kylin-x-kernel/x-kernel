@@ -117,9 +117,9 @@ pub(crate) unsafe fn free_pt_page(pa: u64) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestPerm {
     /// Normal cacheable read/write (RAM).
-    RamRW,
+    RamRw,
     /// Device memory read/write (MMIO regions).
-    DeviceRW,
+    DeviceRw,
 }
 
 /// Second-stage address translation (GPA → HPA).

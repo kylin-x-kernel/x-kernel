@@ -24,3 +24,6 @@ filemap = { workspace = true }
 posix-types = { workspace = true }
 bitflags = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

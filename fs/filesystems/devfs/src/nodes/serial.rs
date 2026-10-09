@@ -30,12 +30,12 @@ const SERIAL_MAJOR: u32 = 4;
 /// `/dev/serialN` backing for one per-instance UART. Wraps the driver-model
 /// `ClassDevice<CharDeviceImpl>` and adapts its offset-less `CharDevice` API
 /// to the `DeviceFileOps` the VFS expects.
-pub struct SerialDev {
+pub(crate) struct SerialDev {
     device: ClassDevice<CharDeviceImpl>,
 }
 
 impl SerialDev {
-    pub fn new(device: ClassDevice<CharDeviceImpl>) -> Self {
+    pub(crate) fn new(device: ClassDevice<CharDeviceImpl>) -> Self {
         Self { device }
     }
 }
@@ -84,7 +84,7 @@ fn map_err(err: DriverError) -> KError {
 /// after devfs is mounted will not appear. On the current boot flow the
 /// serial driver probes during early bus enumeration, before devfs mount, so
 /// the auxiliary UARTs are present.
-pub fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
+pub(crate) fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
     let mut serials = DirMapping::new();
     let stdout_id = stdout_console_id();
     let mut idx = 0u32;

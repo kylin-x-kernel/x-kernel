@@ -130,6 +130,11 @@ impl<T, F: FnOnce() -> T> Lazy<T, F> {
     /// assert_eq!(Lazy::force(&lazy), &92);
     /// assert_eq!(&*lazy, &92);
     /// ```
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: A previous initializer panicked and left \
+                  no value; like std's poisoned Once and LazyLock, the value can never be produced"
+    )]
     pub fn force(this: &Self) -> &T {
         // Ensure single initialization through once-cell mechanism
         this.value_storage.call_once(|| {

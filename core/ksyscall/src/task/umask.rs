@@ -7,7 +7,7 @@
 use kerrno::KResult;
 
 /// Sets the process umask and returns the previous value.
-pub fn sys_umask(mask: u32) -> KResult<isize> {
+pub(crate) fn sys_umask(mask: u32) -> KResult<isize> {
     let old = kprocess::current_user_process().replace_umask(mask)?;
     Ok(old as isize)
 }

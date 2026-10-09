@@ -81,6 +81,12 @@ impl PartitionDispatchState {
         let needs_requeue = match self {
             Self::Inspecting => remainder == SourceRemainder::More,
             Self::InspectingNotified => true,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: Callers finish only a turn \
+                          started by begin_inspection, and notices or detach keep that turn in an \
+                          inspecting state"
+            )]
             _ => panic!("source has no selection to finish"),
         };
         *self = if needs_requeue {

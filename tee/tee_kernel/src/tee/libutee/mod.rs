@@ -2,5 +2,5 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-pub mod tee_api_objects;
-pub mod utee_defines;
+pub(super) mod tee_api_objects;
+pub(super) mod utee_defines;

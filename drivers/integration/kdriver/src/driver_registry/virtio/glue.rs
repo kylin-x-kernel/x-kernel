@@ -13,10 +13,10 @@ use virtio::{BufferDirection, PhysAddr, VirtIoHal};
 
 cfg_if! {
     if #[cfg(feature = "virtio-net")] {
-        pub struct VirtIoNet;
+        pub(super) struct VirtIoNet;
 
         impl VirtIoNet {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::NetDeviceImpl> {
@@ -32,10 +32,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-gpu")] {
-        pub struct VirtIoGpu;
+        pub(super) struct VirtIoGpu;
 
         impl VirtIoGpu {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::DisplayDeviceImpl> {
@@ -49,10 +49,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-socket")] {
-        pub struct VirtIoSocket;
+        pub(super) struct VirtIoSocket;
 
         impl VirtIoSocket {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::VsockDeviceImpl> {
@@ -67,10 +67,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-9p")] {
-        pub struct VirtIo9p;
+        pub(super) struct VirtIo9p;
 
         impl VirtIo9p {
-            pub fn try_new<T: virtio::Transport + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + 'static>(
                 transport: T,
                 _irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::Virtio9pDeviceImpl> {
@@ -84,10 +84,10 @@ cfg_if! {
 
 cfg_if! {
     if #[cfg(feature = "virtio-rng")] {
-        pub struct VirtIoRng;
+        pub(super) struct VirtIoRng;
 
         impl VirtIoRng {
-            pub fn try_new<T: virtio::Transport + Send + 'static>(
+            pub(super) fn try_new<T: virtio::Transport + Send + 'static>(
                 transport: T,
                 irq: Option<usize>,
             ) -> DriverResult<kclass::prelude::HwrngDeviceImpl> {
@@ -105,7 +105,7 @@ cfg_if! {
 }
 
 use memaddr::PAGE_SIZE_4K;
-pub struct VirtIoHalImpl;
+pub(super) struct VirtIoHalImpl;
 
 // SAFETY: `VirtIoHal` requires that DMA buffers handed to the device are
 // valid for the device's view of memory and stay alive until `dma_dealloc`
@@ -154,6 +154,12 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
                 // and returned via `dma_dealloc`. We deliberately do NOT wrap it
                 // in `DmaCoherent` (whose Drop would free it on return).
                 let paddr = alloc.bus_addr as PhysAddr;
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: The resource-provider \
+                              contract guarantees a non-null CPU address on successful DMA \
+                              allocation or MMIO mapping"
+                )]
                 let ptr = NonNull::new(cpu_ptr).expect("dma allocation stored a null CPU address");
                 (paddr, ptr)
             }
@@ -164,7 +170,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         }
     }
 
-    #[allow(unused_variables)]
     unsafe fn dma_dealloc(
         paddr: PhysAddr,
         vaddr: NonNull<u8>,
@@ -187,8 +192,25 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
             size,
         };
         match crate::resource::resource_provider().map_mmio(region, "virtio-hal") {
-            Ok(m) => NonNull::new(m.vaddr as *mut u8)
-                .expect("virtio mmio mapping stored a null virtual address"),
+            Ok(m) =>
+            {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: The resource-provider \
+                              contract guarantees a non-null CPU address on successful DMA \
+                              allocation or MMIO mapping"
+                )]
+                NonNull::new(m.vaddr as *mut u8)
+                    .expect("virtio mmio mapping stored a null virtual address")
+            }
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): map_mmio can fail with \
+                          NoMemory, InvalidResource or MappingFailed during a fallible PCI probe, \
+                          but this VirtIO HAL callback can only return a pointer; pre-map the \
+                          MMIO regions before constructing the transport and fail the probe on \
+                          mapping errors"
+            )]
             Err(err) => {
                 log::error!(
                     "virtio mmio_phys_to_virt failed: paddr={:#x}, size={:#x}, err={:?}",
@@ -201,7 +223,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
         }
     }
 
-    #[allow(unused_variables)]
     #[inline]
     unsafe fn share(
         buffer: NonNull<[u8]>,
@@ -218,7 +239,6 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     }
 
     #[inline]
-    #[allow(unused_variables)]
     unsafe fn unshare(
         paddr: PhysAddr,
         buffer: NonNull<[u8]>,
@@ -244,7 +264,7 @@ unsafe impl VirtIoHal for VirtIoHalImpl {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::ptr::NonNull;
 

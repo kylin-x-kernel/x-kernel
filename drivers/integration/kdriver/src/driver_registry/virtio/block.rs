@@ -34,7 +34,19 @@ impl<H: VirtIoHal, T: Transport> Drop for BlockActivation<H, T> {
     fn drop(&mut self) {
         // Prepare on the removing task, not the original probe task. No
         // recoverable failure may let device-core continue tearing down live DMA.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Device removal runs in sleepable task \
+                      context; each newly created completion has a fresh ID and four inline \
+                      waiter slots"
+        )]
         let mut drain = block_completion::prepare_block_wait().expect("block close task context");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Device removal runs in sleepable task \
+                      context; each newly created completion has a fresh ID and four inline \
+                      waiter slots"
+        )]
         let mut stop = block_completion::prepare_block_wait().expect("block close task context");
         self.device.begin_close(drain.signals());
         if let Some(disk) = &self.disk {

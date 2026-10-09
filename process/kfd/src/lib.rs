@@ -32,7 +32,7 @@ pub use self::{
     stat::Kstat,
 };
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};

@@ -15,7 +15,7 @@ use crate::{
 };
 
 /// Expands an interface trait into a facade type with direct call methods.
-pub fn interface(interface: ItemTrait, args: InterfaceArgs) -> Result<TokenStream, Error> {
+pub(crate) fn interface(interface: ItemTrait, args: InterfaceArgs) -> Result<TokenStream, Error> {
     if !interface.generics.params.is_empty() {
         return Err(crate::errors::generic_not_allowed_error(
             &interface.generics,

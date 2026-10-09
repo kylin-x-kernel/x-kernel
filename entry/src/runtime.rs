@@ -5,7 +5,7 @@
 //! Entry-side runtime orchestration and unittest glue.
 
 /// Initialize entry-owned runtime services.
-pub fn init_runtime() {
+pub(crate) fn init_runtime() {
     info!("Initialize alarm...");
     kprocess::init_timer_runtime();
 }
@@ -24,10 +24,10 @@ mod unittest_runtime {
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     fn init_unittest_tee_context(_: &Thread) {}
 
-    pub fn register_unittest_runtime() {
+    pub(crate) fn register_unittest_runtime() {
         unittest_support::register_unittest_runtime(init_unittest_tee_context);
     }
 }
 
 #[cfg(feature = "unittest")]
-pub use unittest_runtime::register_unittest_runtime;
+pub(crate) use unittest_runtime::register_unittest_runtime;

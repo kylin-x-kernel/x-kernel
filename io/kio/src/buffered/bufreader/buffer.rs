@@ -21,7 +21,7 @@ use heapless::Vec;
 use crate::DEFAULT_BUF_SIZE;
 use crate::{Read, Result};
 
-pub struct Buffer {
+pub(super) struct Buffer {
     // The buffer.
     #[cfg(feature = "alloc")]
     buf: Box<[MaybeUninit<u8>]>,
@@ -52,7 +52,7 @@ impl Buffer {
     /// With `alloc`, panics on allocation size overflow; allocation failure follows
     /// the allocator's failure policy.
     #[inline]
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
         #[cfg(feature = "alloc")]
         let buf = Box::new_uninit_slice(capacity);
         #[cfg(not(feature = "alloc"))]
@@ -75,53 +75,52 @@ impl Buffer {
 
     /// Returns the initialized, unread bytes without reading from the underlying source.
     #[inline]
-    pub fn buffer(&self) -> &[u8] {
+    pub(super) fn buffer(&self) -> &[u8] {
         // SAFETY: the buffer invariant is pos <= filled <= capacity, with all
         // bytes below filled initialized. The shared borrow prevents mutation
         // for the lifetime of the returned slice.
-        unsafe {
-            self.buf
-                .get_unchecked(self.pos..self.filled)
-                .assume_init_ref()
-        }
+        let unread = unsafe { self.buf.get_unchecked(self.pos..self.filled) };
+        // SAFETY: fill_buf initializes all bytes below filled, including unread;
+        // the shared borrow keeps them unchanged for the returned lifetime.
+        unsafe { unread.assume_init_ref() }
     }
 
     #[inline]
-    pub fn capacity(&self) -> usize {
+    pub(super) fn capacity(&self) -> usize {
         self.buf.len()
     }
 
     #[inline]
-    pub fn filled(&self) -> usize {
+    pub(super) fn filled(&self) -> usize {
         self.filled
     }
 
     #[inline]
-    pub fn pos(&self) -> usize {
+    pub(super) fn pos(&self) -> usize {
         self.pos
     }
 
     #[cfg(borrowedbuf_init)]
     #[inline]
-    pub fn initialized(&self) -> usize {
+    pub(super) fn initialized(&self) -> usize {
         self.initialized
     }
 
     #[inline]
-    pub fn discard_buffer(&mut self) {
+    pub(super) fn discard_buffer(&mut self) {
         self.pos = 0;
         self.filled = 0;
     }
 
     #[inline]
-    pub fn consume(&mut self, amt: usize) {
+    pub(super) fn consume(&mut self, amt: usize) {
         self.pos = cmp::min(self.pos + amt, self.filled);
     }
 
     /// If there are `amt` bytes available in the buffer, pass a slice containing those bytes to
     /// `visitor` and return true. If there are not enough bytes available, return false.
     #[inline]
-    pub fn consume_with<V>(&mut self, amt: usize, mut visitor: V) -> bool
+    pub(super) fn consume_with<V>(&mut self, amt: usize, mut visitor: V) -> bool
     where
         V: FnMut(&[u8]),
     {
@@ -136,12 +135,12 @@ impl Buffer {
     }
 
     #[inline]
-    pub fn unconsume(&mut self, amt: usize) {
+    pub(super) fn unconsume(&mut self, amt: usize) {
         self.pos = self.pos.saturating_sub(amt);
     }
 
     /// Read more bytes into the buffer without discarding any of its contents
-    pub fn read_more(&mut self, mut reader: impl Read) -> Result<usize> {
+    pub(super) fn read_more(&mut self, mut reader: impl Read) -> Result<usize> {
         let mut buf = BorrowedBuf::from(&mut self.buf[self.filled..]);
         #[cfg(borrowedbuf_init)]
         let old_init = self.initialized - self.filled;
@@ -162,7 +161,7 @@ impl Buffer {
     }
 
     /// Remove bytes that have already been read from the buffer.
-    pub fn backshift(&mut self) {
+    pub(super) fn backshift(&mut self) {
         self.buf.copy_within(self.pos.., 0);
         self.filled -= self.pos;
         self.pos = 0;
@@ -183,7 +182,7 @@ impl Buffer {
     /// With debug assertions enabled, panics if the internal read position exceeds
     /// the filled length, violating the buffer invariant.
     #[inline]
-    pub fn fill_buf(&mut self, mut reader: impl Read) -> Result<&[u8]> {
+    pub(super) fn fill_buf(&mut self, mut reader: impl Read) -> Result<&[u8]> {
         // If we've reached the end of our internal buffer then we need to fetch
         // some more data from the reader.
         // Branch using `>=` instead of the more correct `==`

@@ -94,7 +94,17 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
             return false;
         }
     };
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded and \
+                  assigned this descriptor a logical IRQ"
+    )]
     let virq = desc.logical_irq().unwrap();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed this \
+                  descriptor in the same exclusively borrowed registry"
+    )]
     let entry = state
         .descs
         .get_mut(&virq)

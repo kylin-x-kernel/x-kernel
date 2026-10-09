@@ -24,10 +24,10 @@ fn fifo_and_reuse() {
     for _ in 0..64 {
         // SAFETY: both pinned nodes outlive the list; all accesses are shared
         // and list/link mutations are serialized in this test until drained.
-        unsafe {
-            assert!(pending.push_back(NonNull::from(&*first)));
-            assert!(pending.push_back(NonNull::from(&*second)));
-        }
+        assert!(unsafe { pending.push_back(NonNull::from(&*first)) });
+        // SAFETY: both pinned nodes outlive the list; all accesses are shared
+        // and list/link mutations are serialized in this test until drained.
+        assert!(unsafe { pending.push_back(NonNull::from(&*second)) });
         assert_eq!(
             pending.pop_first_matching(|_| true),
             Some(NonNull::from(&*first))
@@ -55,10 +55,10 @@ fn skipped_nodes_keep_fifo_position() {
     let mut pending = PendingList::new();
     // SAFETY: stable pinned storage outlives the drained list, with only shared
     // node access and serialized linkage operations.
-    unsafe {
-        assert!(pending.push_back(NonNull::from(&*first)));
-        assert!(pending.push_back(NonNull::from(&*second)));
-    }
+    assert!(unsafe { pending.push_back(NonNull::from(&*first)) });
+    // SAFETY: stable pinned storage outlives the drained list, with only shared
+    // node access and serialized linkage operations.
+    assert!(unsafe { pending.push_back(NonNull::from(&*second)) });
     assert!(pending.pop_first_matching(|_| false).is_none());
     let second_address = NonNull::from(&*second);
     assert_eq!(
@@ -90,18 +90,30 @@ fn direct_removal_and_duplicate_rejection() {
     let last = pin!(PendingNode::new());
     let mut pending = PendingList::new();
     let mut other = PendingList::new();
-    // SAFETY: nodes stay pinned/alive beyond both lists. Operations on both
-    // lists are serialized; removal targets a known member of pending only.
-    unsafe {
-        assert!(pending.push_back(NonNull::from(&*first)));
-        assert!(pending.push_back(NonNull::from(&*middle)));
-        assert!(pending.push_back(NonNull::from(&*last)));
-        assert!(!pending.push_back(NonNull::from(&*middle)));
-        assert!(!other.push_back(NonNull::from(&*middle)));
-        assert!(pending.remove(&middle));
-        assert!(!pending.remove(&middle));
-        assert!(other.push_back(NonNull::from(&*middle)));
-    }
+    // SAFETY: first stays pinned until both lists are drained; this test serializes all link
+    // accesses.
+    assert!(unsafe { pending.push_back(NonNull::from(&*first)) });
+    // SAFETY: middle stays pinned until both lists are drained; this test serializes all link
+    // accesses.
+    assert!(unsafe { pending.push_back(NonNull::from(&*middle)) });
+    // SAFETY: last stays pinned until both lists are drained; this test serializes all link
+    // accesses.
+    assert!(unsafe { pending.push_back(NonNull::from(&*last)) });
+    // SAFETY: middle is still live and pinned in pending; duplicate checking is serialized with
+    // both lists.
+    assert!(!unsafe { pending.push_back(NonNull::from(&*middle)) });
+    // SAFETY: middle is still live and pinned; both lists are serialized, so its linked bit rejects
+    // this duplicate.
+    assert!(!unsafe { other.push_back(NonNull::from(&*middle)) });
+    // SAFETY: middle was inserted into pending above and has not moved; this test is its sole
+    // accessor.
+    assert!(unsafe { pending.remove(&middle) });
+    // SAFETY: The preceding removal left middle unlinked and live; no concurrent link operation
+    // occurs.
+    assert!(!unsafe { pending.remove(&middle) });
+    // SAFETY: middle is now unlinked and stays pinned until other is drained; all accesses remain
+    // serialized.
+    assert!(unsafe { other.push_back(NonNull::from(&*middle)) });
     assert_eq!(
         pending.pop_first_matching(|_| true),
         Some(NonNull::from(&*first))

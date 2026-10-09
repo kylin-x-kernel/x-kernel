@@ -2,6 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): this crate only constructs kernel \
+              test fixtures; fixture and cleanup failures must fail the test"
+)]
 #![no_std]
 
 extern crate alloc;
@@ -319,10 +324,10 @@ impl<T, const N: usize> TestUserArray<T, N> {
 
 impl Drop for TestUserBuffer {
     fn drop(&mut self) {
-        let _ = self
-            .aspace
+        self.aspace
             .lock()
-            .unmap(VirtAddr::from_usize(self.user_addr), self.mapped_size);
+            .unmap(VirtAddr::from_usize(self.user_addr), self.mapped_size)
+            .expect("test buffer mapping must remain owned until teardown");
         kalloc::global_allocator().dealloc_pages(
             self.kernel_va,
             self.num_pages,

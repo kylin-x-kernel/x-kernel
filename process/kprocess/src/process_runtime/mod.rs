@@ -199,7 +199,6 @@ impl Drop for AttachedForkProcess {
 
 impl ProcessRuntime {
     /// Creates a new [`ProcessRuntime`].
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         process: Arc<Process>,
         exe_path: String,
@@ -223,7 +222,12 @@ impl ProcessRuntime {
     }
 
     /// Creates a new [`ProcessRuntime`] with an explicit [`NsProxy`].
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one process \
+                  runtime from its executable, address space, descriptor table and namespace \
+                  owners"
+    )]
     pub(crate) fn new_with_nsproxy(
         process: Arc<Process>,
         exe_path: String,
@@ -248,7 +252,12 @@ impl ProcessRuntime {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Construct one process \
+                  runtime from its executable, address space, descriptor table and namespace \
+                  owners"
+    )]
     fn new_with_nsproxy_and_mm_user(
         process: Arc<Process>,
         exe_path: String,
@@ -284,30 +293,30 @@ impl ProcessRuntime {
     }
 
     /// Returns the stable process identity that owns this runtime.
-    pub fn process(&self) -> &Arc<Process> {
+    pub(crate) fn process(&self) -> &Arc<Process> {
         &self.process
     }
 
     /// Returns the process-owned resource state.
-    pub fn resources(&self) -> &Arc<ProcessResources> {
+    pub(crate) fn resources(&self) -> &Arc<ProcessResources> {
         &self.resources
     }
 
     /// Returns the live process signal manager.
-    pub fn signal_manager(&self) -> &Arc<ProcessSignalManager> {
+    pub(crate) fn signal_manager(&self) -> &Arc<ProcessSignalManager> {
         &self.signal_manager
     }
 
     /// Runs a closure with mutable access to the process-shared TEE TA context.
     #[cfg(feature = "tee")]
-    pub fn with_tee_ta_ctx_mut<R>(&self, f: impl FnOnce(&mut TeeTaCtx) -> R) -> R {
+    pub(crate) fn with_tee_ta_ctx_mut<R>(&self, f: impl FnOnce(&mut TeeTaCtx) -> R) -> R {
         let mut tee_ta_ctx = self.tee_ta_ctx.write();
         f(&mut tee_ta_ctx)
     }
 
     /// Runs a closure with immutable access to the process-shared TEE TA context.
     #[cfg(feature = "tee")]
-    pub fn with_tee_ta_ctx<R>(&self, f: impl FnOnce(&TeeTaCtx) -> R) -> R {
+    pub(crate) fn with_tee_ta_ctx<R>(&self, f: impl FnOnce(&TeeTaCtx) -> R) -> R {
         let tee_ta_ctx = self.tee_ta_ctx.read();
         f(&tee_ta_ctx)
     }
@@ -324,27 +333,27 @@ impl ProcessRuntime {
     }
 
     /// Returns the executable path.
-    pub fn exe_path(&self) -> String {
+    pub(crate) fn exe_path(&self) -> String {
         String::from(self.exec_metadata().exe_path())
     }
 
     /// Returns the command-line arguments.
-    pub fn cmdline(&self) -> Arc<Vec<String>> {
+    pub(crate) fn cmdline(&self) -> Arc<Vec<String>> {
         self.exec_metadata().cmdline().clone()
     }
 
     /// Returns the process OOM score adjustment.
-    pub fn oom_score_adj(&self) -> i32 {
+    pub(crate) fn oom_score_adj(&self) -> i32 {
         self.posix_state.oom_score_adj()
     }
 
     /// Sets the process OOM score adjustment.
-    pub fn set_oom_score_adj(&self, value: i32) {
+    pub(crate) fn set_oom_score_adj(&self, value: i32) {
         self.posix_state.set_oom_score_adj(value);
     }
 
     /// Updates the executable metadata snapshot after a successful exec.
-    pub fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
+    pub(crate) fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
         self.posix_state.set_exec_metadata(exe_path, cmdline);
     }
 
@@ -362,7 +371,7 @@ impl ProcessRuntime {
     }
 
     /// Returns the bound address-space identity used by private futex keys.
-    pub fn mm_id(&self) -> u64 {
+    pub(crate) fn mm_id(&self) -> u64 {
         self.runtime_state.mm_id()
     }
 
@@ -371,17 +380,17 @@ impl ProcessRuntime {
     }
 
     /// Returns the process-owned filesystem context while it remains attached.
-    pub fn fs_context(&self) -> Option<Arc<Mutex<FsStruct>>> {
+    pub(crate) fn fs_context(&self) -> Option<Arc<Mutex<FsStruct>>> {
         self.fs_context.read().clone()
     }
 
     /// Returns the namespace proxy while it remains attached.
-    pub fn nsproxy(&self) -> Option<Arc<NsProxy>> {
+    pub(crate) fn nsproxy(&self) -> Option<Arc<NsProxy>> {
         self.nsproxy.read().clone()
     }
 
     /// Returns the UTS namespace while the namespace proxy remains attached.
-    pub fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
+    pub(crate) fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
         self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
     }
 
@@ -396,12 +405,12 @@ impl ProcessRuntime {
     }
 
     /// Returns the top address of the user heap.
-    pub fn heap_top(&self) -> usize {
+    pub(crate) fn heap_top(&self) -> usize {
         self.runtime_state.heap_top()
     }
 
     /// Sets the top address of the user heap.
-    pub fn set_heap_top(&self, top: usize) {
+    pub(crate) fn set_heap_top(&self, top: usize) {
         self.runtime_state.set_heap_top(top);
     }
 
@@ -427,19 +436,19 @@ impl ProcessRuntime {
     }
 
     /// Records the CPU that currently owns this process mm residency.
-    pub fn set_mm_resident_cpu(&self, cpu_id: kcpu_id_map::LogicalCpuId) {
+    pub(crate) fn set_mm_resident_cpu(&self, cpu_id: kcpu_id_map::LogicalCpuId) {
         self.runtime_state.set_mm_resident_cpu(cpu_id);
     }
 
     /// Returns the hardware page-table root for this process.
     #[cfg(target_arch = "aarch64")]
-    pub fn page_table_hw_root(&self) -> karch::HwPageTableRoot {
+    pub(crate) fn page_table_hw_root(&self) -> karch::HwPageTableRoot {
         self.runtime_state.page_table_hw_root()
     }
 
     /// Clears the process-local TEE private state.
     #[cfg(feature = "tee")]
-    pub fn clear_tee_runtime_private(&self) {
+    pub(crate) fn clear_tee_runtime_private(&self) {
         *self.tee_runtime_private.write() = None;
     }
 
@@ -449,12 +458,12 @@ impl ProcessRuntime {
     /// `SIG_IGN` dispositions, resets caught handlers to `SIG_DFL`, and clears
     /// flags/masks/restorers for every action, including ignored ones.
     /// Returns `NoSuchProcess` after last-thread signal ownership cleanup.
-    pub fn reset_signal_actions(&self) -> KResult<()> {
+    pub(crate) fn reset_signal_actions(&self) -> KResult<()> {
         self.signal_manager.reset_actions_for_exec()
     }
 
     /// Clears all process POSIX timers.
-    pub fn clear_posix_timers(&self) {
+    pub(crate) fn clear_posix_timers(&self) {
         let mut manager = self.timer_manager().lock();
         manager.clear_posix_timers();
         self.set_cpu_timers_armed(manager.any_cpu_timer_armed());

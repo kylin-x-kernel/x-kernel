@@ -7,4 +7,4 @@
 mod eventfd;
 mod pipe;
 
-pub use self::{eventfd::*, pipe::*};
+pub(crate) use self::{eventfd::*, pipe::*};

@@ -32,6 +32,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 调用者负责在操作入口取得一个稳定 `Arc<Cred>`；`kvfs` 负责让整次路径遍历、最终检查
 和 namespace mutation 使用传入的同一对象。
 
+`CommandFile` 不信任 read callback 一定返回内容；`Ok(None)` 返回
+`VfsError::InvalidData`，而不是触发内核 panic。
+
 ## 外部边界 / 攻击面
 
 - `Filename::open_with_flags_at` 和 `dentry_open` 是保留 raw `O_*` 的兼容入口，会把

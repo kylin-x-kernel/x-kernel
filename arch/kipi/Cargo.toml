@@ -31,3 +31,6 @@ page_table = { workspace = true, features = ["smp"] }
 kcpu_slot.workspace = true
 unittest.workspace = true
 kbuild_config.workspace = true
+
+[lints]
+workspace = true

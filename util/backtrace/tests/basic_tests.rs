@@ -15,7 +15,6 @@
 mod test_stubs {
     #![allow(dead_code)]
     #![allow(non_upper_case_globals)]
-    #![allow(clippy::used_underscore_binding)]
 
     macro_rules! stub {
         ($name:ident) => {

@@ -152,7 +152,7 @@ fn do_select(
 
 /// Select file descriptors with microsecond timeout
 #[cfg(target_arch = "x86_64")]
-pub fn sys_select(
+pub(crate) fn sys_select(
     nfds: u32,
     readfds: UserPtr<FdSet>,
     writefds: UserPtr<FdSet>,
@@ -174,7 +174,7 @@ pub fn sys_select(
 }
 
 /// Select file descriptors with nanosecond timeout and signal masking
-pub fn sys_pselect6(
+pub(crate) fn sys_pselect6(
     nfds: u32,
     readfds: UserPtr<FdSet>,
     writefds: UserPtr<FdSet>,

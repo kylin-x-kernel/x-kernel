@@ -2,32 +2,26 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::{AuxType, ELFHeadersBuilder, ELFParser};
+use kernel_elf_parser::{AuxType, ElfHeadersBuilder, ElfParser};
 
 #[test]
 fn test_elf_parser() {
     // A simple elf file compiled by the x86_64-linux-musl-gcc.
-    let elf_bytes = include_bytes!("elf_static");
-    // Ensure the alignment of the byte array
-    let mut aligned_elf_bytes = unsafe {
-        let ptr = elf_bytes.as_ptr() as *mut u8;
-        std::slice::from_raw_parts_mut(ptr, elf_bytes.len())
-    }
-    .to_vec();
-    if aligned_elf_bytes.len() % 16 != 0 {
-        let padding = vec![0u8; 16 - aligned_elf_bytes.len() % 16];
-        aligned_elf_bytes.extend(padding);
-    }
+    // The parser borrows aligned ELF structures; padding the length alone
+    // does not establish pointer alignment.
+    #[repr(align(16))]
+    struct AlignedElf([u8; include_bytes!("elf_static").len()]);
+    let aligned_image = AlignedElf(*include_bytes!("elf_static"));
+    let aligned_elf_bytes = aligned_image.0.as_slice();
 
-    let builder =
-        ELFHeadersBuilder::new(aligned_elf_bytes.as_slice()).expect("Failed to parse ELF header");
+    let builder = ElfHeadersBuilder::new(aligned_elf_bytes).expect("Failed to parse ELF header");
     let range = builder.ph_range().expect("Invalid program-header range");
     let headers = builder
         .build(&aligned_elf_bytes[range.start as usize..range.end as usize])
         .expect("Failed to parse program headers");
 
     let interp_base = 0x1000;
-    let elf_parser = kernel_elf_parser::ELFParser::new(&headers, interp_base).unwrap();
+    let elf_parser = kernel_elf_parser::ElfParser::new(&headers, interp_base).unwrap();
     let base_addr = elf_parser.base();
     assert_eq!(base_addr, 0);
 
@@ -49,7 +43,7 @@ fn test_elf_parser() {
     test_ustack(&elf_parser);
 }
 
-fn test_ustack(elf_parser: &ELFParser) {
+fn test_ustack(elf_parser: &ElfParser) {
     let auxv = elf_parser.aux_vector(0x1000, None).collect::<Vec<_>>();
     // let phent = auxv.get(&AT_PHENT).unwrap();
     // assert_eq!(*phent, 56);
@@ -136,4 +130,34 @@ fn initial_stack_supports_empty_argv_and_terminates_auxv_last() {
         &stack_data[execfn_offset..execfn_offset + b"/bin/empty-argv\0".len()],
         b"/bin/empty-argv\0"
     );
+}
+
+#[test]
+fn parser_rejects_missing_or_overflowing_program_header_addresses() {
+    #[repr(align(8))]
+    struct AlignedElf([u8; include_bytes!("elf_static").len()]);
+    let image = AlignedElf(*include_bytes!("elf_static"));
+    let builder = ElfHeadersBuilder::new(&image.0).unwrap();
+    let range = builder.ph_range().unwrap();
+    let mut headers = builder
+        .build(&image.0[range.start as usize..range.end as usize])
+        .unwrap();
+    assert!(ElfParser::new(&headers, 0).is_ok());
+    let ph_offset = headers.header.pt2.ph_offset();
+    let header = headers
+        .ph
+        .iter_mut()
+        .find(|header| header.offset <= ph_offset && ph_offset - header.offset < header.file_size)
+        .unwrap();
+    header.offset = 0;
+    header.virtual_addr = u64::MAX;
+    assert!(matches!(
+        ElfParser::new(&headers, 0),
+        Err("program-header address overflows")
+    ));
+    headers.ph.clear();
+    assert!(matches!(
+        ElfParser::new(&headers, 0),
+        Err("program-header table is not covered by a segment")
+    ));
 }

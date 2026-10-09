@@ -20,6 +20,11 @@ impl BootHandler {
         ));
         irq_driver::riscv::init_primary();
         irq_driver::riscv::init_current_cpu_context();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: stdout configuration \
+                      cannot be parsed; early_driver_init has no error return or recovery"
+        )]
         console_driver::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
         if let Some(fdt) = of::fdt() {
@@ -28,6 +33,12 @@ impl BootHandler {
         console_driver::register_input_irq_handler();
         #[cfg(feature = "rtc")]
         {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the device-tree RTC \
+                          cannot supply the startup wall clock; early_driver_init has no error \
+                          return or recovery"
+            )]
             let sample =
                 rtc_driver::read_from_device_tree().expect("failed to read rtc from device tree");
             ktime::initialize_realtime(sample);

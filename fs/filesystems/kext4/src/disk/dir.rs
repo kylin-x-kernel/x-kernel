@@ -255,7 +255,7 @@ impl HTreeEntry {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use unittest::{assert_eq, def_test};
 

@@ -18,7 +18,7 @@ use osvm::VirtMutPtr;
 use super::ProcessSignalManager;
 use crate::{
     DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalOSAction, SignalSet, SignalStack, Signo,
+    SignalInfo, SignalOsAction, SignalSet, SignalStack, Signo,
     api::{SignalDequeueAction, notify_signal_dequeued},
     arch::{self, UContext},
 };
@@ -120,13 +120,13 @@ impl ThreadSignalManager {
     /// signal rewrites `uctx` to enter the user handler on a freshly built
     /// signal frame (`ucontext` + `siginfo` + restorable state) written to
     /// user memory, applies the handler mask and
-    /// `SA_RESETHAND`, and returns [`SignalOSAction::Handler`].
+    /// `SA_RESETHAND`, and returns [`SignalOsAction::Handler`].
     ///
     /// # Returns
     ///
     /// `None` when the signal needs no OS action (ignored or default-ignore),
     /// otherwise the action the caller must perform. A user-memory write
-    /// failure is reported as [`SignalOSAction::CoreDump`] instead of an
+    /// failure is reported as [`SignalOsAction::CoreDump`] instead of an
     /// error so the fatal path stays uniform.
     pub fn handle_signal(
         &self,
@@ -134,16 +134,16 @@ impl ThreadSignalManager {
         restore_blocked: SignalSet,
         sig: &SignalInfo,
         action: &SignalAction,
-    ) -> Option<SignalOSAction> {
+    ) -> Option<SignalOsAction> {
         let signo = sig.signo();
         debug!("Handle signal: {signo:?}");
         match action.disposition {
             SignalDisposition::Default => match signo.default_action() {
-                DefaultSignalAction::Terminate => Some(SignalOSAction::Terminate),
-                DefaultSignalAction::CoreDump => Some(SignalOSAction::CoreDump),
-                DefaultSignalAction::Stop => Some(SignalOSAction::Stop),
+                DefaultSignalAction::Terminate => Some(SignalOsAction::Terminate),
+                DefaultSignalAction::CoreDump => Some(SignalOsAction::CoreDump),
+                DefaultSignalAction::Stop => Some(SignalOsAction::Stop),
                 DefaultSignalAction::Ignore => None,
-                DefaultSignalAction::Continue => Some(SignalOSAction::Continue),
+                DefaultSignalAction::Continue => Some(SignalOsAction::Continue),
             },
             SignalDisposition::Ignore => None,
             SignalDisposition::Handler(handler) => {
@@ -169,7 +169,7 @@ impl ThreadSignalManager {
                     })
                     .is_err()
                 {
-                    return Some(SignalOSAction::CoreDump);
+                    return Some(SignalOsAction::CoreDump);
                 }
 
                 uctx.set_ip(handler as usize);
@@ -185,7 +185,7 @@ impl ThreadSignalManager {
                 {
                     let new_sp = uctx.sp() - 8;
                     if (new_sp as *mut usize).write_vm(restorer).is_err() {
-                        return Some(SignalOSAction::CoreDump);
+                        return Some(SignalOsAction::CoreDump);
                     }
                     uctx.set_sp(new_sp);
                 }
@@ -203,7 +203,7 @@ impl ThreadSignalManager {
                         .ok()?;
                 }
                 *self.blocked.lock() |= add_blocked;
-                Some(SignalOSAction::Handler)
+                Some(SignalOsAction::Handler)
             }
         }
     }
@@ -213,7 +213,7 @@ impl ThreadSignalManager {
         &self,
         uctx: &mut UserContext,
         restore_blocked: Option<SignalSet>,
-    ) -> Option<(SignalInfo, SignalOSAction)> {
+    ) -> Option<(SignalInfo, SignalOsAction)> {
         let blocked = self.blocked.lock();
         let mask = !*blocked;
         let current_blocked = *blocked;
@@ -246,7 +246,7 @@ impl ThreadSignalManager {
         &self,
         uctx: &mut UserContext,
         restore_blocked: Option<SignalSet>,
-    ) -> Option<(SignalInfo, SignalOSAction)> {
+    ) -> Option<(SignalInfo, SignalOsAction)> {
         // Fast path
         if !self.possibly_has_signal.load(Ordering::Acquire)
             && !self.proc.has_pending.load(Ordering::Acquire)

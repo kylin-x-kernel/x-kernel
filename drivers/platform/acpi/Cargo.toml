@@ -11,3 +11,6 @@ repository.workspace = true
 [dependencies]
 kaddr_layout = { workspace = true }
 lazyinit.workspace = true
+
+[lints]
+workspace = true

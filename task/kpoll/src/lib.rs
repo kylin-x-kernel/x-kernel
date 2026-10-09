@@ -27,7 +27,11 @@ mod event;
 mod events;
 mod registration;
 mod source;
-mod tests;
+/// Unit tests for kpoll using the unittest framework.
+#[unittest::mod_test]
+mod tests {
+    include!("tests.rs");
+}
 
 pub use completion::Completion;
 pub use event::PollEvent;

@@ -7,7 +7,7 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult, BaseAllocator, ByteAllocator, TlsfByteAllocator};
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{DMAInfo, DmaBusAddress};
+use crate::{DmaBusAddress, DmaInfo};
 
 pub(super) const DMA_BOUNCE_POOL_PAGES: usize = 1024;
 
@@ -25,7 +25,7 @@ pub(super) struct BounceMapping {
 }
 
 impl BouncePool {
-    pub(super) fn new(dma: DMAInfo, size: usize) -> Self {
+    pub(super) fn new(dma: DmaInfo, size: usize) -> Self {
         let mut allocator = TlsfByteAllocator::new();
         allocator.init_region(dma.cpu_addr.as_ptr() as usize, size);
         Self {
@@ -36,12 +36,12 @@ impl BouncePool {
         }
     }
 
-    pub(super) fn allocate(&mut self, len: usize) -> AllocResult<(DMAInfo, Layout)> {
+    pub(super) fn allocate(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
         let layout = bounce_buffer_layout(len)?;
         let cpu_addr = self.allocator.allocate(layout)?;
         let offset = cpu_addr.as_ptr() as usize - self.cpu_addr;
         let bus_addr = DmaBusAddress::new(self.bus_addr.as_u64() + offset as u64);
-        Ok((DMAInfo { cpu_addr, bus_addr }, layout))
+        Ok((DmaInfo { cpu_addr, bus_addr }, layout))
     }
 
     pub(super) fn deallocate(&mut self, cpu_addr: usize, layout: Layout) {

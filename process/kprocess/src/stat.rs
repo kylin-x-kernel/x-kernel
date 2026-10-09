@@ -232,7 +232,7 @@ impl fmt::Display for TaskStat {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_stat {
     use unittest::def_test;
 

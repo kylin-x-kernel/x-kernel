@@ -23,7 +23,11 @@ use super::{
 // tee_fs_htree_node_image or two struct tee_fs_htree_image.
 const TEST_BLOCK_SIZE: usize = 144;
 
-pub fn test_get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResult<(usize, usize)> {
+pub(super) fn test_get_offs_size(
+    typ: TeeFsHtreeType,
+    idx: usize,
+    vers: u8,
+) -> TeeResult<(usize, usize)> {
     let node_size = size_of::<TeeFsHtreeNodeImage>();
     let block_nodes = TEST_BLOCK_SIZE / (node_size * 2);
 
@@ -77,7 +81,7 @@ pub fn test_get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResul
 }
 
 #[derive(Clone)]
-pub struct TestHtreeStorageInner {
+pub(super) struct TestHtreeStorageInner {
     pub data: Vec<u8>,
     pub data_len: usize,
     pub data_alloced: usize,
@@ -99,7 +103,7 @@ impl Debug for TestHtreeStorageInner {
 }
 
 #[derive(Debug)]
-pub struct TestHtreeStorage {
+pub(super) struct TestHtreeStorage {
     inner: Mutex<TestHtreeStorageInner>,
 }
 
@@ -287,6 +291,10 @@ fn do_range_backwards(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: unittest scenario: one linear hash-tree rewrite script in a file test module"
+)]
 fn htree_test_rewrite(
     aux: &mut TestHtreeStorage,
     num_blocks: usize,
@@ -638,7 +646,7 @@ fn test_write_read(num_blocks: usize) -> TeeResult {
 }
 
 #[unittest::mod_test]
-pub mod tests_fs_htree_tests {
+pub(super) mod tests_fs_htree_tests {
     use unittest::assert;
 
     use super::*;

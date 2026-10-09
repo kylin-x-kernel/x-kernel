@@ -99,7 +99,7 @@ impl JournalReplayPlan {
 
 /// Summary of an executed journal replay plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct JournalReplayReport {
+pub(crate) struct JournalReplayReport {
     update_count: usize,
     revoke_hit_count: usize,
     head: JournalBlock,
@@ -108,22 +108,22 @@ pub struct JournalReplayReport {
 
 impl JournalReplayReport {
     /// Returns how many metadata blocks were written by replay.
-    pub const fn update_count(&self) -> usize {
+    pub(crate) const fn update_count(&self) -> usize {
         self.update_count
     }
 
     /// Returns how many descriptor updates were suppressed by revoke records.
-    pub const fn revoke_hit_count(&self) -> usize {
+    pub(crate) const fn revoke_hit_count(&self) -> usize {
         self.revoke_hit_count
     }
 
     /// Returns the first journal block after the recovered log contents.
-    pub const fn head(&self) -> JournalBlock {
+    pub(crate) const fn head(&self) -> JournalBlock {
         self.head
     }
 
     /// Returns the sequence expected for the next transaction.
-    pub const fn next_sequence(&self) -> TransactionId {
+    pub(crate) const fn next_sequence(&self) -> TransactionId {
         self.next_sequence
     }
 }
@@ -314,7 +314,7 @@ fn committed_transactions(
         .filter(|transaction| transaction.state() == JournalTransactionState::Committed)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::collections::BTreeMap;
     use core::cell::RefCell;

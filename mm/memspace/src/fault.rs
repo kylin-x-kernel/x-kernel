@@ -165,7 +165,7 @@ impl FaultOutcome {
 /// Compatibility alias for older call sites.
 pub type PageFaultOutcome = FaultOutcome;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use khal::trap::PageFaultFlags;
     use memaddr::VirtAddr;

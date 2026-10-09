@@ -648,7 +648,7 @@ fn effective_want_extra_isize(
         .max(disk_want_extra_isize)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

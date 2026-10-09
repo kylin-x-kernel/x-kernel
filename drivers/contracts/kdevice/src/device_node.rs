@@ -191,6 +191,12 @@ impl DeviceNodeLifecycle {
             2 => DeviceNodeState::RemovePending,
             3 => DeviceNodeState::Removing,
             4 => DeviceNodeState::Removed,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: The lifecycle byte is written \
+                          only from DeviceNodeState discriminants, so every stored value decodes \
+                          to a state"
+            )]
             state => panic!("invalid device-node lifecycle state: {state}"),
         }
     }
@@ -216,6 +222,12 @@ impl DeviceNodeLifecycle {
             | DeviceNodeState::Removing
             | DeviceNodeState::Removed => return false,
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The device registry serializes state \
+                      transitions, so the previously read state cannot change before \
+                      compare_exchange"
+        )]
         self.state
             .compare_exchange(
                 current as u8,
@@ -239,8 +251,20 @@ impl DeviceNodeLifecycle {
                 DeviceNodeState::Removing,
                 true,
             ),
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: The registry serializes \
+                          transitions and finish_publish runs once for a node it created in \
+                          Publishing; removal moves Publishing only to RemovePending"
+            )]
             state => panic!("cannot finish publishing a node in state {state:?}"),
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The device registry serializes state \
+                      transitions, so the previously read state cannot change before \
+                      compare_exchange"
+        )]
         self.state
             .compare_exchange(
                 current as u8,
@@ -527,6 +551,11 @@ static DEVICE_NODES: LazyInit<SpinNoPreempt<DeviceNodeRegistry>> = LazyInit::new
 
 fn device_node_registry() -> SpinNoPreemptGuard<'static, DeviceNodeRegistry> {
     DEVICE_NODES.call_once(|| SpinNoPreempt::new(DeviceNodeRegistry::new()));
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the device-node registry"
+    )]
     DEVICE_NODES
         .get()
         .expect("device-node registry call_once succeeded")
@@ -644,7 +673,7 @@ pub fn install_device_node_lifecycle_publisher(
     device_node_registry().install_lifecycle_publisher(callback)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

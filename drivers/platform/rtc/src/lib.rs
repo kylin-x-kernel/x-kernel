@@ -182,13 +182,13 @@ fn pl031_config_from_device_tree() -> Option<RtcConfig> {
 
 /// Discovers, maps, and samples the RTC described by the device tree.
 ///
-/// Returns `None` when no supported RTC is present or the device does not
-/// provide a usable sample.
+/// Returns `None` when no supported RTC is present, its register range cannot
+/// be mapped, or the device does not provide a usable sample. A mapping
+/// failure is logged.
 ///
 /// # Panics
 ///
-/// Panics if the discovered register range cannot be mapped or its RTC
-/// configuration is unsupported.
+/// Panics if the discovered RTC configuration is unsupported.
 #[cfg(any(feature = "pl031", feature = "goldfish"))]
 pub fn read_from_device_tree() -> Option<SystemTime> {
     let config = config_from_device_tree()?;
@@ -204,13 +204,20 @@ pub fn read_from_device_tree() -> Option<SystemTime> {
                 RtcKind::Cmos => "rtc",
                 RtcKind::Ls7a => "ls7a-rtc",
             };
-            RtcConfig::mmio_mapped(
-                kind,
-                memspace::iomap_device(paddr, size, name)
-                    .unwrap_or_else(|err| panic!("failed to iomap {name}: {err:?}")),
-                source,
-            )
+            let vaddr = match memspace::iomap_device(paddr, size, name) {
+                Ok(vaddr) => vaddr,
+                Err(err) => {
+                    log::warn!("failed to iomap {name}: {err:?}");
+                    return None;
+                }
+            };
+            RtcConfig::mmio_mapped(kind, vaddr, source)
         }
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Device-tree discovery builds only \
+                      MMIO RTC configurations, so no other transport reaches this match"
+        )]
         other => panic!("unsupported rtc configuration: {other:?}"),
     };
     read(mapped)
@@ -233,13 +240,20 @@ pub fn read(config: RtcConfig) -> Option<SystemTime> {
         (RtcKind::Cmos, RtcTransport::Platform) => cmos::read_platform(),
         #[cfg(feature = "ls7a")]
         (RtcKind::Ls7a, RtcTransport::MmioMapped { vaddr }) => ls7a::read_mapped(vaddr),
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Each RtcConfig producer (device-tree \
+                      discovery or a platform's static RTC setup) is built with the matching \
+                      backend feature, so an unmatched kind and transport is a \
+                      build-configuration error"
+        )]
         (kind, transport) => {
             panic!("unsupported rtc configuration: kind={kind:?} transport={transport:?}");
         }
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

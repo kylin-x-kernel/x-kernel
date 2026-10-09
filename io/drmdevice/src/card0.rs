@@ -159,8 +159,8 @@ impl DrmIoctl for DrmAuthMagic {
     }
 }
 
-impl DrmIoctl for DrmModeDirtyFB {
-    const CMD: u32 = iowr::<DrmModeDirtyFB>(DRM_TYPE, 0xB1);
+impl DrmIoctl for DrmModeDirtyFb {
+    const CMD: u32 = iowr::<DrmModeDirtyFb>(DRM_TYPE, 0xB1);
 
     fn handle(dev: &DrmCard, dirty: &mut Self) -> VfsResult<usize> {
         // Linux's drm_mode_dirtyfb_ioctl() rejects an unknown fb_id with
@@ -248,13 +248,10 @@ impl DrmIoctl for DrmModeCrtc {
     }
 }
 
-#[allow(dead_code)]
 struct DumbBuffer {
     width: u32,
     height: u32,
-    bpp: u32,
     pitch: u32,
-    size: u64,
     offset: u64,
     resource_id: u32,
     pages: Arc<GlobalPage>,
@@ -463,6 +460,11 @@ impl DeviceFileOps for DrmCard {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: linear DRM ioctl dispatch table: one short match arm \
+                  per command, arms share no state"
+    )]
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         self.display()?;
         match cmd {
@@ -495,9 +497,9 @@ impl DeviceFileOps for DrmCard {
                 let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
                 <DrmAuthMagic as DrmIoctl>::handle_raw(self, user_ptr)
             }
-            <DrmModeDirtyFB as DrmIoctl>::CMD => {
-                let user_ptr = UserPtr::<DrmModeDirtyFB>::from(arg);
-                <DrmModeDirtyFB as DrmIoctl>::handle_raw(self, user_ptr)
+            <DrmModeDirtyFb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeDirtyFb>::from(arg);
+                <DrmModeDirtyFb as DrmIoctl>::handle_raw(self, user_ptr)
             }
             <DrmPrimeHandle as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmPrimeHandle>::from(arg);
@@ -819,9 +821,7 @@ impl DrmIoctl for DrmModeCreateDumb {
             DumbBuffer {
                 width: c.width,
                 height: c.height,
-                bpp: c.bpp,
                 pitch: c.pitch,
-                size: c.size,
                 offset,
                 resource_id,
                 pages: pages_arc,

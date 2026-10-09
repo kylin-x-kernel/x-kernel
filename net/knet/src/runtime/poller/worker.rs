@@ -134,7 +134,7 @@ fn run_background() {
 #[cfg(unittest)]
 static BACKGROUND_RUNS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

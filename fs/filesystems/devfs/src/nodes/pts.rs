@@ -48,16 +48,16 @@ impl SlaveNode {
 impl InodeOperations for SlaveNode {
     fn getattr(
         &self,
-        _idmap: &kvfs::MountIdmap,
-        _path: Option<&kvfs::Path>,
-        _request_mask: kvfs::GetattrRequestMask,
-        _query_flags: kvfs::GetattrQueryFlags,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
     ) -> VfsResult<Metadata>;
 
     fn setattr(
         &self,
-        _idmap: &kvfs::MountIdmap,
-        _dentry: &kvfs::Dentry,
+        idmap: &kvfs::MountIdmap,
+        dentry: &kvfs::Dentry,
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate>;
 }
@@ -83,7 +83,7 @@ impl DeviceFileOps for Ptmx {
 }
 
 /// /dev/pts directory containing only slaves with a live master.
-pub struct PtsDir;
+pub(crate) struct PtsDir;
 
 impl SimpleDirOps for PtsDir {
     fn supports_dentry_cache(&self) -> bool {
@@ -107,6 +107,7 @@ impl SimpleDirOps for PtsDir {
     }
 }
 
-#[cfg(unittest)]
-#[path = "../tests/pts.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("../tests/pts.rs");
+}

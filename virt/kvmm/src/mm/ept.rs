@@ -75,8 +75,10 @@ impl Ept {
         let pdpt_ptr = kaddr_layout::p2v(pdpt_pa as usize) as *const u64;
 
         for i in 0..L1_ENTRIES {
-            // SAFETY: pdpt_ptr points to a valid 4KB page; i < 512.
-            let pd_entry = unsafe { pdpt_ptr.add(i).read() };
+            // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
+            let pd_entry_ptr = unsafe { pdpt_ptr.add(i) };
+            // SAFETY: pd_entry_ptr is an aligned, initialized PDPT entry.
+            let pd_entry = unsafe { pd_entry_ptr.read() };
             if pd_entry & EPT_READ != 0 {
                 let pd_pa = pd_entry & EPT_ADDR_MASK;
                 // SAFETY: pd_pa was allocated by us in new().
@@ -124,10 +126,10 @@ impl GuestMem for Ept {
             core::mem::forget(pd_page);
 
             // PDPT[i] → PD[i]
-            // SAFETY: pdpt_va is valid; i < 512.
-            unsafe {
-                pdpt_va.add(i).write(pd_pa | EPT_RWX);
-            }
+            // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
+            let pdpt_entry_ptr = unsafe { pdpt_va.add(i) };
+            // SAFETY: pdpt_entry_ptr is aligned in the unpublished PDPT page we own.
+            unsafe { pdpt_entry_ptr.write(pd_pa | EPT_RWX) };
 
             // Fill PD with 2 MiB large page entries
             for j in 0..L2_ENTRIES {
@@ -140,10 +142,10 @@ impl GuestMem for Ept {
                     gpa
                 };
                 let entry = hpa | EPT_RWX | mt | EPT_LARGE;
-                // SAFETY: pd_va is valid; j < 512.
-                unsafe {
-                    pd_va.add(j).write(entry);
-                }
+                // SAFETY: j < L2_ENTRIES, so the offset stays inside this PD page.
+                let pd_entry_ptr = unsafe { pd_va.add(j) };
+                // SAFETY: pd_entry_ptr is aligned in an unpublished PD page we own.
+                unsafe { pd_entry_ptr.write(entry) };
             }
         }
 
@@ -202,8 +204,10 @@ impl GuestMem for Ept {
                 return false;
             }
 
-            // SAFETY: pdpt_ptr is valid; pdpt_idx < L1_ENTRIES.
-            let pd_entry = unsafe { pdpt_ptr.add(pdpt_idx).read() };
+            // SAFETY: pdpt_idx < L1_ENTRIES was checked above, inside the PDPT page.
+            let pd_entry_ptr = unsafe { pdpt_ptr.add(pdpt_idx) };
+            // SAFETY: pd_entry_ptr is an aligned, initialized PDPT entry.
+            let pd_entry = unsafe { pd_entry_ptr.read() };
             if pd_entry & EPT_READ == 0 {
                 addr += block_size;
                 continue;
@@ -211,10 +215,12 @@ impl GuestMem for Ept {
 
             let pd_pa = pd_entry & EPT_ADDR_MASK;
             let pd_va = kaddr_layout::p2v(pd_pa as usize) as *mut u64;
-            // SAFETY: pd_va is valid; pd_idx < 512.
-            unsafe {
-                pd_va.add(pd_idx).write(0);
-            }
+            // SAFETY: pd_idx is a 9-bit index (< L2_ENTRIES), inside the PD page
+            // referenced by the present PDPT entry.
+            let entry_ptr = unsafe { pd_va.add(pd_idx) };
+            // SAFETY: entry_ptr is an aligned entry in a live PD page owned by this
+            // Ept; &mut self serializes table updates.
+            unsafe { entry_ptr.write(0) };
 
             addr += block_size;
         }

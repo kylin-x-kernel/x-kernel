@@ -138,6 +138,12 @@ impl<W: TtyWrite> LineDiscipline<W> {
                 self.output_char(&term, ch);
             }
             if !term.canonical() {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: this sole producer checked \
+                              is_full above and has not pushed since; the consumer can only free \
+                              capacity"
+                )]
                 self.buf_tx.try_push(ch).unwrap();
                 progress.bytes_published += 1;
                 continue;

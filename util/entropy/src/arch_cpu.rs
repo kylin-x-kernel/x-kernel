@@ -59,7 +59,7 @@ fn read_into(buf: &mut [u8]) -> usize {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, assert_ne, def_test};
 

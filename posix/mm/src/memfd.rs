@@ -76,7 +76,7 @@ fn format_memfd_name(name: &str) -> alloc::string::String {
     formatted
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use linux_raw_sys::general::MFD_ALLOW_SEALING;
     use unittest::{assert_eq, def_test};

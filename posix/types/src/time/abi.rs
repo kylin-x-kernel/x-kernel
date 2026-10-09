@@ -267,14 +267,13 @@ unsafe impl UserWrite for timespec {}
 unsafe impl UserWrite for timeval {}
 
 #[cfg(target_arch = "x86_64")]
-#[allow(non_camel_case_types)]
 #[repr(C)]
 pub struct utimbuf {
     pub actime: __kernel_old_time_t,
     pub modtime: __kernel_old_time_t,
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

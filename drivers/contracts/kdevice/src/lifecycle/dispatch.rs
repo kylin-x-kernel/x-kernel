@@ -67,13 +67,13 @@ pub(crate) fn dispatch_device_event(event: DeviceEvent) {
 }
 
 /// Mark a device matched and notify driver-core observers.
-pub fn mark_device_matched(device: &DeviceObject) {
+pub(crate) fn mark_device_matched(device: &DeviceObject) {
     device.mark_matched();
     dispatch_device_event(DeviceEvent::Matched { id: device.id() });
 }
 
 /// Bind a device to a driver and notify driver-core observers.
-pub fn bind_device_to_driver(
+pub(crate) fn bind_device_to_driver(
     device: &DeviceObject,
     driver_id: DriverId,
     driver_name: &'static str,
@@ -87,7 +87,7 @@ pub fn bind_device_to_driver(
 }
 
 /// Mark a device active and notify driver-core observers.
-pub fn activate_device(device: &DeviceObject, kind: DeviceKind) {
+pub(crate) fn activate_device(device: &DeviceObject, kind: DeviceKind) {
     device.mark_active(kind);
     dispatch_device_event(DeviceEvent::Activated {
         id: device.id(),

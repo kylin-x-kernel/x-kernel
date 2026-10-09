@@ -109,6 +109,11 @@ impl InputWork {
     }
 
     #[cfg(unittest)]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: shutdown failure fails the \
+                  calling unittest"
+    )]
     fn shutdown(&self) {
         let work = self.work.lock().take();
         if let Some(work) = work {
@@ -189,10 +194,11 @@ struct SimpleReader<R> {
     buf_tx: CachingProd<ReadBuf>,
 }
 impl<R: TtyRead> SimpleReader<R> {
-    pub fn poll(&mut self) {
+    pub(crate) fn poll(&mut self) {
         let read = self.reader.read(&mut self.read_buf);
         for ch in &self.read_buf[..read] {
             if *ch == b'\n' {
+                // Echo is best effort; bytes are dropped when the transmit queue is full.
                 let _ = self.buf_tx.try_push(b'\r');
             }
             let _ = self.buf_tx.try_push(*ch);
@@ -265,11 +271,16 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
                             work.queue();
                         }
                     });
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: TTY work mode is \
+                                  constructed in sleepable task context after the permanent \
+                                  normal worker service is installed"
+                    )]
+                    let work =
+                        WorkHandle::new(callback_fn).expect("TTY input requires normal workers");
                     InputWork {
-                        work: SpinNoIrq::new(Some(
-                            WorkHandle::new(callback_fn)
-                                .expect("TTY input requires normal workers"),
-                        )),
+                        work: SpinNoIrq::new(Some(work)),
                         cpu_id,
                     }
                 });
@@ -391,6 +402,7 @@ impl<R, W> Drop for TtyPort<R, W> {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests/port.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("tests/port.rs");
+}

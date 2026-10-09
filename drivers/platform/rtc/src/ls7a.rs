@@ -97,10 +97,15 @@ fn build_system_time(year: u32, toy_low: u32) -> Option<SystemTime> {
         .single()?;
     let date_time =
         date_time.with_nanosecond(extract_bits(toy_low, 0..4) * NANOS_PER_MILLIS as u32)?;
-    Some(
+    Some({
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: chrono has validated the timestamp \
+                      and normalized its nanoseconds below one billion"
+        )]
         SystemTime::from_unix_parts(date_time.timestamp(), date_time.nanosecond())
-            .expect("chrono returns normalized nanoseconds"),
-    )
+            .expect("chrono returns normalized nanoseconds")
+    })
 }
 
 /// Sample `(year, toy_low)` with a year-boundary consistency check.
@@ -160,7 +165,7 @@ pub(super) fn read_mapped(vaddr: VirtAddr) -> Option<SystemTime> {
     read_rtc_from(&mut regs)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::SystemTime;
     use unittest::{assert, assert_eq, assert_ne, def_test};

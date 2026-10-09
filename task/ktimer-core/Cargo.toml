@@ -22,3 +22,6 @@ kerrno.workspace = true
 kspin.workspace = true
 ktime_types.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

@@ -34,6 +34,32 @@ documentation = "https://gitee.com/openkylin/x-kernel"
 keywords = ["kylin-x-kernel", "kernel"]
 categories = ["os", "no-std"]
 
+# Lint levels; lint parameters live in clippy.toml.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }
+
+[workspace.lints.clippy]
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+disallowed_methods = "warn"
+fn_params_excessive_bools = "warn"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny" # moved from xkmake
+unimplemented = "deny"
+used_underscore_binding = "warn"
+linkedlist = "warn"
+too_many_lines = "warn"
+excessive_nesting = "warn"
+upper_case_acronyms = "warn"
+unused_result_ok = "warn"
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+
 [workspace.dependencies]
 # Internal: API and core services
 kfeat = { path = "api/kfeat" }

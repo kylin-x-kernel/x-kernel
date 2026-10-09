@@ -22,3 +22,5 @@ kspin = { workspace = true }
 smallvec = { workspace = true }
 unittest.workspace = true
 
+[lints]
+workspace = true

@@ -66,7 +66,16 @@ enum StdoutKind {
 
 /// Parsed device-tree stdout node: just enough to build a [`SerialPort`] and
 /// wire its input interrupt.
-#[allow(dead_code)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Parsed stdout fields are consumed by different enabled \
+              serial backends"
+)]
+#[allow(
+    dead_code,
+    reason = "CG-024-lint-exceptions: dead_code: Parsed stdout fields are consumed by different \
+              enabled serial backends"
+)]
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 struct StdoutDesc {
     kind: StdoutKind,
@@ -260,6 +269,12 @@ fn device_tree_irq_desc(info: of::InterruptInfo) -> IrqDesc {
 /// Map the stdout MMIO window and build the matching [`SerialPort`].
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware-described stdout \
+                  UART window cannot be mapped; console initialization has no error return or \
+                  recovery"
+    )]
     let uart_base = memspace::iomap_device(desc.paddr, desc.size, "console")
         .unwrap_or_else(|err| panic!("failed to iomap console: {err:?}"));
     match desc.kind {
@@ -337,7 +352,17 @@ pub fn register_input_irq_handler() {
     if INPUT_IRQ_REGISTERED.load(Ordering::Acquire) {
         return;
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: The resolved console IRQ belongs to the \
+                  stdout port installed before IRQ input initialization"
+    )]
     let port = serial::stdout_port().expect("console IRQ requires a stdout port");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the console input buffer \
+                  cannot be prepared; console IRQ initialization has no error return or recovery"
+    )]
     port.prepare_irq_input()
         .expect("failed to allocate console input buffer");
     if INPUT_IRQ_REGISTERED
@@ -348,10 +373,23 @@ pub fn register_input_irq_handler() {
     }
     match kirq::try_register_shared(virq, Arc::new(move |_| port.handle_input_irq())) {
         Ok(Some(token)) => *INPUT_IRQ.lock() = Some(token),
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: kirq cannot install a \
+                      shared action on the stdout input IRQ (unresolved line, teardown or a \
+                      non-shared action); console IRQ initialization has no error return or \
+                      recovery"
+        )]
         Ok(None) => {
             INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
             panic!("failed to register console input IRQ handler: {desc:?}");
         }
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: kirq rejects the stdout \
+                      input IRQ registration; console IRQ initialization has no error return or \
+                      recovery"
+        )]
         Err(err) => {
             INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
             panic!("failed to register console input IRQ handler: {desc:?} ({err:?})");

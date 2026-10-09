@@ -13,3 +13,6 @@ lazyinit.workspace = true
 memaddr.workspace = true
 rs_fdtree = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

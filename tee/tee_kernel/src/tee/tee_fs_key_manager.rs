@@ -21,7 +21,7 @@ use super::{
     utee_defines::{TEE_SM3_HASH_SIZE, TeeAlg},
 };
 
-pub const TEE_FS_KM_FEK_SIZE: usize = 16; /* bytes */
+pub(super) const TEE_FS_KM_FEK_SIZE: usize = 16; /* bytes */
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "tee_ss_smx")] {
@@ -37,7 +37,7 @@ cfg_if::cfg_if! {
     }
 }
 #[derive(Debug, Clone)]
-pub struct TeeFsSsk {
+pub(super) struct TeeFsSsk {
     pub is_init: bool,
     pub key: [u8; TEE_FS_KM_SSK_SIZE],
 }
@@ -71,7 +71,7 @@ lazy_static! {
     static ref TEE_FS_SSK: Mutex<TeeFsSsk> = Mutex::new(init_ssk());
 }
 
-pub fn crypto_cipher_ecb_nopad(
+pub(super) fn crypto_cipher_ecb_nopad(
     algo: TeeAlg,
     mode: TEE_OperationMode,
     key: &[u8],
@@ -126,7 +126,7 @@ pub fn crypto_cipher_ecb_nopad(
     Ok(())
 }
 
-pub fn do_hmac(out_key: &mut [u8], in_key: &[u8], message: &[u8]) -> TeeResult {
+pub(super) fn do_hmac(out_key: &mut [u8], in_key: &[u8], message: &[u8]) -> TeeResult {
     // 参数检查
     if out_key.is_empty() || in_key.is_empty() || message.is_empty() {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -159,7 +159,7 @@ impl TeeFsSsk {
     }
 }
 
-pub fn tee_fs_fek_crypt(
+pub(super) fn tee_fs_fek_crypt(
     uuid: Option<&TEE_UUID>,
     mode: TEE_OperationMode,
     in_key: Option<&[u8]>,
@@ -181,7 +181,8 @@ pub fn tee_fs_fek_crypt(
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
-    if size != TEE_FS_KM_FEK_SIZE || size != out_key.as_ref().unwrap().len() {
+    if size != TEE_FS_KM_FEK_SIZE || size != out_key.as_ref().ok_or(TEE_ERROR_BAD_PARAMETERS)?.len()
+    {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
 
@@ -229,7 +230,7 @@ pub fn tee_fs_fek_crypt(
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_fs_key_manager {
+pub(super) mod tests_tee_fs_key_manager {
     use unittest::{assert, assert_eq};
 
     use super::*;

@@ -11,3 +11,6 @@ documentation.workspace = true
 
 [dependencies]
 block.workspace = true
+
+[lints]
+workspace = true

@@ -115,7 +115,14 @@ impl ConfigGenerator {
         for key in sorted_keys {
             let value = &config[key];
 
-            content.push_str("#[allow(dead_code)]\n");
+            content.push_str(
+                "#[expect(clippy::allow_attributes, reason = \"CG-024-lint-exceptions: Generated constants are consumed by \
+                 different platform and feature subsets, so dead_code expectations are unreliable\")]\n",
+            );
+            content.push_str(
+                "#[allow(dead_code, reason = \"CG-024-lint-exceptions: dead_code: Kconfig emits all resolved symbols; each consumer \
+                 uses only its platform and feature subset\")]\n",
+            );
 
             // Strip CONFIG_ prefix to look up in type_map
             let clean_key = key.strip_prefix("CONFIG_").unwrap_or(key.as_str());

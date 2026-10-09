@@ -2,9 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Unit tests for kprocess
 
-#![cfg(unittest)]
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{

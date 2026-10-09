@@ -5,7 +5,7 @@
 //! Lazily initialized statics backed by [`crate::Lazy`].
 //!
 //! Each `static ref` expands to a distinct, unnameable wrapper type that
-//! [`Deref`]s to the inner value `T`, mirroring the upstream `lazy_static`
+//! [`Deref`](core::ops::Deref)s to the inner value `T`, mirroring the upstream `lazy_static`
 //! crate. Because the wrapper type intentionally does not implement
 //! `Clone`/`Copy`, trait-method lookup on a `static NAME: ...` falls through
 //! the `Deref` impl to the inner value `T`. That is what makes idioms like
@@ -51,14 +51,6 @@
 //! assert!(DRV.ping());
 //! ```
 
-// `Deref` and `Lazy` are referenced directly inside the `paste::item!`
-// expansion below, so they must be in scope at the macro definition site.
-#[allow(unused_imports)]
-use core::ops::Deref;
-
-#[allow(unused_imports)]
-use crate::Lazy;
-
 /// Declares lazily-initialized static variables.
 ///
 /// Each `static ref NAME: T = init;` produces a `static NAME: <wrapper>`
@@ -92,14 +84,14 @@ macro_rules! __lazy_static_inner {
             // spliced ident (e.g. `N_TTY__init`) carries the user's UPPER
             // static name as a prefix.
             #[doc(hidden)]
-            #[allow(non_snake_case)]
+            #[allow(non_snake_case, reason = "CG-024-lint-exceptions: non_snake_case: Macro helper identifiers incorporate the caller-provided static name")]
             fn [<$name __init>]() -> $ty { $init }
 
             // Backing storage, lazily initialized via `Lazy` and never exposed
             // directly. The explicit `fn() -> $ty` factory type keeps it
             // consistent regardless of the inference of the fn-item type.
             #[doc(hidden)]
-            #[allow(non_upper_case_globals)]
+            #[allow(non_upper_case_globals, reason = "CG-024-lint-exceptions: non_upper_case_globals: Macro helper identifiers incorporate the caller-provided static name")]
             static [<$name __LAZY>]: $crate::Lazy<$ty, fn() -> $ty> =
                 $crate::Lazy::new([<$name __init>] as fn() -> $ty);
 
@@ -116,7 +108,7 @@ macro_rules! __lazy_static_inner {
             // least as visible as the static itself); `#[doc(hidden)]` keeps
             // it out of the rendered API surface.
             #[doc(hidden)]
-            #[allow(non_camel_case_types)]
+            #[allow(non_camel_case_types, reason = "CG-032-camel-case-types: Macro helper identifiers incorporate the caller-provided static name")]
             $vis struct [<$name __LazyRef>];
 
             impl ::core::ops::Deref for [<$name __LazyRef>] {

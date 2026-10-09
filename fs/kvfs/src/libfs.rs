@@ -241,7 +241,7 @@ pub(crate) fn noop_fsync(_data_only: bool) -> VfsResult<()> {
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{string::String, sync::Arc};
     use core::any::Any;

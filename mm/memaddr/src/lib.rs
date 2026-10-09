@@ -50,6 +50,12 @@ pub const fn ceil_align(addr: usize, align: usize) -> usize {
     let mask = align - 1;
     match addr.checked_add(mask) {
         Some(addr) => addr & !mask,
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Only an address within align - 1 of \
+                      usize::MAX overflows, which no valid address range reaches; this mirrors an \
+                      integer overflow check in a const fn"
+        )]
         None => panic!("aligned address overflow"),
     }
 }
@@ -94,8 +100,7 @@ pub use floor_4k as align_down_4k;
 pub use floor_align as align_down;
 pub use rem_4k as align_offset_4k;
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_memaddr {
     use unittest::def_test;
 

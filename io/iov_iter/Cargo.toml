@@ -10,3 +10,6 @@ repository.workspace = true
 
 [dependencies]
 kerrno = { workspace = true }
+
+[lints]
+workspace = true

@@ -23,6 +23,7 @@ impl MmioOp for XKernelResourceProvider {
 
     fn unmap_mmio(&self, mapping: MmioMapping) {
         let vaddr = memaddr::VirtAddr::from(mapping.vaddr);
+        // Teardown has no error return; an already absent mapping needs no action.
         let _ = memspace::iounmap(vaddr);
     }
 }

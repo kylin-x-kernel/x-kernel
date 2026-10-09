@@ -8,7 +8,7 @@ use kspin::SpinNoIrq;
 use log::{trace, warn};
 use vdev_virtio::{
     AccessWidth, AddressSpaceMemory, GuestPhysAddr, MmioReadOutcome, MmioWriteAction,
-    VirtioDeviceID, VirtioError, VirtioMmioState, VirtioQueue, VirtioResult,
+    VirtioDeviceId, VirtioError, VirtioMmioState, VirtioQueue, VirtioResult,
     memory::GuestMemoryAccessor, mmio::transport, queue::VirtQueueDesc,
 };
 
@@ -64,7 +64,7 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         let state = VirtioMmioState::new(
             base_ipa,
             length,
-            VirtioDeviceID::Block.to_device_id(),
+            VirtioDeviceId::Block.to_device_id(),
             VIRTIO_VENDOR_ID,
             VIRTIO_BLK_FEATURES,
             queues,
@@ -234,8 +234,9 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         if descriptors.len() < MIN_DESCRIPTOR_CHAIN_LENGTH {
             return Err(VirtioError::InvalidDescriptor);
         }
-        let header = &descriptors[0];
-        let status = descriptors.last().unwrap();
+        let [header, data @ .., status] = descriptors else {
+            return Err(VirtioError::InvalidDescriptor);
+        };
         if header.is_write() || header.len < VirtioBlockHeader::SIZE {
             return Err(VirtioError::InvalidDescriptor);
         }
@@ -244,9 +245,9 @@ impl<B: BlockBackend, T: GuestMemoryAccessor + Clone> VirtioMmioBlockDevice<B, T
         }
         let mut header_bytes = [0u8; VirtioBlockHeader::SIZE as usize];
         memory.read(header.base_addr, &mut header_bytes)?;
-        let request_type = u32::from_le_bytes(header_bytes[0..4].try_into().unwrap());
-        let sector = u64::from_le_bytes(header_bytes[8..16].try_into().unwrap());
-        let data = &descriptors[1..descriptors.len() - 1];
+        let [t0, t1, t2, t3, _, _, _, _, sector @ ..] = header_bytes;
+        let request_type = u32::from_le_bytes([t0, t1, t2, t3]);
+        let sector = u64::from_le_bytes(sector);
         let completion = match request_type {
             VIRTIO_BLK_T_IN => self.process_read(sector, data, memory),
             VIRTIO_BLK_T_OUT => self.process_write(sector, data, memory),

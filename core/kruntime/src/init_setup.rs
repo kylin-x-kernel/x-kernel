@@ -26,9 +26,10 @@ pub(crate) fn init_cb() {
     // SAFETY: The linker provides a contiguous `.init_array` range containing
     // only `extern "C" fn()` entries emitted by `#[register_init]`, so
     // `[init_start, init_end)` can be viewed as a function-pointer slice.
-    let init_fns = unsafe {
-        core::slice::from_raw_parts(init_start, init_end.offset_from(init_start) as usize)
-    };
+    let count = unsafe { init_end.offset_from(init_start) as usize };
+    // SAFETY: The linker aligns this immutable range of initialized extern "C"
+    // function pointers, and count spans exactly the .init_array section.
+    let init_fns = unsafe { core::slice::from_raw_parts(init_start, count) };
 
     for init_fn in init_fns {
         init_fn();

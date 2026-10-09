@@ -119,7 +119,7 @@ impl BlockDeviceOperations for SDHCIDriver {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_bcm2835sdhci {
     use unittest::def_test;
 

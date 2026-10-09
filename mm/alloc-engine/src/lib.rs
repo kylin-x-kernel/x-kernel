@@ -13,6 +13,12 @@
 //! - [`IdAllocator`]: Used to allocate unique IDs.
 
 #![no_std]
+#![allow(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 10 legacy diagnostic sites need \
+              individual failure-contract review; new code remains subject to the \
+              no-legitimate-failure-panic rule"
+)]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 #[cfg(any(test, unittest))]
@@ -194,31 +200,6 @@ pub trait IdAllocator: BaseAllocator {
 
     /// Returns the number of available IDs.
     fn available(&self) -> usize;
-}
-
-// Note: Standard power-of-2 memory alignment bitwise operations.
-// These mathematical expressions are fundamental idioms in systems
-// programming and memory management, and should not be interpreted
-// as project-specific duplications.
-#[inline]
-#[allow(dead_code)]
-const fn align_down(pos: usize, align: usize) -> usize {
-    pos & !(align - 1)
-}
-
-#[inline]
-#[allow(dead_code)]
-const fn align_up(pos: usize, align: usize) -> usize {
-    (pos + align - 1) & !(align - 1)
-}
-
-/// Checks whether the address has the demanded alignment.
-///
-/// Equivalent to `addr % align == 0`, but the alignment must be a power of two.
-#[inline]
-#[allow(dead_code)]
-const fn is_aligned(base_addr: usize, align: usize) -> bool {
-    base_addr & (align - 1) == 0
 }
 
 #[cfg(feature = "allocator_api")]

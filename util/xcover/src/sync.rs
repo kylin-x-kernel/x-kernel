@@ -59,7 +59,8 @@ impl<T> Once<T> {
         if self.state.load(Ordering::Acquire) == READY {
             // SAFETY: `READY` is only published after `storage` is fully
             // initialized. We hand out only `&T`; no further mutation occurs.
-            Some(unsafe { &*(*self.storage.get()).as_ptr() })
+            // MaybeUninit<T> shares T's layout, so the cast retains alignment.
+            Some(unsafe { &*self.storage.get().cast::<T>() })
         } else {
             None
         }
@@ -99,8 +100,10 @@ impl<T> Once<T> {
                                 (*self.storage.get()).write(value);
                             }
                             self.state.store(READY, Ordering::Release);
-                            // SAFETY: just published READY with Release.
-                            return Ok(unsafe { &*(*self.storage.get()).as_ptr() });
+                            // SAFETY: This thread initialized T and just published READY;
+                            // the cell keeps it live and immutable. MaybeUninit<T>
+                            // shares T's layout and alignment.
+                            return Ok(unsafe { &*self.storage.get().cast::<T>() });
                         }
                         Err(e) => {
                             // Allow retry.
@@ -111,9 +114,17 @@ impl<T> Once<T> {
                 }
                 Err(actual) => match actual {
                     READY => {
-                        // SAFETY: another thread published READY.
-                        return Ok(unsafe { &*(*self.storage.get()).as_ptr() });
+                        // SAFETY: The failed CAS acquired the other initializer's
+                        // READY publication. T remains live and immutable in the
+                        // cell; MaybeUninit<T> has T's layout and alignment.
+                        return Ok(unsafe { &*self.storage.get().cast::<T>() });
                     }
+                    #[expect(
+                        clippy::panic,
+                        reason = "CG-021-no-panic-on-reachable-failure: A previous initializer \
+                                  panicked and left no value; like std's poisoned Once and \
+                                  LazyLock, the value can never be produced"
+                    )]
                     POISONED => {
                         panic!("Once poisoned by a previous panic during initialization")
                     }
@@ -134,7 +145,7 @@ impl<T> Drop for Once<T> {
         if *self.state.get_mut() == READY {
             // SAFETY: READY guarantees storage holds a live `T`.
             unsafe {
-                (*self.storage.get()).assume_init_drop();
+                self.storage.get_mut().assume_init_drop();
             }
         }
     }

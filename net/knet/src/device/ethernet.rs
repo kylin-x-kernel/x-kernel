@@ -271,7 +271,7 @@ struct PendingTxPacket {
 }
 
 /// Ethernet device backed by a driver-provided NIC.
-pub struct EthernetDevice {
+pub(crate) struct EthernetDevice {
     name: String,
     flags: u32,
     mtu: usize,
@@ -289,7 +289,7 @@ impl EthernetDevice {
     const NEIGHBOR_TTL: TimeSpan = TimeSpan::from_secs(300);
 
     /// Create a new Ethernet device wrapper.
-    pub fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
+    pub(crate) fn new(name: String, inner: ClassDevice<NetDeviceImpl>) -> Self {
         let rx_source = if let Some(rx_source) = register_net_rx_source() {
             let scheduler: Arc<dyn NetRxScheduler> = Arc::new(KnetRxScheduler {
                 source: Arc::downgrade(&rx_source),
@@ -637,26 +637,21 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<Option<PacketBuf>> {
         if !self.is_link_up() {
-            return None;
+            return Ok(None);
         }
         loop {
             let rx_buf: NetBufHandle = match self.inner.recv() {
                 Ok(buf) => buf,
-                Err(err) => {
-                    if !matches!(err, DriverError::WouldBlock) {
-                        warn!("recv failed: {:?}", err);
-                    }
-                    return None;
-                }
+                Err(DriverError::WouldBlock) => return Ok(None),
+                Err(err) => return Err(map_dev_err(err)),
             };
             trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
-
             let packet = self.handle_rx_frame(ifindex, rx_buf.data(), timestamp);
-            self.inner.recycle_rx(rx_buf).unwrap();
+            self.inner.recycle_rx(rx_buf).map_err(map_dev_err)?;
             if packet.is_some() {
-                return packet;
+                return Ok(packet);
             }
         }
     }
@@ -842,7 +837,7 @@ fn map_dev_err(err: DriverError) -> KError {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
     use core::{
@@ -854,22 +849,42 @@ mod tests {
 
     use super::*;
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_clone(data: *const ()) -> RawWaker {
         RawWaker::new(data, &WAKER_VTABLE)
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_wake(data: *const ()) {
         // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
         let counter = unsafe { &*(data as *const AtomicUsize) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_wake_by_ref(data: *const ()) {
         // SAFETY: test wakers install a leaked, aligned `AtomicUsize` pointer.
         let counter = unsafe { &*(data as *const AtomicUsize) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_drop(_data: *const ()) {}
 
     static WAKER_VTABLE: RawWakerVTable =

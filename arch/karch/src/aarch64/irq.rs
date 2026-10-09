@@ -63,15 +63,15 @@ const TOKEN_MASK: usize = 0xFF;
 #[cfg(feature = "nmi-hardware")]
 const ALLINT_MASK: u64 = 1 << 13;
 
-/// Per‑CPU: hardware‑NMI (ALLINT) mechanism active on this CPU.
-///
-/// Set by the platform's NMI `late_init` when `detect_mode()` confirmed
-/// `NmiMode::Hardware`; every `ALLINT` register access is gated on it so a
-/// degraded build (CPU without FEAT_NMI) never touches the register
-/// (UNDEFINED).  The NMI mode itself lives in the platform; this is only a
-/// derived readiness flag, mirroring [`pmr::READY`].
 #[cfg(feature = "nmi-hardware")]
 kcpu_slot::cpu_slot! {
+    /// Per‑CPU: hardware‑NMI (ALLINT) mechanism active on this CPU.
+    ///
+    /// Set by the platform's NMI `late_init` when `detect_mode()` confirmed
+    /// `NmiMode::Hardware`; every `ALLINT` register access is gated on it so a
+    /// degraded build (CPU without FEAT_NMI) never touches the register
+    /// (UNDEFINED).  The NMI mode itself lives in the platform; this is only a
+    /// derived readiness flag, mirroring [`pmr::READY`].
     static ALLINT_ACTIVE: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);
 }
@@ -305,7 +305,7 @@ pub fn restore_irq(state: usize) {
 /// [`super::cpu::stop_cpu`]. PMR is not touched: once every DAIF class is
 /// masked, the CPU takes no interrupt at any priority.
 #[inline]
-pub fn disable_local_exceptions() {
+pub(super) fn disable_local_exceptions() {
     DAIF.write(DAIF::D::Masked + DAIF::A::Masked + DAIF::I::Masked + DAIF::F::Masked);
 }
 

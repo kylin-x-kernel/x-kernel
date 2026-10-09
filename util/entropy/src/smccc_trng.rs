@@ -29,7 +29,7 @@ pub(crate) fn read(len: usize) -> Result<Vec<u8>, TrngReadError> {
     Ok(buf)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, assert_ne, def_test};
 

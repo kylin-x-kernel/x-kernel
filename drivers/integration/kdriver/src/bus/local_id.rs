@@ -10,6 +10,8 @@
 //! Keep this helper local to `bus/` so discovery code can reuse it without
 //! duplicating counters in every backend implementation.
 
+use driver_base::{DriverError, DriverResult};
+
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct LocalIdAlloc {
     next: u16,
@@ -20,12 +22,23 @@ impl LocalIdAlloc {
         Self { next: 0 }
     }
 
-    pub(crate) fn alloc(&mut self) -> u16 {
+    pub(crate) fn alloc(&mut self) -> DriverResult<u16> {
         let id = self.next;
-        self.next = self
-            .next
-            .checked_add(1)
-            .expect("LocalIdAlloc: u16 counter overflow");
-        id
+        self.next = self.next.checked_add(1).ok_or(DriverError::NoMemory)?;
+        Ok(id)
+    }
+}
+
+#[unittest::mod_test]
+mod tests {
+    use super::*;
+
+    #[unittest::def_test]
+    fn exhausted_local_ids_return_errors_without_wrapping() {
+        let mut ids = LocalIdAlloc { next: u16::MAX - 1 };
+        assert_eq!(ids.alloc(), Ok(u16::MAX - 1));
+        assert_eq!(ids.alloc(), Err(DriverError::NoMemory));
+        assert_eq!(ids.alloc(), Err(DriverError::NoMemory));
+        assert_eq!(ids.next, u16::MAX);
     }
 }

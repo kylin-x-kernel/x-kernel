@@ -85,6 +85,12 @@ impl Io {
     ///
     /// Panics if the handle has no active mapping.
     pub fn as_ptr(&self) -> NonNull<u8> {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The provider supplies a non-null MMIO \
+                      mapping retained until this handle is dropped; live methods cannot observe \
+                      release"
+        )]
         NonNull::new(
             self.mapping
                 .as_ref()
@@ -100,6 +106,12 @@ impl Io {
     ///
     /// Panics if the handle has no active mapping.
     pub fn region(&self) -> MmioRegion {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The provider supplies a non-null MMIO \
+                      mapping retained until this handle is dropped; live methods cannot observe \
+                      release"
+        )]
         self.mapping
             .as_ref()
             .expect("Io handle used after release")
@@ -111,6 +123,11 @@ impl Io {
     #[inline]
     fn access_ptr(&self, offset: usize, size: usize) -> *mut u8 {
         let region = self.region();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: MMIO accessors require offsets within \
+                      the mapped region; overflowing a register offset violates that contract"
+        )]
         let end = offset
             .checked_add(size)
             .expect("MMIO access offset overflow");

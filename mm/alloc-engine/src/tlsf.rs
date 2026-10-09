@@ -43,24 +43,28 @@ impl BaseAllocator for TlsfByteAllocator {
     fn init_region(&mut self, start: usize, size: usize) {
         // SAFETY: The caller provides a valid, writable pool at
         // `[start, start + size)` for the TLSF allocator.
+        let pool = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
+        // SAFETY: The allocator's region contract transfers exclusive use of
+        // this live pool to TLSF; it remains allocated while TLSF manages it.
         unsafe {
-            let pool = core::slice::from_raw_parts_mut(start as *mut u8, size);
             self.inner
                 .insert_free_block_ptr(NonNull::new(pool).unwrap())
-                .unwrap();
         }
+        .unwrap();
         self.pool_bytes = size;
     }
 
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
         // SAFETY: The caller provides a valid, writable pool at
         // `[start, start + size)` that can be added to the TLSF allocator.
+        let pool = unsafe { core::slice::from_raw_parts_mut(start as *mut u8, size) };
+        // SAFETY: The allocator's region contract transfers exclusive use of
+        // this live pool to TLSF; it remains allocated while TLSF manages it.
         unsafe {
-            let pool = core::slice::from_raw_parts_mut(start as *mut u8, size);
             self.inner
                 .insert_free_block_ptr(NonNull::new(pool).unwrap())
-                .ok_or(AllocError::InvalidInput)?;
         }
+        .ok_or(AllocError::InvalidInput)?;
         self.pool_bytes += size;
         Ok(())
     }
@@ -93,9 +97,9 @@ impl ByteAllocator for TlsfByteAllocator {
     }
 }
 
-#[cfg(all(unittest, feature = "tlsf"))]
-#[allow(missing_docs)]
-pub mod tests_tlsf {
+#[cfg(feature = "tlsf")]
+#[unittest::mod_test]
+pub(crate) mod tests_tlsf {
     use core::alloc::Layout;
 
     use unittest::def_test;

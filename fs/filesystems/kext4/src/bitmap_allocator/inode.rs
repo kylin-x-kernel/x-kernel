@@ -181,7 +181,7 @@ fn validate_inode_bitmap_capacity(bitmap: &[u8], range: InodeGroupRange) -> Ext4
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

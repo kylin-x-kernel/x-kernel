@@ -197,7 +197,7 @@ impl UtsNamespace {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_uts {
     use unittest::def_test;
 

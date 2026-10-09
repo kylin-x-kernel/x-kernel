@@ -75,6 +75,19 @@ fn test_complete_workflow() {
     assert!(config_rs.contains("pub const TEST_BOOL: bool = true;"));
     assert!(config_rs.contains("pub const TEST_STRING: &str = \"hello\";"));
     assert!(config_rs.contains("pub const TEST_INT: u32 = 42;"));
+    let allowances: Vec<_> = config_rs
+        .lines()
+        .filter(|line| line.starts_with("#[allow("))
+        .collect();
+    assert_eq!(allowances.len(), config.len());
+    for pair in config_rs.lines().collect::<Vec<_>>().windows(2) {
+        if pair[1].starts_with("#[allow(") {
+            assert!(pair[0].starts_with("#[expect(clippy::allow_attributes, reason = "));
+        }
+    }
+    for attribute in allowances {
+        assert!(attribute.contains("reason = \"CG-024-lint-exceptions: dead_code: Kconfig emits all resolved symbols;"));
+    }
 }
 
 #[test]

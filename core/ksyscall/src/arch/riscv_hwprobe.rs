@@ -24,7 +24,7 @@ const RISCV_HWPROBE_WHICH_CPUS: u32 = 1 << 0;
 /// Internal ABI carrier for [`sys_riscv_hwprobe`]. Kept `pub(crate)` rather
 /// than fully private because the `pub(crate)` syscall names it in its
 /// signature, and `pub(crate)` keeps it out of the crate's external API: the
-/// `pub use arch::*` re-export cannot widen it beyond the crate boundary.
+/// `pub(crate) use arch::*` re-export cannot widen it beyond the crate boundary.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, UserRead, UserWrite)]
 pub(crate) struct RiscvHwprobePair {
@@ -39,7 +39,7 @@ pub(crate) struct RiscvHwprobePair {
 /// supplied). With `RISCV_HWPROBE_WHICH_CPUS`, the pairs are treated as inputs
 /// describing the requested values, and the CPU set is rewritten in place to
 /// contain only the matching CPUs.
-pub fn sys_riscv_hwprobe(
+pub(crate) fn sys_riscv_hwprobe(
     pairs: UserPtr<RiscvHwprobePair>,
     pair_count: usize,
     cpusetsize: usize,

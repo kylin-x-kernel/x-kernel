@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 
 use crate::{
-    GuestPhysAddr, VirtioDeviceID,
+    GuestPhysAddr, VirtioDeviceId,
     constants::*,
     error::{VirtioError, VirtioResult},
     memory::GuestMemory,
@@ -263,13 +263,12 @@ impl DescriptorTable {
 
         let mut bytes = [0u8; 16];
         memory.read(desc_addr, &mut bytes)?;
+        let [addr @ .., l0, l1, l2, l3, f0, f1, n0, n1] = bytes;
         Ok(VirtQueueDesc {
-            base_addr: GuestPhysAddr::from(
-                u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize
-            ),
-            len: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
-            flags: u16::from_le_bytes(bytes[12..14].try_into().unwrap()),
-            next: u16::from_le_bytes(bytes[14..16].try_into().unwrap()),
+            base_addr: GuestPhysAddr::from(u64::from_le_bytes(addr) as usize),
+            len: u32::from_le_bytes([l0, l1, l2, l3]),
+            flags: u16::from_le_bytes([f0, f1]),
+            next: u16::from_le_bytes([n0, n1]),
         })
     }
 
@@ -426,17 +425,17 @@ impl DescriptorTable {
     pub fn get_data_buffers(
         &self,
         head_index: u16,
-        device_type: VirtioDeviceID,
+        device_type: VirtioDeviceId,
         memory: &mut dyn GuestMemory,
     ) -> VirtioResult<Vec<(GuestPhysAddr, usize, bool)>> {
         let descriptors = self.follow_chain(head_index, memory)?;
 
-        if descriptors.len() < 2 && device_type == VirtioDeviceID::Block {
+        if descriptors.len() < 2 && device_type == VirtioDeviceId::Block {
             return Ok(Vec::new());
         }
 
         let mut buffers = Vec::new();
-        if device_type == VirtioDeviceID::Block {
+        if device_type == VirtioDeviceId::Block {
             for desc in &descriptors[1..descriptors.len() - 1] {
                 buffers.push((desc.base_addr, desc.len as usize, desc.is_write()));
             }

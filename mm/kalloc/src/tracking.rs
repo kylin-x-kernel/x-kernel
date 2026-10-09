@@ -118,8 +118,7 @@ pub fn allocations_in(range: Range<u64>, visitor: impl FnMut(&AllocationInfo)) {
     });
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_tracking {
     use unittest::def_test;
 

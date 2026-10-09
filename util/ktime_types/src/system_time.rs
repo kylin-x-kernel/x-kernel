@@ -125,14 +125,25 @@ impl SystemTime {
         let delta = self.unix_nanos() - earlier.unix_nanos();
         if delta < 0 {
             return Err(SystemTimeError {
-                duration: TimeSpan::try_from_nanos((-delta) as u128)
-                    .expect("SystemTime difference fits in TimeSpan"),
+                duration: {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: Two i64-second SystemTime \
+                                  values differ by at most u64::MAX seconds, which fits TimeSpan"
+                    )]
+                    TimeSpan::try_from_nanos((-delta) as u128)
+                        .expect("SystemTime difference fits in TimeSpan")
+                },
             });
         }
-        Ok(
-            TimeSpan::try_from_nanos(delta as u128)
-                .expect("SystemTime difference fits in TimeSpan"),
-        )
+        Ok({
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Two i64-second SystemTime values \
+                          differ by at most u64::MAX seconds, which fits TimeSpan"
+            )]
+            TimeSpan::try_from_nanos(delta as u128).expect("SystemTime difference fits in TimeSpan")
+        })
     }
 }
 
@@ -154,6 +165,12 @@ impl Add<TimeSpan> for SystemTime {
     ///
     /// Panics if the result is outside the representable Unix timestamp range.
     fn add(self, rhs: TimeSpan) -> Self::Output {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
+        )]
         self.checked_add(rhs)
             .expect("system time addition overflow")
     }
@@ -168,6 +185,12 @@ impl Sub<TimeSpan> for SystemTime {
     ///
     /// Panics if the result is outside the representable Unix timestamp range.
     fn sub(self, rhs: TimeSpan) -> Self::Output {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Unchecked time arithmetic requires \
+                      representable, correctly ordered operands; external values use the checked \
+                      variants"
+        )]
         self.checked_sub(rhs)
             .expect("system time subtraction overflow")
     }

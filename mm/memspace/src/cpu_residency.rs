@@ -57,7 +57,7 @@ impl Default for MmCpuResidency {
 /// Shared handle to one address space's CPU residency state.
 pub type MmCpuResidencyRef = Arc<MmCpuResidency>;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_cpu_residency {
     use kbuild_config::NR_CPUS;
     use kcpu_id_map::LogicalCpuId;

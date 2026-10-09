@@ -48,3 +48,6 @@ tee_kernel.workspace = true
 [package.metadata.vendor-filter]
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]
 all-features = true
+
+[lints]
+workspace = true

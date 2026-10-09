@@ -37,30 +37,17 @@ macro_rules! color_fmt {
 }
 
 #[repr(u8)]
-#[allow(dead_code)]
 enum AnsiColor {
-    Black   = 30,
-    Red     = 31,
-    Green   = 32,
-    Yellow  = 33,
-    Blue    = 34,
-    Magenta = 35,
-    Cyan    = 36,
-    White   = 37,
+    Red    = 31,
+    Green  = 32,
+    Yellow = 33,
+    Cyan   = 36,
+    White  = 37,
 }
 
 #[repr(u8)]
-#[allow(dead_code)]
-#[allow(clippy::enum_variant_names)]
 enum AnsiBrightColor {
-    BrightBlack   = 90,
-    BrightRed     = 91,
-    BrightGreen   = 92,
-    BrightYellow  = 93,
-    BrightBlue    = 94,
-    BrightMagenta = 95,
-    BrightCyan    = 96,
-    BrightWhite   = 97,
+    BrightBlack = 90,
 }
 
 #[kiface::interface]
@@ -139,6 +126,7 @@ impl Log for KernelLogger {
                 let tid = LoggerAdapter::task_id();
                 let now = LoggerAdapter::now();
 
+                // Logging is best effort; reporting its format error via the logger would recurse.
                 let _ = match (compact, cpu_id, tid) {
                     (true, Some(c), Some(t)) => print_fmt(color_fmt!(
                         AnsiColor::White,
@@ -209,6 +197,12 @@ pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
 }
 
 pub fn init_klogger() {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: failure to install the global logger \
+                  during primary boot is unrecoverable; this initialization entry has no error \
+                  return or recovery caller"
+    )]
     log::set_logger(&KernelLogger).unwrap();
     log::set_max_level(LevelFilter::Warn);
 }
@@ -298,7 +292,7 @@ pub fn set_log_level(level: &str) {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
 

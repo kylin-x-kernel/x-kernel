@@ -13,3 +13,6 @@ categories.workspace = true
 
 [dependencies]
 unittest.workspace = true
+
+[lints]
+workspace = true

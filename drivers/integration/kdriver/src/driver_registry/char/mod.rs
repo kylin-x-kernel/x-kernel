@@ -20,6 +20,6 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
     serial::ns16550_ioport_descriptor,
 ];
 
-pub fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
+pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
 }

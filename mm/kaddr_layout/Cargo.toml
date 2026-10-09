@@ -8,3 +8,6 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 description = "Shared kernel virtual layout constants and helpers"
+
+[lints]
+workspace = true

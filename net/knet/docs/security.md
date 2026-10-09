@@ -16,6 +16,13 @@ provide their respective buffer and parsing contracts. Driver DMA programming,
 raw user-pointer access, host-side handshake clients, and TIPC service policy
 are external responsibilities rather than guarantees established by `knet`.
 
+A driver error while recycling an Ethernet RX buffer no longer panics the
+kernel: the device returns a typed error and drops the decoded packet. The
+Router retains the earlier batch and reports the interface/error separately from
+empty-queue results; the service logs it and ends that RX round. The consuming
+driver owns cleanup of the returned handle even on error; repeated driver errors
+can still prevent receive progress.
+
 ## Trust Model
 
 The prepared poller Work and its private NormalQueue live for the kernel
@@ -672,7 +679,7 @@ Severity levels:
 - Full UDP PCB receive queues and Router TX queues result in packet drops or `WouldBlock`; the poller waits for IO readiness events.
 - Full smoltcp buffers and Unix stream ring buffers return `WouldBlock`, and the poller waits for IO readiness events. A nonblocking Unix stream send returns a partial byte count if it has already made progress. When a Unix listener backlog is full, nonblocking `connect` returns `WouldBlock`; blocking connections wait according to `SO_SNDTIMEO` for `accept` to release capacity or for the backlog limit to increase, and return `WouldBlock` on timeout.
 - Full loopback and Ethernet queues drop packets and log warnings. When the shared `NetRx` queue is full, loopback send still returns success, matching Linux `loopback_xmit`, which returns `NETDEV_TX_OK` even when `__netif_rx` returns `NET_RX_DROP`.
-- Panic paths include initialization order, violated internal invariants, `expect` assertions, and the driver RX recycling `unwrap` in `EthernetDevice::poll_rx`. New public entry points should validate inputs and return errors through `KError` before entering paths that contain internal assertions.
+- Panic paths include initialization order, violated internal invariants, `expect` assertions. New public entry points should validate inputs and return errors through `KError` before entering paths that contain internal assertions.
 
 ## Privacy Analysis
 
@@ -689,7 +696,9 @@ Ordinary logs omit payload contents, while trace logs record Ethernet frame byte
 - The reverse TIPC forwarding map currently has an empty UUID allowlist, accepting every client admitted by the TIPC service. Per-client isolation requires a nonempty mapping or external service policy.
 - `VsockConnectionManager::handle_raw_event` trusts the provider's typed events and copies only available receive bytes. A receive length larger than the supplied body is not rejected, and a full connection ring drops excess bytes. Record completeness depends on the provider and flow-control contract.
 - The unsafe callback functions identified in the test-only inventory have incomplete function-level safety documentation. Existing local block comments are recorded above; missing callback contracts remain a source follow-up.
-- Driver RX recycling is assumed to succeed: `EthernetDevice::poll_rx` calls `recycle_rx(...).unwrap()`. A provider recycling error can panic despite successful packet parsing.
+- Driver RX recycling errors propagate through `KError` to the service, which
+  reports them and ends the RX round. Cleanup of a consumed buffer remains the
+  provider's responsibility; repeated errors can prevent receive progress.
 
 - `RTM_GETNEIGH` neighbor dumps remain unimplemented. `RTM_NEWNEIGH` mutations delegate neighbor updates to the device-state owner.
 - IPv4 output uses the MTU of the device selected by the matching route. The next-hop MTU in ICMP Fragmentation Needed enters only the UDP error queue; a dynamic PMTU cache is not yet implemented.

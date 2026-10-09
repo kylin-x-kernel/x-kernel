@@ -95,6 +95,11 @@ impl NsProxy {
     /// Boot must initialize VFS before calling this entry point.
     pub fn new_initial() -> Arc<Self> {
         Arc::clone(INIT_NSPROXY.call_once(|| {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: VFS boot initializes the \
+                          permanent mount namespace before initial namespace-proxy creation"
+            )]
             let mnt_ns =
                 MntNamespace::initial().expect("initial VFS mount namespace must be initialized");
             Self::new_initial_with_mnt_ns(mnt_ns)
@@ -211,7 +216,7 @@ impl NsProxy {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_nsproxy {
     use alloc::sync::Arc;
 

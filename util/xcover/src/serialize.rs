@@ -149,7 +149,7 @@ fn value_prof_data_size(records: &[crate::record::FunctionRecord], sites: &[Valu
 
 /// Computes the total serialized buffer size for the given snapshot.
 #[cfg(feature = "alloc")]
-pub fn encoded_size(snapshot: &ProfileSnapshot) -> u64 {
+pub(crate) fn encoded_size(snapshot: &ProfileSnapshot) -> u64 {
     let data_size = snapshot.records.len() as u64 * RECORD_SIZE;
     let counters_size = counter_bytes_len(&snapshot.counters);
     let bitmap_size = snapshot.bitmap.len() as u64;
@@ -172,7 +172,11 @@ pub fn encoded_size(snapshot: &ProfileSnapshot) -> u64 {
 
 /// Encodes a `ProfileSnapshot` into profraw bytes and writes via `ProfileWriter`.
 #[cfg(feature = "alloc")]
-pub fn encode(
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy profraw encoder; split per output section"
+)]
+pub(crate) fn encode(
     snapshot: &ProfileSnapshot,
     writer: &mut dyn ProfileWriter,
 ) -> Result<(), ProfileError> {

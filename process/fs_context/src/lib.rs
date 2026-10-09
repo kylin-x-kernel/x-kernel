@@ -76,6 +76,11 @@ impl FsStruct {
     /// Panics if `root` is not a directory. Use [`Self::from_root_and_pwd`]
     /// when the caller needs a recoverable error.
     pub fn new(root: Path) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The infallible constructor requires a \
+                      directory root; fallible callers use from_root_and_pwd"
+        )]
         Self::from_root_and_pwd(root.clone(), root).expect("initial root must be a directory")
     }
 
@@ -150,6 +155,11 @@ impl FsStruct {
     ///
     /// See [`Self::attach_root`] for a complete initialization sequence.
     pub fn root(&self) -> &Path {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Mounted-context access requires \
+                      attach_root to have installed root and pwd"
+        )]
         self.root.as_ref().expect("fs root not initialized")
     }
 
@@ -162,6 +172,11 @@ impl FsStruct {
     ///
     /// See [`Self::attach_root`] for a complete initialization sequence.
     pub fn pwd(&self) -> &Path {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Mounted-context access requires \
+                      attach_root to have installed root and pwd"
+        )]
         self.pwd.as_ref().expect("fs pwd not initialized")
     }
 

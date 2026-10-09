@@ -34,3 +34,6 @@ input = ["dep:input"]
 net = ["dep:net"]
 vsock = ["dep:vsock"]
 virtio-9p = ["dep:virtio"]
+
+[lints]
+workspace = true

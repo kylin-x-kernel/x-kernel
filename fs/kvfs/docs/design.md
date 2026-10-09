@@ -796,6 +796,8 @@ child cache 仍使用 mutex。RCU、seqcount lookup 和 lock-free dcache travers
 ### SimpleFile 写入模式
 
 `SimpleFileOps` 默认拒绝写入；需要可写文件时，由具体操作对象实现写入语义。
+`CommandFile` 的 read callback 必须返回 `Some(content)`；`Ok(None)` 转为
+`VfsError::InvalidData`，callback 自身错误原样传播，空内容使用 `Some(Vec::new())`。
 `CommandFile` 表达 procfs/cgroupfs 一类 command-style pseudo file。一次 write/writev
 请求先完整复制到最多 4096 字节的内核缓冲区，再作为一个命令交给 callback；文件 offset
 和此前写入均不参与命令拼接。callback 同时收到保存 opener credential 的 `VfsFile`，因此

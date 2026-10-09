@@ -107,9 +107,10 @@ SysCtrl (kiface)
 - Bring-up panics name the failure: a failed RTC aperture mapping
   (`"failed to iomap ls7a rtc"`), a console parse failure, and a boot AP
   without a raw CPU id mapping all abort loudly.
-- Absence degrades: a firmware without `syscon-poweroff` falls back to
-  halting with power kept; a spurious external IRQ logs and returns
-  `None` to `kirq`.
+- Absence degrades: a firmware without `syscon-poweroff`, or a declared
+  sleep-control register that cannot be mapped, falls back to halting
+  with power kept; a spurious external IRQ logs and returns `None` to
+  `kirq`.
 - `suspend_to_ram` reports `KError::OperationNotSupported`.
 
 ## Design Decisions

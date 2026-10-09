@@ -13,3 +13,6 @@ categories.workspace = true
 driver_base.workspace = true
 kspin.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

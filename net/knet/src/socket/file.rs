@@ -131,7 +131,7 @@ impl Pollable for Socket {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod socket_tests {
     use linux_raw_sys::general::S_IFSOCK;
     use unittest::def_test;

@@ -27,7 +27,7 @@ use crate::sync::{FutexWaitRestartBlock, resume_futex_wait};
 ///
 /// * `EINTR` — no restart-block is armed.
 /// * otherwise the error of the resumed syscall.
-pub fn sys_restart_syscall() -> KResult<isize> {
+pub(crate) fn sys_restart_syscall() -> KResult<isize> {
     let current = current_user_thread();
     if let Some(wait) = current.take_restart_block::<FutexWaitRestartBlock>() {
         return resume_futex_wait(wait);

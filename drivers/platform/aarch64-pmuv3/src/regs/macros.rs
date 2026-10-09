@@ -36,7 +36,8 @@ macro_rules! mrs {
     (@inner $val:expr, $reg:expr) => {{
         // `out(reg)` requires the destination variable directly in the
         // asm! block — local capture is not possible.
-        #[allow(clippy::macro_metavars_in_unsafe)]
+        #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: The register-read macro must pass the caller destination directly to asm out(reg)")]
+        #[allow(clippy::macro_metavars_in_unsafe, reason = "CG-024-lint-exceptions: clippy::macro_metavars_in_unsafe: The register-read macro must pass the caller destination directly to asm out(reg)")]
         {
             // SAFETY: reads a system register identified by the caller.
             // `nomem nostack` constrain the asm to the register access only.
@@ -46,7 +47,8 @@ macro_rules! mrs {
         }
     }};
     (@inner_w $val:expr, $reg:expr, $asm_width:tt) => {{
-        #[allow(clippy::macro_metavars_in_unsafe)]
+        #[expect(clippy::allow_attributes, reason = "CG-024-lint-exceptions: The register-read macro must pass the caller destination directly to asm out(reg)")]
+        #[allow(clippy::macro_metavars_in_unsafe, reason = "CG-024-lint-exceptions: clippy::macro_metavars_in_unsafe: The register-read macro must pass the caller destination directly to asm out(reg)")]
         {
             // SAFETY: reads a system register identified by the caller.
             // `nomem nostack` constrain the asm to the register access only.
@@ -128,23 +130,15 @@ macro_rules! __read_raw {
         /// Reads the raw bits of the CPU register.
         #[inline]
         fn get(&self) -> $width {
-            match () {
-                #[cfg(target_arch = "aarch64")]
-                () => {
-                    let reg;
-                    // SAFETY: reads a system or general-purpose register
-                    // identified by `$asm_reg_name`.  The caller selects a
-                    // valid register; `nomem nostack` constrain the asm to
-                    // have no unexpected side-effects.
-                    unsafe {
-                        core::arch::asm!(concat!($asm_instr, " {reg:", $asm_width, "}, ", $asm_reg_name), reg = out(reg) reg, options(nomem, nostack));
-                    }
-                    reg
-                }
-
-                #[cfg(not(target_arch = "aarch64"))]
-                () => unimplemented!(),
+            let reg;
+            // SAFETY: reads a system or general-purpose register
+            // identified by `$asm_reg_name`.  The caller selects a
+            // valid register; `nomem nostack` constrain the asm to
+            // have no unexpected side-effects.
+            unsafe {
+                core::arch::asm!(concat!($asm_instr, " {reg:", $asm_width, "}, ", $asm_reg_name), reg = out(reg) reg, options(nomem, nostack));
             }
+            reg
         }
     };
 }
@@ -152,23 +146,14 @@ macro_rules! __read_raw {
 macro_rules! __write_raw {
     ($width:ty, $asm_instr:tt, $asm_reg_name:tt, $asm_width:tt) => {
         /// Writes raw bits to the CPU register.
-        #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
         #[inline]
         fn set(&self, value: $width) {
-            match () {
-                #[cfg(target_arch = "aarch64")]
-                () => {
-                    // SAFETY: writes a system or general-purpose register
-                    // identified by `$asm_reg_name`.  The caller selects a
-                    // valid register and value; `nomem nostack` constrain
-                    // the asm to have no unexpected side-effects.
-                    unsafe {
-                        core::arch::asm!(concat!($asm_instr, " ", $asm_reg_name, ", {reg:", $asm_width, "}"), reg = in(reg) value, options(nomem, nostack))
-                    }
-                }
-
-                #[cfg(not(target_arch = "aarch64"))]
-                () => unimplemented!(),
+            // SAFETY: writes a system or general-purpose register
+            // identified by `$asm_reg_name`.  The caller selects a
+            // valid register and value; `nomem nostack` constrain
+            // the asm to have no unexpected side-effects.
+            unsafe {
+                core::arch::asm!(concat!($asm_instr, " ", $asm_reg_name, ", {reg:", $asm_width, "}"), reg = in(reg) value, options(nomem, nostack))
             }
         }
     };

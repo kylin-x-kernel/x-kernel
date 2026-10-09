@@ -23,11 +23,16 @@ struct SleepControlRegister {
 }
 
 impl SleepControlRegister {
-    /// Maps the one-byte register at `paddr`.
-    fn map(paddr: PhysAddr) -> Self {
-        let vaddr = memspace::iomap_device(paddr, 1, "acpi-sleep-ctl")
-            .unwrap_or_else(|err| panic!("failed to map ACPI sleep-control register: {err:?}"));
-        Self { vaddr }
+    /// Maps the one-byte register at `paddr`, or returns `None` after logging
+    /// the mapping error.
+    fn map(paddr: PhysAddr) -> Option<Self> {
+        match memspace::iomap_device(paddr, 1, "acpi-sleep-ctl") {
+            Ok(vaddr) => Some(Self { vaddr }),
+            Err(err) => {
+                warn!("failed to map ACPI sleep-control register: {err:?}");
+                None
+            }
+        }
     }
 
     /// Writes the request byte: a single volatile byte store naming S5 with
@@ -55,6 +60,11 @@ fn fdt_poweroff() -> Option<(PhysAddr, u8)> {
 impl SysCtrl {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: start_secondary_cpus passes only \
+                      logical ids enumerated from the present-CPU map, so each one has a raw id"
+        )]
         let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
             panic!(
                 "missing raw CPU id mapping for logical CPU {}",
@@ -74,7 +84,11 @@ impl SysCtrl {
             warn!("no firmware S5 declaration; halting instead of powering off");
             karch::stop_cpu()
         };
-        SleepControlRegister::map(paddr).write(value);
+        let Some(register) = SleepControlRegister::map(paddr) else {
+            warn!("cannot reach the firmware S5 register; halting instead of powering off");
+            karch::stop_cpu()
+        };
+        register.write(value);
         warn!("S5 request returned; halting the current CPU");
         karch::stop_cpu()
     }

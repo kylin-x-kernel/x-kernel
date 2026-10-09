@@ -61,6 +61,11 @@ pub(crate) fn prepare_queue(
             }
         }
         let binding = |cpu| {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: The complete immutable CPU \
+                          service coverage was validated before binding the queue"
+            )]
             services
                 .binding(cpu, kind)
                 .expect("validated service coverage")
@@ -147,8 +152,23 @@ impl Services {
         let diagnostics = kworkqueue_ng::service::Directory::new();
         let create = |config, name, kind| {
             let binding = |cpu| match kind {
-                ExecutionKind::Normal => normal.binding(cpu).expect("normal boot CPU coverage"),
+                ExecutionKind::Normal =>
+                {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: Successful normal and \
+                                  bottom-half startup covers every CPU in the same boot CPU \
+                                  configuration"
+                    )]
+                    normal.binding(cpu).expect("normal boot CPU coverage")
+                }
                 ExecutionKind::BottomHalf(priority) => {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: Successful normal and \
+                                  bottom-half startup covers every CPU in the same boot CPU \
+                                  configuration"
+                    )]
                     let service = bottom_half
                         .service(cpu, priority)
                         .expect("BH boot CPU coverage");
@@ -328,7 +348,14 @@ fn install_with_actions(
             }
             // Once publishes with Release only after both actions are installed.
             // Until then readers return unready; the private queues accept no work.
-            Ok(candidate.take().expect("initializing candidate"))
+            Ok({
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: try_call_once invokes this \
+                              closure at most once and candidate starts as Some"
+                )]
+                candidate.take().expect("initializing candidate")
+            })
         })
     };
     let error = match result {
@@ -336,8 +363,18 @@ fn install_with_actions(
         Ok(_) => InitError::AlreadyInitialized,
         Err(error) => error,
     };
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: A published candidate returned above; all \
+                  remaining outcomes retain the unpublished candidate"
+    )]
     let retired = candidate.expect("failed candidate was not published");
     // Once has ended initialization; join tasks and timer cleanup without locks.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Rollback runs in the same sleepable task \
+                  after dropping the preemption guard, with fresh inline completion registrations"
+    )]
     retired
         .normal
         .stop()
@@ -362,10 +399,20 @@ fn run(priority: BottomHalfPriority) {
         let Some(services) = services else {
             return;
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Bottom-half registration installs \
+                      services for every immutable boot CPU before publishing actions"
+        )]
         let service = services
             .bottom_half
             .service(khal::percpu::this_cpu_id(), priority)
             .expect("BH registration covers every boot CPU");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The registered softirq action runs on \
+                      its pinned owner CPU in bottom-half context"
+        )]
         service.run_pass().expect("registered local softirq entry");
     });
 }

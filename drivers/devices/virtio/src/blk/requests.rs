@@ -113,29 +113,30 @@ impl BlockRequests {
     unsafe fn enqueue(&mut self, request: &Request) {
         // SAFETY: the caller keeps the node pinned, live and exclusively on this
         // FIFO; the device lock excludes other list/state access.
-        unsafe {
-            assert_eq!(*request.state.get(), RequestState::Prepared);
-            assert!(self.pending.push_back(NonNull::from(request)));
-            *request.state.get() = RequestState::Pending;
-        }
+        assert_eq!(unsafe { *request.state.get() }, RequestState::Prepared);
+        // SAFETY: The caller pins and retains this node through removal;
+        // the held device lock serializes its link and pending-list accesses.
+        assert!(unsafe { self.pending.push_back(NonNull::from(request)) });
+        // SAFETY: The device lock still excludes other state readers/writers.
+        unsafe { *request.state.get() = RequestState::Pending };
     }
 
     fn finish(request: &Request, result: DriverResult) {
         // SAFETY: callers hold the device lock and have removed all list/token
         // references after successful reclamation, or before any submission.
-        unsafe {
-            *request.operation.get() = None;
-            *request.state.get() = RequestState::Done(result);
-        }
+        unsafe { *request.operation.get() = None };
+        // SAFETY: The same device lock protects state publication after all
+        // list/token references have been reclaimed or before submission.
+        unsafe { *request.state.get() = RequestState::Done(result) };
     }
 
     fn cancel_pending(&mut self, request: &Request, error: DriverError) {
         // SAFETY: only the submitting caller can cancel; it has not submitted
         // this Pending node, and holds its device lock and pinned lifetime.
-        unsafe {
-            assert_eq!(*request.state.get(), RequestState::Pending);
-            assert!(self.pending.remove(request));
-        }
+        assert_eq!(unsafe { *request.state.get() }, RequestState::Pending);
+        // SAFETY: This unsubmitted node belongs to pending and remains pinned;
+        // the submitting caller holds the device lock throughout removal.
+        assert!(unsafe { self.pending.remove(request) });
         Self::finish(request, Err(error));
     }
 
@@ -152,32 +153,39 @@ impl BlockRequests {
         {
             return false;
         }
-        // SAFETY: the pending node and caller buffer are pinned/borrowed through
-        // run_request. No device owns them yet. DMA fields use UnsafeCell, never
-        // a mutable reference to the whole shared node. Completion takes the
-        // same device lock, so it cannot run before token installation below.
-        let submitted = unsafe {
-            assert_eq!(*request.state.get(), RequestState::Pending);
-            match (*request.operation.get()).expect("pending operation") {
-                Operation::Read(sector, mut buffer) => device
-                    .read_blocks_nb(
-                        sector,
-                        &mut *request.header.get(),
-                        buffer.as_mut(),
-                        &mut *request.response.get(),
-                    )
-                    .map(Some),
-                Operation::Write(sector, buffer) => device
-                    .write_blocks_nb(
-                        sector,
-                        &mut *request.header.get(),
-                        buffer.as_ref(),
-                        &mut *request.response.get(),
-                    )
-                    .map(Some),
-                Operation::Flush => {
-                    device.flush_nb(&mut *request.header.get(), &mut *request.response.get())
-                }
+        // SAFETY: run_request pins and retains request, and the device lock
+        // serializes all state reads and transitions.
+        assert_eq!(unsafe { *request.state.get() }, RequestState::Pending);
+        // SAFETY: The same lock protects the initialized operation metadata.
+        let operation = unsafe { *request.operation.get() }.expect("pending operation");
+        // SAFETY: No device owns this pending request's header yet. Only this
+        // field is borrowed, under the device lock, from the pinned request.
+        let header = unsafe { &mut *request.header.get() };
+        // SAFETY: response is a distinct initialized field not yet owned by
+        // DMA; the device lock excludes any other CPU access.
+        let response = unsafe { &mut *request.response.get() };
+        let submitted = match operation {
+            Operation::Read(sector, mut buffer) => {
+                // SAFETY: run_request retains the exclusively borrowed read
+                // buffer until terminal completion; no device owns it yet.
+                let buffer = unsafe { buffer.as_mut() };
+                // SAFETY: All three disjoint buffers stay pinned/live through
+                // reclamation; the device lock prevents completion before the
+                // returned token is installed below.
+                unsafe { device.read_blocks_nb(sector, header, buffer, response) }.map(Some)
+            }
+            Operation::Write(sector, buffer) => {
+                // SAFETY: run_request retains the immutable initialized write
+                // buffer through terminal completion.
+                let buffer = unsafe { buffer.as_ref() };
+                // SAFETY: The header, data and response stay live and disjoint
+                // until token reclamation, serialized by the held device lock.
+                unsafe { device.write_blocks_nb(sector, header, buffer, response) }.map(Some)
+            }
+            Operation::Flush => {
+                // SAFETY: Both disjoint protocol fields stay pinned/live through
+                // completion, which cannot acquire the device lock until submit ends.
+                unsafe { device.flush_nb(header, response) }
             }
         };
         if submitted == Err(Error::QueueFull) {
@@ -219,29 +227,39 @@ impl BlockRequests {
             // SAFETY: the token references a pinned caller whose terminal wait
             // cannot return yet. Device lock protects the node and its metadata.
             let request = unsafe { pointer.as_ref() };
-            // SAFETY: this is exactly the token and buffers supplied at submit.
-            // peek_used has observed device completion. Only protocol projections
-            // are borrowed; no other CPU accesses them through the device lock.
-            let completed = unsafe {
-                assert_eq!(*request.state.get(), RequestState::Submitted(token));
-                match (*request.operation.get()).expect("submitted operation") {
-                    Operation::Read(_, mut buffer) => device.complete_read_blocks(
-                        token,
-                        &*request.header.get(),
-                        buffer.as_mut(),
-                        &mut *request.response.get(),
-                    ),
-                    Operation::Write(_, buffer) => device.complete_write_blocks(
-                        token,
-                        &*request.header.get(),
-                        buffer.as_ref(),
-                        &mut *request.response.get(),
-                    ),
-                    Operation::Flush => device.complete_flush(
-                        token,
-                        &*request.header.get(),
-                        &mut *request.response.get(),
-                    ),
+            // SAFETY: The device lock serializes reads of this retained request.
+            let state = unsafe { *request.state.get() };
+            assert_eq!(state, RequestState::Submitted(token));
+            // SAFETY: The submitted operation is initialized and immutable until
+            // reclamation under the same device lock completes.
+            let operation = unsafe { *request.operation.get() }.expect("submitted operation");
+            // SAFETY: peek_used observed completion; the pinned header is the
+            // one supplied for token and no writer can access it under this lock.
+            let header = unsafe { &*request.header.get() };
+            // SAFETY: The device finished writing this distinct response field,
+            // and the device lock excludes concurrent CPU access.
+            let response = unsafe { &mut *request.response.get() };
+            let completed = match operation {
+                Operation::Read(_, mut buffer) => {
+                    // SAFETY: run_request retains this exclusive read buffer;
+                    // peek_used observed that device writes have completed.
+                    let buffer = unsafe { buffer.as_mut() };
+                    // SAFETY: token and all buffers are exactly those submitted;
+                    // peek_used reported completion and this lock serializes reclaim.
+                    unsafe { device.complete_read_blocks(token, header, buffer, response) }
+                }
+                Operation::Write(_, buffer) => {
+                    // SAFETY: run_request retains the initialized immutable
+                    // write buffer until this terminal reclamation completes.
+                    let buffer = unsafe { buffer.as_ref() };
+                    // SAFETY: These are token's original submitted buffers;
+                    // completion was observed and reclamation holds the device lock.
+                    unsafe { device.complete_write_blocks(token, header, buffer, response) }
+                }
+                Operation::Flush => {
+                    // SAFETY: These are the original protocol fields for the
+                    // completed token, retained through this serialized reclamation.
+                    unsafe { device.complete_flush(token, header, response) }
                 }
             };
             // These are the only terminal statuses after successful pop_used in
@@ -250,6 +268,13 @@ impl BlockRequests {
                 Ok(()) => Ok(()),
                 Err(Error::IoError) => Err(DriverError::Io),
                 Err(Error::Unsupported) => Err(DriverError::Unsupported),
+                #[expect(
+                    clippy::panic,
+                    reason = "CG-021-no-panic-on-reachable-failure: After a successful pop_used \
+                              for this token, the pinned virtio-drivers completion returns only \
+                              Ok, IoError or Unsupported; any other error means the descriptor \
+                              chain cannot be reclaimed safely"
+                )]
                 Err(error) => panic!("virtio block descriptor reclamation failed: {error:?}"),
             };
             *entry = None;

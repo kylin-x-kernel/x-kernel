@@ -13,7 +13,7 @@ use lazyinit::LazyInit;
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 
-pub fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
+pub(super) fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {
         return;
     }
@@ -29,14 +29,16 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     TRAP_OP.init_once(cpu.trap_operations());
 }
 
-pub fn init_current_cpu() {
+pub(super) fn init_current_cpu() {
     debug!("Initialize GICv3 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
-    let _ = cpu.init_current_cpu();
+    if let Err(err) = cpu.init_current_cpu() {
+        error!("GICv3 CPU initialization failed: {err}");
+    }
     cpu.set_eoi_mode(true);
 }
 
-pub fn set_trigger(interrupt_id: usize, edge: bool) {
+pub(super) fn set_trigger(interrupt_id: usize, edge: bool) {
     trace!("GICv3 set trigger: {interrupt_id} {edge}");
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
@@ -45,7 +47,7 @@ pub fn set_trigger(interrupt_id: usize, edge: bool) {
     GIC.lock().set_cfg(intid, cfg);
 }
 
-pub fn enable(irq: usize, enabled: bool) {
+pub(super) fn enable(irq: usize, enabled: bool) {
     trace!("GICv3 set enable: {irq} {enabled}");
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
@@ -54,7 +56,7 @@ pub fn enable(irq: usize, enabled: bool) {
     gic.set_irq_enable(intid, enabled);
 }
 
-pub fn set_prio(irq: usize, priority: u8) {
+pub(super) fn set_prio(irq: usize, priority: u8) {
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
@@ -67,7 +69,7 @@ pub fn set_prio(irq: usize, priority: u8) {
 /// This is a read-only capability query backed by `GICD_TYPER.NMI`; it never
 /// modifies a live interrupt attribute as part of feature detection.
 #[cfg(feature = "nmi-hardware")]
-pub fn supports_hardware_nmi() -> bool {
+pub(super) fn supports_hardware_nmi() -> bool {
     GIC.lock().supports_nmi_attributes()
 }
 
@@ -77,7 +79,7 @@ pub fn supports_hardware_nmi() -> bool {
 /// programmed (unsupported INTID, or the current CPU's redistributor frame
 /// cannot be located).
 #[cfg(feature = "nmi-hardware")]
-pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
+pub(super) fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
@@ -219,7 +221,7 @@ fn unmask_nmis_from_irqson() {
 /// `nmi-hardware`, the NMI is acknowledged via `ICC_NMIAR1_EL1` (IAR1 never
 /// returns NMI-attribute interrupts).  Mirrors
 /// `__gic_handle_irq_from_irqsoff`.
-pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
+pub(super) fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
     #[cfg(feature = "nmi-pseudo")]
     let saved_pmr = karch::pmr::read();
     #[cfg(feature = "nmi-pseudo")]
@@ -303,7 +305,7 @@ fn read_nmi_iar() -> u32 {
     (value as u32) & 0x00FF_FFFF
 }
 
-pub fn complete_irq(completion_cookie: usize) {
+pub(super) fn complete_irq(completion_cookie: usize) {
     // SAFETY: completion_cookie is the INTID returned by ack1() in
     // dispatch_irq on the same CPU; it is always a valid GICv3
     // interrupt identifier (special values already filtered out).
@@ -311,7 +313,7 @@ pub fn complete_irq(completion_cookie: usize) {
     TRAP_OP.dir(intid);
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+pub(super) fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     // `ICC_SGI1R_EL1` is written via a system-register `msr`, so we need
     // `dsb st` here rather than a mere ordering barrier. This guarantees the
     // shootdown request state stored in Normal memory has completed before the

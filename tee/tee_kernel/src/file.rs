@@ -98,7 +98,7 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
     })
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[test]
     fn validate_tee_path_allows_tee_root() {

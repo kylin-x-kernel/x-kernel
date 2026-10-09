@@ -116,6 +116,7 @@ async fn alarm_task() {
                 continue;
             }
 
+            // Notification and timeout both lead to rereading the alarm heap.
             let _ = timeout_at(Some(deadline), listener).await;
         }
     }

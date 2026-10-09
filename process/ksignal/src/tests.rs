@@ -64,6 +64,11 @@ fn observe_pending(
     let waker = Waker::from(observed.clone());
     let context = Context::from_waker(&waker);
     let mut registrations = kpoll::PollRegistrations::new();
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: a failed registration is \
+                  the setup failure the caller's test reports"
+    )]
     registrations
         .context(&context)
         .register_weak(source)
@@ -1020,7 +1025,7 @@ fn test_process_signal_manager_child_exit_sigchld_uses_linux_default_semantics()
 
     let mut sigchld = SignalSet::default();
     sigchld.add(Signo::SIGCHLD);
-    let _ = thread.dequeue_signal(&sigchld);
+    assert!(thread.dequeue_signal(&sigchld).is_some());
 
     let (result, target_tid) = proc
         .send_child_exit_signal(new_sigchld_child_exit_signal())
@@ -1029,7 +1034,7 @@ fn test_process_signal_manager_child_exit_sigchld_uses_linux_default_semantics()
     assert!(!result.should_autoreap());
     assert!(proc.pending().has(Signo::SIGCHLD));
 
-    let _ = thread.dequeue_signal(&sigchld);
+    assert!(thread.dequeue_signal(&sigchld).is_some());
     proc.set_signal_action(
         Signo::SIGCHLD,
         SignalAction {

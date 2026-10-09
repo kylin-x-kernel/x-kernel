@@ -64,7 +64,7 @@ impl NamespaceType {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_types {
     use unittest::def_test;
 

@@ -132,7 +132,7 @@ fn load_cpu_id_map(load: impl FnOnce(&mut CpuIdMap) -> bool) -> bool {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct CpuIdMap {
+pub(crate) struct CpuIdMap {
     raw_cpu_ids_by_logical: [usize; NR_CPUS],
     present_count: usize,
     invalid_raw_cpu_id: usize,

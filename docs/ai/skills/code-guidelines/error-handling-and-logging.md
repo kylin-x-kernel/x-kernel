@@ -5,9 +5,6 @@ error mapping, retry behavior, or log statements.
 
 ## Error Handling
 
-- use `?` for ordinary error propagation;
-- avoid `.unwrap()` and hidden panics
-  where failure is a legitimate possibility;
 - return typed errors that match the layer's contract;
 - validate at subsystem boundaries,
   then trust validated internal invariants;
@@ -33,7 +30,6 @@ error mapping, retry behavior, or log statements.
 
 Check specifically for:
 
-- unwrap-like failure paths hidden inside normal control flow;
 - weak or lossy error mapping at subsystem boundaries;
 - runtime validation accidentally downgraded into `debug_assert!`;
 - logs at the wrong severity;

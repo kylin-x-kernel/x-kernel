@@ -27,71 +27,141 @@ pub(crate) static __llvm_profile_raw_version: u64 = INSTR_PROF_RAW_VERSION;
 
 // === #[unsafe(no_mangle)] section accessor exports ===
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined counters
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_counters() -> *const u8 {
     platform::profile_sections().counters.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined counters
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_counters() -> *const u8 {
     platform::profile_sections().counters.end()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined data
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_data() -> *const LlvmProfileData {
     platform::profile_sections().data.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined data
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_data() -> *const LlvmProfileData {
     platform::profile_sections().data.end()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined names
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_names() -> *const u8 {
     platform::profile_sections().names.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined names
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_names() -> *const u8 {
     platform::profile_sections().names.end()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined bitmap
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_bitmap() -> *const u8 {
     platform::profile_sections().bitmap.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined bitmap
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_bitmap() -> *const u8 {
     platform::profile_sections().bitmap.end()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined vnodes
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_vnodes() -> *const ValueProfNode {
     platform::profile_sections().vnodes.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined vnodes
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_vnodes() -> *const ValueProfNode {
     platform::profile_sections().vnodes.end()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined vtables
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_vtables() -> *const u8 {
     platform::profile_sections().vtables.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined vtables
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_vtables() -> *const u8 {
     platform::profile_sections().vtables.end()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined vtabnames
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_begin_vtabnames() -> *const u8 {
     platform::profile_sections().vtabnames.begin()
 }
 
+/// # Safety
+///
+/// No caller preconditions: this only returns the linker-defined vtabnames
+/// section boundary. Dereferencing the returned pointer requires a separate
+/// validity check; an end pointer must not be dereferenced.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_end_vtabnames() -> *const u8 {
     platform::profile_sections().vtabnames.end()
@@ -100,12 +170,24 @@ pub(crate) unsafe extern "C" fn __llvm_profile_end_vtabnames() -> *const u8 {
 // === #[unsafe(no_mangle)] profiling operation exports ===
 
 /// Resets all profiling counters to their initial state.
+///
+/// # Safety
+///
+/// No caller preconditions: the runtime resets initialized profiling state
+/// through atomic stores and handles an uninitialized image as a no-op.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_reset_counters() {
     crate::reset();
 }
 
 /// Merges profile data from a buffer into the current counters.
+///
+/// # Safety
+///
+/// For non-null `profile`, `size` must describe initialized, readable bytes
+/// within one allocation, with length at most `isize::MAX` and no address
+/// wraparound. The bytes must remain immutable for this call. A null pointer
+/// is accepted and checked without dereferencing it.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_merge_from_buffer(
     profile: *const u8,
@@ -123,6 +205,13 @@ pub(crate) unsafe extern "C" fn __llvm_profile_merge_from_buffer(
 }
 
 /// Checks if the given profile data is compatible with the current binary.
+///
+/// # Safety
+///
+/// For non-null `profile`, `size` must describe initialized, readable bytes
+/// within one allocation, with length at most `isize::MAX` and no address
+/// wraparound. The bytes must remain immutable for this call. A null pointer
+/// is accepted and checked without dereferencing it.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_check_compatibility(
     profile: *const u8,
@@ -244,6 +333,15 @@ pub(crate) extern "C" fn __llvm_profile_get_size_for_buffer() -> u64 {
 }
 
 /// Writes the raw profile data into the provided buffer.
+///
+/// # Safety
+///
+/// When profiling output is available and `buffer` is non-null, it must
+/// point into one allocation containing enough initialized, exclusively
+/// writable bytes for the current encoded snapshot, with length at most
+/// `isize::MAX`. Keep it live throughout this call. If sizing with
+/// `__llvm_profile_get_size_for_buffer`, prevent profile growth between
+/// sizing and writing so the allocated capacity remains sufficient.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_write_buffer(buffer: *mut u8) -> i32 {
     #[cfg(feature = "alloc")]
@@ -275,6 +373,12 @@ pub(crate) unsafe extern "C" fn __llvm_profile_write_buffer(buffer: *mut u8) -> 
 }
 
 /// Records an indirect call target for value profiling.
+///
+/// # Safety
+///
+/// No caller preconditions: `data` is used only as an address to resolve a
+/// record in the linker-owned profile section, never dereferenced directly.
+/// The value-profiling runtime validates indices and synchronizes updates.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_instrument_target(
     target_value: u64,
@@ -285,6 +389,12 @@ pub(crate) unsafe extern "C" fn __llvm_profile_instrument_target(
 }
 
 /// Records an indirect call target with an explicit count.
+///
+/// # Safety
+///
+/// No caller preconditions: `data` is used only as an address to resolve a
+/// record in the linker-owned profile section, never dereferenced directly.
+/// The value-profiling runtime validates indices and synchronizes updates.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_instrument_target_value(
     target_value: u64,
@@ -296,6 +406,12 @@ pub(crate) unsafe extern "C" fn __llvm_profile_instrument_target_value(
 }
 
 /// Records a memory operation size for value profiling.
+///
+/// # Safety
+///
+/// No caller preconditions: `data` is used only as an address to resolve a
+/// record in the linker-owned profile section, never dereferenced directly.
+/// The value-profiling runtime validates indices and synchronizes updates.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn __llvm_profile_instrument_memop(
     target_value: u64,

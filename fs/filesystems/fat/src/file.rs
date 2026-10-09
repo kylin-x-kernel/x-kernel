@@ -45,7 +45,8 @@ impl FatFileInode {
 fn file_size(file: &mut ff::File) -> u64 {
     let pos = file.seek(SeekFrom::Current(0)).unwrap_or(0);
     let size = file.seek(SeekFrom::End(0)).unwrap_or(0);
-    file.seek(SeekFrom::Start(pos)).ok();
+    // This best-effort size query keeps its result even if restoring the cursor fails.
+    let _ = file.seek(SeekFrom::Start(pos));
     size
 }
 

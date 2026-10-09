@@ -22,7 +22,7 @@ const GICH_BASE: u64 = 0x0803_0000;
 const GICV_BASE: u64 = 0x0804_0000;
 它做三件事：
 1. guest 访问 GICC_BASE 时，stage2 实际映射到硬件 GICV_BASE。
-gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRW)
+gm.map_region(GICC_BASE, GICV_BASE, GIC_IF_SIZE, GuestPerm::DeviceRw)
 2. host 自己 iomap GICH_BASE，用于写 GICH list registers。
 let gich_va = memspace::iomap_device(... GICH_BASE ...)
 3. 创建 Vgic 和 Vgicd。

@@ -711,7 +711,7 @@ fn validate_ifindex_or_any(ifindex: i32) -> KResult {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

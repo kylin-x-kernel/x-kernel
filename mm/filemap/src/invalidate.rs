@@ -10,12 +10,12 @@ use memspace::InvalidateHandle;
 use vmobj::{MappingViewNotifier, ObjectInvalidateWork, ObjectViewHit};
 
 /// Reverse-mapping notifier for one file-backed VMA view.
-pub struct MmSpaceInvalidate {
+pub(crate) struct MmSpaceInvalidate {
     handle: InvalidateHandle,
 }
 
 impl MmSpaceInvalidate {
-    pub fn new(handle: InvalidateHandle) -> Arc<Self> {
+    pub(crate) fn new(handle: InvalidateHandle) -> Arc<Self> {
         Arc::new(Self { handle })
     }
 }

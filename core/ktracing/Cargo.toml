@@ -26,3 +26,6 @@ memspace = { workspace = true }
 memaddr = { workspace = true }
 ktask = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

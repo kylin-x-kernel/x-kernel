@@ -56,3 +56,6 @@ bitflags = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 multiboot2 = "0.24"
+
+[lints]
+workspace = true

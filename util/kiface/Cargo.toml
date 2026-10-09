@@ -22,3 +22,6 @@ syn.workspace = true
 [dev-dependencies]
 define-simple-interfaces = { path = "test_crates/define-simple-interfaces" }
 impl-simple-interfaces = { path = "test_crates/impl-simple-interfaces" }
+
+[lints]
+workspace = true

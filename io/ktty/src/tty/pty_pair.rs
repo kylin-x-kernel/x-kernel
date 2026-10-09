@@ -158,6 +158,11 @@ impl PtyPair {
         Ok(Arc::new_cyclic(|weak| {
             let (master, slave) = create_endpoints(Some(weak.clone()));
             master.set_pty_number(number.0);
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: create_endpoints builds the slave \
+                          with ProcessMode::Work, which always has input work"
+            )]
             let input_work = slave
                 .input
                 .lock()

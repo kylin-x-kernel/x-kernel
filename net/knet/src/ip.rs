@@ -358,7 +358,7 @@ pub(crate) fn to_smoltcp_ip_address(addr: IpAddress) -> SmoltcpIpAddress {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::string::ToString;
 

@@ -100,11 +100,11 @@ macro_rules! virtio_driver_pair {
     (
         $pci_ctor:ident, $mmio_ctor:ident, $kind:expr, $vtype:expr, $pci_name:expr, $mmio_name:expr
     ) => {
-        pub fn $pci_ctor() -> BoxedDriver {
+        pub(crate) fn $pci_ctor() -> BoxedDriver {
             make_virtio_driver($pci_name, $kind, $vtype, BusTypeId::PCI)
         }
 
-        pub fn $mmio_ctor() -> BoxedDriver {
+        pub(crate) fn $mmio_ctor() -> BoxedDriver {
             make_virtio_driver($mmio_name, $kind, $vtype, BusTypeId::PLATFORM)
         }
     };
@@ -116,7 +116,16 @@ macro_rules! virtio_driver_pair {
 
 /// Activate a VirtIO device whose type is known (PCI path).
 #[cfg(feature = "virtio")]
-#[allow(unused_variables)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Device activation inputs are used only by enabled VirtIO \
+              device features"
+)]
+#[allow(
+    unused_variables,
+    reason = "CG-024-lint-exceptions: unused_variables: Device activation inputs are used only by \
+              enabled VirtIO device features"
+)]
 fn activate_virtio_device(
     device: Arc<DeviceObject>,
     device_kind: DeviceKind,
@@ -372,6 +381,6 @@ const DRIVER_FACTORIES: &[crate::driver_registry::DriverFactory] = &[
 
 /// Register all enabled VirtIO drivers with the given registrar.
 #[cfg(feature = "virtio")]
-pub fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
+pub(crate) fn register_all(registrar: &mut crate::driver_registry::DriverRegistrar) {
     crate::driver_registry::register_factories(registrar, DRIVER_FACTORIES);
 }

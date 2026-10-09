@@ -63,7 +63,7 @@ pub(crate) struct RawHeader {
 #[cfg(feature = "alloc")]
 impl RawHeader {
     /// Parse the header from bytes. Returns None if too short.
-    pub fn parse(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 128 {
             return None;
         }
@@ -82,7 +82,7 @@ impl RawHeader {
     }
 
     /// Validates magic and version.
-    pub fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         let expected_magic = if size_of::<*const ()>() == 8 {
             crate::abi::layout::INSTR_PROF_RAW_MAGIC_64
         } else {
@@ -93,7 +93,7 @@ impl RawHeader {
                 == crate::abi::layout::INSTR_PROF_RAW_VERSION
     }
 
-    pub fn is_byte_coverage(&self) -> bool {
+    pub(crate) fn is_byte_coverage(&self) -> bool {
         self.version & crate::abi::layout::VARIANT_MASK_BYTE_COVERAGE != 0
     }
 }
@@ -112,7 +112,7 @@ pub(crate) struct SectionLayout {
 
 #[cfg(feature = "alloc")]
 impl SectionLayout {
-    pub fn compute(header: &RawHeader) -> Option<Self> {
+    pub(crate) fn compute(header: &RawHeader) -> Option<Self> {
         let data_offset = 128usize.checked_add(usize::try_from(header.binary_ids_size).ok()?)?;
         let data_size = header.num_data.checked_mul(64)?; // 64 bytes per record
         let counters_offset = data_offset
@@ -189,7 +189,11 @@ pub(crate) struct ParsedProfraw {
 
 /// Parses a `.profraw` byte buffer into structured data.
 #[cfg(feature = "alloc")]
-pub fn parse_profraw(bytes: &[u8]) -> Result<ParsedProfraw, ProfileError> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy profraw parser; split per input section"
+)]
+pub(crate) fn parse_profraw(bytes: &[u8]) -> Result<ParsedProfraw, ProfileError> {
     let header = RawHeader::parse(bytes).ok_or(ProfileError::MalformedInput)?;
     if !header.is_valid() {
         return Err(ProfileError::MalformedInput);
@@ -485,7 +489,7 @@ fn compute_site_offset_in_function(
 /// Compares structured metadata: version, counter kind, function count,
 /// per-function name_ref, func_hash, num_counters, num_bitmap_bytes.
 #[cfg(feature = "alloc")]
-pub fn check_compatibility(
+pub(crate) fn check_compatibility(
     image: &ProfileImage,
     parsed: &ParsedProfraw,
 ) -> Result<(), ProfileError> {

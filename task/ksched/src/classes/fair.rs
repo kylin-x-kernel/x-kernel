@@ -112,7 +112,10 @@ unsafe impl<T, const D: bool> Adapter for FairAdapter<T, D> {
         // SAFETY: Adapter supplies a live entity; OFFSET selects its
         // aligned, initialized link field without creating an exclusive
         // entity reference.
-        unsafe { NonNull::new_unchecked(value.cast::<u8>().add(Self::OFFSET).cast_mut().cast()) }
+        let link = unsafe { value.cast::<u8>().add(Self::OFFSET).cast_mut().cast() };
+        // SAFETY: A field within the caller's live SchedTask allocation cannot
+        // have a null address.
+        unsafe { NonNull::new_unchecked(link) }
     }
 
     fn link_ops(&self) -> &Self::LinkOps {
@@ -185,7 +188,7 @@ pub(crate) struct FairClass<T> {
 }
 
 impl<T> FairClass<T> {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             ready: RBTree::new(FairAdapter::NEW),
             vruntime_tree: RBTree::new(FairAdapter::NEW),
@@ -377,6 +380,11 @@ impl<T> FairClass<T> {
                 .is_some_and(|found| core::ptr::eq(found, Arc::as_ptr(&task))),
             "EEVDF vruntime tree out of sync with ready for task {id}"
         );
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the preceding assertion proves this \
+                      cursor points to the ready task in the vruntime tree"
+        )]
         let secondary = cursor.remove().unwrap();
         if self
             .first_vruntime
@@ -454,10 +462,15 @@ impl<T> FairClass<T> {
         }
         let buddy = self.next_buddy.take()?;
         self.has_sync_wake = false;
-        Some(
+        Some({
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: A nominated eligible buddy \
+                          remains in the ready tree under the runqueue lock"
+            )]
             self.dequeue_entity(Self::deadline_key(&buddy, tok), tok)
-                .expect("nominated buddy is in the ready tree"),
-        )
+                .expect("nominated buddy is in the ready tree")
+        })
     }
 
     fn update_entity_lag(&self, curr: &SchedTask<T>, tok: RqLocked) {
@@ -554,6 +567,11 @@ impl<T> FairClass<T> {
         let Some(key) = self.earliest_eligible(avg, tok) else {
             return false;
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: earliest_eligible returns a key from \
+                      this unchanged, locked ready tree"
+        )]
         let peer = self
             .ready
             .find(&key)
@@ -659,10 +677,23 @@ impl<T> ClassOps<T> for FairClass<T> {
         let avg = self.avg_vruntime(None, tok);
         let key = match self.earliest_eligible(avg, tok) {
             Some(key) => key,
-            None => self
-                .first_deadline_key(tok)
-                .expect("ready tree is not empty"),
+            None =>
+            {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: The ready tree was checked \
+                              nonempty and the selected key remains present under the runqueue \
+                              lock"
+                )]
+                self.first_deadline_key(tok)
+                    .expect("ready tree is not empty")
+            }
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The ready tree was checked nonempty \
+                      and the selected key remains present under the runqueue lock"
+        )]
         let picked = self
             .dequeue_entity(key, tok)
             .expect("pick key is in the ready tree");

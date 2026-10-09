@@ -95,16 +95,29 @@ impl NetBuf {
     }
 
     fn get_slice(&self, start: usize, len: usize) -> &[u8] {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: NetBuf setters validate header and \
+                      payload lengths against the backing buffer before slice access"
+        )]
         let end = start
             .checked_add(len)
             .expect("network buffer slice end overflow");
         debug_assert!(end <= self.buf_len, "network buffer slice out of bounds");
         // SAFETY: `start..end` is checked against this buffer's backing
         // allocation, so the raw slice stays within the owned storage.
-        unsafe { core::slice::from_raw_parts(self.base_ptr().add(start), len) }
+        let data = unsafe { self.base_ptr().add(start) };
+        // SAFETY: The checked range contains len initialized bytes of this owned
+        // allocation; self keeps storage live and excludes mutation.
+        unsafe { core::slice::from_raw_parts(data, len) }
     }
 
     fn get_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: NetBuf setters validate header and \
+                      payload lengths against the backing buffer before slice access"
+        )]
         let end = start
             .checked_add(len)
             .expect("network buffer slice end overflow");
@@ -114,7 +127,10 @@ impl NetBuf {
         );
         // SAFETY: `start..end` is checked against this buffer's backing
         // allocation, and `&mut self` guarantees exclusive access.
-        unsafe { core::slice::from_raw_parts_mut(self.base_ptr().add(start), len) }
+        let data = unsafe { self.base_ptr().add(start) };
+        // SAFETY: The checked range contains len initialized bytes of this owned
+        // allocation; &mut self excludes all other access.
+        unsafe { core::slice::from_raw_parts_mut(data, len) }
     }
 
     /// Returns the capacity of the buffer.
@@ -178,19 +194,13 @@ impl NetBuf {
 
     /// Converts the buffer into a [`NetBufHandle`].
     ///
-    /// # Panics
-    ///
-    /// Only through the internal `NonNull::new(..).unwrap()` calls if the
-    /// box pointer or the payload pointer were null, which cannot happen
-    /// for a live pooled buffer.
+    /// Transfers ownership of the box while retaining its non-null object and
+    /// payload pointers in the handle.
     pub fn into_handle(mut self: Box<Self>) -> NetBufHandle {
-        let data_ptr = self.payload_mut().as_mut_ptr();
+        let data_ptr = NonNull::from(self.payload_mut()).cast();
         let data_len = self.payload_len;
-        NetBufHandle::new(
-            NonNull::new(Box::into_raw(self) as *mut u8).unwrap(),
-            NonNull::new(data_ptr).unwrap(),
-            data_len,
-        )
+        let object_ptr = NonNull::from(Box::leak(self)).cast();
+        NetBufHandle::new(object_ptr, data_ptr, data_len)
     }
 
     /// Restore [`NetBuf`] from a handle.
@@ -208,6 +218,11 @@ impl NetBuf {
     }
 
     const fn frame_len(&self) -> usize {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: NetBuf setters validate header and \
+                      payload lengths against the backing buffer before slice access"
+        )]
         let frame_len = self
             .hdr_len
             .checked_add(self.payload_len)
@@ -308,8 +323,8 @@ impl NetBufPool {
     }
 }
 
-#[cfg(unittest)]
-pub mod tests_netbuf {
+#[unittest::mod_test]
+pub(crate) mod tests_netbuf {
     use unittest::def_test;
     extern crate alloc;
     use alloc::{vec, vec::Vec};

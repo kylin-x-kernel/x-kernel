@@ -53,6 +53,12 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
     fn advance(&mut self, _clk: &RqClock, _tok: RqLocked) {}
 
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: SchedAttr::validate admits only Fair \
+                  policies until other classes are wired, so no task reaches an unwired class's \
+                  enqueue"
+    )]
     fn enqueue(
         &mut self,
         _task: Arc<SchedTask<T>>,
@@ -330,6 +336,11 @@ impl<T> Scheduler<T> {
 
     fn leave(&mut self, now_ns: u64, reason: LeaveReason, tok: RqLocked) -> Arc<SchedTask<T>> {
         let _ = self.charge(now_ns, tok);
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: leave is only entered for the \
+                      installed current runner under the runqueue lock"
+        )]
         let curr = self.curr.take().expect("leave without runner");
         let class = curr.sched_class();
         // After `charge`, `last_ns == now_ns`. `put_prev` may read this

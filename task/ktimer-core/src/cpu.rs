@@ -97,10 +97,13 @@ impl CpuTimers {
         }
         // SAFETY: removed above if linked; the caller guarantees exclusive
         // node access and stable live storage through subsequent removal.
-        unsafe {
-            node.replace_deadline(deadline);
-            self.pending.insert(UnsafeRef::from_raw(node));
-        }
+        unsafe { node.replace_deadline(deadline) };
+        // SAFETY: The caller keeps node at this address until removal and all
+        // subsequent borrowed accesses end; UnsafeRef takes no storage ownership.
+        let pending = unsafe { UnsafeRef::from_raw(node) };
+        // SAFETY: node is unlinked, its deadline is prepared, and the caller's
+        // serialized access excludes deadline changes throughout membership.
+        unsafe { self.pending.insert(pending) };
         !was_linked
     }
 
@@ -155,7 +158,7 @@ impl CpuTimers {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::{MonotonicInstant, TimeSpan};
     use unittest::{assert, assert_eq, def_test};
@@ -201,11 +204,13 @@ mod tests {
         unsafe { timers.arm(&node, setting(10)) };
         let (running, event) = timers.take_expired(10).unwrap();
         // SAFETY: same running node and collection; successor uses its existing link.
-        unsafe {
-            assert!(timers.arm(&node, setting(20)));
-            assert!(!timers.arm(&node, setting(30)));
-            assert!(matches!(timers.try_cancel(&node), CancelResult::Running));
-        }
+        assert!(unsafe { timers.arm(&node, setting(20)) });
+        // SAFETY: The same stack-stable node is accessed only by this test,
+        // and its existing membership belongs to timers.
+        assert!(!unsafe { timers.arm(&node, setting(30)) });
+        // SAFETY: timers owns this node's membership; access remains serialized.
+        let canceled = unsafe { timers.try_cancel(&node) };
+        assert!(matches!(canceled, CancelResult::Running));
         assert_eq!(event.deadline_ns, 10);
         assert_eq!(timers.earliest_deadline_ns(), Some(30));
         assert!(timers.take_expired(100).is_none());

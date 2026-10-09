@@ -11,10 +11,10 @@ use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OVERFLOW};
 use super::{TeeResult, libutee::utee_defines::tee_u32_to_big_endian};
 
 /// Fixed width for Curve25519-family key octet strings (Ed25519 / X25519).
-pub const KEY_SIZE_BYTES_25519: usize = 32;
+pub(super) const KEY_SIZE_BYTES_25519: usize = 32;
 
 /// `tee_cryp_obj` attribute ops table index for 32-byte curve25519 keys.
-pub const ATTR_OPS_INDEX_25519: u32 = 3;
+pub(super) const ATTR_OPS_INDEX_25519: u32 = 3;
 
 fn secure_zero(bytes: &mut [u8]) {
     for byte in bytes.iter_mut() {

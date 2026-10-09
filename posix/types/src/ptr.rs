@@ -401,7 +401,16 @@ impl UserConstPtr<c_char> {
     /// Propagates the `osvm` string-copy error or returns `IllegalBytes` for
     /// invalid UTF-8. Allocation failure follows allocator policy.
     pub fn load_string(self) -> KResult<String> {
-        #[allow(clippy::unnecessary_cast)]
+        #[expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: C char is signed on some architectures; user-memory \
+                      helpers require byte pointers"
+        )]
+        #[allow(
+            clippy::unnecessary_cast,
+            reason = "CG-024-lint-exceptions: clippy::unnecessary_cast: C char is signed on some \
+                      architectures; user-memory helpers require byte pointers"
+        )]
         let bytes = load_vec_until_null(self.0 as *const u8)?;
         String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
     }
@@ -442,7 +451,16 @@ impl UserConstPtr<c_char> {
 
         for offset in 0..=max_len {
             let mut byte = MaybeUninit::<u8>::uninit();
-            #[allow(clippy::unnecessary_cast)]
+            #[expect(
+                clippy::allow_attributes,
+                reason = "CG-024-lint-exceptions: C char is signed on some architectures; \
+                          user-memory helpers require byte pointers"
+            )]
+            #[allow(
+                clippy::unnecessary_cast,
+                reason = "CG-024-lint-exceptions: clippy::unnecessary_cast: C char is signed on \
+                          some architectures; user-memory helpers require byte pointers"
+            )]
             let user_ptr = (self.0 as *const u8).wrapping_add(offset);
             read_vm_bytes(user_ptr, as_uninit_bytes(&mut byte))?;
             // SAFETY: `read_vm_bytes` initialized exactly one byte in `byte`.

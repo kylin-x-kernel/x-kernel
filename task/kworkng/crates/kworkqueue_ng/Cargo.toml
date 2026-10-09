@@ -28,5 +28,5 @@ kworkerpool_ng.workspace = true
 khal.workspace = true
 kirq.workspace = true
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
+[lints]
+workspace = true

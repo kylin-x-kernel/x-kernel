@@ -11,3 +11,6 @@ description = "Virtual PL011 UART device"
 [dependencies]
 klogger.workspace = true
 vdev-core.workspace = true
+
+[lints]
+workspace = true

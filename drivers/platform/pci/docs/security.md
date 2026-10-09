@@ -96,6 +96,7 @@ No FFI or inline assembly exists in the crate.
 |----|--------------|--------------|---------------|----------|----------|
 | F-01 | No config space (`PCI_ECAM_BASE=0`, no firmware host) | `(0, 0, Static)` / `PciInitError::InvalidRange` | PCI skipped entirely; boot continues | 3 | Explicit skip path with logging. |
 | F-02 | ECAM mapping fails | `PciInitError::MappingFailed` | PCI bus unavailable | 3 | Error mapped from `memspace::IoMapError`, logged with the failing range. |
+| F-04 | Invalid BAR encoding | `PciInitError::InvalidBar` | Device configuration rejected | 3 | Returned to the host adapter as `DriverError::InvalidInput`. |
 | F-03 | BAR allocator exhausted | `PciInitError::NoMemory` | Device skipped | 3 | Checked, logged. |
 | F-04 | Missing BAR allocator in `configure_device` | Panic ("No memory ranges available for PCI BARs!") | Boot fails | 2 | Platform configuration error; failing fast is intentional. |
 | F-05 | Unprogrammed INTx pin | `legacy_interrupt_route` returns `None` | Device falls back to MSI-X or stays IRQ-less | 4 | Logged `Option`. |

@@ -71,9 +71,9 @@ pub fn total_ram() -> usize {
     described_ram_regions().iter().map(|r| r.1).sum()
 }
 
-pub type OverlapError = (Range<usize>, Range<usize>);
+pub(super) type OverlapError = (Range<usize>, Range<usize>);
 
-pub fn check_overlap(iter: impl Iterator<Item = MemRange>) -> Result<(), OverlapError> {
+pub(crate) fn check_overlap(iter: impl Iterator<Item = MemRange>) -> Result<(), OverlapError> {
     let mut last = Range::default();
     for (s, n) in iter {
         if last.end > s {

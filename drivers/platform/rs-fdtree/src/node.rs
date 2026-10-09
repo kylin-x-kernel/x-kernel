@@ -11,7 +11,8 @@ const FDT_BEGIN_NODE: u32 = 1;
 const FDT_END_NODE: u32 = 2;
 const FDT_PROP: u32 = 3;
 pub(crate) const FDT_NOP: u32 = 4;
-const FDT_END: u32 = 5;
+const FDT_END: u32 = 9;
+const MAX_NODE_DEPTH: usize = 63;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -138,7 +139,7 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
 ) -> impl Iterator<Item = FdtNode<'b, 'a>> {
     let mut stream = FdtData::new(header.structs_block());
     let mut done = false;
-    let mut parents: [&[u8]; 64] = [&[]; 64];
+    let mut parents: [&[u8]; MAX_NODE_DEPTH + 1] = [&[]; MAX_NODE_DEPTH + 1];
     let mut parent_index = 0usize;
 
     core::iter::from_fn(move || {
@@ -201,18 +202,36 @@ pub struct NodeProperty<'a> {
 
 impl<'a> NodeProperty<'a> {
     fn parse(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction validates every \
+                      property header, string offset and node name before traversal"
+        )]
         let tag = stream.u32().expect("FDT property tag").get();
         assert_eq!(tag, FDT_PROP, "bad prop, tag: {}", tag);
 
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction validates every \
+                      property header, string offset and node name before traversal"
+        )]
         let prop = FdtProperty::from_bytes(stream).expect("FDT property");
         let data_len = prop.len.get() as usize;
         let data = &stream.remaining()[..data_len];
         skip_4_aligned(stream, data_len);
 
         NodeProperty {
-            name: header
-                .string_at_offset(prop.name_offset.get() as usize)
-                .expect("invalid FDT string offset"),
+            name: {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction \
+                              validates every property header, string offset and node name before \
+                              traversal"
+                )]
+                header
+                    .string_at_offset(prop.name_offset.get() as usize)
+                    .expect("invalid FDT string offset")
+            },
             value: data,
         }
     }
@@ -446,33 +465,139 @@ pub(crate) fn memory_regions<'b, 'a: 'b>(
 }
 
 pub(crate) fn skip_current_node<'a>(stream: &mut FdtData<'a>, header: &LinuxFdt<'a>) {
-    assert_eq!(stream.u32().unwrap().get(), FDT_BEGIN_NODE, "bad node");
-
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: constructor validation proves this node \
+                  has a complete BEGIN_NODE token"
+    )]
+    let tag = stream.u32().unwrap().get();
+    assert_eq!(tag, FDT_BEGIN_NODE, "bad node");
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: constructor validation proves every node \
+                  name is NUL-terminated UTF-8"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: LinuxFdt construction validates every \
+                  property header, string offset and node name before traversal"
+    )]
     let unit_name = CStr::new(stream.remaining())
         .expect("unit_name C str")
         .as_str()
         .unwrap();
-    let full_name_len = unit_name.len() + 1;
-    skip_4_aligned(stream, full_name_len);
+    skip_4_aligned(stream, unit_name.len() + 1);
 
     stream.skip_nops();
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: validated property records and balanced \
+                  nodes always leave a following token"
+    )]
     while stream.peek_u32().unwrap().get() == FDT_PROP {
         NodeProperty::parse(stream, header);
         stream.skip_nops();
     }
-
     loop {
         stream.skip_nops();
-        if stream.peek_u32().unwrap().get() != FDT_BEGIN_NODE {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: constructor validation proves a token \
+                      follows each property or completed child"
+        )]
+        let next = stream.peek_u32().unwrap().get();
+        if next != FDT_BEGIN_NODE {
             break;
         }
         skip_current_node(stream, header);
     }
-
     stream.skip_nops();
-    assert_eq!(stream.u32().unwrap().get(), FDT_END_NODE, "bad node");
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: constructor validation balances every \
+                  BEGIN_NODE with a complete END_NODE token"
+    )]
+    let tag = stream.u32().unwrap().get();
+    assert_eq!(tag, FDT_END_NODE, "bad node");
 }
 
 fn skip_4_aligned(stream: &mut FdtData<'_>, len: usize) {
     stream.skip((len + 3) & !0x3);
+}
+
+/// Validates the complete token grammar before a LinuxFdt can be published.
+/// The bounded stack also proves the depth bound used by all_nodes/recursion.
+pub(crate) fn validate_structure(bytes: &[u8], strings: &[u8]) -> Result<(), crate::FdtError> {
+    use crate::FdtError::ParseError;
+
+    let mut stream = FdtData::new(bytes);
+    let mut has_children = [false; MAX_NODE_DEPTH];
+    let mut depth = 0;
+    loop {
+        // This parser also runs at physical addresses before paging is enabled.
+        // Keep NOPs and the final END outside the node-token dispatch: a dense
+        // five-token match generates absolute virtual-address jump tables on
+        // RISC-V, which cannot be used in that boot phase.
+        stream.skip_nops();
+        match stream.u32().ok_or(ParseError)?.get() {
+            FDT_BEGIN_NODE => {
+                if depth == MAX_NODE_DEPTH {
+                    return Err(ParseError);
+                }
+                let name = CStr::new(stream.remaining())
+                    .and_then(|name| name.as_str())
+                    .ok_or(ParseError)?;
+                if (depth == 0 && !name.is_empty())
+                    || (depth != 0 && name.is_empty())
+                    || name.contains('/')
+                {
+                    return Err(ParseError);
+                }
+                take_aligned(&mut stream, name.len().checked_add(1).ok_or(ParseError)?)?;
+                if depth > 0 {
+                    has_children[depth - 1] = true;
+                }
+                has_children[depth] = false;
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                depth = depth.checked_sub(1).ok_or(ParseError)?;
+                if depth == 0 {
+                    stream.skip_nops();
+                    return if stream.u32().ok_or(ParseError)?.get() == FDT_END && stream.is_empty()
+                    {
+                        Ok(())
+                    } else {
+                        Err(ParseError)
+                    };
+                }
+            }
+            FDT_PROP => {
+                if depth == 0 || has_children[depth - 1] {
+                    return Err(ParseError);
+                }
+                let property = FdtProperty::from_bytes(&mut stream).ok_or(ParseError)?;
+                let name_bytes = strings
+                    .get(property.name_offset.get() as usize..)
+                    .ok_or(ParseError)?;
+                let name = CStr::new(name_bytes)
+                    .and_then(|name| name.as_str())
+                    .ok_or(ParseError)?;
+                if name.is_empty() {
+                    return Err(ParseError);
+                }
+                take_aligned(&mut stream, property.len.get() as usize)?;
+            }
+            _ => return Err(ParseError),
+        }
+    }
+}
+
+fn take_aligned(stream: &mut FdtData<'_>, len: usize) -> Result<(), crate::FdtError> {
+    use crate::FdtError::ParseError;
+    let padded_len = len.checked_add(3).ok_or(ParseError)? & !3;
+    // Padding is not interpreted. Some deployed DTBs (including crosvm.dtb)
+    // retain nonzero bytes there; only its presence is needed for safe traversal.
+    stream.take(padded_len).ok_or(ParseError)?;
+    Ok(())
 }

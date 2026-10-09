@@ -22,11 +22,13 @@ pub use tee_dice::{
     dice_init, dice_tee_handover_main_flow_chain, dice_tee_handover_main_flow_chain_code_hash,
 };
 
+/// CDI_Attest, CDI_Seal and DICE chain slices borrowed from a handover buffer.
+pub type HandoverSlices<'a> = (&'a [u8], &'a [u8], &'a [u8]);
+
 /// Parse the Android handover buffer and extract CDI values and optional chain.
 /// * `buffer` – the handover buffer to parse.
 ///   Returns a tuple of (cdi_attest, cdi_seal, chain) slices, or a DiceResult error.
-#[allow(clippy::type_complexity)]
-pub fn dice_parse_handover(buffer: &[u8]) -> Result<(&[u8], &[u8], &[u8]), DiceResult> {
+pub fn dice_parse_handover(buffer: &[u8]) -> Result<HandoverSlices<'_>, DiceResult> {
     let (cdi_attest, cdi_seal, chain) = dice_android_handover_parse(buffer)?;
     let chain_slice = chain.unwrap_or(&[]);
     Ok((cdi_attest.as_slice(), cdi_seal.as_slice(), chain_slice))

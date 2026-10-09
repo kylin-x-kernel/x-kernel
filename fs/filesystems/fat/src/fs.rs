@@ -76,6 +76,11 @@ impl DerefMut for FatFilesystemGuard<'_> {
 impl FatFilesystem {
     /// Fills a newly reserved FAT superblock from its canonical block device.
     pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: get_tree_bdev installs the block \
+                      device before invoking fill_super"
+        )]
         let dev = super_block
             .block_device()
             .expect("get_tree_bdev must set s_bdev before fill_super")

@@ -14,7 +14,7 @@ mod private;
 mod runtime;
 mod shared;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod test_support {
     use alloc::sync::Arc;
 

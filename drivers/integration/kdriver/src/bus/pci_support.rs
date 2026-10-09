@@ -23,13 +23,18 @@ fn pci_bar_allocator() -> SpinNoPreemptGuard<'static, Option<pci::PciRangeAlloca
             .map(|(start, len, _)| pci::PciRangeAllocator::new(start, len));
         SpinNoPreempt::new(alloc)
     });
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the PCI BAR allocator slot"
+    )]
     PCI_BAR_ALLOCATOR
         .get()
         .expect("PCI_BAR_ALLOCATOR call_once succeeded")
         .lock()
 }
 
-pub fn pci_cam_kind() -> pci::Cam {
+pub(crate) fn pci_cam_kind() -> pci::Cam {
     #[cfg(feature = "pci-non-ecam")]
     {
         pci::Cam::MmioCam
@@ -84,7 +89,7 @@ fn has_unassigned_memory_bar<C: pci::ConfigurationAccess>(
 /// touched; the call only refreshes the device command bits. If any memory BAR
 /// is unassigned and no allocation range is available, returns
 /// [`DriverError::NoMemory`].
-pub fn configure_pci_device_if_needed<C: pci::ConfigurationAccess>(
+pub(crate) fn configure_pci_device_if_needed<C: pci::ConfigurationAccess>(
     root: &mut pci::PciRoot<C>,
     bdf: pci::DeviceFunction,
 ) -> DriverResult {
@@ -95,7 +100,9 @@ pub fn configure_pci_device_if_needed<C: pci::ConfigurationAccess>(
             warn!("failed to configure PCI device {:?}: {:?}", bdf, err);
             match err {
                 pci::PciInitError::NoMemory => DriverError::NoMemory,
-                pci::PciInitError::InvalidRange => DriverError::InvalidInput,
+                pci::PciInitError::InvalidRange | pci::PciInitError::InvalidBar => {
+                    DriverError::InvalidInput
+                }
                 pci::PciInitError::MappingFailed => DriverError::Io,
             }
         });
@@ -114,8 +121,49 @@ pub fn configure_pci_device_if_needed<C: pci::ConfigurationAccess>(
         warn!("failed to configure PCI device {:?}: {:?}", bdf, err);
         match err {
             pci::PciInitError::NoMemory => DriverError::NoMemory,
-            pci::PciInitError::InvalidRange => DriverError::InvalidInput,
+            pci::PciInitError::InvalidRange | pci::PciInitError::InvalidBar => {
+                DriverError::InvalidInput
+            }
             pci::PciInitError::MappingFailed => DriverError::Io,
         }
     })
+}
+
+#[unittest::mod_test]
+mod tests {
+    use pci::{ConfigurationAccess, DeviceFunction, PciInitError, PciRoot, configure_device};
+
+    use super::*;
+
+    struct InvalidBarConfig;
+
+    impl ConfigurationAccess for InvalidBarConfig {
+        fn read_word(&self, _bdf: DeviceFunction, offset: u8) -> u32 {
+            if offset == 0x10 { 0b110 } else { 0 }
+        }
+
+        fn write_word(&mut self, _bdf: DeviceFunction, _offset: u8, _value: u32) {}
+
+        unsafe fn unsafe_clone(&self) -> Self {
+            Self
+        }
+    }
+
+    #[unittest::def_test]
+    fn invalid_bar_encoding_returns_error() {
+        let mut root = PciRoot::new(InvalidBarConfig);
+        let bdf = DeviceFunction {
+            bus: 0,
+            device: 0,
+            function: 0,
+        };
+        unittest::assert_eq!(
+            configure_device(&mut root, bdf, &mut None),
+            Err(PciInitError::InvalidBar)
+        );
+        unittest::assert_eq!(
+            configure_pci_device_if_needed(&mut root, bdf),
+            Err(DriverError::InvalidInput)
+        );
+    }
 }

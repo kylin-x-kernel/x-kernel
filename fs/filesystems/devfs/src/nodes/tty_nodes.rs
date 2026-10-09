@@ -12,6 +12,11 @@ use crate::{DeviceFile, add_device_entry};
 
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     // Reserve both numeric ranges and enforce EIO for aliases before publishing PTMX.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: devfs root construction \
+                  registers the Unix98 PTY ranges once and has no error return"
+    )]
     tty::register_pty_drivers().expect("Unix98 drivers register once");
     add_device_entry(
         root,

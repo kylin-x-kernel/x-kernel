@@ -130,7 +130,7 @@ pub(crate) fn instrument_memop(target_value: u64, data: *mut c_void, counter_ind
 
 /// Maps an observed memop size value to the representative value of its range.
 /// Mirrors `InstrProfGetRangeRepValue` in InstrProfData.inc.
-pub fn get_range_rep_value(value: u64) -> u64 {
+pub(crate) fn get_range_rep_value(value: u64) -> u64 {
     if value <= 8 {
         return value;
     }

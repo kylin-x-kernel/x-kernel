@@ -48,7 +48,7 @@ pub(super) unsafe fn dispatch_round(
     any_due
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -182,13 +182,13 @@ mod tests {
         let b = |_: TimerControl<'_>, _: Expiration| {
             second.fetch_add(2, Ordering::Relaxed);
         };
-        // SAFETY: both fixed closures outlive the array and all its memberships.
-        let nodes = unsafe {
-            [
-                TimerNode::with_handler(setting(10), &a),
-                TimerNode::with_handler(setting(20), &b),
-            ]
-        };
+        let nodes = [
+            // SAFETY: a stays at its stack address until all array memberships
+            // and callback invocations have ended.
+            unsafe { TimerNode::with_handler(setting(10), &a) },
+            // SAFETY: b likewise outlives the array and both dispatch rounds.
+            unsafe { TimerNode::with_handler(setting(20), &b) },
+        ];
         for (i, node) in nodes.iter().enumerate() {
             // SAFETY: fixed node array and callbacks; serialized owner-lock access.
             unsafe { timers.lock().arm(node, setting(10 + i as u64 * 10)) };

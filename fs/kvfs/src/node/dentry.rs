@@ -94,7 +94,7 @@ impl DentryFlags {
 
 /// Key type for dentry cache lookups.
 #[derive(Clone, Debug)]
-pub struct DentryKey {
+pub(crate) struct DentryKey {
     parent: Option<Weak<DentryInner>>,
     name: String,
 }
@@ -351,7 +351,11 @@ impl Dentry {
         self.vfs_inode().update_metadata(self, update)
     }
 
-    #[allow(clippy::len_without_is_empty)]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "CG-024-lint-exceptions: clippy::len_without_is_empty: Length is the inode byte \
+                  size, not collection membership; directories have separate entry semantics"
+    )]
     /// Gets the byte length of the instantiated dentry.
     pub fn len(&self) -> VfsResult<u64> {
         self.vfs_inode().len()
@@ -1582,7 +1586,7 @@ impl RenameData<'_> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_dentry {
     use alloc::{string::String, sync::Arc, vec::Vec};
     use core::sync::atomic::{AtomicUsize, Ordering};

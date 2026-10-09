@@ -2,4 +2,4 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-pub const TEE_USAGE_DEFAULT: u32 = 0xffffffff;
+pub(crate) const TEE_USAGE_DEFAULT: u32 = 0xffffffff;

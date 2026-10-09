@@ -31,3 +31,6 @@ linux-raw-sys = { workspace = true, features = ["general", "ioctl"] }
 posix-types.workspace = true
 unittest.workspace = true
 zerocopy.workspace = true
+
+[lints]
+workspace = true

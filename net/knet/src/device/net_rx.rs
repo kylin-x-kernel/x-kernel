@@ -250,7 +250,7 @@ fn deliver_stamped_udp(packet: PacketBuf) -> Option<PacketBuf> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
     use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};

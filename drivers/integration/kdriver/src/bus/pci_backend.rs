@@ -122,23 +122,27 @@ struct BridgeEntry {
     /// Upper bound of bus numbers behind this bridge. Not used by the
     /// current flat scan (`0..=bus_end`), but kept for future recursive
     /// enumeration and range validation.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: Retain the discovered subordinate bus bound \
+                  for bridge-range validation"
+    )]
     subordinate_bus: u8,
 }
 
 /// PCI bus discovery backend.
-pub struct PciBackend {
+pub(crate) struct PciBackend {
     cam: Cam,
 }
 
 impl PciBackend {
     /// Create a PCI backend with the given CAM type.
-    pub fn new(cam: Cam) -> Self {
+    pub(crate) fn new(cam: Cam) -> Self {
         Self { cam }
     }
 
     /// Auto-detect the right CAM type based on feature flags.
-    pub fn auto() -> Self {
+    pub(crate) fn auto() -> Self {
         Self::new(super::pci_support::pci_cam_kind())
     }
 }
@@ -152,6 +156,11 @@ impl BusBackend for PciBackend {
         BusTypeId::PCI
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: TODO(cg): legacy PCI enumeration; split bus scan, BAR \
+                  allocation and device registration"
+    )]
     fn enumerate(&mut self, context: &mut EnumerationContext, bus_id: BusId) -> DriverResult {
         let mut bus = match PciBus::new(self.cam) {
             Ok(bus) => bus,

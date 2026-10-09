@@ -397,7 +397,7 @@ fn reassembled_ecn(ecn_mask: u8, first_ecn: u8) -> Option<u8> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec::Vec;
 

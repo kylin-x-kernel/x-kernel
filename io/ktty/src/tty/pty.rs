@@ -107,6 +107,11 @@ pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, 
         pair.clone(),
     );
 
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: the slave was constructed above with \
+                  ProcessMode::Work, which always has an input waker"
+    )]
     let input_waker = slave
         .input
         .lock()

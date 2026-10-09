@@ -479,7 +479,7 @@ pub fn take_early_port(ident: &SerialIdent) -> Option<Arc<SerialPort>> {
     (stdout.port.ident() == *ident).then(|| stdout.port.clone())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use khal::mem::PhysAddr;
     use unittest::{assert, assert_eq, def_test};

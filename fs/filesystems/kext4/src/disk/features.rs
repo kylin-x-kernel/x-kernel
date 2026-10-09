@@ -204,7 +204,7 @@ impl FeatureSet {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use unittest::{assert_eq, def_test};
 
@@ -222,7 +222,7 @@ mod unittests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

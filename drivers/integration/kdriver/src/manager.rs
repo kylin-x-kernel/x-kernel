@@ -145,6 +145,11 @@ impl Default for DeviceManager {
 /// still empty, which is impossible and would indicate memory corruption.
 pub fn device_manager() -> &'static DeviceManager {
     DEVICE_MANAGER.call_once(DeviceManager::new);
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the device manager"
+    )]
     DEVICE_MANAGER
         .get()
         .expect("DEVICE_MANAGER call_once succeeded")

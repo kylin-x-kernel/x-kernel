@@ -16,10 +16,10 @@ use crate::{
 };
 
 /// Internal buffer size for sequential virtual files.
-pub const SEQ_BUF_SIZE: usize = 0x1000;
+pub(crate) const SEQ_BUF_SIZE: usize = 0x1000;
 
 /// A large synthetic file size reported to userspace.
-pub const VIRTUAL_FILE_SIZE: u64 = 1024 * 1024;
+pub(crate) const VIRTUAL_FILE_SIZE: u64 = 1024 * 1024;
 
 /// Iterator interface for proc-style files.
 pub trait SeqIterator: Send + 'static {
@@ -235,7 +235,7 @@ impl<I: SeqIterator> FileOperations for SeqFileInode<I> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::string::String;
     use core::fmt;

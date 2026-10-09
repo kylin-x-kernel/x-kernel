@@ -12,6 +12,11 @@ use kvfs::{
     VfsError,
 };
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: linear registration table: each statement registers one \
+              independent procfs root entry"
+)]
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "cmdline",
@@ -40,6 +45,11 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         SimpleFile::new_regular(fs.clone(), || {
             let mut info = String::new();
             for_each_present_logical_cpu(|present_index, cpu_id, cpu_count| {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: String writes are infallible \
+                              and the formatted integers and strings cannot return fmt::Error"
+                )]
                 writeln!(
                     info,
                     "processor\t: {}\ncpu cores\t: {}\narchitecture\t: {}",
@@ -60,6 +70,11 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         SimpleFile::new_regular(fs.clone(), || {
             let mut info = String::new();
             for file_system_type in kvfs::registered_filesystems() {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: String writes are infallible \
+                              and the formatted integers and strings cannot return fmt::Error"
+                )]
                 writeln!(
                     info,
                     "{}\t{}",
@@ -146,7 +161,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     });
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{format, sync::Arc};
 

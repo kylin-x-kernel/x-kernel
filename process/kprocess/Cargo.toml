@@ -49,3 +49,6 @@ unittest.workspace = true
 
 [dev-dependencies]
 kspin = { workspace = true, features = ["smp"] }
+
+[lints]
+workspace = true

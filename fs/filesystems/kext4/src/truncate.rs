@@ -52,7 +52,7 @@ impl Ext4SbInfo {
     /// resize the generic page cache and then call
     /// [`Self::finish_regular_inode_shrink`] so the extents are truncated and
     /// the orphan entry is removed.
-    pub fn prepare_regular_inode_truncate(
+    pub(crate) fn prepare_regular_inode_truncate(
         &mut self,
         inode: &Ext4Inode,
         new_size: u64,
@@ -77,7 +77,7 @@ impl Ext4SbInfo {
     }
 
     /// Finishes a prepared shrink after the VFS page cache has been truncated.
-    pub fn finish_regular_inode_shrink(
+    pub(crate) fn finish_regular_inode_shrink(
         &mut self,
         inode: &Ext4Inode,
         new_size: u64,
@@ -88,7 +88,7 @@ impl Ext4SbInfo {
 
     /// Changes a regular file's visible length using Linux-style orphan protection.
     #[cfg(unittest)]
-    pub fn truncate_regular_inode(
+    pub(crate) fn truncate_regular_inode(
         &mut self,
         inode: &Ext4Inode,
         new_size: u64,
@@ -112,7 +112,10 @@ impl Ext4SbInfo {
     ///
     /// Active delayed-allocation reservations make this operation a no-op so
     /// allocation state cannot be discarded underneath dirty page-cache data.
-    pub fn discard_regular_inode_preallocations(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
+    pub(crate) fn discard_regular_inode_preallocations(
+        &mut self,
+        inode: &Ext4Inode,
+    ) -> Ext4Result<()> {
         self.ensure_regular_file_mutation_supported(inode)?;
         if inode.has_delalloc_reservations() {
             return Ok(());

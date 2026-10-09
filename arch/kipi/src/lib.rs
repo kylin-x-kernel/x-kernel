@@ -107,6 +107,11 @@ fn is_ipi_queue_ready(cpu_id: LogicalCpuId) -> bool {
 /// Panics if the current CPU's slot area has not been published yet.
 pub fn init() {
     let cpu_id = this_cpu_id();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: CPU startup publishes the current CPU \
+                  slot before initializing its IPI queue"
+    )]
     ipi_queue(cpu_id)
         .expect("current CPU area must be published before IPI initialization")
         .init_once(SpinNoIrq::new(IpiEventQueue::default()));
@@ -170,6 +175,11 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
             );
             return Err(KipiError::TargetCpuNotReady);
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: IPI readiness is published only after \
+                      CPU-area and queue initialization; validated online CPUs retain both"
+        )]
         ipi_queue(dest_cpu)
             .expect("ready IPI CPU area must be published")
             .get()
@@ -237,6 +247,11 @@ pub fn run_on_each_cpu_via_ipi<T: Into<MulticastCallback>>(callback: T) -> Resul
     validate_broadcast_targets(current_cpu_id, true)?;
 
     // Push to current CPU's queue so it runs from IPI context too
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: IPI readiness is published only after \
+                  CPU-area and queue initialization; validated online CPUs retain both"
+    )]
     ipi_queue(current_cpu_id)
         .expect("local IPI CPU area must be published")
         .get()
@@ -289,6 +304,12 @@ fn validate_broadcast_targets(current_cpu_id: LogicalCpuId, include_self: bool) 
 fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &MulticastCallback) {
     for_each_present_logical_cpu(|_, cpu_id, _| {
         if cpu_id != current_cpu_id {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: IPI readiness is published only \
+                          after CPU-area and queue initialization; validated online CPUs retain \
+                          both"
+            )]
             ipi_queue(cpu_id)
                 .expect("ready IPI CPU area must be published")
                 .get()
@@ -319,6 +340,11 @@ pub fn ipi_handler() {
 
     notification::handle_pending();
 
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: IPI readiness is published only after \
+                  CPU-area and queue initialization; validated online CPUs retain both"
+    )]
     while let Some((src_cpu_id, callback)) = ipi_queue(this_cpu_id())
         .expect("local IPI CPU area must be published")
         .get()

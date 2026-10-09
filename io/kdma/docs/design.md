@@ -28,7 +28,7 @@ point for address-space integration.
 - Address translation: `p2b` / `b2p` over the linear
   `kbuild_config::PHYS_BUS_OFFSET` mapping, and `DmaBusAddress` as the
   `u64` bus address wrapper handed to devices.
-- Result reporting: `DMAInfo { cpu_addr, bus_addr }` pairs the CPU view
+- Result reporting: `DmaInfo { cpu_addr, bus_addr }` pairs the CPU view
   with the device view of each region.
 - Bounce pool: a lazily created 1024-page coherent region sub-allocated
   by a TLSF byte allocator (`bounce_pool`), sized once from the same
@@ -55,7 +55,7 @@ point for address-space integration.
 ```text
 io/kdma/
 ├── src/
-│   ├── lib.rs          # public unsafe API, DmaBusAddress, DMAInfo, p2b/b2p
+│   ├── lib.rs          # public unsafe API, DmaBusAddress, DmaInfo, p2b/b2p
 │   ├── dma.rs          # DmaAllocator, DmaPageTableIf, coherent paths,
 │   │                   # bounce mapping bookkeeping, dma-trace
 │   └── bounce_pool.rs  # TLSF-backed coherent bounce pool
@@ -73,7 +73,7 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   |    kalloc alloc_dma_pages (UsageKind::Dma)        v
   |    DmaPageTableIf::protect (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
   |    kplat::dma::prepare / release                 TLSF byte allocator
-  |    p2b -> DMAInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
+  |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
   |                                           active_mappings: BTreeMap<bus, BounceMapping>
 ```
 

@@ -137,7 +137,7 @@ fn allows(
         && (!permission.contains(Permission::MAY_EXEC) || mode.contains(exec_bit))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec::Vec;
 

@@ -471,6 +471,11 @@ impl AnonPrivateObject {
         }
         let new_handle = AnonPrivatePageHandle::new(pa, size);
         commit().map_err(AnonPrivatePageCommitError::Commit)?;
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The same exclusively held page map \
+                      was checked for this key before replacement"
+        )]
         let old = pages
             .insert(object_start, new_handle)
             .expect("validated private page slot must exist");
@@ -569,7 +574,7 @@ impl AnonPrivateObject {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
     use vmobj::{MappingViewKind, MappingViewSpec};

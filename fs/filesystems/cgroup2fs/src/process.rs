@@ -26,6 +26,11 @@ pub(crate) fn membership_file(
                 let _operation = cgroup.begin_operation()?;
                 let mut output = String::new();
                 for process_id in kprocess::cgroup_member_process_ids(&cgroup) {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: Formatting an integer \
+                                  into alloc::String cannot return fmt::Error"
+                    )]
                     writeln!(output, "{process_id}").expect("writing to a String cannot fail");
                 }
                 Ok(Some(output))

@@ -69,3 +69,6 @@ unittest_support.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 kcpu.workspace = true
+
+[lints]
+workspace = true

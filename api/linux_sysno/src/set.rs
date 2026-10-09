@@ -280,7 +280,7 @@ struct NonZeroUsizeIter<'a> {
 }
 
 impl<'a> NonZeroUsizeIter<'a> {
-    pub fn new(iter: core::slice::Iter<'a, usize>) -> Self {
+    pub(crate) fn new(iter: core::slice::Iter<'a, usize>) -> Self {
         Self { iter, count: 0 }
     }
 }
@@ -408,7 +408,7 @@ impl<'de> Deserialize<'de> for SysnoSet {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
     use alloc::{format, vec, vec::Vec};

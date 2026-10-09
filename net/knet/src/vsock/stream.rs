@@ -307,9 +307,9 @@ impl VsockTransportOps for VsockStreamTransport {
 
         if !options.flags.contains(RecvFlags::PEEK)
             && let Some(conn_id) = conn_id
+            && let Err(e) = advance_rx_credit(conn_id, count)
         {
-            let _ = advance_rx_credit(conn_id, count)
-                .map_err(|e| warn!("vsock recv failed to update credit: {e:?}"));
+            warn!("vsock recv failed to update credit: {e:?}");
         }
 
         Ok(count)
@@ -454,6 +454,7 @@ impl Pollable for VsockStreamTransport {
 
 impl Drop for VsockStreamTransport {
     fn drop(&mut self) {
+        // Drop cannot report shutdown errors; connection ownership is still released.
         let _ = self.shutdown(Shutdown::Both);
 
         if let Some(conn_id) = *self.conn_id.lock() {

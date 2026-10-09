@@ -28,7 +28,14 @@ impl DwarfContextStorage {
         unsafe { (*self.0.get()).as_ref() }
     }
 
-    #[cfg_attr(any(test, unittest), allow(dead_code))]
+    #[cfg_attr(
+        any(test, unittest),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: test builds compile out the \
+                      linker-section DWARF loading that stores the context"
+        )
+    )]
     fn init_once(&self, ctx: Context<DwarfReader>) {
         // SAFETY: `INIT_ONCE` ensures this write runs at most once before the
         // context is ever observed. Subsequent access is read-only.
@@ -40,14 +47,11 @@ impl DwarfContextStorage {
 // context is treated as immutable shared state through `get()`.
 unsafe impl Sync for DwarfContextStorage {}
 
-#[cfg_attr(any(test, unittest), allow(dead_code))]
 static CONTEXT: DwarfContextStorage = DwarfContextStorage::new();
-#[cfg_attr(any(test, unittest), allow(dead_code))]
 static INIT_ONCE: Once<()> = Once::new();
 
 // Only define macro in non-test builds
 #[cfg(not(any(test, unittest)))]
-#[allow(unused_macros)] // Used at runtime via macro expansion
 macro_rules! generate_sections {
     ($($name:ident),*) => {
         unsafe extern "C" {
@@ -80,15 +84,6 @@ macro_rules! generate_sections {
     };
 }
 
-// Stub macro for test builds - does nothing
-#[cfg(any(test, unittest))]
-#[allow(unused_macros)] // Intentionally unused in tests
-macro_rules! generate_sections {
-    ($($name:ident),*) => {
-        // No-op in test mode
-    };
-}
-
 /// Returns whether the in-kernel DWARF context is initialized and ready.
 ///
 /// The [`Backtrace`](crate::Backtrace) display impl falls back to raw
@@ -97,8 +92,15 @@ pub(crate) fn is_ready() -> bool {
     CONTEXT.get().is_some()
 }
 
-#[cfg_attr(any(test, unittest), allow(dead_code))]
-pub fn init() {
+#[cfg_attr(
+    test,
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: host tests do not call init from \
+                  backtrace::init"
+    )
+)]
+pub(crate) fn init() {
     INIT_ONCE.call_once(|| {
         // Only initialize DWARF in kernel builds
         #[cfg(not(any(test, unittest)))]
@@ -349,7 +351,7 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_unittest {
     use alloc::{format, string::String};
     use core::fmt;

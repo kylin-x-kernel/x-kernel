@@ -30,3 +30,6 @@ tipc_handle.workspace = true
 unittest.workspace = true
 log.workspace = true
 uuid = { workspace = true }
+
+[lints]
+workspace = true

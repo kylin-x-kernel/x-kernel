@@ -17,3 +17,6 @@ ksync.workspace = true
 kvfs.workspace = true
 macros.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

@@ -60,3 +60,6 @@ console_driver = { workspace = true, optional = true }
 driver_base.workspace = true
 kdevice.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

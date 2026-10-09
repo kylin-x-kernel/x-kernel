@@ -150,14 +150,15 @@ impl CpuSlotChunk {
         debug_assert!(cpu < self.cpu_count);
         // SAFETY: Callers validate cpu and offset; the chunk contract covers
         // the resulting pointer and alignment is checked by the allocator.
-        unsafe {
-            NonNull::new_unchecked(
-                self.base
-                    .as_ptr()
-                    .add(cpu * self.area_stride + offset)
-                    .cast(),
-            )
-        }
+        let element = unsafe {
+            self.base
+                .as_ptr()
+                .add(cpu * self.area_stride + offset)
+                .cast()
+        };
+        // SAFETY: The validated CPU/offset locates an element within the live,
+        // non-null chunk allocation, so its address cannot be null.
+        unsafe { NonNull::new_unchecked(element) }
     }
 }
 
@@ -218,7 +219,11 @@ impl<T: 'static> DynamicCpuSlot<'_, T> {
     /// The caller must pin execution with a valid CPU ID and provide exclusive
     /// access to this CPU's value, including exclusion of local IRQ handlers
     /// that can access it.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: The unsafe caller guarantees \
+                  exclusive access to the pinned CPU slot for the returned lifetime"
+    )]
     pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> Option<&'a mut T> {
         let cpu = pin.current_cpu().as_usize();
         if cpu >= self.chunk.cpu_count {

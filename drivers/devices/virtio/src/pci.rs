@@ -58,7 +58,15 @@ impl PciTransport {
     fn new_with_msix<H: VirtIoHal, C: ConfigurationAccess>(
         root: &mut PciRoot<C>,
         bdf: DeviceFunction,
-        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))] msix: PciMsixStateOption,
+        #[cfg_attr(
+            not(target_arch = "x86_64"),
+            expect(
+                unused_variables,
+                reason = "CG-024-lint-exceptions: unused_variables: MSI-X transport setup is \
+                          implemented only on x86_64"
+            )
+        )]
+        msix: PciMsixStateOption,
     ) -> Result<Self, VirtioPciError> {
         let inner = match RawPciTransport::new::<H, C>(root, bdf) {
             Ok(inner) => inner,

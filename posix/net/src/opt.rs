@@ -111,34 +111,34 @@ mod conv {
     use linux_raw_sys::{general::timeval, net::ucred};
     use posix_types::{TimeSpanLike, UserRead};
 
-    pub struct Int<T>(T);
+    pub(super) struct Int<T>(T);
 
     impl<T: TryFrom<i32> + TryInto<i32>> Int<T> {
-        pub fn sys_to_rust(val: i32) -> KResult<T> {
+        pub(super) fn sys_to_rust(val: i32) -> KResult<T> {
             T::try_from(val).map_err(|_| KError::InvalidInput)
         }
 
-        pub fn rust_to_sys(val: T) -> KResult<i32> {
+        pub(super) fn rust_to_sys(val: T) -> KResult<i32> {
             val.try_into().map_err(|_| KError::InvalidInput)
         }
     }
 
-    pub struct IntBool;
+    pub(super) struct IntBool;
 
     impl IntBool {
-        pub fn sys_to_rust(val: i32) -> KResult<bool> {
+        pub(super) fn sys_to_rust(val: i32) -> KResult<bool> {
             Ok(val != 0)
         }
 
-        pub fn rust_to_sys(val: bool) -> KResult<i32> {
+        pub(super) fn rust_to_sys(val: bool) -> KResult<i32> {
             Ok(val as _)
         }
     }
 
-    pub struct SocketTimeout;
+    pub(super) struct SocketTimeout;
 
     impl SocketTimeout {
-        pub fn sys_to_rust(val: timeval) -> KResult<TimeSpan> {
+        pub(super) fn sys_to_rust(val: timeval) -> KResult<TimeSpan> {
             let timeout = val.try_into_time_span()?;
             if timeout.is_zero() {
                 return Ok(timeout);
@@ -154,15 +154,15 @@ mod conv {
             )
         }
 
-        pub fn rust_to_sys(val: TimeSpan) -> KResult<timeval> {
+        pub(super) fn rust_to_sys(val: TimeSpan) -> KResult<timeval> {
             Ok(timeval::from_time_span(val))
         }
     }
 
-    pub struct Ucred;
+    pub(super) struct Ucred;
 
     impl Ucred {
-        pub fn sys_to_rust(val: ucred) -> KResult<UnixCredentials> {
+        pub(super) fn sys_to_rust(val: ucred) -> KResult<UnixCredentials> {
             Ok(UnixCredentials {
                 pid: val.pid,
                 uid: val.uid,
@@ -170,7 +170,7 @@ mod conv {
             })
         }
 
-        pub fn rust_to_sys(val: UnixCredentials) -> KResult<ucred> {
+        pub(super) fn rust_to_sys(val: UnixCredentials) -> KResult<ucred> {
             Ok(ucred {
                 pid: val.pid,
                 uid: val.uid,
@@ -179,10 +179,9 @@ mod conv {
         }
     }
 
-    #[allow(non_camel_case_types)]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    pub struct tpacket_stats {
+    pub(super) struct tpacket_stats {
         pub tp_packets: u32,
         pub tp_drops: u32,
     }
@@ -190,17 +189,17 @@ mod conv {
     // SAFETY: `tpacket_stats` is a POD getsockopt result structure.
     unsafe impl UserRead for tpacket_stats {}
 
-    pub struct PacketStats;
+    pub(super) struct PacketStats;
 
     impl PacketStats {
-        pub fn sys_to_rust(val: tpacket_stats) -> KResult<PacketStatistics> {
+        pub(super) fn sys_to_rust(val: tpacket_stats) -> KResult<PacketStatistics> {
             Ok(PacketStatistics {
                 packets: val.tp_packets,
                 drops: val.tp_drops,
             })
         }
 
-        pub fn rust_to_sys(val: PacketStatistics) -> KResult<tpacket_stats> {
+        pub(super) fn rust_to_sys(val: PacketStatistics) -> KResult<tpacket_stats> {
             Ok(tpacket_stats {
                 tp_packets: val.packets,
                 tp_drops: val.drops,
@@ -208,10 +207,9 @@ mod conv {
         }
     }
 
-    #[allow(non_camel_case_types)]
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    pub struct packet_mreq {
+    pub(super) struct packet_mreq {
         pub mr_ifindex: i32,
         pub mr_type: u16,
         pub mr_alen: u16,
@@ -221,10 +219,10 @@ mod conv {
     // SAFETY: `packet_mreq` is a POD setsockopt/getsockopt carrier.
     unsafe impl UserRead for packet_mreq {}
 
-    pub struct PacketMembershipConv;
+    pub(super) struct PacketMembershipConv;
 
     impl PacketMembershipConv {
-        pub fn sys_to_rust(val: packet_mreq) -> KResult<PacketMembership> {
+        pub(super) fn sys_to_rust(val: packet_mreq) -> KResult<PacketMembership> {
             Ok(PacketMembership {
                 ifindex: val.mr_ifindex,
                 membership_type: val.mr_type,
@@ -233,7 +231,7 @@ mod conv {
             })
         }
 
-        pub fn rust_to_sys(val: PacketMembership) -> KResult<packet_mreq> {
+        pub(super) fn rust_to_sys(val: PacketMembership) -> KResult<packet_mreq> {
             Ok(packet_mreq {
                 mr_ifindex: val.ifindex,
                 mr_type: val.membership_type,
@@ -455,7 +453,7 @@ pub fn sys_setsockopt(
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use ktime_types::{NANOS_PER_SEC, TimeSpan};

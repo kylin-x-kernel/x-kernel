@@ -309,6 +309,11 @@ impl Gendisk {
     pub fn part0(&self) -> Arc<BlockDevice> {
         // A disk borrow comes from either a live GendiskRef or its owning
         // BlockDevice. Both keep part0 alive; no standalone disk Arc escapes.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: a disk is only borrowed through a \
+                      live GendiskRef or its owning BlockDevice, both of which keep part0 alive"
+        )]
         self.part0
             .upgrade()
             .expect("a borrowed disk has a live part0")
@@ -727,7 +732,7 @@ pub fn block_devices() -> Vec<Arc<BlockDevice>> {
         .collect()
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 

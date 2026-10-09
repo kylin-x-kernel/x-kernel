@@ -7,28 +7,26 @@
 //! See Linux's `include/uapi/drm/drm.h` for the canonical definitions —
 //! everything here is layout-compatible with that header.
 
-#![allow(dead_code)]
-
 use core::ffi::c_int;
 
 use bytemuck::{AnyBitPattern, NoUninit};
 use posix_types::{UserPtr, UserRead, UserWrite};
 
 /// Size constants referenced by struct field types.
-pub const DRM_MODE_NAME_LEN: usize = 32;
-pub const DRM_PROP_NAME_LEN: usize = 32;
+pub(crate) const DRM_MODE_NAME_LEN: usize = 32;
+pub(crate) const DRM_PROP_NAME_LEN: usize = 32;
 
 // ======== struct definitions ========
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmAuth {
+pub(crate) struct DrmAuth {
     pub magic: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeDirtyFB {
+pub(crate) struct DrmModeDirtyFb {
     pub fb_id: u32,
     pub flags: u32,
     pub color: u32,
@@ -38,7 +36,7 @@ pub struct DrmModeDirtyFB {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmPrimeHandle {
+pub(crate) struct DrmPrimeHandle {
     pub handle: u32,
     pub flags: u32,
     pub fd: i32,
@@ -46,7 +44,7 @@ pub struct DrmPrimeHandle {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmVersion {
+pub(crate) struct DrmVersion {
     pub version_major: c_int,
     pub version_minor: c_int,
     pub version_patchlevel: c_int,
@@ -61,14 +59,14 @@ pub struct DrmVersion {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmUnique {
+pub(crate) struct DrmUnique {
     pub unique_len: usize,
     pub unique: UserPtr<u8>,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmSetVersion {
+pub(crate) struct DrmSetVersion {
     pub drm_di_major: c_int,
     pub drm_di_minor: c_int,
     pub drm_dd_major: c_int,
@@ -77,21 +75,21 @@ pub struct DrmSetVersion {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmGetCap {
+pub(crate) struct DrmGetCap {
     pub capability: u64,
     pub value: u64,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmSetClientCap {
+pub(crate) struct DrmSetClientCap {
     pub capability: u64,
     pub value: u64,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeCardRes {
+pub(crate) struct DrmModeCardRes {
     pub fb_id_ptr: UserPtr<u32>,
     pub crtc_id_ptr: UserPtr<u32>,
     pub connector_id_ptr: UserPtr<u32>,
@@ -108,7 +106,7 @@ pub struct DrmModeCardRes {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeModeInfo {
+pub(crate) struct DrmModeModeInfo {
     pub clock: u32,
     pub hdisplay: u16,
     pub hsync_start: u16,
@@ -128,7 +126,7 @@ pub struct DrmModeModeInfo {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeCrtc {
+pub(crate) struct DrmModeCrtc {
     pub set_connectors_ptr: UserPtr<u32>,
     pub count_connectors: u32,
     pub crtc_id: u32,
@@ -142,7 +140,7 @@ pub struct DrmModeCrtc {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeGetEncoder {
+pub(crate) struct DrmModeGetEncoder {
     pub encoder_id: u32,
     pub encoder_type: u32,
     pub crtc_id: u32,
@@ -152,7 +150,7 @@ pub struct DrmModeGetEncoder {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeGetConnector {
+pub(crate) struct DrmModeGetConnector {
     pub encoders_ptr: UserPtr<u32>,
     pub modes_ptr: UserPtr<DrmModeModeInfo>,
     pub props_ptr: UserPtr<u32>,
@@ -173,7 +171,7 @@ pub struct DrmModeGetConnector {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeFbCmd2 {
+pub(crate) struct DrmModeFbCmd2 {
     pub fb_id: u32,
     pub width: u32,
     pub height: u32,
@@ -188,7 +186,7 @@ pub struct DrmModeFbCmd2 {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeCreateDumb {
+pub(crate) struct DrmModeCreateDumb {
     pub height: u32,
     pub width: u32,
     pub bpp: u32,
@@ -200,7 +198,7 @@ pub struct DrmModeCreateDumb {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeMapDumb {
+pub(crate) struct DrmModeMapDumb {
     pub handle: u32,
     pub pad: u32,
     pub offset: u64,
@@ -208,13 +206,13 @@ pub struct DrmModeMapDumb {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeDestroyDumb {
+pub(crate) struct DrmModeDestroyDumb {
     pub handle: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeGetPlaneRes {
+pub(crate) struct DrmModeGetPlaneRes {
     pub plane_id_ptr: UserPtr<u32>,
     pub count_planes: u32,
     pub abi_pad: u32,
@@ -222,7 +220,7 @@ pub struct DrmModeGetPlaneRes {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeGetPlane {
+pub(crate) struct DrmModeGetPlane {
     pub plane_id: u32,
     pub crtc_id: u32,
     pub fb_id: u32,
@@ -234,7 +232,7 @@ pub struct DrmModeGetPlane {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeObjGetProperties {
+pub(crate) struct DrmModeObjGetProperties {
     pub props_ptr: UserPtr<u32>,
     pub prop_values_ptr: UserPtr<u64>,
     pub count_props: u32,
@@ -245,14 +243,14 @@ pub struct DrmModeObjGetProperties {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModePropertyEnum {
+pub(crate) struct DrmModePropertyEnum {
     pub value: u64,
     pub name: [u8; DRM_PROP_NAME_LEN],
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeGetProperty {
+pub(crate) struct DrmModeGetProperty {
     pub values_ptr: UserPtr<u64>,
     pub enum_blob_ptr: UserPtr<DrmModePropertyEnum>,
     pub prop_id: u32,
@@ -264,7 +262,7 @@ pub struct DrmModeGetProperty {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeCrtcPageFlip {
+pub(crate) struct DrmModeCrtcPageFlip {
     pub crtc_id: u32,
     pub fb_id: u32,
     pub flags: u32,
@@ -274,7 +272,7 @@ pub struct DrmModeCrtcPageFlip {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmWaitVblank {
+pub(crate) struct DrmWaitVblank {
     pub rep_type: u32,
     pub sequence: u32,
     pub tv_sec: i64,
@@ -283,14 +281,14 @@ pub struct DrmWaitVblank {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, NoUninit)]
-pub struct DrmEvent {
+pub(crate) struct DrmEvent {
     pub event_type: u32,
     pub length: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, NoUninit)]
-pub struct DrmEventVblank {
+pub(crate) struct DrmEventVblank {
     pub base: DrmEvent,
     pub user_data: u64,
     pub tv_sec: u32,
@@ -301,7 +299,7 @@ pub struct DrmEventVblank {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeAtomic {
+pub(crate) struct DrmModeAtomic {
     pub flags: u32,
     pub count_objs: u32,
     pub objs_ptr: UserPtr<u32>,
@@ -314,7 +312,7 @@ pub struct DrmModeAtomic {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeCreateBlob {
+pub(crate) struct DrmModeCreateBlob {
     pub data: UserPtr<u8>,
     pub length: u32,
     pub blob_id: u32,
@@ -322,13 +320,13 @@ pub struct DrmModeCreateBlob {
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeDestroyBlob {
+pub(crate) struct DrmModeDestroyBlob {
     pub blob_id: u32,
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
-pub struct DrmModeGetBlob {
+pub(crate) struct DrmModeGetBlob {
     pub blob_id: u32,
     pub length: u32,
     pub data: UserPtr<u8>,

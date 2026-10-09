@@ -32,6 +32,12 @@ use osvm::{MemError, MemResult, VirtMemIo};
 /// kernel.
 pub fn access_user_memory<R>(f: impl FnOnce() -> R) -> R {
     let curr = current();
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fault-resolving user atomics serve futex \
+                  and robust-list operations on the user thread that owns the address space; a \
+                  kernel task has no user address space to access"
+    )]
     let Some(thread) = curr.try_as_thread() else {
         panic!("access_user_memory called outside of thread context");
     };
@@ -137,14 +143,32 @@ pub fn check_access(start: usize, len: usize) -> MemResult {
 
 /// Load a null-terminated string from user virtual memory.
 pub fn vm_load_string(ptr: *const c_char) -> KResult<String> {
-    #[allow(clippy::unnecessary_cast)]
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: C char is signed on some architectures; user-memory \
+                  helpers require byte pointers"
+    )]
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "CG-024-lint-exceptions: clippy::unnecessary_cast: C char is signed on some \
+                  architectures; user-memory helpers require byte pointers"
+    )]
     let bytes = osvm::load_vec_until_null(ptr as *const u8)?;
     String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
 
 /// Load a string with a fixed byte length from user virtual memory.
 pub fn vm_load_string_with_len(ptr: *const c_char, len: usize) -> KResult<String> {
-    #[allow(clippy::unnecessary_cast)]
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: C char is signed on some architectures; user-memory \
+                  helpers require byte pointers"
+    )]
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "CG-024-lint-exceptions: clippy::unnecessary_cast: C char is signed on some \
+                  architectures; user-memory helpers require byte pointers"
+    )]
     let bytes = osvm::load_vec(ptr as *const u8, len)?;
     String::from_utf8(bytes).map_err(|_| KError::IllegalBytes)
 }
@@ -277,13 +301,11 @@ unsafe impl VirtMemIo for Vm {
         copy_user_pages(start, buf.len(), MappingFlags::READ, |offset, count| {
             // SAFETY: the validated user page and this subrange of `buf` cover
             // `count` bytes. The exception table reports inaccessible memory.
-            unsafe {
-                user_copy(
-                    buf.as_mut_ptr().cast::<u8>().add(offset),
-                    (start + offset) as _,
-                    count,
-                )
-            }
+            let destination = unsafe { buf.as_mut_ptr().cast::<u8>().add(offset) };
+            // SAFETY: copy_user_pages validated the user source; destination
+            // covers count exclusively borrowed kernel bytes. Faults are handled
+            // by user_copy's exception-table path.
+            unsafe { user_copy(destination, (start + offset) as _, count) }
         })
     }
 
@@ -291,12 +313,15 @@ unsafe impl VirtMemIo for Vm {
         copy_user_pages(start, buf.len(), MappingFlags::WRITE, |offset, count| {
             // SAFETY: the validated user page and this subrange of `buf` cover
             // `count` bytes. The exception table reports inaccessible memory.
-            unsafe { user_copy((start + offset) as _, buf.as_ptr().add(offset), count) }
+            let source = unsafe { buf.as_ptr().add(offset) };
+            // SAFETY: The kernel source has count initialized bytes, and
+            // copy_user_pages validated the user destination; user_copy handles faults.
+            unsafe { user_copy((start + offset) as _, source, count) }
         })
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use memspace::PageFaultOutcome;
     use osvm::MemError;

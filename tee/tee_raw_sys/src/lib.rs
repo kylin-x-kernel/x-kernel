@@ -3,14 +3,29 @@
 // See LICENSES for license details.
 
 #![no_std]
-#![allow(non_camel_case_types, non_snake_case)]
+#![expect(
+    non_camel_case_types,
+    non_snake_case,
+    reason = "CG-024-lint-exceptions: non_camel_case_types, non_snake_case: Expose GlobalPlatform \
+              TEE C ABI type and field names verbatim"
+)]
 
 pub use tee_api_defines::*;
 pub use tee_api_types::*;
 pub use utee_types::*;
 
 mod tee_api_defines;
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "CG-032-camel-case-types: raw GlobalPlatform TEE ABI bindings retain the external C \
+              type and enum names"
+)]
 mod tee_api_types;
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "CG-032-camel-case-types: raw OP-TEE syscall ABI bindings retain the external \
+              operation and time-category names"
+)]
 mod utee_types;
 
 /// Libc compatibility types

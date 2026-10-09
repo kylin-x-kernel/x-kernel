@@ -130,21 +130,33 @@ pub fn sys_brk(addr: usize) -> KResult<isize> {
                     {
                         return Ok(current_top as isize);
                     }
-                    let _ = aspace.map(
-                        map_start,
-                        map_size,
-                        MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
-                        false,
-                        VmRuntimeRef::new_anon_private(map_start, PageSize::Size4K),
-                    );
+                    if aspace
+                        .map(
+                            map_start,
+                            map_size,
+                            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER,
+                            false,
+                            VmRuntimeRef::new_anon_private(map_start, PageSize::Size4K),
+                        )
+                        .is_err()
+                    {
+                        return Ok(current_top as isize);
+                    }
                 }
             }
         }
     } else if let Some((shrink_start, shrink_size)) = request.shrink_range() {
         let aspace_ref = current_user_process_address_space();
-        let _ = aspace_ref.lock().unmap(shrink_start, shrink_size);
+        if aspace_ref.lock().unmap(shrink_start, shrink_size).is_err() {
+            return Ok(current_top as isize);
+        }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: A running user thread retains live \
+                  process heap state for the duration of its syscall"
+    )]
     current_user_process()
         .set_heap_top(request.requested_top)
         .expect("current user thread must have live process heap state");

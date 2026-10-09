@@ -20,7 +20,7 @@ pub mod riscv_sbi;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_lapic_tsc;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::{MonotonicInstant, TimeSpan};
     use unittest::def_test;

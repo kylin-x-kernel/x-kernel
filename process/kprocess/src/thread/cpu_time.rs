@@ -72,7 +72,7 @@ impl CpuTimeStatistics {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::{MonotonicInstant, TimeSpan};
     use unittest::def_test;

@@ -122,3 +122,6 @@ harness = false
 name = "xts_throughput"
 path = "benchs/xts_throughput.rs"
 harness = false
+
+[lints]
+workspace = true

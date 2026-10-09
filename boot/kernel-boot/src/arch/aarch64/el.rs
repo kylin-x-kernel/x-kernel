@@ -21,7 +21,7 @@ use aarch64_cpu::{asm::barrier, registers::*};
 /// switching to EL1 will not strand required stack or code mappings.
 #[cfg(not(feature = "vmm"))]
 #[unsafe(link_section = ".idmap.text")]
-pub unsafe fn switch_to_el1() {
+pub(super) unsafe fn switch_to_el1() {
     let current_sp = aarch64_cpu::registers::SP.get();
     SPSel.write(SPSel::SP::ELx);
     aarch64_cpu::registers::SP.set(current_sp);
@@ -76,7 +76,7 @@ pub unsafe fn switch_to_el1() {
 /// caller must ensure VHE is supported by the CPU (ARMv8.1+).
 #[cfg(feature = "vmm")]
 #[unsafe(link_section = ".idmap.text")]
-pub unsafe fn init_el2_vhe() {
+pub(super) unsafe fn init_el2_vhe() {
     let current_el = CurrentEL.read(CurrentEL::EL);
     if current_el < 2 {
         return;

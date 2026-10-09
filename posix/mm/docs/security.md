@@ -124,3 +124,6 @@
 - `memfd` regular-file inode 是否始终复用 inode-owned `AddressSpace`。
 - `MADV_DONTNEED` 是否只命中 private-anon object，并通过 object-driven
   invalidate 主线完成 PTE zap。
+
+`brk` 不忽略补建/收缩映射的错误；失败时不发布请求的新 heap top，
+避免用户观察到未完成的地址空间变更。

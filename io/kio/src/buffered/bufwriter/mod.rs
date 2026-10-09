@@ -243,11 +243,12 @@ impl<W: ?Sized + Write> BufWriter<W> {
         // SAFETY: the caller guarantees sufficient spare capacity and no overlap.
         // The exclusive borrow keeps the allocation live and stable; u8 needs
         // no extra alignment. The copy initializes the tail before set_len.
-        unsafe {
-            let dst = self.buf.as_mut_ptr().add(old_len);
-            core::ptr::copy_nonoverlapping(src, dst, buf_len);
-            self.buf.set_len(old_len + buf_len);
-        }
+        let dst = unsafe { self.buf.as_mut_ptr().add(old_len) };
+        // SAFETY: The caller guarantees buf_len spare bytes at dst and no
+        // overlap with the initialized source; both byte ranges remain live.
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, buf_len) };
+        // SAFETY: The copy initialized the full tail within reserved capacity.
+        unsafe { self.buf.set_len(old_len + buf_len) };
     }
 
     /// Buffer some data without flushing it, regardless of the size of the

@@ -60,8 +60,7 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_paging {
     use unittest::def_test;
 

@@ -307,6 +307,11 @@ pub fn handle_ipi_fixup() {
 
 #[inline]
 fn ticks_to_nanos(ticks: u64) -> u64 {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Generic timer initialization installs \
+                  conversion ratios before publishing clock and timer operations"
+    )]
     CNTPCT_TO_NANOS_RATIO
         .get()
         .expect("ARM generic timer conversion ratio is not initialized")
@@ -315,6 +320,11 @@ fn ticks_to_nanos(ticks: u64) -> u64 {
 
 #[inline]
 fn nanos_to_ticks(nanos: u64) -> u64 {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Generic timer initialization installs \
+                  conversion ratios before publishing clock and timer operations"
+    )]
     NANOS_TO_CNTPCT_RATIO
         .get()
         .expect("ARM generic timer inverse conversion ratio is not initialized")
@@ -573,7 +583,7 @@ fn raw_now_ticks() -> u64 {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

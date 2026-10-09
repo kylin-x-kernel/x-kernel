@@ -9,7 +9,7 @@ use khal::time::monotonic_time;
 use posix_types::{PosixClockTicks, Tms, UserPtr};
 
 /// Returns timing information including user and system CPU time.
-pub fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
+pub(crate) fn sys_times(tms: UserPtr<Tms>) -> KResult<isize> {
     let process = kprocess::current_user_process();
     let (utime, stime) = process.process_cpu_times();
     let (child_utime, child_stime) = process.child_time();

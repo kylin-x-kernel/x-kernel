@@ -32,3 +32,6 @@ log = { workspace = true }
 # simple-sdmmc = { git = "https://github.com/Starry-OS/simple-sdmmc.git", rev = "9e6420c", optional = true }
 # simple-ahci = { git = "https://github.com/Starry-OS/simple-ahci.git", rev = "36d0979", optional = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

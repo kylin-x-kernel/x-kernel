@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(unsafe_op_in_unsafe_fn)]
-
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use simple_ahci::AhciDriver as CoreAhciDriver;
@@ -28,12 +26,16 @@ impl<H: AhciHal> AhciDriver<H> {
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// - `base` refers to a valid MMIO register block of the AHCI controller.
-    /// - The memory region from `base` onward is mapped and accessible.
+    /// - `base_addr` refers to a valid MMIO register block of the AHCI controller.
+    /// - The memory region from `base_addr` onward is mapped and accessible.
     /// - No other part of the code is accessing the AHCI controller simultaneously.
     /// - The AHCI hardware is functioning at the provided address.
     pub unsafe fn new(base_addr: usize) -> Option<Self> {
-        CoreAhciDriver::<H>::try_new(base_addr).map(|driver| {
+        // SAFETY: the caller upholds the `# Safety` contract of this function:
+        // `base_addr` is the mapped MMIO register block of a present, working
+        // AHCI controller that no other code accesses concurrently, which is
+        // exactly the contract `simple_ahci::AhciDriver::try_new` requires.
+        unsafe { CoreAhciDriver::<H>::try_new(base_addr) }.map(|driver| {
             let block_size = driver.block_size();
             let num_blocks = driver.capacity();
             AhciDriver {
@@ -99,7 +101,7 @@ impl<H: AhciHal> BlockDeviceOperations for AhciDriver<H> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_ahci {
     use unittest::{assert, assert_eq, def_test};
 
@@ -111,9 +113,9 @@ pub mod tests_ahci {
     struct MockAhciHal;
 
     impl AhciHal for MockAhciHal {
-        unsafe fn read_ptr(&self, _offset: usize) -> u32 {
+        unsafe fn read_ptr(&self, offset: usize) -> u32 {
             // Mock implementation - return safe test values
-            match _offset {
+            match offset {
                 0x00 => 0x12345678, // Version register mock
                 0x04 => 0x00000003, // Global capabilities mock (2 ports)
                 _ => 0,

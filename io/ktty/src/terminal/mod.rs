@@ -54,7 +54,7 @@ impl Terminal {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod terminal_tests {
     use unittest::def_test;
 

@@ -4,6 +4,14 @@
 
 `knet` provides a kernel network stack for x-kernel, which combines driver-level network devices, protocol stack, socket objects, poll and wakeup mechanisms, Unix domain sockets, netlink, and optional vsock support into a unified `SocketOps` interface. It is mainly responsible for protocol state, routing, RX/TX progress, and socket semantics. It uses crate-local IPv4, UDP, and ICMPv4 data paths to handle UDP send and receive, fragmentation, and error reporting. smoltcp supplies TCP, raw IP, IPv6, and staged interface polling.
 
+`NetDevice::poll_rx` returns `KResult<Option<PacketBuf>>`: an empty queue is
+`Ok(None)`, while receive and recycling failures retain their mapped `KError`.
+`RxDrain` reports the failing interface and error alongside any earlier packets
+in the batch, and advances the device cursor. The service logs that error and
+ends the RX round after handling the partial batch. A packet decoded during a
+failed recycling operation is dropped; a later round may retry. The driver owns
+the consumed buffer handle even on error.
+
 ## Background
 
 x-kernel needs socket semantics that can serve both POSIX syscalls and in-kernel clients. `knet` owns protocol state, packet queues, routing, and progress scheduling, while its surrounding subsystems supply device access, task scheduling, filesystem operations, and caller context.

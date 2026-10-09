@@ -5,7 +5,6 @@
 #![cfg_attr(not(test), no_std)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
-#![allow(rustdoc::broken_intra_doc_links)]
 
 //! # Architecture
 //!

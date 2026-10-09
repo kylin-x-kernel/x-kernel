@@ -13,7 +13,7 @@
 
 use core::alloc::Layout;
 
-use crate::{AllocError, buddy_alloc::BuddyAllocator};
+use crate::{AllocError, AllocResult, buddy_alloc::BuddyAllocator};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -103,12 +103,22 @@ impl<const BLK_SIZE: usize> Slab<BLK_SIZE> {
 
     // --- intrusive freelist helpers ---
 
+    /// # Safety
+    ///
+    /// `addr` must address a live free slab block, aligned for `usize`, whose
+    /// first word contains an initialized freelist link. The allocator must
+    /// exclude concurrent writes to that word for this read.
     unsafe fn read_next(addr: usize) -> usize {
         // SAFETY: caller guarantees addr points to a free slab block whose
         // first bytes store the next pointer.
         unsafe { *(addr as *const usize) }
     }
 
+    /// # Safety
+    ///
+    /// `addr` must address a live free slab block, aligned for `usize`, with
+    /// at least one writable word and no outstanding user access. The allocator
+    /// must exclusively own that word while installing the new freelist link.
     unsafe fn write_next(addr: usize, next: usize) {
         // SAFETY: caller guarantees addr points to a free slab block;
         // writing the next pointer there is safe.
@@ -163,6 +173,13 @@ impl SlabHeap {
             slab_2048: Slab::new(),
             buddy: BuddyAllocator::new(),
         };
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): BaseAllocator::init_region \
+                      returns (), so a misaligned or undersized initial region cannot be \
+                      reported; make init_region return AllocResult like add_region and propagate \
+                      the error"
+        )]
         heap.buddy.init_region(start, size).unwrap_or_else(|e| {
             panic!(
                 "SlabHeap::new init_region({:#x}, {:#x}) failed: {:?}",
@@ -178,13 +195,14 @@ impl SlabHeap {
     ///
     /// The caller must ensure the memory range is valid and does not
     /// overlap with existing managed memory.
-    pub unsafe fn add_memory(&mut self, start: usize, size: usize) {
-        self.buddy.add_region(start, size).unwrap_or_else(|e| {
-            panic!(
-                "SlabHeap::add_memory add_region({:#x}, {:#x}) failed: {:?}",
-                start, size, e
-            )
-        });
+    ///
+    /// # Errors
+    ///
+    /// Returns the backing buddy allocator's registration error when the
+    /// range is misaligned, too small, overflows, overlaps managed memory, or
+    /// exceeds the region table.
+    pub unsafe fn add_memory(&mut self, start: usize, size: usize) -> AllocResult {
+        self.buddy.add_region(start, size)
     }
 
     // ------------------------------------------------------------------
@@ -388,8 +406,7 @@ fn size_class(layout: Layout) -> SizeClass {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use core::alloc::Layout;
 

@@ -6,7 +6,7 @@
 
 use syn::{Error, Generics};
 
-pub fn generic_not_allowed_error(generics: &Generics) -> Error {
+pub(crate) fn generic_not_allowed_error(generics: &Generics) -> Error {
     Error::new_spanned(
         generics,
         "generic parameters are not allowed in kiface interfaces",

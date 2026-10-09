@@ -317,12 +317,10 @@ pub(crate) unsafe fn try_free(
     let pin = owner.guard();
     // SAFETY: the pointer provenance contract is forwarded from this
     // function's caller; `owner` establishes exclusive local cache access.
-    unsafe {
-        PERCPU_SLAB_CACHE
-            .get_mut_unchecked(pin)
-            .try_free(size_class, object)
-    }
-    .is_ok()
+    let cache = unsafe { PERCPU_SLAB_CACHE.get_mut_unchecked(pin) };
+    // SAFETY: The caller transfers a live object of this size class and ends
+    // all access to it before this cache stores its free-list link.
+    unsafe { cache.try_free(size_class, object) }.is_ok()
 }
 
 /// Refill the current CPU cache while holding the central allocator lock.
@@ -362,15 +360,13 @@ pub(crate) unsafe fn drain_cache<A: ByteAllocator>(
     let pin = owner.guard();
     // SAFETY: the pointer and allocator provenance contracts are forwarded
     // from this function's caller; `owner` serializes local cache mutation.
-    unsafe {
-        PERCPU_SLAB_CACHE
-            .get_mut_unchecked(pin)
-            .drain(size_class, allocator, object)
-    };
+    let cache = unsafe { PERCPU_SLAB_CACHE.get_mut_unchecked(pin) };
+    // SAFETY: The caller supplies the originating central allocator and a
+    // live, exclusively transferred object of the specified size class.
+    unsafe { cache.drain(size_class, allocator, object) };
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec::Vec;
 
@@ -440,10 +436,10 @@ mod tests {
 
         // SAFETY: both stack slots are live, writable, aligned 8-byte objects
         // and are not accessible until they are popped below.
-        unsafe {
-            cache.try_push(first).unwrap();
-            cache.try_push(second).unwrap();
-        }
+        unsafe { cache.try_push(first) }.unwrap();
+        // SAFETY: The second stack slot is a distinct live aligned object;
+        // the test does not access it again until it is popped.
+        unsafe { cache.try_push(second) }.unwrap();
         assert_eq!(cache.pop(), Some(second));
         assert_eq!(cache.pop(), Some(first));
         assert_eq!(cache.pop(), None);

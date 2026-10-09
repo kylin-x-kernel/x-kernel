@@ -8,3 +8,6 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 description = "Raw early firmware handoff parsers for x-kernel boot paths"
+
+[lints]
+workspace = true

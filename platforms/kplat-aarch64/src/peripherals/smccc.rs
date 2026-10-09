@@ -69,6 +69,12 @@ pub(crate) fn init_conduit(method: &str) {
     let conduit = match method {
         "hvc" => SmcccConduit::Hvc,
         "smc" => SmcccConduit::Smc,
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware PSCI node \
+                      names an SMCCC conduit other than hvc or smc, so no firmware call can be \
+                      issued; firmware initialization has no error return or recovery"
+        )]
         _ => panic!("Unknown SMCCC conduit method: {}", method),
     };
     CONDUIT.store(conduit as u8, Ordering::Release);
@@ -166,7 +172,7 @@ pub fn smc_call(func: u32, arg0: usize, arg1: usize, arg2: usize) -> SmcccResult
     out
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

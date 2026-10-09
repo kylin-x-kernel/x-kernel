@@ -4,7 +4,6 @@
 
 #![no_std]
 #![doc = include_str!("../README.md")]
-#![allow(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
 
 //! # Backtrace - Stack Unwinding for x-kernel
 //!
@@ -134,13 +133,26 @@ fn capture_into(fp: usize, out: &mut [Frame]) -> usize {
 /// State of a captured backtrace.
 // `Unsupported` is only constructed on architectures without unwinding
 // support, so it is dead on supported targets.
-#[allow(dead_code)]
 // The fixed capture buffer dwarfs the empty variant; that is the point of
 // the allocation-free design.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "CG-024-lint-exceptions: clippy::large_enum_variant: The captured backtrace \
+              deliberately embeds its fixed frame buffer to avoid allocation"
+)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
 enum Inner {
     /// Architecture does not support unwinding.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: The unsupported-unwind variant is used only on targets \
+                  without frame-pointer unwinding"
+    )]
+    #[allow(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: The unsupported-unwind variant is used only \
+                  on targets without frame-pointer unwinding"
+    )]
     Unsupported,
     /// Successfully captured backtrace (fixed buffer + frame count).
     Captured([Frame; MAX_FRAMES], usize),

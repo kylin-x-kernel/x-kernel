@@ -46,20 +46,32 @@ fn zero_modification_preserves_waiting_fifo() {
         blocker
             .as_ref()
             .modify_after(&queue, Some(0.into()), TimeSpan::ZERO, || unreachable!())
-            .unwrap();
+    }
+    .unwrap();
+    // SAFETY: all three pinned objects and shared capture remain live through
+    // controlled execution, queue flush and individual timer drain below.
+    unsafe {
         first
             .as_ref()
             .modify_after(&queue, Some(0.into()), TimeSpan::ZERO, || unreachable!())
-            .unwrap();
+    }
+    .unwrap();
+    // SAFETY: all three pinned objects and shared capture remain live through
+    // controlled execution, queue flush and individual timer drain below.
+    unsafe {
         second
             .as_ref()
             .modify_after(&queue, Some(0.into()), TimeSpan::ZERO, || unreachable!())
-            .unwrap();
+    }
+    .unwrap();
+    // SAFETY: all three pinned objects and shared capture remain live through
+    // controlled execution, queue flush and individual timer drain below.
+    unsafe {
         first
             .as_ref()
             .modify_after(&queue, Some(0.into()), TimeSpan::ZERO, || unreachable!())
-            .unwrap();
     }
+    .unwrap();
     let partition = queue.partition(0.into()).unwrap();
     assert!(!first.work_for_test().state.lock().pending_is_ready());
     for _ in 0..3 {

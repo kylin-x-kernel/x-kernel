@@ -51,18 +51,14 @@ unsafe extern "C" {
 
 impl ExceptionContext {
     pub(crate) fn fixup_exception(&mut self) -> bool {
-        // SAFETY: `_ex_table_start` and `_ex_table_end` are linker-defined
-        // symbols bounding the `__ex_table` section. They form a valid slice
-        // of `ExceptionTableEntry` items. The table has been sorted by
-        // `init_exception_table()` at boot.
-        let entries = unsafe {
-            core::slice::from_raw_parts(
-                _ex_table_start.as_ptr(),
-                _ex_table_end
-                    .as_ptr()
-                    .offset_from_unsigned(_ex_table_start.as_ptr()),
-            )
-        };
+        let start = core::ptr::addr_of!(_ex_table_start).cast::<ExceptionTableEntry>();
+        let end = core::ptr::addr_of!(_ex_table_end).cast::<ExceptionTableEntry>();
+        // SAFETY: The linker places both symbols at the ordered boundaries of
+        // one contiguous __ex_table section of ExceptionTableEntry records.
+        let len = unsafe { end.offset_from_unsigned(start) };
+        // SAFETY: The linker supplies aligned, initialized entries covering len.
+        // Boot sorted the table before publication; entries remain immutable.
+        let entries = unsafe { core::slice::from_raw_parts(start, len) };
         match entries.binary_search_by(|e| e.from.cmp(&self.ip())) {
             Ok(entry) => {
                 self.set_ip(entries[entry].to);
@@ -74,23 +70,19 @@ impl ExceptionContext {
 }
 
 pub(crate) fn init_exception_table() {
-    // SAFETY: `_ex_table_start` / `_ex_table_end` are valid linker symbols.
-    // This is called once during boot (single-threaded), so mutable access
-    // is exclusive. `cast_mut()` is safe because we own the section data
-    // at init time.
-    let ex_table = unsafe {
-        core::slice::from_raw_parts_mut(
-            _ex_table_start.as_ptr().cast_mut(),
-            _ex_table_end
-                .as_ptr()
-                .offset_from_unsigned(_ex_table_start.as_ptr()),
-        )
-    };
+    let start = core::ptr::addr_of!(_ex_table_start).cast::<ExceptionTableEntry>();
+    let end = core::ptr::addr_of!(_ex_table_end).cast::<ExceptionTableEntry>();
+    // SAFETY: The linker places both symbols at the ordered boundaries of
+    // one contiguous __ex_table section of ExceptionTableEntry records.
+    let len = unsafe { end.offset_from_unsigned(start) };
+    // SAFETY: The linker supplies aligned, initialized entries covering len.
+    // Single-threaded boot owns this writable section before publication.
+    let ex_table = unsafe { core::slice::from_raw_parts_mut(start.cast_mut(), len) };
     ex_table.sort_unstable();
 }
 
-#[cfg(unittest)]
-pub mod tests_userspace_common {
+#[unittest::mod_test]
+pub(crate) mod tests_userspace_common {
     use unittest::def_test;
 
     use super::{ExceptionKind, ReturnReason};

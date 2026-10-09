@@ -98,7 +98,7 @@ fn do_poll(
 
 /// Poll file descriptors with millisecond timeout
 #[cfg(target_arch = "x86_64")]
-pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
+pub(crate) fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
     let mut poll_fds = fds.load_vm_vec(nfds as usize)?;
     let timeout = if timeout < 0 {
         None
@@ -113,7 +113,7 @@ pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize>
 }
 
 /// Poll file descriptors with high-precision timeout and signal masking
-pub fn sys_ppoll(
+pub(crate) fn sys_ppoll(
     fds: UserPtr<pollfd>,
     nfds: i32,
     timeout: UserConstPtr<timespec>,

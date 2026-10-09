@@ -52,8 +52,10 @@ mod crypto;
 mod curve25519_key;
 mod fs_dirfile;
 mod fs_htree;
-#[cfg(unittest)]
-mod fs_htree_tests;
+#[unittest::mod_test]
+mod fs_htree_tests {
+    include!("fs_htree_tests.rs");
+}
 mod huk_subkey;
 
 mod libutee;
@@ -122,6 +124,11 @@ fn tee_syscall_storage_create_extras(uctx: &UserContext) -> (usize, *mut c_uint)
 }
 
 /// Dispatch TEE-specific syscalls from the userspace context
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy TEE syscall dispatch whose arms marshal \
+              arguments inline; move marshalling into per-syscall helpers"
+)]
 pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
     // Handle TEE-specific syscalls here
     match sysno {

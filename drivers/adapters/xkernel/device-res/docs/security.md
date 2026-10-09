@@ -56,7 +56,7 @@ Invariants:
 
 ### DMA free
 
-`free_coherent()` rebuilds `kdma::DMAInfo` from the `DmaAllocation` and
+`free_coherent()` rebuilds `kdma::DmaInfo` from the `DmaAllocation` and
 calls `kdma::deallocate_dma_memory()`.
 
 Invariants:

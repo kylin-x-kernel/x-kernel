@@ -49,7 +49,10 @@ mod control;
 
 #[cfg_attr(
     all(not(unittest), not(doc)),
-    expect(dead_code, reason = "timer API integration follows")
+    expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: timer API integration follows"
+    )
 )]
 mod cpu;
 mod deadline;

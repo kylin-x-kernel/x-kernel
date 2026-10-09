@@ -2,4 +2,4 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-pub mod config;
+pub(crate) mod config;

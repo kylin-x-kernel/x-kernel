@@ -30,6 +30,7 @@ pub struct MemReserveIter<'a> {
 pub struct LinuxFdt<'a> {
     data: &'a [u8],
     header: FdtHeader,
+    mem_rsvmap_end: usize,
 }
 
 impl core::fmt::Debug for LinuxFdt<'_> {
@@ -41,7 +42,16 @@ impl core::fmt::Debug for LinuxFdt<'_> {
 }
 
 impl<'a> LinuxFdt<'a> {
-    /// Construct a new `Fdt` from a byte buffer
+    /// Validates a DTB and borrows its immutable bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FdtError::BadMagic`] for a bad magic value and
+    /// [`FdtError::BufferTooSmall`] for missing header/blob storage.
+    /// [`FdtError::ParseError`] reports invalid block ranges, missing reservation
+    /// termination, unsupported format versions, malformed tokens/properties or
+    /// names, and nesting beyond 63 nodes (including the root). No tree is
+    /// published until the entire structure has passed validation.
     ///
     /// Note: this function does ***not*** require that the data be 4-byte
     /// aligned
@@ -58,9 +68,13 @@ impl<'a> LinuxFdt<'a> {
             return Err(FdtError::BufferTooSmall);
         }
 
+        let data = &data[..total_size];
+        let mem_rsvmap_end = header.validate(data)?;
+        node::validate_structure(&data[header.struct_range()], &data[header.strings_range()])?;
         Ok(Self {
-            data: &data[..total_size],
+            data,
             header,
+            mem_rsvmap_end,
         })
     }
 
@@ -69,23 +83,14 @@ impl<'a> LinuxFdt<'a> {
     ///
     /// # Errors
     ///
-    /// Returns `FdtError::BadPtr` for a null pointer and
-    /// `FdtError::BadMagic` when the header parses but the magic is
-    /// wrong. `FdtError::BufferTooSmall` is unreachable on this path:
-    /// the slice handed to the validator is exactly the declared total
-    /// size, so a blob shorter than its declaration is the caller's
-    /// safety obligation, not a returned error.
-    ///
-    /// # Panics
-    ///
-    /// Panics via the internal unwrap when the fixed-size header
-    /// (36 bytes) cannot be parsed at all — i.e. the caller-provided
-    /// region is shorter than one header.
+    /// Returns [`FdtError::BadPtr`] for a null pointer, otherwise the same
+    /// validation errors as [`Self::new`]. Actual readable storage shorter than
+    /// the header-declared size violates the caller's safety obligation.
     ///
     /// # Safety
     ///
     /// `ptr` must point to a readable flattened devicetree blob whose header
-    /// and total-size range remain accessible for the returned lifetime.
+    /// and total-size range remain readable and immutable for the returned lifetime.
     ///
     /// Note: this function does ***not*** require that the data be 4-byte
     /// aligned
@@ -94,17 +99,24 @@ impl<'a> LinuxFdt<'a> {
             return Err(FdtError::BadPtr);
         }
 
-        // SAFETY: we assume that the pointer is valid and points to a valid FDT
+        // SAFETY: the caller guarantees a readable header at `ptr`; byte reads
+        // do not require FdtHeader alignment or structurally valid contents.
         let tmp_header =
             unsafe { core::slice::from_raw_parts(ptr, core::mem::size_of::<FdtHeader>()) };
 
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: tmp_header contains \
+                      size_of::<FdtHeader>() bytes and the parser only consumes its ten u32 fields"
+        )]
         let real_size = FdtHeader::from_bytes(&mut FdtData::new(tmp_header))
             .unwrap()
             .totalsize
             .get() as usize;
 
-        // SAFETY: `ptr` was validated above and `real_size` comes from the FDT
-        // header at that address, so this slice covers the same live FDT blob.
+        // SAFETY: the caller guarantees that the full header-declared range is
+        // readable and immutable for the returned lifetime. Structural
+        // validation follows inside `new`; it cannot establish pointer validity.
         unsafe { Self::new(core::slice::from_raw_parts(ptr, real_size)) }
     }
 
@@ -223,7 +235,7 @@ impl<'a> LinuxFdt<'a> {
     }
 
     fn mem_rsvmap_block(&self) -> &'a [u8] {
-        &self.data[self.header.mem_rsvmap_range()]
+        &self.data[self.header.mem_rsvmap_range().start..self.mem_rsvmap_end]
     }
 
     pub(crate) fn string_at_offset(&self, offset: usize) -> Option<&'a str> {

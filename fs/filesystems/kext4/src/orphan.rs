@@ -573,7 +573,7 @@ fn orphan_block_checksum(checksum_seed: u32, physical: FilesystemBlock, entries:
     checksum::crc32c(checksum, entries)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

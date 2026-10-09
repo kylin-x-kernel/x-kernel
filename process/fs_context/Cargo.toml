@@ -12,3 +12,6 @@ repository.workspace = true
 klazy.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
+
+[lints]
+workspace = true

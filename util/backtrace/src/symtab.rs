@@ -190,7 +190,7 @@ pub(crate) fn write_annotation(f: &mut fmt::Formatter<'_>, ip: usize) -> fmt::Re
     write!(f, " {name}+{:#x}/{:#x}", symbol.offset, symbol.size)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_unittest {
     use alloc::vec::Vec;
 

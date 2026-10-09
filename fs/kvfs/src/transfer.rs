@@ -28,6 +28,11 @@ use crate::{FMode, VfsFile, pipe::PipeObject};
 /// locks. File positions are locked in address order; pipe paths acquire a
 /// non-pipe position only inside the pipe-owned transfer, never across a
 /// pipe-readiness wait.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy file transfer; split position-lock \
+              setup, the per-chunk copy step and position write-back"
+)]
 pub fn transfer_files(
     input: &Arc<VfsFile>,
     input_offset: Option<&mut u64>,

@@ -5,7 +5,7 @@
 use crate::cpu_id::{RawCpuId, cpu_map_initialized, load_cpu_id_map_from_fdt};
 
 #[inline]
-pub const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
+pub(crate) const fn normalize_raw_id(raw_cpu_id: RawCpuId) -> RawCpuId {
     raw_cpu_id
 }
 
@@ -36,6 +36,7 @@ pub fn init_boot_cpu_id_map(dtb_paddr: usize) {
     }
 
     let dtb_vaddr = kaddr_layout::p2v(dtb_paddr) as *const u8;
+    #[expect(clippy::expect_used, reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware CPU-map device tree is invalid; early CPU initialization has no error return or recovery")]
     // SAFETY: `dtb_paddr` comes from boot firmware; after `p2v` it points to
     // the readable DTB blob used for CPU enumeration during early boot.
     let fdt = unsafe { of::LinuxFdt::from_ptr(dtb_vaddr) }

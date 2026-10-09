@@ -71,6 +71,11 @@ static CONSOLE_CLASS_BRIDGE: LazyInit<()> = LazyInit::new();
 
 fn console_subsystem() -> &'static SpinNoPreempt<ConsoleSubsystem> {
     CONSOLE_SUBSYS.call_once(|| SpinNoPreempt::new(ConsoleSubsystem::new()));
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completed successfully and \
+                  permanently published the console subsystem"
+    )]
     CONSOLE_SUBSYS
         .get()
         .expect("console subsystem call_once succeeded")
@@ -153,6 +158,7 @@ pub fn unregister_console_device(id: DeviceId) -> Option<ClassDevice<CharDeviceI
     console_subsystem().lock().remove(id)
 }
 
-#[cfg(unittest)]
-#[path = "tests/runtime.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("tests/runtime.rs");
+}

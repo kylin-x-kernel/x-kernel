@@ -28,3 +28,6 @@ kbuild_config = { workspace = true }
 karch = { workspace = true }
 kaddr_layout = { workspace = true }
 vmobj = { workspace = true }
+
+[lints]
+workspace = true

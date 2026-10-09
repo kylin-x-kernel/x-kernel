@@ -116,7 +116,7 @@ const fn align_up(val: usize) -> usize {
     (val + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_ramdisk {
     use unittest::{assert, assert_eq, def_test};
 

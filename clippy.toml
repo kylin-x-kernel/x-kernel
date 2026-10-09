@@ -1,0 +1,31 @@
+# Clippy lint parameters for the kernel workspace.
+#
+# Lint levels (allow/warn/deny) live in `[workspace.lints]` of the root
+# `Cargo.toml`. This file only holds lint parameters: thresholds,
+# disallowed lists, and test exemptions.
+
+# Apply documentation lints such as clippy::missing_safety_doc to private items too.
+check-private-items = true
+
+# std `#[test]` code only; `cfg(unittest)` code is exempted by `util/macros`.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+# Check exported APIs as well as private implementation details.
+avoid-breaking-exported-api = false
+disallowed-methods = [
+    { path = "core::mem::zeroed", reason = "Prefer safe construction; exceptions must prove that the concrete type contract admits the all-zero bit pattern." },
+]
+
+upper-case-acronyms-aggressive = true
+
+# Function length limit for clippy::too_many_lines (non-blank, non-comment lines).
+too-many-lines-threshold = 100
+
+# Block nesting limit for clippy::excessive_nesting. Module, impl and function
+# bodies count as levels, so 6 leaves four levels of control flow in a method.
+excessive-nesting-threshold = 6
+
+# Boolean parameter limit for clippy::fn_params_excessive_bools (the clippy default).
+max-fn-params-bools = 3

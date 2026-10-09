@@ -182,7 +182,11 @@ fn unregister_virtio_net_irq(irq: usize, handle_id: usize) {
 pub struct VirtIoNetDev<H: Hal, T: Transport, const QS: usize> {
     bufs: SpinNoPreempt<NetBufState<QS>>,
     // Kept alive so that `NetBufBox`es in `bufs` remain valid.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: Own the RX buffer pool for the lifetime of \
+                  the network device even when no direct field read is needed"
+    )]
     buf_pool: Arc<NetBufPool>,
     inner: Arc<SpinNoIrq<InnerDev<H, T, QS>>>,
     mac: MacAddress,
@@ -491,7 +495,7 @@ impl<H: Hal, T: Transport, const QS: usize> NetDevice for VirtIoNetDev<H, T, QS>
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

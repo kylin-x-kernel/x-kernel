@@ -35,3 +35,6 @@ kcpu_slot.workspace = true
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu.workspace = true
 kcpu_slot.workspace = true
+
+[lints]
+workspace = true

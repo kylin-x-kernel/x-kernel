@@ -14,3 +14,6 @@ kaddr_layout = { workspace = true }
 kbuild_config = { workspace = true }
 x86_boot_common = { workspace = true }
 multiboot2 = { version = "0.24.1", default-features = false }
+
+[lints]
+workspace = true

@@ -222,7 +222,7 @@ fn finish_restartable_io(result: KResult<usize>) -> KResult<usize> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod restart_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -362,7 +362,7 @@ mod restart_tests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod transfer_count_tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

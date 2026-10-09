@@ -44,8 +44,7 @@ pub(crate) fn wait_for_completion(completion: &Completion) -> Result<(), kpoll::
     }))
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};

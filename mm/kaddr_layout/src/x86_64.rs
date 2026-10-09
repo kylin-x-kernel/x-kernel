@@ -12,7 +12,7 @@ use crate::{LayoutConsts, UserLayoutConsts};
 //
 // The gaps between these ranges stay reserved and match the existing boot
 // assumptions about the linear-map and kernel-image slots.
-pub const LAYOUT: LayoutConsts = LayoutConsts {
+pub(crate) const LAYOUT: LayoutConsts = LayoutConsts {
     pg_va_bits: 48,
     kernel_aspace_base: 0xffff_8000_0000_0000,
     kernel_aspace_size: 0x0000_7fff_ffff_f000,
@@ -39,7 +39,7 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
 //   0x0000_7FFF_0000_0000 ┄┐ ← USER_STACK_TOP
 //          ↑ 0x8_0000       │   USER_STACK_SIZE = 512 KiB
 //   0x0000_7FFF_FFFF_F000 ┄┄┘ ← USER_SPACE_BASE + USER_SPACE_SIZE
-pub const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
+pub(crate) const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
     user_space_base: 0x1000,
     user_space_size: 0x7fff_ffff_f000,
     user_interp_base: 0x400_0000,

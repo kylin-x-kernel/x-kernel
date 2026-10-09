@@ -19,3 +19,6 @@ kspin = { workspace = true }
 ktime_types = { workspace = true }
 smallvec = { version = "1.15", features = ["const_generics", "union"] }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

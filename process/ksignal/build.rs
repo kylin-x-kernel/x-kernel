@@ -2,6 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#![allow(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (a): this host build script \
+              intentionally fails the build when Cargo does not supply CARGO_CFG_TARGET_ARCH"
+)]
+
 fn main() {
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     alias(

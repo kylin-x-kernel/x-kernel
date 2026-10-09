@@ -144,10 +144,9 @@ fn real_softirq_executes_work_and_completion_refill() {
     }));
     let bh = local_bh_disable();
     // SAFETY: pinned Work and captured stack state outlive the complete softirq drain.
-    unsafe {
-        queue.submit(&first, Some(cpu), || unreachable!()).unwrap();
-        queue.submit(&next, Some(cpu), || unreachable!()).unwrap();
-    }
+    unsafe { queue.submit(&first, Some(cpu), || unreachable!()) }.unwrap();
+    // SAFETY: pinned Work and captured stack state outlive the complete softirq drain.
+    unsafe { queue.submit(&next, Some(cpu), || unreachable!()) }.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     drop(bh);
     let _ = softirq::run_pending_softirqs();

@@ -50,3 +50,6 @@ kbuild_config = { workspace = true }
 karch = { workspace = true }
 klazy = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

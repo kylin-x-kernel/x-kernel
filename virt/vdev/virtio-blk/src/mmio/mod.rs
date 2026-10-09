@@ -8,7 +8,7 @@ pub use device::{BlockDeviceEvent, VirtioMmioBlockDevice};
 /// VirtIO block request header structure
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
-pub struct VirtioBlockHeader {
+pub(crate) struct VirtioBlockHeader {
     /// Request type (VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT, etc.)
     pub request_type: u32,
     /// I/O priority (currently unused)
@@ -19,5 +19,5 @@ pub struct VirtioBlockHeader {
 
 impl VirtioBlockHeader {
     /// Size of the VirtIO block header in bytes
-    pub const SIZE: u32 = 16; // type (4) + ioprio (4) + sector (8)
+    pub(crate) const SIZE: u32 = 16; // type (4) + ioprio (4) + sector (8)
 }

@@ -16,3 +16,6 @@ stats = ["dep:klockstat-macros"]
 [dependencies]
 linkme.workspace = true
 klockstat-macros = { workspace = true, optional = true }
+
+[lints]
+workspace = true

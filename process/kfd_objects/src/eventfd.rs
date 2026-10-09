@@ -210,7 +210,7 @@ impl Pollable for EventFd {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod eventfd_tests {
     use core::task::{Context, RawWaker, Waker};
 

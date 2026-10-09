@@ -169,8 +169,7 @@ fn free_msi(virq: Virq) -> bool {
     })
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 
@@ -184,8 +183,8 @@ mod tests {
     }
 }
 
-#[cfg(all(unittest, not(target_arch = "x86_64")))]
-#[allow(missing_docs)]
+#[cfg(not(target_arch = "x86_64"))]
+#[unittest::mod_test]
 mod unittest_tests {
     use unittest::def_test;
 

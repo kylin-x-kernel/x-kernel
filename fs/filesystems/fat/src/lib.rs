@@ -8,7 +8,6 @@
 //! root probing and ordinary mounts therefore use the same descriptor.
 #![cfg_attr(any(not(test), doc), no_std)]
 #![feature(likely_unlikely)]
-#![allow(clippy::new_ret_no_self)]
 
 extern crate alloc;
 
@@ -47,6 +46,11 @@ static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
 
 #[macros::register_init]
 fn init_fat_fs() {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("FAT filesystem type must register once");
 }
 
@@ -118,7 +122,6 @@ impl<T> FsRef<T> {
     }
 
     /// Borrow a mutable reference tied to the filesystem lifetime.
-    #[allow(clippy::mut_from_ref)]
     pub(crate) fn borrow_mut<'a, 'fs>(&self, fs: &'a mut FatFilesystemGuard<'fs>) -> &'a mut T {
         self.assert_owner(fs);
         // SAFETY: `assert_owner` checked that `fs` is the filesystem instance

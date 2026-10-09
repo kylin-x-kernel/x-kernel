@@ -5,7 +5,6 @@ imports, crate dependencies, macros, lints, or attributes.
 
 ## Visibility And Imports
 
-- default to the narrowest visibility that works;
 - keep module boundaries aligned with ownership and audit surface;
 - define crate boundaries around cohesive ownership domains:
   tightly related data, state, invariants, lifecycle rules, and execution-context
@@ -31,9 +30,6 @@ imports, crate dependencies, macros, lints, or attributes.
 - keep attributes ordered predictably;
 - place `#[derive(...)]` after other outer attributes;
 - keep derived traits ordered consistently;
-- suppress lints at the narrowest practical scope;
-- use `#[expect(dead_code)]` only when the dead code is simple,
-  clearly intentional, and likely to become used.
 
 ## Macros
 
@@ -46,7 +42,6 @@ imports, crate dependencies, macros, lints, or attributes.
 
 Check specifically for:
 
-- over-wide visibility;
 - crates whose contents do not share a coherent ownership, state, and invariant model;
 - implementation-only modules promoted to crates without a real cross-crate reuse boundary;
 - shared state/data components left inside one crate even though multiple peer crates depend
@@ -55,6 +50,5 @@ Check specifically for:
   testing, or migration wiring;
 - direct free-function imports that remove call-site context;
 - dependency declarations that bypass workspace conventions;
-- broad lint suppression;
 - attributes or derives ordered inconsistently with the project convention;
 - macros used where a normal function would be clearer.

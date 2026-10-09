@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 use anon::{AnonLineageId, AnonSharedObject};
-use kerrno::{KError, KResult};
+use kerrno::KResult;
 use khal::{
     paging::{MappingFlags, PageSize, PageTableMut},
     trap::PageFaultFlags,
@@ -89,37 +89,61 @@ pub struct ForkCloneTarget<'a> {
     pub invalidate: Option<InvalidateHandle>,
 }
 
+/// Writeback mode requested by an `msync()` call.
+///
+/// `MS_SYNC` and `MS_ASYNC` are mutually exclusive, so a single mode replaces
+/// two independent flags and cannot express the invalid combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsyncWriteback {
+    /// Neither `MS_SYNC` nor `MS_ASYNC` was requested.
+    Unspecified,
+    /// `MS_ASYNC`: writeback may be scheduled without waiting.
+    Async,
+    /// `MS_SYNC`: file writeback must complete before returning.
+    Sync,
+}
+
 /// Validated `msync()` policy visible to MM internals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MsyncPolicy {
-    sync: bool,
-    async_: bool,
+    writeback: MsyncWriteback,
     invalidate: bool,
     data_only: bool,
 }
 
 impl MsyncPolicy {
-    /// Creates a new validated `msync()` policy.
-    pub fn try_new(sync: bool, async_: bool, invalidate: bool, data_only: bool) -> KResult<Self> {
-        if sync && async_ {
-            return Err(KError::InvalidInput);
+    /// Creates a policy with the given writeback mode, without
+    /// `MS_INVALIDATE`, and with metadata sync included.
+    pub const fn new(writeback: MsyncWriteback) -> Self {
+        Self {
+            writeback,
+            invalidate: false,
+            data_only: false,
         }
-        Ok(Self {
-            sync,
-            async_,
-            invalidate,
-            data_only,
-        })
+    }
+
+    /// Returns this policy with `MS_INVALIDATE` set as requested.
+    #[must_use]
+    pub const fn with_invalidate(mut self, invalidate: bool) -> Self {
+        self.invalidate = invalidate;
+        self
+    }
+
+    /// Returns this policy with metadata sync skipped when `data_only` is set.
+    #[must_use]
+    pub const fn with_data_only(mut self, data_only: bool) -> Self {
+        self.data_only = data_only;
+        self
     }
 
     /// Returns whether this request requires synchronous file writeback.
     pub const fn is_sync(self) -> bool {
-        self.sync
+        matches!(self.writeback, MsyncWriteback::Sync)
     }
 
     /// Returns whether this request is `MS_ASYNC`.
     pub const fn is_async(self) -> bool {
-        self.async_
+        matches!(self.writeback, MsyncWriteback::Async)
     }
 
     /// Returns whether this request carries `MS_INVALIDATE`.
@@ -158,7 +182,7 @@ pub enum VmRuntimeRef {
 
 /// Semantic class of a VMA-side runtime reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmRuntimeKind {
+pub(crate) enum VmRuntimeKind {
     Linear,
     AnonShared,
     AnonPrivate,
@@ -1019,7 +1043,8 @@ impl VmAreaSet {
         not(unittest),
         expect(
             dead_code,
-            reason = "production merge call sites need runtime/view lifecycle updates"
+            reason = "CG-024-lint-exceptions: dead_code: production merge call sites need \
+                      runtime/view lifecycle updates"
         )
     )]
     pub(crate) fn merge_adjacent(&mut self, start: VirtAddr) -> Option<VirtAddr> {
@@ -1042,6 +1067,11 @@ impl VmAreaSet {
             let mut split_right = None;
             let mut remove_before = false;
             {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: before_start came from this \
+                              map and no entry was removed before acquiring its mutable reference"
+                )]
                 let before = self.areas.get_mut(&before_start).unwrap();
                 let before_end = before.end();
                 if before_end > start {
@@ -1064,8 +1094,18 @@ impl VmAreaSet {
 
         let after_key = self.areas.range(start..).next().map(|(&key, _)| key);
         if let Some(after_start) = after_key {
+            #[expect(
+                clippy::unwrap_used,
+                reason = "CG-021-no-panic-on-reachable-failure: after_start was just obtained \
+                          from this map with no intervening mutation"
+            )]
             let after_end = self.areas.get(&after_start).unwrap().end();
             if after_start < end {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: after_start was just found in \
+                              this map and the shared lookup cannot remove it"
+                )]
                 let mut new_area = self.areas.remove(&after_start).unwrap();
                 let delta_pages = ((end - after_start) / PAGE_SIZE_4K) as u64;
                 new_area.page_offset += delta_pages;
@@ -1095,6 +1135,11 @@ impl VmAreaSet {
             } else if area_start >= start && area_end <= end {
                 area.set_flags(new_flags);
             } else if area_start < start && area_end > end {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the overlap branches prove \
+                              end lies strictly inside this VMA"
+                )]
                 let right = area.split(end).unwrap();
                 area.set_end(start);
 
@@ -1112,10 +1157,20 @@ impl VmAreaSet {
                 to_insert.push((right.start(), right));
                 to_insert.push((middle.start(), middle));
             } else if area_end > end {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the overlap branches prove \
+                              end lies strictly inside this VMA"
+                )]
                 let right = area.split(end).unwrap();
                 area.set_flags(new_flags);
                 to_insert.push((right.start(), right));
             } else {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the preceding overlap \
+                              branches leave only a VMA with start strictly inside its range"
+                )]
                 let mut right = area.split(start).unwrap();
                 right.set_flags(new_flags);
                 to_insert.push((right.start(), right));
@@ -1150,7 +1205,7 @@ impl Default for VmAreaSet {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::KError;
     use khal::paging::{MappingFlags, PageSize};

@@ -42,7 +42,7 @@ macro_rules! syscall_enum {
         /// `From<i32>` and `From<u32>` panic for numbers not in the table.
         /// Use `new` when decoding untrusted registers.
         $(#[$outer])*
-        #[allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
+        #[expect(non_camel_case_types, reason = "CG-032-camel-case-types: Syscall variants preserve architecture-specific Linux syscall table spellings")]
         #[derive(Eq, PartialEq, Clone, Copy, Hash, Ord, PartialOrd)]
         #[cfg_attr(feature = "serde_repr", derive(::serde_repr::Serialize_repr, ::serde_repr::Deserialize_repr))]
         #[repr(i32)]

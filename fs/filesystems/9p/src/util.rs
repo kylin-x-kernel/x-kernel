@@ -28,7 +28,7 @@ pub(crate) fn dtype_to_vfs(dtype: u8) -> NodeType {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

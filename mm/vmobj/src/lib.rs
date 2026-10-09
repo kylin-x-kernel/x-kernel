@@ -167,12 +167,21 @@ impl MappingView {
     }
 
     /// Creates a new object-side mapped view record.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is invalid. Use [`Self::try_new`] for unvalidated ranges.
     pub const fn new(
         id: MappingViewId,
         mm_id: u64,
         range: MappingViewRange,
         kind: MappingViewKind,
     ) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The infallible mapping-view \
+                      constructor requires a valid range; unvalidated inputs use try_new"
+        )]
         Self::try_new(id, mm_id, range, kind).expect("mapping view range must be valid")
     }
 
@@ -365,6 +374,11 @@ impl ObjectViewHit {
 
     /// Returns the VMA start covered by this invalidation hit.
     pub fn vma_start(&self) -> u64 {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: ObjectViewHit construction checks \
+                      that the object hit lies inside its mapped view"
+        )]
         let offset = self
             .view
             .object_to_vma_offset(self.object_start)
@@ -430,12 +444,22 @@ impl ObjectInvalidateWork {
     }
 
     /// Creates one object-side invalidation work item.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is invalid or does not cover every hit.
+    /// Use [`Self::try_new`] for unvalidated ranges and hits.
     pub fn new(
         object: VmObjectId,
         object_start: u64,
         object_len: usize,
         hits: Vec<ObjectViewHit>,
     ) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The infallible invalidation \
+                      constructor requires a valid covering range; unvalidated inputs use try_new"
+        )]
         Self::try_new(object, object_start, object_len, hits)
             .expect("invalidate work range must be valid and cover every hit")
     }
@@ -541,7 +565,7 @@ pub trait MappingViewNotifier: Send + Sync {
     fn invalidate(&self, work: &ObjectInvalidateWork, hit: &ObjectViewHit);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

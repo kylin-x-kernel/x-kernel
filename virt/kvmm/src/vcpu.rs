@@ -87,7 +87,11 @@ impl<A: VmmArch> Vcpu<A> {
 /// `restore_guest_ctx` → `enter_guest` → `save_guest_ctx` → `exit_handler`.
 ///
 /// Returns `Ok(())` on normal exit, `Err(())` on unhandled exit or entry failure.
-#[allow(clippy::result_unit_err)]
+#[expect(
+    clippy::result_unit_err,
+    reason = "CG-024-lint-exceptions: clippy::result_unit_err: exit and entry failures are logged \
+              at the failure site; callers only need the stop status"
+)]
 pub fn vmm_run_vcpu<A: VmmArch>(vcpu: &mut Vcpu<A>) -> Result<(), ()> {
     log::info!("[VMM] Starting vcpu{}", vcpu.vcpu_id);
 

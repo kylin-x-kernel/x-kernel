@@ -317,6 +317,7 @@ fn return_msg_handles(msg: IpcMsg, handles: Vec<Arc<dyn Handle>>) -> KResult {
                     Ok(id) => ids.push(id),
                     Err(err) => {
                         for id in ids.drain(..) {
+                            // Rollback is best effort; report the original failure.
                             let _ = table.uctx_handle_uninstall(id);
                         }
                         return Err(err);
@@ -328,6 +329,7 @@ fn return_msg_handles(msg: IpcMsg, handles: Vec<Arc<dyn Handle>>) -> KResult {
     }
 
     if let Err(err) = UserPtr::<i32>::from(msg.handles).write_vm_slice(&ids) {
+        // Rollback is best effort; the handle table may already be gone at exit.
         let _ = kprocess::current_user_process().with_tipc_handles(|handle_table| {
             let mut table = handle_table.write();
             for id in ids {
@@ -380,6 +382,7 @@ fn sys_tipc_port_create(
     )?;
     let id = install(port.clone())? as i32;
     if let Err(err) = ipc_port_publish(&port) {
+        // Rollback is best effort; the handle table may already be gone at exit.
         let _ = kprocess::current_user_process()
             .with_tipc_handles(|handles| handles.write().uctx_handle_uninstall(id));
         return Err(err);
@@ -403,6 +406,7 @@ fn sys_tipc_accept(port_id: i32, peer_uuid: UserPtr<TipcUuid>) -> KResult<isize>
     let (channel, peer) = port.ipc_port_accept()?;
     let id = install(channel)? as i32;
     if let Err(err) = peer_uuid.write_vm(peer.into()) {
+        // Rollback is best effort; the handle table may already be gone at exit.
         let _ = kprocess::current_user_process()
             .with_tipc_handles(|handles| handles.write().uctx_handle_uninstall(id));
         return Err(err.into());

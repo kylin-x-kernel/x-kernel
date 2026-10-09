@@ -36,3 +36,6 @@ unittest.workspace = true
 posix-fs.workspace = true
 posix-ipc.workspace = true
 tee_kernel = { workspace = true, optional = true }
+
+[lints]
+workspace = true

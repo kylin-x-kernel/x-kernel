@@ -30,6 +30,11 @@ static NEXT_DRIVER_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_DESC_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_DEVICE_ID: AtomicU64 = AtomicU64::new(0);
 
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: Monotonic 64-bit ID counters cannot reach \
+              u64::MAX through ID allocation in practice, as the counter comment explains"
+)]
 fn fetch_add_u64(counter: &AtomicU64, what: &'static str) -> u64 {
     let prev = counter.fetch_add(1, Ordering::Relaxed);
     if prev == u64::MAX {
@@ -75,7 +80,7 @@ impl DeviceDescEntry {
 /// the monotonically increasing IDs, i.e. registration order. `bus_types`
 /// stays a `Vec` because it holds only a handful of fixed entries keyed by a
 /// string `BusTypeId`.
-pub struct DeviceRegistry {
+pub(crate) struct DeviceRegistry {
     descriptors: BTreeMap<DeviceDescId, DeviceDescEntry>,
     devices: BTreeMap<DeviceId, Arc<DeviceObject>>,
     buses: BTreeMap<BusId, Arc<BusInstance>>,
@@ -97,32 +102,32 @@ impl DeviceRegistry {
     }
 
     /// Allocate a unique bus ID.
-    pub fn alloc_bus_id(&mut self) -> BusId {
+    pub(crate) fn alloc_bus_id(&mut self) -> BusId {
         BusId::new(fetch_add_u64(&NEXT_BUS_ID, "BusId"))
     }
 
     /// Allocate a unique driver ID.
-    pub fn alloc_driver_id(&mut self) -> DriverId {
+    pub(crate) fn alloc_driver_id(&mut self) -> DriverId {
         DriverId::new(fetch_add_u64(&NEXT_DRIVER_ID, "DriverId"))
     }
 
     /// Allocate a unique discovery descriptor ID.
-    pub fn alloc_device_desc_id(&mut self) -> DeviceDescId {
+    pub(crate) fn alloc_device_desc_id(&mut self) -> DeviceDescId {
         DeviceDescId::new(fetch_add_u64(&NEXT_DESC_ID, "DeviceDescId"))
     }
 
     /// Allocate a unique device ID.
-    pub fn alloc_device_id(&mut self) -> DeviceId {
+    pub(crate) fn alloc_device_id(&mut self) -> DeviceId {
         DeviceId::new(fetch_add_u64(&NEXT_DEVICE_ID, "DeviceId"))
     }
 
     /// Find a discovery descriptor.
-    pub fn find_device_desc(&self, id: DeviceDescId) -> Option<DeviceDesc> {
+    pub(crate) fn find_device_desc(&self, id: DeviceDescId) -> Option<DeviceDesc> {
         self.descriptors.get(&id).map(|entry| entry.desc.clone())
     }
 
     /// Find a descriptor only if it is still waiting for a matching driver.
-    pub fn find_pending_device_desc(&self, id: DeviceDescId) -> Option<DeviceDesc> {
+    pub(crate) fn find_pending_device_desc(&self, id: DeviceDescId) -> Option<DeviceDesc> {
         self.descriptors
             .get(&id)
             .filter(|entry| entry.state == DeviceDescState::Pending)
@@ -135,7 +140,7 @@ impl DeviceRegistry {
     }
 
     /// Find the live device currently created from a descriptor.
-    pub fn find_device_for_desc(&self, id: DeviceDescId) -> Option<Arc<DeviceObject>> {
+    pub(crate) fn find_device_for_desc(&self, id: DeviceDescId) -> Option<Arc<DeviceObject>> {
         let device_id = match self.descriptors.get(&id)?.state {
             DeviceDescState::Bound(device_id) => device_id,
             _ => return None,
@@ -144,7 +149,7 @@ impl DeviceRegistry {
     }
 
     /// Find a device object.
-    pub fn find_device(&self, id: DeviceId) -> Option<Arc<DeviceObject>> {
+    pub(crate) fn find_device(&self, id: DeviceId) -> Option<Arc<DeviceObject>> {
         self.devices.get(&id).cloned()
     }
 
@@ -226,7 +231,7 @@ impl DeviceRegistry {
     }
 
     /// Find a bus object.
-    pub fn find_bus(&self, id: BusId) -> Option<Arc<BusInstance>> {
+    pub(crate) fn find_bus(&self, id: BusId) -> Option<Arc<BusInstance>> {
         self.buses.get(&id).cloned()
     }
 
@@ -235,7 +240,7 @@ impl DeviceRegistry {
     /// Used by backends that need to cross-link a controller they own with
     /// the upstream bus that hosts them (e.g. the PCI host bridge living on
     /// a `platform-firmware` or `platform-static` bus).
-    pub fn find_bus_by_name(&self, name: &str) -> Option<Arc<BusInstance>> {
+    pub(crate) fn find_bus_by_name(&self, name: &str) -> Option<Arc<BusInstance>> {
         self.buses
             .values()
             .find(|bus| bus.info().name == name)
@@ -243,12 +248,12 @@ impl DeviceRegistry {
     }
 
     /// Find a driver object.
-    pub fn find_driver(&self, id: DriverId) -> Option<Arc<DriverObject>> {
+    pub(crate) fn find_driver(&self, id: DriverId) -> Option<Arc<DriverObject>> {
         self.drivers.get(&id).cloned()
     }
 
     /// Find a driver object by its stable name.
-    pub fn find_driver_by_name(&self, name: &str) -> Option<Arc<DriverObject>> {
+    pub(crate) fn find_driver_by_name(&self, name: &str) -> Option<Arc<DriverObject>> {
         self.drivers
             .values()
             .find(|driver| driver.name() == name)
@@ -256,7 +261,7 @@ impl DeviceRegistry {
     }
 
     /// Register a bus type object with a custom matcher.
-    pub fn register_bus_type(&mut self, bus_type: Arc<BusTypeObject>) {
+    pub(crate) fn register_bus_type(&mut self, bus_type: Arc<BusTypeObject>) {
         if !self.bus_types.iter().any(|bt| bt.id() == bus_type.id()) {
             self.bus_types.push(bus_type);
         }
@@ -268,7 +273,13 @@ impl DeviceRegistry {
     ///
     /// Panics if the bus type was not registered before use. Call
     /// [`register_bus_type`] during init before creating bus instances.
-    pub fn find_bus_type(&self, id: BusTypeId) -> Arc<BusTypeObject> {
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Driver-core init (default_bus_manager) \
+                  registers the PCI and platform bus types before any bus instance or driver \
+                  refers to them, as the Panics section documents"
+    )]
+    pub(crate) fn find_bus_type(&self, id: BusTypeId) -> Arc<BusTypeObject> {
         self.bus_types
             .iter()
             .find(|bus_type| bus_type.id() == id)
@@ -299,7 +310,7 @@ impl DeviceRegistry {
     }
 
     /// Snapshot all discovery descriptors.
-    pub fn device_descs_snapshot(&self) -> Vec<DeviceDesc> {
+    pub(crate) fn device_descs_snapshot(&self) -> Vec<DeviceDesc> {
         self.descriptors
             .values()
             .map(|entry| entry.desc.clone())
@@ -307,17 +318,20 @@ impl DeviceRegistry {
     }
 
     /// Snapshot all registered bus metadata.
-    pub fn buses_snapshot(&self) -> Vec<BusInfo> {
+    pub(crate) fn buses_snapshot(&self) -> Vec<BusInfo> {
         self.buses.values().map(|bus| bus.info().clone()).collect()
     }
 
     /// Snapshot all registered driver metadata.
-    pub fn drivers_snapshot(&self) -> Vec<DriverInfo> {
+    pub(crate) fn drivers_snapshot(&self) -> Vec<DriverInfo> {
         self.drivers.values().map(|driver| driver.info()).collect()
     }
 
     /// Snapshot firmware match specs from drivers registered on one bus type.
-    pub fn firmware_match_specs_for_bus_type(&self, bus_type: BusTypeId) -> Vec<FirmwareMatchSpec> {
+    pub(crate) fn firmware_match_specs_for_bus_type(
+        &self,
+        bus_type: BusTypeId,
+    ) -> Vec<FirmwareMatchSpec> {
         self.drivers
             .values()
             .filter(|driver| driver.bus_types().contains(&bus_type))
@@ -326,7 +340,7 @@ impl DeviceRegistry {
     }
 
     /// Snapshot all live device records from device objects.
-    pub fn records_snapshot(&self) -> Vec<DeviceRecord> {
+    pub(crate) fn records_snapshot(&self) -> Vec<DeviceRecord> {
         self.devices
             .values()
             .map(|device| device.record_snapshot())

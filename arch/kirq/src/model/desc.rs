@@ -152,7 +152,7 @@ pub enum IrqPolarity {
 }
 
 /// Returns the implied signal polarity when one is encoded by the trigger.
-pub const fn trigger_polarity(trigger: IrqTrigger) -> IrqPolarity {
+pub(crate) const fn trigger_polarity(trigger: IrqTrigger) -> IrqPolarity {
     match trigger {
         IrqTrigger::EdgeRising | IrqTrigger::LevelHigh => IrqPolarity::High,
         IrqTrigger::EdgeFalling | IrqTrigger::LevelLow => IrqPolarity::Low,

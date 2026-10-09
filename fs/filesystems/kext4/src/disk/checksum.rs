@@ -35,7 +35,7 @@ pub(crate) fn bitmap_checksum(bitmap: &[u8], checksum_seed: u32) -> u32 {
     crc32c(checksum_seed, bitmap)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

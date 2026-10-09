@@ -149,7 +149,7 @@ impl FileOperations for PidfdFops {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod pidfd_tests {
     use unittest::def_test;
 

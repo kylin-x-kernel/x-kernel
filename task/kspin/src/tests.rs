@@ -62,9 +62,9 @@ fn try_lock_works() {
 #[def_test(serial)]
 fn guard_state_restored() {
     let m = TestSpinIrq::new(());
-    let _a = m.lock();
+    let a = m.lock();
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 1);
-    drop(_a);
+    drop(a);
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 
@@ -115,14 +115,14 @@ fn rwlock_try_write_fails_when_reader_is_active() {
 #[cfg(feature = "smp")]
 fn failed_try_lock_restores_state() {
     let m = TestSpinIrq::new(());
-    let _a = m.lock();
+    let a = m.lock();
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 1);
 
     let b = m.try_lock();
     assert!(b.is_none());
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 1);
 
-    drop(_a);
+    drop(a);
     assert_eq!(IRQ_CNT.load(Ordering::Relaxed), 0);
 }
 

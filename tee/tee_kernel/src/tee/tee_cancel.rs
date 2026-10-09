@@ -26,7 +26,7 @@ fn map_user_mem_error(err: MemError) -> u32 {
 /// Returns 1 if the session cancel flag is set and not masked, otherwise 0.
 /// Get the cancellation flag for the current session
 /// Returns 1 if cancelled and unmasked, otherwise 0
-pub fn sys_tee_scn_get_cancellation_flag(cancel: *mut c_uint) -> TeeResult {
+pub(super) fn sys_tee_scn_get_cancellation_flag(cancel: *mut c_uint) -> TeeResult {
     let is_cancelled = with_tee_session_ctx(|ctx| Ok(tee_ta_session_is_cancelled(ctx, None)))?;
     let flag: u32 = if is_cancelled { 1 } else { 0 };
     UserPtr::<c_uint>::from(cancel)
@@ -41,7 +41,7 @@ pub fn sys_tee_scn_get_cancellation_flag(cancel: *mut c_uint) -> TeeResult {
 /// functions can detect the flag.
 /// Unmask cancellation for the current session
 /// Returns previous masked state
-pub fn sys_tee_scn_unmask_cancellation(old_mask: *mut c_uint) -> TeeResult {
+pub(super) fn sys_tee_scn_unmask_cancellation(old_mask: *mut c_uint) -> TeeResult {
     let prev = with_tee_session_ctx_mut(|ctx| {
         let prev = ctx.cancel_mask;
         ctx.cancel_mask = false;
@@ -58,7 +58,7 @@ pub fn sys_tee_scn_unmask_cancellation(old_mask: *mut c_uint) -> TeeResult {
 /// Masks cancellation at session level; returns previous masked state (1 if masked before).
 /// Mask cancellation for the current session
 /// Returns previous masked state
-pub fn sys_tee_scn_mask_cancellation(old_mask: *mut c_uint) -> TeeResult {
+pub(super) fn sys_tee_scn_mask_cancellation(old_mask: *mut c_uint) -> TeeResult {
     let prev = with_tee_session_ctx_mut(|ctx| {
         let prev = ctx.cancel_mask;
         ctx.cancel_mask = true;

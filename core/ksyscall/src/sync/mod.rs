@@ -13,4 +13,4 @@ mod membarrier;
 
 pub(crate) use futex::{FutexWaitRestartBlock, resume_futex_wait};
 
-pub use self::{futex::*, membarrier::*};
+pub(crate) use self::{futex::*, membarrier::*};

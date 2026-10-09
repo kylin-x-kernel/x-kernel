@@ -122,7 +122,10 @@ impl MsixTable {
 
         // SAFETY: `index` was checked against `len`, and `new` requires `base`
         // to cover `len` MSI-X table entries.
-        Some(unsafe { &*self.base.as_ptr().add(index) })
+        let entry = unsafe { self.base.as_ptr().add(index) };
+        // SAFETY: new guarantees aligned, live table entries and unique register
+        // access ownership; self keeps the mapped entry live for this borrow.
+        Some(unsafe { &*entry })
     }
 }
 

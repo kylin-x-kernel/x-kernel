@@ -11,3 +11,6 @@ description = "Virtual test MMIO device"
 [dependencies]
 log.workspace = true
 vdev-core.workspace = true
+
+[lints]
+workspace = true

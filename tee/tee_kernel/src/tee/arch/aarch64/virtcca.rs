@@ -20,7 +20,7 @@ const fn smc_tsi_fid(x: u32) -> u32 {
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
-pub enum ImageKeyAlg {
+pub(crate) enum ImageKeyAlg {
     HmacSha256 = 0,
 }
 
@@ -31,7 +31,7 @@ const SMC_TSI_HUK_DERIVE_KEY: u32 = smc_tsi_fid(0x19B);
 ///
 /// Register layout matches Linux `arm_smccc_1_1_smc` for the common case:
 /// `func` → `x0`, four arguments → `x1`..`x4`, `x5`..`x7` = 0.
-pub fn rsi_smc_call(
+pub(crate) fn rsi_smc_call(
     func: u32,
     arg0: usize,
     arg1: usize,
@@ -49,7 +49,7 @@ pub fn rsi_smc_call(
 }
 
 /// Derive key via TSI HUK SMC; returns SMCCC status in `x0` (same as `arm_smccc_res.a0`).
-pub fn smc_image_key(alg: u32, user_param: &[u8], key_buf: &mut [u8]) -> TeeResult<usize> {
+pub(crate) fn smc_image_key(alg: u32, user_param: &[u8], key_buf: &mut [u8]) -> TeeResult<usize> {
     if key_buf.len() != IMAGE_KEY_LEN {
         return Err(TEE_ERROR_SHORT_BUFFER);
     }
@@ -65,7 +65,7 @@ pub fn smc_image_key(alg: u32, user_param: &[u8], key_buf: &mut [u8]) -> TeeResu
     Ok(ret0)
 }
 
-pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
+pub(crate) fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     let salt = b"virtcca image key";
     let mut user_param = [0u8; USER_PARAM_LEN];
     let mut image_key = [0u8; IMAGE_KEY_LEN];

@@ -118,7 +118,7 @@ impl<H: Hal, T: Transport> Device for VirtIo9pDev<H, T> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

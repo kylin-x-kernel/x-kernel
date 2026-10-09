@@ -8,8 +8,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    DeriveInput, Error, Ident, Item, ItemFn, ItemImpl, ItemMod, LitInt, Token, parse_macro_input,
-    punctuated::Punctuated,
+    AttrStyle, Attribute, DeriveInput, Error, Ident, Item, ItemFn, ItemImpl, ItemMod, LitInt,
+    Token, parse_macro_input, parse_quote, punctuated::Punctuated,
 };
 
 /// Registers a function in the kernel runtime init array.
@@ -79,6 +79,13 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 /// This is equivalent to `#[cfg(unittest)]` but more readable.
 /// The module will only be compiled when `--test` flag is passed to the build.
 ///
+/// The module also allows `clippy::unwrap_used`, `clippy::expect_used`,
+/// `clippy::panic` and `missing_docs`: clippy's own test exemptions only
+/// recognise `#[cfg(test)]`, not `cfg(unittest)`.
+///
+/// Only inline modules (`mod name { ... }`) are supported on stable Rust;
+/// attribute macros on file modules (`mod name;`) are rejected with E0658.
+///
 /// # Example
 ///
 /// ```rust
@@ -101,32 +108,42 @@ pub fn register_init(attr: TokenStream, function: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn mod_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let module = parse_macro_input!(item as ItemMod);
+    let mut module = parse_macro_input!(item as ItemMod);
 
-    let mod_attrs = &module.attrs;
-    let mod_vis = &module.vis;
-    let mod_name = &module.ident;
-
-    let output = if let Some((brace, items)) = &module.content {
-        // Module with body
-        let _ = brace; // suppress unused warning
-        quote! {
-            #[cfg(unittest)]
-            #(#mod_attrs)*
-            #mod_vis mod #mod_name {
-                #(#items)*
-            }
+    // An inline module takes the allowances as inner attributes, a file module
+    // (`mod foo;`) as outer ones. rustc currently rejects attribute macros on
+    // file modules (E0658), so the outer form is not reachable on stable.
+    let mut allows: [Attribute; 3] = [
+        parse_quote! {
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: unittest module: test helpers may panic on failure"
+            )]
+        },
+        parse_quote! {
+            #[allow(missing_docs, reason = "CG-024-lint-exceptions: missing_docs: unittest module: test code is outside rustdoc scope")]
+        },
+        parse_quote! {
+            #[allow(
+                clippy::too_many_lines,
+                reason = "CG-028-focused-functions: unittest module: a test scenario reads as one linear script"
+            )]
+        },
+    ];
+    if module.content.is_some() {
+        for attr in &mut allows {
+            attr.style = AttrStyle::Inner(Token![!](Span::call_site()));
         }
-    } else {
-        // Module without body (e.g., `mod foo;`)
-        quote! {
-            #[cfg(unittest)]
-            #(#mod_attrs)*
-            #mod_vis mod #mod_name;
-        }
-    };
+    }
+    module.attrs.extend(allows);
 
-    output.into()
+    quote! {
+        #[cfg(unittest)]
+        #module
+    }
+    .into()
 }
 
 /// Marks a function as a unit test.
@@ -196,12 +213,28 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
         fn_name.to_string().to_uppercase()
     );
 
+    // clippy's `allow-*-in-tests` only recognises `#[cfg(test)]` / `#[test]`,
+    // so the unittest body is exempted here.
+    let unittest_allow = quote! {
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: unittest body: a failed assertion is the intended outcome"
+        )]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "CG-028-focused-functions: unittest body: a test scenario reads as one linear script"
+        )]
+    };
+
     // The test function itself becomes the wrapper - body is embedded directly
     // This way assert macros can use `return TestResult::Failed` correctly
     let test_fn = if has_return_type {
         // Function already returns TestResult
         quote! {
             #(#fn_attrs)*
+            #unittest_allow
             fn #fn_name() -> unittest::TestResult {
                 #(#fn_stmts)*
             }
@@ -210,6 +243,7 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
         // Function doesn't return anything, wrap it to return TestResult
         quote! {
             #(#fn_attrs)*
+            #unittest_allow
             fn #fn_name() -> unittest::TestResult {
                 #(#fn_stmts)*
                 unittest::TestResult::Ok
@@ -254,16 +288,23 @@ fn generate_function_test(args: Punctuated<Ident, Token![,]>, input: ItemFn) -> 
 /// Resolve the crate path for `posix_types::__private` trait aliases.
 ///
 /// Returns `crate` when invoked inside `posix-types` itself,
-/// and the external crate name otherwise.
-fn posix_types_private_path() -> proc_macro2::TokenStream {
+/// and the external crate name otherwise. Missing dependencies produce a
+/// derive-site compile error rather than a procedural-macro panic.
+fn posix_types_private_path() -> syn::Result<proc_macro2::TokenStream> {
     use proc_macro_crate::{FoundCrate, crate_name};
-    match crate_name("posix-types").expect("posix-types is present in `Cargo.toml`") {
+    let found = crate_name("posix-types").map_err(|error| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("posix-types dependency is required: {error}"),
+        )
+    })?;
+    Ok(match found {
         FoundCrate::Itself => quote!(crate),
         FoundCrate::Name(name) => {
             let ident = Ident::new(&name, Span::call_site());
             quote!(#ident)
         }
-    }
+    })
 }
 
 /// Derive macro that generates `unsafe impl UserRead for T {}`.
@@ -274,7 +315,10 @@ pub fn derive_user_read(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let path = posix_types_private_path();
+    let path = match posix_types_private_path() {
+        Ok(path) => path,
+        Err(error) => return error.to_compile_error().into(),
+    };
     quote! {
         unsafe impl #impl_generics #path::__private::UserReadTrait for #name #ty_generics #where_clause {}
     }
@@ -289,7 +333,10 @@ pub fn derive_user_write(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let path = posix_types_private_path();
+    let path = match posix_types_private_path() {
+        Ok(path) => path,
+        Err(error) => return error.to_compile_error().into(),
+    };
     quote! {
         unsafe impl #impl_generics #path::__private::UserWriteTrait for #name #ty_generics #where_clause {}
     }
@@ -347,6 +394,11 @@ pub fn drm_ioctl(args: TokenStream, input: TokenStream) -> TokenStream {
     // Extract the struct name from `impl DrmIoctl for T`.
     // self_ty is the type after `for`, e.g. `DrmVersion`.
     let struct_name = if let syn::Type::Path(type_path) = &*impl_block.self_ty {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: syn parses a Type::Path with at least \
+                      one path segment"
+        )]
         &type_path.path.segments.last().unwrap().ident
     } else {
         return Error::new_spanned(&impl_block.self_ty, "expected a path type")

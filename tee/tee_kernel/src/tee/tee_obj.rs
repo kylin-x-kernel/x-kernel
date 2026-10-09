@@ -17,7 +17,7 @@ use super::{
 };
 
 /// GP: `tee_obj_id_type`
-pub type TeeObjIdType = c_ulong; //usize;
+pub(super) type TeeObjIdType = c_ulong; //usize;
 
 // scope_local::scope_local! {
 //     /// The open objects for TA.
@@ -26,7 +26,7 @@ pub type TeeObjIdType = c_ulong; //usize;
 
 #[repr(C)]
 /// GP: `struct tee_obj`
-pub struct TeeObj {
+pub(super) struct TeeObj {
     pub info: TEE_ObjectInfo,
     pub busy: bool,      // true if used by an operation
     pub have_attrs: u32, // bitfield identifying set properties
@@ -82,7 +82,7 @@ fn obj_outer_to_inner(obj: TeeObjIdType) -> TeeObjIdType {
     (obj - 1) as TeeObjIdType
 }
 
-pub fn tee_obj_add(mut obj: TeeObj) -> TeeResult<TeeObjIdType> {
+pub(super) fn tee_obj_add(mut obj: TeeObj) -> TeeResult<TeeObjIdType> {
     with_tee_session_ctx_mut(|ctx| {
         // 获取一个可用的 ID
         let vacant = ctx.objects.vacant_entry();
@@ -101,7 +101,7 @@ pub fn tee_obj_add(mut obj: TeeObj) -> TeeResult<TeeObjIdType> {
     })
 }
 
-pub fn tee_obj_get(obj_id: TeeObjIdType) -> TeeResult<Arc<Mutex<TeeObj>>> {
+pub(super) fn tee_obj_get(obj_id: TeeObjIdType) -> TeeResult<Arc<Mutex<TeeObj>>> {
     let obj_id = obj_outer_to_inner(obj_id);
     with_tee_session_ctx(|ctx| match ctx.objects.get(obj_id as _) {
         Some(obj) => Ok(Arc::clone(obj)),
@@ -113,7 +113,7 @@ pub fn tee_obj_get(obj_id: TeeObjIdType) -> TeeResult<Arc<Mutex<TeeObj>>> {
 ///
 /// # Arguments
 /// * `obj_id` - the id of the TeeObj
-pub fn tee_obj_delete(obj_id: u32) -> TeeResult<Arc<Mutex<TeeObj>>> {
+pub(super) fn tee_obj_delete(obj_id: u32) -> TeeResult<Arc<Mutex<TeeObj>>> {
     let obj_id = obj_outer_to_inner(obj_id as TeeObjIdType);
     // remove from session objects
     with_tee_session_ctx_mut(|ctx| -> TeeResult<Arc<Mutex<TeeObj>>> {
@@ -136,7 +136,7 @@ pub fn tee_obj_delete(obj_id: u32) -> TeeResult<Arc<Mutex<TeeObj>>> {
 /// * `obj_id` - the id of the TeeObj
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_obj_close(obj_id: u32) -> TeeResult {
+pub(super) fn tee_obj_close(obj_id: u32) -> TeeResult {
     let obj = tee_obj_delete(obj_id as _)?;
 
     let mut obj_guard = obj.lock();
@@ -160,7 +160,7 @@ pub fn tee_obj_close(obj_id: u32) -> TeeResult {
 /// Close all open objects in the current session context.
 ///
 /// Mirrors GP `tee_obj_close_all()` in `release_utc_state`.
-pub fn tee_obj_close_all() -> TeeResult {
+pub(super) fn tee_obj_close_all() -> TeeResult {
     let ids: Vec<u32> = with_tee_session_ctx(|ctx| {
         Ok(ctx
             .objects

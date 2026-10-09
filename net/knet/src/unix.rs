@@ -62,7 +62,6 @@ pub trait UnixTransportOps: Configurable + Pollable + Send + Sync {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 #[enum_dispatch(Configurable, UnixTransportOps)]
 pub enum UnixTransport {
     Stream(StreamTransport),
@@ -352,7 +351,7 @@ impl Pollable for UnixDomainSocket {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

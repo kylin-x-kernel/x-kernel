@@ -43,7 +43,7 @@ fn build_dice_dtb() -> Vec<u8> {
     const FDT_BEGIN_NODE: u32 = 1;
     const FDT_END_NODE: u32 = 2;
     const FDT_PROP: u32 = 3;
-    const FDT_END: u32 = 5;
+    const FDT_END: u32 = 9;
 
     fn push_be32(buf: &mut Vec<u8>, value: u32) {
         buf.extend_from_slice(&value.to_be_bytes());
@@ -129,7 +129,7 @@ fn build_reserved_memory_dtb() -> Vec<u8> {
     const FDT_BEGIN_NODE: u32 = 1;
     const FDT_END_NODE: u32 = 2;
     const FDT_PROP: u32 = 3;
-    const FDT_END: u32 = 5;
+    const FDT_END: u32 = 9;
 
     fn push_be32(buf: &mut Vec<u8>, value: u32) {
         buf.extend_from_slice(&value.to_be_bytes());
@@ -225,7 +225,7 @@ fn build_chosen_memory_dtb() -> Vec<u8> {
     const FDT_BEGIN_NODE: u32 = 1;
     const FDT_END_NODE: u32 = 2;
     const FDT_PROP: u32 = 3;
-    const FDT_END: u32 = 5;
+    const FDT_END: u32 = 9;
 
     fn push_be32(buf: &mut Vec<u8>, value: u32) {
         buf.extend_from_slice(&value.to_be_bytes());

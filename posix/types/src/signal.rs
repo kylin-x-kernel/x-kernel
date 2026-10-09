@@ -14,7 +14,10 @@ use crate::{UserRead, UserWrite};
 /// A raw `sigset_t` carrier used at the syscall boundary.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, UserRead, UserWrite)]
 #[repr(transparent)]
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub struct k_sigset(
     /// Raw signal bits; bit zero represents signal 1.
     pub u64,
@@ -51,7 +54,10 @@ impl From<kernel_sigset_t> for k_sigset {
 ///
 /// Reuses the target Linux definition, including its optional restorer slot,
 /// so syscall copies cannot diverge from the architecture's field layout.
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub type k_sigaction = kernel_sigaction;
 
 // SAFETY: the target ABI record contains only nullable function addresses and
@@ -64,14 +70,20 @@ unsafe impl UserWrite for k_sigaction {}
 /// A raw `siginfo_t` carrier used at the syscall boundary.
 #[derive(Clone, UserRead, UserWrite)]
 #[repr(transparent)]
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub struct k_siginfo(
     /// Raw Linux signal-information record, including its tagged union payload.
     pub siginfo_t,
 );
 
 /// A raw `sigval_t` carrier used at the syscall boundary.
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub type k_sigval = sigval_t;
 
 // SAFETY: `sigval_t` is an ABI POD type copied verbatim at the syscall boundary.
@@ -80,7 +92,10 @@ unsafe impl UserRead for k_sigval {}
 unsafe impl UserWrite for k_sigval {}
 
 /// A raw `sigevent` carrier used at the syscall boundary.
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "CG-032-camel-case-types: Preserve the Linux ABI type name used by syscall records"
+)]
 pub type k_sigevent = sigevent;
 
 // SAFETY: `sigevent` is an ABI POD type copied verbatim at the syscall boundary.
@@ -91,7 +106,6 @@ unsafe impl UserWrite for k_sigevent {}
 /// A raw `sigaltstack` carrier used at the syscall boundary.
 #[derive(Clone, Copy, UserRead, UserWrite)]
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct k_sigaltstack {
     /// User virtual address of the alternate stack base.
     pub sp: usize,

@@ -80,7 +80,6 @@ pub const X86_SEL_TSS: u64 = 0x28; // GDT index 5 (16-byte descriptor)
 /// VMCS field encodings.
 #[repr(u64)]
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum VmcsField {
     // 16-bit guest
     GuestSelEs       = 0x0800,
@@ -450,14 +449,18 @@ fn build_guest_identity_pt(vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>) -> Optio
         let pd_pa = kaddr_layout::v2p(pd_va as usize) as u64;
 
         // PDPT[i] → PD
-        // SAFETY: pdpt_va is valid; i < 512.
-        unsafe { pdpt_va.add(i).write(pd_pa | PT_PRESENT | PT_WRITABLE) };
+        // SAFETY: i < 4, so the offset stays inside the PDPT page.
+        let pdpt_entry_ptr = unsafe { pdpt_va.add(i) };
+        // SAFETY: pdpt_entry_ptr is aligned in the unpublished PDPT page we own.
+        unsafe { pdpt_entry_ptr.write(pd_pa | PT_PRESENT | PT_WRITABLE) };
 
         // Fill PD with 2 MiB identity large pages
         for j in 0..512usize {
             let pa = ((i as u64) << 30) | ((j as u64) << 21);
-            // SAFETY: pd_va is valid; j < 512.
-            unsafe { pd_va.add(j).write(pa | PT_PRESENT | PT_WRITABLE | PT_LARGE) };
+            // SAFETY: j < 512, so the offset stays inside this PD page.
+            let pd_entry_ptr = unsafe { pd_va.add(j) };
+            // SAFETY: pd_entry_ptr is aligned in an unpublished PD page we own.
+            unsafe { pd_entry_ptr.write(pa | PT_PRESENT | PT_WRITABLE | PT_LARGE) };
         }
         vcpu.hw_pages.push(pd);
     }
@@ -472,6 +475,11 @@ fn build_guest_identity_pt(vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>) -> Optio
 // ── Per-vCPU VMCS Initialization ──
 
 /// Initialize a VMCS for a vCPU. Allocates a VMCS page and programs all fields.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split VMCS allocation, control, \
+              host-state and guest-state programming into helpers"
+)]
 pub fn vmcs_init_vcpu(
     vcpu: &mut crate::vcpu::Vcpu<super::X86Vmx>,
     entry: u64,
@@ -850,10 +858,15 @@ fn sidt_limit() -> u16 {
 /// Read TSS base from the 16-byte system descriptor at GDT index 5.
 fn read_tss_base(gdt_base: u64) -> u64 {
     let gdt = gdt_base as *const u64;
-    // SAFETY: GDT base is valid and index 5-6 are within the TSS descriptor range.
-    let tss_lo = unsafe { gdt.add(5).read() };
+    // SAFETY: the live GDT holds the 16-byte TSS descriptor at indices 5-6,
+    // so this offset stays inside the table.
+    let tss_lo_ptr = unsafe { gdt.add(5) };
+    // SAFETY: index 6 is the last slot of that TSS descriptor, inside the table.
+    let tss_hi_ptr = unsafe { gdt.add(6) };
+    // SAFETY: GDT[5] is the aligned lower half of the TSS system descriptor.
+    let tss_lo = unsafe { tss_lo_ptr.read() };
     // SAFETY: GDT[6] is the upper half of the 16-byte TSS system descriptor.
-    let tss_hi = unsafe { gdt.add(6).read() };
+    let tss_hi = unsafe { tss_hi_ptr.read() };
     ((tss_lo >> 16) & 0xFF_FFFF) | (((tss_lo >> 56) & 0xFF) << 24) | ((tss_hi & 0xFFFF_FFFF) << 32)
 }
 

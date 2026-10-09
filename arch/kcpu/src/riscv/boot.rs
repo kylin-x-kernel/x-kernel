@@ -12,9 +12,9 @@ pub fn init_trap() {
     unsafe extern "C" {
         fn trap_vector_base();
     }
-    // SAFETY: Setting SUM bit allows supervisor to access user pages; required for `copy_user`. `trap_vector_base` is defined in `excp.S` with 4-byte alignment.
-    unsafe {
-        riscv::register::sstatus::set_sum();
-        karch::write_trap_vector_base(trap_vector_base as *const () as usize);
-    }
+    // SAFETY: Boot runs in supervisor mode; setting SUM enables the user-copy access policy on this
+    // hart.
+    unsafe { riscv::register::sstatus::set_sum() };
+    // SAFETY: excp.S supplies the live, four-byte-aligned vector before this hart enables traps.
+    unsafe { karch::write_trap_vector_base(trap_vector_base as *const () as usize) };
 }

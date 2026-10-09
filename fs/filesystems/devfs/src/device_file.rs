@@ -71,16 +71,16 @@ impl DeviceFile {
 impl InodeOperations for DeviceFile {
     fn getattr(
         &self,
-        _idmap: &kvfs::MountIdmap,
-        _path: Option<&kvfs::Path>,
-        _request_mask: kvfs::GetattrRequestMask,
-        _query_flags: kvfs::GetattrQueryFlags,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
     ) -> VfsResult<Metadata>;
 
     fn setattr(
         &self,
-        _idmap: &kvfs::MountIdmap,
-        _dentry: &kvfs::Dentry,
+        idmap: &kvfs::MountIdmap,
+        dentry: &kvfs::Dentry,
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate>;
 }

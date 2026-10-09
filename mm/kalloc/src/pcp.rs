@@ -106,7 +106,7 @@ impl<const NR_PAGES: usize, const COUNT: usize> PerCpuPages<NR_PAGES, COUNT> {
     }
 
     /// Current number of cached entries.
-    #[allow(dead_code)]
+    #[cfg(unittest)]
     fn len(&self) -> usize {
         self.size as usize
     }
@@ -313,15 +313,32 @@ cpu_slot_cell! {
 #[inline]
 pub(crate) fn try_alloc(owner: &mut crate::AllocLocalOwner, num_pages: usize) -> Option<usize> {
     let pin = owner.guard();
-    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
-    unsafe {
-        match num_pages {
-            1 => PCP_PAGESET.get_mut_unchecked(pin).cache1.try_pop(),
-            2 => PCP_PAGESET.get_mut_unchecked(pin).cache2.try_pop(),
-            3 => PCP_PAGESET.get_mut_unchecked(pin).cache3.try_pop(),
-            4 => PCP_PAGESET.get_mut_unchecked(pin).cache4.try_pop(),
-            _ => None,
+    match num_pages {
+        1 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache1.try_pop()
         }
+        2 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache2.try_pop()
+        }
+        3 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache3.try_pop()
+        }
+        4 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache4.try_pop()
+        }
+        _ => None,
     }
 }
 
@@ -335,31 +352,32 @@ pub(crate) fn try_alloc(owner: &mut crate::AllocLocalOwner, num_pages: usize) ->
 #[inline]
 pub(crate) fn try_free(owner: &mut crate::AllocLocalOwner, num_pages: usize, addr: usize) -> bool {
     let pin = owner.guard();
-    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
-    unsafe {
-        match num_pages {
-            1 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache1
-                .try_push(addr)
-                .is_ok(),
-            2 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache2
-                .try_push(addr)
-                .is_ok(),
-            3 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache3
-                .try_push(addr)
-                .is_ok(),
-            4 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache4
-                .try_push(addr)
-                .is_ok(),
-            _ => false,
+    match num_pages {
+        1 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache1.try_push(addr).is_ok()
         }
+        2 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache2.try_push(addr).is_ok()
+        }
+        3 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache3.try_push(addr).is_ok()
+        }
+        4 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache4.try_push(addr).is_ok()
+        }
+        _ => false,
     }
 }
 
@@ -377,15 +395,32 @@ pub(crate) fn fill_cache(
     palloc: &mut BuddyPageAllocator<PAGE_SIZE_4K>,
 ) -> AllocResult<usize> {
     let pin = owner.guard();
-    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
-    unsafe {
-        match num_pages {
-            1 => PCP_PAGESET.get_mut_unchecked(pin).cache1.alloc(palloc),
-            2 => PCP_PAGESET.get_mut_unchecked(pin).cache2.alloc(palloc),
-            3 => PCP_PAGESET.get_mut_unchecked(pin).cache3.alloc(palloc),
-            4 => PCP_PAGESET.get_mut_unchecked(pin).cache4.alloc(palloc),
-            _ => unreachable!("fill_cache: num_pages={} not in 1..=4", num_pages),
+    match num_pages {
+        1 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache1.alloc(palloc)
         }
+        2 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache2.alloc(palloc)
+        }
+        3 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache3.alloc(palloc)
+        }
+        4 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache4.alloc(palloc)
+        }
+        _ => unreachable!("fill_cache: num_pages={} not in 1..=4", num_pages),
     }
 }
 
@@ -402,27 +437,32 @@ pub(crate) fn drain_cache(
     addr: usize,
 ) {
     let pin = owner.guard();
-    // SAFETY: `owner` proves exclusive access to this CPU's page cache.
-    unsafe {
-        match num_pages {
-            1 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache1
-                .dealloc(palloc, addr),
-            2 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache2
-                .dealloc(palloc, addr),
-            3 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache3
-                .dealloc(palloc, addr),
-            4 => PCP_PAGESET
-                .get_mut_unchecked(pin)
-                .cache4
-                .dealloc(palloc, addr),
-            _ => unreachable!("drain_cache: num_pages={} not in 1..=4", num_pages),
+    match num_pages {
+        1 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache1.dealloc(palloc, addr)
         }
+        2 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache2.dealloc(palloc, addr)
+        }
+        3 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache3.dealloc(palloc, addr)
+        }
+        4 => {
+            // SAFETY: owner pins this CPU with IRQs disabled and exclusively
+            // owns PCP_PAGESET throughout this selected cache operation.
+            let cache = unsafe { PCP_PAGESET.get_mut_unchecked(pin) };
+            cache.cache4.dealloc(palloc, addr)
+        }
+        _ => unreachable!("drain_cache: num_pages={} not in 1..=4", num_pages),
     }
 }
 
@@ -430,8 +470,7 @@ pub(crate) fn drain_cache(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc_engine::BaseAllocator;
     use unittest::def_test;

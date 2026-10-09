@@ -133,7 +133,7 @@ impl ErrnoSentinel for usize {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod test {
     extern crate alloc;
     use alloc::format;

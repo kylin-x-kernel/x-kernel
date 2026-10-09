@@ -522,7 +522,7 @@ impl Ext4SbInfo {
     /// it does not publish a filesystem whose legacy indirect block maps can
     /// only be read but not safely allocated, truncated, or freed.
     #[cfg(unittest)]
-    pub fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
+    pub(crate) fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
         let mut filesystem = Self::prepare_mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)?;
         filesystem.persist_directory_hash_policy()?;
         Ok(filesystem)
@@ -570,7 +570,7 @@ impl Ext4SbInfo {
     /// Returns [`Ext4Error::Unsupported`] before replay when the filesystem
     /// lacks extent-based block mapping, because recovery may need the same
     /// mutation and block-release support as a normal writable mount.
-    pub fn recover(
+    pub(crate) fn recover(
         device: Arc<dyn BlockDeviceOperations>,
     ) -> Ext4Result<Option<Ext4RecoveryReport>> {
         Ext4Recovery::open(device)?.replay()
@@ -734,7 +734,7 @@ impl Ext4SbInfo {
     }
 
     /// Returns the ext4-private legacy indirect-block file-size limit.
-    pub const fn bitmap_max_file_size(&self) -> u64 {
+    pub(crate) const fn bitmap_max_file_size(&self) -> u64 {
         self.bitmap_maxbytes
     }
 
@@ -802,37 +802,37 @@ impl Ext4SbInfo {
     /// with the allocator; use [`Self::free_blocks_count`],
     /// [`Self::free_inodes_count`], [`Self::needs_recovery`], and
     /// [`Self::has_orphan_present`] instead of their on-disk snapshots here.
-    pub const fn superblock(&self) -> &Ext4DiskSuperblock {
+    pub(crate) const fn superblock(&self) -> &Ext4DiskSuperblock {
         &self.superblock
     }
 
     /// Returns the live free-block aggregate maintained by the allocator.
-    pub fn free_blocks_count(&self) -> u64 {
+    pub(crate) fn free_blocks_count(&self) -> u64 {
         lock(&self.allocator).free_blocks_count
     }
 
     /// Returns the live free-inode aggregate maintained by the allocator.
-    pub fn free_inodes_count(&self) -> u32 {
+    pub(crate) fn free_inodes_count(&self) -> u32 {
         lock(&self.allocator).free_inodes_count
     }
 
     /// Returns whether the filesystem currently carries the recovery flag.
-    pub fn needs_recovery(&self) -> bool {
+    pub(crate) fn needs_recovery(&self) -> bool {
         lock(&self.allocator).needs_recovery
     }
 
     /// Returns whether the orphan file may contain entries needing cleanup.
-    pub fn has_orphan_present(&self) -> bool {
+    pub(crate) fn has_orphan_present(&self) -> bool {
         lock(&self.allocator).has_orphan_present
     }
 
     /// Returns the immutable derived layout.
-    pub const fn layout(&self) -> FilesystemLayout {
+    pub(crate) const fn layout(&self) -> FilesystemLayout {
         self.layout
     }
 
     /// Returns the timestamp limits implied by this filesystem's inode size.
-    pub const fn timestamp_limits(&self) -> TimestampLimits {
+    pub(crate) const fn timestamp_limits(&self) -> TimestampLimits {
         timestamp_limits_for_inode_size(self.superblock.inode_size())
     }
 
@@ -881,7 +881,7 @@ impl Ext4SbInfo {
     }
 
     /// Returns the physical block for one internal journal block.
-    pub fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
+    pub(crate) fn map_journal_block(&self, block: JournalBlock) -> Ext4Result<FilesystemBlock> {
         JournalBlockMapper::map_journal_block(self, block)
     }
 
@@ -904,7 +904,7 @@ impl Ext4SbInfo {
     ///
     /// Returns an error when validated filesystem geometry cannot be represented
     /// consistently in the reported block counts.
-    pub fn statfs(&self) -> Ext4Result<Ext4StatFs> {
+    pub(crate) fn statfs(&self) -> Ext4Result<Ext4StatFs> {
         self.statfs_with_mode(self.statfs_mode)
     }
 
@@ -919,7 +919,7 @@ impl Ext4SbInfo {
     ///
     /// Returns an error when validated filesystem geometry cannot be represented
     /// consistently in the reported block counts.
-    pub fn statfs_with_mode(&self, mode: Ext4StatFsMode) -> Ext4Result<Ext4StatFs> {
+    pub(crate) fn statfs_with_mode(&self, mode: Ext4StatFsMode) -> Ext4Result<Ext4StatFs> {
         // Read order is fixed to allocator lock first, then the delalloc
         // mutex; no path takes them in the opposite order.
         let alloc = lock(&self.allocator);
@@ -957,7 +957,7 @@ impl Ext4SbInfo {
     }
 
     /// Reads complete filesystem blocks without exposing metadata mutation.
-    pub fn read_blocks(
+    pub(crate) fn read_blocks(
         &self,
         start: FilesystemBlock,
         block_count: u32,
@@ -1983,7 +1983,7 @@ fn is_inode_physical_block_valid(
     true
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use unittest::{assert_eq, def_test};
 

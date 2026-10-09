@@ -67,6 +67,11 @@ static V9FS_SUPER_OPERATIONS: V9fsSuperOperations = V9fsSuperOperations;
 
 impl SuperBlockOperations for V9fsSuperOperations {
     fn timestamp_limits(&self, super_block: &SuperBlock) -> kvfs::TimestampLimits {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: these operations are installed only \
+                      on superblocks created with a V9fsSession as private data"
+        )]
         let session = super_block
             .private::<V9fsSession>()
             .expect("9P superblock initialization must install its session");

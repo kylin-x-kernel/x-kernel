@@ -491,7 +491,7 @@ impl Drop for StreamTransport {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{
         sync::{Arc, Weak},

@@ -14,13 +14,13 @@ use crate::tee::TeeResult;
 /// A Universally Unique Resource Identifier (UUID) type as defined in RFC4122.
 /// The value is used to identify a trusted application.
 #[derive(Copy, Clone, Default)]
-pub struct Uuid {
+pub(super) struct Uuid {
     raw: raw::TEE_UUID,
 }
 
 impl Uuid {
     /// Parses a Uuid from a string of hexadecimal digits with optional hyphens.
-    pub fn parse_str(input: &str) -> TeeResult<Uuid> {
+    pub(super) fn parse_str(input: &str) -> TeeResult<Uuid> {
         let uuid = uuid_crate::Uuid::parse_str(input).map_err(|_| TEE_ERROR_BAD_FORMAT)?;
         let (time_low, time_mid, time_hi_and_version, clock_seq_and_node) = uuid.as_fields();
         Ok(Self::new_raw(
@@ -32,12 +32,12 @@ impl Uuid {
     }
 
     /// Returns the TA Unix socket path for this UUID under `/tmp`.
-    pub fn ta_unix_socket_path(&self) -> String {
+    pub(super) fn ta_unix_socket_path(&self) -> String {
         format!("/tmp/{}.sock", self)
     }
 
     /// Creates a raw TEE client uuid object with specified parameters.
-    pub fn new_raw(
+    pub(super) fn new_raw(
         time_low: u32,
         time_mid: u16,
         time_hi_and_version: u16,
@@ -53,7 +53,7 @@ impl Uuid {
     }
 
     /// Converts a uuid to a raw `TEE_UUID` reference.
-    pub fn as_raw_ref(&self) -> &raw::TEE_UUID {
+    pub(super) fn as_raw_ref(&self) -> &raw::TEE_UUID {
         &self.raw
     }
 }
@@ -82,11 +82,11 @@ impl From<raw::TEE_UUID> for Uuid {
 ///
 /// Rejects path traversal and other non-UUID characters before the path is
 /// passed to the Unix socket layer.
-pub fn ta_unix_socket_path(uuid: &str) -> TeeResult<String> {
+pub(super) fn ta_unix_socket_path(uuid: &str) -> TeeResult<String> {
     Ok(Uuid::parse_str(uuid)?.ta_unix_socket_path())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[test]
     fn ta_unix_socket_path_valid_uuid() {

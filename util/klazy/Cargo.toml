@@ -14,5 +14,5 @@ categories.workspace = true
 paste = { workspace = true }
 unittest = { workspace = true }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
+[lints]
+workspace = true

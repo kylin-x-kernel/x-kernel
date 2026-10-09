@@ -33,3 +33,6 @@ osvm.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 unittest.workspace = true
+
+[lints]
+workspace = true

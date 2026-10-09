@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#![allow(clippy::format_push_string)]
-
 use alloc::{
     format,
     string::{String, ToString},

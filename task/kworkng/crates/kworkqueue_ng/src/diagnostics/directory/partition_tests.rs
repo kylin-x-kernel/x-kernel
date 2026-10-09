@@ -105,12 +105,12 @@ fn pending_changes_only_restart_on_execution() {
     unsafe { queue.submit(&a, Some(0.into()), || unreachable!()) }.unwrap();
     let first = snapshot(&directory, "cpu0");
     assert!(first.is_some());
-    // SAFETY: same retained pinned storage; B and C wait for A's reserved allowance.
-    unsafe {
-        queue.submit(&b, Some(0.into()), || unreachable!()).unwrap();
-        queue.submit(&c, Some(0.into()), || unreachable!()).unwrap();
-        assert!(queue.submit(&a, Some(0.into()), || unreachable!()).is_err());
-    }
+    // SAFETY: same retained pinned storage; B waits for A's reserved allowance.
+    unsafe { queue.submit(&b, Some(0.into()), || unreachable!()) }.unwrap();
+    // SAFETY: same retained pinned storage; C waits for A's reserved allowance.
+    unsafe { queue.submit(&c, Some(0.into()), || unreachable!()) }.unwrap();
+    // SAFETY: A remains pinned and live; the duplicate submission is rejected while A is pending.
+    assert!(unsafe { queue.submit(&a, Some(0.into()), || unreachable!()) }.is_err());
     assert_eq!(snapshot(&directory, "cpu0"), first);
     assert!(c.cancel_pending());
     assert_eq!(snapshot(&directory, "cpu0"), first);
@@ -232,11 +232,10 @@ fn other_cpu_progress_preserves_age() {
     let queue = queue(&directory);
     let a = pin!(Work::with_callback(|| {}));
     let b = pin!(Work::with_callback(|| {}));
-    // SAFETY: both pinned objects remain live through their manual executions below.
-    unsafe {
-        queue.submit(&a, Some(0.into()), || unreachable!()).unwrap();
-        queue.submit(&b, Some(1.into()), || unreachable!()).unwrap();
-    }
+    // SAFETY: A remains pinned and live through its manual execution below.
+    unsafe { queue.submit(&a, Some(0.into()), || unreachable!()) }.unwrap();
+    // SAFETY: B remains pinned and live through its manual execution below.
+    unsafe { queue.submit(&b, Some(1.into()), || unreachable!()) }.unwrap();
     let first = snapshot(&directory, "cpu0");
     queue
         .partition(1.into())

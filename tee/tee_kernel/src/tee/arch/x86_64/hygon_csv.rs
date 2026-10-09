@@ -145,7 +145,7 @@ fn get_sealing_key() -> TeeResult<Vec<u8>> {
     Ok(sealing_key.to_vec())
 }
 
-pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
+pub(crate) fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     let sealing_key = get_sealing_key()?;
     let salt = "Hygon CSV Sealing Key";
     let derived = hkdf::hkdf::<HmacSm3>(salt.as_bytes(), &sealing_key, &[], huk_key.len())
@@ -155,7 +155,7 @@ pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
 }
 #[cfg(feature = "csv_huk_key")]
 #[unittest::mod_test]
-pub mod tests_hygon_csv_get_sealing_key {
+pub(crate) mod tests_hygon_csv_get_sealing_key {
     use unittest::assert;
 
     use super::*;

@@ -761,7 +761,7 @@ pub fn sched_stats_text() -> alloc::string::String {
     crate::run_queue::sched_stats_text()
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_api {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, Ordering};

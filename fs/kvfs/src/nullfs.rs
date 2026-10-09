@@ -180,7 +180,7 @@ fn nullfs_root_dentry() -> Dentry {
     Dentry::new_dir_from_inode(inode, None, alloc::string::String::new())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

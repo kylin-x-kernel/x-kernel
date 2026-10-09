@@ -27,16 +27,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Metadata journal credits reserved for one operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct JournalCredits(u32);
+pub(crate) struct JournalCredits(u32);
 
 impl JournalCredits {
     /// Creates a credit count.
-    pub const fn new(value: u32) -> Self {
+    pub(crate) const fn new(value: u32) -> Self {
         Self(value)
     }
 
     /// Returns the raw credit count.
-    pub const fn get(self) -> u32 {
+    pub(crate) const fn get(self) -> u32 {
         self.0
     }
 
@@ -176,7 +176,7 @@ enum TransactionPhase {
 /// The same object moves through running, committing, and checkpoint phases.
 /// Freezing converts mutable membership sets into shared immutable slices; no
 /// parallel commit object or transaction payload is created.
-pub struct RuntimeTransaction {
+pub(crate) struct RuntimeTransaction {
     id: TransactionId,
     phase: Mutex<TransactionPhase>,
 }
@@ -190,29 +190,29 @@ impl RuntimeTransaction {
     }
 
     /// Returns the transaction sequence.
-    pub const fn id(&self) -> TransactionId {
+    pub(crate) const fn id(&self) -> TransactionId {
         self.id
     }
 
     /// Returns the credits reserved by handles in this transaction.
     #[cfg(unittest)]
-    pub fn reserved_credits(&self) -> Ext4Result<u32> {
+    pub(crate) fn reserved_credits(&self) -> Ext4Result<u32> {
         Ok(self.frozen_state()?.reserved_credits)
     }
 
     /// Returns credits consumed for metadata buffer write access.
     #[cfg(unittest)]
-    pub fn used_credits(&self) -> Ext4Result<u32> {
+    pub(crate) fn used_credits(&self) -> Ext4Result<u32> {
         Ok(self.frozen_state()?.used_credits)
     }
 
     /// Returns metadata blocks touched by this transaction.
-    pub fn metadata_blocks(&self) -> Ext4Result<Arc<[FilesystemBlock]>> {
+    pub(crate) fn metadata_blocks(&self) -> Ext4Result<Arc<[FilesystemBlock]>> {
         Ok(self.frozen_state()?.metadata_blocks)
     }
 
     /// Returns filesystem blocks revoked by this transaction.
-    pub fn revoked_blocks(&self) -> Ext4Result<Arc<[FilesystemBlock]>> {
+    pub(crate) fn revoked_blocks(&self) -> Ext4Result<Arc<[FilesystemBlock]>> {
         Ok(self.frozen_state()?.revoked_blocks)
     }
 
@@ -323,14 +323,14 @@ impl fmt::Debug for RuntimeTransaction {
 
 /// Evidence that a committed transaction has completed checkpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct JournalCheckpoint {
+pub(crate) struct JournalCheckpoint {
     transaction: TransactionId,
 }
 
 impl JournalCheckpoint {
     /// Returns the checkpointed transaction sequence.
     #[cfg(unittest)]
-    pub const fn transaction(&self) -> TransactionId {
+    pub(crate) const fn transaction(&self) -> TransactionId {
         self.transaction
     }
 }
@@ -358,7 +358,7 @@ impl fmt::Debug for JournalTransactions {
 impl JournalTransactions {
     /// Creates an unbounded transaction engine for isolated tests.
     #[cfg(unittest)]
-    pub fn new(first_transaction: TransactionId) -> Self {
+    pub(crate) fn new(first_transaction: TransactionId) -> Self {
         Self::new_with_credit_limit(first_transaction, u32::MAX)
     }
 
@@ -406,7 +406,7 @@ impl JournalTransactions {
     }
 
     /// Starts or joins the running transaction.
-    pub fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
+    pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
         if credits.get() > self.max_reserved_credits {
             return Err(Ext4Error::InsufficientJournalCredits);
         }
@@ -516,7 +516,7 @@ impl JournalTransactions {
 
     /// Returns whether this journal has been aborted.
     #[cfg(unittest)]
-    pub fn is_aborted(&self) -> bool {
+    pub(crate) fn is_aborted(&self) -> bool {
         lock(&self.inner).aborted.is_some()
     }
 
@@ -525,7 +525,7 @@ impl JournalTransactions {
     /// JBD2 abort is not a cross-operation memory rollback. The running
     /// transaction remains attached so existing handles can stop and release
     /// their reservations, but it can no longer accept updates or commit.
-    pub fn abort(&self, error: Ext4Error) {
+    pub(crate) fn abort(&self, error: Ext4Error) {
         let mut inner = lock(&self.inner);
         inner.aborted.get_or_insert(error);
         drop(inner);
@@ -536,7 +536,10 @@ impl JournalTransactions {
     ///
     /// Persistence is performed separately while the same object remains in
     /// this phase. The transition refuses to run while callers hold handles.
-    pub fn force_commit(&self, transaction: TransactionId) -> Ext4Result<Arc<RuntimeTransaction>> {
+    pub(crate) fn force_commit(
+        &self,
+        transaction: TransactionId,
+    ) -> Ext4Result<Arc<RuntimeTransaction>> {
         let mut inner = lock(&self.inner);
         check_not_aborted(&inner)?;
 
@@ -694,7 +697,7 @@ impl JournalTransactions {
     }
 
     /// Marks the oldest checkpoint transaction complete.
-    pub fn finish_checkpoint(
+    pub(crate) fn finish_checkpoint(
         &self,
         commit: &Arc<RuntimeTransaction>,
     ) -> Ext4Result<JournalCheckpoint> {
@@ -768,7 +771,10 @@ impl JournalTransactions {
 
     /// Waits for a committed transaction's checkpoint state.
     #[cfg(unittest)]
-    pub fn wait_checkpoint(&self, transaction: TransactionId) -> Ext4Result<JournalCheckpoint> {
+    pub(crate) fn wait_checkpoint(
+        &self,
+        transaction: TransactionId,
+    ) -> Ext4Result<JournalCheckpoint> {
         self.checkpoint_waiters.wait_until(|| {
             let inner = lock(&self.inner);
             inner.aborted.is_some()
@@ -861,7 +867,7 @@ fn is_checkpoint_pending(inner: &JournalInner, transaction: TransactionId) -> bo
 }
 
 /// A live reference to the running transaction plus its remaining credits.
-pub struct JournalHandle<'a> {
+pub(crate) struct JournalHandle<'a> {
     journal: &'a JournalTransactions,
     id: TransactionId,
     remaining_credits: u32,
@@ -871,7 +877,7 @@ pub struct JournalHandle<'a> {
 
 impl<'a> JournalHandle<'a> {
     /// Returns the transaction id used by metadata buffers.
-    pub const fn id(&self) -> TransactionId {
+    pub(crate) const fn id(&self) -> TransactionId {
         self.id
     }
 
@@ -881,7 +887,7 @@ impl<'a> JournalHandle<'a> {
     }
 
     /// Returns remaining credits local to this handle.
-    pub const fn remaining_credits(&self) -> u32 {
+    pub(crate) const fn remaining_credits(&self) -> u32 {
         self.remaining_credits
     }
 
@@ -1004,7 +1010,7 @@ impl Drop for JournalHandle<'_> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

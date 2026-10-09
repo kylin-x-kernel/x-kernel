@@ -195,7 +195,7 @@ pub fn realtime_deadline_to_monotonic(deadline: SystemTime) -> MonotonicInstant 
         .unwrap_or(MonotonicInstant::from_span_since_origin(TimeSpan::MAX))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

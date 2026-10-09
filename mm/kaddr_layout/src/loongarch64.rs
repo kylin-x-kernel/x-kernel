@@ -15,7 +15,7 @@ use crate::{LayoutConsts, UserLayoutConsts};
 //   [0xffffff0000200000, 0xffffff0020200000)              iomap window
 //   [0xffffff8000200000, 0xffffff8020200000)              kernel image
 //   [rest of kernel aspace]                               reserved
-pub const LAYOUT: LayoutConsts = LayoutConsts {
+pub(crate) const LAYOUT: LayoutConsts = LayoutConsts {
     pg_va_bits: 48,
     kernel_aspace_base: 0xffff_8000_0000_0000,
     kernel_aspace_size: 0x0000_7fff_ffff_f000,
@@ -40,7 +40,7 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
 //          ↑ 0x8_0000       │   USER_STACK_SIZE = 512 KiB
 //   0x0000_003F_FFFF_F000 ┄┄┘ ← USER_SPACE_BASE + USER_SPACE_SIZE
 
-pub const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
+pub(crate) const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
     user_space_base: 0x1000,
     user_space_size: 0x3f_ffff_f000,
     user_interp_base: 0x400_0000,

@@ -154,6 +154,11 @@ impl PidHandle {
     /// Panics if the handle has no root projection; both public constructors
     /// maintain that invariant.
     pub fn root_nr(&self) -> u32 {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Both PID-handle constructors install \
+                      a root-visible number alongside any nested namespace projections"
+        )]
         self.numbers
             .iter()
             .find(|upid| upid.ns.is_root())
@@ -190,6 +195,11 @@ static ROOT_PID_NS: LazyInit<Arc<PidNamespace>> = LazyInit::new();
 /// violate the lazy-initialization contract.
 pub fn root_pid_namespace() -> &'static Arc<PidNamespace> {
     ROOT_PID_NS.call_once(|| Arc::new(PidNamespace::new_root()));
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: call_once completes root namespace \
+                  initialization before get reads it"
+    )]
     ROOT_PID_NS.get().unwrap()
 }
 
@@ -203,7 +213,7 @@ pub fn allocate_root_pid_handle() -> KResult<Arc<PidHandle>> {
     PidHandle::allocate_in(root_pid_namespace())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

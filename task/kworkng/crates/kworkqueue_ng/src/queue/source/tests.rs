@@ -162,10 +162,9 @@ fn dispatch_runs_real_work_and_refills_without_new_submission() {
         calls.fetch_add(10, Ordering::Relaxed);
     }));
     // SAFETY: pinned Work and stack captures outlive all executions below.
-    unsafe {
-        queue.submit(&first, None, || LogicalCpuId::new(0)).unwrap();
-        queue.submit(&next, None, || LogicalCpuId::new(0)).unwrap();
-    }
+    unsafe { queue.submit(&first, None, || LogicalCpuId::new(0)) }.unwrap();
+    // SAFETY: pinned Work and stack captures outlive all executions below.
+    unsafe { queue.submit(&next, None, || LogicalCpuId::new(0)) }.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
     assert!(dispatch.run_bounded_pass(NonZeroUsize::new(1).unwrap()));
@@ -188,12 +187,9 @@ fn ready_cancellation_publishes_waiting_work() {
         calls.fetch_add(1, Ordering::Relaxed);
     }));
     // SAFETY: canceled storage is unlinked and next is run before leaving scope.
-    unsafe {
-        queue
-            .submit(&canceled, None, || LogicalCpuId::new(0))
-            .unwrap();
-        queue.submit(&next, None, || LogicalCpuId::new(0)).unwrap();
-    }
+    unsafe { queue.submit(&canceled, None, || LogicalCpuId::new(0)) }.unwrap();
+    // SAFETY: canceled storage is unlinked and next is run before leaving scope.
+    unsafe { queue.submit(&next, None, || LogicalCpuId::new(0)) }.unwrap();
     assert!(canceled.cancel_pending());
     assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
     assert!(dispatch.run_one_turn());
@@ -313,14 +309,9 @@ fn shared_dispatch_rotates_sources_and_drains_closed_queue() {
         trace.fetch_add(10, Ordering::Relaxed);
     }));
     // SAFETY: both queues are drained before the external Work/captures leave.
-    unsafe {
-        first_queue
-            .submit(&first, None, || LogicalCpuId::new(0))
-            .unwrap();
-        second_queue
-            .submit(&second, None, || LogicalCpuId::new(0))
-            .unwrap();
-    }
+    unsafe { first_queue.submit(&first, None, || LogicalCpuId::new(0)) }.unwrap();
+    // SAFETY: both queues are drained before the external Work/captures leave.
+    unsafe { second_queue.submit(&second, None, || LogicalCpuId::new(0)) }.unwrap();
     first_queue.close_admission();
     assert!(dispatch.run_one_turn());
     assert_eq!(trace.load(Ordering::Relaxed), 1);
@@ -369,14 +360,9 @@ fn sparse_cpu_bindings_keep_demand_and_execution_separate() {
         calls.fetch_add(10, Ordering::Relaxed);
     }));
     // SAFETY: both pinned Work objects and their captures outlive both turns.
-    unsafe {
-        queue
-            .submit(&zero, Some(LogicalCpuId::new(0)), || unreachable!())
-            .unwrap();
-        queue
-            .submit(&two, Some(LogicalCpuId::new(2)), || unreachable!())
-            .unwrap();
-    }
+    unsafe { queue.submit(&zero, Some(LogicalCpuId::new(0)), || unreachable!()) }.unwrap();
+    // SAFETY: both pinned Work objects and their captures outlive both turns.
+    unsafe { queue.submit(&two, Some(LogicalCpuId::new(2)), || unreachable!()) }.unwrap();
     assert_eq!(wakes[0].0.load(Ordering::Relaxed), 1);
     assert_eq!(wakes[1].0.load(Ordering::Relaxed), 1);
     assert!(dispatches[1].run_one_turn());
@@ -427,13 +413,11 @@ fn service_kicks_run_after_partition_unlock() {
     let first = pin!(Work::with_callback(|| {}));
     let next = pin!(Work::with_callback(|| {}));
     // SAFETY: all pinned objects are canceled/executed before scope exit.
-    unsafe {
-        queue
-            .submit(&canceled, None, || LogicalCpuId::new(0))
-            .unwrap();
-        queue.submit(&first, None, || LogicalCpuId::new(0)).unwrap();
-        queue.submit(&next, None, || LogicalCpuId::new(0)).unwrap();
-    }
+    unsafe { queue.submit(&canceled, None, || LogicalCpuId::new(0)) }.unwrap();
+    // SAFETY: all pinned objects are canceled/executed before scope exit.
+    unsafe { queue.submit(&first, None, || LogicalCpuId::new(0)) }.unwrap();
+    // SAFETY: all pinned objects are canceled/executed before scope exit.
+    unsafe { queue.submit(&next, None, || LogicalCpuId::new(0)) }.unwrap();
     assert!(canceled.cancel_pending());
     assert!(dispatch.run_one_turn());
     assert!(dispatch.run_one_turn());
@@ -457,11 +441,11 @@ fn service_kicks_run_after_partition_unlock() {
         deferred
             .as_ref()
             .queue_after_on(&queue, 0.into(), ktime_types::TimeSpan::ZERO)
-            .unwrap();
-        queue
-            .submit(&next, Some(0.into()), || unreachable!())
-            .unwrap();
     }
+    .unwrap();
+    // SAFETY: deferred and next remain pinned through ordinary execution and
+    // physical timer drain; initialized boot service is not replaced by this test.
+    unsafe { queue.submit(&next, Some(0.into()), || unreachable!()) }.unwrap();
     assert_eq!(probe.calls.load(Ordering::Relaxed), 5);
     let (withdrawn, token) = CompletionObserver::prepare();
     let _registration = withdrawn.register(kick.as_ref()).unwrap();

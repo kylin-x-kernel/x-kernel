@@ -348,16 +348,9 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
         command.env_remove("UNITTEST_CRATE");
     }
     if matches!(action, CargoAction::Clippy) {
-        command.arg("--").args([
-            "-A",
-            "unsafe_op_in_unsafe_fn",
-            "-D",
-            "clippy::undocumented_unsafe_blocks",
-            "-D",
-            "warnings",
-            "--cfg",
-            "unittest",
-        ]);
+        command
+            .arg("--")
+            .args(["-D", "warnings", "--cfg", "unittest"]);
     }
     command.run()
 }

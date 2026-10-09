@@ -26,3 +26,6 @@ kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
 unittest.workspace = true
 kiface = { workspace = true, optional = true }
+
+[lints]
+workspace = true

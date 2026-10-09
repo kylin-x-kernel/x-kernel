@@ -87,7 +87,7 @@ struct NetworkTimer;
 #[cfg(unittest)]
 static SAMPLE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod timer_irq_tests {
     //! Runtime integration probe using the permanent boot-created service.
     //! This only observes IRQ progress; the timeout is a hang bound, not a
@@ -120,7 +120,7 @@ impl ktask::TimerHandler for NetworkTimer {
     }
 }
 
-pub struct Service {
+pub(crate) struct Service {
     timer: ktask::Timer<NetworkTimer>,
     pub(crate) iface: Mutex<Interface>,
     router: Mutex<Router>,
@@ -136,7 +136,7 @@ pub struct Service {
 }
 
 impl Service {
-    pub fn new(mut router: Router) -> Self {
+    pub(crate) fn new(mut router: Router) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
 
@@ -181,7 +181,12 @@ impl Service {
     /// pending batches intact and reports immediate work for a later round.
     /// A due IPv4 reassembly timer remains pending across ingress-lock
     /// contention without aborting TX or protocol progress in the current round.
-    pub fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: TODO(cg): legacy budgeted poll round; split ingress, \
+                  timers and transmit phases"
+    )]
+    pub(crate) fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
         let mut control_packets = self.control_batch.lock();
@@ -399,6 +404,9 @@ impl Service {
             }
             let drain = router.drain_rx_budgeted_into(device_timestamp, batch_budget, rx_batch);
             drop(router);
+            if let Some((ifindex, error)) = &drain.error {
+                warn!("network RX poll failed on ifindex {ifindex}: {error:?}");
+            }
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
@@ -410,6 +418,11 @@ impl Service {
             ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
             {
                 progress.has_lock_contention = true;
+                break;
+            }
+            // Keep the partial batch above, but end this round rather than
+            // spinning on a failed device; later poll rounds may retry it.
+            if drain.error.is_some() {
                 break;
             }
             if !drain.has_more || drain.work_done == 0 {
@@ -512,7 +525,7 @@ impl Service {
         true
     }
 
-    pub fn get_smoltcp_source_address(
+    pub(crate) fn get_smoltcp_source_address(
         &self,
         dst_addr: &SmoltcpIpAddress,
     ) -> KResult<SmoltcpIpAddress> {
@@ -523,20 +536,20 @@ impl Service {
             .map(ip::to_smoltcp_ip_address)
     }
 
-    pub fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
+    pub(crate) fn get_source_address(&self, dst_addr: &IpAddress) -> KResult<IpAddress> {
         self.router.lock().output_route_source(dst_addr, 0)
     }
 
     #[cfg(unittest)]
-    pub fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
+    pub(crate) fn ipv4_route_mtu(&self, dst_addr: &IpAddress) -> Option<usize> {
         self.router.lock().route_mtu(dst_addr)
     }
 
-    pub fn can_send_ip_packet(&self) -> bool {
+    pub(crate) fn can_send_ip_packet(&self) -> bool {
         self.router.lock().can_enqueue_tx_packet()
     }
 
-    pub fn prepare_and_send_ipv4_packet(
+    pub(crate) fn prepare_and_send_ipv4_packet(
         &self,
         bound_src: Option<IpAddress>,
         dst_addr: &IpAddress,
@@ -579,7 +592,7 @@ impl Service {
         }
     }
 
-    pub fn register_rx_waker(
+    pub(crate) fn register_rx_waker(
         &self,
         mask: u32,
         context: &mut PollContext<'_>,
@@ -746,23 +759,23 @@ impl Service {
         self.rebuild_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
         self.router.lock().link_snapshots()
     }
 
-    pub fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
         self.router.lock().link_snapshot_for_ifindex(ifindex)
     }
 
-    pub fn has_device(&self, ifindex: i32) -> bool {
+    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
         self.router.lock().has_device(ifindex)
     }
 
-    pub fn device_index_by_name(&self, name: &str) -> Option<usize> {
+    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
         self.router.lock().device_index_by_name(name)
     }
 
-    pub fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
         self.router.lock().link_send_snapshot_for_ifindex(ifindex)
     }
 
@@ -874,7 +887,7 @@ impl Service {
         Ok(())
     }
 
-    pub fn update_device_link(
+    pub(crate) fn update_device_link(
         &self,
         ifindex: i32,
         update: LinkConfigUpdate,
@@ -936,7 +949,7 @@ impl Service {
         self.router.lock().has_neighbor(dev, dst)
     }
 
-    pub fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
+    pub(crate) fn send_link_frame(&self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
         self.router.lock().send_link_frame(ifindex, frame)
     }
 }
@@ -1075,7 +1088,7 @@ fn output_ipv4_packet_count(
         / max_fragment_payload_len)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, sync::Weak, task::Wake, vec, vec::Vec};
     use core::{sync::atomic::AtomicBool, task::Context};

@@ -43,3 +43,6 @@ pipefs.workspace = true
 sysfs.workspace = true
 p9 = { workspace = true, optional = true }
 v9fs = { workspace = true, optional = true }
+
+[lints]
+workspace = true

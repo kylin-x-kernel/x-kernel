@@ -490,11 +490,12 @@ impl DeviceFileOps for CurrentTty {
     }
 }
 
-#[cfg(unittest)]
-#[path = "../tests/pty.rs"]
-mod tests_pty;
+#[unittest::mod_test]
+mod tests_pty {
+    include!("../tests/pty.rs");
+}
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

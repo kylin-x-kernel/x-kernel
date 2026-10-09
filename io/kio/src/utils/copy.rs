@@ -195,9 +195,14 @@ impl BufferedWriterSpec for Vec<u8> {
     }
 
     fn copy_from<R: Read + ?Sized>(&mut self, reader: &mut R) -> Result<u64> {
-        reader
-            .read_to_end(self)
-            .map(|bytes| u64::try_from(bytes).expect("usize overflowed u64"))
+        reader.read_to_end(self).map(|bytes| {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: All supported kernel targets have \
+                          usize no wider than u64"
+            )]
+            u64::try_from(bytes).expect("usize overflowed u64")
+        })
     }
 }
 

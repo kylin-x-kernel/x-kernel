@@ -200,7 +200,7 @@ fn is_virtio_rng(name: &str, driver_name: &str) -> bool {
 #[cfg(unittest)]
 mod real_device_tests;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktask::WaitQueue;
     use unittest::{assert, assert_eq, def_test};

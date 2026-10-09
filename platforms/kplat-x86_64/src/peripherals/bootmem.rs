@@ -10,7 +10,7 @@ use klazy::Once;
 use multiboot2::{BootInformation, BootInformationHeader, MemoryAreaType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BootMemoryKind {
+pub(crate) enum BootMemoryKind {
     Ram,
     Reserved {
         kind: ReservedKind,
@@ -23,13 +23,23 @@ const AP_TRAMPOLINE_MAX_PADDR: usize = 0xA_0000;
 
 static AP_TRAMPOLINE_PAGE: Once<usize> = Once::new();
 
-pub fn init_ap_trampoline_page(boot_info: &BootInfo) {
+pub(crate) fn init_ap_trampoline_page(boot_info: &BootInfo) {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no low-memory AP trampoline \
+                  page is available; BSP memory preparation has no error return or recovery"
+    )]
     let paddr = choose_ap_trampoline_page(boot_info)
         .expect("failed to find a low-memory x86 AP trampoline page");
     AP_TRAMPOLINE_PAGE.call_once(|| paddr);
 }
 
-pub fn ap_trampoline_page_paddr() -> usize {
+pub(crate) fn ap_trampoline_page_paddr() -> usize {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: BSP memory preparation installs the \
+                  permanent AP trampoline page before AP startup"
+    )]
     AP_TRAMPOLINE_PAGE
         .get()
         .copied()
@@ -41,7 +51,7 @@ pub fn ap_trampoline_page_paddr() -> usize {
 /// Call only during primary boot, before `memspace::init_memory_management`
 /// replaces the boot stub's identity mapping; the protocol tables are read
 /// through their physical addresses. See [`for_each_memory_region`].
-pub fn for_each_ram_region<F>(boot_info: &BootInfo, mut f: F)
+pub(crate) fn for_each_ram_region<F>(boot_info: &BootInfo, mut f: F)
 where
     F: FnMut(usize, usize),
 {
@@ -59,7 +69,7 @@ where
 /// identity mapping of low memory is active and the page allocator has not
 /// reused those pages. Call this only from the `prepare_boot_memory` boot hook
 /// that `khal::mem::init` runs during primary boot.
-pub fn for_each_memory_region<F>(boot_info: &BootInfo, f: F)
+pub(crate) fn for_each_memory_region<F>(boot_info: &BootInfo, f: F)
 where
     F: FnMut(BootMemoryKind, usize, usize),
 {
@@ -102,6 +112,11 @@ where
     if multiboot_info_ptr == 0 {
         return;
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: multiboot2 boot information \
+                  is invalid; memory discovery has no error return or recovery"
+    )]
     // SAFETY: the boot protocol provides `multiboot_info_ptr` as a valid pointer to
     // the immutable Multiboot2 information block for the duration of early boot.
     let info = unsafe { BootInformation::load(multiboot_info_ptr as *const BootInformationHeader) }
@@ -152,6 +167,11 @@ where
     };
 
     for index in 0..params.e820_entries() {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The loop index is bounded by the \
+                      validated LinuxBootParams e820 entry count"
+        )]
         let entry = params
             .e820_entry(index)
             .expect("linux boot params e820 entry out of range");

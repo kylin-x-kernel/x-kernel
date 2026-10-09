@@ -168,8 +168,6 @@ fn test_cursor_write_slice() {
     assert_eq!(n, 5);
     assert_eq!(cursor.position(), 10);
 
-    #[allow(clippy::drop_non_drop)]
-    drop(cursor);
     assert_eq!(&buf, b"HelloWorld");
 }
 
@@ -183,8 +181,6 @@ fn test_cursor_write_vec() {
     cursor.write_all(b"World").unwrap();
     assert_eq!(cursor.position(), 11);
 
-    #[allow(clippy::drop_non_drop)]
-    drop(cursor);
     assert_eq!(&v, b"Hello World");
 }
 
@@ -197,8 +193,6 @@ fn test_cursor_write_vec_overwrite() {
     cursor.write_all(b"AB").unwrap();
     assert_eq!(cursor.position(), 2);
 
-    #[allow(clippy::drop_non_drop)]
-    drop(cursor);
     assert_eq!(&v[..2], b"AB");
     assert_eq!(v[2], 0);
 }
@@ -323,8 +317,6 @@ fn test_cursor_write_at_gap() {
     cursor.set_position(5);
     cursor.write_all(b"AB").unwrap();
 
-    #[allow(clippy::drop_non_drop)]
-    drop(cursor);
     assert_eq!(v.len(), 7);
     assert_eq!(&v[..5], &[0, 0, 0, 0, 0]);
     assert_eq!(&v[5..], b"AB");

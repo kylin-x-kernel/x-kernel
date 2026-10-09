@@ -64,6 +64,7 @@ zero virtual address is rejected before any pointer dereference.
 | F-01 | No supported RTC is discovered | `read_from_device_tree` returns `None` | Platform either stops initialization or uses epoch-plus-uptime fallback | 3 | Explicit platform policy at the call site. |
 | F-02 | RTC sample is out of range | Device read returns `None` | Realtime is not initialized from that device | 3 | Checked conversion to signed `SystemTime`. |
 | F-03 | Unsupported kind/transport pair | Driver panics | Boot fails | 2 | Configuration and feature selection must match the platform backend. |
+| F-04 | Device-tree RTC range cannot be mapped | `read_from_device_tree` logs the mapping error and returns `None` | Same platform policy as F-01 | 3 | No pointer is constructed without a successful mapping. |
 
 ## Known Limitations
 

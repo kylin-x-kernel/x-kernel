@@ -16,7 +16,7 @@ struct Random;
 
 impl Random {
     /// Create a new random device node.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
@@ -68,7 +68,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     );
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, assert_ne, def_test};
 

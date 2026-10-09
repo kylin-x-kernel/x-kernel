@@ -165,7 +165,7 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
     queue_ipv4_error(local, remote, ingress_ifindex, error);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
 

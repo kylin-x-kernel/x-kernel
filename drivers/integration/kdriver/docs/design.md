@@ -688,6 +688,10 @@ ixgbe ─────────► net (placeholder)
 platform driver is enabled; `cfg(feature = "any_firmware_driver")`
 replaces the verbose `any(ahci, bcm2835-sdhci, sdmmc, fxmac)` condition.
 
+Platform location IDs use a fallible monotonic allocator. Exhaustion returns
+`DriverError::NoMemory`; firmware discovery records it in its existing first-error
+result, and static discovery propagates it before registering another device.
+
 ## Hardware entropy completion provider
 
 `rng_completion.rs` is the X-Kernel implementation of the driver-facing

@@ -29,7 +29,9 @@ pub(super) fn init(boot_info: &BootInfo) {
 
     if boot_info.rsdp_addr != 0 {
         bootln!("firmware: ACPI RSDP at {:#x}", boot_info.rsdp_addr);
-        let _ = acpi::init(boot_info.rsdp_addr);
+        if let Err(err) = acpi::init(boot_info.rsdp_addr) {
+            bootln!("firmware: failed to initialize ACPI: {err:?}");
+        }
     }
 
     bootln!(

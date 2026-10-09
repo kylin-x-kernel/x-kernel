@@ -74,8 +74,17 @@ unsafe impl Sync for SecondaryBootStacks {}
 /// spans every present CPU; without this barrier a round-robin selection
 /// could land on a secondary that has entered but not yet registered its
 /// run queue, panicking in `RUN_QUEUES.get().expect()`.
-#[allow(clippy::absurd_extreme_comparisons)]
-pub fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: The CPU loop bound is generated from NR_CPUS and can be one \
+              in a uniprocessor configuration"
+)]
+#[allow(
+    clippy::absurd_extreme_comparisons,
+    reason = "CG-024-lint-exceptions: clippy::absurd_extreme_comparisons: The CPU loop bound is \
+              generated from NR_CPUS and can be one in a uniprocessor configuration"
+)]
+pub(crate) fn start_secondary_cpus(primary_cpu_id: LogicalCpuId) -> KResult {
     let mut secondary_logical_cpu_id = 0;
     let mut start_result = Ok(());
     for_each_present_logical_cpu(|_, logical_cpu_id, _| {
@@ -182,7 +191,7 @@ impl SecondaryKernelEntry {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub(super) mod tests_startup_order {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -342,12 +351,14 @@ mod tests_tlb_shootdown {
             // Map a page to set ToFlush::Addresses.
             let test_vaddr = VirtAddr::from(0x7F00_0000usize);
             let mut pt_mut = pt.modify();
-            let _ = pt_mut.map(
-                test_vaddr,
-                PhysAddr::from(0x8000_0000usize),
-                khal::paging::PageSize::Size4K,
-                khal::paging::MappingFlags::READ,
-            );
+            pt_mut
+                .map(
+                    test_vaddr,
+                    PhysAddr::from(0x8000_0000usize),
+                    khal::paging::PageSize::Size4K,
+                    khal::paging::MappingFlags::READ,
+                )
+                .expect("fresh test page table must accept its first mapping");
 
             // Dropping pt_mut calls finish() → flush_tlb_all_cpus → flush_remote.
             // On architectures without hardware broadcast (x86_64, riscv64), this sends IPIs.
@@ -387,10 +398,10 @@ mod tests_tlb_shootdown {
             // freshly allocated physical pages owned by this test.  Writing
             // magic values through volatile pointers is safe because no other
             // code holds references to these pages.
-            unsafe {
-                core::ptr::write_volatile(v1 as *mut u64, MAGIC_A);
-                core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
-            }
+            unsafe { core::ptr::write_volatile(v1 as *mut u64, MAGIC_A) };
+            // SAFETY: v2 is the aligned kernel mapping of the second freshly
+            // allocated page, exclusively owned by this test with no references.
+            unsafe { core::ptr::write_volatile(v2 as *mut u64, MAGIC_B) };
 
             // Pick a kernel-high virtual address in the reserved region.
             // Must be valid across all architectures (SV39 needs ≥0xFFFFFFC0).
@@ -460,7 +471,9 @@ mod tests_tlb_shootdown {
             {
                 let mut aspace = memspace::kernel_layout().lock();
                 let mut pt_mut = aspace.page_table_mut().modify();
-                let _ = pt_mut.unmap(test_vaddr);
+                pt_mut
+                    .unmap(test_vaddr)
+                    .expect("test mapping must remain installed until cleanup");
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);
@@ -514,10 +527,10 @@ mod tests_tlb_shootdown {
             // freshly allocated physical pages owned by this test.  Writing
             // magic values through volatile pointers is safe because no other
             // code holds references to these pages.
-            unsafe {
-                core::ptr::write_volatile(v1 as *mut u64, MAGIC_A);
-                core::ptr::write_volatile(v2 as *mut u64, MAGIC_B);
-            }
+            unsafe { core::ptr::write_volatile(v1 as *mut u64, MAGIC_A) };
+            // SAFETY: v2 is the aligned kernel mapping of the second freshly
+            // allocated page, exclusively owned by this test with no references.
+            unsafe { core::ptr::write_volatile(v2 as *mut u64, MAGIC_B) };
 
             let test_vaddr = VirtAddr::from(kaddr_layout::IOMAP_VADDR + kaddr_layout::IOMAP_VSIZE);
 
@@ -612,7 +625,9 @@ mod tests_tlb_shootdown {
             {
                 let mut aspace = memspace::kernel_layout().lock();
                 let mut pt_mut = aspace.page_table_mut().modify();
-                let _ = pt_mut.unmap(test_vaddr);
+                pt_mut
+                    .unmap(test_vaddr)
+                    .expect("test mapping must remain installed until cleanup");
             }
             kalloc::global_allocator().dealloc_pages(v1, 1, kalloc::UsageKind::PageTable);
             kalloc::global_allocator().dealloc_pages(v2, 1, kalloc::UsageKind::PageTable);

@@ -29,7 +29,7 @@ fn parse_signo(signo: u32) -> KResult<Signo> {
 /// Manipulates the signal mask for the current thread.
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigprocmask.2.html>.
-pub fn sys_rt_sigprocmask(
+pub(crate) fn sys_rt_sigprocmask(
     how: i32,
     set: UserConstPtr<k_sigset>,
     oldset: UserPtr<k_sigset>,
@@ -64,7 +64,7 @@ pub fn sys_rt_sigprocmask(
 /// Sets or retrieves the action for a signal.
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigaction.2.html>.
-pub fn sys_rt_sigaction(
+pub(crate) fn sys_rt_sigaction(
     signo: u32,
     act: UserConstPtr<k_sigaction>,
     oldact: UserPtr<k_sigaction>,
@@ -98,7 +98,7 @@ pub fn sys_rt_sigaction(
 /// Returns the set of pending signals.
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigpending.2.html>.
-pub fn sys_rt_sigpending(set: UserPtr<k_sigset>, sigsetsize: usize) -> KResult<isize> {
+pub(crate) fn sys_rt_sigpending(set: UserPtr<k_sigset>, sigsetsize: usize) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
     set.write_vm(
         kprocess::current_user_thread()
@@ -124,7 +124,7 @@ fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
 /// Sends a signal to a process or process group.
 ///
 /// See <https://man7.org/linux/man-pages/man2/kill.2.html>.
-pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
+pub(crate) fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
     debug!("sys_kill: pid = {pid}, signo = {signo}");
     let sig = make_siginfo(signo, SI_USER as _)?;
 
@@ -168,7 +168,7 @@ pub fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
 /// Sends a signal to a specific thread.
 ///
 /// See <https://man7.org/linux/man-pages/man2/tkill.2.html>.
-pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
+pub(crate) fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
     kprocess::process_signals::send_to_thread(None, tid, sig)?;
     Ok(0)
@@ -177,14 +177,14 @@ pub fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
 /// Sends a signal to a thread within a specific thread group.
 ///
 /// See <https://man7.org/linux/man-pages/man2/tgkill.2.html>.
-pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
+pub(crate) fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
     kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
 
 /// Builds a queued signal payload for `rt_sigqueueinfo`-style syscalls.
-pub fn make_queue_signal_info(
+pub(crate) fn make_queue_signal_info(
     tgid: Pid,
     signo: u32,
     sig: UserConstPtr<k_siginfo>,
@@ -204,7 +204,7 @@ pub fn make_queue_signal_info(
 }
 
 /// Queues a real-time signal with additional information to a process.
-pub fn sys_rt_sigqueueinfo(
+pub(crate) fn sys_rt_sigqueueinfo(
     tgid: Pid,
     signo: u32,
     sig: UserConstPtr<k_siginfo>,
@@ -218,7 +218,7 @@ pub fn sys_rt_sigqueueinfo(
 }
 
 /// Queues a real-time signal with additional information to a specific thread.
-pub fn sys_rt_tgsigqueueinfo(
+pub(crate) fn sys_rt_tgsigqueueinfo(
     tgid: Pid,
     tid: Pid,
     signo: u32,
@@ -235,7 +235,7 @@ pub fn sys_rt_tgsigqueueinfo(
 /// Returns from a signal handler and restores context.
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigreturn.2.html>.
-pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
+pub(crate) fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
     kprocess::current_user_thread()
         .signal_manager()
         .restore(uctx);
@@ -249,7 +249,7 @@ pub fn sys_rt_sigreturn(uctx: &mut UserContext) -> KResult<isize> {
 /// does not list as a valid errno.
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigtimedwait.2.html>.
-pub fn sys_rt_sigtimedwait(
+pub(crate) fn sys_rt_sigtimedwait(
     uctx: &mut UserContext,
     set: UserConstPtr<k_sigset>,
     info: UserPtr<k_siginfo>,
@@ -330,7 +330,7 @@ pub fn sys_rt_sigtimedwait(
 /// instead of returning `ENOMEM`, which this syscall must not surface.
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigsuspend.2.html>.
-pub fn sys_rt_sigsuspend(
+pub(crate) fn sys_rt_sigsuspend(
     _uctx: &mut UserContext,
     set: UserConstPtr<k_sigset>,
     sigsetsize: usize,
@@ -356,7 +356,7 @@ pub fn sys_rt_sigsuspend(
 ///
 /// See <https://man7.org/linux/man-pages/man2/pause.2.html>.
 #[cfg(target_arch = "x86_64")]
-pub fn sys_pause() -> KResult<isize> {
+pub(crate) fn sys_pause() -> KResult<isize> {
     wait_for_deliverable_signal()
 }
 
@@ -399,7 +399,7 @@ fn wait_for_deliverable_signal() -> KResult<isize> {
 /// Sets or retrieves the alternate signal stack.
 ///
 /// See <https://man7.org/linux/man-pages/man2/sigaltstack.2.html>.
-pub fn sys_sigaltstack(
+pub(crate) fn sys_sigaltstack(
     uctx: &UserContext,
     ss: UserConstPtr<k_sigaltstack>,
     old_ss: UserPtr<k_sigaltstack>,
@@ -446,7 +446,7 @@ pub fn sys_sigaltstack(
 }
 
 /// Creates or updates a `signalfd` file descriptor.
-pub fn sys_signalfd4(
+pub(crate) fn sys_signalfd4(
     fd: i32,
     mask: UserConstPtr<k_sigset>,
     sigsetsize: usize,

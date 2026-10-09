@@ -159,7 +159,6 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 - 类型无法表达时，名称是否包含 bytes/pages/ns 等单位；
 - boolean 是否使用 `is_`、`has_`、`can_` 等断言式命名；
 - 持有闭包/函数的变量是否符合项目 `_fn` 约定；
-- 已实际使用的参数是否仍保留误导性的 `_` 前缀；
 - 函数是否混合 syscall 语义、状态管理和底层字节操作；
 - 嵌套、控制流和文件布局是否符合自顶向下阅读。
 
@@ -255,7 +254,11 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 - 只因其他架构实现不同就要求统一；
 - 把大规模重构作为修复一条局部规范问题的前提；
 - 评论未修改的历史代码；
-- rustfmt、编译器或 lint 已能准确自动处理的问题。
+- rustfmt、编译器或 lint 已能准确自动处理的问题
+  （统一规则入口和例外政策见 `docs/code-guidelines/README.md`；lint 范围和覆盖程度
+  见 `docs/code-guidelines/lints.md`，判断标准见 `docs/code-guidelines/CG-*.md`；
+  partial 覆盖留下的判断和 case (b) 关闭 crate 的新增代码仍需审查。
+  x-review-ng 只加载带 `ai` check 的 CG 文件，不重复审查纯 rustc/Clippy 文件）。
 
 ## 输出要求
 

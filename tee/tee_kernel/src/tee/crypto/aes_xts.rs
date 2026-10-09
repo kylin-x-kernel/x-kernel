@@ -292,7 +292,17 @@ fn decrypt_pre_advance_for_stealing(xts: &mut AesXtsState) {
 }
 
 fn gf128mul_x(r: &mut [u8; XTS_BLOCK_SIZE], x: &[u8; XTS_BLOCK_SIZE]) {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: x is a fixed XTS block array and the \
+                  slice 0..8 is exactly one u64"
+    )]
     let a = u64::from_le_bytes(x[0..8].try_into().unwrap());
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: x is a fixed 16-byte XTS block array and \
+                  the slice 8..16 is exactly one u64"
+    )]
     let b = u64::from_le_bytes(x[8..16].try_into().unwrap());
     let ra = (a << 1) ^ (0x0087u64 >> (8 - ((b >> 63) as u32) * 8));
     let rb = (a >> 63) | (b << 1);

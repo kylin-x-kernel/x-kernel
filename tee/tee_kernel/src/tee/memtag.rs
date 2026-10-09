@@ -8,7 +8,7 @@ use super::types_ext::*;
 use crate::tee::TeeResult;
 
 #[inline]
-pub fn memtag_strip_tag_vaddr(addr: *const c_void) -> Vaddr {
+pub(super) fn memtag_strip_tag_vaddr(addr: *const c_void) -> Vaddr {
     addr as Vaddr
 }
 

@@ -20,3 +20,6 @@ name = "xdice"
 [dependencies]
 tee_crypto.workspace = true
 zeroize.workspace = true
+
+[lints]
+workspace = true

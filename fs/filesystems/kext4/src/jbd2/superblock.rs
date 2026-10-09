@@ -398,7 +398,7 @@ fn put_be_u32(output: &mut [u8], offset: usize, value: u32) -> Ext4Result<()> {
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

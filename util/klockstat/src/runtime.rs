@@ -88,7 +88,7 @@ pub fn class_for_init_site(loc: &'static Location, kind: &'static str) -> &'stat
 }
 
 /// Returns snapshots for runtime-registered lock statistics.
-pub fn runtime_stats_snapshot() -> Vec<crate::LockClassEntry> {
+pub(crate) fn runtime_stats_snapshot() -> Vec<crate::LockClassEntry> {
     REGISTRY.with(|registry| {
         registry
             .runtime_stats

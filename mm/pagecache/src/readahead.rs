@@ -53,8 +53,9 @@ impl MappingPages {
         }
         let mut state = self.state.lock();
         let mut count = 0;
-        for (folio, guard) in batch.iter().zip(&locked) {
-            let index = guard.as_ref().unwrap().index();
+        // Every batch folio has a guard in the matching leading slot.
+        for (folio, guard) in batch.iter().zip(locked.iter().flatten()) {
+            let index = guard.index();
             if state.entries.contains_key(&index) {
                 break;
             }
@@ -66,6 +67,12 @@ impl MappingPages {
             return Ok(0);
         }
         let consumed = {
+            #[expect(
+                clippy::unwrap_used,
+                reason = "CG-021-no-panic-on-reachable-failure: the first batch.len() slots were \
+                          locked above and count is at most batch.len(); the callback needs an \
+                          exact-size iterator"
+            )]
             let mut folios = locked[..count]
                 .iter_mut()
                 .map(|guard| guard.as_deref_mut().unwrap());
@@ -75,8 +82,9 @@ impl MappingPages {
         // Unconsumed pages never leave our locked reservation lifecycle:
         // detach before unlocking, so waiters must find a fresh resident.
         let mut state = self.state.lock();
-        for (candidate, guard) in batch.iter().zip(&mut locked).take(count).skip(consumed) {
-            let folio = guard.as_deref_mut().unwrap();
+        let guards = locked.iter_mut().flatten();
+        for (candidate, guard) in batch.iter().zip(guards).take(count).skip(consumed) {
+            let folio: &mut Folio = guard;
             if state.is_current(folio.index(), candidate) {
                 Self::discard_folio(&mut state, folio);
             }

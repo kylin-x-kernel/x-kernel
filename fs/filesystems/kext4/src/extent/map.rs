@@ -31,7 +31,7 @@ pub(crate) struct InodeMappingRoot {
 
 impl Ext4SbInfo {
     /// Returns the superblock-wide maximum size used by extent-format inodes.
-    pub fn extent_max_file_size(&self) -> Ext4Result<u64> {
+    pub(crate) fn extent_max_file_size(&self) -> Ext4Result<u64> {
         extent_max_file_size(
             self.layout().block_size(),
             self.superblock().features().has_huge_file(),
@@ -39,7 +39,7 @@ impl Ext4SbInfo {
     }
 
     /// Returns the superblock-wide maximum size for legacy block-map inodes.
-    pub fn legacy_max_file_size(&self) -> Ext4Result<u64> {
+    pub(crate) fn legacy_max_file_size(&self) -> Ext4Result<u64> {
         legacy_max_file_size(
             self.layout().block_size(),
             self.superblock().features().has_huge_file(),
@@ -47,7 +47,11 @@ impl Ext4SbInfo {
     }
 
     /// Maps a logical inode block without allocating or modifying metadata.
-    pub fn map_blocks(&self, inode: &Ext4Inode, logical: LogicalBlock) -> Ext4Result<BlockMapping> {
+    pub(crate) fn map_blocks(
+        &self,
+        inode: &Ext4Inode,
+        logical: LogicalBlock,
+    ) -> Ext4Result<BlockMapping> {
         let root = inode.mapping_root();
         self.map_blocks_with_root(inode, &root, logical)
     }
@@ -85,7 +89,7 @@ impl Ext4SbInfo {
     ///
     /// Delayed-allocation extents take precedence over on-disk holes, matching
     /// `ext4_map_blocks()` with `EXT4_MAP_DELAYED` in Linux report paths.
-    pub fn report_mapping(
+    pub(crate) fn report_mapping(
         &self,
         inode: &Ext4Inode,
         logical: LogicalBlock,

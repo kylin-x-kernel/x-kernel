@@ -15,7 +15,7 @@ use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 
 use crate::{
-    DMAInfo, DmaBusAddress, DmaDirection,
+    DmaBusAddress, DmaDirection, DmaInfo,
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
     p2b,
 };
@@ -54,7 +54,7 @@ struct CoherentAllocation {
 }
 
 impl DmaAllocator {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             bounce_pool: None,
             active_mappings: BTreeMap::new(),
@@ -71,17 +71,17 @@ impl DmaAllocator {
     ///
     /// # Safety
     ///
-    /// The caller must treat the returned [`DMAInfo`] as coherent DMA memory:
+    /// The caller must treat the returned [`DmaInfo`] as coherent DMA memory:
     /// deallocate it exactly once with the same `layout`, do not forge or
     /// offset the returned CPU address, and only hand the bus address to a
     /// device that is allowed to DMA that range.
     #[track_caller]
-    pub unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
+    pub(crate) unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         self.alloc_coherent_pages(layout)
     }
 
     #[track_caller]
-    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DMAInfo> {
+    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
         let num_pages = layout_pages(&layout);
         let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
@@ -95,7 +95,7 @@ impl DmaAllocator {
             | MappingFlags::SHARED;
         self.update_flags(vaddr, num_pages, flags)?;
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
-        let dma_info = DMAInfo {
+        let dma_info = DmaInfo {
             // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
             // and therefore cannot be null.
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
@@ -139,7 +139,7 @@ impl DmaAllocator {
     /// `dma` must come from a prior successful [`allocate_dma_memory`] call on
     /// this allocator, and `layout` must exactly match that allocation.
     #[track_caller]
-    pub unsafe fn deallocate_dma_memory(&mut self, dma: DMAInfo, layout: Layout) {
+    pub(crate) unsafe fn deallocate_dma_memory(&mut self, dma: DmaInfo, layout: Layout) {
         let num_pages = layout_pages(&layout);
         if !self.trace_coherent_free(dma, num_pages) {
             return;
@@ -148,7 +148,9 @@ impl DmaAllocator {
         let size = num_pages * PAGE_SIZE_4K;
         let vaddr = va!(virt_raw);
 
+        // Deallocation cannot fail; the helper already logs platform release errors.
         let _ = self.release_platform_dma(v2p(vaddr), size);
+        // Deallocation cannot fail; update_flags already logs restoration errors.
         let _ = self.update_flags(vaddr, num_pages, MappingFlags::READ | MappingFlags::WRITE);
 
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
@@ -161,11 +163,11 @@ impl DmaAllocator {
     /// `buffer` must remain live and exclusively owned by the caller until the
     /// matching [`unmap_dma_buffer`] call. The caller must not let the device
     /// access the returned bus address after unmapping.
-    pub unsafe fn map_dma_buffer(
+    pub(crate) unsafe fn map_dma_buffer(
         &mut self,
         buffer: NonNull<[u8]>,
         direction: DmaDirection,
-    ) -> AllocResult<DMAInfo> {
+    ) -> AllocResult<DmaInfo> {
         use core::sync::atomic::{Ordering, fence};
 
         let len = buffer.len();
@@ -216,7 +218,7 @@ impl DmaAllocator {
     /// `dma_addr` must be the still-active mapping returned by
     /// [`map_dma_buffer`] for the same `buffer`, and this function must be
     /// called exactly once for that mapping.
-    pub unsafe fn unmap_dma_buffer(
+    pub(crate) unsafe fn unmap_dma_buffer(
         &mut self,
         dma_addr: DmaBusAddress,
         buffer: NonNull<[u8]>,
@@ -225,6 +227,11 @@ impl DmaAllocator {
         use core::sync::atomic::{Ordering, fence};
 
         let len = buffer.len();
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: The Safety contract requires dma_addr \
+                      to be the still-active mapping from map_dma_buffer, unmapped exactly once"
+        )]
         let mapping = self
             .active_mappings
             .remove(&dma_addr.as_u64())
@@ -253,12 +260,17 @@ impl DmaAllocator {
         self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
     }
 
-    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DMAInfo, Layout)> {
+    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
         let pool = self.bounce_pool_mut()?;
         pool.allocate(len)
     }
 
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Active bounce mappings retain the \
+                      bounce pool until their buffers are recycled"
+        )]
         let pool = self
             .bounce_pool
             .as_mut()
@@ -271,12 +283,17 @@ impl DmaAllocator {
             let dma = self.alloc_coherent_pages(layout_for_pages(DMA_BOUNCE_POOL_PAGES))?;
             self.bounce_pool = Some(BouncePool::new(dma, bounce_pool_size()));
         }
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the None branch installs the bounce \
+                      pool or returns the allocation error before reaching this expression"
+        )]
         Ok(self.bounce_pool.as_mut().unwrap())
     }
 
     #[cfg(feature = "dma-trace")]
     #[track_caller]
-    fn trace_coherent_alloc(&mut self, dma: DMAInfo, num_pages: usize) {
+    fn trace_coherent_alloc(&mut self, dma: DmaInfo, num_pages: usize) {
         let cpu_addr = dma.cpu_addr.as_ptr() as usize;
         let site = TraceSite::caller();
         if let Some(prev) = self.coherent_allocs.get(&cpu_addr).copied() {
@@ -305,11 +322,11 @@ impl DmaAllocator {
     }
 
     #[cfg(not(feature = "dma-trace"))]
-    fn trace_coherent_alloc(&mut self, _dma: DMAInfo, _num_pages: usize) {}
+    fn trace_coherent_alloc(&mut self, _dma: DmaInfo, _num_pages: usize) {}
 
     #[cfg(feature = "dma-trace")]
     #[track_caller]
-    fn trace_coherent_free(&mut self, dma: DMAInfo, num_pages: usize) -> bool {
+    fn trace_coherent_free(&mut self, dma: DmaInfo, num_pages: usize) -> bool {
         let cpu_addr = dma.cpu_addr.as_ptr() as usize;
         let site = TraceSite::caller();
 
@@ -367,7 +384,7 @@ impl DmaAllocator {
     }
 
     #[cfg(not(feature = "dma-trace"))]
-    fn trace_coherent_free(&mut self, _dma: DMAInfo, _num_pages: usize) -> bool {
+    fn trace_coherent_free(&mut self, _dma: DmaInfo, _num_pages: usize) -> bool {
         true
     }
 }
@@ -402,5 +419,11 @@ const fn layout_pages(layout: &Layout) -> usize {
 }
 
 fn layout_for_pages(num_pages: usize) -> Layout {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: the only caller passes the fixed \
+                  DMA_BOUNCE_POOL_PAGES constant; its byte size fits Layout and PAGE_SIZE_4K is a \
+                  power of two"
+    )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
 }

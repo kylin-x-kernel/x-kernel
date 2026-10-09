@@ -141,6 +141,7 @@ impl ProcessResources {
 
     fn close_descriptors(descriptors: impl IntoIterator<Item = FileDescriptor>) {
         for descriptor in descriptors {
+            // Teardown must close every descriptor; close errors have no receiver.
             let _ = descriptor.close();
         }
     }
@@ -323,6 +324,11 @@ impl ProcessResources {
             }
 
             let new_table = FdTable::clone_shared_from(table);
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: The fd-table owner was checked \
+                          while holding the same exclusive write lock"
+            )]
             owner
                 .replace(new_table)
                 .expect("fd table owner was checked")
@@ -345,7 +351,7 @@ impl ProcessResources {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

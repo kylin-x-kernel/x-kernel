@@ -240,7 +240,7 @@ impl Ext4SbInfo {
     /// after metadata publication.
     /// HTree insertion, mkdir/link/unlink/rename, and zero-link eviction remain
     /// separate R7 steps.
-    pub fn create_regular_file(
+    pub(crate) fn create_regular_file(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -272,7 +272,7 @@ impl Ext4SbInfo {
     }
 
     /// Creates a subdirectory in a linear ext4 directory.
-    pub fn create_directory(
+    pub(crate) fn create_directory(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -309,7 +309,7 @@ impl Ext4SbInfo {
     }
 
     /// Creates a symbolic link in a linear ext4 directory.
-    pub fn create_symlink(
+    pub(crate) fn create_symlink(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -326,7 +326,7 @@ impl Ext4SbInfo {
     }
 
     /// Creates a fast symbolic link in a linear ext4 directory.
-    pub fn create_fast_symlink(
+    pub(crate) fn create_fast_symlink(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -347,7 +347,7 @@ impl Ext4SbInfo {
     }
 
     /// Creates a single-block extent-backed symbolic link in a linear ext4 directory.
-    pub fn create_block_mapped_symlink(
+    pub(crate) fn create_block_mapped_symlink(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -389,7 +389,7 @@ impl Ext4SbInfo {
 
     /// Creates a FIFO, socket, character device, or block device in a linear directory.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_special_file(
+    pub(crate) fn create_special_file(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -407,7 +407,7 @@ impl Ext4SbInfo {
     }
 
     /// Adds a hard link to an existing non-directory inode in a linear directory.
-    pub fn link(
+    pub(crate) fn link(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -443,7 +443,7 @@ impl Ext4SbInfo {
     ///
     /// Returns a typed namespace, ownership, format, journal, or I/O error.
     /// The supplied child must match the directory entry selected by `name`.
-    pub fn unlink(
+    pub(crate) fn unlink(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -480,7 +480,7 @@ impl Ext4SbInfo {
     ///
     /// Returns a typed namespace, ownership, format, journal, or I/O error.
     /// The supplied child must match the directory entry selected by `name`.
-    pub fn remove_directory(
+    pub(crate) fn remove_directory(
         &mut self,
         parent: &Ext4Inode,
         name: &[u8],
@@ -522,9 +522,10 @@ impl Ext4SbInfo {
     /// source and target directory entries.
     #[expect(
         clippy::too_many_arguments,
-        reason = "rename receives the complete set of VFS-locked namespace participants"
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: rename receives the \
+                  complete set of VFS-locked namespace participants"
     )]
-    pub fn rename(
+    pub(crate) fn rename(
         &mut self,
         source_parent: &Ext4Inode,
         source_name: &[u8],
@@ -982,7 +983,7 @@ impl Ext4SbInfo {
     ///
     /// After this call the inode is orphaned.  The caller should release the
     /// `KExt4Core` lock before calling Phase B.
-    pub fn eviction_prepare(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
+    pub(crate) fn eviction_prepare(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
         if inode.links_count() != 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
         }
@@ -1018,7 +1019,7 @@ impl Ext4SbInfo {
     /// - `done` is `true` when the extent tree is fully empty.
     ///
     /// The caller should release the `KExt4Core` lock between batches.
-    pub fn eviction_release_batch(
+    pub(crate) fn eviction_release_batch(
         &mut self,
         inode: &Ext4Inode,
         max_blocks: u32,
@@ -1102,7 +1103,7 @@ impl Ext4SbInfo {
     ///    orphan recovery will handle it on crash).
     /// 2. `remove_orphan` — remove from the orphan list.
     /// 3. `release_allocated_inode` — free the inode table slot + bit.
-    pub fn eviction_finish(
+    pub(crate) fn eviction_finish(
         &mut self,
         inode: &Ext4Inode,
         timestamp: Ext4Timestamp,

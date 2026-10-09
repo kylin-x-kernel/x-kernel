@@ -255,7 +255,7 @@ struct ExtraIsizeLayoutCandidate {
 
 impl Ext4SbInfo {
     /// Reads all supported extended attributes stored on an inode.
-    pub fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
+    pub(crate) fn read_xattrs(&self, inode: &Ext4Inode) -> Ext4Result<Vec<Ext4Xattr>> {
         let mut xattrs = Vec::new();
         self.read_inline_xattrs(inode, &mut xattrs)?;
         self.read_external_xattrs(inode, &mut xattrs)?;
@@ -266,7 +266,7 @@ impl Ext4SbInfo {
     ///
     /// Names borrow from validated inode snapshots or external-block metadata
     /// and remain valid only for the duration of each sink call.
-    pub fn list_xattrs(
+    pub(crate) fn list_xattrs(
         &self,
         inode: &Ext4Inode,
         sink: &mut dyn Ext4XattrNameSink,
@@ -277,7 +277,7 @@ impl Ext4SbInfo {
     }
 
     /// Reads one extended attribute by namespace and raw name suffix.
-    pub fn get_xattr(
+    pub(crate) fn get_xattr(
         &self,
         inode: &Ext4Inode,
         namespace: Ext4XattrNamespace,
@@ -297,7 +297,7 @@ impl Ext4SbInfo {
     /// may be split between the inode body and one external xattr block, with
     /// refcount and checksum maintenance for the external part.
     #[cfg(unittest)]
-    pub fn set_xattr(
+    pub(crate) fn set_xattr(
         &mut self,
         inode: &Ext4Inode,
         namespace: Ext4XattrNamespace,
@@ -316,7 +316,7 @@ impl Ext4SbInfo {
     }
 
     /// Sets an extended attribute with an atomic existence requirement.
-    pub fn set_xattr_with_mode(
+    pub(crate) fn set_xattr_with_mode(
         &mut self,
         inode: &Ext4Inode,
         namespace: Ext4XattrNamespace,
@@ -350,7 +350,7 @@ impl Ext4SbInfo {
     }
 
     /// Removes an extended attribute.
-    pub fn remove_xattr(
+    pub(crate) fn remove_xattr(
         &mut self,
         inode: &Ext4Inode,
         namespace: Ext4XattrNamespace,
@@ -1941,7 +1941,7 @@ fn validate_non_overlapping_value_ranges(ranges: &mut [(usize, usize)]) -> Ext4R
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{format, vec, vec::Vec};
 
@@ -2648,7 +2648,7 @@ mod tests {
 }
 
 /// QEMU unittest coverage for xattr layout decisions used by metadata writes.
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use alloc::{vec, vec::Vec};
 

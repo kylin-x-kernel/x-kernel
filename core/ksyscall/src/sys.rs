@@ -34,7 +34,7 @@ use posix_types::{UserConstPtr, UserPtr, system::k_sysinfo};
 // because the module is empty on other architectures, where a glob import
 // would otherwise trip `-D unused-imports`.
 #[cfg(target_arch = "riscv64")]
-pub use crate::arch::*;
+pub(crate) use crate::arch::*;
 
 /// Maximum hostname length in bytes accepted by `sethostname(2)`.
 ///
@@ -80,7 +80,7 @@ const fn pad_field<const N: usize>(src: &[u8]) -> [c_char; N] {
 }
 
 /// Get system information including OS name, version, and hardware platform
-pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
+pub(crate) fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
     let uts_ns = current_user_process().uts_ns()?;
 
     // Read both per-namespace names into stack buffers in a single locked
@@ -102,7 +102,7 @@ pub fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
 }
 
 /// Get general system information such as process count and memory unit
-pub fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
+pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
     let mut kinfo = k_sysinfo::default();
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
@@ -118,12 +118,12 @@ pub fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
 }
 
 /// Access kernel log buffer (syslog)
-pub fn sys_syslog(_type: i32, _buf: *mut c_char, _len: usize) -> KResult<isize> {
+pub(crate) fn sys_syslog(_type: i32, _buf: *mut c_char, _len: usize) -> KResult<isize> {
     Ok(0)
 }
 
 /// Sets the hostname in the calling process's UTS namespace.
-pub fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
+pub(crate) fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
     if !kprocess::current_cred().is_privileged() {
         return Err(KError::OperationNotPermitted);
     }
@@ -159,7 +159,7 @@ pub fn sys_sethostname(name: UserConstPtr<u8>, len: usize) -> KResult<isize> {
 /// Other commands (`RESTART`, `RESTART2`, `KEXEC`) are rejected with
 /// `EINVAL`, since `reboot(2)` returns `EINVAL` — not `ENOSYS` — for an
 /// unsupported command.
-pub fn sys_reboot(
+pub(crate) fn sys_reboot(
     magic1: u32,
     magic2: u32,
     command: u32,
@@ -320,7 +320,7 @@ const SECCOMP_GET_NOTIF_SIZES: u32 = 3;
 /// `ENOSYS`, this kernel's unimplemented-feature policy. Flags and pointed-to
 /// arguments are not inspected, and no task state or user memory is changed.
 /// `op` and flags retain Linux's `unsigned int` ABI width at dispatch.
-pub fn sys_seccomp(op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
+pub(crate) fn sys_seccomp(op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     if !matches!(
         op,
         SECCOMP_SET_MODE_STRICT
@@ -333,7 +333,7 @@ pub fn sys_seccomp(op: u32, _flags: u32, _args: *const ()) -> KResult<isize> {
     Err(KError::from(kerrno::LinuxError::ENOSYS))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_seccomp {
     use kerrno::KError;
     use linux_raw_sys::prctl::{PR_GET_NO_NEW_PRIVS, PR_GET_SECCOMP};
@@ -384,7 +384,7 @@ mod tests_seccomp {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_sysinfo {
     use alloc::vec;
     use core::mem::{offset_of, size_of};

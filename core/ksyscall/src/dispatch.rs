@@ -78,6 +78,11 @@ fn sys_riscv_flush_icache(flags: usize) -> KResult<isize> {
 ///
 /// Handler access to missing current process/thread state or uninitialized
 /// providers can panic. Allocation failure follows kernel allocator policy.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: linear syscall dispatch table: one short match arm per \
+              syscall number, arms share no state"
+)]
 pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
         warn!("Invalid syscall number: {}", uctx.sysno());

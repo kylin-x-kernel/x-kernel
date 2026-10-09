@@ -48,14 +48,14 @@ static_lock! {
     static REE_FS_MUTEX: Mutex<()> = Mutex::new(());
 }
 
-pub const BLOCK_SHIFT: usize = 12;
-pub const BLOCK_SIZE: usize = 1 << BLOCK_SHIFT;
+pub(super) const BLOCK_SHIFT: usize = 12;
+pub(super) const BLOCK_SIZE: usize = 1 << BLOCK_SHIFT;
 
 /// REE filesystem file descriptor (htree + backing file).
 ///
 /// GP: `struct tee_fs_fd` / `tee_file_handle`
 #[derive(Debug, Default)]
-pub struct TeeFsFd {
+pub(super) struct TeeFsFd {
     pub ht: Box<TeeFsHtree>,
     pub fd: Box<FileVariant>,
     pub dfh: TeeFsDirfileFileh,
@@ -83,12 +83,12 @@ pub struct TeeFsFd {
 //
 // So we use TeeFsFdAux(with only member: fd: FileVariant) to store the file descriptor and the auxiliary struct data.
 #[derive(Debug, Default)]
-pub struct TeeFsFdAux {
+pub(super) struct TeeFsFdAux {
     pub fd: FileVariant,
 }
 
 impl TeeFsFdAux {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             fd: FileVariant::default(),
         }
@@ -97,7 +97,7 @@ impl TeeFsFdAux {
 
 #[repr(C)]
 #[derive(Default)]
-pub struct TeeFsDir {
+pub(super) struct TeeFsDir {
     /// Whether this dir iterator holds a reference on the global dirh.
     /// Replaces the former raw `*mut TeeFsDirfileDirh` pointer
     /// across process/thread boundaries.
@@ -111,7 +111,7 @@ fn pos_to_block_num(position: usize) -> usize {
     position >> BLOCK_SHIFT
 }
 
-pub fn get_tmp_block() -> Result<Box<[u8; BLOCK_SIZE]>, ()> {
+pub(super) fn get_tmp_block() -> Result<Box<[u8; BLOCK_SIZE]>, ()> {
     let mut vec = Vec::new();
     if vec.try_reserve_exact(BLOCK_SIZE).is_err() {
         return Err(());
@@ -122,7 +122,11 @@ pub fn get_tmp_block() -> Result<Box<[u8; BLOCK_SIZE]>, ()> {
 
 fn put_tmp_block(_block: Box<[u8; BLOCK_SIZE]>) {}
 
-pub fn get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResult<(usize, usize)> {
+pub(super) fn get_offs_size(
+    typ: TeeFsHtreeType,
+    idx: usize,
+    vers: u8,
+) -> TeeResult<(usize, usize)> {
     let node_size = size_of::<TeeFsHtreeNodeImage>();
     let block_nodes = BLOCK_SIZE / (node_size * 2);
 
@@ -216,7 +220,7 @@ pub fn get_offs_size(typ: TeeFsHtreeType, idx: usize, vers: u8) -> TeeResult<(us
 ///
 /// # Returns
 /// * `Ok(usize)` - number of bytes read
-pub fn tee_fs_rpc_read_final(
+pub(super) fn tee_fs_rpc_read_final(
     fd: &FileVariant,
     typ: TeeFsHtreeType,
     idx: usize,
@@ -261,7 +265,7 @@ pub fn tee_fs_rpc_read_final(
 ///
 /// # Returns
 /// * `Ok(usize)` - number of bytes written
-pub fn tee_fs_rpc_write_final(
+pub(super) fn tee_fs_rpc_write_final(
     fd: &FileVariant,
     typ: TeeFsHtreeType,
     idx: usize,
@@ -289,17 +293,17 @@ pub fn tee_fs_rpc_write_final(
 
 /// init for read rpc
 /// no need to do anything in starryos, because we use file operations to read data
-pub fn ree_fs_rpc_read_init() -> TeeResult {
+pub(super) fn ree_fs_rpc_read_init() -> TeeResult {
     Ok(())
 }
 
 /// init for write rpc
 /// no need to do anything in starryos, because we use file operations to write data
-pub fn ree_fs_rpc_write_init() -> TeeResult {
+pub(super) fn ree_fs_rpc_write_init() -> TeeResult {
     Ok(())
 }
 
-pub trait TeeFsHtreeStorageOps: Debug + Any + Send + Sync {
+pub(super) trait TeeFsHtreeStorageOps: Debug + Any + Send + Sync {
     fn block_size(&self) -> usize;
 
     fn rpc_read_init(&self) -> TeeResult;
@@ -373,7 +377,7 @@ impl TeeFsHtreeStorageOps for TeeFsFdAux {
 ///
 /// # Returns
 /// * `TeeResult<Box<TeeFsFd>>` - the file descriptor
-pub fn ree_fs_open_primitive(
+pub(super) fn ree_fs_open_primitive(
     uuid: Option<&TEE_UUID>,
     create: bool,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
@@ -514,7 +518,7 @@ fn out_of_place_write(
     Ok(())
 }
 
-pub fn ree_fs_read_primitive(
+pub(super) fn ree_fs_read_primitive(
     fh: &mut TeeFsFd,
     pos: usize,
     buf_core: &mut [u8],
@@ -600,7 +604,7 @@ pub fn ree_fs_read_primitive(
     Ok(())
 }
 
-pub fn ree_fs_ftruncate_internal(fdp: &mut TeeFsFd, new_file_len: usize) -> TeeResult {
+pub(super) fn ree_fs_ftruncate_internal(fdp: &mut TeeFsFd, new_file_len: usize) -> TeeResult {
     let meta_length = {
         let meta = tee_fs_htree_get_meta(&mut fdp.ht);
         meta.length
@@ -626,7 +630,7 @@ pub fn ree_fs_ftruncate_internal(fdp: &mut TeeFsFd, new_file_len: usize) -> TeeR
     Ok(())
 }
 
-pub fn ree_fs_write_primitive(
+pub(super) fn ree_fs_write_primitive(
     fdp: &mut TeeFsFd,
     pos: usize,
     buf_core: &[u8],
@@ -657,15 +661,15 @@ pub fn ree_fs_write_primitive(
     out_of_place_write(fdp, pos, buf_core, buf_user, len)
 }
 
-pub fn ree_fs_close_primitive(_fdp: &mut TeeFsFd) {
+pub(super) fn ree_fs_close_primitive(fdp: &mut TeeFsFd) {
     // Align with GP ree_fs_close_primitive():
     // close htree context then close underlying file descriptor.
-    let ht = core::mem::take(&mut _fdp.ht);
+    let ht = core::mem::take(&mut fdp.ht);
     let _ = tee_fs_htree_close(ht);
-    let _ = tee_fs_rpc_close(&_fdp.fd);
+    let _ = tee_fs_rpc_close(&fdp.fd);
 }
 
-pub fn ree_dirf_commit_writes(
+pub(super) fn ree_dirf_commit_writes(
     fh: &mut TeeFsFd,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
 ) -> TeeResult {
@@ -681,7 +685,7 @@ pub fn ree_dirf_commit_writes(
 /// Trait for file interface operations supplied by user of this interface
 ///
 /// tee_fs_dirfile_operations
-pub trait TeeFsDirfileOperations {
+pub(super) trait TeeFsDirfileOperations {
     /// Opens a file
     fn open(
         &self,
@@ -710,7 +714,7 @@ pub trait TeeFsDirfileOperations {
 
 /// Implementation of TeeFsDirfileOperations for REE file system
 #[derive(Copy, Clone, Debug, Default)]
-pub struct ReeDirfOps;
+pub(super) struct ReeDirfOps;
 
 impl TeeFsDirfileOperations for ReeDirfOps {
     fn open(
@@ -755,7 +759,7 @@ impl TeeFsDirfileOperations for ReeDirfOps {
 
 /// tee_file_operations is the operations of the TeePobj
 #[derive(Debug)]
-pub struct TeeFileOperations {
+pub(super) struct TeeFileOperations {
     pub name: &'static str,
 
     pub open: fn(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>>,
@@ -799,7 +803,7 @@ pub struct TeeFileOperations {
     pub echo: fn() -> String,
 }
 
-pub fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>> {
+pub(super) fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeFsFd>> {
     tee_debug!("ree_fs_open: po: {:?}", po);
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
@@ -832,7 +836,8 @@ pub fn ree_fs_open(po: &TeePobj, size: Option<&mut usize>) -> TeeResult<Box<TeeF
     };
 
     if ret.is_err() {
-        state.put_dirh_primitive(true).ok();
+        // Releasing the cached handle is best effort; preserve the open error.
+        let _ = state.put_dirh_primitive(true);
     }
     ret
 }
@@ -930,10 +935,12 @@ fn ree_fs_create(
     );
 
     if ret.is_err() {
-        state.put_dirh_primitive(true).ok();
+        // Releasing the cached handle is best effort; retain the operation result.
+        let _ = state.put_dirh_primitive(true);
         if let Some(ref mut fdp_val) = fdp {
             ree_fs_close_primitive(fdp_val);
-            tee_fs_rpc_remove_dfh(Some(&dfh)).ok();
+            // Removing the partial file must not replace the creation error.
+            let _ = tee_fs_rpc_remove_dfh(Some(&dfh));
         }
     }
     ret
@@ -999,12 +1006,13 @@ fn ree_fs_create_inner(
     fdp.take().ok_or(TEE_ERROR_GENERIC)
 }
 
-pub fn ree_fs_close(fh: &mut Option<Box<TeeFsFd>>) {
+pub(super) fn ree_fs_close(fh: &mut Option<Box<TeeFsFd>>) {
     if let Some(mut fdp) = fh.take() {
         let _global_lock = REE_FS_MUTEX.lock();
         {
             let mut state = REE_FS_STATE.lock();
-            state.put_dirh_primitive(false).ok();
+            // Close has no error channel and must still release the file handle below.
+            let _ = state.put_dirh_primitive(false);
         }
         // Avoid dropping file handles while REE_FS_STATE is held.
         // Drop path may touch global fd/VFS locks and can deadlock with
@@ -1013,7 +1021,7 @@ pub fn ree_fs_close(fh: &mut Option<Box<TeeFsFd>>) {
     }
 }
 
-pub fn ree_fs_read(
+pub(super) fn ree_fs_read(
     fh: &mut TeeFsFd,
     pos: usize,
     buf_core: &mut [u8],
@@ -1024,7 +1032,7 @@ pub fn ree_fs_read(
     ree_fs_read_primitive(fh, pos, buf_core, buf_user, len)
 }
 
-pub fn ree_fs_write(
+pub(super) fn ree_fs_write(
     fh: &mut TeeFsFd,
     pos: usize,
     buf_core: &[u8],
@@ -1055,11 +1063,12 @@ pub fn ree_fs_write(
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
-pub fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
+pub(super) fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
     state.get_dirh()?;
@@ -1075,11 +1084,12 @@ pub fn ree_fs_truncate(fh: &mut TeeFsFd, len: usize) -> TeeResult {
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
-pub fn ree_fs_rename(old: &TeePobj, new: &TeePobj, overwrite: bool) -> TeeResult {
+pub(super) fn ree_fs_rename(old: &TeePobj, new: &TeePobj, overwrite: bool) -> TeeResult {
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
     state.get_dirh()?;
@@ -1120,11 +1130,12 @@ pub fn ree_fs_rename(old: &TeePobj, new: &TeePobj, overwrite: bool) -> TeeResult
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
-pub fn ree_fs_remove(po: &TeePobj) -> TeeResult {
+pub(super) fn ree_fs_remove(po: &TeePobj) -> TeeResult {
     tee_debug!("ree_fs_remove: po: {:?}", po);
 
     let _global_lock = REE_FS_MUTEX.lock();
@@ -1144,7 +1155,8 @@ pub fn ree_fs_remove(po: &TeePobj) -> TeeResult {
         Ok(())
     })();
 
-    state.put_dirh_primitive(ret.is_err()).ok();
+    // Releasing the cached handle is best effort; retain the operation result.
+    let _ = state.put_dirh_primitive(ret.is_err());
     ret
 }
 
@@ -1154,7 +1166,7 @@ fn ree_fs_echo() -> alloc::string::String {
 }
 
 // global file_ops for REE FS, in starryos REE is  starryos self
-pub static REE_FS_OPS: TeeFileOperations = TeeFileOperations {
+pub(super) static REE_FS_OPS: TeeFileOperations = TeeFileOperations {
     name: "REE_FS_OPS",
     open: ree_fs_open,
     create: ree_fs_create,
@@ -1176,7 +1188,9 @@ pub static REE_FS_OPS: TeeFileOperations = TeeFileOperations {
 // RPMB.
 //
 // only support REE FS now
-pub fn tee_svc_storage_file_ops(storage_id: c_uint) -> TeeResult<&'static TeeFileOperations> {
+pub(super) fn tee_svc_storage_file_ops(
+    storage_id: c_uint,
+) -> TeeResult<&'static TeeFileOperations> {
     match storage_id {
         TEE_STORAGE_PRIVATE => Ok(&REE_FS_OPS),
         TEE_STORAGE_PRIVATE_REE => Ok(&REE_FS_OPS),
@@ -1219,7 +1233,7 @@ fn commit_dirh_writes(dirh: &mut TeeFsDirfileDirh) -> TeeResult {
 /// All callers obtain a `MutexGuard<ReeFsDirh>` and access the inner
 /// `TeeFsDirfileDirh` through safe `&mut` references — no raw pointers escape
 /// the lock scope.
-pub struct ReeFsDirh {
+pub(super) struct ReeFsDirh {
     /// Directory handle cache
     handle: Option<Box<TeeFsDirfileDirh>>,
     /// Reference count (for compatibility with the put_dirh semantic of the C version)
@@ -1233,7 +1247,7 @@ impl Default for ReeFsDirh {
 }
 
 impl ReeFsDirh {
-    pub const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             handle: None,
             refcount: 0,
@@ -1247,18 +1261,26 @@ impl ReeFsDirh {
     /// This two-step design avoids holding a mutable borrow on `self` across
     /// the entire operation, which would prevent calling `put_dirh_primitive`
     /// in error paths.
-    pub fn get_dirh(&mut self) -> TeeResult<()> {
+    pub(super) fn get_dirh(&mut self) -> TeeResult<()> {
         if self.handle.is_none() {
             let dirh = open_dirh()?;
             self.handle = Some(dirh);
         }
         self.refcount += 1;
 
-        tee_debug!(
-            "get_dirh: refcount: {:?}, h: {:p}",
-            self.refcount,
-            self.handle.as_ref().unwrap().as_ref() as *const _
-        );
+        #[allow(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the None branch installs the \
+                      directory handle or returns its open error; this debug macro can be \
+                      disabled by cfg"
+        )]
+        {
+            tee_debug!(
+                "get_dirh: refcount: {:?}, h: {:p}",
+                self.refcount,
+                self.handle.as_ref().unwrap().as_ref() as *const _
+            );
+        }
         Ok(())
     }
 
@@ -1266,7 +1288,12 @@ impl ReeFsDirh {
     ///
     /// # Panics
     /// Panics if `get_dirh()` has not been called successfully first.
-    pub fn dirh_mut(&mut self) -> &mut TeeFsDirfileDirh {
+    pub(super) fn dirh_mut(&mut self) -> &mut TeeFsDirfileDirh {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: dirh_mut requires a preceding \
+                      successful get_dirh that retains the cached handle"
+        )]
         self.handle.as_mut().expect("dirh not opened").as_mut()
     }
 
@@ -1274,7 +1301,7 @@ impl ReeFsDirh {
     ///
     /// If `close` is true or the reference count drops to zero, the cached
     /// handle is closed and freed.
-    pub fn put_dirh_primitive(&mut self, close: bool) -> TeeResult {
+    pub(super) fn put_dirh_primitive(&mut self, close: bool) -> TeeResult {
         if self.refcount == 0 {
             warn!("put_dirh_primitive: refcount already 0 (double free or logic error)");
             return Ok(());
@@ -1304,7 +1331,7 @@ impl Drop for ReeFsDirh {
     }
 }
 
-pub fn ree_fs_opendir_rpc(uuid: &TEE_UUID) -> TeeResult<Box<TeeFsDir>> {
+pub(super) fn ree_fs_opendir_rpc(uuid: &TEE_UUID) -> TeeResult<Box<TeeFsDir>> {
     let mut d = Box::new(TeeFsDir::default());
     d.uuid = *uuid;
 
@@ -1329,24 +1356,26 @@ pub fn ree_fs_opendir_rpc(uuid: &TEE_UUID) -> TeeResult<Box<TeeFsDir>> {
         }
         Err(e) => {
             d.has_dirh_ref = false;
-            state.put_dirh_primitive(false).ok();
+            // Releasing the cached handle is best effort; retain the operation result.
+            let _ = state.put_dirh_primitive(false);
             Err(e)
         }
     }
 }
 
-pub fn ree_fs_closedir_rpc(d: &mut TeeFsDir) -> TeeResult {
+pub(super) fn ree_fs_closedir_rpc(d: &mut TeeFsDir) -> TeeResult {
     if d.has_dirh_ref {
         let _global_lock = REE_FS_MUTEX.lock();
         let mut state = REE_FS_STATE.lock();
-        state.put_dirh_primitive(false).ok();
+        // The reference was consumed; preserve best-effort close without retrying it.
+        let _ = state.put_dirh_primitive(false);
         d.has_dirh_ref = false;
     }
 
     Ok(())
 }
 
-pub fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut TeeFsDirent) -> TeeResult {
+pub(super) fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut TeeFsDirent) -> TeeResult {
     let _global_lock = REE_FS_MUTEX.lock();
     let mut state = REE_FS_STATE.lock();
     // The dirh must have been acquired by opendir; access it through the lock.
@@ -1366,7 +1395,7 @@ pub fn ree_fs_readdir_rpc(d: &mut TeeFsDir, ent: &mut TeeFsDirent) -> TeeResult 
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_ree_fs {
+pub(super) mod tests_tee_ree_fs {
     use unittest::{assert, assert_eq};
 
     use super::*;

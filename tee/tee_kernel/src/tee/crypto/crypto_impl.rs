@@ -23,16 +23,16 @@ use crate::tee::{
 };
 
 /// GP: `crypto_ecc_keypair_ops_generate`
-pub trait CryptoEccKeypairOpsGenerate {
+pub(crate) trait CryptoEccKeypairOpsGenerate {
     fn generate(&mut self, key_size_bits: usize) -> TeeResult;
 }
 
-pub trait EccKeyPairCanGenerate {}
+pub(crate) trait EccKeyPairCanGenerate {}
 
-pub struct EccComKeyPair;
-pub struct Sm2PkeKeyPair;
-pub struct Sm2DsaKeyPair;
-pub struct Sm2KepKeyPair;
+pub(crate) struct EccComKeyPair;
+pub(crate) struct Sm2PkeKeyPair;
+pub(crate) struct Sm2DsaKeyPair;
+pub(crate) struct Sm2KepKeyPair;
 
 impl EccKeyPairCanGenerate for EccComKeyPair {}
 impl EccKeyPairCanGenerate for Sm2DsaKeyPair {}
@@ -40,13 +40,13 @@ impl EccKeyPairCanGenerate for Sm2KepKeyPair {}
 impl EccKeyPairCanGenerate for Sm2PkeKeyPair {}
 
 /// GP: `struct ecc_keypair` (typed ops context for key generation)
-pub struct EccKeypairOpsCtx<'a, A> {
+pub(crate) struct EccKeypairOpsCtx<'a, A> {
     pub inner: &'a mut EccKeypair,
     pub _marker: PhantomData<A>,
 }
 
 impl<'a, A> EccKeypairOpsCtx<'a, A> {
-    pub fn new(inner: &'a mut EccKeypair) -> Self {
+    pub(crate) fn new(inner: &'a mut EccKeypair) -> Self {
         Self {
             inner,
             _marker: PhantomData,
@@ -148,7 +148,7 @@ fn bn_from_bytes(bytes: &[u8]) -> TeeResult<BigNum> {
     BigNum::from_bytes(bytes)
 }
 
-pub fn crypto_acipher_gen_rsa_key(
+pub(crate) fn crypto_acipher_gen_rsa_key(
     key: &mut crate::tee::crypto::crypto::RsaKeypair,
     key_size: usize,
 ) -> TeeResult {
@@ -187,7 +187,7 @@ pub fn crypto_acipher_gen_rsa_key(
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_crypto_impl {
+pub(crate) mod tests_tee_crypto_impl {
     use unittest::assert;
 
     use super::*;

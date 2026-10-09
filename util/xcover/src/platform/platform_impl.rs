@@ -22,7 +22,7 @@ use core::{marker::PhantomData, ptr};
 
 use crate::abi::layout::{LlvmProfileData, ValueProfNode};
 
-pub struct SectionRange<T> {
+pub(crate) struct SectionRange<T> {
     begin: *const T,
     end: *const T,
     _marker: PhantomData<T>,
@@ -45,21 +45,21 @@ impl<T> SectionRange<T> {
         }
     }
 
-    pub fn begin(self) -> *const T {
+    pub(crate) fn begin(self) -> *const T {
         self.begin
     }
 
-    pub fn end(self) -> *const T {
+    pub(crate) fn end(self) -> *const T {
         self.end
     }
 
-    pub fn byte_len(self) -> usize {
+    pub(crate) fn byte_len(self) -> usize {
         (self.end as usize).saturating_sub(self.begin as usize)
     }
 }
 
 impl SectionRange<u8> {
-    pub fn as_slice(self) -> &'static [u8] {
+    pub(crate) fn as_slice(self) -> &'static [u8] {
         // SAFETY: profile sections are process-lifetime linker sections, and
         // this immutable view is bounded by the captured section range.
         unsafe { core::slice::from_raw_parts(self.begin, self.byte_len()) }
@@ -67,11 +67,11 @@ impl SectionRange<u8> {
 }
 
 impl SectionRange<LlvmProfileData> {
-    pub fn len(self) -> usize {
+    pub(crate) fn len(self) -> usize {
         self.byte_len() / core::mem::size_of::<LlvmProfileData>()
     }
 
-    pub fn as_slice(self) -> &'static [LlvmProfileData] {
+    pub(crate) fn as_slice(self) -> &'static [LlvmProfileData] {
         // SAFETY: the linker-provided profile-data section contains initialized
         // `LlvmProfileData` records for the process lifetime.
         unsafe { core::slice::from_raw_parts(self.begin, self.len()) }
@@ -79,7 +79,7 @@ impl SectionRange<LlvmProfileData> {
 }
 
 #[derive(Clone)]
-pub struct ProfileSections {
+pub(crate) struct ProfileSections {
     pub data: SectionRange<LlvmProfileData>,
     pub counters: SectionRange<u8>,
     pub bitmap: SectionRange<u8>,
@@ -122,34 +122,34 @@ mod imp {
     static VNODES_BUFFER: StaticBuffer<{ core::mem::size_of::<ValueProfNode>() }> =
         StaticBuffer::new();
 
-    pub fn begin_data() -> *const LlvmProfileData {
+    pub(super) fn begin_data() -> *const LlvmProfileData {
         DATA_BUFFER.as_mut_ptr().cast()
     }
-    pub fn end_data() -> *const LlvmProfileData {
+    pub(super) fn end_data() -> *const LlvmProfileData {
         DATA_BUFFER.as_mut_ptr().cast()
     }
-    pub fn begin_counters() -> *const u8 {
+    pub(super) fn begin_counters() -> *const u8 {
         COUNTERS_BUFFER.as_mut_ptr().cast()
     }
-    pub fn end_counters() -> *const u8 {
+    pub(super) fn end_counters() -> *const u8 {
         COUNTERS_BUFFER.as_mut_ptr().cast()
     }
-    pub fn begin_bitmap() -> *const u8 {
+    pub(super) fn begin_bitmap() -> *const u8 {
         BITMAP_BUFFER.as_mut_ptr().cast()
     }
-    pub fn end_bitmap() -> *const u8 {
+    pub(super) fn end_bitmap() -> *const u8 {
         BITMAP_BUFFER.as_mut_ptr().cast()
     }
-    pub fn begin_names() -> *const u8 {
+    pub(super) fn begin_names() -> *const u8 {
         NAMES_BUFFER.as_mut_ptr().cast()
     }
-    pub fn end_names() -> *const u8 {
+    pub(super) fn end_names() -> *const u8 {
         NAMES_BUFFER.as_mut_ptr().cast()
     }
-    pub fn begin_vnodes() -> *const ValueProfNode {
+    pub(super) fn begin_vnodes() -> *const ValueProfNode {
         VNODES_BUFFER.as_mut_ptr().cast()
     }
-    pub fn end_vnodes() -> *const ValueProfNode {
+    pub(super) fn end_vnodes() -> *const ValueProfNode {
         VNODES_BUFFER.as_mut_ptr().cast()
     }
 }
@@ -171,39 +171,39 @@ mod imp {
         static __stop___llvm_prf_vnds: ValueProfNode;
     }
 
-    pub fn begin_data() -> *const LlvmProfileData {
+    pub(super) fn begin_data() -> *const LlvmProfileData {
         ptr::addr_of!(__start___llvm_prf_data)
     }
-    pub fn end_data() -> *const LlvmProfileData {
+    pub(super) fn end_data() -> *const LlvmProfileData {
         ptr::addr_of!(__stop___llvm_prf_data)
     }
-    pub fn begin_counters() -> *const u8 {
+    pub(super) fn begin_counters() -> *const u8 {
         ptr::addr_of!(__start___llvm_prf_cnts)
     }
-    pub fn end_counters() -> *const u8 {
+    pub(super) fn end_counters() -> *const u8 {
         ptr::addr_of!(__stop___llvm_prf_cnts)
     }
-    pub fn begin_bitmap() -> *const u8 {
+    pub(super) fn begin_bitmap() -> *const u8 {
         ptr::addr_of!(__start___llvm_prf_bits)
     }
-    pub fn end_bitmap() -> *const u8 {
+    pub(super) fn end_bitmap() -> *const u8 {
         ptr::addr_of!(__stop___llvm_prf_bits)
     }
-    pub fn begin_names() -> *const u8 {
+    pub(super) fn begin_names() -> *const u8 {
         ptr::addr_of!(__start___llvm_prf_names)
     }
-    pub fn end_names() -> *const u8 {
+    pub(super) fn end_names() -> *const u8 {
         ptr::addr_of!(__stop___llvm_prf_names)
     }
-    pub fn begin_vnodes() -> *const ValueProfNode {
+    pub(super) fn begin_vnodes() -> *const ValueProfNode {
         ptr::addr_of!(__start___llvm_prf_vnds)
     }
-    pub fn end_vnodes() -> *const ValueProfNode {
+    pub(super) fn end_vnodes() -> *const ValueProfNode {
         ptr::addr_of!(__stop___llvm_prf_vnds)
     }
 }
 
-pub fn profile_sections() -> ProfileSections {
+pub(crate) fn profile_sections() -> ProfileSections {
     ProfileSections {
         data: SectionRange::new(imp::begin_data(), imp::end_data()),
         counters: SectionRange::new(imp::begin_counters(), imp::end_counters()),

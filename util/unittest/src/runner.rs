@@ -18,7 +18,6 @@ use crate::test_framework::{
 };
 
 // External symbols defined in the linker script
-#[allow(improper_ctypes)]
 unsafe extern "C" {
     static __unittest_start: u8;
     static __unittest_end: u8;

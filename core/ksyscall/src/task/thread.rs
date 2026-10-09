@@ -35,7 +35,7 @@ enum ArchPrctlCode {
 /// Architecture-specific operations (x86_64 only)
 /// Supports FS/GS segment base operations and CPUID control
 #[cfg(target_arch = "x86_64")]
-pub fn sys_arch_prctl(
+pub(crate) fn sys_arch_prctl(
     uctx: &mut khal::uspace::UserContext,
     code: i32,
     addr: usize,
@@ -70,12 +70,12 @@ pub fn sys_arch_prctl(
 }
 
 /// Returns the thread ID of the current thread.
-pub fn sys_gettid() -> KResult<isize> {
+pub(crate) fn sys_gettid() -> KResult<isize> {
     Ok(kprocess::current_user_tid() as _)
 }
 
 /// Sets the `clear_child_tid` pointer for the current thread.
-pub fn sys_set_tid_address(clear_child_tid: usize) -> KResult<isize> {
+pub(crate) fn sys_set_tid_address(clear_child_tid: usize) -> KResult<isize> {
     let current_thread = kprocess::current_user_thread();
     current_thread.set_clear_child_tid(clear_child_tid);
     Ok(kprocess::current_user_tid() as isize)

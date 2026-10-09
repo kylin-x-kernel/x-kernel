@@ -29,3 +29,6 @@ raw-cpuid = "11.5"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-none"]
+
+[lints]
+workspace = true

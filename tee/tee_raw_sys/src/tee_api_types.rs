@@ -13,7 +13,6 @@ use core::{ffi::*, fmt, fmt::Debug};
 use super::TEE_ATTR_FLAG_VALUE;
 use crate::libc_compat::size_t;
 
-#[allow(non_camel_case_types)]
 pub type TEE_Result = u32;
 
 #[repr(C)]
@@ -67,40 +66,34 @@ pub union TEE_Param {
 pub struct __TEE_TASessionHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_TASessionHandle = *mut __TEE_TASessionHandle;
 
 #[repr(C)]
 pub struct __TEE_PropSetHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_PropSetHandle = *mut __TEE_PropSetHandle;
 
 #[repr(C)]
 pub struct __TEE_ObjectHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_ObjectHandle = *mut __TEE_ObjectHandle;
 
 #[repr(C)]
 pub struct __TEE_ObjectEnumHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_ObjectEnumHandle = *mut __TEE_ObjectEnumHandle;
 
 #[repr(C)]
 pub struct __TEE_OperationHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_OperationHandle = *mut __TEE_OperationHandle;
 
 // Storage Definitions
 
-#[allow(non_camel_case_types)]
 pub type TEE_ObjectType = u32;
 
 #[repr(C)]
@@ -234,11 +227,8 @@ pub struct TeeTime {
 
 // TEE Arithmetical APIs
 
-#[allow(non_camel_case_types)]
 pub type TEE_BigInt = u32;
-#[allow(non_camel_case_types)]
 pub type TEE_BigIntFMM = u32;
-#[allow(non_camel_case_types)]
 pub type TEE_BigIntFMMContext = u32;
 
 // Tee Secure Element APIs
@@ -247,25 +237,21 @@ pub type TEE_BigIntFMMContext = u32;
 pub struct __TEE_SEServiceHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_SEServiceHandle = *mut __TEE_SEServiceHandle;
 #[repr(C)]
 pub struct __TEE_SEReaderHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_SEReaderHandle = *mut __TEE_SEReaderHandle;
 #[repr(C)]
 pub struct __TEE_SESessionHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_SESessionHandle = *mut __TEE_SESessionHandle;
 #[repr(C)]
 pub struct __TEE_SEChannelHandle {
     _unused: [u8; 0],
 }
-#[allow(non_camel_case_types)]
 pub type TEE_SEChannelHandle = *mut __TEE_SEChannelHandle;
 
 #[repr(C)]
@@ -282,9 +268,7 @@ pub struct TEE_SEAID {
 }
 
 // Other definitions
-#[allow(non_camel_case_types)]
 pub type TEE_ErrorOrigin = u32;
-#[allow(non_camel_case_types)]
 pub type TEE_Session = *mut c_void;
 
 pub const TEE_MEM_INPUT: u32 = 0x00000001;

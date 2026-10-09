@@ -27,12 +27,12 @@ const VIRTIO_MMIO_DT_COMPATIBLE: &str = "virtio,mmio";
 
 /// Unified platform bus backend covering both firmware-described and
 /// compile-time-known devices.
-pub struct PlatformBackend {
+pub(crate) struct PlatformBackend {
     id_alloc: LocalIdAlloc,
 }
 
 impl PlatformBackend {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             id_alloc: LocalIdAlloc::new(),
         }
@@ -113,10 +113,15 @@ impl PlatformBackend {
                         }
                     }
                 } else {
+                    let id = match self.id_alloc.alloc() {
+                        Ok(id) => id,
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                            return;
+                        }
+                    };
                     Some((
-                        DeviceLocation::FirmwareNode {
-                            id: self.id_alloc.alloc(),
-                        },
+                        DeviceLocation::FirmwareNode { id },
                         DeviceIdentity::Platform(PlatformIdentity {
                             alias: None,
                             firmware_id: Some(dev.firmware_id),
@@ -227,9 +232,23 @@ impl PlatformBackend {
     /// `context` and `bus_id` are consumed only inside the per-device `#[cfg]`
     /// blocks below, so a configuration that compiles in no platform-static
     /// device leaves both unused. The names are kept non-underscored because
-    /// they are genuine inputs; `#[allow(unused_variables)]` covers the empty
-    /// configuration (same convention as `virtio::activate_virtio_device`).
-    #[allow(unused_variables)]
+    /// they are genuine inputs; the allowance below covers configurations
+    /// without a matching static device, as in `virtio::activate_virtio_device`.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Static enumeration inputs are used only when a matching \
+                  platform driver feature is enabled"
+    )]
+    #[allow(
+        unused_variables,
+        reason = "CG-024-lint-exceptions: unused_variables: Static enumeration inputs are used \
+                  only when a matching platform driver feature is enabled"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: TODO(cg): legacy static platform enumeration; split \
+                  per device class"
+    )]
     fn enumerate_static(
         &mut self,
         context: &mut EnumerationContext,
@@ -246,7 +265,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -267,7 +286,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -296,7 +315,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -322,7 +341,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {
@@ -348,7 +367,7 @@ impl PlatformBackend {
             context.register_device(
                 bus_id,
                 DeviceLocation::PlatformStatic {
-                    id: self.id_alloc.alloc(),
+                    id: self.id_alloc.alloc()?,
                 },
                 DiscoveryOrigin::PlatformStatic,
                 DeviceIdentity::Platform(PlatformIdentity {

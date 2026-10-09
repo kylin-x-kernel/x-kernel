@@ -23,6 +23,13 @@ pub(crate) fn current_base() -> usize {
 }
 
 /// Installs `value` as this CPU's per-CPU area base.
+///
+/// # Safety
+///
+/// Call during setup of the current CPU with interrupts and migration
+/// prevented and exclusive ownership of its per-CPU area. `value` must
+/// identify that CPU's initialized per-CPU allocation, which must remain
+/// mapped and live for all subsequent slot accesses.
 #[cfg(not(test))]
 #[inline]
 pub(crate) unsafe fn set_current_base(value: usize) {

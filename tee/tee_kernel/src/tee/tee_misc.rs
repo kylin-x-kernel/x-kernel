@@ -6,7 +6,7 @@
 use hex::{decode_to_slice, encode_to_slice};
 
 #[cfg(unittest)]
-pub const fn tee_b2hs_hsbuf_size(x: usize) -> usize {
+pub(super) const fn tee_b2hs_hsbuf_size(x: usize) -> usize {
     x.saturating_mul(2).saturating_add(1)
 }
 
@@ -14,7 +14,7 @@ pub const fn tee_b2hs_hsbuf_size(x: usize) -> usize {
 ///
 /// 返回写入的长度（不包含末尾 0）
 #[cfg(unittest)]
-pub fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
+pub(super) fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
     let expected_len = b.len() * 2;
 
     if hs.len() < expected_len + 1 {
@@ -37,7 +37,7 @@ pub fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
 ///
 /// 返回写入的字节数
 #[cfg(unittest)]
-pub fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
+pub(super) fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
     let hslen = hs.len();
     if !hslen.is_multiple_of(2) {
         return Err(()); // 长度必须是偶数
@@ -53,7 +53,7 @@ pub fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_misc {
+pub(super) mod tests_tee_misc {
     use unittest::{assert, assert_eq};
 
     use super::*;

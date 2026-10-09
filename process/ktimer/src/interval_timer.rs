@@ -52,6 +52,11 @@ impl TimerInstant {
             (Self::ProcessCpu(now), Self::ProcessCpu(earlier)) => {
                 now.saturating_duration_since(earlier)
             }
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: Callers compare instants read \
+                          from the same timer's clock, so both sides share one clock domain"
+            )]
             (now, earlier) => {
                 panic!("timer instant clock-domain mismatch: {now:?} vs {earlier:?}")
             }
@@ -142,7 +147,7 @@ impl ITimer {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ksignal::Signo;
     use ktime_types::{ProcessCpuInstant, TimeSpan};

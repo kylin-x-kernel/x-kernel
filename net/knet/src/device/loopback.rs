@@ -6,7 +6,7 @@
 use alloc::string::String;
 
 use ::core::task::Waker;
-use kerrno::LinuxError;
+use kerrno::{KResult, LinuxError};
 use kpoll::{PollContext, PollRegisterError};
 use ksync::Mutex;
 use ktime_types::MonotonicInstant;
@@ -41,7 +41,7 @@ use crate::{
 /// Complete IPv4 UDP datagrams are delivered from `NetRx` (Linux
 /// `loopback_xmit` → `__netif_rx` → `NET_RX_SOFTIRQ`). TCP, ICMP, IPv6,
 /// fragments, and unmatched UDP stay on the deferred queue for the task poller.
-pub struct LoopbackDevice {
+pub(crate) struct LoopbackDevice {
     name: String,
     flags: u32,
     mtu: usize,
@@ -57,7 +57,7 @@ pub struct LoopbackDevice {
 
 impl LoopbackDevice {
     /// Create a new loopback device.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let _ = super::ethernet::ensure_net_rx_softirq_available();
         Self {
             name: String::from("lo"),
@@ -116,10 +116,14 @@ impl NetDevice for LoopbackDevice {
         }
     }
 
-    fn poll_rx(&mut self, ifindex: i32, _timestamp: MonotonicInstant) -> Option<PacketBuf> {
+    fn poll_rx(
+        &mut self,
+        ifindex: i32,
+        _timestamp: MonotonicInstant,
+    ) -> KResult<Option<PacketBuf>> {
         self.rx_ifindex = Some(ifindex);
         if !self.is_link_up() {
-            return None;
+            return Ok(None);
         }
         // Task-context fallback when NetRx did not run (unit tests, or the
         // vector is owned by another action). Stamped UDP is consumed first.
@@ -128,7 +132,7 @@ impl NetDevice for LoopbackDevice {
         // next round continues draining remaining work. Retrying here would make
         // device polling unbounded while producers keep enqueueing packets.
         net_rx::drain_pending();
-        net_rx::pop_deferred(ifindex)
+        Ok(net_rx::pop_deferred(ifindex))
     }
 
     fn has_rx_work(&self) -> bool {
@@ -246,7 +250,7 @@ impl NetDevice for LoopbackDevice {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

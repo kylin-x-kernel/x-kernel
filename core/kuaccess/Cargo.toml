@@ -26,3 +26,6 @@ memspace.workspace = true
 osvm.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
+
+[lints]
+workspace = true

@@ -1032,17 +1032,26 @@ struct TaskStack {
 }
 
 impl TaskStack {
-    pub fn alloc(size: usize) -> Self {
+    pub(crate) fn alloc(size: usize) -> Self {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: kernel task constructors supply \
+                      page-aligned stack sizes within the kernel address space; alignment 16 is \
+                      valid"
+        )]
         let layout = Layout::from_size_align(size, 16).unwrap();
-        Self {
-            // SAFETY: `layout` is validated above and the returned allocation
-            // is owned exclusively by this `TaskStack`.
-            ptr: NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap(),
-            layout,
-        }
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the kernel GlobalAllocator calls \
+                      handle_alloc_error on allocation failure and never returns null"
+        )]
+        // SAFETY: `layout` is validated above and the returned allocation
+        // is owned exclusively by this `TaskStack`.
+        let ptr = NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap();
+        Self { ptr, layout }
     }
 
-    pub fn top(&self) -> VirtAddr {
+    pub(crate) fn top(&self) -> VirtAddr {
         // SAFETY: adding `layout.size()` to the base allocation pointer yields
         // the one-past-the-end stack-top address represented as `VirtAddr`.
         VirtAddr::from(self.ptr.as_ptr().wrapping_add(self.layout.size()) as usize)
@@ -1080,7 +1089,11 @@ impl CurrentTask {
     }
 
     /// Clone the inner `KtaskRef`.
-    #[allow(clippy::should_implement_trait)]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "CG-024-lint-exceptions: clippy::should_implement_trait: This clone returns a \
+                  KtaskRef rather than duplicating the current-task wrapper"
+    )]
     pub fn clone(&self) -> KtaskRef {
         self.0.deref().clone()
     }
@@ -1090,6 +1103,12 @@ impl CurrentTask {
         Arc::ptr_eq(&self.0, other)
     }
 
+    /// # Safety
+    ///
+    /// Call once during this CPU's scheduler initialization, with its per-CPU
+    /// area installed and no current task yet. Exclude interrupts and migration
+    /// until publication completes; `init_task` must be this CPU's initial task
+    /// with its TLS initialized when enabled.
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
         #[cfg(all(feature = "tls", target_os = "none"))]
@@ -1106,6 +1125,13 @@ impl CurrentTask {
         }
     }
 
+    /// # Safety
+    ///
+    /// `prev` must represent this CPU's owning current-task reference, consumed
+    /// exactly once. Exclude interrupts, migration, and observers of the slot
+    /// during replacement. Keep another strong reference to the previous task
+    /// until its stack and context are no longer in use, and coordinate this
+    /// publication with the context switch to `next`.
     pub(crate) unsafe fn set_current(prev: Self, next: KtaskRef) {
         let Self(arc) = prev;
         ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.

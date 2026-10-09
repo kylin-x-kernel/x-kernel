@@ -66,8 +66,10 @@ run their close callbacks under the table lock.
 
 ## Metadata conversion
 
-`From<kvfs::Metadata>` populates `Kstat`; conversion to Linux ABI values starts
-with a zero value then assigns fields. Time values become seconds/nanoseconds;
+`From<kvfs::Metadata>` populates `Kstat`; conversion to Linux `stat` starts
+with a zero value then assigns fields; `statx` uses a safe struct literal with
+explicit zeros for reserved and unsupported fields. Time values become
+seconds/nanoseconds;
 `statx` sets `stx_mask` to `STATX_BASIC_STATS` for the basic fields populated by
 every conversion, splits device major/minor, and additionally advertises
 4096-byte atomic-write units for regular-file modes. Numeric casts follow

@@ -23,3 +23,6 @@ klazy.workspace = true
 linux-raw-sys = { workspace = true, default-features = false, features = ["general", "no_std"] }
 posix-types.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

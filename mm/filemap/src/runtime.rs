@@ -205,8 +205,7 @@ pub fn new_file_private_vma(
     file_end: Option<u64>,
     flags: MappingFlags,
 ) -> KResult<(VmArea, VmRuntimeRef)> {
-    let runtime = new_private_runtime(start, len, page_size, file.clone(), offset, file_end, None)
-        .expect("cached private file source must build runtime");
+    let runtime = new_private_runtime(start, len, page_size, file.clone(), offset, file_end, None)?;
     let vma = build_file_vma(
         FileVmaSpec {
             start,
@@ -227,7 +226,7 @@ pub fn new_file_private_vma(
     Ok((vma, runtime))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

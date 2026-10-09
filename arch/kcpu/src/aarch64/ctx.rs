@@ -279,6 +279,13 @@ impl TaskContext {
     }
 }
 
+/// # Safety
+///
+/// The scheduler must exclude interrupts and concurrent execution of either
+/// context. The next context must contain a valid, aligned kernel stack and
+/// resume address established by `TaskContext::init` or an earlier switch.
+/// Keep both contexts and stacks live until their saved continuations finish;
+/// TLS, FP state and address-space state must already match the next task.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(
@@ -307,6 +314,11 @@ unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task:
     )
 }
 
+/// # Safety
+///
+/// FP/SIMD access must be enabled on this CPU. Prevent task switches while
+/// saving so all registers belong to the same task; `state` is exclusively
+/// borrowed for the assembly writes.
 #[unsafe(naked)]
 #[cfg(feature = "fp-simd")]
 unsafe extern "C" fn fpstate_save(state: &mut FpState) {
@@ -339,6 +351,11 @@ unsafe extern "C" fn fpstate_save(state: &mut FpState) {
     )
 }
 
+/// # Safety
+///
+/// FP/SIMD access must be enabled on this CPU, and `state` must contain
+/// valid saved or initial FP register values. Prevent task switches and
+/// ensure no live kernel FP/SIMD values depend on the registers replaced.
 #[unsafe(naked)]
 #[cfg(feature = "fp-simd")]
 unsafe extern "C" fn fpstate_restore(state: &FpState) {

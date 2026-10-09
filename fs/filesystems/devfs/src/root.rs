@@ -8,7 +8,7 @@ use kvfs::{DirMaker, DirMapping, SimpleDir, SimpleFs};
 
 use crate::{dynamic, nodes};
 
-pub fn builder(fs: Arc<SimpleFs>) -> DirMaker {
+pub(crate) fn builder(fs: Arc<SimpleFs>) -> DirMaker {
     dynamic::initialize(fs.clone());
     let mut root = DirMapping::new();
 

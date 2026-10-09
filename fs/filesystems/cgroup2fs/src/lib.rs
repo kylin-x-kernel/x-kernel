@@ -23,7 +23,7 @@ mod state;
 
 pub use mount::{FILE_SYSTEM_TYPE, new_cgroup2fs, new_initial_cgroup2fs};
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

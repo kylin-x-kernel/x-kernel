@@ -134,7 +134,7 @@ impl BlockDeviceOperations for RamDisk {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_ramdisk_static {
     use unittest::def_test;
 

@@ -357,7 +357,16 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop for PageTabl
             M::flush_tlb_process_asid(None, asid);
         }
         let root = self.table_of(self.root_paddr);
-        #[allow(unused_variables)]
+        #[expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: The root-entry index is used only with the \
+                      copy-from feature"
+        )]
+        #[allow(
+            unused_variables,
+            reason = "CG-024-lint-exceptions: unused_variables: The root-entry index is used only \
+                      with the copy-from feature"
+        )]
         for (i, entry) in root.iter().enumerate() {
             #[cfg(feature = "copy-from")]
             if self.borrowed_entries.get(i) {
@@ -1030,7 +1039,7 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> Drop
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     use core::ptr::NonNull;
@@ -1179,6 +1188,12 @@ mod tests {
     /// `TestMeta::flush_tlb_process_mask`, which has no access to the test
     /// instance) makes each parallel test case self-contained: the counter
     /// lives on the test-owned `ProviderCtx`, not a shared module static.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must point to the initialized, aligned `ProviderCtx` registered
+    /// by the test. The test must keep it alive for every provider invocation;
+    /// concurrent reads and updates must use its atomic fields.
     #[cfg(all(feature = "smp", not(target_arch = "aarch64")))]
     unsafe fn test_user_cpu_mask_provider(ctx: NonNull<()>) -> KCpuMask {
         // SAFETY: the caller (PageTable64::set_user_cpu_mask_provider) upholds
@@ -1233,7 +1248,7 @@ mod tests {
             // SAFETY: Unit tests allocate each frame at most once by advancing
             // `NEXT_FRAME`. `FramePool` is 4K-aligned and each slot is exactly
             // one page, so the returned address satisfies `PagingHandler`.
-            let ptr = unsafe { (*FRAME_POOL.0.get()).as_mut_ptr().add(index) };
+            let ptr = unsafe { FRAME_POOL.0.get().cast::<TestFrame>().add(index) };
             Some(PhysAddr::from(ptr as usize))
         }
 

@@ -387,7 +387,22 @@ impl IrqDescRuntimeState {
         self.teardown_depth != 0
     }
 
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: MSI teardown queries are used only by the x86 MSI \
+                      backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        allow(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: MSI teardown queries are used only by \
+                      the x86 MSI backend"
+        )
+    )]
     const fn is_msi(&self) -> bool {
         self.is_msi
     }
@@ -520,7 +535,22 @@ impl IrqStateDesc {
         self.runtime.is_teardown_in_progress()
     }
 
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: MSI teardown queries are used only by the x86 MSI \
+                      backend"
+        )
+    )]
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        allow(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: MSI teardown queries are used only by \
+                      the x86 MSI backend"
+        )
+    )]
     pub(super) fn is_msi(&self) -> bool {
         self.runtime.is_msi()
     }

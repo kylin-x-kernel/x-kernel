@@ -11,13 +11,13 @@
 use crate::{config::BacktraceConfig, error::Result, frame::Frame};
 
 /// Stack unwinder.
-pub struct Unwinder<'a> {
+pub(crate) struct Unwinder<'a> {
     config: &'a BacktraceConfig,
 }
 
 impl<'a> Unwinder<'a> {
     /// Create a new unwinder with the given configuration.
-    pub const fn new(config: &'a BacktraceConfig) -> Self {
+    pub(crate) const fn new(config: &'a BacktraceConfig) -> Self {
         Self { config }
     }
 
@@ -26,7 +26,7 @@ impl<'a> Unwinder<'a> {
     /// Returns the number of frames written. The unwind stops at the first
     /// invalid frame, on a detected cycle, or when `out` is full; the
     /// configured max depth also caps the walk.
-    pub fn unwind(&self, mut fp: usize, out: &mut [Frame]) -> usize {
+    pub(crate) fn unwind(&self, mut fp: usize, out: &mut [Frame]) -> usize {
         // Validate initial frame pointer
         if !self.config.validate_fp(fp) {
             return 0;

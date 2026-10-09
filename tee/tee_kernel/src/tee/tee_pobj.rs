@@ -35,7 +35,7 @@ pub(crate) struct ObjId {
 
 #[repr(C)]
 /// GP: `struct tee_pobj`
-pub struct TeePobj {
+pub(super) struct TeePobj {
     pub refcnt: AtomicU32,
     pub uuid: TEE_UUID,
     pub obj_id: Mutex<ObjId>,
@@ -96,7 +96,7 @@ impl TeePobj {
     /// * `obj_id` - The object ID
     /// * `obj_id_len` - The actual length of the object ID
     /// * `fops` - The reference to the TeeFileOperations struct
-    pub fn matches(
+    pub(super) fn matches(
         &self,
         uuid: &TEE_UUID,
         obj_id: &[u8],
@@ -133,13 +133,13 @@ impl TeePobj {
 
 /// GP: `struct tee_pobjs`
 #[derive(Debug)]
-pub struct TeePobjs {
+pub(super) struct TeePobjs {
     inner: Mutex<VecDeque<Arc<TeePobj>>>,
 }
 
 impl TeePobjs {
     /// Create a new TeePobjs
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         TeePobjs {
             inner: Mutex::new(VecDeque::new()),
         }
@@ -152,7 +152,7 @@ impl TeePobjs {
     /// * `obj_id` - The object ID
     /// * `obj_id_len` - The actual length of the object ID
     /// * `fops` - The reference to the TeeFileOperations struct
-    pub fn find_pobj(
+    pub(super) fn find_pobj(
         &self,
         uuid: &TEE_UUID,
         obj_id: &[u8],
@@ -169,7 +169,7 @@ impl TeePobjs {
 
 /// GP: `tee_pobj_usage`
 #[derive(PartialEq, Debug)]
-pub enum TeePobjUsage {
+pub(super) enum TeePobjUsage {
     /// GP: `TEE_POBJ_USAGE_OPEN`
     Open      = 0,
     /// GP: `TEE_POBJ_USAGE_RENAME`
@@ -193,7 +193,7 @@ fn pobj_need_usage_lock(flags: u32) -> bool {
 /// # Arguments
 /// * `obj` - The TeePobj
 /// * `f` - The function to execute
-pub fn with_pobj_usage_lock<R, F>(flags: u32, f: F) -> R
+pub(super) fn with_pobj_usage_lock<R, F>(flags: u32, f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -265,7 +265,7 @@ fn tee_pobj_check_access(oflags: u32, nflags: u32) -> TeeResult {
 ///
 /// # Returns
 /// * The TeePobj, can safe shared reference
-pub fn tee_pobj_get(
+pub(super) fn tee_pobj_get(
     uuid: &TEE_UUID,
     obj_id: &[u8],
     obj_id_len: u32,
@@ -324,7 +324,7 @@ pub fn tee_pobj_get(
     Ok(pobj)
 }
 
-pub fn tee_pobj_create_final(po: &TeePobj) {
+pub(super) fn tee_pobj_create_final(po: &TeePobj) {
     let _guard = POBJS_MUTEX.lock();
     po.temporary.store(false, Ordering::Relaxed);
     po.creating.store(false, Ordering::Relaxed);
@@ -338,7 +338,7 @@ pub fn tee_pobj_create_final(po: &TeePobj) {
 /// * `obj` - The TeePobj
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_pobj_release(obj: Arc<TeePobj>) -> TeeResult {
+pub(super) fn tee_pobj_release(obj: Arc<TeePobj>) -> TeeResult {
     let _guard = POBJS_MUTEX.lock();
     let prev = obj.refcnt.fetch_sub(1, Ordering::Relaxed);
     if prev == 0 {
@@ -368,7 +368,7 @@ pub fn tee_pobj_release(obj: Arc<TeePobj>) -> TeeResult {
 /// * `obj_id_len` - The actual length of the new object ID
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_pobj_rename(obj: &TeePobj, obj_id: &[u8], obj_id_len: u32) -> TeeResult {
+pub(super) fn tee_pobj_rename(obj: &TeePobj, obj_id: &[u8], obj_id_len: u32) -> TeeResult {
     let _guard = POBJS_MUTEX.lock();
 
     let refcnt = obj.refcnt.load(Ordering::Relaxed);

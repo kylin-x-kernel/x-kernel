@@ -9,3 +9,6 @@ description = "Versioned metadata ABI for X-Kernel ELF images"
 kernel = []
 
 [dependencies]
+
+[lints]
+workspace = true

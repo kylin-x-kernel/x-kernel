@@ -397,10 +397,10 @@ impl Process {
 
     pub(super) fn discard_prepared_locked(
         &self,
-        _domain: &process_domain::ProcessDomainWriteGuard<'_>,
+        domain: &process_domain::ProcessDomainWriteGuard<'_>,
     ) {
         self.parent_relation.clear_reserved_slots();
-        self.retire_group_membership_locked(_domain);
+        self.retire_group_membership_locked(domain);
     }
 
     pub(super) fn attach_to_parent_slot_locked(

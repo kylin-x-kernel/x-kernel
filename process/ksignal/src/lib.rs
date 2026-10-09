@@ -21,7 +21,7 @@
 //! - `register_signal_observer` — kernel-side dequeue policy hooks.
 //!
 //! Syscall ABI decoding, permission checks, and the user-loop that turns
-//! [`SignalOSAction`] into process teardown belong to `ksyscall` and the
+//! [`SignalOsAction`] into process teardown belong to `ksyscall` and the
 //! posix process runtime.
 #![no_std]
 

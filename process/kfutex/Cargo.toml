@@ -20,3 +20,6 @@ kuaccess.workspace = true
 linux-raw-sys = { workspace = true, default-features = false, features = ["no_std", "general"] }
 memspace.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

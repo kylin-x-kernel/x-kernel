@@ -285,7 +285,7 @@ impl<H: Hal + Send, T: Transport + Send> IrqHandler for VirtIoRngDev<H, T> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
     use core::{
@@ -380,36 +380,49 @@ mod tests {
     unsafe fn finish(queue: &MockQueue, len: u32, is_wrong_token: bool) {
         core::assert_eq!(queue.size, 8);
         core::assert_ne!(queue.descriptors, 0);
-        // SAFETY: the caller retains the published queue and outstanding Box. Ring
-        // slots are bounded by depth. Writes are bounded by the descriptor, even
-        // when testing a dishonest reported length. No CPU reader runs concurrently.
-        unsafe {
-            let available = queue.available as *const u16;
-            let index = available.add(1).read_volatile().wrapping_sub(1);
-            let token = available
-                .add(2 + usize::from(index) % queue.size)
-                .read_volatile();
-            core::assert!(usize::from(token) < queue.size);
-            let descriptor = (queue.descriptors as *const u8).add(usize::from(token) * 16);
-            let address = descriptor.cast::<u64>().read_volatile() as *mut u8;
-            let capacity = descriptor.add(8).cast::<u32>().read_volatile();
-            core::assert_eq!(capacity as usize, MAX_REQUEST_BYTES);
-            core::assert_eq!(descriptor.add(12).cast::<u16>().read_volatile(), 2);
-            for offset in 0..len.min(capacity) as usize {
-                address.add(offset).write_volatile(offset as u8);
-            }
-            let used = queue.used as *mut u8;
-            let used_index = used.add(2).cast::<u16>().read_volatile();
-            let slot = used
-                .add(4 + usize::from(used_index) % queue.size * 8)
-                .cast::<u32>();
-            slot.write_volatile(u32::from(token) + u32::from(is_wrong_token));
-            slot.add(1).write_volatile(len);
-            core::sync::atomic::fence(Ordering::Release);
-            used.add(2)
-                .cast::<u16>()
-                .write_volatile(used_index.wrapping_add(1));
+        // The caller retains the published queue and outstanding Box. Ring slots
+        // are bounded by depth. Writes are bounded by the descriptor, even when
+        // testing a dishonest reported length. No CPU reader runs concurrently.
+        let available = queue.available as *const u16;
+        // SAFETY: the live available ring's `idx` is the aligned u16 at index 1.
+        let index = unsafe { available.wrapping_add(1).read_volatile() }.wrapping_sub(1);
+        // SAFETY: `index % size` selects an aligned u16 entry of the live ring.
+        let token = unsafe {
+            available
+                .wrapping_add(2 + usize::from(index) % queue.size)
+                .read_volatile()
+        };
+        core::assert!(usize::from(token) < queue.size);
+        let descriptor = (queue.descriptors as *const u8).wrapping_add(usize::from(token) * 16);
+        // SAFETY: `token` is bounded by depth; offset 0 is the descriptor's aligned u64 address.
+        let address = unsafe { descriptor.cast::<u64>().read_volatile() } as *mut u8;
+        // SAFETY: offset 8 of the same live descriptor is its aligned u32 length.
+        let capacity = unsafe { descriptor.wrapping_add(8).cast::<u32>().read_volatile() };
+        core::assert_eq!(capacity as usize, MAX_REQUEST_BYTES);
+        // SAFETY: offset 12 of the same live descriptor is its aligned u16 flags.
+        let flags = unsafe { descriptor.wrapping_add(12).cast::<u16>().read_volatile() };
+        core::assert_eq!(flags, 2);
+        for offset in 0..len.min(capacity) as usize {
+            // SAFETY: `offset` is below the descriptor capacity of the retained Box.
+            unsafe { address.wrapping_add(offset).write_volatile(offset as u8) };
         }
+        let used = queue.used as *mut u8;
+        // SAFETY: offset 2 of the live used ring is its aligned u16 `idx`.
+        let used_index = unsafe { used.wrapping_add(2).cast::<u16>().read_volatile() };
+        let slot = used
+            .wrapping_add(4 + usize::from(used_index) % queue.size * 8)
+            .cast::<u32>();
+        // SAFETY: `slot` is the aligned id field of a used element bounded by depth.
+        unsafe { slot.write_volatile(u32::from(token) + u32::from(is_wrong_token)) };
+        // SAFETY: the length field directly follows the id in the same used element.
+        unsafe { slot.wrapping_add(1).write_volatile(len) };
+        core::sync::atomic::fence(Ordering::Release);
+        // SAFETY: publish the element through the same aligned u16 used `idx`.
+        unsafe {
+            used.wrapping_add(2)
+                .cast::<u16>()
+                .write_volatile(used_index.wrapping_add(1))
+        };
     }
 
     type Device = VirtIoRngDev<TrackedHal, MockTransport>;

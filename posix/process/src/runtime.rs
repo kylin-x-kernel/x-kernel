@@ -16,7 +16,7 @@ use kprocess::{
     current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
     process_signals,
 };
-use ksignal::{SignalInfo, SignalOSAction, SignalSet, Signo};
+use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
 use kuaccess::{atomic_cmpxchg_u32, atomic_load_u32};
 use linux_raw_sys::general::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT};
@@ -63,7 +63,8 @@ pub(crate) fn run_user_thread_loop(
     let thr = current_user_thread();
 
     if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
-        tid.write_vm(thr.tid()).ok();
+        // The child is already published; a failed TID writeback must not prevent it running.
+        let _ = tid.write_vm(thr.tid());
     }
 
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
@@ -112,7 +113,16 @@ pub(crate) fn run_user_thread_loop(
             ReturnReason::Interrupt => {
                 ktask::check_preempt_pending();
             }
-            #[allow(unused_labels)]
+            #[expect(
+                clippy::allow_attributes,
+                reason = "CG-024-lint-exceptions: The exception label is used only by \
+                          architecture-specific exception recovery branches"
+            )]
+            #[allow(
+                unused_labels,
+                reason = "CG-024-lint-exceptions: unused_labels: The exception label is used only \
+                          by architecture-specific exception recovery branches"
+            )]
             ReturnReason::Exception(exc_info) => 'exc: {
                 let signo = match exc_info.kind() {
                     ExceptionKind::Misaligned => {
@@ -297,6 +307,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     }
 
     if !pending_address.is_null() && !pending_is_pi {
+        // Robust-list cleanup is best effort; a stale user pointer must not stop exit.
         let _ = handle_futex_death(pending_address, offset, tid, true);
     }
 }
@@ -398,6 +409,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         // only surviving sibling threads.
         for task in kprocess::scheduler::process_tasks(process.as_ref()) {
             let tid = task.as_thread().tid();
+            // A sibling may already have exited and needs no delivery.
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }
@@ -444,14 +456,14 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
 /// # Returns
 ///
 /// The OS action just performed, or `None` when nothing was delivered.
-/// [`SignalOSAction::Handler`] means a user handler folded any restart code.
-/// [`SignalOSAction::Continue`] means default `SIGCONT` was consumed and the
+/// [`SignalOsAction::Handler`] means a user handler folded any restart code.
+/// [`SignalOsAction::Continue`] means default `SIGCONT` was consumed and the
 /// restart code is still the caller's to rewrite.
 pub fn check_signals(
     thr: &Thread,
     uctx: &mut UserContext,
     restore_blocked: Option<SignalSet>,
-) -> Option<SignalOSAction> {
+) -> Option<SignalOsAction> {
     // do_exit returns to the kernel loop; its remaining iterations must not
     // touch user mappings or repeat teardown after membership/MM release.
     if thr.is_exiting() {
@@ -461,10 +473,10 @@ pub fn check_signals(
 
     let signo = sig.signo();
     match os_action {
-        SignalOSAction::Terminate => do_exit(signo as i32, true),
-        SignalOSAction::CoreDump => do_exit(128 + signo as i32, true),
-        SignalOSAction::Stop => do_exit(1, true),
-        SignalOSAction::Continue | SignalOSAction::Handler => {}
+        SignalOsAction::Terminate => do_exit(signo as i32, true),
+        SignalOsAction::CoreDump => do_exit(128 + signo as i32, true),
+        SignalOsAction::Stop => do_exit(1, true),
+        SignalOsAction::Continue | SignalOsAction::Handler => {}
     }
     Some(os_action)
 }
@@ -519,7 +531,7 @@ fn scan_installed_handler(thr: &Thread, uctx: &mut UserContext) -> bool {
         let Some(action) = check_signals(thr, uctx, None) else {
             return false;
         };
-        if matches!(action, SignalOSAction::Handler) {
+        if matches!(action, SignalOsAction::Handler) {
             return true;
         }
         delivered += 1;
@@ -628,8 +640,8 @@ mod tests {
             &SignalInfo::new_kernel(Signo::SIGCONT),
             &SignalAction::default(),
         );
-        assert_eq!(action, Some(SignalOSAction::Continue));
-        let has_installed_handler = matches!(action, Some(SignalOSAction::Handler));
+        assert_eq!(action, Some(SignalOsAction::Continue));
+        let has_installed_handler = matches!(action, Some(SignalOsAction::Handler));
         restart_syscall_without_handler(
             &mut uctx,
             UserThreadRuntimeAction::Continue,

@@ -391,6 +391,11 @@ impl TaskContext {
     }
 }
 
+/// # Safety
+///
+/// Floating-point access must be enabled on this CPU. Prevent task switches
+/// while saving so all registers belong to the same task; the destination
+/// state must remain exclusively borrowed for the assembly writes.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn save_fp_registers(fpu: &mut FpuState) {
@@ -408,6 +413,11 @@ unsafe extern "C" fn save_fp_registers(fpu: &mut FpuState) {
     )
 }
 
+/// # Safety
+///
+/// Floating-point access must be enabled on this CPU, and the source must
+/// contain valid saved or initial FP state. Prevent task switches and ensure
+/// no live kernel FP values depend on the registers replaced by this call.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn restore_fp_registers(fpu: &FpuState) {
@@ -425,6 +435,13 @@ unsafe extern "C" fn restore_fp_registers(fpu: &FpuState) {
     )
 }
 
+/// # Safety
+///
+/// The scheduler must exclude interrupts and concurrent execution of either
+/// context. The next context must contain a valid, aligned kernel stack and
+/// resume address established by `TaskContext::init` or an earlier switch.
+/// Keep both contexts and stacks live until their saved continuations finish;
+/// TLS, FP state and address-space state must already match the next task.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(

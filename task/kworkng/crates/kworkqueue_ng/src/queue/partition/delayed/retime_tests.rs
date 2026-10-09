@@ -41,11 +41,10 @@ fn ready_withdrawal_releases_allowance_and_old_scope() {
     unsafe {
         work.as_ref()
             .queue_after_on(&queue, 0.into(), TimeSpan::ZERO)
-            .unwrap();
-        queue
-            .submit(&next, Some(0.into()), || unreachable!())
-            .unwrap();
     }
+    .unwrap();
+    // SAFETY: both pinned objects and captures remain live through execution/drain below.
+    unsafe { queue.submit(&next, Some(0.into()), || unreachable!()) }.unwrap();
     let (old, token) = CompletionObserver::prepare();
     work.work_for_test()
         .capture(&mut alloc::vec![token])
@@ -188,11 +187,10 @@ fn rejected_withdrawal_and_claim_leave_old_queueing_intact() {
     unsafe {
         work.as_ref()
             .queue_after_on(&queue, 0.into(), TimeSpan::ZERO)
-            .unwrap();
-        queue
-            .submit(&next, Some(0.into()), || unreachable!())
-            .unwrap();
     }
+    .unwrap();
+    // SAFETY: pinned objects and captures outlive both manual executions and timer drain.
+    unsafe { queue.submit(&next, Some(0.into()), || unreachable!()) }.unwrap();
     let (receipt, token) = CompletionObserver::prepare();
     work.work_for_test()
         .capture(&mut alloc::vec![token])

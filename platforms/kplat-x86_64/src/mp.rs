@@ -4,4 +4,4 @@
 
 //! SMP bring-up helpers for kplat-x86_64.
 
-pub use crate::peripherals::mp::start_secondary_cpu;
+pub(crate) use crate::peripherals::mp::start_secondary_cpu;

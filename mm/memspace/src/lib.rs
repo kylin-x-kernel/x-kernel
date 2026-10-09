@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Virtual address space management utilities.
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy memspace has 12 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![no_std]
 
 #[macro_use]
@@ -43,8 +48,9 @@ pub use self::{
     },
     lifetime::MmObserver,
     vma::{
-        FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, VmArea, VmAreaSet,
-        VmBackingInfo, VmBackingKind, VmInheritance, VmMayPerm, VmPerm, VmRuntimeOps, VmRuntimeRef,
+        FileMappingInfo, ForkCloneTarget, MsyncPolicy, MsyncRuntimeResult, MsyncWriteback, VmArea,
+        VmAreaSet, VmBackingInfo, VmBackingKind, VmInheritance, VmMayPerm, VmPerm, VmRuntimeOps,
+        VmRuntimeRef,
     },
 };
 
@@ -149,7 +155,7 @@ pub fn init_memory_management_secondary() {
     karch::flush_tlb(None);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_memspace {
     use khal::{mem::MemFlags, paging::MappingFlags};
     use unittest::def_test;

@@ -4,6 +4,6 @@
 
 use crate::tee::TeeResult;
 
-pub fn vm_check_access_rights(_flags: u32, _uaddr: usize, _len: usize) -> TeeResult {
+pub(super) fn vm_check_access_rights(_flags: u32, _uaddr: usize, _len: usize) -> TeeResult {
     Ok(())
 }

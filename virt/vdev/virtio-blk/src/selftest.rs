@@ -100,6 +100,11 @@ impl RecordingIrqSender {
 }
 
 /// Bind one descriptor in the fake guest memory.
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: fake guest-memory access \
+              failures abort the self-test"
+)]
 fn put_desc(guest: &TestGuestDma, index: usize, addr: u64, len: u32, flags: u16, next: u16) {
     let offset = DESC_TABLE + index as u64 * 16;
     let mut desc = [0u8; 16];
@@ -111,6 +116,11 @@ fn put_desc(guest: &TestGuestDma, index: usize, addr: u64, len: u32, flags: u16,
 }
 
 /// Append `head` to the available ring and advance its idx to `next_idx`.
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: fake guest-memory access \
+              failures abort the self-test"
+)]
 fn avail_push(guest: &TestGuestDma, next_idx: u16, head: u16) {
     let entry = AVAIL_RING + 4 + ((next_idx - 1) % QUEUE_SIZE) as u64 * 2;
     guest
@@ -123,6 +133,11 @@ fn avail_push(guest: &TestGuestDma, next_idx: u16, head: u16) {
 
 /// Program a header+data+status chain and notify; the last descriptor index
 /// owned by this helper is written to the status slot.
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: fake guest-memory access \
+              failures abort the self-test"
+)]
 fn submit(guest: &TestGuestDma, request_type: u32, data_len: u32, write_to_device: bool) {
     let mut header = [0u8; 16];
     header[0..4].copy_from_slice(&request_type.to_le_bytes());
@@ -152,6 +167,12 @@ fn submit(guest: &TestGuestDma, request_type: u32, data_len: u32, write_to_devic
 
 /// Drive one request through the device and validate status, used ring and
 /// interrupt injection.
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: fake guest-memory access \
+              failures abort the self-test, and each used-element field is a fixed four-byte slice"
+)]
 fn drive_and_check(
     dev: &mut VirtioBlkDevice,
     guest: &TestGuestDma,
@@ -205,6 +226,11 @@ fn drive_and_check(
 /// Returns `true` when the whole driver sequence — negotiation, queue
 /// programming, OUT/IN/FLUSH data path, used-ring accounting and interrupt
 /// injection — behaves as a Linux virtio-blk driver expects.
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: fake guest-memory access \
+              failures abort the self-test"
+)]
 pub fn vmm_selftest_virtio_blk() -> bool {
     log::warn!("[vmm] === VirtIO Block Device Self-Test ===");
     let guest = Arc::new(TestGuestDma::new());

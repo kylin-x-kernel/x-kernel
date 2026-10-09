@@ -9,6 +9,12 @@
 //! long-lived state machines behind those syscalls.
 
 #![no_std]
+#![allow(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): 69 legacy diagnostic sites need \
+              individual failure-contract review; new code remains subject to the \
+              no-legitimate-failure-panic rule"
+)]
 
 #[macro_use]
 extern crate klogger;

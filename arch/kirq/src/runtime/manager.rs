@@ -79,6 +79,11 @@ fn apply_platform_plan(plan: IrqPlatformPlan) {
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
 pub fn try_map(desc: IrqDesc) -> Result<Virq, IrqDescError> {
     let mut state = IRQ_STATE.lock();
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish returns only \
+                  descriptors assigned a logical IRQ"
+    )]
     Ok(try_resolve_and_publish(&mut state, IrqSpec::Desc(desc))?
         .logical_irq()
         .unwrap())
@@ -147,7 +152,17 @@ fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<()
                 )?;
             }
             let desc = try_resolve_and_publish(&mut state, spec)?;
+            #[expect(
+                clippy::unwrap_used,
+                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded \
+                          and assigned this descriptor a logical IRQ"
+            )]
             let virq = desc.logical_irq().unwrap();
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed \
+                          this descriptor in the same exclusively borrowed registry"
+            )]
             let entry = state
                 .descs
                 .get_mut(&virq)
@@ -445,7 +460,17 @@ fn resolve_action_install_entry<'a>(
         return Ok(None);
     }
     let desc = try_resolve_and_publish(state, spec)?;
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded and \
+                  assigned this descriptor a logical IRQ"
+    )]
     let virq = desc.logical_irq().unwrap();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed this \
+                  descriptor in the same exclusively borrowed registry"
+    )]
     let entry = state
         .descs
         .get_mut(&virq)
@@ -567,6 +592,13 @@ pub fn try_free_irq_action(
     try_free_irq_inner(spec.into(), Some(token))
 }
 
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): waiter registration can fail (e.g. \
+              NoMemory) after the action is removed and teardown has begun; preallocate and \
+              register the completion waiter before removing the action so the failure returns an \
+              error with the action still installed"
+)]
 fn try_free_irq_inner(
     spec: IrqSpec,
     token: Option<IrqActionToken>,
@@ -744,8 +776,7 @@ fn run_irq_exit_tail_with_context(
     ));
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_irq {
     use alloc::{boxed::Box, sync::Arc, vec::Vec};
     use core::{
@@ -848,21 +879,41 @@ pub mod tests_irq {
         IrqEvent::HANDLED
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn clone_waker(data: *const ()) -> RawWaker {
         RawWaker::new(data, &WAKER_VTABLE)
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn wake_waker(data: *const ()) {
         // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
         let counter = unsafe { &*(data as *const AtomicUsize) };
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn wake_waker_by_ref(data: *const ()) {
         // SAFETY: same invariant as `wake_waker`.
         unsafe { wake_waker(data) };
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn drop_waker(_data: *const ()) {}
 
     static WAKER_VTABLE: RawWakerVTable =
@@ -878,6 +929,7 @@ pub mod tests_irq {
         if IRQ_WAIT_TEST_TARGET.load(Ordering::Acquire) != virq {
             return;
         }
+        // Keep the first observed in-flight count when callbacks race.
         let _ = IRQ_WAIT_TEST_OBSERVED.compare_exchange(
             0,
             in_flight,
@@ -907,6 +959,7 @@ pub mod tests_irq {
     fn record_irq_tail_order(slot: &AtomicUsize) {
         if slot.load(Ordering::Relaxed) == 0 {
             let order = IRQ_TAIL_ORDER_SEQ.fetch_add(1, Ordering::Relaxed);
+            // A competing callback may have published the first observation; keep it.
             let _ = slot.compare_exchange(0, order, Ordering::Relaxed, Ordering::Relaxed);
         }
     }

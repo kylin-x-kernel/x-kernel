@@ -59,5 +59,6 @@ pub fn log(args: fmt::Arguments<'_>) {
         return;
     }
     let mut writer = BootConsoleWriter;
+    // Early console output is best effort; losing it must not interrupt boot.
     let _ = writer.write_fmt(args);
 }

@@ -14,13 +14,13 @@ use kvfs::{DirMapping, SeqFileInode, SeqIterator, SimpleDir, SimpleFs};
 // /proc/devices — all devices grouped by kind
 // ---------------------------------------------------------------------------
 
-pub struct DevicesIter {
+pub(crate) struct DevicesIter {
     text: String,
     done: bool,
 }
 
 impl DevicesIter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             done: false,
@@ -137,13 +137,13 @@ impl SeqIterator for DevicesIter {
 // /proc/bus/devices — all devices grouped by bus
 // ---------------------------------------------------------------------------
 
-pub struct BusDevicesIter {
+pub(crate) struct BusDevicesIter {
     text: String,
     done: bool,
 }
 
 impl BusDevicesIter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             done: false,
@@ -209,13 +209,13 @@ impl SeqIterator for BusDevicesIter {
 // /proc/bus/drivers — all drivers grouped by bus type
 // ---------------------------------------------------------------------------
 
-pub struct BusDriversIter {
+pub(crate) struct BusDriversIter {
     text: String,
     done: bool,
 }
 
 impl BusDriversIter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             done: false,
@@ -270,13 +270,13 @@ impl SeqIterator for BusDriversIter {
 // /proc/bus/topology — bus/device tree with parent-child relations
 // ---------------------------------------------------------------------------
 
-pub struct BusTopologyIter {
+pub(crate) struct BusTopologyIter {
     text: String,
     done: bool,
 }
 
 impl BusTopologyIter {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             done: false,

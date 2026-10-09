@@ -26,3 +26,6 @@ linkme = { workspace = true, optional = true }
 lock_api.workspace = true
 khal = { workspace = true, optional = true }
 unittest = { workspace = true}
+
+[lints]
+workspace = true

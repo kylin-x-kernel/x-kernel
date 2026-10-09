@@ -14,3 +14,6 @@ khal.workspace = true
 memaddr.workspace = true
 of.workspace = true
 xdice = { workspace = true, features = ["nostd"] }
+
+[lints]
+workspace = true

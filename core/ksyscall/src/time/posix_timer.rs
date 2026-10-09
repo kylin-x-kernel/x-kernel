@@ -79,7 +79,7 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
 }
 
 /// Creates a POSIX timer object for the current process.
-pub fn sys_timer_create(
+pub(crate) fn sys_timer_create(
     clockid: i32,
     sevp: UserConstPtr<k_sigevent>,
     timerid: UserPtr<i32>,
@@ -92,7 +92,7 @@ pub fn sys_timer_create(
 }
 
 /// Queries the current setting of a POSIX timer.
-pub fn sys_timer_gettime(timerid: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
+pub(crate) fn sys_timer_gettime(timerid: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
     let process = kprocess::current_user_process();
     let spec = process.get_posix_timer(timerid)?;
     curr_value.write_vm(build_itimerspec(spec.0, spec.1))?;
@@ -100,7 +100,7 @@ pub fn sys_timer_gettime(timerid: i32, curr_value: UserPtr<itimerspec>) -> KResu
 }
 
 /// Arms, rearms, or disarms a POSIX timer.
-pub fn sys_timer_settime(
+pub(crate) fn sys_timer_settime(
     timerid: i32,
     flags: i32,
     new_value: UserConstPtr<itimerspec>,
@@ -129,13 +129,13 @@ pub fn sys_timer_settime(
 }
 
 /// Deletes a POSIX timer object.
-pub fn sys_timer_delete(timerid: i32) -> KResult<isize> {
+pub(crate) fn sys_timer_delete(timerid: i32) -> KResult<isize> {
     kprocess::current_user_process().delete_posix_timer(timerid)?;
     Ok(0)
 }
 
 /// Returns the overrun count for the last timer notification.
-pub fn sys_timer_getoverrun(timerid: i32) -> KResult<isize> {
+pub(crate) fn sys_timer_getoverrun(timerid: i32) -> KResult<isize> {
     let overrun = kprocess::current_user_process().get_posix_timer_overrun(timerid)?;
     Ok(overrun as isize)
 }

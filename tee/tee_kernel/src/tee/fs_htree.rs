@@ -33,23 +33,23 @@ use crate::tee::{
     utils::slice_fmt,
 };
 
-pub const TEE_FS_HTREE_IV_SIZE: usize = 16;
-pub const TEE_FS_HTREE_FEK_SIZE: usize = 16;
-pub const TEE_FS_HTREE_TAG_SIZE: usize = 16;
+pub(super) const TEE_FS_HTREE_IV_SIZE: usize = 16;
+pub(super) const TEE_FS_HTREE_FEK_SIZE: usize = 16;
+pub(super) const TEE_FS_HTREE_TAG_SIZE: usize = 16;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "tee_ss_smx")] {
-        pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SM3;
-        pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SM3_HASH_SIZE;
-        pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_SM4_GCM;
+        pub(super) const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SM3;
+        pub(super) const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SM3_HASH_SIZE;
+        pub(super) const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_SM4_GCM;
     } else {
-        pub const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SHA256;
-        pub const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SHA256_HASH_SIZE;
-        pub const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_AES_GCM;
+        pub(super) const TEE_FS_HTREE_HASH_ALG: TeeAlg = TEE_ALG_SHA256;
+        pub(super) const TEE_FS_HTREE_HASH_SIZE: usize = TEE_SHA256_HASH_SIZE;
+        pub(super) const TEE_FS_HTREE_AUTH_ENC_ALG: TeeAlg = TEE_ALG_AES_GCM;
     }
 }
 
-pub const HTREE_NODE_COMMITTED_BLOCK: u32 = 1 << 0; // 即 0x1
+pub(super) const HTREE_NODE_COMMITTED_BLOCK: u32 = 1 << 0; // 即 0x1
 
 #[inline]
 fn block_num_to_node_id(num: usize) -> usize {
@@ -63,28 +63,28 @@ fn node_id_to_block_num(id: usize) -> usize {
 }
 
 #[inline]
-pub const fn htree_node_committed_child(n: usize) -> u32 {
+pub(super) const fn htree_node_committed_child(n: usize) -> u32 {
     1 << (1 + n)
 }
 
 #[repr(C)]
 #[derive(Copy, Debug, Clone, Default, Pod, Zeroable)]
-pub struct TeeFsHtreeMeta {
+pub(super) struct TeeFsHtreeMeta {
     pub length: u64,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug, Pod, Zeroable)]
-pub struct TeeFsHtreeImeta {
+pub(super) struct TeeFsHtreeImeta {
     pub meta: TeeFsHtreeMeta,
     pub max_node_id: u32,
     pub _padding: [u8; 4],
 }
 
-pub const TEE_FS_HTREE_IMETA_SIZE: usize = core::mem::size_of::<TeeFsHtreeImeta>();
+pub(super) const TEE_FS_HTREE_IMETA_SIZE: usize = core::mem::size_of::<TeeFsHtreeImeta>();
 #[repr(C)]
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
-pub struct TeeFsHtreeImage {
+pub(super) struct TeeFsHtreeImage {
     pub iv: [u8; TEE_FS_HTREE_IV_SIZE],
     pub tag: [u8; TEE_FS_HTREE_TAG_SIZE],
     pub enc_fek: [u8; TEE_FS_HTREE_FEK_SIZE],
@@ -108,7 +108,7 @@ impl Debug for TeeFsHtreeImage {
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
-pub struct TeeFsHtreeNodeImage {
+pub(super) struct TeeFsHtreeNodeImage {
     pub hash: [u8; TEE_FS_HTREE_HASH_SIZE],
     pub iv: [u8; TEE_FS_HTREE_IV_SIZE],
     pub tag: [u8; TEE_FS_HTREE_TAG_SIZE],
@@ -118,11 +118,11 @@ pub struct TeeFsHtreeNodeImage {
 static_assertions::const_assert!(core::mem::size_of::<TeeFsHtreeNodeImage>() == 66);
 
 impl TeeFsHtreeNodeImage {
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(super) fn as_bytes(&self) -> &[u8] {
         bytes_of(self)
     }
 
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+    pub(super) fn as_bytes_mut(&mut self) -> &mut [u8] {
         bytes_of_mut(self)
     }
 }
@@ -141,7 +141,7 @@ impl Debug for TeeFsHtreeNodeImage {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum TeeFsHtreeType {
+pub(super) enum TeeFsHtreeType {
     Head,
     Node,
     Block,
@@ -151,7 +151,7 @@ pub enum TeeFsHtreeType {
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
-pub struct TeeFsHtreeData {
+pub(super) struct TeeFsHtreeData {
     pub head: TeeFsHtreeImage,
     pub fek: [u8; TEE_FS_HTREE_FEK_SIZE],
     pub imeta: TeeFsHtreeImeta,
@@ -162,7 +162,7 @@ pub struct TeeFsHtreeData {
 }
 
 #[derive(Debug, Default)]
-pub struct HtreeNode {
+pub(super) struct HtreeNode {
     pub id: usize,
     pub dirty: bool,
     pub block_updated: bool,
@@ -177,7 +177,7 @@ pub struct HtreeNode {
 }
 
 impl HtreeNode {
-    pub fn new(id: usize, node_image: TeeFsHtreeNodeImage) -> Self {
+    pub(super) fn new(id: usize, node_image: TeeFsHtreeNodeImage) -> Self {
         HtreeNode {
             id,
             node: node_image,
@@ -185,12 +185,12 @@ impl HtreeNode {
         }
     }
 
-    pub fn set_left(current_node: &mut HtreeNode, mut child: HtreeNode) {
+    pub(super) fn set_left(current_node: &mut HtreeNode, mut child: HtreeNode) {
         child.parent_id = Some(current_node.id);
         current_node.left = Some(Box::new(child));
     }
 
-    pub fn set_right(current_node: &mut HtreeNode, mut child: HtreeNode) {
+    pub(super) fn set_right(current_node: &mut HtreeNode, mut child: HtreeNode) {
         child.parent_id = Some(current_node.id);
         current_node.right = Some(Box::new(child));
     }
@@ -199,7 +199,7 @@ impl HtreeNode {
     ///
     /// `index` 为 0 时返回左子树，为 1 时返回右子树。
     /// 如果对应子树不存在，则返回 `None`。
-    pub fn get_child_by_index(&mut self, index: usize) -> Option<&HtreeNode> {
+    pub(super) fn get_child_by_index(&mut self, index: usize) -> Option<&HtreeNode> {
         if index == 0 {
             self.left.as_ref().map(|b| b.as_ref())
         } else {
@@ -211,7 +211,7 @@ impl HtreeNode {
     ///
     /// `index` 为 0 时返回左子树，为 1 时返回右子树。
     /// 如果对应子树不存在，则返回 `None`。
-    pub fn get_child_by_index_mut(&mut self, index: usize) -> Option<&mut HtreeNode> {
+    pub(super) fn get_child_by_index_mut(&mut self, index: usize) -> Option<&mut HtreeNode> {
         if index == 0 {
             self.left.as_mut().map(|b| b.as_mut())
         } else {
@@ -220,9 +220,9 @@ impl HtreeNode {
     }
 }
 
-pub type Subtree = Option<Box<HtreeNode>>;
+pub(super) type Subtree = Option<Box<HtreeNode>>;
 
-pub trait SubtreeExt {
+pub(super) trait SubtreeExt {
     fn get_mut(&mut self) -> Option<&mut HtreeNode>;
 
     fn get_ref(&self) -> Option<&HtreeNode>;
@@ -239,7 +239,7 @@ impl SubtreeExt for Subtree {
 }
 
 // #[derive(Debug)]
-pub struct TeeFsHtree {
+pub(super) struct TeeFsHtree {
     pub root: HtreeNode,
     pub data: TeeFsHtreeData,
     pub storage: Box<dyn TeeFsHtreeStorageOps>,
@@ -266,7 +266,7 @@ impl Debug for TeeFsHtree {
 }
 
 /// Hash context wrapping tee_crypto hash types.
-pub enum HashContext {
+pub(super) enum HashContext {
     Sm3(Sm3),
     Sha256(Sha256),
 }
@@ -325,7 +325,7 @@ fn crypto_hash_final(md: HashContext, digest: &mut [u8]) -> TeeResult {
 /// * `data` - the data to read
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn rpc_read(
+pub(super) fn rpc_read(
     // fd: &mut FileVariant,
     storage: &dyn TeeFsHtreeStorageOps,
     typ: TeeFsHtreeType,
@@ -357,7 +357,7 @@ pub fn rpc_read(
 /// * `head` - the head of the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn rpc_read_head(
+pub(super) fn rpc_read_head(
     storage: &dyn TeeFsHtreeStorageOps,
     // ht: &mut TeeFsHtree,
     vers: u8,
@@ -376,7 +376,7 @@ pub fn rpc_read_head(
 /// * `head` - the head of the node
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn rpc_read_node(
+pub(super) fn rpc_read_node(
     // fd: &mut FileVariant,
     // ht: &mut TeeFsHtree,
     // storage: &dyn TeeFsHtreeStorageOps,
@@ -401,7 +401,7 @@ pub fn rpc_read_node(
 /// * `data` - the data to write
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn rpc_write(
+pub(super) fn rpc_write(
     // fd: &FileVariant,
     storage: &dyn TeeFsHtreeStorageOps,
     typ: TeeFsHtreeType,
@@ -433,7 +433,7 @@ pub fn rpc_write(
 /// * `head` - the head of the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn rpc_write_head(
+pub(super) fn rpc_write_head(
     // fd: &FileVariant,
     // ht: &mut TeeFsHtree,
     storage: &dyn TeeFsHtreeStorageOps,
@@ -454,7 +454,7 @@ pub fn rpc_write_head(
 /// * `head` - the head of the node
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn rpc_write_node(
+pub(super) fn rpc_write_node(
     // fd: &FileVariant,
     // ht: &mut TeeFsHtree,
     storage: &dyn TeeFsHtreeStorageOps,
@@ -483,7 +483,7 @@ pub fn rpc_write_node(
 /// # Returns
 /// * `TeeResult` - the result of the operation
 #[cfg(unittest)]
-pub fn calc_node(
+pub(super) fn calc_node(
     node: &mut HtreeNode,
     ht_data: &TeeFsHtreeData,
     _storage: &dyn TeeFsHtreeStorageOps,
@@ -516,7 +516,7 @@ pub fn calc_node(
 /// * `digest` - the digest of the hash
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn calc_node_hash_with_ctx(
+pub(super) fn calc_node_hash_with_ctx(
     mut md: HashContext,
     node: &HtreeNode,
     meta: Option<&TeeFsHtreeMeta>,
@@ -571,7 +571,7 @@ pub fn calc_node_hash_with_ctx(
 /// * `digest` - the digest of the hash
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn calc_node_hash_with_type(
+pub(super) fn calc_node_hash_with_type(
     t: TeeAlg,
     node: &HtreeNode,
     meta: Option<&TeeFsHtreeMeta>,
@@ -592,7 +592,7 @@ pub fn calc_node_hash_with_type(
 /// * `digest` - the digest of the hash
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn calc_node_hash(
+pub(super) fn calc_node_hash(
     node: &HtreeNode,
     meta: &TeeFsHtreeMeta,
     digest: &mut [u8; TEE_FS_HTREE_HASH_SIZE],
@@ -608,7 +608,7 @@ pub fn calc_node_hash(
 /// * `visitor` - the visitor function
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn post_order_traverse<F>(
+pub(super) fn post_order_traverse<F>(
     node: &HtreeNode,
     ht_data: &TeeFsHtreeData,
     visitor: &mut F,
@@ -644,7 +644,7 @@ where
 /// # Returns
 /// * `TeeResult` - the result of the operation
 #[cfg(unittest)]
-pub fn post_order_traverse_mut<F>(
+pub(super) fn post_order_traverse_mut<F>(
     node: &mut HtreeNode,
     ht_data: &TeeFsHtreeData,
     storage: &dyn TeeFsHtreeStorageOps,
@@ -682,7 +682,7 @@ where
 /// * `fd` - the file descriptor
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn verify_node(
+pub(super) fn verify_node(
     node: &HtreeNode,
     ht_data: &TeeFsHtreeData,
     // _fd: Option<&mut FileVariant>,
@@ -723,7 +723,7 @@ pub fn verify_node(
 /// # Returns
 /// * `TeeResult` - the result of the operation
 #[cfg(unittest)]
-pub fn print_node_hash(
+pub(super) fn print_node_hash(
     node: &HtreeNode,
     ht_data: &TeeFsHtreeData,
     // _fd: Option<&mut FileVariant>,
@@ -832,7 +832,7 @@ fn sync_tree_to_storage(ht: &mut TeeFsHtree) -> TeeResult {
 
 /// AEAD cipher context replacing mbedtls Cipher type-state.
 /// Stores parameters for one-shot encrypt/decrypt at finalize time.
-pub struct AeadContext {
+pub(super) struct AeadContext {
     alg: TeeAlg,
     key: [u8; TEE_FS_HTREE_FEK_SIZE],
     nonce: [u8; TEE_FS_HTREE_IV_SIZE],
@@ -841,11 +841,11 @@ pub struct AeadContext {
 
 /// Marker for encryption direction (kept for API compatibility, no longer used as generic bound).
 #[allow(dead_code)]
-pub struct Encryption;
+pub(super) struct Encryption;
 
 /// Marker for decryption direction (kept for API compatibility, no longer used as generic bound).
 #[allow(dead_code)]
-pub struct Decryption;
+pub(super) struct Decryption;
 
 /// create cipher for encrypt or decrypt
 ///
@@ -937,7 +937,7 @@ fn authenc_init_core(
 /// * `root_hash` - the hash of the root
 /// # Returns
 /// * `AeadContext` - the cipher for encrypt or decrypt
-pub fn authenc_init(
+pub(super) fn authenc_init(
     mode: TEE_OperationMode,
     ht: &mut TeeFsHtree,
     ni: Option<&mut TeeFsHtreeNodeImage>,
@@ -1046,7 +1046,7 @@ fn authenc_init_encrypt(
 /// * `plain` - the plain for decrypt
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn authenc_decrypt_final(
+pub(super) fn authenc_decrypt_final(
     ctx: AeadContext,
     tag: &[u8],
     crypt: &[u8],
@@ -1083,7 +1083,7 @@ pub fn authenc_decrypt_final(
 /// * `crypt` - the crypt for encrypt
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn authenc_encrypt_final(
+pub(super) fn authenc_encrypt_final(
     ctx: AeadContext,
     tag: &mut [u8],
     plain: &[u8],
@@ -1120,7 +1120,7 @@ pub fn authenc_encrypt_final(
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn update_root(ht: &mut TeeFsHtree) -> TeeResult {
+pub(super) fn update_root(ht: &mut TeeFsHtree) -> TeeResult {
     ht.data.head.counter += 1;
 
     let cipher = authenc_init(
@@ -1182,7 +1182,7 @@ where
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn verify_tree(ht: &TeeFsHtree) -> TeeResult {
+pub(super) fn verify_tree(ht: &TeeFsHtree) -> TeeResult {
     htree_traverse_post_order(ht, &mut verify_node)?;
     Ok(())
 }
@@ -1194,7 +1194,7 @@ pub fn verify_tree(ht: &TeeFsHtree) -> TeeResult {
 /// # Returns
 /// * `TeeResult` - the result of the operation
 #[cfg(unittest)]
-pub fn calc_tree(ht: &mut TeeFsHtree) -> TeeResult {
+pub(super) fn calc_tree(ht: &mut TeeFsHtree) -> TeeResult {
     htree_traverse_post_order_mut(ht, &mut calc_node)?;
     Ok(())
 }
@@ -1206,7 +1206,7 @@ pub fn calc_tree(ht: &mut TeeFsHtree) -> TeeResult {
 /// # Returns
 /// * `TeeResult` - the result of the operation
 #[cfg(unittest)]
-pub fn print_tree_hash(ht: &TeeFsHtree) -> TeeResult {
+pub(super) fn print_tree_hash(ht: &TeeFsHtree) -> TeeResult {
     htree_traverse_post_order(ht, &mut print_node_hash)?;
 
     Ok(())
@@ -1218,7 +1218,7 @@ pub fn print_tree_hash(ht: &TeeFsHtree) -> TeeResult {
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn init_root_node(ht: &mut TeeFsHtree) -> TeeResult {
+pub(super) fn init_root_node(ht: &mut TeeFsHtree) -> TeeResult {
     tee_debug!("init_root_node");
     let _hash = crypto_hash_alloc_ctx(TEE_ALG_SHA256)?;
 
@@ -1239,7 +1239,7 @@ pub fn init_root_node(ht: &mut TeeFsHtree) -> TeeResult {
 /// * `node_id` - the node id
 /// # Returns
 /// * `usize` - the level of the node
-pub fn node_id_to_level(node_id: usize) -> usize {
+pub(super) fn node_id_to_level(node_id: usize) -> usize {
     assert!(node_id > 0 && node_id < usize::MAX);
     (usize::BITS - node_id.leading_zeros()) as usize
 }
@@ -1251,7 +1251,7 @@ pub fn node_id_to_level(node_id: usize) -> usize {
 /// * `node_id` - the node id
 /// # Returns
 /// * `&mut HtreeNode` - the closest node
-pub fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut HtreeNode {
+pub(super) fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut HtreeNode {
     let target_level = node_id_to_level(node_id);
 
     // 记录访问路径（索引序列），避免在循环中的借用冲突
@@ -1272,7 +1272,13 @@ pub fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut HtreeNode 
 
         if child_exists {
             // 重新获取子节点引用，因为之前的引用已经释放
-            current = current.get_child_by_index_mut(index).unwrap();
+            #[expect(
+                clippy::unwrap_used,
+                reason = "CG-021-no-panic-on-reachable-failure: child_exists checked this same \
+                          index while the tree is exclusively borrowed and no mutation intervenes"
+            )]
+            let child = current.get_child_by_index_mut(index).unwrap();
+            current = child;
         } else {
             // 子节点不存在，返回当前节点
             return current;
@@ -1289,7 +1295,7 @@ pub fn find_closest_node(ht: &mut TeeFsHtree, node_id: usize) -> &mut HtreeNode 
 /// * `node_id` - the node id
 /// # Returns
 /// * `Option<&mut HtreeNode>` - the node
-pub fn find_node(ht: &mut TeeFsHtree, node_id: usize) -> Option<&mut HtreeNode> {
+pub(super) fn find_node(ht: &mut TeeFsHtree, node_id: usize) -> Option<&mut HtreeNode> {
     let node = find_closest_node(ht, node_id);
     if node.id == node_id { Some(node) } else { None }
 }
@@ -1350,7 +1356,11 @@ fn ensure_node_exists(ht: &mut TeeFsHtree, create: bool, node_id: usize) -> TeeR
 /// * `node_id` - the node id
 /// # Returns
 /// * `TeeResult<&mut HtreeNode>` - the node
-pub fn get_node(ht: &mut TeeFsHtree, create: bool, node_id: usize) -> TeeResult<&mut HtreeNode> {
+pub(super) fn get_node(
+    ht: &mut TeeFsHtree,
+    create: bool,
+    node_id: usize,
+) -> TeeResult<&mut HtreeNode> {
     // first ensure the node exists (create the required nodes)
     ensure_node_exists(ht, create, node_id)?;
 
@@ -1395,7 +1405,7 @@ fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, ()> {
 /// * `hash` - the hash of the target node
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn init_head_from_data(
+pub(super) fn init_head_from_data(
     // fd: &mut FileVariant,
     ht: &mut TeeFsHtree,
     hash: Option<&[u8]>,
@@ -1472,7 +1482,7 @@ pub fn init_head_from_data(
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn init_tree_from_data(ht: &mut TeeFsHtree) -> TeeResult {
+pub(super) fn init_tree_from_data(ht: &mut TeeFsHtree) -> TeeResult {
     let mut node_image = TeeFsHtreeNodeImage::default();
     let mut node_id = 2;
 
@@ -1512,7 +1522,7 @@ pub fn init_tree_from_data(ht: &mut TeeFsHtree) -> TeeResult {
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn verify_root(ht: &mut TeeFsHtree) -> TeeResult {
+pub(super) fn verify_root(ht: &mut TeeFsHtree) -> TeeResult {
     let mut fek = [0u8; TEE_FS_HTREE_FEK_SIZE];
     tee_fs_fek_crypt(
         Some(&ht.data.uuid),
@@ -1549,7 +1559,7 @@ pub fn verify_root(ht: &mut TeeFsHtree) -> TeeResult {
 /// * `hash` - the hash of the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_fs_htree_sync_to_storage(
+pub(super) fn tee_fs_htree_sync_to_storage(
     ht: &mut TeeFsHtree,
     // fd: &mut FileVariant,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
@@ -1608,7 +1618,7 @@ pub fn tee_fs_htree_sync_to_storage(
 /// * `uuid` - the uuid of the tree
 /// # Returns
 /// * `TeeResult<Box<TeeFsHtree>>` - the tree
-pub fn tee_fs_htree_open(
+pub(super) fn tee_fs_htree_open(
     // fd: &mut FileVariant,
     storage: Box<dyn TeeFsHtreeStorageOps>,
     create: bool,
@@ -1685,7 +1695,7 @@ pub fn tee_fs_htree_open(
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_fs_htree_close(_ht: Box<TeeFsHtree>) -> TeeResult {
+pub(super) fn tee_fs_htree_close(_ht: Box<TeeFsHtree>) -> TeeResult {
     // TODO: check if no need to free nodes manually??? rust will free them automatically???
     // htree_traverse_post_order(&ht, &mut free_node, None)?;
 
@@ -1699,7 +1709,7 @@ pub fn tee_fs_htree_close(_ht: Box<TeeFsHtree>) -> TeeResult {
 /// * `ht` - the tree
 /// # Returns
 /// * `&mut TeeFsHtreeMeta` - the meta of the tree
-pub fn tee_fs_htree_get_meta(ht: &mut TeeFsHtree) -> &mut TeeFsHtreeMeta {
+pub(super) fn tee_fs_htree_get_meta(ht: &mut TeeFsHtree) -> &mut TeeFsHtreeMeta {
     &mut ht.data.imeta.meta
 }
 
@@ -1709,7 +1719,7 @@ pub fn tee_fs_htree_get_meta(ht: &mut TeeFsHtree) -> &mut TeeFsHtreeMeta {
 /// * `ht` - the tree
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_fs_htree_meta_set_dirty(ht: &mut TeeFsHtree) {
+pub(super) fn tee_fs_htree_meta_set_dirty(ht: &mut TeeFsHtree) {
     ht.data.dirty = true;
     ht.root.dirty = true;
 }
@@ -1741,7 +1751,7 @@ fn get_block_node(
 /// * `block` - the block
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_fs_htree_read_block(
+pub(super) fn tee_fs_htree_read_block(
     ht: &mut TeeFsHtree,
     // fd: &mut FileVariant,
     block_num: usize,
@@ -1846,7 +1856,7 @@ pub fn tee_fs_htree_read_block(
 /// * `block` - the block
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_fs_htree_write_block(
+pub(super) fn tee_fs_htree_write_block(
     ht: &mut TeeFsHtree,
     // storage: &dyn TeeFsHtreeStorageOps,
     // fd: &mut FileVariant,
@@ -1949,7 +1959,7 @@ pub fn tee_fs_htree_write_block(
 /// * `block_num` - the block number
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn tee_fs_htree_truncate(ht: &mut TeeFsHtree, block_num: usize) -> TeeResult {
+pub(super) fn tee_fs_htree_truncate(ht: &mut TeeFsHtree, block_num: usize) -> TeeResult {
     let node_id = block_num_to_node_id(block_num);
 
     while node_id < ht.data.imeta.max_node_id as usize {
@@ -2359,13 +2369,13 @@ mod tests_node_id_to_level {
     // kernel unittest cannot catch panics yet.
     #[allow(dead_code)]
     #[should_panic]
-    pub fn test_node_id_zero_should_panic() {
+    pub(super) fn test_node_id_zero_should_panic() {
         node_id_to_level(0);
     }
 
     #[allow(dead_code)]
     #[should_panic]
-    pub fn test_node_id_max_should_panic() {
+    pub(super) fn test_node_id_max_should_panic() {
         node_id_to_level(usize::MAX);
     }
 }
@@ -3006,7 +3016,7 @@ mod tests_authenc_funcs {
 }
 
 #[unittest::mod_test]
-pub mod tests_fs_htree {
+pub(super) mod tests_fs_htree {
     use unittest::{assert, assert_eq};
 
     use super::*;

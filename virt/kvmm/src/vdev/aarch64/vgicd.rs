@@ -151,6 +151,11 @@ impl MmioDevice for Vgicd {
         self.read_for_vcpu(offset, size, 0)
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: each unwrap repeats the word_index call \
+                  that its match guard proved is Some"
+    )]
     fn read_for_vcpu(&self, offset: u64, size: u8, vcpu_id: u32) -> u64 {
         match offset {
             GICD_TYPER => (((self.nr_vcpus.saturating_sub(1)) as u64) << 5) | 0x3,
@@ -177,6 +182,11 @@ impl MmioDevice for Vgicd {
         self.write_for_vcpu(offset, size, value, 0)
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: each unwrap repeats the word_index call \
+                  that its match guard proved is Some"
+    )]
     fn write_for_vcpu(&mut self, offset: u64, size: u8, value: u64, vcpu_id: u32) {
         let v = value as u32;
         match offset {

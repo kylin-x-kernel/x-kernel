@@ -60,6 +60,9 @@ where
     R: Into<Vec<u8>>,
 {
     /// Creates a command file.
+    ///
+    /// The handler must return `Some(content)` for reads. A successful read
+    /// without content is rejected with [`VfsError::InvalidData`].
     pub fn new(imp: F) -> Self {
         Self(imp)
     }
@@ -71,7 +74,8 @@ where
     R: Into<Vec<u8>>,
 {
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
-        (self.0)(SimpleFileOperation::Read).map(|it| Cow::Owned(it.unwrap().into()))
+        let content = (self.0)(SimpleFileOperation::Read)?.ok_or(VfsError::InvalidData)?;
+        Ok(Cow::Owned(content.into()))
     }
 
     fn write(&self, file: &VfsFile, data: &[u8], _offset: u64) -> VfsResult<usize> {
@@ -199,16 +203,16 @@ impl InodeOperations for SimpleFile {
 
     fn getattr(
         &self,
-        _idmap: &crate::MountIdmap,
-        _path: Option<&crate::Path>,
-        _request_mask: crate::GetattrRequestMask,
-        _query_flags: crate::GetattrQueryFlags,
+        idmap: &crate::MountIdmap,
+        path: Option<&crate::Path>,
+        request_mask: crate::GetattrRequestMask,
+        query_flags: crate::GetattrQueryFlags,
     ) -> VfsResult<Metadata>;
 
     fn setattr(
         &self,
-        _idmap: &crate::MountIdmap,
-        _dentry: &crate::Dentry,
+        idmap: &crate::MountIdmap,
+        dentry: &crate::Dentry,
         update: MetadataUpdate,
     ) -> VfsResult<MetadataUpdate>;
 }
@@ -256,7 +260,7 @@ impl FileOperations for SimpleFile {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{sync::Arc, vec, vec::Vec};
 
@@ -266,6 +270,16 @@ mod tests {
     use crate::{DirMapping, FileSystemType, Filename, Mount, NodePermission, SimpleDir, SimpleFs};
 
     static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::internal("simple-file-test");
+
+    #[def_test]
+    fn command_file_read_rejects_missing_content() {
+        let missing = CommandFile::new(|_| Ok(None::<Vec<u8>>));
+        assert_eq!(missing.read_all(), Err(VfsError::InvalidData));
+        let failed = CommandFile::new(|_| Err::<Option<Vec<u8>>, _>(VfsError::PermissionDenied));
+        assert_eq!(failed.read_all(), Err(VfsError::PermissionDenied));
+        let empty = CommandFile::new(|_| Ok(Some(Vec::<u8>::new())));
+        assert_eq!(empty.read_all(), Ok(Cow::Owned(Vec::new())));
+    }
 
     #[def_test]
     fn command_file_consumes_each_write_independently_of_offset() {

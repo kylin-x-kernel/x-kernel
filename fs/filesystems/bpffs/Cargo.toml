@@ -16,3 +16,6 @@ kcred.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 macros.workspace = true
+
+[lints]
+workspace = true

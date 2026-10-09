@@ -17,10 +17,11 @@ conversion builds kernel values; it does not copy them to user memory.
 
 | Location | Operation | Invariant and safe entry |
 |---|---|---|
-| `src/stat.rs`, `From<Kstat> for linux_raw_sys::general::stat` | `core::mem::zeroed` | The target binding is a plain C ABI struct whose integer/pointer fields admit zero/null; no reference, invalid enum discriminant, or drop-bearing object may be introduced. Conversion fills supported fields after initialization. |
-| `src/stat.rs`, `From<Kstat> for linux_raw_sys::general::statx` | `core::mem::zeroed` | All binding fields, including reserved fields, admit zero; the conversion fills supported metadata and leaves unsupported fields zero. |
+| `src/stat.rs`, `From<Kstat> for linux_raw_sys::general::stat` | `core::mem::zeroed` | The target binding is a plain C ABI struct whose integer fields and integer arrays admit zero; no reference, invalid enum discriminant, or drop-bearing object may be introduced. Conversion fills supported fields after initialization. |
 
-These match the local `SAFETY` comments. There is no unsafe `Send`/`Sync` impl.
+`statx` uses a safe struct literal that initializes every field, including reserved
+fields and unsupported metadata. The `stat` entry matches its local `SAFETY`
+comment. There is no unsafe `Send`/`Sync` impl.
 Zero-valued fields do not by themselves prove that Rust struct padding will be
 preserved as zero through arbitrary moves; ABI copyout must obey its own byte
 initialization contract rather than infer that guarantee from this conversion.
@@ -42,7 +43,7 @@ locks; the final table destructor has exclusive ownership of its entries.
 | T-03 | File reference leaks across exec | High | Caller omits close-on-exec cleanup | `remove_cloexec_files` returns flagged entries; exec owner must invoke cleanup and close them outside the lock. |
 | T-04 | Reentrant close deadlock | Medium | Flush callback needs a held table lock | Removal returns owned entries and `kresources` closes after unlocking; direct callers must do likewise. |
 | T-05 | Stale snapshot used as current authorization | High | FD is closed/reused or flags change after snapshot | Snapshot pins the old file intentionally; consumers needing live state must re-query with appropriate authorization. |
-| T-06 | Invalid ABI value or leaked fields | High | Binding changes invalidate zero initialization or copyout exposes padding | Re-audit both zeroed conversions and copyout on ABI updates; explicit fields start zero, but copyout owns byte-level guarantees. |
+| T-06 | Invalid ABI value or leaked fields | High | Binding changes invalidate zero initialization or copyout exposes padding | Re-audit the `stat` zero-validity assumption, both ABI conversions, and copyout on ABI updates; all fields are initialized, but copyout owns byte-level guarantees. |
 | T-07 | Incorrect reported I/O capability | Low | Regular-file mode is used for unsupported atomic writes | Conversion advertises fixed atomic-write metadata for all regular files; consumers/providers must not treat it as independent device validation. |
 
 ## Failure modes and effects (FMEA)

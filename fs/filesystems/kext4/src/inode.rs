@@ -647,7 +647,7 @@ impl Ext4InodeState {
     ///
     /// No locking here: only valid while the caller already holds the inode-state
     /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub fn uid(&self) -> u32 {
+    pub(crate) fn uid(&self) -> u32 {
         self.metadata.uid
     }
 
@@ -655,7 +655,7 @@ impl Ext4InodeState {
     ///
     /// No locking here: only valid while the caller already holds the inode-state
     /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub fn gid(&self) -> u32 {
+    pub(crate) fn gid(&self) -> u32 {
         self.metadata.gid
     }
 
@@ -663,7 +663,7 @@ impl Ext4InodeState {
     ///
     /// No locking here: only valid while the caller already holds the inode-state
     /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub fn size(&self) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         self.visible_size
     }
 
@@ -672,7 +672,7 @@ impl Ext4InodeState {
     /// This is the kext4 equivalent of Linux ext4's `i_disksize`. No locking
     /// here: only valid while the caller already holds the inode-state lock, e.g.
     /// inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub fn disk_size(&self) -> u64 {
+    pub(crate) fn disk_size(&self) -> u64 {
         self.metadata.disk_size
     }
 
@@ -680,7 +680,7 @@ impl Ext4InodeState {
     ///
     /// No locking here: only valid while the caller already holds the inode-state
     /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub fn is_immutable(&self) -> bool {
+    pub(crate) fn is_immutable(&self) -> bool {
         self.metadata.flags & disk_inode::EXT4_IMMUTABLE_FL != 0
     }
 
@@ -688,7 +688,7 @@ impl Ext4InodeState {
     ///
     /// No locking here: only valid while the caller already holds the inode-state
     /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub fn is_append_only(&self) -> bool {
+    pub(crate) fn is_append_only(&self) -> bool {
         self.metadata.flags & disk_inode::EXT4_APPEND_FL != 0
     }
 }
@@ -1227,6 +1227,11 @@ impl Ext4Inode {
     ///
     /// Returns an extent-validation, overflow, accounting, or no-space error
     /// without publishing a partial mount reservation.
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "CG-029-shallow-control-flow: TODO(cg): legacy delayed-allocation reservation; \
+                  move the per-extent mapping walk and hole coalescing into a helper"
+    )]
     pub(crate) fn reserve_delalloc_range(
         &self,
         sb: &Ext4SbInfo,
@@ -1595,7 +1600,7 @@ fn ensure_ext4_device_id_representable(device: Ext4DeviceId) -> Ext4Result<()> {
 
 impl Ext4SbInfo {
     /// Returns an inline fast-symlink target, or `None` for a block-mapped target.
-    pub fn fast_symlink_target(&self, inode: &Ext4Inode) -> Ext4Result<Option<Vec<u8>>> {
+    pub(crate) fn fast_symlink_target(&self, inode: &Ext4Inode) -> Ext4Result<Option<Vec<u8>>> {
         inode.fast_symlink_target(
             self.layout().block_size(),
             self.superblock().features().has_ea_inode(),
@@ -1613,7 +1618,7 @@ impl Ext4SbInfo {
     ///
     /// Returns a typed corruption or unsupported-format error for an invalid
     /// inode table entry.
-    pub fn load_inode_private(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
+    pub(crate) fn load_inode_private(&self, number: InodeNumber) -> Ext4Result<Ext4Inode> {
         let inode_number = number.get();
         if inode_number == 0 || inode_number > self.superblock().inodes_count() {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeNumber));
@@ -1739,7 +1744,7 @@ impl Ext4SbInfo {
     ///
     /// Returns an extent-validation, overflow, accounting, or no-space error
     /// without publishing a partial mount reservation.
-    pub fn reserve_delalloc_range(
+    pub(crate) fn reserve_delalloc_range(
         &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
@@ -1753,7 +1758,7 @@ impl Ext4SbInfo {
     /// # Errors
     ///
     /// Returns an overflow or accounting-invariant error.
-    pub fn release_delalloc_range(
+    pub(crate) fn release_delalloc_range(
         &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
@@ -1777,7 +1782,7 @@ impl Ext4SbInfo {
     /// # Errors
     ///
     /// Returns an accounting-invariant error.
-    pub fn truncate_delalloc_range(
+    pub(crate) fn truncate_delalloc_range(
         &self,
         inode: &Ext4Inode,
         first_block: LogicalBlock,
@@ -1796,7 +1801,7 @@ impl Ext4SbInfo {
     /// # Errors
     ///
     /// Returns an accounting-invariant error.
-    pub fn release_all_delalloc(&self, inode: &Ext4Inode) -> Ext4Result<()> {
+    pub(crate) fn release_all_delalloc(&self, inode: &Ext4Inode) -> Ext4Result<()> {
         self.ensure_delalloc_accounting(inode)?;
         let released = inode.clear_delalloc_reservations();
         let mut delalloc_reserved_blocks = sync::mutex_lock(&self.delalloc_reserved_blocks);
@@ -2076,7 +2081,7 @@ impl Ext4SbInfo {
     }
 
     /// Applies a journaled inode metadata update.
-    pub fn update_inode_metadata(
+    pub(crate) fn update_inode_metadata(
         &mut self,
         inode: &Ext4Inode,
         update: Ext4InodeMetadataUpdate,
@@ -2673,7 +2678,7 @@ fn inode_checksum(
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 
@@ -3086,7 +3091,7 @@ mod tests {
 /// `target_os = "none"`), so they use the `unittest` assertion macros and,
 /// for the concurrency cases, the kernel scheduler (`ktask`) and
 /// synchronization primitives (`ksync`) instead of `std::thread`.
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use alloc::vec::Vec;
 

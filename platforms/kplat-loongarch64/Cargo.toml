@@ -45,3 +45,6 @@ loongArch64 = "0.2.4"
 
 [package.metadata.docs.rs]
 targets = ["loongarch64-unknown-none"]
+
+[lints]
+workspace = true

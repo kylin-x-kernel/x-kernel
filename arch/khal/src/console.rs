@@ -69,14 +69,20 @@ pub static IO_LOCK: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
 
 #[doc(hidden)]
 pub fn _sys_log(fmt: Arguments) {
-    let _l = IO_LOCK.lock();
+    let lock = IO_LOCK.lock();
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Logger::write_str always succeeds; \
+                  formatters must not report errors unless the writer fails"
+    )]
     Logger.write_fmt(fmt).unwrap();
-    drop(_l);
+    drop(lock);
 }
 
 #[doc(hidden)]
 pub fn _sys_log_atomic(fmt: Arguments) {
-    AtomicLogger.write_fmt(fmt).ok();
+    // Emergency output is best effort; reporting a formatting error here could recurse.
+    let _ = AtomicLogger.write_fmt(fmt);
 }
 
 #[macro_export]

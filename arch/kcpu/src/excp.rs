@@ -29,7 +29,16 @@ pub static NMI: [fn(usize) -> bool];
 #[def_trap_handler]
 pub static PAGE_FAULT: [fn(VirtAddr, PageFaultFlags) -> bool];
 
-#[allow(unused_macros)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Trap dispatch macro is used by architecture-specific \
+              exception handlers"
+)]
+#[allow(
+    unused_macros,
+    reason = "CG-024-lint-exceptions: unused_macros: Trap dispatch macro is used by \
+              architecture-specific exception handlers"
+)]
 macro_rules! handle_trap {
     ($trap:ident, $($args:tt)*) => {{
         let mut iter = $crate::excp::$trap.iter();
@@ -45,7 +54,7 @@ macro_rules! handle_trap {
     }}
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_excp {
     use unittest::def_test;
 

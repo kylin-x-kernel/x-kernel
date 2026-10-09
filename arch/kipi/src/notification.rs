@@ -182,6 +182,11 @@ pub fn enable_fixed_notifications() {
     // Do not run a preemption check when leaving boot drain: AP initialization
     // still has work to finish before entering its normal scheduling loop.
     let _guard = kspin::IrqSave::new();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the fixed IPI IRQ cannot be \
+                  enabled; CPU notification initialization has no error return or recovery"
+    )]
     kirq::try_enable(kbuild_config::IPI_IRQ, true).expect("fixed IPI line enable failed");
     PENDING[this_cpu_id().as_usize()].enable();
     handle_pending();
@@ -214,7 +219,7 @@ fn handle_bottom_half(reasons: NotificationFlags) {
 #[cfg(unittest)]
 mod bottom_half_tests;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

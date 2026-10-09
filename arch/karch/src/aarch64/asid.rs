@@ -12,7 +12,7 @@ use super::mmu::HwPageTableRoot;
 pub const USER_ASID_BITS: u32 = 16;
 
 /// Shift for packing ASID into TTBR0_EL1[63:48].
-pub const TTBR_ASID_SHIFT: u32 = 48;
+pub(super) const TTBR_ASID_SHIFT: u32 = 48;
 
 /// Physical address mask for TTBR0_EL1 (bits [47:0] with 4 KiB alignment).
 const TTBR_BADDR_MASK: u64 = (1 << TTBR_ASID_SHIFT as u64) - 1;

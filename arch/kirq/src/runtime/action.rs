@@ -48,7 +48,6 @@ impl IrqActionId {
 /// This milestone only reserves the shape. It deliberately carries no task,
 /// waitqueue, workerqueue, or softirq target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) struct IrqThreadSlot;
 
 bitflags! {
@@ -65,13 +64,20 @@ bitflags! {
 /// One internally registered IRQ action.
 #[derive(Clone)]
 pub(super) struct IrqAction {
-    #[allow(dead_code)]
     id: IrqActionId,
     primary: Handler,
     thread: Option<IrqThreadSlot>,
-    #[allow(dead_code)]
     flags: IrqActionFlags,
-    #[allow(dead_code)]
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Action names are read by unittest until named handler \
+                  registration is exposed"
+    )]
+    #[allow(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: Action names are read by unittest until \
+                  named handler registration is exposed"
+    )]
     name: Option<&'static str>,
 }
 
@@ -171,7 +177,16 @@ pub(super) enum IrqActionReturn {
     ///
     /// This variant is inert until a later threaded-IRQ milestone creates a
     /// real thread slot and scheduler handoff.
-    #[allow(dead_code)]
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Only unittest constructs this variant until threaded \
+                  IRQ registration is implemented"
+    )]
+    #[allow(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: Only unittest constructs this variant until \
+                  threaded IRQ registration is implemented"
+    )]
     WakeThread { sources: u8 },
 }
 
@@ -188,7 +203,6 @@ impl IrqActionReturn {
     }
 
     /// Returns the source bitmap carried by handled-like outcomes.
-    #[allow(dead_code)]
     pub(super) const fn sources(self) -> u8 {
         match self {
             Self::Unhandled => 0,
@@ -202,8 +216,7 @@ impl IrqActionReturn {
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

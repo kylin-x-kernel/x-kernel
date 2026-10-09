@@ -15,3 +15,6 @@ kerrno.workspace = true
 kpoll.workspace = true
 kspin.workspace = true
 smallvec = { version = "1.15", features = ["const_new", "union"] }
+
+[lints]
+workspace = true

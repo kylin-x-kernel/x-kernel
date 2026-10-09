@@ -450,7 +450,7 @@ impl From<PageSize> for usize {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_page_table_defs {
     use memaddr::VirtAddr;
     use unittest::def_test;

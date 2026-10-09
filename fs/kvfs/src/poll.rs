@@ -41,7 +41,7 @@ pub async fn poll_file_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, sync::Arc, task::Wake};
     use core::{

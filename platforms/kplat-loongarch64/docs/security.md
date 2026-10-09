@@ -74,7 +74,7 @@ no user-space input.
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
 | F-01 | RTC aperture mapping fails | Panic in `early_driver_init` | Boot fails | 2 | A machine whose RTC cannot be mapped cannot establish wall time. |
-| F-02 | No `syscon-poweroff` declaration | Warn + halt on power-off | Power stays on; system halted | 3 | Documented degradation path. |
+| F-02 | No `syscon-poweroff` declaration, or its register cannot be mapped | Warn + halt on power-off | Power stays on; system halted | 3 | Documented degradation path. |
 | F-03 | Console node parse failure | Panic in `early_driver_init` | Boot fails | 2 | A machine without a usable console aborts rather than running headless silently. |
 | F-04 | `notify_cpu` / `set_prio` called | `todo!()` panic | Offending caller aborts | 2 | Unimplemented capability (see Known Limitations); surfaced loudly instead of misrouting. |
 

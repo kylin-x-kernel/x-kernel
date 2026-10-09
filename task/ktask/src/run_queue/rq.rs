@@ -130,7 +130,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
     /// Adds a task to the scheduler.
     ///
     /// This function is used to add a new task to the scheduler.
-    pub fn add_task(&mut self, task: KtaskRef) {
+    pub(crate) fn add_task(&mut self, task: KtaskRef) {
         debug!(
             "task add: {} on run_queue {}",
             task.id_name(),
@@ -153,7 +153,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
     ///
     /// This function does nothing if the task is not in [`TaskState::Blocked`],
     /// which means the task is already unblocked by other cores.
-    pub fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
+    pub(crate) fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
         // Wakeups can originate in IRQ context; never allocate a task-name string.
         let task_id = task.trace_id();
         // Try to change the state of the task from `Blocked` to `Ready`,
@@ -195,7 +195,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///
     /// Matches Linux `update_curr`: request-done may set `need_resched`. Peer
     /// pick comparison belongs on the schedule-tick account path.
-    pub fn account_current_runtime(&mut self, now_ns: u64) {
+    pub(crate) fn account_current_runtime(&mut self, now_ns: u64) {
         self.account_runtime(now_ns, false);
     }
 
@@ -203,7 +203,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///
     /// Only the due schedule slot uses this. Soft/periodic IRQs must not
     /// re-evaluate pick — that ping-ponged WF_SYNC later-deadline handoffs.
-    pub fn account_sched_tick(&mut self, now_ns: u64) {
+    pub(crate) fn account_sched_tick(&mut self, now_ns: u64) {
         self.account_runtime(now_ns, true);
     }
 
@@ -243,7 +243,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     }
 
     /// Recomputes the per-CPU schedule deadline for the running task.
-    pub fn refresh_sched_deadline(&mut self, now_ns: u64) {
+    pub(crate) fn refresh_sched_deadline(&mut self, now_ns: u64) {
         let next_rel = if self.current_task.is_idle() {
             None
         } else {
@@ -255,7 +255,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Yield the current task and reschedule.
     /// This function will put the current task into this run queue with `Ready` state,
     /// and reschedule to the next task on this run queue.
-    pub fn yield_current(&mut self) {
+    pub(crate) fn yield_current(&mut self) {
         let now_ns = khal::time::monotonic_time_nanos();
         self.account_current_runtime(now_ns);
         let curr = &self.current_task;
@@ -287,7 +287,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Note: the ownership if migrating task (which is current task) is handed over to the migration task,
     /// before the migration task inserted it into the target run queue.
     #[cfg(feature = "smp")]
-    pub fn migrate_current(&mut self, migration_task: KtaskRef) {
+    pub(crate) fn migrate_current(&mut self, migration_task: KtaskRef) {
         let now_ns = khal::time::monotonic_time_nanos();
         self.account_current_runtime(now_ns);
         let curr = &self.current_task;
@@ -316,7 +316,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// Note:
     /// preemption may happened in `enable_preempt`, which is called
     /// each time a [`kspin::NoPreemptGuard`] is dropped.
-    pub fn preempt_resched(&mut self) {
+    pub(crate) fn preempt_resched(&mut self) {
         // There is no need to disable IRQ and preemption here, because
         // they both have been disabled in `current_check_preempt_pending`.
         let now_ns = khal::time::monotonic_time_nanos();
@@ -400,7 +400,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
     /// Exit the current task with the specified exit code.
     /// This function will never return.
-    pub fn exit_current(&mut self, exit_code: i32) -> ! {
+    pub(crate) fn exit_current(&mut self, exit_code: i32) -> ! {
         let now_ns = khal::time::monotonic_time_nanos();
         self.account_current_runtime(now_ns);
         let curr = &self.current_task;
@@ -467,7 +467,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// `block_on`-free template. `#[track_caller]` points the panic at the
     /// call site.
     #[track_caller]
-    pub fn blocked_resched(&mut self, mut woke: SpinNoIrqGuard<'_, bool>) {
+    pub(crate) fn blocked_resched(&mut self, mut woke: SpinNoIrqGuard<'_, bool>) {
         let now_ns = khal::time::monotonic_time_nanos();
         self.account_current_runtime(now_ns);
         let curr = &self.current_task;
@@ -504,7 +504,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         self.inner.resched(pull_if_empty);
     }
 
-    pub fn set_current_priority(&mut self, prio: isize) -> bool {
+    pub(crate) fn set_current_priority(&mut self, prio: isize) -> bool {
         let now_ns = khal::time::monotonic_time_nanos();
         let Some(decision) = self.inner.set_fair_nice(&self.current_task, prio, now_ns) else {
             return false;
@@ -515,7 +515,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 }
 
 impl<G: BaseGuard> KRunQueueRef<'_, G> {
-    pub fn set_task_priority(&mut self, task: &KtaskRef, prio: isize) -> bool {
+    pub(crate) fn set_task_priority(&mut self, task: &KtaskRef, prio: isize) -> bool {
         let now_ns = khal::time::monotonic_time_nanos();
         let Some(decision) = self.inner.set_fair_nice(task, prio, now_ns) else {
             return false;
@@ -830,50 +830,67 @@ impl RunQueue {
         // Program the schedule timer for the incoming task before switching.
         program_next_deadline(self, &next_task, now_ns);
 
-        // SAFETY: scheduling owns both task contexts here, IRQs are disabled,
-        // and the percpu scheduler/task pointers being updated are local to
-        // the current CPU.
-        unsafe {
-            let prev_ctx_ptr = prev_task.ctx_mut_ptr();
-            let next_ctx_ptr = next_task.ctx_mut_ptr();
+        let prev_ctx_ptr = prev_task.ctx_mut_ptr();
+        let next_ctx_ptr = next_task.ctx_mut_ptr();
 
-            #[cfg(target_arch = "aarch64")]
-            if let Some(root) = next_task
-                .user_runtime()
-                .and_then(|runtime| runtime.switch_page_table_root())
-            {
-                (*next_ctx_ptr).set_page_table_root(root);
-            }
-
-            // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
-            #[cfg(feature = "smp")]
-            {
-                *PREV_TASK.shared_current().lock() = Arc::downgrade(&prev_task);
-            }
-
-            // The strong reference count of `prev_task` will be decremented by 1,
-            // but won't be dropped until `gc_entry()` is called.
-            assert!(Arc::strong_count(&prev_task) > 1);
-            assert!(Arc::strong_count(&next_task) >= 1);
-
-            let suspended_exception = khal::context::suspend_active_exception_context();
-            CurrentTask::set_current(prev_task, next_task);
-
-            (*prev_ctx_ptr).switch_to(&*next_ctx_ptr);
-            khal::context::resume_active_exception_context(suspended_exception);
-            if let Some(runtime) = current().user_runtime() {
-                runtime.on_enter();
-            }
-
-            // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
-            // to indicate that it has finished its scheduling process and no longer running on this CPU.
-            #[cfg(feature = "smp")]
-            clear_prev_task_on_cpu(self);
+        #[cfg(target_arch = "aarch64")]
+        if let Some(root) = next_task
+            .user_runtime()
+            .and_then(|runtime| runtime.switch_page_table_root())
+        {
+            // SAFETY: The scheduler owns next_task's inactive context;
+            // IRQs are disabled and it cannot be run by another CPU here.
+            unsafe { (*next_ctx_ptr).set_page_table_root(root) };
         }
+
+        // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
+        #[cfg(feature = "smp")]
+        {
+            *PREV_TASK.shared_current().lock() = Arc::downgrade(&prev_task);
+        }
+
+        // The strong reference count of `prev_task` will be decremented by 1,
+        // but won't be dropped until `gc_entry()` is called.
+        assert!(Arc::strong_count(&prev_task) > 1);
+        assert!(Arc::strong_count(&next_task) >= 1);
+
+        let suspended_exception = khal::context::suspend_active_exception_context();
+        // SAFETY: IRQs and migration are disabled, prev_task is current, and
+        // the scheduler owns the next task and transfers its retained reference.
+        unsafe { CurrentTask::set_current(prev_task, next_task) };
+
+        // SAFETY: Scheduling owns the outgoing context exclusively; its task
+        // remains retained after set_current and cannot be reclaimed here.
+        let prev_ctx = unsafe { &mut *prev_ctx_ptr };
+        // SAFETY: next_task's retained context is initialized and distinct from
+        // prev_ctx; scheduler ownership excludes concurrent context mutation.
+        let next_ctx = unsafe { &*next_ctx_ptr };
+        prev_ctx.switch_to(next_ctx);
+        khal::context::resume_active_exception_context(suspended_exception);
+        if let Some(runtime) = current().user_runtime() {
+            runtime.on_enter();
+        }
+
+        // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
+        // to indicate that it has finished its scheduling process and no longer running on this
+        // CPU.
+        #[cfg(feature = "smp")]
+        // SAFETY: The switch finished on this run queue with IRQs/migration
+        // disabled; PREV_TASK still retains the task whose old stack is inactive.
+        unsafe {
+            clear_prev_task_on_cpu(self)
+        };
     }
 }
 
 /// Clear the `on_cpu` field of previous task running on this CPU.
+///
+/// # Safety
+///
+/// Call on the CPU owning `current_rq`, with IRQs and migration disabled,
+/// after switching away from the task recorded in `PREV_TASK` and before
+/// replacing that record. That task must remain alive and must no longer
+/// execute on its old stack, since clearing `on_cpu` permits remote enqueue.
 #[cfg(feature = "smp")]
 pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
     // SAFETY: this is called on the CPU that owns `PREV_TASK`, after the

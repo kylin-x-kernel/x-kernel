@@ -23,7 +23,7 @@ fn map_user_mem_error(err: MemError) -> u32 {
 }
 
 /// Trait representing a TA property.
-trait TEEProps {
+trait TeeProps {
     fn name(&self) -> CString;
     fn prop_type(&self) -> PropType;
     fn get(&self, buf: *mut c_void, blen: &mut u32) -> TeeResult;
@@ -82,9 +82,9 @@ impl PropType {
 struct ClientIdentity;
 struct ClientEndian;
 
-impl TEEProps for ClientIdentity {
+impl TeeProps for ClientIdentity {
     fn name(&self) -> CString {
-        CString::new("gpd.client.identity").unwrap()
+        c"gpd.client.identity".into()
     }
 
     fn prop_type(&self) -> PropType {
@@ -105,9 +105,9 @@ impl TEEProps for ClientIdentity {
     }
 }
 
-impl TEEProps for ClientEndian {
+impl TeeProps for ClientEndian {
     fn name(&self) -> CString {
-        CString::new("gpd.client.endian").unwrap()
+        c"gpd.client.endian".into()
     }
 
     fn prop_type(&self) -> PropType {
@@ -129,11 +129,11 @@ impl TEEProps for ClientEndian {
 }
 
 // Properties of the set TEE_PROPSET_CURRENT_TA
-struct TAAppID;
+struct TaAppId;
 
-impl TEEProps for TAAppID {
+impl TeeProps for TaAppId {
     fn name(&self) -> CString {
-        CString::new("gpd.ta.appID").unwrap()
+        c"gpd.ta.appID".into()
     }
 
     fn prop_type(&self) -> PropType {
@@ -154,7 +154,7 @@ impl TEEProps for TAAppID {
     }
 }
 
-fn get_prop_struct(prop_set: PropertySet, index: c_ulong) -> TeeResult<Box<dyn TEEProps>> {
+fn get_prop_struct(prop_set: PropertySet, index: c_ulong) -> TeeResult<Box<dyn TeeProps>> {
     match prop_set {
         PropertySet::CurrentClient => match index {
             0 => Ok(Box::new(ClientIdentity)),
@@ -162,7 +162,7 @@ fn get_prop_struct(prop_set: PropertySet, index: c_ulong) -> TeeResult<Box<dyn T
             _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
         },
         PropertySet::CurrentTa => match index {
-            0 => Ok(Box::new(TAAppID)),
+            0 => Ok(Box::new(TaAppId)),
             _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
         },
         PropertySet::TeeImplementation => Err(TEE_ERROR_ITEM_NOT_FOUND),
@@ -181,7 +181,7 @@ fn get_prop_index(name: &str) -> TeeResult<u32> {
 }
 
 /// Get a TEE property from a property set by index
-pub fn sys_tee_scn_get_property(
+pub(super) fn sys_tee_scn_get_property(
     prop_set: c_ulong,
     index: c_ulong,
     name: *mut c_void,
@@ -236,7 +236,7 @@ pub fn sys_tee_scn_get_property(
 }
 
 /// Convert a TEE property name to its index
-pub fn sys_tee_scn_get_property_name_to_index(
+pub(super) fn sys_tee_scn_get_property_name_to_index(
     _prop_set: c_ulong,
     name: *mut c_void,
     name_len: c_ulong,

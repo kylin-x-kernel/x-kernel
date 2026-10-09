@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 define-simple-interfaces = { path = "../define-simple-interfaces" }
 kiface = { path = "../.." }
+
+[lints]
+workspace = true

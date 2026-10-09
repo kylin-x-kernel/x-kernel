@@ -76,3 +76,6 @@ karch = { workspace = true }
 kernel_boot = { workspace = true }
 unittest.workspace = true
 kcpu_id_map = { workspace = true }
+
+[lints]
+workspace = true

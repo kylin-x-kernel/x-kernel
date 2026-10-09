@@ -210,41 +210,38 @@ impl VirtioNet {
     }
 
     fn with_udp_relay<R>(&mut self, f: impl FnOnce(&knet::UdpDatagramRelay) -> R) -> Option<R> {
-        if self.udp_relay.is_none() {
-            match knet::UdpDatagramRelay::new() {
-                Ok(relay) => self.udp_relay = Some(relay),
-                Err(err) => {
-                    log::warn!(
-                        "[virtio-net] vm{} failed to create UDP relay: {:?}",
-                        self.vm_id,
-                        err,
-                    );
-                    return None;
-                }
+        if let Some(relay) = &self.udp_relay {
+            return Some(f(relay));
+        }
+        match knet::UdpDatagramRelay::new() {
+            Ok(relay) => Some(f(self.udp_relay.insert(relay))),
+            Err(err) => {
+                log::warn!(
+                    "[virtio-net] vm{} failed to create UDP relay: {:?}",
+                    self.vm_id,
+                    err,
+                );
+                None
             }
         }
-        Some(f(self.udp_relay.as_ref().expect("UDP relay initialized")))
     }
 
     fn with_udp_ingress<R>(&mut self, f: impl FnOnce(&knet::UdpDatagramRelay) -> R) -> Option<R> {
-        if self.udp_ingress.is_none() {
-            match knet::UdpDatagramRelay::new_with_port(GUEST_UDP_PORT) {
-                Ok(relay) => self.udp_ingress = Some(relay),
-                Err(err) => {
-                    log::warn!(
-                        "[virtio-net] vm{} failed to create UDP ingress on port {}: {:?}",
-                        self.vm_id,
-                        GUEST_UDP_PORT,
-                        err,
-                    );
-                    return None;
-                }
+        if let Some(relay) = &self.udp_ingress {
+            return Some(f(relay));
+        }
+        match knet::UdpDatagramRelay::new_with_port(GUEST_UDP_PORT) {
+            Ok(relay) => Some(f(self.udp_ingress.insert(relay))),
+            Err(err) => {
+                log::warn!(
+                    "[virtio-net] vm{} failed to create UDP ingress on port {}: {:?}",
+                    self.vm_id,
+                    GUEST_UDP_PORT,
+                    err,
+                );
+                None
             }
         }
-        Some(f(self
-            .udp_ingress
-            .as_ref()
-            .expect("UDP ingress initialized")))
     }
 
     fn process_rx_queue(&mut self) {

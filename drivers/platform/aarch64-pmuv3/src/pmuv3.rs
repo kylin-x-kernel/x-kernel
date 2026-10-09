@@ -13,7 +13,6 @@ pub const PMU_OVERFLOW_IRQ: u32 = 23;
 /// See ARM PMU Events
 ///
 /// todo: more event to support
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
 pub enum PmuEvent {

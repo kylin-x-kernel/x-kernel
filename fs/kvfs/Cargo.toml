@@ -33,3 +33,6 @@ ktask.workspace = true
 memaddr = { workspace = true }
 pagecache = { workspace = true }
 vmobj = { workspace = true }
+
+[lints]
+workspace = true

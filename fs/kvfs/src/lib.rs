@@ -3,8 +3,12 @@
 // See LICENSES for license details.
 
 //! Next-generation VFS interfaces and data structures.
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kvfs has 24 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![no_std]
-#![allow(rustdoc::broken_intra_doc_links)]
 
 extern crate alloc;
 

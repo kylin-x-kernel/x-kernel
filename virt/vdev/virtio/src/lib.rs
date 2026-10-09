@@ -30,7 +30,7 @@ mod dma;
 pub use addr::{AccessWidth, GuestPhysAddr, PhysAddr};
 pub use config::VirtioConfig;
 pub use constants::*;
-pub use device_type::VirtioDeviceID;
+pub use device_type::VirtioDeviceId;
 pub use dma::DmaGuestMemory;
 pub use error::{VirtioError, VirtioResult};
 pub use memory::{AddressSpaceMemory, GuestMemory, GuestMemoryAccessor, NoGuestMemoryAccessor};

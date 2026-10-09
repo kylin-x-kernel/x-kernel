@@ -9,7 +9,7 @@ use linux_raw_sys::general::{itimerval, timeval};
 use posix_types::{ITimerType, TimeSpanLike, UserConstPtr, UserPtr};
 
 /// Returns the current value of an interval timer.
-pub fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
+pub(crate) fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
     let timer_type = ITimerType::from_repr(which).ok_or(KError::InvalidInput)?;
     let process = kprocess::current_user_process();
     let (it_interval, it_value) = process.get_itimer(timer_type)?;
@@ -22,7 +22,7 @@ pub fn sys_getitimer(which: i32, value: UserPtr<itimerval>) -> KResult<isize> {
 }
 
 /// Sets an interval timer and optionally returns the previous value.
-pub fn sys_setitimer(
+pub(crate) fn sys_setitimer(
     which: i32,
     new_value: UserConstPtr<itimerval>,
     old_value: UserPtr<itimerval>,
@@ -65,7 +65,7 @@ pub fn sys_setitimer(
 ///
 /// See <https://man7.org/linux/man-pages/man2/alarm.2.html>.
 #[cfg(target_arch = "x86_64")]
-pub fn sys_alarm(seconds: u32) -> KResult<isize> {
+pub(crate) fn sys_alarm(seconds: u32) -> KResult<isize> {
     let process = kprocess::current_user_process();
     let (_, old_remaining) = process.set_itimer(
         ITimerType::Real,

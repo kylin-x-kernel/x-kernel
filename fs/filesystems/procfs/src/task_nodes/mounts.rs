@@ -256,7 +256,7 @@ impl SeqIterator for ProcMountIter {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{string::ToString, sync::Arc};
 

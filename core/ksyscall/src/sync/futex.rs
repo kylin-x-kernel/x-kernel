@@ -132,10 +132,10 @@ fn parse_timeout(
 /// wait. `SA_RESTART` does not restart a timed futex wait. When no handler is
 /// delivered, the user-return path rewrites the syscall number to
 /// `restart_syscall` and leaves the block armed. Default `SIGCONT` is the
-/// third case: it is dequeued as `SignalOSAction::Continue`, not as a
+/// third case: it is dequeued as `SignalOsAction::Continue`, not as a
 /// handler, so it neither converts this code to `EINTR` nor suppresses the
 /// rewrite to `restart_syscall`.
-pub fn sys_futex(
+pub(crate) fn sys_futex(
     uaddr: UserPtr<u32>,
     futex_op: u32,
     value: u32,
@@ -340,7 +340,7 @@ fn wait_futex(
 }
 
 /// Returns the robust-list head of the selected thread.
-pub fn sys_get_robust_list(
+pub(crate) fn sys_get_robust_list(
     tid: u32,
     head: UserPtr<*const robust_list_head>,
     size: UserPtr<usize>,
@@ -355,7 +355,10 @@ pub fn sys_get_robust_list(
 }
 
 /// Sets the robust-list head for the current thread.
-pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) -> KResult<isize> {
+pub(crate) fn sys_set_robust_list(
+    head: UserConstPtr<robust_list_head>,
+    size: usize,
+) -> KResult<isize> {
     if size != size_of::<robust_list_head>() {
         return Err(KError::InvalidInput);
     }
@@ -363,7 +366,7 @@ pub fn sys_set_robust_list(head: UserConstPtr<robust_list_head>, size: usize) ->
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kerrno::LinuxError;
     use kprocess::current_user_thread;

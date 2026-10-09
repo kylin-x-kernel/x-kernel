@@ -25,3 +25,6 @@ kspin = { workspace = true }
 log = { workspace = true }
 ksync = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

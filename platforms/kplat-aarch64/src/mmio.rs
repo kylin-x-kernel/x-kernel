@@ -31,6 +31,11 @@ fn invoke_mmio_guard_map(phys_addr: usize, granule_count: usize) -> usize {
 
 #[cfg(feature = "kvm-mmio-guard")]
 fn map_guarded_granules(phys_addr: usize, size_bytes: usize) {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: khal::mem::init runs prepare_boot_memory, \
+                  which initializes the guard granule, before any device MMIO range is mapped"
+    )]
     let guard_granule_bytes = *GUARD_GRANULE_BYTES
         .get()
         .expect("KVM MMIO guard granule must be initialized before MMIO mapping");

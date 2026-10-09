@@ -3,7 +3,6 @@
 // See LICENSES for license details.
 
 //! PSCI interface helpers for power management and CPU control.
-#![allow(dead_code)]
 
 use kcpu_id_map::RawCpuId;
 use kerrno::{KError, KErrorKind};
@@ -11,15 +10,9 @@ use kerrno::{KError, KErrorKind};
 use crate::peripherals::smccc;
 const PSCI_0_2_FN_BASE: u32 = 0x84000000;
 const PSCI_0_2_64BIT: u32 = 0x40000000;
-const PSCI_0_2_FN_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + 1;
 const PSCI_0_2_FN_CPU_OFF: u32 = PSCI_0_2_FN_BASE + 2;
-const PSCI_0_2_FN_CPU_ON: u32 = PSCI_0_2_FN_BASE + 3;
-const PSCI_0_2_FN_MIGRATE: u32 = PSCI_0_2_FN_BASE + 5;
 const PSCI_0_2_FN_SYSTEM_OFF: u32 = PSCI_0_2_FN_BASE + 8;
-const PSCI_0_2_FN_SYSTEM_RESET: u32 = PSCI_0_2_FN_BASE + 9;
-const PSCI_0_2_FN64_CPU_SUSPEND: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 1;
 const PSCI_0_2_FN64_CPU_ON: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 3;
-const PSCI_0_2_FN64_MIGRATE: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 5;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum PsciError {
@@ -46,7 +39,12 @@ impl From<i32> for PsciError {
             -7 => NotPresent,
             -8 => Disabled,
             -9 => InvalidAddress,
-            _ => panic!("Unknown PSCI error code: {}", code),
+            // PSCI defines no other return codes. Treat an out-of-spec firmware
+            // value as an internal failure so callers take their error paths.
+            _ => {
+                warn!("unknown PSCI return code {code}; treating it as INTERNAL_FAILURE");
+                InternalFailure
+            }
         }
     }
 }
@@ -81,7 +79,8 @@ pub fn init(method: &str) {
 /// Powers off the whole system via PSCI `SYSTEM_OFF`.
 pub fn system_power_off() -> ! {
     info!("Shutting down...");
-    psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0).ok();
+    // Any return, including an error, takes the warning and local halt path below.
+    let _ = psci_call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0);
     warn!("PSCI SYSTEM_OFF returned; halting the current CPU");
     karch::stop_cpu()
 }
@@ -108,9 +107,9 @@ pub fn cpu_on(
 }
 /// Power off the current CPU via PSCI.
 pub fn cpu_off() {
-    const PSCI_POWER_STATE_TYPE_STANDBY: u32 = 0;
     const PSCI_POWER_STATE_TYPE_POWER_DOWN: u32 = 1;
     const PSCI_0_2_POWER_STATE_TYPE_SHIFT: u32 = 16;
     let state: u32 = PSCI_POWER_STATE_TYPE_POWER_DOWN << PSCI_0_2_POWER_STATE_TYPE_SHIFT;
-    psci_call(PSCI_0_2_FN_CPU_OFF, state as usize, 0, 0).ok();
+    // This best-effort request has no error channel; leave control with the caller.
+    let _ = psci_call(PSCI_0_2_FN_CPU_OFF, state as usize, 0, 0);
 }

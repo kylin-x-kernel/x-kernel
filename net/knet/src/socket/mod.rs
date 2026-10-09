@@ -315,7 +315,6 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
 }
 
 /// Network socket abstraction.
-#[allow(clippy::large_enum_variant)]
 #[enum_dispatch(Configurable, SocketOps)]
 pub enum Socket {
     Udp(Box<UdpSocket>),

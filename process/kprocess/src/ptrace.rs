@@ -41,7 +41,7 @@ fn check_cross_process_read_real_creds_access(caller: &Cred, target: &Cred) -> K
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kcred::Cred;
     use kerrno::KError;

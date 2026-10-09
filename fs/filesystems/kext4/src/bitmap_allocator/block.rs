@@ -321,7 +321,7 @@ fn validate_bitmap_capacity(bitmap: &[u8], range: BlockGroupRange) -> Ext4Result
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

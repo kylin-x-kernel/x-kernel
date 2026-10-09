@@ -87,7 +87,7 @@ pub use mmio::*;
 pub use provider::*;
 pub use time::*;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     //! Unit tests for resource provider contracts and device cleanup ordering.
     //!

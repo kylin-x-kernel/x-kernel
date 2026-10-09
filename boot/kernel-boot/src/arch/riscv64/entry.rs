@@ -20,7 +20,7 @@ use super::mmu;
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 
 /// Unified boot info passed from the RISC-V boot entry into the runtime.
-static mut RISCV_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::OpenSBI);
+static mut RISCV_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::OpenSbi);
 
 #[unsafe(link_section = ".text.boot")]
 fn enable_fp_simd() {
@@ -116,7 +116,13 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
 /// Must only be entered from [`_start_secondary`] after paging is enabled and
 /// the secondary CPU stack has been adjusted into the kernel virtual address
 /// space.
-pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+pub(super) unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Secondary CPUs are started only through \
+                  boot_ap for logical ids from the present-CPU map, using the raw id recorded \
+                  there, so an entering CPU has a mapping"
+    )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -133,7 +139,7 @@ pub unsafe extern "C" fn __secondary_switched(raw_cpu_id: RawCpuId) -> ! {
 /// Must only be entered from [`_start`] after the boot page tables are active,
 /// `kimage_voffset` matches the current image mapping, and `dtb_paddr` still
 /// points to the immutable boot DTB.
-pub unsafe extern "C" fn __primary_switched(
+pub(super) unsafe extern "C" fn __primary_switched(
     raw_cpu_id: RawCpuId,
     dtb_paddr: usize,
     kimage_voffset: usize,
@@ -153,6 +159,12 @@ pub unsafe extern "C" fn __primary_switched(
 
     kaddr_layout::set_kimage_voffset(kimage_voffset);
     kcpu_id_map::init_boot_cpu_id_map(dtb_paddr);
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the firmware CPU description \
+                  lacks the boot CPU's raw id, so no logical CPU id exists for per-CPU setup; the \
+                  boot entry has no error return or recovery"
+    )]
     let logical_cpu_id = kcpu_id_map::logical_cpu_id(raw_cpu_id).unwrap_or_else(|| {
         panic!(
             "missing logical cpu id mapping for raw cpu id {:#x}",
@@ -169,7 +181,7 @@ pub unsafe extern "C" fn __primary_switched(
     // SAFETY: primary boot CPU performs one-time initialization of the global
     // boot-info structure after BSS clear and before handing control to the kernel.
     unsafe {
-        RISCV_BOOT_INFO = BootInfo::new(BootProtocol::OpenSBI)
+        RISCV_BOOT_INFO = BootInfo::new(BootProtocol::OpenSbi)
             .with_memory_description_root(MemoryDescriptionRoot::DeviceTree)
             .with_hardware_description_root(HardwareDescriptionRoot::DeviceTree)
             .with_protocol_info_addr(dtb_paddr)

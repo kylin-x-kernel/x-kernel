@@ -6,15 +6,15 @@ use tee_raw_sys::TEE_OBJECT_ID_MAX_LEN;
 
 use super::tee_ree_fs::TeeFsFd;
 
-pub const TEE_FS_NAME_MAX: usize = 350;
+pub(super) const TEE_FS_NAME_MAX: usize = 350;
 
 /// GP: `typedef struct tee_file_handle` (REE file descriptor)
-pub type TeeFileHandle = TeeFsFd;
+pub(super) type TeeFileHandle = TeeFsFd;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 /// GP: `struct tee_fs_dirent`
-pub struct TeeFsDirent {
+pub(super) struct TeeFsDirent {
     pub oid: [u8; TEE_OBJECT_ID_MAX_LEN as _],
     pub oid_len: u32,
 }

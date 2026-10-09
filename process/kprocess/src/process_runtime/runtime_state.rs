@@ -46,7 +46,17 @@ struct ProcessTimers {
 /// Immutable scheduling ownership for a thread that has left its process.
 /// Contains no active MM user; mappings may be cleared while the root is pinned.
 pub(crate) struct ExitAddressSpace {
-    _mm_pin: MmPin,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: owns the exit snapshot pin until Drop; inspected only \
+                  by unittest observers"
+    )]
+    #[allow(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: owns the exit snapshot pin until Drop; \
+                  inspected only by unittest observers"
+    )]
+    mm_pin: MmPin,
     mm_cpu_residency: MmCpuResidencyRef,
     #[cfg(target_arch = "aarch64")]
     user_asid_context: Arc<memspace::Aarch64UserAsidContext>,
@@ -130,7 +140,7 @@ impl ProcessRuntimeState {
     pub(super) fn capture_exit_address_space(&self) -> ExitAddressSpace {
         let binding = self.address_space.lock();
         ExitAddressSpace {
-            _mm_pin: binding.mm_pin.clone(),
+            mm_pin: binding.mm_pin.clone(),
             mm_cpu_residency: binding.mm_cpu_residency.clone(),
             #[cfg(target_arch = "aarch64")]
             user_asid_context: binding.user_asid_context.clone(),
@@ -271,6 +281,7 @@ impl Drop for ProcessRuntimeState {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests_runtime_state.rs"]
-mod tests;
+#[unittest::mod_test]
+mod tests {
+    include!("tests_runtime_state.rs");
+}

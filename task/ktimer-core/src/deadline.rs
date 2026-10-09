@@ -36,7 +36,7 @@ pub struct Expiration {
     pub deadline_ns: u64,
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::TimeSpan;
     use unittest::{assert_eq, def_test};

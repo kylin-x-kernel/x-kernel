@@ -101,6 +101,52 @@ impl RawSocket {
         SERVICE.get_smoltcp_source_address(&remote)
     }
 
+    /// Delivers the next packet from the connected peer, discarding packets
+    /// from other sources; peeks instead of dequeuing when `PEEK` is set.
+    ///
+    /// Returns `WouldBlock` when no packet is queued. With `TRUNCATE` the
+    /// result is the full packet length rather than the bytes written.
+    fn recv_from_socket(
+        &self,
+        socket: &mut smol::Socket<'_>,
+        dst: &mut impl Write,
+        options: &mut RecvOptions<'_>,
+    ) -> KResult<usize> {
+        loop {
+            let packet = if options.flags.contains(RecvFlags::PEEK) {
+                let packet = socket.peek().map_err(|_| KError::WouldBlock)?;
+                let (source, _) = self.parse_ip_packet(packet)?;
+                if let Some(peer) = *self.peer_addr.read()
+                    && source != peer
+                {
+                    let _ = socket.recv().map_err(|_| KError::WouldBlock)?;
+                    continue;
+                }
+                packet
+            } else {
+                socket.recv().map_err(|_| KError::WouldBlock)?
+            };
+            let (source, packet) = self.parse_ip_packet(packet)?;
+
+            if let Some(peer) = *self.peer_addr.read()
+                && source != peer
+            {
+                continue;
+            }
+
+            if let Some(from) = options.from.as_deref_mut() {
+                *from = SocketAddrEx::Ip(SocketAddr::new(source.into(), 0));
+            }
+
+            let written = dst.write(packet)?;
+            return Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                packet.len()
+            } else {
+                written
+            });
+        }
+    }
+
     fn parse_ip_packet<'a>(&self, packet: &'a [u8]) -> KResult<(IpAddress, &'a [u8])> {
         match self.ip_version {
             IpVersion::Ipv4 => {
@@ -293,39 +339,7 @@ impl SocketOps for RawSocket {
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
                 network_poller().assist_once();
                 self.with_smol_socket(|socket| {
-                    loop {
-                        let packet = if options.flags.contains(RecvFlags::PEEK) {
-                            let packet = socket.peek().map_err(|_| KError::WouldBlock)?;
-                            let (source, _) = self.parse_ip_packet(packet)?;
-                            if let Some(peer) = *self.peer_addr.read()
-                                && source != peer
-                            {
-                                let _ = socket.recv().map_err(|_| KError::WouldBlock)?;
-                                continue;
-                            }
-                            packet
-                        } else {
-                            socket.recv().map_err(|_| KError::WouldBlock)?
-                        };
-                        let (source, packet) = self.parse_ip_packet(packet)?;
-
-                        if let Some(peer) = *self.peer_addr.read()
-                            && source != peer
-                        {
-                            continue;
-                        }
-
-                        if let Some(from) = options.from.as_deref_mut() {
-                            *from = SocketAddrEx::Ip(SocketAddr::new(source.into(), 0));
-                        }
-
-                        let written = dst.write(packet)?;
-                        return Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                            packet.len()
-                        } else {
-                            written
-                        });
-                    }
+                    self.recv_from_socket(socket, &mut dst, &mut options)
                 })
             })
     }
@@ -397,12 +411,13 @@ impl Pollable for RawSocket {
 
 impl Drop for RawSocket {
     fn drop(&mut self) {
+        // Drop cannot report shutdown errors; the socket must still be removed.
         let _ = self.shutdown(Shutdown::Both);
         SOCKET_SET.remove(self.handle);
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{vec, vec::Vec};
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

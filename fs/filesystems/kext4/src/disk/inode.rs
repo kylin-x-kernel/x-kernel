@@ -237,7 +237,7 @@ fn extra_field_fits(extra_isize: u16, offset: usize, size: usize) -> Ext4Result<
     Ok(end <= available)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

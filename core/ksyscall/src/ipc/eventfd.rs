@@ -27,7 +27,7 @@ bitflags! {
 }
 
 /// Creates an eventfd object and returns a new file descriptor.
-pub fn sys_eventfd2(initval: u32, flags: u32) -> KResult<isize> {
+pub(crate) fn sys_eventfd2(initval: u32, flags: u32) -> KResult<isize> {
     debug!("sys_eventfd2 <= initval: {initval}, flags: {flags}");
 
     let flags = EventFdFlags::from_bits(flags).ok_or(KError::InvalidInput)?;

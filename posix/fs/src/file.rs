@@ -36,7 +36,7 @@ pub fn add_stdio(fd_table: &mut FdTable, fs_struct: &FsStruct) -> KResult<()> {
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
 

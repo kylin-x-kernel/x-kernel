@@ -6,7 +6,7 @@ use crate::{LayoutConsts, UserLayoutConsts};
 
 // Generic fallback layout used only for architectures that do not yet have a
 // dedicated address-space description in this crate.
-pub const LAYOUT: LayoutConsts = LayoutConsts {
+pub(crate) const LAYOUT: LayoutConsts = LayoutConsts {
     pg_va_bits: 48,
     kernel_aspace_base: 0xffff_0000_0000_0000,
     kernel_aspace_size: 0x0000_ffff_ffff_f000,
@@ -19,7 +19,7 @@ pub const LAYOUT: LayoutConsts = LayoutConsts {
     kimage_vsize: 0x0000_0000_2000_0000,
 };
 
-pub const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
+pub(crate) const USER_LAYOUT: UserLayoutConsts = UserLayoutConsts {
     user_space_base: 0x1000,
     user_space_size: 0x7fff_ffff_f000,
     user_interp_base: 0x400_0000,

@@ -315,6 +315,12 @@ impl FutexTable {
         let mut woken = 0;
         let mut moved = 0;
         for _ in 0..original_len {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: The locked bucket is visited \
+                          exactly its original length times, removing at most one original waiter \
+                          per iteration"
+            )]
             let waiter = queue
                 .pop_front()
                 .expect("original futex bucket length must remain available");
@@ -345,6 +351,12 @@ impl FutexTable {
         let mut woken = 0;
         let mut moved = 0;
         for _ in 0..original_len {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: The locked bucket is visited \
+                          exactly its original length times, removing at most one original waiter \
+                          per iteration"
+            )]
             let waiter = source_queue
                 .pop_front()
                 .expect("original futex bucket length must remain available");
@@ -406,6 +418,12 @@ impl FutexTable {
             let mut queue = self.bucket(bucket_id).waiters.lock();
             let len = queue.len();
             for _ in 0..len {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: The locked bucket is visited \
+                              exactly its original length times, removing at most one original \
+                              waiter per iteration"
+                )]
                 let waiter = queue
                     .pop_front()
                     .expect("futex bucket length must remain available");
@@ -644,7 +662,7 @@ pub fn global_table() -> GlobalFutexTable {
     GlobalFutexTable
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
     use core::task::Waker;

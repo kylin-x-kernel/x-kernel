@@ -19,7 +19,7 @@ pub const PATH_MAX: usize = 4096;
 
 /// A borrowed pathname view.
 ///
-/// Different from [`std::path::Path`], this type is always UTF-8 encoded.
+/// Different from `std::path::Path`, this type is always UTF-8 encoded.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pathname<'a> {
     inner: &'a str,
@@ -155,7 +155,7 @@ impl AsRef<str> for Pathname<'_> {
 
 /// An owned, mutable [`Pathname`] buffer.
 ///
-/// Different from [`std::path::PathBuf`], this type is always
+/// Different from `std::path::PathBuf`, this type is always
 /// UTF-8 encoded.
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PathBuf {
@@ -263,7 +263,7 @@ mod test {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

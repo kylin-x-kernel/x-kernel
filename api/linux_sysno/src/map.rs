@@ -326,17 +326,27 @@ impl<T> core::ops::Index<Sysno> for SysnoMap<T> {
     type Output = T;
 
     fn index(&self, sysno: Sysno) -> &T {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Index requires an occupied syscall \
+                      entry; optional lookups use get or get_mut"
+        )]
         self.get(sysno).expect("no entry found for key")
     }
 }
 
 impl<T> core::ops::IndexMut<Sysno> for SysnoMap<T> {
     fn index_mut(&mut self, sysno: Sysno) -> &mut T {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Index requires an occupied syscall \
+                      entry; optional lookups use get or get_mut"
+        )]
         self.get_mut(sysno).expect("no entry found for key")
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
     use alloc::{format, string::String, vec::Vec};

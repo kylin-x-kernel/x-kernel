@@ -89,14 +89,14 @@ mod status {
     // a value for which there exists a valid Status. This means that users of this API must only
     // be allowed to load and store `Status`es.
     #[repr(transparent)]
-    pub struct AtomicStatus(AtomicU8);
+    pub(super) struct AtomicStatus(AtomicU8);
 
     /// Four possible states for the `Once` cell, encoded as `u8` discriminants in
     /// the atomic state word. Represents the lifecycle:
     /// `Uninitialized` → `Initializing` → `Ready` / `Failed`
     #[repr(u8)]
     #[derive(Clone, Copy, Debug, PartialEq)]
-    pub enum Status {
+    pub(super) enum Status {
         Uninitialized = 0x00,
         Initializing  = 0x01,
         Ready         = 0x02,
@@ -116,27 +116,27 @@ mod status {
 
     impl AtomicStatus {
         #[inline(always)]
-        pub const fn new(status: Status) -> Self {
+        pub(super) const fn new(status: Status) -> Self {
             // Convert Status enum to underlying u8 representation
             Self(AtomicU8::new(status as u8))
         }
 
         #[inline(always)]
-        pub fn load(&self, ordering: Ordering) -> Status {
+        pub(super) fn load(&self, ordering: Ordering) -> Status {
             // The invariant ensures the loaded u8 is a valid Status variant
             let raw_value = self.0.load(ordering);
             Status::from_raw(raw_value)
         }
 
         #[inline(always)]
-        pub fn store(&self, status: Status, ordering: Ordering) {
+        pub(super) fn store(&self, status: Status, ordering: Ordering) {
             // Store the enum discriminant value directly
             let raw_value = status as u8;
             self.0.store(raw_value, ordering);
         }
 
         #[inline(always)]
-        pub fn compare_exchange(
+        pub(super) fn compare_exchange(
             &self,
             old: Status,
             new: Status,
@@ -156,7 +156,7 @@ mod status {
         }
 
         #[inline(always)]
-        pub fn get_mut(&mut self) -> Status {
+        pub(super) fn get_mut(&mut self) -> Status {
             Status::from_raw(*self.0.get_mut())
         }
     }
@@ -265,6 +265,12 @@ impl<T> Once<T> {
                     // Successfully claimed initialization responsibility
                     // Implementation continues below
                 }
+                #[expect(
+                    clippy::panic,
+                    reason = "CG-021-no-panic-on-reachable-failure: A previous initializer \
+                              panicked and left no value; like std's poisoned Once and LazyLock, \
+                              the value can never be produced"
+                )]
                 Err(Status::Failed) => {
                     panic!("OnceCell has failed during a previous initialization attempt")
                 }
@@ -302,14 +308,9 @@ impl<T> Once<T> {
                 }
             };
 
-            // Write the initialized value to storage
-            unsafe {
-                // SAFETY:
-                // - We have exclusive write access via CAS
-                // - Pointer is derived from MaybeUninit
-                let storage_ptr = (*self.storage.get()).as_mut_ptr();
-                storage_ptr.write(initialized_value);
-            };
+            // SAFETY: The successful CAS gives this thread exclusive initialization
+            // rights. MaybeUninit<T> has T's layout, and storage belongs to this cell.
+            unsafe { self.storage.get().cast::<T>().write(initialized_value) };
 
             // Initialization succeeded, disarm panic guard
             core::mem::forget(panic_guard);
@@ -376,6 +377,12 @@ impl<T> Once<T> {
                     // initialized value has been published to `storage`.
                     return Some(unsafe { self.get_value_unchecked() });
                 }
+                #[expect(
+                    clippy::panic,
+                    reason = "CG-021-no-panic-on-reachable-failure: A previous initializer \
+                              panicked and left no value; like std's poisoned Once and LazyLock, \
+                              the value can never be produced"
+                )]
                 Status::Failed => {
                     panic!("OnceCell was contaminated by a previous panic")
                 }
@@ -388,7 +395,11 @@ impl<T> Once<T> {
     /// A const-initialized [`Once`] in the `Uninitialized` state.
     ///
     /// Equivalent to [`Once::new()`], but as an associated constant.
-    #[allow(clippy::declare_interior_mutable_const)]
+    #[expect(
+        clippy::declare_interior_mutable_const,
+        reason = "CG-024-lint-exceptions: clippy::declare_interior_mutable_const: INIT constructs \
+                  independent Once cells; it does not name shared mutable storage"
+    )]
     pub const INIT: Self = Self {
         state: AtomicStatus::new(Status::Uninitialized),
         storage: UnsafeCell::new(MaybeUninit::uninit()),
@@ -424,29 +435,47 @@ impl<T> Once<T> {
     }
 
     /// Get a reference to the initialized value. Must only be called when Ready.
+    ///
+    /// # Safety
+    ///
+    /// The value must be initialized and published as `Status::Ready`. The
+    /// caller must have initialized it, observed publication with acquire
+    /// ordering, or own the cell exclusively. Keep it initialized for the
+    /// borrow and permit mutation only through its interior-mutable fields.
     unsafe fn get_value_unchecked(&self) -> &T {
-        // SAFETY:
-        // - Caller ensures value is initialized
-        // - Data is immutable after initialization
-        unsafe { &*(*self.storage.get()).as_ptr() }
+        // SAFETY: The caller observed Ready after initialization, and the cell
+        // keeps T live without further mutation. MaybeUninit<T> shares T's layout.
+        unsafe { &*self.storage.get().cast::<T>() }
     }
 
     /// Get a mutable reference to the initialized value. Must only be called when Ready.
+    ///
+    /// # Safety
+    ///
+    /// The cell must be `Status::Ready` with a fully initialized value that
+    /// has not been moved out. The exclusive borrow covers all value access.
     unsafe fn get_value_mut_unchecked(&mut self) -> &mut T {
         // SAFETY:
         // - Caller ensures value is initialized
         // - We have exclusive mutable access
-        unsafe { &mut *(*self.storage.get()).as_mut_ptr() }
+        unsafe { self.storage.get_mut().assume_init_mut() }
     }
 
-    /// Extract the initialized value. Must only be called when Ready.
+    /// Moves the initialized value out of storage.
+    ///
+    /// # Safety
+    ///
+    /// The cell must contain a fully initialized value that has not been moved
+    /// out. Consuming the cell gives this operation exclusive access to storage;
+    /// the operation suppresses the cell destructor when moving the value out.
     unsafe fn extract_value_unchecked(self) -> T {
         let this = core::mem::ManuallyDrop::new(self);
         // SAFETY:
         // - Caller ensures value is initialized
         // - We own the Once, so we can move the value out
         // - ManuallyDrop prevents the Ready cell from dropping the moved value
-        unsafe { (*this.storage.get()).as_ptr().read() }
+        // - MaybeUninit<T> shares T's layout, so the cast preserves alignment
+        unsafe { this.storage.get().cast::<T>().read() }
     }
 
     /// Returns a reference to the inner value if the [`Once`] has been initialized.
@@ -579,7 +608,7 @@ impl<T> Drop for Once<T> {
             // SAFETY: `Status::Ready` guarantees the slot contains a live `T`,
             // and `&mut self` guarantees exclusive access during drop.
             unsafe {
-                core::ptr::drop_in_place((*self.storage.get()).as_mut_ptr());
+                self.storage.get_mut().assume_init_drop();
             }
         }
     }
@@ -597,7 +626,9 @@ impl<'a> Drop for PanicGuard<'a> {
     }
 }
 
+// Gate before resolving the macro: boot loaders use this crate without an allocator.
 #[cfg(unittest)]
+#[unittest::mod_test]
 mod unittest_tests {
     use unittest::{assert, assert_eq, def_test};
 
@@ -859,13 +890,13 @@ mod tests {
             thread::spawn(move || {
                 let (once, called) = &*shared;
 
-                once.try_call_once(|| {
+                let result = once.try_call_once(|| {
                     called.fetch_add(1, Ordering::AcqRel);
                     tx.send(()).unwrap();
                     thread::sleep(std::time::Duration::from_millis(50));
                     Err(())
-                })
-                .ok();
+                });
+                assert_eq!(result, Err(()));
             })
         };
 

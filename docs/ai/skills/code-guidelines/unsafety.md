@@ -5,15 +5,7 @@ modifies, or reviews `unsafe` code.
 
 ## Mandatory Rules
 
-- every `unsafe` block must have a preceding `// SAFETY:` comment;
-- every `unsafe fn` and `unsafe trait` must include a `# Safety` rustdoc section;
-- `unsafe impl` must have an explicit safety argument in nearby comments or docs;
 - safety arguments must state concrete invariants and who upholds them;
-- keep each `unsafe` block as small as practical,
-  so the audited region is obvious;
-- inside `unsafe fn`, still isolate each unsafe operation
-  in an explicit `unsafe {}` block rather than relying on
-  the whole function body being implicitly unsafe;
 - avoid vague claims like "this is safe by construction"
   without naming the construction and the invariant.
 - when a crate or module is expected to remain safe-only,
@@ -102,9 +94,7 @@ alignment, exclusivity, or initialization.
   introduce a type that does, such as `MaybeUninit<T>`,
   `NonNull<T>`, pin wrappers, newtypes for raw handles,
   or guard/token types for validated access;
-- use types to carry as much of the safety story as possible,
-  then use the smallest remaining `unsafe` block and `// SAFETY:`
-  comment to discharge what cannot be encoded statically;
+- use types to carry as much of the safety story as possible;
 - prefer a safe wrapper API around raw-pointer or FFI internals
   when the invariant can be centralized;
 - when an `unsafe fn` has cheap, deterministic precondition checks,
@@ -160,7 +150,6 @@ Unsafe reduction goals, in preferred order:
 - remove real UB or latent invariant breaks;
 - replace open-coded raw operations with existing typed APIs;
 - encode caller obligations in types;
-- shrink unsafe blocks to the minimal audited operation;
 - improve `SAFETY:` arguments and `# Safety` contracts.
 
 Do not treat “fewer `unsafe` tokens” as success by itself.
@@ -205,7 +194,6 @@ Prefer:
 
 Avoid:
 
-- `mem::zeroed()` or `assume_init()` for arbitrary `T`;
 - creating `&T` / `&mut T` before the pointee is fully initialized;
 - whole-array `assume_init()` unless initialization of every element is proven.
 
@@ -505,8 +493,6 @@ For each nontrivial unsafe site, answer these in review:
 
 Avoid patterns like:
 
-- `mem::zeroed()` or `assume_init()` for types whose valid bit patterns
-  are not proven by the type contract;
 - creating `&T` or `&mut T` before the pointee is fully initialized;
 - widening the unsafe region to include ordinary safe logic
   such as error handling, logging, or branching;
@@ -517,10 +503,6 @@ Avoid patterns like:
 
 Check specifically for:
 
-- missing `// SAFETY:` comments;
-- `unsafe fn` without `# Safety`;
-- unsafe operations inside `unsafe fn`
-  that are not wrapped in a minimal `unsafe {}` block;
 - invariants that are asserted but not actually enforced;
 - `unsafe` sites that rely on several conditions
   but document only one of them;

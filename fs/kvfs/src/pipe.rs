@@ -969,7 +969,7 @@ pub fn pipe_file_operations() -> Arc<dyn FileOperations> {
     PIPE_FILE_OPERATIONS.clone()
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

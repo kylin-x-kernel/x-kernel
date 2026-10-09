@@ -9,7 +9,7 @@ use xdice::dice_parse_handover;
 
 use crate::tee::TeeResult;
 
-pub fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
+pub(crate) fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     if huk_key.is_empty() {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }

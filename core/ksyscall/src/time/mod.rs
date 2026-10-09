@@ -10,4 +10,4 @@ mod queries;
 mod sleep;
 mod timerfd;
 
-pub use self::{itimer::*, posix_timer::*, queries::*, sleep::*, timerfd::*};
+pub(crate) use self::{itimer::*, posix_timer::*, queries::*, sleep::*, timerfd::*};

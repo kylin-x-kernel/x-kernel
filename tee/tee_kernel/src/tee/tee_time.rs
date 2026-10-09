@@ -24,7 +24,7 @@ fn map_user_mem_error(err: MemError) -> u32 {
     }
 }
 
-pub fn tee_time_get_sys_time() -> SystemTime {
+pub(super) fn tee_time_get_sys_time() -> SystemTime {
     ktime::realtime()
 }
 fn tee_time_get_ree_time() -> SystemTime {
@@ -32,7 +32,7 @@ fn tee_time_get_ree_time() -> SystemTime {
 }
 
 /// Get the current time from the specified time category
-pub fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
+pub(super) fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
     // Get current session context
     let uuid = with_tee_session_ctx(|ctx| Ok(ctx.clnt_id.uuid))?;
 
@@ -83,7 +83,7 @@ pub fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult {
 }
 
 /// Set the TA-specific time offset
-pub fn sys_tee_scn_set_ta_time(mytime: *const TeeTime) -> TeeResult {
+pub(super) fn sys_tee_scn_set_ta_time(mytime: *const TeeTime) -> TeeResult {
     let t = UserConstPtr::<TeeTime>::from(mytime)
         .read_vm()
         .map_err(map_user_mem_error)?;
@@ -178,7 +178,7 @@ fn tee_time_ta_set_offs(uuid: &TEE_UUID, offs: &TeeTime, positive: bool) -> TeeR
 }
 
 // Get TA time
-pub fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
+pub(super) fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
     let (offs, positive) = tee_time_ta_get_offs(uuid)?;
     let t = tee_time_get_sys_time();
 
@@ -198,7 +198,7 @@ pub fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
 }
 
 // Set TA time
-pub fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult {
+pub(super) fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult {
     // Check if time is normalized
     if time.millis >= 1000 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -229,7 +229,7 @@ pub fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult {
 }
 
 // Busy wait function
-pub fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
+pub(super) fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
     let start_time = monotonic_time();
     let delay = TimeSpan::from_millis(milliseconds_delay as u64);
     let end_time = start_time.checked_add(delay).ok_or(TEE_ERROR_OVERFLOW)?;
@@ -244,6 +244,6 @@ pub fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
 }
 
 /// Wait for a specified number of milliseconds
-pub fn sys_tee_scn_wait(milliseconds_delay: u32) -> TeeResult {
+pub(super) fn sys_tee_scn_wait(milliseconds_delay: u32) -> TeeResult {
     tee_time_busy_wait(milliseconds_delay)
 }

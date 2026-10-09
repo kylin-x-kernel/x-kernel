@@ -50,6 +50,11 @@ impl<const RAM: usize, const FW: usize> Aarch64MemState<RAM, FW> {
     }
 
     pub fn ram_regions(&'static self) -> &'static [MemRange] {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Platform memory initialization \
+                      publishes RAM ranges before exposing the memory provider"
+        )]
         self.ram_regions
             .get()
             .map(|ranges| &ranges[..self.ram_count.load(Ordering::Relaxed)])
@@ -61,6 +66,11 @@ impl<const RAM: usize, const FW: usize> Aarch64MemState<RAM, FW> {
         if count == 0 {
             return &[];
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: A nonzero reserved count is published \
+                      only after its region array is installed"
+        )]
         &self
             .fw_reserved_regions
             .get()
@@ -155,10 +165,21 @@ fn push_reserved_non_overlapping<const N: usize>(
     }
     let mut cut = Vec::<MemRange, N>::new();
     for existing in regions.iter() {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The cut vector and source region \
+                      vector share capacity N, with one cut per existing region"
+        )]
         cut.push(existing.range()).expect("too many cut ranges");
     }
     cut.sort_unstable_by_key(|&(start, _)| start);
     let single = [region.range()];
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware reservations overlap \
+                  after normalization or exceed fixed-capacity storage; memory discovery has no \
+                  error return or recovery"
+    )]
     sub_ranges(&single, cut.as_slice(), |(start, size)| {
         regions
             .push(ReservedRegion::new(
@@ -174,6 +195,12 @@ fn push_reserved_non_overlapping<const N: usize>(
     sort_and_merge_reserved(regions);
 }
 
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: firmware reserved regions overlap \
+              with different kind, source or name, so the reserved map cannot be normalized; boot \
+              memory initialization has no error return or recovery"
+)]
 fn sort_and_merge_reserved<const N: usize>(regions: &mut Vec<ReservedRegion, N>) {
     regions.sort_unstable_by_key(|region| region.start);
     if regions.len() < 2 {

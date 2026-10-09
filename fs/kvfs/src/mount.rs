@@ -63,7 +63,7 @@ bitflags::bitflags! {
 /// and sleep. It must therefore happen in sleepable task context, without
 /// holding a non-sleepable lock or a lock required by filesystem shutdown.
 #[derive(Debug)]
-pub struct VfsMount {
+pub(crate) struct VfsMount {
     mnt_root: Dentry,
     mnt_sb: Arc<SuperBlock>,
     mnt_flags: AtomicU32,
@@ -1486,7 +1486,7 @@ fn retarget_path(path: &Path, mount_map: &HashMap<usize, Arc<Mount>>) -> VfsResu
     Ok(Path::new(mount.clone(), path.dentry.clone()))
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     extern crate alloc;
 

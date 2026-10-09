@@ -199,6 +199,11 @@ impl ShootdownRequestSlot {
     }
 
     fn allocate_seq(&self) -> RequestSeq {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: fetch_update cannot return Err \
+                      because its closure unconditionally returns Some"
+        )]
         let previous = self
             .next_seq
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -567,7 +572,7 @@ pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
     TlbFlushIf::flush_all_cpus(vaddr);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, def_test};
 

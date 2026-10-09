@@ -11,7 +11,7 @@ use syn::{
 };
 
 /// Extracts argument expressions for forwarding an interface call.
-pub fn extract_caller_args(sig: &Signature) -> Result<Punctuated<Expr, Comma>, Error> {
+pub(crate) fn extract_caller_args(sig: &Signature) -> Result<Punctuated<Expr, Comma>, Error> {
     let mut args = Punctuated::new();
     for arg in &sig.inputs {
         if let FnArg::Typed(arg) = arg {
@@ -29,7 +29,7 @@ pub fn extract_caller_args(sig: &Signature) -> Result<Punctuated<Expr, Comma>, E
 }
 
 /// Extracts argument types for function-pointer signature checks.
-pub fn extract_arg_types(sig: &Signature) -> Punctuated<Type, Comma> {
+pub(crate) fn extract_arg_types(sig: &Signature) -> Punctuated<Type, Comma> {
     let mut types = Punctuated::new();
     for arg in &sig.inputs {
         if let FnArg::Typed(arg) = arg {
@@ -40,7 +40,7 @@ pub fn extract_arg_types(sig: &Signature) -> Punctuated<Type, Comma> {
 }
 
 /// Returns the last path segment as the interface name.
-pub fn interface_name_from_path(path: &Path) -> Result<&Ident, Error> {
+pub(crate) fn interface_name_from_path(path: &Path) -> Result<&Ident, Error> {
     path.segments
         .last()
         .map(|segment| &segment.ident)
@@ -48,17 +48,21 @@ pub fn interface_name_from_path(path: &Path) -> Result<&Ident, Error> {
 }
 
 /// Generates the hidden module name that owns extern declarations.
-pub fn extern_mod_name(interface_name: &Ident) -> Ident {
+pub(crate) fn extern_mod_name(interface_name: &Ident) -> Ident {
     format_ident!("__kiface_{}_extern", interface_name)
 }
 
 /// Generates the local exported function identifier used by a provider.
-pub fn exported_fn_ident(interface_name: &Ident, fn_name: &Ident) -> Ident {
+pub(crate) fn exported_fn_ident(interface_name: &Ident, fn_name: &Ident) -> Ident {
     format_ident!("__kiface_export_{}_{}", interface_name, fn_name)
 }
 
 /// Generates the link symbol for an interface method.
-pub fn exported_symbol(namespace: Option<&str>, interface_name: &Ident, fn_name: &Ident) -> String {
+pub(crate) fn exported_symbol(
+    namespace: Option<&str>,
+    interface_name: &Ident,
+    fn_name: &Ident,
+) -> String {
     if let Some(namespace) = namespace {
         format!("__kiface_{namespace}_{interface_name}_{fn_name}")
     } else {

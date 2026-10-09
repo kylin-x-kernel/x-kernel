@@ -24,7 +24,6 @@ unsafe impl UserWrite for new_utsname {}
 /// gaps as explicit fields that [`Default`] sets to zero.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, UserWrite)]
-#[allow(non_camel_case_types)]
 pub struct k_sysinfo {
     /// Seconds since boot.
     pub uptime: __kernel_long_t,

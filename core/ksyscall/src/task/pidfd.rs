@@ -12,7 +12,7 @@ use posix_types::{UserConstPtr, k_siginfo};
 use super::make_queue_signal_info;
 
 /// Create a process file descriptor for the specified process.
-pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
+pub(crate) fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_open <= pid: {pid}, flags: {flags}");
 
     if flags != 0 {
@@ -29,7 +29,7 @@ pub fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
 }
 
 /// Duplicate a file descriptor from another process using its pidfd.
-pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize> {
+pub(crate) fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize> {
     debug!("sys_pidfd_getfd <= pidfd: {pidfd}, target_fd: {target_fd}, flags: {flags}");
 
     let pidfd_file = kprocess::current_resources().get_file(pidfd)?;
@@ -48,7 +48,7 @@ pub fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult<isize>
 }
 
 /// Send a signal to the process referenced by the pidfd.
-pub fn sys_pidfd_send_signal(
+pub(crate) fn sys_pidfd_send_signal(
     pidfd: i32,
     signo: u32,
     sig: UserConstPtr<k_siginfo>,

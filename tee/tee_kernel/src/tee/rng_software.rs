@@ -22,17 +22,17 @@ fn software_rng_seed() -> [u8; RNG_SEED_SIZE] {
 }
 
 /// Read data from the kernel entropy pool into `buf`.
-pub fn crypto_rng_read(buf: &mut [u8]) -> TeeResult {
+pub(super) fn crypto_rng_read(buf: &mut [u8]) -> TeeResult {
     tee_software_get_rand(buf);
     Ok(())
 }
 
-pub struct TeeSoftwareRng {
+pub(super) struct TeeSoftwareRng {
     rng: DeterministicRng,
 }
 
 impl TeeSoftwareRng {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let seed = software_rng_seed();
         Self {
             rng: DeterministicRng::seed_from_bytes(&seed),
@@ -60,24 +60,39 @@ impl TryRng for TeeSoftwareRng {
 impl TryCryptoRng for TeeSoftwareRng {}
 
 /// RNG backed by the kernel entropy pool.
-pub struct GlobalSoftwareRng;
+pub(super) struct GlobalSoftwareRng;
 
 impl TryRng for GlobalSoftwareRng {
     type Error = Infallible;
 
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let mut bytes = [0u8; 4];
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: crypto_rng_read fills from the kernel \
+                      entropy pool and unconditionally returns Ok"
+        )]
         crypto_rng_read(&mut bytes).expect("global RNG failure");
         Ok(u32::from_le_bytes(bytes))
     }
 
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let mut bytes = [0u8; 8];
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: crypto_rng_read fills from the kernel \
+                      entropy pool and unconditionally returns Ok"
+        )]
         crypto_rng_read(&mut bytes).expect("global RNG failure");
         Ok(u64::from_le_bytes(bytes))
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: crypto_rng_read fills from the kernel \
+                      entropy pool and unconditionally returns Ok"
+        )]
         crypto_rng_read(dest).expect("global RNG failure");
         Ok(())
     }
@@ -86,7 +101,7 @@ impl TryRng for GlobalSoftwareRng {
 impl TryCryptoRng for GlobalSoftwareRng {}
 
 #[unittest::mod_test]
-pub mod tests_rng_software {
+pub(super) mod tests_rng_software {
     use unittest::assert_ne;
 
     use super::*;

@@ -124,11 +124,14 @@ impl<T: Read> Read for Take<T> {
             // new_init bytes of the following unfilled region. Its borrow has
             // ended, so those same ranges can be committed to the parent cursor.
             unsafe {
-                // SAFETY: filled bytes have been filled and therefore initialized
-                buf.advance_unchecked(filled);
-                // SAFETY: new_init bytes of buf's unfilled buffer have been initialized
-                buf.set_init(new_init);
-            }
+                buf.advance_unchecked(filled)
+            };
+            #[cfg(borrowedbuf_init)]
+            // SAFETY: new_init records the initialized prefix after the filled
+            // bytes just consumed; the subcursor's exclusive borrow has ended.
+            unsafe {
+                buf.set_init(new_init)
+            };
             #[cfg(not(borrowedbuf_init))]
             // SAFETY: filled bytes have been filled and therefore initialized
             unsafe {

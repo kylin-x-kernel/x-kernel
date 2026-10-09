@@ -60,7 +60,11 @@ impl EnumerationContext {
 
     /// Same as [`register_device`], but records a parent device the resulting
     /// runtime object will be attached under once it is published.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Enumeration supplies the \
+                  complete device descriptor and parent relationship in one registration"
+    )]
     pub fn register_device_with_parent(
         &mut self,
         bus_id: BusId,
@@ -128,7 +132,7 @@ impl Default for EnumerationContext {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kdevice::PlatformIdentity;
     use unittest::{assert_eq, def_test};

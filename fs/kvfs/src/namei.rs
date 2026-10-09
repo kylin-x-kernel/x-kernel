@@ -24,7 +24,7 @@ use crate::{
 pub struct DelayedCall;
 
 /// Default maximum number of symbolic or magic-link follows in one lookup.
-pub const DEFAULT_MAX_LINKS: usize = 40;
+pub(crate) const DEFAULT_MAX_LINKS: usize = 40;
 
 const AT_FDCWD: i32 = -100;
 const ND_ROOT_PRESET: u32 = 1;
@@ -1065,7 +1065,7 @@ pub fn may_mknod(mode: Umode) -> VfsResult<NodeType> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{string::String, sync::Arc, vec::Vec};
 

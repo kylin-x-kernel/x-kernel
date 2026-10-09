@@ -16,7 +16,7 @@ use crate::tee::TeeResult;
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-pub enum HukSubkeyUsage {
+pub(super) enum HukSubkeyUsage {
     Rpmb     = 0,
     Ssk      = 1,
     DieId    = 2,
@@ -24,9 +24,9 @@ pub enum HukSubkeyUsage {
     TaEnc    = 4,
 }
 
-pub const HUK_SUBKEY_MAX_LEN: usize = super::utee_defines::TEE_SHA256_HASH_SIZE;
+pub(super) const HUK_SUBKEY_MAX_LEN: usize = super::utee_defines::TEE_SHA256_HASH_SIZE;
 
-pub fn huk_subkey_derive(
+pub(super) fn huk_subkey_derive(
     usage: HukSubkeyUsage,
     const_data: Option<&[u8]>,
     subkey: &mut [u8],

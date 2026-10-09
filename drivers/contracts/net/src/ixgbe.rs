@@ -176,7 +176,7 @@ fn ixgbe_ptr_to_buf(ptr: NetBufHandle, pool: &Arc<MemPool>) -> DriverResult<Ixgb
         .map_err(|_| DriverError::BadState)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_ixgbe {
     use unittest::def_test;
     extern crate alloc;

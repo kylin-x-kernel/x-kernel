@@ -19,7 +19,7 @@ const MEMBARRIER_CMD_QUERY: i32 = 0;
 /// than the query itself is implemented.
 const SUPPORTED_COMMANDS: i32 = 0;
 
-pub fn sys_membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> KResult<isize> {
+pub(crate) fn sys_membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> KResult<isize> {
     // No flag-taking membarrier command is supported here, so reject any
     // non-zero flags.
     if flags != 0 {

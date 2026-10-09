@@ -29,6 +29,12 @@ pub struct MockHal;
 // for DMA, which is safe in std/test environments. Physical and virtual
 // addresses are identical in this mock (identity mapping).
 unsafe impl Hal for MockHal {
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: MockHal backs DMA with the \
+                  global allocator and the Hal callback has no error channel for allocation \
+                  failure"
+    )]
     fn dma_alloc(
         pages: usize,
         _direction: BufferDirection,

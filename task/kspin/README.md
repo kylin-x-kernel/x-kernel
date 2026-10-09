@@ -178,4 +178,4 @@ impl KernelGuardIf for MyKernelGuard {
 
 ## License
 
-See [LICENSE](LICENSE) in the repository root.
+See the repository-root `LICENSE` file.

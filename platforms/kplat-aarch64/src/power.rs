@@ -16,6 +16,11 @@ impl SysCtrl {
         let entry_paddr = v2p(va!(
             kernel_boot::arch::_start_secondary as *const () as usize
         ));
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: start_secondary_cpus passes only \
+                      logical ids enumerated from the present-CPU map, so each one has a raw id"
+        )]
         let raw_cpu_id = raw_cpu_id(logical_cpu_id).unwrap_or_else(|| {
             panic!(
                 "missing raw CPU id mapping for logical CPU {}",

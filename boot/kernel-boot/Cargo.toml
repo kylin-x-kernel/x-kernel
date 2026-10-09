@@ -49,3 +49,6 @@ karch = { workspace = true }
 memaddr = { workspace = true }
 of = { workspace = true }
 page_table = { workspace = true }
+
+[lints]
+workspace = true

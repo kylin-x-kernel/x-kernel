@@ -60,10 +60,10 @@ pub fn flush_icache_range(start: VirtAddr, size: usize) {
         // matching Linux arm64 caches_clean_inval_pou() semantics. `ic ivau`
         // invalidates I-cache by VA to PoU. Both instructions are standard
         // ARM instructions, safe at all privilege levels.
-        unsafe {
-            asm!("dc cvau, {0:x}", in(reg) va);
-            asm!("ic ivau, {0:x}", in(reg) va);
-        }
+        unsafe { asm!("dc cvau, {0:x}", in(reg) va) };
+        // SAFETY: At the kernel exception level IC IVAU is available; va names
+        // the same cache line just cleaned to PoU for instruction execution.
+        unsafe { asm!("ic ivau, {0:x}", in(reg) va) };
     }
     // Completing IC IVAU requires a DSB covering both reads and writes;
     // a store-only DSB ISHST cannot provide this completion guarantee.

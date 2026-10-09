@@ -230,7 +230,10 @@ impl TimerIndex {
         self.earliest.map(|node| {
             // SAFETY: the cache points to a linked node kept alive by the
             // insertion contract. Linked deadlines cannot change during access.
-            unsafe { node.as_ref().deadline().deadline_ns() }
+            let node = unsafe { node.as_ref() };
+            // SAFETY: Index access is serialized and linked deadlines stay
+            // immutable until the node is removed from this tree.
+            unsafe { node.deadline().deadline_ns() }
         })
     }
 
@@ -267,6 +270,11 @@ impl TimerIndex {
         // SAFETY: the caller proves node belongs to this tree; &mut self
         // serializes tree access and external node operations are excluded.
         let mut cursor = unsafe { self.tree.cursor_mut_from_ptr(node) };
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The unsafe remove contract proves \
+                      membership in this exclusively borrowed timer index"
+        )]
         let removed = cursor.remove().expect("timer index member missing");
         if was_earliest {
             // remove leaves the cursor at the successor, now the minimum.
@@ -283,11 +291,14 @@ impl TimerIndex {
         let node = self.earliest?;
         // SAFETY: the cache identifies a live member of this exact tree.
         // No mutation occurs between the minimum check and this removal.
-        Some(unsafe { self.remove(node.as_ref()) })
+        let node = unsafe { node.as_ref() };
+        // SAFETY: The cached node still belongs to this exact index; &mut self
+        // serializes removal and no deadline/membership change intervened.
+        Some(unsafe { self.remove(node) })
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::ptr;
 
@@ -324,7 +335,10 @@ mod tests {
         for node in &nodes {
             // SAFETY: nodes remain at their stack addresses until after index
             // drops; each is unlinked and this test is their sole accessor.
-            unsafe { index.insert(UnsafeRef::from_raw(node)) };
+            let pending = unsafe { UnsafeRef::from_raw(node) };
+            // SAFETY: This test keeps the unlinked node stable and exclusively
+            // accessed until the index removes it or is dropped.
+            unsafe { index.insert(pending) };
             assert!(cache_is_valid(&index));
         }
         // SAFETY: nodes[2] was inserted in this index above and not removed.
@@ -348,10 +362,13 @@ mod tests {
         for deadline in [100, 0, u64::MAX, 10, 1] {
             // SAFETY: the previous iteration drained this node. This test
             // exclusively accesses it, and its address remains stable.
-            unsafe {
-                node.replace_deadline(setting(deadline));
-                index.insert(UnsafeRef::from_raw(&node));
-            }
+            unsafe { node.replace_deadline(setting(deadline)) };
+            // SAFETY: The stack node stays live and unmoved until this index
+            // and all removed handles have finished accessing it.
+            let pending = unsafe { UnsafeRef::from_raw(&node) };
+            // SAFETY: The node is unlinked, has its prepared deadline, and this
+            // sequential test excludes all concurrent node access.
+            unsafe { index.insert(pending) };
             assert_eq!(index.earliest_deadline_ns(), Some(deadline));
             if deadline > 0 {
                 assert!(index.pop_due(deadline - 1).is_none());
@@ -370,7 +387,10 @@ mod tests {
             let mut index = TimerIndex::new();
             // SAFETY: node outlives this index and is neither moved nor
             // modified while the index (including its Drop) accesses it.
-            unsafe { index.insert(UnsafeRef::from_raw(&node)) };
+            let pending = unsafe { UnsafeRef::from_raw(&node) };
+            // SAFETY: This test keeps the unlinked node stable and exclusively
+            // accessed until the index removes it or is dropped.
+            unsafe { index.insert(pending) };
         }
         assert!(!node.link.is_linked());
         // SAFETY: index destruction finished; no other node access exists.
@@ -394,10 +414,13 @@ mod tests {
             let deadline = ((step * 31) % 127) as u64;
             // SAFETY: this node is now unlinked, has a stable stack address,
             // and is exclusively accessed by this sequential test.
-            unsafe {
-                nodes[slot].replace_deadline(setting(deadline));
-                index.insert(UnsafeRef::from_raw(&nodes[slot]));
-            }
+            unsafe { nodes[slot].replace_deadline(setting(deadline)) };
+            // SAFETY: The stack node stays live and unmoved until this index
+            // and all removed handles have finished accessing it.
+            let pending = unsafe { UnsafeRef::from_raw(&nodes[slot]) };
+            // SAFETY: The node is unlinked, has its prepared deadline, and this
+            // sequential test excludes all concurrent node access.
+            unsafe { index.insert(pending) };
             deadlines[slot] = Some(deadline);
             assert_eq!(
                 index.earliest_deadline_ns(),

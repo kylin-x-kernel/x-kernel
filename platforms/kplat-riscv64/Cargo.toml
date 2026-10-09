@@ -38,3 +38,6 @@ sbi-rt = { version = "0.0.3", features = ["legacy"] }
 
 [package.metadata.docs.rs]
 targets = ["riscv64gc-unknown-none-elf"]
+
+[lints]
+workspace = true

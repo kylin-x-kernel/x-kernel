@@ -14,3 +14,6 @@ kbuild_config = { workspace = true }
 x86_boot_common = { workspace = true }
 uefi = { version = "0.36.1", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
 log = "0.4"
+
+[lints]
+workspace = true

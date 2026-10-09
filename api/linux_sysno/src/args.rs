@@ -170,7 +170,7 @@ macro_rules! syscall_args {
     };
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

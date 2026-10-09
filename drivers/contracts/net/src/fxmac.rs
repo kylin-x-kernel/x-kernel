@@ -152,7 +152,7 @@ impl NetDevice for FXmacNic {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod tests_fxmac {
     use unittest::def_test;
     extern crate alloc;

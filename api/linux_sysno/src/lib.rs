@@ -26,18 +26,6 @@
 
 #![no_std]
 #![deny(clippy::all)]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::inline_always,
-    clippy::missing_errors_doc,
-    clippy::module_name_repetitions,
-    clippy::must_use_candidate,
-    clippy::needless_pass_by_value,
-    clippy::ptr_as_ptr,
-    clippy::unsafe_derive_deserialize
-)]
 
 #[macro_use]
 mod macros;
@@ -54,7 +42,7 @@ pub use errno::{Errno, ErrnoSentinel};
 pub use map::*;
 pub use set::*;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

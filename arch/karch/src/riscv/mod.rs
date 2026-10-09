@@ -17,7 +17,11 @@ pub use cache::{
     flush_icache_remote,
 };
 pub use cpu::{await_interrupts, stop_cpu};
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "CG-024-lint-exceptions: deprecated: Preserve compatibility aliases while callers \
+              migrate to the local-IRQ API"
+)]
 pub use irq::{
     disable_irq, disable_local_irq, enable_irq, enable_local_irq, irq_enabled, local_irq_enabled,
     restore_irq, save_irq_and_disable,

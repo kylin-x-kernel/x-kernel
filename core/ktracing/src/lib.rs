@@ -40,7 +40,6 @@ pub struct TraceRawLock(SpinRaw<()>);
 unsafe impl lock_api::RawMutex for TraceRawLock {
     type GuardMarker = lock_api::GuardSend;
 
-    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: Self = Self(SpinRaw::new(()));
 
     fn lock(&self) {
@@ -117,6 +116,11 @@ ktracepoint::define_event_trace!(
 pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops> {
     TRACE_MANAGER.call_once(|| {
         static_keys::global_init();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: ktracepoint global_init_events \
+                      constructs the linker-registered event map and unconditionally returns Ok"
+        )]
         let manager =
             global_init_events::<TraceRawLock, Kops>().expect("failed to initialize trace events");
         ktask::register_sched_trace_hooks(trace_sched_wakeup, trace_sched_switch);
@@ -265,6 +269,7 @@ impl KernelTraceOps for Kops {
 
         {
             let mut layout = memspace::kernel_layout().lock();
+            // Patched text cannot be rolled back; restoring protection is best effort.
             let _ = layout.protect(start_va, span, old_flags);
         }
 

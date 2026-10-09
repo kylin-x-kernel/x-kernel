@@ -44,7 +44,7 @@ impl Default for GeneralOptions {
 }
 impl GeneralOptions {
     /// Create a new set of general options with defaults.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             nonblock: AtomicBool::new(false),
             reuse_address: AtomicBool::new(false),
@@ -60,22 +60,22 @@ impl GeneralOptions {
     }
 
     /// Returns whether the socket is non-blocking.
-    pub fn nonblocking(&self) -> bool {
+    pub(crate) fn nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
     }
 
     /// Returns whether address reuse is enabled.
-    pub fn reuse_address(&self) -> bool {
+    pub(crate) fn reuse_address(&self) -> bool {
         self.reuse_address.load(Ordering::Relaxed)
     }
 
     /// Returns whether broadcast sending is enabled.
-    pub fn broadcast(&self) -> bool {
+    pub(crate) fn broadcast(&self) -> bool {
         self.broadcast.load(Ordering::Relaxed)
     }
 
     /// Returns whether credential ancillary messages are enabled.
-    pub fn pass_credentials(&self) -> bool {
+    pub(crate) fn pass_credentials(&self) -> bool {
         self.pass_credentials.load(Ordering::Relaxed)
     }
 
@@ -83,7 +83,7 @@ impl GeneralOptions {
     ///
     /// Lock-free and valid from NetRx. A concurrent update may yield the old
     /// or new ifindex.
-    pub fn bound_dev_if(&self) -> i32 {
+    pub(crate) fn bound_dev_if(&self) -> i32 {
         // This scalar does not publish other state to RX/TX readers.
         self.bound_dev_if.load(Ordering::Relaxed)
     }
@@ -98,18 +98,18 @@ impl GeneralOptions {
     }
 
     #[cfg(unittest)]
-    pub fn set_bound_dev_if_for_test(&self, ifindex: i32) {
+    pub(crate) fn set_bound_dev_if_for_test(&self, ifindex: i32) {
         self.set_bound_dev_if(ifindex);
     }
 
     /// Returns the configured send timeout.
-    pub fn send_timeout(&self) -> Option<TimeSpan> {
+    pub(crate) fn send_timeout(&self) -> Option<TimeSpan> {
         let nanos = self.send_timeout_nanos.load(Ordering::Relaxed);
         (nanos > 0).then(|| TimeSpan::from_nanos(nanos))
     }
 
     /// Returns the configured receive timeout.
-    pub fn recv_timeout(&self) -> Option<TimeSpan> {
+    pub(crate) fn recv_timeout(&self) -> Option<TimeSpan> {
         let nanos = self.recv_timeout_nanos.load(Ordering::Relaxed);
         (nanos > 0).then(|| TimeSpan::from_nanos(nanos))
     }
@@ -117,7 +117,7 @@ impl GeneralOptions {
     /// Returns the RX device selection for `SO_BINDTODEVICE`.
     ///
     /// An unbound socket registers all devices, independently of its address.
-    pub fn rx_device_mask(&self) -> u32 {
+    pub(crate) fn rx_device_mask(&self) -> u32 {
         let ifindex = self.bound_dev_if();
         if ifindex > 0 {
             1u32.checked_shl((ifindex - 1) as u32).unwrap_or(0)
@@ -131,7 +131,7 @@ impl GeneralOptions {
     /// Keeps a configuration-change registration across the wait. Changes
     /// during registration force a recheck; later changes wake the waiter to
     /// rebuild its device registrations. Runs in task context without spinlocks.
-    pub fn register_rx_waker(
+    pub(crate) fn register_rx_waker(
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
@@ -157,7 +157,7 @@ impl GeneralOptions {
     }
 
     /// Registers for network progress that may free transmit capacity.
-    pub fn register_tx_waker(
+    pub(crate) fn register_tx_waker(
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
@@ -165,7 +165,7 @@ impl GeneralOptions {
     }
 
     /// Poll for send readiness and run the provided operation.
-    pub fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
+    pub(crate) fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
         f: F,
@@ -175,7 +175,7 @@ impl GeneralOptions {
 
     /// Poll for send readiness and run the operation with a per-call
     /// nonblocking override.
-    pub fn send_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(
+    pub(crate) fn send_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
         nonblocking: bool,
@@ -193,7 +193,7 @@ impl GeneralOptions {
     }
 
     /// Poll for receive readiness and run the provided operation.
-    pub fn recv_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
+    pub(crate) fn recv_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
         f: F,
@@ -203,7 +203,7 @@ impl GeneralOptions {
 
     /// Poll for receive readiness and run the operation with a per-call
     /// nonblocking override.
-    pub fn recv_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(
+    pub(crate) fn recv_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
         nonblocking: bool,
@@ -309,7 +309,7 @@ impl Configurable for GeneralOptions {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{sync::Arc, task::Wake};
     use core::{sync::atomic::AtomicUsize, task::Context};

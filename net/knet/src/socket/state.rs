@@ -34,24 +34,24 @@ impl TryFrom<u8> for State {
 }
 
 #[derive(Debug)]
-pub struct StateLock(AtomicU8);
+pub(crate) struct StateLock(AtomicU8);
 impl StateLock {
-    pub fn new(state: State) -> Self {
+    pub(crate) fn new(state: State) -> Self {
         Self(AtomicU8::new(state as u8))
     }
 
-    pub fn get(&self) -> State {
+    pub(crate) fn get(&self) -> State {
         self.0
             .load(Ordering::Acquire)
             .try_into()
             .expect("invalid state")
     }
 
-    pub fn set(&self, state: State) {
+    pub(crate) fn set(&self, state: State) {
         self.0.store(state as u8, Ordering::Release);
     }
 
-    pub fn lock(&self, expect: State) -> Result<StateGuard<'_>, State> {
+    pub(crate) fn lock(&self, expect: State) -> Result<StateGuard<'_>, State> {
         match self.0.compare_exchange(
             expect as u8,
             State::Busy as u8,
@@ -66,9 +66,9 @@ impl StateLock {
 
 #[must_use]
 #[derive(Debug)]
-pub struct StateGuard<'a>(&'a StateLock, u8);
+pub(crate) struct StateGuard<'a>(&'a StateLock, u8);
 impl StateGuard<'_> {
-    pub fn transit<R>(self, new: State, f: impl FnOnce() -> KResult<R>) -> KResult<R> {
+    pub(crate) fn transit<R>(self, new: State, f: impl FnOnce() -> KResult<R>) -> KResult<R> {
         match f() {
             Ok(result) => {
                 self.0.0.store(new as u8, Ordering::Release);

@@ -15,7 +15,7 @@ use log::{trace, warn};
 pub use used::{UsedRing, VirtQueueUsed, VirtqUsedElem};
 
 use crate::{
-    GuestPhysAddr, VirtioDeviceID,
+    GuestPhysAddr, VirtioDeviceId,
     constants::{VIRTQ_AVAIL_ALIGN, VIRTQ_DESC_ALIGN, VIRTQ_USED_ALIGN},
     error::{VirtioError, VirtioResult},
     memory::GuestMemoryAccessor,
@@ -710,7 +710,7 @@ impl<T: GuestMemoryAccessor + Clone> VirtioQueue<T> {
     pub fn get_data_buffers(
         &self,
         head_index: u16,
-        device_type: VirtioDeviceID,
+        device_type: VirtioDeviceId,
     ) -> VirtioResult<Vec<(GuestPhysAddr, usize, bool)>> {
         if self.faulted.load(Ordering::Acquire) {
             return Err(VirtioError::QueueFaulted);

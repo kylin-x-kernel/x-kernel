@@ -182,6 +182,11 @@ cpu_slot_cell! {
 
 #[inline]
 fn current_lockup_detection() -> &'static LockupDetection {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: CPU startup publishes the local slot \
+                  before invoking lockup detection"
+    )]
     let area = kcpu_slot::area(khal::percpu::this_cpu_id())
         .expect("current CPU lockup-detection area is not published");
     LOCKUP_DETECTION.shared_at(area)
@@ -228,7 +233,7 @@ impl WatchdogTask for LockupDetection {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, def_test};
 

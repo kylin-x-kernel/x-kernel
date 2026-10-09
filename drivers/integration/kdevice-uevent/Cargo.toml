@@ -14,3 +14,6 @@ kdevice.workspace = true
 klazy.workspace = true
 knet.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

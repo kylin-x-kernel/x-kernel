@@ -15,12 +15,12 @@ use osvm::{VirtMutPtr, VirtPtr, write_vm_mem};
 use crate::{DeviceFile, add_device_entry};
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DiceNodeInfo;
+pub(crate) struct DiceNodeInfo;
 
 type DiceUserBuffer = [usize; 3];
 
 impl DiceNodeInfo {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
@@ -119,7 +119,7 @@ fn get_process_hash() -> KResult<Vec<u8>> {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn get_rand(output: usize, len: usize) -> u32 {
+pub(crate) extern "C" fn get_rand(output: usize, len: usize) -> u32 {
     if len == 0 {
         return 0;
     }

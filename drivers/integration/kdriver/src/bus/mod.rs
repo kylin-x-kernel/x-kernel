@@ -10,12 +10,12 @@
 
 use kdevice::IrqTrigger;
 
-pub mod backend;
+pub(crate) mod backend;
 mod local_id;
-pub mod manager;
-pub mod pci_backend;
-pub mod pci_support;
-pub mod platform_backend;
+pub(crate) mod manager;
+pub(crate) mod pci_backend;
+pub(crate) mod pci_support;
+pub(crate) mod platform_backend;
 
 fn irq_trigger_from_firmware(trigger: khal::firmware::devices::InterruptTrigger) -> IrqTrigger {
     match trigger {

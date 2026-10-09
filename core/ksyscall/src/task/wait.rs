@@ -146,7 +146,7 @@ fn scan_waitable_child(
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod wait_test_sync {
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -154,26 +154,26 @@ mod wait_test_sync {
     static REGISTER_BARRIER_ARRIVALS: AtomicUsize = AtomicUsize::new(0);
     static REGISTER_BARRIER_RELEASED: AtomicBool = AtomicBool::new(false);
 
-    pub fn arm_register_barrier() {
+    pub(super) fn arm_register_barrier() {
         REGISTER_BARRIER_ARRIVALS.store(0, Ordering::Release);
         REGISTER_BARRIER_RELEASED.store(false, Ordering::Release);
         REGISTER_BARRIER_ENABLED.store(true, Ordering::Release);
     }
 
-    pub fn register_barrier_arrivals() -> usize {
+    pub(super) fn register_barrier_arrivals() -> usize {
         REGISTER_BARRIER_ARRIVALS.load(Ordering::Acquire)
     }
 
-    pub fn release_register_barrier() {
+    pub(super) fn release_register_barrier() {
         REGISTER_BARRIER_RELEASED.store(true, Ordering::Release);
     }
 
-    pub fn disarm_register_barrier() {
+    pub(super) fn disarm_register_barrier() {
         REGISTER_BARRIER_ENABLED.store(false, Ordering::Release);
         REGISTER_BARRIER_RELEASED.store(true, Ordering::Release);
     }
 
-    pub fn pause_after_register_if_armed() {
+    pub(super) fn pause_after_register_if_armed() {
         if !REGISTER_BARRIER_ENABLED.load(Ordering::Acquire) {
             return;
         }
@@ -240,7 +240,7 @@ fn wait_on_matching_children(
     }))
 }
 
-pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {
+pub(crate) fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {
     let options = WaitOptions::from_bits_truncate(options);
 
     let current_thread = kprocess::current_user_thread();
@@ -259,7 +259,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize
     wait_on_matching_children(proc, selector, exit_code, options)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests_wait {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};

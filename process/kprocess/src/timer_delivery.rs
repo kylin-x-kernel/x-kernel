@@ -23,9 +23,11 @@ use crate::{
 pub fn dispatch_timer_delivery(process_pid: Pid, delivery: TimerDelivery) {
     match delivery {
         TimerDelivery::Process(signal) => {
+            // The target may exit before delivery; nobody is left to notify.
             let _ = send_to_process(process_pid, Some(build_timer_signal_info(signal)));
         }
         TimerDelivery::Thread { tid, signal } => {
+            // The target may exit before delivery; nobody is left to notify.
             let _ = send_to_thread(None, tid, Some(build_timer_signal_info(signal)));
         }
     }

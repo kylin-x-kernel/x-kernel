@@ -19,3 +19,6 @@ ksync.workspace = true
 kvfs.workspace = true
 linux-raw-sys.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

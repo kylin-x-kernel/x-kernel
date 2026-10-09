@@ -23,7 +23,7 @@ fn sleep_impl(duration: TimeSpan) -> (KResult<()>, TimeSpan) {
 }
 
 /// Sleeps for the requested relative duration.
-pub fn sys_nanosleep(req: UserConstPtr<timespec>, rem: UserPtr<timespec>) -> KResult<isize> {
+pub(crate) fn sys_nanosleep(req: UserConstPtr<timespec>, rem: UserPtr<timespec>) -> KResult<isize> {
     let req = req.read_vm()?.try_into_time_span()?;
     debug!("sys_nanosleep <= req: {req:?}");
 
@@ -44,7 +44,7 @@ pub fn sys_nanosleep(req: UserConstPtr<timespec>, rem: UserPtr<timespec>) -> KRe
 ///
 /// Absolute deadlines at or before the current clock complete immediately and
 /// do not report a remaining relative duration.
-pub fn sys_clock_nanosleep(
+pub(crate) fn sys_clock_nanosleep(
     clock_id: __kernel_clockid_t,
     flags: u32,
     req: UserConstPtr<timespec>,

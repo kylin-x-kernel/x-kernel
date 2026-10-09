@@ -34,3 +34,6 @@ vdev-virtio-blk.workspace = true
 vdev-virtio-net.workspace = true
 memspace.workspace = true
 memaddr.workspace = true
+
+[lints]
+workspace = true

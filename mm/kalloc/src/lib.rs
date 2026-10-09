@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Kernel global allocator and page allocation helpers.
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kalloc has 15 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![no_std]
 
 #[macro_use]
@@ -16,7 +21,6 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-#[allow(unused_imports)]
 use alloc_engine::{
     AllocError, AllocResult, BaseAllocator, BuddyPageAllocator, ByteAllocator, PageAllocator,
 };
@@ -216,10 +220,10 @@ cpu_slot_cell! {
 }
 
 fn with_current_usage_counters<T>(f: impl FnOnce(&UsageCounters) -> T) -> T {
-    let _preempt_guard = NoPreempt::new();
+    let preempt_guard = NoPreempt::new();
     // Early-boot allocation can precede this CPU's area publication; skip the
     // diagnostic accounting instead of panicking on an unpublished area.
-    let Some(area) = kcpu_slot::area(_preempt_guard.current_cpu()) else {
+    let Some(area) = kcpu_slot::area(preempt_guard.current_cpu()) else {
         return f(&UsageCounters::new());
     };
     let counters = PERCPU_USAGE_COUNTERS.shared_at(area);
@@ -914,8 +918,7 @@ pub fn is_page_allocator_ready() -> bool {
     GLOBAL_ALLOCATOR.is_page_allocator_ready()
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_kalloc {
     use strum::VariantArray;
     use unittest::def_test;

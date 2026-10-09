@@ -84,6 +84,7 @@ impl SimpleDirOps for CgroupDir {
         match state.node_with_owner(child, mode.permission(), uid, gid) {
             Ok(node) => Ok(node.directory()),
             Err(error) => {
+                // Rollback is best effort; preserve the original creation error.
                 let _ = self.cgroup.remove_child(name);
                 Err(error)
             }

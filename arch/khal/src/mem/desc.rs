@@ -145,11 +145,11 @@ impl fmt::Debug for MemFlags {
 }
 
 /// Default flags for usable RAM.
-pub const RAM_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::FREE);
+pub(super) const RAM_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::FREE);
 /// Default flags for reserved memory.
-pub const RSVD_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::RSVD);
+pub(super) const RSVD_DEF: MemFlags = MemFlags::R.union(MemFlags::W).union(MemFlags::RSVD);
 /// Default flags for MMIO regions.
-pub const MMIO_DEF: MemFlags = MemFlags::R
+pub(super) const MMIO_DEF: MemFlags = MemFlags::R
     .union(MemFlags::W)
     .union(MemFlags::DEV)
     .union(MemFlags::RSVD);

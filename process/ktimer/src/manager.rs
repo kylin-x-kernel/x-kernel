@@ -260,6 +260,11 @@ impl ProcessTimerManager {
             .settime(absolute, interval, value, process_utime, process_stime)?;
 
         let signal_seq = self.allocate_posix_signal_seq();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The timer ID was validated in this \
+                      exclusively borrowed manager and sequence allocation does not remove timers"
+        )]
         let timer = self
             .posix_timers
             .get_mut(&timer_id)
@@ -373,13 +378,18 @@ impl ProcessTimerManager {
     fn arm_itimer_real(timer: &mut ITimer, owner_pid: Pid) {
         let deadline = timer.deadline().map(|deadline| match deadline {
             TimerInstant::Monotonic(deadline) => deadline,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: ITIMER_REAL timers are created on \
+                          the monotonic clock, so their deadlines are monotonic instants"
+            )]
             _ => panic!("ITIMER_REAL deadline must use the monotonic clock"),
         });
         timer.set_alarm(deadline, Some(owner_pid));
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ksignal::Signo;
     use ktime_types::TimeSpan;

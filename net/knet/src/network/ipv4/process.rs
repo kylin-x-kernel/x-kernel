@@ -539,7 +539,7 @@ pub(crate) fn rewrite_reassembled_header(
     Ok(())
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::vec;
 

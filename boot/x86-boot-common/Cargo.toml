@@ -14,3 +14,6 @@ kernel_elf_loader = { workspace = true }
 boot_info = { workspace = true }
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
+
+[lints]
+workspace = true

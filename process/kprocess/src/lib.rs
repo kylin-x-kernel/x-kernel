@@ -45,12 +45,21 @@
 //! assert_eq!(nice.proc_stat_priority(), 0);
 //! ```
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kprocess has 31 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![no_std]
 #![warn(missing_docs)]
 
 extern crate alloc;
 
-mod tests;
+/// Unit tests for kprocess
+#[unittest::mod_test]
+mod tests {
+    include!("tests.rs");
+}
 
 /// Capability-target validation helpers.
 pub mod capability;
@@ -201,7 +210,11 @@ pub fn publish_user_task(task: ktask::TaskInner) -> kerrno::KResult<PublishedUse
 /// its runtime are constructed as one object.
 /// `signal_actions` is an owned initial configuration; use the thread clone
 /// preparation APIs to share an existing process's signal configuration.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Thread construction binds \
+              process ownership, identity, kernel entry and user runtime state together"
+)]
 pub fn build_process_thread(
     process: alloc::sync::Arc<Process>,
     task_number: alloc::sync::Arc<kidentity::PidHandle>,
@@ -225,7 +238,11 @@ pub fn build_process_thread(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Thread construction binds \
+              process ownership, identity, kernel entry and user runtime state together"
+)]
 pub(crate) fn build_process_thread_with_config(
     process: alloc::sync::Arc<Process>,
     task_number: alloc::sync::Arc<kidentity::PidHandle>,

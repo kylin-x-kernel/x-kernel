@@ -74,7 +74,7 @@ fn recv_tee_response(socket: &UnixDomainSocket) -> TeeResult<TeeResponse> {
     protocal::decode_message(&payload).map_err(|_| TEE_ERROR_GENERIC)
 }
 
-pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
+pub(super) fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     let parsed = Uuid::parse_str(&uuid)?;
     let path = parsed.ta_unix_socket_path();
     let uuid = parsed.to_string();
@@ -110,7 +110,7 @@ pub fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     }
 }
 
-pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
+pub(super) fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     // Connect to dest TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
     let path = ta_unix_socket_path(&sess_id.uuid)?;
@@ -129,7 +129,7 @@ pub fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     Ok(())
 }
 
-pub fn tee_ta_invoke_command(
+pub(super) fn tee_ta_invoke_command(
     sess_id: SessionIdentity,
     cmd_id: u32,
     _usr_param: *mut utee_params,
@@ -161,14 +161,14 @@ pub fn tee_ta_invoke_command(
     }
 }
 
-pub fn tee_ta_get_session(handle: u32) -> TeeResult<SessionIdentity> {
+pub(super) fn tee_ta_get_session(handle: u32) -> TeeResult<SessionIdentity> {
     with_tee_ta_ctx(|ctx| match ctx.open_sessions.get(&handle) {
         Some(sess_id) => Ok(sess_id.clone()),
         None => Err(TEE_ERROR_ITEM_NOT_FOUND),
     })
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     #[test]
     fn validated_payload_len_accepts_within_limit() {

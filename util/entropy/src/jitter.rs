@@ -82,7 +82,7 @@ fn seed_state() -> u64 {
     ticks ^ stack_addr.rotate_left(17) ^ 0xa5a5_a5a5_a5a5_a5a5
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert, assert_eq, assert_ne, def_test};
 

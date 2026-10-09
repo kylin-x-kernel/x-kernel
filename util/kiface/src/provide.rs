@@ -21,7 +21,7 @@ fn cfg_attrs(attrs: &[Attribute]) -> impl Iterator<Item = &Attribute> {
 }
 
 /// Expands a provider impl into exported interface method symbols.
-pub fn provide(implementation: ItemImpl, args: ProvideArgs) -> Result<TokenStream, Error> {
+pub(crate) fn provide(implementation: ItemImpl, args: ProvideArgs) -> Result<TokenStream, Error> {
     if !implementation.generics.params.is_empty() {
         return Err(crate::errors::generic_not_allowed_error(
             &implementation.generics,

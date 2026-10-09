@@ -72,11 +72,13 @@ points:
   of a live, fully initialized POD `loop_info` value as
   `MaybeUninit<u8>`. `osvm::read_vm_bytes` initializes that exact destination
   range from userspace before the typed value is passed to `set_info`.
-- `src/nodes/event.rs::ongkey` is a `#[unsafe(no_mangle)] pub extern "C"`
-  export. Its stable C ABI takes no arguments, accesses no caller memory, and
+- `src/nodes/event.rs::ongkey` is a crate-visible
+  `#[unsafe(no_mangle)] extern "C"` function exported by its unmangled symbol
+  name. Its stable C ABI takes no arguments, accesses no caller memory, and
   only passes `()` through `core::hint::black_box`.
-- `src/nodes/dice.rs::get_rand` is a `#[unsafe(no_mangle)] pub extern "C"`
-  export. The caller supplies a userspace output address and length. The
+- `src/nodes/dice.rs::get_rand` is a crate-visible
+  `#[unsafe(no_mangle)] extern "C"` function exported by its unmangled symbol
+  name. The caller supplies a userspace output address and length. The
   function fills an owned `Vec<u8>` and copies it through the checked
   `write_vm_mem` boundary; an invalid destination returns status `1`, while a
   successful write or a zero length returns `0`.

@@ -36,6 +36,11 @@ fn truncate_fat_mtime(timestamp: SystemTime) -> SystemTime {
 fn unix_to_dos(datetime: SystemTime) -> fatfs::DateTime {
     let datetime = clamp_fat_timestamp(datetime);
 
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: clamp_fat_timestamp limits the value to \
+                  the FAT range, which chrono represents"
+    )]
     let dt = DateTime::from_timestamp(datetime.unix_seconds(), datetime.subsec_nanos())
         .expect("clamped FAT timestamp is representable by chrono");
     let dt = dt.naive_utc();
@@ -60,7 +65,8 @@ pub(crate) fn file_metadata(
     use fatfs::Seek;
     let pos = file.seek(fatfs::SeekFrom::Current(0)).unwrap_or(0);
     let size = file.seek(fatfs::SeekFrom::End(0)).unwrap_or(0);
-    file.seek(fatfs::SeekFrom::Start(pos)).ok();
+    // This best-effort size query keeps its result even if restoring the cursor fails.
+    let _ = file.seek(fatfs::SeekFrom::Start(pos));
     Metadata {
         inode,
         device: 0,
@@ -99,11 +105,19 @@ pub(crate) fn normalize_file_metadata_update(mut update: MetadataUpdate) -> Meta
 pub(crate) fn update_file_metadata(file: &mut ff::File, update: MetadataUpdate) -> MetadataUpdate {
     let applied = normalize_file_metadata_update(update);
     if let Some(atime) = applied.atime {
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "CG-024-lint-exceptions: deprecated: fatfs has no non-deprecated setter for \
+                      explicit utimens access dates"
+        )]
         file.set_accessed(unix_to_dos(atime).date);
     }
     if let Some(mtime) = applied.mtime {
-        #[allow(deprecated)]
+        #[expect(
+            deprecated,
+            reason = "CG-024-lint-exceptions: deprecated: fatfs has no non-deprecated setter for \
+                      explicit utimens modification times"
+        )]
         file.set_modified(unix_to_dos(mtime));
     }
     applied
@@ -125,7 +139,7 @@ pub(crate) fn into_vfs_err<E>(err: fatfs::Error<E>) -> VfsError {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

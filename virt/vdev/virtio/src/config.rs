@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use crate::{GuestPhysAddr, VirtioDeviceID, constants::*};
+use crate::{GuestPhysAddr, VirtioDeviceId, constants::*};
 /// Configuration for VirtIO devices with device index mapping
 #[derive(Debug, Clone)]
 pub struct VirtioConfig {
@@ -21,7 +21,7 @@ pub struct VirtioConfig {
     /// Device features supported
     pub device_features: u64,
     /// Device Type
-    pub device_type: VirtioDeviceID,
+    pub device_type: VirtioDeviceId,
 }
 
 impl VirtioConfig {
@@ -30,7 +30,7 @@ impl VirtioConfig {
         base_addr: GuestPhysAddr,
         device_features: u64,
         num_queues: u16,
-        device_type: VirtioDeviceID,
+        device_type: VirtioDeviceId,
     ) -> Self {
         Self {
             base_addr,

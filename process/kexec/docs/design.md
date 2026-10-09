@@ -58,7 +58,7 @@ The public interaction directions are:
   VMAs, `memspace` for mappings and stack writes, and `ksignal` for the signal
   trampoline. These dependencies do not call back into `kexec` during commit.
 - `ElfCacheEntry::load_file` calls
-  `kernel_elf_parser::ELFHeadersBuilder::{new, ph_range, build}` to create owned
+  `kernel_elf_parser::ElfHeadersBuilder::{new, ph_range, build}` to create owned
   cached header metadata. `PreparedElfImage::new` then passes that metadata to
   the private `elf_image::ValidatedElfImage` validator before any MM operation.
 

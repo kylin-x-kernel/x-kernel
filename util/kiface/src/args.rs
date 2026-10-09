@@ -11,7 +11,7 @@ use syn::{
 
 /// Arguments for `#[interface]`.
 #[derive(Default)]
-pub struct InterfaceArgs {
+pub(crate) struct InterfaceArgs {
     /// Optional namespace used to disambiguate exported symbols.
     pub namespace: Option<String>,
     /// Whether the provider may be absent.
@@ -46,7 +46,7 @@ impl Parse for InterfaceArgs {
 
 /// Arguments for `#[provide]`.
 #[derive(Default)]
-pub struct ProvideArgs {
+pub(crate) struct ProvideArgs {
     /// Optional namespace used to match the interface definition.
     pub namespace: Option<String>,
 }

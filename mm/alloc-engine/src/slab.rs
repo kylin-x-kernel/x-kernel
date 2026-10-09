@@ -47,10 +47,7 @@ impl BaseAllocator for SlabByteAllocator {
     fn add_region(&mut self, start: usize, size: usize) -> AllocResult {
         // SAFETY: The caller provides a valid backing region at
         // `[start, start + size)` to extend the slab heap.
-        unsafe {
-            self.inner_mut().add_memory(start, size);
-        }
-        Ok(())
+        unsafe { self.inner_mut().add_memory(start, size) }
     }
 }
 
@@ -86,9 +83,9 @@ impl ByteAllocator for SlabByteAllocator {
     }
 }
 
-#[cfg(all(unittest, feature = "slab"))]
-#[allow(missing_docs)]
-pub mod tests_slab {
+#[cfg(feature = "slab")]
+#[unittest::mod_test]
+pub(crate) mod tests_slab {
     use core::alloc::Layout;
 
     use unittest::def_test;

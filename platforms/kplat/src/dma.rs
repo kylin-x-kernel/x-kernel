@@ -9,12 +9,12 @@ use kplat_macros::device_interface;
 #[device_interface]
 pub trait PlatformDmaIf {
     /// Finalize a DMA mapping after page attributes have been updated.
-    fn prepare(_pa: usize, _size: usize) -> kerrno::KResult {
+    fn prepare(pa: usize, size: usize) -> kerrno::KResult {
         Ok(())
     }
 
     /// Tear down any platform-specific DMA state before the pages are released.
-    fn release(_pa: usize, _size: usize) -> kerrno::KResult {
+    fn release(pa: usize, size: usize) -> kerrno::KResult {
         Ok(())
     }
 }

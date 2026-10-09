@@ -10,7 +10,7 @@ use linux_raw_sys::general::rlimit64;
 use posix_types::{UserConstPtr, UserPtr};
 
 /// Gets and/or sets resource limits for a process.
-pub fn sys_prlimit64(
+pub(crate) fn sys_prlimit64(
     pid: Pid,
     resource: u32,
     new_limit: UserConstPtr<rlimit64>,
@@ -35,11 +35,11 @@ pub fn sys_prlimit64(
 }
 
 /// Returns the current resource limits of the calling process.
-pub fn sys_getrlimit(resource: u32, old_limit: UserPtr<rlimit64>) -> KResult<isize> {
+pub(crate) fn sys_getrlimit(resource: u32, old_limit: UserPtr<rlimit64>) -> KResult<isize> {
     sys_prlimit64(0, resource, UserConstPtr::from(0usize), old_limit)
 }
 
 /// Updates the resource limits of the calling process.
-pub fn sys_setrlimit(resource: u32, new_limit: UserConstPtr<rlimit64>) -> KResult<isize> {
+pub(crate) fn sys_setrlimit(resource: u32, new_limit: UserConstPtr<rlimit64>) -> KResult<isize> {
     sys_prlimit64(0, resource, new_limit, UserPtr::from(0usize))
 }

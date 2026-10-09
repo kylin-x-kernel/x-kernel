@@ -108,10 +108,20 @@ impl kirq::IntrManagerIf {
 
     fn complete_irq(_completion_cookie: usize) {}
 
+    #[expect(
+        clippy::todo,
+        reason = "CG-023-unfinished-implementations: TODO(cg): LoongArch inter-processor \
+                  interrupt delivery to the target CPU is not implemented"
+    )]
     fn notify_cpu(_interrupt_id: usize, _target: TargetCpu) {
         todo!()
     }
 
+    #[expect(
+        clippy::todo,
+        reason = "CG-023-unfinished-implementations: TODO(cg): LoongArch controller-local \
+                  interrupt priority programming is not implemented"
+    )]
     fn set_prio(_irq: usize, _priority: u8) {
         todo!()
     }

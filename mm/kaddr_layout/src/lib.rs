@@ -162,6 +162,11 @@ static KIMAGE_VOFFSET: AtomicUsize = AtomicUsize::new(0);
 
 /// Records the kernel-image VA-to-PA offset established during early boot.
 #[inline]
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: Only the primary boot entry records the \
+              offset, once per boot, so a second differing value cannot occur"
+)]
 pub fn set_kimage_voffset(offset: usize) {
     let current = KIMAGE_VOFFSET.load(Ordering::Relaxed);
     if current != 0 && current != offset {
@@ -179,6 +184,11 @@ pub fn kimage_voffset() -> usize {
 /// Convert a physical address to its linear-map virtual address.
 #[inline]
 pub fn p2v(pa: usize) -> usize {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Physical addresses passed to p2v must fit \
+                  the configured linear-map window"
+    )]
     pa.checked_add(PAGE_OFFSET).expect("p2v overflow")
 }
 
@@ -188,8 +198,19 @@ const fn in_window(va: usize, start: usize, size: usize) -> bool {
 }
 
 #[inline]
+#[expect(
+    clippy::panic,
+    reason = "CG-021-no-panic-on-reachable-failure: Callers translate only linear-map or \
+              kernel-image addresses, the windows with a fixed physical offset; v2p has no error \
+              return"
+)]
 pub(crate) fn v2p_with_kimage_window(va: usize, layout: LayoutConsts) -> usize {
     if in_window(va, layout.kimage_vaddr, layout.kimage_vsize) {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Kernel image addresses use the \
+                      boot-installed image offset, which cannot exceed the image virtual address"
+        )]
         va.checked_sub(kimage_voffset())
             .expect("invalid kernel image voffset")
     } else if in_window(va, layout.linear_map_vaddr, layout.linear_map_vsize) {

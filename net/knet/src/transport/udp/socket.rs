@@ -49,7 +49,12 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Creates a new UDP socket.
-    #[allow(clippy::new_without_default)]
+    #[expect(
+        clippy::new_without_default,
+        reason = "CG-024-lint-exceptions: clippy::new_without_default: Creating a socket \
+                  initializes the UDP registry and allocates a PCB rather than representing a \
+                  default value"
+    )]
     pub fn new() -> Self {
         registry::init_udp_registry();
         let state = UdpSocketState::new();
@@ -604,12 +609,13 @@ impl Pollable for UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        self.shutdown(Shutdown::Both).ok();
+        // Drop cannot report shutdown errors and must still unregister the PCB.
+        let _ = self.shutdown(Shutdown::Both);
         registry::unregister_udp_pcb(&self.pcb);
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::task::Wake;
 

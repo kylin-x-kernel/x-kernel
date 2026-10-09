@@ -82,7 +82,7 @@ impl UdpSocketWaiters {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::boxed::Box;
     use core::{
@@ -110,6 +110,11 @@ mod tests {
         RawWaker::new(data, &WAKER_VTABLE)
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_wake(data: *const ()) {
         // SAFETY: `data` is the waker data pointer installed by
         // `make_waker`, which stores a leaked `AtomicUsize` with static
@@ -118,6 +123,11 @@ mod tests {
         counter.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// # Safety
+    ///
+    /// `data` must be the aligned pointer to a live static `AtomicUsize`
+    /// installed by `make_waker`. It must remain valid for every cloned waker;
+    /// these callbacks borrow the counter and never reclaim its allocation.
     unsafe fn waker_wake_by_ref(data: *const ()) {
         // SAFETY: `data` follows the same contract as in `waker_wake`.
         let counter = unsafe { &*(data as *const AtomicUsize) };

@@ -42,11 +42,11 @@ pub(crate) struct RqCell<V>(UnsafeCell<V>);
 unsafe impl<V: Send + Copy> Sync for RqCell<V> {}
 
 impl<V: Copy> RqCell<V> {
-    pub const fn new(v: V) -> Self {
+    pub(crate) const fn new(v: V) -> Self {
         Self(UnsafeCell::new(v))
     }
 
-    pub fn get(&self, _: RqLocked) -> V {
+    pub(crate) fn get(&self, _: RqLocked) -> V {
         // SAFETY: deref of `UnsafeCell::get()` (`*mut V`) for a read.
         // Validity and alignment: `RqCell` is `#[repr(transparent)]` over
         // `UnsafeCell<V>`, so `get()` yields a pointer to this cell's `V`.
@@ -58,7 +58,7 @@ impl<V: Copy> RqCell<V> {
         unsafe { *self.0.get() }
     }
 
-    pub fn set(&self, v: V, _: RqLocked) {
+    pub(crate) fn set(&self, v: V, _: RqLocked) {
         // SAFETY: write through `UnsafeCell::get()` (`*mut V`).
         // Validity and alignment: same transparent layout as `get`.
         // Initialization: the destination is a live `V` from `new` or a
@@ -70,7 +70,7 @@ impl<V: Copy> RqCell<V> {
         }
     }
 
-    pub fn update(&self, tok: RqLocked, f: impl FnOnce(V) -> V) {
+    pub(crate) fn update(&self, tok: RqLocked, f: impl FnOnce(V) -> V) {
         let next = f(self.get(tok));
         self.set(next, tok);
     }
@@ -232,7 +232,8 @@ impl<T> SchedTask<T> {
     /// Returns the first [`SchedAttr::validate`] failure.
     #[expect(
         dead_code,
-        reason = "ktask still publishes tasks through the plugin schedulers"
+        reason = "CG-024-lint-exceptions: dead_code: ktask still publishes tasks through the \
+                  plugin schedulers"
     )]
     pub(crate) fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
         attr.validate()?;

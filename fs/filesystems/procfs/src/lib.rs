@@ -45,6 +45,11 @@ pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", init
 
 #[macros::register_init]
 fn init_proc_fs() {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("proc filesystem type must register once");
 }
 
@@ -60,7 +65,7 @@ fn new_procfs_with_type(
     SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, root::builder)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

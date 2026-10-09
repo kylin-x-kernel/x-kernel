@@ -75,6 +75,12 @@ impl Port {
         self.base + off * self.stride
     }
 
+    /// # Safety
+    ///
+    /// `off` must select a register valid for a read of `reg_width` bytes
+    /// inside the live MMIO mapping established by `Port::new`. Address
+    /// arithmetic must not overflow, the address must retain the required
+    /// alignment, and accesses must be serialized with other UART users.
     unsafe fn read_reg(&self, off: usize) -> u8 {
         let addr = self.reg_addr(off);
         match self.reg_width {
@@ -96,6 +102,12 @@ impl Port {
         }
     }
 
+    /// # Safety
+    ///
+    /// `off` must select a register valid for a write of `reg_width` bytes
+    /// inside the live MMIO mapping established by `Port::new`. Address
+    /// arithmetic must not overflow, the address must retain the required
+    /// alignment, and accesses must be serialized with other UART users.
     unsafe fn write_reg(&self, off: usize, val: u8) {
         let addr = self.reg_addr(off);
         match self.reg_width {
@@ -117,10 +129,18 @@ impl Port {
         }
     }
 
+    /// # Safety
+    ///
+    /// The `Port::new` MMIO mapping must still be live and exclusively owned
+    /// for UART initialization. Exclude concurrent UART accesses while changing
+    /// the divisor-latch selector, FIFO, modem-control and interrupt registers.
     pub(crate) unsafe fn init_preserve_baud(&self) {
         // SAFETY: `self` carries the MMIO window invariants established by
         // `Self::new`; these accesses are to standard NS16550 registers.
-        unsafe { self.write_reg(Self::LCR, self.read_reg(Self::LCR) & !Self::LCR_DLAB) };
+        let lcr = unsafe { self.read_reg(Self::LCR) };
+        // SAFETY: The caller exclusively owns the live UART during init; LCR
+        // is writable at the configured register width and only DLAB is cleared.
+        unsafe { self.write_reg(Self::LCR, lcr & !Self::LCR_DLAB) };
         // SAFETY: same MMIO register window invariant as above.
         unsafe { self.write_reg(Self::FCR, 0xC7) };
         // SAFETY: same MMIO register window invariant as above.

@@ -127,8 +127,7 @@ pub fn busy_wait_until(deadline: MonotonicInstant) {
     spin_until(deadline);
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_time {
     use ktime_types::{NANOS_PER_SEC, TimeSpan};
     use unittest::def_test;

@@ -74,9 +74,9 @@ fn bb_memdup_object_id_from_user(
 }
 
 #[cfg(unittest)]
-pub const TEE_UUID_HEX_LEN: usize = size_of::<TEE_UUID>();
+pub(super) const TEE_UUID_HEX_LEN: usize = size_of::<TEE_UUID>();
 
-pub static ROOT_TEE_FS_INIT: Once<()> = Once::new();
+pub(super) static ROOT_TEE_FS_INIT: Once<()> = Once::new();
 /// GP persistent object header on storage media.
 ///
 /// GP: `struct tee_svc_storage_head`
@@ -96,13 +96,13 @@ struct TeeSvcStorageHead {
 }
 
 /// GP: `struct tee_storage_enum`
-pub struct TeeStorageEnum {
+pub(super) struct TeeStorageEnum {
     pub id: c_ulong,
     pub dir: Option<Box<TeeFsDir>>,
     pub fops: Option<&'static TeeFileOperations>,
 }
 
-pub fn tee_svc_storage_add_enum(mut obj: TeeStorageEnum) -> TeeResult<c_ulong> {
+pub(super) fn tee_svc_storage_add_enum(mut obj: TeeStorageEnum) -> TeeResult<c_ulong> {
     with_tee_session_ctx_mut(|ctx| {
         // 获取一个可用的 ID
         let vacant = ctx.storage_enums.vacant_entry();
@@ -165,7 +165,7 @@ fn tee_svc_close_enum(enum_id: c_ulong) -> TeeResult {
 /// Close all storage enumerators in the current session context.
 ///
 /// Mirrors GP `tee_svc_storage_close_all_enum()` in `release_utc_state`.
-pub fn tee_svc_storage_close_all_enum() -> TeeResult {
+pub(super) fn tee_svc_storage_close_all_enum() -> TeeResult {
     let ids: Vec<c_ulong> = with_tee_session_ctx(|ctx| {
         Ok(ctx
             .storage_enums
@@ -197,7 +197,7 @@ pub fn tee_svc_storage_close_all_enum() -> TeeResult {
 /// `Err(TeeError::ShortBuffer)` - 提供的 `buf` 缓冲区太小。
 /// `Err(TeeError::Generic)` - 其他转换错误。
 #[cfg(unittest)]
-pub fn tee_svc_storage_create_dirname(buf: &mut [u8], uuid: &TEE_UUID) -> TeeResult {
+pub(super) fn tee_svc_storage_create_dirname(buf: &mut [u8], uuid: &TEE_UUID) -> TeeResult {
     use super::tee_misc::{tee_b2hs, tee_b2hs_hsbuf_size};
 
     let required_len = tee_b2hs_hsbuf_size(TEE_UUID_HEX_LEN) + 1; // '/' + UUID_HEX_CHARS + '\0'
@@ -223,7 +223,7 @@ pub fn tee_svc_storage_create_dirname(buf: &mut [u8], uuid: &TEE_UUID) -> TeeRes
 
 const CFG_TEE_FS_PARENT_PATH: &str = "/tee/";
 
-pub fn tee_svc_storage_create_filename_dfh(
+pub(super) fn tee_svc_storage_create_filename_dfh(
     buf: &mut [u8],
     dfh: Option<&TeeFsDirfileFileh>,
 ) -> TeeResult<usize> {
@@ -370,7 +370,7 @@ fn tee_svc_storage_read_head(o: &mut TeeObj) -> TeeResult {
 /// * The tee_obj_id
 ///
 /// TODO: need add remove_corrupt_obj() while TEE_ERROR_CORRUPT_OBJECT
-pub fn syscall_storage_obj_open(
+pub(super) fn syscall_storage_obj_open(
     storage_id: c_ulong,
     object_id: *mut c_void,
     object_id_len: usize,
@@ -571,6 +571,11 @@ struct CreateInnerCtx {
 /// * `obj_is_null` - whether the object is null
 /// # Returns
 /// * `CreateInnerResult` - the result of the operation
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy storage object creation; split \
+              validation, allocation and persistence"
+)]
 fn syscall_storage_obj_create_inner(
     ctx: &mut CreateInnerCtx,
     flags: c_ulong,
@@ -743,7 +748,7 @@ fn syscall_storage_obj_create_inner(
 /// # Returns
 /// * `TeeResult` - the result of the operation
 #[allow(clippy::too_many_arguments)]
-pub fn syscall_storage_obj_create(
+pub(super) fn syscall_storage_obj_create(
     storage_id: c_ulong,
     object_id: *mut c_void,
     object_id_len: usize,
@@ -889,7 +894,7 @@ fn convert_error(mut e: u32) -> u32 {
 /// * `obj_id` - the object id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_obj_del(obj_id: c_ulong) -> TeeResult {
+pub(super) fn syscall_storage_obj_del(obj_id: c_ulong) -> TeeResult {
     tee_debug!("syscall_storage_obj_del: obj_id: {:X?}", obj_id);
     let o = tee_obj_get(obj_id)?;
 
@@ -926,7 +931,7 @@ pub fn syscall_storage_obj_del(obj_id: c_ulong) -> TeeResult {
 /// * `object_id_len` - the length of the new object id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_obj_rename(
+pub(super) fn syscall_storage_obj_rename(
     obj: c_ulong,
     object_id: *mut c_void,
     object_id_len: usize,
@@ -1048,7 +1053,7 @@ pub fn syscall_storage_obj_rename(
 /// * `count` - the count of the data
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_obj_read(
+pub(super) fn syscall_storage_obj_read(
     obj: c_ulong,
     data: *mut c_void,
     len: usize,
@@ -1134,7 +1139,7 @@ pub fn syscall_storage_obj_read(
 /// * `len` - the length of the data
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_obj_write(obj: c_ulong, data: *mut c_void, len: usize) -> TeeResult {
+pub(super) fn syscall_storage_obj_write(obj: c_ulong, data: *mut c_void, len: usize) -> TeeResult {
     tee_debug!(
         "syscall_storage_obj_write: obj: {:X?}, data_len: {:X?}",
         obj,
@@ -1190,7 +1195,7 @@ pub fn syscall_storage_obj_write(obj: c_ulong, data: *mut c_void, len: usize) ->
     Ok(())
 }
 
-pub fn tee_svc_storage_write_usage(o: &mut TeeObj, usage: u32) -> TeeResult {
+pub(super) fn tee_svc_storage_write_usage(o: &mut TeeObj, usage: u32) -> TeeResult {
     let pos = offset_of!(TeeSvcStorageHead, object_usage);
 
     let fops = {
@@ -1216,7 +1221,7 @@ pub fn tee_svc_storage_write_usage(o: &mut TeeObj, usage: u32) -> TeeResult {
 /// * `len` - the length to truncate
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_obj_trunc(obj: c_ulong, len: usize) -> TeeResult {
+pub(super) fn syscall_storage_obj_trunc(obj: c_ulong, len: usize) -> TeeResult {
     let o = tee_obj_get(obj)?;
 
     // check flags and get fops and attr size
@@ -1283,7 +1288,7 @@ pub fn syscall_storage_obj_trunc(obj: c_ulong, len: usize) -> TeeResult {
 /// * `whence` - the whence to seek
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_obj_seek(obj: c_ulong, offset: i32, whence: c_ulong) -> TeeResult {
+pub(super) fn syscall_storage_obj_seek(obj: c_ulong, offset: i32, whence: c_ulong) -> TeeResult {
     let o = tee_obj_get(obj)?;
     let o_guard = o.lock();
     if o_guard.info.handleFlags & TEE_HANDLE_FLAG_PERSISTENT == 0 {
@@ -1341,7 +1346,7 @@ pub fn syscall_storage_obj_seek(obj: c_ulong, offset: i32, whence: c_ulong) -> T
 /// * `obj_enum` - the object enumeration id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_alloc_enum(obj_enum: *mut c_uint) -> TeeResult {
+pub(super) fn syscall_storage_alloc_enum(obj_enum: *mut c_uint) -> TeeResult {
     let obj = TeeStorageEnum {
         id: 0,
         dir: None,
@@ -1360,7 +1365,7 @@ pub fn syscall_storage_alloc_enum(obj_enum: *mut c_uint) -> TeeResult {
 /// * `obj_enum` - the object enumeration id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_free_enum(obj_enum: c_ulong) -> TeeResult {
+pub(super) fn syscall_storage_free_enum(obj_enum: c_ulong) -> TeeResult {
     tee_svc_close_enum(obj_enum)
 }
 
@@ -1370,7 +1375,7 @@ pub fn syscall_storage_free_enum(obj_enum: c_ulong) -> TeeResult {
 /// * `obj_enum` - the object enumeration id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_reset_enum(obj_enum: c_ulong) -> TeeResult {
+pub(super) fn syscall_storage_reset_enum(obj_enum: c_ulong) -> TeeResult {
     let obj = tee_svc_storage_get_enum(obj_enum)?;
     // get the lock of the dir, and get the &mut TeeFsDir borrow
     let fops = {
@@ -1399,7 +1404,7 @@ pub fn syscall_storage_reset_enum(obj_enum: c_ulong) -> TeeResult {
 /// * `storage_id` - the storage id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_start_enum(obj_enum: c_ulong, storage_id: c_ulong) -> TeeResult {
+pub(super) fn syscall_storage_start_enum(obj_enum: c_ulong, storage_id: c_ulong) -> TeeResult {
     let fops =
         tee_svc_storage_file_ops(storage_id as u32).map_err(|_e| TEE_ERROR_ITEM_NOT_FOUND)?;
 
@@ -1435,7 +1440,7 @@ pub fn syscall_storage_start_enum(obj_enum: c_ulong, storage_id: c_ulong) -> Tee
 /// * `len` - the length of the object id
 /// # Returns
 /// * `TeeResult` - the result of the operation
-pub fn syscall_storage_next_enum(
+pub(super) fn syscall_storage_next_enum(
     obj_enum: c_ulong,
     info: *mut utee_object_info,
     obj_id: *mut c_void,
@@ -1544,7 +1549,7 @@ pub fn syscall_storage_next_enum(
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_svc_storage {
+pub(super) mod tests_tee_svc_storage {
     use alloc::{string::String, vec::Vec};
     use core::ffi::c_ulong;
 

@@ -177,8 +177,10 @@ impl DirBuffer {
         // `linux_dirent64`. The byte buffer may not satisfy `linux_dirent64`
         // alignment at arbitrary offsets, so the header write must be
         // unaligned.
+        let entry_ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
+        // SAFETY: The checked entry length reserves the header; the byte buffer
+        // is exclusively borrowed and write_unaligned imposes no struct alignment.
         unsafe {
-            let entry_ptr = self.buf.as_mut_ptr().add(self.offset);
             entry_ptr
                 .cast::<linux_dirent64>()
                 .write_unaligned(linux_dirent64 {
@@ -188,11 +190,16 @@ impl DirBuffer {
                     d_type: d_type as _,
                     d_name: Default::default(),
                 });
-
-            let name_ptr = entry_ptr.add(NAME_OFFSET);
-            name_ptr.copy_from_nonoverlapping(name.as_ptr(), name.len());
-            name_ptr.add(name.len()).write(0);
         }
+        // SAFETY: NAME_OFFSET lies within the entry whose full size was checked.
+        let name_ptr = unsafe { entry_ptr.add(NAME_OFFSET) };
+        // SAFETY: The checked entry includes name.len() bytes, and the input
+        // name does not alias the exclusively borrowed output buffer.
+        unsafe { name_ptr.copy_from_nonoverlapping(name.as_ptr(), name.len()) };
+        // SAFETY: The checked entry length also reserves the trailing NUL byte.
+        let terminator = unsafe { name_ptr.add(name.len()) };
+        // SAFETY: terminator is a writable byte within the exclusively held buffer.
+        unsafe { terminator.write(0) };
 
         self.offset += len;
         true

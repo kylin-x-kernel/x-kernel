@@ -15,7 +15,7 @@ fn validate_job_pid(pid: i32) -> KResult<()> {
 }
 
 /// Returns the session ID of the given process.
-pub fn sys_getsid(pid: i32) -> KResult<isize> {
+pub(crate) fn sys_getsid(pid: i32) -> KResult<isize> {
     validate_job_pid(pid)?;
     let proc = if pid == 0 {
         kprocess::current_user_process()
@@ -26,7 +26,7 @@ pub fn sys_getsid(pid: i32) -> KResult<isize> {
 }
 
 /// Creates a new session and makes the caller its leader.
-pub fn sys_setsid() -> KResult<isize> {
+pub(crate) fn sys_setsid() -> KResult<isize> {
     let current_thread = kprocess::current_user_thread();
     let proc = current_thread.process();
     if kprocess::job_control::target_group(proc.pid()).is_ok() {
@@ -41,7 +41,7 @@ pub fn sys_setsid() -> KResult<isize> {
 }
 
 /// Returns the process group ID of the given process.
-pub fn sys_getpgid(pid: i32) -> KResult<isize> {
+pub(crate) fn sys_getpgid(pid: i32) -> KResult<isize> {
     validate_job_pid(pid)?;
     let proc = if pid == 0 {
         kprocess::current_user_process()
@@ -53,12 +53,12 @@ pub fn sys_getpgid(pid: i32) -> KResult<isize> {
 
 /// Returns the process group ID of the calling process.
 #[cfg(target_arch = "x86_64")]
-pub fn sys_getpgrp() -> KResult<isize> {
+pub(crate) fn sys_getpgrp() -> KResult<isize> {
     Ok(kprocess::current_user_process().group().pgid() as _)
 }
 
 /// Sets the process group ID of the given process.
-pub fn sys_setpgid(pid: i32, pgid: i32) -> KResult<isize> {
+pub(crate) fn sys_setpgid(pid: i32, pgid: i32) -> KResult<isize> {
     if pgid < 0 {
         return Err(KError::InvalidInput);
     }
@@ -81,7 +81,7 @@ pub fn sys_setpgid(pid: i32, pgid: i32) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

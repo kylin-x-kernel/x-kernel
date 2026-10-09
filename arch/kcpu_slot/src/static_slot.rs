@@ -299,7 +299,10 @@ impl<T: 'static> CpuSlotCell<T> {
         // SAFETY: the guard proves the pinned CPU's area is initialized and
         // that no conflicting local access can overlap `'a`, so a shared
         // reference is valid even for non-`Sync` payloads.
-        unsafe { &*self.get_unchecked(guard).get() }
+        let cell = unsafe { self.get_unchecked(guard) };
+        // SAFETY: The guard keeps this CPU pinned and excludes conflicting local
+        // access throughout the shared borrow of the initialized value.
+        unsafe { &*cell.get() }
     }
 
     /// Exclusively borrows the pinned CPU's value through a plain [`CpuPin`].
@@ -309,11 +312,18 @@ impl<T: 'static> CpuSlotCell<T> {
     /// [`CpuLocalGuard`] bounds only its own borrow: two different guards can
     /// both name this slot. The caller must therefore hold exclusive access to
     /// this CPU's value for the returned lifetime.
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: The unsafe caller guarantees \
+                  exclusive access to the pinned CPU slot for the returned lifetime"
+    )]
     pub unsafe fn get_mut_unchecked<'a>(&'a self, pin: &'a impl CpuPin) -> &'a mut T {
         // SAFETY: see [`Self::get_unchecked`]; exclusive access is supplied by
         // the caller.
-        unsafe { &mut *self.get_unchecked(pin).get() }
+        let cell = unsafe { self.get_unchecked(pin) };
+        // SAFETY: The caller guarantees exclusive access to the initialized CPU
+        // value for the returned lifetime; pin keeps its address stable.
+        unsafe { &mut *cell.get() }
     }
 
     /// Accesses the current CPU's cell.
@@ -344,7 +354,10 @@ impl<T: 'static> CpuSlotCell<T> {
         // SAFETY: The guard pins this CPU and excludes local IRQ reentry for
         // the duration of the call, so the cell is initialized and not
         // concurrently accessed; no reference escapes the call.
-        unsafe { self.get_unchecked(guard).get().read() }
+        let cell = unsafe { self.get_unchecked(guard) };
+        // SAFETY: The initialized cell remains pinned, and the access exclusion
+        // described above covers this entire copy.
+        unsafe { cell.get().read() }
     }
 
     /// Overwrites the current CPU's cell value.
@@ -356,7 +369,10 @@ impl<T: 'static> CpuSlotCell<T> {
         // SAFETY: The guard pins this CPU and excludes local IRQ reentry for
         // the duration of the call, so the cell is initialized and no other
         // context can observe the store in progress.
-        unsafe { self.get_unchecked(guard).get().write(value) }
+        let cell = unsafe { self.get_unchecked(guard) };
+        // SAFETY: The initialized cell remains pinned, and the access exclusion
+        // described above covers this entire write.
+        unsafe { cell.get().write(value) }
     }
 
     /// Copies out the current CPU's cell value through a plain
@@ -372,7 +388,10 @@ impl<T: 'static> CpuSlotCell<T> {
     {
         // SAFETY: The caller's pin contract guarantees the cell is
         // initialized and that no conflicting access runs during the call.
-        unsafe { self.get_unchecked(pin).get().read() }
+        let cell = unsafe { self.get_unchecked(pin) };
+        // SAFETY: The initialized cell remains pinned, and the access exclusion
+        // described above covers this entire copy.
+        unsafe { cell.get().read() }
     }
 
     /// Overwrites the current CPU's cell value through a plain
@@ -385,7 +404,10 @@ impl<T: 'static> CpuSlotCell<T> {
     pub(crate) unsafe fn write_unchecked(&self, pin: &impl CpuPin, value: T) {
         // SAFETY: The caller's pin contract guarantees exclusive access to
         // the selected CPU's cell for the duration of the store.
-        unsafe { self.get_unchecked(pin).get().write(value) }
+        let cell = unsafe { self.get_unchecked(pin) };
+        // SAFETY: The initialized cell remains pinned, and the access exclusion
+        // described above covers this entire write.
+        unsafe { cell.get().write(value) }
     }
 
     /// Mutably borrows the current CPU's value for the kernel lifetime.
@@ -397,7 +419,6 @@ impl<T: 'static> CpuSlotCell<T> {
     /// # Safety
     /// The caller must be the single execution context on this CPU and must
     /// not alias the value for the returned lifetime.
-    #[allow(clippy::mut_from_ref)]
     pub unsafe fn current_shared_mut(&self) -> &'static mut T {
         // SAFETY: caller's contract; the slot storage is permanent.
         unsafe { &mut *((crate::arch::current_base() + self.offset()) as *mut T) }

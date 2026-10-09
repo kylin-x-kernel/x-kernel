@@ -195,24 +195,22 @@ fn statfs_flags(mnt_flags: MountFlags, superblock_flags: SuperBlockFlags) -> Sta
 
 fn statfs(loc: &Path) -> KResult<statfs> {
     let stat = loc.filesystem_stat()?;
-    // SAFETY: `statfs` is a plain Linux ABI data structure. Zeroing it
-    // initializes padding and fields that this syscall path does not
-    // currently set explicitly before copying the value to user memory.
-    let mut result: statfs = unsafe { core::mem::zeroed() };
-    result.f_type = stat.fs_type as _;
-    result.f_bsize = stat.block_size as _;
-    result.f_blocks = stat.blocks as _;
-    result.f_bfree = stat.blocks_free as _;
-    result.f_bavail = stat.blocks_available as _;
-    result.f_files = stat.file_count as _;
-    result.f_ffree = stat.free_file_count as _;
-    result.f_fsid = __kernel_fsid_t {
-        val: [0, loc.mount().synthetic_device_id() as _],
-    };
-    result.f_namelen = stat.name_length as _;
-    result.f_frsize = stat.fragment_size as _;
-    result.f_flags = statfs_flags(loc.mount().flags(), loc.mount().super_block_flags()).bits() as _;
-    Ok(result)
+    Ok(statfs {
+        f_type: stat.fs_type as _,
+        f_bsize: stat.block_size as _,
+        f_blocks: stat.blocks as _,
+        f_bfree: stat.blocks_free as _,
+        f_bavail: stat.blocks_available as _,
+        f_files: stat.file_count as _,
+        f_ffree: stat.free_file_count as _,
+        f_fsid: __kernel_fsid_t {
+            val: [0, loc.mount().synthetic_device_id() as _],
+        },
+        f_namelen: stat.name_length as _,
+        f_frsize: stat.fragment_size as _,
+        f_flags: statfs_flags(loc.mount().flags(), loc.mount().super_block_flags()).bits() as _,
+        f_spare: [0; 4],
+    })
 }
 
 /// Gets filesystem statistics by path.
@@ -245,7 +243,7 @@ pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use kvfs::{MountFlags, StatFsFlags, SuperBlockFlags};
     use unittest::{assert, assert_eq, def_test};

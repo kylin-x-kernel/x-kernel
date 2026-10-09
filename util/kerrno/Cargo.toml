@@ -21,3 +21,6 @@ linux_sysno = { workspace = true }
 log = "0.4"
 strum = { workspace = true }
 unittest = { workspace = true }
+
+[lints]
+workspace = true

@@ -3,4 +3,4 @@
 // See LICENSES for license details.
 
 /// GP: `vaddr_t`
-pub type Vaddr = usize;
+pub(super) type Vaddr = usize;

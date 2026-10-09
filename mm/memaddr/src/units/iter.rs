@@ -96,9 +96,8 @@ where
     }
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
-pub mod tests_iter {
+#[unittest::mod_test]
+pub(super) mod tests_iter {
     use unittest::def_test;
 
     use super::{DynPageIter, PageIter};

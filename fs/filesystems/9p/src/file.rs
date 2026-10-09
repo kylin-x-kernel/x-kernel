@@ -142,7 +142,7 @@ fn p9_open_flags(mut flags: OpenFlags, was_created: bool) -> P9OpenFlags {
     mapped
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

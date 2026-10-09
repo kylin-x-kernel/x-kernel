@@ -1196,7 +1196,7 @@ fn read_timestamp_nanoseconds(buf: &[u8], offset: &mut usize) -> KResult<u32> {
     Ok(nanoseconds as u32)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use alloc::{boxed::Box, vec, vec::Vec};
 

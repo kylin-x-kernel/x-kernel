@@ -23,3 +23,6 @@ kvfs.workspace = true
 kuaccess.workspace = true
 kprocess.workspace = true
 posix-types.workspace = true
+
+[lints]
+workspace = true

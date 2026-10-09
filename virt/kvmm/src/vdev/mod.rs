@@ -18,7 +18,7 @@ pub mod dma;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittest_tests {
     use unittest::{assert, def_test};
     use vdev_virtio_blk::selftest::vmm_selftest_virtio_blk;

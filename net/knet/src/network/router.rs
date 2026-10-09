@@ -46,14 +46,18 @@ pub(crate) struct Rule {
     pub protocol: u8,
     pub scope: u8,
     pub route_type: u8,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "CG-024-lint-exceptions: dead_code: Retain the route preferred-source attribute \
+                  for source-address selection"
+    )]
     pub prefsrc: Option<IpAddress>,
     source: RuleSource,
     origin: RuleOrigin,
 }
 
 impl Rule {
-    pub fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
+    pub(crate) fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
         Self {
             filter,
             via,
@@ -69,7 +73,7 @@ impl Rule {
         }
     }
 
-    pub fn with_route_attrs(
+    pub(crate) fn with_route_attrs(
         filter: IpCidr,
         via: Option<IpAddress>,
         dev: usize,
@@ -98,8 +102,14 @@ impl Rule {
         owner_dev: usize,
         owner_addr: Ipv4Cidr,
     ) -> Self {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: 32 is a valid IPv4 prefix length for \
+                      the local host route"
+        )]
+        let filter = Ipv4Cidr::new(owner_addr.address(), 32).unwrap();
         Self::for_ipv4_address(
-            Ipv4Cidr::new(owner_addr.address(), 32).unwrap(),
+            filter,
             loopback_dev,
             owner_dev,
             owner_addr,
@@ -184,11 +194,11 @@ pub(crate) struct RouteTable {
     rules: Vec<Rule>,
 }
 impl RouteTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { rules: Vec::new() }
     }
 
-    pub fn add_rule(&mut self, rule: Rule) {
+    pub(crate) fn add_rule(&mut self, rule: Rule) {
         let rank = (
             rule.filter.prefix_len(),
             matches!(
@@ -215,17 +225,17 @@ impl RouteTable {
         self.rules.insert(idx, rule);
     }
 
-    pub fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
+    pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
         self.rules
             .iter()
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
-    pub fn rules(&self) -> &[Rule] {
+    pub(crate) fn rules(&self) -> &[Rule] {
         &self.rules
     }
 
-    pub fn remove_exact_rule(&mut self, route: Rule) {
+    pub(crate) fn remove_exact_rule(&mut self, route: Rule) {
         if let Some(index) = self.rules.iter().position(|rule| {
             matches!(rule.origin, RuleOrigin::Configured) && rule.same_route_as(route)
         }) {
@@ -245,7 +255,7 @@ impl RouteTable {
         });
     }
 
-    pub fn remove_device(&mut self, dev: usize) {
+    pub(crate) fn remove_device(&mut self, dev: usize) {
         self.rules.retain(|rule| {
             rule.dev != dev
                 && !matches!(

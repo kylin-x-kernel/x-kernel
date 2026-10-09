@@ -36,5 +36,5 @@ log.workspace = true
 klogger = { workspace = true, optional = true }
 kbuild_config.workspace = true
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
+[lints]
+workspace = true

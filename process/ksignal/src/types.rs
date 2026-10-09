@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 //! Signal types, sets, and siginfo helpers.
-use core::{fmt, mem};
+use core::fmt;
 
 use derive_more::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use ktime_types::TimeSpan;
@@ -25,6 +25,10 @@ pub const MAX_SIGNALS: usize = 64;
 /// and real-time signals `32..=64` (`SIGRTMIN` is 32).
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "CG-032-camel-case-types: signal variants use the Linux SIG* ABI names"
+)]
 pub enum Signo {
     /// Hangup (`SIGHUP`, 1).
     SIGHUP    = 1,
@@ -493,10 +497,11 @@ impl From<SigchldChildExitSignalInfo> for SignalInfo {
 
 impl SignalInfo {
     fn empty() -> Self {
-        // SAFETY: Linux `siginfo_t` uses an integer/union payload ABI where an
-        // all-zero bit pattern is a valid baseline state. Constructors below
-        // immediately set the active header fields and any payload they expose.
-        unsafe { mem::zeroed() }
+        // The ABI padding arm covers the entire siginfo payload, including
+        // fields not populated by the signal-specific constructors below.
+        Self(siginfo_t {
+            __bindgen_anon_1: linux_raw_sys::general::siginfo__bindgen_ty_1 { _si_pad: [0; 32] },
+        })
     }
 
     fn header(&self) -> &linux_raw_sys::general::siginfo__bindgen_ty_1__bindgen_ty_1 {
@@ -567,6 +572,11 @@ impl SignalInfo {
     /// (`1..=64`). Values imported from user ABI payloads
     /// (via [`From<k_siginfo>`](SignalInfo::from)) must be validated by the
     /// syscall layer before any method that decodes the signo is called.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: SignalInfo constructors store a valid \
+                  Signo; raw siginfo callers must validate si_signo as required by this method"
+    )]
     pub fn signo(&self) -> Signo {
         Signo::from_repr(self.header().si_signo as _).unwrap()
     }

@@ -11,11 +11,11 @@ use smallvec::SmallVec;
 
 /// Type-indexed metadata storage.
 #[derive(Default)]
-pub struct TypeMap(SmallVec<[(TypeId, Arc<dyn Any + Send + Sync>); 2]>);
+pub(crate) struct TypeMap(SmallVec<[(TypeId, Arc<dyn Any + Send + Sync>); 2]>);
 
 impl TypeMap {
     /// Insert an existing `Arc<T>` by its concrete type.
-    pub fn insert_arc<T: Any + Send + Sync>(&mut self, value: Arc<T>) {
+    pub(crate) fn insert_arc<T: Any + Send + Sync>(&mut self, value: Arc<T>) {
         let id = TypeId::of::<T>();
         let value: Arc<dyn Any + Send + Sync> = value;
         self.insert_any(id, value);
@@ -30,7 +30,7 @@ impl TypeMap {
     }
 
     /// Get a value by its concrete type.
-    pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+    pub(crate) fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
         self.0
             .iter()
             .find_map(|(id, value)| {

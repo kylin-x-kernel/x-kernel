@@ -86,6 +86,11 @@ pub(super) fn observe_writeback_wait(folio: &Arc<Mutex<Folio>>) {
 }
 
 fn folio_from_bytes(index: u64, data: &[u8]) -> crate::Folio {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: fixture allocation failure \
+                  aborts the test setup"
+    )]
     let mut folio = crate::Folio::new_zeroed(index).unwrap();
     folio.data()[..data.len()].copy_from_slice(data);
     folio

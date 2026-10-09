@@ -5,9 +5,6 @@ functions, methods, types, traits, modules, or public contracts.
 
 ## Functions And Methods
 
-- keep functions small and focused;
-- minimize unnecessary nesting;
-- avoid boolean arguments when the call site becomes unclear;
 - use explaining variables or block expressions
   when they make control flow easier to read;
 - prefer checked or saturating arithmetic
@@ -39,7 +36,6 @@ functions, methods, types, traits, modules, or public contracts.
 Check specifically for:
 
 - APIs that force callers to remember hidden invariants;
-- boolean flags that should be split into clearer entry points;
 - public fields or modules that expose implementation details;
 - public contracts that leak representation or internal policy.
 - public helpers that return broad internal state objects when a narrower capability

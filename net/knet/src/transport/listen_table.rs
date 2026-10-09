@@ -80,24 +80,24 @@ impl ListenEntry {
     }
 }
 
-pub struct ListenTable {
+pub(crate) struct ListenTable {
     entries: Mutex<HashMap<IpListenEndpoint, Arc<ListenEntry>>>,
 }
 
 impl ListenTable {
     /// Create an empty listen table.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn can_listen(&self, endpoint: IpListenEndpoint) -> bool {
+    pub(crate) fn can_listen(&self, endpoint: IpListenEndpoint) -> bool {
         let entries = self.entries.lock();
         !Self::listen_conflicts(&entries, endpoint)
     }
 
-    pub fn listen(&self, listen_endpoint: IpListenEndpoint, backlog: usize) -> KResult {
+    pub(crate) fn listen(&self, listen_endpoint: IpListenEndpoint, backlog: usize) -> KResult {
         let port = listen_endpoint.port;
         assert_ne!(port, 0);
 
@@ -111,7 +111,7 @@ impl ListenTable {
         Ok(())
     }
 
-    pub fn unlisten(&self, endpoint: IpListenEndpoint) {
+    pub(crate) fn unlisten(&self, endpoint: IpListenEndpoint) {
         let entry = {
             let mut entries = self.entries.lock();
             entries.remove(&endpoint)
@@ -132,7 +132,11 @@ impl ListenTable {
         }
     }
 
-    pub fn can_accept(&self, endpoint: IpListenEndpoint, sockets: &SocketSet<'_>) -> KResult<bool> {
+    pub(crate) fn can_accept(
+        &self,
+        endpoint: IpListenEndpoint,
+        sockets: &SocketSet<'_>,
+    ) -> KResult<bool> {
         let Some(entry) = self.get_entry(&endpoint) else {
             warn!("accept before listen");
             return Err(KError::InvalidInput);
@@ -145,7 +149,7 @@ impl ListenTable {
             .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets)))
     }
 
-    pub fn register_accept_waker(
+    pub(crate) fn register_accept_waker(
         &self,
         endpoint: IpListenEndpoint,
         sockets: &SocketSet<'_>,
@@ -174,7 +178,7 @@ impl ListenTable {
         Ok(())
     }
 
-    pub fn accept(
+    pub(crate) fn accept(
         &self,
         endpoint: IpListenEndpoint,
         sockets: &mut SocketSet<'_>,
@@ -203,7 +207,7 @@ impl ListenTable {
         }
     }
 
-    pub fn note_tcp_packet(&self, dst: IpEndpoint) {
+    pub(crate) fn note_tcp_packet(&self, dst: IpEndpoint) {
         let Some((_, entry)) = self.lookup_entry(dst) else {
             return;
         };
@@ -211,7 +215,7 @@ impl ListenTable {
         entry.state.lock().touched = true;
     }
 
-    pub fn refresh_acceptors(&self, sockets: &mut SocketSet<'_>) {
+    pub(crate) fn refresh_acceptors(&self, sockets: &mut SocketSet<'_>) {
         let entries = {
             let entries = self.entries.lock();
             entries.values().cloned().collect::<Vec<_>>()
@@ -236,7 +240,7 @@ impl ListenTable {
         }
     }
 
-    pub fn incoming_tcp_packet(
+    pub(crate) fn incoming_tcp_packet(
         &self,
         src: IpEndpoint,
         dst: IpEndpoint,
@@ -432,7 +436,7 @@ fn promote_ready_in_socket_set(
     moved
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use smoltcp::wire::{IpAddress, Ipv4Address};
     use unittest::{assert, def_test};

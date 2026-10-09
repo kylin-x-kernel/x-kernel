@@ -26,7 +26,6 @@ pub enum utee_entry_func {
     UTEE_ENTRY_FUNC_INVOKE_COMMAND,
 }
 
-#[allow(non_camel_case_types)]
 #[repr(C)]
 pub enum utee_cache_operation {
     TEE_CACHECLEAN,

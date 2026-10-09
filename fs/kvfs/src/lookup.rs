@@ -127,7 +127,7 @@ pub trait MagicLinkOps: Send + Sync + 'static {
     fn follow(&self, intent: LookupIntent, flags: LookupFlags) -> VfsResult<ResolvedObject>;
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

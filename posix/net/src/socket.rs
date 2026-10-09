@@ -272,7 +272,7 @@ pub fn sys_socketpair(
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

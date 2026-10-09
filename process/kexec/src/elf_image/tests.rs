@@ -4,7 +4,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use kernel_elf_parser::ELFHeadersBuilder;
+use kernel_elf_parser::ElfHeadersBuilder;
 use kerrno::KError;
 use unittest::def_test;
 
@@ -32,7 +32,12 @@ fn current_machine() -> u16 {
     return 243;
     #[cfg(target_arch = "loongarch64")]
     return 258;
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    )))]
     0
 }
 
@@ -73,7 +78,7 @@ fn test_elf(elf_type: u16, machine: u16, entry: u64, segments: &[TestSegment]) -
 }
 
 fn parse_image(data: &[u8]) -> Result<ValidatedElfImage, KError> {
-    let builder = ELFHeadersBuilder::new(data).map_err(|_| KError::InvalidExecutable)?;
+    let builder = ElfHeadersBuilder::new(data).map_err(|_| KError::InvalidExecutable)?;
     let range = builder.ph_range().map_err(|_| KError::InvalidExecutable)?;
     let headers = builder
         .build(&data[range.start as usize..range.end as usize])

@@ -14,7 +14,7 @@ const FDT_MAGIC: u32 = 0xd00dfeed;
 const FDT_BEGIN_NODE: u32 = 1;
 const FDT_END_NODE: u32 = 2;
 const FDT_PROP: u32 = 3;
-const FDT_END: u32 = 5;
+const FDT_END: u32 = 9;
 
 struct TestDtbBuilder {
     structs: Vec<u8>,

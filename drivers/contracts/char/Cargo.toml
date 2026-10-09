@@ -11,3 +11,6 @@ categories.workspace = true
 
 [dependencies]
 driver_base = { workspace = true }
+
+[lints]
+workspace = true

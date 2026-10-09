@@ -264,6 +264,12 @@ impl UserContext {
         unsafe { karch::write_thread_pointer(kernel_fs_base) };
         on_user_exit();
 
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: kernel four-level paging records \
+                      canonical page-fault addresses in CR2; no kernel path writes a noncanonical \
+                      CR2 value"
+        )]
         let cr2 = Cr2::read().unwrap().as_u64() as usize;
         let vector = self.vector as u8;
 
@@ -340,6 +346,11 @@ pub(super) fn init_syscall() {
     LStar::write(x86_64::VirtAddr::new_truncate(
         syscall_entry as *const () as usize as _,
     ));
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: the fixed GDT selectors satisfy STAR \
+                  ordering: UCODE64 follows UDATA and KDATA follows KCODE64"
+    )]
     Star::write(gdt::UCODE64, gdt::UDATA, gdt::KCODE64, gdt::KDATA).unwrap();
     SFMask::write(
         RFlags::TRAP_FLAG

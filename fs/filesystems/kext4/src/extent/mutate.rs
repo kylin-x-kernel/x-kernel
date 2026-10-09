@@ -2279,7 +2279,7 @@ fn encode_extent_len(len: u32, is_unwritten: bool) -> Ext4Result<u16> {
     u16::try_from(len).map_err(|_| Ext4Error::Overflow)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

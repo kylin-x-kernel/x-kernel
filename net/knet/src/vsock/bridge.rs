@@ -71,12 +71,12 @@ struct PublishedPort {
 }
 
 /// Initializes the bridge against the registered vsock connection manager.
-pub fn init() -> KResult {
+pub(crate) fn init() -> KResult {
     VSOCK_BRIDGE.init()
 }
 
 /// Starts bridge worker tasks once the scheduler can spawn on every CPU.
-pub fn start() {
+pub(crate) fn start() {
     VSOCK_BRIDGE.start()
 }
 
@@ -266,6 +266,7 @@ impl VsockBridge {
                 "vsock bridge failed to connect fixed port {} to {}: {err:?}",
                 mapping.port, mapping.tipc_service
             );
+            // Teardown must finish even if the connection was already removed.
             let _ = abort_bridge(conn_id);
             return;
         }
@@ -386,6 +387,7 @@ impl VsockBridge {
 
     fn remove_channel_handle(&self, token: usize, channel: Arc<IpcChan>) {
         let handle: Arc<dyn Handle> = channel;
+        // The handle may already have been removed from the event set.
         let _ = self.handle_set.handle_set_ctrl(
             HandleSetCommand::Delete,
             HandleSetEntry {
@@ -448,8 +450,10 @@ impl VsockBridge {
             .iter()
             .any(|conn| conn.conn_id() == conn_id && conn.local_port() == 0);
         if should_reject {
+            // Rejection is best effort; the failing peer may already be gone.
             let _ = send_bridge(conn_id, &[DYNAMIC_CONNECT_STATUS_REJECT]);
         }
+        // Teardown must finish even if the connection was already removed.
         let _ = abort_bridge(conn_id);
     }
 
@@ -465,6 +469,7 @@ impl VsockBridge {
             self.remove_channel_handle(removed.token(), channel.clone());
             channel.close();
         }
+        // The peer may already have removed the connection.
         let _ = disconnect_bridge(conn_id);
     }
 

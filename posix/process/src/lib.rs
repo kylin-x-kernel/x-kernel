@@ -29,6 +29,12 @@
 //! The caller must first prepare the matching image and clone result in an
 //! initialized kernel task context; this example only compiles in that target.
 
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy posix-process has 11 \
+              diagnostic sites, too many to judge individually in this migration; new code \
+              remains reviewed"
+)]
 #![no_std]
 
 extern crate alloc;

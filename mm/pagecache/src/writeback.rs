@@ -253,6 +253,11 @@ impl MappingPages {
     /// mapping or folio locks; completion revalidates each resident identity.
     /// The callback must not wait for or truncate folios in its submitted batch:
     /// their writeback completes only after the callback returns.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: TODO(cg): legacy writeback batch loop; split \
+                  collection, submission and completion, preserving lock order"
+    )]
     pub fn write_cache_pages(
         &self,
         visible_len: u64,

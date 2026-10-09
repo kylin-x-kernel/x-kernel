@@ -64,7 +64,6 @@ kfd resources / kvfs / device and pipe implementations
 | 位置 | 调用路径 | 用途 | 不变量 / 安全理由 |
 |------|----------|------|-------------------|
 | `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；记录按 `align_of::<linux_dirent64>()` 对齐；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
-| `stat.rs::statfs` | `sys_statfs` / `sys_fstatfs` | 用零初始化创建 Linux `statfs` ABI 结构 | `statfs` 是 C ABI plain data 结构；零值用于初始化 padding 和暂未显式设置字段；函数随后逐项写入返回给用户态的可见字段 |
 | `ioctl.rs::FiemapHeader` 的 `UserRead`/`UserWrite` 实现 | `sys_ioctl(FS_IOC_FIEMAP)` | 复制 Linux FIEMAP header | `repr(C)` 结构仅含整数，末尾显式 `reserved` 覆盖 ABI 对齐且任意 bit pattern 有效；每个字节都属于已初始化字段 |
 | `ioctl.rs::FiemapExtent` 的 `UserWrite` 实现 | FIEMAP writer 输出 | 复制 Linux FIEMAP extent | `repr(C)` 结构所有 ABI reserved 区域都由显式整数数组覆盖并在每次输出时清零，不存在未初始化 padding |
 
@@ -94,7 +93,7 @@ kfd resources / kvfs / device and pipe implementations
    定点 I/O 拒绝负 offset；
    fd-to-fd 复制由 VFS 更新内核态 offset，再经 `UserPtr` 回写。
 6. **临时 ABI 结构不能泄露未初始化内存**：
-   `statfs` 使用零初始化；
+   `statfs` 使用安全的结构体字面量显式初始化所有字段，`f_spare` 为零；
    `getdents64` 的临时 `Vec` 初始为零，目录项记录显式写入尾部 NUL。
 7. **FIEMAP 可变长输出必须使用 checked arithmetic**：
    `fm_extent_count` 先受 Linux UAPI 总字节上限约束，header 地址、数组字节数和每项
@@ -163,7 +162,7 @@ kfd resources / kvfs / device and pipe implementations
 |------|----------|------|----------|----------|----------|
 | T-01 | 用户坏指针导致内核越界读写 | 用户路径/缓冲区/iovec | 高 | 直接解引用用户地址或忽略 copy 错误 | 统一使用 `UserPtr`、`UserConstPtr`、`VmBytes`、`IoVectorBuf` 并传播 `KResult` |
 | T-02 | `getdents64` 写出目录项时越过临时缓冲区 | 用户输出缓冲区 / ABI 布局 | 高 | 记录长度计算错误或未检查剩余空间 | `DirBuffer::write_entry` 先检查空间，记录长度按 ABI 对齐 |
-| T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 使用 zeroed 初始化后逐项赋值 |
+| T-03 | `statfs` 向用户泄露未初始化内核栈数据 | 用户输出缓冲区 / ABI 布局 | 高 | C ABI 结构 padding 未初始化 | `statfs` 用结构体字面量初始化所有字段及 `f_spare`；四个受支持的 64 位 ABI 布局没有隐式 padding，ABI 变更时须重新核对布局和 copyout |
 | T-04 | `/proc/<pid>/fd/<fd>` magic-link 绕过普通路径解析访问不该访问的对象 | VFS magic-link | 高 | procfs follow 未保持 fd 生命周期或缺少权限模型 | procfs fd entry 通过 fd snapshot 持有目标对象；非 VFS 目标 follow 返回不支持；跨进程权限策略仍需收紧 |
 | T-05 | `O_NOFOLLOW` 被忽略导致符号链接或 magic-link 被跟随 | 路径 flags | 高 | open/at flags 没有传入解析层 | syscall 层统一把 flags 转成 `LookupFlags`，`kvfs::namei` 按 `LookupIntent` 处理 final/non-final symlink 与 magic-link |
 | T-06 | `fallocate` offset/len 溢出破坏文件大小或范围操作 | scalar 参数 / VFS | 高 | 负数或 `offset + len` 溢出 | 校验非负并用 `checked_add` |

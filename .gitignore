@@ -55,3 +55,7 @@ target/kbuild/
 !.cargo/config.toml
 .vscode
 /ci-test/
+
+# Tool-specific agent instructions stay local; shared guidance lives in AGENTS.md and docs/ai/skills/
+/.claude/
+CLAUDE.md

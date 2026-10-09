@@ -13,6 +13,8 @@ pub enum FdtError {
     BadPtr,
     /// The buffer is shorter than the header-declared total size.
     BufferTooSmall,
+    /// Invalid DTB layout or structure, or a format/depth this parser cannot traverse.
+    ParseError,
 }
 
 impl core::fmt::Display for FdtError {
@@ -21,10 +23,7 @@ impl core::fmt::Display for FdtError {
             FdtError::BadMagic => write!(f, "bad FDT magic value"),
             FdtError::BadPtr => write!(f, "an invalid pointer was passed"),
             FdtError::BufferTooSmall => write!(f, "the given buffer was too small"),
+            FdtError::ParseError => write!(f, "invalid or unsupported FDT structure"),
         }
     }
 }
-
-/// Convenience type alias for Result with FdtError
-#[allow(dead_code)]
-pub type Result<T> = core::result::Result<T, FdtError>;

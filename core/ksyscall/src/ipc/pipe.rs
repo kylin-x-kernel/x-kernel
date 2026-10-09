@@ -25,7 +25,7 @@ bitflags! {
 }
 
 /// Creates a pipe and returns the read/write file descriptors.
-pub fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
+pub(crate) fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> {
     let flags = PipeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
 
     let cloexec = flags.contains(PipeFlags::CLOEXEC);

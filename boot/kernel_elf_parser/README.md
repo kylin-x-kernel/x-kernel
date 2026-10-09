@@ -41,3 +41,8 @@ let stack_data = kernel_elf_parser::app_stack_region(
 // args length
 assert_eq!(stack_data[0..8], [3, 0, 0, 0, 0, 0, 0, 0]);
 ```
+
+`ElfParser::new` validates that a segment covers the program-header table
+file offset and that its biased virtual address fits `usize`. Missing coverage
+or address overflow returns an error at construction; `phdr` and `aux_vector`
+use the retained validated address without an input-dependent panic.

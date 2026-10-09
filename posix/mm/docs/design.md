@@ -235,3 +235,6 @@ This preserves the ownership split between:
 - `MappingPermissions.maximum` 已与 current permission 分离；匿名映射和
   private file 映射保留可被 `mprotect()` 提升的 may-permission，shared file
   映射按文件打开权限收窄。
+
+`brk` 在补建预映射范围或收缩范围失败时返回原 break，只有映射操作成功
+后才发布新 heap top，与超出初始范围扩展失败的既有 ABI 一致。

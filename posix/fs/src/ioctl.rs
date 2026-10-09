@@ -154,7 +154,7 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
         })
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use core::mem::size_of;
 

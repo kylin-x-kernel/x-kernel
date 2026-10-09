@@ -105,6 +105,11 @@ pub fn init(boot_info: &boot_info::BootInfo) {
     let reserved = reserved::reserved_regions(kernel_start, kernel_end - kernel_start);
     let reserved_ranges = reserved::append_reserved_memory_regions(&reserved, &mut push);
     let ram_regions = described_ram_regions();
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: reserved_regions sorts and rejects \
+                  overlapping reservations before this subtraction"
+    )]
     sub_ranges(ram_regions, &reserved_ranges, |(start, size)| {
         push(MemoryRegion::new_ram(start, size, "free memory"));
     })
@@ -112,6 +117,12 @@ pub fn init(boot_info: &boot_info::BootInfo) {
     .unwrap();
 
     all_regions.sort_unstable_by_key(|r| r.paddr);
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: overlapping final physical memory regions \
+                  make allocator startup unsafe; this boot entry has no error return or caller \
+                  that can recover"
+    )]
     check_overlap(all_regions.iter().map(|r| (r.paddr.into(), r.size)))
         .inspect_err(|(a, b)| error!("Physical memory region {a:#x?} overlaps with {b:#x?}"))
         .unwrap();
@@ -134,8 +145,7 @@ unsafe extern "C" {
     fn boot_stack_top();
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_mem {
     use unittest::def_test;
 

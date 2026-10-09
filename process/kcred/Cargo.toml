@@ -13,3 +13,6 @@ bitflags.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

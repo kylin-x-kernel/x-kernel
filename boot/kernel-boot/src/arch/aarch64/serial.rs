@@ -30,6 +30,12 @@ static BOOT_CONSOLE_START_OF_LINE: AtomicBool = AtomicBool::new(true);
 
 #[inline]
 fn assert_boot_uart_fits_boot_io_window() {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the configured early UART \
+                  address is absent or invalid; boot-console access has no error return or \
+                  recovery"
+    )]
     let uart_paddr = bootconsole_config::mmio_addr().expect("missing boot console mmio address");
     let offset = uart_paddr & (BOOT_IO_SLOT_SIZE - 1);
     let span = (offset + PAGE_SIZE_4K).align_up_4k();
@@ -198,7 +204,7 @@ pub(crate) fn activate_boot_map() -> bool {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _boot_print_usize(num: usize) {
+pub(crate) extern "C" fn _boot_print_usize(num: usize) {
     if !is_enabled_idmap() {
         return;
     }
@@ -208,18 +214,17 @@ pub extern "C" fn _boot_print_usize(num: usize) {
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
-pub fn boot_print_str(data: &str) {
+pub(crate) fn boot_print_str(data: &str) {
     write_str_idmap(data);
 }
 
-#[allow(dead_code)]
-pub fn boot_print_usize(num: usize) {
+pub(crate) fn boot_print_usize(num: usize) {
     write_hex_idmap(num);
     write_str_idmap("\r\n");
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Uart {
+pub(crate) struct Uart {
     base_address: usize,
 }
 
@@ -232,14 +237,18 @@ fn counter_ticks() -> u64 {
     // SAFETY: Firmware/hypervisor entry must permit reads of the configured
     // counter at the kernel's exception level. Selecting the virtual view
     // avoids CNTPCT_EL0 accesses that may trap in an EL1 guest.
-    unsafe {
-        if IS_VIRTUAL_COUNTER {
+    if IS_VIRTUAL_COUNTER {
+        // SAFETY: Firmware permits the selected virtual counter at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTVCT_EL0",
                 out(reg) ticks,
                 options(nostack, preserves_flags)
             );
-        } else {
+        }
+    } else {
+        // SAFETY: The configured physical-counter view is readable at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTPCT_EL0",
                 out(reg) ticks,
@@ -257,14 +266,18 @@ fn counter_ticks_idmap() -> u64 {
     // SAFETY: Firmware/hypervisor entry must permit reads of the configured
     // counter at the kernel's exception level. Selecting the virtual view
     // avoids CNTPCT_EL0 accesses that may trap in an EL1 guest.
-    unsafe {
-        if IS_VIRTUAL_COUNTER {
+    if IS_VIRTUAL_COUNTER {
+        // SAFETY: Firmware permits the selected virtual counter at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTVCT_EL0",
                 out(reg) ticks,
                 options(nostack, preserves_flags)
             );
-        } else {
+        }
+    } else {
+        // SAFETY: The configured physical-counter view is readable at this EL.
+        unsafe {
             core::arch::asm!(
                 "mrs {0}, CNTPCT_EL0",
                 out(reg) ticks,
@@ -409,31 +422,35 @@ fn write_data_reg_idmap(base_address: usize, c: u8) {
 }
 
 impl Uart {
-    pub const fn new(base_address: usize) -> Self {
+    pub(crate) const fn new(base_address: usize) -> Self {
         Self { base_address }
     }
 
     #[unsafe(link_section = ".idmap.text")]
-    pub const fn new_idmap(base_address: usize) -> Self {
+    pub(crate) const fn new_idmap(base_address: usize) -> Self {
         Self { base_address }
     }
 
-    pub fn put(&self, c: u8) -> Option<u8> {
+    pub(crate) fn put(&self, c: u8) -> Option<u8> {
         write_data_reg(self.base_address, c);
         pace_one_byte();
         Some(c)
     }
 
     #[unsafe(link_section = ".idmap.text")]
-    pub fn put_idmap(&self, c: u8) -> Option<u8> {
+    pub(crate) fn put_idmap(&self, c: u8) -> Option<u8> {
         write_data_reg_idmap(self.base_address, c);
         pace_one_byte_idmap();
         Some(c)
     }
 }
 
-#[allow(dead_code)]
-pub fn print_el1_reg(switch: bool) {
+#[expect(
+    dead_code,
+    reason = "CG-024-lint-exceptions: dead_code: Retain register-dump helpers for diagnosing boot \
+              failures before normal logging is available"
+)]
+pub(crate) fn print_el1_reg(switch: bool) {
     if !switch {
         return;
     }
@@ -486,8 +503,12 @@ macro_rules! boot_print_reg {
     };
 }
 
-#[allow(unused)]
+#[expect(
+    dead_code,
+    reason = "CG-024-lint-exceptions: dead_code: Retain direct serial output for diagnosing \
+              failures before normal logging is available"
+)]
 #[unsafe(link_section = ".idmap.text")]
-pub fn boot_serial_send(data: u8) {
+pub(crate) fn boot_serial_send(data: u8) {
     write_prefixed_byte(data);
 }

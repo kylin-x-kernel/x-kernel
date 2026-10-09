@@ -203,15 +203,19 @@ pub fn set_irq_enabled(irq: usize, enabled: bool) {
 
     let vector = IO_APIC_VECTOR_BASE + irq;
     if vector < APIC_TIMER_VECTOR as usize {
-        // SAFETY: `IO_APIC` is initialized during APIC bring-up before runtime IRQ
-        // masking is used, and the spin lock serializes MMIO access to the device.
-        unsafe {
+        {
             let mut io_apic = IO_APIC.lock();
-            if irq <= io_apic.max_table_entry() as usize {
+            // SAFETY: IO_APIC retains its initialized mapping and this guard
+            // serializes the register-select/window accesses.
+            if irq <= unsafe { io_apic.max_table_entry() } as usize {
                 if enabled {
-                    io_apic.enable_irq(irq as u8);
+                    // SAFETY: The line is within max_table_entry, and the same IO-APIC lock remains
+                    // held.
+                    unsafe { io_apic.enable_irq(irq as u8) };
                 } else {
-                    io_apic.disable_irq(irq as u8);
+                    // SAFETY: The checked line belongs to this mapped IO-APIC; its lock serializes
+                    // masking.
+                    unsafe { io_apic.disable_irq(irq as u8) };
                 }
             }
         }
@@ -226,11 +230,13 @@ pub fn configure_irq(irq: usize, trigger: IoApicTriggerMode, polarity: IoApicPol
 
     let vector = IO_APIC_VECTOR_BASE + irq;
     if vector < APIC_TIMER_VECTOR as usize {
-        // SAFETY: `IO_APIC` is initialized before IRQ descriptors are configured.
-        unsafe {
+        {
             let mut io_apic = IO_APIC.lock();
-            if irq <= io_apic.max_table_entry() as usize {
-                let mut entry = io_apic.table_entry(irq as u8);
+            // SAFETY: IO_APIC retains its initialized mapping and this guard
+            // serializes the register-select/window accesses.
+            if irq <= unsafe { io_apic.max_table_entry() } as usize {
+                // SAFETY: The checked redirection entry is read under the IO-APIC lock.
+                let mut entry = unsafe { io_apic.table_entry(irq as u8) };
                 let mut flags = entry.flags();
                 if trigger == IoApicTriggerMode::Level {
                     flags.insert(IrqFlags::LEVEL_TRIGGERED);
@@ -243,7 +249,9 @@ pub fn configure_irq(irq: usize, trigger: IoApicTriggerMode, polarity: IoApicPol
                     flags.remove(IrqFlags::LOW_ACTIVE);
                 }
                 entry.set_flags(flags);
-                io_apic.set_table_entry(irq as u8, entry);
+                // SAFETY: The checked entry is updated under the same lock with valid
+                // trigger/polarity flags.
+                unsafe { io_apic.set_table_entry(irq as u8, entry) };
             }
         }
     }
@@ -261,13 +269,14 @@ pub fn irq_trigger_mode(irq: usize) -> Option<IoApicTriggerMode> {
         return None;
     }
 
-    // SAFETY: `IO_APIC` is initialized before IO-APIC interrupts can be dispatched.
-    unsafe {
+    {
         let mut io_apic = IO_APIC.lock();
-        if irq > io_apic.max_table_entry() as usize {
+        // SAFETY: The initialized IO-APIC mapping remains live under its lock.
+        if irq > unsafe { io_apic.max_table_entry() } as usize {
             return None;
         }
-        let flags = io_apic.table_entry(irq as u8).flags();
+        // SAFETY: The preceding bounds check selected a valid entry, still protected by the lock.
+        let flags = unsafe { io_apic.table_entry(irq as u8) }.flags();
         Some(if flags.contains(IrqFlags::LEVEL_TRIGGERED) {
             IoApicTriggerMode::Level
         } else {
@@ -335,12 +344,10 @@ fn cpu_has_x2apic() -> bool {
 /// Panics if the xAPIC MMIO mapping fails.
 pub fn init_primary(io_apic_paddr: PhysAddr) {
     info!("Initialize Local APIC...");
-    // SAFETY: these are the legacy PIC data ports; masking them here is part of
-    // x86 APIC bring-up before interrupts are routed through the IO-APIC/LAPIC.
-    unsafe {
-        Port::<u8>::new(0x21).write(0xff);
-        Port::<u8>::new(0xA1).write(0xff);
-    }
+    // SAFETY: CPL0 boot owns the master PIC data port; 0xff masks its legacy interrupt inputs.
+    unsafe { Port::<u8>::new(0x21).write(0xff) };
+    // SAFETY: CPL0 boot also owns the slave PIC data port; mask its inputs before APIC routing.
+    unsafe { Port::<u8>::new(0xA1).write(0xff) };
     let mut builder = LocalApicBuilder::new();
     builder
         .timer_vector(APIC_TIMER_VECTOR as _)
@@ -351,6 +358,12 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         IS_X2APIC.store(true, Ordering::Relaxed);
     } else {
         info!("Using xAPIC.");
+        #[expect(
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the xAPIC register page \
+                      cannot be mapped; interrupt-controller initialization has no error return \
+                      or recovery"
+        )]
         // SAFETY: on the xAPIC path, `xapic_base` reads the architectural LAPIC
         // base address, which is then mapped before the builder uses it.
         let base_vaddr = iomap_device(pa!(unsafe { xapic_base() } as usize), 0x1000, "lapic")
@@ -358,6 +371,11 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
         XAPIC_BASE.store(base_vaddr.as_usize() as u64, Ordering::Relaxed);
         builder.set_xapic_base(base_vaddr.as_usize() as u64);
     }
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: all required timer, error and spurious \
+                  vectors are supplied, and the xAPIC path supplies the mapped base"
+    )]
     let mut lapic = builder.build().unwrap();
     // SAFETY: the LAPIC instance was built from either x2APIC CPU state or a
     // freshly mapped xAPIC MMIO base, so enabling it is valid during boot init.
@@ -366,18 +384,23 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
     }
     install_local_apic(lapic);
 
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the IOAPIC register page \
+                  cannot be mapped; interrupt-controller initialization has no error return or \
+                  recovery"
+    )]
     let io_apic_base = iomap_device(io_apic_paddr, 0x1000, "ioapic")
         .unwrap_or_else(|err| panic!("failed to iomap IOAPIC: {err:?}"));
     // SAFETY: `io_apic_base` is the MMIO mapping for the platform IO-APIC and is
     // kept alive for the duration of the constructed controller object.
     let mut io_apic = unsafe { IoApic::new(io_apic_base.as_usize() as u64) };
 
-    // SAFETY: `io_apic` was just created from a valid IO-APIC mapping and is still
-    // exclusively owned here while the redirection table is initialized.
-    unsafe {
+    {
         use x2apic::ioapic::{IrqMode, RedirectionTableEntry};
 
-        let max_entry = io_apic.max_table_entry();
+        // SAFETY: The newly mapped controller is exclusively owned during init.
+        let max_entry = unsafe { io_apic.max_table_entry() };
         info!(
             "  IO-APIC supports {} IRQ inputs (0-{})",
             max_entry + 1,
@@ -395,7 +418,9 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
             } else {
                 entry.set_flags(IrqFlags::MASKED);
             }
-            io_apic.set_table_entry(irq, entry);
+            // SAFETY: irq is bounded by the controller-reported table size;
+            // this unpublished controller is exclusively owned during setup.
+            unsafe { io_apic.set_table_entry(irq, entry) };
         }
         info!("IO-APIC initialized and masked");
     }
@@ -456,6 +481,11 @@ fn build_local_apic() -> LocalApic {
         assert!(xapic_base != 0, "xAPIC base is not initialized");
         builder.set_xapic_base(xapic_base);
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: The builder receives valid fixed APIC \
+                  vectors and, for xAPIC, an asserted nonzero MMIO base"
+    )]
     builder.build().expect("failed to build local APIC")
 }
 

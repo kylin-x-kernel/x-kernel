@@ -314,31 +314,29 @@ impl VcpuHook<Aarch64Vhe> for VgicHook {
                         continue;
                     }
 
-                    match lr.iter().position(|&l| l & LR_STATE_MASK == 0) {
-                        Some(slot) => {
-                            core.sgi_sources[irq as usize]
-                                .fetch_and(!(1u16 << source_vcpu), Ordering::AcqRel);
-                            if core.sgi_sources[irq as usize].load(Ordering::Acquire) == 0 {
-                                core.pending.fetch_and(!(1u64 << irq), Ordering::AcqRel);
-                            }
-                            lr[slot] = Vgic::pending_lr_value(irq, source_vcpu);
-                            // let n = SGI_LR_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
-                            // if n < 128 || n.is_power_of_two() {
-                            //     log::info!(
-                            //         "[vgic] SGI LR#{n}: vcpu={} irq={} src={} slot={} lr={:#x} \
-                            //          enabled={:#x} pending_all={:#x}",
-                            //         vcpu_id,
-                            //         irq,
-                            //         source_vcpu,
-                            //         slot,
-                            //         lr[slot],
-                            //         enabled,
-                            //         pending_all,
-                            //     );
-                            // }
-                        }
-                        None => break,
+                    let Some(slot) = lr.iter().position(|&l| l & LR_STATE_MASK == 0) else {
+                        break;
+                    };
+                    core.sgi_sources[irq as usize]
+                        .fetch_and(!(1u16 << source_vcpu), Ordering::AcqRel);
+                    if core.sgi_sources[irq as usize].load(Ordering::Acquire) == 0 {
+                        core.pending.fetch_and(!(1u64 << irq), Ordering::AcqRel);
                     }
+                    lr[slot] = Vgic::pending_lr_value(irq, source_vcpu);
+                    // let n = SGI_LR_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    // if n < 128 || n.is_power_of_two() {
+                    //     log::info!(
+                    //         "[vgic] SGI LR#{n}: vcpu={} irq={} src={} slot={} lr={:#x} \
+                    //          enabled={:#x} pending_all={:#x}",
+                    //         vcpu_id,
+                    //         irq,
+                    //         source_vcpu,
+                    //         slot,
+                    //         lr[slot],
+                    //         enabled,
+                    //         pending_all,
+                    //     );
+                    // }
                 }
                 continue;
             }

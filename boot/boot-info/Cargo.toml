@@ -15,5 +15,5 @@ categories = ["no-std", "os"]
 kcpu_id_map = { workspace = true }
 unittest = { workspace = true }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
+[lints]
+workspace = true

@@ -12,8 +12,8 @@ which adds kernel-specific semantics.
 ## Responsibilities
 
 - Validate the FDT container: header magic (`0xd00dfeed`), declared total
-  size versus the available buffer (`LinuxFdt::new`), and block offsets
-  (structs, strings, memreserve) derived from the header.
+  size versus the available buffer (`LinuxFdt::new`), nonoverlapping block
+  ranges, reservation termination, and the entire structure token stream.
 - Iterate and find nodes: depth-first `all_nodes`, path-based `find_node`,
   alias-aware `resolve_node` (via `/aliases`, ignoring `:`-suffixed
   cell suffixes), `find_compatible`.
@@ -31,7 +31,7 @@ which adds kernel-specific semantics.
   `google,open-dice` / `kylin,open-dice` compatibles), and
   `InterruptController` (first node carrying an `interrupt-controller`
   property).
-- Report failures as `FdtError` (`BadMagic`, `BadPtr`, `BufferTooSmall`).
+- Report failures as `FdtError` (`BadMagic`, `BadPtr`, `BufferTooSmall`, `ParseError`).
 
 ## Non-Responsibilities
 
@@ -65,7 +65,7 @@ drivers/platform/rs-fdtree/
 ```text
 &[u8] DTB blob (or *const u8 via unsafe from_ptr)
       |
-  FdtHeader (big-endian fields; magic + totalsize validated)
+  FdtHeader + validate_structure (container and token stream validated)
       |
       +-- structs block --> all_nodes / find_node / reserved_memory_*
       +-- strings block --> property name resolution (string_at_offset)
@@ -81,20 +81,41 @@ All types carry the borrow of the blob: `LinuxFdt<'a>`,
 
 ## Parsing Model
 
-- A single forward cursor (`FdtData`) reads big-endian scalars, C strings,
-  and skips padding; every accessor returns `Option`/`Result` instead of
-  indexing unchecked.
-- The header is the only trusted length source: block ranges are computed
-  from header offsets, and the blob slice is clamped to the declared
-  `totalsize` at construction.
-- Structure-block walking stops at the end token; unknown property or node
-  content is passed through as raw bytes rather than rejected.
+Construction performs one allocation-free validation pass before publishing a
+`LinuxFdt`. The accepted format uses the version-17 header (or a newer version
+compatible with version 17). Checked block arithmetic establishes bounds,
+relative alignment, nonoverlap, and a complete memory-reservation terminator.
+The returned reservation view ends immediately after that terminator.
+
+The structure validator checks balanced node tokens, exactly one empty root,
+NUL-terminated UTF-8 names, properties preceding children, complete property
+headers, name offsets, payload lengths, and alignment padding bounds. It requires
+`FDT_END = 9` after the root closes, following the
+[Devicetree flattened format](https://devicetree-specification.readthedocs.io/en/stable/flattened-format.html).
+Nesting is limited to 63 nodes including the root, matching the existing
+iterator's fixed parent storage and bounding recursive path lookup. Padding
+bytes are ignored for compatibility with the checked-in crosvm fixture; their
+ranges must still be present. Property names may share suffixes in the strings
+block.
+
+Traversal subsequently trusts these immutable structural invariants. Its
+narrow lint exceptions document constructor-proven complete tokens, UTF-8
+names, and delimiters. Property payloads remain uninterpreted bytes: device
+semantics, cell formats, and reserved physical-address overlap are separate
+checks owned by callers.
 
 ## Execution Context
 
 - Callable from the earliest boot stage: no allocator, no globals, no
   hardware access, no environment assumptions beyond the blob being
   readable at the given address.
+- RISC-V calls the constructor at physical addresses before enabling paging.
+  Token validation consumes NOPs separately and checks the final `FDT_END`
+  after the root closes, leaving only the three node/property tokens in the
+  dispatch. This avoids the absolute virtual-address jump table generated for
+  the former five-token dispatch. Changes to this control flow need optimized
+  normal and unit-test binary inspection and early-boot checks; source-level
+  branch spelling alone does not constrain compiler lowering.
 - `LinuxFdt::new` is the safe entry for an already-sliced blob;
   `from_ptr` is the unsafe boot-loader-pointer entry (null check, header
   read, then the header-declared total size).
@@ -106,22 +127,24 @@ All types carry the borrow of the blob: `LinuxFdt<'a>`,
 
 ## Error Model
 
-- Construction is fallible: `FdtError::BadMagic` for a wrong magic,
-  `BufferTooSmall` when the buffer is shorter than the declared total size,
-  `BadPtr` for a null pointer in `from_ptr`.
-- Accessors return `Option`: absent nodes, properties, or undecodable
-  entries yield `None`; iterators simply end. No panics on malformed tree
-  contents.
+Construction returns `BadMagic` for a wrong magic, `BufferTooSmall` for a
+truncated header or a buffer shorter than the declared total size, and `BadPtr`
+for a null pointer in `from_ptr`. `ParseError` reports malformed container or
+structure data, unsupported header compatibility, or excessive nesting.
+Malformed structure therefore never becomes an absent-node result.
+
+On a successfully constructed tree, accessors return `None` for absent nodes or
+properties and for property values that cannot be decoded in the requested
+semantic format. Iterators traverse already validated structural data.
 
 ## Firmware Trust Boundary
 
-- What is validated: header magic, total size against the buffer, and
-  bounds on every field read (a truncated stream yields `None`, not a
-  fault).
-- What is trusted: header offsets pointing at plausible blocks. A malicious
-  header can name offsets inside the blob that decode to nonsense nodes;
-  the result is absent or odd data, never memory-unsafe access, because all
-  reads are clamped to the borrowed slice.
+Both constructors validate container ranges and the complete structure before
+returning a tree. Callers must keep the borrowed bytes alive and immutable;
+raw-pointer callers must additionally establish readability of the complete
+header-declared range before calling `from_ptr`. Structural validation does not
+establish that firmware describes the actual hardware correctly or that each
+property's value obeys its device binding.
 
 ## Unsafe Code
 
@@ -129,7 +152,7 @@ One unsafe entry point: `LinuxFdt::from_ptr(ptr)`. It forms two
 `slice::from_raw_parts` views — header-sized, then `totalsize`-sized after
 re-reading the header from the first view. The `# Safety` contract: `ptr`
 must point to a readable DTB whose header and total-size range remain
-accessible for the returned lifetime. All other code is safe and bounds-
+accessible and immutable for the returned lifetime. All other code is safe and bounds-
 checked.
 
 ## Design Decisions
@@ -140,6 +163,10 @@ checked.
   passes nodes and properties around freely without cloning, and the
   two-lifetime `FdtNode<'b, 'a>` lets iterators borrow the tree while
   values keep pointing into the blob.
+- Version-17 headers only: a header with `version < 17` or
+  `last_comp_version > 17` is rejected with `ParseError`. The structure
+  block bounds check needs `size_dt_struct`, which older header versions do
+  not define, so such blobs cannot be validated before use.
 - Unaligned reads over alignment preconditions: boot firmware does not
   guarantee 4-byte alignment for the DTB, so `FdtData` reads big-endian
   fields byte-wise.

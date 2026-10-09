@@ -58,6 +58,10 @@ mod math_tests {
     use unittest::def_test;
     /// Test Vec operations
     #[def_test]
+    #[expect(
+        clippy::vec_init_then_push,
+        reason = "test scenario: exercises Vec::push starting from an empty vector"
+    )]
     fn test_vec_push() {
         let mut v = alloc::vec::Vec::new();
         v.push(1);

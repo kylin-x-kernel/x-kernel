@@ -58,7 +58,10 @@ impl Frame {
         let offset = CurrentArch::FRAME_OFFSET;
         // SAFETY: The caller guarantees `fp` points at a readable frame record
         // with the architecture-specific offset already accounted for.
-        unsafe { (fp as *const Frame).sub(offset).read() }
+        let frame = unsafe { (fp as *const Frame).sub(offset) };
+        // SAFETY: read_unchecked's caller supplies a readable, aligned frame
+        // record at the architecture-adjusted address.
+        unsafe { frame.read() }
     }
 
     /// Adjust the instruction pointer for symbolication.
@@ -67,7 +70,7 @@ impl Frame {
     /// the call). To symbolicate correctly, we need to subtract 1 to get the
     /// address of the call instruction.
     ///
-    /// See: https://github.com/rust-lang/backtrace-rs/blob/master/src/symbolize/mod.rs#L145
+    /// See: <https://github.com/rust-lang/backtrace-rs/blob/master/src/symbolize/mod.rs#L145>
     pub const fn adjust_ip(&self) -> usize {
         self.ip.saturating_sub(1)
     }

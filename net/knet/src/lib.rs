@@ -6,13 +6,16 @@
 //!
 //! # Organization
 //!
-//! - [`TcpSocket`]: A TCP socket that provides POSIX-like APIs.
-//! - [`UdpSocket`]: A UDP socket that provides POSIX-like APIs.
+//! - [`TcpSocket`](tcp::TcpSocket): A TCP socket that provides POSIX-like APIs.
+//! - [`UdpSocket`](udp::UdpSocket): A UDP socket that provides POSIX-like APIs.
 //! - [`send_link_frame`]: Sends a link-layer frame through a selected interface.
 //! - [`UdpDatagramRelay`]: A persistent nonblocking UDP relay socket.
-//! - [`dns_query`]: Function for DNS query.
+#![allow(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy knet has 20 diagnostic \
+              sites, too many to judge individually in this migration; new code remains reviewed"
+)]
 #![no_std]
-#![allow(rustdoc::broken_intra_doc_links)]
 
 #[macro_use]
 extern crate log;
@@ -95,6 +98,11 @@ pub fn init_network() {
     let mut router = Router::new();
     let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: the fixed loopback prefix length 8 is \
+                  within the IPv4 range 0 through 32"
+    )]
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
     router
         .add_ipv4_addr(Ipv4AddrEntry {
@@ -124,6 +132,11 @@ pub fn init_network() {
                 broadcast: None,
             })
             .expect("Ethernet IPv4 address must fit the interface");
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the fixed default-route IPv4 prefix \
+                      length 0 is valid"
+        )]
         router.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             Some(IpAddress::Ipv4(

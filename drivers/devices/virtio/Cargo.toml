@@ -41,3 +41,6 @@ zerocopy = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 safe-mmio = { workspace = true }
+
+[lints]
+workspace = true

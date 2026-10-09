@@ -301,7 +301,7 @@ pub fn sys_fremovexattr(fd: i32, name: UserConstPtr<c_char>) -> KResult<isize> {
     remove_xattr(resolve_fd(fd, &cred)?, name, &cred)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

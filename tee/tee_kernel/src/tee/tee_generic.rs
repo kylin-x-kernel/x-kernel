@@ -23,13 +23,13 @@ use crate::{
 };
 
 /// Return from a TEE syscall with a return code
-pub fn sys_tee_scn_return(_return_code: u32) -> TeeResult {
+pub(super) fn sys_tee_scn_return(_return_code: u32) -> TeeResult {
     // Now we just ignore the return code and return Ok
     Ok(())
 }
 
 /// Log a message from TEE userspace
-pub fn sys_tee_scn_log(buf: *const c_char, len: usize) -> TeeResult {
+pub(super) fn sys_tee_scn_log(buf: *const c_char, len: usize) -> TeeResult {
     // Implementation for TEE log syscall we use info to output the log now
     info!("TEE log syscall invoked with len: {}", len);
 
@@ -59,7 +59,7 @@ pub fn sys_tee_scn_log(buf: *const c_char, len: usize) -> TeeResult {
 }
 
 /// Kernel-direct panic notification. Wire format NOTE/TODO: [`crate::tee::protocal`].
-pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
+pub(super) fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     // Connect to current TA via Unix socket
     let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
@@ -77,7 +77,7 @@ pub fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
 }
 
 #[unittest::mod_test]
-pub mod tests_tee_generic {
+pub(super) mod tests_tee_generic {
     use unittest::assert_eq;
 
     use super::*;

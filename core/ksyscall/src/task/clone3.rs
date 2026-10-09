@@ -36,7 +36,7 @@ const fn zeroed_clone_args() -> clone_args {
     }
 }
 
-pub fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<isize> {
+pub(crate) fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KResult<isize> {
     if size < CLONE_ARGS_SIZE_VER0 {
         return Err(KError::InvalidInput);
     }

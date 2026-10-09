@@ -57,6 +57,11 @@ pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
 
 #[macros::register_init]
 fn init_bpf_fs() {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
     kvfs::register_filesystem(&FILE_SYSTEM_TYPE).expect("BPF filesystem type must register once");
 }
 const PIN_PERMISSION: NodePermission = NodePermission::from_bits_truncate(0o600);
@@ -86,7 +91,6 @@ impl BpfProgramMapValue {
 
 /// Loaded BPF program object shared by anonymous fds and bpffs pins.
 pub struct BpfProgram {
-    #[allow(dead_code)]
     insns: Arc<[u8]>,
     prog_type: u32,
     map_values: Arc<[BpfProgramMapValue]>,

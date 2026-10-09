@@ -13,3 +13,6 @@ categories = ["os", "no-std"]
 
 [package.metadata.kbuild]
 enabled = true
+
+[lints]
+workspace = true

@@ -10,3 +10,6 @@ description = "Virtual device interfaces for x-kernel VMMs"
 
 [dependencies]
 ksync.workspace = true
+
+[lints]
+workspace = true

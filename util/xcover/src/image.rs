@@ -41,15 +41,15 @@ pub(crate) struct BitmapStore {
 
 #[cfg(feature = "alloc")]
 impl BitmapStore {
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.bytes.len()
     }
 
-    pub fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
 }
@@ -63,15 +63,15 @@ pub(crate) struct NameTable {
 
 #[cfg(feature = "alloc")]
 impl NameTable {
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.bytes.len()
     }
 
-    pub fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
 }
@@ -110,7 +110,7 @@ pub(crate) struct ValueProfileStore {
 
 #[cfg(feature = "alloc")]
 impl ValueProfileStore {
-    pub fn new(max_values_per_site: usize) -> Self {
+    pub(crate) fn new(max_values_per_site: usize) -> Self {
         Self {
             sites: Vec::new(),
             max_values_per_site,
@@ -122,7 +122,7 @@ impl ValueProfileStore {
     /// Creates empty `ValueSite` entries for each function's value profiling
     /// sites based on `num_sites_per_kind`. This must be called after parsing
     /// function records to enable value recording.
-    pub fn initialize_sites(&mut self, records: &[FunctionRecord]) {
+    pub(crate) fn initialize_sites(&mut self, records: &[FunctionRecord]) {
         self.sites.clear();
 
         for record in records {
@@ -143,13 +143,13 @@ impl ValueProfileStore {
         }
     }
 
-    pub fn sites(&self) -> &[ValueSite] {
+    pub(crate) fn sites(&self) -> &[ValueSite] {
         &self.sites
     }
 
     /// Record a value observation into a non-atomic store (used by the
     /// parser when constructing `ParsedProfraw`). Pure safe logic.
-    pub fn record_value(&mut self, site_index: usize, value: u64, count: u64) {
+    pub(crate) fn record_value(&mut self, site_index: usize, value: u64, count: u64) {
         if count == 0 {
             return;
         }
@@ -203,7 +203,7 @@ pub(crate) enum AtomicCounterStore {
 impl AtomicCounterStore {
     /// Builds an atomic counter store from raw section bytes.
     /// `counters` slice is the raw `__llvm_prf_cnts` section content.
-    pub fn from_section(counters: &[u8], is_byte_coverage: bool) -> Self {
+    pub(crate) fn from_section(counters: &[u8], is_byte_coverage: bool) -> Self {
         if is_byte_coverage {
             Self::Byte(counters.iter().map(|&b| AtomicU8::new(b)).collect())
         } else {
@@ -220,7 +220,7 @@ impl AtomicCounterStore {
     }
 
     /// Resets all counters to their initial value.
-    pub fn reset(&self) {
+    pub(crate) fn reset(&self) {
         match self {
             Self::Wide(v) => v.iter().for_each(|c| c.store(0, Ordering::Relaxed)),
             // Byte coverage: 0xFF = "not covered".
@@ -230,7 +230,7 @@ impl AtomicCounterStore {
 
     /// Merges source counters into self via atomic fetch_*.
     /// Wide: saturating add. Byte: bitwise AND.
-    pub fn merge_from(&self, src: &CounterStore) {
+    pub(crate) fn merge_from(&self, src: &CounterStore) {
         match (self, src) {
             (Self::Wide(dst), CounterStore::Wide(s)) => {
                 for (d, x) in dst.iter().zip(s.iter()) {
@@ -260,7 +260,7 @@ impl AtomicCounterStore {
     }
 
     /// Atomically reads all counters into a non-atomic `CounterStore` snapshot.
-    pub fn snapshot(&self) -> CounterStore {
+    pub(crate) fn snapshot(&self) -> CounterStore {
         match self {
             Self::Wide(v) => {
                 let mut out = Vec::with_capacity(v.len());
@@ -279,7 +279,7 @@ impl AtomicCounterStore {
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         match self {
             Self::Wide(v) => v.len(),
             Self::Byte(v) => v.len(),
@@ -296,18 +296,18 @@ pub(crate) struct AtomicBitmapStore {
 
 #[cfg(feature = "alloc")]
 impl AtomicBitmapStore {
-    pub fn from_slice(bytes: &[u8]) -> Self {
+    pub(crate) fn from_slice(bytes: &[u8]) -> Self {
         Self {
             bytes: bytes.iter().map(|&b| AtomicU8::new(b)).collect(),
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.bytes.len()
     }
 
     /// Bitmap merge: bitwise OR within a range, atomic.
-    pub fn or_assign(&self, range: BitmapRange, source: &[u8]) {
+    pub(crate) fn or_assign(&self, range: BitmapRange, source: &[u8]) {
         for (i, &src_byte) in source.iter().enumerate() {
             if let Some(dst) = self.bytes.get(range.start + i) {
                 dst.fetch_or(src_byte, Ordering::Relaxed);
@@ -316,14 +316,14 @@ impl AtomicBitmapStore {
     }
 
     /// Reset bitmap, atomic.
-    pub fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.bytes
             .iter()
             .for_each(|b| b.store(0, Ordering::Relaxed));
     }
 
     /// Atomically reads all bytes into a non-atomic `BitmapStore` snapshot.
-    pub fn snapshot(&self) -> BitmapStore {
+    pub(crate) fn snapshot(&self) -> BitmapStore {
         let mut out = Vec::with_capacity(self.bytes.len());
         for b in &self.bytes {
             out.push(b.load(Ordering::Relaxed));
@@ -354,7 +354,7 @@ pub(crate) struct AtomicValueSite {
 
 #[cfg(feature = "alloc")]
 impl AtomicValueSite {
-    pub fn new(kind: ValueKind, capacity: usize) -> Self {
+    pub(crate) fn new(kind: ValueKind, capacity: usize) -> Self {
         Self {
             kind,
             values: (0..capacity).map(|_| AtomicU64::new(0)).collect(),
@@ -364,7 +364,7 @@ impl AtomicValueSite {
     }
 
     /// Records a (value, count) observation. Lock-free.
-    pub fn record_value(&self, value: u64, count: u64) {
+    pub(crate) fn record_value(&self, value: u64, count: u64) {
         if count == 0 {
             return;
         }
@@ -412,7 +412,7 @@ impl AtomicValueSite {
     }
 
     /// Clears all counts to zero. Site structure (number of slots) is preserved.
-    pub fn clear_counts(&self) {
+    pub(crate) fn clear_counts(&self) {
         let len = self.len.load(Ordering::Relaxed);
         for i in 0..len {
             self.counts[i].store(0, Ordering::Relaxed);
@@ -420,12 +420,12 @@ impl AtomicValueSite {
     }
 
     /// Number of currently-occupied slots.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len.load(Ordering::Relaxed)
     }
 
     /// Snapshot into a non-atomic `ValueSite`.
-    pub fn snapshot(&self) -> ValueSite {
+    pub(crate) fn snapshot(&self) -> ValueSite {
         let len = self.len.load(Ordering::Acquire);
         let mut values = Vec::with_capacity(len);
         for i in 0..len {
@@ -451,7 +451,7 @@ pub(crate) struct AtomicValueProfileStore {
 
 #[cfg(feature = "alloc")]
 impl AtomicValueProfileStore {
-    pub fn new(max_values_per_site: usize) -> Self {
+    pub(crate) fn new(max_values_per_site: usize) -> Self {
         Self {
             sites: Vec::new(),
             max_values_per_site,
@@ -459,7 +459,7 @@ impl AtomicValueProfileStore {
     }
 
     /// Initializes sites from function records.
-    pub fn initialize_sites(&mut self, records: &[FunctionRecord]) {
+    pub(crate) fn initialize_sites(&mut self, records: &[FunctionRecord]) {
         self.sites.clear();
         for record in records {
             for (kind_idx, &num_sites) in record.value_sites.num_sites_per_kind.iter().enumerate() {
@@ -478,7 +478,7 @@ impl AtomicValueProfileStore {
     }
 
     /// Records a (value, count) at the given flat site index.
-    pub fn record_value(&self, site_index: usize, value: u64, count: u64) {
+    pub(crate) fn record_value(&self, site_index: usize, value: u64, count: u64) {
         let Some(site) = self.sites.get(site_index) else {
             return;
         };
@@ -486,19 +486,19 @@ impl AtomicValueProfileStore {
     }
 
     /// Clears counts across all sites.
-    pub fn clear_counts(&self) {
+    pub(crate) fn clear_counts(&self) {
         for site in &self.sites {
             site.clear_counts();
         }
     }
 
     /// Total occupied value entries across all sites.
-    pub fn total_value_count(&self) -> usize {
+    pub(crate) fn total_value_count(&self) -> usize {
         self.sites.iter().map(|s| s.len()).sum()
     }
 
     /// Merges a non-atomic `ValueProfileStore` into self.
-    pub fn merge_from(&self, other: &ValueProfileStore) {
+    pub(crate) fn merge_from(&self, other: &ValueProfileStore) {
         for (i, src_site) in other.sites().iter().enumerate() {
             if i >= self.sites.len() {
                 break;
@@ -510,7 +510,7 @@ impl AtomicValueProfileStore {
     }
 
     /// Snapshots all sites into a non-atomic `ValueProfileStore`.
-    pub fn snapshot(&self) -> ValueProfileStore {
+    pub(crate) fn snapshot(&self) -> ValueProfileStore {
         let mut out = ValueProfileStore::new(self.max_values_per_site);
         out.set_sites(self.sites.iter().map(|s| s.snapshot()).collect());
         out
@@ -544,7 +544,7 @@ pub(crate) struct ProfileImage {
 /// during I/O.
 #[cfg(feature = "alloc")]
 #[derive(Clone, Debug)]
-pub struct ProfileSnapshot {
+pub(crate) struct ProfileSnapshot {
     pub(crate) records: Vec<FunctionRecord>,
     pub(crate) counters: CounterStore,
     pub(crate) bitmap: BitmapStore,
@@ -556,7 +556,7 @@ pub struct ProfileSnapshot {
 #[cfg(feature = "alloc")]
 impl ProfileImage {
     /// Create an immutable snapshot for serialization.
-    pub fn snapshot(&self) -> ProfileSnapshot {
+    pub(crate) fn snapshot(&self) -> ProfileSnapshot {
         ProfileSnapshot {
             records: self.records.clone(),
             counters: self.counters.snapshot(),
@@ -568,7 +568,7 @@ impl ProfileImage {
     }
 
     /// Reset counters, bitmap, and value counts atomically.
-    pub fn reset(&self) {
+    pub(crate) fn reset(&self) {
         self.counters.reset();
         self.bitmap.clear();
         self.value_sites.clear_counts();

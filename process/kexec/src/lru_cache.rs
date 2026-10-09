@@ -178,7 +178,7 @@ impl<'a, V, const CAP: usize> Iterator for LruIter<'a, V, CAP> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 

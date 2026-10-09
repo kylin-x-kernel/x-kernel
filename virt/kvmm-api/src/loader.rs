@@ -12,7 +12,7 @@ use kvfs::{Filename, NodePermission, VfsFile};
 use kvmm::mm::GuestMem;
 
 #[derive(Debug)]
-pub enum LoadError {
+pub(crate) enum LoadError {
     FileNotFound,
     ReadFailed,
     AddressTranslation,
@@ -45,7 +45,7 @@ fn open_kernel_file(path: &str) -> Result<Arc<VfsFile>, LoadError> {
 /// The VM's second-stage page table translates `load_gpa` to a host
 /// physical address, which is then converted to a kernel VA for the copy.
 /// Returns the number of bytes loaded.
-pub fn load_image_to_guest<G: GuestMem>(
+pub(crate) fn load_image_to_guest<G: GuestMem>(
     guest_mem: &G,
     path: &str,
     load_gpa: u64,
@@ -99,7 +99,7 @@ pub fn load_image_to_guest<G: GuestMem>(
 /// `device_type = "cpu"`), without touching guest memory.
 ///
 /// Used to size `nr_vcpus` so the VM always matches its own DTB.
-pub fn peek_dtb_cpu_count(path: &str) -> Result<usize, LoadError> {
+pub(crate) fn peek_dtb_cpu_count(path: &str) -> Result<usize, LoadError> {
     let file = open_kernel_file(path)?;
 
     let mut dtb: alloc::vec::Vec<u8> = alloc::vec![];
@@ -206,7 +206,7 @@ fn find_string_offset(strings: &[u8], name: &[u8]) -> Option<u32> {
 
 /// Patch `linux,initrd-start` and `linux,initrd-end` properties in a DTB
 /// that has already been loaded into guest memory.
-pub fn patch_dtb_initrd<G: GuestMem>(
+pub(crate) fn patch_dtb_initrd<G: GuestMem>(
     guest_mem: &G,
     dtb_gpa: u64,
     dtb_size: usize,
@@ -301,7 +301,7 @@ pub fn patch_dtb_initrd<G: GuestMem>(
 /// layout). The memory node is identified by a node name starting with
 /// `memory` (e.g. `memory@70000000`); its node-name unit need not match the
 /// new base, since Linux reads the address from `reg`.
-pub fn patch_dtb_memory<G: GuestMem>(
+pub(crate) fn patch_dtb_memory<G: GuestMem>(
     guest_mem: &G,
     dtb_gpa: u64,
     dtb_size: usize,
@@ -434,7 +434,7 @@ fn encode_cells(dtb: &mut [u8], offset: usize, cells: usize, value: u64) {
 }
 
 /// Disable selected DTB nodes by replacing their structure-block subtree with NOPs.
-pub fn nop_dtb_nodes<G: GuestMem>(
+pub(crate) fn nop_dtb_nodes<G: GuestMem>(
     guest_mem: &G,
     dtb_gpa: u64,
     dtb_size: usize,

@@ -28,7 +28,7 @@ fn exit_snapshot_alone_pins_cleared_mm_without_resurrection() {
     {
         let binding = state.address_space.lock();
         assert!(Arc::ptr_eq(
-            snapshot._mm_pin.address_space(),
+            snapshot.mm_pin.address_space(),
             binding.mm_pin.address_space(),
         ));
         assert!(Arc::ptr_eq(
@@ -52,8 +52,8 @@ fn exit_snapshot_alone_pins_cleared_mm_without_resurrection() {
         assert_eq!(owner.lock().vmas().count(), 0);
         assert!(MmSpace::acquire_user(owner).is_none());
     }
-    assert!(!snapshot._mm_pin.is_user_alive());
-    assert!(snapshot._mm_pin.try_upgrade_user().is_none());
+    assert!(!snapshot.mm_pin.is_user_alive());
+    assert!(snapshot.mm_pin.try_upgrade_user().is_none());
     assert!(ktask::is_sleepable_context());
     drop(snapshot);
     assert!(weak.upgrade().is_none());

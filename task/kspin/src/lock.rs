@@ -136,11 +136,10 @@ impl<G: BaseGuard, T: ?Sized> SpinLock<G, T> {
                     .is_ok()
                 {
                     #[cfg(feature = "stats")]
-                    {
-                        self.record_acquisitions();
-                        if did_wait {
-                            self.record_contentions();
-                        }
+                    self.record_acquisitions();
+                    #[cfg(feature = "stats")]
+                    if did_wait {
+                        self.record_contentions();
                     }
                     break;
                 }

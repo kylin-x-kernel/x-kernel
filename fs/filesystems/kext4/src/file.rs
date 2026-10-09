@@ -243,7 +243,11 @@ impl Ext4SbInfo {
     /// belong to the runtime inode rather than the mount-wide journal. The VFS
     /// inode will own targeted cursors once mutation completion reports tids;
     /// committing the shared transaction is conservative and correct meanwhile.
-    pub fn sync_inode(&mut self, _inode: &Ext4Inode, _intent: Ext4SyncIntent) -> Ext4Result<()> {
+    pub(crate) fn sync_inode(
+        &mut self,
+        _inode: &Ext4Inode,
+        _intent: Ext4SyncIntent,
+    ) -> Ext4Result<()> {
         let result = match self.commit_running_metadata_transaction() {
             Ok(true) => Ok(()),
             Ok(false) => {
@@ -257,7 +261,12 @@ impl Ext4SbInfo {
     }
 
     /// Reads bytes from a regular file inode.
-    pub fn read_at(&self, inode: &Ext4Inode, offset: u64, output: &mut [u8]) -> Ext4Result<usize> {
+    pub(crate) fn read_at(
+        &self,
+        inode: &Ext4Inode,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Ext4Result<usize> {
         if inode.kind() != InodeKind::RegularFile {
             return Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind));
         }
@@ -265,7 +274,7 @@ impl Ext4SbInfo {
     }
 
     /// Reads bytes from a symbolic link inode.
-    pub fn read_link_at(
+    pub(crate) fn read_link_at(
         &self,
         inode: &Ext4Inode,
         offset: u64,
@@ -452,7 +461,7 @@ impl Ext4SbInfo {
     /// remaining suffix.
     /// Device or journal failures may abort the mounted journal, in which case
     /// recovery is required before the data can be submitted again.
-    pub fn writeback_ordered_at(
+    pub(crate) fn writeback_ordered_at(
         &mut self,
         inode: &Ext4Inode,
         offset: u64,
@@ -482,7 +491,7 @@ impl Ext4SbInfo {
     /// Device or journal failures may abort the mounted journal, in which case
     /// recovery is required before the data can be submitted again.
     #[allow(clippy::too_many_arguments)]
-    pub fn writeback_ordered_at_with_prealloc_budget(
+    pub(crate) fn writeback_ordered_at_with_prealloc_budget(
         &mut self,
         inode: &Ext4Inode,
         offset: u64,
@@ -621,6 +630,12 @@ impl Ext4SbInfo {
             let progress = match result {
                 Ok(progress) => progress,
                 Err(error) => {
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "CG-021-no-panic-on-reachable-failure: \
+                                  complete_metadata_mutation preserves the supplied operation \
+                                  error even when transaction completion also fails"
+                    )]
                     let error = self
                         .complete_metadata_mutation::<()>(handle, Err(error))
                         .expect_err("ordered writeback transaction returned an error");
@@ -1169,7 +1184,7 @@ fn block_count_for_byte_span(
     u32::try_from(block_count).map_err(|_| Ext4Error::Overflow)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::def_test;
 
@@ -1195,7 +1210,7 @@ mod tests {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod unittests {
     use unittest::{assert_eq, def_test};
 

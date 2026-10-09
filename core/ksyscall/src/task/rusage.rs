@@ -69,7 +69,7 @@ fn children_rusage(process: &Process) -> Rusage {
 
 /// Returns resource usage information for the current process, its children, or the current
 /// thread.
-pub fn sys_getrusage(who: i32, usage: UserPtr<rusage>) -> KResult<isize> {
+pub(crate) fn sys_getrusage(who: i32, usage: UserPtr<rusage>) -> KResult<isize> {
     const RUSAGE_SELF: i32 = linux_raw_sys::general::RUSAGE_SELF as i32;
     const RUSAGE_CHILDREN: i32 = linux_raw_sys::general::RUSAGE_CHILDREN;
     const RUSAGE_THREAD: i32 = linux_raw_sys::general::RUSAGE_THREAD as i32;
@@ -86,7 +86,7 @@ pub fn sys_getrusage(who: i32, usage: UserPtr<rusage>) -> KResult<isize> {
     Ok(0)
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use ktime_types::TimeSpan;
     use unittest::def_test;

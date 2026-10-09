@@ -5,12 +5,12 @@
 use alloc::{format, string::String};
 
 #[inline]
-pub const fn bit32(nr: u32) -> u32 {
+pub(super) const fn bit32(nr: u32) -> u32 {
     1u32 << nr
 }
 
 #[inline]
-pub const fn bit(nr: u32) -> u32 {
+pub(super) const fn bit(nr: u32) -> u32 {
     bit32(nr)
 }
 
@@ -35,7 +35,7 @@ macro_rules! member_size {
     };
 }
 
-pub fn roundup_u<
+pub(super) fn roundup_u<
     T: Copy
         + core::ops::Add<Output = T>
         + core::ops::Sub<Output = T>
@@ -49,7 +49,7 @@ pub fn roundup_u<
     (v + (size - T::from(1))) & !(size - T::from(1))
 }
 
-pub fn slice_fmt(data: &[u8]) -> String {
+pub(super) fn slice_fmt(data: &[u8]) -> String {
     let min_len: usize = 128;
     let len = data.len();
     let show_len = len.min(min_len);
@@ -62,12 +62,12 @@ pub fn slice_fmt(data: &[u8]) -> String {
 
 /// Fill `data` from the kernel entropy pool (same source as TEE crypto RNG).
 #[cfg(feature = "csv_huk_key")]
-pub fn random_bytes(data: &mut [u8]) {
+pub(crate) fn random_bytes(data: &mut [u8]) {
     entropy::fill_random(data);
 }
 
 #[unittest::mod_test]
-pub mod tests_utils {
+pub(super) mod tests_utils {
     use unittest::assert_eq;
 
     use super::*;

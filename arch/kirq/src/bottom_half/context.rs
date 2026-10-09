@@ -257,7 +257,7 @@ impl Drop for HardIrqContextGuard {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub mod test_support {
     use kspin::NoPreemptIrqSave;
 
@@ -465,8 +465,7 @@ fn should_log_context_warning(warning_count: usize) -> bool {
     warning_count <= INITIAL_CONTEXT_WARNING_LOGS || warning_count.is_power_of_two()
 }
 
-#[cfg(unittest)]
-#[allow(missing_docs)]
+#[unittest::mod_test]
 pub mod tests_context {
     use unittest::{assert, assert_eq, def_test};
 

@@ -18,3 +18,6 @@ klazy.workspace = true
 lazyinit.workspace = true
 macros.workspace = true
 unittest.workspace = true
+
+[lints]
+workspace = true

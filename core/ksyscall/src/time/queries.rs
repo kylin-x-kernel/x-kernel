@@ -15,7 +15,10 @@ use linux_raw_sys::general::{
 use posix_types::{SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
 
 /// Returns the current time from the specified clock.
-pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) -> KResult<isize> {
+pub(crate) fn sys_clock_gettime(
+    clock_id: __kernel_clockid_t,
+    ts: UserPtr<timespec>,
+) -> KResult<isize> {
     let value = match clock_id as u32 {
         CLOCK_REALTIME | CLOCK_REALTIME_COARSE => timespec::from_system_time(ktime::realtime()),
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
@@ -37,14 +40,14 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: UserPtr<timespec>) ->
 }
 
 /// Returns the current wall-clock time of day.
-pub fn sys_gettimeofday(ts: UserPtr<timeval>) -> KResult<isize> {
+pub(crate) fn sys_gettimeofday(ts: UserPtr<timeval>) -> KResult<isize> {
     ts.write_vm(timeval::from_system_time(ktime::realtime()))?;
     Ok(0)
 }
 
 /// Returns the current wall-clock time in seconds since the Unix epoch.
 #[cfg(target_arch = "x86_64")]
-pub fn sys_time(tloc: UserPtr<linux_raw_sys::general::__kernel_time_t>) -> KResult<isize> {
+pub(crate) fn sys_time(tloc: UserPtr<linux_raw_sys::general::__kernel_time_t>) -> KResult<isize> {
     let seconds = ktime::realtime().unix_seconds() as linux_raw_sys::general::__kernel_time_t;
     if let Some(tloc) = tloc.check_non_null() {
         tloc.write_vm(seconds)?;
@@ -64,7 +67,7 @@ fn set_wall_time(value: SystemTime) -> KResult<isize> {
 }
 
 /// Sets the wall clock from a `timeval` value.
-pub fn sys_settimeofday(
+pub(crate) fn sys_settimeofday(
     ts: UserConstPtr<timeval>,
     timezone: UserConstPtr<timezone>,
 ) -> KResult<isize> {
@@ -81,7 +84,7 @@ pub fn sys_settimeofday(
 }
 
 /// Sets `CLOCK_REALTIME` (or its coarse variant) from a `timespec` value.
-pub fn sys_clock_settime(
+pub(crate) fn sys_clock_settime(
     clock_id: __kernel_clockid_t,
     ts: UserConstPtr<timespec>,
 ) -> KResult<isize> {
@@ -96,7 +99,10 @@ pub fn sys_clock_settime(
 }
 
 /// Returns the resolution of the specified clock.
-pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: UserPtr<timespec>) -> KResult<isize> {
+pub(crate) fn sys_clock_getres(
+    clock_id: __kernel_clockid_t,
+    res: UserPtr<timespec>,
+) -> KResult<isize> {
     match clock_id as u32 {
         CLOCK_REALTIME
         | CLOCK_REALTIME_COARSE

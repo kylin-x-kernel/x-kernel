@@ -108,21 +108,22 @@ impl Hardware {
 
     fn notified(&mut self) {
         core::assert_ne!(self.available, 0);
-        // SAFETY: queue_set publishes the allocated avail ring until queue_unset.
-        // The test drives this under its hardware lock; the driver published idx
-        // before notify. Each ring slot lies within the negotiated queue depth.
-        unsafe {
-            let available = self.available as *const u16;
-            let end = available.add(1).read_volatile();
-            while self.seen != end {
-                let token = available
-                    .add(2 + usize::from(self.seen) % self.depth)
-                    .read_volatile();
-                self.submitted.push(token);
-                self.seen = self.seen.wrapping_add(1);
-                if self.is_immediate {
-                    self.complete(token, 0);
-                }
+        let available = self.available as *const u16;
+        // SAFETY: queue_set retains the aligned avail ring through queue_unset;
+        // offset one selects its index field under the fake hardware lock.
+        let index_ptr = unsafe { available.add(1) };
+        // SAFETY: The driver published this initialized avail index before notify.
+        let end = unsafe { index_ptr.read_volatile() };
+        while self.seen != end {
+            // SAFETY: Modulo depth selects an in-bounds avail ring entry, after
+            // the two-word header, in the live queue allocation.
+            let slot = unsafe { available.add(2 + usize::from(self.seen) % self.depth) };
+            // SAFETY: The driver initialized this aligned slot before publishing end.
+            let token = unsafe { slot.read_volatile() };
+            self.submitted.push(token);
+            self.seen = self.seen.wrapping_add(1);
+            if self.is_immediate {
+                self.complete(token, 0);
             }
         }
     }
@@ -130,50 +131,68 @@ impl Hardware {
     fn complete(&mut self, token: u16, status: u8) {
         core::assert!(usize::from(token) < self.depth);
         core::assert_ne!(self.descriptors, 0);
-        // SAFETY: this fake acts as the device on live, published descriptors.
-        // TrackedHal uses identity addresses. Direct/indirect chain bounds are
-        // checked before dereference. Output writes stay within each descriptor;
-        // the used ring is queue-owned and remains live until queue_unset.
-        unsafe {
-            let mut table = self.descriptors as *const Descriptor;
-            let mut index = usize::from(token);
-            let mut count = self.depth;
-            let head = table.add(index).read_volatile();
-            if head.flags & 4 != 0 {
-                table = head.address as *const Descriptor;
-                index = 0;
-                count = head.len as usize / core::mem::size_of::<Descriptor>();
-            }
-            for step in 0..count {
-                core::assert!(index < count);
-                let descriptor = table.add(index).read_volatile();
-                let address = descriptor.address as *mut u8;
-                if descriptor.len >= SECTOR_SIZE as u32 {
-                    self.data_addresses.push(address as usize);
-                }
-                if descriptor.flags & 2 != 0 {
-                    if descriptor.len == 1 {
-                        address.write_volatile(status);
-                    } else {
-                        address.write_bytes(0xa5, descriptor.len as usize);
-                    }
-                }
-                if descriptor.flags & 1 == 0 {
-                    break;
-                }
-                core::assert!(step + 1 < count, "cyclic fake descriptor chain");
-                index = usize::from(descriptor.next);
-            }
-            let used = self.used as *mut u8;
-            let slot = used
-                .add(4 + (usize::from(self.completed) % self.depth) * 8)
-                .cast::<u32>();
-            slot.write_volatile(u32::from(token));
-            slot.add(1).write_volatile(0);
-            core::sync::atomic::fence(Ordering::Release);
-            self.completed = self.completed.wrapping_add(1);
-            used.add(2).cast::<u16>().write_volatile(self.completed);
+        let mut table = self.descriptors as *const Descriptor;
+        let mut index = usize::from(token);
+        let mut count = self.depth;
+        // SAFETY: token was checked against the live published descriptor table's
+        // depth; queue_set keeps its allocation valid under the hardware lock.
+        let head_ptr = unsafe { table.add(index) };
+        // SAFETY: The driver initialized this aligned descriptor before notify.
+        let head = unsafe { head_ptr.read_volatile() };
+        if head.flags & 4 != 0 {
+            table = head.address as *const Descriptor;
+            index = 0;
+            count = head.len as usize / core::mem::size_of::<Descriptor>();
         }
+        for step in 0..count {
+            core::assert!(index < count);
+            // SAFETY: index is checked against the direct/indirect table length;
+            // TrackedHal identity addresses refer to live driver-owned tables.
+            let descriptor_ptr = unsafe { table.add(index) };
+            // SAFETY: The published descriptor is initialized and aligned, and
+            // no driver mutation overlaps this hardware-locked completion.
+            let descriptor = unsafe { descriptor_ptr.read_volatile() };
+            let address = descriptor.address as *mut u8;
+            if descriptor.len >= SECTOR_SIZE as u32 {
+                self.data_addresses.push(address as usize);
+            }
+            if descriptor.flags & 2 != 0 {
+                if descriptor.len == 1 {
+                    // SAFETY: The writable descriptor grants this fake device
+                    // one live response byte, mapped identically by TrackedHal.
+                    unsafe { address.write_volatile(status) };
+                } else {
+                    // SAFETY: The writable descriptor grants descriptor.len
+                    // live bytes retained by the submitting driver until completion.
+                    unsafe { address.write_bytes(0xa5, descriptor.len as usize) };
+                }
+            }
+            if descriptor.flags & 1 == 0 {
+                break;
+            }
+            core::assert!(step + 1 < count, "cyclic fake descriptor chain");
+            index = usize::from(descriptor.next);
+        }
+        let used = self.used as *mut u8;
+        // SAFETY: queue_set retains the used ring; modulo depth selects an
+        // eight-byte entry after its four-byte header, aligned for u32 access.
+        let slot = unsafe {
+            used.add(4 + (usize::from(self.completed) % self.depth) * 8)
+                .cast::<u32>()
+        };
+        // SAFETY: The fake device owns this in-bounds used-ring token field.
+        unsafe { slot.write_volatile(u32::from(token)) };
+        // SAFETY: The second u32 is within the same eight-byte used-ring entry.
+        let length = unsafe { slot.add(1) };
+        // SAFETY: The fake exclusively writes the initialized, aligned used entry.
+        unsafe { length.write_volatile(0) };
+        core::sync::atomic::fence(Ordering::Release);
+        self.completed = self.completed.wrapping_add(1);
+        // SAFETY: The u16 used index is at byte offset two of the live ring header.
+        let used_index = unsafe { used.add(2).cast::<u16>() };
+        // SAFETY: The fake owns this aligned index; the release fence publishes
+        // the completed entry before the driver can observe the new index.
+        unsafe { used_index.write_volatile(self.completed) };
         self.is_pending_irq = true;
     }
 }

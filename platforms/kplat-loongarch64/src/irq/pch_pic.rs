@@ -30,6 +30,11 @@ const PCH_PIC_PADDR: usize = 0x1000_0000;
 static PCH_PIC_BASE: LazyInit<VirtAddr> = LazyInit::new();
 
 fn mmio_base() -> usize {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: PCH PIC initialization installs the MMIO \
+                  mapping before interrupt operations are exposed"
+    )]
     PCH_PIC_BASE
         .get()
         .expect("pch-pic iomap not initialized")
@@ -85,7 +90,13 @@ impl PchPicRegs for MmioPchPic {
     }
 }
 
-pub fn init() {
+pub(super) fn init() {
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PCH-PIC register aperture \
+                  cannot be mapped; interrupt-controller initialization has no error return or \
+                  recovery"
+    )]
     let base = memspace::iomap_device(PhysAddr::from_usize(PCH_PIC_PADDR), PCH_PIC_SIZE, "pch-pic")
         .unwrap_or_else(|err| panic!("failed to iomap pch-pic: {err:?}"));
     PCH_PIC_BASE.init_once(base);
@@ -133,15 +144,15 @@ fn disable_irq_impl<R: PchPicRegs>(regs: &mut R, irq: usize) {
     regs.reg_write(addr, val | bit);
 }
 
-pub fn enable_irq(irq: usize) {
+pub(super) fn enable_irq(irq: usize) {
     enable_irq_impl(&mut MmioPchPic, irq);
 }
 
-pub fn disable_irq(irq: usize) {
+pub(super) fn disable_irq(irq: usize) {
     disable_irq_impl(&mut MmioPchPic, irq);
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 

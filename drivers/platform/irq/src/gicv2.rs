@@ -13,7 +13,7 @@ static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 const GUEST_VTIMER_IRQ: usize = 27;
 
-pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
+pub(super) fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {
         return;
     }
@@ -29,14 +29,14 @@ pub fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     TRAP_OP.init_once(cpu.trap_operations());
 }
 
-pub fn init_current_cpu() {
+pub(super) fn init_current_cpu() {
     debug!("Initialize GICv2 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
     cpu.init_current_cpu();
     cpu.set_eoi_mode_ns(true);
 }
 
-pub fn set_trigger(interrupt_id: usize, edge: bool) {
+pub(super) fn set_trigger(interrupt_id: usize, edge: bool) {
     trace!("GICv2 set trigger: {interrupt_id} {edge}");
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
@@ -45,7 +45,7 @@ pub fn set_trigger(interrupt_id: usize, edge: bool) {
     GIC.lock().set_cfg(intid, cfg);
 }
 
-pub fn enable(irq: usize, enabled: bool) {
+pub(super) fn enable(irq: usize, enabled: bool) {
     trace!("GICv2 set enable: {irq} {enabled}");
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
@@ -54,7 +54,7 @@ pub fn enable(irq: usize, enabled: bool) {
     gic.set_irq_enable(intid, enabled);
 }
 
-pub fn set_prio(irq: usize, priority: u8) {
+pub(super) fn set_prio(irq: usize, priority: u8) {
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
@@ -99,7 +99,7 @@ fn claim_irq() -> Option<(usize, usize)> {
 /// into a non‑maskable interrupt, so this path is unreachable in a correct
 /// build (the platform rejects NMI on GICv2).  The interrupt is still
 /// acknowledged and completed so the GIC does not keep it pending.
-pub fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
+pub(super) fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
     claim_irq()
 }
 
@@ -120,7 +120,7 @@ fn skip_dir_for_vmm_guest_irq(ack: Ack) -> bool {
     hwirq == GUEST_VTIMER_IRQ
 }
 
-pub fn complete_irq(completion_cookie: usize) {
+pub(super) fn complete_irq(completion_cookie: usize) {
     let ack = Ack::from(completion_cookie as u32);
     if skip_dir_for_vmm_guest_irq(ack) {
         return;
@@ -128,7 +128,7 @@ pub fn complete_irq(completion_cookie: usize) {
     TRAP_OP.dir(ack);
 }
 
-pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
+pub(super) fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     // `dmb ishst` orders the caller's prior Normal-memory stores before the
     // SGI MMIO write, which is required for cross-CPU publish-before-notify
     // semantics.

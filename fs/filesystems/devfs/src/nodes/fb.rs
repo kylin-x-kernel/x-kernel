@@ -20,7 +20,7 @@ use crate::{DeviceFile, add_device_entry};
 
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy)]
-pub struct FrameBufferBitfield {
+pub(crate) struct FrameBufferBitfield {
     /// The beginning of bitfield.
     offset: u32,
     /// The length of bitfield.
@@ -95,20 +95,34 @@ struct FixScreenInfo {
 /// demand: `write()` to `/dev/fb0` and the `FBIOPAN_DISPLAY` ioctl both
 /// trigger [`fbdevice::fb_present`], so writes to the node stay visible while
 /// an active DRM master keeps the scanout to itself.
-pub struct FrameBuffer {
+pub(crate) struct FrameBuffer {
     base: VirtAddr,
     size: usize,
 }
 impl FrameBuffer {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         // fb_available() is checked by the caller (add_root_entries) before
         // constructing us, so the shadow is guaranteed present.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The caller checks fb_available and \
+                      the framebuffer shadow remains allocated for kernel lifetime"
+        )]
         let base = fbdevice::fb_shadow_vaddr().expect("fbdev shadow missing");
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The caller checks fb_available and \
+                      the framebuffer shadow remains allocated for kernel lifetime"
+        )]
         let size = fbdevice::fb_shadow_size().expect("fbdev shadow missing");
         Self { base, size }
     }
 
-    #[allow(clippy::mut_from_ref)]
+    #[expect(
+        clippy::mut_from_ref,
+        reason = "CG-024-lint-exceptions: clippy::mut_from_ref: DeviceFileOps supplies a shared \
+                  receiver for access to the externally mapped fbdev shadow buffer"
+    )]
     fn as_mut_slice(&self) -> &mut [u8] {
         // SAFETY: `base..base+size` is the fbdev emulation shadow buffer,
         // which stays mapped for the kernel lifetime; concurrent userspace

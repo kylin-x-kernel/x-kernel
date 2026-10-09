@@ -55,6 +55,72 @@ impl FdtHeader {
         (self.off_mem_rsvmap.get() as usize)..
     }
 
+    /// Checks all container ranges before any accessor can slice them.
+    pub(crate) fn validate(&self, data: &[u8]) -> Result<usize, crate::FdtError> {
+        use crate::FdtError::ParseError;
+
+        if data.len() < core::mem::size_of::<Self>()
+            || self.version.get() < 17
+            || self.last_comp_version.get() > 17
+        {
+            return Err(ParseError);
+        }
+        let structures = checked_block_range(
+            self.off_dt_struct.get(),
+            self.size_dt_struct.get(),
+            data.len(),
+        )?;
+        let strings = checked_block_range(
+            self.off_dt_strings.get(),
+            self.size_dt_strings.get(),
+            data.len(),
+        )?;
+        if !structures.start.is_multiple_of(4)
+            || !structures.len().is_multiple_of(4)
+            || (!strings.is_empty()
+                && structures.start < strings.end
+                && strings.start < structures.end)
+        {
+            return Err(ParseError);
+        }
+        let reservation_start = self.off_mem_rsvmap.get() as usize;
+        if reservation_start < core::mem::size_of::<Self>() || !reservation_start.is_multiple_of(8)
+        {
+            return Err(ParseError);
+        }
+        // Stop at the next block: its zero bytes must never be mistaken for a
+        // missing reservation terminator. Block order need not be assumed.
+        let mut reservation_limit = data.len();
+        for block in [&structures, &strings] {
+            if block.is_empty() {
+                continue;
+            }
+            if block.contains(&reservation_start) {
+                return Err(ParseError);
+            }
+            if block.start >= reservation_start {
+                reservation_limit = reservation_limit.min(block.start);
+            }
+        }
+        let mut reservations = FdtData::new(
+            data.get(reservation_start..reservation_limit)
+                .ok_or(ParseError)?,
+        );
+        loop {
+            let address = reservations.u64().ok_or(ParseError)?.get();
+            let size = reservations.u64().ok_or(ParseError)?.get();
+            if address == 0 && size == 0 {
+                break;
+            }
+        }
+        let reservation_end = reservation_limit - reservations.remaining().len();
+        let names = &data[strings];
+        if (!names.is_empty() && names.last() != Some(&0)) || core::str::from_utf8(names).is_err() {
+            return Err(ParseError);
+        }
+        Ok(reservation_end)
+    }
+
     pub(crate) fn from_bytes(bytes: &mut FdtData<'_>) -> Option<Self> {
         Some(Self {
             magic: bytes.u32()?,
@@ -69,4 +135,19 @@ impl FdtHeader {
             size_dt_struct: bytes.u32()?,
         })
     }
+}
+
+fn checked_block_range(
+    offset: u32,
+    size: u32,
+    total: usize,
+) -> Result<core::ops::Range<usize>, crate::FdtError> {
+    let start = offset as usize;
+    let end = start
+        .checked_add(size as usize)
+        .ok_or(crate::FdtError::ParseError)?;
+    if start < core::mem::size_of::<FdtHeader>() || end > total {
+        return Err(crate::FdtError::ParseError);
+    }
+    Ok(start..end)
 }

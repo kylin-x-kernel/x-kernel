@@ -124,6 +124,10 @@ The current checked-in toolchain is described by `rust-toolchain.toml`.
 
 Read `docs/ai/skills/code-guidelines/SKILL.md` before writing or
 reviewing Rust kernel code.
+Read `docs/code-guidelines/README.md` for the rule registry and unified
+exception policy before writing or reviewing lint attributes. Backend levels
+and coverage live in `docs/code-guidelines/lints.md`; rule requirements and
+judgment criteria live in `docs/code-guidelines/CG-*.md`.
 
 Key local rules:
 

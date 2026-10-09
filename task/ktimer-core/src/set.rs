@@ -238,8 +238,14 @@ impl<const N: usize> TimerSet<N> {
     ) -> KResult<(LogicalCpuId, bool)> {
         // SAFETY: forwards the same storage and routing contract. Unconditional
         // acceptance cannot produce None and does not call any external code.
-        unsafe { self.arm_on_checked(node, selected_cpu, deadline, || true) }
-            .map(|armed| armed.expect("unconditional arm must be accepted"))
+        unsafe { self.arm_on_checked(node, selected_cpu, deadline, || true) }.map(|armed| {
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: The acceptance closure always \
+                          returns true, so successful arm_on_checked always returns Some"
+            )]
+            armed.expect("unconditional arm must be accepted")
+        })
     }
 
     /// Arms only if the deadline is still in the future at the locked time check.
@@ -326,12 +332,13 @@ impl<const N: usize> TimerSet<N> {
             // No delivery is running. Remove old membership before touching the
             // new index, retaining external storage throughout. Publish the route
             // only after insertion and before either lock is released.
-            let was_pending = unsafe {
-                let was_pending = matches!(old.try_cancel(node), CancelResult::Removed(_));
-                new.arm(node, deadline);
-                node.set_owner_cpu(selected_cpu);
-                was_pending
-            };
+            let was_pending = matches!(unsafe { old.try_cancel(node) }, CancelResult::Removed(_));
+            // SAFETY: Cancellation removed the old membership and no delivery
+            // runs; both owner locks still protect the retained stable node.
+            unsafe { new.arm(node, deadline) };
+            // SAFETY: Both ordered locks remain held after insertion; publish
+            // the new route before either lock permits another node operation.
+            unsafe { node.set_owner_cpu(selected_cpu) };
             return Ok(Some((selected_cpu, !was_pending)));
         }
     }
@@ -343,7 +350,7 @@ impl<const N: usize> Default for TimerSet<N> {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 pub(crate) mod tests {
     use ktime_types::{MonotonicInstant, TimeSpan};
     use unittest::{assert, assert_eq, def_test};
@@ -594,10 +601,10 @@ pub(crate) mod tests {
         let second = TimerSet::<1>::new();
         // SAFETY: distinct stable nodes are each used with exactly one set;
         // both sets are drained before any external node storage is released.
-        unsafe {
-            first.arm_on(&nodes[0], 0.into(), setting(10)).unwrap();
-            second.arm_on(&nodes[1], 0.into(), setting(20)).unwrap();
-        }
+        unsafe { first.arm_on(&nodes[0], 0.into(), setting(10)) }.unwrap();
+        // SAFETY: nodes[1] is distinct, stack-stable, and used only with second;
+        // second is drained below before node storage is released.
+        unsafe { second.arm_on(&nodes[1], 0.into(), setting(20)) }.unwrap();
         // SAFETY: first owns this node's membership, with no running callback.
         let removed_first = unsafe { first.cancel_sync(&nodes[0]) };
         let first_deadline = first.cpus[0].lock().earliest_deadline_ns();
@@ -914,10 +921,10 @@ pub(crate) mod tests {
             let (_, mut timers) = timer_set.lock_owner(&node);
             // SAFETY: borrowed execution accesses finished; only saved identity
             // is needed to retire it, then cancellation removes the successor.
-            unsafe {
-                timers.clear_running(address);
-                timers.try_cancel(&node);
-            }
+            unsafe { timers.clear_running(address) };
+            // SAFETY: The same revalidated owner lock remains held, the running
+            // delivery is retired, and the successor belongs to this collection.
+            unsafe { timers.try_cancel(&node) };
         }
         assert_eq!(
             // SAFETY: now idle; same stable node may move to the selected slot.
@@ -946,6 +953,11 @@ pub(crate) mod tests {
     /// Propagates panics from the supplied worker driver or yield function; this
     /// helper does not catch them.
     #[cfg(feature = "smp")]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "CG-029-shallow-control-flow: test scenario: the routing check runs inside \
+                  worker closures of one linear SMP script"
+    )]
     pub fn concurrent_owner_routes(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
         yield_now: fn(),
@@ -1022,6 +1034,16 @@ pub(crate) mod tests {
     /// scenario provides a fresh node and a two-CPU timer set. Panics from the
     /// supplied worker driver or yield function are not caught.
     #[cfg(feature = "smp")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: test scenario: one linear concurrent-cancel script \
+                  exposed for SMP tests"
+    )]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "CG-029-shallow-control-flow: test scenario: the timer handler is defined inside \
+                  one linear SMP script"
+    )]
     pub fn concurrent_cancel_waits_for_cleanup(
         run_workers: impl FnOnce([alloc::boxed::Box<dyn FnOnce() + Send>; 2]) -> bool,
         yield_now: fn(),

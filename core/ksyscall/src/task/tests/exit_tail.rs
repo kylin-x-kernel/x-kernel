@@ -2,10 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Real exit tails block twice and optionally migrate across a remote window.
-//! Both resume boundaries check saved/hardware roots and MM scheduling metadata.
-//! Noexec controls also retain M through the runtime. Exec cases replace that
-//! binding twice while the unpublished sibling must keep using its captured M.
+// Real exit tails block twice and optionally migrate across a remote window.
+// Both resume boundaries check saved/hardware roots and MM scheduling metadata.
+// Noexec controls also retain M through the runtime. Exec cases replace that
+// binding twice while the unpublished sibling must keep using its captured M.
 
 use alloc::{format, sync::Arc, vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -115,6 +115,10 @@ pub(in crate::task) fn check_current_root(empty_sentinel: Option<usize>) -> usiz
     check()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: unittest scenario: one linear exit-tail test script in a file test module"
+)]
 fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     let cpu = khal::percpu::this_cpu_id().as_usize();
     let affinity = ktask::current().cpumask();

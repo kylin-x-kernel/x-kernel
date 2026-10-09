@@ -58,8 +58,18 @@ pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpf
 
 #[macros::register_init]
 fn init_memory_filesystems() {
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
     kvfs::register_filesystem(&ramfs::RAMFS_TYPE)
         .expect("ramfs filesystem type must register once");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
 }
 
@@ -110,13 +120,16 @@ static MEMFS_TYPE: FileSystemType = FileSystemType::internal("memfs");
 
 impl MemoryFs {
     /// Creates an in-memory superblock.
-    #[allow(clippy::new_ret_no_self)]
+    #[expect(
+        clippy::new_ret_no_self,
+        reason = "CG-024-lint-exceptions: clippy::new_ret_no_self: MemFs construction returns the \
+                  mounted SuperBlock that owns the filesystem"
+    )]
     pub fn new() -> Arc<SuperBlock> {
         Self::new_with_superblock_flags(SuperBlockFlags::empty())
     }
 
     /// Creates an in-memory superblock with explicit VFS-wide flags.
-    #[allow(clippy::new_ret_no_self)]
     pub fn new_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
         Self::new_with_name_superblock_flags_and_root_mode(
             &MEMFS_TYPE,
@@ -221,7 +234,7 @@ struct Inode {
 }
 
 impl Inode {
-    pub fn new(
+    pub(crate) fn new(
         fs: &Arc<MemoryFs>,
         parent: Option<u64>,
         node_type: NodeType,
@@ -315,7 +328,7 @@ struct InodeRef {
 }
 
 impl InodeRef {
-    pub fn new(fs: Arc<MemoryFs>, ino: u64) -> Self {
+    pub(crate) fn new(fs: Arc<MemoryFs>, ino: u64) -> Self {
         fs.get(ino).metadata.lock().nlink += 1;
         Self { fs, ino }
     }
@@ -337,7 +350,7 @@ struct MemoryNode {
 }
 
 impl MemoryNode {
-    pub fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<Self> {
+    pub(crate) fn new(fs: Arc<MemoryFs>, inode: Arc<Inode>) -> Arc<Self> {
         Arc::new(Self { fs, inode })
     }
 
@@ -543,14 +556,14 @@ impl InodeDirOperations for MemoryNode {
     fn create(
         &self,
         _idmap: &kvfs::MountIdmap,
-        _dir: &kvfs::VfsInode,
+        dir: &kvfs::VfsInode,
         dentry: &LockedDentry<'_>,
         mode: kvfs::Umode,
         _exclusive: bool,
         cred: &Cred,
     ) -> VfsResult<()> {
         let mode = mode.with_node_type(NodeType::RegularFile);
-        self.ramfs_mknod(_dir, dentry, mode, DeviceId::default(), cred)
+        self.ramfs_mknod(dir, dentry, mode, DeviceId::default(), cred)
     }
 
     fn mkdir(
@@ -850,7 +863,7 @@ impl AddressSpaceOperations for MemoryAddressSpaceOperations {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use linux_raw_sys::general::{O_CREAT, O_EXCL, O_WRONLY};
     use unittest::{assert, assert_eq, def_test};

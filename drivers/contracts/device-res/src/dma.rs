@@ -165,6 +165,12 @@ impl DmaCoherent {
     /// drop, so this indicates re-entry), or if the stored CPU address
     /// was null, which the provider contract forbids.
     pub fn cpu_ptr(&self) -> NonNull<u8> {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The provider supplies a non-null DMA \
+                      allocation retained until this handle is dropped; live methods cannot \
+                      observe release"
+        )]
         NonNull::new(
             self.allocation
                 .as_ref()
@@ -180,6 +186,12 @@ impl DmaCoherent {
     ///
     /// Panics if the handle was already released.
     pub fn bus_addr(&self) -> u64 {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The provider supplies a non-null DMA \
+                      allocation retained until this handle is dropped; live methods cannot \
+                      observe release"
+        )]
         self.allocation
             .as_ref()
             .expect("DmaCoherent handle used after release")
@@ -192,6 +204,12 @@ impl DmaCoherent {
     ///
     /// Panics if the handle was already released.
     pub fn len(&self) -> usize {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: The provider supplies a non-null DMA \
+                      allocation retained until this handle is dropped; live methods cannot \
+                      observe release"
+        )]
         self.allocation
             .as_ref()
             .expect("DmaCoherent handle used after release")

@@ -404,6 +404,13 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
+    /// # Safety
+    ///
+    /// `kstack_top` must be the 16-byte-aligned end of a live, exclusively
+    /// writable kernel stack allocation with room below it for one `u64` and a
+    /// `ContextSwitchFrame`. Keep the stack live until the task finishes.
+    /// `entry` must be a valid task entry that obeys the kernel calling
+    /// convention and never returns into the uninitialized stack-top word.
     #[inline]
     unsafe fn prepare_initial_frame(entry: usize, kstack_top: VirtAddr) -> u64 {
         // SAFETY: `kstack_top` points to the top of a valid kernel stack with sufficient space.
@@ -412,7 +419,10 @@ impl TaskContext {
         let top_u64 = kstack_top.as_mut_ptr() as *mut u64;
         // SAFETY: pointer arithmetic stays within the reserved initial-frame
         // space at the top of the kernel stack.
-        let frame_ptr = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>().sub(1) };
+        let top_frame = unsafe { top_u64.sub(1).cast::<ContextSwitchFrame>() };
+        // SAFETY: The caller reserves a ContextSwitchFrame below this word;
+        // subtracting one frame stays within the live kernel stack allocation.
+        let frame_ptr = unsafe { top_frame.sub(1) };
         // SAFETY: `frame_ptr` points to writable stack memory reserved for the
         // initial context-switch frame.
         unsafe {
@@ -515,6 +525,14 @@ impl TaskContext {
     }
 }
 
+/// # Safety
+///
+/// The scheduler must exclude interrupts and concurrent execution of either
+/// task. The current stack must have space for the six saved registers;
+/// `*_next_stack` must point to a live `ContextSwitchFrame` made by a prior
+/// switch or `prepare_initial_frame`, with a valid return address and ABI
+/// stack alignment. Keep both stacks and context slots live until resumed,
+/// with the next task's TLS, FP state and address space already installed.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64) {
     naked_asm!(

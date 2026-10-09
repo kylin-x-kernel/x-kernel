@@ -2,12 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Kernel unit tests for Fair/Idle arbitration and EEVDF.
-//!
-//! Stop, Deadline, and RT cases stay on `refactor_ksched` until those
-//! classes are wired here.
 
-#![cfg(unittest)]
 
 extern crate alloc;
 

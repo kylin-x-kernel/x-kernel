@@ -79,7 +79,12 @@ pub fn dice_android_format_config_descriptor(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "CG-024-lint-exceptions: clippy::too_many_arguments: mirrors the Open DICE \
+              DiceAndroidMainFlow ABI: context, both current CDIs, chain, inputs, output buffer \
+              and both next CDIs are distinct caller-owned values"
+)]
 pub fn dice_android_main_flow(
     context: &mut u8,
     current_cdi_attest: &[u8; DICE_CDI_SIZE],
@@ -337,10 +342,15 @@ pub fn dice_android_handover_main_flow(
     Ok(out_size + chain_size)
 }
 
-#[allow(clippy::type_complexity)]
-pub fn dice_android_handover_parse(
-    handover: &[u8],
-) -> Result<(&[u8; DICE_CDI_SIZE], &[u8; DICE_CDI_SIZE], Option<&[u8]>), DiceResult> {
+/// CDI_Attest, CDI_Seal and the optional DICE chain borrowed from an Android
+/// handover buffer.
+pub type AndroidHandover<'a> = (
+    &'a [u8; DICE_CDI_SIZE],
+    &'a [u8; DICE_CDI_SIZE],
+    Option<&'a [u8]>,
+);
+
+pub fn dice_android_handover_parse(handover: &[u8]) -> Result<AndroidHandover<'_>, DiceResult> {
     let mut input = CborIn::new(handover);
 
     let num_pairs = input.read_map().map_err(|_| DiceResult::InvalidInput)?;

@@ -6,4 +6,4 @@
 
 mod platform_impl;
 
-pub use platform_impl::*;
+pub(crate) use platform_impl::*;

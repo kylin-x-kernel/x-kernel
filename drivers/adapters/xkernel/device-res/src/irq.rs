@@ -45,6 +45,14 @@ impl IrqOp for XKernelResourceProvider {
                             irq.number
                         );
                     }
+                    #[expect(
+                        clippy::panic,
+                        reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
+                                  IrqOp::release_irq returns (), so a kirq free error such as an \
+                                  invalid calling context cannot reach the driver; make \
+                                  release_irq fallible and propagate the error through device \
+                                  teardown"
+                    )]
                     Err(err) => {
                         panic!(
                             "failed to release IRQ {} regular action: {err:?}",
@@ -64,6 +72,14 @@ impl IrqOp for XKernelResourceProvider {
                             id
                         );
                     }
+                    #[expect(
+                        clippy::panic,
+                        reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): \
+                                  IrqOp::release_irq returns (), so a kirq free error such as an \
+                                  invalid calling context cannot reach the driver; make \
+                                  release_irq fallible and propagate the error through device \
+                                  teardown"
+                    )]
                     Err(err) => {
                         panic!(
                             "failed to release IRQ {} action token {}: {err:?}",
@@ -211,7 +227,7 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
     }
 }
 
-#[cfg(unittest)]
+#[unittest::mod_test]
 mod tests {
     use unittest::{assert_eq, def_test};
 
