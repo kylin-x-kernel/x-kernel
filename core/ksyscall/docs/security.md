@@ -107,11 +107,11 @@ registered wakeups rather than polling or a timer.
 
 ## Known limitations
 
-- `sched_setscheduler` and `sched_setparam` retain their baseline process-target
-  lookup and do not enforce a complete owner/capability/RT authorization policy.
-  The worker-TID query helper is read-only and is not used by either setter;
-  accepting published worker TIDs for reads must not expand this write scope.
-  A complete setter authorization change needs a separate review.
+- `sched_setscheduler` and `sched_setparam` now accept published worker TIDs.
+  Policy/parameter setters enforce caller-euid vs target ruid/euid ownership
+  or privileged euid 0 before mutating metadata. Full capability/RT resource-limit
+  authorization remains unimplemented; these metadata writes do not establish
+  real RT execution.
 - Exec supports only a live single-threaded process. Independent CLONE_VM peers
   retain their old MM; this is not a de_thread or vfork implementation.
 - `ioctl` first asks `posix-net::handle_net_ioctl` for exact commands, then
@@ -168,3 +168,10 @@ registered wakeups rather than polling or a timer.
 The exec and exit-tail regressions in `src/task/tests/` cover the exec
 boundaries above. Synthetic-image and injected-error cases do not establish
 real user-program execution or allocator-exhaustion behavior.
+
+Scheduler ownership does not equate shared PID/thread-group membership with
+matching credentials. Raw credential changes affect only the calling thread;
+libc-wide synchronization is a separate userspace responsibility. A caller
+that dropped its UID cannot update a peer retaining another UID solely because
+they share a process. The same-group raw-setuid regression checks peer IDs,
+EPERM and unchanged scheduler metadata, then restores caller credentials.

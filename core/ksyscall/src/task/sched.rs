@@ -78,18 +78,18 @@ pub(crate) fn sys_sched_setaffinity(
 fn prepare_setaffinity_target(pid: i32, cpu_mask: &KCpuMask) -> KResult<KtaskRef> {
     let task = affinity_target(pid)?;
     let thread = task.try_as_thread().ok_or(KError::NoSuchProcess)?;
-    check_affinity_permission(&kprocess::current_cred(), &thread.real_cred())?;
+    check_scheduler_owner_permission(&kprocess::current_cred(), &thread.real_cred())?;
     if cpu_mask.is_empty() {
         return Err(KError::InvalidInput);
     }
     Ok(task)
 }
 
-/// Linux `check_same_owner` / `CAP_SYS_NICE` gate for `sched_setaffinity`.
+/// Shared owner gate for scheduling setters and `sched_setaffinity`.
 ///
 /// Caller euid must match the target's ruid or euid, or the caller must be
 /// privileged (`euid == 0`, standing in for `CAP_SYS_NICE`).
-fn check_affinity_permission(caller: &Cred, target: &Cred) -> KResult<()> {
+fn check_scheduler_owner_permission(caller: &Cred, target: &Cred) -> KResult<()> {
     if !caller.is_privileged() && caller.euid() != target.ruid() && caller.euid() != target.euid() {
         return Err(KError::OperationNotPermitted);
     }
@@ -104,7 +104,7 @@ fn affinity_target(pid: i32) -> KResult<KtaskRef> {
         return Ok(current().clone());
     }
     // Linux accepts a tid here (pthread_setaffinity_np). Fall back to the
-    // process-leader lookup used by other sched_* syscalls.
+    // existing process fallback used only by the affinity syscalls.
     match kprocess::scheduler::task_by_tid(pid as u32) {
         Ok(task) => Ok(task),
         Err(_) => kprocess::scheduler::target_task(pid),
@@ -135,7 +135,6 @@ pub(crate) fn sys_getcpu(cpu: UserPtr<u32>, node: UserPtr<u32>, _tcache: usize) 
 ///
 /// A positive process PID denotes its leader TID, even from a worker caller.
 /// There is no fallback to another process member if that TID is unpublished.
-/// This read-only contract intentionally differs from the baseline setters.
 ///
 /// # Errors
 ///
@@ -150,7 +149,13 @@ pub(crate) fn sys_sched_getscheduler(pid: i32) -> KResult<isize> {
         .unwrap_or_else(configured_scheduler_policy) as _)
 }
 
-/// Sets the scheduler policy.
+/// Sets policy for a published TID, or the caller when `pid` is zero.
+///
+/// An absent, unpublished, or negative target returns [`KError::NoSuchProcess`].
+/// Unprivileged callers whose euid matches neither target ruid nor euid
+/// receive [`KError::OperationNotPermitted`], even within one thread group.
+/// Raw credential syscalls update only the calling thread; libc is responsible
+/// for synchronizing credentials across POSIX threads.
 pub(crate) fn sys_sched_setscheduler(
     pid: i32,
     policy: i32,
@@ -161,6 +166,7 @@ pub(crate) fn sys_sched_setscheduler(
     let param = param.cast::<SchedParam>().read_vm()?;
 
     validate_scheduler_priority(policy, param.sched_priority)?;
+    check_scheduler_owner_permission(&kprocess::current_cred(), &task.as_thread().real_cred())?;
     task.as_thread().set_scheduler(policy, param.sched_priority);
 
     Ok(0)
@@ -170,7 +176,6 @@ pub(crate) fn sys_sched_setscheduler(
 ///
 /// A positive process PID denotes its leader TID, even from a worker caller.
 /// There is no fallback to another process member if that TID is unpublished.
-/// This read-only contract intentionally differs from the baseline setters.
 ///
 /// # Errors
 ///
@@ -188,12 +193,17 @@ pub(crate) fn sys_sched_getparam(pid: i32, param: UserPtr<()>) -> KResult<isize>
     Ok(0)
 }
 
-/// Updates scheduler parameters without changing the scheduler policy.
+/// Updates parameters for a published TID, or the caller when `pid` is zero.
+///
+/// The policy is retained. An absent, unpublished, or negative target returns
+/// [`KError::NoSuchProcess`]. Unrelated unprivileged callers receive
+/// [`KError::OperationNotPermitted`] before the target metadata changes.
 pub(crate) fn sys_sched_setparam(pid: i32, param: UserConstPtr<()>) -> KResult<isize> {
     let task = scheduler_target(pid)?;
     let thread = task.as_thread();
     let param = param.cast::<SchedParam>().read_vm()?;
 
+    check_scheduler_owner_permission(&kprocess::current_cred(), &thread.real_cred())?;
     thread.set_scheduler_priority_with(
         param.sched_priority,
         configured_scheduler_policy(),
@@ -315,15 +325,27 @@ pub(crate) fn sys_setpriority(which: u32, who: u32, prio: i32) -> KResult<isize>
 }
 
 fn scheduler_target(pid: i32) -> KResult<ktask::KtaskRef> {
-    kprocess::scheduler::target_task(pid)
+    // Preserve the existing setter ESRCH ABI while correcting published-TID
+    // lookup. Linux returns EINVAL for negative IDs; aligning that errno is a
+    // separate compatibility change, rather than part of this target fix.
+    if pid < 0 {
+        return Err(KError::NoSuchProcess);
+    }
+    if pid == 0 {
+        return Ok(current().clone());
+    }
+    // A positive process PID names its leader TID, not a representative worker.
+    // An unpublished leader remains ESRCH while workers live: falling back
+    // would update a different thread from the one the caller named.
+    kprocess::scheduler::task_by_tid(pid as u32)
 }
 
 fn scheduler_query_target(pid: i32) -> KResult<KtaskRef> {
     // pthread_getschedparam queries worker TIDs. Keep this read-only lookup
-    // separate so the setters retain their existing process-target scope.
+    // separate so getters keep their EINVAL contract for negative IDs.
     // Do not fall back to a representative thread: getpid() denotes the leader
     // TID, and an unpublished leader remains ESRCH. Negative getter IDs return
-    // EINVAL; the baseline setters' ESRCH deviation is outside this query fix.
+    // EINVAL; setters retain their existing ESRCH behavior for negative IDs.
     if pid < 0 {
         return Err(KError::InvalidInput);
     }
@@ -518,15 +540,20 @@ mod scheduler_query_tests {
         TestResult::Ok
     }
 
-    fn check_worker_setter_process_pid() -> TestResult {
+    fn check_worker_setter_thread_targets() -> TestResult {
         let caller = current();
         let thread = caller.as_thread();
         let pid = thread.pid() as i32;
         let tid = thread.tid() as i32;
         assert!(tid != pid, "fixture must be a non-leader");
+        let leader = scheduler_target(pid).expect("published process leader");
+        assert!(!caller.ptr_eq(&leader));
+        assert_eq!(leader.as_thread().tid() as i32, pid);
+        let leader_policy = leader.as_thread().scheduler_policy();
+        let leader_priority = leader.as_thread().scheduler_priority();
         let mut param = TestUserValue::from_value(SchedParam { sched_priority: 7 }).unwrap();
-        for target in [0, pid] {
-            let resolved = scheduler_target(target).expect("baseline caller target");
+        for target in [0, tid] {
+            let resolved = scheduler_target(target).expect("calling worker target");
             assert!(caller.ptr_eq(&resolved));
             assert_eq!(
                 sys_sched_setscheduler(
@@ -543,22 +570,20 @@ mod scheduler_query_tests {
                 Ok(0)
             );
             assert_eq!(thread.scheduler_priority(), 8);
+            assert_eq!(leader.as_thread().scheduler_policy(), leader_policy);
+            assert_eq!(leader.as_thread().scheduler_priority(), leader_priority);
             param.write(SchedParam { sched_priority: 7 });
         }
-        // The caller's own worker TID still is not a process PID for setters.
+        // Reapplying the leader's own parameter must not modify this worker.
+        param.write(SchedParam {
+            sched_priority: leader_priority,
+        });
         assert_eq!(
-            sys_sched_setparam(tid, UserConstPtr::from(param.as_user_ptr().addr())),
-            Err(KError::NoSuchProcess)
-        );
-        assert_eq!(
-            sys_sched_setscheduler(
-                tid,
-                SCHED_FIFO as i32,
-                UserConstPtr::from(param.as_user_ptr().addr()),
-            ),
-            Err(KError::NoSuchProcess)
+            sys_sched_setparam(pid, UserConstPtr::from(param.as_user_ptr().addr())),
+            Ok(0)
         );
         assert_eq!(thread.scheduler_priority(), 8);
+        assert_eq!(leader.as_thread().scheduler_priority(), leader_priority);
         TestResult::Ok
     }
 
@@ -584,7 +609,7 @@ mod scheduler_query_tests {
     }
 
     #[def_test(user, serial)]
-    fn scheduler_query_worker_tid_does_not_expand_setter_targets() -> TestResult {
+    fn scheduler_query_and_setters_address_published_worker_tid() -> TestResult {
         let prepared = kprocess::current_user_thread()
             .prepare_thread_clone()
             .expect("prepare published scheduler query worker");
@@ -612,7 +637,51 @@ mod scheduler_query_tests {
                 Ok(0)
             );
             assert_eq!(output.read().sched_priority, 7);
-            for pid in [tid, -1, i32::MIN, i32::MAX] {
+            // The published worker stays root-owned while the caller drops
+            // its credentials; both actual setters must deny cross-owner writes.
+            let caller = kprocess::current_user_thread();
+            let saved_cred = caller.cred();
+            let denied = (|| -> TestResult {
+                // unittest_support starts each user test with initial_cred();
+                // fail explicitly if that root-owned fixture contract changes.
+                assert_eq!(saved_cred.ruid(), 0);
+                assert_eq!(saved_cred.euid(), 0);
+                assert_eq!(crate::task::credentials::sys_setuid(3000), Ok(0));
+                assert_eq!(caller.cred().euid(), 3000);
+                assert_eq!(published.task().as_thread().pid(), caller.pid());
+                assert_eq!(
+                    published.task().as_thread().real_cred().ruid(),
+                    saved_cred.ruid()
+                );
+                assert_eq!(
+                    published.task().as_thread().real_cred().euid(),
+                    saved_cred.euid()
+                );
+                assert_eq!(
+                    sys_sched_setscheduler(
+                        tid,
+                        SCHED_NORMAL as i32,
+                        UserConstPtr::from(param.as_user_ptr().addr())
+                    ),
+                    Err(KError::OperationNotPermitted)
+                );
+                let rt_param = TestUserValue::from_value(SchedParam { sched_priority: 8 }).unwrap();
+                assert_eq!(
+                    sys_sched_setparam(tid, UserConstPtr::from(rt_param.as_user_ptr().addr())),
+                    Err(KError::OperationNotPermitted)
+                );
+                assert_eq!(sys_sched_getscheduler(tid), Ok(SCHED_FIFO as isize));
+                assert_eq!(
+                    sys_sched_getparam(tid, UserPtr::from(output.as_user_ptr()).cast()),
+                    Ok(0)
+                );
+                assert_eq!(output.read().sched_priority, 7);
+                TestResult::Ok
+            })();
+            // Restore credentials even when an inner assertion returns failure.
+            caller.commit_creds((*saved_cred).clone());
+            assert_eq!(denied, TestResult::Ok);
+            for pid in [-1, i32::MIN, i32::MAX] {
                 assert_eq!(
                     sys_sched_setscheduler(
                         pid,
@@ -626,17 +695,37 @@ mod scheduler_query_tests {
                     Err(KError::NoSuchProcess)
                 );
             }
-            assert_eq!(sys_sched_getscheduler(tid), Ok(SCHED_FIFO as isize));
+            assert_eq!(
+                sys_sched_setscheduler(
+                    tid,
+                    SCHED_NORMAL as i32,
+                    UserConstPtr::from(param.as_user_ptr().addr()),
+                ),
+                Ok(0)
+            );
+            assert_eq!(
+                sys_sched_setparam(tid, UserConstPtr::from(param.as_user_ptr().addr())),
+                Ok(0)
+            );
+            assert_eq!(sys_sched_getscheduler(tid), Ok(SCHED_NORMAL as isize));
             assert_eq!(
                 sys_sched_getparam(tid, UserPtr::from(output.as_user_ptr()).cast()),
                 Ok(0)
             );
-            assert_eq!(output.read().sched_priority, 7);
+            assert_eq!(output.read().sched_priority, 0);
             TestResult::Ok
         })();
         published.abort();
-        // An unpublished worker TID must no longer be a query target.
+        // An unpublished worker TID must no longer be a read or write target.
         assert_eq!(sys_sched_getscheduler(tid), Err(KError::NoSuchProcess));
+        assert_eq!(
+            sys_sched_setscheduler(tid, SCHED_NORMAL as i32, UserConstPtr::default()),
+            Err(KError::NoSuchProcess)
+        );
+        assert_eq!(
+            sys_sched_setparam(tid, UserConstPtr::default()),
+            Err(KError::NoSuchProcess)
+        );
         assert_eq!(
             sys_sched_getparam(tid, UserPtr::default()),
             Err(KError::NoSuchProcess)
@@ -645,8 +734,8 @@ mod scheduler_query_tests {
     }
 
     #[def_test(user, serial)]
-    fn scheduler_setters_keep_current_worker_process_pid_resolution() -> TestResult {
-        run_worker(check_worker_setter_process_pid)
+    fn scheduler_setters_resolve_worker_and_leader_tids() -> TestResult {
+        run_worker(check_worker_setter_thread_targets)
     }
 }
 
@@ -659,7 +748,7 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::{
-        affinity_target, check_affinity_permission, check_setpriority_permission,
+        affinity_target, check_scheduler_owner_permission, check_setpriority_permission,
         prepare_setaffinity_target,
     };
 
@@ -729,13 +818,13 @@ mod tests {
             .set_resuid(Some(1000), Some(2000), Some(1000))
             .unwrap();
 
-        assert!(check_affinity_permission(&Cred::new(1000, 1), &target).is_ok());
-        assert!(check_affinity_permission(&Cred::new(2000, 1), &target).is_ok());
+        assert!(check_scheduler_owner_permission(&Cred::new(1000, 1), &target).is_ok());
+        assert!(check_scheduler_owner_permission(&Cred::new(2000, 1), &target).is_ok());
         assert_eq!(
-            check_affinity_permission(&Cred::new(3000, 1), &target),
+            check_scheduler_owner_permission(&Cred::new(3000, 1), &target),
             Err(KError::OperationNotPermitted)
         );
-        assert!(check_affinity_permission(&Cred::root(), &target).is_ok());
+        assert!(check_scheduler_owner_permission(&Cred::root(), &target).is_ok());
     }
 
     #[def_test]

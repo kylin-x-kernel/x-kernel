@@ -197,12 +197,13 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   interfaces, `kprocess` process/thread state, and `khal` CPU queries.
   `getcpu` ignores its obsolete third cache argument without reading it.
   Null CPU/node outputs are allowed; non-null outputs use the existing user-copy wrappers.
-  `sched_getscheduler` and `sched_getparam` resolve positive published TIDs
-  through a separate read-only helper; zero selects the current thread and
-  negative IDs return EINVAL. The two policy/parameter setters retain
-  `kprocess::scheduler::target_task`: zero and the caller's process PID select
-  the caller; other positive process PIDs select a representative task;
-  non-process worker TIDs and negative IDs remain ESRCH.
+  Scheduler policy/parameter getters and setters resolve positive published TIDs,
+  including workers. Zero selects the caller; a process PID denotes its leader
+  TID and never a representative worker. Missing or unpublished TIDs return ESRCH.
+  Getters reject negative IDs with EINVAL; setters retain their existing ESRCH.
+  Policy/parameter setters require the caller effective UID to match the target
+  real/effective UID, or root (the current privilege approximation); otherwise
+  they return EPERM before changing metadata.
   `PRIO_PROCESS` selects one task by TID; `PRIO_PGRP` and `PRIO_USER`
   iterate every published task — a process representative thread must not
   stand in for per-thread nice or real UID. `setpriority` compares the
@@ -262,3 +263,21 @@ and [PR_SET_SECCOMP(2const)](https://man7.org/linux/man-pages/man2/PR_SET_SECCOM
 - implement path resolution, signal state machines, timer state machines,
   or pipe buffer behavior;
 - provide a convenient catch-all owner abstraction.
+
+## Scheduler syscall thread targets
+
+Scheduler parameter queries and updates resolve published thread IDs. This allows pthread APIs to address non-leader threads; zero selects the caller, and positive process IDs select only the leader TID. There is no process representative fallback.
+
+Scheduler ownership checks use the caller thread's subjective credentials and
+the target thread's objective credentials. Raw `setuid`/`setresuid` update only
+the calling thread through `update_current_cred` and `commit_creds`; they do not
+broadcast changes to a thread group. Linux has the same per-thread kernel
+model; POSIX-wide credential changes are synchronized by libc/NPTL wrappers
+using signals, as documented by
+[setuid(2), C library/kernel differences](https://man7.org/linux/man-pages/man2/setuid.2.html)
+and [nptl(7)](https://man7.org/linux/man-pages/man7/nptl.7.html).
+A raw syscall can intentionally leave same-group threads with different UIDs.
+The scheduler gate must then use the concrete target credentials, without a
+same-group exemption. The published-worker regression invokes actual
+`sys_setuid`, verifies the caller changed while its peer retained its IDs, and
+checks both setters return EPERM without modifying the peer's metadata.
