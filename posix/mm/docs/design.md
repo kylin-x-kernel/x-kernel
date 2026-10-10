@@ -104,6 +104,16 @@ EOF 处理、private file COW source 和 shared mapping 约束留在
 
 ### memfd_create
 
+回归程序 `uapps/memfd-test` 直接调用 `memfd_create`，以带 `/` 的标签创建
+对象，检查 `ftruncate`、共享映射读写及格式化后同名对象的内容隔离。
+修复前 syscall 对 slash 返回 `EINVAL`，该程序会退出非零。内核 formatter
+断言只验证单个 backing 名称分量，不单独证明 syscall 放行或 mount 拓扑。
+
+用户名称是调试标签，可以包含 `/`。创建 private tmpfs 的内部文件名时将 `/`
+替换为 `:`，保留单一路径分量，避免将标签解释为目录遍历。每个 memfd 使用独立
+private mount，因此转换后相同的标签仍创建独立对象。249 字节上限和 flags 校验
+保持不变；`/proc/self/fd` 名称显示仍可能与 Linux 有差异。
+
 ```text
 sys_memfd_create
   -> validate flags
@@ -214,7 +224,8 @@ This preserves the ownership split between:
 
 4. `memfd` 名字只作为调试标签。
    原因：Linux `memfd` 不是路径创建接口，用户名字不能污染全局 VFS
-   namespace。包含 `/` 的名字按 Linux 语义拒绝。
+   namespace。Linux 调试标签允许包含 `/`；formatter 将 `/` 替换为 `:`，
+   再添加 `memfd:` 前缀，转换为单个私有 backing component。
 
 5. `MmapRequest` 保存 typed policy。
    原因：下游 `MmSpace` / `filemap` 不应再读取 raw syscall flags。

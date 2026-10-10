@@ -505,6 +505,10 @@ fn apply_syscall_restart(
     // One rescan, not a loop on the interrupt flag. A peer that keeps posting
     // signals would otherwise hold this thread in the kernel: the flag never
     // stays clear, the handler never runs, and the CPU is never yielded.
+    // Keep the first installed handler frame until userspace has run it. A
+    // timer/preemption signal queued after that frame stays pending, with its
+    // interrupt notification intact, for a later return (including sigreturn).
+    // This intentionally does not promise immediate delivery inside a handler.
     if !has_installed_handler && current().is_interrupted() {
         let curr = current();
         // Clear only because this scan follows. A sender that races it keeps

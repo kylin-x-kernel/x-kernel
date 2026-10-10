@@ -40,11 +40,11 @@ impl MemfdFlags {
 ///
 /// This creates a private tmpfs-backed file object whose content is owned by an
 /// inode-backed `kvfs::AddressSpace`, similar to `shmem_file_setup()` in
-/// Linux `mm/shmem.c`.
+/// Linux `mm/shmem.c`. The user name is a debug label, so slash characters are
+/// accepted and escaped before creating the private backing-file component.
 pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     let flags = MemfdFlags::from_raw(flags)?;
     let display_name = name.load_string_with_max_len(MEMFD_NAME_MAX_LEN)?;
-    validate_memfd_name(&display_name)?;
     let cred = kprocess::current_cred();
     let file = create_memfd_file(
         &format_memfd_name(&display_name),
@@ -56,13 +56,6 @@ pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize
         .resources()?
         .add_file(file, flags.is_cloexec())
         .map(|fd| fd as _)
-}
-
-fn validate_memfd_name(name: &str) -> KResult<()> {
-    if name.contains('/') {
-        return Err(KError::InvalidInput);
-    }
-    Ok(())
 }
 
 fn format_memfd_name(name: &str) -> alloc::string::String {
@@ -97,8 +90,8 @@ mod tests {
     }
 
     #[def_test]
-    fn memfd_name_rejects_slash() {
-        assert_eq!(validate_memfd_name("bad/name"), Err(KError::InvalidInput));
-        assert_eq!(validate_memfd_name("good:name"), Ok(()));
+    fn memfd_debug_name_formats_a_single_backing_component() {
+        assert_eq!(format_memfd_name("/../buffer"), "memfd::..:buffer");
+        assert_eq!(format_memfd_name("good:name"), "memfd:good:name");
     }
 }

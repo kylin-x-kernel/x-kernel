@@ -59,3 +59,5 @@ target/kbuild/
 # Tool-specific agent instructions stay local; shared guidance lives in AGENTS.md and docs/ai/skills/
 /.claude/
 CLAUDE.md
+
+/uapps/memfd-test/out/

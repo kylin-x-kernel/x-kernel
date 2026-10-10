@@ -64,8 +64,12 @@ while that handler blocked it and made deliverable when the previous mask is
 restored. Restart of the interrupted syscall is not applied again on this path.
 For other traps, the return records the restart code and drains pending
 signals before it polls CPU timers and checks preemption. An interrupt raised
-by that poll or by preemption causes one more signal scan, not a loop on the
-interrupt flag. A peer that keeps posting signals must not pin the thread in
+by that poll or by preemption causes one more signal scan only if the first
+drain did not install a handler; it never loops on the interrupt flag. If a
+handler is already installed, it runs first and the new signal remains pending
+with its interrupt notification intact for a later return, including sigreturn.
+Delivery inside a long-running handler is not promised by this return path.
+A peer that keeps posting signals must not pin the thread in
 the kernel: the first handler ends the drain so userspace runs it, and
 non-handler signals are capped, with one yield when the cap is hit while the
 task is still interrupted. Signals left pending keep their notification.

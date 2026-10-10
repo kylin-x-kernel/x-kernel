@@ -1,0 +1,17 @@
+[package]
+name = "memfd-test"
+description = "Memfd slash-label syscall and object-isolation regression"
+enabled = true
+order = 20
+
+[prepare]
+commands = [
+  "sh -c 'mkdir -p out && ${CROSS_COMPILE}gcc -static -O2 -std=c11 -Wall -Wextra -Werror -o out/memfd-test memfd-test.c'",
+]
+
+[[install]]
+src = "out/memfd-test"
+dest = "/usr/local/bin/memfd-test"
+mode = "0755"
+
+# Manual invocation only; installing a regression must not change boot behavior.

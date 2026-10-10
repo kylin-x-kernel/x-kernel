@@ -67,7 +67,7 @@
 | 威胁 | 应对 |
 |------|------|
 | 用户通过 `memfd` 名字污染全局路径空间 | `memfs::shmem` factory 创建 private mount 上的 anonymous file |
-| 用户构造包含 `/` 的名字影响 VFS 路径语义 | syscall 边界拒绝包含 `/` 的 memfd 名字 |
+| 用户构造包含 `/` 的名字影响 VFS 路径语义 | 接受 Linux 调试标签中的 `/`，仅在 private mount 的内部文件名中替换为 `:`；不解析用户标签为路径 |
 | 用户提供未终止或超长 memfd 名字 | `load_string_with_max_len()` 限制为 249 bytes excluding NUL |
 | 用户通过未知 `memfd_create` flags 进入未定义路径 | `MemfdFlags::from_bits()` 拒绝未知 bits |
 | raw `mmap` flags 静默穿透到 MM internals | `MmapRequest` 显式校验 unknown/deferred flags |
@@ -114,6 +114,10 @@
   dirty tracking 支持。
 
 ## 审计清单
+
+- `uapps/memfd-test` 是否通过真实 syscall 检查 slash 标签创建、映射读写
+  和格式化同名对象内容隔离；formatter 字符串断言不能替代这项检查，也不能
+  单独证明 private mount 拓扑。
 
 - 新增 syscall flag 时是否同步更新 typed request 校验与文档。
 - syscall 是否先构造 typed request，再调用 `MmSpace` / `filemap`。
