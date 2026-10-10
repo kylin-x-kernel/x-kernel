@@ -104,7 +104,9 @@ Repository hygiene is exposed under `xkmake hygiene`. XKMake orchestrates
 pinned external tools rather than linking their implementation stacks:
 `cargo-shear` provides Cargo-aware dependency analysis, while `licensure`
 checks and updates the repository's exact Rust source header template. Rust
-source scope comes from Git's tracked and non-ignored untracked files.
+source scope comes from Git's tracked and non-ignored untracked files. The
+lint-inheritance check asks Cargo for the root workspace members and rejects
+any member manifest without `[lints] workspace = true`.
 `make install-tools` delegates to `xkmake hygiene install-tools`, keeping tool
 installation and version validation on the same pinned version constants.
 

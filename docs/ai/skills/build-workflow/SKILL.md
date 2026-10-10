@@ -296,6 +296,7 @@ make ramdisk_img
 make install-tools
 make check_deps
 make check_header
+make check_lints
 make doc
 make doc_check_missing
 make fmt
@@ -313,6 +314,11 @@ command.
 `xkmake hygiene header`. Use `make header` to add or update the configured
 three-line header. XKMake passes tracked and non-ignored untracked Rust source
 files to licensure; deleted worktree paths and non-Rust files are not checked.
+
+`make check_lints` runs `xkmake hygiene lints`. Every root workspace member,
+including implicit path-dependency members, must declare
+`[lints] workspace = true`; there is no opt-out list. `make clippy`,
+`make dylint`, and `make dylint_test` run it before Cargo.
 
 `make unittest` means a kernel unit-test build followed by QEMU execution. It
 is equivalent to the former `make run UNITTEST=y` workflow:

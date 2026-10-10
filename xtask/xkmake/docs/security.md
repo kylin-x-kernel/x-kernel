@@ -57,6 +57,9 @@ Header 检查通过 Git 取得已跟踪及未忽略的 Rust 文件，只把仍�
 路径分批传给固定版本的 licensure。检查模式只读；`--fix` 是显式写操作，
 会依据仓库根 `.licensure.yml` 更新源文件开头，并在写入后强制复查。
 
+Lint 继承检查只读：调用 `cargo metadata --no-deps` 并解析成员 manifest，
+不运行构建脚本，也不修改文件。
+
 覆盖率流程只在 unittest QEMU 正常退出，且本轮新建的 `qemu.log` 同时确认
 测试通过和覆盖率写入/fsync/filesystem sync 成功后读取用户指定的磁盘镜像。
 旧 profile 即使能够被 LLVM 解码，也不能替代 guest 的本轮持久化标记。

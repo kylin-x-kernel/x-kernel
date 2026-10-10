@@ -185,6 +185,16 @@ stdin/stderr 保持继承，交互会话不受影响。
 4. 普通模式执行 `--check`；`--fix` 先执行 `--in-place`，再以 `--check`
    复查最终状态。header 模板和注释格式由仓库根 `.licensure.yml` 定义。
 
+### Hygiene Lints
+
+1. 在根 workspace 执行 `cargo metadata --no-deps`，以 Cargo 解析出的
+   `workspace_members` 为准；workspace 目录内的 path 依赖是隐式成员，
+   不能只看 `members` glob。
+2. 逐个解析成员 manifest，要求 `lints.workspace = true`；缺失或为
+   `false` 的成员一次性列出后失败。没有登记豁免名单。
+3. `make clippy`、`make dylint` 和 `make dylint_test` 在 Cargo 检查前执行
+   本项，因此 CI 的 clippy 阶段会拦下不继承 `[workspace.lints]` 的 crate。
+
 x86_64 bundle 同时携带 `kernel.bzimg` 和 `kernel.uefi.img`。默认使用
 LinuxBoot，`--boot uefi` 使用 OVMF。OVMF VARS 模板在每次运行时复制到
 `target/xkmake/runtime/<platform>/`，不会修改固件模板或 bundle。

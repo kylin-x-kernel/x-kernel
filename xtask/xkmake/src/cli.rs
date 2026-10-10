@@ -48,6 +48,8 @@ pub(crate) enum HygieneCommand {
     Deps(HygieneFixArgs),
     /// Check Rust source license headers.
     Header(HygieneFixArgs),
+    /// Check that root workspace members inherit `[workspace.lints]`.
+    Lints,
 }
 
 #[derive(Debug, Args)]

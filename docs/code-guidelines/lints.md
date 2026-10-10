@@ -11,6 +11,8 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 - MUST 对应 `deny`，SHOULD 对应 `warn`；`make clippy` 带 `-D warnings`，两者都阻塞合入。
 - `make clippy` 带 `--cfg unittest` 检查选定平台的依赖图（本地库、proc-macro、host `build.rs`），
   不带 `--all-targets`。因此 `cfg(not(unittest))` 代码、未选中的测试/bench target 从不被 lint。
+- 根 workspace 的每个成员（含隐式 path 依赖成员）必须声明 `[lints] workspace = true`，
+  `make check_lints` 检查，`make clippy` 前置执行；不继承即绕过全部等级，不设豁免。
 - `xtask` 是独立 workspace，不继承根 lint；单独运行
   `cargo clippy --manifest-path xtask/Cargo.toml -p xkmake --no-deps`。
 

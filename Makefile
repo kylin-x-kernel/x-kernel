@@ -167,7 +167,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header fmt hooks clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -217,15 +217,15 @@ symbolize:
 	@$(XKMAKE) symbolize $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS) $(if $(strip $(LOG)),--log $(LOG))
 
 clippy:
-	@$(MAKE) --no-print-directory check_deps check_header
+	@$(MAKE) --no-print-directory check_deps check_header check_lints
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:
-	@$(MAKE) --no-print-directory check_deps check_header
+	@$(MAKE) --no-print-directory check_deps check_header check_lints
 	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint_test:
-	@$(MAKE) --no-print-directory check_deps check_header
+	@$(MAKE) --no-print-directory check_deps check_header check_lints
 	@$(XKMAKE) dylint --self-test $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 doc:
@@ -365,6 +365,9 @@ check_header:
 
 header:
 	@$(XKMAKE) hygiene header --fix
+
+check_lints:
+	@$(XKMAKE) hygiene lints
 
 fmt:
 	@cargo +nightly-2026-03-08 fmt --all

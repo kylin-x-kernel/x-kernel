@@ -5,15 +5,18 @@
 //! Repository hygiene orchestration.
 
 use std::{
-    env, io,
+    collections::HashSet,
+    env, fs, io,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
 
+use serde::Deserialize;
+
 use crate::{
     cli::HygieneFixArgs,
     context::workspace_root,
-    error::{Error, Result},
+    error::{Error, IoResultExt, Result},
     process::Process,
 };
 
@@ -100,6 +103,90 @@ pub(crate) fn check_headers(args: &HygieneFixArgs) -> Result<()> {
         run_licensure(&root, &rust_files, false)?;
     }
     run_licensure(&root, &rust_files, true)
+}
+
+/// Fails when a root workspace member does not inherit `[workspace.lints]`.
+///
+/// A member without `[lints] workspace = true` silently skips every workspace
+/// rustc/Clippy level, including the lint-exception rules.
+pub(crate) fn check_lint_inheritance() -> Result<()> {
+    let root = workspace_root()?;
+    let mut missing = Vec::new();
+    for manifest_path in workspace_member_manifests(&root)? {
+        let content = fs::read_to_string(&manifest_path).with_path(&manifest_path)?;
+        if !inherits_workspace_lints(&content).map_err(|error| {
+            Error::Message(format!(
+                "failed to parse {}: {error}",
+                manifest_path.display()
+            ))
+        })? {
+            missing.push(
+                manifest_path
+                    .strip_prefix(&root)
+                    .unwrap_or(&manifest_path)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort();
+    Err(Error::Message(format!(
+        "workspace members must inherit the root lint levels; add `[lints] workspace = true` \
+         to:\n  {}",
+        missing.join("\n  ")
+    )))
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<MetadataPackage>,
+    workspace_members: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct MetadataPackage {
+    id: String,
+    manifest_path: PathBuf,
+}
+
+fn workspace_member_manifests(root: &Path) -> Result<Vec<PathBuf>> {
+    // Path dependencies inside the workspace directory are implicit members,
+    // so Cargo, not the `members` globs, is the source of truth.
+    let output = Command::new("cargo")
+        .current_dir(root)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "cargo".into(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(Error::CommandFailed {
+            program: "cargo metadata".into(),
+            status: output.status,
+        });
+    }
+    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
+        .map_err(|error| Error::Message(format!("failed to parse cargo metadata: {error}")))?;
+    let members: HashSet<_> = metadata.workspace_members.into_iter().collect();
+    Ok(metadata
+        .packages
+        .into_iter()
+        .filter(|package| members.contains(&package.id))
+        .map(|package| package.manifest_path)
+        .collect())
+}
+
+fn inherits_workspace_lints(manifest: &str) -> std::result::Result<bool, toml::de::Error> {
+    let manifest: toml::Table = toml::from_str(manifest)?;
+    Ok(manifest
+        .get("lints")
+        .and_then(|lints| lints.get("workspace"))
+        .and_then(toml::Value::as_bool)
+        == Some(true))
 }
 
 fn ensure_licensure_version() -> Result<()> {
@@ -325,8 +412,26 @@ mod tests {
     use std::io;
 
     use super::{
-        cargo_install_list_has_version, reported_version, tool_spawn_error, unexpected_tool_version,
+        cargo_install_list_has_version, inherits_workspace_lints, reported_version,
+        tool_spawn_error, unexpected_tool_version,
     };
+
+    #[test]
+    fn accepts_only_workspace_lint_inheritance() {
+        let package = "[package]\nname = \"demo\"\n";
+        assert!(
+            inherits_workspace_lints(&format!("{package}[lints]\nworkspace = true\n")).unwrap()
+        );
+        assert!(inherits_workspace_lints(&format!("lints.workspace = true\n{package}")).unwrap());
+        assert!(!inherits_workspace_lints(package).unwrap());
+        assert!(
+            !inherits_workspace_lints(&format!("{package}[lints]\nworkspace = false\n")).unwrap()
+        );
+        assert!(
+            !inherits_workspace_lints(&format!("{package}[lints.clippy]\nall = \"allow\"\n"))
+                .unwrap()
+        );
+    }
 
     #[test]
     fn extracts_versions_from_supported_tool_output() {

@@ -100,6 +100,7 @@ fn run() -> Result<()> {
             HygieneCommand::InstallTools => hygiene::install_tools(),
             HygieneCommand::Deps(args) => hygiene::check_dependencies(&args),
             HygieneCommand::Header(args) => hygiene::check_headers(&args),
+            HygieneCommand::Lints => hygiene::check_lint_inheritance(),
         },
     }
 }
