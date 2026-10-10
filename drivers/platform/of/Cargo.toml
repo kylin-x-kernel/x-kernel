@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 lazyinit.workspace = true
+log.workspace = true
 memaddr.workspace = true
 rs_fdtree = { workspace = true }
 unittest = { workspace = true }

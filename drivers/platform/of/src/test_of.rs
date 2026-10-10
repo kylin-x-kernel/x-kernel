@@ -426,89 +426,6 @@ fn test_generic_pci_non_prefetchable_mem_range(
     preferred.or(fallback)
 }
 
-fn test_generic_pci_legacy_interrupt(
-    fdt: &'static LinuxFdt<'static>,
-    bus: u8,
-    device: u8,
-    function: u8,
-    pin: u8,
-) -> Option<InterruptInfo> {
-    let node = test_generic_pci_host(fdt)?;
-    let child_address_cells = node.cell_sizes().address_cells;
-    let child_interrupt_cells = node.property_u32("#interrupt-cells").unwrap_or(1) as usize;
-    let key_cells = child_address_cells + child_interrupt_cells;
-    if child_address_cells != 3 || child_interrupt_cells == 0 {
-        return None;
-    }
-
-    let mut key = [0u32; 4];
-    key[0] = ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8);
-    key[1] = 0;
-    key[2] = 0;
-    key[3] = pin as u32;
-
-    let mask_bytes = node.property("interrupt-map-mask")?.value;
-    if mask_bytes.len() < key_cells * 4 {
-        return None;
-    }
-    let mut mask = [0u32; 4];
-    for (idx, word) in mask_bytes.chunks_exact(4).take(key_cells).enumerate() {
-        mask[idx] = u32::from_be_bytes(word.try_into().ok()?);
-    }
-
-    let map = node.property("interrupt-map")?.value;
-    let mut offset = 0usize;
-    while offset + (key_cells + 1) * 4 <= map.len() {
-        let mut child = [0u32; 4];
-        for (idx, slot) in child.iter_mut().enumerate().take(key_cells) {
-            let start = offset + idx * 4;
-            *slot = u32::from_be_bytes(map[start..start + 4].try_into().ok()?);
-        }
-        offset += key_cells * 4;
-
-        let phandle = u32::from_be_bytes(map[offset..offset + 4].try_into().ok()?);
-        offset += 4;
-        let controller_node = test_find_node_by_phandle(fdt, phandle)?;
-        let parent_address_cells =
-            controller_node.property_u32("#address-cells").unwrap_or(0) as usize;
-        let parent_interrupt_cells = controller_node
-            .property_u32("#interrupt-cells")
-            .unwrap_or(0) as usize;
-        let parent_total_cells = parent_address_cells + parent_interrupt_cells;
-        if offset + parent_total_cells * 4 > map.len() {
-            return None;
-        }
-
-        let mut parent = [0u32; 4];
-        if parent_total_cells > parent.len() {
-            return None;
-        }
-        for (idx, slot) in parent.iter_mut().enumerate().take(parent_total_cells) {
-            let start = offset + idx * 4;
-            *slot = u32::from_be_bytes(map[start..start + 4].try_into().ok()?);
-        }
-        offset += parent_total_cells * 4;
-
-        let matched = child
-            .iter()
-            .zip(mask.iter())
-            .zip(key.iter())
-            .take(key_cells)
-            .all(|((&child, &mask), &key)| (child & mask) == (key & mask));
-        if !matched {
-            continue;
-        }
-
-        let controller = test_controller_kind(controller_node);
-        return parse_interrupt_by_controller(
-            controller,
-            &parent[parent_address_cells..parent_total_cells],
-        );
-    }
-
-    None
-}
-
 fn test_read_named_reserved_memory_regions<const N: usize>(
     fdt: &'static LinuxFdt<'static>,
 ) -> ([NamedMemoryRegion; N], usize) {
@@ -590,13 +507,96 @@ fn pci_host_helpers_cover_ecam_ranges_and_legacy_irq_map() {
     );
 
     assert_eq!(
-        test_generic_pci_legacy_interrupt(fdt, 0, 1, 0, 1),
+        pci_legacy_interrupt_from_fdt(fdt, 0, 1, 0, 1),
         Some(InterruptInfo {
             irq: 41,
             trigger: InterruptTrigger::LevelHigh,
             controller: InterruptControllerKind::Gic,
         })
     );
+}
+
+fn pci_interrupt_test_fdt(
+    parent_address_cells: u32,
+    child_interrupt_cells: u32,
+    map: &[u32],
+) -> &'static LinuxFdt<'static> {
+    let mut builder = TestDtbBuilder::new();
+    builder.begin_node("");
+    builder.prop_u32("#address-cells", 2);
+    builder.prop_u32("#size-cells", 2);
+    builder.begin_node("intc");
+    builder.prop_u32("phandle", 1);
+    builder.prop_str("compatible", "arm,gic-v3");
+    builder.prop_empty("interrupt-controller");
+    builder.prop_u32("#address-cells", parent_address_cells);
+    builder.prop_u32("#interrupt-cells", 3);
+    builder.end_node();
+    builder.begin_node("pci");
+    builder.prop_str("compatible", "pci-host-ecam-generic");
+    builder.prop_u32("#address-cells", 3);
+    builder.prop_u32("#size-cells", 2);
+    builder.prop_u32("#interrupt-cells", child_interrupt_cells);
+    builder.prop_u32s(
+        "interrupt-map-mask",
+        &vec![u32::MAX; 3 + child_interrupt_cells as usize],
+    );
+    builder.prop_u32s("interrupt-map", map);
+    builder.end_node();
+    builder.end_node();
+    let bytes = Box::leak(builder.finish().into_boxed_slice());
+    // SAFETY: The builder emits a complete DTB and its leaked allocation
+    // remains readable throughout the test run.
+    let fdt = unsafe { LinuxFdt::from_ptr(bytes.as_ptr()) }.unwrap();
+    Box::leak(Box::new(fdt))
+}
+
+#[def_test]
+fn pci_interrupt_map_accepts_gic_parent_address_cells_and_skips_other_routes() {
+    let fdt = pci_interrupt_test_fdt(
+        2,
+        1,
+        &[
+            0, 0, 0, 1, 1, 0, 0, 0, 3, 4, 0x800, 0, 0, 2, 1, 0, 0, 0, 5, 4,
+        ],
+    );
+    assert_eq!(
+        pci_legacy_interrupt_from_fdt(fdt, 0, 1, 0, 2),
+        Some(InterruptInfo {
+            irq: 37,
+            trigger: InterruptTrigger::LevelHigh,
+            controller: InterruptControllerKind::Gic,
+        })
+    );
+    assert_eq!(pci_legacy_interrupt_from_fdt(fdt, 0, 1, 0, 1), None);
+}
+
+#[def_test]
+fn pci_interrupt_map_rejects_unsupported_child_interrupt_cells() {
+    for child_interrupt_cells in [0, 2, 14] {
+        // A complete mask exercises child shape validation before indexing.
+        let fdt = pci_interrupt_test_fdt(0, child_interrupt_cells, &[]);
+        assert_eq!(pci_legacy_interrupt_from_fdt(fdt, 0, 0, 0, 1), None);
+    }
+}
+
+#[def_test]
+fn pci_interrupt_map_checks_parent_capacity_boundary() {
+    let mut map = vec![0, 0, 0, 1, 1];
+    map.extend_from_slice(&[0; 13]);
+    map.extend_from_slice(&[0, 3, 4]);
+    let fdt = pci_interrupt_test_fdt(13, 1, &map);
+    assert_eq!(
+        pci_legacy_interrupt_from_fdt(fdt, 0, 0, 0, 1).unwrap().irq,
+        35
+    );
+
+    // Complete 17-cell parent: rejection is due to capacity, not truncation.
+    let mut oversized = vec![0, 0, 0, 1, 1];
+    oversized.extend_from_slice(&[0; 14]);
+    oversized.extend_from_slice(&[0, 3, 4]);
+    let fdt = pci_interrupt_test_fdt(14, 1, &oversized);
+    assert_eq!(pci_legacy_interrupt_from_fdt(fdt, 0, 0, 0, 1), None);
 }
 
 #[def_test]

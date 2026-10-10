@@ -32,6 +32,14 @@ init, drivers) are trusted to check those `Option`s.
   power-off register addresses — drive kernel configuration downstream;
   a wrong-but-well-formed DTB is indistinguishable from truth here.
 
+PCI interrupt-map child specifiers are validated as three address cells and
+one interrupt cell before key-size arithmetic and 4-cell buffer decoding.
+Unsupported child layouts return `None`, preventing firmware-controlled cell
+counts from indexing beyond those buffers. Oversized parent specifiers are
+rejected before filling the 16-cell buffer and report the requested size and
+capacity through `log::warn!`.
+This change does not add diagnostic coverage for other parser failures.
+
 ## Unsafe Code
 
 Four unsafe entry points, each with a `# Safety` section and a matching

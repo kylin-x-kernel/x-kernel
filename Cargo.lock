@@ -3616,6 +3616,7 @@ name = "of"
 version = "0.3.0-dev"
 dependencies = [
  "lazyinit",
+ "log",
  "memaddr",
  "rs_fdtree",
  "unittest",

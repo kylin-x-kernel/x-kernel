@@ -249,7 +249,14 @@ fn parse_interrupt_by_controller(
 }
 
 fn find_node_by_phandle(phandle: u32) -> Option<FdtNode<'static, 'static>> {
-    fdt()?.all_nodes().find(|node| {
+    find_node_by_phandle_in(fdt()?, phandle)
+}
+
+fn find_node_by_phandle_in(
+    fdt: &'static LinuxFdt<'static>,
+    phandle: u32,
+) -> Option<FdtNode<'static, 'static>> {
+    fdt.all_nodes().find(|node| {
         property_u32(*node, "phandle").or_else(|| property_u32(*node, "linux,phandle"))
             == Some(phandle)
     })
@@ -338,7 +345,12 @@ pub fn find_compatible(compatible: &str) -> Option<FdtNode<'static, 'static>> {
 /// Finds the generic PCI host bridge node (`pci-host-ecam-generic` or
 /// `pci-host-cam-generic`).
 pub fn generic_pci_host() -> Option<FdtNode<'static, 'static>> {
-    find_compatible("pci-host-ecam-generic").or_else(|| find_compatible("pci-host-cam-generic"))
+    generic_pci_host_in(fdt()?)
+}
+
+fn generic_pci_host_in(fdt: &'static LinuxFdt<'static>) -> Option<FdtNode<'static, 'static>> {
+    fdt.find_compatible("pci-host-ecam-generic")
+        .or_else(|| fdt.find_compatible("pci-host-cam-generic"))
 }
 
 /// Finds a node by absolute device-tree path.
@@ -536,21 +548,39 @@ pub fn generic_pci_non_prefetchable_mem_range() -> Option<PciRangeInfo> {
     preferred.or(fallback)
 }
 
+/// Maximum parent specifier size in 32-bit cells, matching Linux's phandle cap.
+const MAX_PHANDLE_ARGS: usize = 16;
+
 /// Resolves a legacy INTx route through the bridge's `interrupt-map` for a
 /// (bus, device, function, pin) address.
+///
+/// The PCI child specifier uses three address cells and one interrupt cell;
+/// other child layouts are rejected with `None` before fixed-buffer decoding.
+/// Parent address and interrupt cells share a bounded buffer. A parent
+/// specifier exceeding that capacity is logged and rejected with `None`.
 pub fn generic_pci_legacy_interrupt(
     bus: u8,
     device: u8,
     function: u8,
     pin: u8,
 ) -> Option<InterruptInfo> {
-    let node = generic_pci_host()?;
+    pci_legacy_interrupt_from_fdt(fdt()?, bus, device, function, pin)
+}
+
+fn pci_legacy_interrupt_from_fdt(
+    fdt: &'static LinuxFdt<'static>,
+    bus: u8,
+    device: u8,
+    function: u8,
+    pin: u8,
+) -> Option<InterruptInfo> {
+    let node = generic_pci_host_in(fdt)?;
     let child_address_cells = node.cell_sizes().address_cells;
     let child_interrupt_cells = property_u32(node, "#interrupt-cells").unwrap_or(1) as usize;
-    let key_cells = child_address_cells + child_interrupt_cells;
-    if child_address_cells != 3 || child_interrupt_cells == 0 {
+    if child_address_cells != 3 || child_interrupt_cells != 1 {
         return None;
     }
+    let key_cells = child_address_cells + child_interrupt_cells;
 
     let mut key = [0u32; 4];
     key[0] = ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8);
@@ -579,18 +609,22 @@ pub fn generic_pci_legacy_interrupt(
 
         let phandle = u32::from_be_bytes(map[offset..offset + 4].try_into().ok()?);
         offset += 4;
-        let controller_node = find_node_by_phandle(phandle)?;
+        let controller_node = find_node_by_phandle_in(fdt, phandle)?;
         let parent_address_cells =
             property_u32(controller_node, "#address-cells").unwrap_or(0) as usize;
         let parent_interrupt_cells =
             property_u32(controller_node, "#interrupt-cells").unwrap_or(0) as usize;
         let parent_total_cells = parent_address_cells + parent_interrupt_cells;
-        if offset + parent_total_cells * 4 > map.len() {
+        // The GIC parent may need two address cells plus three interrupt cells.
+        let mut parent = [0u32; MAX_PHANDLE_ARGS];
+        if parent_total_cells > parent.len() {
+            log::warn!(
+                "of: interrupt-map parent specifier needs {parent_total_cells} cells (> \
+                 MAX_PHANDLE_ARGS {MAX_PHANDLE_ARGS})"
+            );
             return None;
         }
-
-        let mut parent = [0u32; 4];
-        if parent_total_cells > parent.len() {
+        if offset + parent_total_cells * 4 > map.len() {
             return None;
         }
         for (idx, slot) in parent.iter_mut().enumerate().take(parent_total_cells) {

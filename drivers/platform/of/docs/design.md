@@ -81,6 +81,20 @@ Re-exports `rs_fdtree::{Chosen, Dice, FdtError, FdtNode,
 InterruptController, LinuxFdt, MemoryRegion, NodeProperty, RegIter}` so
 callers need only this crate.
 
+The global PCI accessor delegates to an explicit-tree parser so unit tests
+exercise the production decoder with isolated DTBs. Both access paths share
+one phandle lookup rule, including the `linux,phandle` fallback. PCI host
+information, memory windows and INTx routing also share the same host lookup:
+prefer `pci-host-ecam-generic`, then `pci-host-cam-generic`.
+
+The PCI interrupt-map parent buffer holds up to 16 cells: a controller with
+2 address cells and 3 interrupt cells consumes 5. This follows the Linux
+`MAX_PHANDLE_ARGS` capacity policy. Larger parent specifiers produce a warning
+and return `None`. The child specifier must have three address cells and one
+interrupt cell, checked before key-size arithmetic or decoding into the 4-cell
+buffers. Other child layouts return `None`. Tests cover unsupported child
+interrupt counts, a 5-cell GIC parent and the 16/17-cell parent boundary.
+
 ## Execution Context
 
 - Early boot. `init_device_tree_ptr` runs once on the boot hart before any
