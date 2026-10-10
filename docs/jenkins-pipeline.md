@@ -75,6 +75,15 @@ $WORKSPACE/
 Build 与 Run 阶段之间需要连续使用的 Cargo、boot 和 kernel 产物。它不跨
 Jenkins Build 共享。
 
+TEE storage tests use `/xkernel-target/libutee-<arch>` as a source/build cache
+within this container only. Each architecture has one script invocation and a
+separate directory; it is not a cross-job cache. Synchronization tries fetch
+and reset first, then clones into a temporary sibling on failure. A completed
+clone replaces an invalid existing tree so later calls can reuse it; failed
+clones leave the old tree intact and remove their temporary directory. Three
+attempts use 5/10-second backoff, with per-operation retry and publication logs.
+
+
 以下节点本地 named volume 可以跨 Build 复用，volume 名称以 `Jenkinsfile` 中的
 `--mount` 参数为准：
 
