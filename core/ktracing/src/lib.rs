@@ -14,7 +14,7 @@ use core::mem;
 
 use khal::paging::MappingFlags;
 use klazy::Once;
-use kspin::{SpinNoIrq, SpinRaw};
+use kspin::{SpinNoIrq, SpinRaw, static_lock};
 use ktask::current;
 use ktracepoint::{
     KernelTraceOps, TraceCmdLineCache, TraceEntryParser, TracePipeOps, TracePipeRaw,
@@ -22,10 +22,14 @@ use ktracepoint::{
 };
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 
-static TRACE_RAW_PIPE: SpinNoIrq<TracePipeRaw> = SpinNoIrq::new(TracePipeRaw::new(4096));
+static_lock! {
+    static TRACE_RAW_PIPE: SpinNoIrq<TracePipeRaw> = SpinNoIrq::new(TracePipeRaw::new(4096));
+}
 
-static TRACE_CMDLINE_CACHE: SpinNoIrq<TraceCmdLineCache> =
-    SpinNoIrq::new(TraceCmdLineCache::new(1024));
+static_lock! {
+    static TRACE_CMDLINE_CACHE: SpinNoIrq<TraceCmdLineCache> =
+        SpinNoIrq::new(TraceCmdLineCache::new(1024));
+}
 
 static TRACE_MANAGER: Once<TracingEventsManager<TraceRawLock, Kops>> = Once::new();
 

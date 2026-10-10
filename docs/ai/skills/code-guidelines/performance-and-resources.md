@@ -64,7 +64,7 @@ Check specifically for:
   needs stable element addresses, or is touched from IRQ-safe paths;
 - linked-list needs served by ad hoc structures or non-intrusive lists
   instead of the project-standard `linked_list_r4l`;
-- `Vec::remove`/`Vec::insert` inside loops, or `Vec` growth on hot paths;
+- `Vec` growth on hot paths;
 - large elements stored by value in growable `Vec`s where
   reallocation copies dominate;
 - cleanup paths that depend on manual caller discipline

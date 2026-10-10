@@ -9,9 +9,12 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Error, Expr, ExprCall, Ident, ItemStatic, Type, TypePath,
+    Error, Expr, ExprCall, Ident, ItemStatic, StaticMutability, Type, TypePath,
     parse::{Parse, ParseStream},
 };
+
+const STATIC_MUT_MESSAGE: &str =
+    "static_lock! does not accept `static mut`; the lock already provides interior mutability";
 
 enum LockFamily {
     KsyncMutex,
@@ -128,6 +131,11 @@ pub(crate) fn expand_static_lock(input: TokenStream) -> TokenStream {
 
 fn expand_static_lock_result(input: TokenStream) -> syn::Result<proc_macro2::TokenStream> {
     let StaticLockInput::Item(item) = syn::parse(input)?;
+    // The generated item is always immutable, so silently accepting `mut`
+    // would change the meaning of the declaration.
+    if let StaticMutability::Mut(token) = &item.mutability {
+        return Err(Error::new_spanned(token, STATIC_MUT_MESSAGE));
+    }
     // Counter-set types and `linkme` are re-exported by `ksync` / `kspin`, so callers
     // only need the lock crate that matches the static lock type in Cargo.toml.
 

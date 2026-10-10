@@ -11,7 +11,7 @@ use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use driver_net::{
     MacAddress, NetBuf, NetBufBox, NetBufHandle, NetBufPool, NetDevice, NetRxScheduler,
 };
-use kspin::{SpinNoIrq, SpinNoPreempt};
+use kspin::{SpinNoIrq, SpinNoPreempt, static_lock};
 use virtio_drivers::{Hal, device::net::VirtIONetRaw as InnerDev, transport::Transport};
 
 use crate::as_driver_error;
@@ -63,11 +63,17 @@ impl<H: Hal, T: Transport, const QS: usize> VirtIoNetIrqAck for VirtIoNetIrqHand
     }
 }
 
-static NET_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn VirtIoNetIrqAck>>> = SpinNoIrq::new(Vec::new());
-static REGISTERED_NET_IRQS: SpinNoIrq<BTreeSet<usize>> = SpinNoIrq::new(BTreeSet::new());
-/// Keeps the network interrupt registrations alive for the lifetime of the
-/// kernel; dropping an [`Irq`] guard would release the handler.
-static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
+static_lock! {
+    static NET_IRQ_HANDLES: SpinNoIrq<Vec<Arc<dyn VirtIoNetIrqAck>>> = SpinNoIrq::new(Vec::new());
+}
+static_lock! {
+    static REGISTERED_NET_IRQS: SpinNoIrq<BTreeSet<usize>> = SpinNoIrq::new(BTreeSet::new());
+}
+static_lock! {
+    /// Keeps the network interrupt registrations alive for the lifetime of the
+    /// kernel; dropping an [`Irq`] guard would release the handler.
+    static NET_IRQ_GUARDS: SpinNoIrq<Vec<Irq>> = SpinNoIrq::new(Vec::new());
+}
 
 /// Event source bits reported by the virtio-net IRQ handler. The regular
 /// handler only acks; these bits are advisory for future multi-queue routing

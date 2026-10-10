@@ -65,7 +65,9 @@ impl Write for AtomicLogger {
     }
 }
 
-pub static IO_LOCK: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
+kspin::static_lock! {
+    pub static IO_LOCK: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
+}
 
 #[doc(hidden)]
 pub fn _sys_log(fmt: Arguments) {

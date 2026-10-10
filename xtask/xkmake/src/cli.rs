@@ -20,6 +20,8 @@ pub(crate) enum Command {
     Build(BuildArgs),
     /// Check the configured kernel with Clippy.
     Clippy(BuildArgs),
+    /// Scan the configured kernel with the repository Dylint lints.
+    Dylint(DylintArgs),
     /// Generate workspace rustdoc for the configured kernel features.
     Doc(DocArgs),
     /// Build the configured kernel and run its bundle with QEMU.
@@ -134,6 +136,20 @@ pub(crate) struct BuildArgs {
     /// Restrict kernel unit tests to a crate or comma-separated crate list.
     #[arg(long, requires = "unittest")]
     pub(crate) unittest_crate: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DylintArgs {
+    #[command(flatten)]
+    pub(crate) build: BuildArgs,
+
+    /// Run the lint crate's UI tests instead of scanning the kernel.
+    #[arg(long)]
+    pub(crate) self_test: bool,
+
+    /// Additional Cargo arguments passed after `cargo dylint --`.
+    #[arg(last = true)]
+    pub(crate) cargo_args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Args)]

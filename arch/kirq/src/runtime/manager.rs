@@ -4,7 +4,7 @@
 
 //! IRQ manager public API and dispatch-entry orchestration.
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 use super::sync_wait::IrqSyncWaitIf;
 use crate::{
@@ -37,7 +37,9 @@ pub use crate::{
     state::DYNAMIC_VIRQ_BASE,
 };
 
-static IRQ_CONTROL_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+static_lock! {
+    static IRQ_CONTROL_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+}
 
 /// Options for installing a regular IRQ handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +310,15 @@ fn wait_for_virq_in_flight(virq: Virq, operation: &'static str) -> Result<(), Ir
 type WaitForInFlightHook = fn(Virq, usize);
 
 #[cfg(unittest)]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unregistered_static_spinlock,
+    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+)]
 static WAIT_FOR_IN_FLIGHT_HOOK: SpinNoIrq<Option<WaitForInFlightHook>> = SpinNoIrq::new(None);
 
 #[cfg(unittest)]
@@ -809,6 +820,15 @@ pub mod tests_irq {
         state::MAX_IRQ_ACTIONS,
     };
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unregistered_static_spinlock,
+        reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+    )]
     static IRQ_LIFECYCLE_TEST_LOCK: kspin::SpinNoIrq<()> = kspin::SpinNoIrq::new(());
     static REGULAR_CALLS: AtomicUsize = AtomicUsize::new(0);
     static SHARED_A_CALLS: AtomicUsize = AtomicUsize::new(0);

@@ -179,6 +179,19 @@ def ciBuildStages() {
         type: 'build',
         platform: 'kplat-aarch64-virtcca',
         defconfig: 'platforms/kplat-aarch64/qemu_virtcca_defconfig',
+    ], [
+        name: 'Lint Check: dylint kplat-aarch64',
+        failure: 'dylint 发现违反 docs/code-guidelines 规则的代码',
+        type: 'dylint',
+        platform: 'kplat-aarch64',
+        defconfig: 'platforms/kplat-aarch64/qemu_defconfig',
+        lockStat: true,
+    ], [
+        name: 'Lint Check: dylint kplat-x86_64',
+        failure: 'dylint 发现违反 docs/code-guidelines 规则的代码',
+        type: 'dylint',
+        platform: 'kplat-x86_64',
+        defconfig: 'platforms/kplat-x86_64/qemu_defconfig',
     ]]
 
     if (docCheckEnabled()) {
@@ -393,6 +406,9 @@ def runCiWorkload(Map spec) {
         case 'build':
             runClippyAndBuild(spec.platform, spec.defconfig ?: defconfigForPlatform(spec.platform))
             break
+        case 'dylint':
+            runDylintCheck(spec.name, spec.platform, spec.defconfig, spec.lockStat ?: false)
+            break
         case 'doc':
             runDocStage(spec.arch)
             break
@@ -473,6 +489,31 @@ make defconfig
 make clippy
 stdbuf -oL -eL make build
 """
+        }
+    }
+}
+
+def runDylintCheck(String stageName, String platform, String defconfigPath, boolean lockStat) {
+    initStageLog(stageName)
+    def dylintTargetDir = "/xkernel-target/dylint-${platform}"
+    // Lock statistics switch static_lock! to its registering proc macro and
+    // compile the stats lock paths; no other CI configuration enables them.
+    def lockStatScan = lockStat ? """
+printf 'KFEAT_LOCK_STAT=y\\n' >> .config
+make olddefconfig
+grep -qx 'KFEAT_LOCK_STAT=y' .config
+make dylint
+""" : ''
+    withCleanSourceWorkspace("dylint-${platform}") {
+        withEnv(["TARGET_DIR=${dylintTargetDir}"]) {
+            sh label: "Dylint check ${platform}", script: """#!/bin/bash
+set -euo pipefail
+${stageLogTeeLine(stageName)}
+cp ${defconfigPath} .config
+make defconfig
+make dylint_test
+make dylint
+${lockStatScan}"""
         }
     }
 }

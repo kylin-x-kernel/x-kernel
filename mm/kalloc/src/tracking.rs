@@ -11,7 +11,7 @@ use core::{
 
 use backtrace::Backtrace;
 use kcpu_slot::cpu_slot_cell;
-use kspin::{NoPreemptIrqSave, SpinNoIrq};
+use kspin::{NoPreemptIrqSave, SpinNoIrq, static_lock};
 
 pub(crate) static TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -64,10 +64,12 @@ pub(crate) struct GlobalState {
     pub generation: u64,
 }
 
-static STATE: SpinNoIrq<GlobalState> = SpinNoIrq::new(GlobalState {
-    map: BTreeMap::new(),
-    generation: 0,
-});
+static_lock! {
+    static STATE: SpinNoIrq<GlobalState> = SpinNoIrq::new(GlobalState {
+        map: BTreeMap::new(),
+        generation: 0,
+    });
+}
 
 /// Enables allocation tracking.
 pub fn enable_tracking() {

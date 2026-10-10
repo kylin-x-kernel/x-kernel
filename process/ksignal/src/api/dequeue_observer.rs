@@ -4,7 +4,7 @@
 
 //! Per-signal dequeue observers.
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 use crate::{MAX_SIGNALS, SignalInfo, Signo};
 
@@ -21,8 +21,10 @@ type ObserverFn = fn(&SignalInfo) -> SignalDequeueAction;
 
 const NONE: Option<ObserverFn> = None;
 
-static OBSERVERS: SpinNoIrq<[Option<ObserverFn>; MAX_SIGNALS]> =
-    SpinNoIrq::new([NONE; MAX_SIGNALS]);
+static_lock! {
+    static OBSERVERS: SpinNoIrq<[Option<ObserverFn>; MAX_SIGNALS]> =
+        SpinNoIrq::new([NONE; MAX_SIGNALS]);
+}
 
 /// Registers an observer invoked whenever `signo` is dequeued.
 ///

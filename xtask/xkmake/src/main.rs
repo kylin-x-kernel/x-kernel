@@ -10,6 +10,7 @@ mod context;
 mod coverage;
 mod doc;
 mod dwarf_embed;
+mod dylint;
 mod error;
 mod hygiene;
 mod image_metadata;
@@ -74,6 +75,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Command::Clippy(args) => build::clippy(&args),
+        Command::Dylint(args) => dylint::run(&args),
         Command::Doc(args) => doc::generate(&args),
         Command::Run(args) => {
             let bundle = if args.no_build {

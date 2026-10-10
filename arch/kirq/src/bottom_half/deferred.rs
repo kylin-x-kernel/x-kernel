@@ -12,7 +12,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 use crate::Virq;
 
@@ -82,10 +82,12 @@ pub enum DeferredRunResult {
     Ran,
 }
 
-static DEFERRED_EXECUTOR_HOOKS: SpinNoIrq<DeferredExecutorHooks> =
-    SpinNoIrq::new(DeferredExecutorHooks {
-        on_hardirq_exit: None,
-    });
+static_lock! {
+    static DEFERRED_EXECUTOR_HOOKS: SpinNoIrq<DeferredExecutorHooks> =
+        SpinNoIrq::new(DeferredExecutorHooks {
+            on_hardirq_exit: None,
+        });
+}
 static DEFERRED_EXECUTOR_HOOK: AtomicUsize = AtomicUsize::new(0);
 
 /// Register the single deferred executor owner.

@@ -283,7 +283,7 @@ enum CargoAction {
     Clippy,
 }
 
-fn generate_build_configuration(context: &BuildContext) -> Result<()> {
+pub(crate) fn generate_build_configuration(context: &BuildContext) -> Result<()> {
     if context.dry_run {
         return Ok(());
     }
@@ -295,13 +295,7 @@ fn generate_build_configuration(context: &BuildContext) -> Result<()> {
 }
 
 fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
-    let feature_names = context
-        .config
-        .cargo_features()
-        .iter()
-        .map(|feature| format!("kfeat/{feature}"))
-        .chain(context.unittest.then(|| "unittest".to_string()))
-        .collect::<Vec<_>>();
+    let feature_names = kernel_feature_flags(context);
 
     let mut command = Process::new("cargo", context.dry_run, context.verbosity);
     command
@@ -315,17 +309,8 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
         .arg("--target")
         .arg(context.config.target())
         .arg("--target-dir")
-        .arg(&context.target_dir)
-        .env("RUSTC_BOOTSTRAP", "1")
-        .env("TARGET_DIR", &context.target_dir)
-        .env("K_ARCH", context.config.arch().as_str())
-        .env("K_TARGET", context.config.target())
-        .env("K_PLAT_NAME", context.config.platform())
-        .env("K_MODE", context.config.profile().as_str())
-        .env("K_IP", context.guest_ip.to_string())
-        .env("K_GW", context.gateway.to_string())
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+        .arg(&context.target_dir);
+    apply_kernel_env(&mut command, context);
 
     if context.config.profile() == BuildProfile::Release {
         command.arg("--release");
@@ -342,17 +327,42 @@ fn run_cargo(context: &BuildContext, action: CargoAction) -> Result<()> {
             command.arg("-vv");
         }
     }
-    if let Some(unittest_crate) = &context.unittest_crate {
-        command.env("UNITTEST_CRATE", unittest_crate);
-    } else {
-        command.env_remove("UNITTEST_CRATE");
-    }
     if matches!(action, CargoAction::Clippy) {
         command
             .arg("--")
             .args(["-D", "warnings", "--cfg", "unittest"]);
     }
     command.run()
+}
+
+pub(crate) fn kernel_feature_flags(context: &BuildContext) -> Vec<String> {
+    context
+        .config
+        .cargo_features()
+        .iter()
+        .map(|feature| format!("kfeat/{feature}"))
+        .chain(context.unittest.then(|| "unittest".to_string()))
+        .collect()
+}
+
+pub(crate) fn apply_kernel_env(command: &mut Process, context: &BuildContext) {
+    command
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("TARGET_DIR", &context.target_dir)
+        .env("K_ARCH", context.config.arch().as_str())
+        .env("K_TARGET", context.config.target())
+        .env("K_PLAT_NAME", context.config.platform())
+        .env("K_MODE", context.config.profile().as_str())
+        .env("K_IP", context.guest_ip.to_string())
+        .env("K_GW", context.gateway.to_string())
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+
+    if let Some(unittest_crate) = &context.unittest_crate {
+        command.env("UNITTEST_CRATE", unittest_crate);
+    } else {
+        command.env_remove("UNITTEST_CRATE");
+    }
 }
 
 fn create_bundle(

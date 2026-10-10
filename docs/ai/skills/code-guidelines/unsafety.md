@@ -174,8 +174,7 @@ Prefer:
 Avoid:
 
 - direct dereference of user pointers in syscall code;
-- ad hoc `from_raw_parts` over user addresses;
-- copying raw bytes into arbitrary `T` without a `UserRead`-style validity contract.
+- ad hoc `from_raw_parts` over user addresses.
 
 Repository examples:
 
@@ -253,7 +252,6 @@ Prefer:
 
 Avoid:
 
-- open-coded `static mut Option<T>` initialization;
 - partially synchronized “init if null” patterns;
 - duplicating once-state machines outside foundational crates without reason.
 
@@ -421,9 +419,7 @@ Avoid:
 - leaving boot-entry assumptions implicit
   just because the code is architecture-specific;
 - mixing ordinary initialization logic into naked-entry or
-  CPU-transition blocks when it can run after the unsafe handoff;
-- treating `#[unsafe(naked)]`, `#[unsafe(no_mangle)]`,
-  or linker-section placement as self-justifying.
+  CPU-transition blocks when it can run after the unsafe handoff.
 
 Repository examples:
 

@@ -10,7 +10,7 @@ use core::{
 };
 
 use kerrno::{KResult, k_bail};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 use memaddr::PhysAddr;
 
 const USER_ASID_FIRST_VERSION: u64 = 1_u64 << karch::USER_ASID_BITS;
@@ -24,8 +24,10 @@ type RuntimeUserAsidAllocator = UserAsidAllocator<{ kbuild_config::NR_CPUS }>;
 static ACTIVE_ASID_CONTEXT_IDS: [AtomicU64; kbuild_config::NR_CPUS] =
     [const { AtomicU64::new(0) }; kbuild_config::NR_CPUS];
 
-static USER_ASID_ALLOCATOR: SpinNoIrq<RuntimeUserAsidAllocator> =
-    SpinNoIrq::new(UserAsidAllocator::new());
+static_lock! {
+    static USER_ASID_ALLOCATOR: SpinNoIrq<RuntimeUserAsidAllocator> =
+        SpinNoIrq::new(UserAsidAllocator::new());
+}
 
 /// AArch64 user address-space ASID context.
 #[derive(Debug)]

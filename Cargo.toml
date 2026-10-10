@@ -18,6 +18,8 @@ exclude = [
     "boot/x86_64-linuxboot",
     # build config tools (std crates, not part of the no_std kernel workspace)
     "xtask/*",
+    # standalone host lint tools (not part of the no_std kernel workspace)
+    "tools/*",
     # TEE user-space apps (built separately with std toolchain)
     "tee_apps/*",
 ]

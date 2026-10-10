@@ -420,6 +420,16 @@ mod tests {
 
     #[def_test]
     fn device_cleanups_run_lifo_order() {
+        #[expect(
+            clippy::allow_attributes,
+            reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+        )]
+        #[allow(
+            unknown_lints,
+            unregistered_static_spinlock,
+            reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in \
+                      lock_stat"
+        )]
         static ORDER: SpinNoIrq<Vec<usize>> = SpinNoIrq::new(Vec::new());
         static NEXT: AtomicUsize = AtomicUsize::new(0);
 

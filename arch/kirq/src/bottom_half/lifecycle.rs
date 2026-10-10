@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 /// Callback invoked by the IRQ core while normal preemption is disabled.
 ///
@@ -32,10 +32,12 @@ pub struct IrqLifecycleHooks {
     pub on_irq_exit: Option<IrqLifecycleHook>,
 }
 
-static IRQ_LIFECYCLE_HOOKS: SpinNoIrq<IrqLifecycleHooks> = SpinNoIrq::new(IrqLifecycleHooks {
-    on_irq_enter: None,
-    on_irq_exit: None,
-});
+static_lock! {
+    static IRQ_LIFECYCLE_HOOKS: SpinNoIrq<IrqLifecycleHooks> = SpinNoIrq::new(IrqLifecycleHooks {
+        on_irq_enter: None,
+        on_irq_exit: None,
+    });
+}
 static IRQ_LIFECYCLE_HOOKS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Register IRQ lifecycle hooks.

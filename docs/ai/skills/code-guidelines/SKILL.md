@@ -101,8 +101,6 @@ When reviewing Rust kernel code:
 5. Check whether raw-pointer, FFI, and `MaybeUninit`
    usage is modeled with the narrowest sound pattern available.
 6. Check whether lock scope, lock order, and wake/block behavior are safe.
-   For new or moved `Mutex` / `RwLock` / spin statics, also check
-   `concurrency.md` lock construction (`static_lock!` vs `::new`).
 7. Check whether syscall boundaries and current-context assumptions are explicit.
 8. Check whether typed errors and logging levels are used appropriately.
 9. Check whether modules, visibility, macros, and attributes stay disciplined.
@@ -123,9 +121,6 @@ Before considering a code change aligned with this skill, verify:
 - raw-pointer and FFI code states validity, alignment,
   lifetime, aliasing, and ABI assumptions where relevant;
 - shared-state code has sane lock scope and lock ordering;
-- static `Mutex` / `RwLock` / spin items use `static_lock!`,
-  and heap locks use `::new` rather than `const_new` unless
-  an untracked const initializer is required;
 - boundary validation happens at subsystem edges;
 - modules, visibility, imports, and attributes stay narrowly scoped;
 - error paths use `Result`;

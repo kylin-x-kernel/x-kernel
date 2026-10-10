@@ -91,6 +91,13 @@ mod util;
 #[cfg(not(feature = "stats"))]
 #[macro_export]
 macro_rules! static_lock {
+    // Reject what the `stats` expansion rejects, so both configurations agree.
+    ($(#[$attr:meta])* $vis:vis static mut $($rest:tt)*) => {
+        compile_error!(
+            "static_lock! does not accept `static mut`; the lock already provides interior \
+             mutability"
+        );
+    };
     ($item:item) => {
         $item
     };

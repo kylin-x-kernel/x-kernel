@@ -4,7 +4,7 @@
 
 //! Optional scheduler trace hooks (filled by `ktracing` when tracepoints are used).
 
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 type WakeupFn = fn(u64);
 type SwitchFn = fn(u64, u64);
@@ -14,10 +14,12 @@ struct Hooks {
     switch: Option<SwitchFn>,
 }
 
-static HOOKS: SpinNoIrq<Hooks> = SpinNoIrq::new(Hooks {
-    wakeup: None,
-    switch: None,
-});
+static_lock! {
+    static HOOKS: SpinNoIrq<Hooks> = SpinNoIrq::new(Hooks {
+        wakeup: None,
+        switch: None,
+    });
+}
 
 /// Called once from `ktracing` init. Before that, fires are no-ops.
 pub fn register_sched_trace_hooks(wakeup: WakeupFn, switch_fn: SwitchFn) {

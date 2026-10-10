@@ -21,15 +21,10 @@ imports, crate dependencies, macros, lints, or attributes.
   external semantic model;
 - a crate should publicly expose its natural domain objects and stable capabilities,
   not the internal structures used to assemble or cache them;
-- prefer importing a parent module and qualifying free-function calls
-  rather than importing free functions directly by name;
 - use workspace dependencies instead of ad hoc per-crate version drift.
 
 ## Attributes
 
-- keep attributes ordered predictably;
-- place `#[derive(...)]` after other outer attributes;
-- keep derived traits ordered consistently;
 
 ## Macros
 
@@ -48,7 +43,5 @@ Check specifically for:
   on them;
 - internal structs or free functions that were made public only for convenience,
   testing, or migration wiring;
-- direct free-function imports that remove call-site context;
 - dependency declarations that bypass workspace conventions;
-- attributes or derives ordered inconsistently with the project convention;
 - macros used where a normal function would be clearer.

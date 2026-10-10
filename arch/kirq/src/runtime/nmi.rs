@@ -6,7 +6,7 @@
 
 use alloc::collections::BTreeMap;
 
-use kspin::SpinRaw;
+use kspin::{SpinRaw, static_lock};
 
 use crate::{
     Hwirq, IrqDesc, IrqFlags, IrqSpec,
@@ -15,29 +15,31 @@ use crate::{
     state::{IRQ_STATE, IrqStateDesc, try_resolve_and_publish},
 };
 
-/// NMI handler table, keyed by hwirq.
-///
-/// # Locking invariant
-///
-/// - **WRITES**: boot-time registration via [`register_nmi`] /
-///   [`unregister_nmi`], or — rarely — from an NMI handler itself (see
-///   [`dispatch_nmi_handler`]). The normal IRQ path and process context never write
-///   this table.
-/// - **READS**: NMI context only, via [`dispatch_nmi_handler`]. The lock is never
-///   acquired from a normal IRQ handler, so an NMI that preempts a
-///   normal IRQ never contends on this lock.
-///
-/// [`SpinRaw`] (no IRQ / preempt guards) is therefore safe:
-///
-/// - boot-time writers run before any NMI can be delivered;
-/// - a pseudo-NMI cannot preempt another pseudo-NMI on the same CPU (the NMI
-///   path never lowers PMR below `NMI_ONLY`), so a writer and a reader never
-///   run concurrently on the same CPU;
-/// - a hardware NMI can preempt a normal IRQ handler (the IRQ path opens the
-///   ALLINT window), but IRQ handlers never touch this table, and the NMI
-///   path keeps `PSTATE.ALLINT` set so a hardware NMI cannot preempt another
-///   NMI.
-static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new());
+static_lock! {
+    /// NMI handler table, keyed by hwirq.
+    ///
+    /// # Locking invariant
+    ///
+    /// - **WRITES**: boot-time registration via [`register_nmi`] /
+    ///   [`unregister_nmi`], or — rarely — from an NMI handler itself (see
+    ///   [`dispatch_nmi_handler`]). The normal IRQ path and process context never write
+    ///   this table.
+    /// - **READS**: NMI context only, via [`dispatch_nmi_handler`]. The lock is never
+    ///   acquired from a normal IRQ handler, so an NMI that preempts a
+    ///   normal IRQ never contends on this lock.
+    ///
+    /// [`SpinRaw`] (no IRQ / preempt guards) is therefore safe:
+    ///
+    /// - boot-time writers run before any NMI can be delivered;
+    /// - a pseudo-NMI cannot preempt another pseudo-NMI on the same CPU (the NMI
+    ///   path never lowers PMR below `NMI_ONLY`), so a writer and a reader never
+    ///   run concurrently on the same CPU;
+    /// - a hardware NMI can preempt a normal IRQ handler (the IRQ path opens the
+    ///   ALLINT window), but IRQ handlers never touch this table, and the NMI
+    ///   path keeps `PSTATE.ALLINT` set so a hardware NMI cannot preempt another
+    ///   NMI.
+    static NMI_TABLE: SpinRaw<BTreeMap<Hwirq, Handler>> = SpinRaw::new(BTreeMap::new());
+}
 
 /// Register an NMI handler for a hardware interrupt.
 ///

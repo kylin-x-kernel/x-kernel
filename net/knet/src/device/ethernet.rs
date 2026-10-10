@@ -15,7 +15,7 @@ use hashbrown::HashMap;
 use kclass::{ClassDevice, prelude::*};
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollSet;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 use ktime_types::{MonotonicInstant, TimeSpan};
 #[cfg(not(unittest))]
 use lazyinit::LazyInit;
@@ -47,7 +47,9 @@ fn is_ipv4_source_usable_for_egress(
 }
 
 static NEXT_NET_RX_SOURCE_ID: AtomicUsize = AtomicUsize::new(1);
-static NET_RX_SOURCES: SpinNoIrq<NetRxSources> = SpinNoIrq::new(NetRxSources::new());
+static_lock! {
+    static NET_RX_SOURCES: SpinNoIrq<NetRxSources> = SpinNoIrq::new(NetRxSources::new());
+}
 #[cfg(not(unittest))]
 static NET_RX_SOFTIRQ_INIT: LazyInit<()> = LazyInit::new();
 static NET_RX_SOFTIRQ_AVAILABLE: AtomicBool = AtomicBool::new(false);

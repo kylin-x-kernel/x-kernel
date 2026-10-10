@@ -189,8 +189,10 @@ impl Log for KernelLogger {
 }
 
 pub fn print_fmt(args: fmt::Arguments) -> fmt::Result {
-    use kspin::SpinNoIrq;
-    static LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+    use kspin::{SpinNoIrq, static_lock};
+    static_lock! {
+        static LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+    }
 
     let _guard = LOCK.lock();
     KernelLogger.write_fmt(args)

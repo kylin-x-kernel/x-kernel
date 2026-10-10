@@ -10,7 +10,7 @@ use core::{alloc::Layout, ptr::NonNull};
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
 use khal::{mem::v2p, paging::MappingFlags};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
 
@@ -28,7 +28,9 @@ pub trait DmaPageTableIf {
     fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> kerrno::KResult;
 }
 
-pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());
+static_lock! {
+    pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());
+}
 
 pub(crate) struct DmaAllocator {
     bounce_pool: Option<BouncePool>,

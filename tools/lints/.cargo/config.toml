@@ -1,0 +1,4 @@
+# dylint-link renames the cdylib to `lib<name>@<toolchain>-<host>.so`,
+# the file name Dylint and dylint_testing load.
+[target.'cfg(all())']
+linker = "dylint-link"

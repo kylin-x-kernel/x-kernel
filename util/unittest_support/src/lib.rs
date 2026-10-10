@@ -32,6 +32,15 @@ use unittest::{TestDescriptor, TestResult};
 
 static NEXT_TEST_USER_ADDR: AtomicUsize = AtomicUsize::new(kaddr_layout::USER_HEAP_BASE);
 static NEXT_TEST_PROCESS_ID: AtomicU32 = AtomicU32::new(1_000_000);
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unregistered_static_spinlock,
+    reason = "CG-001-static-spinlock-registration: test-only lock; not tracked in lock_stat"
+)]
 static INIT_TEST_THREAD_HOOK: SpinNoIrq<Option<InitTestThreadHook>> = SpinNoIrq::new(None);
 
 #[macro_export]

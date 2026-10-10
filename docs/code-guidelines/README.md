@@ -28,8 +28,8 @@ belong to the tool's own README.
 - `CG-*.md`: the rule registry for all backends, indexed below. Reused ids
   CG-016, CG-018 and CG-021 receive their AI checks when the stack lands;
   CG-017 stays the separate Send/Sync argument rule.
-- `pending.md` (stack placeholder): Dylint candidates. Add its link when
-  part 2 lands. Rustc/Clippy candidates stay in `lints.md`.
+- [pending.md](pending.md): Dylint candidates; landing a lint removes its row.
+  Rustc/Clippy candidates stay in [lints.md](lints.md).
 
 ## Suppressing a check
 
@@ -98,36 +98,32 @@ checked through the configured kernel's `make clippy` during this migration.
 
 | Rule | Level | Backend | Lints |
 | --- | --- | --- | --- |
-| [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | clippy | `undocumented_unsafe_blocks` |
-| [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | clippy | `disallowed_methods` |
-| [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy | `panic`, `unwrap_used`, `expect_used` |
-| [CG-023-unfinished-implementations](CG-023-unfinished-implementations.md) | MUST | clippy | `todo`, `unimplemented` |
-| [CG-024-lint-exceptions](CG-024-lint-exceptions.md) | MUST | clippy | `allow_attributes`, `allow_attributes_without_reason` |
-| [CG-025-minimal-unsafe-scope](CG-025-minimal-unsafe-scope.md) | MUST | clippy, rustc | `multiple_unsafe_ops_per_block`, `unsafe_op_in_unsafe_fn` |
-| [CG-026-unsafe-api-safety-docs](CG-026-unsafe-api-safety-docs.md) | MUST | clippy | `missing_safety_doc` |
+| [CG-001-static-spinlock-registration](CG-001-static-spinlock-registration.md) | MUST | dylint | `unregistered_static_spinlock` |
+| [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | clippy | `clippy::undocumented_unsafe_blocks` |
+| [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | clippy | `clippy::disallowed_methods` |
+| [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy | `clippy::panic`, `clippy::unwrap_used`, `clippy::expect_used` |
+| [CG-023-unfinished-implementations](CG-023-unfinished-implementations.md) | MUST | clippy | `clippy::todo`, `clippy::unimplemented` |
+| [CG-024-lint-exceptions](CG-024-lint-exceptions.md) | MUST | clippy | `clippy::allow_attributes`, `clippy::allow_attributes_without_reason` |
+| [CG-025-minimal-unsafe-scope](CG-025-minimal-unsafe-scope.md) | MUST | clippy, rustc | `clippy::multiple_unsafe_ops_per_block`, `unsafe_op_in_unsafe_fn` |
+| [CG-026-unsafe-api-safety-docs](CG-026-unsafe-api-safety-docs.md) | MUST | clippy | `clippy::missing_safety_doc` |
 | [CG-027-narrow-visibility](CG-027-narrow-visibility.md) | SHOULD | rustc | `unreachable_pub` |
-| [CG-028-focused-functions](CG-028-focused-functions.md) | SHOULD | clippy | `too_many_lines` |
-| [CG-029-shallow-control-flow](CG-029-shallow-control-flow.md) | SHOULD | clippy | `excessive_nesting` |
-| [CG-030-explicit-boolean-parameters](CG-030-explicit-boolean-parameters.md) | SHOULD | clippy | `fn_params_excessive_bools` |
-| [CG-031-intrusive-linked-lists](CG-031-intrusive-linked-lists.md) | SHOULD | clippy | `linkedlist` |
-| [CG-032-camel-case-types](CG-032-camel-case-types.md) | SHOULD | clippy | `upper_case_acronyms` |
-| [CG-033-explicit-result-discard](CG-033-explicit-result-discard.md) | SHOULD | clippy | `unused_result_ok` |
-| [CG-034-used-binding-names](CG-034-used-binding-names.md) | SHOULD | clippy | `used_underscore_binding` |
+| [CG-028-focused-functions](CG-028-focused-functions.md) | SHOULD | clippy | `clippy::too_many_lines` |
+| [CG-029-shallow-control-flow](CG-029-shallow-control-flow.md) | SHOULD | clippy | `clippy::excessive_nesting` |
+| [CG-030-explicit-boolean-parameters](CG-030-explicit-boolean-parameters.md) | SHOULD | clippy | `clippy::fn_params_excessive_bools` |
+| [CG-031-intrusive-linked-lists](CG-031-intrusive-linked-lists.md) | SHOULD | clippy | `clippy::linkedlist` |
+| [CG-032-camel-case-types](CG-032-camel-case-types.md) | SHOULD | clippy | `clippy::upper_case_acronyms` |
+| [CG-033-explicit-result-discard](CG-033-explicit-result-discard.md) | SHOULD | clippy | `clippy::unused_result_ok` |
+| [CG-034-used-binding-names](CG-034-used-binding-names.md) | SHOULD | clippy | `clippy::used_underscore_binding` |
 | [CG-035-declared-cfgs](CG-035-declared-cfgs.md) | SHOULD | rustc | `unexpected_cfgs` |
-| [CG-036-ordinary-error-propagation](CG-036-ordinary-error-propagation.md) | SHOULD | clippy | `question_mark` |
-
-Ids CG-001–022 are reserved for the Dylint/AI stack. Reused files here are
-CG-016 (unsafe comments), CG-018 (initialization validity), and CG-021
-(reachable-failure panics). CG-017 is not reused: its Send/Sync concurrency
-argument is more specific than comment presence. The first free id is CG-037.
+| [CG-036-ordinary-error-propagation](CG-036-ordinary-error-propagation.md) | SHOULD | clippy | `clippy::question_mark` |
 
 ## Adding a rule
 
 First choose the backend. Rustc/Clippy checks inherit `[workspace.lints]` in
 root `Cargo.toml`; parameters live in root `clippy.toml`. Validate through
 `make clippy` after preparing a platform defconfig, as described in
-`docs/ai/skills/build-workflow/SKILL.md`. Dylint candidates will be listed in
-`pending.md`; landing one removes its row. AI checks describe judgments the
+`docs/ai/skills/build-workflow/SKILL.md`. Dylint candidates are listed in
+[pending.md](pending.md); landing one removes its row. AI checks describe judgments the
 lint backends cannot prove. x-review-ng loads only `CG-*.md` and selects rules
 with an `ai` check; files with only rustc/Clippy checks have no `triggers` and
 are ignored by AI review.

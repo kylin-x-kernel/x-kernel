@@ -10,6 +10,7 @@
 #     - TARGET_DIR          Artifact / cargo output directory
 #     - UNITTEST            Build the unittest entry and run it under QEMU (y/n)
 #     - UNITTEST_CRATE      Limit unittest to crate(s), comma-separated
+#     - DYLINT_DRIVER_PATH  Directory for the Dylint driver cache
 #
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
@@ -162,7 +163,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 		fi; \
 	fi)
 
-.PHONY: all build run justrun debug disasm clippy doc doc_check_missing
+.PHONY: all build run justrun debug disasm clippy dylint dylint_test doc doc_check_missing
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
@@ -218,6 +219,14 @@ symbolize:
 clippy:
 	@$(MAKE) --no-print-directory check_deps check_header
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
+
+dylint:
+	@$(MAKE) --no-print-directory check_deps check_header
+	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
+
+dylint_test:
+	@$(MAKE) --no-print-directory check_deps check_header
+	@$(XKMAKE) dylint --self-test $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 doc:
 	@$(XKMAKE) doc --target-dir "$(TARGET_DIR)" $(XKMAKE_ARGS)

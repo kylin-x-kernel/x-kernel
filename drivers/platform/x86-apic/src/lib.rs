@@ -44,7 +44,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kcpu_id_map::{LogicalCpuId, RawCpuId, raw_cpu_id};
 use kcpu_slot::{CpuLocalGuard, cpu_slot_cell};
-use kspin::{NoPreemptIrqSave, SpinNoIrq};
+use kspin::{NoPreemptIrqSave, SpinNoIrq, static_lock};
 use lazyinit::LazyInit;
 use memaddr::{PhysAddr, pa};
 use memspace::iomap_device;
@@ -83,8 +83,10 @@ cpu_slot_cell! {
 static IS_X2APIC: AtomicBool = AtomicBool::new(false);
 static XAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
-static MSIX_VECTOR_ALLOCATOR: SpinNoIrq<MsixVectorAllocator> =
-    SpinNoIrq::new(MsixVectorAllocator::new());
+static_lock! {
+    static MSIX_VECTOR_ALLOCATOR: SpinNoIrq<MsixVectorAllocator> =
+        SpinNoIrq::new(MsixVectorAllocator::new());
+}
 
 struct MsixVectorAllocator {
     allocated: [u64; MSIX_VECTOR_WORDS],

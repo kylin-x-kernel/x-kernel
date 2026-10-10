@@ -19,12 +19,57 @@ use crate::{
 
 const CARGO_SHEAR_VERSION: &str = "1.13.2";
 const LICENSURE_VERSION: &str = "0.8.1";
+pub(crate) const DYLINT_VERSION: &str = "6.0.4";
 const CARGO_WORKSPACES: &[&str] = &[".", "xtask"];
 const LICENSURE_FILE_BATCH_SIZE: usize = 256;
 
 pub(crate) fn install_tools() -> Result<()> {
     install_cargo_tool("cargo-shear", CARGO_SHEAR_VERSION)?;
-    install_cargo_tool("licensure", LICENSURE_VERSION)
+    install_cargo_tool("licensure", LICENSURE_VERSION)?;
+    install_cargo_tool("cargo-dylint", DYLINT_VERSION)?;
+    install_cargo_tool("dylint-link", DYLINT_VERSION)
+}
+
+pub(crate) fn ensure_dylint_tools() -> Result<()> {
+    // cargo-dylint is a Cargo subcommand and expects its subcommand name.
+    let output = Command::new("cargo-dylint")
+        .args(["dylint", "--version"])
+        .output()
+        .map_err(|source| tool_spawn_error("cargo-dylint", DYLINT_VERSION, source))?;
+    if !output.status.success() {
+        return Err(Error::CommandFailed {
+            program: "cargo-dylint".into(),
+            status: output.status,
+        });
+    }
+    let reported = String::from_utf8_lossy(&output.stdout);
+    if reported.trim() != format!("cargo-dylint {DYLINT_VERSION}") {
+        return Err(unexpected_tool_version(
+            "cargo-dylint",
+            DYLINT_VERSION,
+            reported.trim(),
+        ));
+    }
+
+    // dylint-link is a linker wrapper: `--version` is forwarded to the linker,
+    // so only its presence is checked here. `make install-tools` pins its version.
+    if find_cargo_tool("dylint-link").is_none() {
+        return Err(tool_spawn_error(
+            "dylint-link",
+            DYLINT_VERSION,
+            io::ErrorKind::NotFound.into(),
+        ));
+    }
+    Ok(())
+}
+
+fn find_cargo_tool(program: &str) -> Option<PathBuf> {
+    let executable = format!("{program}{}", env::consts::EXE_SUFFIX);
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path)
+            .map(|directory| directory.join(&executable))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 pub(crate) fn check_dependencies(args: &HygieneFixArgs) -> Result<()> {
@@ -195,7 +240,7 @@ fn unexpected_tool_version(program: &str, required: &str, reported: &str) -> Err
 }
 
 fn cargo_install_has_expected_version() -> bool {
-    let Some(executable) = find_cargo_shear() else {
+    let Some(executable) = find_cargo_tool("cargo-shear") else {
         return false;
     };
     let Some(bin_dir) = executable.parent() else {
@@ -217,15 +262,6 @@ fn cargo_install_has_expected_version() -> bool {
     };
     output.status.success()
         && cargo_install_list_has_version(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn find_cargo_shear() -> Option<PathBuf> {
-    let executable = format!("cargo-shear{}", env::consts::EXE_SUFFIX);
-    env::var_os("PATH").and_then(|path| {
-        env::split_paths(&path)
-            .map(|directory| directory.join(&executable))
-            .find(|candidate| candidate.is_file())
-    })
 }
 
 fn cargo_install_list_has_version(output: &str) -> bool {

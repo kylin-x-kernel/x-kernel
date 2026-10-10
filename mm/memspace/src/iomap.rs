@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use kaddr_layout::{IOMAP_VADDR, IOMAP_VSIZE};
 use khal::paging::MappingFlags;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange, va};
 
 use crate::kernel_layout;
@@ -51,7 +51,9 @@ struct RegionEntry {
     refs: RegionRefs,
 }
 
-static DEVICE_REGISTRY: SpinNoIrq<Vec<RegionEntry>> = SpinNoIrq::new(Vec::new());
+static_lock! {
+    static DEVICE_REGISTRY: SpinNoIrq<Vec<RegionEntry>> = SpinNoIrq::new(Vec::new());
+}
 
 // Boot/runtime layout ownership lives in kaddr_layout. memspace only consumes
 // the dedicated I/O VA window and allocates device mappings from that range.

@@ -40,7 +40,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
 use kirq::{IrqActionToken, IrqDesc};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 #[cfg(feature = "ns16550-mmio")]
 pub use ns16550_mmio::SerialRegWidth;
 pub use serial::{SerialIdent, SerialPort, SerialRole};
@@ -102,8 +102,10 @@ pub struct SerialMmioLayout {
 }
 
 static INPUT_IRQ_REGISTERED: AtomicBool = AtomicBool::new(false);
-/// Keeps the console input interrupt registration identity for diagnostics.
-static INPUT_IRQ: SpinNoIrq<Option<IrqActionToken>> = SpinNoIrq::new(None);
+static_lock! {
+    /// Keeps the console input interrupt registration identity for diagnostics.
+    static INPUT_IRQ: SpinNoIrq<Option<IrqActionToken>> = SpinNoIrq::new(None);
+}
 
 /// Fixed I/O-port base for the NS16550 ISA COM port used as stdout on x86.
 #[cfg(feature = "ns16550-ioport")]

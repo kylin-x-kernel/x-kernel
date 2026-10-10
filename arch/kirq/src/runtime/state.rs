@@ -11,7 +11,7 @@ use alloc::{
 use core::array;
 
 use kpoll::{Completion, PollSet};
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, static_lock};
 
 use super::unhandled::{UnhandledIrqReport, UnhandledIrqState};
 use crate::{
@@ -19,13 +19,15 @@ use crate::{
     action::{IrqAction, IrqActionToken},
 };
 
-/// IRQ control-plane aggregate.
-///
-/// All descriptor, handler, and `(domain, hwirq) -> virq` namespace changes go
-/// through this lock. Dispatch may briefly snapshot an action from this state,
-/// but hardware IRQ translation on the hot path consumes the immutable reverse
-/// maps published by `domain.rs` instead of walking these mutable maps directly.
-pub(super) static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());
+static_lock! {
+    /// IRQ control-plane aggregate.
+    ///
+    /// All descriptor, handler, and `(domain, hwirq) -> virq` namespace changes go
+    /// through this lock. Dispatch may briefly snapshot an action from this state,
+    /// but hardware IRQ translation on the hot path consumes the immutable reverse
+    /// maps published by `domain.rs` instead of walking these mutable maps directly.
+    pub(super) static IRQ_STATE: SpinNoIrq<IrqState> = SpinNoIrq::new(IrqState::new());
+}
 pub const DYNAMIC_VIRQ_BASE: Virq = 4096;
 pub(super) const MAX_IRQ_ACTIONS: usize = 4;
 

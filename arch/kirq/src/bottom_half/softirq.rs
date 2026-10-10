@@ -9,7 +9,7 @@ use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
 
 use kcpu_slot::{CpuPin, cpu_slot};
-use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
+use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq, static_lock};
 
 use crate::{
     context::{self, SoftIrqContextGuard},
@@ -123,8 +123,10 @@ cpu_slot! {
         core::sync::atomic::AtomicUsize::new(0);
 }
 
-static SOFTIRQ_ACTIONS: SpinNoIrq<[Option<SoftirqAction>; SoftirqVec::COUNT]> =
-    SpinNoIrq::new([None; SoftirqVec::COUNT]);
+static_lock! {
+    static SOFTIRQ_ACTIONS: SpinNoIrq<[Option<SoftirqAction>; SoftirqVec::COUNT]> =
+        SpinNoIrq::new([None; SoftirqVec::COUNT]);
+}
 
 #[cfg(unittest)]
 static SOFTIRQ_DAEMON_WAKE_ENABLED: AtomicUsize = AtomicUsize::new(1);

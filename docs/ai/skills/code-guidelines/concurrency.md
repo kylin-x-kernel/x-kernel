@@ -78,14 +78,6 @@ Write lock initialization so the `stats` paths compile when that feature
 is on. `make clippy` follows `.config`; do not special-case the feature
 in the build tool.
 
-When `stats` is off, `static_lock!` is an identity macro and
-`Mutex::new` / `RwLock::new` stay `const fn`. Wrapping statics in
-`static_lock!` is therefore always the right form.
-
-The crate that owns the static must depend on `ksync` (Mutex / RwLock)
-or `kspin` (spin types). The macro resolves those crate names from
-`Cargo.toml`.
-
 ### Heap and lazy runtime init
 
 Use `Mutex::new` / `RwLock::new` (and `Arc::new(Mutex::new(...))`,
@@ -93,38 +85,6 @@ Use `Mutex::new` / `RwLock::new` (and `Arc::new(Mutex::new(...))`,
 class via `#[track_caller]` and are **not** `const`.
 
 Do not call them from `const fn` or from a `static` initializer.
-
-If a constructor is only used at runtime, drop `const` so it can keep
-`Mutex::new` and remain tracked.
-
-### Static locks
-
-Wrap the static item in `static_lock!`. The initializer may still look
-like `Mutex::new(...)`; the macro rewrites it to `new_with_stats`.
-
-```rust
-use ksync::{Mutex, static_lock};
-
-static_lock! {
-    static TABLE: Mutex<Inner> = Mutex::new(Inner::new());
-}
-```
-
-Supported type names (last path segment): `Mutex`, `RwLock`,
-`SpinNoIrq`, `SpinNoPreempt`, `SpinRaw`.
-
-If a `static` is a wrapper around a lock, extract the lock into its own
-`static_lock!` item. The macro does not wrap `Foo(Mutex::new(...))`.
-
-`SpinNoIrq::new` stays `const` under `stats` but binds `NOOP_CLASS`.
-Static spins that should appear in `/proc/lock_stat` still need
-`static_lock!`.
-
-### Untracked const init
-
-Use `Mutex::const_new(RawMutex::new(), val)` (and the RwLock equivalent)
-only when a `const` initializer is required and tracking is acceptable
-to lose. Do not use it as the default for ordinary statics.
 
 ### Recording
 
@@ -190,7 +150,6 @@ Check specifically for:
 - atomics used where a lock would be clearer and safer;
 - unstated assumptions about IRQ state, scheduler availability,
   or wakeup ordering;
-- `static Mutex` / `RwLock` / spin without `static_lock!`;
 - `Mutex::new` / `RwLock::new` inside `const fn` or a `static`
   initializer (including `Foo(Mutex::new(...))` wrappers);
 - lock-stat counters updated by writing private fields instead of
