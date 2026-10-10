@@ -41,7 +41,9 @@ pub(crate) fn sys_clock_gettime(
 
 /// Returns the current wall-clock time of day.
 pub(crate) fn sys_gettimeofday(ts: UserPtr<timeval>) -> KResult<isize> {
-    ts.write_vm(timeval::from_system_time(ktime::realtime()))?;
+    if let Some(ts) = ts.check_non_null() {
+        ts.write_vm(timeval::from_system_time(ktime::realtime()))?;
+    }
     Ok(0)
 }
 
@@ -88,8 +90,8 @@ pub(crate) fn sys_clock_settime(
     clock_id: __kernel_clockid_t,
     ts: UserConstPtr<timespec>,
 ) -> KResult<isize> {
-    // Keep symmetry with `sys_clock_gettime`: both realtime clocks are settable.
-    if !matches!(clock_id as u32, CLOCK_REALTIME | CLOCK_REALTIME_COARSE) {
+    // Coarse clocks are query-only on Linux, even though gettime accepts them.
+    if clock_id as u32 != CLOCK_REALTIME {
         return Err(KError::InvalidInput);
     }
     let Some(ts) = ts.check_non_null() else {
@@ -135,5 +137,39 @@ mod tests {
         let after = ktime::realtime().unix_seconds() as isize;
 
         assert!((before..=after).contains(&seconds));
+    }
+}
+
+#[unittest::mod_test]
+mod tests_time_query_arguments {
+    use kerrno::KError;
+    use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_REALTIME_COARSE, timespec};
+    use posix_types::{UserConstPtr, UserPtr};
+    use unittest::{assert, assert_eq, def_test};
+
+    #[def_test]
+    fn gettimeofday_accepts_null_timeval() {
+        assert_eq!(super::sys_gettimeofday(UserPtr::default()), Ok(0));
+    }
+
+    #[def_test(user, serial)]
+    fn clock_settime_rejects_query_only_clocks_before_reading_time() {
+        // Address 1 is outside the valid user range. Prove BadAddress from
+        // access validation; this does not exercise a page fault during copying.
+        let invalid = UserConstPtr::<timespec>::from(1usize);
+        assert!(matches!(
+            invalid.read_vm().map_err(KError::from),
+            Err(KError::BadAddress)
+        ));
+        for clock in [CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC] {
+            assert_eq!(
+                super::sys_clock_settime(clock as _, invalid),
+                Err(KError::InvalidInput)
+            );
+            assert_eq!(
+                super::sys_clock_settime(clock as _, UserConstPtr::default()),
+                Err(KError::InvalidInput)
+            );
+        }
     }
 }

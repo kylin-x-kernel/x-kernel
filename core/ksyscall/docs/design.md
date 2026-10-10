@@ -281,3 +281,19 @@ The scheduler gate must then use the concrete target credentials, without a
 same-group exemption. The published-worker regression invokes actual
 `sys_setuid`, verifies the caller changed while its peer retained its IDs, and
 checks both setters return EPERM without modifying the peer's metadata.
+
+## Time-query argument compatibility
+
+`gettimeofday` accepts a NULL timeval pointer and returns zero without reading
+the wall clock or copying output. A non-NULL pointer keeps the existing timeval
+conversion and user-copy path. `clock_settime` accepts only CLOCK_REALTIME;
+CLOCK_REALTIME_COARSE remains query-only, as in Linux. Unsupported clock IDs
+return EINVAL before reading the supplied timespec or reaching the privileged
+wall-clock setter. CLOCK_REALTIME continues to use the existing pointer, range
+and privilege checks. This does not change coarse-query resolution or timezone
+handling.
+
+The query-only clock regression runs in a fresh user task, first demonstrates
+that its non-NULL input fails the real user-copy path, then checks EINVAL for
+both that address and NULL. Test assertions use the unittest framework so a
+failed check reports a test failure instead of panicking the kernel.

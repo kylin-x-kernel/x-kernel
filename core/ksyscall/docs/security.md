@@ -175,3 +175,12 @@ libc-wide synchronization is a separate userspace responsibility. A caller
 that dropped its UID cannot update a peer retaining another UID solely because
 they share a process. The same-group raw-setuid regression checks peer IDs,
 EPERM and unchanged scheduler metadata, then restores caller credentials.
+
+## Optional time-query output and query-only clocks
+
+A NULL gettimeofday timeval skips all user access and clock sampling. A
+non-NULL timeval still uses the checked user-copy boundary. clock_settime
+rejects query-only clocks before user memory is read or the privileged setter
+is entered; rejecting CLOCK_REALTIME_COARSE does not relax any authorization
+for CLOCK_REALTIME. No unsafe operations, lock changes or additional privileges
+are introduced.
