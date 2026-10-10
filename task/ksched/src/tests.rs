@@ -236,6 +236,30 @@ fn eevdf_nice_change_queued_and_running() {
 }
 
 #[def_test]
+fn eevdf_queued_nice_change_preserves_weighted_vruntime() {
+    let mut s = sched();
+    let a = task(1);
+    let b = task(2);
+    a.set_vruntime_for_test(1_000_000);
+    b.set_vruntime_for_test(3_000_000);
+    s.fair_mut().inject_ready_for_test(a.clone());
+    s.fair_mut().inject_ready_for_test(b.clone());
+    assert!(s.fair_mut().ready_indices_valid_for_test());
+    for nice in [10, -5, 0] {
+        assert!(s.set_attr(&a, nice_attr(nice), 0).is_ok());
+        assert!(s.fair_mut().ready_indices_valid_for_test());
+        let weight = i64::from(Nice::new(nice).unwrap().weight());
+        let expected = (1_000_000_i64 * weight + 3_000_000 * 1024) / (weight + 1024);
+        assert_eq!(s.fair_mut().avg_vruntime_for_test(None), expected);
+    }
+    assert!(s.dequeue(&a, 0).is_some());
+    assert!(s.fair_mut().ready_indices_valid_for_test());
+    assert_eq!(s.fair_mut().avg_vruntime_for_test(None), 3_000_000);
+    assert!(s.dequeue(&b, 0).is_some());
+    assert!(s.fair_mut().ready_indices_valid_for_test());
+}
+
+#[def_test]
 fn eevdf_steal_fair_only() {
     let mut s = sched();
     let fair = task(1);

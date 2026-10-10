@@ -80,6 +80,10 @@ Fair 的放置与插件 EEVDF 对齐：`vruntime = V - lag`，离树的 runner �
 入队。Idle 的 `has_runnable` 恒为真，所以 `pick_next` 在 Fair 为空时落到
 idle，不会返回空。
 
+排队 Fair 任务修改 nice 时，`Scheduler::set_attr` 已写入新权重。
+`attr_changed` 必须按旧 nice 对应的入队权重扣除 `total_weight` / `sum_wv`，
+再按新权重重新入队；整个过程在同一 RQ 锁内完成。运行任务离树，不走这条扣账路径。
+
 Stop / Deadline 只占秩。`SchedAttr::validate` 拒绝 Deadline。FIFO/RR
 要求优先级 `1..=99`，Fair 策略必须带 `RtPrio::NONE`。Idle 任务拒绝
 `set_attr`（`KernelClassImmutable`）。

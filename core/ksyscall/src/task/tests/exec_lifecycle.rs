@@ -18,7 +18,8 @@ use kprocess::{
     ProcessForkConfig,
 };
 use ksignal::{SignalAction, SignalDisposition, SignalInfo, SignalSet, SignalStack, Signo};
-use ktask::TaskInner;
+use ktask::{TaskInner, WaitQueue};
+use ktime_types::TimeSpan;
 use kvfs::{
     DirMapping, FileSystemType, Mount, NodeFlags, NodePermission, Path, SimpleDir, SimpleFile,
     SimpleFs, VfsInode,
@@ -109,6 +110,7 @@ impl Retirement {
 
 struct PeerSwitch {
     stage: Arc<AtomicUsize>,
+    empty_acknowledgement: WaitQueue,
     cpu: usize,
     target_cpu: Option<usize>,
 }
@@ -355,7 +357,16 @@ impl ExecProbe {
         }
         // Release/acquire orders the peer's user-memory check before resumption.
         switch.stage.store(EMPTY_READY, Ordering::Release);
-        bounded_wait(|| switch.stage.load(Ordering::Acquire) == EMPTY_ACKNOWLEDGED);
+        // The parent must observe a real blocked interval. Periodic polling
+        // makes that interval transient and can stay in phase with its poll.
+        assert!(
+            !switch
+                .empty_acknowledgement
+                .wait_timeout_until(TimeSpan::from_secs(5), || {
+                    switch.stage.load(Ordering::Acquire) == EMPTY_ACKNOWLEDGED
+                }),
+            "exec activation peer acknowledgement timeout"
+        );
         assert_eq!(khal::percpu::this_cpu_id().as_usize(), switch.cpu);
         assert_eq!(check_current_root(Some(self.sentinel_addr)), root);
         if self.should_fail_after_exchange() {
@@ -822,6 +833,7 @@ fn run_case_with_session(
     let child_success = has_live_success.clone();
     let switch = Arc::new(PeerSwitch {
         stage: Arc::new(AtomicUsize::new(0)),
+        empty_acknowledgement: WaitQueue::new(),
         cpu,
         target_cpu,
     });
@@ -857,6 +869,9 @@ fn run_case_with_session(
         assert_eq!(sentinel.read(), 0x1234);
         sentinel.write(0x1234);
         switch.stage.store(acknowledged, Ordering::Release);
+        if acknowledged == EMPTY_ACKNOWLEDGED {
+            switch.empty_acknowledgement.notify_one(false);
+        }
     };
     if let Some(retirement) = &retirement {
         retirement.block_release_and_queue_signals(&child, sentinel_addr);

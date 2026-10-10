@@ -167,6 +167,7 @@ IRQ/preempt 约束提供。
 - [ ] 单测是否覆盖五种 disposition 与 pick-without-leave。
 - [ ] `steal_ready_task` 是否走 `remove_task` 且不安装 `curr`。
 - [ ] EEVDF 双树和最早缓存是否一致，所有改键是否先摘树。
+- [ ] 排队任务改 nice 是否先扣除旧权重贡献，再按新权重入队；摘除后是否无残账。
 - [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
 - [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
 - [ ] 未接线 class（Stop / Deadline）的用户策略是否仍被 `validate` 拒绝。

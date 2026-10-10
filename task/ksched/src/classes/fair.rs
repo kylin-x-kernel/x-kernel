@@ -361,6 +361,15 @@ impl<T> FairClass<T> {
     }
 
     fn dequeue_entity(&mut self, key: DeadlineKey, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+        self.dequeue_entity_with_weight(key, None, tok)
+    }
+
+    fn dequeue_entity_with_weight(
+        &mut self,
+        key: DeadlineKey,
+        queued_weight: Option<i64>,
+        tok: RqLocked,
+    ) -> Option<Arc<SchedTask<T>>> {
         let mut cursor = self.ready.find_mut(&key);
         let task = cursor.remove()?;
         if self
@@ -371,7 +380,7 @@ impl<T> FairClass<T> {
             self.first_deadline = cursor.as_cursor().clone_pointer();
         }
         let id = task.fair().tree_id.get(tok);
-        let weight = Self::weight(&task, tok);
+        let weight = queued_weight.unwrap_or_else(|| Self::weight(&task, tok));
         let vruntime = task.fair().vruntime.get(tok);
         let mut cursor = self.vruntime_tree.find_mut(&(vruntime, id));
         assert!(
@@ -830,7 +839,11 @@ impl<T> ClassOps<T> for FairClass<T> {
             Self::rescale_vlag(task, old_weight, tok);
             return;
         }
-        if let Some(removed) = self.dequeue_entity(Self::deadline_key(task, tok), tok) {
+        // set_attr has already published the new weight; the tree still owns
+        // the old contribution until this dequeue completes under the RQ lock.
+        if let Some(removed) =
+            self.dequeue_entity_with_weight(Self::deadline_key(task, tok), Some(old_weight), tok)
+        {
             Self::rescale_deadline(&removed, old_weight, tok);
             self.enqueue_tree(removed, None, tok);
         }
