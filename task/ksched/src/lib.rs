@@ -10,11 +10,11 @@ mod clock;
 mod config;
 mod entity;
 mod policy;
+mod ready_list;
 mod scheduler;
-/// Kernel unit tests for Fair/Idle arbitration and EEVDF.
+/// Kernel unit tests for Fair, RT, and Idle arbitration.
 ///
-/// Stop, Deadline, and RT cases stay on `refactor_ksched` until those
-/// classes are wired here.
+/// Stop and Deadline stay unwired. Deadline `set_attr` is rejected.
 #[unittest::mod_test]
 mod tests {
     include!("tests.rs");
@@ -24,7 +24,9 @@ extern crate alloc;
 
 pub use class::{Decision, EnqueueKind, LeaveReason, UpdateKind};
 pub use clock::RqClock;
-pub use config::DEFAULT_SLICE_NS;
+pub use config::{
+    DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS, DEFAULT_SLICE_NS,
+};
 pub use entity::{KernelClass, SchedTask};
-pub use policy::{Nice, SchedAttr, SchedClass, SchedError, SchedPolicy};
+pub use policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use scheduler::Scheduler;

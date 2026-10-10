@@ -57,6 +57,15 @@ fn main() {
         if !config_content.contains("SCHED_FAIR_REQUEST_US") {
             config_content.push_str("\npub const SCHED_FAIR_REQUEST_US: usize = 2000;\n");
         }
+        if !config_content.contains("SCHED_RR_SLICE_US") {
+            config_content.push_str("\npub const SCHED_RR_SLICE_US: usize = 100000;\n");
+        }
+        if !config_content.contains("SCHED_RT_PERIOD_US") {
+            config_content.push_str("\npub const SCHED_RT_PERIOD_US: usize = 1000000;\n");
+        }
+        if !config_content.contains("SCHED_RT_RUNTIME_US") {
+            config_content.push_str("\npub const SCHED_RT_RUNTIME_US: usize = 950000;\n");
+        }
         if !config_content.contains("ENTROPY_PHYTIUM_TRNG_PADDR") {
             config_content.push_str("\npub const ENTROPY_PHYTIUM_TRNG_PADDR: usize = 0;\n");
         }
@@ -79,7 +88,9 @@ fn main() {
         fs::write(
             &config_rs_path,
             "// No config.rs generated yet\npub const SEV_CBIT_POS: u32 = 0;\npub const \
-             SCHED_FAIR_REQUEST_US: usize = 2000;\npub const KFEAT_ENTROPY_ARCH_CPU: bool = \
+             SCHED_FAIR_REQUEST_US: usize = 2000;\npub const SCHED_RR_SLICE_US: usize = \
+             100000;\npub const SCHED_RT_PERIOD_US: usize = 1000000;\npub const \
+             SCHED_RT_RUNTIME_US: usize = 950000;\npub const KFEAT_ENTROPY_ARCH_CPU: bool = \
              false;\npub const KFEAT_ENTROPY_SMCCC_TRNG: bool = false;\npub const \
              KFEAT_ENTROPY_JITTER: bool = false;\npub const KFEAT_DRIVER_VIRTIO_RNG: bool = \
              false;\n",

@@ -6,7 +6,7 @@
 ktask RunQueue（生产调用方）
    │  持有 RQ 锁后调用 Scheduler
    v
-Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
+Stop / Deadline（未接线） -> RT FIFO/RR -> Fair EEVDF -> Idle
 ```
 
 - 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经
@@ -16,7 +16,14 @@ Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
   `token()` 里：`ktask` 在持有该 RQ 锁时调用这些方法。
   `init_attr_unpublished` 仍是 `pub(crate)`，只适用于尚未发布、由创建者独占
   的任务。本 crate 不检查锁本身。
-- 调度器信任传入的任务状态已由调用方校验。用户策略只经 `SchedAttr::validate`。
+- 调度器信任传入的任务状态已由调用方校验。本 crate 只通过
+  `SchedAttr::validate` 检查结构：FIFO/RR 的优先级必须在 `1..=99`。
+  凭据校验不在这里做。调用 `set_attr` 放入 RT 之前，调用方必须已经确认
+  调用者具备实时调度权限（Linux `CAP_SYS_NICE`；当前内核用 `euid == 0` 代替）。
+  现在的 `sys_sched_setscheduler` 只校验 policy 和 priority 的取值，然后把
+  结果写进线程快照，既不查权限，也不调用 `Scheduler::set_attr`，所以非特权
+  进程可以让这次系统调用返回 0，但任务不会进入 `RtClass`。接线时如果漏掉
+  权限检查，FIFO 99 就能一直抢在全部 Fair 任务前面。
 
 ## 外部边界 / 攻击面
 
@@ -29,14 +36,15 @@ Stop / Deadline / RT（未接线） -> Fair EEVDF -> Idle
 
 各算法实现主要依赖安全集合/`Arc`。FIFO/RR 的 unsafe 集中在 ready_list：
 ReadyItem 声明具体字段偏移，ReadyAdapter 完成正反指针投影；按实体删除先核对
-非零且永不复用的队列身份，再使用 cursor_mut_from_ptr。不能仅凭 is_linked
+这条 `ReadyList` 的地址，再使用 cursor_mut_from_ptr。不能仅凭 is_linked
 判断属于本队列。源队列独占借用阻止检查到摘除之间发生本队列修改。
 
-owner 只在库成功取得链接后写入，并在库释放链接之前清零。错误队列删除返回
-None；重复入队由 AtomicLink 拒绝，不覆盖 owner。队列移动不改变身份，Drop
-清除所有归属及拥有的 Arc。编号耗尽明确 panic，不复用身份造成误删。
+已经链接的任务不会改写 owner。未链接的先记下本链表地址再入链，并在库
+释放链接之前清零。错误队列删除返回 None。运行队列公布之后，含有
+节点的链表对象不能再移动，否则地址不再等于 owner。Drop 清除所有归属及
+拥有的 Arc。
 owner 不是链表同步锁；Relaxed 足够用于身份检查，同一队列的操作已有独占访问，
-其他队列只能写其自身身份或零，不能伪造本队列身份。跨队列取得链接依赖库的
+其他队列只能写其自身地址或零，不能伪造本队列地址。跨队列取得链接依赖库的
 原子链接操作。所有链接和身份字段均不公开，不添加手写 Send/Sync。
 
 steal 的临时 Arc 视图是额外的原始所有权指针审计点：指针来自游标 get_ptr，
@@ -65,8 +73,26 @@ EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T
 
 `RqCell` 的 `get` / `set` 是 `UnsafeCell` 读写。读要求指针有效、值已初始化、
 无并发写；写还要求独占。这三件事都由 `RqLocked` 加上 `new`/`set` 的完整 `Copy`
-值保证。`seat` 与 `attr`、Fair 虚拟时间字段走同一套令牌。`class` 仍是
-`AtomicU8`，给无锁的 `sched_class()` 读。
+值保证。`seat`、`attr`、Fair 虚拟时间和 `rr_left_ns` 走同一套令牌。
+
+`class` 与 `rt_prio` 是 `AtomicU8`。`sched_class()` / `rt_priority_snapshot()`
+用 Acquire，配对 `set_class` / `store_rt_prio` 的 Release，给不持 RQ 锁的选核
+读。`seat` 仍走 `RqCell`，只在锁下读。
+
+RT 按地址摘除在 `ready_list`。`ReadyItem` 给出 `ReadyLinks` 的字段偏移，
+`ReadyAdapter` 用同一偏移做正反投影。摘除先核对归属字是否等于这条链表的
+地址，再调用 `cursor_mut_from_ptr`。不能只凭 `is_linked` 判断属于本队列。
+队列的独占借用盖住从检查到摘除的窗口。
+
+已经链接的任务不会改写归属。未链接的先记下本链表地址再入链，并在库释放
+链接之前清零。错误队列删除返回
+`None`；重复入队由 `AtomicLink` 拒绝，不覆盖归属。`Drop` 逐个摘除并清归属。
+归属不是链表锁；Relaxed 足够，因为同一条链表的操作已经独占，别的链表只能
+写自己的地址或零。
+
+steal 用游标 `get_ptr` 构造 `ManuallyDrop<Arc<_>>`，不经 `&T` 再向前恢复
+`Arc` 头。链表仍持有原来的强引用。谓词只拿到 `&Arc`。命中后 `cursor.remove`
+转交那份 `Arc`，临时视图不再使用。
 
 ## 内存安全不变量
 
@@ -79,6 +105,9 @@ EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T
 6. 两棵 EEVDF 树成员相同；挂树期间排序字段不变。修改优先级先摘两树再更新。
 7. 按实体摘除先核对键与指针身份，不用 is_linked 推断属于本树；错误队列中的
    set_priority 不得修改挂在别处的实体。重复入队为调用方契约错误，链接断言会拒绝。
+8. RT 任务同一时刻只挂在一条优先级链表上。归属字等于该链表的身份。摘除
+   失败不得减少 `queued`。节流期间任务仍可留在链表里，但 `has_runnable`
+   为假，`pick_next` 不得选出它们。
 
 ## 线程安全
 
@@ -111,7 +140,7 @@ IRQ/preempt 约束提供。
 ## 故障管理
 
 - 契约破坏优先 `assert!`（编程错误，不应静默恢复）。
-- 优先级越界返回 `false`，由上层决定是否向用户返回错误。
+- 用户策略不合法时 `SchedAttr::validate` 返回 `SchedError`，由 `ktask` 传给调用方。
 
 ## 隐私分析
 
@@ -119,9 +148,14 @@ IRQ/preempt 约束提供。
 
 ## 已知限制
 
-- CFS 在 `ktask` feature 接线仍指向历史 `axsched` 名称时不可用；算法本体在本 crate。
-- `Scheduler` 尚未替换 `ktask` 的 `BaseScheduler`。Stop、Deadline、RT 没有队列，
-  对应 `sched_setscheduler` 策略在 `SchedAttr::validate` 被拒绝。
+- Stop 与 Deadline 没有队列。`SCHED_DEADLINE` 在 `SchedAttr::validate` 被拒绝。
+- `sched_setscheduler` 尚未把 FIFO/RR 送进 `RtClass`，也没有
+  `CAP_SYS_NICE` 检查。接线前必须先补上，否则非特权调用者可以长期占住 CPU。
+- `SCHED_RESET_ON_FORK` 能通过策略字校验并记在线程快照里，fork 尚未按该标志
+  把子任务打回 `SCHED_NORMAL`。
+- RT 带宽按每个 RQ 计算，没有跨 CPU 的根域带宽池。本 RQ 节流后不再
+  `pick_next` 这些任务，但 idle-pull 仍可把它们摘到另一颗 CPU，改记那颗
+  CPU 的 runtime。跨 CPU 选核尚未接入，没有 Linux `cpupri` push/pull。
 
 ## 审计清单
 
@@ -135,4 +169,5 @@ IRQ/preempt 约束提供。
 - [ ] EEVDF 双树和最早缓存是否一致，所有改键是否先摘树。
 - [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
 - [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
-- [ ] 未接线 class 的用户策略是否仍被 `validate` 拒绝。
+- [ ] 未接线 class（Stop / Deadline）的用户策略是否仍被 `validate` 拒绝。
+- [ ] RT 摘除是否先核对队列身份，再 `cursor_mut_from_ptr`。

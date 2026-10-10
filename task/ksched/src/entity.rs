@@ -12,7 +12,10 @@ use core::{
 
 use intrusive_collections::RBTreeAtomicLink;
 
-use crate::policy::{Nice, SchedAttr, SchedClass, SchedError};
+use crate::{
+    policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy},
+    ready_list::{ReadyItem, ReadyLinks},
+};
 
 /// Zero-sized token: RQ-protected fields may be read or written.
 ///
@@ -148,6 +151,26 @@ pub(crate) struct FairEntity {
     pub(crate) vruntime_link: RBTreeAtomicLink,
 }
 
+/// FIFO/RR leftover quantum. Present on every task so a class switch does not allocate.
+pub(crate) struct RtEntity {
+    /// Nanoseconds left in the current `SCHED_RR` quantum.
+    pub rr_left_ns: RqCell<u64>,
+    /// This task's quantum expired with a same-priority waiter waiting.
+    ///
+    /// The next preempt of this task goes to the tail. Stored on the task so a
+    /// class switch cannot leave the flag for a later RT runner.
+    pub rr_rotate: RqCell<bool>,
+}
+
+impl RtEntity {
+    const fn new(rr_slice_ns: u64) -> Self {
+        Self {
+            rr_left_ns: RqCell::new(rr_slice_ns),
+            rr_rotate: RqCell::new(false),
+        }
+    }
+}
+
 impl FairEntity {
     const fn new(request_ns: u64) -> Self {
         Self {
@@ -183,9 +206,16 @@ impl KernelClass {
 pub struct SchedTask<T> {
     inner: T,
     class: AtomicU8,
+    /// Lock-free RT priority for CPU placement. `0` when not RT.
+    rt_prio: AtomicU8,
     seat: RqCell<QueueSeat>,
     attr: RqCell<SchedAttr>,
+    /// `fair.rs` names this field in `offset_of!`. Other reads go through [`Self::fair`].
     pub(crate) fair: FairEntity,
+    rt: RtEntity,
+    /// Intrusive FIFO link for one RT priority list. Detached while the task
+    /// is not queued on RT.
+    rt_links: ReadyLinks,
 }
 
 impl<T> SchedTask<T> {
@@ -203,9 +233,12 @@ impl<T> SchedTask<T> {
         Self {
             inner,
             class: AtomicU8::new(class.as_u8()),
+            rt_prio: AtomicU8::new(attr.rt_priority.get()),
             seat: RqCell::new(QueueSeat::Detached),
             attr: RqCell::new(attr),
             fair: FairEntity::new(crate::DEFAULT_SLICE_NS),
+            rt: RtEntity::new(crate::DEFAULT_RR_SLICE_NS),
+            rt_links: ReadyLinks::new(),
         }
     }
 
@@ -220,6 +253,15 @@ impl<T> SchedTask<T> {
         SchedClass::from_u8(self.class.load(Ordering::Acquire))
     }
 
+    /// Live FIFO/RR priority, or `0` when this task is not RT.
+    ///
+    /// Acquire pairs with the Release store in [`Self::set_attr`] /
+    /// [`Self::init_attr_unpublished`] so CPU selection can compare against a
+    /// remote run queue without that scheduler lock.
+    pub fn rt_priority_snapshot(&self) -> u8 {
+        self.rt_prio.load(Ordering::Acquire)
+    }
+
     /// `true` when this task is the per-CPU idle class.
     pub fn is_idle_class(&self) -> bool {
         self.sched_class() == SchedClass::Idle
@@ -232,8 +274,8 @@ impl<T> SchedTask<T> {
     /// Returns the first [`SchedAttr::validate`] failure.
     #[expect(
         dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: ktask still publishes tasks through the \
-                  plugin schedulers"
+        reason = "CG-024-lint-exceptions: dead_code: ktask does not publish a non-Fair SchedAttr \
+                  until sched_* calls set_attr"
     )]
     pub(crate) fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
         attr.validate()?;
@@ -242,6 +284,7 @@ impl<T> SchedTask<T> {
         let tok = unsafe { RqLocked::assume() };
         self.attr.set(attr, tok);
         self.fair.weight.set(attr.nice.weight(), tok);
+        self.store_rt_prio(attr);
         self.class.store(attr.class().as_u8(), Ordering::Release);
         Ok(())
     }
@@ -257,6 +300,16 @@ impl<T> SchedTask<T> {
     pub(crate) fn set_attr(&self, attr: SchedAttr, tok: RqLocked) {
         self.attr.set(attr, tok);
         self.fair.weight.set(attr.nice.weight(), tok);
+        self.store_rt_prio(attr);
+    }
+
+    fn store_rt_prio(&self, attr: SchedAttr) {
+        let prio = if attr.policy.is_realtime() {
+            attr.rt_priority.get()
+        } else {
+            0
+        };
+        self.rt_prio.store(prio, Ordering::Release);
     }
 
     pub(crate) fn set_class(&self, class: SchedClass, _tok: RqLocked) {
@@ -273,6 +326,28 @@ impl<T> SchedTask<T> {
 
     pub(crate) fn fair(&self) -> &FairEntity {
         &self.fair
+    }
+
+    pub(crate) fn rt(&self) -> &RtEntity {
+        &self.rt
+    }
+
+    pub(crate) fn policy(&self, tok: RqLocked) -> SchedPolicy {
+        self.attr.get(tok).policy
+    }
+
+    pub(crate) fn rt_priority(&self, tok: RqLocked) -> RtPrio {
+        self.attr.get(tok).rt_priority
+    }
+}
+
+// SAFETY: `OFFSET` is the private `rt_links` field. Only `ReadyList` reads
+// that link and its owner word, and only while the owning RQ lock is held.
+unsafe impl<T> ReadyItem for SchedTask<T> {
+    const OFFSET: usize = core::mem::offset_of!(Self, rt_links);
+
+    fn ready_links(&self) -> &ReadyLinks {
+        &self.rt_links
     }
 }
 

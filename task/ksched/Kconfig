@@ -8,4 +8,30 @@ config SCHED_FAIR_REQUEST_US
       Default wall-clock request assigned to a Fair task on first
       enqueue. Virtual deadline uses this length. Default 2 000 (2 ms).
 
+config SCHED_RR_SLICE_US
+    usize "SCHED_RR time quantum (microseconds)"
+    range 1000 1000000
+    default 100000
+    help
+      How long a SCHED_RR task may run at its priority before rotating
+      to the tail of that level. Default 100 000 (100 ms).
+
+config SCHED_RT_PERIOD_US
+    usize "RT bandwidth period (microseconds)"
+    range 1000 10000000
+    default 1000000
+    help
+      Length of the RT class throttle window. Paired with
+      SCHED_RT_RUNTIME_US. Default 1 000 000 (1 s).
+
+config SCHED_RT_RUNTIME_US
+    usize "RT bandwidth runtime per period (microseconds)"
+    range 0 10000000
+    default 950000
+    help
+      How much CPU the whole RT class may consume in each
+      SCHED_RT_PERIOD_US window before it is throttled so Fair can
+      run. Values above the period are clamped to the period.
+      Default 950 000 (0.95 s). Zero throttles RT immediately.
+
 endmenu

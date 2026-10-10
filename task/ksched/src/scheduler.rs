@@ -4,10 +4,11 @@
 
 //! Class arbitrator. `ktask` drives this type on the production path.
 //!
-//! [`Scheduler`] owns the five class ranks and the runner `Arc`. Stop,
-//! Deadline, and RT are rank slots: `pick_next` returns [`None`] and
-//! `enqueue` panics. Fair is EEVDF. Idle is the lowest rank, so a finished
-//! pick never returns [`None`]. Every public method takes an absolute
+//! [`Scheduler`] owns the five class ranks and the runner `Arc`. Stop and
+//! Deadline are rank slots: `pick_next` returns [`None`] and `enqueue`
+//! panics. RT is fixed-priority FIFO/RR. Fair is EEVDF. Idle is the lowest
+//! rank, so a finished pick never returns [`None`]. Every public method takes
+//! an absolute
 //! `now_ns`, advances [`RqClock`], and returns a [`Decision`] when the
 //! caller may need to reschedule or reprogram a timer. This crate does not
 //! sample the clock, hold the RQ lock, or switch stacks.
@@ -17,7 +18,7 @@ use core::marker::PhantomData;
 
 use crate::{
     class::{ClassOps, Decision, EnqueueKind, LeaveReason, UpdateKind},
-    classes::{FairClass, IdleClass},
+    classes::{FairClass, IdleClass, RtClass},
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
     policy::{SchedAttr, SchedClass, SchedError},
@@ -175,7 +176,7 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 pub(crate) struct ClassSet<T> {
     stop: UnwiredClass<T>,
     deadline: UnwiredClass<T>,
-    rt: UnwiredClass<T>,
+    rt: RtClass<T>,
     fair: FairClass<T>,
     idle: IdleClass<T>,
 }
@@ -234,7 +235,7 @@ impl<T> Scheduler<T> {
             classes: ClassSet {
                 stop: UnwiredClass::new(SchedClass::Stop),
                 deadline: UnwiredClass::new(SchedClass::Deadline),
-                rt: UnwiredClass::new(SchedClass::Rt),
+                rt: RtClass::new(),
                 fair: FairClass::new(),
                 idle: IdleClass::new(idle),
             },
@@ -449,7 +450,7 @@ impl<T> Scheduler<T> {
         self.classes.get_mut(class).dequeue(task, curr, &clock, tok)
     }
 
-    /// Idle-pull source: steal one Fair waiter that matches `want`.
+    /// Idle-pull source: steal one RT waiter, then one Fair waiter, that matches `want`.
     pub fn steal(
         &mut self,
         want: &mut dyn FnMut(&SchedTask<T>) -> bool,
@@ -458,6 +459,10 @@ impl<T> Scheduler<T> {
         let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         let clock = self.clock;
+        let rt_curr = Self::curr_for(&self.curr, SchedClass::Rt);
+        if let Some(task) = self.classes.rt.steal(want, rt_curr, &clock, tok) {
+            return Some(task);
+        }
         let fair_curr = Self::curr_for(&self.curr, SchedClass::Fair);
         self.classes.fair.steal(want, fair_curr, &clock, tok)
     }
@@ -520,7 +525,8 @@ impl<T> Scheduler<T> {
     ///
     /// # Errors
     ///
-    /// Returns the first [`SchedAttr::validate`] failure.
+    /// Returns the first [`SchedAttr::validate`] failure, including
+    /// [`SchedError::InvalidPriority`] for a bad FIFO/RR priority.
     ///
     /// Returns [`SchedError::KernelClassImmutable`] when `task` is Idle.
     ///

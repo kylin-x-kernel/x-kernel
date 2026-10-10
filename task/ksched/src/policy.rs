@@ -7,8 +7,8 @@
 /// Kernel dispatch class for a scheduled task.
 ///
 /// Rank is Linux order: Stop, Deadline, RT, Fair, Idle. Smaller
-/// discriminant wins. Only Fair and Idle have class operations today;
-/// the other ranks are reserved so later PRs can plug in without
+/// discriminant wins. Fair, RT, and Idle have class operations. Stop and
+/// Deadline keep their ranks so a later PR can plug them in without
 /// renumbering.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -17,7 +17,7 @@ pub enum SchedClass {
     Stop     = 0,
     /// `SCHED_DEADLINE`. Not admitted until a Deadline class exists.
     Deadline = 1,
-    /// `SCHED_FIFO` / `SCHED_RR`. Not admitted until an RT class exists.
+    /// `SCHED_FIFO` / `SCHED_RR`.
     Rt       = 2,
     /// `SCHED_NORMAL` / `SCHED_BATCH` / `SCHED_IDLE`.
     Fair     = 3,
@@ -55,8 +55,8 @@ impl SchedClass {
 
 /// Linux `SCHED_*` values.
 ///
-/// FIFO, RR, and Deadline decode and map to a class, but
-/// [`SchedAttr::validate`] still rejects them until those classes are wired.
+/// FIFO and RR decode onto the RT class. Deadline decodes onto its rank,
+/// but [`SchedAttr::validate`] still rejects it until that class is wired.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedPolicy {
@@ -100,6 +100,43 @@ impl SchedPolicy {
             Self::Deadline => SchedClass::Deadline,
             Self::Normal | Self::Batch | Self::Idle => SchedClass::Fair,
         }
+    }
+
+    /// `true` for `SCHED_FIFO` and `SCHED_RR`.
+    pub const fn is_realtime(self) -> bool {
+        matches!(self, Self::Fifo | Self::Rr)
+    }
+}
+
+/// `SCHED_FIFO` / `SCHED_RR` priority. Larger wins. Non-RT is [`Self::NONE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RtPrio(u8);
+
+impl RtPrio {
+    /// Highest valid RT priority. Same bound as `config::MAX_RT_PRIORITY`.
+    pub const MAX: RtPrio = RtPrio(crate::config::MAX_RT_PRIORITY);
+    /// Lowest valid RT priority. Same bound as `config::MIN_RT_PRIORITY`.
+    pub const MIN: RtPrio = RtPrio(crate::config::MIN_RT_PRIORITY);
+    /// Not a realtime task.
+    pub const NONE: RtPrio = RtPrio(0);
+
+    /// Validate a user RT priority (`1..=99`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedError::InvalidPriority`] when `v` is outside `1..=99`.
+    /// [`Self::NONE`] (`0`) is the non-RT sentinel and is not accepted here.
+    pub const fn new(v: i32) -> Result<Self, SchedError> {
+        if v < Self::MIN.get() as i32 || v > Self::MAX.get() as i32 {
+            Err(SchedError::InvalidPriority)
+        } else {
+            Ok(RtPrio(v as u8))
+        }
+    }
+
+    /// Stored priority byte.
+    pub const fn get(self) -> u8 {
+        self.0
     }
 }
 
@@ -181,8 +218,10 @@ const _: () = assert!(NICE_TO_WEIGHT[20] as i64 == NICE_0_WEIGHT);
 pub struct SchedAttr {
     /// Linux `sched_policy`.
     pub policy: SchedPolicy,
-    /// Fair weight source. Kept so a later nice change can rescale lag.
+    /// Fair weight source. Kept so a later return to Fair restores it.
     pub nice: Nice,
+    /// [`RtPrio::NONE`] unless [`SchedPolicy::is_realtime`].
+    pub rt_priority: RtPrio,
 }
 
 impl SchedAttr {
@@ -190,6 +229,7 @@ impl SchedAttr {
     pub const DEFAULT: SchedAttr = SchedAttr {
         policy: SchedPolicy::Normal,
         nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
     };
 
     /// Dispatch class implied by [`Self::policy`].
@@ -197,12 +237,36 @@ impl SchedAttr {
         self.policy.class()
     }
 
-    /// Only Fair policies are admitted until other classes are wired.
+    /// Structural consistency for the policies this layer admits.
+    ///
+    /// FIFO and RR require an RT priority in `1..=99`. Fair policies must
+    /// carry [`RtPrio::NONE`]. Deadline is still rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedError::InvalidPolicy`] for [`SchedPolicy::Deadline`].
+    ///
+    /// Returns [`SchedError::InvalidPriority`] when FIFO/RR is outside
+    /// `1..=99`, or when a Fair policy carries a non-[`RtPrio::NONE`] priority.
     pub const fn validate(&self) -> Result<(), SchedError> {
-        if matches!(self.class(), SchedClass::Fair) {
-            Ok(())
-        } else {
-            Err(SchedError::InvalidPolicy)
+        match self.policy {
+            SchedPolicy::Fifo | SchedPolicy::Rr => {
+                if self.rt_priority.get() < RtPrio::MIN.get()
+                    || self.rt_priority.get() > RtPrio::MAX.get()
+                {
+                    Err(SchedError::InvalidPriority)
+                } else {
+                    Ok(())
+                }
+            }
+            SchedPolicy::Deadline => Err(SchedError::InvalidPolicy),
+            SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
+                if self.rt_priority.get() != RtPrio::NONE.get() {
+                    Err(SchedError::InvalidPriority)
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -212,6 +276,8 @@ impl SchedAttr {
 pub enum SchedError {
     /// Unknown or unsupported `SCHED_*` value.
     InvalidPolicy,
+    /// RT priority outside `1..=99`, or a non-RT attr carries a priority.
+    InvalidPriority,
     /// Nice outside `-20..=19`.
     InvalidNice,
     /// Idle tasks are not user-modifiable.

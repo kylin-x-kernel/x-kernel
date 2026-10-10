@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
-use ksched::{Decision, EnqueueKind, Nice, SchedAttr, SchedPolicy, UpdateKind};
+use ksched::{Decision, EnqueueKind, Nice, RtPrio, SchedAttr, SchedPolicy, UpdateKind};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
@@ -605,6 +605,7 @@ impl RunQueue {
         let attr = SchedAttr {
             policy: SchedPolicy::Normal,
             nice,
+            rt_priority: RtPrio::NONE,
         };
         self.with_sched(|s| s.set_attr(task, attr, now_ns)).ok()
     }
