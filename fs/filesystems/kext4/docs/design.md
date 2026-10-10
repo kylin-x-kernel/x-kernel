@@ -289,16 +289,26 @@ VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。�
 这保证 durability，但可能连带提交无关 inode 的 metadata。待共享 VFS runtime inode 接口具备
 后，再实现目标 transaction 等待；不能重新引入按 inode number 索引的 mount-wide cursor map。
 `syncfs` 和 KVFS unmount writeback 仍提交 running transaction 并 drain 全部 checkpoint。
-当前 ordered-data dependency 是同步基线：数据块写入发生在使其可达的 metadata transaction
-完成之前。PageCache 仍以固定上限聚合 folio；dirty range 的必需数据块已由 `write_begin` 或
+当前 ordered-data dependency 记录在 running transaction 的 `has_unflushed_ordered_data` 中：
+发布 metadata 的 writeback batch 在成功的数据 write 后设置该位，多个 PageCache batch 和 inode 可以共享同一事务。普通 batch
+结束只更新内存 metadata，不单独 flush；freeze 把依赖位带入 committing phase，persist 在
+任何 recovery evidence 或 journal write 之前统一 flush，成功后才清除依赖并继续提交。
+因此 writeback 完成不代表当前事务的数据已持久化；inode/filesystem sync 或容量压力提交提供
+持久化边界。metadata-only transaction 不增加数据 flush。仅覆盖已映射且不超过 `i_disksize`
+的数据在 data-only 路径不加入 metadata 事务；inode sync 提交已有事务时的同设备 journal flush，
+或无事务时的直接设备 flush，以及 filesystem sync 的最终 flush，保证同步返回时的数据持久化。
+该路径不承诺覆盖内容先于无关事务的 commit record 持久化。`flush_ordered_data` 把设备 barrier
+与依赖清除封装在同一入口：成功才清除，失败保留；barrier 期间不持有 journal/transaction 内部锁，
+调用者仍须持有 mount 写锁串行化数据写入与 commit/checkpoint。
+PageCache 仍以固定上限聚合 folio；dirty range 的必需数据块已由 `write_begin` 或
 `page_mkwrite` 纳入 delayed-allocation accounting，writeback 不再扫描完整范围生成静态空间/
 credit plan。实际写回由 byte cursor 推进，每处理一个 mapped、unwritten 或 hole allocation run
 都重新调用 `map_blocks()`；unwritten conversion 和 hole allocation/insert/conversion 按实际
 发生的 run 增长 credit usage，并优先通过 `JournalHandle::reserve_more()` 扩展当前 transaction。
 transaction credit limit 只由 journal engine 持有并在 `begin()`/`reserve_more()` 内执行约束，
 file 层不读取或重复解释该上限。若 handle 无法继续扩展，core 先 flush 当前数据、只推进该前缀
-的 `i_disksize`，同步提交 transaction 并精确释放该前缀的 delalloc reservation，再从同一
-cursor 开启下一 transaction。optional preallocation 只使用扣除 reserved blocks 和全部
+的 `i_disksize`，清除本事务已满足的数据依赖，同步提交 transaction 并精确释放该前缀的
+delalloc reservation，再从同一 cursor 开启下一 transaction。optional preallocation 只使用扣除 reserved blocks 和全部
 delalloc reservation 后的可用块，并保存在 cursor 中按 allocator 实际多分配的 block 扣减；
 最后一个 transaction 才发布完整 timestamp/size。异步 dependency 对象和后台 writeback 属于
 后续阶段。
@@ -306,12 +316,14 @@ delalloc reservation 后的可用块，并保存在 cursor 中按 allocator 实�
 operation savepoint、operation token 和 operation-local metadata byte copy 已删除。ext4
 mutation 在首次 metadata access 前完成格式、目标状态、空间、credits 和 extent path
 可表达性检查；allocator 在私有 bitmap/descriptor/superblock bytes 与 free-extent cache 副本上
-完成计算后再发布。JBD2 handle 只维护 credits 和 metadata/revoke membership，显式 stop
+完成计算后再发布。JBD2 handle 维护 credits 和 metadata/revoke membership，并向事务记录
+ordered-data 依赖；显式 stop
 归还未使用 credits 并返回 accounting 错误；journal 自身维护 abort 状态。多个 handle 可独立
-stop。每次成功 metadata/revoke access 都标记当前 handle 已发布更新，即使对应 block 已由
+stop。仅 metadata/revoke access 标记当前 handle 已发布更新，即使对应 block 已由
 同一 running transaction 的前序 handle 加入；transaction membership 一旦发布，就不能由某个 handle
 按路径局部删除，因为其他 handle 可能已共享同一 metadata block；后续 metadata access 失败会
-abort journal。设备/checksum/状态机错误，以及任何发生在 metadata 已发布后的普通错误，同样
+abort journal。数据 I/O 的持久化依赖独立于该标记：metadata access 前的普通错误保留数据依赖，
+允许脏数据重试，不因数据写成功而 abort。设备/checksum/状态机错误，以及任何发生在 metadata 已发布后的普通错误，同样
 会永久 abort；commit 或 checkpoint I/O 失败也在返回错误前记录 abort，后续 sync 和 mutation
 不能把残留的 `committing`/checkpoint state 当作成功。内存中已经发布的 bytes、buffer
 ownership 和其他已成功 operation 的修改不会

@@ -246,8 +246,17 @@ metadata 覆盖 unlink、rmdir、覆盖 rename 和乱序 final eviction；镜像
 KExt4 使用 `Ext4Result` 和 typed `Ext4Error` 表达 corruption、unsupported format、
 out-of-bounds metadata、checksum mismatch、journal credit exhaustion 和 device error。
 日志化修改路径把普通失败前移到首次 metadata access 前；多个 handle 的空失败不会影响同一
-running transaction 中其他修改。metadata 已发布后出现普通错误、设备/checksum/状态机错误或
+running transaction 中其他修改。metadata/revoke 已发布后出现普通错误、设备/checksum/状态机错误或
 handle accounting 错误时会 permanent abort journal，不执行跨 operation 的内存回滚。
+数据 I/O 成功只记录持久化依赖，不标记 handle 已发布 metadata；metadata access 前的普通失败
+保留依赖并允许重试，例如 unwritten extent 转换因树块分配不足返回 `NoSpace`。
+发布 metadata 的 ordered writeback 在设备 I/O 完成后必须设置事务依赖；依赖在 freeze 后保留，commit 在
+任何日志/恢复证据写入前执行一次设备 flush。flush 失败不能清除依赖，也不能进入
+checkpoint phase，必须 abort journal 并向同步调用方报错。此路径仍受 mount 写锁串行保护；
+容量 restart 的显式 flush 成功后才能确认当前全部数据依赖已满足。running/committing 两种
+`flush_ordered_data` 入口内部先 barrier 后清除，不暴露独立清除方法，也不持有事务内部锁执行 I/O。
+data-only 的已映射覆盖写不依赖新 metadata，持久化由 inode sync 的同设备 journal flush 或直接
+flush、filesystem sync 的最终 flush 提供，不承诺先于无关事务的 commit record 持久化。
 Commit/checkpoint failure 会保留 committing 或 pending work 并永久 abort journal，避免静默
 丢失尚未落盘的 metadata；后续 sync 和 mutation 都观察 `JournalAborted`，不能把内存中的
 transaction 当作 durable。多个 pending commit 存在时，完成最老 transaction 只推进 journal

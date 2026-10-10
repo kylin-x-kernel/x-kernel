@@ -50,6 +50,7 @@ struct RunningTransactionState {
     active_handles: u32,
     reserved_credits: u32,
     used_credits: u32,
+    has_unflushed_ordered_data: bool,
     metadata_blocks: BTreeSet<FilesystemBlock>,
     revoked_blocks: BTreeSet<FilesystemBlock>,
 }
@@ -60,6 +61,7 @@ impl RunningTransactionState {
             active_handles: 0,
             reserved_credits: 0,
             used_credits: 0,
+            has_unflushed_ordered_data: false,
             metadata_blocks: BTreeSet::new(),
             revoked_blocks: BTreeSet::new(),
         }
@@ -107,6 +109,7 @@ impl RunningTransactionState {
         FrozenTransactionState {
             reserved_credits: self.reserved_credits,
             used_credits: self.used_credits,
+            has_unflushed_ordered_data: self.has_unflushed_ordered_data,
             metadata_blocks: Arc::from(
                 self.metadata_blocks
                     .into_iter()
@@ -155,6 +158,7 @@ struct JournalInner {
 struct FrozenTransactionState {
     reserved_credits: u32,
     used_credits: u32,
+    has_unflushed_ordered_data: bool,
     metadata_blocks: Arc<[FilesystemBlock]>,
     revoked_blocks: Arc<[FilesystemBlock]>,
 }
@@ -216,6 +220,35 @@ impl RuntimeTransaction {
         Ok(self.frozen_state()?.revoked_blocks)
     }
 
+    /// Returns whether committing metadata still depends on volatile data writes.
+    pub(crate) fn has_unflushed_ordered_data(&self) -> Ext4Result<bool> {
+        let phase = lock(&self.phase);
+        let TransactionPhase::Committing(frozen) = &*phase else {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        };
+        Ok(frozen.has_unflushed_ordered_data)
+    }
+
+    /// Flushes pending ordered data before acknowledging its durability.
+    ///
+    /// The caller serializes commit/checkpoint operations with the mount write
+    /// lock. The barrier runs without the transaction phase lock held.
+    pub(crate) fn flush_ordered_data(
+        &self,
+        barrier_fn: impl FnOnce() -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        if !self.has_unflushed_ordered_data()? {
+            return Ok(());
+        }
+        barrier_fn()?;
+        let mut phase = lock(&self.phase);
+        let TransactionPhase::Committing(frozen) = &mut *phase else {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        };
+        frozen.has_unflushed_ordered_data = false;
+        Ok(())
+    }
+
     fn with_running<R>(
         &self,
         f: impl FnOnce(&mut RunningTransactionState) -> Ext4Result<R>,
@@ -258,7 +291,7 @@ impl RuntimeTransaction {
         let mut phase = lock(&self.phase);
         let current = core::mem::replace(&mut *phase, TransactionPhase::Transitioning);
         match current {
-            TransactionPhase::Committing(frozen) => {
+            TransactionPhase::Committing(frozen) if !frozen.has_unflushed_ordered_data => {
                 *phase = TransactionPhase::Checkpoint { frozen, persisted };
                 Ok(())
             }
@@ -884,6 +917,36 @@ impl<'a> JournalHandle<'a> {
     /// Returns whether this handle has joined metadata or revoke state.
     pub(crate) const fn has_updates(&self) -> bool {
         self.has_updates
+    }
+
+    /// Records successful data I/O whose durability must precede journal commit.
+    ///
+    /// This does not publish metadata or revoke state. An ordinary error before
+    /// metadata access can leave the data dependency pending for a later commit.
+    pub(crate) fn require_ordered_data_flush(&mut self) -> Ext4Result<()> {
+        self.journal.with_running(self.id, |running| {
+            running.has_unflushed_ordered_data = true;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Executes a device-wide barrier and then clears running data dependencies.
+    ///
+    /// The mount write lock excludes concurrent writes while the barrier and this
+    /// acknowledgement run, including writes from other handles in this transaction.
+    /// The barrier runs without journal or transaction locks held. Data dependencies
+    /// remain set when the barrier fails.
+    pub(crate) fn flush_ordered_data(
+        &mut self,
+        barrier_fn: impl FnOnce() -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        self.journal.with_running(self.id, |_| Ok(()))?;
+        barrier_fn()?;
+        self.journal.with_running(self.id, |running| {
+            running.has_unflushed_ordered_data = false;
+            Ok(())
+        })
     }
 
     /// Returns remaining credits local to this handle.

@@ -145,9 +145,10 @@ pub enum Ext4SyncIntent {
 /// Ordered-writeback failure together with its completed byte prefix.
 ///
 /// The prefix is measured from the beginning of the submitted input. Bytes in
-/// that prefix have completed the backing-filesystem transaction boundary and
-/// may be ended as successful PageCache writeback; the remaining suffix must
-/// stay dirty for retry.
+/// that prefix have completed device I/O and their metadata handle, or an
+/// earlier committed transaction restart, and may be ended as successful
+/// PageCache writeback; the remaining suffix must stay dirty for retry. Handle
+/// completion alone does not imply durability until the shared transaction commits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ext4WritebackError {
     completed_bytes: usize,
@@ -213,10 +214,10 @@ impl Ext4SyncIntent {
     }
 }
 
-/// Regular-file metadata to commit after ordered data has reached storage.
+/// Regular-file metadata protected by its transaction's ordered-data barrier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RegularWriteMetadata {
-    /// Commit only the size needed to make flushed data reachable.
+    /// Commit only the size needed to make ordered data reachable.
     SizeOnly,
     /// Commit size and timestamp metadata.
     Full {
@@ -455,6 +456,11 @@ impl Ext4SbInfo {
 
     /// Writes a dirty page-cache range through the ordered-data path.
     ///
+    /// Successful writeback completes device I/O. Batches publishing metadata
+    /// become durable when the shared transaction commits through inode/filesystem
+    /// sync or credit pressure. Data-only mapped overwrites instead rely on the
+    /// device flush performed by inode/filesystem sync, including a journal flush
+    /// when inode sync commits an existing transaction on the same device.
     /// A request may span multiple journal transactions. If a later
     /// transaction fails, [`Ext4WritebackError::completed_bytes`] identifies
     /// the earlier completed prefix so callers only retain or redirty the
@@ -484,6 +490,9 @@ impl Ext4SbInfo {
     /// Writes a dirty page-cache range through the ordered-data path with a
     /// cap on optional preallocation beyond the dirty range itself.
     ///
+    /// Successful writeback completes device I/O. Metadata-publishing batches
+    /// depend on the shared transaction's precommit data barrier; mapped data-only
+    /// overwrites rely on the inode/filesystem sync device flush.
     /// A request may span multiple journal transactions. If a later
     /// transaction fails, [`Ext4WritebackError::completed_bytes`] identifies
     /// the earlier completed prefix so callers only retain or redirty the
@@ -541,6 +550,9 @@ impl Ext4SbInfo {
             )?;
 
         if !needs_metadata {
+            // Existing mappings and i_disksize already make these bytes reachable.
+            // No new metadata depends on this overwrite; sync supplies durability
+            // through the shared device's journal flush or its direct flush fallback.
             let runs =
                 self.collect_allocated_write_runs(inode, offset, input.len(), block_size_usize)?;
             let mut completed_bytes = 0usize;
@@ -815,6 +827,7 @@ impl Ext4SbInfo {
                         block_size_usize,
                         PartialBlockWrite::PreserveExisting,
                     )?;
+                    handle.require_ordered_data_flush()?;
                     cursor.advance(write_len)?;
                 }
                 BlockMapping::Unwritten { physical, len, .. } => {
@@ -842,6 +855,7 @@ impl Ext4SbInfo {
                         block_size_usize,
                         PartialBlockWrite::ZeroFill,
                     )?;
+                    handle.require_ordered_data_flush()?;
                     self.convert_unwritten_extent_range(
                         inode,
                         logical,
@@ -921,6 +935,7 @@ impl Ext4SbInfo {
                         block_size_usize,
                         PartialBlockWrite::ZeroFill,
                     )?;
+                    handle.require_ordered_data_flush()?;
                     self.convert_unwritten_extent_range(
                         inode,
                         logical,
@@ -932,7 +947,6 @@ impl Ext4SbInfo {
             }
 
             if cursor.is_complete(input.len()) {
-                self.flush_device()?;
                 let write_end = cursor.absolute_offset(offset)?;
                 let disk_size = if intent.is_data_only() {
                     inode.disk_size().max(write_end)
@@ -967,7 +981,7 @@ impl Ext4SbInfo {
                 match handle.reserve_more(JournalCredits::new(additional_credits)) {
                     Ok(()) => {}
                     Err(Ext4Error::InsufficientJournalCredits) => {
-                        self.flush_device()?;
+                        handle.flush_ordered_data(|| self.flush_device())?;
                         let durable_size = inode.disk_size().max(cursor.absolute_offset(offset)?);
                         self.update_regular_inode_write_metadata(
                             inode,

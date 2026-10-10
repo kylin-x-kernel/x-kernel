@@ -27,6 +27,107 @@ use crate::{
 };
 
 #[def_test]
+fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
+    let (mut filesystem, _device) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let setup = JournalTransactions::new(TransactionId::new(722));
+    let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, 6, &mut handle);
+    for (logical, start, count) in [(0, 0, 3), (4, 3, 1), (6, 4, 1), (8, 5, 1)] {
+        filesystem
+            .insert_extent_mapping(
+                &inode,
+                LogicalBlock::new(logical),
+                PhysicalBlock::new(physical.get() + start),
+                BlockCount::new(count),
+                ExtentMappingState::Unwritten,
+                &mut handle,
+            )
+            .unwrap();
+    }
+    let mut spare = None;
+    while filesystem.free_blocks_count() != 0 {
+        spare = Some(
+            filesystem
+                .allocate_block(None, &mut handle)
+                .unwrap()
+                .block(),
+        );
+    }
+    inode.set_size((TEST_BLOCK_SIZE * 9) as u64);
+    filesystem
+        .update_regular_inode_write_metadata(
+            &inode,
+            (TEST_BLOCK_SIZE * 9) as u64,
+            RegularWriteMetadata::SizeOnly,
+            &mut handle,
+        )
+        .unwrap();
+    drop(handle);
+    let commit = setup.force_commit(TransactionId::new(722)).unwrap();
+    filesystem
+        .metadata_io
+        .checkpoint_committed(&commit)
+        .unwrap();
+    setup.finish_checkpoint_for_test(&commit).unwrap();
+    install_credit_limited_journal(&mut filesystem, 723, 341, true);
+    let journal = filesystem.metadata_journal().unwrap();
+    let input = vec![0x93; TEST_BLOCK_SIZE];
+
+    // Converting the middle block creates six inline entries and needs a new
+    // tree block. Data I/O succeeds, but allocation fails before metadata access.
+    let failure = filesystem
+        .writeback_ordered_at_with_prealloc_budget(
+            &inode,
+            TEST_BLOCK_SIZE as u64,
+            &input,
+            inode.size(),
+            crate::Ext4Timestamp::new(5692, 0),
+            Ext4SyncIntent::DataOnly,
+            0,
+        )
+        .unwrap_err();
+    assert_eq!(failure.error(), Ext4Error::NoSpace);
+    assert_eq!(failure.completed_bytes(), 0);
+    assert!(!journal.is_aborted());
+    assert!(matches!(
+        filesystem.map_blocks(&inode, LogicalBlock::new(1)).unwrap(),
+        BlockMapping::Unwritten { .. }
+    ));
+
+    // Free one unrelated block, then retry on the same mounted journal.
+    let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
+    filesystem
+        .release_allocated_block(spare.unwrap(), &mut handle)
+        .unwrap();
+    filesystem
+        .complete_metadata_mutation(handle, Ok(()))
+        .unwrap();
+    filesystem
+        .writeback_ordered_at_with_prealloc_budget(
+            &inode,
+            TEST_BLOCK_SIZE as u64,
+            &input,
+            inode.size(),
+            crate::Ext4Timestamp::new(5692, 0),
+            Ext4SyncIntent::DataOnly,
+            0,
+        )
+        .unwrap();
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::DataOnly)
+        .unwrap();
+    let mut output = vec![0; TEST_BLOCK_SIZE];
+    assert_eq!(
+        filesystem.read_at(&inode, TEST_BLOCK_SIZE as u64, &mut output),
+        Ok(TEST_BLOCK_SIZE)
+    );
+    assert_eq!(output, input);
+    assert!(!journal.is_aborted());
+}
+
+#[def_test]
 fn delayed_allocation_range_updates_inode_and_mount_accounting_together() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);
@@ -444,8 +545,9 @@ fn ordered_writeback_restarts_transaction_for_actual_allocation_runs() {
     // to 79 credits. The fifth insertion grows the inline extent root;
     // extending for the sixth run then commits that prefix and restarts.
     assert_eq!(filesystem.pending_checkpoint_count(), 1);
-    // Data, recovery evidence, journal activation, commit, then tail data.
-    assert_eq!(device.flush_count(), flushes_before + 5);
+    // The restarted prefix has data, recovery, activation and commit barriers.
+    // Tail data stays attached to the new running transaction until sync.
+    assert_eq!(device.flush_count(), flushes_before + 4);
     assert_eq!(inode.disk_size(), input.len() as u64);
     assert!(!inode.has_delalloc_reservations());
     assert_eq!(filesystem.delalloc_reserved_blocks(), 0);
@@ -703,16 +805,16 @@ fn failed_split_writeback_publishes_only_the_durable_prefix() {
     fragment_ordered_writeback_free_space(&mut filesystem);
     install_credit_limited_journal(&mut filesystem, 715, 79, true);
     drop(filesystem.metadata_journal().unwrap());
-    let input = vec![0x3d; TEST_BLOCK_SIZE * 6];
+    let input = vec![0x3d; TEST_BLOCK_SIZE * 11];
     let visible_size = input.len() as u64;
     let timestamp = crate::Ext4Timestamp::new(5685, 0);
 
     inode.set_size(visible_size);
     filesystem
-        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 6)
+        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 11)
         .unwrap();
     // The first data barrier and three journal barriers must succeed;
-    // fail the data barrier of the restarted transaction.
+    // fail the capacity-restart data barrier of the second transaction.
     device.fail_flush_at(device.flush_count() + 5);
     let failure = filesystem
         .writeback_ordered_at_with_prealloc_budget(
@@ -733,7 +835,7 @@ fn failed_split_writeback_publishes_only_the_durable_prefix() {
     // advance i_disksize and FullMetadata must remain unpublished.
     assert_eq!(inode.disk_size(), (TEST_BLOCK_SIZE * 5) as u64);
     assert!(inode.has_delalloc_reservations());
-    assert_eq!(filesystem.delalloc_reserved_blocks(), 1);
+    assert_eq!(filesystem.delalloc_reserved_blocks(), 6);
     assert_ne!(inode.ctime(), timestamp);
     assert_ne!(inode.mtime(), timestamp);
     assert!(
@@ -804,7 +906,7 @@ fn ordered_writeback_credits_follow_fragmented_unwritten_runs() {
 
     // Four unwritten conversions fit in one transaction. Charging every
     // logical block as a hole would exceed this journal and split/error.
-    assert_eq!(device.flush_count(), flushes_before + 1);
+    assert_eq!(device.flush_count(), flushes_before);
     assert_eq!(
         filesystem.map_blocks(&inode, LogicalBlock::new(0)),
         Ok(crate::BlockMapping::Mapped {

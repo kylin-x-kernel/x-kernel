@@ -4,15 +4,18 @@
 
 //! Component invariants exercised in the kernel with synthetic metadata.
 
+use alloc::vec;
+
 use block::DriverError;
 use unittest::def_test;
 
 use crate::{
-    Ext4Error, FilesystemBlock, PhysicalBlock,
-    jbd2::JournalCredits,
+    BlockMapping, Ext4Error, Ext4SyncIntent, FilesystemBlock, LogicalBlock, PhysicalBlock,
+    jbd2::{JournalCredits, TransactionId},
     superblock::test_fixtures::{
-        TEST_FREE_BLOCKS, allocator_test_filesystem, install_credit_limited_journal,
-        install_test_internal_journal, journal_allocator_test_filesystem,
+        TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, allocate_checkpointed_regular_inode,
+        allocator_test_filesystem, install_credit_limited_journal, install_test_internal_journal,
+        journal_allocator_test_filesystem,
     },
 };
 
@@ -228,4 +231,133 @@ fn failed_handle_reusing_shared_metadata_aborts_mount_journal() {
         Err(Ext4Error::InvalidJournalTransaction)
     );
     assert!(journal.is_aborted());
+}
+
+#[def_test]
+fn ordered_writeback_batches_and_inodes_share_one_data_barrier() {
+    let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let first = allocate_checkpointed_regular_inode(&mut filesystem);
+    let second = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_credit_limited_journal(&mut filesystem, 720, 341, true);
+    drop(filesystem.metadata_journal().unwrap());
+    let before = device.flush_count();
+    let input = vec![0x6a; TEST_BLOCK_SIZE];
+    for inode in [&first, &second] {
+        inode.set_size((TEST_BLOCK_SIZE * 2) as u64);
+        for offset in [0, TEST_BLOCK_SIZE as u64] {
+            filesystem
+                .writeback_ordered_at_with_prealloc_budget(
+                    inode,
+                    offset,
+                    &input,
+                    inode.size(),
+                    crate::Ext4Timestamp::new(5690, 0),
+                    Ext4SyncIntent::FullMetadata,
+                    0,
+                )
+                .unwrap();
+        }
+    }
+    assert_eq!(device.flush_count(), before);
+    let journal = filesystem.journal.as_ref().unwrap().clone();
+    let commit = journal
+        .transactions
+        .force_commit(TransactionId::new(720))
+        .unwrap();
+    assert!(commit.has_unflushed_ordered_data().unwrap());
+    assert_eq!(
+        journal.transactions.start_checkpoint_for_test(&commit),
+        Err(Ext4Error::InvalidJournalTransaction)
+    );
+    let persisted = filesystem.persist_metadata_journal_commit(&commit).unwrap();
+    // One shared data barrier followed by recovery, activation and journal commit.
+    assert_eq!(device.flush_count(), before + 4);
+    assert!(!commit.has_unflushed_ordered_data().unwrap());
+    journal
+        .transactions
+        .start_checkpoint(&commit, persisted)
+        .unwrap();
+}
+
+#[def_test]
+fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
+    use alloc::sync::Arc;
+
+    use crate::{
+        buffer::Ext4MetadataIo, io::FilesystemDevice, superblock::fault_device::BufferedFaultDevice,
+    };
+
+    for fail_data_flush in [true, false] {
+        let (mut filesystem, original) =
+            journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        install_credit_limited_journal(&mut filesystem, 721, 341, true);
+        drop(filesystem.metadata_journal().unwrap());
+        let initial = original.bytes();
+        // Two file-data writes precede commit. Either fail its first barrier,
+        // or fail the first recovery-evidence write after that barrier.
+        let device = Arc::new(BufferedFaultDevice::new(
+            initial.clone(),
+            if fail_data_flush { None } else { Some(3) },
+            if fail_data_flush { Some(1) } else { None },
+        ));
+        filesystem.device = Arc::new(
+            FilesystemDevice::open(
+                device.clone(),
+                TEST_BLOCK_SIZE,
+                (initial.len() / TEST_BLOCK_SIZE) as u64,
+            )
+            .unwrap(),
+        );
+        filesystem.metadata_io = Ext4MetadataIo::new(filesystem.device.clone());
+        inode.set_size((TEST_BLOCK_SIZE * 2) as u64);
+        let input = vec![0x8c; TEST_BLOCK_SIZE];
+        for offset in [0, TEST_BLOCK_SIZE as u64] {
+            filesystem
+                .writeback_ordered_at_with_prealloc_budget(
+                    &inode,
+                    offset,
+                    &input,
+                    inode.size(),
+                    crate::Ext4Timestamp::new(5691, 0),
+                    Ext4SyncIntent::FullMetadata,
+                    0,
+                )
+                .unwrap();
+        }
+        assert_eq!(device.committed_bytes(), initial);
+        let journal = filesystem.journal.as_ref().unwrap().clone();
+        let commit = journal
+            .transactions
+            .force_commit(TransactionId::new(721))
+            .unwrap();
+        assert_eq!(
+            filesystem.commit_metadata_transaction(TransactionId::new(721)),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+        assert!(journal.is_aborted());
+        assert_eq!(
+            filesystem.sync_inode(&inode, Ext4SyncIntent::FullMetadata),
+            Err(Ext4Error::JournalAborted)
+        );
+        assert_eq!(
+            commit.has_unflushed_ordered_data().unwrap(),
+            fail_data_flush
+        );
+        let committed = device.committed_bytes();
+        if fail_data_flush {
+            assert_eq!(committed, initial);
+        } else {
+            for logical in 0..2 {
+                let BlockMapping::Mapped { physical, .. } = filesystem
+                    .map_blocks(&inode, LogicalBlock::new(logical))
+                    .unwrap()
+                else {
+                    panic!("completed data mapping");
+                };
+                let start = physical.get() as usize * TEST_BLOCK_SIZE;
+                assert_eq!(&committed[start..start + TEST_BLOCK_SIZE], &input);
+            }
+        }
+    }
 }

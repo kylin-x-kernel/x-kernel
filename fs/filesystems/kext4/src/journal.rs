@@ -546,6 +546,9 @@ impl Ext4SbInfo {
             .cloned()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
         journal.transactions.validate_committing(commit)?;
+        // Batches that publish metadata join this dependency. Freeze excludes
+        // new handles, so one barrier orders their data before journal I/O.
+        commit.flush_ordered_data(|| self.flush_device())?;
         let previous = journal.newest_persisted_commit()?;
         self.set_ext4_needs_recovery_feature()?;
         let superblock = journal.superblock();
