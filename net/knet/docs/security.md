@@ -25,6 +25,11 @@ can still prevent receive progress.
 
 ## Trust Model
 
+IPv4 filter match-value constructors validate owned kernel inputs for port and
+ICMP code ranges, TCP flag masks, and interface-name byte lengths. Callers must
+bound string allocation before construction. Rule and table validation,
+userspace decoding, and packet evaluation belong to later integration stages.
+
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can
 call it, and queue startup follows network state initialization. An IRQ-safe

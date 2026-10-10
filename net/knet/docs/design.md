@@ -36,6 +36,11 @@ net/knet/
     │   ├── mod.rs
     │   ├── packet.rs
     │   └── wire.rs
+    ├── netfilter/
+    │   ├── mod.rs
+    │   └── filter/
+    │       ├── mod.rs
+    │       └── matcher.rs
     ├── netlink/
     │   ├── mod.rs
     │   ├── rtnetlink.rs
@@ -213,6 +218,14 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | kclass network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
 | kclass vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
 
+### IPv4 Filter Match Values
+
+`netfilter/filter/matcher.rs` stores IPv4 address, interface, protocol, and
+TCP, UDP, and ICMP conditions. Constructors validate port and ICMP code ranges,
+TCP flag masks, and interface-name byte lengths. `Negated` stores independent
+field inversion; ICMP type and code share one inversion flag.
+These owned values are prepared for later rule construction and packet evaluation.
+
 ## Calling Constraints and Execution Context
 
 `knet` runs in kernel context, but different code paths have different execution-context requirements. Callers must follow the constraints below.
@@ -228,6 +241,10 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 * **Normal protocol processing runs in task context**
 
   Paths such as `NetworkPoller::assist_once`, socket `send` / `recv` / `connect` / `accept`, and netlink mutations may acquire `Mutex` or `RwLock` objects and may execute relatively heavy data-plane work. These paths must run in normal task context.
+
+* **IPv4 filter match-value construction**
+
+  Construct owned interface names in task context after allocator initialization.
 
 * **IRQ handlers only signal RX work**
 
@@ -965,6 +982,7 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 
 | Resource / trigger | Cleanup and remaining state |
 |---|---|
+| IPv4 filter match-value drop | Releases owned interface-name strings. Other condition values are stored inline. |
 | TCP file close | Removes a `Closed` handle immediately when no reset is pending. Unread RX data causes abort, with the handle retained until RST is sent. Other handles remain in deferred close while the poller completes transmission and closure. Detached connections receive a 60-second reclamation deadline only in `FIN_WAIT_2`. |
 | TCP listener close | Marks the listener closed, drains child handles, and removes them from `SOCKET_SET`. |
 | Unix stream listener drop | Closes the listener queue, wakes waiters, clears the binding slot, and releases pending requests and ring buffers. |
