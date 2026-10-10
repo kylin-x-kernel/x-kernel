@@ -38,3 +38,14 @@ fn trace_raw_lock_lock_path_matches_try_lock_state() {
 
     assert!(!lock.is_locked());
 }
+
+#[def_test]
+fn trace_header_preserves_upstream_columns_and_snapshot_counts() {
+    for count in [0, 1, 3] {
+        let records = alloc::vec![alloc::vec![]; count];
+        assert_eq!(
+            super::trace_header(count),
+            ktracepoint::TracePipeSnapshot::new(records).default_fmt_str()
+        );
+    }
+}

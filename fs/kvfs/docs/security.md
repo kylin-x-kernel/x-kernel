@@ -453,3 +453,21 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
   exclusive data lock。
 - 动态目录 nlink 回调是否在 node metadata lock 释放后执行，且仅覆盖返回副本的
   nlink；是否保留默认 `None` 和回调错误传播语义。
+
+## Snapshot resource bounds
+
+Snapshot generation may allocate and fail during open. The caller must bound
+generated data; each read-capable open retains its own buffer until close.
+Private snapshot operations own initialization and access to the private data;
+no snapshot representation or construction API escapes the crate. Missing
+state makes reads and `SEEK_END` return `InvalidData` rather than regenerating
+content. `SEEK_SET` and `SEEK_CUR` need no snapshot and do not allocate.
+Read offsets are checked against the buffer length before conversion and
+slicing. Seek bases use checked signed conversion and addition; invalid seeks
+do not change the file position. `SEEK_END` reads the descriptor's own buffer
+length, so another open cannot change its EOF by updating inode metadata.
+
+The helper imposes no aggregate memory or generation-work quota. Independent
+readable opens each retain their own allocation, so a per-buffer bound does not
+bound total memory across processes. Filesystem integrations must account for
+this cost in access and resource policy.

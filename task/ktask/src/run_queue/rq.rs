@@ -276,7 +276,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             "yield_current requires Running -> Ready before leave_current"
         );
         let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.yield_current(now_ns));
-        self.inner.resched(pull_if_empty);
+        self.inner.resched(pull_if_empty, TaskState::Ready);
     }
 
     /// Migrate the current task to a new run queue matching its CPU affinity and reschedule.
@@ -304,7 +304,8 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         curr.set_state(TaskState::Ready);
 
         // Migration helper is switched to without enqueue; attach ownership first.
-        self.inner.switch_to_local(current(), migration_task);
+        self.inner
+            .switch_to_local(current(), migration_task, TaskState::Ready);
     }
 
     /// Preempts the current task and reschedules.
@@ -392,7 +393,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
                 "preempt_resched requires Running -> Ready before leave_current"
             );
             let (_, pull_if_empty) = self.inner.leave_and_publish(|s| s.preempt_current(now_ns));
-            self.inner.resched(pull_if_empty);
+            self.inner.resched(pull_if_empty, TaskState::Ready);
         } else {
             curr.set_preempt_pending(true);
         }
@@ -429,7 +430,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             with_exited_tasks(|tasks| tasks.push_back(exited));
             current_wait_for_exit().wake();
 
-            self.inner.resched(pull_if_empty);
+            self.inner.resched(pull_if_empty, TaskState::Exited);
         }
         unreachable!("task exited!");
     }
@@ -501,7 +502,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // see `unblock_task()` for details.
 
         debug!("task block: {}", curr.id_name());
-        self.inner.resched(pull_if_empty);
+        self.inner.resched(pull_if_empty, TaskState::Blocked);
     }
 
     pub(crate) fn set_current_priority(&mut self, prio: isize) -> bool {
@@ -671,15 +672,16 @@ impl RunQueue {
     /// Used for per-CPU helpers such as the affinity migration task that are
     /// entered via `switch_to` rather than the ready queue. Under EEVDF, install
     /// the helper into `curr` here so later peer-preempt probes see it; idle
-    /// never takes this path.
+    /// never takes this path. The caller supplies its leave-decision state;
+    /// do not infer it from mutable task state or assume all helpers migrate.
     #[cfg(feature = "smp")]
-    fn switch_to_local(&self, prev_task: CurrentTask, next_task: KtaskRef) {
+    fn switch_to_local(&self, prev_task: CurrentTask, next_task: KtaskRef, prev_state: TaskState) {
         #[cfg(feature = "smp")]
         self.attach_owner(&next_task);
         self.with_sched(|s| {
             s.install_current(next_task.clone(), khal::time::monotonic_time_nanos());
         });
-        self.switch_to(prev_task, next_task);
+        self.switch_to(prev_task, next_task, prev_state);
     }
 
     /// Puts target task into current run queue with `Ready` state
@@ -729,7 +731,9 @@ impl RunQueue {
     ///
     /// `pull_if_empty` is the ready-tree emptiness sampled in the same sched
     /// lock as leave. Re-taking the lock just to read `nr_queued` is avoided.
-    fn resched(&self, pull_if_empty: bool) {
+    /// `prev_state` records the leave decision; a concurrent wake may already
+    /// have changed the outgoing task from Blocked to Ready before the switch.
+    fn resched(&self, pull_if_empty: bool, prev_state: TaskState) {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.cpu_id).resched);
         let now_ns = khal::time::monotonic_time_nanos();
@@ -750,10 +754,10 @@ impl RunQueue {
             next.id_name(),
             next.state()
         );
-        self.switch_to(current(), next);
+        self.switch_to(current(), next, prev_state);
     }
 
-    fn switch_to(&self, prev_task: CurrentTask, next_task: KtaskRef) {
+    fn switch_to(&self, prev_task: CurrentTask, next_task: KtaskRef, prev_state: TaskState) {
         // Make sure that IRQs are disabled by kernel guard or other means.
         assert!(
             !karch::local_irq_enabled(),
@@ -803,7 +807,11 @@ impl RunQueue {
         // Fire the context switch tracepoint.
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(cpu_id).switch);
-        fire_context_switch(prev_task.trace_id(), next_task.trace_id());
+        fire_context_switch(
+            prev_task.trace_id(),
+            next_task.trace_id(),
+            prev_state as u64,
+        );
 
         // Claim the task as running, we do this before switching to it
         // such that any running task will have this set.

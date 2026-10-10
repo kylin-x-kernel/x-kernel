@@ -37,14 +37,22 @@ struct TracingEventDir {
 
 impl SimpleDirOps for TracingDir {
     fn child_names<'a>(&'a self) -> kvfs::VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(["trace", "events"].into_iter().map(Cow::Borrowed)))
+        Ok(Box::new(
+            ["trace", "snapshot_abi", "events"]
+                .into_iter()
+                .map(Cow::Borrowed),
+        ))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
         match name {
             "trace" => lookup.file(
                 name,
-                SimpleFile::new_regular(self.fs.clone(), || Ok(ktracing::dump_trace_records())),
+                SimpleFile::new_snapshot(self.fs.clone(), || Ok(ktracing::dump_trace_records())),
+            ),
+            "snapshot_abi" => lookup.file(
+                name,
+                SimpleFile::new_regular(self.fs.clone(), || Ok(String::from("1\n"))),
             ),
             "events" => Ok(lookup.dir(
                 name,

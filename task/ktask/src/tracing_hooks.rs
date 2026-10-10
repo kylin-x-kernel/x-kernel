@@ -7,7 +7,7 @@
 use kspin::{SpinNoIrq, static_lock};
 
 type WakeupFn = fn(u64);
-type SwitchFn = fn(u64, u64);
+type SwitchFn = fn(u64, u64, u64);
 
 struct Hooks {
     wakeup: Option<WakeupFn>,
@@ -22,6 +22,11 @@ static_lock! {
 }
 
 /// Called once from `ktracing` init. Before that, fires are no-ops.
+///
+/// The switch callback receives outgoing/incoming trace IDs and the outgoing
+/// [`crate::TaskState`] discriminant captured by the leave decision, before a
+/// concurrent wake can change Blocked to Ready. Callbacks execute with IRQs disabled and
+/// must not block or recursively schedule.
 pub fn register_sched_trace_hooks(wakeup: WakeupFn, switch_fn: SwitchFn) {
     let mut g = HOOKS.lock();
     g.wakeup = Some(wakeup);
@@ -34,8 +39,8 @@ pub(crate) fn fire_task_wakeup(woken_tid: u64) {
     }
 }
 
-pub(crate) fn fire_context_switch(prev_tid: u64, next_tid: u64) {
+pub(crate) fn fire_context_switch(prev_tid: u64, next_tid: u64, prev_state: u64) {
     if let Some(f) = HOOKS.lock().switch {
-        f(prev_tid, next_tid);
+        f(prev_tid, next_tid, prev_state);
     }
 }

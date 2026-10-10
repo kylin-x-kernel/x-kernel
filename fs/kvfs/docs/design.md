@@ -884,3 +884,28 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
   `unregister_filesystem()` 生命周期。
 - `FsContext` 只传递一页 opaque mount data；具体 binary/text format 和支持的 option 集合属于
   各 filesystem type。
+
+## Per-open generated-file snapshots
+
+`SimpleFile` owns a file-operation object selected at construction. Ordinary
+files use `GeneratedFileOperations`; `new_snapshot` selects the private
+`SnapshotFileOperations`. Snapshot initialization, reads, write capability and
+seeking belong to that object, without a mode flag in the generic simple file.
+The generator remains shared with the inode's symlink operations.
+
+Read-capable opens generate one immutable, private `SimpleFileSnapshot` in
+`VfsFile::private_data`. Write-only opens neither generate nor retain bytes.
+Separate opens capture independent generations. Normal descriptor sharing
+retains the same file description and buffer; low-level clones that bypass
+open are not supported initializers; reads and `SEEK_END` with missing state
+return `InvalidData`.
+The snapshot representation and constructor are not public API.
+
+`SEEK_SET` and `SEEK_CUR` use only the descriptor position and work even for
+write-only opens without generating content. `SEEK_END` uses that
+open's immutable buffer length, never shared inode metadata. Negative results,
+invalid whence and signed arithmetic overflow return `InvalidInput` without
+changing the position. Seeking beyond EOF is allowed and reading there returns
+zero. Tests cover differently sized generations, EOF, backward seeks and
+invalid offsets. Snapshot operations do not advertise `CAN_WRITE`: write-mode
+writes fail with `InvalidInput`; read-only writes fail with `BadFileDescriptor`.
