@@ -811,6 +811,19 @@ credential。`child_names()` 可传播生命周期或后端错误，使旧目录
 静默转换为空目录。需要持久 identity 的 pseudo filesystem 可用 `SimpleFile::new_inode()`、
 `SimpleDir::new_inode_with_owner()` 和 `SimpleDirLookup::{file,dir}_from_inode()` 重用 inode。
 
+### SimpleDir 动态目录链接数
+
+`SimpleDirOps::link_count()` 为整个目录提供可选的动态 nlink。`getattr()` 先取得
+`SimpleFsNode` 的 metadata 副本，释放其 metadata lock 后才调用该回调；`Some(nlink)`
+仅覆盖本次返回的链接数，`None` 保留副本中的原值，回调错误向上传播。
+`ChainedDirOps` 不合并各组成目录的链接数，沿用 `None` 默认值。procfs 的 task 目录
+通过该接口在每次查询时读取目标进程的线程成员；已经打开的目录 fd 也得到新查询值。
+其他 metadata 字段与目录 lookup/iteration 路径沿用现有行为。
+动态值只属于 getattr 返回副本，不回写 `SimpleFsNode` 或 `VfsInode` cache。
+需要当前 nlink 的调用方应走 getattr；`metadata()` 保留缓存语义。目录枚举仅从
+缓存取 inode/type，不使用 nlink。新增 guest 定义覆盖 Some 动态变化、默认 None、
+错误传播、其他字段和缓存保持；这些定义尚未编译或执行。
+
 ### Buffered read 与同步预读
 
 读取先查缓存，缺页时才准备最多 128 KiB 请求字节的同步预读窗口，再按需读取未完成页。

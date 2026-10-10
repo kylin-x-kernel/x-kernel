@@ -211,3 +211,30 @@ exit readiness and CPU accounting. Test source existence is not execution proof.
   and be cleared on exec. Arm and take it only through `CurrentThread`.
   The payload type stays in the syscall adapter. Do not store it in the futex
   waiter table.
+
+## Procfs Thread-count Exposure
+
+The procfs accessor accepts a valid reference to the selected `Process` and reads
+kernel-owned membership through the existing table and member-slot locks. It
+accepts no user-provided count and does not depend on current process identity.
+The per-slot scan neither authorizes access nor guarantees stable future
+membership; publication can interleave with it. Callers must not treat it as an
+atomic group snapshot or synchronization against clone/exit.
+
+## Unreleased thread membership
+
+The procfs lifetime count uses member-slot state, not the schedulable-task count.
+ExitedLeader retains no strong task/runtime owner and grants no TID lookup or
+signal delivery capability. Exact Weak task identity gates the exit transition
+so an old task cannot retire a replacement binding. Reserved/rolled-back slots
+remain Vacant; nonleader exit is released; reap/autoreap clears the retained
+leader under the existing process-domain transaction. Exec does not change
+member accounting, canonical TID, or publication in this patch. The existing
+nonleader-exec identity gap and its post-exec count consequence are documented
+in design.md; metadata must not be presented as proof of Linux-exact takeover.
+Current runtime TIDs are checked monotonic allocations and are not recycled on
+drop; exhaustion fails rather than wrapping. Fixed-number test identities do not
+provide a production reuse path. Any future recycling policy must preserve leader
+retention separately from replacement publication before changing that invariant.
+The count is a slot scan, not a global counter or atomic snapshot. No new unsafe code or sleepable lock
+is introduced, and directory metadata locks are not held across the query.

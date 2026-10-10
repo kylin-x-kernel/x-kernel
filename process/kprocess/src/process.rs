@@ -121,6 +121,9 @@ impl Process {
             slot.retire();
         }
         self.retire_group_membership_locked(domain);
+        if self.is_exited_locked(domain) {
+            self.release_exited_thread_members_locked(domain);
+        }
     }
 
     pub(crate) fn publish_group_membership_locked(

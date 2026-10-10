@@ -307,3 +307,52 @@ representative-thread credential snapshots, simplified ptrace privilege checks
 (effective UID zero substitutes for CAP_SYS_PTRACE), and no full authorization
 policy in signal/job-control facade helpers. Optional TEE/TIPC behavior exists
 only with its Cargo feature enabled.
+
+## Published tasks and unreleased thread-group members
+
+`scheduler::process_task_count(&Process)` retains the published-task view:
+exit unpublishes a TID immediately, so external targeting cannot reach teardown.
+`procfs::thread_group_member_count(&Process)` has a different lifetime contract.
+The member-slot state is Vacant, Published(Weak task), or ExitedLeader.
+A published numeric group leader exits into ExitedLeader; nonleaders release
+their slot at exit. Last-task detection, task enumeration and lookup ignore
+ExitedLeader. The retained state
+owns no task, runtime or mm and cannot be scheduled. Wait consumption/autoreap
+clears it when the process identity is retired, even if other Arc<Process>
+observers remain. Failed publication uses Vacant and contributes no membership.
+
+This change does not implement exec thread-group identity takeover. In particular,
+a sole nonleader may currently exec after the original leader exits while retaining
+its original TID; kprocess has no unified de_thread transition that changes that
+identity and its global publication. The original ExitedLeader therefore remains
+until reap, and the task-directory count can include that retained member after
+nonleader exec. Linux-exact post-exec counts are not claimed for this path. A
+count-only leader alias would conceal the identity mismatch, so exec neither
+promotes a member for accounting nor removes the original leader slot here.
+A follow-up must coordinate canonical task identity, global/member publication,
+signal/cgroup bindings, old-leader release and the successful/fatal exec boundary
+before procfs can derive the corresponding Linux count from final membership.
+
+This retention scheme relies on the current runtime identity allocator, not on
+the probability of TID reuse. `Thread::prepare_thread_clone` calls
+`allocate_thread_task_number`, which delegates to `kidentity`'s root namespace.
+Its checked monotonic `fetch_update` returns `WouldBlock` at exhaustion; dropping
+a handle does not recycle a number and the counter never wraps. The fixed-number
+replacement fixture deliberately bypasses allocation to test stale Weak identity
+guards; it does not demonstrate runtime numeric reuse. Introducing recycling
+would require revisiting retained-leader ownership before allowing a new task to
+overwrite an `ExitedLeader` slot.
+
+Both queries scan stored slots under the existing membership/slot locks and
+allocate no list or maintained counter. Publication may interleave with a scan;
+neither result promises an atomic thread-group snapshot. Reap clears retained
+membership under process-domain -> membership -> slot order. Task exit releases
+membership locks before global TID removal and acquires no process-domain lock
+while holding them. There is no procfs max(1) or zombie-state compensation.
+
+Regression definitions extend the real exit/reap test to distinguish live count
+0 from lifetime count 1 before reap and 0 after reap with strong observers still
+held. Another test explicitly exits the leader before a sibling and checks that
+only the leader remains until reap. These definitions exercise real member exit
+and reap with never-run tasks; they do not execute an exec syscall or prove
+identity takeover. Their execution must be checked against this head's CI.

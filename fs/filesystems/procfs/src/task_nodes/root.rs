@@ -47,6 +47,18 @@ struct ProcessTaskDir {
 }
 
 impl SimpleDirOps for ProcessTaskDir {
+    fn link_count(&self) -> VfsResult<Option<u64>> {
+        // Linux proc_task_getattr counts '.' and '..' plus one subdirectory
+        // per unreleased group member, including a zombie leader before reap.
+        // A retained fd reports base links after target release; it must not
+        // switch to the caller's process or infer membership from exit flags.
+        let threads = self
+            .process
+            .upgrade()
+            .map_or(0, |process| procfs::thread_group_member_count(&process));
+        Ok(Some(2 + threads as u64))
+    }
+
     fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let Some(process) = self.process.upgrade() else {
             return Ok(Box::new(iter::empty()));
@@ -913,13 +925,52 @@ mod tests {
     use khal::paging::MappingFlags;
     use kprocess::AsThread;
     use kvfs::SeqIterator;
-    use unittest::{assert_eq, def_test};
+    use unittest::{assert, assert_eq, def_test};
 
     use super::{
         MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, format_oom_score_adj,
         format_task_status, maps_permissions, namespace_inode, namespace_link_target,
         parse_oom_score_adj_input, render_maps_line, special_mapping_name,
     };
+
+    fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::Path {
+        static FS_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::internal("proc-task-test");
+        let super_block = kvfs::SimpleFs::new_with(&FS_TYPE, 0, move |fs| {
+            let ops = alloc::sync::Arc::new(super::ProcessTaskDir {
+                fs: fs.clone(),
+                process,
+            });
+            kvfs::SimpleDir::new_maker(fs, ops)
+        });
+        kvfs::Mount::new_root(&super_block).root_path()
+    }
+
+    #[def_test(user)]
+    fn test_task_directory_link_count_uses_its_live_target() {
+        // This user-test fixture owns its process and starts no extra threads.
+        let task = ktask::current();
+        let process = task.as_thread().process();
+        let path = task_directory_path(alloc::sync::Arc::downgrade(process));
+        // start_user_task publishes this exact fixture thread before running it.
+        assert!(process.threads().contains(&task.as_thread().tid()));
+        let count = kprocess::procfs::thread_group_member_count(process);
+        assert_eq!(path.getattr().unwrap().nlink, 2 + count as u64);
+        assert_eq!(path.metadata().nlink, 2);
+    }
+
+    #[def_test(user)]
+    fn test_task_directory_link_count_after_target_is_dropped() {
+        // The user fixture has already initialized global init. This separate
+        // parentless identity publishes no task or PID slot and has one owner.
+        let process = kprocess::Process::new_init(0x7fff_ff01);
+        let weak = alloc::sync::Arc::downgrade(&process);
+        let path = task_directory_path(weak.clone());
+        assert_eq!(alloc::sync::Arc::strong_count(&process), 1);
+        drop(process);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(path.getattr().unwrap().nlink, 2);
+        assert_eq!(path.metadata().nlink, 2);
+    }
 
     #[def_test(user)]
     fn test_maps_rewind_observes_captured_image_heap_updates() {

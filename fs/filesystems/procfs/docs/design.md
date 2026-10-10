@@ -55,6 +55,44 @@ holding that mutex or the captured MM mutex is unsupported. Releasing a maps
 iterator must be sleepable and outside spinlocks and the MM mutex because the
 last MM-user release may tear down mappings.
 
+## Task-directory Link Counts
+
+`task_nodes::root::ProcessTaskDir` retains a weak reference to its selected
+Process. Each getattr returns two base links plus the process-owned unreleased
+member count (`kprocess::procfs::thread_group_member_count`). An exited leader
+remains a member until wait/autoreap releases the identity, although TID lookup
+and scheduler queries already exclude it. Thus an opened single-thread child's
+directory reports 3 during its zombie-before-wait window and 2 after reap, even
+if a strong Process observer remains. Inherited fds never switch to the caller.
+Failed Weak upgrade also returns 2. No directory-layer exit-state adjustment,
+extra counter or ownership of the target is introduced.
+
+Nonleader exec after leader exit is outside the Linux-exact count claim. The
+provider currently retains the old leader without changing the survivor's TID;
+this patch does not compensate in procfs or add a count-only leader identity.
+See kprocess design.md for the required unified takeover boundary.
+
+The query scans stored slots under membership/slot spinlocks, with no allocation.
+Publication can interleave; this is not an atomic group snapshot. Each getattr
+incurs O(stored slots) work; no performance improvement is claimed. The distinct
+scheduler facade intentionally counts published tasks and is unsuitable here.
+
+The callback runs after the node metadata-copy lock is released. Dynamic nlink
+changes only the returned getattr copy; cached metadata and directory enumeration
+retain their existing inode/type semantics. The live fixture explicitly checks
+its own TID is published (unittest_support uses start_user_task). A separate
+single-owner identity exercises Weak failure. kprocess exit/reap definitions
+check unreleased-member lifetime, including leader-before-sibling exit. kvfs
+tests compare same-source metadata fields and document the existing block_size
+normalization difference between getattr and metadata(). Definitions are not
+execution evidence and await this head's CI/local regression.
+
+The userspace ABI validation requirements remain synchronized counts 3 / 6 / 3,
+inherited parent fd 6 versus child self 3, plus a pre-opened single-thread child's
+fd reporting 3 after exit but before wait and 2 after wait. No sleep-based zombie
+race is acceptable: use an explicit wait-without-consume observation or other
+deterministic readiness signal before checking, then reap and check again.
+
 ## Maps Capture and Iteration
 
 MM and heap capture is implemented by `MapsIter` in `src/task_nodes/root.rs`

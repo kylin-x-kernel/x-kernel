@@ -57,6 +57,20 @@ implementations in `src/`. Safety still depends on provider contracts:
   does not imply that process runtime resources remain attached; accessors can
   still fail and their errors must be propagated.
 
+## Task-directory Metadata Boundary
+
+Task-directory nlink comes from kernel-owned membership of its retained target,
+never from a caller-supplied count or an unrelated current process. Successful
+weak upgrade retains that `Process` during the query; failed upgrade reports the
+two base directory links. This does not add user-memory access, unsafe code, a
+global task scan, or a new lock.
+
+The query uses the existing membership-table and member-slot locks after the
+simple node's metadata lock has been released. Per-slot publication can
+interleave with the count scan. The returned value cannot authorize access,
+prevent clone/exit, or guarantee that a later task operation sees the same set.
+Existing visibility, credential, and maps-lifetime rules remain independent.
+
 ## Thread Safety
 
 `fs/kvfs/src/seq_file.rs` (repository-relative) requires `SeqIterator: Send` and
@@ -123,3 +137,20 @@ statistics and namespace identities are described in `design.md`.
   controls; preserve lookup-time versus operation-time error distinctions.
 - Treat text escaping, retained-view resource costs, and feature-gated outputs
   as explicit review concerns; do not broaden snapshot or compatibility claims.
+- Check live task-directory link counts through stat/fstat/fstatat, inherited
+  descriptor target identity, and the two base links after target disappearance.
+- Keep member-count queries outside the simple node metadata lock and preserve
+  per-slot observation limits; do not claim an atomic group snapshot.
+
+### Unreleased leader lifetime
+
+Task-directory nlink queries the target Process's member lifetime, including an
+exited leader before wait/autoreap. It does not infer a count from zombie flags,
+force a minimum of one, or expose an exited task to lookup/scheduling. Reap
+releases retained membership independently of remaining Arc observers, and a
+Weak-only directory cannot extend that identity's ownership. Publication can
+interleave with the slot scan; this remains an advisory metadata snapshot.
+
+Nonleader exec does not gain an accounting-only leader alias. Its current
+identity/publication gap also limits Linux-exact task-directory counts after
+exec; the advisory count cannot prove identity takeover or authorize a TID.

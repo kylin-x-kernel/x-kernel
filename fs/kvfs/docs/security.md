@@ -178,6 +178,13 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 - immutable simple symlink 的目标只由 `VfsInode` cached-link 状态持有；
   `SimpleFsNode::i_size` 必须与目标字节长度一致，不能再由 closure 或额外字段保存副本。
 
+## 动态目录 metadata 回调
+
+`SimpleDirOps::link_count()` 是可信文件系统回调，在可睡眠的 task context 中执行，
+调用时不持有 `SimpleFsNode` metadata lock。实现负责其后端同步和生命周期错误；错误
+传播到 `getattr()`。接口返回值只覆盖本次 metadata 副本的 nlink，不修改 inode identity、
+权限、所有者或 node 的已存 metadata。返回值是一次观察，不能作为成员同步或授权依据。
+
 ## 线程安全
 
 字符设备适配器持有选定后端的 `Arc`，不在 open/release 或 poll 回调外加锁。
@@ -444,3 +451,5 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 - shared-file write fault 是否在 address-space invalidate shared lock 和 folio lock 内完成
   `FileMappingOperations::page_mkwrite` prepare、folio dirty 和 writable PTE publish，且不取得 inode
   exclusive data lock。
+- 动态目录 nlink 回调是否在 node metadata lock 释放后执行，且仅覆盖返回副本的
+  nlink；是否保留默认 `None` 和回调错误传播语义。

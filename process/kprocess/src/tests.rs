@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-
-
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -2238,6 +2236,7 @@ fn test_exit_and_reap_unpublish_tid_and_pid() {
     let published = prepare_user_task(prepared).publish().unwrap().activate();
     let tid = published.as_thread().tid();
     let pid = process.pid();
+    assert_eq!(procfs::thread_group_member_count(&process), 1);
 
     assert!(
         process.exit_thread(&published, 0),
@@ -2247,8 +2246,11 @@ fn test_exit_and_reap_unpublish_tid_and_pid() {
         publication.task(tid).is_err(),
         "retired tid must stop resolving through the task directory"
     );
+    assert_eq!(scheduler::process_task_count(&process), 0);
+    assert_eq!(procfs::thread_group_member_count(&process), 1);
 
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(procfs::thread_group_member_count(&process), 1);
     assert!(
         wait_reap::reap_zombie_process(&process),
         "waitable zombie must be consumable once"
@@ -2257,6 +2259,35 @@ fn test_exit_and_reap_unpublish_tid_and_pid() {
         publication.published_process(pid).is_err(),
         "reaped pid must stop resolving through the process directory"
     );
+    // Strong Process/task handles still exist: reap, not Arc destruction,
+    // releases the retained leader from the lifetime membership view.
+    assert_eq!(procfs::thread_group_member_count(&process), 0);
+}
+
+#[def_test(user, serial)]
+fn test_exited_leader_membership_survives_sibling_exit_until_reap() {
+    let (process, prepared) = build_prepared_test_user_task();
+    let leader = prepare_user_task(prepared).publish().unwrap().activate();
+    let sibling_number = kidentity::allocate_root_pid_handle().unwrap();
+    let sibling = publish_test_thread(&process, sibling_number.root_nr());
+    assert_eq!(procfs::thread_group_member_count(&process), 2);
+
+    assert!(!process.exit_thread(&leader, 0));
+    assert_eq!(scheduler::process_task_count(&process), 1);
+    assert_eq!(procfs::thread_group_member_count(&process), 2);
+    assert!(
+        process_publication()
+            .task(leader.as_thread().tid())
+            .is_err()
+    );
+
+    assert!(process.exit_thread(&sibling, 0));
+    assert_eq!(scheduler::process_task_count(&process), 0);
+    assert_eq!(procfs::thread_group_member_count(&process), 1);
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(procfs::thread_group_member_count(&process), 1);
+    assert!(wait_reap::reap_zombie_process(&process));
+    assert_eq!(procfs::thread_group_member_count(&process), 0);
 }
 
 #[def_test(user, serial)]
@@ -2265,8 +2296,9 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
     let publication = process_publication();
     let first = publish_test_thread(&process, 1_170);
 
-    // Simulate TID reuse on the same slot object: retire without map removal,
-    // then republish a different task under the same number.
+    // Synthetic fixed-number replacement, not runtime allocator behavior:
+    // kidentity never recycles numbers on drop or wraps at exhaustion. Retire
+    // without map removal, then republish a different task under this number.
     publication.retire_task_slot_keep_entry_for_test(1_170);
     let second = publish_test_thread(&process, 1_170);
     assert!(
