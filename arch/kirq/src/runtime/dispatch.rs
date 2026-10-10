@@ -15,7 +15,7 @@ use crate::{IrqEvent, platform::PendingIrq, state::IRQ_STATE};
 /// reported as unhandled and return the resolved `virq` so diagnostics and
 /// deferred hooks can identify the claimed line.
 pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
-    let (virq, snapshot, dispatch_guard) = {
+    let (virq, snapshot, mut dispatch_guard) = {
         let mut state = IRQ_STATE.lock();
         let Some(virq) = pending.resolve() else {
             warn!("Unhandled IRQ {:?}", pending.source());
@@ -56,7 +56,9 @@ pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
             warn!("IRQ {virq} action has unsupported threaded state");
         }
     }
-    if !merged_event.handled() {
+    if let Some(guard) = dispatch_guard.as_mut() {
+        guard.is_unhandled = !merged_event.handled();
+    } else if !merged_event.handled() {
         warn!("Unhandled IRQ {virq}");
     }
     drop(dispatch_guard);
@@ -65,29 +67,52 @@ pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
 
 struct IrqDispatchGuard {
     virq: crate::Virq,
+    is_unhandled: bool,
 }
 
 impl IrqDispatchGuard {
     const fn new(virq: crate::Virq) -> Self {
-        Self { virq }
+        Self {
+            virq,
+            is_unhandled: false,
+        }
     }
 }
 
 impl Drop for IrqDispatchGuard {
     fn drop(&mut self) {
-        let wait_set = {
+        let (wait_set, report) = {
             let mut state = IRQ_STATE.lock();
-            let wait_set = state
-                .descs
-                .get_mut(&self.virq)
-                .and_then(|entry| entry.finish_dispatch());
+            let (wait_set, report) = if let Some(entry) = state.descs.get_mut(&self.virq) {
+                // The in-flight mark keeps this descriptor alive across action
+                // changes. Count only after the complete shared chain returned,
+                // using the existing cleanup lock rather than another hot-path lock.
+                let report = if self.is_unhandled {
+                    entry.record_unhandled_dispatch()
+                } else {
+                    None
+                };
+                (entry.finish_dispatch(), report)
+            } else {
+                (None, None)
+            };
             // This is the matching cleanup point for the last in-flight snapshot:
             // once the guard drops, a descriptor left empty by `free_irq*()` may now
             // be removable. Platform masking is handled by the control path.
             state.remove_if_unused(self.virq);
-            wait_set
+            (wait_set, report)
         };
         wake_in_flight_zero(wait_set);
+        if let Some(report) = report {
+            warn!(
+                "Unhandled IRQ {} (descriptor lifetime count={}, previous warnings suppressed={}, \
+                 count saturated={}; reports at powers of two and first saturation)",
+                self.virq,
+                report.count,
+                report.suppressed,
+                report.count == u64::MAX,
+            );
+        }
     }
 }
 

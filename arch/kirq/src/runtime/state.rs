@@ -13,6 +13,7 @@ use core::array;
 use kpoll::{Completion, PollSet};
 use kspin::SpinNoIrq;
 
+use super::unhandled::{UnhandledIrqReport, UnhandledIrqState};
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqFlags, IrqSpec, Virq,
     action::{IrqAction, IrqActionToken},
@@ -146,6 +147,7 @@ pub(super) struct IrqDescRuntimeState {
     is_msi: bool,
     oneshot_mask_pending: bool,
     next_shared_action_token: usize,
+    unhandled: UnhandledIrqState,
 }
 
 impl IrqDescRuntimeState {
@@ -165,6 +167,7 @@ impl IrqDescRuntimeState {
             is_msi: desc.flags.contains(IrqFlags::MSI),
             oneshot_mask_pending: false,
             next_shared_action_token: 1,
+            unhandled: UnhandledIrqState::new(),
         }
     }
 
@@ -513,6 +516,10 @@ impl IrqStateDesc {
 
     pub(super) fn finish_dispatch(&mut self) -> Option<PollSet> {
         self.runtime.finish_dispatch()
+    }
+
+    pub(super) fn record_unhandled_dispatch(&mut self) -> Option<UnhandledIrqReport> {
+        self.runtime.unhandled.record()
     }
 
     pub(super) fn in_flight(&self) -> usize {

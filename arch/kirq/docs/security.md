@@ -401,6 +401,18 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 
 ## 已知限制
 
+- Descriptor-backed unclaimed action fanout uses saturating event counters
+  and power-of-two warning sampling. Accounting is serialized by the existing
+  in-flight cleanup lock; formatting and logging occur outside `IRQ_STATE`.
+  It never masks an IRQ or changes disable depth. Any shared action claiming
+  an IRQ prevents an unhandled count, including a faulty always-claiming
+  action; these diagnostics cannot establish that hardware was acknowledged.
+- Unhandled reports are bounded per descriptor lifetime, not per unit of
+  time or across repeated descriptor recreation. Counters combine CPUs and
+  action-set changes within that lifetime. A suppressed tail has no public
+  query or teardown report and is discarded with the descriptor. Unknown,
+  missing-descriptor, empty-snapshot and unsupported-thread warnings are
+  unchanged, so this change does not contain all IRQ-related log storms.
 - `kirq` 已支持同一 IRQ line 上的 fixed-capacity shared action list，但尚未提供
   per-action statistics、procfs 输出、debug-shirq 注入或 Linux-style dev_id 指针 ABI。
 - MSI/MSI-X 当前只提供最小 allocation/message bridge，不支持 interrupt remapping、

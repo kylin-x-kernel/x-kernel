@@ -580,6 +580,46 @@ not install a competing implicit deferred-executor owner.
 
 ## 算法流程
 
+### Unclaimed action fanout diagnostics
+
+For a descriptor with a primary-action snapshot, dispatch still runs every
+eligible shared action and ORs its claim result. Only a completely unclaimed
+fanout increments the descriptor's unhandled count. `HANDLED` with no source
+bits is still a claim; a claim is not proof that a device deasserted its IRQ.
+
+The count and pending suppressed-report count are saturating `u64`s owned by
+`IrqDescRuntimeState`. Accounting uses the existing `IRQ_STATE` acquisition at
+in-flight guard cleanup, before the descriptor can be removed. CPUs sharing a
+virq, including a per-CPU IRQ descriptor, share this diagnostic count. There is
+no new lock, atomic, allocation, clock read, feature switch, or controller call.
+This warning budget remains active without `KFEAT_IRQ_STAT`; it records only
+unclaimed fanout, rather than adding general per-CPU IRQ activity statistics.
+The existing guard and claim completion ordering is retained; an owned summary
+is logged after releasing `IRQ_STATE` and waking synchronization waiters.
+Consequently reports can appear out of order across CPUs, or after a later
+descriptor lifetime has begun. A virq and count are not a unique lifetime id.
+
+Reports occur at counts 1, 2, 4, ... and once at `u64::MAX`, at most 65 reports
+per descriptor lifetime. Each report gives its cumulative count and the number
+of earlier events suppressed since the previous scheduled report. This is
+event-count sampling, not a time-based rate limit. Reaching `u64::MAX` marks a
+lower bound; later events never wrap or restart logging. Logging filters may
+hide a scheduled report, as with other `warn!` calls.
+
+Handled dispatches, action additions/removals, descriptor metadata updates,
+and enable/disable do not reset the counters. Existing in-flight ownership
+prevents an old snapshot from being charged to a newly created descriptor.
+Actual descriptor removal discards its counters; recreation starts at zero.
+No public counter-query API or final teardown summary is provided, so an
+unreported tail is not preserved after removal and report spacing can grow
+large. These counts are not per-action attribution, a failure ratio, a hardware
+mask policy, or a recovery detector.
+
+Unresolved sources, resolved sources without descriptors, empty action
+snapshots, and unsupported threaded-state warnings retain their existing
+behavior. They are outside this diagnostic sampling scope and can still log
+on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
+
 ### `register(desc, handler)`
 
 1. 解析 `IrqSpec`。
