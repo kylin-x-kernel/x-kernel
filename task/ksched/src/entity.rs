@@ -171,6 +171,57 @@ impl RtEntity {
     }
 }
 
+/// CBS/EDF fields and the ready/throttled tree links for a Deadline task.
+///
+/// Present on every [`SchedTask`]; only the Deadline class reads or writes
+/// it. Sibling of [`FairEntity`] so the class state stays next to the entity
+/// and enqueue never allocates an index node.
+///
+/// The two links are separate because each residency is ordered by its own
+/// instant: a ready task by its absolute deadline (`deadline_ns`), a throttled
+/// task by the start of its next period (`period_start_ns`). Keeping them
+/// apart also keeps `nr_queued` equal to the ready count.
+pub(crate) struct DeadlineEntity {
+    /// Budget left in the current period; charging stops at zero.
+    ///
+    /// `runtime_ns` / `period_ns` / `deadline_ns` are not duplicated here:
+    /// they live in `SchedAttr`, and only the derived instants below are
+    /// stored.
+    pub(crate) budget_left_ns: RqCell<u64>,
+    /// Absolute nanosecond instant this task must finish its request by.
+    pub(crate) deadline_ns: RqCell<u64>,
+    /// Absolute instant the next period starts, used as the replenish instant
+    /// and as the throttled-tree key.
+    pub(crate) period_start_ns: RqCell<u64>,
+    /// `true` while the task holds a request; cleared when a check finds the
+    /// deadline already passed, which drops its reservation.
+    pub(crate) is_active: RqCell<bool>,
+    /// `true` while the request's runtime is spent and the task waits for
+    /// [`Self::period_start_ns`].
+    pub(crate) is_throttled: RqCell<bool>,
+    /// Tie-breaker for equal tree keys, assigned per enqueue by the class.
+    pub(crate) tree_id: RqCell<u64>,
+    /// Link in the deadline-ordered ready tree.
+    pub(crate) ready_link: RBTreeAtomicLink,
+    /// Link in the period-start-ordered throttled tree.
+    pub(crate) throttled_link: RBTreeAtomicLink,
+}
+
+impl DeadlineEntity {
+    const fn new() -> Self {
+        Self {
+            budget_left_ns: RqCell::new(0),
+            deadline_ns: RqCell::new(0),
+            period_start_ns: RqCell::new(0),
+            is_active: RqCell::new(false),
+            is_throttled: RqCell::new(false),
+            tree_id: RqCell::new(0),
+            ready_link: RBTreeAtomicLink::new(),
+            throttled_link: RBTreeAtomicLink::new(),
+        }
+    }
+}
+
 impl FairEntity {
     const fn new(request_ns: u64) -> Self {
         Self {
@@ -216,6 +267,7 @@ pub struct SchedTask<T> {
     /// Intrusive FIFO link for one RT priority list. Detached while the task
     /// is not queued on RT.
     rt_links: ReadyLinks,
+    pub(crate) deadline: DeadlineEntity,
 }
 
 impl<T> SchedTask<T> {
@@ -239,6 +291,7 @@ impl<T> SchedTask<T> {
             fair: FairEntity::new(crate::DEFAULT_SLICE_NS),
             rt: RtEntity::new(crate::DEFAULT_RR_SLICE_NS),
             rt_links: ReadyLinks::new(),
+            deadline: DeadlineEntity::new(),
         }
     }
 
@@ -328,6 +381,11 @@ impl<T> SchedTask<T> {
         &self.fair
     }
 
+    /// CBS/EDF state. Only the Deadline class reads or writes it.
+    pub(crate) const fn deadline(&self) -> &DeadlineEntity {
+        &self.deadline
+    }
+
     pub(crate) fn rt(&self) -> &RtEntity {
         &self.rt
     }
@@ -405,6 +463,21 @@ impl<T> SchedTask<T> {
 
     pub(crate) fn request_ns_for_test(&self) -> u64 {
         self.fair.request_ns.get(Self::test_token())
+    }
+
+    /// Remaining CBS budget, for deadline class assertions.
+    pub(crate) fn dl_budget_for_test(&self) -> u64 {
+        self.deadline.budget_left_ns.get(Self::test_token())
+    }
+
+    /// Whether the task is waiting for its next period.
+    pub(crate) fn dl_is_throttled_for_test(&self) -> bool {
+        self.deadline.is_throttled.get(Self::test_token())
+    }
+
+    /// Absolute instant the next period starts.
+    pub(crate) fn dl_period_start_for_test(&self) -> u64 {
+        self.deadline.period_start_ns.get(Self::test_token())
     }
 }
 

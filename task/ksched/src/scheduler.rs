@@ -18,7 +18,7 @@ use core::marker::PhantomData;
 
 use crate::{
     class::{ClassOps, Decision, EnqueueKind, LeaveReason, UpdateKind},
-    classes::{FairClass, IdleClass, RtClass},
+    classes::{DeadlineClass, FairClass, IdleClass, RtClass},
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
     policy::{SchedAttr, SchedClass, SchedError},
@@ -175,7 +175,7 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 /// queue can be borrowed mutably beside the runner.
 pub(crate) struct ClassSet<T> {
     stop: UnwiredClass<T>,
-    deadline: UnwiredClass<T>,
+    deadline: DeadlineClass<T>,
     rt: RtClass<T>,
     fair: FairClass<T>,
     idle: IdleClass<T>,
@@ -234,7 +234,7 @@ impl<T> Scheduler<T> {
             curr: None,
             classes: ClassSet {
                 stop: UnwiredClass::new(SchedClass::Stop),
-                deadline: UnwiredClass::new(SchedClass::Deadline),
+                deadline: DeadlineClass::new(),
                 rt: RtClass::new(),
                 fair: FairClass::new(),
                 idle: IdleClass::new(idle),

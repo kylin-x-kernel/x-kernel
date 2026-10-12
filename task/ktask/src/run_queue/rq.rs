@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
-use ksched::{Decision, EnqueueKind, Nice, RtPrio, SchedAttr, SchedPolicy, UpdateKind};
+use ksched::{Decision, EnqueueKind, Nice, UpdateKind};
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
@@ -41,13 +41,13 @@ pub(super) fn request_resched_on(rq: &RunQueue) {
         sched_stat_inc(&sched_stat_cpu(cpu_id).local_resched);
         current().set_preempt_pending(true);
         // A newly runnable peer may need an earlier deadline than the lone
-        // runner, whose schedule timer may currently be disarmed.
+        // runner, whose schedule timer may currently be disarmed. The class
+        // view is taken even for an idle runner: a class can have a pending
+        // event without a runnable task (a throttled deadline task waiting for
+        // its next period), and an idle CPU gets no other timer IRQ to re-arm
+        // it. The idle class reports no runner event of its own.
         let now_ns = khal::time::monotonic_time_nanos();
-        let next_rel = if current().is_idle() {
-            None
-        } else {
-            rq.scheduler.lock().next_event_ns()
-        };
+        let next_rel = rq.scheduler.lock().next_event_ns();
         program_sched_deadline(now_ns, next_rel);
         rearm_local_timer();
     } else {
@@ -242,13 +242,15 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         }
     }
 
-    /// Recomputes the per-CPU schedule deadline for the running task.
+    /// Recomputes the per-CPU schedule deadline.
+    ///
+    /// Takes the class view even when the runner is idle: a class can still
+    /// have a pending event with no runnable task, and dropping it would
+    /// strand that event because an idle CPU gets no further timer IRQ. The
+    /// idle class itself reports no runner event, so this only keeps events
+    /// that some class genuinely asked for.
     pub(crate) fn refresh_sched_deadline(&mut self, now_ns: u64) {
-        let next_rel = if self.current_task.is_idle() {
-            None
-        } else {
-            self.inner.with_sched(|s| s.next_event_ns())
-        };
+        let next_rel = self.inner.with_sched(|s| s.next_event_ns());
         program_sched_deadline(now_ns, next_rel);
     }
 
@@ -367,12 +369,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             self.apply_runtime_account_side_effects(elapsed, is_idle, decision.resched);
             if !decision.resched {
                 self.current_task.set_preempt_pending(false);
-                let rel = if is_idle {
-                    None
-                } else {
-                    decision.next_event_ns
-                };
-                program_sched_deadline(now_ns, rel);
+                // Keep every class event even when the runner is idle: a
+                // class can have a pending event with nothing runnable, and
+                // an idle CPU has no other timer IRQ to re-arm it.
+                program_sched_deadline(now_ns, decision.next_event_ns);
                 rearm_local_timer();
                 return;
             }
@@ -596,6 +596,11 @@ impl RunQueue {
 
     /// Store a Fair nice value. `None` when `prio` is out of range or the
     /// task is the Idle class.
+    ///
+    /// Reads the current attributes and replaces only `nice`, so this path
+    /// never rewrites `policy`, the RT priority or the deadline parameters. A
+    /// non-Fair task therefore keeps its class and its reservation; the new
+    /// nice value takes effect the next time it returns to Fair.
     pub(super) fn set_fair_nice(
         &self,
         task: &KtaskRef,
@@ -603,12 +608,12 @@ impl RunQueue {
         now_ns: u64,
     ) -> Option<Decision> {
         let nice = Nice::new(prio as i32).ok()?;
-        let attr = SchedAttr {
-            policy: SchedPolicy::Normal,
-            nice,
-            rt_priority: RtPrio::NONE,
-        };
-        self.with_sched(|s| s.set_attr(task, attr, now_ns)).ok()
+        self.with_sched(|s| {
+            let mut attr = s.attr(task);
+            attr.nice = nice;
+            s.set_attr(task, attr, now_ns)
+        })
+        .ok()
     }
 
     /// Advances the account epoch and returns elapsed wall time.
@@ -784,11 +789,11 @@ impl RunQueue {
         next_task.set_state(TaskState::Running);
         let program_next_deadline = |rq: &Self, next: &KtaskRef, now: u64| {
             rq.last_accounted_ns.store(now, Ordering::Relaxed);
-            let next_rel = if next.is_idle() {
-                None
-            } else {
-                rq.with_sched(|s| s.next_event_ns())
-            };
+            // The incoming idle runner reports no class event of its own, but
+            // another class may still have one pending (see
+            // `refresh_sched_deadline`), so the class view is taken
+            // unconditionally.
+            let next_rel = rq.with_sched(|s| s.next_event_ns());
             // Immediate requests must arm pending on the *incoming* task: at
             // this point `current()` is still the outgoing task.
             program_sched_deadline_for(Some(next), now, next_rel);

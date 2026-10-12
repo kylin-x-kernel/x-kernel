@@ -420,8 +420,19 @@ min(next_sched_deadline?, prepared_service_deadline?)
 ```
 
    If both sources are empty, `disarm_timer()` runs. Stale/expired IRQs only
-   catch up accounting and rearm; they do not loop catch-up ticks. With
-   `sched_stat`, IRQs are classified from the schedule slot and prepared
+   catch up accounting and rearm; they do not loop catch-up ticks.
+
+   The schedule slot is written from the class view (`next_event_ns()`), not
+   from the runner alone: all four writers — `request_resched_on`,
+   `refresh_sched_deadline`, the `switch_to` reprogram and the failed-probe
+   tail of `preempt_resched` — take the class view even when the current or
+   incoming task is idle. A class can hold an event with nothing runnable (a
+   throttled deadline task waiting for its next period), and an idle CPU
+   receives no other timer IRQ, so dropping the slot there would strand the
+   event. The idle class reports no runner event of its own, so nothing is
+   armed on behalf of the runner itself.
+
+   With `sched_stat`, IRQs are classified from the schedule slot and prepared
    dispatch result. The existing diagnostic field names remain
    (`timer_irq_sched` / `timer_irq_soft` / `timer_irq_periodic` /
    `timer_irq_stale`); `timer_irq_periodic` stays zero because that source was
@@ -891,6 +902,25 @@ signaled an event. If the target's affinity allows this CPU, enqueueing
 locally cuts cross-CPU wake latency and lets `need_resched` take effect at
 this CPU's preempt safe point. If affinity forbids this CPU, ordinary
 placement is used.
+
+### Why the nice path reads-modifies-writes the attributes
+
+`set_prio` / `set_task_prio` change only the task's nice value. They read the
+current `SchedAttr`, replace `nice`, and submit the whole attribute
+(`RunQueue::set_fair_nice`). They deliberately do **not** build a fresh
+`SchedAttr { policy: Normal, .. }`, because that would rewrite the task's
+policy and drop its deadline parameters: a `SCHED_DEADLINE` task would be
+silently demoted to Fair by a nice change.
+
+Consequences:
+
+- a non-Fair task keeps its class and its bandwidth reservation; the new nice
+  value takes effect the next time the task returns to Fair;
+- `ksched::SchedAttr` gains per-class fields without breaking this path, since
+  no caller spells the struct out field by field any more;
+- the nice value is validated by `Nice::new`, and any later structural
+  inconsistency is rejected by `SchedAttr::validate` inside
+  `Scheduler::set_attr`, before any state changes.
 
 ### Why `KernelGuardIf`
 

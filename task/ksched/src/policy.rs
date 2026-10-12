@@ -213,6 +213,77 @@ pub(crate) const NICE_0_WEIGHT: i64 = 1024;
 
 const _: () = assert!(NICE_TO_WEIGHT[20] as i64 == NICE_0_WEIGHT);
 
+/// `SCHED_DEADLINE` bandwidth parameters, all in nanoseconds.
+///
+/// The triple describes one sporadic task: it may run for `runtime_ns` in
+/// every `period_ns`, and each request must finish within `deadline_ns` of
+/// its activation. A period of zero is normalized to the deadline by the
+/// syscall boundary, so the stored period is always nonzero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DlParams {
+    /// Maximum runtime available in one period.
+    pub runtime_ns: u64,
+    /// Relative deadline of each request, measured from activation.
+    pub deadline_ns: u64,
+    /// Minimum inter-arrival time between two requests.
+    pub period_ns: u64,
+}
+
+impl DlParams {
+    /// No reservation. The neutral value carried by a non-Deadline
+    /// [`SchedAttr`]; [`SchedAttr::validate`] rejects it as a real triple.
+    pub const EMPTY: DlParams = DlParams {
+        runtime_ns: 0,
+        deadline_ns: 0,
+        period_ns: 0,
+    };
+
+    /// Validates a deadline parameter triple.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedError::InvalidPolicy`] when any field is zero, when
+    /// `runtime_ns > deadline_ns`, when `deadline_ns > period_ns`, or when
+    /// `runtime_ns` is below [`crate::config::MIN_DL_RUNTIME_NS`].
+    pub const fn new(
+        runtime_ns: u64,
+        deadline_ns: u64,
+        period_ns: u64,
+    ) -> Result<Self, SchedError> {
+        if runtime_ns == 0
+            || deadline_ns == 0
+            || period_ns == 0
+            || runtime_ns > deadline_ns
+            || deadline_ns > period_ns
+            || runtime_ns < crate::config::MIN_DL_RUNTIME_NS
+        {
+            return Err(SchedError::InvalidPolicy);
+        }
+        Ok(Self {
+            runtime_ns,
+            deadline_ns,
+            period_ns,
+        })
+    }
+
+    /// Bandwidth this task reserves, in parts per million of one CPU.
+    ///
+    /// Saturating so an extreme `runtime_ns`/`period_ns` pair cannot panic;
+    /// the value only feeds the per-RQ admission sum. Returns zero for the
+    /// neutral [`Self::EMPTY`] triple.
+    pub(crate) const fn load_ppm(self) -> u64 {
+        if self.period_ns == 0 {
+            return 0;
+        }
+        let scaled = self.runtime_ns as u128 * 1_000_000u128 / self.period_ns as u128;
+        if scaled > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            scaled as u64
+        }
+    }
+}
+
 /// User-visible scheduling attributes. Unique fact on [`crate::SchedTask`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SchedAttr {
@@ -222,6 +293,8 @@ pub struct SchedAttr {
     pub nice: Nice,
     /// [`RtPrio::NONE`] unless [`SchedPolicy::is_realtime`].
     pub rt_priority: RtPrio,
+    /// `Some` exactly when `policy` is [`SchedPolicy::Deadline`].
+    pub dl_params: Option<DlParams>,
 }
 
 impl SchedAttr {
@@ -230,6 +303,7 @@ impl SchedAttr {
         policy: SchedPolicy::Normal,
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
+        dl_params: None,
     };
 
     /// Dispatch class implied by [`Self::policy`].
@@ -237,21 +311,26 @@ impl SchedAttr {
         self.policy.class()
     }
 
-    /// Structural consistency for the policies this layer admits.
+    /// Structural consistency between `policy` and the per-class fields.
     ///
     /// FIFO and RR require an RT priority in `1..=99`. Fair policies must
-    /// carry [`RtPrio::NONE`]. Deadline is still rejected.
+    /// carry [`RtPrio::NONE`]. Deadline requires a valid [`DlParams`]. Any
+    /// policy other than Deadline must leave `dl_params` empty.
     ///
     /// # Errors
     ///
-    /// Returns [`SchedError::InvalidPolicy`] for [`SchedPolicy::Deadline`].
-    ///
     /// Returns [`SchedError::InvalidPriority`] when FIFO/RR is outside
     /// `1..=99`, or when a Fair policy carries a non-[`RtPrio::NONE`] priority.
+    ///
+    /// Returns [`SchedError::InvalidPolicy`] when a policy other than Deadline
+    /// carries `dl_params`, or when a Deadline policy does not carry a valid
+    /// triple.
     pub const fn validate(&self) -> Result<(), SchedError> {
         match self.policy {
             SchedPolicy::Fifo | SchedPolicy::Rr => {
-                if self.rt_priority.get() < RtPrio::MIN.get()
+                if self.dl_params.is_some() {
+                    Err(SchedError::InvalidPolicy)
+                } else if self.rt_priority.get() < RtPrio::MIN.get()
                     || self.rt_priority.get() > RtPrio::MAX.get()
                 {
                     Err(SchedError::InvalidPriority)
@@ -259,9 +338,19 @@ impl SchedAttr {
                     Ok(())
                 }
             }
-            SchedPolicy::Deadline => Err(SchedError::InvalidPolicy),
+            SchedPolicy::Deadline => match self.dl_params {
+                Some(params) => {
+                    match DlParams::new(params.runtime_ns, params.deadline_ns, params.period_ns) {
+                        Ok(_) => Ok(()),
+                        Err(error) => Err(error),
+                    }
+                }
+                None => Err(SchedError::InvalidPolicy),
+            },
             SchedPolicy::Normal | SchedPolicy::Batch | SchedPolicy::Idle => {
-                if self.rt_priority.get() != RtPrio::NONE.get() {
+                if self.dl_params.is_some() {
+                    Err(SchedError::InvalidPolicy)
+                } else if self.rt_priority.get() != RtPrio::NONE.get() {
                     Err(SchedError::InvalidPriority)
                 } else {
                     Ok(())
@@ -280,6 +369,9 @@ pub enum SchedError {
     InvalidPriority,
     /// Nice outside `-20..=19`.
     InvalidNice,
+    /// Per-RQ deadline bandwidth is exhausted; the caller maps this to
+    /// `EBUSY`, distinct from the `EINVAL` of an invalid attribute.
+    AdmissionFull,
     /// Idle tasks are not user-modifiable.
     KernelClassImmutable,
 }

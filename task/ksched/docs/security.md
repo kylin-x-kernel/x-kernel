@@ -6,7 +6,7 @@
 ktask RunQueue（生产调用方）
    │  持有 RQ 锁后调用 Scheduler
    v
-Stop / Deadline（未接线） -> RT FIFO/RR -> Fair EEVDF -> Idle
+Stop（未接线） -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
 ```
 
 - 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经
@@ -30,9 +30,30 @@ Stop / Deadline（未接线） -> RT FIFO/RR -> Fair EEVDF -> Idle
 `ksched` 不直接接触用户内存、设备或固件输入。攻击面主要是：
 
 - 错误的调度 API 使用顺序（漏 `leave_current`、重复入队）；
-- 优先级等参数范围（nice 边界由各实现校验）。
+- 优先级等参数范围（nice 边界由各实现校验）；
+- **Deadline 参数三元组**：`DlParams { runtime_ns, deadline_ns, period_ns }` 最终来自
+  `sched_setattr` 的用户缓冲区。本 crate 的入口是 `SchedAttr::validate` →
+  `DlParams::new`，校验非零、`runtime <= deadline <= period` 以及
+  `runtime >= SCHED_DL_MIN_RUNTIME_US`；非法组合一律返回 `InvalidPolicy`；
+- **带宽总量**：单 RQ 上任务 `runtime/period` 之和（就绪树 + 节流树 + runner）
+  不得超过 `1 - SCHED_DL_BW_MARGIN_PCT`。这是资源公平性约束而非安全边界：
+  越限返回 `AdmissionFull`，不会导致越界或状态损坏。
 
 ## unsafe 代码清单
+
+Deadline 类新增 `DlAdapter<T, const READY: bool>`，与 `FairAdapter` 同构：
+`get_link` / `get_value` 用 `core::mem::offset_of!` 在同一 `SchedTask<T>` 上做
+正反字段投影，分别指向 `deadline.ready_link` 与 `deadline.throttled_link`。
+
+不变量：
+
+1. 每个实例化只投影一个真实存在的 `RBTreeAtomicLink` 字段；
+2. `link` 必须由同一适配器的 `get_link` 产出，且实体存活；
+3. 反向投影只做字段偏移减法，不构造独占引用，不改变所有权；
+4. 树的键在链接期间不可变：`deadline_ns` / `period_start_ns` / `tree_id` 只在
+   摘除后修改；
+5. `KeyAdapter::get_key` 里的 `RqLocked::assume()` 只在持有 RQ 锁的类方法
+   （insert / find / 游标遍历）中被库调用；树析构不调用 `get_key`。
 
 各算法实现主要依赖安全集合/`Arc`。FIFO/RR 的 unsafe 集中在 ready_list：
 ReadyItem 声明具体字段偏移，ReadyAdapter 完成正反指针投影；按实体删除先核对
@@ -148,7 +169,7 @@ IRQ/preempt 约束提供。
 
 ## 已知限制
 
-- Stop 与 Deadline 没有队列。`SCHED_DEADLINE` 在 `SchedAttr::validate` 被拒绝。
+- Stop 没有队列。`SCHED_DEADLINE` 需携带合法 `DlParams`，否则 `SchedAttr::validate` 以 `InvalidPolicy` 拒绝；每 RQ 准入失败以 `AdmissionFull` 拒绝（非权限检查）。
 - `sched_setscheduler` 尚未把 FIFO/RR 送进 `RtClass`，也没有
   `CAP_SYS_NICE` 检查。接线前必须先补上，否则非特权调用者可以长期占住 CPU。
 - `SCHED_RESET_ON_FORK` 能通过策略字校验并记在线程快照里，fork 尚未按该标志
@@ -170,5 +191,8 @@ IRQ/preempt 约束提供。
 - [ ] 排队任务改 nice 是否先扣除旧权重贡献，再按新权重入队；摘除后是否无残账。
 - [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
 - [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
-- [ ] 未接线 class（Stop / Deadline）的用户策略是否仍被 `validate` 拒绝。
+- [ ] 未接线 class（Stop）的用户策略是否仍被 `validate` 拒绝。
+- [ ] `DlParams` 的零值 / 次序颠倒 / 低于最小预算是否都被拒（不截断、不归一化）。
+- [ ] 准入失败是否在改动任务属性之前返回（拒绝后 `attr` 保持不变）。
+- [ ] Deadline 的两个链接在 `advance` / `dequeue` / `put_prev` 各路径是否**至多一个**处于链接状态（不得同时挂在就绪树与节流树上）。
 - [ ] RT 摘除是否先核对队列身份，再 `cursor_mut_from_ptr`。

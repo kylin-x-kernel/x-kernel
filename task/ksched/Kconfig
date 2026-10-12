@@ -34,4 +34,23 @@ config SCHED_RT_RUNTIME_US
       run. Values above the period are clamped to the period.
       Default 950 000 (0.95 s). Zero throttles RT immediately.
 
+config SCHED_DL_MIN_RUNTIME_US
+    usize "SCHED_DEADLINE minimum runtime (microseconds)"
+    range 1 1000000
+    default 100
+    help
+      Smallest runtime a SCHED_DEADLINE task may request. Requests below
+      this bound are rejected during attribute validation, because a
+      shorter runtime cannot be accounted for meaningfully.
+
+config SCHED_DL_BW_MARGIN_PCT
+    u32 "SCHED_DEADLINE bandwidth margin (percent)"
+    range 0 99
+    default 5
+    help
+      Bandwidth kept unassigned on every run queue. A deadline task is
+      admitted only when the run queue's assigned bandwidth stays at or
+      below (100 - margin) percent. A smaller margin admits more deadline
+      load; zero allows assignment up to a whole CPU.
+
 endmenu

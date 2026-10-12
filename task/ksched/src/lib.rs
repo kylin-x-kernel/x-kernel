@@ -12,9 +12,10 @@ mod entity;
 mod policy;
 mod ready_list;
 mod scheduler;
-/// Kernel unit tests for Fair, RT, and Idle arbitration.
+/// Kernel unit tests for Deadline, RT, Fair, and Idle arbitration.
 ///
-/// Stop and Deadline stay unwired. Deadline `set_attr` is rejected.
+/// Stop stays unwired; FIFO/RR `set_attr` is rejected until the RT class
+/// admits them, and Deadline requires a valid `DlParams`.
 #[unittest::mod_test]
 mod tests {
     include!("tests.rs");
@@ -28,5 +29,5 @@ pub use config::{
     DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS, DEFAULT_SLICE_NS,
 };
 pub use entity::{KernelClass, SchedTask};
-pub use policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
+pub use policy::{DlParams, Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use scheduler::Scheduler;

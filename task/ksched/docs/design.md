@@ -4,11 +4,10 @@
 
 `ksched` 的生产调度器是类仲裁器。`ktask` 在持有运行队列锁时调用
 `Scheduler`。仲裁器按 Linux 秩遍历 Stop、Deadline、RT、Fair、Idle：这一层
-实现 RT（FIFO/RR）、Fair（EEVDF）和 Idle。Stop 与 Deadline 仍只占秩，
-`pick_next` 返回空、`enqueue` 视为编程错误。用户任务仍由
-`SchedTask::new` 建成 Fair：`sched_setscheduler` 只写线程快照，还不调用
-`Scheduler::set_attr`，所以生产路径上 `sched_class() == Rt` 目前不成立。
-`ktask` 选核、实体锁和 idle 定时器都不在这次改动里。
+实现 Deadline（CBS + EDF）、RT（FIFO/RR）、Fair（EEVDF）和 Idle。Stop 仍只占
+秩，`pick_next` 返回空、`enqueue` 视为编程错误。用户任务仍由 `SchedTask::new`
+建成 Fair：`sched_setscheduler` / `sched_setattr` 只写线程快照，还不调用
+`Scheduler::set_attr`，所以生产路径上 `sched_class()` 目前仍是 Fair。
 
 ## 背景
 
@@ -22,15 +21,15 @@
 task/ksched/
 ├── src/
 │   ├── lib.rs          # Scheduler / SchedTask
-│   ├── config.rs       # Fair request、RR 时间片、RT 带宽
-│   ├── policy.rs       # SchedClass 秩与用户策略
-│   ├── entity.rs       # SchedTask、FairEntity、RtEntity、RQ 令牌
+│   ├── config.rs       # Fair request、RR 时间片、RT 带宽、DL 预算与准入余量
+│   ├── policy.rs       # SchedClass 秩、用户策略、RtPrio、DlParams
+│   ├── entity.rs       # SchedTask、FairEntity、RtEntity、DeadlineEntity、RQ 令牌
 │   ├── ready_list.rs   # RT 用的 intrusive FIFO 与 O(1) 摘除
 │   ├── class.rs        # ClassOps
-│   ├── classes/        # rt.rs、fair.rs（EEVDF）、idle.rs
-│   ├── scheduler.rs    # 五档仲裁；Stop/Deadline 未接线
+│   ├── classes/        # deadline.rs（CBS+EDF）、rt.rs、fair.rs（EEVDF）、idle.rs
+│   ├── scheduler.rs    # 五档仲裁；Stop 未接线
 │   ├── clock.rs
-│   └── tests.rs        # Fair / RT / Idle 仲裁器单测
+│   └── tests.rs        # Deadline / RT / Fair / Idle 仲裁器单测
 └── docs/
 ```
 
@@ -60,12 +59,13 @@ Blocked|Migrating --enqueue_task--> Ready
 
 ```
 pick_next: Stop -> Deadline -> RT -> Fair -> Idle
-           未接线返回 None         FIFO/RR   EEVDF    永远返回钉住的 idle
+           未接线   CBS+EDF    FIFO/RR   EEVDF    永远返回钉住的 idle
 ```
 
 | 组件 | 职责 |
 |------|------|
-| `SchedTask` | 调用方内部数据、class、seat、attr，以及每任务一份 `FairEntity` 和 `RtEntity` |
+| `SchedTask` | 调用方内部数据、class、seat、attr，以及每任务一份 `FairEntity`、`RtEntity` 和 `DeadlineEntity` |
+| `DeadlineClass` | 就绪 / 节流两棵侵入式 RB 树；CBS 预算；EDF 选人；每 RQ 带宽准入 |
 | `RtClass` | 优先级 `1..=99` 的侵入式 FIFO；RR 时间片；RT 带宽节流 |
 | `FairClass` | 双侵入式 RB 树、lag、NEXT_BUDDY、request |
 | `IdleClass` | 每 RQ 一个钉住的 idle；不入队 |
@@ -84,9 +84,42 @@ idle，不会返回空。
 `attr_changed` 必须按旧 nice 对应的入队权重扣除 `total_weight` / `sum_wv`，
 再按新权重重新入队；整个过程在同一 RQ 锁内完成。运行任务离树，不走这条扣账路径。
 
-Stop / Deadline 只占秩。`SchedAttr::validate` 拒绝 Deadline。FIFO/RR
-要求优先级 `1..=99`，Fair 策略必须带 `RtPrio::NONE`。Idle 任务拒绝
-`set_attr`（`KernelClassImmutable`）。
+Stop 只占秩。`SchedAttr::validate` 按 `policy` 校验各档字段是否自洽：
+Deadline 必须携带合法 `DlParams`，FIFO/RR 要求优先级 `1..=99`，Fair 策略
+必须带 `RtPrio::NONE`；任何非 Deadline 策略都不得携带 `dl_params`。
+Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
+
+### Deadline 类（CBS + EDF）
+
+每个任务按 `DlParams { runtime_ns, deadline_ns, period_ns }` 预留带宽。
+就绪态按**绝对截止期**排序（`deadline_ns`），因此最早截止期先运行；
+`account` 扣减 `budget_left_ns`，归零即进入节流态并按 `period_start_ns`
+转入节流树，等下一个周期由 `advance` 补满预算后回到就绪树。
+
+- 两棵树的键都是 `(instant_ns, tree_id)`：`tree_id` 由类在每次入队时分配，
+  仅用于同刻 tie-break，保证 FIFO 而不引入 id 反查表。
+- `enqueue` 的语义按 `EnqueueKind` 区分：`New` 开新请求；`ClassChange` /
+  `MigrateIn` 由 `switched_to` 或目的 RQ 负责，不重复补预算；`Wake` 在预算
+  仍有剩余时续用当前请求，否则保持节流直到周期开始。
+- **准入是每 RQ 的**：`can_admit` 累加**就绪树 + 节流树 + runner**各自的
+  `runtime/period`。runner 被 `pick_next` 摘出两棵树，所以 class 用私有字段
+  `running`（记 `tree_id` 与预留 ppm）自己记住它：在 `pick_next` / `set_curr`
+  / `switched_to(is_curr)` 置位，在 `put_prev` / `switched_from(is_curr)` 清除，
+  同类内改参数时由 `attr_changed(is_curr)` 刷新。用本次请求替换被改任务在这份
+  和中已计入的旧预留，结果不得超过 `1 - SCHED_DL_BW_MARGIN_PCT`。Block /
+  Migrate 之后既不在树上、也不是 runner 的任务不计入。超限返回
+  `SchedError::AdmissionFull`，上层映射 `EBUSY`；参数非法仍复用
+  `InvalidPolicy`（`EINVAL`）。
+- `set_attr` 入口已调用 `validate()`，因此校验发生在任何状态变更之前；
+  准入在 `set_attr` 的 `can_admit` 阶段完成，失败不改动任务属性。
+- Deadline 不参与 steal：带宽按 home RQ 记账，搬走会脱离准入它的预留。
+- `curr_timer_ns` 报告"预算耗尽"与"请求截止期"的较早者，节流时报告
+  周期开始；`class_timer_ns` 取两棵树最早键。事件以相对纳秒上报，由
+  `Decision::next_event_ns` 交给 `ktask` 编程既有调度槽，**不新增专用定时器**
+  （下限与 Fair 共用 `MIN_SCHED_TIMER_NS`，且低于任何合法 `runtime_ns`）。
+
+已知取舍：`can_admit` 会遍历两棵驻留树、`nr_queued` 会遍历就绪树（O(n)），
+本步优先正确性；若 deadline 任务规模上来，可用增量求和或缓存最早实体替换。
 
 RT 与 Fair 同级切换时，排队任务先从旧类摘下再进新类；正在运行的任务只改
 class，不入队。更高优先级的 RT waiter 通过 `higher_class_runnable` 抢占
@@ -152,7 +185,26 @@ Fair。同一 RT 优先级里，更高优先级 waiter 走 `wakeup_preempts`。�
 - 生产路径走 `Scheduler`。Fair 默认 request 来自 Kconfig
   `SCHED_FAIR_REQUEST_US`。RR 时间片是 `SCHED_RR_SLICE_US`（默认 100 ms）。
   RT 带宽是 `SCHED_RT_RUNTIME_US` / `SCHED_RT_PERIOD_US`（默认 0.95 s / 1 s）。
-  Stop / Deadline 仍只占秩。
+  Deadline 的最小预算与准入余量是 `SCHED_DL_MIN_RUNTIME_US`（默认 100 µs）与
+  `SCHED_DL_BW_MARGIN_PCT`（默认 5）。Stop 仍只占秩。
+- **Deadline 用两棵独立树，而不是就绪与节流共用一棵/一个链接**。曾考虑的
+  备选是单树单链接（省一个 `RBTreeAtomicLink`），被否决，理由有两条：
+  1. **`nr_queued` 的语义会被污染**。`ktask` 的 `load_count` 用
+     `Scheduler::nr_queued() + 非 idle runner` 得到 `nr_running`，选核
+     （`find_idlest_cpu` / SIS / idle-pull）直接读它。共用一棵树时节流任务
+     也在树里，`nr_queued` 会把"本周期不能再跑"的任务算成可运行，选核就会
+     把新任务放到一个实际没有可运行任务的 CPU 上。分开后
+     `nr_queued == ready.len()`，语义与 Fair 一致。
+  2. **两态的排序键不同**。就绪态按请求的绝对截止期（`deadline_ns`）排序，
+     节流态按下一个周期的起点（`period_start_ns`）排序——后者才是唤醒时刻。
+     共用一棵树就必须在同一棵树里混排两种键，并让 `pick_next` 逐项跳过
+     节流项；那会把选人路径从"取最小键"退化为 O(树中节流项数)，也会让
+     `class_timer_ns` 的最早事件不再等于树的 `front()`。
+  代价是每个实体多一个链接（`ready_link` / `throttled_link`），构造时静态
+  初始化，运行期不分配。
+- `SchedAttr` 保持扁平 `Copy` 结构，各档字段并存、由 `policy` 决定谁有意
+  义，`validate()` 是唯一闸门；新增一档只需加字段与分支，不改变既有字段布局。
+  非本类参数用哨兵值（`RtPrio::NONE` / `Option::None`）表示。
 - `Scheduler::curr` 持有运行任务的 `Arc`，和插件 EEVDF 的数值快照不是同一套
   所有权。`leave` 释放仲裁器这份引用；Block 路径仍要求调用方另持一份。
 - 用 `LeaveReason` 替代布尔 `preempt` + 散落的 `account_sleep`，避免调用方

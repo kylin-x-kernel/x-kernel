@@ -10,8 +10,8 @@ use unittest::{assert, assert_eq, def_test};
 
 use crate::{
     DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS, DEFAULT_SLICE_NS, Decision,
-    EnqueueKind, KernelClass, Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy,
-    SchedTask, Scheduler, UpdateKind,
+    DlParams, EnqueueKind, KernelClass, Nice, RtPrio, SchedAttr, SchedClass, SchedError,
+    SchedPolicy, SchedTask, Scheduler, UpdateKind,
 };
 
 const UNIT_NS: u64 = 4096;
@@ -39,6 +39,7 @@ fn nice_attr(nice: i32) -> SchedAttr {
         policy: SchedPolicy::Normal,
         nice: Nice::new(nice).unwrap(),
         rt_priority: RtPrio::NONE,
+        dl_params: None,
     }
 }
 
@@ -47,6 +48,7 @@ fn rt_attr(policy: SchedPolicy, priority: u8) -> SchedAttr {
         policy,
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::new(i32::from(priority)).unwrap(),
+        dl_params: None,
     }
 }
 
@@ -453,6 +455,7 @@ fn set_attr_invalid_does_not_change_class() {
         policy: SchedPolicy::Deadline,
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
+        dl_params: None,
     };
     assert_eq!(s.set_attr(&t, bad, 0), Err(SchedError::InvalidPolicy));
     assert_eq!(t.sched_class(), SchedClass::Fair);
@@ -460,6 +463,7 @@ fn set_attr_invalid_does_not_change_class() {
         policy: SchedPolicy::Fifo,
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
+        dl_params: None,
     };
     assert_eq!(
         s.set_attr(&t, bad_prio, 0),
@@ -800,4 +804,294 @@ fn rt_slice_rotate_does_not_stick_to_later_task() {
     assert_eq!(leave_pick(&mut s, DEFAULT_RR_SLICE_NS), 5);
     s.block_current(DEFAULT_RR_SLICE_NS);
     assert_eq!(pick_id(&mut s, DEFAULT_RR_SLICE_NS), 3);
+}
+
+// ============================================================================
+// Deadline params and class
+// ============================================================================
+
+/// `runtime = deadline = 1 ms`, `period = 2 ms` (50% of one CPU).
+const DL_RUNTIME_NS: u64 = 1_000_000;
+const DL_PERIOD_NS: u64 = 2_000_000;
+
+fn dl_params() -> DlParams {
+    DlParams::new(DL_RUNTIME_NS, DL_RUNTIME_NS, DL_PERIOD_NS).unwrap()
+}
+
+fn dl_attr() -> SchedAttr {
+    SchedAttr {
+        policy: SchedPolicy::Deadline,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: Some(dl_params()),
+    }
+}
+
+/// Builds a task whose policy is already Deadline, without enqueueing it.
+///
+/// Uses `expect` rather than a test assertion: the assertion macros expand to
+/// `return TestResult::Failed`, which only type-checks inside a test function.
+fn dl_task(id: usize) -> Arc<SchedTask<usize>> {
+    let mut s = sched();
+    let t = task(id);
+    s.set_attr(&t, dl_attr(), 0)
+        .expect("deadline attr admitted");
+    t
+}
+
+#[def_test]
+fn dl_params_rejects_invalid_triples() {
+    assert_eq!(DlParams::new(0, 0, 0), Err(SchedError::InvalidPolicy));
+    // runtime must not exceed the deadline.
+    assert_eq!(
+        DlParams::new(2_000_000, 1_000_000, 2_000_000),
+        Err(SchedError::InvalidPolicy)
+    );
+    // deadline must not exceed the period.
+    assert_eq!(
+        DlParams::new(1_000_000, 3_000_000, 2_000_000),
+        Err(SchedError::InvalidPolicy)
+    );
+    // below the configured minimum runtime.
+    assert_eq!(
+        DlParams::new(1, 1_000_000, 2_000_000),
+        Err(SchedError::InvalidPolicy)
+    );
+    // a valid, minimal-legal triple round-trips.
+    let ok = DlParams::new(DL_RUNTIME_NS, DL_PERIOD_NS, DL_PERIOD_NS).unwrap();
+    assert_eq!(ok.runtime_ns, DL_RUNTIME_NS);
+    assert_eq!(ok.deadline_ns, DL_PERIOD_NS);
+    assert_eq!(ok.period_ns, DL_PERIOD_NS);
+}
+
+#[def_test]
+fn sched_attr_validate_checks_field_policy_consistency() {
+    assert!(dl_attr().validate().is_ok());
+    // A Deadline policy without parameters, and a Fair policy carrying them,
+    // are both structurally inconsistent.
+    let missing = SchedAttr {
+        policy: SchedPolicy::Deadline,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: None,
+    };
+    assert_eq!(missing.validate(), Err(SchedError::InvalidPolicy));
+    let extra = SchedAttr {
+        policy: SchedPolicy::Normal,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: Some(dl_params()),
+    };
+    assert_eq!(extra.validate(), Err(SchedError::InvalidPolicy));
+    // An RT policy without a priority in `1..=99` is rejected by the RT rule.
+    let rt = SchedAttr {
+        policy: SchedPolicy::Fifo,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: None,
+    };
+    assert_eq!(rt.validate(), Err(SchedError::InvalidPriority));
+    assert!(SchedAttr::DEFAULT.validate().is_ok());
+}
+
+#[def_test]
+fn dl_earliest_deadline_is_picked_first() {
+    let mut s = sched();
+    // Both tasks open their first request at the same enqueue instant, so
+    // their absolute deadlines are `deadline_ns` apart and EDF picks the
+    // shorter one.
+    let far = dl_task(2);
+    assert!(s.set_attr(&far, deadline_at(2_000_000), 0).is_ok());
+    let near = dl_task(1);
+    assert!(s.set_attr(&near, deadline_at(1_000_000), 0).is_ok());
+    let _ = s.enqueue(far, EnqueueKind::New, 100);
+    let _ = s.enqueue(near, EnqueueKind::New, 100);
+    assert_eq!(pick_id(&mut s, 100), 1);
+}
+
+fn deadline_at(deadline_ns: u64) -> SchedAttr {
+    SchedAttr {
+        policy: SchedPolicy::Deadline,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: Some(DlParams::new(DL_RUNTIME_NS, deadline_ns, DL_PERIOD_NS).unwrap()),
+    }
+}
+
+#[def_test]
+fn dl_request_resumes_until_the_period_end() {
+    let mut s = sched();
+    let t = dl_task(1);
+    s.install_current(t.clone(), 0);
+    // A request is open for the whole period: the budget is only charged by
+    // elapsed time, so a sample inside the period keeps it running.
+    assert_eq!(t.dl_budget_for_test(), DL_RUNTIME_NS);
+    let decision = s.update(DL_RUNTIME_NS / 2, UpdateKind::Account);
+    assert!(!decision.resched);
+    assert!(!t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), DL_RUNTIME_NS / 2);
+}
+
+#[def_test]
+fn dl_period_end_throttles_and_next_period_replenishes() {
+    let mut s = sched();
+    let t = dl_task(1);
+    s.install_current(t.clone(), 0);
+    // Past the request's deadline the budget is exhausted and the class asks
+    // for a reschedule; the task waits for its next period.
+    let decision = s.update(DL_PERIOD_NS, UpdateKind::Account);
+    assert!(decision.resched);
+    assert!(t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), 0);
+    assert_eq!(t.dl_period_start_for_test(), DL_PERIOD_NS);
+    // The task leaves the CPU and is re-enqueued while still throttled: it
+    // waits in the period-start tree, not the ready tree.
+    s.block_current(DL_PERIOD_NS);
+    let _ = s.enqueue(t.clone(), EnqueueKind::Wake { sync: false }, DL_PERIOD_NS);
+    assert_eq!(s.nr_queued(), 0);
+    // The next scheduling point replenishes the budget and lifts the
+    // throttle, so the task becomes runnable again.
+    let _ = s.update(DL_PERIOD_NS + DL_RUNTIME_NS, UpdateKind::Account);
+    assert!(!t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), DL_RUNTIME_NS);
+    assert_eq!(s.nr_queued(), 1);
+    assert_eq!(pick_id(&mut s, DL_PERIOD_NS + DL_RUNTIME_NS), 1);
+}
+
+#[def_test]
+fn dl_admission_rejects_over_reserved_run_queue() {
+    let mut s = sched();
+    // The first 50% reservation fits inside the configured margin.
+    let first = dl_task(1);
+    let _ = s.enqueue(first, EnqueueKind::New, 0);
+    // A second reservation would push the queue past `1 - margin` (5%): the
+    // 50% already admitted plus this whole-CPU request. A second identical
+    // 50% request would exceed the limit as well.
+    let second = task(2);
+    let whole_cpu = SchedAttr {
+        policy: SchedPolicy::Deadline,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: Some(DlParams::new(DL_PERIOD_NS, DL_PERIOD_NS, DL_PERIOD_NS).unwrap()),
+    };
+    assert_eq!(
+        s.set_attr(&second, whole_cpu, 0),
+        Err(SchedError::AdmissionFull)
+    );
+    // Rejected attributes leave the task on its previous class.
+    assert_eq!(second.sched_class(), SchedClass::Fair);
+}
+
+#[def_test]
+fn dl_queued_task_replaces_its_own_reservation() {
+    let mut s = sched();
+    let t = dl_task(1);
+    let _ = s.enqueue(t.clone(), EnqueueKind::New, 0);
+    // The queued task is inside the summed ready tree, so re-submitting the
+    // same triple must replace its own 50%, not add a second one on top.
+    assert!(s.set_attr(&t, dl_attr(), 0).is_ok());
+    assert_eq!(s.attr(&t), dl_attr());
+}
+
+#[def_test]
+fn dl_runner_reservation_counts_toward_admission() {
+    let mut s = sched();
+    // The runner leaves the ready tree on pick, so admission has to add it
+    // back before replacing its reservation.
+    let running = dl_task(1);
+    let _ = s.enqueue(running.clone(), EnqueueKind::New, 0);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let queued = dl_task(2);
+    let _ = s.enqueue(queued, EnqueueKind::New, 0);
+    // 50% running plus 50% ready is the whole CPU, so the runner cannot keep
+    // its reservation and the resubmission is refused.
+    assert_eq!(
+        s.set_attr(&running, dl_attr(), 0),
+        Err(SchedError::AdmissionFull)
+    );
+    assert_eq!(s.attr(&running), dl_attr());
+}
+
+#[def_test]
+fn dl_exit_clears_the_runner_from_admission() {
+    let mut s = sched();
+    // A 50% runner fills half the queue. If leaving the CPU left its
+    // reservation recorded, the next 50% request would look like a whole CPU.
+    let runner = dl_task(1);
+    let _ = s.enqueue(runner.clone(), EnqueueKind::New, 0);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let exited = s.exit_current(0);
+    assert!(Arc::ptr_eq(&exited, &runner));
+    // The queue is empty again, so a fresh 50% reservation must fit.
+    let next = task(2);
+    assert!(s.set_attr(&next, dl_attr(), 0).is_ok());
+    assert_eq!(s.attr(&next), dl_attr());
+}
+
+#[def_test]
+fn dl_timer_reports_budget_and_period_events() {
+    let mut s = sched();
+    let t = dl_task(1);
+    s.install_current(t.clone(), 0);
+    // While the request runs, the next look is the end of the budget.
+    assert_eq!(s.next_event_ns(), Some(DL_RUNTIME_NS));
+    // Spend the full budget by blocking after one runtime, then wake after the
+    // request's deadline has passed with no budget left. The task is throttled
+    // and waits for a fresh request starting `period` after that wake.
+    s.block_current(DL_RUNTIME_NS);
+    let _ = s.enqueue(t.clone(), EnqueueKind::Wake { sync: false }, DL_RUNTIME_NS);
+    assert!(t.dl_is_throttled_for_test());
+    // The current request's period is not reopened by the wake.
+    assert_eq!(t.dl_period_start_for_test(), DL_PERIOD_NS);
+    assert_eq!(s.nr_queued(), 0);
+    // The class reports only the remaining time to the next period, which is
+    // the period length measured from the request's activation.
+    assert_eq!(s.next_event_ns(), Some(DL_PERIOD_NS - DL_RUNTIME_NS));
+}
+
+#[def_test]
+fn dl_class_event_survives_an_idle_runner() {
+    let mut s = sched();
+    let t = dl_task(1);
+    // Run the task and spend its budget before the period ends, so it is
+    // throttled and waiting for the period start at 2 ms.
+    let _ = s.enqueue(t.clone(), EnqueueKind::New, 0);
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let _ = s.update(DL_RUNTIME_NS, UpdateKind::Account);
+    assert!(t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_period_start_for_test(), DL_PERIOD_NS);
+    // Leave the CPU and wake while still throttled: nothing is ready.
+    s.block_current(DL_RUNTIME_NS);
+    let _ = s.enqueue(t.clone(), EnqueueKind::Wake { sync: false }, DL_RUNTIME_NS);
+    assert_eq!(s.nr_queued(), 0);
+    // With the idle task installed as the runner, the class view must still
+    // report the deadline event. `ktask` takes that view unconditionally when
+    // it reprograms the schedule slot, so this is what keeps a throttled
+    // deadline task from being stranded on an idle CPU.
+    let idle = s.idle_task().clone();
+    s.install_current(idle, DL_RUNTIME_NS);
+    assert!(s.current().is_some_and(|curr| curr.is_idle_class()));
+    assert_eq!(s.next_event_ns(), Some(DL_PERIOD_NS - DL_RUNTIME_NS));
+    // When the period starts, the class replenishes and the task is runnable
+    // again, so the idle CPU has something to pick.
+    let _ = s.update(DL_PERIOD_NS, UpdateKind::Account);
+    assert!(!t.dl_is_throttled_for_test());
+    assert_eq!(s.nr_queued(), 1);
+}
+
+#[def_test]
+fn dl_attr_change_is_admitted_before_mutation() {
+    let mut s = sched();
+    let t = dl_task(1);
+    let _ = s.enqueue(t.clone(), EnqueueKind::New, 0);
+    // Raising the reservation past the margin is rejected and the queued task
+    // keeps its previous parameters.
+    let greedy = SchedAttr {
+        policy: SchedPolicy::Deadline,
+        nice: Nice::DEFAULT,
+        rt_priority: RtPrio::NONE,
+        dl_params: Some(DlParams::new(DL_PERIOD_NS, DL_PERIOD_NS, DL_PERIOD_NS).unwrap()),
+    };
+    assert_eq!(s.set_attr(&t, greedy, 0), Err(SchedError::AdmissionFull));
+    assert_eq!(s.attr(&t), dl_attr());
 }
