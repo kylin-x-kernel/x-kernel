@@ -9,9 +9,46 @@ use alloc::sync::Arc;
 use kerrno::KResult;
 use ksync::Mutex;
 
-use crate::{Folio, MappingPages, PageIndex};
+use crate::{Folio, FolioBatch, MappingPages, PageIndex};
 
 impl MappingPages {
+    /// Collects up to `count` contiguous resident folios starting at `start`.
+    ///
+    /// Stops at the first hole or [`FolioBatch::CAPACITY`] without loading pages.
+    /// References keep allocations alive; batch access runs outside the mapping lock.
+    pub fn get_folios_contig(&self, start: PageIndex, count: usize) -> FolioBatch {
+        self.get_folios_contig_with_run_len(start, count.min(FolioBatch::CAPACITY))
+            .0
+    }
+
+    /// Collects references and counts the contiguous resident prefix in one traversal.
+    ///
+    /// Returns at most [`FolioBatch::CAPACITY`] references and a count up to `count`,
+    /// checking entries beyond capacity without retaining them. This mapping-lock
+    /// snapshot does not guarantee residency during later access.
+    pub fn get_folios_contig_with_run_len(
+        &self,
+        start: PageIndex,
+        count: usize,
+    ) -> (FolioBatch, usize) {
+        let mut batch = FolioBatch::new();
+        if count == 0 {
+            return (batch, 0);
+        }
+        let mut run_len = 0;
+        let state = self.state.lock();
+        for (&index, folio) in state.entries.range(start..).take(count) {
+            if start.checked_add(run_len as u64) != Some(index) {
+                break;
+            }
+            if !batch.is_full() {
+                batch.push(folio.clone());
+            }
+            run_len += 1;
+        }
+        (batch, run_len)
+    }
+
     /// Runs `f` with the initialized resident folio at `index`, if present.
     ///
     /// Waits for any current folio holder and rechecks residency. An absent or
@@ -117,5 +154,62 @@ impl MappingPages {
         }
         state.entries.insert(index, Arc::new(Mutex::new(folio)));
         Ok(())
+    }
+}
+
+#[cfg(unittest)]
+mod tests {
+    use memaddr::PAGE_SIZE_4K;
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn collected_folios_reject_removed_and_uninitialized_pages() {
+        let cache = MappingPages::new();
+        let count = FolioBatch::CAPACITY + 2;
+        for index in 0..count {
+            let mut folio = Folio::new_zeroed(index as u64).unwrap();
+            folio.data()[..3].copy_from_slice(b"old");
+            assert!(cache.filemap_add_folio(folio).is_ok());
+        }
+        let (batch, run_len) = cache.get_folios_contig_with_run_len(0, count);
+        assert_eq!(batch.len(), FolioBatch::CAPACITY);
+        assert_eq!(run_len, count);
+        cache.resize_cached_folios((count * PAGE_SIZE_4K) as u64, 0);
+        let mut replacement = Folio::new_zeroed(0).unwrap();
+        replacement.data()[..3].copy_from_slice(b"new");
+        assert!(cache.filemap_add_folio(replacement).is_ok());
+        assert_eq!(batch.with_read_folio(0, |_| ()), None);
+        assert_eq!(
+            cache
+                .get_folios_contig(0, 1)
+                .with_read_folio(0, |data| data[..3].to_vec()),
+            Some(b"new".to_vec())
+        );
+        assert_eq!(
+            cache.with_folio_or_create(1, |_| Err(kerrno::KError::Io), |_| Ok(())),
+            Err(kerrno::KError::Io)
+        );
+        assert_eq!(
+            cache.get_folios_contig(1, 1).with_read_folio(0, |_| ()),
+            None
+        );
+        cache
+            .with_folio_or_create(
+                1,
+                |folio| {
+                    folio.data().fill(0x55);
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            cache
+                .get_folios_contig(1, 1)
+                .with_read_folio(0, |data| data[0]),
+            Some(0x55)
+        );
     }
 }

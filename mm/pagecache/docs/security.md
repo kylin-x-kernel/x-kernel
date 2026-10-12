@@ -29,6 +29,9 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
   整个 dirty range 或被截断的页数增长；
 - 一个 page index 最多关联一个 cached folio；发布前校验 tree key 与 folio immutable index 一致；
 - folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
+- 移除先在 folio lock 下永久标记失效，再删除索引；普通和批次访问在同一锁下校验，
+  失效候选不执行 callback，普通路径重新查询，成功 callback 不重放；
+- owner 必须使 backing read 与发布排除 truncate，并在复制时限制当前 EOF；
 - `Folio::dirty` 是状态源，dirty index 只承担 `PAGECACHE_TAG_DIRTY` 风格的候选枚举；
 - `Folio::writeback` 是状态源，writeback index 只承担等待枚举；
 - 对外 folio 操作返回时，dirty 状态变化已反映到当前 resident folio 的 dirty tag；

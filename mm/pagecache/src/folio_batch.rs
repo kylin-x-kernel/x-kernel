@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Bounded references used by mapping traversal and writeback.
+//! Bounded references shared by cached reads, writeback and mapping traversal.
 
 use alloc::sync::Arc;
 
@@ -12,19 +12,16 @@ use crate::Folio;
 
 /// A bounded, ascending collection of mapping folio references.
 ///
-/// References keep data alive but confer neither residency nor writeback
-/// ownership. Callers must finish any started writeback before clearing the
-/// batch; releasing references does not change folio state.
-///
-/// Entries follow mapping traversal order. The folio owns its index; batch
-/// storage holds only references, as Linux folio_batch does.
-pub(crate) struct FolioBatch {
+/// References keep allocations alive without guaranteeing residency. Clearing
+/// releases references only; callers must first finish any started writeback.
+pub struct FolioBatch {
     entries: [Option<Arc<Mutex<Folio>>>; Self::CAPACITY],
     len: usize,
 }
 
 impl FolioBatch {
-    pub(crate) const CAPACITY: usize = 31;
+    /// Maximum references retained in one batch.
+    pub const CAPACITY: usize = 31;
 
     pub(crate) fn new() -> Self {
         Self {
@@ -33,8 +30,28 @@ impl FolioBatch {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    /// Returns the number of references collected.
+    pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Returns whether no references were collected.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Reads immutable bytes from the folio at a batch position.
+    ///
+    /// `slot` is a traversal position. Calls `read` under the folio lock without
+    /// a mapping lock; it must not re-enter the mapping. Absent, non-uptodate or invalidated
+    /// entries return `None` without calling `read`; callers must resolve them again.
+    pub fn with_read_folio<R>(&self, slot: usize, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let folio = self.entries.get(slot)?.as_ref()?;
+        let mut locked = folio.lock();
+        if locked.is_invalidated() || !locked.is_uptodate() {
+            return None;
+        }
+        Some(read(locked.data()))
     }
 
     pub(crate) fn is_full(&self) -> bool {

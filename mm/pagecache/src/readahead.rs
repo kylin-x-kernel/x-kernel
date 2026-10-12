@@ -36,7 +36,7 @@ impl MappingPages {
             }
             let folio = match Folio::new_zeroed(index) {
                 Ok(folio) => folio,
-                Err(error) if batch.len() == 0 => return Err(error),
+                Err(error) if batch.is_empty() => return Err(error),
                 Err(_) => break,
             };
             batch.push(Arc::new(Mutex::new(folio)));

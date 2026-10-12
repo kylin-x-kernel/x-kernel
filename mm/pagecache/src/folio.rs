@@ -19,6 +19,7 @@ pub struct Folio {
     addr: VirtAddr,
     uptodate: bool,
     dirty: bool,
+    is_invalidated: bool,
     writeback: bool,
 }
 
@@ -37,6 +38,7 @@ impl Folio {
             addr,
             uptodate: false,
             dirty: false,
+            is_invalidated: false,
             writeback: false,
         })
     }
@@ -54,6 +56,16 @@ impl Folio {
     /// Returns the immutable page index; this does not prove mapping residency.
     pub const fn index(&self) -> PageIndex {
         self.index
+    }
+
+    /// Marks a removed cache entry unusable by previously collected readers.
+    pub(crate) fn invalidate(&mut self) {
+        self.is_invalidated = true;
+        self.clear_dirty();
+    }
+
+    pub(crate) fn is_invalidated(&self) -> bool {
+        self.is_invalidated
     }
 
     /// Returns the physical address of this folio.

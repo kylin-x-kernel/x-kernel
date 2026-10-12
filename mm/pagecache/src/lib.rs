@@ -20,7 +20,7 @@ mod truncate;
 mod writeback;
 
 pub use folio::Folio;
-pub(crate) use folio_batch::FolioBatch;
+pub use folio_batch::FolioBatch;
 pub use mapping_pages::MappingPages;
 pub use writeback::WritebackRangeResult;
 

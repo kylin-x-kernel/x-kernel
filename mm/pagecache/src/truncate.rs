@@ -94,7 +94,7 @@ impl MappingPages {
             // Success requires an empty range: a retry limit or a no-progress
             // exit could leave pages referencing blocks the owner will release.
             self.collect_truncate_folios(&mut Some(first_index), &mut batch);
-            if batch.len() == 0 {
+            if batch.is_empty() {
                 break;
             }
             for candidate in batch.iter() {
@@ -119,7 +119,7 @@ impl MappingPages {
 
     pub(super) fn discard_folio(state: &mut MappingPagesState, folio: &mut Folio) {
         let index = folio.index();
-        folio.clear_dirty();
+        folio.invalidate();
         state.entries.remove(&index);
         state.dirty_marks.remove(&index);
         state.writeback_marks.remove(&index);
@@ -191,9 +191,9 @@ impl Drop for MappingPages {
         for folio in entries.values() {
             let mut folio = folio.lock();
             debug_assert!(!folio.is_under_writeback());
-            // External references may outlive the container. Clear discarded
-            // data before Rust drops the entries and their derived marks.
-            folio.clear_dirty();
+            // External references may outlive the container. Invalidate them
+            // before Rust drops the entries and their derived marks.
+            folio.invalidate();
         }
     }
 }

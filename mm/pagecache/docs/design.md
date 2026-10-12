@@ -29,8 +29,8 @@ runtime 不能直接引用它。
 
 - `mapping_pages.rs`：容器、锁内 resident tree/dirty marks 与 dirty reconciliation；
 - `folio.rs`：页分配、数据访问、uptodate/dirty/writeback 状态和释放；
-- `folio_batch.rs`：有界、有序的 folio 引用集合；
-- `filemap.rs`：lookup、materialize 和 insert-if-absent；
+- `folio_batch.rs`：读取、写回与截断共用的有界引用集合，以及只读访问接口；
+- `filemap.rs`：lookup、连续引用批量收集、materialize 和 insert-if-absent；
 - `readahead.rs`：有界缺页段查询、页保留和同步读入协调；
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；

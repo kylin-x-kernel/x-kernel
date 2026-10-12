@@ -386,6 +386,9 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 
 ### Buffered read 与预读发布
 
+批次引用只保活分配，不证明驻留或初始化；页锁内拒绝失效及非 uptodate 候选，
+回退普通查询和初始化。复制仍在页锁内按当前 EOF 限长，短复制立即停止。
+
 同步预读控制对象只在 invalidate shared lock 覆盖的 callback 内借用；完整数据通过
 游标顺序发布，长度不足不会生成有效缓存页，已有 resident 不被 backing 数据覆盖。
 缺页读取同样在该锁内检查 EOF 并完成发布，truncate exclusive 排除迟到的旧数据。

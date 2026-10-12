@@ -5,7 +5,7 @@
 //! Readahead requests, window selection and filesystem dispatch.
 
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex};
+use pagecache::{Folio, FolioBatch, PageIndex};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
@@ -77,6 +77,34 @@ impl ReadaheadControl<'_, '_> {
 }
 
 impl AddressSpace {
+    /// Prepares a bounded read window and collects its first resident batch.
+    ///
+    /// The index snapshot keeps references alive; each copy must still check
+    /// initialization and invalidation under the folio lock. Readahead keeps
+    /// its existing reservation protocol and excludes truncate during I/O.
+    pub(super) fn prepare_read_window_and_batch(
+        &self,
+        offset: u64,
+        len: usize,
+        file_len: u64,
+    ) -> (u64, FolioBatch) {
+        let end = offset
+            .saturating_add(len.min(MAX_READAHEAD_BYTES) as u64)
+            .min(file_len);
+        let start = offset / PAGE_SIZE_4K as u64;
+        let count = end.div_ceil(PAGE_SIZE_4K as u64).saturating_sub(start) as usize;
+        let (batch, run_len) = self.i_pages.get_folios_contig_with_run_len(start, count);
+        if count > 1 && run_len < count {
+            drop(batch);
+            let _invalidate_guard = self.invalidate_lock.read();
+            // Recheck EOF after acquiring invalidate shared before reserving pages.
+            let current_len = self.inode().map_or(file_len, |inode| inode.size());
+            self.sync_readahead(offset, len, current_len.min(file_len));
+            return (end, self.i_pages.get_folios_contig(start, count));
+        }
+        (end, batch)
+    }
+
     // Called with invalidate shared held, including EOF sampling, I/O and
     // initialization. Missing runs are installed and locked before filesystem
     // dispatch, so competing demand reads wait on the same resident folios.

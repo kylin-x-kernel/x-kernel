@@ -88,49 +88,99 @@ impl AddressSpace {
     pub(super) fn read_from_page_cache(
         &self,
         iter: &mut IovIterDest<'_>,
-        mut offset: u64,
+        offset: u64,
     ) -> VfsResult<usize> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
-        let mut total = 0usize;
+        if iter.count() == 0 {
+            return Ok(0);
+        }
+        if iter.count() <= PAGE_SIZE_4K - (offset % PAGE_SIZE_4K as u64) as usize {
+            let mut prepared_end = offset;
+            return self
+                .copy_folio_to_iter(iter, offset, &inode, &mut prepared_end)
+                .map(|(copied, _)| copied);
+        }
+        let mut total = 0;
+        match self.read_cache_batches(iter, offset, &inode, &mut total) {
+            Ok(()) => Ok(total),
+            Err(error) if total == 0 => Err(error),
+            Err(_) => Ok(total),
+        }
+    }
+
+    fn read_cache_batches(
+        &self,
+        iter: &mut IovIterDest<'_>,
+        mut offset: u64,
+        inode: &crate::VfsInode,
+        total: &mut usize,
+    ) -> VfsResult<()> {
         let mut prepared_end = offset;
         while iter.count() != 0 {
-            // Sample EOF after locking the folio, so a completed shrink cannot
-            // expose stale bytes through an earlier file-size snapshot.
-            let cached = self.with_folio(offset / PAGE_SIZE_4K as u64, |folio| {
-                folio.map(|folio| {
-                    let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
-                    let step = inode
-                        .size()
-                        .saturating_sub(offset)
-                        .min((PAGE_SIZE_4K - page_off) as u64)
-                        as usize;
-                    if step == 0 {
-                        return Ok((0, 0));
-                    }
-                    iter.copy_to_iter(&folio.data()[page_off..page_off + step])
-                        .map(|copied| (copied, step))
-                })
-            });
-            let result = match cached {
-                Some(result) => result,
-                None => match self.read_cache_folio(offset, iter.count(), &mut prepared_end) {
-                    Ok(true) => continue,
-                    Ok(false) => break,
-                    Err(error) => Err(error),
-                },
+            let file_len = inode.size();
+            if offset >= file_len {
+                return Ok(());
+            }
+            let batch = if offset >= prepared_end {
+                let (end, batch) =
+                    self.prepare_read_window_and_batch(offset, iter.count(), file_len);
+                prepared_end = end;
+                batch
+            } else {
+                let start = offset / PAGE_SIZE_4K as u64;
+                let end = prepared_end.min(file_len);
+                let count = end.div_ceil(PAGE_SIZE_4K as u64).saturating_sub(start) as usize;
+                self.i_pages.get_folios_contig(start, count)
             };
-            let (copied, step) = match result {
-                Ok(result) => result,
-                Err(error) if total == 0 => return Err(error),
-                Err(_) => break,
-            };
-            offset += copied as u64;
-            total += copied;
-            if copied == 0 || copied < step {
-                break;
+            for slot in 0..batch.len().max(1) {
+                let page_remaining = PAGE_SIZE_4K - (offset % PAGE_SIZE_4K as u64) as usize;
+                let (copied, copy_file_len) = match batch.with_read_folio(slot, |data| {
+                    Self::copy_cached_bytes(iter, data, offset, inode.size())
+                }) {
+                    Some(result) => result?,
+                    None => self.copy_folio_to_iter(iter, offset, inode, &mut prepared_end)?,
+                };
+                offset += copied as u64;
+                *total += copied;
+                if copied < page_remaining || iter.count() == 0 || offset >= copy_file_len {
+                    return Ok(());
+                }
             }
         }
-        Ok(total)
+        Ok(())
+    }
+
+    fn copy_folio_to_iter(
+        &self,
+        iter: &mut IovIterDest<'_>,
+        offset: u64,
+        inode: &crate::VfsInode,
+        prepared_end: &mut u64,
+    ) -> VfsResult<(usize, u64)> {
+        loop {
+            if let Some(result) = self.with_folio(offset / PAGE_SIZE_4K as u64, |folio| {
+                folio.map(|folio| Self::copy_cached_bytes(iter, folio.data(), offset, inode.size()))
+            }) {
+                return result;
+            }
+            if !self.read_cache_folio(offset, iter.count(), prepared_end)? {
+                return Ok((0, inode.size()));
+            }
+        }
+    }
+
+    fn copy_cached_bytes(
+        iter: &mut IovIterDest<'_>,
+        data: &[u8],
+        offset: u64,
+        file_len: u64,
+    ) -> VfsResult<(usize, u64)> {
+        let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
+        let step = file_len
+            .saturating_sub(offset)
+            .min((PAGE_SIZE_4K - page_off) as u64) as usize;
+        let copied = iter.copy_to_iter(&data[page_off..page_off + step])?;
+        Ok((copied, file_len))
     }
 
     fn read_cache_folio(
@@ -274,17 +324,15 @@ impl AddressSpace {
             if accepted < copied {
                 iter.revert(copied - accepted)?;
             }
-            // `write_end` publishes EOF as `pos + accepted`; roll the cache back
-            // to that same end so unaccepted bytes are not left cached and dirty
-            // beyond the visible size.
+            // Preserve the old EOF if a short write accepted fewer bytes than
+            // the range prepared for caching.
             let accepted_end = pos
                 .checked_add(accepted as u64)
                 .ok_or(VfsError::InvalidInput)?;
-            if grew_cache && accepted_end < prepared_end {
-                self.i_pages
-                    .resize_cached_folios(prepared_end, accepted_end);
-            }
             visible_len = visible_len.max(accepted_end);
+            if grew_cache && visible_len < prepared_end {
+                self.i_pages.resize_cached_folios(prepared_end, visible_len);
+            }
             if accepted == 0 {
                 break;
             }
