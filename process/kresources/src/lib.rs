@@ -186,7 +186,8 @@ impl ProcessResources {
     /// # Errors
     ///
     /// Returns `KError::NoSuchProcess` after files detachment, or
-    /// `KError::TooManyOpenFiles` if occupied count reaches the soft cap or the table is full.
+    /// `KError::TooManyOpenFiles` if no free descriptor number is below the soft
+    /// limit and physical table capacity.
     pub fn add_file(&self, file: Arc<VfsFile>, cloexec: bool) -> kerrno::KResult<c_int> {
         self.with_fd_table(|fd_table| fd_table.write().add_file(self.max_nofile(), file, cloexec))
     }
@@ -200,6 +201,26 @@ impl ProcessResources {
     pub fn duplicate_file(&self, fd: c_int, cloexec: bool) -> kerrno::KResult<c_int> {
         let file = self.get_file(fd)?;
         self.add_file(file, cloexec)
+    }
+
+    /// Duplicates a descriptor into the lowest free slot at/above `minimum`.
+    ///
+    /// Reads the soft limit before acquiring the files-owner/table locks. Source
+    /// lookup and insertion share one table write guard, and the files-owner
+    /// read guard prevents concurrent detachment or replacement during either.
+    /// The new slot shares the open file and has the requested close-on-exec bit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::NoSuchProcess` after files detachment. Otherwise propagates
+    /// source, minimum, and exhaustion errors from [`FdTable::duplicate_from`].
+    pub fn duplicate_file_from(&self, fd: c_int, minimum: c_int, cloexec: bool) -> KResult<c_int> {
+        let max_nofile = self.max_nofile();
+        self.with_fd_table(|fd_table| {
+            fd_table
+                .write()
+                .duplicate_from(fd, minimum, max_nofile, cloexec)
+        })
     }
 
     /// Duplicates a descriptor into a fixed slot.
@@ -449,6 +470,16 @@ mod tests {
             Some(kerrno::KError::NoSuchProcess)
         );
         resources.exit_files();
+    }
+
+    #[def_test]
+    fn test_duplicate_file_from_rejects_detached_owner() {
+        let resources = ProcessResources::new(0x80000);
+        resources.exit_files();
+        assert_eq!(
+            resources.duplicate_file_from(0, 0, false),
+            Err(kerrno::KError::NoSuchProcess)
+        );
     }
 
     #[def_test]

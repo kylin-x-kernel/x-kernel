@@ -113,19 +113,59 @@ impl FdTable {
     ///
     /// # Errors
     ///
-    /// Returns `KError::TooManyOpenFiles` if occupied count is at least `max_nofile`
-    /// or no physical slot is available. The soft check is on count, not the FD number.
+    /// Returns `KError::TooManyOpenFiles` if no free descriptor number is below
+    /// both `max_nofile` and physical capacity. Existing high descriptors do not
+    /// prevent reuse of a low hole after the soft limit is reduced.
     pub fn add_file(
         &mut self,
         max_nofile: u64,
         file: Arc<VfsFile>,
         cloexec: bool,
     ) -> KResult<c_int> {
-        if self.count() as u64 >= max_nofile {
-            return Err(KError::TooManyOpenFiles);
+        self.allocate_descriptor(0, max_nofile, FileDescriptor::new(file, cloexec))
+    }
+
+    /// Duplicates into the lowest free descriptor at or above `minimum`.
+    ///
+    /// The new descriptor must be below `max_nofile` and physical table capacity.
+    /// Existing descriptors above a lowered soft limit remain valid sources and
+    /// do not prevent allocation into a free slot below that limit. The caller
+    /// holds the table write lock across source lookup and insertion.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::BadFileDescriptor` for an absent source, checked first;
+    /// `KError::InvalidInput` for a negative minimum or one at/above `max_nofile`;
+    /// and `KError::TooManyOpenFiles` when the permitted range has no free slot.
+    /// Errors leave the table unchanged.
+    pub fn duplicate_from(
+        &mut self,
+        old_fd: c_int,
+        minimum: c_int,
+        max_nofile: u64,
+        cloexec: bool,
+    ) -> KResult<c_int> {
+        let source = self.get(old_fd as usize).ok_or(KError::BadFileDescriptor)?;
+        if minimum < 0 || minimum as u64 >= max_nofile {
+            return Err(KError::InvalidInput);
         }
 
-        self.add(FileDescriptor::new(file, cloexec))
+        let descriptor = FileDescriptor::new(source.file().clone(), cloexec);
+        self.allocate_descriptor(minimum as usize, max_nofile, descriptor)
+    }
+
+    /// Shared allocation for ordinary insertion and minimum-based duplication.
+    /// Command-specific validation happens before this policy-neutral search.
+    fn allocate_descriptor(
+        &mut self,
+        minimum: usize,
+        max_nofile: u64,
+        descriptor: FileDescriptor,
+    ) -> KResult<c_int> {
+        // Search is bounded by the fixed table capacity, even for RLIM_INFINITY.
+        let end = max_nofile.min(krlimit::FILE_LIMIT as u64) as usize;
+        self.entries
+            .add_in_range(minimum, end, descriptor)
             .map(|fd| fd as c_int)
             .map_err(|_| KError::TooManyOpenFiles)
     }

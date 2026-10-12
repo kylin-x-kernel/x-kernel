@@ -436,6 +436,16 @@ namespace detach 之前校验。因此不可解析的 target 仍优先返回查�
 这有助于部分用户态程序继续运行，
 但不是完整的 POSIX/ Linux 文件锁语义。
 
+### fcntl minimum-based duplication
+
+`F_DUPFD` and `F_DUPFD_CLOEXEC` convert the unsigned-long argument to a signed
+32-bit minimum, matching Linux `do_fcntl`, then call
+`ProcessResources::duplicate_file_from`. Source validation precedes minimum
+validation; allocation selects the lowest free FD at/above the minimum and below
+the soft `RLIMIT_NOFILE` and physical capacity. The CLOEXEC variant sets only the
+new descriptor's flag. Ordinary `dup` and fixed-target `dup2`/`dup3` keep their
+existing paths.
+
 ### memfd sealing fcntl
 
 `fd_ops` 处理 `F_GET_SEALS` 和 `F_ADD_SEALS`：

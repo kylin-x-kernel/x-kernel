@@ -43,9 +43,25 @@ and may block or reenter callers, so these flows are not interrupt-safe.
 ## Slot lifecycle and algorithms
 
 A slot is absent or holds a descriptor; these are conceptual states, not a Rust
-state enum. `add_file` checks occupied count against the supplied soft cap, then
-inserts in the first free slot. Physical capacity is `krlimit::FILE_LIMIT` (1024).
-The count policy does not itself enforce a maximum descriptor-number value.
+state enum. `add_file` and `duplicate_from` use the same private allocator to
+insert in the lowest unassigned slot in
+`[minimum, min(soft_limit, FILE_LIMIT))`. Ordinary insertion supplies zero;
+`F_DUPFD` supplies its requested minimum. Physical capacity is
+`krlimit::FILE_LIMIT` (1024), which also bounds the search for an infinite limit.
+The allocator delegates range selection to `FlattenObjects::add_in_range`, which
+reuses the container's single bitmap and skips fully occupied words. It does
+not check every occupied descriptor while holding the table write lock. The
+local dependency preserves upstream 0.2.4 ownership and slot operations; its
+provenance and sole API extension are in `third_party/flatten_objects/XKERNEL-PATCH.md`.
+`duplicate_from` checks the source first and rejects a negative minimum or one
+at/above the soft limit before entering the shared allocator. These
+command-specific errors remain separate from ordinary insertion. Existing high descriptors after a limit
+reduction do not count against free low slots. Source lookup and insertion use
+one exclusive table access; failures do not replace entries or change flags.
+The duplicate shares the open file and receives its own requested `cloexec` bit.
+Regression coverage includes lowering the limit below the occupied count while
+low slots remain free, mixing ordinary insertion and minimum-based duplication,
+and rejecting both operations once every permitted low slot is occupied.
 `insert_file` skips the soft-cap check and returns the uninserted descriptor when
 full. Internal raw slot helpers are `pub(crate)`.
 

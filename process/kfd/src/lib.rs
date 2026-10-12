@@ -35,7 +35,10 @@ pub use self::{
 #[unittest::mod_test]
 mod tests {
     use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::{
+        ffi::c_int,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use anon_inodefs::AnonInodeFs;
     use kpoll::IoEvents;
@@ -165,6 +168,139 @@ mod tests {
             table.snapshot(fd),
             Err(kerrno::KError::BadFileDescriptor)
         ));
+    }
+
+    #[def_test]
+    fn test_duplicate_from_uses_lowest_free_slot_at_minimum() {
+        let mut table = FdTable::default();
+        let source = table.add_file(16, snapshot_test_file(), true).unwrap();
+        assert_eq!(table.duplicate_from(source, 4, 16, false), Ok(4));
+        assert_eq!(table.duplicate_from(source, 4, 16, false), Ok(5));
+        table.file_close_fd_locked(4).unwrap().close().unwrap();
+        assert_eq!(table.duplicate_from(source, 4, 16, false), Ok(4));
+        assert!(table.get(1).is_none());
+        assert_eq!(table.count(), 3);
+    }
+
+    #[def_test]
+    fn test_duplicate_from_shares_file_but_sets_only_new_cloexec() {
+        let mut table = FdTable::default();
+        let file = snapshot_test_file();
+        let source = table.add_file(16, file.clone(), true).unwrap();
+        let plain = table.duplicate_from(source, 4, 16, false).unwrap();
+        let cloexec = table.duplicate_from(source, 8, 16, true).unwrap();
+        assert!(table.cloexec(source).unwrap());
+        assert!(!table.cloexec(plain).unwrap());
+        assert!(table.cloexec(cloexec).unwrap());
+        assert!(Arc::ptr_eq(&file, &table.get_file(plain).unwrap()));
+        table.file_close_fd_locked(source).unwrap().close().unwrap();
+        assert!(Arc::ptr_eq(&file, &table.get_file(cloexec).unwrap()));
+        assert_eq!(table.get_file(plain).unwrap().flags(), OpenFlags::NONBLOCK);
+    }
+
+    #[def_test]
+    fn test_duplicate_from_rejects_invalid_minimum_without_mutation() {
+        let mut table = FdTable::default();
+        let source = table.add_file(16, snapshot_test_file(), false).unwrap();
+        for minimum in [-1, 16, 17, c_int::MAX] {
+            assert_eq!(
+                table.duplicate_from(source, minimum, 16, true),
+                Err(kerrno::KError::InvalidInput)
+            );
+        }
+        assert_eq!(table.count(), 1);
+        assert!(!table.cloexec(source).unwrap());
+    }
+
+    #[def_test]
+    fn test_duplicate_from_checks_source_before_minimum() {
+        let mut table = FdTable::default();
+        for source in [-1, 0, krlimit::FILE_LIMIT as c_int] {
+            assert_eq!(
+                table.duplicate_from(source, -1, 0, false),
+                Err(kerrno::KError::BadFileDescriptor)
+            );
+        }
+        assert_eq!(table.count(), 0);
+    }
+
+    #[def_test]
+    fn test_duplicate_from_exhausted_range_does_not_use_lower_holes() {
+        let mut table = FdTable::default();
+        let source = table.add_file(16, snapshot_test_file(), false).unwrap();
+        assert_eq!(table.duplicate_from(source, 6, 8, false), Ok(6));
+        assert_eq!(table.duplicate_from(source, 6, 8, false), Ok(7));
+        assert_eq!(
+            table.duplicate_from(source, 6, 8, true),
+            Err(kerrno::KError::TooManyOpenFiles)
+        );
+        assert_eq!(table.count(), 3);
+        assert!(!table.cloexec(6).unwrap());
+        assert!(table.get(1).is_none());
+        assert!(table.get(8).is_none());
+    }
+
+    #[def_test]
+    fn test_duplicate_from_lowered_limit_uses_low_hole_despite_high_fds() {
+        let mut table = FdTable::default();
+        let source = table.add_file(16, snapshot_test_file(), false).unwrap();
+        for minimum in 8..12 {
+            table.duplicate_from(source, minimum, 16, false).unwrap();
+        }
+        assert_eq!(table.count(), 5);
+        assert_eq!(table.duplicate_from(source, 1, 4, false), Ok(1));
+        assert_eq!(table.duplicate_from(8, 2, 4, false), Ok(2));
+        assert!(table.get(12).is_none());
+    }
+
+    #[def_test]
+    fn test_open_and_duplicate_share_low_holes_after_limit_reduction() {
+        let mut table = FdTable::default();
+        let file = snapshot_test_file();
+        let source = table.add_file(16, file.clone(), true).unwrap();
+        for minimum in 8..12 {
+            table.duplicate_from(source, minimum, 16, false).unwrap();
+        }
+        unittest::assert_eq!(table.count(), 5);
+
+        unittest::assert_eq!(table.add_file(4, file.clone(), false), Ok(1));
+        unittest::assert_eq!(table.duplicate_from(8, 0, 4, true), Ok(2));
+        unittest::assert_eq!(table.add_file(4, file.clone(), true), Ok(3));
+        unittest::assert_eq!(table.count(), 8);
+        assert!(!table.cloexec(1).unwrap());
+        assert!(table.cloexec(2).unwrap());
+        assert!(table.cloexec(3).unwrap());
+        assert!(Arc::ptr_eq(&file, &table.get_file(2).unwrap()));
+        assert!(Arc::ptr_eq(&file, &table.get_file(8).unwrap()));
+
+        unittest::assert_eq!(
+            table.add_file(4, file, false),
+            Err(kerrno::KError::TooManyOpenFiles)
+        );
+        unittest::assert_eq!(
+            table.duplicate_from(8, 0, 4, false),
+            Err(kerrno::KError::TooManyOpenFiles)
+        );
+        unittest::assert_eq!(table.count(), 8);
+        assert!(table.get(4).is_none());
+    }
+
+    #[def_test]
+    fn test_duplicate_from_respects_physical_capacity_with_large_limit() {
+        let mut table = FdTable::default();
+        let source = table.add_file(16, snapshot_test_file(), false).unwrap();
+        let last = (krlimit::FILE_LIMIT - 1) as c_int;
+        assert_eq!(table.duplicate_from(source, last, u64::MAX, true), Ok(last));
+        assert_eq!(
+            table.duplicate_from(source, last, u64::MAX, false),
+            Err(kerrno::KError::TooManyOpenFiles)
+        );
+        assert_eq!(
+            table.duplicate_from(source, last + 1, u64::MAX, false),
+            Err(kerrno::KError::TooManyOpenFiles)
+        );
+        assert_eq!(table.count(), 2);
+        assert!(table.cloexec(last).unwrap());
     }
 
     #[def_test]

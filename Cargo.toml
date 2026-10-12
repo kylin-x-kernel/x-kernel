@@ -14,6 +14,8 @@ members = [
     "tee/xdice",
 ]
 exclude = [
+    # Preserved upstream crate, with its own standalone host test workspace.
+    "third_party/flatten_objects",
     # platform-specific boot code that is not intended to be built as part of the main workspace
     "boot/x86_64-linuxboot",
     # build config tools (std crates, not part of the no_std kernel workspace)
@@ -300,7 +302,7 @@ virtio-drivers = { version = "0.13.4", default-features = false, package = "kvir
 x86_64 = { version = "=0.15.4", features = ["instructions"] }
 ktracepoint = "0.5"
 static-keys = "0.8"
-flatten_objects = "0.2.4"
+flatten_objects = { path = "third_party/flatten_objects" }
 weak-map = "0.1.1"
 tock-registers = "0.10.1"
 xmas-elf = { version = "0.9", default-features = false }

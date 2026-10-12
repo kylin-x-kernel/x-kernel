@@ -40,6 +40,11 @@ public limits lock must not invert that order. `fd_table()` returns an independe
 strong reference; it can outlive detachment and must not be treated as evidence
 that the process still has a files owner.
 
+`duplicate_file_from` snapshots the soft limit and releases the limits guard
+before taking owner/table locks, so it introduces no reverse nested lock order.
+The owner read guard and a single table write guard cover source lookup and
+minimum-based allocation together. Detachment returns `NoSuchProcess`.
+
 ## State and resource flows
 
 The files owner starts as `Some(table)` and `exit_files` changes it to `None`.
@@ -50,6 +55,9 @@ Repeated exit is harmless. Replacement and unsharing reject `None` with
   and reject every hard-limit increase until capability checks are implemented.
 - Insertion passes `RLIMIT_NOFILE.current` to `FdTable::add_file`. Fixed-slot
   duplication uses the table's capacity check, not that soft-limit policy.
+  Minimum-based duplication passes a limit snapshot to `FdTable::duplicate_from`.
+  Ordinary insertion and minimum-based duplication share the table's lowest-free
+  slot allocator; both bound the allocated number rather than occupied count.
 - Close, range close, close-on-exec, and fixed-slot replacement remove entries
   under the table lock, then run descriptor close outside both table and owner
   locks. Single close returns its flush error; batch cleanup ignores each error

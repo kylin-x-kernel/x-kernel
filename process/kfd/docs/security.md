@@ -39,7 +39,7 @@ locks; the final table destructor has exclusive ownership of its entries.
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
 | T-01 | Access through invalid descriptor | Medium | Negative, closed, or out-of-capacity FD | `FlattenObjects` lookup rejects absent indices and returns `BadFileDescriptor`; ABI-specific checks remain external. |
-| T-02 | Quota bypass | Medium | Caller uses `insert_file`/fixed-slot duplication for an untrusted request | Only `add_file` checks occupied count against the supplied cap; other paths need explicit caller policy. |
+| T-02 | Quota bypass | Medium | Caller uses `insert_file`/fixed-slot duplication for an untrusted request | `add_file` and `duplicate_from` share an allocator that bounds the new descriptor number by the supplied soft limit and physical capacity. Other paths need explicit caller policy. |
 | T-03 | File reference leaks across exec | High | Caller omits close-on-exec cleanup | `remove_cloexec_files` returns flagged entries; exec owner must invoke cleanup and close them outside the lock. |
 | T-04 | Reentrant close deadlock | Medium | Flush callback needs a held table lock | Removal returns owned entries and `kresources` closes after unlocking; direct callers must do likewise. |
 | T-05 | Stale snapshot used as current authorization | High | FD is closed/reused or flags change after snapshot | Snapshot pins the old file intentionally; consumers needing live state must re-query with appropriate authorization. |
@@ -50,7 +50,7 @@ locks; the final table destructor has exclusive ownership of its entries.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1-4) | Handling |
 |---|---|---|---|---|---|---|
-| F-01 | Table/soft-cap exhaustion | No slot or occupied count at cap | `TooManyOpenFiles` | Open/dup fails | 3 | Caller reports failure; `insert_file` instead returns the descriptor. |
+| F-01 | Table/soft-cap exhaustion | No free slot below both soft limit and capacity | `TooManyOpenFiles` | Open/dup fails | 3 | Caller reports failure; `insert_file` instead returns the descriptor. |
 | F-02 | Missing source/invalid target | Invalid descriptor number | `BadFileDescriptor` | Descriptor operation fails | 3 | Validate before replacement. |
 | F-03 | Flush fails | VFS callback error | Entry already removed | Writeback may fail | 2 | Explicit close returns error; final drop continues ignoring errors. |
 | F-04 | Metadata truncation | Wider input than target ABI field | Cast truncates | Incorrect user metadata | 3 | Caller/ABI review must assess supported ranges. |

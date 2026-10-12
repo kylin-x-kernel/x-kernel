@@ -1,5 +1,7 @@
 change_in_place: true
-excludes: []
+# Imported source retains the upstream authors and declared license choices.
+excludes:
+  - ^third_party/flatten_objects/
 
 licenses:
   - files: any

@@ -77,6 +77,19 @@ pub fn sys_dup(old_fd: c_int) -> KResult<isize> {
     dup_fd(old_fd, false)
 }
 
+/// Converts the fcntl unsigned-long argument to Linux's signed int minimum.
+fn dupfd_minimum_from_arg(arg: usize) -> c_int {
+    // Linux do_fcntl truncates to int before passing the minimum to f_dupfd.
+    (arg as u32) as c_int
+}
+
+fn dup_fd_from_minimum(old_fd: c_int, arg: usize, cloexec: bool) -> KResult<isize> {
+    let resources = kprocess::current_user_process().resources()?;
+    resources
+        .duplicate_file_from(old_fd, dupfd_minimum_from_arg(arg), cloexec)
+        .map(|fd| fd as _)
+}
+
 #[cfg(target_arch = "x86_64")]
 /// Duplicates a file descriptor to a specific target fd.
 pub fn sys_dup2(old_fd: c_int, new_fd: c_int) -> KResult<isize> {
@@ -114,8 +127,8 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
     debug!("sys_fcntl <= fd: {fd} cmd: {cmd} arg: {arg}");
 
     match cmd as u32 {
-        F_DUPFD => dup_fd(fd, false),
-        F_DUPFD_CLOEXEC => dup_fd(fd, true),
+        F_DUPFD => dup_fd_from_minimum(fd, arg, false),
+        F_DUPFD_CLOEXEC => dup_fd_from_minimum(fd, arg, true),
         F_SETLK | F_SETLKW => Ok(0),
         F_OFD_SETLK | F_OFD_SETLKW => Ok(0),
         F_GETLK | F_OFD_GETLK => {
@@ -180,4 +193,30 @@ pub fn sys_flock(fd: c_int, operation: c_int) -> KResult<isize> {
     debug!("flock <= fd: {fd}, operation: {operation}");
     // TODO: flock
     Ok(0)
+}
+
+#[unittest::mod_test]
+mod tests {
+    use unittest::def_test;
+
+    use super::dupfd_minimum_from_arg;
+
+    #[def_test]
+    fn test_dupfd_minimum_uses_signed_low_32_bits() {
+        assert_eq!(dupfd_minimum_from_arg(64), 64);
+        assert_eq!(dupfd_minimum_from_arg(u32::MAX as usize), -1);
+        assert_eq!(dupfd_minimum_from_arg(0x8000_0000), i32::MIN);
+    }
+
+    #[def_test]
+    fn test_dupfd_minimum_ignores_high_argument_bits() {
+        if usize::BITS > 32 {
+            let high = 1_u64 << 32;
+            assert_eq!(dupfd_minimum_from_arg((high | 64) as usize), 64);
+            assert_eq!(
+                dupfd_minimum_from_arg((high | u32::MAX as u64) as usize),
+                -1
+            );
+        }
+    }
 }

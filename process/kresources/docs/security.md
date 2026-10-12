@@ -29,7 +29,7 @@ but no longer prove membership in the process's table.
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
 | T-01 | Unauthorized hard-limit increase | High | A caller supplies a larger maximum | `set_rlimit` returns `OperationNotPermitted`; direct public lock access remains trusted and capability-based increases are unsupported. |
-| T-02 | Descriptor exhaustion | Medium | Repeated file insertion | `add_file` passes the soft limit to `FdTable`; fixed-slot duplication only checks capacity, so syscall-level policy remains a caller obligation. |
+| T-02 | Descriptor exhaustion | Medium | Repeated file insertion | `add_file` and `duplicate_file_from` pass the soft limit to the same lowest-free slot allocator in `FdTable`. Both bound the new FD number by that limit and capacity. Fixed-slot duplication only checks capacity, so syscall-level policy remains a caller obligation. |
 | T-03 | Access after process files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; previously cloned table/file references intentionally remain usable. |
 | T-04 | Reentrant filesystem deadlock | Medium | A close callback reacquires process resources | Removal precedes close and releases owner/table locks; callers of raw table APIs must preserve this ordering. |
 
