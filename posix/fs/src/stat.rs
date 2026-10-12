@@ -13,8 +13,8 @@ use kvfs::{
     SuperBlockFlags,
 };
 use linux_raw_sys::general::{
-    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, W_OK, X_OK, stat,
-    statfs, statx,
+    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, STATX_MNT_ID, W_OK,
+    X_OK, stat, statfs, statx,
 };
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -61,7 +61,10 @@ pub fn sys_fstatat(
     Ok(0)
 }
 
-/// Gets extended file metadata (statx).
+/// Gets extended file metadata and the resolved mount identity (statx).
+///
+/// Reports `STATX_MNT_ID` as valid for the same resolved object as the metadata,
+/// including empty-path descriptors and followed procfs magic links.
 pub fn sys_statx(
     dirfd: c_int,
     path: UserConstPtr<c_char>,
@@ -75,7 +78,11 @@ pub fn sys_statx(
         .transpose()?;
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
-    statxbuf.write_vm(resolve_at(dirfd, path.as_deref(), flags)?.stat()?.into())?;
+    let location = resolve_at(dirfd, path.as_deref(), flags)?;
+    let mut metadata: statx = location.stat()?.into();
+    metadata.stx_mnt_id = location.into_path()?.mount().mount_id();
+    metadata.stx_mask |= STATX_MNT_ID;
+    statxbuf.write_vm(metadata)?;
 
     Ok(0)
 }

@@ -112,6 +112,13 @@ core/ksyscall
 
 ## 状态机
 
+### statx 挂载身份
+
+`sys_statx` 复用一次 `resolve_at` 取得的目标，同时读取 metadata 和
+`VfsMount::mount_id()`，填入 `stx_mnt_id` 并声明 `STATX_MNT_ID` 有效。
+空路径 fd 和跟随 procfs magic link 时返回目标挂载身份，不重新解析路径。
+该字段使用现有挂载 ID，不增加或改变挂载生命周期。
+
 ### fd 生命周期
 
 ```text

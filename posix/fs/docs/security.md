@@ -144,6 +144,11 @@ kfd resources / kvfs / device and pipe implementations
 
 ## 线程安全
 
+`statx` 的 metadata 与 mount ID 来自同一次解析后持有的目标；取得身份时
+不再次读取用户路径。新增字段返回现有整数挂载 ID，不暴露内核指针，也不改变
+路径授权。解析、getattr 和用户写回错误沿原有 `KResult` 路径传播，最终通过
+既有 `UserPtr::write_vm` 写回完整 metadata。
+
 | 资源 | 并发条件 | 风险 |
 |------|----------|------|
 | fd 表 | 由当前进程 resources 内部锁保护 | close/dup/lookup 竞态会导致 fd 复用或对象泄漏 |
