@@ -71,7 +71,8 @@ versions (`DYLINT_VERSION`).
 
 CI installs none of the Dylint tooling. The builder image provides
 `cargo-dylint`, `dylint-link`, the lint toolchain and its prebuilt driver, and
-`scripts/ci/check_build_environment.sh` fails when they do not match the pins.
+`scripts/ci/check_dylint_environment.sh`, run at the start of each dylint
+stage, fails when they do not match the pins.
 Before changing the toolchain or the Dylint version, publish a new image
 version (`scripts/ci/docker/`); switch `Jenkinsfile` to it in the same change
 and bump its Rustup volume suffix.

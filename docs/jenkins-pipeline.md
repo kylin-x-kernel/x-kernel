@@ -125,11 +125,13 @@ aarch64 分支随后向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make oldd
 不打开该选项。检查结果与其他并行阶段一起进入 Gitee Check Run。
 
 `Jenkinsfile` 不覆盖 `DYLINT_DRIVER_PATH`，Dylint 直接使用镜像预构建的 driver。
-环境检查只核对 Dylint 工具、lint toolchain 及其组件和 driver 是否与仓库固定的
-版本一致（`xtask/xkmake/src/hygiene.rs` 的 `DYLINT_VERSION` 与
-`tools/lints/rust-toolchain.toml`），不一致时报错，不在节点上现场安装。因此修改
-这两处版本之前，必须先发布新的镜像版本，并在同一改动中切换 `Jenkinsfile` 的镜像
-引用、递增 Rustup volume 后缀。lint 库自身依赖的 crate 不随镜像 vendor，和内核
+每个 Dylint 分支开始时运行 `scripts/ci/check_dylint_environment.sh`，只核对
+Dylint 工具、lint toolchain 及其组件和 driver 是否与仓库固定的版本一致
+（`xtask/xkmake/src/hygiene.rs` 的 `DYLINT_VERSION` 与
+`tools/lints/rust-toolchain.toml`），不一致时报错，不在节点上现场安装。通用的
+Setup 阶段不检查 Dylint 工具，不跑 Dylint 的流水线可以使用不含这些工具的镜像。
+修改上述两处版本之前，必须先发布新的镜像版本，并在同一改动中切换 `Jenkinsfile`
+的镜像引用、递增 Rustup volume 后缀。lint 库自身依赖的 crate 不随镜像 vendor，和内核
 crate 一样经 Cargo 镜像源下载并缓存在 Cargo volume 中。
 
 guest case target、kernel target、覆盖率与测试制品不能放入共享缓存。

@@ -509,6 +509,7 @@ make dylint
             sh label: "Dylint check ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
+scripts/ci/check_dylint_environment.sh
 cp ${defconfigPath} .config
 make defconfig
 make dylint_test
