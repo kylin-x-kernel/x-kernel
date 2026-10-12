@@ -40,6 +40,12 @@ el2_enter_guest:
     //    register. If preempted, another vCPU thread could overwrite it.
     msr  daifset, #2            // PSTATE.I = 1 (mask IRQ)
 
+    // SP_EL0 is shared with the guest. Keep host current on the host stack;
+    // host_ctx saves this adjusted SP until the guest exit restores it.
+    sub  sp, sp, #16
+    mrs  x1, sp_el0
+    str  x1, [sp]
+
     // 1. Save host per-CPU pointer (accessed via tpidr_el1 with TGE=1
     //    under VHE E2H=1 aliasing), then stash vcpu pointer in tpidr_el2
     //    (used by el2_trap_exit with TGE=0 to find vcpu).
@@ -184,6 +190,12 @@ el2_trap_exit_common:
     mrs  x1, sp_el0
     str  x1, [x0, #480]
 
+    // Recover host current before reinstalling host exception vectors. The
+    // saved host SP (host_ctx[12]) points to the entry stub's private frame.
+    ldr  x1, [x0, #368]
+    ldr  x1, [x1]
+    msr  sp_el0, x1
+
     // Capture fault address registers before returning to host code. ESR_EL2
     // is captured by the guest vector; FAR_EL2/HPFAR_EL2 are captured here.
     // These EL2 exception registers are not vCPU-private and can be overwritten
@@ -245,7 +257,7 @@ el2_trap_exit_common:
     ldp  x27, x28, [x1, #64]
     ldp  x29, x30, [x1, #80]
     ldr  x2,       [x1, #96]
-    mov  sp, x2
+    add  sp, x2, #16           // discard the saved host-current frame
 
     // Restore host uaccess state before returning to Rust. A guest exit can
     // leave privileged access to EL0 mappings disabled via PSTATE.PAN, while

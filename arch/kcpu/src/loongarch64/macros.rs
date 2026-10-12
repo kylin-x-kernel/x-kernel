@@ -40,6 +40,7 @@ macro_rules! include_asm_macros {
 
         .macro PUSH_POP_GENERAL_REGS, op
             \op    $ra, $sp, 1
+            // tp is task-local: kernel current or user TLS.
             \op    $tp, $sp, 2
             \op    $a0, $sp, 4
             \op    $a1, $sp, 5

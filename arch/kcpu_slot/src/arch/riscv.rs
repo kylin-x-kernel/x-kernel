@@ -5,11 +5,10 @@
 //! RISC-V per-CPU base: the `gp` register.
 //!
 //! `gp` matches the previous `percpu 0.4` integration in this tree (see
-//! `percpu-0.4.0/src/imp.rs`). `tp` is not available here: the kernel's TLS
-//! implementation already uses it (`arch/khal/src/tls.rs`). On bare-metal
-//! kernels there is no active ABI global pointer discipline, so `gp` is free
-//! for this purpose; if that ever changes, this module and the TLS mapping
-//! must be revisited together.
+//! `percpu-0.4.0/src/imp.rs`). Keep the per-CPU base independent of `tp`,
+//! whose user value belongs to the thread's TLS context. On bare-metal kernels
+//! there is no active ABI global pointer discipline, so `gp` is free for this
+//! purpose; if that ever changes, the per-CPU register mapping must be revisited.
 
 /// Reads the per-CPU area base from `gp`.
 #[inline]

@@ -46,9 +46,7 @@ use lazyinit::LazyInit;
 #[cfg(feature = "smp")]
 pub(crate) use migrate::enforce_affinity_placement;
 pub(crate) use placement::{select_run_queue, select_wake_run_queue, task_run_queue};
-#[cfg(feature = "smp")]
-pub(crate) use rq::clear_prev_task_on_cpu;
-pub(crate) use rq::kick_running_task;
+pub(crate) use rq::{finish_task_switch, kick_running_task};
 #[cfg(feature = "sched_stat")]
 pub(crate) use stats::note_timer_irq;
 pub(crate) use stats::{
@@ -63,10 +61,10 @@ use crate::{
 };
 
 // Scheduler payloads use allocation-free template markers (lazy-uninitialized,
-// empty deque, empty weak), so `StaticSlotValue`'s container blanket impls
+// empty deque, None), so `StaticSlotValue`'s container blanket impls
 // carry the template-copy proof; drops happen only through owner-code
-// assignment and removal (a `PREV_TASK` overwrite drops the previous weak,
-// GC pops drop deque entries), never through storage teardown.
+// removal (switch cleanup takes `PREV_TASK`, GC pops drop deque entries),
+// never through storage teardown.
 // Macro-generated wrapper modules do not inherit the invocation site's
 // lexical scope, so payload types are anchored absolutely.
 // SAFETY: `LazyInit::new()` is an uninitialized marker with no owned payload.
@@ -88,13 +86,12 @@ kcpu_slot::cpu_slot_cell_with_template! {
     static IDLE_TASK: lazyinit::LazyInit<crate::KtaskRef> =
         unsafe { lazyinit::LazyInit::new() };
 }
-#[cfg(feature = "smp")]
-// SAFETY: the lock is unlocked and `Weak::new()` owns no allocation.
+// SAFETY: the lock is unlocked and `None` owns no allocation.
 kcpu_slot::cpu_slot_cell_with_template! {
-    /// Stores the weak reference to the previous task that is running on this
-    /// CPU.
-    static PREV_TASK: kspin::SpinNoIrq<alloc::sync::Weak<crate::KTask>> =
-        unsafe { kspin::SpinNoIrq::new(alloc::sync::Weak::new()) };
+    /// Owns the outgoing current reference until the incoming task finishes
+    /// the switch on this CPU, including on a uniprocessor.
+    static PREV_TASK: kspin::SpinNoIrq<Option<crate::KtaskRef>> =
+        unsafe { kspin::SpinNoIrq::new(None) };
 }
 
 struct RunQueueRegistry([Once<usize>; kbuild_config::NR_CPUS]);

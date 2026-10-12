@@ -13,7 +13,6 @@ mod irq;
 mod mmu;
 mod rng;
 mod tlb;
-mod tls;
 mod trap;
 
 pub use asid::{
@@ -27,7 +26,7 @@ pub use cache::{
 pub use cpu::{await_interrupts, stop_cpu};
 pub use fp::enable_fp;
 #[cfg(feature = "nmi-hardware")]
-pub use irq::{allint_active, allint_clear, allint_is_set, mark_allint_active};
+pub use irq::{allint_active, allint_clear, allint_is_set, allint_set, mark_allint_active};
 pub use irq::{
     disable_local_irq, enable_local_irq, local_irq_enabled, pmr, prepare_enter_user_irq,
     restore_irq, save_irq_and_disable,
@@ -38,5 +37,4 @@ pub use mmu::{
 };
 pub use rng::{cpu_rng_available, init_cpu_rng, read_cpu_random};
 pub use tlb::{flush_tlb, flush_tlb_asid, flush_tlb_va_asid};
-pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use trap::write_trap_vector_base;

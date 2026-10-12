@@ -48,6 +48,8 @@ unsafe extern "C" fn _start() -> ! {
         .dword  0
         .word   0x818223cd
         .word   0x0
+        // Firmware's tp is not a kernel task pointer. Keep the boot header intact.
+        move        $tp, $zero
         move        $s0, $a1
         move        $s1, $a2
         li.d        $t0, {dmw_uncached_base} | 0x1
@@ -119,6 +121,8 @@ unsafe extern "C" fn _start() -> ! {
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
         "
+        // Each CPU has no current task until scheduler initialization.
+        move        $tp, $zero
         li.d        $t0, {dmw_uncached_base} | 0x1
         csrwr       $t0, 0x180
         li.d        $t0, {phys_boot_offset} | 0x11

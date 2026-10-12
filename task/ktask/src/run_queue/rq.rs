@@ -15,17 +15,17 @@ use ksched::{Decision, EnqueueKind, Nice, RtPrio, SchedAttr, SchedPolicy, Update
 use kspin::{BaseGuard, SpinNoIrqGuard, SpinRaw};
 
 #[cfg(feature = "smp")]
+use super::get_run_queue;
+#[cfg(feature = "smp")]
 use super::migrate::spawn_affinity_migration_task;
 #[cfg(feature = "smp")]
 use super::stats::record_remote_resched;
 #[cfg(feature = "sched_stat")]
 use super::stats::{sched_stat_cpu, sched_stat_inc};
 use super::{
-    CurrentRunQueueRef, KRunQueueRef, RunQueue, WakeEnqueue, current_wait_for_exit, gc,
+    CurrentRunQueueRef, KRunQueueRef, PREV_TASK, RunQueue, WakeEnqueue, current_wait_for_exit, gc,
     with_exited_tasks,
 };
-#[cfg(feature = "smp")]
-use super::{PREV_TASK, get_run_queue};
 use crate::{
     KtaskRef, Scheduler, TaskInner,
     api::{current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer},
@@ -852,65 +852,70 @@ impl RunQueue {
             unsafe { (*next_ctx_ptr).set_page_table_root(root) };
         }
 
-        // Store the weak pointer of **prev_task** in percpu variable `PREV_TASK`.
-        #[cfg(feature = "smp")]
-        {
-            *PREV_TASK.shared_current().lock() = Arc::downgrade(&prev_task);
-        }
-
-        // The strong reference count of `prev_task` will be decremented by 1,
-        // but won't be dropped until `gc_entry()` is called.
+        // The scheduler/GC also retains the outgoing task. Switch cleanup
+        // releases its current reference only after leaving its stack.
         assert!(Arc::strong_count(&prev_task) > 1);
         assert!(Arc::strong_count(&next_task) >= 1);
 
         let suspended_exception = khal::context::suspend_active_exception_context();
         // SAFETY: IRQs and migration are disabled, prev_task is current, and
         // the scheduler owns the next task and transfers its retained reference.
-        unsafe { CurrentTask::set_current(prev_task, next_task) };
+        let (prev_owner, next_task_ptr) = unsafe { prev_task.prepare_switch(next_task) };
+        {
+            let mut previous = PREV_TASK.shared_current().lock();
+            debug_assert!(previous.is_none());
+            *previous = Some(prev_owner);
+        }
 
         // SAFETY: Scheduling owns the outgoing context exclusively; its task
-        // remains retained after set_current and cannot be reclaimed here.
+        // remains retained in PREV_TASK and cannot be reclaimed here.
         let prev_ctx = unsafe { &mut *prev_ctx_ptr };
         // SAFETY: next_task's retained context is initialized and distinct from
         // prev_ctx; scheduler ownership excludes concurrent context mutation.
         let next_ctx = unsafe { &*next_ctx_ptr };
-        prev_ctx.switch_to(next_ctx);
+        // SAFETY: IRQs/migration are excluded and the contexts are distinct.
+        // PREV_TASK retains the outgoing task through the stack switch;
+        // next_task_ptr transfers its owning reference to architecture current.
+        unsafe { prev_ctx.switch_to(next_ctx, next_task_ptr) };
         khal::context::resume_active_exception_context(suspended_exception);
         if let Some(runtime) = current().user_runtime() {
             runtime.on_enter();
         }
 
-        // Current it's **next_task** running on this CPU, clear the `prev_task`'s `on_cpu` field
-        // to indicate that it has finished its scheduling process and no longer running on this
-        // CPU.
-        #[cfg(feature = "smp")]
-        // SAFETY: The switch finished on this run queue with IRQs/migration
-        // disabled; PREV_TASK still retains the task whose old stack is inactive.
-        unsafe {
-            clear_prev_task_on_cpu(self)
-        };
+        // SAFETY: the incoming task is now running with IRQs disabled. Use
+        // this CPU's handoff, not `self`: this continuation may have migrated.
+        unsafe { finish_task_switch() };
     }
 }
 
-/// Clear the `on_cpu` field of previous task running on this CPU.
+/// Completes the outgoing task's handoff on the incoming task's stack.
 ///
 /// # Safety
 ///
-/// Call on the CPU owning `current_rq`, with IRQs and migration disabled,
-/// after switching away from the task recorded in `PREV_TASK` and before
-/// replacing that record. That task must remain alive and must no longer
-/// execute on its old stack, since clearing `on_cpu` permits remote enqueue.
-#[cfg(feature = "smp")]
-pub(crate) unsafe fn clear_prev_task_on_cpu(current_rq: &RunQueue) {
-    // SAFETY: this is called on the CPU that owns `PREV_TASK`, after the
-    // context switch completed and before another previous-task record is
-    // installed.
+/// Call exactly once after an actual switch, on its destination CPU with
+/// IRQs and migration disabled, before another handoff replaces `PREV_TASK`.
+/// The outgoing stack must be inactive: clearing `on_cpu` permits remote
+/// enqueue, and releasing the old current reference permits reclamation.
+pub(crate) unsafe fn finish_task_switch() {
     let prev_task = PREV_TASK
         .shared_current()
         .lock()
-        .clone()
-        .upgrade()
-        .expect("Invalid prev_task pointer or prev_task has been dropped");
+        .take()
+        .expect("context switch must supply the outgoing task owner");
+    #[cfg(feature = "smp")]
+    {
+        // The caller excludes migration and runs on the destination
+        // CPU. Its run queue may differ from the suspended caller's queue.
+        let current_rq = super::current_run_queue_ref();
+        clear_prev_task_on_cpu(current_rq, prev_task);
+    }
+    #[cfg(not(feature = "smp"))]
+    drop(prev_task);
+}
+
+/// Releases the on-CPU marker and completes any deferred wake enqueue.
+#[cfg(feature = "smp")]
+fn clear_prev_task_on_cpu(current_rq: &RunQueue, prev_task: KtaskRef) {
     prev_task.set_on_cpu(false);
     // Matching Dekker store-load fence; see `TaskInner::arm_wake_enqueue`.
     core::sync::atomic::fence(Ordering::SeqCst);

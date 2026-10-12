@@ -5,6 +5,68 @@
 //! Run-queue unittests.
 
 #[unittest::mod_test]
+mod tests_switch_handoff {
+    use alloc::sync::Arc;
+
+    use unittest::{assert_eq, def_test};
+
+    use super::super::PREV_TASK;
+
+    #[cfg(feature = "smp")]
+    #[def_test]
+    fn switch_cleanup_follows_task_migration() {
+        if kcpu_id_map::nr_cpus() < 2 {
+            return unittest::TestResult::Ignored;
+        }
+        let worker = crate::spawn(|| {
+            for cpu in (0..2).cycle().take(16) {
+                let mut mask = crate::KCpuMask::new();
+                mask.set(cpu, true);
+                if !crate::set_current_affinity(mask) {
+                    crate::exit(1);
+                }
+                let has_wrong_handoff = {
+                    let _irq = kspin::IrqSave::new();
+                    khal::percpu::this_cpu_id().as_usize() != cpu
+                        || PREV_TASK.shared_current().lock().is_some()
+                };
+                if has_wrong_handoff {
+                    crate::exit(2);
+                }
+            }
+        });
+        assert_eq!(worker.join(), 0);
+    }
+
+    #[def_test]
+    fn incoming_task_consumes_switch_owner_and_exited_task_is_reclaimed() {
+        let worker = crate::spawn(|| {
+            // Check both the first-run entry and resumed switch continuations.
+            for _ in 0..32 {
+                let has_previous = {
+                    let _irq = kspin::IrqSave::new();
+                    PREV_TASK.shared_current().lock().is_some()
+                };
+                if has_previous {
+                    crate::exit(1);
+                }
+                crate::yield_now();
+            }
+        });
+        let retired = Arc::downgrade(&worker);
+        assert_eq!(worker.join(), 0);
+        drop(worker);
+
+        // GC runs asynchronously; a leaked switch owner prevents reclamation
+        // even though the outgoing task will never resume its continuation.
+        while retired.strong_count() != 0 {
+            crate::yield_now();
+        }
+        assert_eq!(retired.strong_count(), 0);
+    }
+}
+
+#[unittest::mod_test]
 mod tests_blocked_resched {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};

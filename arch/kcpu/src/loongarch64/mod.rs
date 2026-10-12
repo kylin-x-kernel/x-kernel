@@ -8,6 +8,7 @@
 mod macros;
 
 mod ctx;
+mod current;
 mod excp;
 mod unaligned;
 
@@ -22,6 +23,7 @@ pub use self::{
     ctx::{
         ExceptionContext as TrapFrame, ExceptionContext, FpuState, GeneralRegisters, TaskContext,
     },
+    current::{current_task_ptr, set_current_task_ptr},
     unaligned::UnalignedError,
 };
 

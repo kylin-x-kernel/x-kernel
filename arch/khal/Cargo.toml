@@ -24,7 +24,6 @@ nmi_pseudo = ["kcpu/nmi-pseudo"]
 nmi_hardware = ["kcpu/nmi-hardware"]
 nmi_pmu = ["nmi", "pmu"]
 pmu = ["kplat/pmu"]
-tls = ["kcpu/tls"]
 
 irq = []
 
@@ -47,7 +46,6 @@ log.workspace = true
 memaddr.workspace = true
 kaddr_layout.workspace = true
 page_table = { workspace = true }
-kcpu_slot.workspace = true
 kiface.workspace = true
 acpi = { workspace = true }
 of = { workspace = true }

@@ -42,6 +42,9 @@
 //!   stay masked by `DAIF.I`.  The NMI path keeps ALLINT set, so NMIs do
 //!   not preempt NMIs.
 //!
+//! Before restoring ELR/SPSR, the exception exit path sets ALLINT again via
+//! `allint_set`, preventing nested entry from overwriting the return state.
+//!
 //! Exception entry saves the *pre‑entry* PSTATE into `SPSR_EL1` before
 //! setting ALLINT, so exception handling must never modify the saved SPSR;
 //! `ERET` restores the interrupted context's exact PSTATE.
@@ -138,6 +141,23 @@ pub fn allint_clear() {
     unsafe { asm!("msr s3_0_c4_c3_0, xzr", options(nomem, nostack)) };
 }
 
+/// Mask IRQs and hardware NMIs for the final exception-return transaction.
+///
+/// No-op unless FEAT_NMI is active on this CPU. Keep the mask set until
+/// `eret` restores the interrupted PSTATE; do not modify the saved SPSR.
+#[cfg(feature = "nmi-hardware")]
+#[inline]
+pub fn allint_set() {
+    if !allint_active() {
+        return;
+    }
+    // SAFETY: The readiness flag proves FEAT_NMI is enabled. This changes
+    // only the live ALLINT mask; the saved exception return state is untouched.
+    unsafe {
+        asm!("msr s3_0_c4_c3_0, {}", in(reg) ALLINT_MASK, options(nostack, preserves_flags));
+    }
+}
+
 /// Enable normal IRQs on the current CPU.
 ///
 /// In PMR mode: sets PMR to [`pmr::ALL`] (unmasking all IRQs), then clears
@@ -194,14 +214,17 @@ pub fn disable_local_irq() {
 /// timer IRQs remain blocked for user code. This helper is called from the
 /// AArch64 user-entry assembly while still on a kernel stack: it masks `DAIF.I`
 /// for the remaining EL1 register-restore window, then restores PMR to
-/// [`pmr::ALL`]. The final EL0 interrupt state is taken from `SPSR_EL1` by
-/// `eret`.
+/// [`pmr::ALL`]. Hardware NMI is also masked with ALLINT when enabled: SP_EL0
+/// will hold the user stack rather than kernel current during this window.
+/// Call before replacing SP_EL0 and do not re-enable interrupts or call Rust
+/// after that replacement. `eret` restores the final EL0 mask from SPSR_EL1.
 #[inline]
 pub fn prepare_enter_user_irq() {
+    #[cfg(feature = "nmi-hardware")]
+    allint_set();
+    DAIF.modify(DAIF::I::Masked);
     #[cfg(feature = "nmi-pseudo")]
     if pmr::is_ready() {
-        // `modify` sets only the DAIF.I bit, preserving the D/A/F masks.
-        DAIF.modify(DAIF::I::Masked);
         pmr::write(pmr::ALL);
     }
 }

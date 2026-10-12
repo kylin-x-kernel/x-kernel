@@ -10,7 +10,6 @@ mod fp;
 mod irq;
 mod mmu;
 mod tlb;
-mod tls;
 mod trap;
 
 pub use cache::{
@@ -33,5 +32,4 @@ pub use mmu::{
     read_user_page_table, write_kernel_page_table, write_pwc, write_user_page_table,
 };
 pub use tlb::flush_tlb;
-pub use tls::{read_thread_pointer, write_thread_pointer};
 pub use trap::{init_trap_state, write_trap_vector_base};

@@ -375,7 +375,6 @@ impl Debug for ExtendedState {
 ///
 /// - Callee-saved registers
 /// - Stack pointer register
-/// - Thread pointer register (for kernel-space thread-local storage)
 /// - FP/SIMD registers
 ///
 /// On context switch, current task saves its context from CPU to memory,
@@ -394,8 +393,6 @@ pub struct TaskContext {
     pub kstack_top: VirtAddr,
     /// `RSP` after all callee-saved registers are pushed.
     pub rsp: u64,
-    /// Thread pointer (FS segment base address)
-    pub fs_base: usize,
     /// Extended states, i.e., FP/SIMD states.
     #[cfg(feature = "fp-simd")]
     pub ext_state: ExtendedState,
@@ -445,7 +442,6 @@ impl TaskContext {
         Self {
             kstack_top: va!(0),
             rsp: 0,
-            fs_base: 0,
             cr3: karch::read_kernel_page_table(),
             #[cfg(feature = "fp-simd")]
             ext_state: ExtendedState::default(),
@@ -454,7 +450,7 @@ impl TaskContext {
 
     /// Initializes the context for a new task, with the given entry point and
     /// kernel stack.
-    pub fn init(&mut self, entry: usize, kstack_top: VirtAddr, tls_area: VirtAddr) {
+    pub fn init(&mut self, entry: usize, kstack_top: VirtAddr) {
         // SAFETY: `kstack_top` is a valid kernel stack top provided by the caller.
         unsafe {
             // x86_64 calling convention: the stack must be 16-byte aligned before
@@ -463,7 +459,6 @@ impl TaskContext {
             self.rsp = Self::prepare_initial_frame(entry, kstack_top);
         }
         self.kstack_top = kstack_top;
-        self.fs_base = tls_area.as_usize();
     }
 
     /// Returns the saved frame pointer and instruction pointer from a
@@ -498,13 +493,22 @@ impl TaskContext {
     ///
     /// It first saves the current task's context from CPU to this place, and then
     /// restores the next task's context from `next_ctx` to CPU.
-    pub fn switch_to(&mut self, next_ctx: &Self) {
-        #[cfg(feature = "tls")]
-        // SAFETY: Reading/writing FS base (TLS pointer) is a per-CPU operation. Interrupts are off during `switch_to`.
-        unsafe {
-            self.fs_base = karch::read_thread_pointer();
-            karch::write_thread_pointer(next_ctx.fs_base);
-        }
+    ///
+    /// Publishes `next_task` immediately before the low-level stack switch.
+    /// This function does not acquire or release task references.
+    ///
+    /// # Safety
+    ///
+    /// Exclude normal IRQs, migration and concurrent execution of either
+    /// context. `self` must be the running context; `next_ctx` must be a
+    /// distinct, initialized context belonging to the live `next_task`.
+    /// Retain both tasks and stacks through the switch and keep the incoming
+    /// task owned while current. Release the outgoing owner on the incoming
+    /// stack, not on the suspended continuation. Local NMI observers must
+    /// finish before interrupted execution resumes.
+    pub unsafe fn switch_to(&mut self, next_ctx: &Self, next_task: *const ()) {
+        debug_assert!(!karch::local_irq_enabled());
+        debug_assert!(!next_task.is_null());
         #[cfg(feature = "fp-simd")]
         {
             self.ext_state.save();
@@ -520,6 +524,9 @@ impl TaskContext {
                 // writing to CR3 has flushed the TLB
             }
         }
+        // SAFETY: the scheduler retains both tasks across publication and
+        // excludes migration; next_task belongs to the incoming context.
+        unsafe { super::set_current_task_ptr(next_task) };
         // SAFETY: `context_switch` is a naked function that saves/restores callee-saved registers and swaps stack pointers. Both `self.rsp` and `next_ctx.rsp` are valid stack pointers.
         unsafe { context_switch(&mut self.rsp, &next_ctx.rsp) }
     }
@@ -532,7 +539,7 @@ impl TaskContext {
 /// `*_next_stack` must point to a live `ContextSwitchFrame` made by a prior
 /// switch or `prepare_initial_frame`, with a valid return address and ABI
 /// stack alignment. Keep both stacks and context slots live until resumed,
-/// with the next task's TLS, FP state and address space already installed.
+/// with the next task's FP state and address space already installed.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_stack: &mut u64, _next_stack: &u64) {
     naked_asm!(

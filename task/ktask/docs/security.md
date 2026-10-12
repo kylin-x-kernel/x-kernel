@@ -239,10 +239,12 @@ Entries concentrate in `current_run_queue*` / `get_run_queue`.
 
 ### `run_queue/rq.rs`: context switch and `CurrentTask` replacement
 
-`CurrentRunQueueRef::switch_to` switches through raw context pointers and
+`RunQueue::switch_to` switches through raw context pointers and
 maintains cross-CPU visibility with `on_cpu` / `PREV_TASK`.
-`clear_prev_task_on_cpu` is an `unsafe fn` and may run only on this CPU
-after the switch completes and before the next `PREV_TASK` is written.
+`finish_task_switch` is an `unsafe fn` and must run once on the incoming
+task's stack after switching, before the next `PREV_TASK` is written. It
+takes the outgoing strong reference out of that CPU's slot, then releases
+it or transfers it to a deferred wake enqueue outside the slot lock.
 
 Invariants:
 
@@ -255,18 +257,26 @@ Invariants:
    least one side finishes enqueue. Do not IRQ-off-spin waiting for remote
    `on_cpu`.
 
-### `task.rs`: `TaskContext` interior mutability and current-task TLS / CPU-local pointers
+### `task.rs`: `TaskContext` interior mutability and architecture current-task pointers
 
 - Shared reads of `UnsafeCell<TaskContext>`
-- `CurrentTask::init_current` / `set_current` write the per-CPU current-task
-  pointer
+- `CurrentTask::init_current` installs the initial task pointer;
+  `prepare_switch` transfers task owners without publishing. The scheduler
+  passes the incoming pointer and its matching context to the architecture
+  switch, retaining the outgoing owner for switch cleanup.
 - `TaskStack` manual allocate/free
 
 Invariants:
 
 1. Task context is mutated only on the controlled schedule path or the current
    user-task root replacement boundary, with IRQs/preemption excluded.
-2. The current-task pointer on each CPU always names a live task object.
+2. After scheduler initialization the current-task pointer names a live task.
+   `kcpu` provides architecture-specific publication and observation; it does
+   not own task references. No read may separate CPU selection from the load
+   across migration. The outgoing slot owner survives publication and remains
+   in the handoff until its old stack is inactive. Local NMI readers finish
+   before interrupted replacement resumes; this is not a remote raw-pointer
+   ownership-acquisition protocol.
 3. The stack is freed only after the task is no longer running and has no
    remaining refs (gc task + `Arc::try_unwrap`).
 

@@ -114,7 +114,12 @@ Key design decisions:
   struct, eliminating cross-CPU data races.
 - **x86_64**: VMXON page allocated dynamically per CPU (not static BSS). VMCS page
   allocated per vCPU inside `init_vcpu`. Idempotency via `VMXON_DONE` percpu flag.
-- **RISC-V**: All state is CSR-based and naturally per-hart. `hext_init()` is idempotent.
+- **RISC-V**: `hext_init()` initializes per-hart CSRs idempotently. Guest entry
+  also saves host `gp` (per-CPU base) and `tp` (current task) in `host_ctx[15]`
+  and `host_ctx[16]`. Exit saves guest x4 before restoring host `tp`, restores
+  it before the host trap vector, and restores `gp` before returning to Rust.
+  The IRQ-off run window excludes migration during this exchange; it is not
+  an NMI/RNMI entry protocol.
 
 ### vCPU Run-State Machine (`VcpuRunState`)
 
@@ -154,6 +159,14 @@ running guest code on another physical CPU are the subject of the next stage
 virtual interrupts.
 
 ### AArch64 world-switch / thread fixes
+
+SP_EL0 holds host current in kernel execution but is also guest architectural
+state. The entry stub saves host SP_EL0 in a 16-byte host-stack frame before
+loading guest state. The exit stub saves guest SP_EL0 to the vCPU and restores
+host SP_EL0 before reinstalling host exception vectors. It discards the saved
+pointer frame when restoring the host stack before returning to Rust. This does
+not acquire a task reference or change the vCPU layout; the scheduler retains
+the running host task.
 
 The EL2 exception registers are not vCPU-private and can be clobbered by a
 host exception once the exit handler unmasks IRQs. They are therefore captured
@@ -354,7 +367,7 @@ on return from VS-mode. x-kernel's linker script does not define this symbol (no
 relaxation), causing an out-of-range relocation.
 
 **Fix**: Save host `gp` into `host_ctx[15]` on guest entry and restore from there on exit,
-instead of recomputing from the undefined linker symbol. Added `HCTX_GP` offset at 448.
+instead of recomputing from the undefined linker symbol. `HCTX_GP` is at offset 472.
 
 ### 2. RISC-V: Unhandled `scause=22` (virtual instruction)
 

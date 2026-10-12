@@ -8,6 +8,8 @@
 mod macros;
 
 mod ctx;
+mod current;
+pub use current::{current_task_ptr, set_current_task_ptr};
 mod excp;
 mod hwprobe;
 

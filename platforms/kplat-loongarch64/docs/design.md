@@ -80,6 +80,11 @@ SysCtrl (kiface)
 
 ## Execution Context
 
+The EIOINTC routes external vectors to CPU0 HWI1. After initializing both
+controllers, `irq::init` enables that parent in CPU0's `ECFG.LIE`, preserving
+other enabled CPU lines. Individual device lines remain gated by EIOINTC and
+PCH PIC; enabling a device alone cannot open the CPU parent gate.
+
 - `early_driver_init` runs on the boot hart before the driver model;
   the RTC path maps its MMIO aperture through `memspace` and must run
   after `memspace` is available.

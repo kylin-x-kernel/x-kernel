@@ -5,6 +5,8 @@
 //! AArch64 CPU context, trap, and userspace support.
 
 mod ctx;
+mod current;
+pub use current::{current_task_ptr, set_current_task_ptr};
 
 pub mod instrs;
 

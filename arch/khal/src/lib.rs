@@ -23,7 +23,6 @@
 //! - `smp`: Enable SMP (symmetric multiprocessing) support.
 //! - `fp-simd`: Enable floating-point and SIMD support.
 //! - `paging`: Enable page table manipulation.
-//! - `tls`: Enable kernel space thread-local storage support.
 //! - User space support is always enabled.
 
 #![allow(
@@ -48,9 +47,6 @@ pub mod mem;
 pub mod percpu;
 pub mod time;
 
-#[cfg(feature = "tls")]
-pub mod tls;
-
 pub mod irq;
 pub mod paging;
 pub mod power;
@@ -63,6 +59,11 @@ pub use firmware::cmdline;
 ///
 /// - [`TaskContext`][kcpu::TaskContext]: The context of a task.
 /// - [`TrapFrame`][kcpu::TrapFrame]: The context of an interrupt or an exception.
+///
+/// Current-task identity is also provided by `kcpu`: [`current_task_ptr`](context::current_task_ptr)
+/// observes an opaque pointer and [`set_current_task_ptr`](context::set_current_task_ptr)
+/// publishes it under scheduler-owned lifetime and migration exclusion. This
+/// module only re-exports those architecture operations; it owns no task storage.
 ///
 /// In addition, this module exposes helpers to *observe* the currently active
 /// trap context on the current CPU:
@@ -86,8 +87,8 @@ pub use firmware::cmdline;
 pub mod context {
     pub use kcpu::{
         SuspendedExceptionContext, TaskContext, TrapFrame, active_exception_context,
-        in_exception_context, resume_active_exception_context, suspend_active_exception_context,
-        with_active_exception_context,
+        current_task_ptr, in_exception_context, resume_active_exception_context,
+        set_current_task_ptr, suspend_active_exception_context, with_active_exception_context,
     };
 }
 

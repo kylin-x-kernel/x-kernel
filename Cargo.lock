@@ -2484,7 +2484,6 @@ dependencies = [
  "kaddr_layout",
  "kalloc",
  "kcpu",
- "kcpu_slot",
  "kernel-boot",
  "kerrno",
  "kiface",

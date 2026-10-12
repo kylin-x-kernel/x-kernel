@@ -479,9 +479,11 @@ nor remote access forms a long-lived `&mut RunQueue`.
 The exited-task queue and `PREV_TASK` each use `SpinNoIrq` inside their
 per-CPU slot. Scheduling, GC, and the context-switch continuation only
 clear/push/pop/clone/replace within the short critical section and never
-return a long-lived `&mut VecDeque` or `&mut Weak` out of the slot. The outer
-short `NoPreempt` only prevents migration while resolving the current-CPU
-slot; the inner lock provides actual object exclusivity.
+return a long-lived mutable reference out of the slot. `PREV_TASK` holds an
+optional strong reference, taken by the incoming task after switching stacks.
+The reference is released or transferred to a wake enqueue outside the lock.
+Callers exclude migration while resolving the current-CPU slot; the inner
+lock provides actual object exclusivity.
 
 Owned timer callbacks run in hard IRQ / local-IRQ-off context and must be short
 and non-blocking. Repetition is a handler policy expressed with `TimerControl`:
@@ -527,6 +529,30 @@ and clears the current CPU's active exception context before replacing
 low-level context switch, the suspended context is restored. Otherwise the
 old CPU would keep believing it is in exception context, or the migrated
 task would wrongly allow preemption in the second half of the trap handler.
+
+Current-task publication retains the outgoing slot's owning reference until
+the incoming initialized pointer has been published and the old stack is
+inactive. `PREV_TASK` transfers this owner to `finish_task_switch()` on the
+incoming task, both on UP and SMP. Resumed continuations and first-run task
+entry each finish exactly one handoff; cleanup resolves the current CPU's run
+queue because a resumed task may have migrated. On SMP it also clears the old
+task's on-CPU marker and completes any deferred wake enqueue.
+Local NMI observations finish before the interrupted switch resumes and can
+therefore borrow either task across that publication boundary. Atomic pointer publication does
+not synchronize arbitrary mutable task fields or permit remote raw Arc upgrades.
+`kcpu` owns current-task storage and its architecture access rules, re-exported
+by `khal::context`. It accepts opaque pointers; `ktask` alone interprets them
+as tasks and manages their owning references. `CurrentTask::prepare_switch`
+only transfers ownership: the outgoing reference goes to `PREV_TASK`, while
+the incoming owning pointer is passed with its context to the unsafe
+`TaskContext::switch_to`. The architecture publishes current immediately before
+the low-level stack switch. Initial CPU task installation remains separate.
+The accessor protects CPU
+selection through the load, not subsequent pointer use. Task-context borrowers
+rely on the scheduler's running-task lifetime; NMI borrowers must finish before
+interrupted execution resumes. Longer-lived or cross-CPU users need independent
+ownership. The writer relies on the scheduler's existing IRQ/migration exclusion
+for the entire replacement, rather than taking a second guard around the store.
 
 ### Block / wake and WaitQueue / Future
 
@@ -798,7 +824,6 @@ dynamic schedule timer plus safe-point preemption model.
 | `snapshot` | Task snapshot and backtrace foundation |
 | `watchdog` | Watchdog diagnostics (depends on `snapshot`); `watchdog_hardlockup` also needs root Kconfig `KFEAT_NMI` (mechanism + PMU period source, AArch64 QEMU) |
 | `ipi` | Required for SMP remote wake / reschedule |
-| `tls` | Optional extension |
 
 `UserTaskRuntime` is `ktask`'s user-runtime interface. Its scheduler hooks
 may run in a preempt-disabled switch context, so implementations must not

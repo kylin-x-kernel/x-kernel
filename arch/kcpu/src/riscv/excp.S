@@ -56,6 +56,8 @@ trap_vector_base:
     LDR     s11, sp, 11
     LDR     ra, sp, 12
     LDR     gp, sp, 13
+    // Restore kernel current before returning to Rust; user tp is in slot-4
+    // of the user trapframe. No scheduling occurs during this entry sequence.
     LDR     tp, sp, 14
     addi    sp, sp, 16 * XLENB
     ret
@@ -77,6 +79,7 @@ enter_user:
     STR     s11, sp, 11
     STR     ra, sp, 12
     STR     gp, sp, 13
+    // Preserve kernel current while U-mode owns tp as its TLS pointer.
     STR     tp, sp, 14
 
     STR     sp, a0, 0

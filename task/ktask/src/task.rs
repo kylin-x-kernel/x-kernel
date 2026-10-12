@@ -25,8 +25,6 @@ use kcpu_id_map::KCpuMaskExt;
 use kcpu_id_map::LogicalCpuId;
 use kerrno::KResult;
 use khal::context::TaskContext;
-#[cfg(feature = "tls")]
-use khal::tls::TlsArea;
 use kpoll::{Completion, PollRegistrations, PollSet};
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
@@ -260,9 +258,6 @@ pub struct TaskInner {
     kstack: Option<TaskStack>,
     ctx: TaskContextCell,
 
-    #[cfg(feature = "tls")]
-    tls: TlsArea,
-
     /// Per-task watchdog recording (lock-free/NMI-safe).
     #[cfg(feature = "snapshot")]
     record_lock: PerTaskRecording,
@@ -303,14 +298,9 @@ impl TaskInner {
         debug!("new task: {}", t.id_name());
         let kstack = TaskStack::alloc(align_up_4k(stack_size));
 
-        #[cfg(feature = "tls")]
-        let tls = VirtAddr::from(t.tls.tls_ptr() as usize);
-        #[cfg(not(feature = "tls"))]
-        let tls = VirtAddr::from(0);
-
         t.entry = Cell::new(Some(Box::new(entry)));
         t.ctx_mut()
-            .init(task_entry as *const () as usize, kstack.top(), tls);
+            .init(task_entry as *const () as usize, kstack.top());
         t.kstack = Some(kstack);
         t
     }
@@ -678,8 +668,6 @@ impl TaskInner {
             wait_for_exit: Completion::new(),
             kstack: None,
             ctx: TaskContextCell::new(),
-            #[cfg(feature = "tls")]
-            tls: TlsArea::alloc(),
             #[cfg(feature = "snapshot")]
             record_lock: PerTaskRecording::new(),
         }
@@ -691,8 +679,8 @@ impl TaskInner {
     /// As it is the current task, no other task can switch to it until it
     /// switches out.
     ///
-    /// And there is no need to set the `entry`, `kstack` or `tls` fields, as
-    /// they will be filled automatically when the task is switches out.
+    /// The task already runs on the CPU's boot stack, so it needs no entry
+    /// closure or owned stack. Its context is saved on the first switch out.
     pub(crate) fn new_boot(name: String) -> Self {
         let mut t = Self::new_common(TaskIdentity::Internal, name);
         t.is_init = true;
@@ -1073,10 +1061,10 @@ pub struct CurrentTask(ManuallyDrop<KtaskRef>);
 
 impl CurrentTask {
     pub(crate) fn try_get() -> Option<Self> {
-        let ptr: *const super::KTask = khal::percpu::current_task_ptr();
+        let ptr: *const super::KTask = khal::context::current_task_ptr().cast();
         if !ptr.is_null() {
-            // SAFETY: the percpu current-task pointer is installed from
-            // `Arc::into_raw` in `init_current`/`set_current` and stays valid
+            // SAFETY: the architecture current-task pointer is installed from
+            // `Arc::into_raw` in `init_current`/`prepare_switch` and stays valid
             // while it is the current task pointer for this CPU.
             Some(Self(unsafe { ManuallyDrop::new(KtaskRef::from_raw(ptr)) }))
         } else {
@@ -1107,40 +1095,34 @@ impl CurrentTask {
     ///
     /// Call once during this CPU's scheduler initialization, with its per-CPU
     /// area installed and no current task yet. Exclude interrupts and migration
-    /// until publication completes; `init_task` must be this CPU's initial task
-    /// with its TLS initialized when enabled.
+    /// until publication completes; `init_task` must be this CPU's initial task.
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
-        #[cfg(all(feature = "tls", target_os = "none"))]
-        // SAFETY: the initial task's TLS block is fully constructed before the
-        // task becomes current, and this writes the current CPU's thread pointer.
-        unsafe {
-            khal::asm::write_thread_pointer(init_task.tls.tls_ptr() as usize)
-        };
         let ptr = Arc::into_raw(init_task);
         // SAFETY: `ptr` originates from `Arc::into_raw` and becomes the owning
-        // percpu current-task pointer for this CPU.
+        // architecture current-task pointer for this CPU.
         unsafe {
-            khal::percpu::set_current_task_ptr(ptr);
+            khal::context::set_current_task_ptr(ptr.cast());
         }
     }
 
+    /// Transfers task ownership for a switch without publishing current.
+    ///
+    /// Returns the outgoing owner and the incoming owning raw pointer.
+    ///
     /// # Safety
     ///
-    /// `prev` must represent this CPU's owning current-task reference, consumed
-    /// exactly once. Exclude interrupts, migration, and observers of the slot
-    /// during replacement. Keep another strong reference to the previous task
-    /// until its stack and context are no longer in use, and coordinate this
-    /// publication with the context switch to `next`.
-    pub(crate) unsafe fn set_current(prev: Self, next: KtaskRef) {
-        let Self(arc) = prev;
-        ManuallyDrop::into_inner(arc); // `call Arc::drop()` to decrease prev task reference count.
+    /// `self` must represent this CPU's current owner, consumed exactly once.
+    /// Exclude normal IRQs and migration until the architecture switch publishes
+    /// the incoming pointer. Retain the returned outgoing owner until its stack
+    /// is inactive, and transfer the incoming pointer to current exactly once.
+    /// For same-task republication, the replacement owner may retain the stack.
+    #[must_use = "transfer both owners to the switch and its cleanup"]
+    pub(crate) unsafe fn prepare_switch(self, next: KtaskRef) -> (KtaskRef, *const ()) {
+        let Self(arc) = self;
+        let prev = ManuallyDrop::into_inner(arc);
         let ptr = Arc::into_raw(next);
-        // SAFETY: `ptr` originates from `Arc::into_raw` and replaces the
-        // owning percpu current-task pointer for this CPU.
-        unsafe {
-            khal::percpu::set_current_task_ptr(ptr);
-        }
+        (prev, ptr.cast())
     }
 }
 
@@ -1156,16 +1138,10 @@ extern "C" fn task_entry() -> ! {
     if let Some(runtime) = crate::current().user_runtime() {
         runtime.on_enter();
     }
-    #[cfg(feature = "smp")]
     // SAFETY: this runs as the first code on a scheduled task after the
-    // context switch, which is exactly when the previous-task on-CPU marker
-    // must be cleared for this CPU.
+    // context switch, with IRQs disabled and the outgoing stack inactive.
     unsafe {
-        // Clear the prev task on CPU before running the task entry function.
-        // SAFETY: a first-run task reaches this point with IRQs disabled and
-        // owns its current CPU's run queue after the context switch.
-        let run_queue = crate::run_queue::current_run_queue_ref();
-        crate::run_queue::clear_prev_task_on_cpu(run_queue);
+        crate::run_queue::finish_task_switch();
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     karch::enable_local_irq();
@@ -1179,6 +1155,10 @@ extern "C" fn task_entry() -> ! {
 #[cfg(unittest)]
 #[path = "tests/preempt_check.rs"]
 mod tests_preempt_check;
+
+#[cfg(unittest)]
+#[path = "tests/current_task.rs"]
+mod tests_current_task;
 
 #[cfg(all(feature = "smp", unittest))]
 mod tests_on_cpu_mask {

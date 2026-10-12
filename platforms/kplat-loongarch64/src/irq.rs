@@ -13,9 +13,30 @@ const EIOINTC_IRQ: usize = 3;
 
 mod eiointc;
 mod pch_pic;
+
+// External vectors target CPU0; an unpinned SMP test may run elsewhere.
+#[cfg(not(feature = "smp"))]
+#[unittest::mod_test]
+mod tests {
+    use unittest::{assert, def_test};
+
+    #[def_test]
+    fn external_interrupt_parent_is_enabled_after_boot() {
+        // Read boot's persistent gate without changing live interrupt state.
+        assert!(
+            super::ecfg::read()
+                .lie()
+                .contains(super::LineBasedInterrupt::HWI1)
+        );
+    }
+}
+
 pub(crate) fn init() {
     eiointc::init();
     pch_pic::init();
+    // EIOINTC routes external vectors to CPU0 HWI1. Device masks remain
+    // downstream; without this parent gate no enabled device can interrupt.
+    ecfg::set_lie(ecfg::read().lie() | LineBasedInterrupt::HWI1);
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IrqType {

@@ -181,7 +181,6 @@ impl FpState {
 ///
 /// - Callee-saved registers
 /// - Stack pointer register
-/// - Thread pointer register (for kernel-space thread-local storage)
 /// - FP/SIMD registers
 ///
 /// On context switch, current task saves its context from CPU to memory,
@@ -215,8 +214,6 @@ pub struct TaskContext {
     pub r29: u64,
     /// Link register (r30).
     pub lr: u64,
-    /// Thread Pointer
-    pub tpidr_el0: u64,
     /// The `ttbr0_el1` register value, i.e., the page table root.
     pub ttbr0_el1: karch::HwPageTableRoot,
     #[cfg(feature = "fp-simd")]
@@ -237,10 +234,9 @@ impl TaskContext {
 
     /// Initializes the context for a new task, with the given entry point and
     /// kernel stack.
-    pub fn init(&mut self, entry: usize, kstack_top: VirtAddr, tls_area: VirtAddr) {
+    pub fn init(&mut self, entry: usize, kstack_top: VirtAddr) {
         self.sp = kstack_top.as_usize() as u64;
         self.lr = entry as u64;
-        self.tpidr_el0 = tls_area.as_usize() as u64;
     }
 
     /// Changes the page table root in this context.
@@ -255,14 +251,22 @@ impl TaskContext {
     ///
     /// It first saves the current task's context from CPU to this place, and then
     /// restores the next task's context from `next_ctx` to CPU.
-    pub fn switch_to(&mut self, next_ctx: &Self) {
-        #[cfg(feature = "tls")]
-        {
-            self.tpidr_el0 = karch::read_thread_pointer() as _;
-            // SAFETY: Writing TPIDR_EL0 for TLS; per-CPU operation with interrupts off
-            // during `switch_to`.
-            unsafe { karch::write_thread_pointer(next_ctx.tpidr_el0 as _) };
-        }
+    ///
+    /// Publishes `next_task` immediately before the low-level stack switch.
+    /// This function does not acquire or release task references.
+    ///
+    /// # Safety
+    ///
+    /// Exclude normal IRQs, migration and concurrent execution of either
+    /// context. `self` must be the running context; `next_ctx` must be a
+    /// distinct, initialized context belonging to the live `next_task`.
+    /// Retain both tasks and stacks through the switch and keep the incoming
+    /// task owned while current. Release the outgoing owner on the incoming
+    /// stack, not on the suspended continuation. Local NMI observers must
+    /// finish before interrupted execution resumes.
+    pub unsafe fn switch_to(&mut self, next_ctx: &Self, next_task: *const ()) {
+        debug_assert!(!karch::local_irq_enabled());
+        debug_assert!(!next_task.is_null());
         #[cfg(feature = "fp-simd")]
         {
             self.fp_state.save();
@@ -273,6 +277,9 @@ impl TaskContext {
             // `set_page_table_root()`, guaranteed valid by the page table subsystem.
             unsafe { karch::write_user_page_table(next_ctx.ttbr0_el1) };
         }
+        // SAFETY: the scheduler retains both tasks across publication and
+        // excludes migration; next_task belongs to the incoming context.
+        unsafe { super::set_current_task_ptr(next_task) };
         // SAFETY: Naked function that saves/restores callee-saved registers (x19-x30, sp)
         // and swaps stack pointers. Both stack pointers are valid.
         unsafe { context_switch(self, next_ctx) }
@@ -285,7 +292,7 @@ impl TaskContext {
 /// context. The next context must contain a valid, aligned kernel stack and
 /// resume address established by `TaskContext::init` or an earlier switch.
 /// Keep both contexts and stacks live until their saved continuations finish;
-/// TLS, FP state and address-space state must already match the next task.
+/// FP state and address-space state must already match the next task.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(

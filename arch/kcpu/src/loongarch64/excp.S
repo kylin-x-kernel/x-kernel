@@ -36,6 +36,8 @@ exception_entry_base:
     LDD     $sp, $a0, 0
     STD     $r0, $a0, 0
     LDD     $ra, $sp, 0
+    // Restore kernel current before returning to Rust. User tp was saved in
+    // trapframe slot-2; IRQs stay masked throughout this entry sequence.
     LDD     $tp, $sp, 1
     LDD     $fp, $sp, 2
     LDD     $r21,$sp, 3
@@ -56,6 +58,7 @@ exception_entry_base:
 enter_user:
     addi.d  $sp, $sp, -14 * 8
     STD     $ra, $sp, 0
+    // Preserve kernel current while user mode uses tp for TLS.
     STD     $tp, $sp, 1
     STD     $fp, $sp, 2
     STD     $r21,$sp, 3

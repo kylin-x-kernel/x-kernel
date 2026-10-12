@@ -83,7 +83,7 @@ pub fn init(boot_info: &boot_info::BootInfo) {
         vaddr: Some(va!(addr_of_sym!(_sdata))),
         size: addr_of_sym!(_edata) - addr_of_sym!(_sdata),
         flags: MemFlags::RSVD | MemFlags::R | MemFlags::W,
-        name: ".data .tdata .tbss",
+        name: ".data",
     });
     push(MemoryRegion {
         paddr: v2p(addr_of_sym!(boot_stack).into()),

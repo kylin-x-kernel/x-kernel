@@ -24,7 +24,10 @@ This crate provides a uniform API across all supported architectures (AArch64, x
   - `enable_local_irq()`, `disable_local_irq()`, `local_irq_enabled()`
   - `save_irq_and_disable() -> usize` — atomically save interrupt state and disable local interrupts
   - `restore_irq(flags: usize)` — restore previously saved interrupt state
-- **Thread pointer (TLS)**: `read_thread_pointer()`, `write_thread_pointer(val)`
+- **Thread pointer registers** (x86_64):
+  `read_thread_pointer()`, `write_thread_pointer(val)`. RISC-V and LoongArch
+  kernel `tp` belongs to `kcpu`'s current-task interface; user TLS is saved in
+  `UserContext`.
 - **FP/SIMD enable** (AArch64, LoongArch64): `enable_fp()`
 - **LSX extension** (LoongArch64): `enable_lsx()`
 - **MMU / Page table root**:

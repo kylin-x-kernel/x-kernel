@@ -90,6 +90,9 @@ no user-space input.
 
 ## Audit Checklist
 
+- CPU0's HWI1 parent gate is enabled after EIOINTC/PCH PIC initialization;
+  otherwise pending device interrupts cannot complete blocked I/O. Device
+  registration still controls the downstream per-device masks.
 - Backend hwirq range gates remain ahead of any IOCSR/MMIO access.
 - The RTC mapping size and address still come from `RTC_PADDR` /
   `LS7A_RTC_SIZE`, and the sample still flows through

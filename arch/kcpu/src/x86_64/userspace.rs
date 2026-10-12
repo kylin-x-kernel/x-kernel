@@ -240,7 +240,6 @@ impl UserContext {
 
         karch::disable_local_irq();
 
-        // Accounting must run while the kernel TLS base is installed.
         on_user_enter();
         let kernel_fs_base = karch::read_thread_pointer();
         // SAFETY: Setting FS base to the user value; the kernel value is saved and restored after `enter_user` returns.

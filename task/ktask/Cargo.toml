@@ -15,7 +15,6 @@ default = []
 snapshot = ["dep:backtrace"]
 ipi = ["dep:kipi", "kipi/reschedule", "kipi/timer-reprogram"]
 watchdog = ["snapshot"]
-tls = ["khal/tls"]
 preempt = ["kspin/preempt", "ktimer_core/preempt"]
 smp = ["kspin/smp", "ipi", "ktimer_core/smp"]
 

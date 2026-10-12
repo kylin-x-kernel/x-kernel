@@ -77,6 +77,11 @@ pub(super) unsafe fn switch_to_el1() {
 #[cfg(feature = "vmm")]
 #[unsafe(link_section = ".idmap.text")]
 pub(super) unsafe fn init_el2_vhe() {
+    let current_sp = aarch64_cpu::registers::SP.get();
+    SPSel.write(SPSel::SP::ELx);
+    aarch64_cpu::registers::SP.set(current_sp);
+    // Kernel current is null until the scheduler installs this CPU's task.
+    SP_EL0.set(0);
     let current_el = CurrentEL.read(CurrentEL::EL);
     if current_el < 2 {
         return;

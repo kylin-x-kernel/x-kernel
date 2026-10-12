@@ -58,6 +58,18 @@ pub use active_exception_context::{
 
 mod userspace_common;
 
+#[unittest::mod_test]
+mod tests_current_task {
+    use unittest::{assert_eq, def_test};
+
+    #[def_test]
+    fn current_task_ptr_is_consistent() {
+        let first = crate::current_task_ptr();
+        let second = crate::current_task_ptr();
+        assert_eq!(first, second);
+    }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
         mod x86_64;

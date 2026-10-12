@@ -95,6 +95,29 @@ arch/kcpu/
 | 架构 | `userspace.rs` | `UserContext`、`enter_user` 汇编调用 |
 | 架构 | `boot.rs` / `mod.rs` | `init_trap()` 初始化 |
 
+### 当前任务身份
+
+`current_task_ptr()` 和 `set_current_task_ptr()` 由架构模块导出，使用不透明任务
+指针，不依赖 `ktask`，也不管理 `Arc`。`ktask` 负责初始化与新旧任务的存活；
+正常调度由 `TaskContext::switch_to(next_ctx, next_task)` 在准备硬件上下文后、
+进入底层切栈前发布 current。调用者必须保证指针与目标上下文属于同一任务。
+`khal::context` 只重新导出接口，不保存另一份 current。
+
+x86_64 的 `current.rs` 通过 GS 单指令读写本 CPU 的槽位。AArch64 的
+`current.rs` 直接读取内核态 SP_EL0；发布时同时更新本 CPU 的 `ENTRY_TASK`，
+供 EL0 异常入口在保存用户 SP 后恢复 current。入口恢复前不调用 Rust；返回
+EL0 前先屏蔽 IRQ/NMI，再将 SP_EL0 改回用户 SP，随后只恢复寄存器并 `eret`。
+`ENTRY_TASK` 是借用指针，不另持任务引用；TPIDR_EL0 仍用于用户态 TLS。
+RISC-V 的 `current.rs` 直接读写内核 `tp`，不屏蔽 IRQ。主从核启动先清零
+`tp`；用户态入口把内核 current 保存在内核 callee frame，返回 Rust 前恢复，
+用户 TLS 则由用户 trapframe 独立保存。`gp` 仍保存 per-CPU 基址，不随任务切换。
+H 扩展的 guest 进出由 `kvmm` 保存、恢复 host `tp`，不把 guest x4 当作 current。
+LoongArch 的 `current.rs` 直接读写内核 `$tp`，不屏蔽 IRQ。主从核启动先清零
+该寄存器；用户态入口的内核 callee frame 保存 current，返回 Rust 前恢复，
+用户 trapframe 独立保存用户 TLS。`$r21` 继续保存 per-CPU 基址。
+架构选择发生在编译期，
+上层不根据目标架构分支，也不依赖 current 必须放在 per-CPU 内存中。
+
 ### 类型关系
 
 ```text
@@ -136,10 +159,10 @@ UserRestorableContext
       │           其他架构仅携带各自所需的窄状态。
 
 TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换)
-                  x86_64:      { kstack_top, rsp, fs_base, cr3, ext_state? }
-                  aarch64:     { sp, r19-r29, lr, tpidr_el0, ttbr0_el1, fp_state? }
-                  riscv:       { ra, sp, s0-s11, tp, satp, fp_state? }
-                  loongarch64: { ra, sp, s[10], tp, pgdl, fpu? }
+                  x86_64:      { kstack_top, rsp, cr3, ext_state? }
+                  aarch64:     { sp, r19-r29, lr, ttbr0_el1, fp_state? }
+                  riscv:       { ra, sp, s0-s11, satp, fp_state? }
+                  loongarch64: { ra, sp, s[10], pgdl, fpu? }
 
                   (带 ? 字段受 fp-simd feature 门控)
 ```
@@ -165,8 +188,8 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
   `RiscvHwprobe` private provider 持有 per-CPU capability snapshot；
   对外 helper 接收 Linux raw key，在 `kcpu` 内部完成取值、聚合和
   `WHICH_CPUS` 匹配语义。syscall 路径不读取 M-mode CSR，也不重新解析设备树。
-- **`TaskContext::switch_to()`**：必须在中断关闭上下文调用。
-  涉及页表切换、TLS 更新和 FP 状态保存/恢复。
+- **`TaskContext::switch_to()`**：unsafe 调度入口，必须由调用者关闭普通 IRQ、
+  排除迁移并保留新旧任务。涉及页表切换、FP 状态保存/恢复及 current 发布。
 - **`UserContext::run()`**：禁用本地 IRQ 后进入用户态，返回后重新启用。
   调用者必须确保当前处于进程线程上下文且用户页表已正确设置。
 - **`user_copy()`**：可在任意内核上下文调用。依赖异常表机制安全处理无效
@@ -174,7 +197,9 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
 - **`active_exception_context()`**：可在任意上下文调用（包括 NMI 类上下文），
   返回 best-effort 快照。
 - **FP/SIMD 保存恢复**：受 `fp-simd` feature 控制。未启用时跳过 FP 状态操作。
-- **TLS 保存恢复**：受 `tls` feature 控制。未启用时跳过线程指针操作。
+- **TLS 边界**：内核任务不分配 TLS，也不在调度时切换 TLS 寄存器。
+  用户态 TLS 仍属于 `UserContext`，由用户态进入/退出路径保存恢复。
+  内核链接脚本拒绝非空 TLS 段，避免无运行时支持的线程局部变量进入镜像。
 
 ## 算法流程
 
@@ -212,7 +237,9 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
 - **hardware NMI**：异常入口（SPINTMASK=0）由硬件置 `PSTATE.ALLINT=1`，异常处理
   无需额外入口代码；`use_nmi_path()` 以 `karch::allint_active() && SPSR.I == 1`
   分类（IRQ 屏蔽时仍到达的中断必然是 Superpriority NMI）；ALLINT 窗口由 GIC IRQ
-  dispatch 路径打开，`ERET` 从 SPSR 恢复中断前状态。
+  dispatch 路径打开。`HardwareNmiExitGuard` 在所有 handler 清理完成后重新置
+  ALLINT，覆盖 NMI 和异常表修复的提前返回，防止恢复 ELR/SPSR 期间被嵌套异常
+  覆盖返回状态；`ERET` 从未修改的 SPSR 恢复中断前状态。
 - **运行时降级**：上述入口处理均以机制 readiness 为门控（`pmr::is_ready()` /
   `allint_active()`），机制不可用（GICv2、无 FEAT_NMI）时行为与普通 IRQ 内核完全
   一致，从不触碰 NMI-only 寄存器。
@@ -222,14 +249,14 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
 ```text
 UserContext::run(&mut self, on_user_enter, on_user_exit) -> ReturnReason:
 1. karch::disable_local_irq()
-2. 调用 on_user_enter，再保存内核 TLS 指针、设置用户 TLS 指针
+2. 调用 on_user_enter，再保存内核侧 FS 寄存器值、设置用户 TLS 指针
 3. 调用 enter_user() [汇编]:
    - 从 trap frame 恢复用户寄存器
    - 切换用户页表
    - 返回用户态 (sysret/eret/sret/ertn)
 4. [用户态执行，直到 trap/异常/syscall]
 5. 汇编 trap 入口触发，保存寄存器，返回 run()
-6. 恢复内核 TLS 指针，调用 on_user_exit（IRQ 分发之前）
+6. 恢复内核侧 FS 寄存器值，调用 on_user_exit（IRQ 分发之前）
 7. 分类返回原因:
    - Syscall: 特定异常号 (int 0x80 / SVC / ecall / syscall)
      x86_64: syscall_entry 汇编将 rax 压入 orig_rax 字段，
@@ -288,8 +315,8 @@ syscall 可被信号中断并需要重启。`orig_rax` 字段保存入口时的�
   不发布跨 CPU 数据。
 - **分布式切片**：`IRQ` 和 `PAGE_FAULT` 使用 `linkme` 分布式切片，
   编译期注册，运行时不可变，无需同步。
-- **IRQ 关闭保护**：`switch_to()` 和 `run()` 在操作上下文前关闭本地 IRQ，
-  防止上下文切换过程中被中断打断。
+- **IRQ 关闭保护**：`switch_to()` 要求调用者已经关闭本地 IRQ；`run()` 自行关闭。
+  普通 IRQ 排除不等于 NMI 排除，任务指针发布仍须保证 NMI 借用期间对象存活。
 - **naked 函数**：所有 `context_switch`、FP 保存/恢复和 LoongArch64 非对齐
   辅助函数使用 `#[unsafe(naked)]` + `naked_asm!`，完全控制函数序言/尾声。
 

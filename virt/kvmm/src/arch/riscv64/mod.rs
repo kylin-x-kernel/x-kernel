@@ -65,7 +65,10 @@ const CSR_HVIP: u16 = 0x645;
 /// RISC-V H-extension VMM backend.
 pub struct RiscvHext;
 
-/// RISC-V vCPU state matching avatar-next `vcpu_t` layout.
+#[cfg(unittest)]
+mod tests;
+
+/// RISC-V vCPU state shared with the H-extension entry/exit assembly.
 #[repr(C)]
 #[derive(Clone)]
 pub struct RiscvVcpu {
@@ -95,8 +98,8 @@ pub struct RiscvVcpu {
     pub htinst_save: u64,
     /// hstatus snapshot carrying the guest's previous virtual privilege mode.
     pub hstatus: u64,
-    /// Host context: ra, s0-s11, sp, orig_stvec, gp (offset 352).
-    pub host_ctx: [u64; 16],
+    /// Host context: ra, s0-s11, sp, orig_stvec, gp, tp (offset 352).
+    pub host_ctx: [u64; 17],
     /// Guest-programmed SBI timer deadline in guest time units.
     pub timer_deadline: u64,
 }
@@ -117,7 +120,7 @@ impl Default for RiscvVcpu {
             htval_save: 0,
             htinst_save: 0,
             hstatus: HSTATUS_SPVP,
-            host_ctx: [0; 16],
+            host_ctx: [0; 17],
             timer_deadline: 0,
         }
     }

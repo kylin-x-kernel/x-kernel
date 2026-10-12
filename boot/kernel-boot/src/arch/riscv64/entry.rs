@@ -47,6 +47,8 @@ fn enable_fp_simd() {
 #[unsafe(link_section = ".text.boot")]
 unsafe extern "C" fn _start() -> ! {
     naked_asm!(
+        // Firmware's tp is not a kernel task pointer.
+        "mv      tp, zero",
         "mv      s0, a0",
         "mv      s1, a1",
         "la      sp, {boot_stack}",
@@ -90,6 +92,8 @@ unsafe extern "C" fn _start() -> ! {
 #[unsafe(link_section = ".text.boot")]
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
+        // Each hart has no current task until scheduler initialization.
+        "mv      tp, zero",
         "mv      s0, a0",
         "mv      sp, a1",
         "call    {enable_fp_simd}",

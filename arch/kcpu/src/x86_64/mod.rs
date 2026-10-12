@@ -5,6 +5,8 @@
 //! x86_64 CPU context, trap, and userspace support.
 
 mod ctx;
+mod current;
+pub use current::{current_task_ptr, set_current_task_ptr};
 mod gdt;
 mod idt;
 

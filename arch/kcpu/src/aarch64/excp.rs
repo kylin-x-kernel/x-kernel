@@ -31,6 +31,7 @@ enum ArchTrapOrigin {
 core::arch::global_asm!(
     include_str!("excp.S"),
     trapframe_size = const core::mem::size_of::<ExceptionContext>(),
+    entry_task = sym super::current::ENTRY_TASK_TEMPLATE,
     TRAP_KIND_SYNC = const ArchTrap::Synchronous as u8,
     TRAP_KIND_IRQ = const ArchTrap::Irq as u8,
     TRAP_KIND_FIQ = const ArchTrap::Fiq as u8,
@@ -78,12 +79,7 @@ fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
 /// (where [`use_nmi_path`] classifies the interrupt) and opens the mask,
 /// then restores PMR before returning to the assembly epilogue.
 ///
-/// Hardware NMI needs no entry/exit handling here: exception entry
-/// (SPINTMASK=0) sets `PSTATE.ALLINT=1` for the duration of the handler, the
-/// GIC IRQ dispatch path opens the ALLINT window for a normal IRQ so a
-/// Superpriority NMI can preempt it, and `ERET` restores the interrupted
-/// context's exact PSTATE from `SPSR_EL1` (which exception entry saved
-/// *before* setting ALLINT — the saved SPSR must not be modified).
+/// Hardware NMI uses a separate exit guard instead of PMR save/restore.
 #[cfg(feature = "nmi-pseudo")]
 struct NmiExceptionGuard {
     saved_pmr: u8,
@@ -126,16 +122,33 @@ impl Drop for NmiExceptionGuard {
     }
 }
 
+/// Closes the hardware NMI window after all exception-handler cleanup.
+///
+/// GIC dispatch allows NMI during ordinary IRQ handling. Before assembly
+/// restores ELR/SPSR, close that window so nested entry cannot overwrite
+/// those registers. `eret` restores the original mask from the saved SPSR.
+#[cfg(feature = "nmi-hardware")]
+struct HardwareNmiExitGuard;
+
+#[cfg(feature = "nmi-hardware")]
+impl Drop for HardwareNmiExitGuard {
+    fn drop(&mut self) {
+        karch::allint_set();
+    }
+}
+
 /// Architecture-specific trap entry point.
 ///
 /// Pseudo-NMI PMR save/restore is performed here, gated on the runtime NMI
 /// mode so a degraded build (no active mechanism) behaves exactly like a
 /// plain-IRQ kernel and never touches the NMI-only registers.  Hardware-NMI
-/// ALLINT handling lives in the GIC dispatch paths
-/// (`dispatch_irq_from_irqson` / `dispatch_irq_from_irqsoff`), not in the
-/// exception entry.
+/// entry sets ALLINT automatically; GIC dispatch may open it during IRQ
+/// processing. The exit guard closes it before register restoration,
+/// including early returns for NMI and exception-table fixups.
 #[unsafe(no_mangle)]
 fn dispatch_exception(tf: &mut ExceptionContext, kind: ArchTrap, source: ArchTrapOrigin) {
+    #[cfg(feature = "nmi-hardware")]
+    let _nmi_guard = HardwareNmiExitGuard;
     #[cfg(feature = "nmi-pseudo")]
     let _nmi_guard = NmiExceptionGuard::new(tf);
     let _tf_guard = crate::ExceptionContextGuard::new(tf);

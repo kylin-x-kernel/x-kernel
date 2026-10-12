@@ -27,7 +27,7 @@
 //  328   : htval_save     8 B
 //  336   : htinst_save    8 B
 //  344   : hstatus        8 B
-//  352   : host_ctx[16]   16×8 = 128 B
+//  352   : host_ctx[17]   17×8 = 136 B
 
 // vcpu_t field offsets
 .equ VCPU_R0,         0
@@ -61,6 +61,7 @@
 .equ HCTX_SP,         456
 .equ HCTX_STVEC,      464
 .equ HCTX_GP,         472
+.equ HCTX_TP,         480
 
 // H-extension CSR numbers (assembler may not recognize symbolic names)
 .equ CSR_HSTATUS,     0x600
@@ -96,6 +97,7 @@ hext_enter_guest:
     sd      s11, HCTX_S11(a0)
     sd      sp,  HCTX_SP(a0)
     sd      gp,  HCTX_GP(a0)
+    sd      tp,  HCTX_TP(a0)
 
     // 2. Save current stvec.
     csrr    t0, stvec
@@ -290,7 +292,8 @@ kvmm_hext_trap_vector:
     and     t0, t0, t1
     csrw    CSR_HSTATUS, t0
 
-    // 4. Restore original stvec.
+    // 4. Restore host current before reinstalling the host trap vector.
+    ld      tp, HCTX_TP(a0)
     ld      t0, HCTX_STVEC(a0)
     csrw    stvec, t0
 

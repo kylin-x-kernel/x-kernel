@@ -104,17 +104,15 @@ SECTIONS
     }
 
     .tdata ALIGN(0x10) : {
-        _stdata = .;
         *(.tdata .tdata.*)
-        _etdata = .;
     }
 
     .tbss ALIGN(0x10) : {
-        _stbss = .;
         *(.tbss .tbss.*)
         *(.tcommon)
-        _etbss = .;
     }
+    /* Kernel tasks have no TLS allocation or thread-pointer switching. */
+    ASSERT(SIZEOF(.tdata) == 0 && SIZEOF(.tbss) == 0, "kernel TLS is unsupported")
 
     /* Independent typed per-CPU slot template and reserved areas. */
     . = ALIGN(4K);

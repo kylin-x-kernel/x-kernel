@@ -61,6 +61,39 @@
 
 ## unsafe 代码清单
 
+### 当前任务指针发布
+
+current 的存储和访问由架构模块拥有，任务存活由调度器保证。底层只传递不透明
+指针，不解引用任务对象，也不获取或释放引用。发布者必须保留新任务，并让旧任务
+跨过发布窗口和旧栈使用期；NMI 的借用必须在被中断流程恢复前结束。
+
+`TaskContext::switch_to` 是 unsafe 边界：调用者保证下一任务指针与目标上下文
+匹配、上下文独占及 IRQ/迁移排除。架构层在硬件上下文准备后、底层切栈前发布
+指针，不执行任务析构。current 发布与栈切换不是单个原子动作；NMI 只能依赖
+指针指向存活任务，不能据此假设所有硬件上下文已同时完成切换。
+
+x86_64 使用对齐的 GS 指令和编译器内存屏障，CPU 选择与指针访问不能被迁移拆开；
+ARM64 直接读取 SP_EL0，CPU 选择与读取也不能被迁移拆开。启动在 EL1/VHE 路径
+均先清零该寄存器。EL0 异常入口在调用 Rust 前用本 CPU 的 `ENTRY_TASK` 恢复
+current；入口的硬件屏蔽状态覆盖这段交接。返回 EL0 时，先在 current 仍有效时
+完成最后一次 Rust 调用并屏蔽普通 IRQ、伪 NMI 及已启用的硬件 NMI，再写入
+用户 SP。最终 `eret` 从 SPSR 恢复用户中断状态。用户 SP 不作为任务指针使用。
+RISC-V 直接读取 `tp`，主从核启动在进入 Rust 前清零。用户态与 guest 的 `tp`
+只在 IRQ 关闭的汇编交接窗口使用，返回内核 Rust 前恢复 host current。内核
+trapframe 保存的 `tp` 属于任务，即使该任务迁移也可恢复；`gp` 属于 CPU，不能
+从可迁移的内核 trapframe 恢复。本机制不提供 RISC-V NMI/RNMI 入口支持。
+LoongArch 直接读取 `$tp`，主从核在第一次 Rust 调用前清零。用户态交接使用
+独立的 callee frame 保存内核 current，并在 IRQ 仍关闭时恢复，再返回 Rust；
+TLB refill 汇编不修改 `$tp`，也不调用 Rust。本机制不增加 LoongArch NMI 支持。
+指针返回后不携带持续的 CPU 固定或所有权。接口不能被当作远端任务引用获取机制。
+
+### AArch64 异常返回窗口
+
+AArch64 硬件 NMI 可打断普通 IRQ handler，但不得打断最终 ELR/SPSR 恢复。
+`HardwareNmiExitGuard` 先声明、最后析构，在其余异常清理完成后设置 ALLINT，
+并保持到 `eret`；保存的 SPSR 不变。该操作受当前 CPU 的 FEAT_NMI readiness
+门控，降级运行不访问 ALLINT。用户态返回同样在替换 SP_EL0 之前屏蔽硬件 NMI。
+
 ### 1. `ExceptionContextGuard::new` / `Drop`（`active_exception_context.rs`）
 
 ```rust
@@ -311,8 +344,8 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 | `TaskContext` | 字段均为 `Send` | 字段均为 `Sync`，但不应跨 CPU 共享 |
 | `ExceptionContextGuard` | 不应跨线程转移（绑定安装时 slot） | 不可共享使用 |
 
-- `TaskContext` 的 `switch_to` 方法接受 `&mut self`，天然独占。
-  上下文切换在关中断下执行，防止并发访问。
+- `TaskContext::switch_to` 是 unsafe 方法；调用者保证运行中与目标上下文独占，
+  并排除普通 IRQ、迁移和其他 CPU 上的并发执行。仅 `&mut self` 不能证明这些条件。
 - `ACTIVE_EXCEPTION_CONTEXT_PTR` 为 per-CPU 变量。安装路径写当前 CPU 副本；
   迟到的 Drop 可能在迁移后访问原 CPU slot，也可能需要清理迁移后当前 CPU 的恢复
   标记，因此恢复路径必须使用 CAS，不能无条件覆盖任一 CPU slot。
@@ -413,6 +446,6 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 - [ ] 新增 RISC-V hwprobe key 时确认数据来源是否来自启动期 snapshot，
       并同步 `ksyscall` 聚合/过滤语义。
 - [ ] 修改页表切换逻辑后验证 TLB 刷新语义是否正确。
-- [ ] 修改 `fp-simd` / `tls` feature 门控代码后验证所有架构的一致性。
+- [ ] 修改 `fp-simd` feature 门控代码后验证所有架构的一致性。
 - [ ] 修改 x86_64 `orig_rax` 或 syscall 重启逻辑后验证 `excp.S` 中的 push/pop 序列与 `ExceptionContext` 布局一致。
 - [ ] 新增可重启 syscall 错误码时同步更新 `syscall_restart_error()` 中的常量列表。

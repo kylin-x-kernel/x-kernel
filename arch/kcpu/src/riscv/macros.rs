@@ -188,6 +188,8 @@ macro_rules! include_asm_macros {
                 // across a U-mode trap: written by `.Lexit_user` on entry and
                 // loaded by `.Ltrap_return` on U-mode return only. An S-mode
                 // trap return leaves `gp` untouched.
+                // tp is task-local: kernel current or user TLS. Unlike gp,
+                // its saved value remains valid if this task migrates.
                 \op tp, sp, 4
                 \op t0, sp, 5
                 \op t1, sp, 6

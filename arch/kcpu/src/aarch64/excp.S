@@ -57,9 +57,21 @@
     add     sp, sp, {trapframe_size}
 .endm
 
+.macro RESTORE_KERNEL_CURRENT
+    mrs     x12, tpidr_el1
+    movz    x13, #:abs_g0:{entry_task}
+    add     x12, x12, x13
+    ldar    x12, [x12]
+    msr     sp_el0, x12
+.endm
+
 .macro HANDLE_TRAP, kind, source
 .p2align 7
     STORE_REGS
+    .if \source == {TRAP_SRC_LOWER_AARCH32}
+    // Unsupported EL0 sources still need valid current for Rust diagnostics.
+    RESTORE_KERNEL_CURRENT
+    .endif
     mov     x0, sp
     mov     x1, \kind
     mov     x2, \source
@@ -107,6 +119,9 @@ exception_vector_base:
     mov     x1, sp
 
     mrs     x8, sp_el0
+    // Exception entry masks nesting. Recover current before returning to Rust;
+    // x8 still carries the user SP to save in UserContext below.
+    RESTORE_KERNEL_CURRENT
     mrs     x9, tpidr_el0
     ldp     x10, x11, [x1, {trapframe_size}]
     stp     x8, x9, [x1, {trapframe_size}]
@@ -134,6 +149,8 @@ enter_user:
     stp     x19, x20, [sp]
 
     mov     x19, x0
+    // Finish all Rust calls and mask IRQ/NMI before SP_EL0 stops being current.
+    bl      kcpu_prepare_enter_user_irq
     mov     x10, sp
     mrs     x11, tpidr_el0
     ldp     x8, x9, [x19, {trapframe_size}]
@@ -141,7 +158,6 @@ enter_user:
     msr     sp_el0, x8
     msr     tpidr_el0, x9
 
-    bl      kcpu_prepare_enter_user_irq
     mov     sp, x19
 
 .Lexception_return:
