@@ -202,3 +202,10 @@ input. Normalization still delegates to the existing shared path: signal-set
 size, event count, descriptor and user-memory checks remain in place. The
 regression uses an invalid descriptor and performs no wait, allocation or
 user-memory access. It does not change `epoll_pwait2` timespec validation.
+
+## pidfd_getfd reserved-argument rejection
+
+Unsupported `pidfd_getfd` flags fail before target-resource access or descriptor
+publication. This argument check does not add or establish ptrace credential
+authorization for the existing flags-zero path. Target lifetime, permission
+policy and FD-table locking remain separate concerns.

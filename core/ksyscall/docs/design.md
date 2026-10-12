@@ -337,3 +337,10 @@ mask handling, copy-to-user behavior and `epoll_pwait2` timespec rules are uncha
 
 The registered user-context regression uses an invalid descriptor to ensure
 `INT_MIN`, `-65536`, `-2` and `-1` reach descriptor validation without blocking.
+
+## pidfd_getfd reserved flags
+
+`pidfd_getfd` accepts only flags equal to zero. Reject any other value with
+`EINVAL` before looking up the pidfd or target descriptor, acquiring the target
+FD-table read guard, or allocating a new descriptor. The flags-zero duplication
+path still shares the original open file description and sets close-on-exec.
