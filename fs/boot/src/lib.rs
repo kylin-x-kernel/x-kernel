@@ -180,7 +180,6 @@ pub fn prepare_namespace() {
 /// Mounts boot-time virtual filesystems into the initial namespace.
 pub fn mount_virtual_filesystems() {
     info!("Initialize VFS...");
-    devfs::capture_firmware_dtb_snapshot();
     BootVfs::initial().mount_virtual_filesystems();
 }
 

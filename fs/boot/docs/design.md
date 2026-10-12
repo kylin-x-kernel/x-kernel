@@ -92,3 +92,6 @@ registry，root 格式由 registry 探测结果决定。
 - cgroup2 hierarchy 的启动挂载属于 feature-controlled boot policy；`mini-oci` 等用户态
   消费者不负责初始化宿主机全局 hierarchy。
 - boot 负责递归创建其声明拥有的 mountpoint；KVFS mount helper 只挂载已解析目录。
+
+设备树快照捕获与静态节点发布由 devtmpfs 首次根目录构造统一完成。
+`mount_virtual_filesystems()` 只负责挂载，不再执行晚期设备树捕获。

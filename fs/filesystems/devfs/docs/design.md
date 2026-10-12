@@ -212,3 +212,14 @@ waiters. Clients never read the VirtIO queue or register IRQ-line waiters.
   stale remove event cannot delete a different replacement record.
 - DRM instances bind one concrete display handle. Multiple display devices can
   therefore receive independent `cardN` nodes and state.
+
+## Firmware snapshot publication
+
+The first devtmpfs superblock construction captures the firmware DTB before
+calling the static root builder. `firmware-dtb` is therefore included even when
+the bootstrap namespace mounts `/dev` before virtual filesystem initialization.
+Capture and static node publication belong to this single initialization stage;
+there is no separate late capture API. Additional mounts share the same root
+and immutable snapshot. Platforms without a firmware
+DTB omit the node. The node exports firmware data as supplied; it does not
+validate device functionality or prove clock accuracy.

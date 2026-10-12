@@ -158,3 +158,8 @@ limitation must not be presented as a complete suspend-aware clock.
 - Add a class adapter before accepting a new `DeviceNodeKind` in devfs.
 - Register removal wakeups before IRQ wakeups and keep event draining in task
   context.
+
+Firmware DTB capture precedes the first static root construction, preventing
+mount order from permanently hiding the snapshot device. The owned byte copy
+remains immutable for the filesystem lifetime; reads do not access user-selected
+physical addresses. Platforms without a DTB publish no snapshot device.

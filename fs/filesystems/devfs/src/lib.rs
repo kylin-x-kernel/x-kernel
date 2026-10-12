@@ -75,6 +75,9 @@ fn new_devfs_with_type(
     superblock_flags: SuperBlockFlags,
 ) -> Arc<SuperBlock> {
     let (super_block, _internal_mount) = DEVFS.call_once(|| {
+        // Static root entries are fixed on the first mount, so capture firmware
+        // before root construction rather than after the bootstrap /dev mount.
+        nodes::dtb::capture_snapshot();
         let super_block = SimpleFs::new_with_superblock_flags(
             file_system_type,
             DEVFS_MAGIC,
@@ -85,11 +88,6 @@ fn new_devfs_with_type(
         (super_block, internal_mount)
     });
     super_block.clone()
-}
-
-/// Capture a snapshot of the firmware device tree blob.
-pub fn capture_firmware_dtb_snapshot() {
-    nodes::dtb::capture_snapshot();
 }
 
 #[cfg(feature = "dev-log")]
