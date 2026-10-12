@@ -47,26 +47,37 @@ impl Stages {
     }
 
     fn wait_command(&self, value: usize) {
-        bounded_wait(|| self.command.load(Ordering::Acquire) >= value);
+        bounded_wait_labeled("sibling wait command", || {
+            self.command.load(Ordering::Acquire) >= value
+        });
     }
 
     fn wait_parked(&self, value: usize, task: &ktask::KtaskRef) {
-        bounded_wait(|| {
+        bounded_wait_labeled("leader wait sibling parked", || {
             self.acknowledgement.load(Ordering::Acquire) == value
                 && task.state() == TaskState::Blocked
         });
     }
 
     fn wait_finish(&self) {
-        bounded_wait(|| self.can_finish.load(Ordering::Acquire));
+        bounded_wait_labeled("child wait finish release", || {
+            self.can_finish.load(Ordering::Acquire)
+        });
     }
 }
 
-pub(in crate::task) fn bounded_wait(mut condition: impl FnMut() -> bool) {
+pub(in crate::task) fn bounded_wait(condition: impl FnMut() -> bool) {
+    bounded_wait_labeled("exit-tail", condition);
+}
+
+fn bounded_wait_labeled(label: &str, mut condition: impl FnMut() -> bool) {
     let deadline = khal::time::monotonic_time() + TimeSpan::from_secs(5);
     let queue = WaitQueue::new();
     while !condition() {
-        assert!(khal::time::monotonic_time() < deadline, "exit-tail timeout");
+        assert!(
+            khal::time::monotonic_time() < deadline,
+            "exit-tail timeout: {label}"
+        );
         queue.wait_timeout(TimeSpan::from_millis(1));
     }
 }
@@ -252,7 +263,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
                         while sibling_stages.command.load(Ordering::Acquire) < END_WINDOW {
                             assert!(
                                 khal::time::monotonic_time() < deadline,
-                                "remote tail timeout"
+                                "remote tail timeout: wait end window"
                             );
                             core::hint::spin_loop();
                         }
@@ -301,7 +312,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
             observe_boundary();
             child_stages.command(RESUME_FIRST);
             if is_remote {
-                bounded_wait(|| {
+                bounded_wait_labeled("leader wait remote window held", || {
                     child_stages.acknowledgement.load(Ordering::Acquire) == WINDOW_HELD
                 });
                 assert_eq!(sibling.state(), TaskState::Running);
@@ -322,7 +333,9 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
             child_stages.wait_finish();
             assert_eq!(check_current_root(Some(sentinel_addr)), current_root);
             assert_eq!(khal::percpu::this_cpu_id().as_usize(), cpu);
-            bounded_wait(|| sibling.state() == TaskState::Exited);
+            bounded_wait_labeled("leader wait sibling exited", || {
+                sibling.state() == TaskState::Exited
+            });
             assert_eq!(sibling.join(), 0);
             drop(sibling);
         },
@@ -333,7 +346,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     task.ctx_mut().set_page_table_root(root);
     task.set_cpumask(ktask::KCpuMask::one_shot(cpu));
     let child = kprocess::start_user_task(task);
-    bounded_wait(|| {
+    bounded_wait_labeled("parent wait leader exited and blocked", || {
         stages.has_leader_exited.load(Ordering::Acquire) && child.state() == TaskState::Blocked
     });
     assert_eq!(child.cpu_id().as_usize(), cpu);
@@ -348,10 +361,12 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
         assert_eq!(mm.lock().vmas().count(), 0);
     }
     stages.can_finish.store(true, Ordering::Release);
-    bounded_wait(|| child.state() == TaskState::Exited);
+    bounded_wait_labeled("parent wait leader exited", || {
+        child.state() == TaskState::Exited
+    });
     assert_eq!(child.join(), 0);
     drop(child);
-    bounded_wait(|| observed.upgrade().is_none());
+    bounded_wait_labeled("parent wait old mm dropped", || observed.upgrade().is_none());
     assert_eq!(sentinel.read(), 0x1234);
     TestResult::Ok
 }
