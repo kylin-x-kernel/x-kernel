@@ -680,6 +680,7 @@ impl VfsFileBuilder {
             private_data: Mutex::new(private_data),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
+            readahead: Mutex::new(crate::file_ra::FileRaState::new()),
             pipe_generation,
         }))
     }
@@ -694,6 +695,7 @@ pub struct VfsFile {
     private_data: Mutex<TypeMap>,
     flags: AtomicU32,
     position: Mutex<u64>,
+    pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
     /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
 }

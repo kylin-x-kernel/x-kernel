@@ -15,6 +15,7 @@ extern crate alloc;
 mod address_space;
 mod fiemap;
 mod file;
+mod file_ra;
 mod file_system_type;
 mod filename;
 mod fs_context;

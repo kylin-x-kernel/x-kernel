@@ -5,12 +5,10 @@
 //! Readahead requests, window selection and filesystem dispatch.
 
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, FolioBatch, PageIndex};
+use pagecache::{Folio, PageIndex};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
-
-const MAX_READAHEAD_BYTES: usize = 128 * 1024;
 
 /// A synchronous readahead cursor over locked, resident, uninitialized folios.
 ///
@@ -77,51 +75,37 @@ impl ReadaheadControl<'_, '_> {
 }
 
 impl AddressSpace {
-    /// Prepares a bounded read window and collects its first resident batch.
-    ///
-    /// The index snapshot keeps references alive; each copy must still check
-    /// initialization and invalidation under the folio lock. Readahead keeps
-    /// its existing reservation protocol and excludes truncate during I/O.
-    pub(super) fn prepare_read_window_and_batch(
-        &self,
-        offset: u64,
-        len: usize,
-        file_len: u64,
-    ) -> (u64, FolioBatch) {
-        let end = offset
-            .saturating_add(len.min(MAX_READAHEAD_BYTES) as u64)
-            .min(file_len);
-        let start = offset / PAGE_SIZE_4K as u64;
-        let count = end.div_ceil(PAGE_SIZE_4K as u64).saturating_sub(start) as usize;
-        let (batch, run_len) = self.i_pages.get_folios_contig_with_run_len(start, count);
-        if count > 1 && run_len < count {
-            drop(batch);
-            let _invalidate_guard = self.invalidate_lock.read();
-            // Recheck EOF after acquiring invalidate shared before reserving pages.
-            let current_len = self.inode().map_or(file_len, |inode| inode.size());
-            self.sync_readahead(offset, len, current_len.min(file_len));
-            return (end, self.i_pages.get_folios_contig(start, count));
-        }
-        (end, batch)
-    }
-
     // Called with invalidate shared held, including EOF sampling, I/O and
     // initialization. Missing runs are installed and locked before filesystem
     // dispatch, so competing demand reads wait on the same resident folios.
-    pub(super) fn sync_readahead(&self, offset: u64, count: usize, file_len: u64) -> u64 {
-        let end = offset
-            .saturating_add(count.min(MAX_READAHEAD_BYTES) as u64)
-            .min(file_len);
-        let last_index = end.div_ceil(PAGE_SIZE_4K as u64);
-        let mut index = offset / PAGE_SIZE_4K as u64;
+    pub(super) fn prepare_readahead(
+        &self,
+        range: core::ops::Range<PageIndex>,
+        marker: Option<PageIndex>,
+        file_len: u64,
+    ) {
+        let last_index = range.end.min(file_len.div_ceil(PAGE_SIZE_4K as u64));
+        let mut index = range.start;
         while let Some(run) = self.i_pages.next_miss_range(index..last_index) {
             #[cfg(unittest)]
             super::tests::observe_readahead_run(self, &run);
             match self.i_pages.readahead_folios(run.clone(), |folios| {
+                // `inspect` receives &&mut Folio and cannot mutate the marker.
+                #[expect(
+                    clippy::manual_inspect,
+                    reason = "CG-024-lint-exceptions: manual_inspect: inspect only lends &&mut \
+                              Folio; setting the marker requires mutable access"
+                )]
+                let mut marked = folios.map(|folio| {
+                    if Some(folio.index()) == marker {
+                        folio.mark_readahead();
+                    }
+                    folio
+                });
                 let mut control = ReadaheadControl {
                     address_space: self,
                     index: run.start,
-                    folios,
+                    folios: &mut marked,
                 };
                 // Consumed failures can be retried; the cache removes the
                 // unconsumed suffix when this callback returns.
@@ -139,6 +123,18 @@ impl AddressSpace {
                 Err(_) => break,
             }
         }
+    }
+}
+
+#[cfg(unittest)]
+impl AddressSpace {
+    pub(super) fn sync_readahead(&self, offset: u64, count: usize, file_len: u64) -> u64 {
+        let end = offset.saturating_add(count as u64).min(file_len);
+        self.prepare_readahead(
+            offset / PAGE_SIZE_4K as u64..end.div_ceil(PAGE_SIZE_4K as u64),
+            None,
+            file_len,
+        );
         end
     }
 }

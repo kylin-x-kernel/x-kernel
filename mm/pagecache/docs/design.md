@@ -29,7 +29,7 @@ runtime 不能直接引用它。
 
 - `mapping_pages.rs`：容器、锁内 resident tree/dirty marks 与 dirty reconciliation；
 - `folio.rs`：页分配、数据访问、uptodate/dirty/writeback 状态和释放；
-- `folio_batch.rs`：读取、写回与截断共用的有界引用集合，以及只读访问接口；
+- `folio_batch.rs`：读取、写回与截断共用的有界引用集合，以及持页锁的读取访问接口；
 - `filemap.rs`：lookup、连续引用批量收集、materialize 和 insert-if-absent；
 - `readahead.rs`：有界缺页段查询、页保留和同步读入协调；
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
@@ -182,3 +182,13 @@ surviving truncated tail 等待写回后清零并重新加入 dirty index；增�
 MappingPages 的 Drop 不等待 I/O：最终所有权排除仍借用容器的写回操作；在任务上下文中
 清 dirty 后，由字段析构释放 entries/marks，外部持有的 folio 也完成清理。
 需要等待写回的清理通过显式 `truncate_final()` 完成。
+
+### 预读标记与缓存历史提示
+
+Folio 的预读标记表示后续窗口的触发点，由 KVFS 在新预留页上设置，缓存命中时
+在页锁下消费；写回中的页保留标记。标记不表示初始化完成，也不承担页所有权。
+`preceding_cached_pages` 在索引锁下进行有界反向查找，提供连续驻留历史提示；
+策略状态属于打开文件，窗口与 EOF 策略不进入 MappingPages。
+
+批次读取在 folio 锁内复核初始化与失效状态后，可消费预读标记；callback 不改变数据、
+dirty 或驻留状态，也不等待其他 folio。预读 I/O 在 callback 返回、释放页锁后执行。

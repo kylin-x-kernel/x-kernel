@@ -40,18 +40,20 @@ impl FolioBatch {
         self.len == 0
     }
 
-    /// Reads immutable bytes from the folio at a batch position.
+    /// Accesses an initialized folio at a batch position for buffered reading.
     ///
     /// `slot` is a traversal position. Calls `read` under the folio lock without
-    /// a mapping lock; it must not re-enter the mapping. Absent, non-uptodate or invalidated
-    /// entries return `None` without calling `read`; callers must resolve them again.
-    pub fn with_read_folio<R>(&self, slot: usize, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
+    /// a mapping lock. The callback may consume a readahead marker, but must not
+    /// modify data, dirty state or residency, or wait for another folio. Absent,
+    /// non-uptodate or invalidated entries return `None` without calling `read`;
+    /// callers must resolve them again.
+    pub fn with_read_folio<R>(&self, slot: usize, read: impl FnOnce(&mut Folio) -> R) -> Option<R> {
         let folio = self.entries.get(slot)?.as_ref()?;
         let mut locked = folio.lock();
         if locked.is_invalidated() || !locked.is_uptodate() {
             return None;
         }
-        Some(read(locked.data()))
+        Some(read(&mut locked))
     }
 
     pub(crate) fn is_full(&self) -> bool {

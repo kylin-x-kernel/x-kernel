@@ -18,6 +18,7 @@ pub struct Folio {
     index: PageIndex,
     addr: VirtAddr,
     uptodate: bool,
+    readahead: bool,
     dirty: bool,
     is_invalidated: bool,
     writeback: bool,
@@ -37,6 +38,7 @@ impl Folio {
             index,
             addr,
             uptodate: false,
+            readahead: false,
             dirty: false,
             is_invalidated: false,
             writeback: false,
@@ -51,6 +53,25 @@ impl Folio {
     /// Makes a completely initialized folio available to cache readers.
     pub fn mark_uptodate(&mut self) {
         self.uptodate = true;
+    }
+
+    /// Marks this newly reserved page as a trigger for the next read window.
+    pub fn mark_readahead(&mut self) {
+        self.readahead = true;
+    }
+
+    /// Returns whether this folio carries a shared read-window trigger.
+    pub fn is_readahead(&self) -> bool {
+        self.readahead
+    }
+
+    /// Consumes a window trigger while holding the folio lock.
+    /// Writeback pages retain the marker for a later read.
+    pub fn take_readahead(&mut self) -> bool {
+        if self.writeback {
+            return false;
+        }
+        core::mem::take(&mut self.readahead)
     }
 
     /// Returns the immutable page index; this does not prove mapping residency.

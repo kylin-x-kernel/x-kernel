@@ -480,3 +480,12 @@ The helper imposes no aggregate memory or generation-work quota. Independent
 readable opens each retain their own allocation, so a per-buffer bound does not
 bound total memory across processes. Filesystem integrations must account for
 this cost in access and resource policy.
+
+### 每次打开文件的预读策略
+
+`FileRaState` 是策略提示，不授予缓存驻留或 EOF 权限。策略锁不跨 I/O 或用户复制；
+标记命中时锁序为 folio → 策略 → 索引（仅有界历史查询）；策略持有者不等待 folio。
+预算检查、标记消费与窗口决策在同一策略临界区内完成；释放页锁和策略锁后，
+再获取 invalidate shared 并重采样 EOF，才发布后续窗口。
+并发 pread 可改变同一打开描述的历史，但不能绕过初始化、身份复核或截断保护。
+独立打开不共享策略状态，dup/fork 的同一打开描述引用共享状态。

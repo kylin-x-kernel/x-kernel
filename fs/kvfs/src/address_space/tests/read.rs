@@ -6,7 +6,7 @@
 
 use alloc::{sync::Arc, vec, vec::Vec};
 
-use iov_iter::{IovSink, iov_iter_dest, iov_iter_kvec_dest};
+use iov_iter::{IovIterDest, IovSink, iov_iter_dest, iov_iter_kvec_dest};
 use kerrno::{KError, KResult};
 use memaddr::PAGE_SIZE_4K;
 use pagecache::Folio;
@@ -229,7 +229,17 @@ impl AddressSpaceOperations for ReadaheadOps {
     fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
         assert!(control.mapping().invalidate_lock.try_write().is_none());
         match control.index() {
-            0 => panic!("single-page misses must use read_folio"),
+            0 => {
+                assert_eq!(control.count(), 4);
+                for index in 0..4 {
+                    let mut data = vec![0x11 * (index + 1) as u8; PAGE_SIZE_4K];
+                    if index == 3 {
+                        data[17..].fill(0);
+                    }
+                    assert_eq!(control.complete_folio(&data), Ok(()));
+                }
+                Ok(())
+            }
             2 => {
                 assert_eq!(control.count(), 2);
                 // The run is already resident and locked; completion fills
@@ -251,7 +261,17 @@ impl AddressSpaceOperations for ReadaheadOps {
 #[def_test]
 fn readahead_reads_singletons_preserves_residents_and_completes_eof() {
     let size = PAGE_SIZE_4K * 3 + 17;
-    let small_inode = read_inode(&READAHEAD_OPS, size);
+    let initial_inode = read_inode(&READAHEAD_OPS, size);
+    let mut initial_byte = [0];
+    assert_eq!(
+        initial_inode
+            .address_space()
+            .read_from_page_cache(&mut iov_iter_kvec_dest(&mut initial_byte), 0),
+        Ok(1)
+    );
+    assert_eq!(initial_byte, [0x11]);
+    assert_eq!(initial_inode.address_space().nrpages(), 4);
+    let small_inode = read_inode(&READAHEAD_OPS, 1);
     let mut byte = [0];
     assert_eq!(
         small_inode
@@ -600,4 +620,135 @@ fn readahead_completes_full_windows_across_batch_boundaries() {
             });
         }
     }
+}
+
+struct BufferedReadOps;
+impl crate::FileOperations for BufferedReadOps {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read_iter(
+        &self,
+        iocb: &mut crate::Kiocb<'_>,
+        iter: &mut IovIterDest<'_>,
+    ) -> VfsResult<usize> {
+        iocb.generic_file_read_iter(iter)
+    }
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: constructing a readable file \
+              from a live fixture inode"
+)]
+fn open_read_inode(inode: Arc<VfsInode>) -> Arc<crate::VfsFile> {
+    let sb = crate::nullfs::new_superblock();
+    let mount = crate::Mount::new_root(&sb);
+    let dentry = crate::Dentry::new_file_from_inode(inode, None, "readahead".into());
+    dentry.bind_super_block(&sb);
+    let mut builder = crate::VfsFileBuilder::from_path_state(
+        crate::Path::new(mount, dentry),
+        crate::FMode::READ | crate::FMode::PREAD,
+        crate::OpenFlags::empty(),
+        Arc::new(BufferedReadOps),
+        kcred::initial_cred(),
+    );
+    builder.mark_opened().unwrap();
+    builder.finish().unwrap()
+}
+
+#[def_test]
+fn open_file_readahead_shares_dup_history_but_not_reopened_history() {
+    let inode = read_inode(&READ_OPS, 128 * PAGE_SIZE_4K);
+    let file = open_read_inode(inode.clone());
+    let shared = file.clone();
+    let reopened = file
+        .alloc_clone(
+            crate::FMode::READ | crate::FMode::PREAD,
+            crate::OpenFlags::empty(),
+            Arc::new(BufferedReadOps),
+        )
+        .unwrap();
+    let mut byte = [0xff];
+    assert_eq!(file.read_from(&mut byte, &mut 0), Ok(1));
+    assert_eq!(inode.address_space().nrpages(), 4);
+    let disabled = file
+        .alloc_clone(
+            crate::FMode::READ | crate::FMode::PREAD,
+            crate::OpenFlags::empty(),
+            Arc::new(BufferedReadOps),
+        )
+        .unwrap();
+    // Model an EIO retreat after the old loop-entry eligibility snapshot,
+    // but before marker consumption, without timing or scheduler assumptions.
+    struct RetreatOnCopy<'a> {
+        file: &'a crate::VfsFile,
+        remaining: usize,
+    }
+    impl IovSink for RetreatOnCopy<'_> {
+        fn count(&self) -> usize {
+            self.remaining
+        }
+
+        fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
+            assert_eq!(src[0], 1);
+            let mut ra = self.file.readahead.lock();
+            while ra.is_enabled() {
+                ra.shrink_after_io_error();
+            }
+            let copied = self.remaining.min(src.len());
+            self.remaining -= copied;
+            Ok(copied)
+        }
+
+        fn revert(&mut self, _count: usize) -> KResult<()> {
+            Err(KError::InvalidInput)
+        }
+    }
+    let mut sink = RetreatOnCopy {
+        file: &disabled,
+        remaining: 1,
+    };
+    assert_eq!(
+        disabled.read_iter_from(&mut iov_iter_dest(&mut sink), &mut (PAGE_SIZE_4K as u64)),
+        Ok(1)
+    );
+    assert_eq!(inode.address_space().nrpages(), 4);
+    assert_eq!(
+        disabled.read_from(&mut byte, &mut (PAGE_SIZE_4K as u64)),
+        Ok(1)
+    );
+    assert_eq!(byte, [1]);
+    assert_eq!(inode.address_space().nrpages(), 4);
+    // The disabled open must leave the marker for the sequential reader,
+    // including when that reader consumes the marker through a resident batch.
+    let mut pages = vec![0xff; 2 * PAGE_SIZE_4K];
+    assert_eq!(
+        shared.read_from(&mut pages, &mut (PAGE_SIZE_4K as u64)),
+        Ok(2 * PAGE_SIZE_4K)
+    );
+    assert!(pages[..PAGE_SIZE_4K].iter().all(|&byte| byte == 1));
+    assert!(pages[PAGE_SIZE_4K..].iter().all(|&byte| byte == 2));
+    assert_eq!(inode.address_space().nrpages(), 12);
+    // A forward seek beyond cached history distinguishes shared sequential
+    // history from the independent open without mutating policy as a probe.
+    assert_eq!(
+        shared.read_from(&mut byte, &mut (80 * PAGE_SIZE_4K as u64)),
+        Ok(1)
+    );
+    assert_eq!(inode.address_space().nrpages(), 13);
+    assert_eq!(
+        file.read_from(&mut byte, &mut (81 * PAGE_SIZE_4K as u64)),
+        Ok(1)
+    );
+    assert_eq!(byte, [81]);
+    assert_eq!(inode.address_space().nrpages(), 17);
+    // A small standalone random request does not populate a whole fixed window.
+    assert_eq!(
+        reopened.read_from(&mut byte, &mut (90 * PAGE_SIZE_4K as u64)),
+        Ok(1)
+    );
+    assert_eq!(inode.address_space().nrpages(), 18);
+    assert_eq!(byte, [90]);
 }

@@ -93,6 +93,24 @@ impl MappingPages {
         Ok(count)
     }
 
+    /// Counts the contiguous resident history immediately before `index`.
+    /// This is a bounded policy hint; residency may change after returning.
+    pub fn preceding_cached_pages(&self, index: PageIndex, limit: u64) -> u64 {
+        let state = self.state.lock();
+        let mut next = index;
+        for (&cached, _) in state
+            .entries
+            .range(index.saturating_sub(limit)..index)
+            .rev()
+        {
+            if cached + 1 != next {
+                break;
+            }
+            next = cached;
+        }
+        index - next
+    }
+
     /// Finds the first contiguous absent run within `range`.
     ///
     /// The result is a hint, not a reservation. Publication must still resolve

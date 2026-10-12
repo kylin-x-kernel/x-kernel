@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(
             cache
                 .get_folios_contig(0, 1)
-                .with_read_folio(0, |data| data[..3].to_vec()),
+                .with_read_folio(0, |folio| folio.data()[..3].to_vec()),
             Some(b"new".to_vec())
         );
         assert_eq!(
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(
             cache
                 .get_folios_contig(1, 1)
-                .with_read_folio(0, |data| data[0]),
+                .with_read_folio(0, |folio| folio.data()[0]),
             Some(0x55)
         );
     }

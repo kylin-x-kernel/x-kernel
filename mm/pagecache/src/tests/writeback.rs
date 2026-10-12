@@ -660,3 +660,16 @@ fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
         cache.truncate_final().unwrap();
     }
 }
+
+#[def_test]
+fn readahead_marker_survives_writeback() {
+    let mut folio = Folio::new_zeroed(0).unwrap();
+    folio.mark_readahead();
+    folio.start_writeback();
+    assert!(!folio.take_readahead());
+    assert!(folio.is_readahead());
+    folio.end_writeback();
+    assert!(folio.take_readahead());
+    assert!(!folio.is_readahead());
+    assert!(!folio.take_readahead());
+}

@@ -31,6 +31,8 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 - folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
 - 移除先在 folio lock 下永久标记失效，再删除索引；普通和批次访问在同一锁下校验，
   失效候选不执行 callback，普通路径重新查询，成功 callback 不重放；
+- 批次读取 callback 只读取数据及更新预读标记，不修改 dirty 或驻留状态；
+  允许索引查询，但不得等待其他 folio，预读 I/O 必须在释放当前 folio 锁后执行；
 - owner 必须使 backing read 与发布排除 truncate，并在复制时限制当前 EOF；
 - `Folio::dirty` 是状态源，dirty index 只承担 `PAGECACHE_TAG_DIRTY` 风格的候选枚举；
 - `Folio::writeback` 是状态源，writeback index 只承担等待枚举；
@@ -108,3 +110,6 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 - `writeback_until` backend callback 是否避免重入同一个 `MappingPages`；
 - writeback 是否在 tree lock 外调用 backend，materialize closure 是否避免重入；
 - `MappingPagesState` 是否保持 crate 内部可见，容器是否始终由 AddressSpace 直接持有。
+
+预读标记的设置与消费要求独占 folio 访问；标记只影响性能策略，不能替代 uptodate
+或 resident 身份检查。缓存历史查询返回瞬时提示，不延长驻留期或授权发布。
