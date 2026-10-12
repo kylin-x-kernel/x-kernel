@@ -198,6 +198,11 @@ pub struct SendOptions {
     pub to: Option<SocketAddrEx>,
     pub flags: SendFlags,
     pub ancillary: Vec<AncillaryData>,
+    /// Authenticated credentials of the user process sending this Unix datagram.
+    ///
+    /// User-facing socket entry points populate this snapshot. Kernel callers
+    /// without a current user process may leave it unset.
+    pub unix_sender_credentials: Option<options::UnixCredentials>,
 }
 
 /// Options for receiving data from a socket.

@@ -137,7 +137,10 @@ pub(crate) enum CMsg {
     Rights { fds: Vec<Arc<VfsFile>> },
 }
 impl CMsg {
-    /// Parse a control message header and extract its data
+    /// Parse a control message header and extract its data.
+    ///
+    /// Explicit SCM_CREDENTIALS sends are unsupported and return EINVAL.
+    /// Accepting them would require validating the claimed identity first.
     pub(crate) fn parse(
         resources: &kresources::ProcessResources,
         hdr_ptr: UserConstPtr<cmsghdr>,
@@ -224,8 +227,14 @@ impl<'a> CMsgBuilder<'a> {
         };
         write_vm_mem(self.hdr.as_ptr().cast_mut(), core::slice::from_ref(&hdr))?;
 
-        self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + cmsg_len);
-        *self.len += cmsg_len;
+        // cmsg_len excludes trailing padding, but the next header must be
+        // aligned. A final message may fit without all of its trailing padding.
+        let space = cmsg_len
+            .checked_next_multiple_of(size_of::<usize>())
+            .ok_or(KError::InvalidInput)?;
+        let consumed = space.min(remaining);
+        self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + consumed);
+        *self.len += consumed;
         Ok(true)
     }
 }

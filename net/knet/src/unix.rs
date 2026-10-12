@@ -26,8 +26,26 @@ pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{
     AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
     SocketOps,
-    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
 };
+
+/// Captures the current sending process's PID and real UID/GID.
+///
+/// User-facing Unix datagram send entry points call this once per send.
+/// Kernel callers without a user thread supply an explicit snapshot or none.
+///
+/// # Panics
+///
+/// Panics when the current task has no user-thread runtime.
+pub fn current_sender_credentials() -> UnixCredentials {
+    let thread = kprocess::current_user_thread();
+    let cred = thread.cred();
+    UnixCredentials {
+        pid: thread.pid(),
+        uid: cred.ruid(),
+        gid: cred.rgid(),
+    }
+}
 
 #[derive(Default, Clone, Debug)]
 pub enum UnixAddr {
@@ -249,6 +267,11 @@ impl UnixDomainSocket {
             local_endpoint: Mutex::new(UnixAddr::Unbound),
             peer_endpoint: Mutex::new(UnixAddr::Unbound),
         }
+    }
+
+    /// Whether this socket uses datagram transport, including current seqpacket pairs.
+    pub fn is_datagram(&self) -> bool {
+        matches!(&self.transport, UnixTransport::Dgram(_))
     }
 
     /// Binds this socket using an explicit credential for pathname access.

@@ -22,7 +22,7 @@ use khal::time::monotonic_time;
 use kio::prelude::*;
 use knet::{
     AncillaryData, KernelAncillaryData, RecvFlags, RecvOptions, SendFlags, SendOptions, Socket,
-    SocketAddrEx, SocketErrorInfo, SocketOps, sock_from_file,
+    SocketAddrEx, SocketErrorInfo, SocketOps, sock_from_file, unix::current_sender_credentials,
 };
 use ktime_types::TimeSpan;
 use kvfs::VfsFile;
@@ -30,7 +30,7 @@ use linux_raw_sys::{
     general::timespec,
     net::{
         MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_PEEK, MSG_TRUNC, SCM_CREDENTIALS, SCM_RIGHTS,
-        SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t, ucred,
+        SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
     },
 };
 use osvm::{VirtPtr, VmBytes, VmBytesMut};
@@ -189,23 +189,23 @@ fn push_socket_cmsg(
         }),
         SocketAncillary::IpError(err) => push_ip_recverr_cmsg(builder, err),
         SocketAncillary::Credentials(credentials) => {
-            builder.push(SOL_SOCKET, SCM_CREDENTIALS, |data| {
-                if data.len() < size_of::<ucred>() {
-                    return Err(KError::from(LinuxError::ENOBUFS));
-                }
-                let credentials = ucred {
-                    pid: credentials.pid,
-                    uid: credentials.uid,
-                    gid: credentials.gid,
-                };
-                // SAFETY: the destination has room for one `ucred`; ancillary
-                // byte buffers do not promise `ucred` alignment, so the write
-                // must be unaligned. Every field is initialized above.
-                unsafe {
-                    core::ptr::write_unaligned(data.as_mut_ptr().cast::<ucred>(), credentials);
-                }
-                Ok(size_of::<ucred>())
-            })
+            let mut is_complete = false;
+            let pushed = builder.push(SOL_SOCKET, SCM_CREDENTIALS, |data| {
+                // Linux put_cmsg preserves the header and any credential prefix
+                // that fits, even when the buffer ends in the middle of a field.
+                let fields = [
+                    credentials.pid.to_ne_bytes(),
+                    credentials.uid.to_ne_bytes(),
+                    credentials.gid.to_ne_bytes(),
+                ];
+                let bytes = fields.as_flattened();
+                let body_len = data.len().min(bytes.len());
+                data[..body_len].copy_from_slice(&bytes[..body_len]);
+                is_complete = body_len == bytes.len();
+                Ok(body_len)
+            })?;
+            // Report truncation only after the partial message has been written.
+            Ok(pushed && is_complete)
         }
     }
 }
@@ -233,10 +233,15 @@ fn send_impl(
     if file.is_nonblocking() {
         send_flags |= SendFlags::DONT_WAIT;
     }
+    let unix_sender_credentials = match socket.as_ref() {
+        Socket::Unix(unix) if unix.is_datagram() => Some(current_sender_credentials()),
+        _ => None,
+    };
     let options = SendOptions {
         to: addr,
         flags: send_flags,
         ancillary,
+        unix_sender_credentials,
     };
     let sent = match socket.as_ref() {
         Socket::Netlink(_) => {
@@ -378,7 +383,7 @@ fn recv_impl(
         output.addrlen.write(addrlen_value)?;
     }
 
-    let mut cmsg_truncated = false;
+    let mut cmsg_truncated = output.cmsg_builder.is_none() && !ancillary.is_empty();
     if let Some(mut builder) = output.cmsg_builder {
         for ancillary in ancillary {
             let Some(ancillary) = into_socket_ancillary(ancillary) else {
@@ -437,6 +442,9 @@ pub fn sys_recvfrom(
 pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> KResult<isize> {
     let mut msg_value = msg.read_vm()?;
     msg_value.msg_flags = 0;
+    if msg_value.msg_control.is_null() {
+        msg_value.msg_controllen = 0;
+    }
     let mut msg_namelen = msg_value.msg_namelen as socklen_t;
     let result = recv_impl(
         fd,
@@ -552,6 +560,9 @@ pub fn sys_recvmmsg(
             break;
         }
         msg.msg_hdr.msg_flags = 0;
+        if msg.msg_hdr.msg_control.is_null() {
+            msg.msg_hdr.msg_controllen = 0;
+        }
         let mut msg_namelen = msg.msg_hdr.msg_namelen as socklen_t;
         let result = recv_impl(
             fd,

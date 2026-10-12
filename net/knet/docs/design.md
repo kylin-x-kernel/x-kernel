@@ -274,7 +274,7 @@ These owned values are prepared for later rule construction and packet evaluatio
 
   Shared access to `SERVICE`, `SOCKET_SET`, and Router state is mainly protected by global locks and atomic state. Syscall-specific semantics are still provided by `posix/net`, which supplies the process file-descriptor context and caller credentials.
 
-  Netlink `send` and socket-file `write` take a snapshot of the current caller credentials when the operation begins. Credentials are not cached in the socket itself.
+  Netlink sends and Unix datagram sends take a snapshot of the current caller credentials when the operation begins. Credentials are not cached in the socket itself.
 
 * **Pathname Unix sockets require filesystem and credential context**
 
@@ -891,7 +891,15 @@ Credentials follow the call path, keeping their lifetime separate from Unix sock
 
 ### Credentials for rtnetlink Sends
 
-Netlink sockets can be passed between processes, so permission checks use the credentials of each sender. POSIX send and socket-file write identify the protocol at entry. The netlink branch takes one current-credential snapshot and passes it through `Socket::send_with_cred` to rtnetlink permission checks. Other protocols continue to use `SocketOps::send`, keeping credential propagation confined to paths that require authorization. Kernel callers outside a user-task context specify credentials explicitly through `send_with_cred`.
+Netlink sockets can be passed between processes, so permission checks use the credentials of each sender. POSIX send and socket-file write identify the protocol at entry. The netlink branch takes one current-credential snapshot and passes it through `Socket::send_with_cred` to rtnetlink permission checks. Kernel callers outside a user-task context specify credentials explicitly through `send_with_cred`.
+
+### Credentials for Unix Datagram Messages
+
+Unix datagram sockets, including the transport currently used for Unix `SOCK_SEQPACKET` socket pairs, can also be inherited or passed between processes. POSIX send and socket-file write use `UnixDomainSocket::is_datagram` to limit capture to datagram transport. Both call `unix::current_sender_credentials` once per send to capture the sending process's PID and real UID/GID into `SendOptions::unix_sender_credentials`. The helper requires a current user thread; stream sends do not call it. Kernel callers without a current user process may leave the snapshot unset.
+
+`DgramTransport` stores the snapshot with the queued message instead of using the PID recorded when the socket was created. On receive, `GeneralOptions::pass_credentials` controls whether the transport appends `KernelAncillaryData::Credentials` to the returned ancillary data. The POSIX receive path serializes that value as `SCM_CREDENTIALS` and reports `MSG_CTRUNC` when the control buffer is absent or too small. Explicit user-supplied `SCM_CREDENTIALS` sends are not supported and return `EINVAL`; supporting them would require identity and privilege validation. This keeps process-context access at the user-facing boundary while ensuring that a child using an inherited socket is identified as the sender.
+
+Unix datagram receive delivers kernel credentials before passed file descriptors so a short control buffer prioritizes sender identity. POSIX control-message output advances by the ABI-aligned message size while keeping cmsg_len unpadded; a final message may omit trailing padding when capacity is exhausted. If only part of a credential message fits, POSIX writes the header and the available native-endian PID/UID/GID bytes (including partial fields), reports the actual message length, and sets `MSG_CTRUNC`. A buffer smaller than the control header produces no control message. Missing trailing padding alone does not mean the credentials were truncated.
 
 ### Device Masks for RX Wakeups
 

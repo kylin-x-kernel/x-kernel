@@ -12,7 +12,10 @@ use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
 
-use crate::{RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps};
+use crate::{
+    RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps,
+    unix::current_sender_credentials,
+};
 
 /// Wraps a socket in a VFS file and captures `cred` as its open credential.
 pub fn sock_alloc_file(socket: Socket, flags: u32, cred: Arc<Cred>) -> KResult<Arc<VfsFile>> {
@@ -75,6 +78,10 @@ impl FileOperations for SocketFileOps {
             Socket::Netlink(_) => {
                 let cred = kprocess::current_cred();
                 socket.send_with_cred(src, options, &cred)
+            }
+            Socket::Unix(unix) if unix.is_datagram() => {
+                options.unix_sender_credentials = Some(current_sender_credentials());
+                socket.send(src, options)
             }
             _ => socket.send(src, options),
         }

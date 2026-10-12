@@ -79,6 +79,7 @@ impl UdpSocket {
                 to: Some(SocketAddrEx::Ip(remote_addr)),
                 flags: SendFlags::DONT_WAIT,
                 ancillary: Vec::new(),
+                unix_sender_credentials: None,
             },
         )
     }
@@ -435,6 +436,7 @@ impl SocketOps for UdpSocket {
             to,
             flags,
             ancillary: _,
+            unix_sender_credentials: _,
         } = options;
         let initial_len = src.remaining();
         self.send_reader(&mut src, to, flags)?;

@@ -23,6 +23,7 @@ struct Datagram {
     data: Vec<u8>,
     ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
+    unix_sender_credentials: Option<UnixCredentials>,
 }
 
 struct Channel {
@@ -201,6 +202,7 @@ impl UnixTransportOps for DgramTransport {
             data: message,
             ancillary: options.ancillary,
             sender: self.local_addr.read().clone(),
+            unix_sender_credentials: options.unix_sender_credentials,
         };
 
         let connected = self.peer.read();
@@ -236,6 +238,7 @@ impl UnixTransportOps for DgramTransport {
                 data,
                 ancillary,
                 sender,
+                unix_sender_credentials,
             } = match rx.try_recv() {
                 Ok(packet) => packet,
                 Err(TryRecvError::Empty) => {
@@ -254,6 +257,15 @@ impl UnixTransportOps for DgramTransport {
                 **from = SocketAddrEx::Unix(sender);
             }
             if let Some(dst) = options.ancillary.as_mut() {
+                // Deliver identity before passed files so a short control
+                // buffer cannot spend the credential space on descriptors.
+                if self.options.pass_credentials()
+                    && let Some(credentials) = unix_sender_credentials
+                {
+                    dst.push(Box::new(crate::KernelAncillaryData::Credentials(
+                        credentials,
+                    )));
+                }
                 dst.extend(ancillary);
             }
 
@@ -296,6 +308,137 @@ impl Drop for DgramTransport {
         }
         if let Some(chan) = self.peer.write().take() {
             chan.poll.wake();
+        }
+    }
+}
+
+#[unittest::mod_test]
+mod tests {
+    use alloc::vec::Vec;
+
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::*;
+    use crate::KernelAncillaryData;
+
+    fn send_credentials(sender: &DgramTransport, credentials: UnixCredentials) {
+        sender
+            .send(
+                &b"x"[..],
+                SendOptions {
+                    unix_sender_credentials: Some(credentials),
+                    ..SendOptions::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn recv_ancillary(receiver: &DgramTransport) -> Vec<AncillaryData> {
+        let mut data = [0_u8; 1];
+        let mut ancillary = Vec::new();
+        receiver
+            .recv(
+                &mut data[..],
+                RecvOptions {
+                    ancillary: Some(&mut ancillary),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        if data != [b'x'] {
+            panic!("unexpected datagram payload");
+        }
+        ancillary
+    }
+
+    #[def_test]
+    fn unix_dgram_passcred_returns_current_sender_credentials() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::PassCredentials(&true))
+            .unwrap();
+        send_credentials(
+            &sender,
+            UnixCredentials {
+                pid: 42,
+                uid: 1000,
+                gid: 1001,
+            },
+        );
+
+        let ancillary = recv_ancillary(&receiver);
+        assert_eq!(ancillary.len(), 1);
+        let credentials = ancillary
+            .into_iter()
+            .next()
+            .unwrap()
+            .downcast::<KernelAncillaryData>()
+            .unwrap();
+        let KernelAncillaryData::Credentials(credentials) = *credentials else {
+            panic!("expected sender credentials");
+        };
+        assert_eq!(credentials.pid, 42);
+        assert_eq!(credentials.uid, 1000);
+        assert_eq!(credentials.gid, 1001);
+    }
+
+    #[def_test]
+    fn unix_dgram_without_passcred_omits_sender_credentials() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        send_credentials(
+            &sender,
+            UnixCredentials {
+                pid: 42,
+                uid: 1000,
+                gid: 1001,
+            },
+        );
+
+        assert!(recv_ancillary(&receiver).is_empty());
+    }
+
+    #[def_test]
+    fn unix_dgram_passcred_without_sender_snapshot_omits_credentials() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::PassCredentials(&true))
+            .unwrap();
+        sender.send(&b"x"[..], SendOptions::default()).unwrap();
+
+        assert!(recv_ancillary(&receiver).is_empty());
+    }
+
+    #[def_test]
+    fn unix_dgram_passcred_preserves_each_sender_snapshot() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::PassCredentials(&true))
+            .unwrap();
+        for pid in [42, 43] {
+            send_credentials(
+                &sender,
+                UnixCredentials {
+                    pid,
+                    uid: pid + 1000,
+                    gid: pid + 2000,
+                },
+            );
+        }
+
+        for pid in [42, 43] {
+            let mut ancillary = recv_ancillary(&receiver);
+            assert_eq!(ancillary.len(), 1);
+            let credentials = ancillary
+                .pop()
+                .unwrap()
+                .downcast::<KernelAncillaryData>()
+                .unwrap();
+            let KernelAncillaryData::Credentials(credentials) = *credentials else {
+                panic!("expected sender credentials");
+            };
+            assert_eq!(credentials.pid, pid);
+            assert_eq!(credentials.uid, pid + 1000);
+            assert_eq!(credentials.gid, pid + 2000);
         }
     }
 }
