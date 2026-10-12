@@ -869,7 +869,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     debug!("Syscall {sysno} return {result:?}");
 
-    uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).into_raw() as _) as _);
+    uctx.set_retval(result.unwrap_or_else(|err| err.into_syscall_return()) as _);
 
     // The signal frame already recorded whether the interrupted syscall should
     // restart. Applying that decision again would roll back the restored context.

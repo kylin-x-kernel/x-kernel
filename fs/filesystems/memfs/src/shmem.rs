@@ -265,6 +265,9 @@ fn create_anonymous_file(
 ) -> VfsResult<ShmemObject> {
     // Kernel-owned shm files share a single tmpfs instance to avoid
     // leaking Mount/SuperBlock references on each create/destroy cycle.
+    // Memfds keep a per-instance tmpfs: their names are user-controlled and
+    // a shared root would both collide same-name creates and accumulate
+    // dentries nothing evicts.
     let root = match kind {
         ShmemObjectKind::Kernel => {
             let mut guard = KERNEL_SHM_FS.lock();
@@ -441,6 +444,28 @@ mod tests {
     use unittest::{assert_eq, def_test};
 
     use super::*;
+
+    /// Memfds live on per-instance super blocks; cross-superblock copies
+    /// between them are served by the memfs native chunk primitive, which
+    /// judges its memfs-storage input itself — a real capability, not an
+    /// admission marker.
+    #[def_test]
+    fn memfd_files_express_file_copy_support() {
+        let cred = kcred::initial_cred();
+        let first = create_memfd_file("memfd-a", false, cred.clone()).unwrap();
+        let second = create_memfd_file("memfd-b", false, cred).unwrap();
+
+        let first_sb = first.location.inode().super_block().unwrap();
+        let second_sb = second.location.inode().super_block().unwrap();
+        assert!(!Arc::ptr_eq(&first_sb, &second_sb));
+
+        let first_file = first.into_file(kcred::initial_cred()).unwrap();
+        let second_file = second.into_file(kcred::initial_cred()).unwrap();
+        assert!(matches!(
+            second_file.copy_chunk_from(&first_file, 0, 0, 0),
+            Some(Ok(0))
+        ));
+    }
 
     #[def_test]
     fn shmem_write_seal_rejects_write_policy() {

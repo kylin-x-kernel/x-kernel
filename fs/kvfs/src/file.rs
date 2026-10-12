@@ -15,7 +15,7 @@ use core::{
 
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
 use kcred::Cred;
-use kerrno::LinuxError;
+use kerrno::{KResult, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError, WeakPollSet};
 use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
@@ -162,6 +162,26 @@ pub trait FileOperations: Send + Sync + 'static {
     /// Returns whether this operation table provides write callbacks.
     fn supports_write(&self) -> bool {
         false
+    }
+
+    /// The table's native chunk-copy primitive, mirroring Linux
+    /// `f_op->copy_file_range`: copies up to `len` bytes from `input` at
+    /// `input_pos` into this table's file at `output_pos` and returns the
+    /// bytes actually copied. `None` means the table carries no native
+    /// implementation — the generic buffered pump serves the pair, and only
+    /// same-superblock pairs at that. An implementation judges input
+    /// compatibility itself and reports `EXDEV` for inputs it cannot serve,
+    /// so the VFS performs no identity comparison anywhere.
+    fn copy_chunk_from(
+        &self,
+        input: &VfsFile,
+        input_pos: u64,
+        output: &VfsFile,
+        output_pos: u64,
+        len: usize,
+    ) -> Option<KResult<usize>> {
+        let _ = (input, input_pos, output, output_pos, len);
+        None
     }
 
     /// Changes this open file description's file offset.
@@ -736,6 +756,19 @@ impl VfsFile {
     /// Returns whether this file's inode is a regular file.
     pub fn is_regular_file(&self) -> bool {
         self.node_type() == NodeType::RegularFile
+    }
+
+    /// Calls this file's native chunk-copy primitive, if its operation
+    /// table carries one; `None` means no native implementation.
+    pub fn copy_chunk_from(
+        &self,
+        input: &VfsFile,
+        input_pos: u64,
+        output_pos: u64,
+        len: usize,
+    ) -> Option<KResult<usize>> {
+        self.operations()
+            .copy_chunk_from(input, input_pos, self, output_pos, len)
     }
 
     /// Returns this file's inode size.

@@ -499,6 +499,18 @@ impl KError {
             Self::Interrupted | Self::IoWaitInterrupted
         )
     }
+
+    /// Encodes this error as the raw return value a syscall dispatch layer
+    /// stores in the user trap context: the negated Linux errno.
+    ///
+    /// The error is first converted through [`LinuxError`], so kernel
+    /// [`KErrorKind`]s are canonicalized to a Linux-compatible errno before the
+    /// sign is applied. This is the syscall ABI boundary: ordinary kernel
+    /// callers should propagate [`KError`] and let the dispatch layer encode it
+    /// exactly once.
+    pub fn into_syscall_return(self) -> isize {
+        -LinuxError::from(self).into_raw() as isize
+    }
 }
 
 impl<E: Into<KErrorKind>> From<E> for KError {

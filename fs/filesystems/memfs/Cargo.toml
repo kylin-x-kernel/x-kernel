@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 iov_iter.workspace = true
 kcred.workspace = true
+kerrno.workspace = true
 kvfs.workspace = true
 pagecache.workspace = true
 macros.workspace = true

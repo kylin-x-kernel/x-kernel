@@ -88,7 +88,7 @@ pub use super_block::{
     SuperBlockRegistry, default_evict_inode, get_tree_bdev, get_tree_nodev, super_block_registry,
     sync_filesystems,
 };
-pub use transfer::transfer_files;
+pub use transfer::{TransferPosition, copy_file_range, transfer_files};
 pub(crate) use type_map::TypeMap;
 pub use types::{
     DeviceId, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode,

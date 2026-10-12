@@ -339,4 +339,37 @@ mod tests {
         let after_read = read_file.path().getattr().unwrap();
         assert!(after_read.atime.unix_seconds() > 1);
     }
+
+    /// `splice(pipe -> file, &off)` must publish the transferred count into
+    /// the caller's explicit offset: the pipe-source pump writes its local
+    /// position back after settlement. Without that write-back a caller
+    /// looping on the manual-page example would rewrite the same range.
+    #[def_test]
+    fn splice_pipe_to_file_advances_explicit_offset() {
+        init_pipefs();
+        let (read_file, write_file) = create_pipe_files(OpenFlags::empty(), kcred::initial_cred())
+            .expect("anonymous pipe files open");
+        let data: alloc::vec::Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(write_file.write(&data).unwrap(), data.len());
+        let output =
+            memfs::shmem::create_memfd_file("splice-off-dst", false, kcred::initial_cred())
+                .unwrap()
+                .into_file(kcred::initial_cred())
+                .unwrap();
+        let mut offset = 0;
+        assert_eq!(
+            kvfs::transfer_files(
+                &read_file,
+                kvfs::TransferPosition::Managed,
+                &output,
+                kvfs::TransferPosition::At(&mut offset),
+                data.len(),
+                false,
+            )
+            .unwrap(),
+            data.len()
+        );
+        assert_eq!(offset, data.len() as u64);
+        assert_eq!(output.position(), 0);
+    }
 }

@@ -3467,6 +3467,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "iov_iter",
  "kcred",
+ "kerrno",
  "ksync",
  "ktime_types",
  "kvfs",
@@ -3840,6 +3841,7 @@ dependencies = [
  "ktime_types",
  "kvfs",
  "memaddr",
+ "memfs",
  "unittest",
 ]
 

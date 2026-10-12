@@ -18,6 +18,7 @@ ktime.workspace = true
 ktime_types.workspace = true
 kvfs.workspace = true
 memaddr.workspace = true
+memfs.workspace = true
 unittest.workspace = true
 
 [lints]

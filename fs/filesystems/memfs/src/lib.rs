@@ -15,8 +15,9 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc};
 use core::{borrow::Borrow, cmp::Ordering};
 
 use hashbrown::HashMap;
-use iov_iter::{IovIterDest, IovIterSource};
+use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
 use kcred::Cred;
+use kerrno::{KError, KResult};
 use ksync::Mutex;
 use ktime_types::SystemTime;
 #[cfg(unittest)]
@@ -733,6 +734,32 @@ impl InodeDirOperations for MemoryNode {
     }
 }
 
+/// The memfs native chunk copy: reads one chunk of `input` storage through
+/// the page-cache generic layer and writes it into `output` storage. Both
+/// sides are already memfs inodes — the caller downcasts before coming here
+/// — so the copy never touches the generic buffered pump.
+fn move_copy_chunk(
+    input: &VfsFile,
+    input_pos: u64,
+    output: &VfsFile,
+    output_pos: u64,
+    len: usize,
+) -> KResult<usize> {
+    let mut buf = alloc::vec![0u8; len];
+    let read = {
+        let mut iocb = Kiocb::new(input, input_pos);
+        let mut iter = iov_iter_kvec_dest(&mut buf);
+        iocb.generic_file_read_iter(&mut iter)?
+    };
+    if read == 0 {
+        return Ok(0);
+    }
+    let mut iocb = Kiocb::new(output, output_pos);
+    let mut iter = iov_iter_kvec_source(&buf[..read]);
+    let written = iocb.generic_file_write_iter(&mut iter)?;
+    Ok(written)
+}
+
 impl FileOperations for MemoryNode {
     fn fsync(&self, _file: &VfsFile, _data_only: bool) -> VfsResult<()> {
         // Memory-backed files and directories have no persistent writeback.
@@ -753,6 +780,25 @@ impl FileOperations for MemoryNode {
             self.inode.content.as_ref(),
             Some(InodeContent::File(_)) | Some(InodeContent::Dir(_))
         )
+    }
+
+    fn copy_chunk_from(
+        &self,
+        input: &VfsFile,
+        input_pos: u64,
+        output: &VfsFile,
+        output_pos: u64,
+        len: usize,
+    ) -> Option<KResult<usize>> {
+        // The memfs implementation serves memfs storage only; any other
+        // input store is refused here, not by a VFS identity check.
+        if input.path().inode().downcast::<MemoryNode>().is_err() {
+            return Some(Err(KError::CrossesDevices));
+        }
+        if len == 0 {
+            return Some(Ok(0));
+        }
+        Some(move_copy_chunk(input, input_pos, output, output_pos, len))
     }
 
     fn supports_write(&self) -> bool {
