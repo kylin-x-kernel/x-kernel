@@ -176,6 +176,16 @@ that dropped its UID cannot update a peer retaining another UID solely because
 they share a process. The same-group raw-setuid regression checks peer IDs,
 EPERM and unchanged scheduler metadata, then restores caller credentials.
 
+## Resource-limit input/output aliasing
+
+The prlimit64 adapter copies the optional input into a kernel-owned value before
+writing any userspace output. Invalid resource IDs, input faults and rejected
+updates cannot overwrite the old-limit output object. An output fault after an
+applied update leaves that update in effect, following Linux behavior. No raw
+user references or new unsafe code are introduced. Existing target-process
+authorization and resource-owner locks are unchanged; separate limit snapshot
+and update calls retain their pre-existing concurrent-observer limitation.
+
 ## Optional time-query output and query-only clocks
 
 A NULL gettimeofday timeval skips all user access and clock sampling. A

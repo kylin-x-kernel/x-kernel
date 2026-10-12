@@ -285,6 +285,33 @@ same-group exemption. The published-worker regression invokes actual
 `sys_setuid`, verifies the caller changed while its peer retained its IDs, and
 checks both setters return EPERM without modifying the peer's metadata.
 
+## Resource-limit syscall copy ordering
+
+`prlimit64` reads the optional new-limit object before publishing any old-limit
+output, so aliased input and output buffers retain the caller's requested
+update. Resource validation also occurs when both pointers are NULL. A rejected
+input/update does not overwrite the output buffer; after a successful update,
+an output copy fault returns EFAULT without rolling back the applied limit,
+matching Linux copy ordering. Legacy getrlimit/setrlimit still require their
+respective output/input buffers. The resource owner's existing locking and
+hard-limit authorization policy remain unchanged; this adapter change does not
+make the separate snapshot and update operations atomic against other threads.
+
+Linux `kernel/sys.c` copies a non-NULL `prlimit64` input before looking up the
+PID, so EFAULT takes priority over ESRCH. Legacy `getrlimit` checks the resource
+before its output copy; `setrlimit` copies its input before resource validation.
+Their differing error priority is intentional, rather than a shared-helper
+symmetry rule. See [Linux v6.12 kernel/sys.c](https://github.com/torvalds/linux/blob/v6.12/kernel/sys.c).
+The user-task regressions exercise a genuinely aliased `TestUserValue`, verify
+the returned old pair and applied new pair, and restore the original soft limit
+after framework assertion failures. A separate user test proves an unreadable
+input before checking PID/resource error priority.
+
+The `prlimit_rejected_update_preserves_aliased_buffer` user/serial regression
+requests cur=2, max=1 with the same input/output buffer and checks InvalidInput
+without replacing that invalid pair with the old limit. This distinguishes
+update-before-output from the incorrect input/output/update ordering.
+
 ## Time-query argument compatibility
 
 `gettimeofday` accepts a NULL timeval pointer and returns zero without reading
