@@ -300,3 +300,13 @@ The query-only clock regression runs in a fresh user task, first demonstrates
 that its non-NULL input fails the real user-copy path, then checks EINVAL for
 both that address and NULL. Test assertions use the unittest framework so a
 failed check reports a test failure instead of panicking the kernel.
+
+### Epoll millisecond timeout normalization
+
+`sys_epoll_pwait` maps every negative millisecond timeout to an unlimited wait,
+matching Linux's `ep_timeout_to_timespec`. Zero remains a poll and nonnegative
+values keep the existing millisecond conversion. The shared wait path, signal
+mask handling, copy-to-user behavior and `epoll_pwait2` timespec rules are unchanged.
+
+The registered user-context regression uses an invalid descriptor to ensure
+`INT_MIN`, `-65536`, `-2` and `-1` reach descriptor validation without blocking.

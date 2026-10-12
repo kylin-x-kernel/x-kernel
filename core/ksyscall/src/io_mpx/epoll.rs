@@ -125,6 +125,8 @@ fn do_epoll_wait(
 }
 
 /// Waits for epoll events with a millisecond timeout.
+///
+/// Any negative timeout waits indefinitely; zero polls without waiting.
 pub(crate) fn sys_epoll_pwait(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
@@ -133,10 +135,10 @@ pub(crate) fn sys_epoll_pwait(
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    let timeout = match timeout {
-        -1 => None,
-        t if t >= 0 => Some(TimeSpan::from_millis(t as u64)),
-        _ => return Err(KError::InvalidInput),
+    let timeout = if timeout < 0 {
+        None
+    } else {
+        Some(TimeSpan::from_millis(timeout as u64))
     };
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
@@ -213,6 +215,32 @@ mod tests_epoll_padding {
         }
         for fd in fds.into_iter().chain([epfd]) {
             sys_close(fd).unwrap();
+        }
+    }
+}
+
+#[unittest::mod_test]
+mod tests_epoll_negative_timeout {
+    use kerrno::KError;
+    use posix_types::{UserConstPtr, UserPtr};
+    use unittest::{assert_eq, def_test};
+
+    use super::sys_epoll_pwait;
+
+    #[def_test(user)]
+    fn test_negative_timeouts_reach_descriptor_validation() {
+        for timeout in [i32::MIN, -65536, -2, -1] {
+            assert_eq!(
+                sys_epoll_pwait(
+                    -1,
+                    UserPtr::default(),
+                    1,
+                    timeout,
+                    UserConstPtr::default(),
+                    0,
+                ),
+                Err(KError::BadFileDescriptor)
+            );
         }
     }
 }

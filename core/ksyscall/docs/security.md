@@ -184,3 +184,11 @@ rejects query-only clocks before user memory is read or the privileged setter
 is entered; rejecting CLOCK_REALTIME_COARSE does not relax any authorization
 for CLOCK_REALTIME. No unsafe operations, lock changes or additional privileges
 are introduced.
+
+### Negative epoll timeouts
+
+All negative millisecond timeouts represent unlimited waits rather than invalid
+input. Normalization still delegates to the existing shared path: signal-set
+size, event count, descriptor and user-memory checks remain in place. The
+regression uses an invalid descriptor and performs no wait, allocation or
+user-memory access. It does not change `epoll_pwait2` timespec validation.
