@@ -461,6 +461,12 @@ slot 在 callback 前已经存在，commit 只交换 location 和原位替换 sl
 
 Snapshot generation may allocate and fail during open. The caller must bound
 generated data; each read-capable open retains its own buffer until close.
+Sequential iterators can preserve a typed filesystem error through
+`SeqIterator::try_show`; the default implementation still maps `fmt::Error` to
+`Io`. A rendering failure clears the partially generated record and resets the
+iterator before returning. It must not expose a failed record on a later read.
+Per-open sequential state remains serialized by its existing mutex.
+
 Private snapshot operations own initialization and access to the private data;
 no snapshot representation or construction API escapes the crate. Missing
 state makes reads and `SEEK_END` return `InvalidData` rather than regenerating

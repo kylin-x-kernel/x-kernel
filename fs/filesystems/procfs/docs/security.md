@@ -73,6 +73,19 @@ Existing visibility, credential, and maps-lifetime rules remain independent.
 
 ## Thread Safety
 
+Status credential columns describe the retained target thread, using one
+objective `Cred` snapshot for both UID and GID. No reader-credential fallback is
+used when a target disappears: existing weak-upgrade failure remains `ESRCH`.
+An intentionally retained task can still expose its last credential snapshot.
+The status iterator keeps only a weak task reference. A record already generated
+by `SeqFile` is retained until consumed; short reads cannot mix old UID columns
+with new GID columns. Rewind regenerates the record, and a reclaimed target then
+returns `ESRCH` through `SeqIterator::try_show`. Opening does not pin the task or
+freeze credentials for the lifetime of the descriptor.
+The snapshot is diagnostic information, not authorization for a later action;
+existing VFS permissions and the absence of local ptrace-style filtering remain
+unchanged. Only initial-user-namespace numeric IDs are currently supported.
+
 `fs/kvfs/src/seq_file.rs` (repository-relative) requires `SeqIterator: Send` and
 serializes each open iterator with a mutex. Procfs provides no extra unsafe
 thread-safety implementation. MM capture releases the binding lock before the

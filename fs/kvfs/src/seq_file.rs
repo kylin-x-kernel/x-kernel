@@ -37,6 +37,15 @@ pub trait SeqIterator: Send + 'static {
 
     /// Formats the current item into `buf`.
     fn show(&self, item: &Self::Item, buf: &mut String) -> fmt::Result;
+
+    /// Formats one record while preserving a filesystem-specific error.
+    ///
+    /// The default maps formatting failures to `VfsError::Io`. Dynamic files
+    /// may override this to report errors such as a reclaimed process. A failed
+    /// record is discarded, and later reads may retry after resetting state.
+    fn try_show(&self, item: &Self::Item, buf: &mut String) -> VfsResult<()> {
+        self.show(item, buf).map_err(|_| VfsError::Io)
+    }
 }
 
 /// Stateful adapter that manages buffering and read offsets.
@@ -116,9 +125,10 @@ impl<I: SeqIterator> SeqFile<I> {
 
         match next_item {
             Some(item) => {
-                self.iter
-                    .show(&item, &mut self.buf)
-                    .map_err(|_| VfsError::Io)?;
+                if let Err(error) = self.iter.try_show(&item, &mut self.buf) {
+                    self.reset();
+                    return Err(error);
+                }
                 if self.buf.is_empty() {
                     return self.fill_next_entry();
                 }
@@ -316,5 +326,43 @@ mod tests {
         let mut buf = [0; 5];
         assert_eq!(seq.read(&mut buf, 7).unwrap(), 5);
         assert_eq!(&buf, b"orld\n");
+    }
+
+    #[def_test]
+    fn test_seq_file_preserves_typed_error_and_discards_failed_record() {
+        struct RetryIter(core::cell::Cell<bool>);
+
+        impl SeqIterator for RetryIter {
+            type Item = ();
+
+            fn rewind(&mut self) {}
+
+            fn start(&mut self) -> Option<Self::Item> {
+                Some(())
+            }
+
+            fn next(&mut self) -> Option<Self::Item> {
+                None
+            }
+
+            fn show(&self, item: &Self::Item, buf: &mut String) -> fmt::Result {
+                self.try_show(item, buf).map_err(|_| fmt::Error)
+            }
+
+            fn try_show(&self, _item: &Self::Item, buf: &mut String) -> crate::VfsResult<()> {
+                if !self.0.replace(true) {
+                    buf.push_str("discard");
+                    return Err(crate::VfsError::NoSuchProcess);
+                }
+                buf.push_str("ready\n");
+                Ok(())
+            }
+        }
+
+        let mut seq = SeqFile::new(RetryIter(core::cell::Cell::new(false)));
+        let mut buf = [0; 6];
+        assert_eq!(seq.read(&mut buf, 0), Err(crate::VfsError::NoSuchProcess));
+        assert_eq!(seq.read(&mut buf, 0).unwrap(), 6);
+        assert_eq!(&buf, b"ready\n");
     }
 }

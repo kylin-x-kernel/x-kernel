@@ -11,9 +11,10 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{ffi::CStr, iter, str};
+use core::{ffi::CStr, fmt, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
+use kcred::Cred;
 use khal::paging::MappingFlags;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
@@ -87,26 +88,63 @@ impl SimpleDirOps for ProcessTaskDir {
     }
 }
 
-fn task_status(task: &KtaskRef) -> String {
-    let thread = task.as_thread();
-    format_task_status(&task.name(), thread.process().pid(), thread.tid() as u64)
+// One status rendering is one sequential record. SeqFile owns unread bytes;
+// the inode and iterator retain only a weak target, never a credential cache.
+struct StatusIter {
+    task: WeakKtaskRef,
 }
 
-#[rustfmt::skip]
-fn format_task_status(name: &str, tgid: u32, pid: u64) -> String {
+impl SeqIterator for StatusIter {
+    type Item = ();
+
+    fn rewind(&mut self) {}
+
+    fn start(&mut self) -> Option<Self::Item> {
+        Some(())
+    }
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+
+    fn show(&self, item: &Self::Item, buf: &mut String) -> fmt::Result {
+        self.try_show(item, buf).map_err(|_| fmt::Error)
+    }
+
+    fn try_show(&self, _item: &Self::Item, buf: &mut String) -> VfsResult<()> {
+        let task = upgrade_task(&self.task)?;
+        buf.push_str(&task_status(&task));
+        Ok(())
+    }
+}
+
+fn task_status(task: &KtaskRef) -> String {
+    let thread = task.as_thread();
+    // One objective snapshot belongs to the selected task, not the reader.
+    let cred = thread.real_cred();
+    format_task_status(
+        &task.name(),
+        thread.process().pid(),
+        thread.tid() as u64,
+        &cred,
+    )
+}
+
+fn format_task_status(name: &str, tgid: u32, pid: u64, cred: &Cred) -> String {
     format!(
-        "Name:\t{}\n\
-        Tgid:\t{}\n\
-        Pid:\t{}\n\
-        Uid:\t0 0 0 0\n\
-        Gid:\t0 0 0 0\n\
-        Cpus_allowed:\t1\n\
-        Cpus_allowed_list:\t0\n\
-        Mems_allowed:\t1\n\
-        Mems_allowed_list:\t0\n",
+        "Name:\t{}\nTgid:\t{}\nPid:\t{}\nUid:\t{} {} {} {}\nGid:\t{} {} {} \
+         {}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\nMems_allowed:\t1\nMems_allowed_list:\t0\n",
         name,
         tgid,
-        pid
+        pid,
+        cred.ruid(),
+        cred.euid(),
+        cred.suid(),
+        cred.fsuid(),
+        cred.rgid(),
+        cred.egid(),
+        cred.sgid(),
+        cred.fsgid()
     )
 }
 
@@ -655,11 +693,12 @@ impl SimpleDirOps for ThreadDir {
             ),
             "status" => lookup.file(
                 name,
-                SimpleFile::new_regular(fs.clone(), {
+                SeqFileInode::new_regular(fs.clone(), {
                     let task_weak = task_weak.clone();
                     move || {
-                        let task = upgrade_task(&task_weak)?;
-                        Ok(task_status(&task))
+                        Ok(StatusIter {
+                            task: task_weak.clone(),
+                        })
                     }
                 }),
             ),
@@ -1033,11 +1072,319 @@ mod tests {
 
     #[def_test]
     fn test_task_status_includes_process_name() {
-        let status = format_task_status("test-bin", 12, 34);
+        let status = format_task_status("test-bin", 12, 34, &kcred::Cred::root());
 
         assert!(status.contains("Name:\ttest-bin\n"));
         assert!(status.contains("Tgid:\t12\n"));
         assert!(status.contains("Pid:\t34\n"));
+    }
+
+    // These fixtures publish targets but never activate them. Reader credentials
+    // are restored before a target is inspected, including every error return.
+    struct ScopedStatusReaderCred {
+        reader: kprocess::CurrentThread,
+        original: alloc::sync::Arc<kcred::Cred>,
+    }
+
+    impl ScopedStatusReaderCred {
+        fn install(next: kcred::Cred) -> Self {
+            let reader = kprocess::current_user_thread();
+            let original = reader.real_cred();
+            core::assert!(alloc::sync::Arc::ptr_eq(&original, &reader.cred()));
+            let guard = Self { reader, original };
+            guard.reader.commit_creds(next);
+            guard
+        }
+    }
+
+    impl Drop for ScopedStatusReaderCred {
+        fn drop(&mut self) {
+            self.reader.commit_creds(self.original.prepare());
+        }
+    }
+
+    fn status_credential_target(
+        cred: kcred::Cred,
+        is_sibling: bool,
+    ) -> kvfs::VfsResult<kprocess::PublishedUserTask> {
+        let prepared = {
+            let _restore = ScopedStatusReaderCred::install(cred);
+            let reader = kprocess::current_user_thread();
+            if is_sibling {
+                reader.prepare_thread_clone()?
+            } else {
+                reader.prepare_process_fork(kprocess::ProcessForkConfig {
+                    parent: kprocess::ForkParent::Caller,
+                    address_space: kprocess::ForkAddressSpace::Shared,
+                    fs: kprocess::ForkFs::Shared,
+                    signal_actions: kprocess::ForkSignalActions::Shared,
+                    fd_table: kprocess::ForkFdTable::Shared,
+                    namespace_flags: Default::default(),
+                    exit_signal: None,
+                })?
+            }
+        };
+        let (thread, identity) = prepared.into_parts();
+        kprocess::publish_user_task(ktask::TaskInner::new_user(
+            || {},
+            alloc::string::String::from("procfs-status-credential-target"),
+            identity,
+            thread,
+        ))
+    }
+
+    fn status_id_columns(status: &str, key: &str) -> Option<[u32; 4]> {
+        let mut rows = status.lines().filter_map(|line| line.strip_prefix(key));
+        let row = rows.next()?;
+        if rows.next().is_some() {
+            return None;
+        }
+        let mut columns = row.split_whitespace();
+        let ids = [
+            columns.next()?.parse().ok()?,
+            columns.next()?.parse().ok()?,
+            columns.next()?.parse().ok()?,
+            columns.next()?.parse().ok()?,
+        ];
+        if columns.next().is_some() {
+            return None;
+        }
+        Some(ids)
+    }
+
+    fn status_distinct_ids() -> kcred::Cred {
+        let mut cred = kcred::Cred::root();
+        cred.set_resgid(Some(201), Some(202), Some(203)).unwrap();
+        cred.set_fsgid(204);
+        // Keeping effective UID zero permits a fourth, distinct filesystem UID.
+        cred.set_resuid(Some(101), Some(0), Some(103)).unwrap();
+        cred.set_fsuid(104);
+        cred
+    }
+
+    static STATUS_TEST_FS_TYPE: kvfs::FileSystemType =
+        kvfs::FileSystemType::internal("procfs-status-credential-test");
+
+    fn status_test_root() -> kvfs::Path {
+        let fs = kvfs::SimpleFs::new_with(&STATUS_TEST_FS_TYPE, 0x9fa0, |fs| {
+            kvfs::SimpleDir::new_maker(
+                fs.clone(),
+                alloc::sync::Arc::new(super::ProcFsHandler::new(fs)),
+            )
+        });
+        kvfs::Mount::new_root(&fs).root_path()
+    }
+
+    fn open_status(
+        root: &kvfs::Path,
+        name: alloc::string::String,
+    ) -> kvfs::VfsResult<alloc::sync::Arc<kvfs::VfsFile>> {
+        kvfs::Filename::new(name).open_with_flags_at(
+            root,
+            root,
+            0,
+            kvfs::NodePermission::empty(),
+            kvfs::NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+    }
+
+    fn read_status(file: &kvfs::VfsFile) -> kvfs::VfsResult<alloc::string::String> {
+        let mut bytes = alloc::vec::Vec::new();
+        let mut chunk = [0u8; 31];
+        for _ in 0..128 {
+            let count = file.read(&mut chunk)?;
+            if count == 0 {
+                return alloc::string::String::from_utf8(bytes)
+                    .map_err(|_| kvfs::VfsError::InvalidData);
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        Err(kvfs::VfsError::BadState)
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_root_credential_columns_remain_zero() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(kcred::Cred::root(), false).unwrap();
+        let status = super::task_status(target.task());
+        assert_eq!(status_id_columns(&status, "Uid:"), Some([0; 4]));
+        assert_eq!(status_id_columns(&status, "Gid:"), Some([0; 4]));
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_nonzero_target_credentials_are_not_reader_credentials() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
+        let reader = ktask::current();
+        assert!(!alloc::sync::Arc::ptr_eq(target.task(), &reader));
+        assert!(!alloc::sync::Arc::ptr_eq(
+            target.task().as_thread().process(),
+            reader.as_thread().process()
+        ));
+        assert_eq!(kprocess::current_real_cred().ruid(), 71);
+        assert_eq!(kprocess::current_real_cred().rgid(), 81);
+        let status = super::task_status(target.task());
+        assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));
+        assert_eq!(status_id_columns(&status, "Gid:"), Some([4321; 4]));
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_orders_real_effective_saved_filesystem_ids() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(status_distinct_ids(), false).unwrap();
+        let cred = target.task().as_thread().real_cred();
+        assert_eq!(
+            [cred.ruid(), cred.euid(), cred.suid(), cred.fsuid()],
+            [101, 0, 103, 104]
+        );
+        assert_eq!(
+            [cred.rgid(), cred.egid(), cred.sgid(), cred.fsgid()],
+            [201, 202, 203, 204]
+        );
+        let status = super::task_status(target.task());
+        assert_eq!(status_id_columns(&status, "Uid:"), Some([101, 0, 103, 104]));
+        assert_eq!(
+            status_id_columns(&status, "Gid:"),
+            Some([201, 202, 203, 204])
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_same_process_threads_keep_their_own_credentials() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let first = status_credential_target(kcred::Cred::new(1234, 4321), true).unwrap();
+        let second = status_credential_target(kcred::Cred::new(2345, 5432), true).unwrap();
+        let reader = ktask::current();
+        let owner = reader.as_thread().process();
+        assert!(alloc::sync::Arc::ptr_eq(
+            first.task().as_thread().process(),
+            owner
+        ));
+        assert!(alloc::sync::Arc::ptr_eq(
+            second.task().as_thread().process(),
+            owner
+        ));
+        assert!(first.task().as_thread().tid() != second.task().as_thread().tid());
+        let first_status = super::task_status(first.task());
+        let second_status = super::task_status(second.task());
+        assert_eq!(status_id_columns(&first_status, "Uid:"), Some([1234; 4]));
+        assert_eq!(status_id_columns(&first_status, "Gid:"), Some([4321; 4]));
+        assert_eq!(status_id_columns(&second_status, "Uid:"), Some([2345; 4]));
+        assert_eq!(status_id_columns(&second_status, "Gid:"), Some([5432; 4]));
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_reader_credential_change_does_not_retarget_snapshot() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
+        let before = super::task_status(target.task());
+        {
+            let _changed = ScopedStatusReaderCred::install(kcred::Cred::new(98, 89));
+            assert_eq!(kprocess::current_real_cred().ruid(), 98);
+            let changed = super::task_status(target.task());
+            assert_eq!(status_id_columns(&changed, "Uid:"), Some([1234; 4]));
+            assert_eq!(status_id_columns(&changed, "Gid:"), Some([4321; 4]));
+        }
+        assert_eq!(kprocess::current_real_cred().ruid(), 71);
+        assert_eq!(kprocess::current_real_cred().rgid(), 81);
+        let after = super::task_status(target.task());
+        assert_eq!(
+            status_id_columns(&before, "Uid:"),
+            status_id_columns(&after, "Uid:")
+        );
+        assert_eq!(
+            status_id_columns(&before, "Gid:"),
+            status_id_columns(&after, "Gid:")
+        );
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_vfs_process_and_thread_paths_render_selected_credentials() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(status_distinct_ids(), false).unwrap();
+        let root = status_test_root();
+        let thread = target.task().as_thread();
+        for name in [
+            alloc::format!("/{}/status", thread.process().pid()),
+            alloc::format!("/{}/task/{}/status", thread.process().pid(), thread.tid()),
+        ] {
+            let file = open_status(&root, name).unwrap();
+            let text = read_status(&file).unwrap();
+            assert_eq!(status_id_columns(&text, "Uid:"), Some([101, 0, 103, 104]));
+            assert_eq!(status_id_columns(&text, "Gid:"), Some([201, 202, 203, 204]));
+            assert!(text.contains(&alloc::format!("Pid:\t{}\n", thread.tid())));
+        }
+        assert_eq!(kprocess::current_real_cred().ruid(), 71);
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_partial_reads_keep_one_record_and_rewind_refreshes_credentials() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(7, 8));
+        let target = ktask::current();
+        let root = status_test_root();
+        let pid = target.as_thread().process().pid();
+        let name = alloc::format!("/{pid}/status");
+        let first = open_status(&root, name.clone()).unwrap();
+        let not_yet_read = open_status(&root, name).unwrap();
+        let original = super::task_status(&target);
+        let split = original.find("Gid:").unwrap();
+        let mut prefix = alloc::vec![0u8; split];
+        assert_eq!(first.read(&mut prefix).unwrap(), split);
+
+        // Change both contents and width after the first record has started.
+        let _changed = ScopedStatusReaderCred::install(kcred::Cred::new(1234567890, 987654321));
+        let mut observed = alloc::string::String::from_utf8(prefix).unwrap();
+        observed.push_str(&read_status(&first).unwrap());
+        assert_eq!(status_id_columns(&observed, "Uid:"), Some([7; 4]));
+        assert_eq!(status_id_columns(&observed, "Gid:"), Some([8; 4]));
+
+        // Each open has its own read state; contents are not frozen at open.
+        let newer = read_status(&not_yet_read).unwrap();
+        assert_eq!(status_id_columns(&newer, "Uid:"), Some([1234567890; 4]));
+        assert_eq!(status_id_columns(&newer, "Gid:"), Some([987654321; 4]));
+
+        assert_eq!(first.llseek(0, 0).unwrap(), 0);
+        let rewound = read_status(&first).unwrap();
+        assert_eq!(status_id_columns(&rewound, "Uid:"), Some([1234567890; 4]));
+        assert_eq!(status_id_columns(&rewound, "Gid:"), Some([987654321; 4]));
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_collected_target_keeps_esrch_without_reader_fallback() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
+        let weak = alloc::sync::Arc::downgrade(target.task());
+        let root = status_test_root();
+        let pid = target.task().as_thread().process().pid();
+        let file = open_status(&root, alloc::format!("/{pid}/status")).unwrap();
+        target.abort();
+        assert!(matches!(
+            super::upgrade_task(&weak),
+            Err(kvfs::VfsError::NoSuchProcess)
+        ));
+        assert_eq!(
+            file.read(&mut [0u8; 31]),
+            Err(kvfs::VfsError::NoSuchProcess)
+        );
+        assert_eq!(kprocess::current_real_cred().ruid(), 71);
+    }
+
+    #[def_test(user, serial)]
+    fn test_status_retained_target_preserves_credentials_after_abort() {
+        let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
+        let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
+        let retained = target.task().clone();
+        let weak = alloc::sync::Arc::downgrade(&retained);
+        target.abort();
+        let status = super::task_status(&retained);
+        assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));
+        assert_eq!(status_id_columns(&status, "Gid:"), Some([4321; 4]));
+        drop(retained);
+        assert!(matches!(
+            super::upgrade_task(&weak),
+            Err(kvfs::VfsError::NoSuchProcess)
+        ));
     }
 
     #[def_test]

@@ -41,6 +41,25 @@ limit of 16 pairs and does not support runtime resizing.
 
 ## Calling Constraints and Execution Context
 
+Task `status` renders UID/GID columns from one immutable objective credential
+snapshot of the selected thread (`Thread::real_cred`), in real, effective,
+saved-set, and filesystem order. The process leader and per-thread paths share
+this iterator; neither substitutes the reader's credentials. Cloning the
+credential `Arc` releases its read lock before formatting. The existing
+`SeqFile` buffer generates one status record on first read, then serves its
+remaining bytes across short reads. A zero-offset read regenerates the record;
+opening alone does not capture credentials. No procfs credential cache is added,
+and unrelated fields are not a globally atomic task snapshot. Current `kcred` IDs belong
+to the initial user namespace; reader-namespace ID translation is not implemented.
+
+Regression fixtures publish inactive targets with distinct credentials, restore
+reader credentials with a scope guard, and abort their owned publications on
+drop. Tests cover root/non-root columns, all four ID roles, sibling isolation,
+reader changes, both VFS status paths with short reads, and retained/reclaimed
+target lifetime. A current-thread credential change between partial reads checks
+record consistency, independent opens, and refresh after rewind. The fixture
+restores credentials and does not activate additional workload threads.
+
 Normal lookup, open, read, write, and release paths require task context with
 allocation and subsystem initialization available. They can take sleeping locks
 and are not interrupt-context or pre-scheduler early-boot interfaces. Filesystem

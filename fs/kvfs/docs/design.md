@@ -908,6 +908,15 @@ FIFO 最后一个 open file 关闭时清空 inode pipe slot，`Arc<PipeObject>` 
 - `FsContext` 只传递一页 opaque mount data；具体 binary/text format 和支持的 option 集合属于
   各 filesystem type。
 
+## Sequential record rendering errors
+
+`SeqIterator::try_show` defaults to the existing `show` formatter and maps its
+formatting failure to `Io`. Iterators that need a filesystem error may override
+it, for example to preserve procfs `NoSuchProcess` when a weak target expires.
+`SeqFile` discards the failed record and resets its iterator before returning the
+error. Successful records use the existing per-open buffer and offset semantics;
+no second snapshot or credential cache is introduced.
+
 ## Per-open generated-file snapshots
 
 `SimpleFile` owns a file-operation object selected at construction. Ordinary
