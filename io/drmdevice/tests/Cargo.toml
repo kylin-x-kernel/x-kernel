@@ -1,0 +1,9 @@
+[package]
+name = "drm-identity-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "identity.rs"

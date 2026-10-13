@@ -70,3 +70,36 @@ handle's availability state and does not mutate another card's local tables.
 - Never select a process-global display from a per-card operation.
 - Validate all user counts and geometry before allocation or copy-out.
 - Keep mapped backing memory alive independently of object-table removal.
+
+## Identity copy bounds
+
+VERSION bounds each copy by the original user capacity before reporting the
+full length, and skips null or zero-capacity destinations. GET_UNIQUE requires
+room for the entire identity. Neither writes a terminator beyond the declared
+buffer; nonempty invalid destinations retain `EFAULT` through the existing
+user-copy helpers. An unset master identity reports zero length without
+accessing the destination. VERSION and GET_UNIQUE cannot activate an identity.
+
+## Master identity ownership
+
+The card's shared master-state mutex serializes open, acquisition, relinquish,
+and final release. Lock order is card master state, file binding, then master
+identity. GET_UNIQUE snapshots the string and releases those locks before
+copying to user memory. File-private state retains its master after relinquish;
+a new master cannot inherit that old identity. The active owner is a weak file
+reference, avoiding a card/file reference cycle. Final private-state destruction
+clears matching ownership even when an open file was never published.
+
+SET_VERSION rejects unsupported requests and reports the supported versions.
+Under the card master-state lock, it verifies that the active owner's weak
+reference matches the calling file before acquiring the binding lock or changing
+the identity. Non-owner requests, including queries, receive `EACCES` and cannot
+modify the shared identity; retaining a former master binding grants no access.
+Interface negotiation may establish an identity before a later driver-version
+error, following Linux's operation order. Identity presence is represented by
+the master-owned optional string, not an independent activation flag.
+
+Master ownership here is an identity lifecycle, not a complete access-control
+implementation: existing authentication and KMS privilege limitations remain.
+The synthetic identity is not a validated hardware bus ID and does not provide
+real PCI bus-id matching.

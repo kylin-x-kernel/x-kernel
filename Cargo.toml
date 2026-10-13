@@ -24,6 +24,8 @@ exclude = [
     "tools/*",
     # TEE user-space apps (built separately with std toolchain)
     "tee_apps/*",
+    # Standalone DRM userspace ABI regression workspace.
+    "io/drmdevice/tests",
 ]
 
 [workspace.package]

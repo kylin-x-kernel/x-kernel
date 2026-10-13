@@ -130,3 +130,35 @@ mapping can reference them.
 - Use local Linux UAPI structures with `repr(C)` and typed user-copy helpers.
 - Share one state model between legacy and atomic paths.
 - Retain mapped pages independently of framebuffer table lifetime.
+
+## Identity ioctl buffer contracts
+
+`DRM_IOCTL_VERSION` supports length-only queries with null pointers or zero
+capacities, and reports complete lengths even when only a prefix fits.
+`DRM_IOCTL_GET_UNIQUE` reports the calling file's master identity and copies
+only when the complete identity fits. An unset identity reports length zero
+without touching its destination, preserving libdrm's open-by-driver-name
+discovery. Neither query establishes an identity.
+
+Each open file description has typed `DrmFile` private data. The first open
+creates and owns a master; subsequent opens share that master. Duplicated file
+descriptors share the same binding. `SET_MASTER` rejects another active owner
+with `EBUSY`; a former owner reuses its master, whereas a client becoming owner
+creates a new master with an unset identity. `DROP_MASTER` and final owner close
+release active ownership without clearing identities held by older files.
+Private-state destruction also rolls back ownership for an unpublished open.
+The ioctl dispatcher resolves `DrmFile` once and passes its shared reference to
+the typed handlers.
+
+`SET_VERSION` requires the calling file to be the current active owner, including
+for query-only requests. Other files receive `EACCES` without changing the shared
+master identity. A former owner must reacquire ownership before calling it.
+`SET_VERSION` validates the requested interface against 1.4 and driver versions
+against the advertised constants, treating major `-1` as a query. A valid
+interface request for 1.1 through 1.4 establishes the calling master's identity;
+query-only and 1.0 requests do not. As in Linux, interface processing precedes
+driver-version validation. Responses report the highest supported interface and
+driver versions, including for lower-version requests and validation errors.
+The established string remains the synthetic driver label; real PCI bus-id
+matching, authentication, leases, and complete KMS master authorization are not
+implemented by this change.

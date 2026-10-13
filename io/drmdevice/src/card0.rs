@@ -12,7 +12,7 @@ use alloc::{
     collections::{BTreeMap, VecDeque},
     format,
     string::String,
-    sync::Arc,
+    sync::{Arc, Weak},
     vec,
     vec::Vec,
 };
@@ -25,7 +25,9 @@ use kclass::{ClassDevice, DisplayDeviceImpl};
 use khal::mem::v2p;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsFile, VfsResult};
+use kvfs::{
+    DeviceFileOps, MmapMapper, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult,
+};
 use memaddr::{PAGE_SIZE_4K, PhysAddrRange};
 use posix_types::{UserPtr, UserRead, UserWrite};
 
@@ -34,14 +36,14 @@ use super::{consts::*, drm::*};
 /// DRM ioctl handler trait. `const CMD` is injected by the `#[drm_ioctl]` attribute macro.
 trait DrmIoctl: Sized {
     const CMD: u32;
-    fn handle(dev: &DrmCard, arg: &mut Self) -> VfsResult<usize>;
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, arg: &mut Self) -> VfsResult<usize>;
 
-    fn handle_raw(dev: &DrmCard, arg: UserPtr<Self>) -> VfsResult<usize>
+    fn handle_raw(dev: &DrmCard, file: &Arc<DrmFile>, arg: UserPtr<Self>) -> VfsResult<usize>
     where
         Self: UserRead + UserWrite,
     {
         let mut ptr: Self = arg.read_vm().map_err(|_| kvfs::VfsError::BadAddress)?;
-        let result = Self::handle(dev, &mut ptr);
+        let result = Self::handle(dev, file, &mut ptr);
         arg.write_vm(ptr).map_err(|_| kvfs::VfsError::BadAddress)?;
         result
     }
@@ -63,28 +65,29 @@ struct DrmModeSetCrtc(DrmModeCrtc);
 #[derive(Clone, Copy, bytemuck::AnyBitPattern, macros::UserRead, macros::UserWrite)]
 struct DrmModeRmFb(u32);
 
+// VERSION reports full lengths even for a length-only or truncated query.
+// Capture the original capacity before updating the output length; this ioctl
+// does not append a NUL terminator.
+fn copy_version_field(user_ptr: UserPtr<u8>, capacity: usize, value: &str) -> VfsResult<usize> {
+    let copy_len = capacity.min(value.len());
+    if copy_len != 0 && !user_ptr.is_null() {
+        user_ptr
+            .write_vm_slice(&value.as_bytes()[..copy_len])
+            .map_err(|_| VfsError::BadAddress)?;
+    }
+    Ok(value.len())
+}
+
 impl DrmIoctl for DrmVersion {
     const CMD: u32 = iowr::<DrmVersion>(DRM_TYPE, 0x00);
 
-    fn handle(_dev: &DrmCard, version: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, version: &mut Self) -> VfsResult<usize> {
         version.version_major = DRIVER_VERSION_MAJOR;
         version.version_minor = DRIVER_VERSION_MINOR;
         version.version_patchlevel = DRIVER_VERSION_PATCHLEVEL;
-        version.name_len = DRIVER_NAME.len();
-        version
-            .name
-            .write_vm_slice(DRIVER_NAME.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
-        version.date_len = DRIVER_DATE.len();
-        version
-            .date
-            .write_vm_slice(DRIVER_DATE.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
-        version.desc_len = DRIVER_DESC.len();
-        version
-            .desc
-            .write_vm_slice(DRIVER_DESC.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
+        version.name_len = copy_version_field(version.name, version.name_len, DRIVER_NAME)?;
+        version.date_len = copy_version_field(version.date, version.date_len, DRIVER_DATE)?;
+        version.desc_len = copy_version_field(version.desc, version.desc_len, DRIVER_DESC)?;
         Ok(0)
     }
 }
@@ -92,15 +95,43 @@ impl DrmIoctl for DrmVersion {
 impl DrmIoctl for DrmSetVersion {
     const CMD: u32 = iowr::<DrmSetVersion>(DRM_TYPE, 0x07);
 
-    fn handle(_dev: &DrmCard, set_version: &mut Self) -> VfsResult<usize> {
-        if set_version.drm_di_major < 0 {
-            set_version.drm_di_major = 1;
-        }
-        if set_version.drm_di_minor < 0 {
-            set_version.drm_di_minor = 4;
-        }
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, set_version: &mut Self) -> VfsResult<usize> {
+        let requested = *set_version;
+        // Like Linux drm_setversion's done path, return supported versions even
+        // for lower-version requests and validation errors, not the input pair.
+        set_version.drm_di_major = 1;
+        set_version.drm_di_minor = 4;
         set_version.drm_dd_major = DRIVER_VERSION_MAJOR;
         set_version.drm_dd_minor = DRIVER_VERSION_MINOR;
+
+        let masters = dev.masters.lock();
+        if !masters
+            .active
+            .as_ref()
+            .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(file)))
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+        let binding = file.binding.lock();
+        // Linux treats interface major -1 as a query and ignores its minor.
+        // See drm_setversion in https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_ioctl.c.
+        if requested.drm_di_major != -1 {
+            if requested.drm_di_major != 1 || !(0..=4).contains(&requested.drm_di_minor) {
+                return Err(VfsError::InvalidInput);
+            }
+            if requested.drm_di_minor >= 1 {
+                *binding.master.unique.lock() = Some(format!("{}:0", DRIVER_NAME));
+            }
+        }
+        // Linux establishes the bus identity before validating the driver
+        // version, and still copies supported versions out on an error.
+        if requested.drm_dd_major != -1
+            && (requested.drm_dd_major != DRIVER_VERSION_MAJOR
+                || requested.drm_dd_minor < 0
+                || requested.drm_dd_minor > DRIVER_VERSION_MINOR)
+        {
+            return Err(VfsError::InvalidInput);
+        }
         Ok(0)
     }
 }
@@ -108,13 +139,21 @@ impl DrmIoctl for DrmSetVersion {
 impl DrmIoctl for DrmUnique {
     const CMD: u32 = iowr::<DrmUnique>(DRM_TYPE, 0x01);
 
-    fn handle(_dev: &DrmCard, unique: &mut Self) -> VfsResult<usize> {
-        let unique_str: String = format!("{}:0", DRIVER_NAME);
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, unique: &mut Self) -> VfsResult<usize> {
+        let identity = {
+            let _masters = dev.masters.lock();
+            let binding = file.binding.lock();
+            binding.master.unique.lock().clone()
+        };
+        let unique_str = identity.as_deref().unwrap_or("");
+        // GET_UNIQUE copies only when the complete identity fits, unlike VERSION.
+        if !unique_str.is_empty() && unique.unique_len >= unique_str.len() {
+            unique
+                .unique
+                .write_vm_slice(unique_str.as_bytes())
+                .map_err(|_| VfsError::BadAddress)?;
+        }
         unique.unique_len = unique_str.len();
-        unique
-            .unique
-            .write_vm_slice(unique_str.as_bytes())
-            .map_err(|_| VfsError::BadAddress)?;
         Ok(0)
     }
 }
@@ -122,7 +161,7 @@ impl DrmIoctl for DrmUnique {
 impl DrmIoctl for DrmGetCap {
     const CMD: u32 = iowr::<DrmGetCap>(DRM_TYPE, 0x0c);
 
-    fn handle(_dev: &DrmCard, cap: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, cap: &mut Self) -> VfsResult<usize> {
         cap.value = match cap.capability {
             DRM_CAP_DUMB_BUFFER => 1,
             // The driver exposes a single primary plane and no cursor
@@ -143,7 +182,7 @@ impl DrmIoctl for DrmGetCap {
 impl DrmIoctl for DrmSetClientCap {
     const CMD: u32 = iow::<DrmSetClientCap>(DRM_TYPE, 0x0d);
 
-    fn handle(_dev: &DrmCard, _cap: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, _cap: &mut Self) -> VfsResult<usize> {
         Ok(0)
     }
 }
@@ -151,7 +190,7 @@ impl DrmIoctl for DrmSetClientCap {
 impl DrmIoctl for DrmAuth {
     const CMD: u32 = iowr::<DrmAuth>(DRM_TYPE, 0x02);
 
-    fn handle(_dev: &DrmCard, auth: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, auth: &mut Self) -> VfsResult<usize> {
         auth.magic = 1;
         Ok(0)
     }
@@ -160,7 +199,7 @@ impl DrmIoctl for DrmAuth {
 impl DrmIoctl for DrmAuthMagic {
     const CMD: u32 = iowr::<DrmAuth>(DRM_TYPE, 0x03);
 
-    fn handle(_dev: &DrmCard, _auth: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, _auth: &mut Self) -> VfsResult<usize> {
         Ok(0)
     }
 }
@@ -168,7 +207,7 @@ impl DrmIoctl for DrmAuthMagic {
 impl DrmIoctl for DrmModeDirtyFb {
     const CMD: u32 = iowr::<DrmModeDirtyFb>(DRM_TYPE, 0xB1);
 
-    fn handle(dev: &DrmCard, dirty: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, dirty: &mut Self) -> VfsResult<usize> {
         // Linux's drm_mode_dirtyfb_ioctl() rejects an unknown fb_id with
         // -EINVAL; present_fb is best-effort, so validate before calling it.
         if !dev.fbs.lock().contains_key(&dirty.fb_id) {
@@ -182,7 +221,7 @@ impl DrmIoctl for DrmModeDirtyFb {
 impl DrmIoctl for DrmPrimeHandle {
     const CMD: u32 = iowr::<DrmPrimeHandle>(DRM_TYPE, 0x2d);
 
-    fn handle(_dev: &DrmCard, prime: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, prime: &mut Self) -> VfsResult<usize> {
         prime.fd = prime.handle as i32;
         Ok(0)
     }
@@ -191,7 +230,7 @@ impl DrmIoctl for DrmPrimeHandle {
 impl DrmIoctl for DrmPrimeFdToHandle {
     const CMD: u32 = iowr::<DrmPrimeHandle>(DRM_TYPE, 0x2e);
 
-    fn handle(_dev: &DrmCard, prime: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, prime: &mut Self) -> VfsResult<usize> {
         prime.0.handle = prime.0.fd as u32;
         Ok(0)
     }
@@ -200,7 +239,7 @@ impl DrmIoctl for DrmPrimeFdToHandle {
 impl DrmIoctl for DrmModeCardRes {
     const CMD: u32 = iowr::<DrmModeCardRes>(DRM_TYPE, 0xA0);
 
-    fn handle(dev: &DrmCard, r: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, r: &mut Self) -> VfsResult<usize> {
         let (w, h) = display_resolution(dev);
         r.min_width = w;
         r.max_width = w;
@@ -219,7 +258,7 @@ impl DrmIoctl for DrmModeCardRes {
 impl DrmIoctl for DrmModeCrtc {
     const CMD: u32 = iowr::<DrmModeCrtc>(DRM_TYPE, 0xA1);
 
-    fn handle(dev: &DrmCard, crtc: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, crtc: &mut Self) -> VfsResult<usize> {
         if crtc.crtc_id != CRTC_ID {
             return Err(VfsError::InvalidInput);
         }
@@ -296,9 +335,50 @@ struct ModesetState {
     plane_crtc_h: u64,
 }
 
+#[derive(Default)]
+struct DrmMaster {
+    unique: Mutex<Option<String>>,
+}
+
+struct MasterBinding {
+    master: Arc<DrmMaster>,
+    // A former owner can reacquire its master after DROP_MASTER.
+    is_master: bool,
+}
+
+struct ActiveMaster {
+    master: Arc<DrmMaster>,
+    owner: Weak<DrmFile>,
+}
+
+#[derive(Default)]
+struct MasterState {
+    active: Option<ActiveMaster>,
+}
+
+struct DrmFile {
+    masters: Arc<Mutex<MasterState>>,
+    binding: Mutex<MasterBinding>,
+}
+
+impl Drop for DrmFile {
+    fn drop(&mut self) {
+        // Also rolls back ownership if the file builder is never published.
+        let mut masters = self.masters.lock();
+        if masters
+            .active
+            .as_ref()
+            .is_some_and(|active| core::ptr::eq(active.owner.as_ptr(), self))
+        {
+            masters.active = None;
+        }
+    }
+}
+
 /// One DRM primary character device bound to one display backend.
 pub struct DrmCard {
     display: ClassDevice<DisplayDeviceImpl>,
+    masters: Arc<Mutex<MasterState>>,
     events: Mutex<VecDeque<DrmEventVblank>>,
     poll_rx: PollSet,
     sequence: AtomicU32,
@@ -324,6 +404,7 @@ impl DrmCard {
     pub fn new(display: ClassDevice<DisplayDeviceImpl>) -> Arc<Self> {
         Arc::new(Self {
             display,
+            masters: Arc::new(Mutex::new(MasterState::default())),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
             poll_rx: PollSet::new(),
             sequence: AtomicU32::new(0),
@@ -437,6 +518,53 @@ fn current_mode(dev: &DrmCard) -> DrmModeModeInfo {
 }
 
 impl DeviceFileOps for DrmCard {
+    fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        self.display()?;
+        let mut masters = self.masters.lock();
+        if masters
+            .active
+            .as_ref()
+            .is_some_and(|active| active.owner.strong_count() == 0)
+        {
+            masters.active = None;
+        }
+        let is_master = masters.active.is_none();
+        let master = match &masters.active {
+            Some(active) => active.master.clone(),
+            None => Arc::new(DrmMaster::default()),
+        };
+        let state = Arc::new(DrmFile {
+            masters: self.masters.clone(),
+            binding: Mutex::new(MasterBinding {
+                master: master.clone(),
+                is_master,
+            }),
+        });
+        if is_master {
+            masters.active = Some(ActiveMaster {
+                master,
+                owner: Arc::downgrade(&state),
+            });
+        }
+        file.set_private_data(state);
+        Ok(())
+    }
+
+    fn release(&self, _inode: &VfsInode, file: &VfsFile) -> VfsResult<()> {
+        let state = file
+            .private_data_get::<DrmFile>()
+            .ok_or(VfsError::InvalidInput)?;
+        let mut masters = self.masters.lock();
+        if masters
+            .active
+            .as_ref()
+            .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(&state)))
+        {
+            masters.active = None;
+        }
+        Ok(())
+    }
+
     fn supports_read(&self) -> bool {
         true
     }
@@ -471,129 +599,163 @@ impl DeviceFileOps for DrmCard {
         reason = "CG-028-focused-functions: linear DRM ioctl dispatch table: one short match arm \
                   per command, arms share no state"
     )]
-    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
         self.display()?;
+        let state = file
+            .private_data_get::<DrmFile>()
+            .ok_or(VfsError::InvalidInput)?;
         match cmd {
-            DRM_IOCTL_SET_MASTER | DRM_IOCTL_DROP_MASTER => Ok(0),
+            DRM_IOCTL_SET_MASTER => {
+                let mut masters = self.masters.lock();
+                if let Some(active) = &masters.active {
+                    return if Weak::ptr_eq(&active.owner, &Arc::downgrade(&state)) {
+                        Ok(0)
+                    } else {
+                        Err(VfsError::ResourceBusy)
+                    };
+                }
+                let mut binding = state.binding.lock();
+                if !binding.is_master {
+                    binding.master = Arc::new(DrmMaster::default());
+                    binding.is_master = true;
+                }
+                masters.active = Some(ActiveMaster {
+                    master: binding.master.clone(),
+                    owner: Arc::downgrade(&state),
+                });
+                Ok(0)
+            }
+            DRM_IOCTL_DROP_MASTER => {
+                let mut masters = self.masters.lock();
+                if !masters
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(&state)))
+                {
+                    return Err(VfsError::InvalidInput);
+                }
+                masters.active = None;
+                Ok(0)
+            }
             <DrmVersion as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmVersion>::from(arg);
-                <DrmVersion as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmVersion as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmUnique as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmUnique>::from(arg);
-                <DrmUnique as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmUnique as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmSetVersion as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmSetVersion>::from(arg);
-                <DrmSetVersion as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmSetVersion as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmGetCap as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmGetCap>::from(arg);
-                <DrmGetCap as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmGetCap as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmSetClientCap as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmSetClientCap>::from(arg);
-                <DrmSetClientCap as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmSetClientCap as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmAuth as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmAuth>::from(arg);
-                <DrmAuth as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmAuth as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmAuthMagic as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
-                <DrmAuthMagic as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmAuthMagic as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeDirtyFb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeDirtyFb>::from(arg);
-                <DrmModeDirtyFb as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeDirtyFb as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmPrimeHandle as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmPrimeHandle>::from(arg);
-                <DrmPrimeHandle as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmPrimeHandle as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmPrimeFdToHandle as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmPrimeFdToHandle>::from(arg);
-                <DrmPrimeFdToHandle as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmPrimeFdToHandle as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeCardRes as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeCardRes>::from(arg);
-                <DrmModeCardRes as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeCardRes as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeCrtc as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeCrtc>::from(arg);
-                <DrmModeCrtc as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeCrtc as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeSetCrtc as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeSetCrtc>::from(arg);
-                <DrmModeSetCrtc as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeSetCrtc as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetEncoder as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetEncoder>::from(arg);
-                <DrmModeGetEncoder as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeGetEncoder as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetConnector as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetConnector>::from(arg);
-                <DrmModeGetConnector as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeGetConnector as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeRmFb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeRmFb>::from(arg);
-                <DrmModeRmFb as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeRmFb as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeCrtcPageFlip as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeCrtcPageFlip>::from(arg);
-                <DrmModeCrtcPageFlip as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeCrtcPageFlip as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeCreateDumb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeCreateDumb>::from(arg);
-                <DrmModeCreateDumb as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeCreateDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeMapDumb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeMapDumb>::from(arg);
-                <DrmModeMapDumb as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeMapDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeDestroyDumb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeDestroyDumb>::from(arg);
-                <DrmModeDestroyDumb as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeDestroyDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetPlaneRes as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetPlaneRes>::from(arg);
-                <DrmModeGetPlaneRes as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeGetPlaneRes as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetPlane as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetPlane>::from(arg);
-                <DrmModeGetPlane as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeGetPlane as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeObjGetProperties as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeObjGetProperties>::from(arg);
-                <DrmModeObjGetProperties as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeObjGetProperties as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetProperty as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetProperty>::from(arg);
-                <DrmModeGetProperty as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeGetProperty as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmWaitVblank as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmWaitVblank>::from(arg);
-                <DrmWaitVblank as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmWaitVblank as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeAtomic as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeAtomic>::from(arg);
-                <DrmModeAtomic as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeAtomic as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeCreateBlob as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeCreateBlob>::from(arg);
-                <DrmModeCreateBlob as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeCreateBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeDestroyBlob as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeDestroyBlob>::from(arg);
-                <DrmModeDestroyBlob as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeDestroyBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetBlob as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetBlob>::from(arg);
-                <DrmModeGetBlob as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeGetBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeFbCmd2 as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeFbCmd2>::from(arg);
-                <DrmModeFbCmd2 as DrmIoctl>::handle_raw(self, user_ptr)
+                <DrmModeFbCmd2 as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             _ => Err(kvfs::VfsError::OperationNotSupported),
         }
@@ -659,7 +821,7 @@ impl Pollable for DrmCard {
 impl DrmIoctl for DrmModeSetCrtc {
     const CMD: u32 = iowr::<DrmModeCrtc>(DRM_TYPE, 0xA2);
 
-    fn handle(dev: &DrmCard, crtc: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, crtc: &mut Self) -> VfsResult<usize> {
         let c = &crtc.0;
         if c.crtc_id != CRTC_ID {
             return Err(VfsError::InvalidInput);
@@ -701,7 +863,7 @@ impl DrmIoctl for DrmModeSetCrtc {
 impl DrmIoctl for DrmModeGetEncoder {
     const CMD: u32 = iowr::<DrmModeGetEncoder>(DRM_TYPE, 0xA6);
 
-    fn handle(_dev: &DrmCard, e: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, e: &mut Self) -> VfsResult<usize> {
         if e.encoder_id != ENCODER_ID {
             return Err(VfsError::InvalidInput);
         }
@@ -716,7 +878,7 @@ impl DrmIoctl for DrmModeGetEncoder {
 impl DrmIoctl for DrmModeGetConnector {
     const CMD: u32 = iowr::<DrmModeGetConnector>(DRM_TYPE, 0xA7);
 
-    fn handle(dev: &DrmCard, c: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
         if c.connector_id != CONNECTOR_ID {
             return Err(VfsError::InvalidInput);
         }
@@ -743,7 +905,7 @@ impl DrmIoctl for DrmModeGetConnector {
 impl DrmIoctl for DrmModeRmFb {
     const CMD: u32 = iowr::<u32>(DRM_TYPE, 0xAF);
 
-    fn handle(dev: &DrmCard, fb_id: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, fb_id: &mut Self) -> VfsResult<usize> {
         dev.fbs.lock().remove(&fb_id.0);
         {
             let mut legacy = dev.legacy_crtc.lock();
@@ -758,7 +920,7 @@ impl DrmIoctl for DrmModeRmFb {
 impl DrmIoctl for DrmModeCrtcPageFlip {
     const CMD: u32 = iowr::<DrmModeCrtcPageFlip>(DRM_TYPE, 0xB0);
 
-    fn handle(dev: &DrmCard, f: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
         if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&f.fb_id) {
             return Err(VfsError::InvalidInput);
         }
@@ -773,7 +935,7 @@ impl DrmIoctl for DrmModeCrtcPageFlip {
 impl DrmIoctl for DrmModeCreateDumb {
     const CMD: u32 = iowr::<DrmModeCreateDumb>(DRM_TYPE, 0xB2);
 
-    fn handle(dev: &DrmCard, c: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
         // Only BGRA8888 (32bpp) is supported, so the bpp == 0 / bpp > 64 /
         // multiple-of-8 checks are subsumed by the bpp != 32 comparison and
         // bytes_per_pixel is constant.
@@ -841,7 +1003,7 @@ impl DrmIoctl for DrmModeCreateDumb {
 impl DrmIoctl for DrmModeMapDumb {
     const CMD: u32 = iowr::<DrmModeMapDumb>(DRM_TYPE, 0xB3);
 
-    fn handle(dev: &DrmCard, m: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, m: &mut Self) -> VfsResult<usize> {
         let offset = dev
             .dumbs
             .lock()
@@ -856,7 +1018,7 @@ impl DrmIoctl for DrmModeMapDumb {
 impl DrmIoctl for DrmModeDestroyDumb {
     const CMD: u32 = iowr::<DrmModeDestroyDumb>(DRM_TYPE, 0xB4);
 
-    fn handle(dev: &DrmCard, d: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, d: &mut Self) -> VfsResult<usize> {
         let Some(resource_id) = dev.dumbs.lock().get(&d.handle).map(|b| b.resource_id) else {
             return Ok(0);
         };
@@ -879,7 +1041,7 @@ impl DrmIoctl for DrmModeDestroyDumb {
 impl DrmIoctl for DrmModeGetPlaneRes {
     const CMD: u32 = iowr::<DrmModeGetPlaneRes>(DRM_TYPE, 0xB5);
 
-    fn handle(_dev: &DrmCard, r: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, r: &mut Self) -> VfsResult<usize> {
         let planes: &[u32] = &[PLANE_ID];
         r.count_planes = report_user_array(r.plane_id_ptr, r.count_planes, planes)?;
         Ok(0)
@@ -889,7 +1051,7 @@ impl DrmIoctl for DrmModeGetPlaneRes {
 impl DrmIoctl for DrmModeGetPlane {
     const CMD: u32 = iowr::<DrmModeGetPlane>(DRM_TYPE, 0xB6);
 
-    fn handle(_dev: &DrmCard, p: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, p: &mut Self) -> VfsResult<usize> {
         if p.plane_id != PLANE_ID {
             return Err(VfsError::InvalidInput);
         }
@@ -906,7 +1068,7 @@ impl DrmIoctl for DrmModeGetPlane {
 impl DrmIoctl for DrmModeObjGetProperties {
     const CMD: u32 = iowr::<DrmModeObjGetProperties>(DRM_TYPE, 0xB9);
 
-    fn handle(dev: &DrmCard, q: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, q: &mut Self) -> VfsResult<usize> {
         let state = *dev.state.lock();
         let (prop_ids, prop_vals): (&[u32], Vec<u64>) = match (q.obj_type, q.obj_id) {
             (DRM_MODE_OBJECT_PLANE, PLANE_ID) => {
@@ -927,7 +1089,7 @@ impl DrmIoctl for DrmModeObjGetProperties {
 impl DrmIoctl for DrmModeGetProperty {
     const CMD: u32 = iowr::<DrmModeGetProperty>(DRM_TYPE, 0xAA);
 
-    fn handle(_dev: &DrmCard, g: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, g: &mut Self) -> VfsResult<usize> {
         let meta = property_meta(g.prop_id).ok_or(VfsError::NotFound)?;
 
         g.flags = meta.flags;
@@ -958,7 +1120,7 @@ impl DrmIoctl for DrmModeGetProperty {
 impl DrmIoctl for DrmWaitVblank {
     const CMD: u32 = iowr::<DrmWaitVblank>(DRM_TYPE, 0x3A);
 
-    fn handle(dev: &DrmCard, request: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, request: &mut Self) -> VfsResult<usize> {
         let is_relative = request.rep_type & DRM_VBLANK_RELATIVE != 0;
         let current = dev.sequence.load(Ordering::Acquire);
         let target = if is_relative {
@@ -994,7 +1156,7 @@ impl DrmIoctl for DrmWaitVblank {
 impl DrmIoctl for DrmModeAtomic {
     const CMD: u32 = iowr::<DrmModeAtomic>(DRM_TYPE, 0xBC);
 
-    fn handle(dev: &DrmCard, a: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, a: &mut Self) -> VfsResult<usize> {
         let known = DRM_MODE_ATOMIC_TEST_ONLY
             | DRM_MODE_ATOMIC_NONBLOCK
             | DRM_MODE_ATOMIC_ALLOW_MODESET
@@ -1056,7 +1218,7 @@ impl DrmIoctl for DrmModeAtomic {
 impl DrmIoctl for DrmModeCreateBlob {
     const CMD: u32 = iowr::<DrmModeCreateBlob>(DRM_TYPE, 0xBD);
 
-    fn handle(dev: &DrmCard, c: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
         if c.length == 0 || c.length as usize > MAX_BLOB_BYTES {
             return Err(VfsError::InvalidInput);
         }
@@ -1072,7 +1234,7 @@ impl DrmIoctl for DrmModeCreateBlob {
 impl DrmIoctl for DrmModeDestroyBlob {
     const CMD: u32 = iowr::<DrmModeDestroyBlob>(DRM_TYPE, 0xBE);
 
-    fn handle(dev: &DrmCard, d: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, d: &mut Self) -> VfsResult<usize> {
         if dev.system_blobs.lock().contains_key(&d.blob_id) {
             return Err(VfsError::PermissionDenied);
         }
@@ -1087,7 +1249,7 @@ impl DrmIoctl for DrmModeDestroyBlob {
 impl DrmIoctl for DrmModeGetBlob {
     const CMD: u32 = iowr::<DrmModeGetBlob>(DRM_TYPE, 0xAC);
 
-    fn handle(dev: &DrmCard, g: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, g: &mut Self) -> VfsResult<usize> {
         let bytes = if let Some(b) = dev.blobs.lock().get(&g.blob_id).cloned() {
             b
         } else if g.blob_id == dev.state.lock().crtc_mode_id
@@ -1113,7 +1275,7 @@ impl DrmIoctl for DrmModeGetBlob {
 impl DrmIoctl for DrmModeFbCmd2 {
     const CMD: u32 = iowr::<DrmModeFbCmd2>(DRM_TYPE, 0xB8);
 
-    fn handle(dev: &DrmCard, f: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
         let handle = f.handles[0];
         if handle == 0 || f.offsets[0] != 0 {
             return Err(VfsError::InvalidInput);
