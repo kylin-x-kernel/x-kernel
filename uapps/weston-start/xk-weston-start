@@ -10,7 +10,7 @@ has_cmd() {
 }
 
 install_deps() {
-    has_cmd weston && has_cmd seatd && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
+    has_cmd weston && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
     has_cmd apk || {
         echo "[weston-start] apk is not available; cannot install Weston"
         return 1
@@ -20,12 +20,12 @@ install_deps() {
     apk update || return 1
     echo "[weston-start] installing Weston packages"
     apk add --no-cache weston weston-backend-drm weston-shell-desktop weston-clients \
-        weston-xwayland xwayland xterm xclock seatd ||
-        apk add --no-cache weston seatd
+        weston-xwayland xwayland xterm xclock ||
+        apk add --no-cache weston
 
-    has_cmd weston && has_cmd seatd && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
+    has_cmd weston && has_cmd weston-simple-shm && has_cmd xterm && has_cmd xclock && return 0
     echo "[weston-start] missing command after install:"
-    for c in weston seatd weston-simple-shm xterm xclock; do
+    for c in weston weston-simple-shm xterm xclock; do
         has_cmd "$c" || echo "  $c"
     done
     return 1
@@ -38,7 +38,7 @@ mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
 WP=$(pgrep -x weston | head -n 1 || true)
 if [ -z "$WP" ]; then
-    rm -f "$RD"/wayland-* "$RD"/wayland-*.lock /run/seatd.sock
+    rm -f "$RD"/wayland-* "$RD"/wayland-*.lock
     rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock
     rm -f "$WL" /tmp/weston-watch.log /tmp/xterm.log /tmp/xclock.log
 fi
@@ -54,14 +54,15 @@ E:ID_INPUT_KEYBOARD=1
 E:ID_SEAT=seat0
 EOF
 
-pgrep seatd >/dev/null 2>&1 || {
-    echo "[weston-start] starting seatd"
-    seatd -g root -l debug >/tmp/seatd.log 2>&1 &
-    sleep 1
-}
+# x-kernel provides tty/pty via devfs and ktty but no VT (virtual
+# console), so the default seatd backend cannot run VT activation on
+# tty0 and refuses device opens ("client is not active"). The libseat
+# "noop" backend opens devices directly as root with no VT dependency,
+# which matches a kernel without a virtual console.
+export LIBSEAT_BACKEND=noop
 
 if [ -z "$WP" ]; then
-    echo "[weston-start] starting weston"
+    echo "[weston-start] starting weston (libseat noop backend)"
     env XDG_RUNTIME_DIR="$RD" WESTON_DISABLE_ATOMIC=1 weston \
         --backend=drm-backend.so --renderer=pixman --drm-device=card0 \
         --seat=seat0 --continue-without-input --idle-time=0 --xwayland --log="$WL" &
