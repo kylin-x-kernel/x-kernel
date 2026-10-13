@@ -45,6 +45,18 @@ pub(super) fn poll_gc(cx: &mut Context<'_>, registrations: &mut PollRegistration
             let Some(task) = with_exited_tasks(|exited_tasks| exited_tasks.pop_front()) else {
                 continue;
             };
+            if task.rcu_reader.is_reading() || task.rcu_reader.is_enrolled() {
+                // GC runs after this CPU has left the exited task. An abandoned
+                // scope must not leave a dangling intrusive node or silently
+                // lose protection. Retain the whole task and its owned resources
+                // (including identity/runtime), without retrying forever.
+                warn!(
+                    "task {} exited with residual RCU protection; retaining storage",
+                    task.id_name()
+                );
+                core::mem::forget(task);
+                continue;
+            }
             match Arc::try_unwrap(task) {
                 Ok(task) => {
                     // If I'm the last holder of the task, drop it immediately.

@@ -241,6 +241,7 @@ pub struct TaskInner {
 
     need_resched: AtomicBool,
     preempt_disable_count: AtomicUsize,
+    pub(crate) rcu_reader: krcu::TaskReader,
     #[cfg(unittest)]
     preempt_check_probe: tests_preempt_check::Probe,
 
@@ -659,6 +660,7 @@ impl TaskInner {
             on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
             need_resched: AtomicBool::new(false),
             preempt_disable_count: AtomicUsize::new(0),
+            rcu_reader: krcu::TaskReader::new(),
             #[cfg(unittest)]
             preempt_check_probe: tests_preempt_check::Probe::new(),
             wake_sync_depth: AtomicUsize::new(0),
@@ -1159,6 +1161,10 @@ mod tests_preempt_check;
 #[cfg(unittest)]
 #[path = "tests/current_task.rs"]
 mod tests_current_task;
+
+#[cfg(unittest)]
+#[path = "tests/rcu_reader.rs"]
+mod tests_rcu_reader;
 
 #[cfg(all(feature = "smp", unittest))]
 mod tests_on_cpu_mask {

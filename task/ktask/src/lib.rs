@@ -48,6 +48,7 @@ mod tests_timer_irq;
 #[macro_use]
 mod api;
 mod irq_wait;
+mod rcu;
 mod run_queue;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;

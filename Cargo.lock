@@ -2850,6 +2850,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "krcu"
+version = "0.3.0-dev"
+dependencies = [
+ "intrusive-collections",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
 name = "kresources"
 version = "0.3.0-dev"
 dependencies = [
@@ -3041,6 +3050,7 @@ dependencies = [
  "kirq",
  "klazy",
  "kpoll",
+ "krcu",
  "ksched",
  "kspin",
  "ktime_types",

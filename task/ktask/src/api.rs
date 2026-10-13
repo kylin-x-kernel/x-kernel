@@ -566,7 +566,16 @@ where
 
 /// Current task gives up the CPU time voluntarily, and switches to another
 /// ready task.
+///
+/// # Panics
+///
+/// Panics inside an explicit RCU read scope, which permits involuntary
+/// preemption but not voluntary context switches.
 pub fn yield_now() {
+    assert!(
+        !current().rcu_reader.is_reading(),
+        "yield in RCU read scope"
+    );
     current_run_queue::<NoPreemptIrqSave>().yield_current();
 }
 
@@ -620,6 +629,7 @@ where
 /// with local IRQs disabled or a no-preempt section held: those contexts have
 /// no stable CPU identity across the blocking switch and must not enter the
 /// blocking scheduler path.
+/// Explicit RCU read scopes also forbid voluntary sleeping.
 pub fn sleep(dur: ktime_types::TimeSpan) {
     assert_sleepable_context("sleep");
     sleep_until_unchecked(khal::time::monotonic_time() + dur);
@@ -633,6 +643,7 @@ pub fn sleep(dur: ktime_types::TimeSpan) {
 /// with local IRQs disabled or a no-preempt section held: those contexts have
 /// no stable CPU identity across the blocking switch and must not enter the
 /// blocking scheduler path.
+/// Explicit RCU read scopes also forbid voluntary sleeping.
 pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
     assert_sleepable_context("sleep_until");
     sleep_until_unchecked(deadline);
@@ -653,6 +664,7 @@ pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
 /// with local IRQs disabled or a no-preempt section held: those contexts have
 /// no stable CPU identity across the blocking switch and must not enter the
 /// blocking scheduler path.
+/// Explicit RCU read scopes also forbid voluntary sleeping.
 pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
     assert_sleepable_context("interruptible_sleep_until");
     if let Err(error) = crate::future::block_on(crate::future::interruptible(
@@ -670,7 +682,7 @@ fn assert_sleepable_context(operation: &'static str) {
     assert!(
         is_sleepable_context(),
         "{operation} called from non-sleepable context: no non-idle current task, interrupt-like, \
-         local IRQs disabled, or no-preempt section held"
+         local IRQs disabled, no-preempt section held, or active RCU read scope"
     );
 }
 
@@ -690,8 +702,9 @@ fn can_sleep_task_context(task: &KtaskRef) -> bool {
         return false;
     }
     // A held no-preempt section must not span a switch either; its preempt
-    // credit would leak across the switched-out interval.
-    if task.preempt_section_held() {
+    // credit would leak across the switched-out interval. Explicit RCU scopes
+    // have a separate no-sleep contract, without raising that preempt count.
+    if task.preempt_section_held() || task.rcu_reader.is_reading() {
         return false;
     }
     true
@@ -701,7 +714,8 @@ fn can_sleep_task_context(task: &KtaskRef) -> bool {
 ///
 /// Requires an initialized non-idle task, no interrupt-like context (including
 /// BH-disabled sections), enabled local IRQs and, when tracked, no preemption
-/// protection. Call before acquiring wait-path spinlocks. This is a snapshot,
+/// protection. Explicit RCU read scopes must also have ended. Call before
+/// acquiring wait-path spinlocks. This is a snapshot,
 /// not permission across later context changes; it does not detect application
 /// dependency cycles or held sleepable locks.
 pub fn is_sleepable_context() -> bool {

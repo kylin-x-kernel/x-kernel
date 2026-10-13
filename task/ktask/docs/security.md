@@ -4,7 +4,19 @@
 
 `api::is_sleepable_context` accepts no external input and adds no unsafe boundary.
 It rejects missing or idle current tasks, interrupt-like/IRQ-masked contexts,
-and preemption protection when tracked. Sleep assertions and prepared waits
+and preemption protection when tracked. Explicit RCU read nesting also rejects
+sleeping and voluntary yielding, without preventing involuntary preemption.
+Only controlled tests enter these scopes; there is no reclamation capability.
+Scheduler enrollment borrows stable Arc-owned task storage. The per-CPU GC runs
+after leaving the exited task on that CPU and checks residual participation
+before moving or destroying it. Abandoned read scopes deliberately retain that
+allocation and all remaining owned resources once, with a diagnostic; this
+includes identity/runtime references and keeps diagnostic weak entries alive.
+The immutable runtime cannot simply be detached while shared task references
+may still borrow it. Normal outer exits remove their node first.
+No raw task pointer is sent to a deferred callback. IRQ/NMI read scope support
+is not implied by this task-context protocol.
+Sleep assertions and prepared waits
 share this gate to avoid inconsistent acceptance. This mitigates invalid-context service startup/stop;
 the caller remains responsible for dependency cycles and provider readiness.
 

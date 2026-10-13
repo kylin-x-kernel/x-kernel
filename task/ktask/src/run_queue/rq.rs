@@ -4,6 +4,10 @@
 
 //! Leave, pick, switch, resched kick, and run-queue operations.
 
+#[cfg(unittest)]
+#[path = "../tests/rcu_switch.rs"]
+mod tests_rcu_switch;
+
 use alloc::sync::Arc;
 #[cfg(feature = "smp")]
 use core::sync::atomic::AtomicUsize;
@@ -478,6 +482,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // Current expected preempt count is 2 for `NoPreemptIrqSave` because we also hold
         // the `woke` SpinNoIrqGuard lock here.
         assert!(curr.can_preempt(2));
+        assert!(!curr.rcu_reader.is_reading(), "blocking in RCU read scope");
         // CurrentTask slot + Scheduler.curr + caller clone (e.g. block_on).
         let strong = Arc::strong_count(curr);
         assert!(
@@ -800,6 +805,9 @@ impl RunQueue {
             rearm_local_timer();
         };
 
+        // SAFETY: IRQs/preemption are excluded and prev_task is this CPU's
+        // Arc-owned current task. Exited-task GC retains residual readers.
+        unsafe { crate::rcu::note_context_switch(&prev_task, self.cpu_id) };
         if prev_task.ptr_eq(&next_task) {
             #[cfg(feature = "sched_stat")]
             sched_stat_inc(&sched_stat_cpu(this_cpu_id()).switch_same);

@@ -5,7 +5,8 @@
 `is_sleepable_context` provides a nonblocking context query for execution-service
 startup and joined teardown. Sleep assertions and prepared waits reuse this
 query: it requires an initialized non-idle task, no interrupt-like context,
-enabled local IRQs and, when tracked, no preemption protection.
+enabled local IRQs and, when tracked, no preemption protection. Explicit RCU
+read participation also makes the task non-sleepable without disabling preemption.
 It neither grants permission across later context changes nor detects dependency
 cycles or held sleepable locks. Workerpool callers query before taking service
 locks; task and timer providers must still be initialized before startup.
@@ -31,6 +32,18 @@ Callers that need switch paths, preemption timing, SMP run-queue behavior, or
 new scheduling/diagnostic hooks should start here.
 
 ## Background
+
+Each task embeds `krcu::TaskReader` for explicit scoped read nesting. Controlled
+kernel tests exercise this accounting; no general RCU reclamation API is exposed.
+The sleepability predicate and blocking scheduler boundary reject active readers,
+and `yield_now` rejects voluntary yielding. Involuntary preemption eligibility
+does not inspect this counter. `rcu::note_context_switch` enrolls an active reader
+before same-task selection returns or an actual stack switch occurs; the common
+path includes migration helpers. CPU nodes have kernel lifetime and retain no
+owning task reference. The task retains its original node across migration;
+outer scope exit unlinks it. GC checks residual participation before attempting
+`Arc::try_unwrap`, permanently retaining abnormal exited readers instead of
+moving their linked storage or retrying them indefinitely.
 
 Owned timer preparation uses `ktimer_core::Timer::new_on` with a snapshot of the
 current logical CPU after platform per-CPU initialization. The platform accessor
