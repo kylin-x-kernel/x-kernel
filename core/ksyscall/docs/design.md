@@ -331,6 +331,18 @@ that its non-NULL input fails the real user-copy path, then checks EINVAL for
 both that address and NULL. Test assertions use the unittest framework so a
 failed check reports a test failure instead of panicking the kernel.
 
+## Poll result-array compatibility
+
+`poll` and `ppoll` clear each copied entry's `revents` before descriptor lookup.
+All negative descriptors are ignored. Invalid nonnegative entries contribute
+`POLLNVAL` and one ready entry, while valid entries are still polled during the
+same call. This prevents stale ignored events and invalid entries from hiding
+valid readiness. Duplicate descriptor entries are counted independently.
+An invalid entry makes the call ready without waiting for an unready valid
+entry; timeout, signal-mask and valid-event masking paths otherwise stay intact.
+Five user-task regressions cover ignored negatives, mixed ready/invalid entries,
+unready/invalid entries, duplicate ready entries and a zero-timeout control.
+
 ### Epoll millisecond timeout normalization
 
 `sys_epoll_pwait` maps every negative millisecond timeout to an unlimited wait,

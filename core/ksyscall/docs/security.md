@@ -200,6 +200,15 @@ is entered; rejecting CLOCK_REALTIME_COARSE does not relax any authorization
 for CLOCK_REALTIME. No unsafe operations, lock changes or additional privileges
 are introduced.
 
+## Poll result-array handling
+
+Ignored negative descriptors perform no file lookup and expose no retained
+input `revents` as an output event. Invalid nonnegative descriptors report
+`POLLNVAL` without skipping valid entries. Counting invalid entries as ready
+prevents waiting on unrelated unready files. The existing user-copy, temporary
+signal-mask and registered-wakeup boundaries remain unchanged; this adds no
+unsafe access, new locks or descriptor-table mutations.
+
 ### Negative epoll timeouts
 
 All negative millisecond timeouts represent unlimited waits rather than invalid
