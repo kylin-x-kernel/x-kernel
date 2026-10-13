@@ -125,3 +125,14 @@ not explicitly erase them. The crate does not intentionally log their contents.
   or stable inode change sequence.
 - Keep all file-derived arithmetic and reads on checked, recoverable paths.
 - Keep generated self-reference ownership and dependency assumptions visible.
+
+Pure BSS PT_LOAD segments declare no file data, so their offsets may exceed EOF.
+An aligned page prefix beyond EOF uses anonymous zero-filled memory. An in-file
+prefix retains its private file mapping to preserve preceding-segment bytes on
+a shared page; such bytes can also contain the program-header table. Only the
+BSS portion is zero-filled. Alignment, memory-range overflow, overlap and entry
+validation still apply, and nonempty declared file ranges must remain within EOF.
+
+File-private BSS page prefixes are capped at the actual executable size,
+including when the BSS offset lies beyond EOF within the same page. The
+remaining bytes are zero-filled rather than copied from the file cache.

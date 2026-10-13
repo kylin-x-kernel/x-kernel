@@ -296,18 +296,32 @@ fn map_elf(uspace: &mut MmSpace, load_bias: usize, prepared: &PreparedElfImage) 
             mapped_start, mapped_end, segment.flags
         );
 
+        let flags = mapping_flags(segment.flags);
+        if !segment.has_file_data && segment.file_start >= file.size() {
+            // Only discard the page prefix when it lies beyond EOF; an in-file
+            // prefix may carry bytes from an earlier segment sharing this page.
+            let start = VirtAddr::from_usize(mapped_start);
+            uspace.map(
+                start,
+                segment.mapping_size(),
+                flags,
+                false,
+                VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+            )?;
+            continue;
+        }
+
         // PT_LOAD mappings follow the Linux rule that both VMA start and file
         // offset are aligned down to the page boundary. The page prefix before
         // `p_vaddr` still belongs to the mapped file object and must not be
         // silently zero-filled.
-        let flags = mapping_flags(segment.flags);
         let (vma, runtime) = new_file_private_vma(
             VirtAddr::from_usize(mapped_start),
             segment.mapping_size(),
             PageSize::Size4K,
             file.clone(),
             segment.file_start,
-            Some(segment.file_data_end),
+            Some(segment.file_data_end.min(file.size())),
             flags,
         )?;
         uspace.map_runtime_vma(vma, false, runtime)?;
@@ -778,18 +792,22 @@ mod tests {
         SimpleFile, SimpleFs, VfsInode,
     };
     use memaddr::VirtAddr;
-    use memspace::MmSpace;
+    use memspace::{MmSpace, VmBackingKind};
     use unittest::def_test;
     use xmas_elf::program::{FLAG_R, FLAG_W, FLAG_X, Flags};
 
     use super::{
         ExecRequest, ExecSource, identity_aux_entries, mapping_flags, script_interpreter_args,
     };
-    use crate::elf_image::tests::executable_bytes;
+    use crate::elf_image::tests::{
+        executable_bytes, probe_bss_fixture, shared_page_bss_crosses_eof_fixture,
+        shared_page_bss_fixture,
+    };
 
     static TEST_FS: FileSystemType = FileSystemType::internal("kexec-test");
 
     fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
+        let cached_data = data.clone();
         let size = data.len() as u64;
         let mut inode = None;
         let super_block = SimpleFs::new_with(&TEST_FS, 0, |fs| {
@@ -804,20 +822,105 @@ mod tests {
                 file.clone(),
                 kvfs::empty_inode_operations(),
                 file,
-                NodeFlags::empty(),
+                NodeFlags::ALWAYS_CACHE,
                 init,
             ));
             SimpleDir::new_maker(fs, Arc::new(DirMapping::new()))
         });
+        let inode = inode.unwrap();
         let mount = Mount::new_root(&super_block);
-        let dentry = Dentry::new_file_from_inode(inode.unwrap(), None, "app".into());
+        let dentry = Dentry::new_file_from_inode(inode, None, "app".into());
+        let location = Path::new(mount, dentry);
+        let file = super::open_exec_file(&location, kcred::initial_cred()).unwrap();
+        for (index, bytes) in cached_data.chunks(4096).enumerate() {
+            file.mapping()
+                .with_folio_or_create(index as u64, |folio| {
+                    folio.data()[..bytes.len()].copy_from_slice(bytes);
+                    Ok(())
+                })
+                .expect("cache fixture bytes");
+        }
         ExecRequest::from_resolved_with_display(
-            Path::new(mount, dentry),
+            location,
             "/fixture/app".into(),
             args,
             vec!["EXEC_TEST=owned".into()],
             kcred::initial_cred(),
         )
+    }
+
+    #[def_test]
+    fn loads_pure_bss_beyond_eof_as_zeroed_anonymous_memory() {
+        let prepared =
+            super::prepare_user_app_request(image_request(probe_bss_fixture(0), vec![])).unwrap();
+        let mut mm = MmSpace::new_user_empty().unwrap();
+        super::load_prepared_user_app(&mut mm, prepared).unwrap();
+        let start = VirtAddr::from_usize(0x41f000);
+        let vma = mm.find_vma(start).unwrap();
+        assert_eq!(vma.start(), start);
+        assert_eq!(vma.end(), VirtAddr::from_usize(0x421000));
+        assert_eq!(
+            vma.flags(),
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER
+        );
+        assert!(matches!(
+            vma.backing().kind(),
+            VmBackingKind::AnonymousPrivate { .. }
+        ));
+        mm.populate_area(start, 0x2000, MappingFlags::READ).unwrap();
+        let mut bytes = vec![0xff; 0x2000];
+        mm.read(start, &mut bytes).unwrap();
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    #[def_test]
+    fn pure_bss_preserves_shared_page_file_bytes_and_program_headers() {
+        let data = shared_page_bss_fixture();
+        let expected = data[0x1000..0x1800].to_vec();
+        let prepared = super::prepare_user_app_request(image_request(data, vec![])).unwrap();
+        let mut mm = MmSpace::new_user_empty().unwrap();
+        super::load_prepared_user_app(&mut mm, prepared).unwrap();
+        let start = VirtAddr::from_usize(0x401000);
+        assert!(matches!(
+            mm.find_vma(start).unwrap().backing().kind(),
+            VmBackingKind::FilePrivate { .. }
+        ));
+        mm.populate_area(start, 0x1000, MappingFlags::READ).unwrap();
+        let mut bytes = vec![0xff; 0x1000];
+        mm.read(start, &mut bytes).unwrap();
+        assert_eq!(&bytes[..0x800], expected.as_slice());
+        assert!(bytes[0x800..].iter().all(|byte| *byte == 0));
+    }
+
+    #[def_test]
+    fn pure_bss_shared_page_crossing_eof_preserves_only_file_bytes() {
+        let data = shared_page_bss_crosses_eof_fixture();
+        let expected = data[0x1000..].to_vec();
+        let prepared = super::prepare_user_app_request(image_request(data, vec![])).unwrap();
+        // Poison the cached bytes past EOF: the loader must not expose them,
+        // even if a backing implementation leaves a nonzero folio tail.
+        prepared
+            .executable
+            .cache_entry
+            .borrow_file()
+            .mapping()
+            .with_folio_or_create(1, |folio| {
+                folio.data()[0x400..0x800].fill(0xcc);
+                Ok(())
+            })
+            .unwrap();
+        let mut mm = MmSpace::new_user_empty().unwrap();
+        super::load_prepared_user_app(&mut mm, prepared).unwrap();
+        let start = VirtAddr::from_usize(0x401000);
+        assert!(matches!(
+            mm.find_vma(start).unwrap().backing().kind(),
+            VmBackingKind::FilePrivate { .. }
+        ));
+        mm.populate_area(start, 0x1000, MappingFlags::READ).unwrap();
+        let mut bytes = vec![0xff; 0x1000];
+        mm.read(start, &mut bytes).unwrap();
+        assert_eq!(&bytes[..0x400], expected.as_slice());
+        assert!(bytes[0x400..].iter().all(|byte| *byte == 0));
     }
 
     #[def_test]
@@ -858,7 +961,7 @@ mod tests {
             super::load_prepared_user_app(&mut mm, prepared),
             Ok((expected_entry, expected_sp))
         );
-        // SimpleFile has no folio reader; inspect ELF VMAs without faulting them.
+        // Inspect the installed ELF mapping permissions.
         assert!(
             mm.find_vma(expected_entry)
                 .unwrap()

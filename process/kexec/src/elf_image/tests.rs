@@ -434,3 +434,69 @@ fn put_u32(data: &mut [u8], offset: usize, value: u32) {
 fn put_u64(data: &mut [u8], offset: usize, value: u64) {
     data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
+
+// Matches the original ARM64 probes: an unaligned pure BSS segment has an
+// offset beyond the small executable, but contributes no file bytes.
+pub(crate) fn probe_bss_fixture(file_bytes: u64) -> Vec<u8> {
+    let segments = [
+        TestSegment {
+            flags: 5,
+            offset: 0,
+            virtual_address: 0x400000,
+            file_size: 0x624,
+            memory_size: 0x624,
+            alignment: 0x10000,
+        },
+        TestSegment {
+            flags: 6,
+            offset: 0xfff0,
+            virtual_address: 0x41fff0,
+            file_size: file_bytes,
+            memory_size: 0x210,
+            alignment: 0x10000,
+        },
+    ];
+    let mut data = test_elf(2, current_machine(), 0x400300, &segments);
+    data.truncate(0x624);
+    data
+}
+
+#[def_test]
+fn accepts_pure_bss_offset_beyond_eof() {
+    let data = probe_bss_fixture(0);
+    let image = parse_image(&data).expect("pure BSS must not require file bytes");
+    assert_eq!(image.segments().len(), 2);
+    let bss = &image.segments()[1];
+    assert!(!bss.has_file_data);
+    assert_eq!(bss.mapping_start, 0x41f000);
+    assert_eq!(bss.mapping_end, 0x421000);
+}
+
+#[def_test]
+fn rejects_file_backed_segment_beyond_eof() {
+    let data = probe_bss_fixture(1);
+    assert_eq!(parse_image(&data).unwrap_err(), KError::InvalidExecutable);
+}
+
+/// Builds a shared-page BSS fixture with program headers in the retained prefix.
+pub(crate) fn shared_page_bss_fixture() -> Vec<u8> {
+    let segments = [
+        TestSegment { flags: 5, offset: 0, virtual_address: 0x400000, file_size: 0x1800, memory_size: 0x1800, alignment: 0x1000 },
+        TestSegment { flags: 6, offset: 0x1800, virtual_address: 0x401800, file_size: 0, memory_size: 0x800, alignment: 0x1000 },
+    ];
+    let mut data = test_elf(2, current_machine(), 0x400300, &segments);
+    let headers = data[64..176].to_vec();
+    data[0x1000..0x1800].fill(0xa5);
+    data[0x1100..0x1170].copy_from_slice(&headers);
+    put_u64(&mut data, 32, 0x1100);
+    data
+}
+
+/// Builds a shared-page fixture whose BSS offset exceeds EOF inside the page.
+pub(crate) fn shared_page_bss_crosses_eof_fixture() -> Vec<u8> {
+    let mut data = shared_page_bss_fixture();
+    // The first segment declares bytes through EOF; its remaining memory is BSS.
+    put_u64(&mut data, 0x1100 + 32, 0x1400);
+    data.truncate(0x1400);
+    data
+}

@@ -29,6 +29,7 @@ pub(super) struct ValidatedLoadSegment {
     pub(super) mapping_end: usize,
     pub(super) file_start: u64,
     pub(super) file_data_end: u64,
+    pub(super) has_file_data: bool,
     pub(super) flags: Flags,
 }
 
@@ -164,7 +165,8 @@ impl ValidatedElfImage {
                 .offset
                 .checked_add(header.file_size)
                 .ok_or(KError::InvalidExecutable)?;
-            if header.offset > file_size || file_data_end > file_size {
+            // A pure BSS segment has no bytes to read; its offset may be beyond EOF.
+            if header.file_size != 0 && file_data_end > file_size {
                 return Err(KError::InvalidExecutable);
             }
 
@@ -187,6 +189,7 @@ impl ValidatedElfImage {
                 mapping_end,
                 file_start,
                 file_data_end,
+                has_file_data: header.file_size != 0,
                 flags: header.flags,
             });
         }

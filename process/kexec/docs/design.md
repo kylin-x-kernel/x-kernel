@@ -209,7 +209,14 @@ replacement does not clear an old MM while independent active users retain it.
 ## Decisions and limitations
 
 Common file-private VMA construction keeps ELF mappings aligned with mmap/COW
-ownership. Stack and heap use normal anonymous MM APIs. Metadata and stack bytes
+ownership. Stack and heap use normal anonymous MM APIs. Pure BSS load segments
+(`p_filesz = 0`) may have offsets beyond EOF because they declare no file bytes.
+When their aligned page prefix starts beyond EOF, they use anonymous zero-filled
+mappings. In-file page prefixes retain private file mappings: a shared page may
+contain bytes from the preceding segment, including the program-header table.
+The BSS portion is zero-filled; nonempty declared file ranges must remain inside
+the executable.
+Metadata and stack bytes
 are prepared without a target MM; fallible installation remains separate. The
 exec syscall replaces only its own process binding, preserving independent
 CLONE_VM peers' old image, and distinguishes errors at the exchange boundary.
@@ -225,3 +232,7 @@ They check that installation errors propagate through the caller's commitment
 policy. The fixture payload contains metadata, not executable user instructions.
 Probe mechanics and observation contracts are documented alongside the test
 interfaces in `src/loader.rs`; production loading has no injection selector.
+
+File-private BSS page prefixes are capped at the actual executable size,
+including when the BSS offset lies beyond EOF within the same page. The
+remaining bytes are zero-filled rather than copied from the file cache.
