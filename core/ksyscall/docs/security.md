@@ -209,3 +209,7 @@ Unsupported `pidfd_getfd` flags fail before target-resource access or descriptor
 publication. This argument check does not add or establish ptrace credential
 authorization for the existing flags-zero path. Target lifetime, permission
 policy and FD-table locking remain separate concerns.
+
+`sysinfo` saturates uptime conversion rather than wrapping into a negative ABI
+value; the existing zero-initialized carrier and checked user-memory write
+remain unchanged.

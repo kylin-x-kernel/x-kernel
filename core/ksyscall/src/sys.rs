@@ -16,6 +16,7 @@ use kbuild_config::ARCH;
 use kerrno::{KError, KResult};
 use khal::mem;
 use kprocess::current_user_process;
+use ktime_types::TimeSpan;
 use linux_raw_sys::{
     ctypes::c_char,
     general::{
@@ -101,9 +102,24 @@ pub(crate) fn sys_uname(name: UserPtr<new_utsname>) -> KResult<isize> {
     Ok(0)
 }
 
-/// Get general system information such as process count and memory unit
+/// Convert elapsed boot time to Linux sysinfo seconds, rounding up.
+///
+/// Linux `do_sysinfo()` adds one second when the nanosecond part is nonzero.
+/// Unlike `clock_gettime(CLOCK_BOOTTIME)`, this ABI has no nanosecond field:
+/// its value can exceed `timespec.tv_sec` by one for the same instant.
+/// See <https://github.com/torvalds/linux/blob/v6.6/kernel/sys.c#L2601-L2611>.
+fn sysinfo_uptime_seconds(elapsed: TimeSpan) -> isize {
+    elapsed
+        .as_secs()
+        .saturating_add(u64::from(elapsed.subsec_nanos() != 0))
+        .min(isize::MAX as u64) as isize
+}
+
+/// Get general system information such as uptime, process count and memory unit
 pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
     let mut kinfo = k_sysinfo::default();
+    // Keep uptime on the same clock source as CLOCK_BOOTTIME.
+    kinfo.uptime = sysinfo_uptime_seconds(khal::time::monotonic_time().span_since_origin()) as _;
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
 
@@ -389,11 +405,53 @@ mod tests_sysinfo {
     use alloc::vec;
     use core::mem::{offset_of, size_of};
 
+    use ktime_types::TimeSpan;
+    use linux_raw_sys::general::{CLOCK_BOOTTIME, timespec};
     use posix_types::{UserPtr, system::k_sysinfo};
     use unittest::def_test;
-    use unittest_support::TestUserBuffer;
+    use unittest_support::{TestUserBuffer, TestUserValue};
 
-    use super::sys_sysinfo;
+    use super::{sys_sysinfo, sysinfo_uptime_seconds};
+
+    #[def_test]
+    fn test_sysinfo_uptime_rounding_and_saturation() {
+        assert_eq!(sysinfo_uptime_seconds(TimeSpan::from_secs(0)), 0);
+        assert_eq!(sysinfo_uptime_seconds(TimeSpan::from_nanos(1)), 1);
+        assert_eq!(sysinfo_uptime_seconds(TimeSpan::from_secs(2)), 2);
+        assert_eq!(
+            sysinfo_uptime_seconds(TimeSpan::from_nanos(2_000_000_001)),
+            3
+        );
+        assert_eq!(
+            sysinfo_uptime_seconds(TimeSpan::from_secs(u64::MAX)),
+            isize::MAX
+        );
+    }
+
+    #[def_test(user)]
+    fn test_sysinfo_uptime_matches_boot_clock() {
+        let size = size_of::<k_sysinfo>();
+        let buf = TestUserBuffer::new(size).unwrap();
+        let clock = TestUserValue::from_value(timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        })
+        .unwrap();
+        crate::time::sys_clock_gettime(CLOCK_BOOTTIME as i32, UserPtr::from(clock.as_user_ptr()))
+            .unwrap();
+        let before = clock.read();
+        let ptr = UserPtr::from(buf.as_user_ptr::<k_sysinfo>());
+        sys_sysinfo(ptr).unwrap();
+        let bytes = buf.read_bytes(size).unwrap();
+        let uptime = i64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        crate::time::sys_clock_gettime(CLOCK_BOOTTIME as i32, UserPtr::from(clock.as_user_ptr()))
+            .unwrap();
+        let after = clock.read();
+        // Compare independent ABI reads, not the conversion helper under test.
+        let before_rounded = before.tv_sec + i64::from(before.tv_nsec != 0);
+        let after_rounded = after.tv_sec + i64::from(after.tv_nsec != 0);
+        assert!(uptime >= before_rounded && uptime <= after_rounded);
+    }
 
     #[def_test(user)]
     fn test_sysinfo_zeroes_abi_padding() {

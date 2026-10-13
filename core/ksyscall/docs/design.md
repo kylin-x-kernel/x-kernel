@@ -344,3 +344,17 @@ The registered user-context regression uses an invalid descriptor to ensure
 `EINVAL` before looking up the pidfd or target descriptor, acquiring the target
 FD-table read guard, or allocating a new descriptor. The flags-zero duplication
 path still shares the original open file description and sets close-on-exec.
+
+## System uptime
+
+`sysinfo.uptime` reads the existing elapsed boot-time source used by
+`CLOCK_BOOTTIME`, rounds up to whole seconds, and saturates at the signed
+ABI maximum. Rounding matches Linux [`do_sysinfo()`](https://github.com/torvalds/linux/blob/v6.6/kernel/sys.c#L2601-L2611).
+Unlike `clock_gettime(CLOCK_BOOTTIME)`, `sysinfo` has no nanosecond field:
+for the same instant, its rounded value can be one greater than `timespec.tv_sec`.
+The boot clock currently aliases monotonic time. This syscall
+maintains no separate clock state and does not change clock or suspend semantics.
+
+The uptime regression brackets `sysinfo` with actual `clock_gettime(CLOCK_BOOTTIME)`
+reads and compares the rounded ABI values, without using the implementation
+helper as the expected-value source.
