@@ -588,10 +588,17 @@ impl ExtentStatusTree {
             end = end.max(next_start + status.len);
             self.ranges.remove(&next_start);
         }
-        // Eviction only causes a slow-path lookup; fragmented files must not
-        // grow an unbounded second extent index in resident inode memory.
-        if self.ranges.len() == Self::MAX_RANGES {
-            self.clear();
+        // Evict the shortest range when full, shedding the least coverage; ties
+        // drop the lowest offset (ascending iteration + min_by_key keeps the first
+        // minimum). Recency-free by design: eviction only drops a proof, never
+        // invents one, so a wrong victim costs one slow-path re-walk that
+        // re-caches the range and `has_initialized_overwrite` stays sound (it can
+        // under-report, never over-report). Clearing the whole tree instead made
+        // the randwrite benchmark re-enter the slow walk on ~half of its overwrites.
+        if self.ranges.len() >= Self::MAX_RANGES
+            && let Some((&shortest, _)) = self.ranges.iter().min_by_key(|(_, status)| status.len)
+        {
+            self.ranges.remove(&shortest);
         }
         self.ranges.insert(
             start,
@@ -3201,9 +3208,33 @@ mod unittests {
         cache.cache_written(last, last + 1);
         assert!(!cache.contains_written(0, 1));
         assert!(cache.contains_written(last, last + 1));
+        // Eviction must preserve the other ranges instead of clearing the tree.
+        assert!(cache.contains_written(4, 5));
         assert!(cache.ranges.len() <= ExtentStatusTree::MAX_RANGES);
         cache.cache_written(0, 1);
         assert!(cache.contains_written(0, 1));
+    }
+
+    #[def_test]
+    fn eviction_prefers_the_shortest_range_over_the_lowest_offset() {
+        let mut cache = ExtentStatusTree::default();
+        // Fill to capacity with equal-length ranges at low offsets, then add one
+        // strictly shorter range at a high offset so the candidate policies
+        // ("shortest range" vs "lowest offset") pick different victims.
+        for index in 0..(ExtentStatusTree::MAX_RANGES as u64 - 1) {
+            let start = index * 4;
+            cache.cache_written(start, start + 2);
+        }
+        cache.cache_written(0x4000, 0x4001);
+        assert_eq!(cache.ranges.len(), ExtentStatusTree::MAX_RANGES);
+
+        // The next insertion must evict the shortest range, not the lowest offset.
+        cache.cache_written(0x8000, 0x8002);
+
+        assert!(!cache.contains_written(0x4000, 0x4001));
+        assert!(cache.contains_written(0, 2));
+        assert!(cache.contains_written(0x8000, 0x8002));
+        assert_eq!(cache.ranges.len(), ExtentStatusTree::MAX_RANGES);
     }
 
     fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
