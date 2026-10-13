@@ -106,8 +106,10 @@ impl Execution {
     ///
     /// End source inspection and release provider/partition locks before calling.
     /// The callback and resource destruction run without Work protection. Running
-    /// stays occupied through both; completion wakes run after the final Work
-    /// access. Callback captures remain owned by Work across completion/cancellation;
+    /// stays occupied through both. Copy all terminal metadata before clearing
+    /// running: a later cancel_sync may observe idle and permit storage release
+    /// without waiting for completion wakes. Callback captures remain owned by
+    /// Work across completion/cancellation;
     /// only accepted occurrence resources are released here. Execution-context
     /// validation belongs to the bound execution provider. The callback must return normally;
     /// recovery is not supplied.
@@ -161,7 +163,10 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
             }
             #[cfg(not(feature = "self-wait-check"))]
             (work.callback)();
-            (work.finish_execution(), work.retirement)
+            // Clearing running permits a new cancel_sync to return immediately.
+            // It must not leave a subsequent read from externally owned Work.
+            let retirement = work.retirement;
+            (work.finish_execution(), retirement)
         };
         Self::complete_execution(finished);
         if let Some(retirement) = retirement {
@@ -176,7 +181,9 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
         let (finished, retirement) = {
             // SAFETY: same unique live execution as the enclosing test entry.
             let work = unsafe { work.cast::<Self>().as_ref() };
-            (work.finish_execution(), work.retirement)
+            // Keep the same pre-retirement snapshot as the production path.
+            let retirement = work.retirement;
+            (work.finish_execution(), retirement)
         };
         Self::complete_execution(finished);
         if let Some(retirement) = retirement {
@@ -184,6 +191,8 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
         }
     }
 
+    // This consumes the running claim's storage protection. Callers must copy
+    // every field they still need before entering, and never access Work after.
     fn finish_execution(&self) -> (WorkSlot<Option<T>>, Option<Arc<Waker>>) {
         let resources = self
             .state

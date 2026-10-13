@@ -8,9 +8,11 @@ repeated publication or outstanding references can cause leaks/double-free/UAF.
 The provider must bind a valid cross-CPU pair, retain publication, publish at most
 once and exclude other accesses/cancellation before freeing storage. Work's
 private immutable Retirement pair implements Send/Sync under that contract.
-Work::run_claimed and the test equivalent copy it while Work is valid, end
-all Work borrows, complete independent notifications, then invoke it. No Work
-access follows. Ordinary Work constructors never install this hook. Completion
+Work::run_claimed and the test equivalent copy it before clearing running, end
+all Work borrows, complete independent notifications, then invoke it. A new
+cancel_sync can observe an empty running slot and permit storage release before
+those notifications; retaining a pointer until notification is not sufficient.
+No Work access follows. Ordinary Work constructors never install this hook. Completion
 does not wait for the hook, and the action must retain its own context until use.
 
 Queue is exported through service.rs with flush and close_and_drain. These
@@ -103,7 +105,7 @@ does not install production services or justify a remote wake/IRQ-allocation cla
 | --- | --- |
 | queue/partition/pending.rs intrusive list | Non-owning UnsafeRef nodes require stable caller-owned Work; partition lock serializes membership |
 | work.rs pending_ptr, claim_pending_node, release_pending_node | Constructor binds concrete layout/function pair; pointers derive from the whole Work allocation; no storage release during access |
-| work/execution.rs erased Execution | Unique claim, matching callback type and live storage through callback/cleanup; no Work access after terminal notification |
+| work/execution.rs erased Execution | Unique claim, matching callback type and live storage through callback/cleanup; snapshot terminal metadata before clearing running, with no subsequent Work access |
 | queue/submission.rs and queue/partition.rs admission/removal | Partition -> Work locking, owner/phase revalidation and external lifetime contract |
 | queue/partition/delayed.rs queue_due | Caller retains stable Work through execution; owner and timer placement are revalidated under partition -> Work protection before intrusive insertion; current Queue payload supplies the color |
 | work/delayed.rs arm_on, deliver and DelayedTimerHandler | Pin fixes the inline Work address; constructor pairs its concrete layout with the erased function; release/acquire publishes the immutable non-owning pointer; external owner retains storage and captures through all calls and both drains |

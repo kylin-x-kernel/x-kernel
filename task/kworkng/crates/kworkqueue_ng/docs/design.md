@@ -21,9 +21,13 @@ ready demand, and release publishes a fresh notification when it becomes eligibl
 
 service::prepare_retiring_work supplies the owning facade with a one-shot no-op
 Work and a paired opaque context/terminal function. Ordinary constructors set
-Work.retirement to None. Execution copies the optional action before ending its
-last Work borrow, completes independent accounting/observers, then calls the
-action without any further Work access. The action can destroy enclosing storage.
+Work.retirement to None. Execution copies the optional action before clearing
+the running slot. Once that transition releases Work protection, a new
+cancel_sync may observe idle and allow the external owner to free Work without
+subscribing to the detached completion. All subsequent execution bookkeeping
+uses detached state, not Work. It completes independent accounting/observers,
+then calls the action without any further Work access. The action can destroy
+enclosing storage.
 This provider capability is unsafe: the integrator retains publication/storage,
 submits once, excludes cancellation/reuse and certifies the callback context.
 Cancellation does not invoke the hook. The hook is outside Work completion scope;
