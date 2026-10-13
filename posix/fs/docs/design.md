@@ -348,6 +348,16 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
    propagation group，所有 mount tree 已具有 private 语义，因此该请求作为幂等操作成功；
    shared、slave 和 unbindable 请求仍被显式拒绝。
 
+### readlink 长度 ABI
+
+`readlink` / `readlinkat` 在 syscall 入口以有符号 32 位整数接收长度；
+分发层截取寄存器低 32 位，入口先拒绝非正值，再访问路径和输出缓冲区。
+只有验证后的正值转换成 `usize` 交给复制逻辑，返回值不计 NUL 终止符，
+保持短缓冲区截断语义。
+
+`namei.rs` 的内核单测直接向 readlink 入口传入非正长度和 NULL 地址，
+确保长度拒绝先于用户内存访问；独立客体探针补充寄存器截断和成功复制检查。
+
 ## 并发模型
 
 `posix-fs` 本身不持有全局状态。

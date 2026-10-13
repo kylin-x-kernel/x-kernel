@@ -112,17 +112,30 @@ pub fn sys_symlinkat(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub fn sys_readlink(path: UserConstPtr<c_char>, buf: UserPtr<u8>, size: usize) -> KResult<isize> {
+/// Reads a symbolic link using the same signed-length ABI as [`sys_readlinkat`].
+pub fn sys_readlink(path: UserConstPtr<c_char>, buf: UserPtr<u8>, size: i32) -> KResult<isize> {
     sys_readlinkat(AT_FDCWD, path, buf, size)
 }
 
 /// Reads the target of a symbolic link.
+///
+/// The syscall ABI takes a signed `int` length, unlike libc's `size_t` wrapper.
+/// Returns the bytes copied, truncated to `size`, without a NUL terminator.
+///
+/// # Errors
+///
+/// Returns `KError::InvalidInput` for a non-positive size before accessing the
+/// pathname. Path lookup and user-buffer write errors are propagated.
 pub fn sys_readlinkat(
     dirfd: i32,
     path: UserConstPtr<c_char>,
     buf: UserPtr<u8>,
-    size: usize,
+    size: i32,
 ) -> KResult<isize> {
+    if size <= 0 {
+        return Err(KError::InvalidInput);
+    }
+    let size = size as usize;
     let path = path.load_string()?;
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
     let cred = kprocess::current_cred();
@@ -134,6 +147,34 @@ pub fn sys_readlinkat(
         buf.write_vm_slice(&link.as_bytes()[..read])?;
         Ok(read as isize)
     })
+}
+
+#[unittest::mod_test]
+mod readlink_tests {
+    use unittest::{assert_eq, def_test};
+
+    use super::*;
+
+    #[def_test]
+    fn readlinkat_rejects_nonpositive_length_before_user_access() {
+        for size in [0, -1, i32::MIN] {
+            assert_eq!(
+                sys_readlinkat(AT_FDCWD, UserConstPtr::default(), UserPtr::default(), size),
+                Err(KError::InvalidInput)
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[def_test]
+    fn readlink_rejects_nonpositive_length_before_user_access() {
+        for size in [0, -1, i32::MIN] {
+            assert_eq!(
+                sys_readlink(UserConstPtr::default(), UserPtr::default(), size),
+                Err(KError::InvalidInput)
+            );
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]

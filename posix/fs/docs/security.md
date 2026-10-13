@@ -142,6 +142,12 @@ kfd resources / kvfs / device and pipe implementations
     `remount`、`reconfigure_mount` 和 `detach` 保持显式调用契约，不引入隐式
     current-process 查询；内核内部调用方自行保证已获得授权。
 
+### readlink 长度输入边界
+
+用户传入的 `readlink` / `readlinkat` 长度按 Linux syscall 的 `int` ABI 解释，
+而非直接把整个寄存器当作 `usize`。非正值返回 `EINVAL`，不读取 pathname、
+不写输出缓冲区；正值复制仍使用 `UserPtr::write_vm_slice`，不引入裸指针访问。
+
 ## 线程安全
 
 `statx` 的 metadata 与 mount ID 来自同一次解析后持有的目标；取得身份时
