@@ -280,6 +280,9 @@ impl<T> Scheduler<T> {
             return false;
         };
         let class = curr.sched_class();
+        if class != SchedClass::Idle && elapsed != 0 {
+            curr.account_runtime(elapsed, tok);
+        }
         self.classes
             .get_mut(class)
             .account(curr, elapsed, &clock, tok)

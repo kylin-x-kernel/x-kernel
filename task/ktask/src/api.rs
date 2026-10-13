@@ -50,6 +50,24 @@ impl kspin::KernelGuardIf {
     }
 }
 
+/// Refreshes and returns the current task's execution time in nanoseconds.
+///
+/// Uses the scheduler's accounting clock, independent of user/system time and
+/// scheduling weight. Takes the local RQ lock, advances scheduler accounting,
+/// and may request preemption of the current task. IRQs and preemption are
+/// disabled across task selection, refresh and read. Call after scheduler
+/// initialization, without an RQ lock.
+/// For another task's committed value, use `KtaskRef::sum_exec_runtime_ns()`.
+///
+/// # Panics
+///
+/// Panics if the current task or its run queue has not been initialized.
+pub fn refresh_current_execution_runtime_ns() -> u64 {
+    let mut rq = current_run_queue::<NoPreemptIrqSave>();
+    rq.account_current_runtime(khal::time::monotonic_time_nanos());
+    current().sum_exec_runtime_ns()
+}
+
 /// Gets the current task, or returns [`None`] if the current task is not
 /// initialized.
 pub fn current_may_uninit() -> Option<CurrentTask> {

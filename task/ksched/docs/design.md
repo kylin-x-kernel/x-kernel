@@ -278,3 +278,7 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 `next_event_ns` 重新编程。
 `steal` 不看节流：idle-pull 可以把这些 waiter 摘到另一颗仍有 runtime 的
 CPU，占用记在目标 RQ 上。周期推进在 `advance` 里用绝对 `RqClock`，不另采样时钟。
+
+实际执行时间由 `SchedTask::sum_exec_runtime_ns` 保存。
+统一 `Scheduler::charge` 消费 `RqClock::advance` 的增量，非 Idle 任务在类算法
+处理前累计一次，不受 nice 权重影响。阻塞/迁移间隙不累计；读取只返回已提交值。

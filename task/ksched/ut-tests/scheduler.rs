@@ -1095,3 +1095,71 @@ fn dl_attr_change_is_admitted_before_mutation() {
     assert_eq!(s.set_attr(&t, greedy, 0), Err(SchedError::AdmissionFull));
     assert_eq!(s.attr(&t), dl_attr());
 }
+
+#[def_test]
+fn execution_runtime_charges_once_across_scheduler_operations() {
+    let mut s = sched();
+    let runner = task(1);
+    let waiter = task(2);
+    assert_eq!(runner.sum_exec_runtime_ns(), 0);
+    s.install_current(runner.clone(), 10);
+    s.update(30, UpdateKind::Account);
+    s.update(30, UpdateKind::SchedTick);
+    assert_eq!(runner.sum_exec_runtime_ns(), 20);
+    s.enqueue(waiter.clone(), EnqueueKind::New, 40);
+    assert_eq!(runner.sum_exec_runtime_ns(), 30);
+    assert_eq!(waiter.sum_exec_runtime_ns(), 0);
+    s.steal(&mut |_| true, 50);
+    assert_eq!(runner.sum_exec_runtime_ns(), 40);
+    s.set_attr(&runner, nice_attr(-5), 60).unwrap();
+    s.update(80, UpdateKind::Account);
+    assert_eq!(runner.sum_exec_runtime_ns(), 70);
+    s.preempt_current(80);
+    let next = s.pick_next(100);
+    assert!(Arc::ptr_eq(&next, &runner));
+    s.yield_current(110);
+    s.pick_next(120);
+    let exited = s.exit_current(130);
+    assert!(Arc::ptr_eq(&exited, &runner));
+    assert_eq!(exited.sum_exec_runtime_ns(), 90);
+    s.update(200, UpdateKind::Account);
+    assert_eq!(exited.sum_exec_runtime_ns(), 90);
+}
+
+#[def_test]
+fn execution_runtime_excludes_blocked_idle_and_migration_gaps() {
+    let mut source = sched();
+    let runner = task(1);
+    source.install_current(runner.clone(), 10);
+    source.block_current(30);
+    let idle_task = source.pick_next(30);
+    source.update(1000, UpdateKind::Account);
+    assert_eq!(idle_task.sum_exec_runtime_ns(), 0);
+    assert_eq!(runner.sum_exec_runtime_ns(), 20);
+    source.enqueue(runner.clone(), EnqueueKind::Wake { sync: false }, 1000);
+    source.preempt_current(1000);
+    assert!(Arc::ptr_eq(&source.pick_next(1000), &runner));
+    source.migrate_current(1030);
+    assert_eq!(runner.sum_exec_runtime_ns(), 50);
+
+    let mut dest = Scheduler::new(idle(), 2000);
+    dest.enqueue(runner.clone(), EnqueueKind::MigrateIn, 2010);
+    assert!(Arc::ptr_eq(&dest.pick_next(2020), &runner));
+    dest.update(2040, UpdateKind::Account);
+    assert_eq!(runner.sum_exec_runtime_ns(), 70);
+    source.update(3000, UpdateKind::Account);
+    assert_eq!(runner.sum_exec_runtime_ns(), 70);
+}
+
+#[def_test]
+fn execution_runtime_ignores_stale_clock_samples() {
+    let mut s = sched();
+    let runner = task(1);
+    s.install_current(runner.clone(), 10);
+    s.update(50, UpdateKind::Account);
+    s.update(30, UpdateKind::Account);
+    s.update(50, UpdateKind::Account);
+    assert_eq!(runner.sum_exec_runtime_ns(), 40);
+    s.exit_current(60);
+    assert_eq!(runner.sum_exec_runtime_ns(), 50);
+}

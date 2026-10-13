@@ -7,7 +7,7 @@
 use core::{
     cell::UnsafeCell,
     ops::Deref,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, AtomicU64, Ordering},
 };
 
 use intrusive_collections::RBTreeAtomicLink;
@@ -259,6 +259,8 @@ pub struct SchedTask<T> {
     class: AtomicU8,
     /// Lock-free RT priority for CPU placement. `0` when not RT.
     rt_prio: AtomicU8,
+    // Written only by the owning RQ's charge path; atomic for remote readers.
+    sum_exec_runtime_ns: AtomicU64,
     seat: RqCell<QueueSeat>,
     attr: RqCell<SchedAttr>,
     /// `fair.rs` names this field in `offset_of!`. Other reads go through [`Self::fair`].
@@ -286,6 +288,7 @@ impl<T> SchedTask<T> {
             inner,
             class: AtomicU8::new(class.as_u8()),
             rt_prio: AtomicU8::new(attr.rt_priority.get()),
+            sum_exec_runtime_ns: AtomicU64::new(0),
             seat: RqCell::new(QueueSeat::Detached),
             attr: RqCell::new(attr),
             fair: FairEntity::new(crate::DEFAULT_SLICE_NS),
@@ -298,6 +301,30 @@ impl<T> SchedTask<T> {
     /// Returns a reference to the inner task struct.
     pub const fn inner(&self) -> &T {
         &self.inner
+    }
+
+    /// Returns committed, unweighted execution time in nanoseconds.
+    ///
+    /// May be read on another CPU without the run-queue lock. Pending time on
+    /// a running task is not refreshed; this value does not publish task state.
+    /// Idle tasks remain at zero. The counter saturates rather than wrapping.
+    pub fn sum_exec_runtime_ns(&self) -> u64 {
+        self.sum_exec_runtime_ns.load(Ordering::Relaxed)
+    }
+
+    /// Commits an interval consumed by the owning scheduler's `charge` path.
+    ///
+    /// The caller must hold this task's owning RQ lock and account only its
+    /// current task. `RqLocked` does not encode which RQ is locked. Migration
+    /// must finish source accounting and detach the task before the destination
+    /// can account it. Remote readers and exit-statistics consumers must not write.
+    /// Every write must preserve this single-writer ownership: the load/store
+    /// below is not an atomic RMW. Adding an independently synchronized writer
+    /// requires redesigning interval ownership, not just making the sum atomic.
+    pub(crate) fn account_runtime(&self, elapsed_ns: u64, _tok: RqLocked) {
+        let total = self.sum_exec_runtime_ns.load(Ordering::Relaxed);
+        self.sum_exec_runtime_ns
+            .store(total.saturating_add(elapsed_ns), Ordering::Relaxed);
     }
 
     /// Live class. Acquire so a lock-free CPU-selection read sees the last
