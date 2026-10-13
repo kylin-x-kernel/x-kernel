@@ -693,6 +693,25 @@ mod copy_file_range_checks_tests {
         }
     }
 
+    /// A native table that refuses the input: its empty-range admission
+    /// query answers `Some(Err(..))`, modelling memfs refusing non-memfs
+    /// storage.
+    struct RefusingBackend;
+
+    impl FileOperations for RefusingBackend {
+        fn copy_chunk_from(
+            &self,
+            input: &VfsFile,
+            input_pos: u64,
+            output: &VfsFile,
+            output_pos: u64,
+            len: usize,
+        ) -> Option<KResult<usize>> {
+            let _ = (input, input_pos, output, output_pos, len);
+            Some(Err(KError::CrossesDevices))
+        }
+    }
+
     /// Linux shortens an oversized request at the source EOF; an unsigned
     /// range wrap is the only `EOVERFLOW`, so a request beyond `off_t`
     /// against a short source still copies what exists.
@@ -953,6 +972,179 @@ mod copy_file_range_checks_tests {
             ),
             Err(KError::from(LinuxError::EXDEV))
         );
+    }
+
+    /// Pair admission is decided in the checks, before the request is
+    /// shortened to the source EOF (Linux `generic_copy_file_checks`,
+    /// `fs/read_write.c:1506`), so a pair the destination cannot serve
+    /// reports `EXDEV` even for an empty request. `copy_file_range01`
+    /// probes cross-device support with exactly this shape: answering it
+    /// with a zero-byte success claims a capability the pair does not have.
+    #[unittest::def_test]
+    fn empty_request_keeps_the_pair_admission_verdict() {
+        let backend = Arc::new(PrimitivelessBackend);
+        let input = memfd_file("xdev-empty-src");
+        fill(&input, 16);
+        let output_base = memfd_file("xdev-empty-dst");
+        let output = output_base
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), backend)
+            .unwrap();
+        // An explicit zero length.
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                0,
+                false,
+            ),
+            Err(KError::from(LinuxError::EXDEV))
+        );
+        // A request past the source EOF, which the checks shorten to zero.
+        let mut input_offset = 16;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Err(KError::from(LinuxError::EXDEV))
+        );
+        assert_eq!(input_offset, 16);
+        assert_eq!(output_offset, 0);
+
+        // A servable pair keeps Linux's empty-request success.
+        let base = memfd_file("xdev-empty-same");
+        fill(&base, 16);
+        let output = base
+            .alloc_clone(
+                FMode::WRITE,
+                OpenFlags::empty(),
+                Arc::new(PrimitivelessBackend),
+            )
+            .unwrap();
+        let mut input_offset = 0;
+        let mut output_offset = 16;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &base,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                0,
+                false,
+            ),
+            Ok(0)
+        );
+    }
+
+    /// Linux resolves pair admission ahead of the range checks
+    /// (`generic_copy_file_checks`: `EXDEV` first, then `EOVERFLOW`, then the
+    /// shortening and `generic_write_check_limits`), so an unservable pair
+    /// reports `EXDEV` rather than the range verdict it would otherwise hit.
+    #[unittest::def_test]
+    fn admission_precedes_range_checks_for_unservable_pairs() {
+        let backend = Arc::new(PrimitivelessBackend);
+        let input = memfd_file("xdev-order-src");
+        fill(&input, 16);
+        let output_base = memfd_file("xdev-order-dst");
+        let output = output_base
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), backend)
+            .unwrap();
+        // A request whose range wraps reports `EXDEV`, not `EOVERFLOW`.
+        let mut input_offset = 1;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                usize::MAX,
+                false,
+            ),
+            Err(KError::from(LinuxError::EXDEV))
+        );
+        // A destination start at the file-size ceiling reports `EXDEV`,
+        // not `EFBIG`.
+        let mut input_offset = 0;
+        let mut output_offset = MAX_LFS_FILESIZE;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &input,
+                TransferPosition::At(&mut input_offset),
+                &output,
+                TransferPosition::At(&mut output_offset),
+                16,
+                false,
+            ),
+            Err(KError::from(LinuxError::EXDEV))
+        );
+
+        // A servable pair keeps the range verdicts: the same wrapping
+        // request reports `EOVERFLOW`.
+        let source = memfd_file("xdev-order-wrap-src");
+        fill(&source, 16);
+        let target = memfd_file("xdev-order-wrap-dst");
+        let mut input_offset = 1;
+        let mut output_offset = 0;
+        assert_eq!(
+            kvfs::copy_file_range(
+                &source,
+                TransferPosition::At(&mut input_offset),
+                &target,
+                TransferPosition::At(&mut output_offset),
+                usize::MAX,
+                false,
+            ),
+            Err(KError::from(LinuxError::EOVERFLOW))
+        );
+    }
+
+    /// A native table that refuses the input rejects the pair at admission:
+    /// the verdict reaches the caller for empty requests too, so it cannot
+    /// depend on a copy step actually running. A refusal may arrive in
+    /// either `KError` representation, so the assertions compare the
+    /// syscall-visible errno both of them leave the kernel as.
+    #[unittest::def_test]
+    fn refused_input_keeps_the_admission_verdict_when_empty() {
+        let input = memfd_file("xdev-refuse-src");
+        fill(&input, 16);
+        let output_base = memfd_file("xdev-refuse-dst");
+        let output = output_base
+            .alloc_clone(FMode::WRITE, OpenFlags::empty(), Arc::new(RefusingBackend))
+            .unwrap();
+        // An explicit zero length.
+        let mut input_offset = 0;
+        let mut output_offset = 0;
+        let empty = kvfs::copy_file_range(
+            &input,
+            TransferPosition::At(&mut input_offset),
+            &output,
+            TransferPosition::At(&mut output_offset),
+            0,
+            false,
+        );
+        assert_eq!(empty.map_err(LinuxError::from), Err(LinuxError::EXDEV));
+        // A request past the source EOF, which the checks shorten to zero.
+        let mut input_offset = 16;
+        let mut output_offset = 0;
+        let past_eof = kvfs::copy_file_range(
+            &input,
+            TransferPosition::At(&mut input_offset),
+            &output,
+            TransferPosition::At(&mut output_offset),
+            16,
+            false,
+        );
+        assert_eq!(past_eof.map_err(LinuxError::from), Err(LinuxError::EXDEV));
     }
 
     /// A destination table without a native primitive falls back to the

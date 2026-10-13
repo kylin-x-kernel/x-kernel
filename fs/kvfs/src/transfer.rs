@@ -425,18 +425,15 @@ fn pump_pipe_to_file(
 /// Runs the full Linux check table in order and returns the effective copy
 /// length: directories are rejected with `EISDIR`, every non-regular fd
 /// (pipes, sockets, devices) with `EINVAL`, a destination opened `O_APPEND`
-/// with `EBADF` (the copy would land at the wrong offset). Pair admission
-/// is not decided here: a destination table with a native chunk-copy
-/// primitive judges its own inputs, and a table without one falls back to
-/// the same-superblock rule (Linux's handler branch, `fs/read_write.c:1436`).
-/// The
-/// range checks then run in Linux's order: an unsigned wrap of the request
-/// is reported as `EOVERFLOW`, the request is shortened to the source EOF,
-/// and the destination's own ceiling applies — a start at or past the
-/// maximum file size is `EFBIG` and the count is clamped to what the
-/// destination can hold. Overlapping ranges within one inode are rejected
-/// with `EINVAL` so the chunked copy can never read bytes it has already
-/// rewritten; a zero-length request never overlaps and remains a no-op.
+/// with `EBADF` (the copy would land at the wrong offset), and a pair the
+/// destination cannot serve with `EXDEV`. The range checks then run in
+/// Linux's order: an unsigned wrap of the request is reported as
+/// `EOVERFLOW`, the request is shortened to the source EOF, and the
+/// destination's own ceiling applies — a start at or past the maximum file
+/// size is `EFBIG` and the count is clamped to what the destination can
+/// hold. Overlapping ranges within one inode are rejected with `EINVAL` so
+/// the chunked copy can never read bytes it has already rewritten; a
+/// zero-length request never overlaps and remains a no-op.
 fn verify_copy_file_range(
     input: &VfsFile,
     output: &VfsFile,
@@ -458,6 +455,27 @@ fn verify_copy_file_range(
     }
     if output.flags().contains(crate::OpenFlags::APPEND) {
         return Err(LinuxError::EBADF.into());
+    }
+    // Pair admission mirrors Linux `generic_copy_file_checks`
+    // (`fs/read_write.c:1506`) and belongs to the checks, not to the copy
+    // loop: Linux decides it before it shortens the request to the source
+    // EOF, so an unservable pair still reports `EXDEV` when the shortened
+    // request is empty. That empty shape is how `copy_file_range01` probes
+    // cross-device support, and answering it with `Ok(0)` would claim a
+    // capability the pair does not have. Linux branches on the DESTINATION
+    // table — a native primitive judges its own inputs, a table without one
+    // falls back to the same-superblock rule. An empty range is the probe:
+    // `None` means the table carries no primitive, `Some` means the
+    // primitive answered for this input.
+    let pair_is_servable = match output.copy_chunk_from(input, input_start, output_start, 0) {
+        Some(admission) => {
+            admission?;
+            true
+        }
+        None => Arc::ptr_eq(&input_inode.super_block()?, &output_inode.super_block()?),
+    };
+    if !pair_is_servable {
+        return Err(LinuxError::EXDEV.into());
     }
     // Linux reports `EOVERFLOW` when the range wraps its unsigned
     // arithmetic (`pos_in + count < pos_in || pos_out + count <
@@ -501,12 +519,12 @@ fn verify_copy_file_range(
 
 /// `copy_file_range(2)` boundary: the caller's position protocol resolves
 /// into explicit starts under the position locks, `verify_copy_file_range`
-/// runs the
-/// check table against those starts, and the pump copies between the local
-/// positions. Resolution, checks, copy and the position commit share one
-/// critical section (Linux `fdget_pos`), so concurrent transfers on a shared
-/// open file description neither duplicate ranges nor clobber a concurrent
-/// seek. [`TransferPosition::At`] sides run at the given offsets and are
+/// runs the check table against those starts — pair admission included, so
+/// an unservable pair reports `EXDEV` even when the request is empty — and
+/// the pump copies between the local positions. Resolution, checks, copy and
+/// the position commit share one critical section (Linux `fdget_pos`), so
+/// concurrent transfers on a shared open file description neither duplicate
+/// ranges nor clobber a concurrent seek. [`TransferPosition::At`] sides run at the given offsets and are
 /// advanced by the transferred count; `f_pos` is untouched for them. Like
 /// Linux `vfs_copy_file_range`, the copy allows partial success: an error
 /// after progress returns the completed prefix and commits it, so the
@@ -538,14 +556,6 @@ pub fn copy_file_range(
     );
     let (input_start, output_start) = positions.starts();
     let count = verify_copy_file_range(input, output, input_start, output_start, len as u64)?;
-    // Linux `generic_copy_file_checks` (fs/read_write.c:1436) branches on the
-    // DESTINATION table: a native primitive serves the pair and judges its
-    // own inputs (`EXDEV` for stores it cannot read); a table without one
-    // falls back to the generic pump under the same-superblock rule.
-    let input_super_block = input.inode().super_block()?;
-    let output_super_block = output.inode().super_block()?;
-    let same_super_block = Arc::ptr_eq(&input_super_block, &output_super_block);
-
     let mut input_pos = input_start;
     let mut output_pos = output_start;
     let result = pump(count as usize, |buf, chunk, _total| {
@@ -562,12 +572,7 @@ pub fn copy_file_range(
                     stop: confirmed < chunk,
                 })
             }
-            None => {
-                if !same_super_block {
-                    return Err(LinuxError::EXDEV.into());
-                }
-                file_pair_step(input, output, &mut input_pos, &mut output_pos, buf, chunk)
-            }
+            None => file_pair_step(input, output, &mut input_pos, &mut output_pos, buf, chunk),
         }
     });
 

@@ -498,7 +498,8 @@ pathname DAC。这对应 Linux `vfs_truncate()` 与 `do_ftruncate()` 的语义�
 KVFS 的传输入口负责文件缓冲和管道消费，syscall 不自行循环调用对象读写。
 短写计入累计量后返回；后续传输错误不能覆盖已完成量。零完成量的文件等待中断
 才可请求信号重启。显式 offset 回写失败是传输后的独立错误，不属于该累计规则。
-尚无零拷贝，也没有完整处理 `copy_file_range` 的同文件重叠和跨文件系统限制。
+尚无零拷贝；`copy_file_range` 的普通文件类型、同 inode 重叠与跨超级块准入已由
+KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
 `copy_file_range` 当前只接受 `flags == 0`，
 非零 flags 会在 syscall 边界返回 `InvalidInput`。
 
@@ -518,7 +519,8 @@ KVFS 的传输入口负责文件缓冲和管道消费，syscall 不自行循环�
 1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount。
 2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
 3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
-4. `copy_file_range` 尚未检查普通文件类型、同文件重叠和跨文件系统条件。
+4. `copy_file_range` 没有零拷贝路径；跨超级块配对只能由目标端的原生拷贝原语
+   服务，否则要求同一超级块。
 5. `mount` 尚不支持 move、recursive bind、shared/slave/unbindable propagation，以及
    只读策略之外的文件系统专用
    reconfigure。普通新挂载已转交一页 opaque mount data，但具体文本或二进制格式及选项仍由

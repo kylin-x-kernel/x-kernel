@@ -171,7 +171,13 @@ pub trait FileOperations: Send + Sync + 'static {
     /// implementation — the generic buffered pump serves the pair, and only
     /// same-superblock pairs at that. An implementation judges input
     /// compatibility itself and reports `EXDEV` for inputs it cannot serve,
-    /// so the VFS performs no identity comparison anywhere.
+    /// so the VFS performs no identity comparison anywhere. The VFS also
+    /// issues one empty-range (`len == 0`) query as pair admission, at the
+    /// point where Linux compares the two `f_op->copy_file_range` slots.
+    /// That query is the pair's verdict, so an implementation must answer it
+    /// without side effects and with the answer a data-carrying call would
+    /// give: `None` exactly when the table carries no primitive, and the
+    /// input judgement ahead of any empty-range short-circuit.
     fn copy_chunk_from(
         &self,
         input: &VfsFile,

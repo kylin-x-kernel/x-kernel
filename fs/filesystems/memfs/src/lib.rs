@@ -791,7 +791,9 @@ impl FileOperations for MemoryNode {
         len: usize,
     ) -> Option<KResult<usize>> {
         // The memfs implementation serves memfs storage only; any other
-        // input store is refused here, not by a VFS identity check.
+        // input store is refused here, not by a VFS identity check. The
+        // judgement precedes the empty-range early return so the VFS
+        // admission probe sees the refusal too.
         if input.path().inode().downcast::<MemoryNode>().is_err() {
             return Some(Err(KError::CrossesDevices));
         }
