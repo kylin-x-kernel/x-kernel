@@ -44,6 +44,38 @@ Backend readers must return a count no greater than the supplied buffer length
 and must not wait for input. The interface is internal kernel code, not a
 user-controlled length boundary.
 
+Every port owns a bounded 4096-byte ingress queue. PTY writers return only the
+accepted prefix; a full queue reports `WouldBlock` instead of discarding bytes.
+Queue locks cover only insertion, consumption and state snapshots. Reader and
+space notifications occur after releasing the queue lock. Master bypass reads
+the same ingress directly and poll cannot consume, transform, or hide input.
+
+Program output and echo serialize through the endpoint's output mutex. This is
+the sole PTY producer, so a room check can reserve a complete CRLF unit while
+the consumer only increases free room. OPOST/ONLCR conversion happens at write
+time, and original input counts are separate from expanded output counts.
+No CRLF suffix survives outside input ownership or flush semantics.
+This relies on the TtyWrite room contract: fitting units are accepted in full
+under producer serialization, or fail before publishing any bytes. Backends
+that can short-write must report only capacity that satisfies this guarantee.
+
+Input flush locks the work/manual reader before clearing ingress, processing
+prefetch, canonical state and cooked bytes. An old in-flight processing batch
+cannot republish input after the flush. Source-owned UART queues are not flushed.
+Space notifications also cover master close and output-policy changes so writers
+recheck capacity or return a transport error rather than staying asleep.
+Poll registration always subscribes to transport space/closure notifications,
+including when OUT was not requested, so peer closure also wakes IN and HUP
+waiters. Shared PTY termios changes notify both ingress space sources after
+releasing termios and input locks; neither endpoint's output waiter depends on
+an unrelated read or signal to recheck changed newline requirements.
+PTY output flush discards only the peer ingress under its queue lock, then wakes
+space waiters. It does not acquire the peer processing mutex or erase bytes
+already accepted by the peer line discipline. Combined flush first discards
+local input and then peer ingress without nesting the two endpoint locks.
+Native console output processing stays backend-owned, avoiding double CRLF
+expansion; PTY output groups ordinary bytes into bounded batch writes.
+
 The constructor assigns terminal or PTY-master identity independently of input
 processing. Controlling-terminal and foreground checks use this identity, so
 changing the processing policy does not change those access rules.
@@ -134,12 +166,26 @@ it is not a synchronous barrier against an already running signal/echo batch.
 ## Known Limitations
 
 PTY capacity is fixed; no per-mount quota or runtime resizing is supplied.
-Complete Linux master-close hangup,
-SIGHUP delivery and peer read/write EOF/EIO semantics are not supplied by pair
-reclamation; existing data-path limitations remain separate.
+Native console output and echo remain best effort; neither promises lossless
+delivery under saturation. Canonical-line storage retains its existing growable
+Vec policy; bounded ingress is not a bound on an entire canonical line.
+Master close makes slave poll report ERR/HUP. Slave reads serialize with input
+work and process retained ingress, prefetch and canonical delivery before
+returning cooked bytes without VMIN waits. EIO is returned only when this
+processing cannot publish further bytes; incomplete canonical lines still need
+a delimiter and are not finalized by closure. Writes report EIO through
+the closed peer ingress. Complete Linux hangup, SIGHUP delivery and symmetric
+EOF/EIO semantics in the opposite direction remain outside this implementation.
+In particular, closing the last slave file does not close its receive ingress
+while the master remains open. A master blocked on full ingress still needs a
+reader, flush or signal to resume; this change does not introduce slave-close
+hangup detection. Echo follows OPOST/ONLCR for LF; a CR with ICRNL disabled
+remains CR, as input processing and output newline conversion are separate.
 
 When a background process group reads the controlling terminal, the
-current implementation waits for it to reach the foreground; Linux's full
+current implementation waits for it to reach the foreground while the peer is
+open. After peer closure, background reads return EIO without consuming input
+reserved for foreground readers. Linux's full
 `SIGTTIN`/orphaned-process-group semantics are not implemented yet.
 
 `TIOCSCTTY` does not yet support Linux's privileged `arg == 1`

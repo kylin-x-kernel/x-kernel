@@ -17,8 +17,9 @@ or its work. Weak self-requeue shares
 the producer's fixed CPU binding. Each round consumes at most 256 input bytes
 or publishes at most 256 output bytes, including partial canonical-line delivery.
 Incomplete canonical input consumes budget even without output. Input-empty and
-output-full stop processing; budget exhaustion requeues. Reads and drain_input
-resubmit when output capacity becomes available. kworkng owns pending/running
+output-full stop processing; budget exhaustion requeues. Reads resubmit when
+cooked capacity becomes available; input flush serializes with the worker and
+wakes blocked ingress producers. kworkng owns pending/running
 state; TTY does not duplicate it.
 
 Echo and signal delivery run in task context under the reader mutex, without
@@ -29,10 +30,19 @@ is unchanged; a per-round budget is not a maximum line length.
 
 ## Input Port And Line Discipline
 
-`TtyPort<R, W>` owns the backend reader, one 80-byte prefetch batch, processing
-mode, prepared work, and readable notifications.
-Existing UART/PTY queues remain the raw-input storage; there is no additional
-4 KiB queue at the TTY boundary. `InputReader` retains a partially consumed batch.
+`TtyPort<R, W>` owns bounded ingress, processing mode, prepared work, and
+readable notifications. Every port uses a fixed 4096-byte `InputIngress`.
+This is a port-owned receive queue analogous to a Linux TTY flip buffer,
+not a line-discipline buffer or a writer-private cache. Its readable PollSet
+serves raw master reads; its space PollSet serves peer writers; its input Waker
+schedules the receiving port's worker. Cooked readability and canonical state
+remain separate and belong to the line discipline and processing port.
+PTY writers push directly into the peer port's shared ingress and return the
+accepted prefix. Native pull adapters stage source bytes into their port's
+ingress before processing; upstream UART storage remains driver-owned.
+`InputReader` retains at most one partially consumed 80-byte processing batch.
+Master bypass reads ingress directly, without prefetch, CRLF expansion, or a
+second readable queue. PTY master poll only observes queued bytes.
 
 `LineDiscipline<W>` owns canonical editing and partial-line delivery state. Its
 `receive(bytes, input_budget, output_budget)` consumes a prefix and reports both
@@ -43,13 +53,18 @@ Terminal read policy (canonical/VMIN/VTIME interpretation) also stays in ldisc;
 the port controls when to retry processing and notify waiters.
 
 ```text
-UART / PTY raw queue -> port prefetch -> ldisc.receive -> cooked queue -> read
-                             ^                              |
-                             +------ output-space retry ----+
+native pull / PTY push -> port ingress -> ldisc.receive -> cooked queue -> read
+                              |              ^                 |
+                              |              +-- work retry ---+
+                              +-> master raw read
+ingress consumption / flush -> space notification -> peer writer retry
 ```
 
-The current adapters remain pull-based: `TtyRead` returns immediately with at
-most the supplied slice length. `TtyWrite` handles task-context output/echo.
+`TtyRead::input_ingress` shares a push source's receiver-owned queue; otherwise
+the port uses the adapter's immediate, slice-bounded `read` method.
+`TtyWrite::write` returns accepted bytes, `write_room` reports byte capacity,
+and `register_tx` registers space notifications. Native console output is
+explicitly best effort, unlike the PTY transport.
 Native console binding is host integration in `tty/ntty.rs`; `WorkHandle` is
 not exposed to the serial driver. A private `InputWake` weakly references
 `InputWork`, which owns the fixed CPU route and an optional prepared work handle.
@@ -60,8 +75,9 @@ restart processing, even if the owner object remains referenced.
 
 Dropping the port closes its input owner without waiting. A running batch may
 finish against its original transport; kworkng drains and destroys captures in
-task context. No synchronous wait occurs in port destruction. Master bypass
-processing and existing PTY overflow limitations remain unchanged. Device-node
+task context. No synchronous wait occurs in port destruction. Closing the master
+closes its ingress and wakes blocked slave writers with a transport error.
+Device-node
 and open-file lifecycle must release or explicitly close processing owners;
 work reclamation alone does not return an allocated PTY number.
 No backend switching or hot-unplug is implemented.
@@ -72,8 +88,65 @@ processing mode; choosing bypass processing alone does not make a TTY a master.
 Console, PTY endpoints and `/dev/tty` open as non-seekable streams. VFS does
 not hold the file-position mutex across stream I/O, so a blocked read cannot
 prevent writes through a duplicated descriptor of the same open file.
-A future push adapter can feed the same receive/progress interface without
-changing terminal parsing, but must own its queue and connection shutdown.
+Push adapters share ingress ownership without changing terminal parsing.
+
+## Output Processing And Backpressure
+
+Program output and echo share one output-line-discipline mutex per endpoint.
+PTY slave output expands LF to CRLF only when both OPOST and ONLCR are set
+at write time; master-to-slave input bypasses this output processing. Room is
+checked for each complete output unit before publishing, so CRLF never needs
+a retained suffix. Write results count original input bytes, not expanded bytes.
+No other producer writes the PTY transport outside this output mutex.
+The TtyWrite contract guarantees full acceptance for a unit fitting write_room
+when producers are serialized. A closure race may return an error before any
+publication; it cannot produce a short CRLF followed by a duplicate retry.
+Plain-byte runs are submitted in batches; only LF requires a separate CRLF unit.
+Native console writers declare backend-owned output processing, so the TTY
+passes their output through in a batch and does not expand LF a second time.
+The existing serial backend policy also serves kernel logs and remains unchanged.
+
+Nonblocking writes return the accepted prefix, or `WouldBlock` if nothing fits.
+Blocking writes retry remaining input through `poll_file_io`, waiting on peer
+ingress space; interruption or error preserves already accepted progress.
+Ingress reads and input flush wake writers after releasing the queue lock.
+OUT readiness reserves a complete two-byte unit when CRLF conversion is enabled;
+otherwise any free byte suffices. Termios changes wake output waiters to recheck.
+PTY endpoints share termios, so TCSETS* notifies both the writer's peer ingress
+space and the local ingress space used by the opposite endpoint's writer.
+Transport space/closure notifications are registered independently of the
+requested poll mask, allowing input-only and hangup-only waiters to observe
+ERR/HUP when the peer receive queue closes.
+After peer closure, reads acquire the input-reader mutex and synchronously
+process ingress, prefetch and pending canonical delivery until input is exhausted
+or the cooked queue is full. They return cooked bytes without waiting for VMIN;
+subsequent reads continue processing retained input before returning EIO.
+Incomplete canonical lines retain the existing requirement for a line delimiter;
+closure does not synthesize one or turn terminal control characters into data.
+Background readers report EIO immediately after peer closure without consuming
+foreground input; while the peer remains open, they retain foreground waiting.
+Echo remains best effort because input processing cannot block on its peer's
+output capacity. It is not part of the program-write delivery guarantee.
+
+TCIFLUSH, the input side of TCIOFLUSH and input-flushing termios updates clear ingress, processing
+prefetch, canonical state and cooked bytes while holding the input-reader mutex.
+Newly pushed bytes after the ingress clear belong to the next input epoch.
+TCOFLUSH clears the peer port's unconsumed ingress, in either direction,
+matching Linux PTY driver flushing of the peer flip buffer. TCIOFLUSH performs
+both local input flush and peer ingress flush. Bytes already transferred into
+the peer's processing batch, canonical state or cooked queue are past the
+output-flush boundary; clearing those requires a peer input flush. The two
+directions are cleared independently, without nesting endpoint reader locks.
+Clearing ingress releases its queue lock before waking blocked producers.
+Concurrent bytes pushed after each clear belong to the next input epoch.
+Console output flush remains a no-op; native hardware queues remain source-owned.
+
+The PTY regressions use manual slave processing to make saturation deterministic
+while exercising the production write loop and poll registrations. They cover
+multi-capacity delivery, partial nonblocking retry, reader-triggered writer wake,
+atomic CRLF publication, bidirectional output flush wake and input/combined flush.
+The existing Work-mode case covers deferred slave input and echo. Console and
+port regressions cover backend-owned conversion and batching of plain bytes.
 
 ## Native Backend Connection
 
@@ -229,8 +302,8 @@ TTY reads use `kvfs::poll_file_io`: available input is attempted before waiting
 and rechecked after signal interruption. A still-blocked read returns the
 file-wait marker; the read syscall boundary and signal delivery decide whether
 to restart or report EINTR. Line-discipline consumption remains responsible for
-the returned byte count. This does not add output backpressure, VTIME handling,
-or partial reads below VMIN; those remain outside the wait contract.
+the returned byte count. This does not add VTIME handling or partial reads
+below VMIN; those remain outside the wait contract.
 
 TTY ioctl paths require the current task to be a user-process thread,
 because permission and session checks depend on `current_user_thread()`.

@@ -3,74 +3,71 @@
 // See LICENSES for license details.
 
 use alloc::sync::{Arc, Weak};
-use core::task::Waker;
 
-use kpoll::PollSet;
-use kspin::SpinNoPreempt;
-use ringbuf::{
-    Cons, HeapRb, Prod,
-    traits::{Consumer, Producer},
-};
+use kerrno::KResult;
+use kpoll::{PollContext, PollRegisterError};
 
 use super::{PtyPair, Tty, TtyKind};
 use crate::{
-    port::{ProcessMode, TtyConfig, TtyRead, TtyWrite},
+    port::{InputIngress, ProcessMode, TtyConfig, TtyRead, TtyWrite},
     terminal::Terminal,
 };
-
-const PTY_BUF_SIZE: usize = 4096;
 
 /// Pseudo-terminal driver
 pub type PtyDriver = Tty<PtyReader, PtyWriter>;
 
-type Buffer = Arc<HeapRb<u8>>;
-
-/// PTY reader consuming data from ring buffer
-pub struct PtyReader(Cons<Buffer>);
+/// PTY reader sharing the receiving port's bounded ingress.
+pub struct PtyReader(Arc<InputIngress>);
 
 impl PtyReader {
-    pub fn new(buffer: Buffer) -> Self {
-        Self(Cons::new(buffer))
+    pub fn new(ingress: Arc<InputIngress>) -> Self {
+        Self(ingress)
     }
 }
 
 impl TtyRead for PtyReader {
     fn read(&mut self, buf: &mut [u8]) -> usize {
-        self.0.pop_slice(buf)
+        self.0.read(buf)
+    }
+
+    fn input_ingress(&self) -> Option<Arc<InputIngress>> {
+        Some(self.0.clone())
     }
 }
 
-/// PTY writer producing data into ring buffer
+/// PTY writer pushing only the accepted prefix into the peer's ingress.
 #[derive(Clone)]
-pub struct PtyWriter(Arc<SpinNoPreempt<Prod<Buffer>>>, PtyNotification);
-
-#[derive(Clone)]
-enum PtyNotification {
-    Input(Waker),
-    Readable(Arc<PollSet>),
-}
+pub struct PtyWriter(Arc<InputIngress>);
 
 impl PtyWriter {
-    fn new(buffer: Buffer, notification: PtyNotification) -> Self {
-        Self(
-            Arc::new(SpinNoPreempt::new(Prod::new(buffer))),
-            notification,
-        )
+    pub(super) fn new(ingress: Arc<InputIngress>) -> Self {
+        Self(ingress)
     }
 }
 
 impl TtyWrite for PtyWriter {
-    fn write(&self, buf: &[u8]) {
-        let read = self.0.lock().push_slice(buf);
-        match &self.1 {
-            PtyNotification::Input(waker) => waker.wake_by_ref(),
-            PtyNotification::Readable(poll_rx) => {
-                poll_rx.wake();
-            }
-        }
-        if read < buf.len() {
-            warn!("Discarding {} bytes written to pty", buf.len() - read);
-        }
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
+        self.0.push_input(buf)
+    }
+
+    fn write_room(&self) -> usize {
+        self.0.available_input_room()
+    }
+
+    fn register_tx(&self, context: &mut PollContext<'_>) -> Result<(), PollRegisterError> {
+        self.0.register_space(context)
+    }
+
+    fn notify_tx(&self) {
+        self.0.notify_space();
+    }
+
+    fn flush_output(&self) {
+        self.0.clear();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.0.is_closed()
     }
 }
 
@@ -87,9 +84,9 @@ pub(super) fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
 }
 
 pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, Arc<PtyDriver>) {
-    let master_to_slave = Arc::new(HeapRb::new(PTY_BUF_SIZE));
-    let slave_to_master = Arc::new(HeapRb::new(PTY_BUF_SIZE));
-    let poll_rx_master = Arc::new(PollSet::new());
+    let master_to_slave = Arc::new(InputIngress::default());
+    let slave_to_master = Arc::new(InputIngress::default());
+    let poll_rx_master = slave_to_master.readable();
 
     let terminal = Arc::new(Terminal::default());
 
@@ -98,10 +95,7 @@ pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, 
         TtyKind::Terminal,
         TtyConfig {
             reader: PtyReader::new(master_to_slave.clone()),
-            writer: PtyWriter::new(
-                slave_to_master.clone(),
-                PtyNotification::Readable(poll_rx_master.clone()),
-            ),
+            writer: PtyWriter::new(slave_to_master.clone()),
             process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
         pair.clone(),
@@ -122,7 +116,7 @@ pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, 
         TtyKind::PtyMaster,
         TtyConfig {
             reader: PtyReader::new(slave_to_master),
-            writer: PtyWriter::new(master_to_slave, PtyNotification::Input(input_waker.clone())),
+            writer: PtyWriter::new(master_to_slave),
             process_mode: ProcessMode::None(poll_rx_master),
         },
         pair,

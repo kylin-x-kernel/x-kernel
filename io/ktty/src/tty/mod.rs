@@ -14,9 +14,10 @@ use kvfs::{DeviceFileOps, NodeFlags, VfsFile, VfsFileBuilder, VfsInode, poll_fil
 use osvm::{VirtMutPtr, VirtPtr};
 
 use crate::{
-    port::{TtyConfig, TtyPort, TtyRead, TtyWrite},
+    port::{InputIngress, TtyConfig, TtyPort, TtyRead, TtyWrite},
     terminal::{
         Terminal, WindowSize,
+        ldisc::OutputLineDiscipline,
         termios::{Termios, Termios2},
     },
 };
@@ -77,6 +78,8 @@ pub struct Tty<R, W> {
     terminal: Arc<Terminal>,
     input: Mutex<TtyPort<R, W>>,
     writer: W,
+    output: Arc<Mutex<OutputLineDiscipline<W>>>,
+    ingress: Arc<InputIngress>,
     kind: TtyKind,
     pty_pair: Option<Weak<PtyPair>>,
 }
@@ -99,12 +102,17 @@ impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
         pty_pair: Option<Weak<PtyPair>>,
     ) -> Arc<Self> {
         let writer = config.writer.clone();
-        let input = Mutex::new(TtyPort::new(terminal.clone(), config));
+        let port = TtyPort::new(terminal.clone(), config);
+        let output = port.output.clone();
+        let ingress = port.ingress.clone();
+        let input = Mutex::new(port);
         Arc::new_cyclic(|this| Self {
             this: this.clone(),
             terminal,
             input,
             writer,
+            output,
+            ingress,
             kind,
             pty_pair,
         })
@@ -112,6 +120,36 @@ impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
 }
 
 impl<R: TtyRead, W: TtyWrite> Tty<R, W> {
+    async fn write_output(&self, is_nonblocking: bool, buf: &[u8]) -> KResult<usize> {
+        let mut written = 0;
+        while written < buf.len() {
+            match poll_file_io(self, IoEvents::OUT, is_nonblocking, || {
+                self.output.lock().write(&buf[written..])
+            })
+            .await
+            {
+                Ok(0) => break,
+                Ok(count) => written += count,
+                Err(_) if written != 0 => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush_queues(&self, selector: u32) -> KResult<()> {
+        match selector {
+            linux_raw_sys::general::TCIFLUSH => self.input.lock().drain_input(),
+            linux_raw_sys::general::TCOFLUSH => self.writer.flush_output(),
+            linux_raw_sys::general::TCIOFLUSH => {
+                self.input.lock().drain_input();
+                self.writer.flush_output();
+            }
+            _ => return Err(KError::InvalidInput),
+        }
+        Ok(())
+    }
+
     fn hold_pty_open(&self, file: &mut VfsFileBuilder) -> KResult<()> {
         if let Some(pair) = &self.pty_pair {
             let pair = pair.upgrade().ok_or(KError::Io)?;
@@ -264,22 +302,28 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                 if self.kind == TtyKind::PtyMaster
                     || self.terminal.job_control.current_in_foreground()
                 {
-                    self.input.lock().read(buf)
+                    let mut input = self.input.lock();
+                    if self.writer.is_closed() {
+                        input.read_after_peer_close(buf)
+                    } else {
+                        input.read(buf)
+                    }
+                } else if self.writer.is_closed() {
+                    Err(KError::Io)
                 } else {
                     // TODO: a background process group reading the controlling
                     // terminal should receive SIGTTIN (or `EIO` when SIGTTIN is
                     // ignored/blocked or the group is orphaned), per POSIX. For now
-                    // we silently block until the reader reaches the foreground,
-                    // which can stall job control.
+                    // while the peer remains open, we silently block until the
+                    // reader reaches the foreground, which can stall job control.
                     Err(KError::WouldBlock)
                 }
             },
         ))
     }
 
-    fn write(&self, _file: &VfsFile, buf: &[u8], _offset: u64) -> KResult<usize> {
-        self.writer.write(buf);
-        Ok(buf.len())
+    fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> KResult<usize> {
+        block_on(self.write_output(file.is_nonblocking(), buf))
     }
 
     fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
@@ -297,29 +341,23 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
                 if cmd == TCSETSF {
                     self.input.lock().drain_input();
                 }
+                self.writer.notify_tx();
+                // Shared PTY termios also changes the peer's output requirements.
+                self.ingress.notify_space();
             }
             TCSETS2 | TCSETSF2 | TCSETSW2 => {
                 *self.terminal.termios.lock() = Arc::new((arg as *const Termios2).read_vm()?);
                 if cmd == TCSETSF2 {
                     self.input.lock().drain_input();
                 }
+                self.writer.notify_tx();
+                self.ingress.notify_space();
             }
             // TCSBRK: send break / drain output. This virtual terminal has no
             // physical serial line and no kernel output buffer, so it is an
             // intentional no-op (including the `arg == 0` drain-output case).
             TCSBRK => {}
-            TCFLSH => match arg as u32 {
-                linux_raw_sys::general::TCIFLUSH => self.input.lock().drain_input(),
-                linux_raw_sys::general::TCIOFLUSH => {
-                    // TCIOFLUSH drains input and output; with no kernel output
-                    // buffer (writes go straight to hardware) only input is
-                    // flushed here.
-                    self.input.lock().drain_input();
-                }
-                // No kernel output buffer to flush (writes go to hardware).
-                linux_raw_sys::general::TCOFLUSH => {}
-                _ => return Err(KError::InvalidInput),
-            },
+            TCFLSH => self.flush_queues(arg as u32)?,
             TIOCGPGRP => {
                 let foreground = if self.kind == TtyKind::PtyMaster {
                     self.terminal
@@ -413,9 +451,13 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
 
 impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
     fn poll(&self) -> IoEvents {
-        let mut events = IoEvents::OUT | self.terminal.job_control.poll();
+        let mut events = self.terminal.job_control.poll();
         if self.kind == TtyKind::PtyMaster || events.contains(IoEvents::IN) {
             events.set(IoEvents::IN, self.input.lock().poll_read());
+        }
+        events.set(IoEvents::OUT, self.output.lock().write_room() != 0);
+        if self.writer.is_closed() {
+            events |= IoEvents::ERR | IoEvents::HUP;
         }
         events
     }
@@ -431,6 +473,8 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
         if events.contains(IoEvents::IN) {
             self.input.lock().register_rx(context)?;
         }
+        // Peer closure reports ERR/HUP regardless of the requested event mask.
+        self.writer.register_tx(context)?;
         Ok(())
     }
 }
@@ -515,7 +559,9 @@ mod tests {
     }
 
     impl TtyWrite for EmptyIo {
-        fn write(&self, _buf: &[u8]) {}
+        fn write(&self, buf: &[u8]) -> kerrno::KResult<usize> {
+            Ok(buf.len())
+        }
     }
 
     #[def_test(user, serial)]

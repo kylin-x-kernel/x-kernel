@@ -4,12 +4,11 @@
 
 //! Terminal input semantics, independent of backend readiness and execution.
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
 
-use kerrno::KError;
+use kerrno::{KError, KResult};
 use ksignal::SignalInfo;
 use linux_raw_sys::general::{
-    ECHOCTL, ECHOK, ICRNL, IGNCR, ISIG, VEOF, VERASE, VKILL, VMIN, VTIME,
+    ECHOCTL, ECHOK, ICRNL, IGNCR, ISIG, ONLCR, OPOST, VEOF, VERASE, VKILL, VMIN, VTIME,
 };
 use ringbuf::{
     CachingProd,
@@ -21,16 +20,100 @@ use crate::{
     terminal::{Terminal, termios::Termios2},
 };
 
+/// Serializes program output and echo so room checks reserve complete units.
+/// PTY writers have one producer through this lock; consumers only free room.
+pub(crate) struct OutputLineDiscipline<W> {
+    terminal: Arc<Terminal>,
+    writer: W,
+    bypass: bool,
+}
+
+impl<W: TtyWrite> OutputLineDiscipline<W> {
+    pub(crate) fn new(terminal: Arc<Terminal>, writer: W, bypass: bool) -> Self {
+        let bypass = bypass || writer.handles_output_processing();
+        Self {
+            terminal,
+            writer,
+            bypass,
+        }
+    }
+
+    /// Returns original input bytes accepted, never transformed output length.
+    /// No unaccepted CRLF suffix is retained after returning to the caller.
+    /// The serialized producer relies on `TtyWrite` accepting complete units
+    /// whose length fits the reported room, or failing before publication.
+    pub(crate) fn write(&self, bytes: &[u8]) -> KResult<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        if self.writer.is_closed() {
+            return Err(KError::Io);
+        }
+        let term = self.terminal.load_termios();
+        if self.bypass || !term.has_oflag(OPOST) || !term.has_oflag(ONLCR) {
+            return match self.writer.write(bytes) {
+                Ok(0) => Err(KError::WouldBlock),
+                result => result,
+            };
+        }
+        let mut accepted = 0;
+        while accepted < bytes.len() {
+            let remaining = &bytes[accepted..];
+            let is_newline = remaining[0] == b'\n';
+            let output = if is_newline {
+                b"\r\n".as_slice()
+            } else {
+                let length = remaining
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .unwrap_or(remaining.len());
+                &remaining[..length.min(self.writer.write_room())]
+            };
+            if output.is_empty() || (is_newline && self.writer.write_room() < 2) {
+                break;
+            }
+            match self.writer.write(output) {
+                Ok(count) if count == output.len() => {
+                    accepted += if is_newline { 1 } else { count };
+                }
+                Ok(count) if !is_newline => {
+                    accepted += count;
+                    break;
+                }
+                Ok(_) => break,
+                Err(error) if accepted == 0 => return Err(error),
+                Err(_) => break,
+            }
+        }
+        if accepted == 0 {
+            Err(KError::WouldBlock)
+        } else {
+            Ok(accepted)
+        }
+    }
+
+    /// Conservatively reserves a full CRLF unit when newline conversion is on.
+    /// This avoids reporting OUT while a blocked newline cannot make progress.
+    pub(crate) fn write_room(&self) -> usize {
+        let term = self.terminal.load_termios();
+        let room = self.writer.write_room();
+        if !self.bypass && term.has_oflag(OPOST) && term.has_oflag(ONLCR) {
+            room / 2
+        } else {
+            room
+        }
+    }
+}
+
 pub(crate) struct LineDiscipline<W> {
     terminal: Arc<Terminal>,
 
-    writer: W,
+    writer: Arc<ksync::Mutex<OutputLineDiscipline<W>>>,
 
     buf_tx: CachingProd<ReadBuf>,
 
     line_buf: Vec<u8>,
     line_read: Option<usize>,
-    clear_line_buf: Arc<AtomicBool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,22 +132,21 @@ pub(crate) struct InputProgress {
 impl<W: TtyWrite> LineDiscipline<W> {
     pub(crate) fn new(
         terminal: Arc<Terminal>,
-        writer: W,
+        writer: Arc<ksync::Mutex<OutputLineDiscipline<W>>>,
         buf_tx: CachingProd<ReadBuf>,
-        clear_line_buf: Arc<AtomicBool>,
     ) -> Self {
         Self {
             terminal,
             writer,
             buf_tx,
-            clear_line_buf,
             line_buf: Vec::new(),
             line_read: None,
         }
     }
 
-    pub(crate) fn into_output(self) -> CachingProd<ReadBuf> {
-        self.buf_tx
+    pub(crate) fn clear_input(&mut self) {
+        self.line_buf.clear();
+        self.line_read = None;
     }
 
     /// Consumes a prefix of supplied bytes and publishes terminal input.
@@ -82,10 +164,6 @@ impl<W: TtyWrite> LineDiscipline<W> {
             bytes_published: 0,
             stop: InputStop::InputEmpty,
         };
-        if self.clear_line_buf.swap(false, Ordering::Relaxed) {
-            self.line_buf.clear();
-            self.line_read = None;
-        }
         if input_budget == 0 || output_budget == 0 {
             progress.stop = InputStop::BudgetExhausted;
             return progress;
@@ -194,18 +272,21 @@ impl<W: TtyWrite> LineDiscipline<W> {
     }
 
     fn output_char(&self, term: &Termios2, ch: u8) {
-        match ch {
-            b'\n' => self.writer.write(b"\n"),
-            b'\r' => self.writer.write(b"\r\n"),
-            ch if ch == term.special_char(VERASE) => self.writer.write(b"\x08 \x08"),
-            ch if ch == b' ' || ch.is_ascii_graphic() => self.writer.write(&[ch]),
+        let output = self.writer.lock();
+        // Echo cannot wait while holding the input processor; unlike accepted
+        // program output, unavailable echo bytes remain explicitly best effort.
+        let _ = match ch {
+            b'\n' | b'\r' => output.write(&[ch]),
+            ch if ch == term.special_char(VERASE) => output.write(b"\x08 \x08"),
+            ch if ch == b' ' || ch.is_ascii_graphic() => output.write(&[ch]),
             ch if ch.is_ascii_control() && term.has_lflag(ECHOCTL) => {
-                self.writer.write(&[b'^', (ch + 0x40)]);
+                output.write(&[b'^', (ch + 0x40)])
             }
             other => {
                 warn!("Ignored echo char: {other:#x}");
+                Ok(0)
             }
-        }
+        };
     }
 }
 

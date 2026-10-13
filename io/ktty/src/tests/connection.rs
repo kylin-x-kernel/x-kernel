@@ -85,7 +85,7 @@ fn runtime_connection_is_shared_by_read_write_and_repeated_handoff() {
     let mut bytes = [0; 3];
     assert_eq!(TtyRead::read(&mut connection, &mut bytes), 3);
     assert_eq!(bytes, [b'r'; 3]);
-    TtyWrite::write(&connection, b"test");
+    assert_eq!(TtyWrite::write(&connection, b"test"), Ok(4));
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
@@ -101,11 +101,11 @@ fn runtime_errors_return_both_directions_to_the_boot_port() {
         let (mut connection, calls) = connection(stdout.parent(), true, Some(fixture.port()));
         let mut prefix = [0; 4];
         if write_first {
-            TtyWrite::write(&connection, b"first");
+            assert_eq!(TtyWrite::write(&connection, b"first"), Ok(5));
             assert_eq!(TtyRead::read(&mut connection, &mut prefix), prefix.len());
         } else {
             assert_eq!(TtyRead::read(&mut connection, &mut prefix), prefix.len());
-            TtyWrite::write(&connection, b"first");
+            assert_eq!(TtyWrite::write(&connection, b"first"), Ok(5));
         }
         assert_eq!(&prefix, b"boot");
         assert!(connection.runtime_handle().is_none());
@@ -113,7 +113,7 @@ fn runtime_errors_return_both_directions_to_the_boot_port() {
         let count = TtyRead::read(&mut connection, &mut suffix);
         assert_eq!(&suffix[..count], b"-input");
         assert_eq!(TtyRead::read(&mut connection, &mut suffix), 0);
-        TtyWrite::write(&connection, b"-second");
+        assert_eq!(TtyWrite::write(&connection, b"-second"), Ok(7));
         assert_eq!(fixture.output(), b"first-second");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
@@ -136,9 +136,30 @@ fn unavailable_runtime_clears_handle_and_uses_boot_port() {
     let mut bytes = [0; 4];
     assert_eq!(TtyRead::read(&mut connection, &mut bytes), 4);
     assert_eq!(&bytes, b"boot");
-    TtyWrite::write(&connection, b"out");
+    assert_eq!(TtyWrite::write(&connection, b"out"), Ok(3));
     assert_eq!(fixture.output(), b"out");
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
+fn console_output_keeps_backend_owned_newline_processing() {
+    let fixture = SerialPortFixture::new(&[]);
+    let connection = Arc::new(ConsoleConnection {
+        boot_port: Some(fixture.port()),
+        runtime: SpinNoPreempt::new(None),
+    });
+    let tty = Tty::new(
+        Arc::default(),
+        TtyKind::Terminal,
+        TtyConfig {
+            reader: connection.clone(),
+            writer: connection,
+            process_mode: ProcessMode::Manual,
+        },
+    );
+    assert_eq!(tty.output.lock().write(b"line\n"), Ok(5));
+    // The test serial backend is raw; the TTY must pass LF through unchanged.
+    assert_eq!(fixture.output(), b"line\n");
 }
 
 #[def_test]
@@ -146,7 +167,7 @@ fn direct_boot_connection_and_manual_input_remain_usable() {
     let connection = Arc::new(ConsoleConnection::new());
     assert!(connection.runtime_handle().is_none());
     assert_eq!(ConsoleConnection::read(&connection, &mut []), 0);
-    TtyWrite::write(&connection, &[]);
+    assert_eq!(TtyWrite::write(&connection, &[]), Ok(0));
     let tty = Tty::new(
         Arc::default(),
         TtyKind::Terminal,

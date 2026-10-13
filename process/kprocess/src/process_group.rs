@@ -46,6 +46,13 @@ pub struct ProcessGroup {
 }
 
 impl ProcessGroup {
+    /// Creates an empty group in a private session for isolated job-control cases.
+    /// Neither identity is published, and no live process membership is changed.
+    #[cfg(unittest)]
+    pub fn new_isolated_for_test() -> Arc<Self> {
+        Self::new(0, &Session::new(0))
+    }
+
     /// Create a new [`ProcessGroup`] within a [`Session`].
     pub(crate) fn new(pgid: Pid, session: &Arc<Session>) -> Arc<Self> {
         let group = Arc::new(Self {

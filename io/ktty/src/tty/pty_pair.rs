@@ -267,27 +267,39 @@ impl PtyPair {
     }
 
     fn release_open(&self, kind: TtyKind) {
-        let (resources, removed) = {
+        let (resources, removed, closed_input) = {
             let mut state = self.state.lock();
+            let closed_input = if kind == TtyKind::PtyMaster {
+                state
+                    .resources
+                    .as_ref()
+                    .map(|resources| resources.master.ingress.clone())
+            } else {
+                None
+            };
             match kind {
                 TtyKind::PtyMaster => state.has_master = false,
                 TtyKind::Terminal => state.slave_opens -= 1,
             }
             if state.has_master || state.slave_opens != 0 {
-                return;
-            }
-            let removed = if state.is_published {
-                let mut registry = PTYS.lock();
-                let mut cursor = registry.pairs.find_mut(&self.number);
-                // The number remains reserved until the detached resources drop.
-                debug_assert!(cursor.get().is_some_and(|pair| core::ptr::eq(pair, self)));
-                cursor.remove()
+                (None, None, closed_input)
             } else {
-                None
-            };
-            state.is_published = false;
-            (state.resources.take(), removed)
+                let removed = if state.is_published {
+                    let mut registry = PTYS.lock();
+                    let mut cursor = registry.pairs.find_mut(&self.number);
+                    // The number remains reserved until the detached resources drop.
+                    debug_assert!(cursor.get().is_some_and(|pair| core::ptr::eq(pair, self)));
+                    cursor.remove()
+                } else {
+                    None
+                };
+                state.is_published = false;
+                (state.resources.take(), removed, closed_input)
+            }
         };
+        if let Some(input) = closed_input {
+            input.close();
+        }
         if let Some(resources) = resources {
             resources.input_work.close();
             // A session snapshot is not an open use. Detach only this terminal,

@@ -94,8 +94,9 @@ impl MockWriter {
 }
 
 impl TtyWrite for MockWriter {
-    fn write(&self, buf: &[u8]) {
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
         self.writes.lock().push_back(buf.to_vec());
+        Ok(buf.len())
     }
 }
 
@@ -173,7 +174,7 @@ fn test_canonical_line_buffering_and_echo() {
     let mut buf = [0; 8];
     assert_eq!(ldisc.read(&mut buf).unwrap(), 3);
     assert_eq!(&buf[..3], b"ab\n");
-    assert_eq!(writer.written(), b"ab\n");
+    assert_eq!(writer.written(), b"ab\r\n");
 }
 
 #[def_test]
@@ -187,7 +188,7 @@ fn test_canonical_erase_updates_line_and_echo() {
     let mut buf = [0; 8];
     assert_eq!(ldisc.read(&mut buf).unwrap(), 2);
     assert_eq!(&buf[..2], b"a\n");
-    assert_eq!(writer.written(), b"ab\x08 \x08\n");
+    assert_eq!(writer.written(), b"ab\x08 \x08\r\n");
 }
 
 #[def_test]
@@ -201,7 +202,7 @@ fn test_canonical_kill_clears_pending_line() {
     let mut buf = [0; 8];
     assert_eq!(ldisc.read(&mut buf).unwrap(), 2);
     assert_eq!(&buf[..2], b"c\n");
-    assert_eq!(writer.written(), vec![b'a', b'b', b'^', b'U', b'c', b'\n']);
+    assert_eq!(writer.written(), vec![b'a', b'b', b'^', b'U', b'c', b'\r', b'\n']);
 }
 
 #[def_test]
@@ -329,8 +330,8 @@ fn test_process_mode_none_reads_raw_stream_and_reports_would_block_when_empty() 
     assert!(ldisc.poll_read());
 
     let mut buf = [0; 8];
-    assert_eq!(ldisc.read(&mut buf).unwrap(), 3);
-    assert_eq!(&buf[..3], b"a\r\n");
+    assert_eq!(ldisc.read(&mut buf).unwrap(), 2);
+    assert_eq!(&buf[..2], b"a\n");
     assert!(matches!(ldisc.read(&mut buf), Err(KError::WouldBlock)));
 }
 
@@ -361,12 +362,25 @@ fn await_input<R: TtyRead>(ldisc: &mut TtyPort<R, MockWriter>) {
 }
 
 #[def_test]
+fn output_batches_plain_bytes_and_expands_only_newlines() {
+    let writer = MockWriter::default();
+    let output = OutputLineDiscipline::new(Arc::new(Terminal::default()), writer.clone(), false);
+    assert_eq!(output.write(b"abc\ndef\n"), Ok(8));
+    assert_eq!(writer.written(), b"abc\r\ndef\r\n");
+    assert_eq!(writer.writes.lock().len(), 4);
+}
+
+#[def_test]
 fn discipline_accepts_bytes_without_a_backend_or_worker() {
     let terminal = Arc::new(Terminal::default());
     let writer = MockWriter::default();
     let (producer, mut consumer) = ReadBuf::default().split();
-    let mut discipline =
-        LineDiscipline::new(terminal, writer, producer, Arc::new(AtomicBool::new(false)));
+    let output = Arc::new(ksync::Mutex::new(OutputLineDiscipline::new(
+        terminal.clone(),
+        writer,
+        false,
+    )));
+    let mut discipline = LineDiscipline::new(terminal, output, producer);
     let progress = discipline.receive(b"abc\n", 4, 1);
     assert_eq!(progress.bytes_consumed, 4);
     assert_eq!(progress.bytes_published, 0);
@@ -386,12 +400,12 @@ fn discipline_reports_unconsumed_suffix_when_output_is_full() {
     let terminal = Arc::new(Terminal::default());
     set_termios(&terminal, |term| term.c_lflag &= !(ICANON | ISIG | ECHO));
     let (producer, mut consumer) = ReadBuf::default().split();
-    let mut discipline = LineDiscipline::new(
-        terminal,
+    let output = Arc::new(ksync::Mutex::new(OutputLineDiscipline::new(
+        terminal.clone(),
         MockWriter::default(),
-        producer,
-        Arc::new(AtomicBool::new(false)),
-    );
+        false,
+    )));
+    let mut discipline = LineDiscipline::new(terminal, output, producer);
     let data = [b'x'; BUF_SIZE + 3];
     let progress = discipline.receive(&data, data.len(), data.len());
     assert_eq!(progress.bytes_consumed, BUF_SIZE);
@@ -465,7 +479,6 @@ fn input_and_pending_output_each_obey_the_budget() {
         unreachable!()
     };
     reader.process_budget(0);
-    assert!(!ldisc.clear_line_buf.load(Ordering::Relaxed));
     assert_eq!(reader.process_budget(256).bytes_published, 0);
 }
 

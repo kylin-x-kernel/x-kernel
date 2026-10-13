@@ -11,6 +11,7 @@ use console_driver::{
     serial::{self, SerialPort},
 };
 use kclass::{CharDeviceImpl, ClassDevice};
+use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;
 
@@ -127,10 +128,16 @@ impl TtyRead for Arc<ConsoleConnection> {
 }
 
 impl TtyWrite for Arc<ConsoleConnection> {
-    fn write(&self, buf: &[u8]) {
+    fn handles_output_processing(&self) -> bool {
+        true
+    }
+
+    // Native output preserves its existing best-effort contract; reported bytes
+    // do not establish a lossless transport or hardware drain guarantee.
+    fn write(&self, buf: &[u8]) -> KResult<usize> {
         if let Some(handle) = self.runtime_handle() {
             match handle.write(buf) {
-                Ok(_) => return,
+                Ok(_) => return Ok(buf.len()),
                 Err(error) => {
                     self.fallback(&handle);
                     warn!("tty: runtime stdout write failed ({error:?}), using boot port");
@@ -142,6 +149,7 @@ impl TtyWrite for Arc<ConsoleConnection> {
         } else {
             khal::console::write_data(buf);
         }
+        Ok(buf.len())
     }
 }
 
