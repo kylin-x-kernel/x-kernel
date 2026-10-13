@@ -15,8 +15,19 @@ use crate::{
 };
 
 fn revoke_journal_test_filesystem(sequence: u32) -> (Ext4SbInfo, Arc<TestDevice>) {
+    revoke_journal_test_filesystem_with_log_blocks(sequence, 1023)
+}
+
+fn revoke_journal_test_filesystem_with_log_blocks(
+    sequence: u32,
+    log_blocks: u32,
+) -> (Ext4SbInfo, Arc<TestDevice>) {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let mut bytes = test_journal_superblock_bytes_with_blocks(sequence, 1024);
+    // Keep the valid minimum journal size while limiting its usable log ring.
+    let first = 1024 - log_blocks;
+    bytes[0x14..0x18].copy_from_slice(&first.to_be_bytes());
+    bytes[0x58..0x5c].copy_from_slice(&first.to_be_bytes());
     // JBD2 v2 is required for revoke and deferred checkpointing. The shared
     // fixture's default v1 journal deliberately exercises synchronous fallback.
     bytes[4..8].copy_from_slice(&4u32.to_be_bytes());
@@ -25,6 +36,107 @@ fn revoke_journal_test_filesystem(sequence: u32) -> (Ext4SbInfo, Arc<TestDevice>
     install_test_journal(&mut filesystem, superblock);
     assert!(filesystem.journal_supports_revoke());
     (filesystem, device)
+}
+
+#[def_test]
+fn journal_space_pressure_keeps_the_unneeded_checkpoint_suffix() {
+    // Each allocation logs three metadata blocks plus descriptor and commit.
+    // This ring holds three commits; the fourth needs only the oldest retired.
+    let (mut filesystem, device) = revoke_journal_test_filesystem_with_log_blocks(506, 17);
+    let journal = filesystem.metadata_journal().unwrap();
+    let free_blocks_before = filesystem.free_blocks_count();
+    for _ in 0..3 {
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = handle.id();
+        filesystem
+            .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+            .unwrap();
+        drop(handle);
+        filesystem.commit_metadata_transaction(transaction).unwrap();
+    }
+    let before = journal.transactions.checkpoint_batch().unwrap();
+    assert_eq!(before.len(), 3);
+    let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let transaction = handle.id();
+    filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    drop(handle);
+    let flushes_before = device.flush_count();
+    filesystem.commit_metadata_transaction(transaction).unwrap();
+    // Prefix home barrier, active tail barrier, and the new commit barrier.
+    assert_eq!(device.flush_count(), flushes_before + 3);
+    assert_eq!(pending_checkpoint_count(&filesystem), 3);
+    let pending = journal.transactions.checkpoint_batch().unwrap();
+    assert!(Arc::ptr_eq(&pending[0].0, &before[1].0));
+    assert!(Arc::ptr_eq(&pending[1].0, &before[2].0));
+    assert_eq!(pending[0].1, before[1].1);
+    assert_eq!(pending[1].1, before[2].1);
+    assert_eq!(pending[2].0.id(), transaction);
+    let status = journal_status(&filesystem);
+    assert_eq!(status.sequence(), before[1].0.id().get());
+    assert!(status.has_nonzero_log_start());
+    assert!(filesystem.needs_recovery());
+    let scan = crate::jbd2::scan_journal(&journal.superblock(), &filesystem).unwrap();
+    assert_eq!(scan.transactions().len(), 3);
+    assert_eq!(scan.transactions()[0].sequence(), before[1].0.id());
+    assert_eq!(scan.transactions()[2].sequence(), transaction);
+    let bytes = device.bytes();
+    let on_disk =
+        Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE]).unwrap();
+    assert!(on_disk.features().needs_recovery());
+    assert_eq!(on_disk.on_disk_free_blocks_count(), free_blocks_before - 1);
+    assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 4);
+
+    // Explicit sync drains the retained versions, including the wrapped commit.
+    filesystem.sync_filesystem().unwrap();
+    assert_eq!(pending_checkpoint_count(&filesystem), 0);
+    assert!(!journal_status(&filesystem).has_nonzero_log_start());
+    assert!(!filesystem.needs_recovery());
+    let bytes = device.bytes();
+    let on_disk =
+        Ext4DiskSuperblock::decode(&bytes[1024..1024 + superblock::SUPERBLOCK_SIZE]).unwrap();
+    assert!(!on_disk.features().needs_recovery());
+    assert_eq!(on_disk.on_disk_free_blocks_count(), free_blocks_before - 4);
+}
+
+#[def_test]
+fn failed_space_reclamation_keeps_the_prefix_and_suffix_pending() {
+    for failure in 1..=2 {
+        let (mut filesystem, device) = revoke_journal_test_filesystem_with_log_blocks(507, 17);
+        let journal = filesystem.metadata_journal().unwrap();
+        for _ in 0..3 {
+            let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+            let transaction = handle.id();
+            filesystem
+                .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+                .unwrap();
+            drop(handle);
+            filesystem.commit_metadata_transaction(transaction).unwrap();
+        }
+        let before = journal.transactions.checkpoint_batch().unwrap();
+        let original = journal.superblock();
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        let transaction = handle.id();
+        filesystem
+            .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+            .unwrap();
+        drop(handle);
+        device.fail_flush_at(device.flush_count() + failure);
+        assert_eq!(
+            filesystem.commit_metadata_transaction(transaction),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+        assert_eq!(pending_checkpoint_count(&filesystem), 3);
+        assert_eq!(journal.superblock().sequence(), original.sequence());
+        assert_eq!(journal.superblock().start(), original.start());
+        assert_eq!(
+            journal.transactions.newest_persisted_commit().unwrap(),
+            Some(before[2].1)
+        );
+        assert!(filesystem.needs_recovery());
+        assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
+    }
 }
 
 pub(super) fn pending_checkpoint_count(filesystem: &Ext4SbInfo) -> usize {
@@ -149,7 +261,7 @@ fn successful_operations_share_running_transaction_until_sync() {
 }
 
 #[def_test]
-fn journal_queue_appends_two_commits_and_advances_tail() {
+fn journal_queue_checkpoints_shared_metadata_in_one_batch() {
     let (mut filesystem, device) = revoke_journal_test_filesystem(502);
     let journal = filesystem
         .metadata_journal()
@@ -194,30 +306,26 @@ fn journal_queue_appends_two_commits_and_advances_tail() {
         crate::jbd2::scan_journal(&journal.superblock(), &filesystem).expect("scan two commits");
     assert_eq!(scan.transactions().len(), 2);
 
-    filesystem
-        .run_checkpoint_worker()
-        .expect("checkpoint first transaction");
-    assert_eq!(pending_checkpoint_count(&filesystem), 1);
-    assert!(filesystem.needs_recovery());
+    let flushes_before = device.flush_count();
+    filesystem.run_checkpoint_worker().unwrap();
+    // One home-block barrier, one tail barrier, and one ext4 recovery-bit clear.
+    assert_eq!(device.flush_count(), flushes_before + 3);
+    assert_eq!(pending_checkpoint_count(&filesystem), 0);
+    assert!(!filesystem.needs_recovery());
+    let status = journal_status(&filesystem);
+    assert_eq!(status.sequence(), second_transaction.get().wrapping_add(1));
+    assert!(!status.has_nonzero_log_start());
     let on_disk_bytes = device.bytes();
     let on_disk_superblock =
         Ext4DiskSuperblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
-            .expect("decode checkpointed primary superblock");
-    assert!(on_disk_superblock.features().needs_recovery());
-    let status = journal_status(&filesystem);
-    assert_eq!(status.sequence(), second_transaction.get());
-    assert!(status.has_nonzero_log_start());
-    let scan = crate::jbd2::scan_journal(&journal.superblock(), &filesystem)
-        .expect("scan remaining commit");
-    assert_eq!(scan.transactions().len(), 1);
-    assert_eq!(scan.transactions()[0].sequence(), second_transaction);
-
-    filesystem
-        .sync_filesystem()
-        .expect("checkpoint remaining transaction");
-    assert_eq!(pending_checkpoint_count(&filesystem), 0);
-    assert!(!filesystem.needs_recovery());
-    assert!(!journal_status(&filesystem).has_nonzero_log_start());
+            .unwrap();
+    // Both transactions touched allocator metadata, including the same primary
+    // superblock. The final frozen version must win, with no lost allocation.
+    assert_eq!(
+        on_disk_superblock.on_disk_free_blocks_count(),
+        free_blocks_before - 2
+    );
+    assert!(!on_disk_superblock.features().needs_recovery());
     assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 2);
 
     let mut cleanup_handle = journal.begin(JournalCredits::new(8)).unwrap();
@@ -241,34 +349,142 @@ fn journal_queue_appends_two_commits_and_advances_tail() {
 }
 
 #[def_test]
-fn failed_checkpoint_worker_keeps_pending_work() {
-    let (mut filesystem, device) = revoke_journal_test_filesystem(503);
-    let journal = filesystem
-        .metadata_journal()
-        .expect("open metadata journal");
-    let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
-    let transaction = handle.id();
-    let block_goal = FilesystemBlock::new(6);
+fn checkpoint_batch_preserves_recovery_for_its_last_transaction() {
+    let (mut filesystem, device) = revoke_journal_test_filesystem(505);
+    let journal = filesystem.metadata_journal().unwrap();
+    let free_blocks_before = filesystem.free_blocks_count();
 
+    let mut first_handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let first_transaction = first_handle.id();
     filesystem
-        .allocate_block(Some(block_goal), &mut handle)
-        .expect("allocate a metadata block");
-    drop(handle);
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut first_handle)
+        .unwrap();
+    drop(first_handle);
     filesystem
-        .commit_metadata_transaction(transaction)
-        .expect("enqueue checkpoint");
-    device.fail_flush_at(device.flush_count() + 1);
-
-    assert_eq!(
-        filesystem.sync_filesystem(),
-        Err(Ext4Error::Device(DriverError::Io))
-    );
+        .commit_metadata_transaction(first_transaction)
+        .unwrap();
     assert_eq!(pending_checkpoint_count(&filesystem), 1);
-    assert!(matches!(
-        journal.begin(JournalCredits::new(1)),
-        Err(Ext4Error::JournalAborted)
-    ));
-    assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
+
+    let mut second_handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let second_transaction = second_handle.id();
+    filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut second_handle)
+        .unwrap();
+    drop(second_handle);
+    // Entering the preserving mutation path commits this running transaction
+    // behind the older ClearAfterCheckpoint entry and drains both immediately.
+    filesystem
+        .metadata_journal_for_mutation(
+            JournalCredits::new(4),
+            RecoveryFlagPolicy::PreserveDuringRecovery,
+        )
+        .unwrap();
+    assert_eq!(pending_checkpoint_count(&filesystem), 0);
+    assert_eq!(journal.transactions.running_transaction().unwrap(), None);
+    let status = journal_status(&filesystem);
+    assert_eq!(status.sequence(), second_transaction.get().wrapping_add(1));
+    assert!(!status.has_nonzero_log_start());
+    assert!(filesystem.needs_recovery());
+    let on_disk_bytes = device.bytes();
+    let on_disk_superblock =
+        Ext4DiskSuperblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+            .unwrap();
+    // Reload must retain the newest shared superblock's allocator counters
+    // while keeping recovery evidence for the remaining recovery work.
+    assert_eq!(
+        on_disk_superblock.on_disk_free_blocks_count(),
+        free_blocks_before - 2
+    );
+    assert_eq!(filesystem.free_blocks_count(), free_blocks_before - 2);
+    assert!(on_disk_superblock.features().needs_recovery());
+
+    // A later normal transaction belongs to a separate batch and can clear
+    // recovery evidence after its own home blocks have become durable.
+    let mut next_handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let next_transaction = next_handle.id();
+    filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut next_handle)
+        .unwrap();
+    drop(next_handle);
+    filesystem
+        .commit_metadata_transaction(next_transaction)
+        .unwrap();
+    assert_eq!(pending_checkpoint_count(&filesystem), 1);
+    filesystem.drain_pending_checkpoints().unwrap();
+    assert_eq!(pending_checkpoint_count(&filesystem), 0);
+    assert!(!filesystem.needs_recovery());
+    let on_disk_bytes = device.bytes();
+    let on_disk_superblock =
+        Ext4DiskSuperblock::decode(&on_disk_bytes[1024..1024 + superblock::SUPERBLOCK_SIZE])
+            .unwrap();
+    assert!(!on_disk_superblock.features().needs_recovery());
+    assert_eq!(
+        on_disk_superblock.on_disk_free_blocks_count(),
+        free_blocks_before - 3
+    );
+}
+
+#[def_test]
+fn failed_checkpoint_batch_keeps_all_pending_work() {
+    // Fail after a written prefix, at the home-block barrier, and at the tail
+    // barrier. None may release any transaction or permit another mutation.
+    for failure in 0..3 {
+        let (mut filesystem, device) = revoke_journal_test_filesystem(503);
+        let journal = filesystem.metadata_journal().unwrap();
+        for _ in 0..2 {
+            let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+            let transaction = handle.id();
+            filesystem
+                .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+                .unwrap();
+            drop(handle);
+            filesystem.commit_metadata_transaction(transaction).unwrap();
+        }
+        let original = journal.superblock();
+        let tail_block = journal.map_block(JournalBlock::new(0)).unwrap();
+        let tail_offset = tail_block.get() as usize * filesystem.device.block_size();
+        let before = device.bytes();
+        let batch = journal.transactions.checkpoint_batch().unwrap();
+        let flushes_before = device.flush_count();
+        if failure == 0 {
+            let first_blocks = batch[0].0.metadata_blocks().unwrap().len();
+            device.fail_write_at(device.write_count() + first_blocks + 1);
+        } else {
+            device.fail_flush_at(flushes_before + failure);
+        }
+        assert_eq!(
+            filesystem.run_checkpoint_worker(),
+            Err(Ext4Error::Device(DriverError::Io))
+        );
+        assert_eq!(device.flush_count(), flushes_before + failure);
+        assert_eq!(pending_checkpoint_count(&filesystem), 2);
+        let retained = journal
+            .transactions
+            .newest_persisted_commit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained, batch[1].1);
+        assert_eq!(journal.superblock().sequence(), original.sequence());
+        assert_eq!(journal.superblock().start(), original.start());
+        if failure < 2 {
+            let after = device.bytes();
+            let tail_end = tail_offset + filesystem.device.block_size();
+            assert_eq!(
+                &after[tail_offset..tail_end],
+                &before[tail_offset..tail_end]
+            );
+        }
+        // The old recovery range remains intact even if the tail write reached
+        // the device before its flush failed. Do not reclaim or overwrite it.
+        let scan = crate::jbd2::scan_journal(&original, &filesystem).unwrap();
+        assert_eq!(scan.transactions().len(), 2);
+        assert!(journal.is_aborted());
+        assert!(matches!(
+            journal.begin(JournalCredits::new(1)),
+            Err(Ext4Error::JournalAborted)
+        ));
+        assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
+    }
 }
 
 fn allocate_regular_inode(filesystem: &mut Ext4SbInfo) -> Ext4Inode {

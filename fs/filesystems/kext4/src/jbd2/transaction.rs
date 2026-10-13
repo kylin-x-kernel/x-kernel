@@ -616,6 +616,29 @@ impl JournalTransactions {
         Err(Ext4Error::InvalidJournalTransaction)
     }
 
+    /// Snapshots the pending FIFO under the transaction lock, without doing I/O.
+    ///
+    /// The mount write lock must serialize checkpoint and append until this
+    /// batch has completed. Its size is bounded by the occupied journal ring.
+    /// Production entries carry persistence evidence before enqueueing; missing
+    /// evidence is an invalid transaction, not a commit still in progress.
+    pub(crate) fn checkpoint_batch(
+        &self,
+    ) -> Ext4Result<Vec<(Arc<RuntimeTransaction>, JournalPersistedCommit)>> {
+        let inner = lock(&self.inner);
+        check_not_aborted(&inner)?;
+        inner
+            .checkpoint_transactions
+            .iter()
+            .map(|checkpoint| {
+                let persisted = checkpoint
+                    .persisted_commit()?
+                    .ok_or(Ext4Error::InvalidJournalTransaction)?;
+                Ok((checkpoint.clone(), persisted))
+            })
+            .collect()
+    }
+
     /// Confirms that this exact transaction object is owned by this journal's
     /// committing phase.
     pub(crate) fn validate_committing(&self, commit: &Arc<RuntimeTransaction>) -> Ext4Result<()> {
@@ -665,43 +688,6 @@ impl JournalTransactions {
         Ok(())
     }
 
-    /// Returns the oldest transaction awaiting home-block checkpoint.
-    pub(crate) fn checkpoint_transaction(
-        &self,
-    ) -> Ext4Result<Option<(Arc<RuntimeTransaction>, JournalPersistedCommit)>> {
-        let inner = lock(&self.inner);
-        check_not_aborted(&inner)?;
-        inner
-            .checkpoint_transactions
-            .front()
-            .map(|checkpoint| {
-                checkpoint
-                    .persisted_commit()?
-                    .map(|persisted| (checkpoint.clone(), persisted))
-                    .ok_or(Ext4Error::InvalidJournalTransaction)
-            })
-            .transpose()
-    }
-
-    /// Confirms that this exact transaction and persistence evidence form the
-    /// oldest checkpoint owned by this journal.
-    pub(crate) fn validate_checkpoint(
-        &self,
-        commit: &Arc<RuntimeTransaction>,
-        persisted: &JournalPersistedCommit,
-    ) -> Ext4Result<()> {
-        let inner = lock(&self.inner);
-        check_not_aborted(&inner)?;
-        let checkpoint = inner
-            .checkpoint_transactions
-            .front()
-            .ok_or(Ext4Error::InvalidJournalTransaction)?;
-        if !Arc::ptr_eq(checkpoint, commit) || checkpoint.persisted_commit()? != Some(*persisted) {
-            return Err(Ext4Error::InvalidJournalTransaction);
-        }
-        Ok(())
-    }
-
     /// Returns whether at least one transaction awaits checkpoint.
     pub(crate) fn has_checkpoint_transactions(&self) -> bool {
         !lock(&self.inner).checkpoint_transactions.is_empty()
@@ -712,18 +698,6 @@ impl JournalTransactions {
         lock(&self.inner)
             .checkpoint_transactions
             .back()
-            .map(|checkpoint| checkpoint.persisted_commit())
-            .transpose()
-            .map(Option::flatten)
-    }
-
-    /// Returns the persisted state that follows the active checkpoint.
-    pub(crate) fn next_checkpoint_persisted_commit(
-        &self,
-    ) -> Ext4Result<Option<JournalPersistedCommit>> {
-        lock(&self.inner)
-            .checkpoint_transactions
-            .get(1)
             .map(|checkpoint| checkpoint.persisted_commit())
             .transpose()
             .map(Option::flatten)

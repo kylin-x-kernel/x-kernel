@@ -266,6 +266,8 @@ pub(crate) struct TestDevice {
     pub(crate) bytes: Mutex<Vec<u8>>,
     pub(crate) flush_count: Mutex<usize>,
     pub(crate) fail_flush_at: Mutex<Option<usize>>,
+    write_count: Mutex<usize>,
+    fail_write_at: Mutex<Option<usize>>,
 }
 
 impl TestDevice {
@@ -274,11 +276,21 @@ impl TestDevice {
             bytes: Mutex::new(bytes),
             flush_count: Mutex::new(0),
             fail_flush_at: Mutex::new(None),
+            write_count: Mutex::new(0),
+            fail_write_at: Mutex::new(None),
         }
     }
 
     pub(crate) fn bytes(&self) -> Vec<u8> {
         lock(&self.bytes).clone()
+    }
+
+    pub(crate) fn write_count(&self) -> usize {
+        *lock(&self.write_count)
+    }
+
+    pub(crate) fn fail_write_at(&self, write_count: usize) {
+        *lock(&self.fail_write_at) = Some(write_count);
     }
 
     pub(crate) fn flush_count(&self) -> usize {
@@ -326,6 +338,12 @@ impl BlockDeviceOperations for TestDevice {
     }
 
     fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
+        let mut write_count = lock(&self.write_count);
+        *write_count += 1;
+        if *lock(&self.fail_write_at) == Some(*write_count) {
+            return Err(DriverError::Io);
+        }
+        drop(write_count);
         let start = usize::try_from(block_id)
             .ok()
             .and_then(|block| block.checked_mul(TEST_BLOCK_SIZE))

@@ -16,8 +16,9 @@ use crate::{
         JournalBlock, JournalBlockMapper, JournalBlockReader, JournalBlockWriter,
         JournalCommitBlock, JournalCredits, JournalHandle, JournalPersistedCommit,
         JournalReplayApplied, JournalReplayReport, JournalSuperblock, JournalTransactions,
-        RuntimeTransaction, TransactionId, enable_superblock_revoke, finish_journal_checkpoint,
-        mark_superblock_empty, persist_journal_commit,
+        RuntimeTransaction, TransactionId, enable_superblock_revoke,
+        finish_journal_checkpoint_batch, journal_checkpoint_prefix_len,
+        journal_transaction_blocks_required, mark_superblock_empty, persist_journal_commit,
     },
     superblock::{
         Ext4Recovery, Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal,
@@ -98,10 +99,6 @@ impl MountedJournal {
 
     fn has_pending_checkpoints(&self) -> bool {
         self.transactions.has_checkpoint_transactions()
-    }
-
-    fn next_checkpoint_persisted_commit(&self) -> Ext4Result<Option<JournalPersistedCommit>> {
-        self.transactions.next_checkpoint_persisted_commit()
     }
 
     fn newest_persisted_commit(&self) -> Ext4Result<Option<JournalPersistedCommit>> {
@@ -443,7 +440,10 @@ impl Ext4SbInfo {
                         .as_ref()
                         .is_some_and(|journal| journal.has_pending_checkpoints()) =>
                 {
-                    self.run_checkpoint_worker()?;
+                    let required_blocks =
+                        journal_transaction_blocks_required(&journal.superblock(), &commit)?;
+                    let result = self.run_checkpoint_worker_inner(Some(required_blocks));
+                    result.map_err(|error| self.fail_journal_operation(error))?;
                 }
                 Err(error) => return Err(error),
             }
@@ -478,44 +478,67 @@ impl Ext4SbInfo {
     }
 
     fn run_checkpoint_worker(&mut self) -> Ext4Result<()> {
-        let result = self.run_checkpoint_worker_inner();
+        let result = self.run_checkpoint_worker_inner(None);
         result.map_err(|error| self.fail_journal_operation(error))
     }
 
-    fn run_checkpoint_worker_inner(&mut self) -> Ext4Result<()> {
-        let Some((commit, persisted)) = self
-            .journal
-            .as_ref()
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
-            .transactions
-            .checkpoint_transaction()?
-        else {
-            return Ok(());
-        };
-        let transaction = commit.id();
-        let recovery_flag_policy = self
-            .journal
-            .as_ref()
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
-            .checkpoint_policy(transaction)?;
-        let next_oldest = self
-            .journal
-            .as_ref()
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
-            .next_checkpoint_persisted_commit()?;
-        self.checkpoint_metadata_journal_commit_with_policy(
-            &commit,
-            &persisted,
-            next_oldest.as_ref(),
-            recovery_flag_policy,
-        )?;
+    /// Reclaims a sufficient prefix for an append, or drains for explicit sync.
+    fn run_checkpoint_worker_inner(&mut self, required_blocks: Option<usize>) -> Ext4Result<()> {
         let journal = self
             .journal
             .as_ref()
             .cloned()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-        journal.transactions.finish_checkpoint(&commit)?;
-        journal.remove_checkpoint_policy(transaction)?;
+        let pending = journal.transactions.checkpoint_batch()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let checkpoint_count = match required_blocks {
+            Some(required_blocks) => journal_checkpoint_prefix_len(
+                &journal.superblock(),
+                pending.iter().map(|(_, persisted)| persisted),
+                required_blocks,
+            )?,
+            None => pending.len(),
+        };
+        let (batch, remaining) = pending.split_at(checkpoint_count);
+        let next_oldest = remaining.first().map(|(_, persisted)| persisted);
+        let Some((last, _)) = batch.last() else {
+            return Ok(());
+        };
+        // PreserveDuringRecovery is appended and checkpointed synchronously
+        // under the mount write lock. If present, it is the last transaction:
+        // no later ClearAfterCheckpoint can join before this batch drains.
+        // Earlier ClearAfterCheckpoint entries may share its preserving batch.
+        let recovery_flag_policy = journal.checkpoint_policy(last.id())?;
+        // Validate selected policies before consuming any frozen image. Recovery
+        // cleanup is needed only when this batch leaves no pending transaction.
+        for (commit, _) in batch {
+            journal.checkpoint_policy(commit.id())?;
+        }
+        // The mount write lock excludes append, mutation and other checkpoint
+        // workers. Preserve frozen-version order when transactions share blocks.
+        let writeback_result = (|| {
+            for (commit, _) in batch {
+                self.metadata_io.write_checkpoint_committed(commit)?;
+            }
+            self.flush_device()
+        })();
+        if let Err(error) = writeback_result {
+            self.reset_block_allocation_caches();
+            return Err(error);
+        }
+        self.finish_metadata_journal_checkpoint_batch_with_policy(
+            batch.iter().map(|(_, persisted)| persisted),
+            next_oldest,
+            recovery_flag_policy,
+        )?;
+        // Keep the selected prefix and its space reserved until both barriers have
+        // succeeded. Any I/O error reaches the worker's journal-abort wrapper.
+        for (commit, _) in batch {
+            journal.transactions.finish_checkpoint(commit)?;
+            journal.remove_checkpoint_policy(commit.id())?;
+        }
         let _ = self.metadata_io.reclaim_unused(usize::MAX);
         Ok(())
     }
@@ -604,22 +627,14 @@ impl Ext4SbInfo {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn finish_metadata_journal_checkpoint(
+    /// Finishes a pending prefix after its home-block writes are durable.
+    ///
+    /// The caller holds the mount write lock through snapshot and completion,
+    /// so `next_oldest` identifies the unchanged suffix, if one remains.
+    fn finish_metadata_journal_checkpoint_batch_with_policy<'a>(
         &mut self,
-        persisted: &JournalPersistedCommit,
-    ) -> Ext4Result<()> {
-        self.finish_metadata_journal_checkpoint_with_policy(
-            persisted,
-            None,
-            RecoveryFlagPolicy::ClearAfterCheckpoint,
-        )
-    }
-
-    pub(crate) fn finish_metadata_journal_checkpoint_with_policy(
-        &mut self,
-        persisted: &JournalPersistedCommit,
-        next_oldest: Option<&JournalPersistedCommit>,
+        persisted: impl IntoIterator<Item = &'a JournalPersistedCommit>,
+        next_oldest: Option<&'a JournalPersistedCommit>,
         recovery_flag_policy: RecoveryFlagPolicy,
     ) -> Ext4Result<()> {
         let superblock = self
@@ -627,18 +642,21 @@ impl Ext4SbInfo {
             .as_ref()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
             .superblock();
-        let advanced = match finish_journal_checkpoint(&superblock, self, persisted, next_oldest) {
-            Ok(advanced) => advanced,
-            Err(error) => {
-                self.reset_block_allocation_caches();
-                return Err(error);
-            }
-        };
+        let advanced =
+            match finish_journal_checkpoint_batch(&superblock, self, persisted, next_oldest) {
+                Ok(advanced) => advanced,
+                Err(error) => {
+                    self.reset_block_allocation_caches();
+                    return Err(error);
+                }
+            };
         self.journal
             .as_ref()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
             .replace_superblock(advanced);
         if next_oldest.is_some() {
+            // Remaining commits still require recovery, and their newer frozen
+            // superblock images must not be invalidated by a prefix checkpoint.
             return Ok(());
         }
         self.ensure_journal_superblock_has_zero_start()?;
@@ -662,43 +680,6 @@ impl Ext4SbInfo {
             return Err(error);
         }
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn checkpoint_metadata_journal_commit(
-        &mut self,
-        commit: &Arc<RuntimeTransaction>,
-        persisted: &JournalPersistedCommit,
-    ) -> Ext4Result<()> {
-        self.checkpoint_metadata_journal_commit_with_policy(
-            commit,
-            persisted,
-            None,
-            RecoveryFlagPolicy::ClearAfterCheckpoint,
-        )
-    }
-
-    pub(crate) fn checkpoint_metadata_journal_commit_with_policy(
-        &mut self,
-        commit: &Arc<RuntimeTransaction>,
-        persisted: &JournalPersistedCommit,
-        next_oldest: Option<&JournalPersistedCommit>,
-        recovery_flag_policy: RecoveryFlagPolicy,
-    ) -> Ext4Result<()> {
-        self.journal
-            .as_ref()
-            .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?
-            .transactions
-            .validate_checkpoint(commit, persisted)?;
-        if let Err(error) = self.metadata_io.checkpoint_committed(commit) {
-            self.reset_block_allocation_caches();
-            return Err(error);
-        }
-        self.finish_metadata_journal_checkpoint_with_policy(
-            persisted,
-            next_oldest,
-            recovery_flag_policy,
-        )
     }
 
     fn mark_journal_clean(

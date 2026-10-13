@@ -10,8 +10,9 @@ mod superblock;
 mod transaction;
 
 pub(crate) use commit::{
-    JournalBlockWriter, JournalCommitBlock, JournalPersistedCommit, finish_journal_checkpoint,
-    persist_journal_commit,
+    JournalBlockWriter, JournalCommitBlock, JournalPersistedCommit,
+    finish_journal_checkpoint_batch, journal_checkpoint_prefix_len,
+    journal_transaction_blocks_required, persist_journal_commit,
 };
 pub(crate) use log::{
     JournalBlockReader, JournalLogScan, JournalTransaction, JournalTransactionState, scan_journal,

@@ -207,7 +207,7 @@ exclusive data lock 下先把 hole reservation 发布到同一个 delayed set，
 | T-07 | clean journal 上残留 orphan，mount 永久返回 `NeedsRecovery` | 中 | namespace transaction 已 checkpoint，但 final inode eviction 尚未发生 | 显式 recovery 无论 journal 是否需要 replay 都遍历 legacy list 与 orphan file；clean 分支以 `PreserveDuringRecovery` 建立 recovery evidence，逐个同步 commit/checkpoint，确认 journal start 清零且 orphan file 为空后才清除 recovery features；zero-link entry 复用 journaled final-eviction 路径 |
 | T-08 | free-block aggregate、delalloc 区间与 reservation aggregate 漂移导致过量预留 | 中 | VFS/ext4 两侧分别更新，或逐块 set 与 mount counter 只更新一侧 | block mutation 同时发布 superblock 与 group descriptor；ext4 range API 在独立 reservation mutex 下联合更新 inode interval、`i_reserved_data_blocks` 等价计数和 mount aggregate，admission/statfs 直接使用该 aggregate |
 | T-09 | 新建 inode 固定为 root，绕过调用者 owner 语义 | 高 | callback 丢弃 credential 或 ext4 constructor 隐式填入 UID/GID 0 | create/mkdir/mknod/symlink callback 使用 `inode_init_owner()`，显式 `uid`、`gid` 随同 namei transaction 持久化 |
-| T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 最老 transaction 再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
+| T-10 | journal head 追上 tail 并覆盖尚未 checkpoint 的 commit | 高 | 多个 committed transaction 占满环形日志，追加仍继续写入 | 依据 oldest tail/current head 计算 live 空间，始终保留一个空 block；空间不足时先 checkpoint 足够释放空间的连续前缀再重试，不发出覆盖写；真实 ext4 镜像测试覆盖双 transaction tail 推进 |
 | T-11 | 损坏 extent 或超大 FIEMAP 范围造成算术溢出、错误物理地址或无界遍历 | 高 | disk mapping 长度越过格式容量，或字节/块换算未检查 | ext4 算法暴露 Linux 对等的 inode 格式相关最大字节数；KVFS operation 对每次加法、乘法和输出字段做 checked 校验，并把 mapping 截断到请求与格式边界 |
 | T-12 | 磁盘 inode 的 immutable/append-only 状态在 VFS 接入中丢失，导致 xattr 被修改 | 中 | iget 构造 KVFS inode 时总是使用空 `NodeFlags` | ext4 以语义方法暴露 `EXT4_IMMUTABLE_FL/EXT4_APPEND_FL`；kext4 KVFS 层在发布 VFS inode identity 时映射为 KVFS flags，由通用 xattr 权限层在 mutation 前返回 `EPERM` |
 | T-13 | 同一 inode 出现 snapshot 分叉，或 inode number reuse 继承旧 transient state | 中 | KVFS 初始化/释放期间并发 `iget`，namei 按编号重载 live child，或 orphan removal 为 resident 前驱解码临时对象 | KVFS-wide `(SuperBlock, ino)` table 的 `New/Live/Freeing` 是唯一 identity 状态；`New/Freeing` 等待并重试；kext4 向 unlink/rmdir/rename 传入既有 private component；legacy orphan next 只读写 journaled inode-table bytes；KExt4 无 resident cache；reuse 只能在 `Freeing` 完成并删除旧 slot 后发生 |
@@ -235,7 +235,7 @@ metadata 覆盖 unlink、rmdir、覆盖 rename 和乱序 final eviction；镜像
 | F-04 | 粗粒度 write lock 串行化慢 mutation I/O | live kext4 KVFS 层在 blocking filesystem mutation 周围持有 mount-level core write guard | 吞吐下降 | 其他 KExt4 mutation 等待；只读路径仍可共享 read guard | 4 | inode private state 已有独立 state lock；N2 根据实际 worker 和共享状态继续建立 per-group/journal/metadata-buffer 锁域；锁拆分前不宣称 mutation 并发性能 |
 | F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | 单次 mutation 无法容纳时在修改 metadata 前失败；writeback transaction 扩展失败时只提交完整前缀 | admission 失败保持磁盘不变；分段 writeback 的后续 transaction 若再失败，调用方可收到错误而 durable prefix 保留 | 3 | namespace 与 final eviction 分开预算；目录插入计划在事务前识别 HTree 转换/split，并把独立块 mapping 和 HTree credits 纳入同一预检；ordered writeback 在每个 live mapping run 前保证该操作及 inode publish 余量，先尝试 `reserve_more()`，容量不足则提交已 flush 的前缀、精确结算其 delalloc 后重开 transaction，只有连单次 mutation 都无法容纳时才在 admission 阶段拒绝；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 small-journal actual-run restart、fragmented unwritten、failure/retry、rename-overwrite、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | kext4 KVFS 层不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
-| F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步推进最老 pending checkpoint 后重试 |
+| F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步处理足够释放空间的 pending checkpoint 前缀后重试 |
 | F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 ext4 mapping 校验；KVFS operation 拒绝零进度和算术溢出，不输出未经检查的 extent |
 | F-09 | eviction 与并发 `iget` 交错 | final teardown 已开始时另一路按相同 inode number 加载 | 调用方可能观察正在释放的 metadata，或建立并行 identity | stale I/O、重复释放或 transient state 串线 | 2 | KVFS cache mutex 下完成 `Live -> Freeing`；lookup/insert 在内部等待，finish 精确移除旧 Weak entry 并唤醒后重试，不向路径操作返回 `EINVAL`/`ESTALE` |
 | F-10 | 存量 inode 的 extra-isize 扩展在每次脏写重复失败 | xattr 布局或 external block 资源持续不满足，但失败结论没有驻留状态 | 每次 ordinary inode dirty 重复 metadata I/O、checksum、解码、排序和布局规划 | 元数据更新吞吐下降，磁盘满场景可能被放大 | 4 | 确定布局不可行时在唯一 resident `Ext4Inode` 状态中设置 `no_expand`；成功删除 xattr 后清除，journal busy/credits 不足保持可重试 |
@@ -257,10 +257,25 @@ checkpoint phase，必须 abort journal 并向同步调用方报错。此路径�
 `flush_ordered_data` 入口内部先 barrier 后清除，不暴露独立清除方法，也不持有事务内部锁执行 I/O。
 data-only 的已映射覆盖写不依赖新 metadata，持久化由 inode sync 的同设备 journal flush 或直接
 flush、filesystem sync 的最终 flush 提供，不承诺先于无关事务的 commit record 持久化。
+
+Checkpoint 批处理必须保持 FIFO frozen image 写回顺序：选中连续前缀的全部 home-block
+写入成功并 flush 之后，才允许一次持久化日志尾部更新；在尾部 flush 及 recovery 状态处理成功前，不移除
+任何批内事务或回收日志空间。写回中途失败或任一道 flush 失败都保留整批 pending work
+并 abort，禁止在当前 mount 重试已消费的缓存快照；重新挂载依赖保留的日志恢复。
+空间不足时，只回收足够容纳待提交事务且仍保留一个空日志块的最短前缀；剩余事务及其
+policy 不移除。tail 指向 `next_oldest`，journal 必须保持 active，ext4 recovery feature
+不得清除，也不能失效仍有 frozen checkpoint image 的缓存。显式同步仍排空全部队列。
+生产 checkpoint entry 必须先取得 persisted evidence 再在事务锁内入队；缺少证据属于
+内部不变量破坏，不能按仍在提交的 `JournalBusy` 状态跳过。写回前须确认每笔事务的
+policy 记录存在。`PreserveDuringRecovery` 追加后在 mount 写锁下同步排空，若批内存在
+该策略，它必为最后一笔，整批保留 recovery evidence；不得允许后续普通事务在排空前
+覆盖批末策略。恢复工作全部完成后才可执行最终 recovery feature 清除。
+
 Commit/checkpoint failure 会保留 committing 或 pending work 并永久 abort journal，避免静默
 丢失尚未落盘的 metadata；后续 sync 和 mutation 都观察 `JournalAborted`，不能把内存中的
-transaction 当作 durable。多个 pending commit 存在时，完成最老 transaction 只推进 journal
-tail；只有最后一个完成后才清除 journal start 和 ext4 recovery evidence。当前 inode sync
+transaction 当作 durable。journal tail 只能越过已经完成 home-block 持久化的连续事务
+前缀；只有覆盖全部 pending commit 的批次完成后才清除 journal start 和 ext4 recovery
+evidence。当前 inode sync
 采用提交整个 running transaction 的保守语义。显式 recovery 同样只有在 legacy list 与
 orphan-file cleanup 全部完成 commit/checkpoint、确认 journal start 为零且 orphan file 为空，
 并 flush 最终 superblock 状态之后才能返回成功；在 cleanup durable 之前失败会保留 orphan entry 或 recovery feature

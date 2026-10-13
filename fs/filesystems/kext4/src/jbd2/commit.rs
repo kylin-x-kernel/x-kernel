@@ -309,36 +309,76 @@ pub(crate) fn persist_journal_commit(
     Ok((JournalPersistedCommit { log }, active_superblock))
 }
 
-/// Marks a persisted transaction checkpointed in the journal superblock.
+/// Advances the tail once for a contiguous prefix whose home blocks are durable.
 ///
-/// The caller must complete and flush home-block checkpoint I/O before calling
-/// this function. When another persisted transaction remains, the journal tail
-/// advances to `next_oldest`; otherwise the journal becomes clean.
-pub(crate) fn finish_journal_checkpoint(
+/// The caller must flush every transaction's home-block writes first. Validation
+/// of the entire log chain precedes any superblock write or space reclamation.
+/// A prefix caller must supply the first persisted transaction left behind;
+/// only a caller draining the queue may pass `next_oldest = None`.
+pub(crate) fn finish_journal_checkpoint_batch<'a>(
     superblock: &JournalSuperblock,
     journal: &impl JournalIo,
-    persisted: &JournalPersistedCommit,
-    next_oldest: Option<&JournalPersistedCommit>,
+    persisted: impl IntoIterator<Item = &'a JournalPersistedCommit>,
+    next_oldest: Option<&'a JournalPersistedCommit>,
 ) -> Ext4Result<JournalSuperblock> {
-    if superblock.sequence() != persisted.log.transaction()
-        || superblock.start() != JournalStart::Block(persisted.log.start())
+    let mut persisted = persisted.into_iter();
+    let first = persisted
+        .next()
+        .ok_or(Ext4Error::InvalidJournalTransaction)?;
+    if superblock.sequence() != first.log.transaction()
+        || superblock.start() != JournalStart::Block(first.log.start())
     {
         return Err(Ext4Error::InvalidJournalTransaction);
     }
-    let Some(next_oldest) = next_oldest else {
-        return write_journal_superblock_empty(superblock, journal, &persisted.log);
-    };
-    if next_oldest.log.transaction() != persisted.log.next_sequence()
-        || next_oldest.log.start() != persisted.log.head()
-    {
-        return Err(Ext4Error::InvalidJournalTransaction);
+    let mut last = first;
+    for next in persisted.chain(next_oldest) {
+        if next.log.transaction() != last.log.next_sequence() || next.log.start() != last.log.head()
+        {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        }
+        last = next;
     }
-    write_journal_superblock_active(
-        superblock,
-        journal,
-        next_oldest.log.transaction(),
-        next_oldest.log.start(),
-    )
+    if let Some(next_oldest) = next_oldest {
+        write_journal_superblock_active(
+            superblock,
+            journal,
+            next_oldest.log.transaction(),
+            next_oldest.log.start(),
+        )
+    } else {
+        write_journal_superblock_empty(superblock, journal, &last.log)
+    }
+}
+
+/// Selects the shortest pending prefix that leaves room for an append.
+///
+/// The iterator must cover the complete persisted FIFO in log order. The caller
+/// serializes append and checkpoint with the mount write lock. Space accounting
+/// uses the same circular-log and spare-block rules as the append path.
+pub(crate) fn journal_checkpoint_prefix_len<'a>(
+    superblock: &JournalSuperblock,
+    mut persisted: impl DoubleEndedIterator<Item = &'a JournalPersistedCommit>,
+    required_blocks: usize,
+) -> Ext4Result<usize> {
+    if required_blocks >= log_capacity(superblock)? {
+        return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
+    }
+    let newest = persisted
+        .next_back()
+        .ok_or(Ext4Error::InvalidJournalTransaction)?;
+    for (index, checkpoint) in persisted.chain(core::iter::once(newest)).enumerate() {
+        match ensure_log_space(
+            superblock,
+            checkpoint.log.head(),
+            newest.log.head(),
+            required_blocks,
+        ) {
+            Ok(()) => return Ok(index + 1),
+            Err(Ext4Error::JournalBusy) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Ext4Error::InvalidJournalTransaction)
 }
 
 /// Writes descriptor, data, and commit blocks for one committing transaction.
@@ -506,20 +546,29 @@ fn journal_blocks_required(
     commit: &RuntimeTransaction,
     blocks: &[JournalCommitBlock],
 ) -> Ext4Result<usize> {
+    validate_commit_blocks(superblock, commit, blocks)?;
+    journal_transaction_blocks_required(superblock, commit)
+}
+
+/// Counts descriptor, metadata, revoke and commit blocks for a frozen transaction.
+pub(crate) fn journal_transaction_blocks_required(
+    superblock: &JournalSuperblock,
+    commit: &RuntimeTransaction,
+) -> Ext4Result<usize> {
     validate_supported_features(superblock)?;
     let revoked_blocks = commit.revoked_blocks()?;
     if !revoked_blocks.is_empty() && !has_revoke(superblock) {
         return Err(Ext4Error::InvalidJournalTransaction);
     }
-    validate_commit_blocks(superblock, commit, blocks)?;
+    let metadata_blocks = commit.metadata_blocks()?;
 
     let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
     let descriptor_capacity = descriptor_tag_capacity(superblock, block_size)?;
     let revoke_capacity = revoke_block_capacity(superblock, block_size)?;
-    let descriptor_count = blocks.len().div_ceil(descriptor_capacity);
+    let descriptor_count = metadata_blocks.len().div_ceil(descriptor_capacity);
     let revoke_block_count = revoked_blocks.len().div_ceil(revoke_capacity);
     let total = descriptor_count
-        .checked_add(blocks.len())
+        .checked_add(metadata_blocks.len())
         .and_then(|count| count.checked_add(revoke_block_count))
         .and_then(|count| count.checked_add(1))
         .ok_or(Ext4Error::Overflow)?;
@@ -1464,7 +1513,8 @@ mod tests {
         let (persisted, active_superblock) =
             persist_journal_commit(&superblock, &journal, None, &commit, &blocks).unwrap();
         let clean =
-            finish_journal_checkpoint(&active_superblock, &journal, &persisted, None).unwrap();
+            finish_journal_checkpoint_batch(&active_superblock, &journal, &[persisted], None)
+                .unwrap();
 
         assert_eq!(clean.start(), JournalStart::Zero);
         assert_eq!(clean.sequence(), TransactionId::new(SEQUENCE + 1));
@@ -1510,6 +1560,48 @@ mod tests {
     }
 
     #[def_test]
+    fn checkpoint_prefix_reserves_append_space_across_ring_wrap() {
+        for head in [JOURNAL_BLOCKS - 11, JOURNAL_BLOCKS - 4] {
+            let mut bytes = journal_superblock_bytes(0, 0, SEQUENCE);
+            put_be_u32(&mut bytes, 20, JOURNAL_BLOCKS - 11).unwrap();
+            put_be_u32(&mut bytes, 0x58, head).unwrap();
+            let mut superblock =
+                JournalSuperblock::decode(&bytes, BLOCK_SIZE as u32, JOURNAL_BLOCKS, UUID).unwrap();
+            let journal = TestJournal::with_superblock(&superblock);
+            let mut pending = Vec::new();
+            for offset in 0..3 {
+                let (commit, blocks) = committed_blocks_with_sequence(
+                    SEQUENCE + offset,
+                    &[(FilesystemBlock::new(1100), vec![offset as u8; BLOCK_SIZE])],
+                );
+                let (persisted, active) =
+                    persist_journal_commit(&superblock, &journal, pending.last(), &commit, &blocks)
+                        .unwrap();
+                pending.push(persisted);
+                superblock = active;
+            }
+            // Reclaiming three blocks leaves five free; equality still requires
+            // a second transaction because an append must retain one spare.
+            assert_eq!(
+                journal_checkpoint_prefix_len(&superblock, pending.iter(), 4),
+                Ok(1)
+            );
+            assert_eq!(
+                journal_checkpoint_prefix_len(&superblock, pending.iter(), 5),
+                Ok(2)
+            );
+            assert_eq!(
+                journal_checkpoint_prefix_len(&superblock, pending.iter(), 8),
+                Ok(3)
+            );
+            assert_eq!(
+                journal_checkpoint_prefix_len(&superblock, pending.iter(), 11),
+                Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
+            );
+        }
+    }
+
+    #[def_test]
     fn appends_commits_and_advances_checkpoint_tail_in_order() {
         let superblock = journal_superblock(0, FEATURE_INCOMPAT_CSUM_V3, SEQUENCE);
         let journal = TestJournal::with_superblock(&superblock);
@@ -1541,8 +1633,25 @@ mod tests {
         let scan = scan_journal(&second_superblock, &journal).unwrap();
         assert_eq!(scan.transactions().len(), 2);
 
+        let flushes_before = *journal.flush_count.borrow();
+        let writes_before = journal.write_order.borrow().len();
+        assert_eq!(
+            finish_journal_checkpoint_batch(&second_superblock, &journal, &[first, first], None),
+            Err(Ext4Error::InvalidJournalTransaction)
+        );
+        assert_eq!(*journal.flush_count.borrow(), flushes_before);
+        assert_eq!(journal.write_order.borrow().len(), writes_before);
+        assert_eq!(
+            scan_journal(&second_superblock, &journal)
+                .unwrap()
+                .transactions()
+                .len(),
+            2
+        );
+
         let second_is_oldest =
-            finish_journal_checkpoint(&second_superblock, &journal, &first, Some(&second)).unwrap();
+            finish_journal_checkpoint_batch(&second_superblock, &journal, &[first], Some(&second))
+                .unwrap();
         assert_eq!(second_is_oldest.sequence(), second.log().transaction());
         assert_eq!(
             second_is_oldest.start(),
@@ -1556,7 +1665,8 @@ mod tests {
             second.log().transaction()
         );
 
-        let clean = finish_journal_checkpoint(&second_is_oldest, &journal, &second, None).unwrap();
+        let clean =
+            finish_journal_checkpoint_batch(&second_is_oldest, &journal, &[second], None).unwrap();
         assert_eq!(clean.start(), JournalStart::Zero);
         assert_eq!(clean.sequence(), second.log().next_sequence());
         assert_eq!(clean.head(), second.log().head());

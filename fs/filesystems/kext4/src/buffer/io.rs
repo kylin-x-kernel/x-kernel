@@ -112,11 +112,20 @@ impl Ext4MetadataIo {
     /// boundary that later `fsync` and `syncfs` code can build on.
     #[allow(dead_code)]
     pub(crate) fn checkpoint_committed(&self, commit: &RuntimeTransaction) -> Ext4Result<()> {
+        self.write_checkpoint_committed(commit)?;
+        self.cache.flush_device()
+    }
+
+    /// Writes frozen metadata in transaction order without a durability barrier.
+    ///
+    /// The mount checkpoint coordinator must flush all home-block writes before
+    /// advancing the journal tail. A failure must abort that journal.
+    pub(crate) fn write_checkpoint_committed(&self, commit: &RuntimeTransaction) -> Ext4Result<()> {
         let metadata_blocks = commit.metadata_blocks()?;
         for block in metadata_blocks.iter() {
             self.cache.checkpoint_block(*block, commit.id())?;
         }
-        self.cache.flush_device()
+        Ok(())
     }
 
     /// Captures metadata images that must be emitted into an online JBD2 commit.

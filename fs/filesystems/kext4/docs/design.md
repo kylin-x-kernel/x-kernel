@@ -267,7 +267,8 @@ write batch；batch 在 journal ring wrap 和 internal-journal 不连续 physica
 
 设置 ext4 recovery feature 时只更新磁盘 recovery evidence 和内存 feature 状态，不再用尚未
 checkpoint 的旧 home-block superblock 覆盖较新的内存 allocator counters。真实 Linux ext4
-镜像测试覆盖了两个 committed transaction 同时可扫描、逐个推进 tail、最终 clean 和 e2fsck。
+镜像回归覆盖 committed transaction 扫描、最终 clean 和 e2fsck；组件测试进一步验证
+共享 metadata 的两个事务批量 checkpoint 后保留最新版本，并合并 home/tail 屏障。
 若 transaction 包含 primary superblock，persist 路径会把 recovery feature 同时合并进 journal
 记录和该 transaction 的 frozen checkpoint image；因此较老 checkpoint 在后续 commit 仍 pending
 时不会把磁盘 `needs_recovery` 错误清零。只有 journal tail 真正清空后才单独清除该标志。
@@ -278,9 +279,26 @@ transaction。新 handle 加入前按 journal 格式开销采用约三分之一�
 容量。不再以固定 operation 数或“半个 journal”触发普通提交。home-block checkpoint
 仍留在 FIFO queue；`syncfs` 和 KVFS unmount writeback 会先提交当前 running transaction，
 再 drain 全部 pending checkpoint；普通 mount 在 dentry eviction 后再次执行同一同步路径，
-以覆盖 final inode eviction 产生的新 metadata。journal 空间不足时提交者同步推进最老
-checkpoint 后重试 append。当前仍由调用者同步驱动，没有 background worker 和基于时间的
-age trigger。
+以覆盖 final inode eviction 产生的新 metadata。checkpoint worker 在 mount 写锁下快照当前
+FIFO 中已提交事务：显式同步选取全部队列；journal 空间不足时，按待提交事务的 descriptor、
+metadata、revoke 和 commit 块开销选取足够释放空间的最短连续前缀，仍保留一个空日志块。
+选中事务按顺序写回 frozen metadata（同一块的较新版本最后写入），
+统一执行一次 home-block flush，再一次更新并 flush journal tail。只有这两道持久化屏障
+及末尾 recovery 状态处理成功后，才逐个释放事务及其日志空间；写回、flush 或尾部更新
+失败会保留整批 pending work 并 abort journal。批大小由当前占用的日志空间自然限制，
+不跨越未提交的 running/committing transaction；revoke 仍通过原有缓存规则抑制旧版本写回。
+journal 空间不足时提交者同步处理选中的前缀后重试 append，后续事务继续留在 FIFO。
+当前仍由调用者同步驱动，没有 background worker 和基于时间的 age trigger。
+
+只有批次排空 FIFO 时，才按批末事务策略处理 recovery 状态；保留后缀时用 `next_oldest`
+把日志尾部推进到剩余首笔事务，保持 journal active 和 ext4 recovery evidence，不执行缓存
+失效或 mutable metadata 重载。`PreserveDuringRecovery` 事务追加后在 mount
+写锁下立即同步 checkpoint，因此它若出现在批中必为最后一笔，不会有后续普通事务
+在排空前加入。批中可以有更早的 `ClearAfterCheckpoint` 事务，整批仍保留 recovery
+evidence 并重载最新 mutable metadata state。所有 policy 记录在 frozen image 写回前
+校验存在。尾部校验借用现有 batch 中的 persisted evidence 迭代器，不构造第二份凭据容器；
+全部连续性校验完成后才写入 journal superblock。这里仍逐事务写回 frozen image，尚未实现
+跨事务 metadata block 写回合并。
 
 精准 `fsync`/`fdatasync` transaction id 的所有权不在 journal 的 inode-number 全局表，而应在
 VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。现有 KVFS inode 尚未
