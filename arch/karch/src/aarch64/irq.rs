@@ -24,10 +24,11 @@
 //! [`disable_local_irq`] and [`enable_local_irq`] will silently overwrite
 //! the bit without restoring a caller‑set value.
 //!
-//! The one deliberate exception is [`disable_local_exceptions`], the
-//! terminal-path helper behind the park in [`super::cpu::stop_cpu`]: it
-//! masks all four DAIF exception classes and is never followed by a
-//! restore, so no restore path exists.
+//! Deliberate exceptions are the terminal [`disable_local_exceptions`] path,
+//! the final EL0 handoff in [`prepare_enter_user_irq`], and the bounded
+//! [`super::cpu::idle_wait`] sequence. Idle temporarily masks I/F at the CPU
+//! while opening PMR so pending interrupts can wake WFI, then restores PMR
+//! before DAIF. No ordinary IRQ helper runs inside that temporary state.
 
 //! # Hardware‑NMI ALLINT invariant
 //!

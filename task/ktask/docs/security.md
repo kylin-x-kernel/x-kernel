@@ -34,6 +34,21 @@ Production IRQ/hardware integration services the prepared core as its only
 general timer source. Async sleep/timeout, timerfd, network and watchdog sampling
 use owned timers; the legacy waker map and periodic callback vector are removed.
 
+### Idle Wake Boundary
+
+The final work check and architecture wait share a `NoPreemptIrqSave` guard.
+The check never clears `need_resched`; an IRQ handled before the check therefore
+cannot erase its own wake request. Later IRQs are covered by the architecture's
+pending-wake contract. No runqueue lock is retained, and IRQ-tail scheduling
+stays excluded until the wait returns. Mask restoration precedes preemption
+restoration. Availability still depends on enabled controller wake sources and
+the IPI producer's publish-before-notify contract, not on a periodic timer tick.
+
+With `arm-timer-resume-fixup`, an outer no-preempt guard spans the before-wait
+sample and the timer repair after IRQ restoration. Pending work cannot schedule
+the idle task away before that repair completes; logging and timer notifications
+do not extend the IRQ-off wait window.
+
 ### Prepared Timer Platform Boundary
 
 `Timer::new` reads the platform CPU ID after per-CPU initialization and passes

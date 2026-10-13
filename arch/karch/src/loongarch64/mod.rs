@@ -16,7 +16,7 @@ pub use cache::{
     dma_read_barrier, flush_icache_all, flush_icache_all_local, flush_icache_range,
     flush_icache_remote,
 };
-pub use cpu::{await_interrupts, stop_cpu};
+pub use cpu::{fixup_idle_irq_return, idle_wait, stop_cpu};
 pub use fp::{enable_fp, enable_lsx};
 #[expect(
     deprecated,

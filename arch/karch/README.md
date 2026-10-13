@@ -19,7 +19,8 @@ This crate provides a uniform API across all supported architectures (AArch64, x
   device reads the same memory via DMA (`dbar 0` on LoongArch64, no-op on
   cache-coherent architectures)
 - **CPU control**: `stop_cpu() -> !` (terminal halt; never returns),
-  `await_interrupts()`
+  and `unsafe idle_wait()` (scheduler wait with normal
+  IRQs disabled on entry and return; requires preemption exclusion).
 - **Local interrupt management**:
   - `enable_local_irq()`, `disable_local_irq()`, `local_irq_enabled()`
   - `save_irq_and_disable() -> usize` — atomically save interrupt state and disable local interrupts

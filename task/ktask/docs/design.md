@@ -392,6 +392,21 @@ Voluntary switch paths:
 ready task it first idle-pulls a Ready `!on_cpu` waiter from a CPU with
 `nr_running >= 2`, then falls back to this CPU's `IDLE_TASK`.
 
+### Idle wait handshake
+
+`run_idle` yields first, then pins the CPU and masks normal IRQs. Its final
+`need_resched` check does not consume the retained request: pending work skips
+sleep. With no retained request, `karch::idle_wait` prevents a later normal IRQ
+from being consumed before the sleep instruction. No runqueue lock crosses the
+wait. Timer-only notifications are covered by the architecture wake mechanism,
+not by treating them as reschedule requests. Each return reevaluates work.
+
+The architecture returns IRQ-off even if it temporarily enabled delivery. The
+guard restores IRQs before allowing preemption. With timer-resume fixup enabled,
+an outer no-preempt guard keeps the before-wait sample and post-wait repair in
+one non-schedulable region, including repair logging and notifications after
+IRQ restoration. This path does not introduce RCU tracking or a periodic wake tick.
+
 ### Hardware timer drive and dynamic schedule timer
 
 `ktask` owns all hardware timer-drive logic. `kruntime` only registers the

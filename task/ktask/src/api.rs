@@ -721,15 +721,38 @@ pub fn exit(exit_code: i32) -> ! {
     current_run_queue::<NoPreemptIrqSave>().exit_current(exit_code)
 }
 
+fn idle_wait_if_no_work(_guard: &NoPreemptIrqSave) -> bool {
+    if current().is_preempt_pending() {
+        return false;
+    }
+    // SAFETY: The borrowed guard excludes preemption and normal IRQs. The
+    // callers hold no runqueue lock and retain the ordinary task NMI state.
+    unsafe { karch::idle_wait() };
+    true
+}
+
+#[cfg(unittest)]
+#[path = "tests/idle.rs"]
+mod tests_idle;
+
 /// The idle task routine.
 ///
-/// It runs an infinite loop that keeps calling [`yield_now()`].
+/// Rechecks retained scheduling work with IRQs masked before each wait.
 pub fn run_idle() -> ! {
     loop {
         yield_now();
+        // Like Linux's idle loop, finish local bookkeeping before scheduling.
+        // Keep this separate from IRQ exclusion: timer repair also logs and
+        // notifies other CPUs, and need not extend the IRQ-off wait window.
+        #[cfg(feature = "arm-timer-resume-fixup")]
+        let _idle_pin = kspin::NoPreempt::new();
+        let guard = NoPreemptIrqSave::new();
         #[cfg(feature = "arm-timer-resume-fixup")]
         let cntpct_before = khal::time::now_ticks();
-        karch::await_interrupts();
+        if !idle_wait_if_no_work(&guard) {
+            continue;
+        }
+        drop(guard);
 
         #[cfg(feature = "arm-timer-resume-fixup")]
         {

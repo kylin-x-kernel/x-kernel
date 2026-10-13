@@ -12,6 +12,8 @@ use loongArch64::register::{
 use super::ctx::ExceptionContext;
 use crate::excp::PageFaultFlags;
 
+const PRMD_PPLV_MASK: usize = 0b11;
+
 core::arch::global_asm!(
     include_asm_macros!(),
     include_str!("excp.S"),
@@ -76,6 +78,11 @@ fn loongarch64_trap_handler(tf: &mut ExceptionContext) {
             tf.emulate_unaligned().unwrap();
         },
         Trap::Interrupt(_) => {
+            // A wake handled between enabling IE and IDLE must return past
+            // IDLE, including timer-only IPIs that do not request scheduling.
+            if tf.prmd & PRMD_PPLV_MASK == 0 {
+                karch::fixup_idle_irq_return(&mut tf.era);
+            }
             let interrupt_id: usize = estat.is().trailing_zeros() as usize;
             handle_trap!(IRQ, interrupt_id);
         }

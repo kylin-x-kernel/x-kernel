@@ -1,6 +1,29 @@
-# Cache Isolation Safety
+# Architecture Primitive Safety
 
-## Scope and Inputs
+## Idle Wait Boundary
+
+On bare metal, the unsafe `idle_wait` contract requires IRQ/preemption exclusion, initialized
+wake sources, task-context NMI state and no locks required by IRQ handlers.
+Violating it can deadlock a CPU or permit scheduling during a caller's excluded
+region. The operation allocates nothing and accepts no external data. Debug
+assertions check normal IRQ masking; callers own the remaining obligations.
+The x86 host fallback only spins once; it neither changes IRQ state nor validates
+the bare-metal masking contract.
+
+The AArch64 PMR sequence is a bounded exception to the ordinary DAIF invariant:
+no ordinary IRQ helper runs between CPU masking and exact mask restoration.
+Hardware-NMI ALLINT is preserved. LoongArch IRQ entry fixes up only kernel
+frames whose PC exactly names the dedicated IDLE instruction; no user-supplied
+PC is rewritten. The assembly leaf preserves callee-saved registers and returns
+with IE clear. Other architectures also return IRQ-off, including spurious wakes.
+
+These guarantees prevent consuming a normal wake before an unconditional sleep;
+they do not guarantee controller delivery, support CPU hotplug or change terminal
+CPU-stop behavior. Disassembly checks and real IRQ tests complement caller review.
+
+## Cache Isolation Safety
+
+### Scope and Inputs
 
 This analysis covers `src/cache.rs` and `src/<arch>/cache_layout.rs` only.
 Privileged architecture operations,
@@ -11,7 +34,7 @@ The sole input is an owned Rust value `T`. This module has no raw-pointer, FFI,
 user-memory, device, file or network parsing entry point and no unsafe code.
 It performs no allocation, I/O, logging or synchronization.
 
-## Invariants and Limitations
+### Invariants and Limitations
 
 Rust enforces alignment, initialization, borrowing and normal destruction.
 `Deref` and `DerefMut` borrow the contained field; no pointer conversion or
@@ -31,7 +54,7 @@ the public constant derives from the selected type, preventing inconsistent
 numeric and layout definitions. Unknown architectures are rejected at compile
 time instead of receiving an unverified fallback.
 
-## Threat Model and Responses
+### Threat Model and Responses
 
 The protected assets are payload memory safety and confidentiality, the integrity
 of the selected layout policy, and the availability of consumers using aligned
@@ -52,7 +75,7 @@ controls from responsibilities that remain with consumers.
 | T04 | Memory/device data integrity / hardware consumers | A caller uses `SMP_CACHE_BYTES` as a cache-maintenance instruction stride or assumes the wrapper establishes DMA suitability. Incorrect coverage or buffer assumptions can produce stale or corrupted data. | High | **Mitigate and transfer validation to the hardware integration boundary.** Module rustdoc explicitly excludes both contracts, and the wrapper performs no hardware operations. Architecture maintenance APIs and DMA providers must establish their own geometry, mapping and ownership requirements. This analysis does not claim to audit those excluded implementations. |
 | T05 | Consumer availability / storage footprint | Applying padded alignment to a large array increases static, stack or heap usage, potentially exceeding a memory budget. Stack exhaustion or allocation failure can interrupt service. | Medium | **Mitigate at the consumer boundary.** Construction itself allocates nothing and Rust exposes the real padded size through `size_of`; no hidden allocation or fallback is introduced. Consumer review must check array size and placement against its memory budget. The module imposes no quota or recoverable allocation policy on its owners. |
 
-## Failure Modes and Verification
+### Failure Modes and Verification
 
 | ID | Failure mode and cause | Local / system effect | Control and verification |
 | --- | --- | --- | --- |
@@ -64,7 +87,7 @@ The tests in `src/cache.rs` also check that payloads with stronger alignment ret
 it and that shared/mutable value access remains correct. These are layout checks,
 not evidence of DMA safety, synchronization, pinning or hardware cache behavior.
 
-## Audit Checklist
+### Audit Checklist
 
 - Wrap the complete independently updated object, including its lock.
 - Preserve existing ownership, pinning and synchronization protocols.

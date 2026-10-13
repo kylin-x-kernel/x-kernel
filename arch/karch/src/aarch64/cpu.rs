@@ -4,6 +4,48 @@
 
 //! CPU control operations for AArch64.
 
+/// Wait for an idle wakeup, returning with normal IRQs disabled.
+///
+/// # Safety
+/// The caller must disable normal IRQs and preemption, hold no scheduler
+/// locks, and enter with the task-context NMI mask state. Wake sources must
+/// remain enabled at the controller.
+#[inline]
+pub unsafe fn idle_wait() {
+    debug_assert!(!super::irq::local_irq_enabled());
+    #[cfg(feature = "nmi-pseudo")]
+    if super::irq::pmr::is_ready() {
+        // SAFETY: PMR readiness proves the GIC CPU interface is accessible.
+        // Mask CPU delivery before opening PMR for wakeup; restore PMR before
+        // DAIF. No ordinary IRQ helper may run inside this temporary state.
+        unsafe {
+            core::arch::asm!(
+                "mrs {daif}, daif",
+                "msr daifset, #3",
+                "mrs {pmr}, ICC_PMR_EL1",
+                "msr ICC_PMR_EL1, {open}",
+                "isb",
+                "dsb sy",
+                "wfi",
+                "msr ICC_PMR_EL1, {pmr}",
+                "isb",
+                "msr daif, {daif}",
+                daif = out(reg) _,
+                pmr = out(reg) _,
+                open = in(reg) u64::from(super::irq::pmr::ALL),
+                options(nostack, preserves_flags),
+            );
+        }
+        return;
+    }
+    // SAFETY: Normal IRQ delivery is masked but WFI observes pending wake
+    // signals. DAIF and, when supported, ALLINT are left unchanged, so a
+    // hardware NMI retains its task-context delivery and return semantics.
+    unsafe {
+        core::arch::asm!("dsb sy", "wfi", options(nostack, preserves_flags));
+    }
+}
+
 /// Halt the current CPU terminally.
 ///
 /// Masks every DAIF exception class — debug exceptions, SError, IRQs
@@ -21,12 +63,4 @@ pub fn stop_cpu() -> ! {
     loop {
         aarch64_cpu::asm::wfi();
     }
-}
-
-/// Relaxes the current CPU and waits for interrupts.
-///
-/// It must be called with interrupts enabled, otherwise it will never return.
-#[inline]
-pub fn await_interrupts() {
-    aarch64_cpu::asm::wfi();
 }

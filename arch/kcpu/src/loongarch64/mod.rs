@@ -35,6 +35,24 @@ pub mod tests_arch {
     use super::ExceptionContext;
 
     #[def_test]
+    fn idle_irq_return_skips_only_the_wait_instruction() {
+        unsafe extern "C" {
+            static __karch_idle_instruction: u8;
+            static __karch_idle_return: u8;
+        }
+        let idle_pc = core::ptr::addr_of!(__karch_idle_instruction) as usize;
+        let exit_pc = core::ptr::addr_of!(__karch_idle_return) as usize;
+        let mut pc = idle_pc;
+        karch::fixup_idle_irq_return(&mut pc);
+        assert_eq!(pc, exit_pc);
+        for other_pc in [0, idle_pc - 4, exit_pc, exit_pc + 4] {
+            let mut pc = other_pc;
+            karch::fixup_idle_irq_return(&mut pc);
+            assert_eq!(pc, other_pc);
+        }
+    }
+
+    #[def_test]
     fn test_syscall_restart_ignored_without_syscall_trap() {
         let mut ctx = ExceptionContext::default();
         ctx.saved_syscall_arg0 = 7;

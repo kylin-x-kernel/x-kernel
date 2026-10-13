@@ -23,7 +23,7 @@ pub use cache::{
     clean_dcache_line_to_poc, clean_dcache_range_to_poc, dma_read_barrier, flush_icache_all,
     flush_icache_all_local, flush_icache_range, flush_icache_remote,
 };
-pub use cpu::{await_interrupts, stop_cpu};
+pub use cpu::{idle_wait, stop_cpu};
 pub use fp::enable_fp;
 #[cfg(feature = "nmi-hardware")]
 pub use irq::{allint_active, allint_clear, allint_is_set, allint_set, mark_allint_active};

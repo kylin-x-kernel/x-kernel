@@ -6,6 +6,22 @@
 
 use super::irq::disable_local_irq;
 
+/// Wait for an idle wakeup, returning with normal IRQs disabled.
+///
+/// # Safety
+/// The caller must disable supervisor IRQ delivery and preemption, keep the
+/// individual wake sources enabled, and hold no scheduler locks.
+#[inline]
+pub unsafe fn idle_wait() {
+    debug_assert!(!super::irq::local_irq_enabled());
+    // SAFETY: SIE remains clear under the caller's exclusion. WFI resumes on
+    // individually enabled pending interrupts irrespective of global SIE;
+    // the fence orders preceding work before waiting without consuming it.
+    unsafe {
+        core::arch::asm!("fence iorw, iorw", "wfi", options(nostack));
+    }
+}
+
 /// Halt the current CPU terminally.
 ///
 /// Disables local interrupts and remains in `wfi` until the hart is
@@ -18,12 +34,4 @@ pub fn stop_cpu() -> ! {
     loop {
         riscv::asm::wfi();
     }
-}
-
-/// Relaxes the current CPU and waits for interrupts.
-///
-/// It must be called with interrupts enabled, otherwise it will never return.
-#[inline]
-pub fn await_interrupts() {
-    riscv::asm::wfi()
 }
