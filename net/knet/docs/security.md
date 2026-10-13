@@ -25,10 +25,12 @@ can still prevent receive progress.
 
 ## Trust Model
 
-IPv4 filter match-value constructors validate owned kernel inputs for port and
-ICMP code ranges, TCP flag masks, and interface-name byte lengths. Callers must
-bound string allocation before construction. Rule and table validation,
-userspace decoding, and packet evaluation belong to later integration stages.
+The IPv4 filter model validates owned kernel values before constructing an
+immutable table. Rule and chain constructors establish local invariants;
+table construction checks aggregate limits, hook coverage, and the jump graph.
+These limits bound accepted policies and validation work. Callers must bound
+input allocation before construction. Userspace decoding and packet evaluation
+lie outside this model.
 
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can

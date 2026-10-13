@@ -2,6 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Validated IPv4 filter match-condition values.
+//! Immutable IPv4 filter rules, chains, and validated table graphs.
 
+mod chain;
+mod error;
 mod matcher;
+mod rule;
+mod table;
