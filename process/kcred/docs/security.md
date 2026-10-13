@@ -134,10 +134,10 @@ infallible, and the namespace counter has no wrap rejection.
 
 ## Verification points
 
-Existing `src/tests.rs` cases cover rejected set-ID changes, saved-ID rules,
+Existing `ut-tests/kcred_unittest.rs` cases cover rejected set-ID changes, saved-ID rules,
 filesystem-ID no-ops, keep-capabilities locking/exec reset, sorted groups with
 duplicates, stable prepared snapshots, access identity and asymmetric matching.
-`src/namespace.rs` tests singleton identity, ID ordering and decimal display.
+`ut-tests/namespace_unittest.rs` tests singleton identity, ID ordering and decimal display.
 These tests do not validate all external task publication paths or counter wrap.
 Use the platform defconfig and `make unittest UNITTEST_CRATE=kcred` to run the
 registered kernel tests. Crate rustdoc also contains a runnable prepare/transition

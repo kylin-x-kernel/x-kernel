@@ -27,7 +27,7 @@ process/ksignal/src/
 │   └── dequeue_observer.rs  per-signal dequeue observers
 ├── arch/                per-architecture MContext/UContext and trampoline
 │   ├── mod.rs, x86_64.rs, aarch64.rs, riscv.rs, loongarch64.rs
-└── tests.rs             kernel unit tests
+└── ../ut-tests/         kernel unit tests
 ```
 
 ## Architecture

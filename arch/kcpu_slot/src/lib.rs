@@ -56,4 +56,5 @@ pub trait CpuLocalIrqIf {
 }
 
 #[cfg(test)]
-mod tests;
+#[path = "../host-tests/kcpu_slot_host.rs"]
+mod kcpu_slot_host_tests;

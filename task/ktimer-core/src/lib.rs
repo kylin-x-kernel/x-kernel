@@ -69,4 +69,5 @@ pub use timer::{CancelResult, Timer};
 
 /// Test-only scenarios driven by an upper-layer kernel task harness.
 #[cfg(unittest)]
+#[path = "../ut-tests/test_support.rs"]
 pub mod test_support;

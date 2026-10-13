@@ -25,7 +25,7 @@ The source layout is:
 | `src/utils/mod.rs`, `src/utils/copy.rs`, `src/utils/cursor.rs` | Utility exports, copying, position-based memory I/O |
 | `src/utils/chain.rs`, `src/utils/take.rs` | Sequential and byte-limited readers |
 | `src/utils/empty.rs`, `src/utils/repeat.rs`, `src/utils/sink.rs`, `src/utils/iofn.rs` | Synthetic streams and closure adapters |
-| `src/test_cursor.rs`, `src/test_iobuf.rs`, `src/test_read_write.rs`, `src/test_seek.rs` | Registered kernel unit tests |
+| `ut-tests/cursor.rs`, `ut-tests/iobuf.rs`, `ut-tests/read_write.rs`, `ut-tests/seek.rs` | Registered kernel unit tests |
 | `build.rs`, `Cargo.toml` | Compiler API probes, feature and dependency selection |
 
 There are no file descriptors, filesystem lookup, permissions, user-pointer

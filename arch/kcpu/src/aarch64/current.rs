@@ -53,16 +53,6 @@ pub unsafe fn set_current_task_ptr(ptr: *const ()) {
 }
 
 #[cfg(unittest)]
-mod tests {
-    use super::*;
-
-    #[unittest::def_test]
-    fn entry_task_matches_kernel_current() {
-        let irq_state = karch::save_irq_and_disable();
-        let current = current_task_ptr();
-        let entry_task = ENTRY_TASK.current_shared().load(Ordering::Acquire);
-        karch::restore_irq(irq_state);
-        assert!(!current.is_null());
-        assert_eq!(entry_task, current as usize);
-    }
+mod current_unittest {
+    include!("../../ut-tests/aarch64_current_unittest.rs");
 }

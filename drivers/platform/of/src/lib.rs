@@ -837,5 +837,5 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
 
 #[unittest::mod_test]
 mod unittest_tests {
-    include!("test_of.rs");
+    include!("../ut-tests/of_unittest.rs");
 }

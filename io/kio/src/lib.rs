@@ -26,9 +26,13 @@ mod seek;
 mod utils;
 mod write;
 
+#[path = "../ut-tests/cursor.rs"]
 mod test_cursor;
+#[path = "../ut-tests/iobuf.rs"]
 mod test_iobuf;
+#[path = "../ut-tests/read_write.rs"]
 mod test_read_write;
+#[path = "../ut-tests/seek.rs"]
 mod test_seek;
 
 pub use self::{buffered::*, iobuf::*, read::*, seek::*, utils::*, write::*};

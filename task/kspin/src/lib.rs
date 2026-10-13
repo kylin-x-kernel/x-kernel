@@ -86,9 +86,11 @@
 extern crate alloc;
 
 mod guard;
+#[cfg(unittest)]
+#[path = "../ut-tests/kspin_unittest.rs"]
+mod kspin_unittest_tests;
 mod lock;
 mod rwlock;
-mod tests;
 
 pub use guard::{
     BaseGuard, CurrentCpuIf, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave,

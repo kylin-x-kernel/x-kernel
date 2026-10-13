@@ -141,10 +141,10 @@ count arithmetic, or reliable destructor error reporting. Some initialization
 and append-only assumptions still depend on local bookkeeping or provider
 behavior as described above; they must not be described as validated isolation.
 
-Existing kernel tests in `src/test_cursor.rs` cover seek boundaries, gap padding,
-fixed-write overflow and UTF-8 reads; `src/test_read_write.rs` covers buffered
-I/O, `Take`, chaining, copying and synthetic streams; `src/test_iobuf.rs` covers
-remaining counts; `src/test_seek.rs` covers offset handling. Run them through
+Existing kernel tests in `ut-tests/cursor.rs` cover seek boundaries, gap padding,
+fixed-write overflow and UTF-8 reads; `ut-tests/read_write.rs` covers buffered
+I/O, `Take`, chaining, copying and synthetic streams; `ut-tests/iobuf.rs` covers
+remaining counts; `ut-tests/seek.rs` covers offset handling. Run them through
 `make unittest UNITTEST_CRATE=kio` after the platform configuration workflow.
 These tests are not exhaustive checks of malicious providers or every unsafe
 initialization path. Rustdoc examples exercise bounded memory I/O and explicit

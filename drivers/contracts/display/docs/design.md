@@ -44,8 +44,8 @@ drivers that can scan out guest memory directly.
 ```text
 drivers/contracts/display/
 ├── src/
-│   ├── lib.rs        # DisplayDevice trait, display/scanout types
-│   └── tests.rs      # unit tests (unittest harness)
+│   └── lib.rs        # DisplayDevice trait, display/scanout types
+├── ut-tests/         # unit tests (unittest harness)
 └── Cargo.toml
 ```
 

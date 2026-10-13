@@ -20,6 +20,7 @@ macro_rules! ktest_println {
 }
 
 pub mod runner;
+#[path = "framework.rs"]
 pub mod test_framework;
 
 // Re-export the def_test and mod_test macros from unittest-macros crate

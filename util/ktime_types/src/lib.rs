@@ -34,4 +34,5 @@ pub use units::{
 };
 
 #[cfg(unittest)]
-mod tests;
+#[path = "../ut-tests/time_values.rs"]
+mod time_value_tests;

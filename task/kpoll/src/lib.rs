@@ -30,7 +30,7 @@ mod source;
 /// Unit tests for kpoll using the unittest framework.
 #[unittest::mod_test]
 mod tests {
-    include!("tests.rs");
+    include!("../ut-tests/kpoll_unittest.rs");
 }
 
 pub use completion::Completion;

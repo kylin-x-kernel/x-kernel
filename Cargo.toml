@@ -28,6 +28,10 @@ exclude = [
     "io/drmdevice/tests",
 ]
 
+[workspace.metadata.cargo-shear]
+ignored = ["unittest"]
+ignored-paths = ["**/ut-tests/*.rs", "**/host-tests/*.rs"]
+
 [workspace.package]
 version = "0.3.0-dev"
 edition = "2024"

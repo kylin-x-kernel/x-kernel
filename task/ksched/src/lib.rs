@@ -18,7 +18,7 @@ mod scheduler;
 /// admits them, and Deadline requires a valid `DlParams`.
 #[unittest::mod_test]
 mod tests {
-    include!("tests.rs");
+    include!("../ut-tests/scheduler.rs");
 }
 
 extern crate alloc;

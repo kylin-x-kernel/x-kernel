@@ -4,10 +4,10 @@
 
 This analysis covers the entire crate — `src/lib.rs` (global DTB state,
 semantic accessors, PCI/interrupt/memory decoding) plus
-`src/test_of.rs`, which is test-only and reachable exclusively through
-the audited public entry points. The four unsafe entry points are the
-only direct external-input boundaries; the DTB blob itself is validated
-by `rs_fdtree` (see its own security document).
+`ut-tests/of_unittest.rs`, which is test-only and reachable exclusively
+through the audited public entry points. The four unsafe entry points
+are the only direct external-input boundaries; the DTB blob itself is
+validated by `rs_fdtree` (see its own security document).
 
 
 ## Trust Model

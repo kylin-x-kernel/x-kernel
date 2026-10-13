@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the entire crate — `src/lib.rs` (the
-`DisplayDevice` trait and scanout value types) plus `src/tests.rs`,
+`DisplayDevice` trait and scanout value types) plus `ut-tests/`,
 which is test-only. The crate holds no state and no unsafe code; the
 security-relevant content is the scanout resource contract and the
 obligations it places on callers and drivers.

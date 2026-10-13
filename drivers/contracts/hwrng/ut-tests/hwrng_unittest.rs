@@ -4,8 +4,6 @@
 
 //! Unit tests for the hardware RNG device contract.
 
-#![cfg(unittest)]
-
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 
 use kspin::SpinNoIrq;

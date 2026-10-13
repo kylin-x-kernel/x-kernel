@@ -34,8 +34,8 @@ This document covers the entire crate, including its namespace module and tests.
 | `src/credentials/model.rs` | `Cred` storage, queries and transitions |
 | `src/credentials/user.rs`, `src/credentials/group.rs` | `Uid` and `Gid`, both `u32` aliases |
 | `src/credentials/securebits.rs` | Crate-private `SecureBits` bitflags |
-| `src/namespace.rs` | IDs, namespace parentage, initial namespace and namespace tests |
-| `src/tests.rs` | Credential transition and snapshot tests under `cfg(unittest)` |
+| `src/namespace.rs` | IDs, namespace parentage and initial namespace |
+| `ut-tests/kcred_unittest.rs`, `ut-tests/namespace_unittest.rs` | Credential and namespace tests under `cfg(unittest)` |
 | `Cargo.toml` | Dependency declarations; no crate-specific features |
 
 `credentials` and `namespace` are private modules. The root exports `Cred`,

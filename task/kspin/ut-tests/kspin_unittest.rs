@@ -4,8 +4,6 @@
 
 //! Test suite for kspin
 
-#![cfg(unittest)]
-
 use alloc::{format, sync::Arc};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 

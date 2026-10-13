@@ -194,9 +194,9 @@ pub unsafe fn force_unlock(&self)
   `unlock` 由 `lock_api` 契约保证只在持锁后调用。
   调用点已补充 `SAFETY:` 注释。
 
-### 9. `tests.rs` fake guard counter
+### 9. `kspin_unittest.rs` fake guard counter
 
-位置：`src/tests.rs`
+位置：`ut-tests/kspin_unittest.rs`
 
 测试中的 `static mut IRQ_CNT` 用于验证 fake guard acquire/release 是否配对。
 这些 unsafe 访问只存在于 `#[cfg(unittest)]` 测试代码，

@@ -362,4 +362,5 @@ pub fn ipi_handler() {
 }
 
 #[cfg(unittest)]
-mod tests;
+#[path = "../ut-tests/lib_unittest.rs"]
+mod kipi_unittest;

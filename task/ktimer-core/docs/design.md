@@ -39,7 +39,7 @@ running callbacks retain their owner. No storage or callback ownership changes.
 | `src/cpu.rs` | Private `CpuTimers`, running-delivery identity |
 | `src/dispatch.rs` | Borrowed, unlocked callback delivery and completion |
 | `src/set.rs` | Public `TimerSet`, private routing, migration and cancel loops |
-| `src/test_support.rs` | `cfg(unittest)` scoped storage and cross-crate test entry points |
+| `ut-tests/test_support.rs` | `cfg(unittest)` scoped storage and cross-crate test entry points |
 | `benches/host/` | Independent host workspace for checks and microbenchmarks |
 
 `Cargo.toml` uses workspace dependencies: `intrusive-collections`, `karch`, `kcpu_id_map`,

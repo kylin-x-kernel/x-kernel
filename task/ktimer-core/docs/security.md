@@ -152,7 +152,7 @@ implementation; inclusion does not by itself make the named API unsafe to call.
 | `src/set.rs`: `dispatch_due` | Forward the borrowed-dispatch contract on the matching CPU. All mutation uses the owner protocol; handler/clock behavior, stable storage and unique IRQ-disabled service are platform obligations. |
 | `src/set.rs`: `reprogram_local_timer` | Call the platform programmer under the owner lock. Programmer and capture cleanup cannot allocate, sleep, unwind, invoke business callbacks or take timer/runqueue locks; merge sources and write locally before returning. Deferred writes require a new call. |
 | `src/control.rs`: `TimerControl::new`, `rearm` | Construction ties node, lock and lifetime to the running delivery; external ownership also covers any successor. Validated rearm stays on that owner, whose migration is blocked by running. |
-| `src/test_support.rs`: `with_armed_timer` | Internal stack node/handler survive exercise and synchronous drain. Driver preserves CPU/context/progress, requests hardware refresh when needed, and forbids unwinding from exercise/callback; no node escapes. |
+| `ut-tests/test_support.rs`: `with_armed_timer` | Internal stack node/handler survive exercise and synchronous drain. Driver preserves CPU/context/progress, requests hardware refresh when needed, and forbids unwinding from exercise/callback; no node escapes. |
 
 Inline test unsafe calls exercise the same node, tree and dispatch boundaries.
 Their local owners must outlive every pending/running access and drain before

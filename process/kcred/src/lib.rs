@@ -76,4 +76,5 @@ pub fn initial_cred() -> Arc<Cred> {
 }
 
 #[cfg(unittest)]
-mod tests;
+#[path = "../ut-tests/kcred_unittest.rs"]
+mod kcred_unittest_tests;

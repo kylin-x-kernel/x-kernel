@@ -55,8 +55,9 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
 ```text
 drivers/platform/of/
 ├── src/
-│   ├── lib.rs      # global DTB, semantic accessors, PCI/interrupt/memory decoding
-│   └── test_of.rs  # unit tests (unittest harness)
+│   └── lib.rs      # global DTB, semantic accessors, PCI/interrupt/memory decoding
+├── ut-tests/
+│   └── of_unittest.rs  # unit tests (unittest harness)
 └── Cargo.toml
 ```
 
