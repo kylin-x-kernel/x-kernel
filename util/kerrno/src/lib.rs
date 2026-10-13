@@ -756,11 +756,4 @@ pub mod __priv {
     pub use log::warn;
 }
 
-#[cfg(test)]
-#[path = "../host-tests/kerrno_host.rs"]
-mod kerrno_host_tests;
-
-#[unittest::mod_test]
-mod tests_unittest {
-    include!("../ut-tests/kerrno_unittest.rs");
-}
+unittest::path_mod_test!(tests_unittest, "../ut-tests/kerrno_unittest.rs");

@@ -27,6 +27,7 @@ const PAYLOAD_OFFSET_OFFSET: usize = 0x248;
 const PAYLOAD_LENGTH_OFFSET: usize = 0x24c;
 const INIT_SIZE_OFFSET: usize = 0x260;
 const MIN_UEFI_IMAGE_SIZE_BYTES: u64 = 256 * 1024 * 1024;
+const CARGO_ENCODED_RUSTFLAGS_SEPARATOR: &str = "\x1f";
 
 pub(crate) struct X86BootInputs {
     boot_stub_elf: PathBuf,
@@ -214,19 +215,27 @@ fn uefi_image_size(file_sizes: &[u64]) -> Result<u64> {
 }
 
 fn build_boot_stub(context: &BuildContext) -> Result<()> {
-    cargo_build(context, "x86_64-boot-stub", "x86_64-unknown-none").run()
+    cargo_build(context, "boot/x86_64-boot-stub/Cargo.toml", "x86_64-unknown-none")?.run()
 }
 
 fn build_uefi_loader(context: &BuildContext) -> Result<()> {
-    cargo_build(context, "x86_64-uefi-loader", "x86_64-unknown-uefi").run()
+    cargo_build(
+        context,
+        "boot/x86_64-uefi-loader/Cargo.toml",
+        "x86_64-unknown-uefi",
+    )?
+    .run()
 }
 
-fn cargo_build(context: &BuildContext, package: &str, target: &str) -> Process {
+fn cargo_build(context: &BuildContext, manifest_path: &str, target: &str) -> Result<Process> {
     let mut command = run(context, "cargo");
+    let rustflags = boot_helper_rustflags(target);
+    let work_dir = context.target_dir.join("tools/xkmake/boot-helper-cargo");
+    fs::create_dir_all(&work_dir).with_path(&work_dir)?;
     command
         .arg("build")
-        .arg("-p")
-        .arg(package)
+        .arg("--manifest-path")
+        .arg(context.workspace_root.join(manifest_path))
         .arg("--target")
         .arg(target)
         .arg("--target-dir")
@@ -240,11 +249,40 @@ fn cargo_build(context: &BuildContext, package: &str, target: &str) -> Process {
         .env("K_MODE", context.config.profile().as_str())
         .env("K_IP", context.guest_ip.to_string())
         .env("K_GW", context.gateway.to_string())
-        // Empty explicit values isolate boot helpers from kernel target flags in
-        // `.cargo/.xconfig.toml` while retaining Cargo's normal target defaults.
-        .env("RUSTFLAGS", "")
-        .env("CARGO_ENCODED_RUSTFLAGS", "");
-    command
+        // The x86 boot helpers are built as standalone artifacts. Explicitly
+        // override rustflags so options such as `--cfg unittest` do not pull
+        // kernel-only test code into boot-stub.
+        .current_dir(work_dir)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", rustflags);
+    Ok(command)
+}
+
+fn boot_helper_rustflags(target: &str) -> String {
+    // Keep this list synchronized with the checked-in target rustflags in
+    // `.cargo/config.toml`. These flags replace generated kernel rustflags for
+    // boot helper builds; other Cargo config may still be discovered when the
+    // target directory lives under the workspace.
+    let mut flags = vec![
+        "-C",
+        "force-frame-pointers",
+        "-C",
+        "debuginfo=2",
+        "-C",
+        "strip=none",
+    ];
+    if target == "x86_64-unknown-none" {
+        flags.splice(
+            0..0,
+            [
+                "--cfg",
+                r#"aes_backend="soft""#,
+                "--cfg",
+                r#"curve25519_dalek_backend="serial""#,
+            ],
+        );
+    }
+    flags.join(CARGO_ENCODED_RUSTFLAGS_SEPARATOR)
 }
 
 fn run(context: &BuildContext, program: impl Into<std::ffi::OsString>) -> Process {

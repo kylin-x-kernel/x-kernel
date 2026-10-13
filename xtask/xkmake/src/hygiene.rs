@@ -140,6 +140,35 @@ pub(crate) fn check_lint_inheritance() -> Result<()> {
     )))
 }
 
+/// Fails when kernel crate test sources are outside the agreed layout.
+pub(crate) fn check_test_layout() -> Result<()> {
+    let root = workspace_root()?;
+    let mut violations = Vec::new();
+    for manifest_path in workspace_member_manifests(&root)? {
+        let Some(crate_root) = manifest_path.parent() else {
+            continue;
+        };
+        let crate_name = crate_root
+            .strip_prefix(&root)
+            .unwrap_or(crate_root)
+            .display()
+            .to_string();
+        for source_path in tracked_rust_files_under(&root, crate_root)? {
+            let relative_path = source_path.strip_prefix(crate_root).unwrap_or(&source_path);
+            let content = fs::read_to_string(&source_path).with_path(&source_path)?;
+            collect_test_layout_violations(&crate_name, relative_path, &content, &mut violations);
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    violations.sort();
+    Err(Error::Message(format!(
+        "test source layout violations:\n  {}",
+        violations.join("\n  ")
+    )))
+}
+
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<MetadataPackage>,
@@ -187,6 +216,93 @@ fn inherits_workspace_lints(manifest: &str) -> std::result::Result<bool, toml::d
         .and_then(|lints| lints.get("workspace"))
         .and_then(toml::Value::as_bool)
         == Some(true))
+}
+
+fn tracked_rust_files_under(root: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "--"])
+        .arg(directory)
+        .output()
+        .map_err(|source| Error::Spawn {
+            program: "git".into(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(Error::CommandFailed {
+            program: "git".into(),
+            status: output.status,
+        });
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(|error| {
+        Error::Message(format!(
+            "git returned a non-UTF-8 Rust source path: {error}"
+        ))
+    })?;
+    Ok(stdout
+        .lines()
+        .filter(|path| path.ends_with(".rs"))
+        .map(|path| root.join(path))
+        .filter(|path| path.is_file())
+        .collect())
+}
+
+fn collect_test_layout_violations(
+    crate_name: &str,
+    relative_path: &Path,
+    content: &str,
+    violations: &mut Vec<String>,
+) {
+    let path = relative_path.to_string_lossy().replace('\\', "/");
+    if path.starts_with("host-tests/") {
+        violations.push(format!(
+            "{crate_name}/{path}: host tests must live in <crate>/tests/"
+        ));
+    }
+    if path.starts_with("src/") && is_src_test_file(relative_path) {
+        violations.push(format!(
+            "{crate_name}/{path}: guest unit tests must live in <crate>/ut-tests/"
+        ));
+    }
+    if path.starts_with("src/") && has_inline_test_module(content) {
+        violations.push(format!(
+            "{crate_name}/{path}: use unittest::path_mod_test! with files under ut-tests/"
+        ));
+    }
+    if path.starts_with("ut-tests/") && has_host_test_attr(content) {
+        violations.push(format!(
+            "{crate_name}/{path}: ut-tests must use #[def_test], not #[test]"
+        ));
+    }
+    if path.starts_with("tests/") && has_guest_test_marker(content) {
+        violations.push(format!(
+            "{crate_name}/{path}: Cargo tests must use #[test], not unittest #[def_test]"
+        ));
+    }
+}
+
+fn is_src_test_file(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name == "tests.rs" || file_name.starts_with("test_") || file_name.ends_with("_tests.rs")
+}
+
+fn has_inline_test_module(content: &str) -> bool {
+    let compact: String = content.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact.contains("#[cfg(test)]mod")
+        || compact.contains("#[cfg(unittest)]mod")
+        || compact.contains("#[unittest::mod_test]mod")
+        || compact.contains("#[mod_test]mod")
+        || compact.contains("include!(")
+}
+
+fn has_host_test_attr(content: &str) -> bool {
+    content.contains("#[test]")
+}
+
+fn has_guest_test_marker(content: &str) -> bool {
+    content.contains("#[def_test") || content.contains("unittest::def_test")
 }
 
 fn ensure_licensure_version() -> Result<()> {
@@ -412,8 +528,9 @@ mod tests {
     use std::io;
 
     use super::{
-        cargo_install_list_has_version, inherits_workspace_lints, reported_version,
-        tool_spawn_error, unexpected_tool_version,
+        cargo_install_list_has_version, collect_test_layout_violations, has_inline_test_module,
+        inherits_workspace_lints, is_src_test_file, reported_version, tool_spawn_error,
+        unexpected_tool_version,
     };
 
     #[test]
@@ -430,6 +547,68 @@ mod tests {
         assert!(
             !inherits_workspace_lints(&format!("{package}[lints.clippy]\nall = \"allow\"\n"))
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn recognizes_src_test_file_names() {
+        assert!(is_src_test_file("src/copy_tests.rs".as_ref()));
+        assert!(is_src_test_file("src/tests.rs".as_ref()));
+        assert!(is_src_test_file("src/foo/test_copy.rs".as_ref()));
+        assert!(!is_src_test_file("src/contest.rs".as_ref()));
+    }
+
+    #[test]
+    fn recognizes_inline_test_modules_without_layout_sensitive_paths() {
+        assert!(has_inline_test_module("#[cfg(unittest)]\nmod copy_tests;"));
+        assert!(has_inline_test_module("#[cfg(test)] mod tests { }"));
+        assert!(has_inline_test_module("#[mod_test]\nmod tests { }"));
+        assert!(has_inline_test_module("mod tests { include!(\"../ut-tests/lib.rs\"); }"));
+        assert!(!has_inline_test_module(
+            "unittest::path_mod_test!(tests, \"../ut-tests/lib.rs\");"
+        ));
+    }
+
+    #[test]
+    fn reports_guest_tests_left_under_src() {
+        let mut violations = Vec::new();
+        collect_test_layout_violations(
+            "core/kuaccess",
+            "src/copy_tests.rs".as_ref(),
+            "use unittest::def_test;\n#[def_test]\nfn copies() {}",
+            &mut violations,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("guest unit tests must live in <crate>/ut-tests/"));
+    }
+
+    #[test]
+    fn reports_wrong_macro_for_each_test_directory() {
+        let mut violations = Vec::new();
+        collect_test_layout_violations(
+            "core/demo",
+            "ut-tests/host_style.rs".as_ref(),
+            "#[test]\nfn host_style() {}",
+            &mut violations,
+        );
+        collect_test_layout_violations(
+            "core/demo",
+            "tests/guest_style.rs".as_ref(),
+            "use unittest::def_test;\n#[def_test]\nfn guest_style() {}",
+            &mut violations,
+        );
+
+        assert_eq!(violations.len(), 2);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("ut-tests must use #[def_test]"))
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("Cargo tests must use #[test]"))
         );
     }
 

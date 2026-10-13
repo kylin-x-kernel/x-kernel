@@ -16,7 +16,7 @@
 当前范围包括：
 
 - `src/lib.rs`
-- `src/copy_tests.rs`（用户复制回归测试）
+- `ut-tests/copy_tests.rs`（用户复制回归测试）
 
 ## 架构
 
@@ -98,7 +98,7 @@ syscall / runtime
 
 ## 回归验证
 
-`src/copy_tests.rs` 使用要求 `PreparedTaskWait` 可用的按需映射后端，验证普通
+`ut-tests/copy_tests.rs` 使用要求 `PreparedTaskWait` 可用的按需映射后端，验证普通
 复制的缺页处理发生在异常外的可睡眠任务上下文，并覆盖跨页读、首次写缺页、
 只读保护和撤销映射。分阶段写缺页测试跨越多个页面并超过单页恢复预算，验证同一页连续缺页后
 复制结果完整；无进展测试覆盖反复报告成功、反复报告 COW retry 的有界退出，

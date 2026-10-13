@@ -19,6 +19,40 @@ macro_rules! ktest_println {
     };
 }
 
+/// Declares a file-backed unittest module.
+///
+/// This is the file-module counterpart of `mod_test`. Attribute macros on
+/// file modules (`mod tests;`) are unstable, so `#[mod_test]` cannot be used
+/// together with `#[path = "..."]`. This macro keeps the same `cfg(unittest)`
+/// gate and module-level lint exemptions for tests moved out of production
+/// source files. Additional module attributes can be passed before `mod`.
+#[macro_export]
+macro_rules! path_mod_test {
+    ($(#[$meta:meta])* $vis:vis mod $name:ident, $path:literal $(,)?) => {
+        #[cfg(unittest)]
+        $(#[$meta])*
+        #[path = $path]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            reason = "CG-021-no-panic-on-reachable-failure: unittest module: test helpers may panic on failure"
+        )]
+        #[allow(
+            missing_docs,
+            reason = "CG-024-lint-exceptions: missing_docs: unittest module: test code is outside rustdoc scope"
+        )]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "CG-028-focused-functions: unittest module: a test scenario reads as one linear script"
+        )]
+        $vis mod $name;
+    };
+    ($name:ident, $path:literal $(,)?) => {
+        $crate::path_mod_test!(mod $name, $path);
+    };
+}
+
 pub mod runner;
 #[path = "framework.rs"]
 pub mod test_framework;

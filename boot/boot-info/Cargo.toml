@@ -11,9 +11,16 @@ documentation.workspace = true
 keywords = ["boot", "bootloader", "protocol"]
 categories = ["no-std", "os"]
 
+[features]
+# `unittest` is enabled by the root workspace dependency for normal kernel
+# builds. Keep the crate default empty so standalone boot helpers can depend on
+# boot-info without enabling this crate's file-backed unittest module.
+default = []
+unittest = ["dep:unittest"]
+
 [dependencies]
 kcpu_id_map = { workspace = true }
-unittest = { workspace = true }
+unittest = { workspace = true, optional = true }
 
 [lints]
 workspace = true

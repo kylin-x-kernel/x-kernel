@@ -2,9 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kerrno::{KError, KErrorKind, LinuxError};
 use strum::EnumCount;
-
-use crate::{KError, KErrorKind, LinuxError};
 
 #[test]
 fn test_try_from() {

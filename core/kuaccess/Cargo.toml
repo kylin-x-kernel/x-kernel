@@ -9,7 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-shear]
-ignored = ["linkme"]
+# `#[register_trap_handler(PAGE_FAULT)]` in src/lib.rs expands through the
+# architecture registration path and references the linkme crate name directly.
+# `ksync` and `unittest_support` are used by cfg(unittest) tests under ut-tests,
+# which cargo-shear ignores as test-source layout by convention.
+ignored = ["ksync", "linkme", "unittest_support"]
 
 [dependencies]
 extern-trait = "0.3"

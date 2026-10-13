@@ -9,7 +9,10 @@ repository.workspace = true
 description = "UEFI loader that prepares and enters the x86_64 x-kernel image"
 
 [dependencies]
-boot_info = { workspace = true }
+# Cargo cannot override default-features on an inherited workspace dependency.
+# This explicit path entry mirrors the workspace path while omitting the
+# workspace-only boot-info unittest feature for no-alloc boot helpers.
+boot_info = { path = "../boot-info", package = "boot-info" }
 kbuild_config = { workspace = true }
 x86_boot_common = { workspace = true }
 uefi = { version = "0.36.1", features = ["alloc", "global_allocator", "logger", "panic_handler"] }

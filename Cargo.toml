@@ -87,7 +87,11 @@ kipi = { path = "arch/kipi" }
 kplat = { path = "platforms/kplat" }
 
 # Internal: boot and loader
-boot_info = { path = "boot/boot-info", package = "boot-info" }
+# Normal kernel consumers inherit boot-info with its cfg(unittest) test module
+# enabled. Standalone boot helpers use explicit path dependencies without this
+# feature because Cargo does not allow member manifests to disable inherited
+# workspace dependency features.
+boot_info = { path = "boot/boot-info", package = "boot-info", features = ["unittest"] }
 firmware_handoff = { path = "boot/firmware-handoff", package = "firmware-handoff" }
 kernel_boot = { path = "boot/kernel-boot", package = "kernel-boot" }
 kernel-elf-parser = { path = "boot/kernel_elf_parser" }

@@ -50,6 +50,8 @@ pub(crate) enum HygieneCommand {
     Header(HygieneFixArgs),
     /// Check that root workspace members inherit `[workspace.lints]`.
     Lints,
+    /// Check kernel crate test source layout.
+    TestLayout,
 }
 
 #[derive(Debug, Args)]

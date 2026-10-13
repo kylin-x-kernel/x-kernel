@@ -11,7 +11,10 @@ description = "Shared x86 boot helpers for unified Multiboot and UEFI startup"
 [dependencies]
 kaddr_layout = { workspace = true }
 kernel_elf_loader = { workspace = true }
-boot_info = { workspace = true }
+# Cargo cannot override default-features on an inherited workspace dependency.
+# This explicit path entry mirrors the workspace path while omitting the
+# workspace-only boot-info unittest feature for no-alloc boot helpers.
+boot_info = { path = "../boot-info", package = "boot-info" }
 kbuild_config = { workspace = true }
 kcpu_id_map = { workspace = true }
 
