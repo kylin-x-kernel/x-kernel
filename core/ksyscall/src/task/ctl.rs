@@ -135,7 +135,11 @@ pub(crate) fn sys_prctl(
             if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
                 return Err(KError::InvalidInput);
             }
-            return Err(KError::from(LinuxError::ENOSYS));
+            // The exec credential path consumes this flag via
+            // `Cred::apply_exec`; see docs/security.md for the
+            // no-elevation contract honored on exec.
+            kprocess::current_user_thread().set_no_new_privileges();
+            return Ok(0);
         }
         PR_GET_NO_NEW_PRIVS => {
             if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
@@ -326,10 +330,16 @@ mod tests {
     }
 
     #[def_test(user, serial)]
-    fn prctl_set_no_new_privs_requires_exec_enforcement() {
+    fn prctl_set_no_new_privs_records_the_flag() {
+        // Programs that require this prctl to succeed -- notably Chromium's
+        // child-process launcher -- abort subprocess creation on failure, so
+        // recording the flag must succeed and be observable via PR_GET.
+        assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), Ok(0));
+        assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), Ok(1));
+        // Linux rejects a non-zero argument tail with EINVAL.
         assert_eq!(
-            sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0),
-            Err(KError::from(LinuxError::ENOSYS))
+            sys_prctl(PR_SET_NO_NEW_PRIVS, 1, 1, 0, 0),
+            Err(KError::InvalidInput)
         );
     }
 

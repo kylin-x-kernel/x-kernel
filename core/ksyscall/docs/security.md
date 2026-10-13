@@ -125,8 +125,13 @@ registered wakeups rather than polling or a timer.
   recognized operations with `ENOSYS`. Neither path accesses the supplied
   pointer or changes task state. This is explicit rejection, not seccomp
   enforcement; flags, filters, and query buffers remain unimplemented.
-  `PR_SET_NO_NEW_PRIVS` retains its existing `ENOSYS` result for a valid
-  request; no-new-privileges enforcement is outside this change.
+  `PR_SET_NO_NEW_PRIVS` records the flag on the calling thread and returns
+  success: the exec credential path consumes the flag
+  (`Cred::apply_exec`), and since exec never elevates identity today the
+  promised "exec grants no privileges" holds unconditionally. Future
+  setuid/setgid or file-capability support must consult the flag at the
+  credential reset and refuse elevation instead of silently dropping the
+  guarantee.
 
 ## Audit checklist
 

@@ -171,7 +171,7 @@ pub(super) fn exec_owned(
         }
     };
     let mut exec_cred = thread.prepare_creds();
-    exec_cred.apply_exec();
+    exec_cred.apply_exec(thread.no_new_privileges());
     thread.commit_creds(exec_cred);
     #[cfg(feature = "tee")]
     thread.reset_tee_session_after_exec();

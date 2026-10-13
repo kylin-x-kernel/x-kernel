@@ -235,10 +235,13 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 
 Until unified user-namespace capability authorization exists, `clone` /
 `clone3` return `ENOSYS` for `CLONE_NEWCGROUP` instead of improvising
-namespace-creation permission with UID checks. The exec credential path
-does not yet enforce `no_new_privileges` promotion constraints, so
-`PR_SET_NO_NEW_PRIVS` returns `ENOSYS` and `PR_GET_NO_NEW_PRIVS` reports
-unset. seccomp likewise has no execution engine yet. `PR_SET_SECCOMP`
+namespace-creation permission with UID checks. `PR_SET_NO_NEW_PRIVS`
+records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports
+it back; the exec credential path consumes the flag via
+`Cred::apply_exec`, and because exec never elevates identity today the
+no-elevation contract holds unconditionally — future setuid/setgid or
+file-capability support must consult the flag there. seccomp likewise has
+no execution engine yet. `PR_SET_SECCOMP`
 recognizes only the strict/filter mode identifiers (1/2), returning `ENOSYS`
 instead of claiming installation; all other modes return `EINVAL`.
 `seccomp(2)` recognizes the Linux strict/filter and action/notification-size

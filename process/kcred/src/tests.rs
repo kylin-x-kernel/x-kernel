@@ -61,7 +61,7 @@ fn test_credentials_exec_resets_saved_ids() {
     credentials.set_resgid_unchecked(None, Some(200), Some(300));
     credentials.keep_caps_enable().unwrap();
 
-    credentials.apply_exec();
+    credentials.apply_exec(false);
 
     assert_eq!(credentials.ruid(), 1000);
     assert_eq!(credentials.euid(), 2000);

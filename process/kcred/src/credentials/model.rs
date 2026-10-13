@@ -520,7 +520,16 @@ impl Cred {
     /// supplementary groups remain unchanged. `KEEP_CAPS_LOCKED` remains set if it was set, while
     /// `KEEP_CAPS` is cleared regardless of that lock. This method does not
     /// inspect an executable, apply setuid/setgid file bits, or publish credentials.
-    pub fn apply_exec(&mut self) {
+    ///
+    /// `no_new_privileges` carries the caller's `PR_SET_NO_NEW_PRIVS` state:
+    /// with the flag set, exec must neither elevate nor grant credentials
+    /// (Linux ignores setuid/setgid file bits and file capabilities). Exec
+    /// currently never elevates identity, so the reset below already
+    /// satisfies the contract; future setuid/setgid or file-capability
+    /// support must consult this flag here and refuse the transition
+    /// instead of elevating (see `core/ksyscall/docs/security.md`).
+    pub fn apply_exec(&mut self, no_new_privs: bool) {
+        let _ = no_new_privs;
         // Future setuid/setgid executable support must update euid/egid before this reset.
         self.suid = self.euid;
         self.fsuid = self.euid;
