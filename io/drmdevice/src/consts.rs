@@ -50,9 +50,18 @@ pub(crate) const DRM_IOCTL_DROP_MASTER: u32 = io(DRM_TYPE, 0x1f);
 // ======== capability IDs ========
 
 pub(crate) const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
+pub(crate) const DRM_CAP_CURSOR_WIDTH: u64 = 0x8;
+pub(crate) const DRM_CAP_CURSOR_HEIGHT: u64 = 0x9;
 pub(crate) const DRM_CAP_TIMESTAMP_MONOTONIC: u64 = 0x6;
 pub(crate) const DRM_CAP_CRTC_IN_VBLANK_EVENT: u64 = 0x12;
 pub(crate) const DRM_CAP_ADDFB2_MODIFIERS: u64 = 0x10;
+
+/// Cursor size reported via GET_CAP. The driver exposes a single primary
+/// plane and no cursor commands, so this is a client-compatibility value,
+/// not a hardware capability: libdrm-based clients treat 0 as "cursor
+/// unsupported" and bail out during init. 64x64 matches the virtio-gpu
+/// spec-level cursor dimensions.
+pub(crate) const DRM_CURSOR_COMPAT_SIZE: u64 = 64;
 
 // ======== format modifiers ========
 

@@ -125,6 +125,12 @@ impl DrmIoctl for DrmGetCap {
     fn handle(_dev: &DrmCard, cap: &mut Self) -> VfsResult<usize> {
         cap.value = match cap.capability {
             DRM_CAP_DUMB_BUFFER => 1,
+            // The driver exposes a single primary plane and no cursor
+            // commands (the virtio-gpu cursor path is disabled), so these
+            // are client-compatibility values: libdrm-based clients treat
+            // 0 as "cursor unsupported" and bail out during init. See
+            // DRM_CURSOR_COMPAT_SIZE in consts.rs.
+            DRM_CAP_CURSOR_WIDTH | DRM_CAP_CURSOR_HEIGHT => DRM_CURSOR_COMPAT_SIZE,
             DRM_CAP_TIMESTAMP_MONOTONIC => 1,
             DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
             DRM_CAP_ADDFB2_MODIFIERS => 1,
