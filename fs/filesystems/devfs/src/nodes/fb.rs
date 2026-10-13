@@ -162,7 +162,13 @@ impl DeviceFileOps for FrameBuffer {
         Ok(len)
     }
 
-    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(
+        &self,
+        _file: &VfsFile,
+        _cred: &kcred::Cred,
+        cmd: u32,
+        arg: usize,
+    ) -> VfsResult<usize> {
         match cmd {
             // FBIOGET_VSCREENINFO
             0x4600 => {

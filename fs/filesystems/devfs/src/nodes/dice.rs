@@ -70,7 +70,7 @@ impl DeviceFileOps for DiceNodeInfo {
         Ok(len)
     }
 
-    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> KResult<usize> {
         match cmd {
             DICE_IOCTL_GET_HANDOVER => self.sys_dice_get_handover(arg),
             DICE_IOCTL_GET_RAW_HANDOVER => self.sys_dice_get_raw_handover(arg),

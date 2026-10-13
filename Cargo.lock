@@ -361,7 +361,9 @@ dependencies = [
  "klazy",
  "kspin",
  "ksync",
+ "linux-raw-sys",
  "log",
+ "memaddr",
  "unittest",
 ]
 
@@ -1253,6 +1255,7 @@ dependencies = [
  "display",
  "kalloc",
  "kclass",
+ "kcred",
  "khal",
  "kpoll",
  "ksync",
@@ -3137,6 +3140,7 @@ dependencies = [
  "intrusive-collections",
  "kclass",
  "kcpu_id_map",
+ "kcred",
  "kdevice",
  "kerrno",
  "khal",

@@ -1,64 +1,79 @@
-# block — 设计文档
+# block — Design
 
-## 定位
+## Purpose
 
-`block` 是 X-Kernel 的 block core。它定义 driver-private I/O operations、`Gendisk`、
-`RequestQueue/QueueLimits`、按 `dev_t` 标识的 `BlockDevice`，并拥有唯一 resident
-block-device registry。
+`block` is the X-Kernel block core. It defines driver-private I/O operations,
+`Gendisk`, `RequestQueue`/`QueueLimits`, and the `BlockDevice` identified by
+`dev_t`. It owns the single resident block-device registry.
 
-## Linux 对象映射
+## Linux Object Mapping
 
-| Linux | X-Kernel | 所有权 |
+| Linux | X-Kernel | Ownership |
 |---|---|---|
-| `struct block_device_operations` | `BlockDeviceOperations` | driver/backend algorithm、open mode callback |
-| `struct queue_limits` | `QueueLimits` | logical/physical block size、alignment、minimum/optimal I/O size |
-| `struct request_queue` | `RequestQueue` | canonical queue limits；request dispatch 在后续阶段加入 |
-| `struct gendisk` | `Gendisk` | disk identity、queue、`part0`、state、operations |
-| `struct block_device` | `BlockDevice` | `dev_t`、queue、sector range、capacity |
-| `bd_holder` / exclusive `bdev_open` | `BlockDeviceClaim` | exclusive holder lifetime |
-| `add_disk` / `del_gendisk` | 同名函数 | 显式 publish/unpublish |
-| `blkdev_get_no_open` | `lookup_block_device` | canonical `dev_t` lookup |
-| `set_capacity` | `BlockDevice::set_capacity` | 可变介质容量发布 |
-| `set_disk_ro` / `get_disk_ro` | `BlockDevice::set_disk_read_only` / `is_read_only` | canonical disk state |
+| `struct block_device_operations` | `BlockDeviceOperations` | Driver/backend algorithm, open-mode callback |
+| `struct queue_limits` | `QueueLimits` | Logical/physical block size, alignment, minimum/optimal I/O size |
+| `struct backing_dev_info` | `BackingDevInfo` | Disk-owned shared readahead budget; file history stays in KVFS |
+| `struct request_queue` | `RequestQueue` | Canonical queue limits; request dispatch is added in a later phase |
+| `struct gendisk` | `Gendisk` | Disk identity, queue, `part0`, state, operations |
+| `struct block_device` | `BlockDevice` | `dev_t`, queue, sector range, capacity |
+| `bd_holder` / exclusive `bdev_open` | `BlockDeviceClaim` | Exclusive holder lifetime |
+| `add_disk` / `del_gendisk` | Same-named functions | Explicit publication and withdrawal |
+| `blkdev_get_no_open` | `lookup_block_device` | Canonical `dev_t` lookup |
+| `set_capacity` | `BlockDevice::set_capacity` | Mutable media capacity publication |
+| `set_disk_ro` / `get_disk_ro` | `BlockDevice::set_disk_read_only` / `is_read_only` | Canonical disk state |
 
-`BlockDeviceOperations` 不继承通用 `Device`，因为 disk identity 属于 `Gendisk`；backend
-只表达 I/O 和 Linux block-device operations 层的 open/release/ioctl。`Gendisk` 持有该
-algorithm object 和 `RequestQueue`，但不实现 operations trait；只有 canonical
-`BlockDevice` 方法会调用 backend，从而不能绕过容量、边界和只读策略。PR5 完成 kext4
-Bio 迁移前，`BlockDevice` 对旧同步 operations trait 的实现只派生 block count 并委托这些
-同名方法，不保存第二份状态。disk identity、queue、state 和 operations 直接由 `Gendisk`
-保存，不拆出另一个磁盘状态对象。
-`BlockOpenMode` 对应 Linux `blk_mode_t`，从 KVFS 的 opened-file mode 传入 open/ioctl，
-不会在 loop 等具体驱动中另建一套打开语义。
+`BlockDeviceOperations` does not inherit the generic `Device`, because disk
+identity belongs to `Gendisk`. The backend expresses I/O and the open, release,
+and ioctl callbacks corresponding to Linux block-device operations. `Gendisk`
+holds that algorithm object and the `RequestQueue`, but does not implement the
+operations trait. Backend calls go through canonical `BlockDevice` methods so
+capacity, bounds, and read-only policy cannot be bypassed. Until the kext4 Bio
+migration in PR5, the legacy synchronous operations implementation on
+`BlockDevice` only derives a block count and delegates to those methods; it
+stores no second copy of state. Disk identity, queue, state, and operations
+belong directly to `Gendisk`, without a separate disk-state object.
+`BlockOpenMode` corresponds to Linux `blk_mode_t` and carries the KVFS opened-file
+mode into open/ioctl. Concrete drivers such as loop do not define separate open
+semantics.
 
-当前只创建 whole-disk `part0`。`BlockDevice` 使用 `start_sector + num_sectors` 表达 view
-边界；sector 固定为 512 bytes，与 Linux `sector_t` 语义一致。后续 partition scan 可以
-发布更多 view，而不引入另一种设备对象。
+Only whole-disk `part0` is created today. `BlockDevice` expresses view bounds as
+`start_sector + num_sectors`, using fixed 512-byte sectors consistent with Linux
+`sector_t`. A future partition scan can publish additional views without
+introducing another kind of device object.
 
-## 发布与查找
+## Publication And Lookup
 
-`Gendisk::alloc` 根据 backend 当前报告的 logical block size 建立 `QueueLimits` 和
-`RequestQueue`，把 backend block count 换算成 sector capacity，并同时构造 canonical
-`part0`。因此未发布 disk 已经可以用于不依赖 registry 的测试和内部装配。driver probe 随后经 block
-class lifecycle 调用 `add_disk`；发布只校验 major 非零和同 major 的完整 minor range 不
-重叠，再把同一个 disk/part0 identity 放入 registry，不重新创建对象。devfs、KVFS
-block-special open、filesystem mount 和 boot root selection 都读取该 registry。
+`Gendisk::alloc` creates `QueueLimits` and `RequestQueue` from the logical block
+size reported by the backend, converts the backend block count to sector
+capacity, and constructs canonical `part0` at the same time. Unpublished disks
+can therefore be used for tests and internal assembly without registry access.
+Driver probe subsequently calls `add_disk` through the block class lifecycle.
+Publication only checks that the major is nonzero and the complete minor range
+does not overlap another range under that major, then inserts the same
+disk/part0 identity into the registry without reconstructing it. Devfs, KVFS
+block-special open, filesystem mount, and boot root selection all use this
+registry.
 
-registry 是唯一的 `Mutex<BTreeMap<DeviceNumber, GendiskRef>>`（`BLOCK_DEVICES`）。
-`add_disk`、`del_gendisk`、`lookup_block_device` 和 `block_devices` 在插入、删除、查找时
-持有该锁。锁只保护映射；只读状态、claim 和容量由对象自身的同步原语保护，registry
-锁内不执行 driver I/O 或 callback。
+The registry is the single `Mutex<BTreeMap<DeviceNumber, GendiskRef>>`
+(`BLOCK_DEVICES`). `add_disk`, `del_gendisk`, `lookup_block_device`, and
+`block_devices` hold its lock during insertion, removal, and lookup. The lock
+protects only the map; read-only state, claims, and capacity use the objects'
+own synchronization primitives. No driver I/O or callback runs under the
+registry lock.
 
-`del_gendisk` 按 part0 `dev_t` 删除 registry 持有的磁盘引用；已有 `Arc<BlockDevice>`
-继续持有完整 `Gendisk`，`disk()` 始终返回同一对象，新 lookup 不再取得已撤销对象。
-新介质即使复用相同 `dev_t`，也必须构造新的 `Gendisk`，从而得到新的 canonical
-`BlockDevice` identity；重发同一个 `Gendisk` 仍使用它原有的 `part0`。
+`del_gendisk` removes the registry's owning disk reference by part0 `dev_t`.
+Existing `Arc<BlockDevice>` references retain the complete `Gendisk`, and
+`disk()` continues to return that same object. New lookups no longer find the
+withdrawn disk. New media must use a new `Gendisk` even when reusing the same
+`dev_t`, yielding a new canonical `BlockDevice` identity. Republishing the same
+`Gendisk` retains its original `part0`.
 
-## 所有权与最终释放
+## Ownership And Final Release
 
-Linux `include/linux/blkdev.h` 的 `disk_to_dev()` 使用 `part0->bd_device`，明确由 whole
-block_device 对 gendisk 引用计数；`block/bdev.c:bdev_free_inode()` 在释放 whole device 时
-释放 gendisk。这里按照同一生命周期表达：
+Linux `disk_to_dev()` in `include/linux/blkdev.h` uses `part0->bd_device`: the
+whole block device provides the gendisk reference count.
+`block/bdev.c:bdev_free_inode()` frees the gendisk when freeing the whole device.
+The ownership model here follows the same lifetime:
 
 ```text
 GendiskRef / registry ──strong──> canonical part0 (BlockDevice)
@@ -68,69 +83,120 @@ GendiskRef / registry ──strong──> canonical part0 (BlockDevice)
                                      Gendisk
                                         │
                                       weak
-                                        └────────> 同一 part0
+                                        └────────> same part0
 ```
 
-`GendiskRef` 只封装一个 `Arc<BlockDevice>`，通过 `Deref` 借用完整磁盘，不保存身份、容量、
-队列、打开模式或 holder 状态。它替代公开的 `Arc<Gendisk>`，对应 Linux 经 `disk_to_dev()`
-获取/释放磁盘引用。该拥有引用是必要的：若直接公开内部 `Arc<Gendisk>`，调用方可以单独
-保留磁盘而释放 part0，破坏 canonical whole-device 生命周期。
+`GendiskRef` wraps only an `Arc<BlockDevice>` and borrows the complete disk through
+`Deref`. It stores no identity, capacity, queue, open mode, or holder state. It
+replaces a public `Arc<Gendisk>` and corresponds to acquiring/releasing a Linux
+disk reference through `disk_to_dev()`. This owning reference is necessary:
+exposing the internal `Arc<Gendisk>` would allow callers to retain the disk while
+releasing part0, breaking the canonical whole-device lifetime.
 
-`Gendisk::alloc` 返回 `GendiskRef`，通过 `Arc::new_cyclic` 一次建立全部关联后才返回。
-内部 `Arc<Gendisk>` 不对外暴露；`BlockDevice::disk()` 仅返回借用。因此每次对磁盘的借用
-都由 live part0 保活，`Gendisk::part0()` 的 weak upgrade 必须成功，不是可恢复的设备缺失。
-最后一个磁盘拥有引用、设备引用或 claim 释放后，part0 释放磁盘；磁盘的弱回指不形成环。
-整个构造、借用和回收过程不需要 unsafe。
+`Gendisk::alloc` returns `GendiskRef` only after `Arc::new_cyclic` establishes all
+relationships. The internal `Arc<Gendisk>` is not exposed;
+`BlockDevice::disk()` returns only a borrow. Every disk borrow is therefore kept
+alive by a live part0, and the weak upgrade in `Gendisk::part0()` must succeed;
+failure is not a recoverable missing-device condition. Once the final owning
+disk reference, device reference, or claim is released, part0 releases the disk.
+The disk's weak back-reference does not form a strong cycle. Construction,
+borrowing, and reclamation require no unsafe code.
 
-当前仅构造 whole device。未来加入分区时，分区的所有权也必须保活 canonical part0，
-不能直接暴露内部 disk Arc 或独立构造可逃逸的 `Gendisk`。
+Only whole devices are constructed today. Future partition ownership must also
+keep canonical part0 alive; it must not expose the internal disk Arc or allow an
+independently constructed `Gendisk` to escape.
 
-## 独占持有
+## Exclusive Claims
 
-`BlockDevice::claim_exclusive()` 返回 RAII `BlockDeviceClaim`，对应 Linux block holder
-所有权。一个 canonical device 同时只允许一个 holder；filesystem superblock 直接持有该
-token，并在初始化失败或 final shutdown 进入 dead 后释放。因此不同 filesystem instance
-不能同时拥有同一介质，且 block core 不需要了解 VFS 或文件系统类型。
+`BlockDevice::claim_exclusive()` returns the RAII `BlockDeviceClaim`, corresponding
+to Linux block-holder ownership. A canonical device admits one holder at a time.
+The filesystem superblock holds that token directly and releases it on
+initialization failure or when final shutdown enters the dead state. Different
+filesystem instances cannot own the same media concurrently, and the block core
+needs no knowledge of VFS or filesystem types.
 
-## I/O 边界
+## I/O Boundary
 
-`BlockCompletionOperations` 表达设备完成回收能力：一次调用必须有限、不睡眠、不提交新
-请求。host 保证同一注册的回调串行执行；activation 保持目标强引用直到同步停止。
-一个目标只注册一次。排队和停止的具体所有权由 host 管理，不暴露内核 API 给驱动。
+`BlockCompletionOperations` expresses device completion reclamation. Each call
+must be finite, non-sleeping, and must not submit new requests. The host guarantees
+serial callback execution within one registration; activation keeps a strong
+reference to the target until synchronous stop completes. Each target is
+registered at most once. The host owns queuing and stopping, without exposing
+kernel APIs for these operations to drivers.
 
-`completion` 模块定义 OS-neutral 的 `PrepareBlockWait`、`BlockWaiter` 和
-`BlockSignals`。它们不改变 `BlockDeviceOperations`，也不直接引入内核调度依赖。
-host 注入普通准备函数，返回任务绑定的 waiter，由 waiter.signals() 导出同一通知状态的 Arc，
-驱动通过契约等待准入提示及最终完成。准入提示不授予提交权；队列/FIFO 谓词和
-请求结果仍归具体事务实现管理。终态通知必须在设备释放数据缓冲区后发布。
+The `completion` module defines the OS-neutral `PrepareBlockWait`, `BlockWaiter`,
+and `BlockSignals`. They do not change `BlockDeviceOperations` or directly
+introduce kernel scheduler dependencies. The host injects an ordinary preparation
+function returning a task-bound waiter. `waiter.signals()` exports an Arc to the
+same notification state. Drivers use these contracts to wait for admission hints
+and final completion. An admission hint does not grant submission rights;
+queue/FIFO predicates and request results remain owned by the concrete transaction
+implementation. Terminal notification must be published only after the device
+has released the data buffers.
 
-waiter 不跨任务共享；signals 可以在 IRQ 中调用且不保留 request/data/device 指针。
-等待资源准备和准入注册允许返回错误，但已提交后的终态等待不再注册或返回等待
-错误。VirtIO 实现在 `virtio::blk`，等待及 IRQ/softirq 接入由 `kdriver` 提供；
-其他驱动接入这些契约不需要修改文件系统。
+A waiter is not shared across tasks. Signals can be called from IRQ context and
+retain no request, data, or device pointers. Waiting-resource preparation and
+admission registration may return errors, but the terminal wait after submission
+does not register again or return wait errors. The VirtIO implementation lives in
+`virtio::blk`; `kdriver` supplies waiting and IRQ/softirq integration. Other drivers
+can adopt these contracts without filesystem changes.
 
-`QueueLimits` 是设备几何的唯一 block-core 来源。当前 backend 只报告 logical block size，
-所以 physical block size 和 minimum I/O size 按 Linux 默认值取 logical block size，optimal
-I/O size 与 alignment offset 为零。logical block size 必须至少 512 bytes、为 2 的幂且可由
-`u32` 表示，并受当前 4-KiB page 对应的 Linux `BLK_MAX_BLOCK_SIZE` 上限约束。
+`QueueLimits` is the block core's sole source of device geometry. Backends
+currently report only logical block size, so physical block size and minimum I/O
+size default to logical block size, following Linux defaults. Optimal I/O size
+and alignment offset are zero. Logical block size must be at least 512 bytes,
+a power of two, and representable as `u32`. It is also bounded by the Linux
+`BLK_MAX_BLOCK_SIZE` limit corresponding to the current 4-KiB page size.
 
-`BlockDevice` 在委托 backend 前校验 buffer 是 logical-block-size 整数倍，把 legacy backend
-block ID 换算为 sector extent，检查完整 extent 不越过 `num_sectors`，再把加入
-`start_sector` 后的 sector 转回 backend block ID。全部乘法和加法使用 checked arithmetic。
-`Gendisk::alloc` 把初始 backend block count 换算为 sector；`set_capacity` 与 Linux 一样接收
-sector count。两条路径都要求 `num_sectors * 512` 可由 `u64` 表示。
-容量消费者直接读取 `num_sectors` 或 `size()`；legacy backend block count 只在构造边界换算
-一次，不作为第二套设备容量状态。
+Before delegating to the backend, `BlockDevice` checks that the buffer length is
+a multiple of the logical block size, converts the legacy backend block ID to a
+sector extent, checks that the entire extent fits within `num_sectors`, and
+converts the sector offset including `start_sector` back to a backend block ID.
+All multiplications and additions use checked arithmetic. `Gendisk::alloc`
+converts the initial backend block count to sectors; `set_capacity` accepts a
+sector count, as Linux does. Both paths require `num_sectors * 512` to fit in
+`u64`. Capacity consumers read `num_sectors` or `size()` directly. The legacy
+backend block count is converted once at construction and is not retained as a
+second device-capacity state.
 
-backend 通过 `BlockDeviceOperations::is_inherently_read_only()` 报告设备生命周期内不可变的
-固有只读能力，`Gendisk::alloc` 在发布前保存该能力。`BLKROSET` 控制的管理只读状态单独保存在
-`Gendisk` 的原子状态中；有效只读状态是“固有只读或管理只读”。因此 `BLKROSET 0` 只能清除
-管理状态，不能把固有只读介质变为可写。`BlockDevice::write_block` 在进入 backend 前统一拒绝
-有效只读设备的写入。
+The backend reports its immutable, device-lifetime inherent read-only capability
+through `BlockDeviceOperations::is_inherently_read_only()`. `Gendisk::alloc`
+records it before publication. The administrative read-only state controlled by
+`BLKROSET` is stored separately in `Gendisk` atomic state. Effective read-only
+state is the union of inherent and administrative read-only state. Consequently,
+`BLKROSET 0` succeeds after clearing only the administrative state; it cannot make inherently
+read-only media writable. `BlockDevice::write_block` rejects writes to effectively
+read-only devices before entering the backend.
 
-KVFS 负责 Linux `blkdev_read_iter` / `blkdev_write_iter` 对应的字节适配：完整对齐块直接
-传递调用方 buffer，首尾 partial block 复用单个 read-modify-write scratch buffer。普通
-write 不等价于 durability barrier；只有显式 `fsync` 才调用 backend `flush`。
+KVFS owns the byte-level adaptation corresponding to Linux `blkdev_read_iter` /
+`blkdev_write_iter`. Fully aligned blocks use the caller's buffer directly, while
+leading and trailing partial blocks reuse one read-modify-write scratch buffer.
+An ordinary write is not a durability barrier; only explicit `fsync` calls the
+backend `flush`.
+
+## Generic Ioctls And Disk Sequence
+
+`BlockDevice::ioctl` handles generic block commands centrally. Geometry comes from
+queue limits, capacity from the sector view, and the disk sequence from
+`Gendisk::diskseq`. KVFS supplies fault-checked copy-in/copy-out and the current caller's `has_sys_admin` capability value. Only unknown
+commands reach the driver; errors from generic commands do not trigger fallback.
+`BLKROSET` accepts any nonzero int as read-only. The block dispatcher checks that capability before copying its argument.
+The POSIX entry point passes the current caller's credential snapshot through KVFS,
+which calls `Cred::has_sys_admin()` (currently effective UID 0) for `CAP_SYS_ADMIN`. Driver dispatch
+receives the same capability value and open mode for its own command checks.
+Readahead ioctls read and update `Gendisk::bdi` (`BackingDevInfo::ra_pages`).
+Setters take an immediate sector count and round down to base pages; getters
+copy a native unsigned long sector count, rejecting null before copying.
+KVFS snapshots this budget when opening a file on the disk-backed superblock,
+as Linux `file_ra_state_init` does. Existing opens keep their own history and
+budget. Device-less files use the 128 KiB default. Loop owns no duplicate policy.
+
+Disk allocation and successful loop SET_FD/CLR_FD operations assign a new global
+sequence number; republication and capacity changes leave it unchanged. Drivers
+call `inc_diskseq` under their existing media-change locks. Relaxed atomics are
+sufficient because the sequence only identifies media generations. It does not
+replace I/O synchronization, cache invalidation, or hot removal, and duplicates
+no geometry or capacity state.
 
 ## Non-Responsibilities
 
@@ -140,7 +206,8 @@ write 不等价于 durability barrier；只有显式 `fsync` 才调用 backend `
 - No IRQ wiring or completion threading: waiting, admission, and
   IRQ/softirq delivery are owned by `kdriver`'s block host providers;
   this crate defines the contracts only.
-- No filesystem or page-cache policy: byte-level adaptation, durability
+- No page-cache algorithm or cache ownership: the disk owns the shared
+  readahead budget; file windows, cached pages, byte-level adaptation, durability
   semantics, and mount ownership live in KVFS and the filesystem layer.
 - No partition scanning: only whole-disk `part0` is published today.
 - No media encryption or access control beyond the read-only and
@@ -281,18 +348,24 @@ owning hardware tokens or scheduler objects. Filesystem callers use
 - [VirtIO transactions and resource lifetime](../../../devices/virtio/docs/design.md)
 - [Host waiting, IRQ dispatch and removal](../../../integration/kdriver/docs/design.md)
 
+## Staged Migration And Test Boundaries
 
-## 分阶段迁移与测试边界
+PR1 consolidates disk lifetime, sector capacity, and queue geometry without
+establishing another request-submission path. The existing virtio request-wait,
+IRQ completion reclamation, and shutdown-drain contracts on main remain in
+force. Subsequent Bio/Request migration should reuse and consolidate these
+completion mechanisms instead of retaining parallel request-ownership and
+completion states.
 
-PR1 只收敛磁盘生命周期、sector 容量和队列几何，不建立第二条请求提交路径。
-main 已有的 virtio 请求等待、IRQ 完成回收和关闭排空契约继续生效；后续 Bio/Request
-迁移应复用并收敛这些完成机制，而不是并行保留两套请求所有权和完成状态。
-
-未发布磁盘可构造表示测试不必注册全局设备，不等于整个文件系统 crate 已经能够在
-宿主进程独立运行。当前 `block -> ksync -> ktask` 以及
-`kext4 -> kvfs -> ksignal/memspace` 等依赖仍会引入内核运行环境。直接执行
-`cargo test -p kext4` 的分配器配置、链接和运行时依赖问题，需要单独明确测试层次：
-纯磁盘格式/算法测试可以在宿主执行，涉及真实块层、VFS、调度和页缓存的集成测试
-通过配置后的内核单测路径执行。若要让同一套存储算法支持宿主测试，应在已有的
-能力与集成边界上隔离运行环境；不能为测试新增平行设备模型、伪造内核链接符号，
-或只跳过无法链接的测试来宣称宿主测试通过。
+Constructing an unpublished disk lets tests avoid registering a global device;
+it does not make an entire filesystem crate independently runnable in a host
+process. Dependencies such as `block -> ksync -> ktask` and
+`kext4 -> kvfs -> ksignal/memspace` still bring in the kernel runtime. Allocator,
+linking, and runtime dependency issues with direct `cargo test -p kext4` require
+an explicit distinction between test layers: pure disk-format and algorithm
+tests can run on the host, while integration tests involving the real block
+layer, VFS, scheduling, and page cache use the configured kernel unit-test path.
+Supporting host tests for the same storage algorithms requires isolating runtime
+dependencies at the existing capability and integration boundaries. Tests must
+not introduce a parallel device model, fabricate kernel linker symbols, or claim
+host-test success merely by skipping tests that cannot link.

@@ -1,72 +1,127 @@
-# block — 安全与可靠性分析
+# block — Security And Reliability
 
 ## Scope
 
-This analysis covers the block-core contract in `src/lib.rs` and
-`src/completion.rs`. The concrete backends (`src/ahci.rs`,
+This analysis covers the block-core contract in `src/lib.rs`,
+`src/completion.rs`, `src/backing_dev.rs`, and `src/ioctl.rs`. The concrete backends (`src/ahci.rs`,
 `src/bcm2835sdhci.rs`, `src/sdmmc.rs`, `src/ramdisk*.rs`) are hardware
 adapters excluded from this document and audited separately; the
 registry, validation, and completion invariants below are the core's
 own.
 
+## Trust Boundaries
 
-## 信任边界
+Driver-reported disk identity, initial capacity, logical block size, and I/O
+completion cross the block-core boundary. External media contents are untrusted;
+format validation belongs to the filesystem consuming the device.
 
-driver 报告的 disk identity、初始容量、logical block size 和 I/O completion 跨越
-block-core 边界。
-外部介质内容不可信，格式验证属于使用该设备的文件系统。
+## Invariants
 
-## 不变量
+- The major must be nonzero; the minor range must be nonempty and must not
+  overflow or overlap an already-published disk.
+- Logical block size must be a power of two in the range 512..=4096 bytes.
+- `Gendisk` is associated with its unique `part0` and `RequestQueue` at
+  construction; publication must not replace them.
+- `GendiskRef` keeps the disk alive through part0. `BlockDevice` strongly owns
+  the complete `Gendisk`; the internal disk Arc is not exposed.
+- The disk holds only a weak reference to part0. Releasing the final external
+  owning reference allows the device, disk, and backend to be fully reclaimed.
+- Every borrowable disk has a live part0. `disk()` cannot return a missing-disk
+  state, and the upgrade in `part0()` must succeed.
+- `BlockDevice` start and capacity use 512-byte sectors; `num_sectors * 512`
+  must be representable in `u64`.
+- One `dev_t` maps to exactly one `BlockDevice` in the resident registry.
+- A canonical `BlockDevice` has at most one exclusive holder at a time;
+  the claim token owns release.
+- Every I/O buffer length is a multiple of the logical block size, and the
+  complete sector extent lies within current capacity.
+- Block/sector conversions and offset/length multiplication and addition use
+  checked arithmetic.
+- The operations object, `Gendisk`, and `BlockDevice` are all `Send + Sync`.
+- No driver I/O or callback runs while holding the registry lock.
+- The backend's inherent read-only capability is recorded by `Gendisk` before
+  publication and cannot be cleared through the administrative interface.
+- Administrative read-only state belongs only to the owning `Gendisk`;
+  effective read-only state is the union of inherent and administrative state.
+- Every `BlockDevice` write checks effective read-only state before entering
+  the backend.
+- `Gendisk` does not implement the driver operations trait. The transitional
+  synchronous trait implementation on `BlockDevice` delegates to canonical
+  methods and cannot bypass capacity, bounds, or read-only checks.
 
-- major 必须非零，minor range 非空且不能溢出或与已发布 disk 重叠；
-- logical block size 必须在 512..=4096 bytes 内且为 2 的幂；
-- `Gendisk` 构造时即关联唯一 `part0` 和 `RequestQueue`，发布不能替换它们；
-- `GendiskRef` 经 part0 保活磁盘，`BlockDevice` 强持有完整 `Gendisk`；内部 disk Arc 不外露；
-- 磁盘只弱引用 part0，最后一个外部拥有引用释放后设备、磁盘和 backend 可完整回收；
-- 每个可借用的磁盘必有 live part0，`disk()` 不返回缺失状态，`part0()` 的 upgrade 必须成功；
-- `BlockDevice` 的 start/capacity 使用 512-byte sector，`num_sectors * 512` 在 `u64` 中可表示；
-- 一个 `dev_t` 在 resident registry 中只对应一个 `BlockDevice`；
-- 一个 canonical `BlockDevice` 同时至多有一个 exclusive holder，claim token 负责释放；
-- 每个 I/O buffer 长度是 logical block size 的整数倍，完整 sector extent 位于当前 capacity 内；
-- block/sector 换算以及 offset/length 的乘加必须 checked；
-- operations object、`Gendisk` 和 `BlockDevice` 都是 `Send + Sync`；
-- registry 锁内不执行 driver I/O 或 callback。
-- backend 固有只读能力由 `Gendisk` 在发布前保存且不可被管理接口清除；
-- 管理只读状态只由 owning `Gendisk` 保存，有效只读状态为两者的并集；
-- 所有 `BlockDevice` 写入在 backend 前检查有效只读状态。
-- `Gendisk` 不实现 driver operations trait；`BlockDevice` 的阶段性同步 trait 实现只委托
-  canonical 方法，不能绕过容量、边界和只读检查。
+## Unsafe
 
-## unsafe
+`drivers/contracts/block/src/lib.rs` contains no unsafe blocks. The MMIO/DMA
+safety boundaries of concrete hardware backends belong to each backend's own
+documentation.
 
-`drivers/contracts/block/src/lib.rs` 没有 `unsafe` block。具体硬件 backend 的 MMIO/DMA 安全边界由
-各 backend 文档负责。
+## Failure Handling
 
-## 故障处理
+`BlockCompletionOperations::process_completed_requests` is a trusted driver
+callback and must be finite and non-sleeping. The host's serial-execution
+guarantee applies within one registration; creating multiple registrations for
+the same target must not be assumed to preserve mutual exclusion. Completion
+callbacks must not wake callers while holding a device lock. A strong reference
+to the target must span synchronous stop before device resources are destroyed.
 
-`BlockCompletionOperations::process_completed_requests` 是可信驱动回调，必须有限且不睡眠。host 的串行执行
-保证以单一注册为边界，不能为同一目标创建多个注册后假设仍然互斥。完成回调不得
-在持有设备锁时唤醒调用者；目标强引用必须覆盖同步停止，之后才能销毁设备资源。
+The completion-wait contract requires provider signals to own only notification
+state, never requests or DMA data. Callers notify outside device/registry locks.
+A `BlockWaiter` is used only by the task that prepared it, in sleepable context.
+A failed admission wait cancels the pending node at the transaction layer and
+passes on the admission opportunity. The terminal wait has no recoverable-error
+exit, preventing a request still involved in DMA from being freed early because
+of a wait error. The contract itself implements neither queues nor DMA lifecycle
+and does not verify device completion; drivers must publish the real result
+before raising terminal notification.
 
-完成等待契约要求 provider 的 signals 只拥有通知状态，不拥有请求或 DMA 数据。
-调用方在设备/registry 锁外通知；`BlockWaiter` 仅由准备它的任务在可睡眠上下文使用。
-准入等待失败由事务层取消 pending 节点并传递准入机会；终态等待无可恢复错误出口，
-避免尚在 DMA 中的请求随等待错误提前释放。契约本身不实现队列或 DMA 生命周期，
-也不验证设备已经完成；驱动必须先发布真实结果再发终态通知。
-
-| 故障 | 结果 |
+| Failure | Result |
 |---|---|
-| identity/range 冲突 | `AlreadyExists`，不发布半成品 |
-| logical block size 或初始 sector capacity 无效 | `InvalidInput`，不构造半成品 |
-| 已有 exclusive holder | `ResourceBusy`，不建立第二个 holder |
-| 无效、未对齐或越界 I/O | `InvalidInput`，不调用 backend |
-| backend I/O/flush 失败 | 原样传播 `DriverError` |
-| read-only disk 写入 | `ReadOnly`；KVFS 映射为 Linux `EPERM` |
-| 对固有只读 disk 执行 `BLKROSET 0` | `ReadOnlyFilesystem`（Linux `EROFS`），状态保持只读 |
-| 未知 disk-specific ioctl | `NotATty` |
-| disk 撤销后新 open/mount | canonical lookup 失败 |
+| Identity/range conflict | `AlreadyExists`; no partial disk is published |
+| Invalid logical block size or initial sector capacity | `InvalidInput`; no partial object is constructed |
+| Existing exclusive holder | `ResourceBusy`; no second holder is created |
+| Invalid, unaligned, or out-of-range I/O | `InvalidInput`; backend not called |
+| Backend I/O/flush failure | `DriverError` propagated unchanged |
+| Write to a read-only disk | `ReadOnly`; KVFS maps it to Linux `EPERM` |
+| `BLKROSET 0` on an inherently read-only disk | Success; administrative state is cleared, inherent read-only remains effective |
+| Unknown disk-specific ioctl | `NotATty` |
+| New open/mount after disk withdrawal | Canonical lookup fails |
 
-## 已知限制
+## Ioctl Boundary
 
-当前没有 partition scan，只发布 whole-disk part0。热移除不会主动冻结已有 mounted
-filesystem；已有引用的后续 I/O 依赖 backend 返回设备错误。
+Generic ioctls copy values using their actual Linux ABI widths, not the size
+bits in the command encoding. Copy faults propagate unchanged. A failed
+`BLKROSET` argument read does not change state, and unknown commands do not access
+arguments before driver dispatch. The block dispatcher checks administrative
+authorization using the host-supplied `has_sys_admin` value before copy-in; the current effective-UID-zero check does not
+implement the full capability/user-namespace model. The disk sequence is neither
+an access token nor an I/O barrier, and queries do not provide an atomic state
+snapshot across multiple ioctls.
+
+The trusted host must derive the capability value from the current caller;
+passing a boolean does not authenticate an untrusted kernel caller. Command
+policy belongs to the generic dispatcher or the driver owning that command.
+Linux `drivers/block/loop.c::lo_ioctl` does not require CAP_SYS_ADMIN or an owner
+check for SET_FD/CLR_FD; admission relies on device-node access, and SET_FD derives
+read-only mode from the device and backing-file open modes. SET_STATUS requires
+write-open mode or CAP_SYS_ADMIN. X-Kernel follows those checks; its default
+0666 device nodes therefore allow unprivileged loop attachment/detachment.
+This is a development-stage permission policy, not Linux distribution policy;
+production node ownership/modes must restrict device administration.
+BLKRASET/BLKFRASET require CAP_SYS_ADMIN before updating the disk's shared
+readahead budget. Native unsigned-long multiplication and page rounding follow
+Linux; getters reject null with EINVAL and copy exactly a native unsigned long.
+The budget is a default for future opens, not a cache allocation or a change to
+already-open files.
+
+## Known Limitations
+
+Raw block-device mmap returns ENODEV: block-special inodes have empty
+address-space operations, and no canonical block cache with a media-change
+invalidation protocol exists yet. `inc_diskseq` is only an identity operation,
+not an implementation of Linux `disk_force_media_change`. Enabling block mmap
+requires that cache ownership and invalidation together; a devfs-inode-local
+cache would not satisfy the contract.
+
+There is no partition scan today; only whole-disk part0 is published. Hot removal
+does not actively freeze already-mounted filesystems; further I/O through
+existing references relies on the backend returning device errors.

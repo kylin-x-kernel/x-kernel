@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [dependencies]
 intrusive-collections.workspace = true
+kcred.workspace = true
 kworkng.workspace = true
 kcpu_id_map.workspace = true
 console_driver.workspace = true

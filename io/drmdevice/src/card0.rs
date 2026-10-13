@@ -599,7 +599,7 @@ impl DeviceFileOps for DrmCard {
         reason = "CG-028-focused-functions: linear DRM ioctl dispatch table: one short match arm \
                   per command, arms share no state"
     )]
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         self.display()?;
         let state = file
             .private_data_get::<DrmFile>()

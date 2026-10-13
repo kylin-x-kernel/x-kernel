@@ -6,20 +6,16 @@ use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::{
     mem::{MaybeUninit, size_of},
     slice,
-    sync::atomic::{AtomicU32, Ordering},
 };
 
 use kerrno::{KError, KResult, LinuxError};
 use klazy::Lazy;
 use ksync::{Mutex, static_lock};
 use kvfs::{FMode, NodeType, VfsFile, VfsResult};
-use linux_raw_sys::{
-    ioctl::{BLKRAGET, BLKRASET},
-    loop_device::{
-        LO_FLAGS_READ_ONLY, LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info,
-    },
+use linux_raw_sys::loop_device::{
+    LO_FLAGS_READ_ONLY, LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info,
 };
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtMutPtr;
 
 static_lock! {
     static LOOP_VALIDATE_MUTEX: Mutex<()> = Mutex::new(());
@@ -30,8 +26,6 @@ pub(crate) struct LoopDevice {
     number: u32,
     /// Underlying file for the loop device, if any.
     pub file: Mutex<Option<Arc<VfsFile>>>,
-    /// Read-ahead size for the loop device, in bytes.
-    pub ra: AtomicU32,
 }
 
 const fn empty_loop_info() -> loop_info {
@@ -57,7 +51,6 @@ impl LoopDevice {
         Self {
             number,
             file: Mutex::new(None),
-            ra: AtomicU32::new(512),
         }
     }
 
@@ -134,6 +127,7 @@ impl LoopDevice {
         mode: block::BlockOpenMode,
         cmd: u32,
         arg: usize,
+        has_sys_admin: bool,
     ) -> VfsResult<usize> {
         match cmd {
             LOOP_SET_FD => {
@@ -159,6 +153,7 @@ impl LoopDevice {
                     block_device.set_disk_read_only(old_read_only)?;
                     return Err(KError::InvalidInput);
                 }
+                block_device.disk().inc_diskseq();
             }
             LOOP_CLR_FD => {
                 let _validation = LOOP_VALIDATE_MUTEX.lock();
@@ -171,11 +166,15 @@ impl LoopDevice {
                     .map_err(|_| KError::InvalidInput)?;
                 *backing = None;
                 block_device.set_disk_read_only(false)?;
+                block_device.disk().inc_diskseq();
             }
             LOOP_GET_STATUS => {
                 (arg as *mut loop_info).write_vm(self.get_info(block_device)?)?;
             }
             LOOP_SET_STATUS => {
+                if !mode.contains(block::BlockOpenMode::WRITE) && !has_sys_admin {
+                    return Err(KError::from(LinuxError::EPERM));
+                }
                 let mut info = empty_loop_info();
                 // SAFETY: `info` is a live POD value and the byte slice covers
                 // exactly its initialized storage for a copy-from-user.
@@ -187,13 +186,6 @@ impl LoopDevice {
                 };
                 osvm::read_vm_bytes(arg as *const u8, info_bytes)?;
                 self.set_info(info)?;
-            }
-            BLKRAGET => {
-                (arg as *mut u32).write_vm(self.ra.load(Ordering::Relaxed))?;
-            }
-            BLKRASET => {
-                self.ra
-                    .store((arg as *const u32).read_vm()?, Ordering::Relaxed);
             }
             _ => return Err(KError::NotATty),
         }
@@ -260,8 +252,9 @@ impl block::BlockDeviceOperations for LoopDevice {
         mode: block::BlockOpenMode,
         cmd: u32,
         arg: usize,
+        has_sys_admin: bool,
     ) -> KResult<usize> {
-        self.ioctl_impl(device, mode, cmd, arg)
+        self.ioctl_impl(device, mode, cmd, arg, has_sys_admin)
     }
 }
 
@@ -297,4 +290,56 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
 
 pub(crate) fn init_devices() {
     Lazy::force(&LOOP_DEVICES);
+}
+
+#[unittest::mod_test]
+mod tests {
+    use super::*;
+
+    #[unittest::def_test]
+    fn ioctl_permissions_follow_command_and_open_mode() {
+        use block::BlockOpenMode as Mode;
+        use linux_raw_sys::ioctl::{BLKFRASET, BLKRASET};
+
+        let disk = block::Gendisk::alloc(
+            "test-loop-ioctl".into(),
+            7,
+            0,
+            1,
+            Box::new(Arc::new(LoopDevice::new(0))),
+        )
+        .expect("valid unpublished loop disk");
+        let device = disk.part0();
+        for (cmd, mode, has_sys_admin, error) in [
+            (
+                LOOP_SET_STATUS,
+                Mode::READ,
+                false,
+                KError::from(LinuxError::EPERM),
+            ),
+            (LOOP_SET_STATUS, Mode::WRITE, false, KError::BadAddress),
+            (LOOP_SET_STATUS, Mode::READ, true, KError::BadAddress),
+            (LOOP_SET_FD, Mode::READ, false, KError::BadFileDescriptor),
+            (
+                LOOP_CLR_FD,
+                Mode::READ,
+                false,
+                KError::from(LinuxError::ENXIO),
+            ),
+            (BLKRASET, Mode::WRITE, false, KError::PermissionDenied),
+            (BLKFRASET, Mode::WRITE, false, KError::PermissionDenied),
+        ] {
+            assert_eq!(
+                device.as_ref().ioctl(
+                    mode,
+                    cmd,
+                    usize::MAX,
+                    has_sys_admin,
+                    || panic!("these commands do not copy a generic int"),
+                    |_| panic!("these commands do not copy generic output"),
+                ),
+                Err(error)
+            );
+        }
+    }
 }

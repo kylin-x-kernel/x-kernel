@@ -360,7 +360,7 @@ impl DeviceFileOps for EventDev {
         NodeFlags::NON_CACHEABLE
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         if !self.device.is_available() {
             return Err(KError::NoSuchDevice);
         }

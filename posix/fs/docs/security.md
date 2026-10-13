@@ -299,3 +299,8 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 新增日志不输出文件内容或敏感用户缓冲区。
 - [ ] xattr list 是否逐项检查累计长度、只使用一个输出缓冲区，并在 `size == 0` 时只计数？
 - [ ] 若修复当前已知限制，同步更新本文和 `design.md`。
+
+The ioctl entry passes the current caller's credential snapshot through KVFS.
+The block dispatcher authorizes `BLKROSET` using that effective UID (zero
+stands in for CAP_SYS_ADMIN) before copying the argument, returning EACCES on
+failure. The opening credential does not authorize later ioctl callers.

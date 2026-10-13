@@ -2248,6 +2248,23 @@ impl VfsInode {
             .ok_or_else(|| VfsError::from(LinuxError::ESTALE))
     }
 
+    /// Resolves the backing-device budget without duplicating it in the inode.
+    pub(crate) fn readahead_pages(&self) -> usize {
+        if self.node_type() == NodeType::BlockDevice {
+            return block::lookup_block_device(self.rdev())
+                .map_or(block::BackingDevInfo::DEFAULT_RA_PAGES, |device| {
+                    device.disk().backing_dev_info().readahead_pages()
+                });
+        }
+        self.super_block()
+            .ok()
+            .and_then(|sb| {
+                sb.block_device()
+                    .map(|device| device.disk().backing_dev_info().readahead_pages())
+            })
+            .unwrap_or(block::BackingDevInfo::DEFAULT_RA_PAGES)
+    }
+
     pub(crate) fn address_space(&self) -> Arc<AddressSpace> {
         self.mapping.clone()
     }

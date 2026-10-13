@@ -11,9 +11,8 @@ use block::{BlockDevice, BlockOpenMode, DriverError};
 use kerrno::{KError, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::static_lock;
-use linux_raw_sys::ioctl::{BLKGETSIZE, BLKGETSIZE64, BLKROGET, BLKROSET};
 use memaddr::PhysAddrRange;
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 
 use crate::{
     DeviceId, FMode, FileOperations, Mutex, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
@@ -201,8 +200,8 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.write(file, buf, offset)
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        self.ops.ioctl(file, cmd, arg)
+    fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        self.ops.ioctl(file, cred, cmd, arg)
     }
 
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
@@ -263,9 +262,9 @@ impl FileOperations for DefaultBlkdevFileOperations {
         file_block_device(file)?.write(file, buf, offset)
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         let device = file_block_device(file)?;
-        DeviceFileOps::ioctl(device.as_ref(), file, cmd, arg)
+        DeviceFileOps::ioctl(device.as_ref(), file, cred, cmd, arg)
     }
 
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
@@ -438,37 +437,20 @@ impl DeviceFileOps for BlockDevice {
         write_block_device(self, buf, offset)
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
-        match cmd {
-            BLKGETSIZE => {
-                let sectors =
-                    usize::try_from(self.size() / 512).map_err(|_| VfsError::FileTooLarge)?;
-                (arg as *mut usize).write_vm(sectors)?;
-                Ok(0)
-            }
-            BLKGETSIZE64 => {
-                (arg as *mut u64).write_vm(self.size())?;
-                Ok(0)
-            }
-            BLKROGET => {
-                (arg as *mut u32).write_vm(self.is_read_only() as u32)?;
-                Ok(0)
-            }
-            BLKROSET => {
-                let read_only = (arg as *const u32).read_vm()?;
-                if read_only > 1 {
-                    return Err(KError::InvalidInput);
-                }
-                self.set_disk_read_only(read_only != 0)?;
-                Ok(0)
-            }
-            _ => self.driver_ioctl(block_open_mode(file.mode()), cmd, arg),
-        }
+    fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        BlockDevice::ioctl(
+            self,
+            block_open_mode(file.mode()),
+            cmd,
+            arg,
+            cred.has_sys_admin(),
+            || Ok(i32::from_ne_bytes((arg as *const [u8; 4]).read_vm()?)),
+            |bytes| Ok(osvm::write_vm_bytes(arg as *mut u8, bytes)?),
+        )
     }
 
-    fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
-        mapper.map_file_backed()
-    }
+    // Block-special inodes have no block-backed address-space operations yet.
+    // Keep the default ENODEV instead of installing an unusable file mapping.
 }
 
 pub(crate) fn character_device_file_operations() -> Arc<dyn FileOperations> {
@@ -536,8 +518,15 @@ pub trait DeviceFileOps: Send + Sync {
     fn write(&self, _file: &VfsFile, _buf: &[u8], _offset: u64) -> VfsResult<usize> {
         Err(VfsError::InvalidInput)
     }
-    /// Manipulates the underlying device parameters of special files.
-    fn ioctl(&self, _file: &VfsFile, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+    /// Manipulates device parameters using the current caller's credentials.
+    /// `cred` is the current subjective snapshot, not the opening credential.
+    fn ioctl(
+        &self,
+        _file: &VfsFile,
+        _cred: &kcred::Cred,
+        _cmd: u32,
+        _arg: usize,
+    ) -> VfsResult<usize> {
         Err(VfsError::NotATty)
     }
 

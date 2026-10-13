@@ -24,6 +24,18 @@ fn test_credentials_root_initial_state() {
 }
 
 #[def_test]
+fn sys_admin_uses_effective_identity_in_the_current_model() {
+    let mut credentials = Cred::root();
+    assert!(credentials.has_sys_admin());
+    credentials.set_resuid_unchecked(None, Some(1000), None);
+    assert!(!credentials.has_sys_admin()); // Real and saved UID 0 are insufficient.
+    credentials.set_resuid_unchecked(Some(1000), Some(0), Some(1000));
+    credentials.set_fsuid(1000);
+    assert!(credentials.has_sys_admin()); // Filesystem UID does not govern it.
+    assert!(!Cred::new(1000, 0).has_sys_admin());
+}
+
+#[def_test]
 fn test_credentials_clone_is_deep_copy() {
     let mut parent = Cred::new(1000, 100);
     let child = parent.clone();

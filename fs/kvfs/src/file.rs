@@ -256,8 +256,15 @@ pub trait FileOperations: Send + Sync + 'static {
         })
     }
 
-    /// Manipulates the underlying device parameters of special files.
-    fn ioctl(&self, _file: &VfsFile, _cmd: u32, _arg: usize) -> VfsResult<usize> {
+    /// Manipulates device parameters using the current caller's credentials.
+    /// `cred` is the current subjective snapshot, not the opening credential.
+    fn ioctl(
+        &self,
+        _file: &VfsFile,
+        _cred: &kcred::Cred,
+        _cmd: u32,
+        _arg: usize,
+    ) -> VfsResult<usize> {
         Err(VfsError::NotATty)
     }
 
@@ -672,6 +679,7 @@ impl VfsFileBuilder {
 
         let operations = operations.ok_or(VfsError::InvalidInput)?;
         let location = location.ok_or(VfsError::InvalidInput)?;
+        let readahead = crate::file_ra::FileRaState::new(location.inode().readahead_pages());
         Ok(Arc::new(VfsFile {
             cred,
             mode: AtomicU32::new(mode.bits()),
@@ -680,7 +688,7 @@ impl VfsFileBuilder {
             private_data: Mutex::new(private_data),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
-            readahead: Mutex::new(crate::file_ra::FileRaState::new()),
+            readahead: Mutex::new(readahead),
             pipe_generation,
         }))
     }
@@ -1119,9 +1127,10 @@ impl VfsFile {
         self.operations().llseek(self, offset, whence)
     }
 
-    /// Dispatches an ioctl to this open file.
-    pub fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
-        self.operations().ioctl(self, cmd, arg)
+    /// Dispatches an ioctl using the current caller's subjective credentials.
+    /// The caller must supply its current snapshot, not the opening credential.
+    pub fn ioctl(&self, cred: &Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
+        self.operations().ioctl(self, cred, cmd, arg)
     }
 
     /// Creates a mapping for this open file.

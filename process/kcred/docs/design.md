@@ -12,6 +12,9 @@ access, read syscall pointers, or load executable metadata. `kprocess` owns task
 credential snapshots and publication; `ksyscall` translates and validates user
 arguments; `kvfs` consumes explicit credentials for discretionary access checks.
 The namespace types do not currently participate in `Cred` privilege decisions.
+`Cred::has_sys_admin` supplies the administrative capability decision separately
+from the set-ID `is_privileged` predicate. Both currently use effective UID zero;
+capability-set support must implement their respective semantics in this layer.
 
 ```text
 ksyscall -> kprocess: prepare / commit task snapshot

@@ -14,7 +14,9 @@
 
 extern crate alloc;
 
+mod backing_dev;
 pub mod completion;
+mod ioctl;
 
 use alloc::{
     boxed::Box,
@@ -28,6 +30,7 @@ use core::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
+pub use backing_dev::BackingDevInfo;
 use kdevice::DeviceNumber;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
@@ -70,6 +73,9 @@ bitflags::bitflags! {
 }
 
 const DISK_STATE_ADMIN_READ_ONLY: usize = 1 << 0;
+
+// Sequence allocation is independent of disk publication and I/O state.
+static DISK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// I/O operations that a block storage backend must implement.
 ///
@@ -119,12 +125,17 @@ pub trait BlockDeviceOperations: Send + Sync {
     fn release(&self, _device: &BlockDevice) {}
 
     /// Handles a disk-specific ioctl not consumed by the generic block layer.
+    ///
+    /// `has_sys_admin` describes the current caller's CAP_SYS_ADMIN capability.
+    /// Drivers enforce command-specific permissions using it and `mode`; an
+    /// open device is not blanket authorization for every driver command.
     fn ioctl(
         &self,
         _device: &BlockDevice,
         _mode: BlockOpenMode,
         _cmd: u32,
         _arg: usize,
+        _has_sys_admin: bool,
     ) -> KResult<usize> {
         Err(KError::NotATty)
     }
@@ -174,8 +185,9 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
         mode: BlockOpenMode,
         cmd: u32,
         arg: usize,
+        has_sys_admin: bool,
     ) -> KResult<usize> {
-        (**self).ioctl(device, mode, cmd, arg)
+        (**self).ioctl(device, mode, cmd, arg, has_sys_admin)
     }
 
     fn set_read_only(&self, device: &BlockDevice, read_only: bool) -> KResult<()> {
@@ -190,6 +202,8 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
 /// through `part0`, just as Linux `disk_to_dev()` uses `part0->bd_device`.
 pub struct Gendisk {
     name: String,
+    diskseq: AtomicU64,
+    bdi: BackingDevInfo,
     major: u32,
     first_minor: u32,
     minors: u32,
@@ -263,6 +277,8 @@ impl Gendisk {
         let part0 = Arc::new_cyclic(move |part0| {
             let disk = Arc::new(Self {
                 name,
+                bdi: BackingDevInfo::new(),
+                diskseq: AtomicU64::new(DISK_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1),
                 major,
                 first_minor,
                 minors,
@@ -275,6 +291,11 @@ impl Gendisk {
             BlockDevice::whole(disk, capacity_sectors)
         });
         Ok(GendiskRef(part0))
+    }
+
+    /// Returns the disk's shared backing-device policy (`gendisk::bdi`).
+    pub fn backing_dev_info(&self) -> &BackingDevInfo {
+        &self.bdi
     }
 
     /// Returns the block major assigned to this disk.
@@ -295,6 +316,23 @@ impl Gendisk {
     /// Returns the user-visible disk name (`disk_name`).
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns the globally assigned disk/media sequence number.
+    ///
+    /// Re-publication and capacity changes retain this value. Drivers call
+    /// [`Self::inc_diskseq`] after replacing media in an existing disk object.
+    pub fn diskseq(&self) -> u64 {
+        self.diskseq.load(Ordering::Relaxed)
+    }
+
+    /// Assigns a new global sequence number after a successful media change.
+    ///
+    /// The driver must serialize media changes. This identifies a media
+    /// generation; it does not synchronize I/O or invalidate cached data.
+    pub fn inc_diskseq(&self) {
+        let sequence = DISK_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+        self.diskseq.store(sequence, Ordering::Relaxed);
     }
 
     /// Returns the request queue owned by this disk.
@@ -484,20 +522,16 @@ impl BlockDevice {
             || self.disk.state.load(Ordering::Acquire) & DISK_STATE_ADMIN_READ_ONLY != 0
     }
 
-    /// Changes this disk's canonical read-only state.
+    /// Changes this disk's administrative read-only policy.
+    /// Clearing it succeeds even when inherent read-only state remains set.
     ///
     /// The driver callback runs before the generic state is published, matching
     /// Linux `BLKROSET` ordering.
     ///
     /// # Errors
     ///
-    /// Returns [`KError::ReadOnlyFilesystem`] when attempting to make an
-    /// inherently read-only disk writable. Returns a driver callback error
-    /// without changing the administrative state.
+    /// Returns a driver callback error without changing the administrative state.
     pub fn set_disk_read_only(&self, is_read_only: bool) -> KResult<()> {
-        if !is_read_only && self.disk.is_inherently_read_only {
-            return Err(KError::ReadOnlyFilesystem);
-        }
         self.disk.operations.set_read_only(self, is_read_only)?;
         if is_read_only {
             self.disk
@@ -572,8 +606,16 @@ impl BlockDevice {
     /// # Errors
     ///
     /// Propagates the driver ioctl error unchanged.
-    pub fn driver_ioctl(&self, mode: BlockOpenMode, cmd: u32, arg: usize) -> KResult<usize> {
-        self.disk.operations.ioctl(self, mode, cmd, arg)
+    fn driver_ioctl(
+        &self,
+        mode: BlockOpenMode,
+        cmd: u32,
+        arg: usize,
+        has_sys_admin: bool,
+    ) -> KResult<usize> {
+        self.disk
+            .operations
+            .ioctl(self, mode, cmd, arg, has_sys_admin)
     }
 
     fn backend_block(&self, block_id: u64, len: usize) -> DriverResult<u64> {
@@ -661,8 +703,9 @@ impl BlockDeviceOperations for BlockDevice {
         mode: BlockOpenMode,
         cmd: u32,
         arg: usize,
+        has_sys_admin: bool,
     ) -> KResult<usize> {
-        self.driver_ioctl(mode, cmd, arg)
+        self.driver_ioctl(mode, cmd, arg, has_sys_admin)
     }
 
     fn set_read_only(&self, _device: &BlockDevice, read_only: bool) -> KResult<()> {
@@ -873,6 +916,134 @@ mod tests {
             Box::new(MemoryDisk::new(8)),
         )
         .expect("valid test disk")
+    }
+
+    fn ioctl_bytes(device: &BlockDevice, cmd: u32) -> Vec<u8> {
+        let mut output = Vec::new();
+        device
+            .ioctl(
+                BlockOpenMode::READ,
+                cmd,
+                1,
+                false,
+                || panic!("query must not read the argument"),
+                |bytes| {
+                    output.extend_from_slice(bytes);
+                    Ok(())
+                },
+            )
+            .expect("generic query succeeds without driver ioctl support");
+        output
+    }
+
+    #[def_test]
+    fn generic_ioctls_report_queue_geometry_and_sector_capacity() {
+        use linux_raw_sys::ioctl::{
+            BLKALIGNOFF, BLKGETDISKSEQ, BLKGETSIZE, BLKGETSIZE64, BLKIOMIN, BLKIOOPT, BLKPBSZGET,
+            BLKROGET, BLKSSZGET,
+        };
+
+        let disk = Gendisk::alloc(
+            String::from("ioctl-4k"),
+            249,
+            0,
+            1,
+            Box::new(GeometryDisk {
+                blocks: 2,
+                block_size: 4096,
+            }),
+        )
+        .unwrap();
+        let device = disk.part0();
+        for (cmd, expected) in [
+            (BLKSSZGET, 4096_u32),
+            (BLKPBSZGET, 4096),
+            (BLKIOMIN, 4096),
+            (BLKIOOPT, 0),
+            (BLKALIGNOFF, 0),
+            (BLKROGET, 0),
+        ] {
+            assert_eq!(ioctl_bytes(&device, cmd), expected.to_ne_bytes());
+        }
+        device.set_capacity(9).unwrap();
+        assert_eq!(ioctl_bytes(&device, BLKGETSIZE), 9_usize.to_ne_bytes());
+        assert_eq!(ioctl_bytes(&device, BLKGETSIZE64), 4608_u64.to_ne_bytes());
+        assert_eq!(
+            ioctl_bytes(&device, BLKGETDISKSEQ),
+            disk.diskseq().to_ne_bytes()
+        );
+    }
+
+    #[def_test]
+    fn readahead_ioctls_share_disk_policy_and_linux_argument_semantics() {
+        use linux_raw_sys::ioctl::{BLKFRAGET, BLKFRASET, BLKRAGET, BLKRASET};
+
+        let disk = disk("ioctl-readahead", 249, 0, 1);
+        let device = disk.part0();
+        let set = |cmd, sectors, has_sys_admin| {
+            device.as_ref().ioctl(
+                BlockOpenMode::READ,
+                cmd,
+                sectors,
+                has_sys_admin,
+                || panic!("readahead setter takes a value, not a pointer"),
+                |_| panic!("setter has no output"),
+            )
+        };
+        for cmd in [BLKRAGET, BLKFRAGET] {
+            assert_eq!(ioctl_bytes(&device, cmd), 256_usize.to_ne_bytes());
+            assert_eq!(
+                device.as_ref().ioctl(
+                    BlockOpenMode::READ,
+                    cmd,
+                    0,
+                    false,
+                    || panic!("getter has no input"),
+                    |_| panic!("null is rejected before copying"),
+                ),
+                Err(KError::InvalidInput)
+            );
+            assert_eq!(
+                device.as_ref().ioctl(
+                    BlockOpenMode::READ,
+                    cmd,
+                    1,
+                    false,
+                    || panic!("getter has no input"),
+                    |_| Err(KError::BadAddress),
+                ),
+                Err(KError::BadAddress)
+            );
+        }
+        for cmd in [BLKRASET, BLKFRASET] {
+            assert_eq!(set(cmd, 9, false), Err(KError::PermissionDenied));
+            assert_eq!(set(cmd, 9, true), Ok(0));
+            assert_eq!(disk.backing_dev_info().readahead_pages(), 1);
+            for getter in [BLKRAGET, BLKFRAGET] {
+                assert_eq!(ioctl_bytes(&device, getter), 8_usize.to_ne_bytes());
+            }
+            assert_eq!(set(cmd, 0, true), Ok(0));
+            assert_eq!(disk.backing_dev_info().readahead_pages(), 0);
+        }
+    }
+
+    #[def_test(serial)]
+    fn disk_sequence_tracks_media_not_publication_or_capacity() {
+        let first = disk("sequence-first", 249, 0, 1);
+        let sequence = first.diskseq();
+        assert_ne!(sequence, 0);
+        let device = add_disk(first.clone()).unwrap();
+        assert_eq!(device.disk().diskseq(), sequence);
+        device.set_capacity(3).unwrap();
+        del_gendisk(first.device_number()).unwrap();
+        add_disk(first.clone()).unwrap();
+        assert_eq!(first.diskseq(), sequence);
+        del_gendisk(first.device_number()).unwrap();
+        let second = disk("sequence-reused-devt", 249, 0, 1);
+        assert!(second.diskseq() > sequence);
+        first.inc_diskseq();
+        assert!(device.disk().diskseq() > second.diskseq());
+        assert_eq!(device.num_sectors(), 3);
     }
 
     #[def_test]
@@ -1106,7 +1277,46 @@ mod tests {
     fn read_only_state_is_owned_by_the_block_core() {
         let disk = disk("test-read-only", 244, 0, 1);
         let device = add_disk(disk.clone()).expect("publish read-only disk");
-        device.set_disk_read_only(true).expect("set disk read-only");
+        use linux_raw_sys::ioctl::BLKROSET;
+
+        assert_eq!(
+            device.as_ref().ioctl(
+                BlockOpenMode::READ,
+                BLKROSET,
+                0,
+                false,
+                || panic!("authorization must precede argument access"),
+                |_| panic!("setter must not copy out"),
+            ),
+            Err(KError::PermissionDenied)
+        );
+        assert!(!device.is_read_only());
+        assert_eq!(
+            device.as_ref().ioctl(
+                BlockOpenMode::READ,
+                BLKROSET,
+                0,
+                true,
+                || Err(KError::BadAddress),
+                |_| panic!("setter must not copy out"),
+            ),
+            Err(KError::BadAddress)
+        );
+        assert!(!device.is_read_only());
+        for value in [-1, 2] {
+            device
+                .as_ref()
+                .ioctl(
+                    BlockOpenMode::READ,
+                    BLKROSET,
+                    0,
+                    true,
+                    || Ok(value),
+                    |_| panic!("setter must not copy out"),
+                )
+                .expect("nonzero int sets disk read-only");
+            assert!(device.is_read_only());
+        }
         assert!(device.is_read_only());
         assert_eq!(
             device.write_block(0, &[0; BLOCK_SIZE]).unwrap_err(),
@@ -1116,7 +1326,17 @@ mod tests {
             BlockDeviceOperations::write_block(device.as_ref(), 0, &[0; BLOCK_SIZE]).unwrap_err(),
             DriverError::ReadOnly
         );
-        device.set_disk_read_only(false).expect("set disk writable");
+        device
+            .as_ref()
+            .ioctl(
+                BlockOpenMode::READ,
+                BLKROSET,
+                0,
+                true,
+                || Ok(0),
+                |_| panic!("setter must not copy out"),
+            )
+            .expect("zero clears administrative read-only state");
         assert!(device.write_block(0, &[0; BLOCK_SIZE]).is_ok());
         del_gendisk(disk.device_number()).expect("remove read-only disk");
     }
@@ -1135,8 +1355,15 @@ mod tests {
 
         assert!(device.is_read_only());
         assert!(matches!(
-            device.set_disk_read_only(false),
-            Err(KError::ReadOnlyFilesystem)
+            device.as_ref().ioctl(
+                BlockOpenMode::READ,
+                linux_raw_sys::ioctl::BLKROSET,
+                0,
+                true,
+                || Ok(0),
+                |_| panic!("setter must not copy out"),
+            ),
+            Ok(0)
         ));
         assert!(device.is_read_only());
         assert_eq!(

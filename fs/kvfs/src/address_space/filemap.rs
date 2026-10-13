@@ -175,7 +175,11 @@ impl AddressSpace {
         iter: &mut IovIterDest<'_>,
         offset: u64,
     ) -> VfsResult<usize> {
-        self.read_with_ra(iter, offset, &Mutex::new(FileRaState::new()))
+        self.read_with_ra(
+            iter,
+            offset,
+            &Mutex::new(FileRaState::new(block::BackingDevInfo::DEFAULT_RA_PAGES)),
+        )
     }
 
     fn readahead_after_copy(

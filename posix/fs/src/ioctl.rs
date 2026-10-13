@@ -136,7 +136,7 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
         f.replace_flags(OpenFlags::NONBLOCK, flags);
         return Ok(0);
     }
-    f.ioctl(cmd, arg)
+    f.ioctl(&kprocess::current_cred(), cmd, arg)
         .map(|result| result as isize)
         .inspect_err(|err| {
             if *err == KError::NotATty {

@@ -273,8 +273,9 @@ canonical read-only device；只读 mount 仍可继续交给 filesystem fill-sup
 
 block-special inode 统一安装 KVFS 的 `DefaultBlkdevFileOperations`，对应 Linux
 `def_blk_fops`。open 按 inode `rdev` 直接查 block core；read/write/fsync 和通用
-`BLKGETSIZE*` 操作作用于同一个 resident `BlockDevice`，未知 ioctl 再分派到
-`Gendisk` 的 `BlockDeviceOperations`。普通 close 和 write 不隐式 flush，显式 fsync 才把
+块设备特殊 inode 尚无 canonical block address space，mmap 返回 ENODEV；启用前必须同时实现介质变更失效协议。
+ioctl 操作作用于同一个 resident `BlockDevice`。KVFS 提供参数的安全读写函数及从当前调用者凭据取得的 `has_sys_admin` 权限值；ioctl 调用链显式传递 syscall 取得的 `&Cred`，不使用 opener credential，也不新增凭据字段。
+通用 block 命令及未知命令的 driver fallback 统一由 `BlockDevice::ioctl` 分派。普通 close 和 write 不隐式 flush，显式 fsync 才把
 durability 请求传给 backend。KVFS 不维护第二张 `dev_t -> DeviceFileOps` 表；
 devfs 只投影名称与 `rdev`，loop 设备也按普通 `Gendisk` 发布。
 
@@ -853,7 +854,9 @@ credential。`child_names()` 可传播生命周期或后端错误，使旧目录
 `VfsFile` 持有 `Mutex<FileRaState>`，独立 open / alloc_clone 初始化独立历史，
 共享同一个打开文件描述的 dup/fork 引用共享历史。状态只保存页窗口起点、页数、
 提前触发区长度、可缩减的页预算和已完成读取的字节位置，不保存 EOF 或 folio 引用。
-初始预算为 128 KiB；顺序读按请求规模建立窗口，消费 folio 预读标记后按上限增长。
+打开文件时，从所属 superblock 的 canonical block device 取得 `Gendisk::bdi` 预读预算；
+块设备特殊文件直接解析该设备，无设备文件使用 128 KiB 默认值。预算只在打开时快照，
+既有 fd 不受后续 BLKRASET 影响。顺序读按请求规模建立窗口，消费 folio 预读标记后按上限增长。
 小随机缺页只准备请求范围，不覆盖顺序窗口；必要时从缓存的有界连续历史重建窗口。
 仅允许预读的打开实例可以消费共享标记；预算为零的实例保留标记供其他读者使用。
 其他允许预读的打开实例也可以消费共享标记，并根据当前缓存恢复自己的窗口。按需读取最终

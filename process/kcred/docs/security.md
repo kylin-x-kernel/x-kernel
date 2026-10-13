@@ -38,8 +38,11 @@ crate; its two boolean-style methods only check the lock bit.
 
 ## Authorization and state invariants
 
-`Cred::is_privileged` tests effective UID zero. There is no namespace- or
-capability-specific authorization in the current model. All policy checks below
+`Cred::is_privileged` tests effective UID zero for the set-ID policy.
+`Cred::has_sys_admin` is the separate CAP_SYS_ADMIN decision and currently also
+uses effective UID zero; real, saved and filesystem IDs cannot grant it.
+Consumers supply the current subjective snapshot. Capability sets and namespace
+capability rules are not implemented; the two predicates must evolve independently. All policy checks below
 use the pre-transition state. Checked setters returning an error do not partially
 modify fields; publishing or discarding a prepared object remains the caller's job.
 

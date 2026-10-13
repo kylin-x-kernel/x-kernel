@@ -1499,6 +1499,62 @@ mod tests {
     }
 
     #[def_test(serial)]
+    fn new_file_readahead_snapshots_the_backing_disk_budget() {
+        struct FileOps;
+        impl crate::FileOperations for FileOps {}
+
+        let (disk, device) = add_test_disk("kvfs-ra-budget", 250);
+        let sb = super_block_registry()
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                device.clone(),
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .unwrap();
+        let mount = crate::Mount::new_root(&sb);
+        let open = || {
+            let mut builder = crate::VfsFileBuilder::from_path_state(
+                mount.root_path(),
+                crate::FMode::READ,
+                crate::OpenFlags::empty(),
+                Arc::new(FileOps),
+                kcred::initial_cred(),
+            );
+            builder.mark_opened().unwrap();
+            builder.finish().unwrap()
+        };
+        let set = |sectors| {
+            device
+                .as_ref()
+                .ioctl(
+                    block::BlockOpenMode::READ,
+                    linux_raw_sys::ioctl::BLKRASET,
+                    sectors,
+                    true,
+                    || panic!("setter uses an immediate value"),
+                    |_| panic!("setter has no output"),
+                )
+                .unwrap()
+        };
+        set(8);
+        let first = open();
+        assert_eq!(first.readahead.lock().on_miss(0, 1, |_| 0).0, 0..1);
+        set(64);
+        let second = open();
+        assert_eq!(second.readahead.lock().on_miss(0, 1, |_| 0).0, 0..2);
+        assert_eq!(first.readahead.lock().on_miss(100, 8, |_| 0).0, 100..101);
+        set(0);
+        assert!(!open().readahead.lock().is_enabled());
+        assert!(first.readahead.lock().is_enabled());
+        drop(first);
+        drop(second);
+        drop(mount);
+        drop(sb);
+        block::del_gendisk(disk.device_number()).unwrap();
+    }
+
+    #[def_test(serial)]
     fn block_device_claim_rejects_a_different_filesystem_until_shutdown() {
         FILL_COUNT.store(0, Ordering::Relaxed);
         let (disk, block_device) = add_test_disk("kvfs-holder-test", 247);

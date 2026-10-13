@@ -163,3 +163,18 @@ Firmware DTB capture precedes the first static root construction, preventing
 mount order from permanently hiding the snapshot device. The owned byte copy
 remains immutable for the filesystem lifetime; reads do not access user-selected
 physical addresses. Platforms without a DTB publish no snapshot device.
+
+## Loop ioctl authorization
+
+The block dispatcher passes the current caller's CAP_SYS_ADMIN value to loop.
+As in Linux `lo_ioctl`, SET_STATUS requires write-open mode or that capability
+and returns EPERM before copying on denial. SET_FD/CLR_FD add no administrator
+or owner check beyond device-node access; the default 0666 mode permits ordinary
+callers to reach them. This permissive mode is for development, not a claim of
+Linux distribution-equivalent access control. Production policy must restrict
+node ownership/modes (for example root:disk 0660) rather than add blanket ioctl
+administrator checks absent from Linux. SET_FD derives read-only state from both
+open modes. Raw block mmap is rejected with ENODEV until a canonical block cache
+and media-change invalidation protocol are implemented together.
+Readahead controls belong to the generic block layer; the old loop-local value
+was disconnected from I/O and has been removed.

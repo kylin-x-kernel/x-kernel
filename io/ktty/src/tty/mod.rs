@@ -326,7 +326,7 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         block_on(self.write_output(file.is_nonblocking(), buf))
     }
 
-    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> KResult<usize> {
         use linux_raw_sys::ioctl::*;
         match cmd {
             TCGETS => {
@@ -508,9 +508,9 @@ impl DeviceFileOps for CurrentTty {
         tty.tty.write(file, buf, offset)
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> KResult<usize> {
+    fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> KResult<usize> {
         let tty = tty_file_private(file)?;
-        tty.tty.ioctl(file, cmd, arg)
+        tty.tty.ioctl(file, cred, cmd, arg)
     }
 
     fn poll(&self, file: &VfsFile) -> IoEvents {

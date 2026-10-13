@@ -186,6 +186,16 @@ impl Cred {
         self.euid == 0
     }
 
+    /// Returns this credential's `CAP_SYS_ADMIN` authorization decision.
+    ///
+    /// Until capability sets are implemented, effective UID 0 supplies this
+    /// authority. Real, saved and filesystem IDs do not grant it. Consumers
+    /// must use the current caller's subjective credential, not an opener's
+    /// snapshot. This predicate is independent of the set-ID privilege policy.
+    pub fn has_sys_admin(&self) -> bool {
+        self.euid == 0
+    }
+
     /// Returns whether this credential's real, effective, and saved IDs all
     /// match the real user and group IDs of `caller`.
     ///

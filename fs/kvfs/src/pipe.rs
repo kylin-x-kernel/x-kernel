@@ -841,7 +841,7 @@ impl FileOperations for PipeFileOperations {
         Ok(written)
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         pipe_ioctl(file, cmd, arg)
     }
 
@@ -930,7 +930,7 @@ impl FileOperations for FifoFileOperations {
         Ok(written)
     }
 
-    fn ioctl(&self, file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(&self, file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         pipe_ioctl(file, cmd, arg)
     }
 

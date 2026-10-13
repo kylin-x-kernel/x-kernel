@@ -43,7 +43,13 @@ impl DeviceFileOps for Rtc {
         Ok(0)
     }
 
-    fn ioctl(&self, _file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
+    fn ioctl(
+        &self,
+        _file: &VfsFile,
+        _cred: &kcred::Cred,
+        cmd: u32,
+        arg: usize,
+    ) -> VfsResult<usize> {
         match cmd {
             RTC_RD_TIME => {
                 let unix_nanos = i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX);

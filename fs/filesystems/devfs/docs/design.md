@@ -213,6 +213,9 @@ waiters. Clients never read the VirtIO queue or register IRQ-line waiters.
 - DRM instances bind one concrete display handle. Multiple display devices can
   therefore receive independent `cardN` nodes and state.
 
+Loop advances the owning `Gendisk::diskseq` after successful SET_FD/CLR_FD
+under the existing media-change locks; failed changes retain the sequence.
+
 ## Firmware snapshot publication
 
 The first devtmpfs superblock construction captures the firmware DTB before
