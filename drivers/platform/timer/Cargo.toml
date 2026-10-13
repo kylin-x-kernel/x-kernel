@@ -23,7 +23,6 @@ kcpu_id_map = { workspace = true }
 kiface = { workspace = true }
 klazy = { workspace = true }
 log = "0.4"
-kcpu_slot.workspace = true
 unittest.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]

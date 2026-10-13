@@ -5228,7 +5228,6 @@ dependencies = [
  "int_ratio",
  "kbuild_config",
  "kcpu_id_map",
- "kcpu_slot",
  "kernel-boot",
  "khal",
  "kiface",

@@ -756,17 +756,9 @@ pub fn run_idle() -> ! {
 
         #[cfg(feature = "arm-timer-resume-fixup")]
         {
-            let repaired = khal::time::handle_idle_return(cntpct_before);
-            let cntpct_after = khal::time::now_ticks();
-            if !repaired && cntpct_after < cntpct_before {
-                warn!(
-                    "[PM-DBG] idle WFI returned with counter regression! before={}, after={}, \
-                     delta={}",
-                    cntpct_before.as_raw(),
-                    cntpct_after.as_raw(),
-                    cntpct_before.wrapping_duration_since(cntpct_after).as_raw()
-                );
-            }
+            // Backend reads already publish repaired logical time. A second
+            // logical-time comparison cannot diagnose a raw counter reset.
+            let _ = khal::time::handle_idle_return(cntpct_before);
         }
     }
 }

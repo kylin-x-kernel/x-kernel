@@ -298,7 +298,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 | `rtc` | 启动时打印墙钟时间 |
 | `watchdog` / `watchdog_hardlockup` | 看门狗主/从核初始化；`watchdog_hardlockup` 额外启用 NMI 驱动的硬锁检测（`watchdog/nmi`） |
 | `pmu` | PMU 溢出中断；`kruntime` 在 `pmu` feature 下独立注册溢出分发（`khal::pmu::register_overflow_dispatch`），perf 与 watchdog 解耦；配合 `watchdog_hardlockup` 时 PMU 线可被提升为周期 NMI 源 |
-| `arm-timer-resume-fixup` | 修复 AArch64 虚拟计时器在 idle/WFI 返回后的计数回退 |
+| `arm-timer-resume-fixup` | 在每次读时检查 AArch64 计数器回退，并在定时器中断中发送延后的恢复通知 |
 | `rootfs-secondary-block` | 将第二个块设备作为根文件系统后端 |
 
 默认全部关闭；由 `entry` / `kfeat` 的 defconfig 打开。
@@ -329,3 +329,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 
 - **冗余设计**：无（单路径主核 init）。
 - **过载控制**：不在此 crate；调度与内存压力由 `ktask` / `kalloc` 负责。
+
+## ARM64 counter recovery dispatch
+
+With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-recovery notifications before processing task timers. Clock reads only repair shared counter state and rearm CPU-local registers; IPI delivery is deferred until caller-held clock-read locks have been released. The dispatch runs without the counter lock, does not sleep, and requires initialized interrupt routing. It does not reconstruct elapsed host sleep time.

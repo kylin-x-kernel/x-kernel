@@ -923,7 +923,9 @@ mod tests {
         assert!(bytes[0x400..].iter().all(|byte| *byte == 0));
     }
 
-    #[def_test]
+    // The assertion observes a global loader lock; parallel exec fixtures may
+    // legitimately acquire it after preparation returns. Isolate this check.
+    #[def_test(serial)]
     fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
         let request = image_request(
             executable_bytes(),

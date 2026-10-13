@@ -232,3 +232,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - [ ] 修改 timer/IPI/PMU handler 时，确认 handler 注册先于 IRQ enable，raw per-CPU 访问仍只发生在不可迁移上下文。
 - [ ] 修改 DMA protect 接线时，确认仍由 `memspace` 统一持锁和校验内核页表范围。
 - [ ] 修改启动日志时，评估是否新增物理地址、设备映射或任务身份泄露。
+
+## ARM64 counter recovery dispatch
+
+With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-recovery notifications before processing task timers. Clock reads only repair shared counter state and rearm CPU-local registers; IPI delivery is deferred until caller-held clock-read locks have been released. The dispatch runs without the counter lock, does not sleep, and requires initialized interrupt routing. It does not reconstruct elapsed host sleep time.

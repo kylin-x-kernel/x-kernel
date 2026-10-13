@@ -686,6 +686,8 @@ fn init_interrupt() {
     kirq::register(
         khal::time::interrupt_id(),
         alloc::sync::Arc::new(|_| {
+            #[cfg(feature = "arm-timer-resume-fixup")]
+            timer_driver::arm_generic::dispatch_resume_fixup();
             ktask::on_timer_fire();
             kirq::IrqEvent::HANDLED
         }),

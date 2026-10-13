@@ -51,6 +51,9 @@ pub trait ClockEventIf {
     /// Disarms the local clock event so it will not interrupt until re-armed.
     fn disarm_timer();
     /// Allows the clock-event backend to repair timer state after idle returns.
+    /// `previous_ticks` is the pre-idle logical sample and may be ignored by
+    /// backends that check every read. Returns whether this call repaired state,
+    /// not whether a reset occurred during idle: another read may repair first.
     fn handle_idle_return(previous_ticks: TimerTicks) -> bool;
 }
 

@@ -232,10 +232,12 @@ config KFEAT_KVM_MMIO_GUARD
 
 config KFEAT_ARM_TIMER_RESUME_FIXUP
     bool "Enable AArch64 virtual timer resume fixup"
-    depends on ARCH_AARCH64
+    depends on ARCH_AARCH64 && !KFEAT_NMI
     help
-      Repair virtual timer regressions observed after returning from idle/WFI
-      on guests that require an offset-based timer resume fixup.
+      Repair backward counter discontinuities on every clock read, including
+      unsigned underflow after host resume. Preserve logical time and rearm
+      timers; elapsed sleep time is not recovered. The serialized clock path
+      is not NMI-safe, so this mitigation is restricted to non-NMI guests.
 
 config KFEAT_ROOTFS_SECONDARY_BLOCK
     bool "Mount the secondary block device as root filesystem"

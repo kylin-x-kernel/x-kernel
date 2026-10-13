@@ -15,7 +15,7 @@ their contracts are prerequisites for the operations described here.
 
 The protected resources are PIT channel 2 and its control ports, the current
 CPU's timer registers and LAPIC handle, shared conversion state, and ARM's
-CPU-local logical-tick slot. Hardware and firmware metadata are trusted to
+shared logical-counter state. Hardware and firmware metadata are trusted to
 describe real devices after the local checks below. The crate has no caller
 identity or permission checks; access is through privileged kernel code.
 
@@ -44,8 +44,6 @@ its external data boundaries.
 | `src/x86_lapic_tsc.rs::PitChannel2::{acquire,start_one_shot,has_elapsed}` and `Drop` perform port I/O | Bootstrap executes at CPL0 with exclusive ownership of channel 2. `start_one_shot` asserts a nonzero reload and writes both bytes. The platform calls `early_init` before secondary CPUs and other port users; calibration masks local interrupts around each sample. The guard restores the saved control byte before that interval ends. |
 | `src/x86_lapic_tsc.rs::{init_primary,init_secondary,arm_timer,disarm_timer}` program LAPIC registers | The calling CPU's APIC must already be initialized. `x86_apic::with_local_apic` checks the local handle and masks local interrupts during its mutable borrow. Boot hooks order APIC initialization before timer setup; runtime calls depend on that completed setup. |
 | `src/arm_generic.rs::write_physical_timer_tval`, with `vmm`, executes `msr CNTHP_TVAL_EL2` | The host runs at EL2 with VHE as required by the physical-timer helpers. The assembly takes one `in(reg)` integer, writes the timer register, and has no pointer operand or Rust output. Initialization passes zero; deadline programming bounds positive intervals to `i32::MAX`, within the register's signed 32-bit range. |
-| `src/arm_generic.rs::init_percpu`, with `arm-timer-resume-fixup`, writes `LAST_LOGICAL_TICKS` through a raw per-CPU accessor | CPU-local storage is initialized and belongs to the calling CPU. Local timer bring-up performs this write before normal timer events use the slot. |
-| `src/arm_generic.rs::track_logical_ticks`, with `arm-timer-resume-fixup`, reads and writes `LAST_LOGICAL_TICKS` through raw per-CPU accessors | Each access targets the current CPU's slot. The caller must preserve CPU locality and serialize local mutation. This helper adds no IRQ or migration guard; its safe entry paths rely on the platform execution context. |
 
 The RISC-V backend contains no explicit unsafe block; privileged counter and SBI
 operations are encapsulated by its dependencies. The crate declares no custom
@@ -62,10 +60,9 @@ PIT ownership is global across CPUs. Local interrupt masking protects one sample
 from local IRQ handlers, while the boot sequence prevents other CPUs and drivers
 from reprogramming channel 2. Every normal sample return releases the local guard.
 
-LAPIC handles and ARM logical-tick slots belong to the current CPU. LAPIC access
-uses an IRQ-masked borrow supplied by `x86_apic`; ARM raw per-CPU accesses depend
-on their caller's execution context. Shared ARM offset updates use
-compare-exchange, and remote repair requests use an atomic pending mask.
+LAPIC handles belong to the current CPU and use an IRQ-masked borrow supplied
+by `x86_apic`. ARM samples and state updates share an IRQ-safe lock; remote
+repair requests use an independent atomic pending mask.
 
 ## Threat analysis
 
@@ -76,7 +73,7 @@ compare-exchange, and remote repair requests use an atomic pending mask.
 | T-03 | Another CPU or driver reprograms PIT channel 2 during calibration. | Medium: corrupted samples or disrupted device use. | Bootstrap-only ownership and local IRQ masking prevent the expected competitors. Violating boot ownership remains unsupported. |
 | T-04 | Firmware supplies extreme frequency values or unusable ARM interrupt data. | Medium: boot panic, incorrect time, or missing timer delivery. | Checked frequency scaling, x86 range filters, ARM property-length checks, and initialization assertions limit accepted data. ARM interrupt capacity and the RISC-V conversion scale remain platform responsibilities. |
 | T-05 | TSC rate changes or CPU counters are unsynchronized. | Medium: drift or cross-CPU time regression. | The backend relies on a stable, system-consistent TSC. It provides no runtime recalibration or synchronization repair. |
-| T-06 | Timer operations run before local setup or ARM raw per-CPU accesses race. | High: invalid hardware access or overlapping CPU-local mutation. | Platform boot order establishes local state; APIC access guards its borrow. ARM raw accesses retain CPU-local serialization assumptions. |
+| T-06 | Timer operations run before local setup or ARM counter samples race. | High: invalid hardware access or inconsistent logical time. | Platform boot order establishes local state; APIC access guards its borrow. ARM sampling and updates share an IRQ-safe lock. |
 | T-07 | Timer register or SBI service behavior differs from platform assumptions. | Medium: timer interrupts arrive late, early, or stop. | ARM and x86 clamp relative counts to their register ranges. x86 still assumes a fixed LAPIC rate, and the RISC-V backend does not report SBI failures. |
 
 ## Failure modes
@@ -112,7 +109,7 @@ resources. Shared clock configuration has kernel lifetime.
 
 The driver handles hardware metadata and numeric time values. It receives no
 user payload and persists no personal data. ARM resume diagnostics record CPU
-identifiers, counter values, and correction offsets.
+identifiers, raw counter values, and logical tick values.
 
 Accuracy depends on the chosen frequency and backend conversion precision.
 x86 ratios truncate the frequency to kHz, Intel base frequency is a fallback
@@ -138,3 +135,21 @@ an independent clock.
   unsafe operation retains its privilege, CPU-locality, and serialization contract.
 - Validate real counter progression and timer delivery against an independent
   clock; the simulated frequency tests cannot establish hardware accuracy.
+
+ARM counter discontinuity handling requires one synchronized counter domain and
+forward intervals below half the 64-bit range. Backward intervals establish a
+new baseline without advancing logical time. Plausible forward jumps cannot be
+distinguished from elapsed time, and lost sleep time is not reconstructed. This
+is a guest mitigation, not a host counter-integrity or sleep-accounting guarantee.
+Clock-read repairs only rearm local registers; remote notification and logs run
+from the timer handler after caller locks have been released. Kconfig excludes
+NMI guests because an IRQ-safe lock does not protect against NMI reentrancy.
+
+Deferred notification publication, diagnostic snapshots and consumption are
+serialized by the counter lock. Pending events coalesce and each consumed
+report is dispatched once; a later reset remains a new event. Both dispatching
+CPU and peers are rearmed. The registered lock remains a possible IRQ-latency
+bottleneck under contention. Tiny backward samples also count as resets: no
+arbitrary threshold discards a real reset. A continuously oscillating or
+unsynchronized source violates the assumed clock domain and can cause repeated
+recovery traffic; this feature does not rate-limit or repair such a host.

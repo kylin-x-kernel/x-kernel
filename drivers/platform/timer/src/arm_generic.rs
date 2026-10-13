@@ -15,11 +15,9 @@ use aarch64_cpu::registers::{
 #[cfg(not(feature = "vmm"))]
 use aarch64_cpu::registers::{CNTP_CTL_EL0, CNTP_TVAL_EL0};
 use int_ratio::Ratio;
-#[cfg(feature = "arm-timer-resume-fixup")]
-use kcpu_slot::cpu_slot_cell;
 use klazy::Once;
 #[cfg(feature = "arm-timer-resume-fixup")]
-use kspin::NoPreemptIrqSave;
+use kspin::{NoPreemptIrqSave, SpinNoIrq};
 use ktime_types::Frequency;
 #[cfg(feature = "arm-timer-resume-fixup")]
 use log::info;
@@ -31,13 +29,21 @@ static TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 static TIMER_MODE: AtomicUsize = AtomicUsize::new(TimerMode::Physical as usize);
 static TIMER_INIT_TICKS: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "arm-timer-resume-fixup")]
-static TICK_RESUME_OFFSET: AtomicU64 = AtomicU64::new(0);
+#[path = "resume_counter.rs"]
+mod resume_counter;
+
+// Counter sampling and epoch updates must be one transaction across CPUs.
+// The clock is also read from timer IRQs, so local IRQs must be masked.
 #[cfg(feature = "arm-timer-resume-fixup")]
-cpu_slot_cell! {
-    static LAST_LOGICAL_TICKS: u64 = 0;
+kspin::static_lock! {
+    static RESUME_COUNTER: SpinNoIrq<resume_counter::ResumeCounter> =
+        SpinNoIrq::new(resume_counter::ResumeCounter::new());
 }
 #[cfg(feature = "arm-timer-resume-fixup")]
 static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "arm-timer-resume-fixup")]
+static REMOTE_FIXUP_REQUESTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 static CNTPCT_TO_NANOS_RATIO: Once<Ratio> = Once::new();
 static NANOS_TO_CNTPCT_RATIO: Once<Ratio> = Once::new();
 
@@ -179,7 +185,9 @@ pub fn init(config: TimerConfig) {
     };
     TIMER_INIT_TICKS.store(init_ticks, Ordering::Relaxed);
     #[cfg(feature = "arm-timer-resume-fixup")]
-    TICK_RESUME_OFFSET.store(0, Ordering::Relaxed);
+    RESUME_COUNTER
+        .lock()
+        .initialize(raw_now_ticks(), TIMER_INIT_TICKS.load(Ordering::Relaxed));
 
     let frequency = config
         .frequency
@@ -201,30 +209,25 @@ pub fn init(config: TimerConfig) {
 /// Enables the timer interrupt and arms the per-CPU countdown on the
 /// current CPU.
 pub fn init_percpu() {
-    #[cfg(feature = "arm-timer-resume-fixup")]
-    {
-        let guard = NoPreemptIrqSave::new();
-        LAST_LOGICAL_TICKS.write(
-            &guard,
-            logical_ticks(raw_now_ticks(), TICK_RESUME_OFFSET.load(Ordering::Relaxed)),
-        );
-    }
     rearm_local_timer_irq();
 }
 
 fn rearm_local_timer_irq() {
-    let irq = interrupt_id();
+    rearm_local_timer_registers();
+    kirq::enable(interrupt_id(), true);
+}
+
+fn rearm_local_timer_registers() {
     match mode() {
         TimerMode::Physical => {
-            write_physical_timer_ctl(1);
             write_physical_timer_tval(0);
+            write_physical_timer_ctl(1);
         }
         TimerMode::Virtual => {
-            CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::SET);
             CNTV_TVAL_EL0.set(0);
+            CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::SET);
         }
     }
-    kirq::enable(irq, true);
 }
 
 #[inline]
@@ -236,10 +239,7 @@ fn now_ticks() -> khal::time::TimerTicks {
 fn now_ticks_raw() -> u64 {
     #[cfg(feature = "arm-timer-resume-fixup")]
     {
-        track_logical_ticks(logical_ticks(
-            raw_now_ticks(),
-            TICK_RESUME_OFFSET.load(Ordering::Relaxed),
-        ))
+        sample_resume_counter().ticks
     }
 
     #[cfg(not(feature = "arm-timer-resume-fixup"))]
@@ -249,38 +249,64 @@ fn now_ticks_raw() -> u64 {
 }
 
 #[cfg(feature = "arm-timer-resume-fixup")]
-fn handle_idle_return(previous_ticks: u64) -> bool {
-    let raw = raw_now_ticks();
-    let cpu_id = khal::percpu::this_cpu_id();
-    let old_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
-    let current_ticks = logical_ticks(raw, old_offset);
-    let repaired = if current_ticks < previous_ticks {
-        install_resume_offset(raw, previous_ticks)
-    } else {
-        false
-    };
+fn handle_idle_return(_previous_ticks: u64) -> bool {
+    sample_resume_counter().is_repaired
+}
 
-    let new_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
-    let fixed_ticks = track_logical_ticks(logical_ticks(raw_now_ticks(), new_offset));
-    if repaired {
-        let repair_ticks = fixed_ticks.saturating_sub(current_ticks);
-        info!(
-            "[PM-DBG] cpu{} repaired timer regression: before={}, current={}, after={}, \
-             repair_ticks={}, repair_ns={}, raw_ticks={}, offset={}=>{}",
-            cpu_id.as_usize(),
-            previous_ticks,
-            current_ticks,
-            fixed_ticks,
-            repair_ticks,
-            ticks_to_nanos(repair_ticks),
-            raw,
-            old_offset,
-            new_offset
-        );
-        rearm_local_timer_irq();
-        request_remote_timer_fixup();
+// The outer guard keeps repair side effects on the sampling CPU. Register
+// programming happens after releasing the shared lock. Logging and IPI
+// delivery are deferred to the timer handler.
+#[cfg(feature = "arm-timer-resume-fixup")]
+fn sample_resume_counter() -> resume_counter::CounterSample {
+    let _guard = NoPreemptIrqSave::new();
+    let sample = {
+        let mut counter = RESUME_COUNTER.lock();
+        let sample = counter.sample(raw_now_ticks());
+        if sample.is_repaired {
+            counter.queue_repair(khal::percpu::this_cpu_id().as_usize(), &sample);
+            // Publication and consumption are serialized with the report.
+            REMOTE_FIXUP_REQUESTED.store(true, Ordering::Release);
+        }
+        sample
+    };
+    if sample.is_repaired {
+        // A clock read may hold IRQ-controller or console locks. Only touch
+        // CPU-local registers here; notify peers from the timer handler.
+        rearm_local_timer_registers();
     }
-    repaired
+    sample
+}
+
+/// Sends deferred resume notifications from the timer handler, where no
+/// caller's clock-read locks remain held. Never runs under the counter lock.
+/// Requires initialized interrupt routing and a timer-handler context with no
+/// caller-owned clock-read locks. Does not sleep or reconstruct lost sleep time.
+#[cfg(feature = "arm-timer-resume-fixup")]
+pub fn dispatch_resume_fixup() {
+    if !REMOTE_FIXUP_REQUESTED.load(Ordering::Acquire) {
+        return;
+    }
+    let _guard = NoPreemptIrqSave::new();
+    let report = {
+        let mut counter = RESUME_COUNTER.lock();
+        let report = counter.take_repair();
+        REMOTE_FIXUP_REQUESTED.store(false, Ordering::Release);
+        report
+    };
+    if let Some(report) = report {
+        // Any CPU can dispatch. Rearm it too: AllButSelf excludes this CPU,
+        // which need not be the CPU that originally detected the reset.
+        rearm_local_timer_registers();
+        request_remote_timer_fixup();
+        info!(
+            "[PM-DBG] counter recovery notification: detector_cpu={}, dispatcher_cpu={}, \
+             raw_ticks={}, logical_ticks={}",
+            report.cpu,
+            khal::percpu::this_cpu_id().as_usize(),
+            report.raw_ticks,
+            report.ticks
+        );
+    }
 }
 
 #[cfg(feature = "arm-timer-resume-fixup")]
@@ -294,14 +320,12 @@ pub fn handle_ipi_fixup() {
         return;
     }
 
-    let offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
-    let fixed_ticks = track_logical_ticks(logical_ticks(raw_now_ticks(), offset));
-    rearm_local_timer_irq();
+    let fixed_ticks = now_ticks_raw();
+    rearm_local_timer_registers();
     info!(
-        "[PM-DBG] cpu{} applied remote timer fixup via IPI: logical_ticks={}, offset={}",
+        "[PM-DBG] cpu{} applied remote timer fixup via IPI: logical_ticks={}",
         cpu_id.as_usize(),
-        fixed_ticks,
-        offset
+        fixed_ticks
     );
 }
 
@@ -506,49 +530,6 @@ fn mode() -> TimerMode {
 }
 
 #[cfg(feature = "arm-timer-resume-fixup")]
-#[inline]
-fn logical_ticks(raw_ticks: u64, resume_offset: u64) -> u64 {
-    raw_ticks
-        .wrapping_add(resume_offset)
-        .saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
-}
-
-#[cfg(feature = "arm-timer-resume-fixup")]
-#[inline]
-fn track_logical_ticks(ticks: u64) -> u64 {
-    let guard = NoPreemptIrqSave::new();
-    let last = LAST_LOGICAL_TICKS.read(&guard);
-    if ticks > last {
-        LAST_LOGICAL_TICKS.write(&guard, ticks);
-        ticks
-    } else {
-        last
-    }
-}
-
-#[cfg(feature = "arm-timer-resume-fixup")]
-fn install_resume_offset(raw_ticks: u64, target_ticks: u64) -> bool {
-    loop {
-        let current_offset = TICK_RESUME_OFFSET.load(Ordering::Relaxed);
-        let desired_offset = target_ticks
-            .saturating_add(TIMER_INIT_TICKS.load(Ordering::Relaxed))
-            .saturating_sub(raw_ticks);
-        if desired_offset <= current_offset {
-            return false;
-        }
-        match TICK_RESUME_OFFSET.compare_exchange(
-            current_offset,
-            desired_offset,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return true,
-            Err(_) => continue,
-        }
-    }
-}
-
-#[cfg(feature = "arm-timer-resume-fixup")]
 fn request_remote_timer_fixup() {
     if kcpu_id_map::nr_cpus() <= 1 {
         return;
@@ -577,6 +558,9 @@ fn request_remote_timer_fixup() {
 
 #[inline]
 fn raw_now_ticks() -> u64 {
+    // Serialize raw sampling only for the optional recovery path.
+    #[cfg(feature = "arm-timer-resume-fixup")]
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
     match mode() {
         TimerMode::Physical => CNTPCT_EL0.get(),
         TimerMode::Virtual => CNTVCT_EL0.get(),
