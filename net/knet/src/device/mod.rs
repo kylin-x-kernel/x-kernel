@@ -11,11 +11,15 @@ use kpoll::{PollContext, PollRegisterError};
 use ktime_types::MonotonicInstant;
 
 mod ethernet;
+mod id;
 mod loopback;
 mod net_rx;
+mod registry;
 
 pub(crate) use ethernet::*;
+pub(crate) use id::{NetDeviceId, RxDeviceSelection};
 pub(crate) use loopback::*;
+pub(crate) use registry::DeviceRegistry;
 
 use crate::{
     buf::PacketBuf,
@@ -117,7 +121,7 @@ pub(crate) enum NeighborState {
 /// A control-plane neighbor update targeted at one network device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NeighborUpdate {
-    pub(crate) dev: usize,
+    pub(crate) dev: NetDeviceId,
     pub(crate) dst: IpAddress,
     pub(crate) state: NeighborState,
 }

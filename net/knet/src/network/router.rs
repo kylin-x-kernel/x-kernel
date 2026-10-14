@@ -6,12 +6,15 @@
 
 use alloc::vec::Vec;
 
-use crate::ip::{IpAddress, IpCidr, Ipv4Cidr};
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
     RT_SCOPE_UNIVERSE as ROUTE_SCOPE_UNIVERSE, RT_TABLE_MAIN as ROUTE_TABLE_MAIN,
     RTN_UNICAST as ROUTE_TYPE_UNICAST, RTPROT_BOOT as ROUTE_PROTOCOL_BOOT,
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
+};
+use crate::{
+    device::NetDeviceId,
+    ip::{IpAddress, IpCidr, Ipv4Cidr},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,7 +33,7 @@ enum RuleSource {
 enum RuleOrigin {
     Configured,
     Ipv4Address {
-        owner_dev: usize,
+        owner_dev: NetDeviceId,
         addr: Ipv4Cidr,
         kind: Ipv4AddressRouteKind,
     },
@@ -40,7 +43,7 @@ enum RuleOrigin {
 pub(crate) struct Rule {
     pub filter: IpCidr,
     pub via: Option<IpAddress>,
-    pub dev: usize,
+    pub dev: NetDeviceId,
     pub src: IpAddress,
     pub table: u8,
     pub protocol: u8,
@@ -57,7 +60,12 @@ pub(crate) struct Rule {
 }
 
 impl Rule {
-    pub(crate) fn new(filter: IpCidr, via: Option<IpAddress>, dev: usize, src: IpAddress) -> Self {
+    pub(crate) fn new(
+        filter: IpCidr,
+        via: Option<IpAddress>,
+        dev: NetDeviceId,
+        src: IpAddress,
+    ) -> Self {
         Self {
             filter,
             via,
@@ -76,7 +84,7 @@ impl Rule {
     pub(crate) fn with_route_attrs(
         filter: IpCidr,
         via: Option<IpAddress>,
-        dev: usize,
+        dev: NetDeviceId,
         src: IpAddress,
         attrs: RouteAttrs,
     ) -> Self {
@@ -98,8 +106,8 @@ impl Rule {
     }
 
     pub(crate) fn for_local_ipv4_address(
-        loopback_dev: usize,
-        owner_dev: usize,
+        loopback_dev: NetDeviceId,
+        owner_dev: NetDeviceId,
         owner_addr: Ipv4Cidr,
     ) -> Self {
         #[expect(
@@ -118,7 +126,11 @@ impl Rule {
         )
     }
 
-    pub(crate) fn for_connected_ipv4_address(dev: usize, owner_addr: Ipv4Cidr, scope: u8) -> Self {
+    pub(crate) fn for_connected_ipv4_address(
+        dev: NetDeviceId,
+        owner_addr: Ipv4Cidr,
+        scope: u8,
+    ) -> Self {
         Self::for_ipv4_address(
             owner_addr.network(),
             dev,
@@ -131,8 +143,8 @@ impl Rule {
 
     fn for_ipv4_address(
         filter: Ipv4Cidr,
-        dev: usize,
-        owner_dev: usize,
+        dev: NetDeviceId,
+        owner_dev: NetDeviceId,
         owner_addr: Ipv4Cidr,
         kind: Ipv4AddressRouteKind,
         scope: u8,
@@ -255,7 +267,7 @@ impl RouteTable {
         });
     }
 
-    pub(crate) fn remove_device(&mut self, dev: usize) {
+    pub(crate) fn remove_device(&mut self, dev: NetDeviceId) {
         self.rules.retain(|rule| {
             rule.dev != dev
                 && !matches!(
@@ -263,15 +275,5 @@ impl RouteTable {
                     RuleOrigin::Ipv4Address { owner_dev, .. } if owner_dev == dev
                 )
         });
-        for rule in &mut self.rules {
-            if rule.dev > dev {
-                rule.dev -= 1;
-            }
-            if let RuleOrigin::Ipv4Address { owner_dev, .. } = &mut rule.origin
-                && *owner_dev > dev
-            {
-                *owner_dev -= 1;
-            }
-        }
     }
 }

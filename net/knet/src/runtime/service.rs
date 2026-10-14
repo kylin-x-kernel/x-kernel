@@ -26,7 +26,10 @@ use smoltcp::{
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
     buf::PacketBuf,
-    device::{LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate},
+    device::{
+        LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDeviceId,
+        RxDeviceSelection,
+    },
     ip::{self, IpAddress},
     network::router::Rule,
     poller::{PollBudget, PollProgress},
@@ -594,7 +597,7 @@ impl Service {
 
     pub(crate) fn register_rx_waker(
         &self,
-        mask: u32,
+        selection: RxDeviceSelection,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
         context.register(self.timeout_poll.as_ref())?;
@@ -609,8 +612,10 @@ impl Service {
         drop(sockets);
         self.update_poll_timeout(current, next);
 
-        for (index, device) in self.router.lock().devices.iter().enumerate() {
-            if mask & (1 << index) != 0 {
+        let router = self.router.lock();
+        for (slot, device) in router.devices.iter().enumerate() {
+            let id = router.devices.id_at(slot);
+            if selection.includes(id) {
                 // Ethernet devices that support interrupt-driven RX register
                 // on their NetRx softirq-backed poll source. Loopback and
                 // poll-only devices keep the timeout_poll-backed source waker.
@@ -627,7 +632,7 @@ impl Service {
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        let source_waker = self.register_rx_waker(u32::MAX, context)?;
+        let source_waker = self.register_rx_waker(RxDeviceSelection::All, context)?;
         self.router.lock().register_tx_waker(context)?;
         Ok(source_waker)
     }
@@ -771,8 +776,8 @@ impl Service {
         self.router.lock().has_device(ifindex)
     }
 
-    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
-        self.router.lock().device_index_by_name(name)
+    pub(crate) fn device_id_by_name(&self, name: &str) -> Option<NetDeviceId> {
+        self.router.lock().device_id_by_name(name)
     }
 
     pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
@@ -833,7 +838,7 @@ impl Service {
 
     pub(crate) fn set_primary_ipv4_addr(
         &self,
-        dev: usize,
+        dev: NetDeviceId,
         addr: crate::ip::Ipv4Cidr,
     ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
@@ -843,7 +848,7 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) fn remove_primary_ipv4_addr(&self, dev: usize) -> Result<(), LinuxError> {
+    pub(crate) fn remove_primary_ipv4_addr(&self, dev: NetDeviceId) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
         router.remove_primary_ipv4_addr(dev)?;
         let local_ipv4_addrs = router.local_ipv4_addrs();
@@ -873,13 +878,17 @@ impl Service {
 
     pub(crate) fn set_ipv4_broadcast(
         &self,
-        dev: usize,
+        dev: NetDeviceId,
         broadcast: crate::ip::Ipv4Address,
     ) -> Result<(), LinuxError> {
         self.router.lock().set_ipv4_broadcast(dev, broadcast)
     }
 
-    pub(crate) fn set_ipv4_netmask(&self, dev: usize, prefix_len: u8) -> Result<(), LinuxError> {
+    pub(crate) fn set_ipv4_netmask(
+        &self,
+        dev: NetDeviceId,
+        prefix_len: u8,
+    ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
         router.set_ipv4_netmask(dev, prefix_len)?;
         let local_ipv4_addrs = router.local_ipv4_addrs();
@@ -945,7 +954,7 @@ impl Service {
     }
 
     #[cfg(unittest)]
-    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+    pub(crate) fn has_neighbor(&self, dev: NetDeviceId, dst: IpAddress) -> bool {
         self.router.lock().has_neighbor(dev, dst)
     }
 
@@ -1248,7 +1257,7 @@ mod tests {
     fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
         let mut router = Router::new();
-        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
@@ -1261,7 +1270,7 @@ mod tests {
             ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
                 .unwrap();
         router
-            .queue_ipv4_packet(packet, loopback as i32 + 1)
+            .queue_ipv4_packet(packet, loopback.ifindex())
             .unwrap();
         let service = Service::new(router);
         service
@@ -1279,7 +1288,7 @@ mod tests {
     fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
         let loopback_addr = Ipv4Address::new(127, 0, 0, 1);
         let mut router = Router::new();
-        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev: loopback,
@@ -1292,7 +1301,7 @@ mod tests {
             ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
                 .unwrap();
         router
-            .queue_ipv4_packet(packet, loopback as i32 + 1)
+            .queue_ipv4_packet(packet, loopback.ifindex())
             .unwrap();
         let round_started_at = monotonic_time();
 

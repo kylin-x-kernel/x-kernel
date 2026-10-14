@@ -238,14 +238,20 @@ fn test_bindtodevice_option_default_and_unbind() {
 
 #[def_test]
 fn test_bindtodevice_unbind_uses_all_devices() {
-    use crate::socket::general::GeneralOptions;
+    use crate::{
+        device::{NetDeviceId, RxDeviceSelection},
+        socket::general::GeneralOptions,
+    };
     let opts = GeneralOptions::new();
-    assert_eq!(opts.rx_device_mask(), u32::MAX);
-    opts.set_bound_dev_if_for_test(3);
-    assert_eq!(opts.rx_device_mask(), 0b0100);
+    assert_eq!(opts.rx_device_selection(), RxDeviceSelection::All);
+    opts.set_bound_dev_if_for_test(33);
+    assert_eq!(
+        opts.rx_device_selection(),
+        RxDeviceSelection::Interface(NetDeviceId::new(33).unwrap())
+    );
 
     opts.set_option_inner(SetSocketOption::BindToDevice(&None))
         .unwrap();
     assert_eq!(opts.bound_dev_if(), 0);
-    assert_eq!(opts.rx_device_mask(), u32::MAX);
+    assert_eq!(opts.rx_device_selection(), RxDeviceSelection::All);
 }

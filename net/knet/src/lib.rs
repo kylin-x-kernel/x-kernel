@@ -97,7 +97,9 @@ pub fn init_network() {
     let mut net_devs = net_devices();
 
     let mut router = Router::new();
-    let lo_dev = router.add_device(Box::new(LoopbackDevice::new()));
+    let lo_dev = router
+        .add_device(Box::new(LoopbackDevice::new()))
+        .expect("loopback interface ID must be available");
 
     #[expect(
         clippy::unwrap_used,
@@ -123,7 +125,9 @@ pub fn init_network() {
             .expect("configured IPv4 prefix length must be valid");
 
         let eth0 = EthernetDevice::new("eth0".to_owned(), handle);
-        let eth0_dev = router.add_device(Box::new(eth0));
+        let eth0_dev = router
+            .add_device(Box::new(eth0))
+            .expect("Ethernet interface ID must be available");
 
         router
             .add_ipv4_addr(Ipv4AddrEntry {
@@ -155,7 +159,7 @@ pub fn init_network() {
         warn!("  No network device found!");
     }
 
-    for dev in &router.devices {
+    for dev in router.devices.iter() {
         info!("Device: {}", dev.name());
     }
 

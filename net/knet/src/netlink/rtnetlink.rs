@@ -23,7 +23,7 @@ use crate::{
     SERVICE, control,
     device::{
         LINK_FLAG_UP, LINK_FLAG_VOLATILE, LinkConfigUpdate, LinkKind, LinkSnapshot, NeighborState,
-        NeighborUpdate,
+        NeighborUpdate, NetDeviceId,
     },
     ip::{IpAddress as KernelIpAddress, IpCidr, Ipv4Cidr},
     network::router::{RouteAttrs as RouterRouteAttrs, Rule},
@@ -282,7 +282,7 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
     SERVICE
         .ipv4_addr_snapshots()
         .into_iter()
-        .filter(|snapshot| ifindex == 0 || snapshot.entry.dev as u32 + 1 == ifindex)
+        .filter(|snapshot| ifindex == 0 || snapshot.entry.dev.ifindex() as u32 == ifindex)
         .map(|snapshot| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
             data: build_addr_message(request, snapshot.entry, &snapshot.label),
@@ -491,7 +491,8 @@ fn neighbor_update_from_request(request: NeighRequest) -> Result<NeighborUpdate,
         },
         _ => return Err(LinuxError::EOPNOTSUPP),
     };
-    let dev = request.ifindex.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize;
+    let ifindex = i32::try_from(request.ifindex).map_err(|_| LinuxError::ENODEV)?;
+    let dev = NetDeviceId::new(ifindex).ok_or(LinuxError::ENODEV)?;
     Ok(NeighborUpdate {
         dev,
         dst: to_kernel_ip(request.dst)?,
@@ -506,7 +507,8 @@ fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, L
     if request.family != wire_route::FAMILY_IPV4 {
         return Err(LinuxError::EAFNOSUPPORT);
     }
-    let dev = request.index.checked_sub(1).ok_or(LinuxError::ENODEV)? as usize;
+    let ifindex = i32::try_from(request.index).map_err(|_| LinuxError::ENODEV)?;
+    let dev = NetDeviceId::new(ifindex).ok_or(LinuxError::ENODEV)?;
     Ok(Ipv4AddrEntry {
         dev,
         addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len)
@@ -533,7 +535,7 @@ fn route_delete_matches(route: Rule, request: &RouteRequest) -> bool {
         && (request.route_type == 0 || route.route_type == request.route_type)
         && (request.protocol == 0 || route.protocol == request.protocol)
         && (request.scope == u8::MAX || route.scope == request.scope)
-        && (request.oif == 0 || route.dev as u32 + 1 == request.oif)
+        && (request.oif == 0 || route.dev.ifindex() as u32 == request.oif)
         && request.gateway.is_none_or(|gateway| {
             to_kernel_ip(gateway).is_ok_and(|gateway| route.via == Some(gateway))
         })
@@ -570,7 +572,8 @@ fn route_rule_from_request(request: RouteRequest) -> Result<Rule, LinuxError> {
             .expect("route prefix length was validated")
             .network(),
     );
-    let dev = request.oif.checked_sub(1).ok_or(LinuxError::EOPNOTSUPP)? as usize;
+    let ifindex = i32::try_from(request.oif).map_err(|_| LinuxError::EOPNOTSUPP)?;
+    let dev = NetDeviceId::new(ifindex).ok_or(LinuxError::EOPNOTSUPP)?;
     let gateway = request.gateway.map(to_kernel_ip).transpose()?;
     let prefsrc = request.prefsrc.map(to_kernel_ip).transpose()?;
     let source = prefsrc.unwrap_or(filter.address());
@@ -834,7 +837,7 @@ fn build_addr_message(request: &NlMsgHeader, addr: Ipv4AddrEntry, label: &str) -
         prefix_len: addr.addr.prefix_len(),
         flags: 0,
         scope: addr.scope,
-        index: addr.dev as u32 + 1,
+        index: addr.dev.ifindex() as u32,
     }
     .write(&mut payload);
 
@@ -870,7 +873,7 @@ fn build_route_message(request: &NlMsgHeader, route: Rule) -> Vec<u8> {
     push_attr(
         &mut payload,
         wire_route::attr::OIF,
-        &(route.dev as u32 + 1).to_ne_bytes(),
+        &route.dev.ifindex().to_ne_bytes(),
     );
     if let Some(gateway) = route.via.map(to_smoltcp_ip) {
         let gateway = ip_addr_bytes(gateway);

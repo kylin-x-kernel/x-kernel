@@ -30,7 +30,7 @@ use crate::{
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
-        LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
+        LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice, NetDeviceId,
     },
     network::router::Rule,
     router::{Ipv4AddrEntry, Router},
@@ -167,36 +167,40 @@ impl NetDevice for TestDevice {
 
 fn init_test_state() {
     let mut router = Router::new();
-    router.add_device(Box::new(TestDevice::new(LinkSnapshot {
-        ifindex: 1,
-        name: String::from("lo"),
-        flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
-        mtu: 65_536,
-        operstate: IF_OPER_UNKNOWN,
-        kind: LinkKind::Loopback,
-        hardware_addr: [0; 6],
-        broadcast_addr: [0; 6],
-    })));
-    router.add_device(Box::new(
-        TestDevice::new(LinkSnapshot {
-            ifindex: 2,
-            name: String::from("eth0"),
-            flags: LINK_FLAG_UP
-                | LINK_FLAG_RUNNING
-                | LINK_FLAG_BROADCAST
-                | LINK_FLAG_MULTICAST
-                | LINK_FLAG_LOWER_UP,
-            mtu: 1500,
-            operstate: IF_OPER_UP,
-            kind: LinkKind::Ethernet,
-            hardware_addr: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
-            broadcast_addr: [0xff; 6],
-        })
-        .with_device_id(kdevice::DeviceId::new(2)),
-    ));
+    router
+        .add_device(Box::new(TestDevice::new(LinkSnapshot {
+            ifindex: 1,
+            name: String::from("lo"),
+            flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
+            mtu: 65_536,
+            operstate: IF_OPER_UNKNOWN,
+            kind: LinkKind::Loopback,
+            hardware_addr: [0; 6],
+            broadcast_addr: [0; 6],
+        })))
+        .unwrap();
+    router
+        .add_device(Box::new(
+            TestDevice::new(LinkSnapshot {
+                ifindex: 2,
+                name: String::from("eth0"),
+                flags: LINK_FLAG_UP
+                    | LINK_FLAG_RUNNING
+                    | LINK_FLAG_BROADCAST
+                    | LINK_FLAG_MULTICAST
+                    | LINK_FLAG_LOWER_UP,
+                mtu: 1500,
+                operstate: IF_OPER_UP,
+                kind: LinkKind::Ethernet,
+                hardware_addr: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+                broadcast_addr: [0xff; 6],
+            })
+            .with_device_id(kdevice::DeviceId::new(2)),
+        ))
+        .unwrap();
     router
         .add_ipv4_addr(Ipv4AddrEntry {
-            dev: 0,
+            dev: NetDeviceId::LOOPBACK,
             addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
             scope: wire_route::SCOPE_HOST,
             broadcast: None,
@@ -207,12 +211,12 @@ fn init_test_state() {
         Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
             192, 168, 1, 1,
         ))),
-        1,
+        NetDeviceId::new(2).unwrap(),
         crate::ip::Ipv4Address::new(192, 168, 1, 2).into(),
     ));
     router
         .add_ipv4_addr(Ipv4AddrEntry {
-            dev: 1,
+            dev: NetDeviceId::new(2).unwrap(),
             addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
             scope: wire_route::SCOPE_UNIVERSE,
             broadcast: None,
@@ -521,9 +525,14 @@ fn test_device_removal_refreshes_views() {
             8,
         ))]
     );
-    assert!(SERVICE.route_snapshot().iter().all(|route| route.dev != 1));
+    assert!(
+        SERVICE
+            .route_snapshot()
+            .iter()
+            .all(|route| route.dev != NetDeviceId::new(2).unwrap())
+    );
     assert!(!SERVICE.has_neighbor(
-        1,
+        NetDeviceId::new(2).unwrap(),
         crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(192, 168, 1, 10)),
     ));
 }
@@ -783,7 +792,7 @@ fn test_add_replace_and_delete_address() {
             .iter()
             .any(
                 |entry| entry.addr.address() == crate::ip::Ipv4Address::new(192, 168, 1, 99)
-                    && entry.dev == 1
+                    && entry.dev == NetDeviceId::new(2).unwrap()
             )
     );
 
@@ -809,7 +818,7 @@ fn test_add_replace_and_delete_address() {
             .iter()
             .any(
                 |entry| entry.addr.address() == crate::ip::Ipv4Address::new(192, 168, 1, 99)
-                    && entry.dev == 1
+                    && entry.dev == NetDeviceId::new(2).unwrap()
             )
     );
 }
@@ -942,7 +951,7 @@ fn test_add_and_replace_neighbour() {
 
     add_neigh(req, NLM_F_CREATE | NLM_F_REPLACE).unwrap();
     assert!(SERVICE.has_neighbor(
-        1,
+        NetDeviceId::new(2).unwrap(),
         crate::ip::IpAddress::Ipv4(match req.dst {
             IpAddress::Ipv4(address) => address.into(),
             IpAddress::Ipv6(_) => panic!("IPv4 test neighbor"),
@@ -960,7 +969,7 @@ fn test_add_and_replace_neighbour() {
     };
     add_neigh(replaced, NLM_F_REPLACE).unwrap();
     assert!(SERVICE.has_neighbor(
-        1,
+        NetDeviceId::new(2).unwrap(),
         crate::ip::IpAddress::Ipv4(match replaced.dst {
             IpAddress::Ipv4(address) => address.into(),
             IpAddress::Ipv6(_) => panic!("IPv4 test neighbor"),
@@ -1287,18 +1296,20 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
         .with_device_id(kdevice::DeviceId::new(id))
     };
     let mut router = Router::new();
-    router.add_device(Box::new(TestDevice::new(LinkSnapshot {
-        ifindex: 1,
-        name: String::from("lo"),
-        flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
-        mtu: 65_536,
-        operstate: IF_OPER_UNKNOWN,
-        kind: LinkKind::Loopback,
-        hardware_addr: [0; 6],
-        broadcast_addr: [0; 6],
-    })));
-    router.add_device(Box::new(ethernet(2, "eth0", 2)));
-    router.add_device(Box::new(ethernet(3, "eth1", 3)));
+    router
+        .add_device(Box::new(TestDevice::new(LinkSnapshot {
+            ifindex: 1,
+            name: String::from("lo"),
+            flags: LINK_FLAG_UP | LINK_FLAG_RUNNING | LINK_FLAG_LOOPBACK | LINK_FLAG_LOWER_UP,
+            mtu: 65_536,
+            operstate: IF_OPER_UNKNOWN,
+            kind: LinkKind::Loopback,
+            hardware_addr: [0; 6],
+            broadcast_addr: [0; 6],
+        })))
+        .unwrap();
+    router.add_device(Box::new(ethernet(2, "eth0", 2))).unwrap();
+    router.add_device(Box::new(ethernet(3, "eth1", 3))).unwrap();
     for (dev, addr, scope) in [
         (
             0,
@@ -1318,7 +1329,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
     ] {
         router
             .add_ipv4_addr(Ipv4AddrEntry {
-                dev,
+                dev: NetDeviceId::new(dev + 1).unwrap(),
                 addr: valid_ipv4_cidr(addr, 24),
                 scope,
                 broadcast: None,
@@ -1331,14 +1342,64 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
         SERVICE.init_once(Service::new(router));
     }
 
-    // Removing eth0 renumbers eth1 from slot 2 to slot 1; the lookup must
-    // still resolve eth1 by name and never return eth0's address.
+    // Removing eth0 preserves eth1's interface ID and address.
     assert!(crate::unregister_netdev(kdevice::DeviceId::new(2)));
     assert_eq!(
         crate::interface_ipv4_addr("eth1"),
         Ok(core::net::Ipv4Addr::new(10, 0, 0, 2))
     );
     assert_eq!(crate::interface_ipv4_addr("eth0"), Err(LinuxError::ENODEV));
+    assert_eq!(crate::find_interface("eth1").unwrap().ifindex, 3);
+    assert_eq!(
+        crate::send_link_frame(2, &[]),
+        Err(LinuxError::ENODEV.into())
+    );
+}
+
+#[def_test]
+fn test_removed_interface_id_is_not_reused() {
+    let ethernet = |name: &str, model_id: u64| {
+        TestDevice::new(LinkSnapshot {
+            ifindex: 0,
+            name: String::from(name),
+            flags: LINK_FLAG_UP,
+            mtu: 1500,
+            operstate: IF_OPER_UP,
+            kind: LinkKind::Ethernet,
+            hardware_addr: [0; 6],
+            broadcast_addr: [0xff; 6],
+        })
+        .with_device_id(kdevice::DeviceId::new(model_id))
+    };
+    let mut router = Router::new();
+    let eth0 = router.add_device(Box::new(ethernet("eth0", 2))).unwrap();
+    let eth1 = router.add_device(Box::new(ethernet("eth1", 3))).unwrap();
+    let address = crate::ip::Ipv4Address::new(10, 0, 0, 2);
+    router
+        .add_ipv4_addr(Ipv4AddrEntry {
+            dev: eth1,
+            addr: valid_ipv4_cidr(address, 24),
+            scope: wire_route::SCOPE_UNIVERSE,
+            broadcast: None,
+        })
+        .unwrap();
+
+    router
+        .remove_device_by_model_id(kdevice::DeviceId::new(2))
+        .unwrap();
+    let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(10, 0, 0, 3));
+    assert_eq!(
+        router.output_route_source(&destination, eth1.ifindex()),
+        Ok(address.into())
+    );
+    assert_eq!(
+        router.output_route_source(&destination, eth0.ifindex()),
+        Err(LinuxError::ENETUNREACH.into())
+    );
+
+    let eth2 = router.add_device(Box::new(ethernet("eth2", 4))).unwrap();
+    assert_eq!(eth2.ifindex(), 4);
+    assert!(!router.has_device(eth0.ifindex()));
 }
 
 #[def_test(serial)]
@@ -1421,18 +1482,12 @@ fn test_route_socket_processes_same_class_mutation_batch() {
     assert!(queue.pop_front().is_none());
     drop(queue);
 
-    assert!(
-        SERVICE
-            .ipv4_addr_entries()
-            .iter()
-            .any(|entry| { entry.addr.address() == first_addr.into() && entry.dev == 1 })
-    );
-    assert!(
-        SERVICE
-            .ipv4_addr_entries()
-            .iter()
-            .any(|entry| { entry.addr.address() == second_addr.into() && entry.dev == 1 })
-    );
+    assert!(SERVICE.ipv4_addr_entries().iter().any(|entry| {
+        entry.addr.address() == first_addr.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    }));
+    assert!(SERVICE.ipv4_addr_entries().iter().any(|entry| {
+        entry.addr.address() == second_addr.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    }));
 }
 
 #[def_test(serial)]
@@ -1488,12 +1543,9 @@ fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
         Err(LinuxError::EOPNOTSUPP.into())
     );
     assert!(socket.inner.rx_queue.lock().is_empty());
-    assert!(
-        !SERVICE
-            .ipv4_addr_entries()
-            .iter()
-            .any(|entry| { entry.addr.address() == address.into() && entry.dev == 1 })
-    );
+    assert!(!SERVICE.ipv4_addr_entries().iter().any(|entry| {
+        entry.addr.address() == address.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    }));
 }
 
 #[def_test(serial)]
@@ -1521,12 +1573,9 @@ fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
         Ok(request.len())
     );
     assert!(socket.inner.rx_queue.lock().is_empty());
-    assert!(
-        !SERVICE
-            .ipv4_addr_entries()
-            .iter()
-            .any(|entry| { entry.addr.address() == address.into() && entry.dev == 1 })
-    );
+    assert!(!SERVICE.ipv4_addr_entries().iter().any(|entry| {
+        entry.addr.address() == address.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    }));
 }
 
 #[def_test(serial)]
@@ -1598,10 +1647,7 @@ fn test_mutation_queue_reservation_failure_preserves_network_state() {
         ),
         Err(LinuxError::ENOBUFS.into())
     );
-    assert!(
-        !SERVICE
-            .ipv4_addr_entries()
-            .iter()
-            .any(|entry| { entry.addr.address() == address.into() && entry.dev == 1 })
-    );
+    assert!(!SERVICE.ipv4_addr_entries().iter().any(|entry| {
+        entry.addr.address() == address.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    }));
 }

@@ -21,7 +21,8 @@ use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
     device::{
-        LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice,
+        DeviceRegistry, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
+        NetDevice, NetDeviceId,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     network::{
@@ -46,7 +47,7 @@ pub(crate) struct NeighborUpdatePolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Ipv4AddrEntry {
-    pub dev: usize,
+    pub dev: NetDeviceId,
     pub addr: Ipv4Cidr,
     pub scope: u8,
     /// Linux `ifa_broadcast` override. `None` means derive from the CIDR.
@@ -72,7 +73,7 @@ pub(crate) struct Router {
     next_rx_device: usize,
     ipv4_addrs: Vec<Ipv4AddrEntry>,
     next_ipv4_identification: u16,
-    pub(crate) devices: Vec<Box<dyn NetDevice>>,
+    pub(crate) devices: DeviceRegistry,
     pub(crate) table: RouteTable,
     effective_mtu: usize,
 }
@@ -93,7 +94,7 @@ impl Router {
             next_rx_device: 0,
             ipv4_addrs: Vec::new(),
             next_ipv4_identification: 1,
-            devices: Vec::new(),
+            devices: DeviceRegistry::new(),
             table: RouteTable::new(),
             effective_mtu: STANDARD_MTU,
         }
@@ -102,13 +103,13 @@ impl Router {
     pub(crate) fn route_mtu(&self, dst: &IpAddress) -> Option<usize> {
         let rule = self.table.lookup(dst)?;
         self.devices
-            .get(rule.dev)
+            .get_by_id(rule.dev)
             .map(|device| device.mtu().min(u16::MAX as usize))
     }
 
     /// Returns the source address for an output route with an active device.
     ///
-    /// `oif` is a 1-based bound device index; `0` means the socket is unbound.
+    /// `oif` is a stable interface index; `0` means the socket is unbound.
     /// Limited broadcasts with a bound device use that device's primary
     /// address (or `0.0.0.0`) without requiring a unicast route.
     ///
@@ -121,13 +122,13 @@ impl Router {
         if dst.is_broadcast() && oif > 0 {
             let device = self
                 .devices
-                .get((oif - 1) as usize)
+                .get_by_id(NetDeviceId::new(oif).ok_or(LinuxError::ENETUNREACH)?)
                 .ok_or(KError::from(LinuxError::ENETUNREACH))?;
             if !device.is_link_up() {
                 return Err(LinuxError::ENETUNREACH.into());
             }
             return Ok(self
-                .first_ipv4_addr_for_device(oif as u32)
+                .first_ipv4_addr_for_device(oif)
                 .map(|cidr| IpAddress::Ipv4(cidr.address()))
                 .unwrap_or(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED)));
         }
@@ -138,12 +139,12 @@ impl Router {
             .table
             .lookup(dst)
             .ok_or(KError::from(LinuxError::ENETUNREACH))?;
-        if oif > 0 && rule.dev != (oif - 1) as usize {
+        if oif > 0 && rule.dev.ifindex() != oif {
             return Err(KError::from(LinuxError::ENETUNREACH));
         }
         let device = self
             .devices
-            .get(rule.dev)
+            .get_by_id(rule.dev)
             .ok_or(KError::from(LinuxError::ENETUNREACH))?;
         if !device.is_link_up() {
             return Err(LinuxError::ENETUNREACH.into());
@@ -195,7 +196,7 @@ impl Router {
     pub(crate) fn is_loopback_destination(&self, dst: &IpAddress) -> bool {
         self.table.lookup(dst).is_some_and(|rule| {
             self.devices
-                .get(rule.dev)
+                .get_by_id(rule.dev)
                 .is_some_and(|device| device.link_kind() == LinkKind::Loopback)
         })
     }
@@ -228,11 +229,14 @@ impl Router {
         self.table.add_rule(rule);
     }
 
-    pub(crate) fn add_device(&mut self, device: Box<dyn NetDevice>) -> usize {
-        self.devices.push(device);
+    pub(crate) fn add_device(
+        &mut self,
+        device: Box<dyn NetDevice>,
+    ) -> Result<NetDeviceId, LinuxError> {
+        let id = self.devices.register(device)?;
         self.sync_device_ipv4_addrs();
         self.recompute_effective_mtu();
-        self.devices.len() - 1
+        Ok(id)
     }
 
     pub(crate) fn remove_device_by_model_id(&mut self, id: kdevice::DeviceId) -> Option<()> {
@@ -240,24 +244,20 @@ impl Router {
             .devices
             .iter()
             .position(|device| device.device_id() == Some(id))?;
+        let dev = self.devices.id_at(pos);
         let removed_sources: Vec<_> = self
             .ipv4_addrs
             .iter()
-            .filter_map(|entry| (entry.dev == pos).then_some(entry.addr.address()))
+            .filter_map(|entry| (entry.dev == dev).then_some(entry.addr.address()))
             .collect();
-        self.devices.remove(pos);
-        self.table.remove_device(pos);
-        self.ipv4_addrs.retain(|entry| entry.dev != pos);
-        for entry in &mut self.ipv4_addrs {
-            if entry.dev > pos {
-                entry.dev -= 1;
-            }
-        }
+        self.devices.remove_slot(pos);
+        self.table.remove_device(dev);
+        self.ipv4_addrs.retain(|entry| entry.dev != dev);
         for source in removed_sources {
             if !self.has_ipv4_address(source) {
                 self.table
                     .remove_configured_routes_with_source(source.into());
-                for device in &mut self.devices {
+                for device in self.devices.iter_mut() {
                     device.remove_pending_ipv4_source(source);
                 }
             }
@@ -294,37 +294,40 @@ impl Router {
         self.devices
             .iter()
             .enumerate()
-            .map(|(dev, device)| device.link_snapshot(dev as i32 + 1))
+            .map(|(slot, device)| device.link_snapshot(self.devices.id_at(slot).ifindex()))
             .collect()
     }
 
     pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        let dev_index = Self::device_index(ifindex)?;
+        let dev_index = self.device_slot(ifindex)?;
         self.devices
-            .get(dev_index)
+            .get_by_slot(dev_index)
             .map(|device| device.link_snapshot(ifindex))
     }
 
     pub(crate) fn has_device(&self, ifindex: i32) -> bool {
-        Self::device_index(ifindex).is_some_and(|dev_index| self.devices.get(dev_index).is_some())
+        self.device_slot(ifindex).is_some()
     }
 
-    pub(crate) fn device_index_by_name(&self, name: &str) -> Option<usize> {
-        self.devices.iter().position(|device| device.name() == name)
+    pub(crate) fn device_id_by_name(&self, name: &str) -> Option<NetDeviceId> {
+        self.devices
+            .iter()
+            .position(|device| device.name() == name)
+            .map(|slot| self.devices.id_at(slot))
     }
 
     /// Returns the primary IPv4 address of the device named `name`.
     ///
     /// Device resolution and address lookup happen under one Router borrow so
-    /// a concurrent device removal cannot renumber slots between the two
-    /// steps, matching Linux `devinet_ioctl` holding `rtnl_lock`.
+    /// a concurrent device removal cannot invalidate the resolved ID between
+    /// the two steps, matching Linux `devinet_ioctl` holding `rtnl_lock`.
     ///
     /// # Errors
     ///
     /// Returns `ENODEV` for an unknown device and `EADDRNOTAVAIL` when the
     /// device has no IPv4 address.
     pub(crate) fn interface_ipv4_addr(&self, name: &str) -> Result<Ipv4Cidr, LinuxError> {
-        let dev = self.device_index_by_name(name).ok_or(LinuxError::ENODEV)?;
+        let dev = self.device_id_by_name(name).ok_or(LinuxError::ENODEV)?;
         self.ipv4_addrs
             .iter()
             .find(|entry| entry.dev == dev)
@@ -332,21 +335,18 @@ impl Router {
             .ok_or(LinuxError::EADDRNOTAVAIL)
     }
 
-    fn first_ipv4_addr_for_device(&self, ifindex: u32) -> Option<Ipv4Cidr> {
-        ifindex
-            .checked_sub(1)
-            .and_then(|dev| {
-                self.ipv4_addrs
-                    .iter()
-                    .find(|entry| entry.dev == dev as usize)
-            })
+    fn first_ipv4_addr_for_device(&self, ifindex: i32) -> Option<Ipv4Cidr> {
+        let dev = NetDeviceId::new(ifindex)?;
+        self.ipv4_addrs
+            .iter()
+            .find(|entry| entry.dev == dev)
             .map(|entry| entry.addr)
     }
 
     pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
-        let dev_index = Self::device_index(ifindex)?;
+        let dev_index = self.device_slot(ifindex)?;
         self.devices
-            .get(dev_index)
+            .get_by_slot(dev_index)
             .map(|device| device.link_send_snapshot())
     }
 
@@ -358,16 +358,18 @@ impl Router {
         self.ipv4_addrs
             .iter()
             .filter_map(|entry| {
-                self.devices.get(entry.dev).map(|device| Ipv4AddrSnapshot {
-                    entry: *entry,
-                    label: String::from(device.name()),
-                })
+                self.devices
+                    .get_by_id(entry.dev)
+                    .map(|device| Ipv4AddrSnapshot {
+                        entry: *entry,
+                        label: String::from(device.name()),
+                    })
             })
             .collect()
     }
 
     pub(crate) fn add_ipv4_addr(&mut self, entry: Ipv4AddrEntry) -> Result<(), LinuxError> {
-        if entry.dev >= self.devices.len() {
+        if self.devices.slot(entry.dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
         if !entry.addr.address().is_unicast() {
@@ -397,10 +399,10 @@ impl Router {
     /// `SIOCSIFADDR`; setting the same local address is a no-op.
     pub(crate) fn set_primary_ipv4_addr(
         &mut self,
-        dev: usize,
+        dev: NetDeviceId,
         addr: Ipv4Cidr,
     ) -> Result<(), LinuxError> {
-        if dev >= self.devices.len() {
+        if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
         if !addr.address().is_unicast() {
@@ -444,8 +446,8 @@ impl Router {
     ///
     /// Other addresses on the device remain unchanged. An interface without
     /// an IPv4 address is accepted to match `SIOCSIFADDR 0.0.0.0`.
-    pub(crate) fn remove_primary_ipv4_addr(&mut self, dev: usize) -> Result<(), LinuxError> {
-        if dev >= self.devices.len() {
+    pub(crate) fn remove_primary_ipv4_addr(&mut self, dev: NetDeviceId) -> Result<(), LinuxError> {
+        if self.devices.slot(dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
         let Some(primary_index) = self.ipv4_addrs.iter().position(|entry| entry.dev == dev) else {
@@ -482,7 +484,7 @@ impl Router {
         self.table.rules().to_vec()
     }
 
-    pub(crate) fn has_ipv4_subnet_for_device(&self, dev: usize, address: IpAddress) -> bool {
+    pub(crate) fn has_ipv4_subnet_for_device(&self, dev: NetDeviceId, address: IpAddress) -> bool {
         self.ipv4_addrs
             .iter()
             .any(|entry| entry.dev == dev && entry.addr.contains_addr(&address))
@@ -490,7 +492,7 @@ impl Router {
 
     pub(crate) fn is_ipv4_directed_broadcast_for_device(
         &self,
-        dev: usize,
+        dev: NetDeviceId,
         address: Ipv4Address,
     ) -> bool {
         self.ipv4_addrs
@@ -522,7 +524,7 @@ impl Router {
 
     pub(crate) fn set_ipv4_broadcast(
         &mut self,
-        dev: usize,
+        dev: NetDeviceId,
         broadcast: Ipv4Address,
     ) -> Result<(), LinuxError> {
         let entry = self
@@ -540,7 +542,7 @@ impl Router {
     /// `ifa_broadcast` when it still matches the old derived mask.
     pub(crate) fn set_ipv4_netmask(
         &mut self,
-        dev: usize,
+        dev: NetDeviceId,
         prefix_len: u8,
     ) -> Result<(), LinuxError> {
         if prefix_len > 32 {
@@ -559,7 +561,7 @@ impl Router {
         let old_derived_broadcast = old.addr.broadcast();
         let has_broadcast_flag = self
             .devices
-            .get(dev)
+            .get_by_id(dev)
             .is_some_and(|device| device.link_kind() == LinkKind::Ethernet);
         let should_recalculate_broadcast = has_broadcast_flag
             && prefix_len < 31
@@ -589,7 +591,7 @@ impl Router {
         }
         self.table
             .remove_configured_routes_with_source(IpAddress::Ipv4(address));
-        for device in &mut self.devices {
+        for device in self.devices.iter_mut() {
             device.remove_pending_ipv4_source(address);
         }
     }
@@ -604,7 +606,7 @@ impl Router {
         if !matches!(rule.filter, IpCidr::Ipv4(_)) {
             return Err(LinuxError::EAFNOSUPPORT);
         }
-        if rule.dev >= self.devices.len() {
+        if self.devices.slot(rule.dev).is_none() {
             return Err(LinuxError::ENODEV);
         }
         if let Some(prefsrc) = rule.preferred_source()
@@ -637,8 +639,8 @@ impl Router {
         ifindex: i32,
         update: LinkConfigUpdate,
     ) -> Result<bool, LinuxError> {
-        let dev = Self::device_index(ifindex).ok_or(LinuxError::ENODEV)?;
-        let device = self.devices.get(dev).ok_or(LinuxError::ENODEV)?;
+        let dev = self.device_slot(ifindex).ok_or(LinuxError::ENODEV)?;
+        let device = self.devices.get_by_slot(dev).ok_or(LinuxError::ENODEV)?;
         if let Some(name) = update.name.as_deref() {
             crate::device::validate_interface_name(name)?;
             if self
@@ -658,7 +660,10 @@ impl Router {
         let effective_mtu = self.effective_mtu;
 
         let LinkConfigUpdate { name, mtu, is_up } = update;
-        let device = &mut self.devices[dev];
+        let device = self
+            .devices
+            .get_mut_by_slot(dev)
+            .expect("validated device slot");
         if let Some(mtu) = mtu {
             device.set_mtu(mtu)?;
         }
@@ -674,8 +679,8 @@ impl Router {
         Ok(self.effective_mtu != effective_mtu)
     }
 
-    fn device_index(ifindex: i32) -> Option<usize> {
-        (ifindex > 0).then_some((ifindex - 1) as usize)
+    fn device_slot(&self, ifindex: i32) -> Option<usize> {
+        self.devices.slot(NetDeviceId::new(ifindex)?)
     }
 
     pub(crate) fn apply_neighbor_update(
@@ -683,7 +688,10 @@ impl Router {
         update: NeighborUpdate,
         policy: NeighborUpdatePolicy,
     ) -> Result<(), LinuxError> {
-        let device = self.devices.get_mut(update.dev).ok_or(LinuxError::ENODEV)?;
+        let device = self
+            .devices
+            .get_mut_by_id(update.dev)
+            .ok_or(LinuxError::ENODEV)?;
         let exists = device.has_neighbor(update.dst);
         if exists && !policy.can_replace {
             return Err(LinuxError::EEXIST);
@@ -695,15 +703,15 @@ impl Router {
     }
 
     #[cfg(unittest)]
-    pub(crate) fn has_neighbor(&self, dev: usize, dst: IpAddress) -> bool {
+    pub(crate) fn has_neighbor(&self, dev: NetDeviceId, dst: IpAddress) -> bool {
         self.devices
-            .get(dev)
+            .get_by_id(dev)
             .is_some_and(|device| device.has_neighbor(dst))
     }
 
     fn select_ipv4_source(
         &self,
-        dev: usize,
+        dev: NetDeviceId,
         next_hop: &IpAddress,
         route_scope: u8,
     ) -> Option<Ipv4Address> {
@@ -725,7 +733,8 @@ impl Router {
     fn sync_device_ipv4_addrs(&mut self) {
         let local_addrs: Vec<_> = self.ipv4_addrs.iter().map(|entry| entry.addr).collect();
         let assigned_addrs: Vec<Vec<_>> = (0..self.devices.len())
-            .map(|dev| {
+            .map(|slot| {
+                let dev = self.devices.id_at(slot);
                 self.ipv4_addrs
                     .iter()
                     .filter_map(|entry| (entry.dev == dev).then_some(entry.addr))
@@ -742,7 +751,8 @@ impl Router {
         let loopback_dev = self
             .devices
             .iter()
-            .position(|device| device.link_kind() == crate::device::LinkKind::Loopback);
+            .position(|device| device.link_kind() == crate::device::LinkKind::Loopback)
+            .map(|slot| self.devices.id_at(slot));
         let entries = self.ipv4_addrs.clone();
         let mut connected = Vec::new();
         for entry in entries {
@@ -762,8 +772,11 @@ impl Router {
                 continue;
             }
             connected.push((entry.dev, network));
-            let scope = if self.devices[entry.dev].link_kind() == crate::device::LinkKind::Loopback
-            {
+            let device = self
+                .devices
+                .get_by_id(entry.dev)
+                .expect("address device must be registered");
+            let scope = if device.link_kind() == crate::device::LinkKind::Loopback {
                 ROUTE_SCOPE_HOST
             } else {
                 ROUTE_SCOPE_LINK
@@ -806,7 +819,7 @@ impl Router {
 
         for _ in 0..device_count {
             let dev_index = self.next_rx_device;
-            let ifindex = dev_index as i32 + 1;
+            let ifindex = self.devices.id_at(dev_index).ifindex();
             loop {
                 if work_done >= budget {
                     self.next_rx_device = next_device_index(dev_index, device_count);
@@ -818,7 +831,10 @@ impl Router {
                 }
 
                 let packet = {
-                    let dev = &mut self.devices[dev_index];
+                    let dev = self
+                        .devices
+                        .get_mut_by_slot(dev_index)
+                        .expect("valid RX device slot");
                     dev.poll_rx(ifindex, timestamp)
                 };
                 let packet = match packet {
@@ -860,10 +876,10 @@ impl Router {
     }
 
     pub(crate) fn send_link_frame(&mut self, ifindex: i32, frame: &[u8]) -> KResult<usize> {
-        let dev_index = Self::device_index(ifindex).ok_or(KError::InvalidInput)?;
+        let dev_id = NetDeviceId::new(ifindex).ok_or(KError::InvalidInput)?;
         let dev = self
             .devices
-            .get_mut(dev_index)
+            .get_mut_by_id(dev_id)
             .ok_or(KError::from(LinuxError::ENODEV))?;
         dev.send_link_frame(ifindex, frame)
     }
@@ -903,9 +919,9 @@ impl Router {
                         )
                     };
                     if is_multicast {
-                        for (dev_index, dev) in self.devices.iter_mut().enumerate() {
+                        for (id, dev) in self.devices.iter_mut_with_ids() {
                             poll_next |= dev.send_ip_packet(
-                                dev_index as i32 + 1,
+                                id.ifindex(),
                                 dst_addr,
                                 src_addr,
                                 packet.clone(),
@@ -920,9 +936,12 @@ impl Router {
                         assert_eq!(rule.src, src_addr);
 
                         let next_hop = rule.via.unwrap_or(dst_addr);
-                        let dev = &mut self.devices[rule.dev];
+                        let dev = self
+                            .devices
+                            .get_mut_by_id(rule.dev)
+                            .expect("route device must be registered");
                         poll_next |= dev.send_ip_packet(
-                            rule.dev as i32 + 1,
+                            rule.dev.ifindex(),
                             next_hop,
                             src_addr,
                             packet,
@@ -956,21 +975,21 @@ impl Router {
             }
 
             let bound_if = packet.ifindex();
-            let device_count = self.devices.len();
-            let Some((last_device, preceding_devices)) = self.devices.split_last_mut() else {
+            let mut devices = self.devices.iter_mut_with_ids();
+            let Some((last_id, last_device)) = devices.next_back() else {
                 return false;
             };
 
             let mut poll_next = false;
-            for (dev_index, dev) in preceding_devices.iter_mut().enumerate() {
-                let ifindex = dev_index as i32 + 1;
+            for (id, dev) in devices {
+                let ifindex = id.ifindex();
                 if bound_if != 0 && bound_if != ifindex {
                     continue;
                 }
                 poll_next |=
                     dev.send_ip_packet(ifindex, dst_addr, src_addr, packet.clone(), timestamp);
             }
-            let last_ifindex = device_count as i32;
+            let last_ifindex = last_id.ifindex();
             if bound_if == 0 || bound_if == last_ifindex {
                 poll_next |=
                     last_device.send_ip_packet(last_ifindex, dst_addr, src_addr, packet, timestamp);
@@ -983,10 +1002,10 @@ impl Router {
             return false;
         };
         let bound_if = packet.ifindex();
-        if bound_if != 0 && bound_if != rule.dev as i32 + 1 {
+        if bound_if != 0 && bound_if != rule.dev.ifindex() {
             warn!(
                 "Dropping IPv4 packet bound to ifindex {bound_if} via device {}",
-                rule.dev as i32 + 1
+                rule.dev.ifindex()
             );
             return false;
         }
@@ -999,8 +1018,11 @@ impl Router {
         }
 
         let next_hop = rule.via.unwrap_or(dst_addr);
-        let dev = &mut self.devices[rule.dev];
-        dev.send_ip_packet(rule.dev as i32 + 1, next_hop, src_addr, packet, timestamp)
+        let dev = self
+            .devices
+            .get_mut_by_id(rule.dev)
+            .expect("route device must be registered");
+        dev.send_ip_packet(rule.dev.ifindex(), next_hop, src_addr, packet, timestamp)
     }
 
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
@@ -1091,15 +1113,19 @@ mod tests {
 
     fn router_with_ready_loopback_packet() -> Router {
         let mut router = Router::new();
-        let loopback = router.add_device(Box::new(LoopbackDevice::new()));
+        let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::Ipv4Stack);
-        let _ = router.devices[loopback].send_ip_packet(
-            1,
-            IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
-            IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
-            packet,
-            MonotonicInstant::ORIGIN,
-        );
+        let _ = router
+            .devices
+            .get_mut_by_id(loopback)
+            .unwrap()
+            .send_ip_packet(
+                1,
+                IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+                IpAddress::Ipv4(Ipv4Address::new(127, 0, 0, 1)),
+                packet,
+                MonotonicInstant::ORIGIN,
+            );
         router
     }
 
@@ -1114,7 +1140,7 @@ mod tests {
         }
 
         fn link_kind(&self) -> LinkKind {
-            self.link.link_kind()
+            LinkKind::Ethernet
         }
 
         fn mtu(&self) -> usize {
@@ -1169,22 +1195,24 @@ mod tests {
     fn rx_failure_preserves_partial_batch_and_advances_device_cursor() {
         let mut router = Router::new();
         for _ in 0..2 {
-            router.add_device(Box::new(FailingRxDevice {
-                link: LoopbackDevice::new(),
-                packet: Some(tx_packet_buf(vec![0x45, 0, 0, 20])),
-            }));
+            router
+                .add_device(Box::new(FailingRxDevice {
+                    link: LoopbackDevice::new(),
+                    packet: Some(tx_packet_buf(vec![0x45, 0, 0, 20])),
+                }))
+                .unwrap();
         }
         let mut packets = Vec::new();
         let first = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 4, &mut packets);
         assert_eq!(first.work_done, 1);
         assert_eq!(packets.len(), 1);
-        assert_eq!(first.error, Some((1, KError::Io)));
+        assert_eq!(first.error, Some((2, KError::Io)));
         assert!(first.has_more);
 
         let second = router.drain_rx_budgeted_into(MonotonicInstant::ORIGIN, 4, &mut packets);
         assert_eq!(second.work_done, 1);
         assert_eq!(packets.len(), 1);
-        assert_eq!(second.error, Some((2, KError::Io)));
+        assert_eq!(second.error, Some((3, KError::Io)));
         assert!(!second.has_more);
     }
 
@@ -1245,7 +1273,7 @@ mod tests {
     #[def_test]
     fn ipv4_address_installs_local_and_connected_routes() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         let entry = Ipv4AddrEntry {
             dev,
             addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
@@ -1277,7 +1305,7 @@ mod tests {
     #[def_test]
     fn ipv4_broadcast_detection_covers_limited_and_directed_addresses() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,
@@ -1299,7 +1327,7 @@ mod tests {
     #[def_test]
     fn ipv4_address_capacity_matches_smoltcp_interface_limit() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
 
         for index in 0..smoltcp::config::IFACE_MAX_ADDR_COUNT {
             router
@@ -1326,7 +1354,7 @@ mod tests {
     #[def_test]
     fn setting_primary_ipv4_address_keeps_secondary_addresses() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         let primary = Ipv4AddrEntry {
             dev,
             addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
@@ -1355,7 +1383,7 @@ mod tests {
     #[def_test]
     fn removing_primary_ipv4_address_keeps_secondary_addresses() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         let primary = Ipv4AddrEntry {
             dev,
             addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 7), 24),
@@ -1379,7 +1407,7 @@ mod tests {
     #[def_test]
     fn setting_ipv4_netmask_keeps_secondary_scope_and_custom_broadcast() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         let custom_broadcast = Ipv4Address::new(192, 0, 2, 111);
         let secondary = Ipv4AddrEntry {
             dev,
@@ -1412,7 +1440,7 @@ mod tests {
     #[def_test]
     fn deleting_ipv4_address_removes_automatic_routes() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         let entry = Ipv4AddrEntry {
             dev,
             addr: valid_ipv4_cidr(Ipv4Address::new(198, 51, 100, 7), 24),
@@ -1440,7 +1468,7 @@ mod tests {
     #[def_test]
     fn configured_gateway_must_be_on_device_subnet() {
         let mut router = Router::new();
-        let dev = router.add_device(Box::new(LoopbackDevice::new()));
+        let dev = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
         router
             .add_ipv4_addr(Ipv4AddrEntry {
                 dev,

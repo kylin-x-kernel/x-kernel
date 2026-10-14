@@ -28,9 +28,11 @@ net/knet/
 └── src/
     ├── device/
     │   ├── ethernet.rs
+    │   ├── id.rs
     │   ├── loopback.rs
     │   ├── mod.rs
-    │   └── net_rx.rs
+    │   ├── net_rx.rs
+    │   └── registry.rs
     ├── link/
     │   ├── buf.rs
     │   ├── mod.rs
@@ -565,7 +567,7 @@ flowchart LR
 | Initial IPv4 address entry | `Router::ipv4_addrs` | `init_network` registers the address through `Router::add_ipv4_addr`; Router also creates the corresponding local and connected routes. |
 | IPv4 address entry | smoltcp, `IngressProcessor`, and device address projections | `Service` refreshes all derived views when an address is added, removed, or its owning device is removed. |
 | Last owner of an IPv4 address | Router configured routes | When the address is removed, configured routes using that address as `prefsrc` are also removed. |
-| Removed device | Router routes and device neighbor state | `unregister_netdev` holds `network_config_lock`; Router removes routes and neighbors associated with the interface and renumbers subsequent interface indices. |
+| Removed device | Router routes and device neighbor state | `unregister_netdev` holds `network_config_lock`; Router removes routes, addresses, and neighbors associated with the interface; other interface indices remain unchanged. |
 | `RTM_GETADDR` | Router address snapshot | rtnetlink reads `Service::ipv4_addr_snapshots` directly and returns only the specified device's addresses when the request includes an interface index. |
 | Initial route | `Router` | `init_network` calls `Router::add_rule` directly. |
 | `RTM_NEWROUTE` / `RTM_DELROUTE` / `SIOCADDRT` / `SIOCDELRT` | `Router` | The control plane validates and applies route changes within the Router owner. |
@@ -869,7 +871,7 @@ The Router owns configured routes, address-derived routes, and dynamic source-se
 
 RX registration reads the event version, reads the interface index, registers device sources and the binding-change event, then rechecks the version. Changes during registration trigger a readiness recheck; changes while waiting trigger registration renewal. Each new `PollRegistrations` replaces the old device registrations, and cancellation or completion removes the binding-change subscription.
 
-TCP and raw IP use `GeneralOptions::rx_device_mask` to select RX devices. Explicit `SO_BINDTODEVICE` selects the specified device; default and unbound states select all devices. Address binding, connection state, and route changes are independent of this selection, while the protocol receive path filters packet delivery.
+TCP and raw IP use `GeneralOptions::rx_device_selection` to select RX devices. Explicit `SO_BINDTODEVICE` selects the specified device; default and unbound states select all devices. Address binding, connection state, and route changes are independent of this selection, while the protocol receive path filters packet delivery.
 
 `Service::register_rx_waker` uses the caller's `PollContext` to register the aggregate `timeout_poll` and any Ethernet RX poll source that supports interrupt-driven RX. When a device becomes pending, the `NetRx` softirq wakes the corresponding poll source and schedules `knet-poller` work for background protocol progress. TCP and raw IP waiters can also wake through that source. `PollRegistrations` keeps these registrations alive across the `Pending` state.
 
@@ -897,13 +899,15 @@ TCP sends fill the smoltcp buffer and notify the poller, which advances the prot
 
 ### Control-Plane State Ownership
 
+The network device registry assigns stable `NetDeviceId` values independently of its storage slots. Device removal preserves surviving interface indices. The current allocator reserves index 1 for loopback and assigns monotonically increasing indices from 2 through `i32::MAX`, returning `ENOSPC` after exhaustion. Removing the loopback entry clears its registration flag so a subsequent loopback registration can use index 1 again.
+
 Devices own link configuration and expose interface names, MTUs, administrative and operational states, and hardware addresses through `NetDevice::link_snapshot`. `RTM_GETLINK` and `RTM_NEWLINK` access this device-owned state directly. The AF_PACKET send path obtains an allocation-free `LinkSendSnapshot` under the Router lock, validates it after releasing that lock, and reacquires the Router lock through `Service::send_link_frame` for transmission. Snapshot validation and dispatch are separate critical sections. Device-existence checks use `has_device`, and route MTU queries read the matching device directly. Configuration changes or device removal rebuild the smoltcp `Interface` only when the effective MTU changes, keeping cached `DeviceCapabilities` consistent with the device set while otherwise preserving runtime caches.
 
 `Router` owns `Ipv4AddrEntry` values with `dev`, `addr`, `scope`, and optional `broadcast` fields. The broadcast override is exposed as `ifa_broadcast` in rtnetlink. Broadcast addresses default to the CIDR-derived value. Insertion validates the device, unicast address, and smoltcp address capacity. Legacy address and netmask ioctls update the primary entry while preserving other addresses on the device. Netmask updates retain the scope and recompute the broadcast address only when its previous value was mask-derived.
 
 Each address produces a `/32` local route and a connected route for its network. Address removal clears derived routes, routes whose preferred source becomes invalid, and the device's pending TX. `Service` projects Router addresses into the smoltcp `Interface`, `IngressProcessor`, and devices; Ethernet uses them for ARP, directed broadcasts, and packets awaiting neighbor resolution.
 
-Configured routes belong to `Router`, where `RTM_NEWROUTE` and `SIOCADDRT` require gateways to lie within the output interface's IPv4 subnet and exclude directed-broadcast addresses. Ethernet devices own their neighbor tables, so route and neighbor mutations operate through their respective owners. `unregister_netdev` holds `network_config_lock` while Router removes the device's routes, addresses, and neighbors and renumbers subsequent interface indices.
+Configured routes belong to `Router`, where `RTM_NEWROUTE` and `SIOCADDRT` require gateways to lie within the output interface's IPv4 subnet and exclude directed-broadcast addresses. Ethernet devices own their neighbor tables, so route and neighbor mutations operate through their respective owners. `unregister_netdev` holds `network_config_lock` while Router removes the device's routes, addresses, and neighbors. Surviving interface indices remain unchanged.
 
 ### Credentials for Unix Pathname Sockets
 
@@ -925,7 +929,7 @@ Unix datagram receive delivers kernel credentials before passed file descriptors
 
 ### Device Masks for RX Wakeups
 
-TCP and raw IP derive their RX device mask from `SO_BINDTODEVICE`. Explicit binding narrows device subscriptions; default and unbound states select all devices. Waiters register with those devices and the smoltcp poll timeout, then use actual readiness to determine user-visible events. Address binding, connection state, and route changes leave device selection independent. UDP receive-only waits use socket-local events after demultiplexing applies the device-binding filter.
+TCP and raw IP derive their RX device selection from `SO_BINDTODEVICE`. Explicit binding narrows device subscriptions; default and unbound states select all devices. Waiters register with those devices and the smoltcp poll timeout, then use actual readiness to determine user-visible events. Address binding, connection state, and route changes leave device selection independent. UDP receive-only waits use socket-local events after demultiplexing applies the device-binding filter.
 
 smoltcp's `poll_at` returns a deadline with the same epoch as the supplied timestamp, allowing the compatibility layer to map `SmoltcpInstant` directly to `MonotonicInstant`. This mapping preserves expired deadlines without signed-delay calculations or `as u64` conversions.
 

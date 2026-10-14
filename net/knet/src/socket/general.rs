@@ -15,6 +15,7 @@ use ktime_types::TimeSpan;
 
 use crate::{
     SERVICE,
+    device::{NetDeviceId, RxDeviceSelection},
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
@@ -117,13 +118,9 @@ impl GeneralOptions {
     /// Returns the RX device selection for `SO_BINDTODEVICE`.
     ///
     /// An unbound socket registers all devices, independently of its address.
-    pub(crate) fn rx_device_mask(&self) -> u32 {
-        let ifindex = self.bound_dev_if();
-        if ifindex > 0 {
-            1u32.checked_shl((ifindex - 1) as u32).unwrap_or(0)
-        } else {
-            u32::MAX
-        }
+    pub(crate) fn rx_device_selection(&self) -> RxDeviceSelection {
+        NetDeviceId::new(self.bound_dev_if())
+            .map_or(RxDeviceSelection::All, RxDeviceSelection::Interface)
     }
 
     /// Registers the current poll operation for receive readiness.
@@ -135,20 +132,23 @@ impl GeneralOptions {
         &self,
         context: &mut PollContext<'_>,
     ) -> Result<Waker, PollRegisterError> {
-        self.register_rx_waker_with(context, |mask, context| {
-            SERVICE.register_rx_waker(mask, context)
+        self.register_rx_waker_with(context, |selection, context| {
+            SERVICE.register_rx_waker(selection, context)
         })
     }
 
     fn register_rx_waker_with(
         &self,
         context: &mut PollContext<'_>,
-        register_devices: impl FnOnce(u32, &mut PollContext<'_>) -> Result<Waker, PollRegisterError>,
+        register_devices: impl FnOnce(
+            RxDeviceSelection,
+            &mut PollContext<'_>,
+        ) -> Result<Waker, PollRegisterError>,
     ) -> Result<Waker, PollRegisterError> {
-        // Observe the generation before the mask: an intervening commit must
+        // Observe the generation before device selection: an intervening commit must
         // force a recheck even if its wake precedes our event registration.
         let generation = self.device_binding_changed.generation();
-        let source_waker = register_devices(self.rx_device_mask(), context)?;
+        let source_waker = register_devices(self.rx_device_selection(), context)?;
         self.device_binding_changed.register(context)?;
         if self.device_binding_changed.has_changed_since(generation) {
             context.wake_by_ref();
@@ -339,8 +339,11 @@ mod tests {
             let mut registrations = PollRegistrations::new();
 
             options
-                .register_rx_waker_with(&mut registrations.context(&context), |mask, _| {
-                    assert_eq!(mask, 1);
+                .register_rx_waker_with(&mut registrations.context(&context), |selection, _| {
+                    assert_eq!(
+                        selection,
+                        RxDeviceSelection::Interface(NetDeviceId::LOOPBACK)
+                    );
                     // The old device was selected, but the configuration event
                     // has not been subscribed yet. Only the recheck catches it.
                     options.set_bound_dev_if(next_ifindex);
@@ -360,9 +363,9 @@ mod tests {
         let waker = Waker::from(counter.clone());
         let context = Context::from_waker(&waker);
         let mut registrations = PollRegistrations::new();
-        let register_devices = |mask, context: &mut PollContext<'_>| {
+        let register_devices = |selection: RxDeviceSelection, context: &mut PollContext<'_>| {
             for (index, device) in devices.iter().enumerate() {
-                if mask & (1 << index) != 0 {
+                if selection.includes(NetDeviceId::new(index as i32 + 1).unwrap()) {
                     context.register(device)?;
                 }
             }
@@ -416,7 +419,5 @@ mod tests {
             assert!(!options.device_binding_changed.has_changed_since(generation));
             assert_eq!(options.bound_dev_if(), ifindex);
         }
-        options.set_bound_dev_if(32);
-        assert_eq!(options.rx_device_mask(), 1 << 31);
     }
 }

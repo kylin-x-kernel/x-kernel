@@ -12,7 +12,9 @@ use ksync::{Mutex, MutexGuard, static_lock};
 
 use crate::{
     SERVICE,
-    device::{ARPHRD_ETHER, ARPHRD_LOOPBACK, LINK_FLAG_UP, LinkConfigUpdate, LinkKind},
+    device::{
+        ARPHRD_ETHER, ARPHRD_LOOPBACK, LINK_FLAG_UP, LinkConfigUpdate, LinkKind, NetDeviceId,
+    },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     network::router::{
         ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TABLE_MAIN,
@@ -96,7 +98,7 @@ pub fn set_interface_ipv4_addr(
     prefix_len: u8,
 ) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
-    let dev = device_index_by_name(name)?;
+    let dev = device_id_by_name(name)?;
     if addr.is_unspecified() {
         return SERVICE.remove_primary_ipv4_addr(dev);
     }
@@ -116,7 +118,7 @@ pub fn set_interface_ipv4_addr(
 /// interface has no IPv4 address, or `EINVAL` when `prefix_len` is invalid.
 pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
-    let dev = device_index_by_name(name)?;
+    let dev = device_id_by_name(name)?;
     SERVICE.set_ipv4_netmask(dev, prefix_len)
 }
 
@@ -128,7 +130,7 @@ pub fn set_interface_ipv4_netmask(name: &str, prefix_len: u8) -> Result<(), Linu
 /// interface has no IPv4 address.
 pub fn set_interface_ipv4_broadcast(name: &str, broadcast: Ipv4Addr) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
-    let dev = device_index_by_name(name)?;
+    let dev = device_id_by_name(name)?;
     SERVICE.set_ipv4_broadcast(dev, Ipv4Address::from_octets(broadcast.octets()))
 }
 
@@ -139,7 +141,7 @@ pub fn set_interface_ipv4_broadcast(name: &str, broadcast: Ipv4Addr) -> Result<(
 /// Returns `ENODEV` when `name` is unknown.
 pub fn set_interface_flags(name: &str, flags: u16) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
-    let ifindex = (device_index_by_name(name)? + 1) as i32;
+    let ifindex = device_id_by_name(name)?.ifindex();
     SERVICE.update_device_link(
         ifindex,
         LinkConfigUpdate {
@@ -198,7 +200,7 @@ pub fn del_ipv4_route(
 ) -> Result<(), LinuxError> {
     let _network_config_guard = network_config_lock();
     let oif = match oif_name {
-        Some(name) => Some(device_index_by_name(name)?),
+        Some(name) => Some(device_id_by_name(name)?),
         None => None,
     };
     let filter = ipv4_route_filter(dst, dst_len)?;
@@ -233,7 +235,7 @@ fn ipv4_configured_route_rule(
     gateway: Option<Ipv4Addr>,
     oif_name: Option<&str>,
 ) -> Result<Rule, LinuxError> {
-    let dev = device_index_by_name(oif_name.ok_or(LinuxError::ENETUNREACH)?)?;
+    let dev = device_id_by_name(oif_name.ok_or(LinuxError::ENETUNREACH)?)?;
     let filter = ipv4_route_filter(dst, dst_len)?;
     let via = gateway.map(|addr| IpAddress::Ipv4(Ipv4Address::from_octets(addr.octets())));
     let source = ipv4_entries_for_device(dev)
@@ -259,14 +261,14 @@ fn ipv4_configured_route_rule(
     ))
 }
 
-fn device_index_by_name(name: &str) -> Result<usize, LinuxError> {
+fn device_id_by_name(name: &str) -> Result<NetDeviceId, LinuxError> {
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
-    SERVICE.device_index_by_name(name).ok_or(LinuxError::ENODEV)
+    SERVICE.device_id_by_name(name).ok_or(LinuxError::ENODEV)
 }
 
-fn ipv4_entries_for_device(dev: usize) -> Vec<Ipv4AddrEntry> {
+fn ipv4_entries_for_device(dev: NetDeviceId) -> Vec<Ipv4AddrEntry> {
     SERVICE
         .ipv4_addr_snapshots()
         .into_iter()
