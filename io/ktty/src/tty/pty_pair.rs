@@ -239,18 +239,23 @@ impl PtyPair {
     }
 
     pub(super) fn acquire_open(self: &Arc<Self>, kind: TtyKind) -> KResult<PtyOpen> {
+        let kind = match kind {
+            TtyKind::PtyMaster => PtyEndpointKind::Master,
+            TtyKind::Terminal => PtyEndpointKind::Slave,
+            TtyKind::VirtualConsole => return Err(KError::NotATty),
+        };
         let mut state = self.state.lock();
         if state.resources.is_none() {
             return Err(KError::Io);
         }
         match kind {
-            TtyKind::PtyMaster => {
+            PtyEndpointKind::Master => {
                 if state.has_master || state.is_published {
                     return Err(KError::Io);
                 }
                 state.has_master = true;
             }
-            TtyKind::Terminal => {
+            PtyEndpointKind::Slave => {
                 if !state.has_master || !state.is_published {
                     return Err(KError::Io);
                 }
@@ -266,10 +271,10 @@ impl PtyPair {
         })
     }
 
-    fn release_open(&self, kind: TtyKind) {
+    fn release_open(&self, kind: PtyEndpointKind) {
         let (resources, removed, closed_input) = {
             let mut state = self.state.lock();
-            let closed_input = if kind == TtyKind::PtyMaster {
+            let closed_input = if kind == PtyEndpointKind::Master {
                 state
                     .resources
                     .as_ref()
@@ -278,8 +283,8 @@ impl PtyPair {
                 None
             };
             match kind {
-                TtyKind::PtyMaster => state.has_master = false,
-                TtyKind::Terminal => state.slave_opens -= 1,
+                PtyEndpointKind::Master => state.has_master = false,
+                PtyEndpointKind::Slave => state.slave_opens -= 1,
             }
             if state.has_master || state.slave_opens != 0 {
                 (None, None, closed_input)
@@ -329,11 +334,17 @@ impl PtyPair {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PtyEndpointKind {
+    Master,
+    Slave,
+}
+
 /// One use per open file, not per descriptor. Builder rollback and final file
 /// destruction both release it; dup/fork share the containing VfsFile.
 pub(super) struct PtyOpen {
     pair: Arc<PtyPair>,
-    kind: TtyKind,
+    kind: PtyEndpointKind,
 }
 
 impl Drop for PtyOpen {

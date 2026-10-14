@@ -38,6 +38,18 @@ fs/filesystems/devfs/src/
 
 ## Architecture
 
+`nodes/tty_nodes.rs` asks ktty to register fixed VT aliases once, then projects
+its returned named-cdev identities through `DeviceFile::from_registration`.
+The registry owns each name, class and device number; devfs does not repeat
+those facts or register them again. Both aliases select the independent
+VT_CONSOLE terminal. On pair registration failure ktty rolls back the first
+alias, and devfs publishes neither node; procfs/sysfs observe the same result.
+
+`nodes/serial.rs` keeps auxiliary UART names `/dev/serial/serialN` indexed from zero,
+but assigns major 4 minors starting at 64. This leaves the fixed VT range 4:0
+and 4:1 available while keeping the custom serial node names unchanged. The
+stdout UART remains omitted because it is already available as `/dev/console`.
+
 `DeviceFile` projects special-device identity and inode flags; it is not an
 open-file operations adapter. KVFS owns character-device dispatch, including
 capabilities, I/O, poll registration and open/release forwarding.

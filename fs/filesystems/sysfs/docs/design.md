@@ -1,5 +1,14 @@
 # sysfs — Design
 
+Named KVFS cdev registrations use the same device-projection tree as hardware
+nodes, at `devices/virtual/<class>/<name>` with class/dev links and read-only
+identity attributes. Name, class, dev_t and availability come from the cdev
+registration handle; there is no ConsoleAttribute or hardcoded tty0/tty1 path.
+Sysfs subscribes atomically with a registry snapshot, and named add/remove
+callbacks rebuild/invalidate the projection after registry locks are released.
+Read closures recheck registration availability. These virtual identity uevent
+attributes are read-only; hardware DeviceNode uevent behavior is unchanged.
+
 ## Purpose
 
 `sysfs` provides a Linux-compatible, read-mostly device discovery filesystem.

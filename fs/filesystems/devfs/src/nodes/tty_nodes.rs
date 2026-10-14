@@ -18,6 +18,18 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                   registers the Unix98 PTY ranges once and has no error return"
     )]
     tty::register_pty_drivers().expect("Unix98 drivers register once");
+    match tty::register_fixed_vt_devices() {
+        Ok(devices) => {
+            for registration in devices {
+                add_device_entry(
+                    root,
+                    registration.name(),
+                    DeviceFile::from_registration(fs.clone(), &registration),
+                );
+            }
+        }
+        Err(error) => warn!("devtmpfs: cannot register fixed VTs: {error:?}"),
+    }
     add_device_entry(
         root,
         "tty",

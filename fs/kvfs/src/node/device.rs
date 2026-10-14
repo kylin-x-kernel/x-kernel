@@ -4,7 +4,7 @@
 
 //! Device file operations trait and memory mapping callback.
 
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use block::{BlockDevice, BlockOpenMode, DriverError};
@@ -19,12 +19,20 @@ use crate::{
     VfsResult,
 };
 
+mod registration;
+use registration::CharacterDeviceIdentity;
+pub use registration::{
+    CharacterDeviceRegistration, cdev_add_named, registered_character_devices,
+    subscribe_character_devices,
+};
+
 /// One registration identity; inode caches hold only weak references to it.
 pub(super) struct ChrdevEntry {
     first: DeviceId,
     last_minor: u32,
     ops: Arc<dyn DeviceFileOps>,
     is_registered: AtomicBool,
+    identity: Option<CharacterDeviceIdentity>,
 }
 
 impl ChrdevEntry {
@@ -38,6 +46,7 @@ impl ChrdevEntry {
             last_minor,
             ops,
             is_registered: AtomicBool::new(true),
+            identity: None,
         })
     }
 
@@ -52,16 +61,30 @@ impl ChrdevEntry {
 
 struct ChrdevRegistry {
     entries: BTreeMap<(u32, u32), Arc<ChrdevEntry>>,
+    subscribers: Vec<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl ChrdevRegistry {
     const fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            subscribers: Vec::new(),
         }
     }
 
     fn add(&mut self, entry: &Arc<ChrdevEntry>) -> VfsResult<()> {
+        // Named insertion is a cold publication path. A second live number
+        // with the same class/name would collide in every filesystem view.
+        if let Some(identity) = &entry.identity
+            && self.entries.values().any(|existing| {
+                existing
+                    .identity
+                    .as_ref()
+                    .is_some_and(|other| other.matches(identity))
+            })
+        {
+            return Err(VfsError::ResourceBusy);
+        }
         let major = entry.first.major();
         if self
             .entries
@@ -140,7 +163,21 @@ pub fn cdev_add(first: DeviceId, count: u32, ops: Arc<dyn DeviceFileOps>) -> Vfs
 /// Cached inode registrations become invalid before the number can be reused.
 /// Already selected/open backends remain owned by their callers and files.
 pub fn cdev_del(first: DeviceId, count: u32) -> Option<Arc<dyn DeviceFileOps>> {
-    let entry = CHRDEV_MAP.lock().del(first, count)?;
+    let (entry, subscribers) = {
+        let mut registry = CHRDEV_MAP.lock();
+        let entry = registry.del(first, count)?;
+        let subscribers = if entry.identity.is_some() {
+            registry.subscribers.clone()
+        } else {
+            Vec::new()
+        };
+        (entry, subscribers)
+    };
+    // Projection callbacks may acquire filesystem locks; never run them under
+    // the registry lock. The retired identity is already unavailable.
+    for subscriber in subscribers {
+        subscriber();
+    }
     Some(entry.ops.clone())
 }
 

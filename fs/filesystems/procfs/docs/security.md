@@ -1,5 +1,11 @@
 # procfs - Security and Reliability
 
+Named character devices are read from KVFS's registration snapshot; procfs
+does not claim a fixed tty exists when registration failed. A snapshot can
+become stale during concurrent removal, as can hardware topology output; the
+next rewind refreshes it, and this text view grants no device access.
+
+
 ## Trust Model
 
 Procfs accepts filesystem operations through `kvfs` and publishes kernel-owned

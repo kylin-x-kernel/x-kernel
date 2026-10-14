@@ -196,6 +196,15 @@ impl Cred {
         self.euid == 0
     }
 
+    /// Returns this credential's `CAP_SYS_TTY_CONFIG` authorization decision.
+    ///
+    /// Like `has_sys_admin`, this uses effective UID 0 until capability sets
+    /// are implemented. Real, saved and filesystem IDs do not grant authority.
+    /// TTY callers must use the current subjective credential at ioctl time.
+    pub fn has_sys_tty_config(&self) -> bool {
+        self.euid == 0
+    }
+
     /// Returns whether this credential's real, effective, and saved IDs all
     /// match the real user and group IDs of `caller`.
     ///

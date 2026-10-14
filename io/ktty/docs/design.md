@@ -1,5 +1,77 @@
 # ktty — Design
 
+## Fixed Virtual Console
+
+`tty/vt.rs` creates an independent `Tty<VtInput, VtOutput>` with its own
+`Terminal`, session/job-control, ingress and generic line discipline. tty0 and
+tty1 alias this VT; `CurrentTty` preserves its identity and ioctl dispatch.
+It shares only the native console's physical byte output connection, never
+N_TTY's terminal/session or serial input. There is no VT keyboard byte source:
+nonempty reads return EIO; output is writable and poll also reports input ERR.
+
+VT_SETMODE accepts AUTO/PROCESS, retains waitv/relsig/acqsig, and sets ignored
+frsig to zero, as Linux v6.12 vt_ioctl.c does. PROCESS records the actual current
+process as a Weak<Process> after authorization and user-copy validation. Closing
+an fd does not release this ownership. VT_GETMODE reads the registered mode;
+on subsequent ioctl/output use a disappeared or exited controller resets the
+console to AUTO/TEXT/default Unicode policy. Numeric PID reuse cannot address
+another process because ownership is an object identity.
+
+Only VT 1 exists, so VT_ACTIVATE/VT_WAITACTIVE accept 1 and reject other targets.
+Linux change_console returns immediately for the already active VT, without
+relsig/acqsig. Accordingly this implementation invents no switch or signals.
+VT_RELDISP implements Linux vt_reldisp's no-pending branch: PROCESS+VT_ACKACQ
+succeeds, AUTO or release 0/1 without a pending switch returns EINVAL. Cross-VT
+release/acquire and signal-driven switching are not implemented. kprocess has a
+real process signal channel; absence of a second VT, not absence of PID lookup,
+is the boundary. VT_GETSTATE reports active=1 and v_state=3: Linux vt_ioctl.c
+initializes state=1 for tty0's current-VT alias, then mask=2 for VT 1. Bits 0
+and 1 therefore describe the same console here, not two distinct VTs. Bit 2
+is clear: VT 2 does not exist and cannot be activated.
+VT_OPENQRY succeeds with output -1 for no free VT; callers must inspect that
+output instead of treating it as an activatable number.
+
+KD_TEXT sends this VT's text to the native output connection; KD_GRAPHICS
+consumes writes without emitting that text. The state mutex serializes mode
+changes with byte output. KDGETMODE reflects this live policy. This is a
+headless text-plane behavior, not a GPU text renderer, framebuffer save/restore
+or hardware blanking implementation. It does not suppress N_TTY's independent
+serial output or kernel logging.
+
+Program writes pass through the same OutputLineDiscipline mutex as echo.
+VtOutput declares backend-owned processing, so that discipline bypasses its
+newline conversion and still calls the same TEXT/GRAPHICS policy. Nonempty
+backend writes returning zero are normalized to WouldBlock; empty writes
+return zero without calling the backend.
+
+KDSKBMODE admits K_UNICODE/K_OFF, and KDGKBMODE reflects the registered policy.
+No VT keycode translator or keyboard input consumer is connected; serial input
+is not redirected. RAW/XLATE/MEDIUMRAW return EOPNOTSUPP, invalid values EINVAL.
+Unicode is intentional: Linux v6.12 vt.c declares default_utf8=true and
+keyboard.c::kbd_init selects VC_UNICODE when that setting is true. Other Linux
+configurations can select XLATE; this headless interface does not implement it.
+
+All VT/KD setters, activation/wait and VT_RELDISP share authorization:
+current controlling-terminal object equality OR has_sys_tty_config authority,
+following Linux vt_ioctl.c. kcred currently approximates that capability with
+EUID 0; full capability sets/user-namespace semantics remain outside this PR.
+User memory copies occur outside the mode-state mutex. Lock order for output
+is output discipline -> VT state -> native byte connection; no path acquires
+the output or terminal association locks under VT state. Native initialization is deferred
+until actual TEXT output, so registering VT nodes does not initialize N_TTY.
+
+TTY owns 4:0/4:1 registration through named KVFS cdev identities. Partial failure
+rolls back the first alias; devfs projects handles, procfs snapshots and sysfs
+subscribes. Registration failure never creates a hardcoded filesystem identity.
+
+seatd 0.9.1 uses PROCESS -> K_OFF -> KD_GRAPHICS on opening a client; it closes
+the fd but keeps process ownership, and restores Unicode/TEXT on cleanup.
+Initialization does not wait for VT signals. Its terminal helpers return errors,
+but seat.c::vt_open ignores those three helper results; success of seatd alone
+would therefore not prove all three ioctls succeeded. Validation must also
+check their actual return values and resulting state. Multi-VT behavior is out
+of scope; current runtime validation results are recorded in PR material.
+
 ## Native Console Input Work
 
 Native consoles with an input IRQ use `ProcessMode::Work` and a prepared

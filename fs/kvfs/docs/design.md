@@ -1,5 +1,18 @@
 # kvfs - 设计文档
 
+## Named character-device registration
+
+`node/device/registration.rs` adds discoverable identities to the existing
+cdev registry. `cdev_add_named` installs dispatch and name/class metadata in
+one transaction; rejection publishes nothing. Duplicate live class/name identities are also rejected. The registry owns names and
+numbers. Snapshot handles retain the exact entry and its retirement bit, so
+reusing a number cannot revive an old identity. Subscribers and snapshots
+are captured under the registry mutex; add/delete invoke callbacks only after
+unlocking. devfs constructs an inode from the returned registration, procfs
+reads the current list, and sysfs subscribes and gates attributes on availability.
+Existing unnamed cdev_add callers and hardware DeviceNode consumers are unchanged.
+
+
 ## 定位
 
 `kvfs` 提供 Linux 风格的 VFS 对象模型，包括 superblock、mount、dentry、inode、

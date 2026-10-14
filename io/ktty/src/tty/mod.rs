@@ -25,6 +25,7 @@ use crate::{
 mod ntty;
 mod pty;
 mod pty_pair;
+mod vt;
 
 pub use ntty::{N_TTY, NTtyDriver, try_handoff_console};
 pub use pty::PtyDriver;
@@ -34,6 +35,7 @@ pub use pty_pair::{
     PtyPair, open_ptmx, pty_allocated_count, pty_limit, pty_slave_inode, pty_slave_numbers,
     register_pty_drivers,
 };
+pub use vt::{VT_CONSOLE, VtConsole, register_fixed_vt_devices};
 
 fn current_tty_ops(file: &mut VfsFileBuilder) -> KResult<Arc<dyn DeviceFileOps>> {
     let term = kprocess::current_user_thread()
@@ -45,6 +47,10 @@ fn current_tty_ops(file: &mut VfsFileBuilder) -> KResult<Arc<dyn DeviceFileOps>>
     let term = term.into_any();
 
     let term = match term.downcast::<NTtyDriver>() {
+        Ok(term) => return Ok(term),
+        Err(term) => term,
+    };
+    let term = match term.downcast::<VtConsole>() {
         Ok(term) => return Ok(term),
         Err(term) => term,
     };
@@ -88,6 +94,7 @@ pub struct Tty<R, W> {
 enum TtyKind {
     Terminal,
     PtyMaster,
+    VirtualConsole,
 }
 
 impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
@@ -294,6 +301,13 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> KResult<usize> {
+        if self.kind == TtyKind::VirtualConsole {
+            return if buf.is_empty() {
+                Ok(0)
+            } else {
+                Err(KError::Io)
+            };
+        }
         block_on(poll_file_io(
             self,
             IoEvents::IN,
@@ -323,10 +337,20 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
     }
 
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> KResult<usize> {
+        if self.kind == TtyKind::VirtualConsole {
+            // Share the producer lock with echo. VtOutput owns processing,
+            // so this discipline bypasses a second newline conversion.
+            return self.output.lock().write(buf);
+        }
         block_on(self.write_output(file.is_nonblocking(), buf))
     }
 
-    fn ioctl(&self, _file: &VfsFile, _cred: &kcred::Cred, cmd: u32, arg: usize) -> KResult<usize> {
+    fn ioctl(&self, _file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> KResult<usize> {
+        if self.kind == TtyKind::VirtualConsole
+            && let Some(result) = vt::ioctl(self, cred, cmd, arg)
+        {
+            return result;
+        }
         use linux_raw_sys::ioctl::*;
         match cmd {
             TCGETS => {
@@ -458,6 +482,10 @@ impl<R: TtyRead, W: TtyWrite> Pollable for Tty<R, W> {
         events.set(IoEvents::OUT, self.output.lock().write_room() != 0);
         if self.writer.is_closed() {
             events |= IoEvents::ERR | IoEvents::HUP;
+        }
+        if self.kind == TtyKind::VirtualConsole {
+            // The text output remains usable, but no VT input source is wired.
+            events |= IoEvents::ERR;
         }
         events
     }

@@ -1,5 +1,14 @@
 # procfs - Design
 
+`/proc/devices` combines hardware topology records with snapshots of named
+KVFS cdev registrations. Virtual tty name/major values come from successful
+registrations, not hardcoded entries. Failed or removed cdevs are absent from
+subsequent snapshots; the existing no-devices fallback is retained when both
+sources are empty. Existing topology rows retain core DeviceRecord IDs; named
+cdevs use a separate `Registered character devices (major:minor)` section with
+explicit major:minor values. These identifier namespaces are not mixed in one
+column. This is a snapshot view, not a held device lifetime.
+
 ## Purpose and Background
 
 `procfs` is a `no_std` virtual filesystem exposing process information, kernel

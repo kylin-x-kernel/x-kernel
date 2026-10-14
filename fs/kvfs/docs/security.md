@@ -1,5 +1,16 @@
 # kvfs - 安全与可靠性分析
 
+## Named cdev identities and projection
+
+Named registration validates class/name path components and rejects overlapping
+ranges or duplicate class/name identities before publishing any identity. Handles expose no unregister authority;
+only the range owner may call cdev_del. Retired snapshots cannot supply backend
+operations or claim availability, even if the number is later reused. Callbacks
+run in sleepable task context outside registry locks, and consumers must
+serialize snapshot installation with their callback handling. No registry lock
+is held across filesystem invalidation or device callbacks.
+
+
 ## Captured Poll Source Boundary
 
 Backends choose the captured wait source; KVFS does not infer identity from

@@ -24,8 +24,13 @@ use kvfs::{
 
 use crate::{DeviceFile, add_device_entry};
 
-/// Linux TTY major; the minor identifies one auxiliary UART.
+/// Linux TTY major; auxiliary UART minors start at ttyS0's Linux ABI number.
 const SERIAL_MAJOR: u32 = 4;
+const SERIAL_MINOR_BASE: u32 = 64;
+
+fn serial_device_id(index: u32) -> DeviceId {
+    DeviceId::new(SERIAL_MAJOR, SERIAL_MINOR_BASE + index)
+}
 
 /// `/dev/serialN` backing for one per-instance UART. Wraps the driver-model
 /// `ClassDevice<CharDeviceImpl>` and adapts its offset-less `CharDevice` API
@@ -100,7 +105,7 @@ pub(crate) fn serial_devices(fs: Arc<SimpleFs>) -> DirMapping {
         }
         let dev = DeviceFile::new_character(
             fs.clone(),
-            DeviceId::new(SERIAL_MAJOR, idx),
+            serial_device_id(idx),
             Arc::new(SerialDev::new(device)),
         );
         add_device_entry(&mut serials, format!("serial{idx}"), dev);
@@ -114,4 +119,27 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         "serial",
         SimpleDir::new_maker(fs.clone(), Arc::new(serial_devices(fs.clone()))),
     );
+}
+
+#[unittest::mod_test]
+mod tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn auxiliary_serial_minors_do_not_overlap_fixed_vts() {
+        let tty0 = DeviceId::new(SERIAL_MAJOR, 0);
+        let tty1 = DeviceId::new(SERIAL_MAJOR, 1);
+        let first_serial = serial_device_id(0);
+
+        assert_eq!(first_serial.minor(), SERIAL_MINOR_BASE);
+        assert!(SERIAL_MINOR_BASE > tty0.minor());
+        assert!(SERIAL_MINOR_BASE > tty1.minor());
+        assert_ne!(first_serial, tty0);
+        assert_ne!(first_serial, tty1);
+        // The production mapping is monotonic, so every later serialN minor
+        // remains above both fixed VT minors as well.
+        assert!(serial_device_id(1).minor() > tty1.minor());
+    }
 }

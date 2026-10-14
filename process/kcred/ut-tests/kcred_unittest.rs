@@ -54,6 +54,18 @@ fn test_credentials_clone_is_deep_copy() {
 }
 
 #[def_test]
+fn tty_configuration_authority_uses_current_effective_uid() {
+    let mut cred = Cred::root();
+    assert!(cred.has_sys_tty_config());
+    cred.set_resuid_unchecked(None, Some(1000), None);
+    assert!(!cred.has_sys_tty_config());
+    cred.set_resuid_unchecked(Some(1000), Some(0), Some(1000));
+    cred.set_fsuid(1000);
+    assert!(cred.has_sys_tty_config());
+    assert!(!Cred::new(1000, 0).has_sys_tty_config());
+}
+
+#[def_test]
 fn test_credentials_effective_ids_update_filesystem_ids() {
     let mut credentials = Cred::new(1000, 100);
 

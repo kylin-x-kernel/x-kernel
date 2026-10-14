@@ -1,5 +1,16 @@
 # devfs — Security and reliability
 
+## Named character-device projection
+
+Fixed VT nodes are materialized from KVFS registration handles; retired handles
+return NoSuchDevice and are not registered a second time. TTY registers both
+aliases or rolls the first back on failure. Node permissions do not authorize
+VT configuration: ktty checks the current controlling-terminal identity and
+subjective credential at ioctl time. Ordinary character construction continues
+to propagate registration conflicts; this change does not fabricate hardware
+DeviceObjects for virtual terminals.
+
+
 ## Analysis scope
 
 This analysis covers the entire crate: `src/lib.rs`, `src/device_file.rs`,

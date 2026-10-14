@@ -42,7 +42,7 @@ crate; its two boolean-style methods only check the lock bit.
 `Cred::has_sys_admin` is the separate CAP_SYS_ADMIN decision and currently also
 uses effective UID zero; real, saved and filesystem IDs cannot grant it.
 Consumers supply the current subjective snapshot. Capability sets and namespace
-capability rules are not implemented; the two predicates must evolve independently. All policy checks below
+capability rules are not implemented; these predicates must evolve independently. All policy checks below
 use the pre-transition state. Checked setters returning an error do not partially
 modify fields; publishing or discarding a prepared object remains the caller's job.
 
@@ -151,3 +151,9 @@ Review changes against these concrete conditions:
 - Snapshot consistency and commit authorization stay with the owning task layer.
 - Namespace identities are not presented as mappings or capability authority.
 - Singleton use respects initialization, allocation and interrupt constraints.
+
+`Cred::has_sys_tty_config` is the current-credential VT authorization predicate.
+It is an explicit EUID-0 approximation, not an implemented Linux capability set;
+non-root holders of an effective CAP_SYS_TTY_CONFIG are not representable yet.
+Consumers must pass the current subjective credential and perform terminal-owner
+checks separately.

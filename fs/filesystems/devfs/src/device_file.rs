@@ -8,9 +8,9 @@ use alloc::{string::String, sync::Arc};
 
 use inherit_methods_macro::inherit_methods;
 use kvfs::{
-    Dentry, DeviceFileOps, DeviceId, DirMapping, InodeOperations, Metadata, MetadataUpdate,
-    NodeFlags, NodePermission, NodeType, SimpleDirLookup, SimpleFs, SimpleFsNode, VfsInode,
-    VfsInodeInit, VfsResult, cdev_add,
+    CharacterDeviceRegistration, Dentry, DeviceFileOps, DeviceId, DirMapping, InodeOperations,
+    Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType, SimpleDirLookup, SimpleFs,
+    SimpleFsNode, VfsError, VfsInode, VfsInodeInit, VfsResult, cdev_add,
 };
 
 /// A VFS node representing a character or block special file.
@@ -24,6 +24,22 @@ pub struct DeviceFile {
 }
 
 impl DeviceFile {
+    /// Projects an existing named cdev; it does not register its number again.
+    ///
+    /// Returns `NoSuchDevice` if that exact registration has been retired.
+    pub fn from_registration(
+        fs: Arc<SimpleFs>,
+        registration: &CharacterDeviceRegistration,
+    ) -> VfsResult<Arc<Self>> {
+        let operations = registration.operations().ok_or(VfsError::NoSuchDevice)?;
+        let node = SimpleFsNode::new(fs, NodeType::CharacterDevice, NodePermission::default());
+        node.set_rdev(registration.device_id());
+        Ok(Arc::new(Self {
+            node,
+            character_operations: Some(operations),
+        }))
+    }
+
     /// Creates a character-device node and installs its operations table.
     ///
     /// Returns the registry error without publishing a node if the number is

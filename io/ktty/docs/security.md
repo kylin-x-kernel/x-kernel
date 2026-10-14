@@ -16,6 +16,28 @@ kernel objects in `kprocess`.
 
 ## External Boundaries And Attack Surface
 
+The fixed VT owns a separate terminal and real session binding. Configuration
+checks use current ioctl Cred and exact controlling-terminal object equality,
+with kcred's documented EUID 0 approximation for CAP_SYS_TTY_CONFIG. O_NOCTTY
+and node DAC alone do not grant configuration authority.
+
+PROCESS captures a weak actual Process identity before commit; fd close does
+not clear it. Exited/disappeared controllers reset mode/display/keyboard on
+subsequent use, so no reused PID receives ownership. The single-VT boundary
+creates no fake release/acquire signals: PROCESS ACKACQ is accepted when no
+switch is pending, release responses and unsupported VT targets are rejected.
+
+Program writes and echo share the output-line-discipline mutex, acquired
+before the VT mode-state mutex. Backend-owned processing keeps this path in
+bypass without skipping zero-progress normalization. GRAPHICS suppresses this
+VT's output and TEXT forwards to the native byte connection. No user copy
+occurs under this mutex. Native serial terminal/session/input remain separate.
+Keyboard Unicode/off are declared policy with no connected VT keycode consumer;
+other translation modes are rejected. There is no claim of GPU rendering,
+hardware blanking or complete VT keyboard translation. Registry-owned named
+identities are projected by devfs/procfs/sysfs, with failed/retired registrations
+excluded as described in KVFS's registration contract.
+
 - `TC*`/`TIOC*` ioctls carry user addresses and must be copied through
   the `osvm` user-memory access interface.
 - The PGID passed to `TIOCSPGRP` may be invalid, exited, or belong to

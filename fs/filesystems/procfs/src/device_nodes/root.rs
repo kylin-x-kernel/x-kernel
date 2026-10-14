@@ -39,6 +39,7 @@ impl SeqIterator for DevicesIter {
 
         let mut block = Vec::new();
         let mut char_dev = Vec::new();
+        let mut registered_characters = Vec::new();
         let mut net = Vec::new();
         let mut display = Vec::new();
         let mut input = Vec::new();
@@ -71,6 +72,16 @@ impl SeqIterator for DevicesIter {
             }
         }
 
+        for registration in kvfs::registered_character_devices() {
+            registered_characters.push(format!(
+                "  {}:{} {} [{}]\n",
+                registration.device_id().major(),
+                registration.device_id().minor(),
+                registration.name(),
+                "active",
+            ));
+        }
+
         let s = &mut self.text;
         if !block.is_empty() {
             s.push_str("Block devices:\n");
@@ -82,6 +93,14 @@ impl SeqIterator for DevicesIter {
             s.push_str("Character devices:\n");
             for l in &char_dev {
                 s.push_str(l);
+            }
+        }
+        if !registered_characters.is_empty() {
+            // Hardware rows retain their core DeviceRecord::id column. dev_t
+            // belongs to another namespace, so give named cdevs a labeled view.
+            s.push_str("Registered character devices (major:minor):\n");
+            for line in &registered_characters {
+                s.push_str(line);
             }
         }
         if !net.is_empty() {
@@ -108,7 +127,6 @@ impl SeqIterator for DevicesIter {
                 s.push_str(l);
             }
         }
-
         if s.is_empty() {
             s.push_str("No devices registered.\n");
         }
@@ -433,4 +451,39 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         );
         SimpleDir::new_maker(fs.clone(), Arc::new(bus))
     });
+}
+
+#[unittest::mod_test]
+mod named_device_tests {
+    use unittest::def_test;
+
+    use super::*;
+
+    #[def_test]
+    fn named_cdev_output_follows_successful_registration() {
+        struct Backend;
+        impl kvfs::DeviceFileOps for Backend {}
+        let device = kvfs::DeviceId::new(246, 900002);
+        kvfs::cdev_add_named(
+            device,
+            String::from("proc_projection_test"),
+            String::from("test"),
+            Arc::new(Backend),
+        )
+        .unwrap();
+        let mut iter = DevicesIter::new();
+        iter.rewind();
+        assert!(iter.text.contains("proc_projection_test [active]"));
+        assert!(
+            iter.text
+                .contains("Registered character devices (major:minor):\n")
+        );
+        assert!(
+            iter.text
+                .contains("246:900002 proc_projection_test [active]")
+        );
+        kvfs::cdev_del(device, 1).unwrap();
+        iter.rewind();
+        assert!(!iter.text.contains("proc_projection_test"));
+    }
 }

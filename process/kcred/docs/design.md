@@ -181,3 +181,8 @@ the array is freed when the final owning credential releases it. Dropping a
 namespace releases its parent reference. The two singleton statics retain their
 initial `Arc`s for the kernel lifetime. `Once` poisoning after an unwinding
 initializer is not recovered here. No credential or group data is securely erased.
+
+`Cred::has_sys_tty_config` separately names VT configuration authority and uses
+current effective UID 0 until capability sets exist, consistent with the existing
+has_sys_admin model. TTY combines it with controlling-terminal object identity;
+real/saved/filesystem UID zero and file-open credentials do not grant authority.

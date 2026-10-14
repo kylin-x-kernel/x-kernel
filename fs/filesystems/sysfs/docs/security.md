@@ -1,5 +1,13 @@
 # sysfs — Security and reliability
 
+Named character identity attributes retain the cdev registration lifetime,
+not merely copied bytes. Retirement marks snapshots unavailable before the
+registry notifies sysfs, so held attribute reads return NoSuchDevice after
+removal. Registry snapshots and subscribers are captured under one lock;
+callbacks run outside it and serialize through sysfs's event/projection locks.
+Failed registrations publish no record. Names/classes are validated path
+components by the cdev registration API; virtual uevent attributes are read-only.
+
 ## Analysis scope
 
 This analysis covers the entire crate, which currently consists of
