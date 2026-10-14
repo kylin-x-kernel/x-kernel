@@ -221,7 +221,7 @@ impl UnixTransportOps for StreamTransport {
         ))
     }
 
-    fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {
+    fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {
         if options.to.is_some() {
             return Err(KError::InvalidInput);
         }
@@ -269,6 +269,34 @@ impl UnixTransportOps for StreamTransport {
                     {
                         return finish_send_on_error(total, KError::BrokenPipe);
                     }
+                    // A zero-byte send carries no stream position, so its
+                    // ancillary records would never become reachable; as with
+                    // Linux stream sendmsg (no skb is queued and the cmsg fds
+                    // are released), they are dropped and Ok(0) returned.
+                    if count > 0 {
+                        // Attach ancillary records BEFORE publishing the
+                        // bytes: a concurrent receiver cannot consume
+                        // unpublished bytes, so enqueue-then-publish makes a
+                        // record visible no later than its first byte.
+                        // Publishing first would let an SMP receiver consume
+                        // the range before the record is enqueued, deferring
+                        // or losing the fd.
+                        let mut anc = chan.tx_anc.lock();
+                        let start = anc.sent_total;
+                        anc.sent_total += count as u64;
+                        if !options.ancillary.is_empty() {
+                            // Record the fd-bearing segment actually
+                            // committed by this send: [start, start+count).
+                            // Reads stop at `end` (the SCM_RIGHTS barrier)
+                            // even when later plain-data sends leave no
+                            // record boundary to infer it from.
+                            anc.records.push_back((
+                                start,
+                                start + count as u64,
+                                core::mem::take(&mut options.ancillary),
+                            ));
+                        }
+                    }
                     // SAFETY: `count` is the sum of bytes written into the vacant
                     // slices above, so it never exceeds the producer capacity that
                     // was exposed while the channel lock excluded other producers.
@@ -287,7 +315,7 @@ impl UnixTransportOps for StreamTransport {
             })
     }
 
-    fn recv(&self, mut dst: impl Write + IoBufMut, options: RecvOptions) -> KResult<usize> {
+    fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
         let is_zero_length = dst.remaining_mut() == 0;
         self.options
             .recv_poller_with_nonblocking(self, options.flags.nonblocking(), || {
@@ -300,8 +328,32 @@ impl UnixTransportOps for StreamTransport {
                 if is_zero_length && occupied_before > 0 {
                     return Ok(0);
                 }
+                // SCM_RIGHTS barrier (Linux): this read stops at the end
+                // of the first unconsumed fd-bearing segment — the record's
+                // own committed range [start, end) — leaving anything
+                // beyond it (plain data and later records alike) for the
+                // next recvmsg. Without queued records the read is
+                // unbounded. Cap the read at that end: Linux ends the read
+                // after the fd-carrying sendmsg, so plain data following it
+                // must not be consumed here even when later sends leave no
+                // record boundary.
+                let read_cap = {
+                    let anc = chan.rx_anc.lock();
+                    match anc.records.front() {
+                        Some((_, end, _)) => (*end)
+                            .saturating_sub(anc.recv_total)
+                            .min(occupied_before as u64),
+                        _ => occupied_before as u64,
+                    }
+                };
                 let count = {
                     let (left, right) = chan.rx.as_slices();
+                    let cap = (read_cap as usize).min(occupied_before);
+                    let (left, right) = if left.len() >= cap {
+                        (&left[..cap], &left[..0])
+                    } else {
+                        (left, &right[..cap - left.len()])
+                    };
                     let mut count = dst.write(left)?;
                     if count >= left.len() {
                         count += dst.write(right)?;
@@ -318,6 +370,33 @@ impl UnixTransportOps for StreamTransport {
                         && channel::is_stream_writable(occupied_after)
                     {
                         chan.peer_endpoint.polls.writable.wake();
+                    }
+                    // Pop the (at most one, barrier-capped) reached record
+                    // under the spin guard — deque pops only. Two things
+                    // stay outside the guard, for different reasons: the
+                    // sink merge can allocate for a large fd list (the
+                    // peer's send spins on this lock while the no-preempt
+                    // section runs), and the disposal of unsunk records
+                    // genuinely blocks (VfsFile::release takes a
+                    // ksync::Mutex on pipe close).
+                    // The barrier capped the read at the first fd-bearing
+                    // segment, so at most one record is reached: its fds go
+                    // to the sink (or the record is disposed) together with
+                    // the segment this recvmsg consumed.
+                    let popped = {
+                        let mut anc = chan.rx_anc.lock();
+                        anc.recv_total += count as u64;
+                        anc.pop_reached()
+                    };
+                    match options.ancillary.as_mut() {
+                        // The record keeps the sender cmsg boundary: it is
+                        // installed as one SCM_RIGHTS cmsg of its own.
+                        Some(sink) => {
+                            if let Some((_, _, data)) = popped {
+                                sink.extend(data);
+                            }
+                        }
+                        None => drop(popped),
                     }
                     return Ok(count);
                 }
@@ -494,6 +573,7 @@ impl Drop for StreamTransport {
 #[unittest::mod_test]
 mod tests {
     use alloc::{
+        boxed::Box,
         sync::{Arc, Weak},
         task::Wake,
         vec,
@@ -518,7 +598,7 @@ mod tests {
         channel::{STREAM_BUF_BYTES, STREAM_WRITABLE_MAX_OCCUPIED_BYTES},
     };
     use crate::{
-        ConnectOptions, RecvFlags, RecvOptions, SendFlags, SendOptions, Shutdown,
+        AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendFlags, SendOptions, Shutdown,
         options::{Configurable, GetSocketOption, SetSocketOption},
         unix::{BindEntry, UnixAddr},
     };
@@ -1278,5 +1358,295 @@ mod tests {
 
         listener.endpoint.polls.readable.wake();
         assert_eq!(listener_read.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[def_test]
+    fn unix_stream_delivers_ancillary_once_with_sink() {
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+        let send_options = SendOptions {
+            ancillary: vec![Box::new(7_u32) as AncillaryData, Box::new(8_u32)],
+            ..SendOptions::default()
+        };
+        sender.send(&b"xy"[..], send_options).unwrap();
+
+        let mut sink: Vec<AncillaryData> = Vec::new();
+        let mut buf = [0_u8; 2];
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(buf, *b"xy");
+        // every fd of the consumed range arrives exactly once
+        assert_eq!(sink.len(), 2);
+        assert_eq!(sink[0].downcast_ref::<u32>(), Some(&7));
+        assert_eq!(sink[1].downcast_ref::<u32>(), Some(&8));
+
+        // no duplicate delivery on the next consume
+        let mut sink2: Vec<AncillaryData> = Vec::new();
+        let r = receiver.recv(
+            &mut buf[..],
+            RecvOptions {
+                ancillary: Some(&mut sink2),
+                ..RecvOptions::default()
+            },
+        );
+        assert!(matches!(r, Err(KError::WouldBlock)));
+        assert!(sink2.is_empty());
+    }
+
+    #[def_test]
+    fn unix_stream_drops_unsunk_ancillary_without_late_delivery() {
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+        let send_options = SendOptions {
+            ancillary: vec![Box::new(9_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"a"[..], send_options).unwrap();
+
+        let mut buf = [0_u8; 1];
+        let n = receiver.recv(&mut buf[..], RecvOptions::default()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], b'a');
+
+        // a later sink-consuming recv must not see the dropped record
+        let send_options = SendOptions {
+            ancillary: vec![Box::new(10_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"b"[..], send_options).unwrap();
+        let mut sink: Vec<AncillaryData> = Vec::new();
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], b'b');
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].downcast_ref::<u32>(), Some(&10));
+    }
+
+    #[def_test]
+    fn unix_stream_receiver_close_releases_unsunk_records() {
+        // Drop-observable ancillary payload: if the queued record survives
+        // the receiver's close (the pre-take_all behaviour, or a reference
+        // cycle pinning the file), the flag stays unset.
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        let flag = Arc::new(AtomicBool::new(false));
+        let send_options = SendOptions {
+            ancillary: vec![Box::new(DropFlag(flag.clone())) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"a"[..], send_options).unwrap();
+
+        drop(receiver);
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "queued record must be released when the receiver closes"
+        );
+    }
+
+    #[def_test]
+    fn unix_stream_recv_stops_at_ancillary_barrier() {
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+
+        // two sendmsg boundaries, each carrying its own record
+        let so1 = SendOptions {
+            ancillary: vec![Box::new(1_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"a"[..], so1).unwrap();
+        let so2 = SendOptions {
+            ancillary: vec![Box::new(2_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"bb"[..], so2).unwrap();
+
+        // one large recv: Linux stops this read at the first fd segment
+        let mut sink: Vec<AncillaryData> = Vec::new();
+        let mut buf = [0_u8; 16];
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], b'a');
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].downcast_ref::<u32>(), Some(&1));
+
+        // the second segment and its record wait for the next recv
+        let mut sink2: Vec<AncillaryData> = Vec::new();
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink2),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(&buf[..2], b"bb");
+        assert_eq!(sink2.len(), 1);
+        assert_eq!(sink2[0].downcast_ref::<u32>(), Some(&2));
+    }
+
+    #[def_test]
+    fn unix_stream_wrapped_recv_has_no_duplicate_bytes() {
+        // Regression for the duplicated second-slice write: fill the ring
+        // so the readable region wraps across the buffer end, then drain
+        // it with a buffer larger than the occupied bytes. Pre-fix, the
+        // tail slice was written twice (duplicate bytes, over-advanced
+        // cursor); this test fails on that behaviour.
+        const RING: usize = STREAM_BUF_BYTES;
+        assert_eq!(RING, 65_536);
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        let sent: Vec<u8> = (0..125_536_u32).map(|i| (i % 251) as u8).collect();
+
+        sender
+            .send(&sent[..65_000], SendOptions::default())
+            .unwrap();
+        let mut buf = vec![0_u8; 60_000];
+        let n = receiver.recv(&mut buf[..], RecvOptions::default()).unwrap();
+        assert_eq!(n, 60_000);
+        assert_eq!(&buf[..60_000], &sent[..60_000]);
+
+        // free space is now 60_536: this send wraps the write index past
+        // the buffer end
+        let n = sender
+            .send(&sent[65_000..], SendOptions::default())
+            .unwrap();
+        assert_eq!(n, 60_536);
+
+        let mut buf = vec![0_u8; 70_000];
+        let n = receiver.recv(&mut buf[..], RecvOptions::default()).unwrap();
+        assert_eq!(n, 65_536);
+        // the wrapped tail appears exactly once
+        assert_eq!(&buf[..5_536], &sent[60_000..65_536]);
+        let cont: Vec<u8> = (65_536_u32..125_536).map(|i| (i % 251) as u8).collect();
+        assert_eq!(&buf[5_536..65_536], cont.as_slice());
+    }
+
+    #[def_test]
+    fn unix_stream_barrier_stops_before_plain_data_between_records() {
+        // Review case: A+fd1 -> plain MID -> B+fd2. Linux returns "A"+fd1
+        // first (the fd segment ends with its own sendmsg; the plain MID
+        // in between does NOT extend it), then "MIDB"+fd2.
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+
+        let so1 = SendOptions {
+            ancillary: vec![Box::new(1_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"A"[..], so1).unwrap();
+        sender.send(&b"MID"[..], SendOptions::default()).unwrap();
+        let so2 = SendOptions {
+            ancillary: vec![Box::new(2_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"B"[..], so2).unwrap();
+
+        let mut sink: Vec<AncillaryData> = Vec::new();
+        let mut buf = [0_u8; 16];
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(buf[0], b'A');
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink[0].downcast_ref::<u32>(), Some(&1));
+
+        // second recv: plain MID followed by B with its fd
+        let mut sink2: Vec<AncillaryData> = Vec::new();
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink2),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&buf[..4], b"MIDB");
+        assert_eq!(sink2.len(), 1);
+        assert_eq!(sink2[0].downcast_ref::<u32>(), Some(&2));
+    }
+
+    #[def_test]
+    fn unix_stream_barrier_covers_fd_segment_followed_by_plain_data() {
+        // Review case: plain PRE -> A+fd1 -> plain POST. Linux returns
+        // "PREA"+fd1 first (prefix plus the fd segment), leaving "POST".
+        let (sender, receiver) = StreamTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::NonBlocking(&true))
+            .unwrap();
+
+        sender.send(&b"PRE"[..], SendOptions::default()).unwrap();
+        let so = SendOptions {
+            ancillary: vec![Box::new(7_u32) as AncillaryData],
+            ..SendOptions::default()
+        };
+        sender.send(&b"A"[..], so).unwrap();
+        sender.send(&b"POST"[..], SendOptions::default()).unwrap();
+
+        let mut sink: Vec<AncillaryData> = Vec::new();
+        let mut buf = [0_u8; 16];
+        let n = receiver
+            .recv(
+                &mut buf[..],
+                RecvOptions {
+                    ancillary: Some(&mut sink),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&buf[..4], b"PREA");
+        assert_eq!(sink.len(), 1);
+
+        let n = receiver.recv(&mut buf[..], RecvOptions::default()).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(&buf[..4], b"POST");
     }
 }
