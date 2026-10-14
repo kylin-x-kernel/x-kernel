@@ -900,6 +900,25 @@ credential。`child_names()` 可传播生命周期或后端错误，使旧目录
 inode EOF。单次读取的已准备末端只用于避免对失败预留重复发起预读，不保证缓存驻留。
 只有新发布的预留页携带窗口标记；在 folio 锁内完成标记消费与窗口决策，释放 folio 和策略锁后执行后续窗口。
 
+### Advisory 文件锁
+
+`locks.rs` 在 `VfsInode` 上按需建立 `FileLockContext`，对应 Linux `i_flctx`。
+一个 mutex 保护 POSIX/OFD 区间集合和独立的 flock 集合；公开的 `FileLock`
+仅表达不可变请求和查询结果，内部 `LockNode` 保存共享节点。`LockList` 与不可克隆的
+`OwnedLock` 交接安装区间的唯一所有权，只有后者的独占借用能改区间；`Waiter`
+区间终生不可变，`Blocker` 仅提供等待关系身份。通知链表由 `WakeQueue` 私有持有；链表统一使用
+`intrusive-collections::LinkedList` 与同一个节点内嵌链域。
+这些薄类型复用原有 Arc/链表，不增加节点字段、锁或堆分配，并阻止共享句柄绕过所有权
+直接入链。相同 owner 的区间合并、切分、替换；冲突请求
+沿具体 blocker 按冲突形成等待树，授锁时转移后继，取消时直接解链并唤醒下一层。
+已安装区间由 inode 锁保护，首个同类型合并对象原位扩展并保留身份。
+通知复用请求链表节点和已注册 waker，关闭清理不分配；通知出队前请求不得
+重用节点。全局 owner 索引按
+实际 blocker 的 POSIX 类型登记（包括 OFD 请求），仅 POSIX 请求执行沿树根的
+有界 owner 死锁检测，不复制 inode 锁集合。传统 owner 是 fd 表身份，OFD/flock owner
+是打开文件身份；锁记录不强持有这两类 owner。`FileOperations` 分派查询和
+加锁；描述符关闭即使 flush 失败也清理 POSIX 锁，最终文件释放清理 OFD/flock。
+
 ## Drop / 资源释放
 
 VFS 对象通过 `Arc`/`Weak` 管理生命周期。unlink、rename replacement 和 forget 会从

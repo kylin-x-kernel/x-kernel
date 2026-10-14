@@ -289,6 +289,39 @@ pub trait FileOperations: Send + Sync + 'static {
         None
     }
 
+    /// Queries a record-lock conflict in sleepable task context.
+    fn test_lock(
+        &self,
+        file: &VfsFile,
+        request: &crate::FileLock,
+    ) -> VfsResult<Option<crate::FileLock>> {
+        Ok(file
+            .inode()
+            .existing_file_locks()
+            .and_then(|context| context.test(request)))
+    }
+
+    /// Applies a record lock, optionally waiting interruptibly for conflicts.
+    /// Callers must release descriptor-table locks before entering this method.
+    fn lock(&self, file: &VfsFile, request: &crate::FileLock, is_blocking: bool) -> VfsResult<()> {
+        if request.kind() == crate::FileLockType::Unlock
+            && file.inode().existing_file_locks().is_none()
+        {
+            return Ok(());
+        }
+        file.inode().file_locks().apply(request, is_blocking)
+    }
+
+    /// Applies a BSD lock in the inode's separate whole-file lock domain.
+    fn flock(&self, file: &VfsFile, request: &crate::FileLock, is_blocking: bool) -> VfsResult<()> {
+        if request.kind() == crate::FileLockType::Unlock
+            && file.inode().existing_file_locks().is_none()
+        {
+            return Ok(());
+        }
+        file.inode().file_locks().apply(request, is_blocking)
+    }
+
     /// Flushes an open file description.
     fn flush(&self, _file: &VfsFile) -> VfsResult<()> {
         Ok(())
@@ -1102,9 +1135,41 @@ impl VfsFile {
         self.private_data.lock().get::<T>()
     }
 
-    /// Closes this file reference.
-    pub fn close_file(self: Arc<Self>) -> VfsResult<()> {
-        self.flush()
+    /// Closes a descriptor reference for the given files owner. POSIX locks
+    /// are removed even when flush fails; other file references may remain.
+    pub fn close_file(self: Arc<Self>, owner: crate::FileLockOwner) -> VfsResult<()> {
+        let result = self.flush();
+        if !self.is_path() {
+            self.remove_posix_locks(owner);
+        }
+        result
+    }
+
+    /// Queries a record-lock conflict. The request already contains kernel
+    /// offsets and owner identity; no user memory is accessed here.
+    pub fn test_lock(&self, request: &crate::FileLock) -> VfsResult<Option<crate::FileLock>> {
+        self.operations().test_lock(self, request)
+    }
+
+    /// Applies an advisory lock in sleepable task context, with optional
+    /// interruptible waiting. No fd-table lock may be held across this call.
+    pub fn set_lock(&self, request: &crate::FileLock, is_blocking: bool) -> VfsResult<()> {
+        if matches!(request.owner(), crate::FileLockOwner::Flock(_)) {
+            self.operations().flock(self, request, is_blocking)
+        } else {
+            self.operations().lock(self, request, is_blocking)
+        }
+    }
+
+    /// Removes all record locks for an owner. Descriptor close supplies the
+    /// files owner; final release supplies the OFD owner. Cleanup cannot fail
+    /// to the caller and does not allocate in the local lock implementation.
+    pub fn remove_posix_locks(&self, owner: crate::FileLockOwner) {
+        // Close has no lock-error channel and must release even after a failed
+        // filesystem flush. Dispatch through the same operation as acquisition.
+        let _ = self
+            .operations()
+            .lock(self, &crate::FileLock::unlock(owner), false);
     }
 
     /// Flushes this open file.
@@ -1174,6 +1239,12 @@ impl VfsFile {
 
 impl Drop for VfsFile {
     fn drop(&mut self) {
+        self.remove_posix_locks(crate::FileLockOwner::ofd(self));
+        let _ = self.operations().flock(
+            self,
+            &crate::FileLock::unlock(crate::FileLockOwner::flock(self)),
+            false,
+        );
         let old_mode = self.mode.fetch_and(!FMode::OPENED.bits(), Ordering::AcqRel);
         let old_mode = FMode::from_bits_truncate(old_mode);
         let release_result = if old_mode.contains(FMode::OPENED) {

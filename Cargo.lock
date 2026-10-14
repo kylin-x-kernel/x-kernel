@@ -3198,6 +3198,7 @@ dependencies = [
  "block",
  "hashbrown 0.15.5",
  "inherit-methods-macro",
+ "intrusive-collections",
  "iov_iter",
  "kcred",
  "kdevice",

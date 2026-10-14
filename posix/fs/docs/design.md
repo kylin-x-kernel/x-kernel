@@ -23,8 +23,7 @@ POSIX 文件系统 syscall 同时接触用户指针、路径字符串、进程�
 
 当前实现以兼容常用 Linux 用户态程序为目标，
 优先覆盖常用路径和明确拒绝尚不支持的模式。
-部分接口采用兼容占位行为，例如部分 `fcntl` 锁操作和 `flock`，
-这些限制记录在本文的设计决策和已知限制中。
+文件锁通过 KVFS 的 inode 锁上下文实现；尚未覆盖的能力记录在已知限制中。
 
 ## 范围
 
@@ -438,13 +437,18 @@ namespace detach 之前校验。因此不可解析的 target 仍优先返回查�
 尚未实现 capability 与 user namespace 授权；`MntNamespace` 的 `mount_new`、`attach_bind`、
 `remount`、`reconfigure_mount` 和 `detach` 保留显式调用契约，授权由调用方负责。
 
-### 部分兼容占位
+### 文件锁
 
-当前 `F_SETLK`、`F_SETLKW`、`F_OFD_SETLK` 和 `F_OFD_SETLKW` 返回成功，
-`F_GETLK`/`F_OFD_GETLK` 写回 `F_UNLCK`，
-`sys_flock` 返回成功但未实现真实锁。
-这有助于部分用户态程序继续运行，
-但不是完整的 POSIX/ Linux 文件锁语义。
+`fcntl` 将用户区间转换为绝对偏移，校验 fd、打开模式和 OFD 的零 `l_pid`，
+再调用 KVFS 的记录锁操作。POSIX owner 是共享 fd 表身份，OFD owner 是
+`VfsFile` 身份；`F_GETLK` 返回实际冲突。
+传统 `F_GETLK` 在区间转换前拒绝 `F_UNLCK`；`F_OFD_GETLK` 允许用它查询自身锁。
+`F_SETLKW` 可中断等待，信号按 `ERESTARTSYS` 处理；POSIX 加锁成功后复查 fd，
+处理并发关闭/替换。当前 main 的 fd 表绑定仍属于进程；等待期间绑定被替换时，
+清除旧 owner 的迟到加锁，并以原绝对区间在当前表上重试。此 PR 不改变线程文件表、
+exec 或任务身份模型。
+`flock` 使用独立的整文件锁集合。关闭任何指向同一 inode 的 fd 都释放该
+files owner 的 POSIX 锁；OFD/flock 在打开文件最终释放时清理。
 
 ### fcntl minimum-based duplication
 
@@ -518,7 +522,7 @@ KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
 
 1. 凭据 DAC 尚无 capability、LSM、ACL、user namespace ID 映射或 idmapped mount。
 2. FAT 等不能表达 Unix UID/GID 的后端无法完整持久化创建者身份。
-3. `fcntl` 文件锁和 `flock` 目前是兼容占位，不提供真实互斥。
+3. 文件锁提供本地 advisory 语义，不实现 lease 或网络文件系统锁协议。
 4. `copy_file_range` 没有零拷贝路径；跨超级块配对只能由目标端的原生拷贝原语
    服务，否则要求同一超级块。
 5. `mount` 尚不支持 move、recursive bind、shared/slave/unbindable propagation，以及

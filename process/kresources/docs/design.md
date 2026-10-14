@@ -59,7 +59,7 @@ Repeated exit is harmless. Replacement and unsharing reject `None` with
   Ordinary insertion and minimum-based duplication share the table's lowest-free
   slot allocator; both bound the allocated number rather than occupied count.
 - Close, range close, close-on-exec, and fixed-slot replacement remove entries
-  under the table lock, then run descriptor close outside both table and owner
+  under the table lock together with its POSIX lock owner, then run descriptor close outside both table and owner
   locks. Single close returns its flush error; batch cleanup ignores each error
   and continues.
 - `unshare_fd_table` keeps a sole-owned table or clones a shared table while
@@ -76,3 +76,9 @@ closes its remaining entries. No custom `ProcessResources::drop` is needed.
 Limits are stored independently from descriptor ownership so they remain
 queryable after files are detached. This is storage and local policy, not an
 enforcement engine for every Linux resource limit.
+
+File-lock cleanup pins the selected table through each close callback so its
+address-based POSIX owner cannot be reused during cleanup. Binding selection and
+slot removal share the outer owner read guard. Blocking record-lock callers must
+release that guard before waiting and revalidate the current binding with
+`with_fd_table` before reporting success.

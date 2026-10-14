@@ -1159,6 +1159,7 @@ pub struct VfsInode {
     private_data: Arc<dyn Any + Send + Sync>,
     mapping: Arc<AddressSpace>,
     special_state: InodeSpecialState,
+    file_locks: klazy::Once<alloc::boxed::Box<crate::locks::FileLockContext>>,
 }
 
 /// Weak reference to a VFS inode identity.
@@ -1317,6 +1318,15 @@ struct InodeParts {
 }
 
 impl VfsInode {
+    pub(crate) fn file_locks(&self) -> &crate::locks::FileLockContext {
+        self.file_locks
+            .call_once(|| alloc::boxed::Box::new(crate::locks::FileLockContext::new()))
+    }
+
+    pub(crate) fn existing_file_locks(&self) -> Option<&crate::locks::FileLockContext> {
+        self.file_locks.get().map(|context| &**context)
+    }
+
     /// Constructs an inode whose filesystem operation object also stores its
     /// generic attributes.
     ///
@@ -1638,6 +1648,7 @@ impl VfsInode {
             private_data,
             mapping: AddressSpace::new(this.clone(), address_space_operations),
             special_state: InodeSpecialState::new(),
+            file_locks: klazy::Once::new(),
         })
     }
 

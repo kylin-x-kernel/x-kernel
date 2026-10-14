@@ -82,8 +82,10 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 
 ## unsafe 代码清单
 
-当前 `fs/kvfs/src` 没有 `unsafe` block。namespace model 由 safe Rust lock、
-`Arc` ownership 和 operation trait 的 `Send + Sync` 约束维护内存安全。
+文件锁共享节点的 `unsafe` 封装在私有 `locks/node.rs`：区间访问依赖唯一所有权，
+等待关系与取消解链由全局等待锁保护。侵入式链表使用 `intrusive-collections` 的
+typed adapter 和安全的 `clone_pointer()`，不手工调整 Arc 引用计数。其余 namespace
+model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内存安全。
 
 ## 内存安全不变量
 
@@ -369,6 +371,18 @@ KVFS 返回映射后的错误，不伪造成功字节数，也不重试可能已
 location 保持不变，因为 cache commit 只在 callback 成功后执行；rename 所需 key 和 cache
 slot 在 callback 前已经存在，commit 只交换 location 和原位替换 slot，不执行可能失败的
 分配。持久化操作的 rollback 与 logging 仍由后端负责。
+
+文件锁采用 inode context → blocked owner index 的锁序；睡眠与唤醒均在
+释放这两层锁后进行。UnsafeCell 与侵入式节点仅存在于私有 `locks/node.rs`；
+等待关系的修改及全局 guard 不向算法层暴露。安装区间由 `LockList` 独占，
+借用链表只能取得值副本；摘出后由不可克隆的 `OwnedLock` 独占修改，再移交回链表。
+共享 `Blocker` 既不能读取区间，也不能取得侵入式节点；`Waiter` 不能转换为安装所有者。
+这使区间安全不依赖任意同类型 inode guard 参数。公开 `FileLock` 不含共享可变状态。
+已摘出的安装锁仅在 Arc 独占检查成功时通过 get_mut 检查空链表，避免无等待时取全局锁；
+父关系用 Weak；inode 算法仍持有其 mutex 完成更新，死锁追踪不读取安装区间。
+信号取消直接解链并释放后继；待通知请求及注册由原节点移交，出队才允许重试，
+waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清理先于 owner 身份失效。
+锁只约束协作调用者；未加 advisory 锁的文件读写不受其阻止。
 
 ## 已知限制
 

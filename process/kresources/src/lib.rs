@@ -130,7 +130,14 @@ impl ProcessResources {
         self.fd_table.read().clone().ok_or(KError::NoSuchProcess)
     }
 
-    fn with_fd_table<R>(
+    /// Accesses the current table while preventing replacement or detachment.
+    ///
+    /// The callback may lock the table, but must not replace the binding or
+    /// wait for file locks: another task may need this binding to release them.
+    ///
+    /// # Errors
+    /// Returns `NoSuchProcess` after detachment, or the callback's error.
+    pub fn with_fd_table<R>(
         &self,
         access_fn: impl FnOnce(&RwLock<FdTable>) -> KResult<R>,
     ) -> KResult<R> {
@@ -139,10 +146,13 @@ impl ProcessResources {
         access_fn(fd_table)
     }
 
-    fn close_descriptors(descriptors: impl IntoIterator<Item = FileDescriptor>) {
+    fn close_descriptors(
+        descriptors: impl IntoIterator<Item = FileDescriptor>,
+        owner: kvfs::FileLockOwner,
+    ) {
         for descriptor in descriptors {
             // Teardown must close every descriptor; close errors have no receiver.
-            let _ = descriptor.close();
+            let _ = descriptor.close(owner);
         }
     }
 
@@ -239,9 +249,15 @@ impl ProcessResources {
         new_fd: c_int,
         cloexec: bool,
     ) -> kerrno::KResult<c_int> {
-        let (fd, replaced) =
-            self.with_fd_table(|fd_table| fd_table.write().duplicate_to(old_fd, new_fd, cloexec))?;
-        Self::close_descriptors(replaced);
+        let binding = self.fd_table.read();
+        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let (owner, fd, replaced) = {
+            let mut table = table.write();
+            let (fd, replaced) = table.duplicate_to(old_fd, new_fd, cloexec)?;
+            (table.lock_owner(), fd, replaced)
+        };
+        drop(binding);
+        Self::close_descriptors(replaced, owner);
         Ok(fd)
     }
 
@@ -253,9 +269,14 @@ impl ProcessResources {
     /// `KError::BadFileDescriptor` for an absent entry. Propagates the removed
     /// descriptor's VFS close/flush error; the slot stays removed even on that error.
     pub fn close_file(&self, fd: c_int) -> kerrno::KResult {
-        let descriptor =
-            self.with_fd_table(|fd_table| fd_table.write().file_close_fd_locked(fd))?;
-        descriptor.close()
+        let binding = self.fd_table.read();
+        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let (descriptor, owner) = {
+            let mut table = table.write();
+            (table.file_close_fd_locked(fd)?, table.lock_owner())
+        };
+        drop(binding);
+        descriptor.close(owner)
     }
 
     /// Returns whether the given descriptor is marked close-on-exec.
@@ -285,9 +306,14 @@ impl ProcessResources {
     /// Returns `KError::NoSuchProcess` after files detachment. Missing slots are
     /// ignored; batch close operations ignore individual descriptor close errors.
     pub fn close_range(&self, first_fd: c_int, last_fd: c_int) -> KResult<()> {
-        let descriptors =
-            self.with_fd_table(|fd_table| Ok(fd_table.write().remove_range(first_fd, last_fd)))?;
-        Self::close_descriptors(descriptors);
+        let binding = self.fd_table.read();
+        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let (descriptors, owner) = {
+            let mut table = table.write();
+            (table.remove_range(first_fd, last_fd), table.lock_owner())
+        };
+        drop(binding);
+        Self::close_descriptors(descriptors, owner);
         Ok(())
     }
 
@@ -311,9 +337,14 @@ impl ProcessResources {
     /// Returns `KError::NoSuchProcess` after files detachment. Missing slots are
     /// ignored; batch close operations ignore individual descriptor close errors.
     pub fn close_cloexec_files(&self) -> KResult<()> {
-        let descriptors =
-            self.with_fd_table(|fd_table| Ok(fd_table.write().remove_cloexec_files()))?;
-        Self::close_descriptors(descriptors);
+        let binding = self.fd_table.read();
+        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let (descriptors, owner) = {
+            let mut table = table.write();
+            (table.remove_cloexec_files(), table.lock_owner())
+        };
+        drop(binding);
+        Self::close_descriptors(descriptors, owner);
         Ok(())
     }
 

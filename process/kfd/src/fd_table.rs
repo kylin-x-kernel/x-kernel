@@ -28,6 +28,12 @@ impl Default for FdTable {
 }
 
 impl FdTable {
+    /// Returns the POSIX lock owner for this table at its stable shared address.
+    /// Shared tables retain the identity; a copied table obtains a new identity.
+    pub fn lock_owner(&self) -> kvfs::FileLockOwner {
+        kvfs::FileLockOwner::posix(self)
+    }
+
     /// Creates a shared descriptor table handle.
     pub fn new_shared() -> Arc<RwLock<Self>> {
         Arc::new(RwLock::new(Self::default()))
@@ -319,7 +325,7 @@ impl Drop for FdTable {
             )]
             let descriptor = self.remove(fd).expect("descriptor id must remain present");
             // Teardown has no error channel and must close the remaining descriptors.
-            let _ = descriptor.close();
+            let _ = descriptor.close(self.lock_owner());
         }
     }
 }

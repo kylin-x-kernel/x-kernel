@@ -95,6 +95,71 @@ mod tests {
             .expect("fd table drop test file opens")
     }
 
+    // Anonymous files share one inode, so these lock-lifecycle cases must not
+    // contend with each other through the singleton fixture.
+    #[def_test(serial)]
+    fn close_alias_removes_posix_locks_even_after_flush_error() {
+        use kvfs::{FileLock, FileLockOwner, FileLockType};
+
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let file = flush_count_test_file(flushes, Err(kerrno::KError::Io));
+        let table = FdTable::new_shared();
+        let (fd, alias, owner) = {
+            let mut table = table.write();
+            (
+                table.add_file(16, file.clone(), false).unwrap(),
+                table.add_file(16, file.clone(), false).unwrap(),
+                table.lock_owner(),
+            )
+        };
+        let lock = FileLock::new(owner, 1, FileLockType::Write, 0, 0).unwrap();
+        file.set_lock(&lock, false).unwrap();
+        let query = FileLock::new(FileLockOwner::Posix(1), 2, FileLockType::Write, 0, 0).unwrap();
+        assert!(file.test_lock(&query).unwrap().is_some());
+        let descriptor = table.write().file_close_fd_locked(alias).unwrap();
+        assert_eq!(descriptor.close(owner), Err(kerrno::KError::Io));
+        assert!(table.read().get_file(fd).is_ok());
+        assert!(file.test_lock(&query).unwrap().is_none());
+    }
+
+    #[def_test(serial)]
+    fn copied_table_does_not_inherit_posix_owner_and_ofd_survives_close() {
+        use kvfs::{FileLock, FileLockOwner, FileLockType};
+
+        let file = snapshot_test_file();
+        let table = FdTable::new_shared();
+        let fd = table.write().add_file(16, file.clone(), false).unwrap();
+        let copied = FdTable::clone_shared_from(&table);
+        let owner = table.read().lock_owner();
+        assert_ne!(owner, copied.read().lock_owner());
+        file.set_lock(
+            &FileLock::new(owner, 1, FileLockType::Write, 0, 10).unwrap(),
+            false,
+        )
+        .unwrap();
+        drop(copied);
+        let query = FileLock::new(FileLockOwner::Posix(1), 2, FileLockType::Write, 0, 10).unwrap();
+        assert!(file.test_lock(&query).unwrap().is_some());
+        let ofd = FileLockOwner::ofd(&file);
+        file.set_lock(
+            &FileLock::new(ofd, 1, FileLockType::Write, 20, 10).unwrap(),
+            false,
+        )
+        .unwrap();
+        let inode = file.inode().clone();
+        let observer = file
+            .alloc_clone(FMode::READ, OpenFlags::empty(), Arc::new(SnapshotTestFops))
+            .unwrap();
+        let descriptor = table.write().file_close_fd_locked(fd).unwrap();
+        descriptor.close(owner).unwrap();
+        assert!(file.test_lock(&query).unwrap().is_none());
+        let query = FileLock::new(FileLockOwner::Posix(1), 2, FileLockType::Write, 20, 10).unwrap();
+        assert_eq!(observer.test_lock(&query).unwrap().unwrap().pid(), -1);
+        drop(file);
+        assert!(observer.test_lock(&query).unwrap().is_none());
+        drop(inode);
+    }
+
     #[def_test]
     fn test_kstat_default() {
         let kstat = Kstat::default();
@@ -154,7 +219,11 @@ mod tests {
         let fd = table.add_file(16, snapshot_test_file(), true).unwrap();
 
         let snapshot = table.snapshot(fd).unwrap();
-        table.file_close_fd_locked(fd).unwrap().close().unwrap();
+        table
+            .file_close_fd_locked(fd)
+            .unwrap()
+            .close(table.lock_owner())
+            .unwrap();
 
         assert_eq!(snapshot.fd(), fd);
         assert!(snapshot.cloexec());
@@ -176,7 +245,11 @@ mod tests {
         let source = table.add_file(16, snapshot_test_file(), true).unwrap();
         assert_eq!(table.duplicate_from(source, 4, 16, false), Ok(4));
         assert_eq!(table.duplicate_from(source, 4, 16, false), Ok(5));
-        table.file_close_fd_locked(4).unwrap().close().unwrap();
+        table
+            .file_close_fd_locked(4)
+            .unwrap()
+            .close(table.lock_owner())
+            .unwrap();
         assert_eq!(table.duplicate_from(source, 4, 16, false), Ok(4));
         assert!(table.get(1).is_none());
         assert_eq!(table.count(), 3);
@@ -193,7 +266,11 @@ mod tests {
         assert!(!table.cloexec(plain).unwrap());
         assert!(table.cloexec(cloexec).unwrap());
         assert!(Arc::ptr_eq(&file, &table.get_file(plain).unwrap()));
-        table.file_close_fd_locked(source).unwrap().close().unwrap();
+        table
+            .file_close_fd_locked(source)
+            .unwrap()
+            .close(table.lock_owner())
+            .unwrap();
         assert!(Arc::ptr_eq(&file, &table.get_file(cloexec).unwrap()));
         assert_eq!(table.get_file(plain).unwrap().flags(), OpenFlags::NONBLOCK);
     }

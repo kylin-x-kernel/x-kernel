@@ -65,3 +65,8 @@ file release.
 - Detach slots before executing close callbacks.
 - Reject attempts to replace a detached owner.
 - Distinguish retained snapshots from current descriptor membership.
+
+Descriptor close retains the selected table until POSIX-lock cleanup completes.
+This prevents owner-address reuse after concurrent replacement. A blocking
+record-lock caller must revalidate the binding and fd under `with_fd_table`;
+a retained table reference alone does not prove current ownership.

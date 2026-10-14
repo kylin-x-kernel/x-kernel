@@ -18,7 +18,7 @@ use crate::{UserRead, UserWrite};
 /// both gaps as explicit fields. A value read from user memory keeps the
 /// caller's bytes in them, as Linux does when it writes the lock back.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, UserRead, UserWrite)]
+#[derive(Clone, Copy, Debug, Default, UserRead, UserWrite)]
 pub struct k_flock64 {
     /// Lock type: `F_RDLCK`, `F_WRLCK`, or `F_UNLCK`.
     pub l_type: i16,

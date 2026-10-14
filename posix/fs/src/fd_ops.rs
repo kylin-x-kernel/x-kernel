@@ -12,8 +12,8 @@
 use core::ffi::c_int;
 
 use bitflags::bitflags;
-use kerrno::{KError, KResult};
-use kvfs::{FMode, OpenFlags, pipe::PipeObject};
+use kerrno::{KError, KResult, LinuxError};
+use kvfs::{FMode, FileLock, FileLockOwner, FileLockType, OpenFlags, VfsFile, pipe::PipeObject};
 use linux_raw_sys::general::*;
 use memfs::shmem;
 use posix_types::{UserPtr, fs::k_flock64};
@@ -129,14 +129,8 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
     match cmd as u32 {
         F_DUPFD => dup_fd_from_minimum(fd, arg, false),
         F_DUPFD_CLOEXEC => dup_fd_from_minimum(fd, arg, true),
-        F_SETLK | F_SETLKW => Ok(0),
-        F_OFD_SETLK | F_OFD_SETLKW => Ok(0),
-        F_GETLK | F_OFD_GETLK => {
-            let arg = UserPtr::<k_flock64>::from(arg);
-            let mut lock = arg.read_vm()?;
-            lock.l_type = F_UNLCK as _;
-            arg.write_vm(lock)?;
-            Ok(0)
+        F_SETLK | F_SETLKW | F_OFD_SETLK | F_OFD_SETLKW | F_GETLK | F_OFD_GETLK => {
+            fcntl_lock(fd, cmd as u32, arg)
         }
         F_SETFL => {
             let mut flags = u32::try_from(arg).map_err(|_| KError::InvalidInput)?;
@@ -191,7 +185,147 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
 /// Applies or removes an advisory lock on a file descriptor.
 pub fn sys_flock(fd: c_int, operation: c_int) -> KResult<isize> {
     debug!("flock <= fd: {fd}, operation: {operation}");
-    // TODO: flock
+    // Linux ignores the obsolete mandatory-flock extension before fd lookup.
+    if operation as u32 & LOCK_MAND != 0 {
+        return Ok(0);
+    }
+    let kind = match operation as u32 & !LOCK_NB {
+        LOCK_SH => FileLockType::Read,
+        LOCK_EX => FileLockType::Write,
+        LOCK_UN => FileLockType::Unlock,
+        _ => return Err(KError::InvalidInput),
+    };
+    let file = kprocess::current_resources().get_file(fd)?;
+    if file.is_path()
+        || (kind != FileLockType::Unlock && !file.mode().intersects(FMode::READ | FMode::WRITE))
+    {
+        return Err(KError::BadFileDescriptor);
+    }
+    let request = FileLock::new(FileLockOwner::flock(&file), current_lock_pid(), kind, 0, 0)?;
+    file.set_lock(&request, operation as u32 & LOCK_NB == 0)?;
+    Ok(0)
+}
+
+fn current_lock_pid() -> i32 {
+    kprocess::current_user_process().pid() as i32
+}
+
+fn lock_request(file: &VfsFile, owner: FileLockOwner, lock: &k_flock64) -> KResult<FileLock> {
+    let kind = match lock.l_type as u32 {
+        F_RDLCK => FileLockType::Read,
+        F_WRLCK => FileLockType::Write,
+        F_UNLCK => FileLockType::Unlock,
+        _ => return Err(KError::InvalidInput),
+    };
+    let base = match lock.l_whence as u32 {
+        SEEK_SET => 0,
+        SEEK_CUR => file.position(),
+        SEEK_END => file.inode().size(),
+        _ => return Err(KError::InvalidInput),
+    };
+    let base = i64::try_from(base).map_err(|_| KError::from(LinuxError::EOVERFLOW))?;
+    let start = base
+        .checked_add(lock.l_start)
+        .ok_or(KError::from(LinuxError::EOVERFLOW))?;
+    FileLock::new(owner, current_lock_pid(), kind, start, lock.l_len)
+}
+
+fn fcntl_lock(fd: c_int, cmd: u32, arg: usize) -> KResult<isize> {
+    let resources = kprocess::current_resources();
+    let mut table = resources.fd_table()?;
+    let (file, files_owner) = {
+        let table = table.read();
+        (table.get_file(fd)?, table.lock_owner())
+    };
+    if file.is_path() {
+        return Err(KError::BadFileDescriptor);
+    }
+    let pointer = UserPtr::<k_flock64>::from(arg);
+    let mut lock = pointer.read_vm()?;
+    // Traditional GETLK rejects unlock before range conversion; OFD GETLK
+    // permits it to query this open description's own locks.
+    if cmd == F_GETLK && !matches!(lock.l_type as u32, F_RDLCK | F_WRLCK) {
+        return Err(KError::InvalidInput);
+    }
+    let is_ofd = matches!(cmd, F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW);
+    let owner = if is_ofd {
+        FileLockOwner::ofd(&file)
+    } else {
+        files_owner
+    };
+    let mut request = lock_request(&file, owner, &lock)?;
+    if matches!(cmd, F_GETLK | F_OFD_GETLK) {
+        if is_ofd && lock.l_pid != 0 {
+            return Err(KError::InvalidInput);
+        }
+        if let Some(conflict) = file.test_lock(&request)? {
+            lock.l_type = match conflict.kind() {
+                FileLockType::Read => F_RDLCK as _,
+                FileLockType::Write => F_WRLCK as _,
+                FileLockType::Unlock => F_UNLCK as _,
+            };
+            lock.l_whence = SEEK_SET as _;
+            lock.l_start = conflict.start();
+            lock.l_len = conflict.length();
+            lock.l_pid = conflict.pid();
+        } else {
+            lock.l_type = F_UNLCK as _;
+        }
+        pointer.write_vm(lock)?;
+    } else {
+        match request.kind() {
+            FileLockType::Read => file.verify_mode(FMode::READ)?,
+            FileLockType::Write => file.verify_mode(FMode::WRITE)?,
+            FileLockType::Unlock => {}
+        }
+        if is_ofd && lock.l_pid != 0 {
+            return Err(KError::InvalidInput);
+        }
+        loop {
+            file.set_lock(&request, matches!(cmd, F_SETLKW | F_OFD_SETLKW))?;
+            if is_ofd {
+                break;
+            }
+            // Main still has a process-wide files binding. Validate both the
+            // binding and descriptor after waiting; a replaced table must not
+            // turn an installation on an obsolete owner into success.
+            let installed = resources.with_fd_table(|current| {
+                let descriptors = current.read();
+                let is_current = core::ptr::eq(current, table.as_ref());
+                let is_open = descriptors
+                    .get_file(fd)
+                    .is_ok_and(|entry| alloc::sync::Arc::ptr_eq(&entry, &file));
+                if !is_open {
+                    return Err(KError::BadFileDescriptor);
+                }
+                if !is_current && request.kind() != FileLockType::Unlock {
+                    file.remove_posix_locks(request.owner());
+                }
+                Ok(is_current)
+            });
+            match installed {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    if request.kind() != FileLockType::Unlock {
+                        file.remove_posix_locks(request.owner());
+                    }
+                    return Err(error);
+                }
+            }
+            // Preserve the original absolute range across retries (SEEK_CUR
+            // and SEEK_END must not be re-evaluated after a blocking wait).
+            table = resources.fd_table()?;
+            let owner = table.read().lock_owner();
+            request = FileLock::new(
+                owner,
+                request.pid(),
+                request.kind(),
+                request.start(),
+                request.length(),
+            )?;
+        }
+    }
     Ok(0)
 }
 

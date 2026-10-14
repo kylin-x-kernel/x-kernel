@@ -5,3 +5,6 @@
 //! VFS and path-based syscall adapters.
 
 pub(crate) use posix_fs::*;
+
+#[cfg(unittest)]
+mod tests;
