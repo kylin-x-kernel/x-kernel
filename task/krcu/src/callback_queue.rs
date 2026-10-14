@@ -1,0 +1,300 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+//! Per-CPU retirement segments, controlled by one serialized period driver.
+
+use core::sync::atomic::{Ordering, fence};
+
+use intrusive_collections::{LinkedList, UnsafeRef};
+use kspin::{SpinNoIrq, SpinNoIrqGuard};
+
+use crate::{
+    PeriodId,
+    callback::{CallbackAdapter, CallbackNode},
+    grace_period::GracePeriodCoordinator,
+};
+
+type CallbackList = LinkedList<CallbackAdapter>;
+
+struct WaitingSegment {
+    period: Option<PeriodId>,
+    callbacks: CallbackList,
+}
+
+impl WaitingSegment {
+    const fn new() -> Self {
+        Self {
+            period: None,
+            callbacks: CallbackList::new(CallbackAdapter::NEW),
+        }
+    }
+}
+
+struct QueueState {
+    unassigned: CallbackList,
+    // Only the current and its successor period can have assigned callbacks.
+    waiting: [WaitingSegment; 2],
+    eligible: CallbackList,
+    is_executing: bool,
+    outstanding: usize,
+}
+
+/// Caller-retained retirement storage for one CPU; no fixed callback capacity.
+///
+/// Producers touch only this queue. Only CallbackDriver assigns/promotes work.
+/// Queue destruction does not cancel or invoke accepted callbacks: its owner
+/// must retain it and all submitted storage until execution completes.
+pub(super) struct CallbackQueue {
+    state: SpinNoIrq<QueueState>,
+}
+
+impl CallbackQueue {
+    pub(super) const fn new() -> Self {
+        Self {
+            state: SpinNoIrq::new(QueueState {
+                unassigned: CallbackList::new(CallbackAdapter::NEW),
+                waiting: [WaitingSegment::new(), WaitingSegment::new()],
+                eligible: CallbackList::new(CallbackAdapter::NEW),
+                is_executing: false,
+                outstanding: 0,
+            }),
+        }
+    }
+
+    fn lock(&self) -> SpinNoIrqGuard<'_, QueueState> {
+        let state = self.state.lock();
+        // Carry withdrawal/completion across queue handoffs, including UP
+        // configurations whose locks provide exclusion without a full fence.
+        fence(Ordering::SeqCst);
+        state
+    }
+
+    /// Accepts a uniquely prepared node without allocating or invoking it.
+    ///
+    /// # Safety
+    ///
+    /// The node must satisfy CallbackNode::from_raw's retention and ownership
+    /// contract through callback return. Withdraw its protected object before
+    /// submission and satisfy independent retirement obligations before execution.
+    /// Retain this queue until accepted work finishes. The caller must be in
+    /// a context permitting ordinary IRQ-safe locking, never NMI.
+    pub(super) unsafe fn submit(&self, node: UnsafeRef<CallbackNode>) {
+        let mut state = self.lock();
+        state.unassigned.push_back(node);
+        // Count accepted work, not just linked nodes: a detached batch retains
+        // its completed counts until returning its execution claim.
+        state.outstanding += 1;
+    }
+
+    fn capture(&self) -> CallbackList {
+        self.lock().unassigned.take()
+    }
+
+    fn assign(&self, prefix: CallbackList, period: PeriodId) {
+        if prefix.is_empty() {
+            return;
+        }
+        let mut state = self.lock();
+        let index = state
+            .waiting
+            .iter()
+            .position(|segment| segment.period == Some(period))
+            .or_else(|| {
+                state
+                    .waiting
+                    .iter()
+                    .position(|segment| segment.period.is_none())
+            });
+        // A third target would mean the sole driver skipped eager promotion.
+        assert!(
+            index.is_some(),
+            "RCU callback target outside two-period window"
+        );
+        if let Some(index) = index {
+            let segment = &mut state.waiting[index];
+            segment.period = Some(period);
+            segment.callbacks.back_mut().splice_after(prefix);
+        }
+    }
+
+    fn promote(&self, completed: PeriodId) {
+        let mut state = self.lock();
+        for index in 0..state.waiting.len() {
+            if state.waiting[index].period == Some(completed) {
+                let ready = state.waiting[index].callbacks.take();
+                state.waiting[index].period = None;
+                state.eligible.back_mut().splice_after(ready);
+            }
+        }
+    }
+
+    fn needs_period(&self) -> bool {
+        self.lock()
+            .waiting
+            .iter()
+            .any(|segment| segment.period.is_some())
+    }
+
+    /// Includes assigned, detached and currently invoking callbacks.
+    pub(super) fn outstanding(&self) -> usize {
+        self.lock().outstanding
+    }
+
+    /// Persistent queued readiness; a detached executor may also own work.
+    pub(super) fn has_ready(&self) -> bool {
+        !self.lock().eligible.is_empty()
+    }
+
+    /// Executes at most `budget` callbacks, returning only after queue accounting.
+    ///
+    /// A competing or recursive executor returns zero rather than waiting.
+    /// Unexecuted entries return ahead of any newly eligible work. Readiness
+    /// must be rechecked by the host carrier before it relinquishes service.
+    ///
+    /// # Safety
+    ///
+    /// The driver must have used valid CPU observations and unique GP control,
+    /// not merely simulated quiescence. All independent retirement obligations
+    /// must be satisfied. No RCU or callback-dependent lock may be held. Current
+    /// context must permit callbacks and their cleanup; neither may block,
+    /// unwind or wait for this RCU engine. NMI execution is not supported.
+    pub(super) unsafe fn invoke_ready(&self, budget: usize) -> usize {
+        if budget == 0 {
+            return 0;
+        }
+        let Some(mut batch) = CallbackBatch::take(self) else {
+            return 0;
+        };
+        for _ in 0..budget {
+            let Some(node) = batch.callbacks.pop_front() else {
+                break;
+            };
+            // SAFETY: the exclusive executor unlinked this eligible node;
+            // admission retained it, and the caller certifies observation,
+            // retirement and execution-context validity. No lock is held.
+            unsafe { CallbackNode::invoke(node) };
+            // The callback may have freed its node; only batch-owned state is
+            // accessed from here onward. Outstanding includes it until return.
+            batch.completed += 1;
+        }
+        let completed = batch.completed;
+        drop(batch);
+        completed
+    }
+}
+
+/// Detached work and its exclusive execution claim survive carrier descheduling.
+struct CallbackBatch<'queue> {
+    queue: &'queue CallbackQueue,
+    callbacks: CallbackList,
+    completed: usize,
+}
+
+impl<'queue> CallbackBatch<'queue> {
+    fn take(queue: &'queue CallbackQueue) -> Option<Self> {
+        let mut state = queue.lock();
+        if state.is_executing || state.eligible.is_empty() {
+            return None;
+        }
+        state.is_executing = true;
+        Some(Self {
+            queue,
+            callbacks: state.eligible.take(),
+            completed: 0,
+        })
+    }
+}
+
+impl Drop for CallbackBatch<'_> {
+    fn drop(&mut self) {
+        let mut state = self.queue.lock();
+        state
+            .eligible
+            .front_mut()
+            .splice_before(self.callbacks.take());
+        debug_assert!(state.is_executing && state.outstanding >= self.completed);
+        state.outstanding -= self.completed;
+        state.is_executing = false;
+    }
+}
+
+/// Sole callback assignment and GP-control owner; not a runtime service task.
+///
+/// Construct only for an idle coordinator and unassigned/empty queues. No other
+/// driver may assign these queues or start/finalize this coordinator. The shared
+/// coordinator borrow permits concurrent validated observations/reports, not
+/// competing control. Exclusive `&mut self` serializes complete drive passes;
+/// retaining a shared coordinator reference alone does not enforce ownership.
+pub(super) struct CallbackDriver<'core, 'nodes, const CPUS: usize> {
+    coordinator: &'core GracePeriodCoordinator<'nodes, CPUS>,
+    queues: &'core [CallbackQueue; CPUS],
+    active_period: Option<PeriodId>,
+}
+
+impl<'core, 'nodes, const CPUS: usize> CallbackDriver<'core, 'nodes, CPUS> {
+    /// Creates the sole controller for fresh callback queues.
+    ///
+    /// # Safety
+    /// The coordinator must be idle and all queues empty. The caller must grant
+    /// this driver exclusive assignment, promotion and coordinator control for
+    /// their remaining lifetime; shared users may only submit, observe, report
+    /// and execute eligible callbacks. To hand off control, move this driver,
+    /// preserving its active period. Dropping it does not finish a period or
+    /// release this obligation: do not reconstruct a driver over the same state.
+    pub(super) unsafe fn new(
+        coordinator: &'core GracePeriodCoordinator<'nodes, CPUS>,
+        queues: &'core [CallbackQueue; CPUS],
+    ) -> Self {
+        Self {
+            coordinator,
+            queues,
+            active_period: None,
+        }
+    }
+
+    /// Captures each finite prefix, advances completion and starts required work.
+    ///
+    /// Does not wait, execute callbacks or infer hardware observations. The
+    /// returned current identity is private bookkeeping, not a persistent cookie.
+    pub(super) fn drive(&mut self) -> Option<PeriodId> {
+        // Only this driver advances completion. Computing the target does not
+        // start a period: initialization still follows all prefix captures.
+        let target = self.active_period.map_or_else(
+            || self.coordinator.completed_period().wrapping_add(1),
+            |active| active.wrapping_add(1),
+        );
+        let mut has_assigned_work = false;
+        for queue in self.queues {
+            let prefix = queue.capture();
+            has_assigned_work |= !prefix.is_empty();
+            queue.assign(prefix, target);
+        }
+        if let Some(active) = self.active_period {
+            let Some(completed) = self.coordinator.try_complete_period() else {
+                return Some(active);
+            };
+            assert_eq!(completed, active, "RCU callback driver lost GP ownership");
+            // Persist eligibility everywhere before allowing any new period.
+            // No old target remains to be re-compared after an arbitrary delay.
+            for queue in self.queues {
+                queue.promote(completed);
+            }
+            self.active_period = None;
+        }
+        // New assignments target the successor, so promotion cannot erase them.
+        // Without new work, a previously assigned successor may still remain.
+        if has_assigned_work || self.queues.iter().any(CallbackQueue::needs_period) {
+            self.active_period = self.coordinator.begin_period();
+            assert!(
+                self.active_period.is_some(),
+                "RCU coordinator has another driver"
+            );
+        }
+        self.active_period
+    }
+}
+
+#[cfg(any(test, unittest))]
+#[path = "../ut-tests/callback_queue.rs"]
+mod tests;

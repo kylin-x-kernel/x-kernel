@@ -165,7 +165,7 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
     fn finish_finalization(&self, period: PeriodId) {
         let mut state = self.state.lock();
         // Node finalization precedes the completion seen by another CPU. A
-        // future callback service must also latch eligibility before restarting.
+        // callback driver must also latch eligibility before restarting.
         fence(Ordering::SeqCst);
         debug_assert_eq!(state.phase, Phase::Finalizing);
         debug_assert_eq!(state.completed.wrapping_add(1), period);

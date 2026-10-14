@@ -85,3 +85,58 @@ missing hardware observation/lifetime protocol.
 IRQ/NMI scope use requires deferred-cleanup integration not supplied here.
 The current removal path must not run in NMI. This module must not be used as
 a standalone concurrent reclamation algorithm.
+
+## Callback Storage Ownership
+
+The containing object owns an embedded `CallbackNode`; no field offset or
+allocation layout is imposed by the core. Unsafe admission must pair its function
+with the actual containing layout and retain storage, callback code and resources
+until invocation. A callback recovering its enclosing object needs pointer
+provenance derived from that object's raw pointer, not a shared field reference.
+Cross-CPU transfer must be valid for the enclosing payload and its resources;
+the node's own auto traits do not establish that property for an erased payload.
+
+Intrusive UnsafeRef handles do not own Rust cleanup. The private queue protocol
+must not clone them into competing invocations, free or move their storage early,
+or lose them. Abandoning a handle does not cancel accepted work and may leak the
+retained resources. Exactly-once scheduling and teardown remain obligations of
+queue integration, not guarantees supplied by this storage primitive.
+
+Invocation is unsafe and requires unique detached ownership, completed retirement
+obligations and a permitted execution context. A debug assertion detects linked
+nodes but does not prove the absence of aliases or GP completion. The callback
+and resource cleanup must not block, unwind or wait on this RCU engine. The saved
+function may free the whole containing object during invocation, so the executor
+must keep later accounting independently and never inspect the old node again.
+Borrowed storage needs an independently proven lifetime through callback return;
+a notification alone does not prove that an executor has finished using it.
+
+## Callback Queue Control
+
+Submission requires withdrawal before publication to the queue and retention
+until callback return. It is allocation-free but not NMI-safe. Queues own only
+nonowning links; dropping a queue is not cancellation or successful reclamation.
+Only one driver may assign their targets and start/finalize their coordinator.
+An exclusive driver borrow serializes its own passes, not arbitrary control calls
+through another shared coordinator reference. Its host must enforce that boundary.
+The unsafe constructor requires idle, empty initial state and grants exclusive
+control for its remaining lifetime. Moving the driver preserves an active GP;
+dropping it neither completes the GP nor permits reconstruction over that state.
+
+The driver captures before reserving the future period and promotes all due
+segments before another period starts. At most two live targets exist; matching
+identity is valid only within that bounded control protocol. Once promoted, no
+callback relies on an ancient numeric target. Queue locks never nest with node or
+coordinator locks and no callback executes under any of them.
+
+The execution claim remains owned while its detached batch is preempted or
+invoking a callback. Restoring the old remainder precedes releasing that claim,
+so neither a competing executor nor a later marker can pass the batch. Counts
+remain conservative until callbacks return; no execution bookkeeping uses a
+node after invocation. A callback must return normally: neither panic/unwind nor
+nonreturning task exit is an accepted cancellation mechanism for a batch.
+
+`invoke_ready` is unsafe because simulated observations or an invalid host context
+cannot authorize real reclamation. Its caller must certify observation validity,
+independent retirement obligations and nonblocking invocation/cleanup outside
+dependent locks. No public arbitrary callback API or automatic carrier is exposed.

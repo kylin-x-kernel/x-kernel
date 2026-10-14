@@ -105,8 +105,8 @@ use the RCU-local full-fence discipline without strengthening generic spinlocks.
 
 The coordinator exposes no waiter, callback or public numeric cookie. Completed
 identity is internal ordered bookkeeping, not an arbitrary-age comparison API.
-Future callback integration must latch due work as eligible before allowing the
-next period. The current private engine is driven by deterministic tests only;
+The callback driver latches due work as eligible before allowing the next period.
+The current private engine is driven by deterministic tests only;
 hardware observation validity, watched-context integration and full-wrap report
 lifetime safety remain outside this bookkeeping implementation.
 
@@ -118,6 +118,82 @@ holds the reporting CPU's next-period obligation while a previous-period capture
 is in flight. This checks the consequence of a watched interval, not whether the
 host correctly recognizes and preserves that interval. Neither test permits
 arbitrarily old numeric reports or proves hardware observation correctness.
+
+## Embedded Callback Storage
+
+`CallbackNode` contains intrusive linkage and an invocation function. Callers
+embed it in stable storage; the core neither allocates nor frees that storage.
+One list can hold nodes from different containing-object layouts and ownership
+policies. Retiring an existing object therefore requires no separate callback
+allocation, although embedding the node increases that object's size.
+
+List references are nonowning handles. Unsafe admission requires the caller to
+retain storage and callback resources and preserve unique invocation ownership.
+Dropping a handle neither cancels the callback nor frees its object. Invocation
+consumes the detached handle and saves the function before calling it. The
+callback may free its entire containing object; the executor must keep subsequent
+accounting elsewhere and never access the node afterward. Callback execution and
+resource cleanup must run outside RCU locks.
+
+Allocation policy belongs to the containing object, not the queue. A borrowed
+stack-node test drains synchronously before its frame ends; it does not establish
+a production asynchronous waiter's notification-versus-return lifetime protocol.
+
+These private storage primitives are tested with unpublished fixture objects.
+They do not themselves establish GP eligibility or provide a public submission
+API. Real retirement additionally needs the queue protocol and validated hardware
+observations.
+
+## Callback Period Assignment
+
+Each `CallbackQueue` has its own IRQ-safe lock and intrusive unassigned, waiting
+and eligible lists. There are two waiting segments, for the current period and
+its successor; this is a bound on distinct targets, not on callback count. Moving
+or joining a whole segment uses constant-time list take/splice operations. No
+assignment/completion pass scans individual callbacks or allocates queue storage.
+
+One `CallbackDriver` serializes assignment and all coordinator start/completion
+operations. It borrows the coordinator to allow concurrent observations/reports;
+this borrow does not permit another controller to drive the same coordinator.
+Construction is unsafe: the host grants exclusive control over an idle
+coordinator and empty queues. A handoff moves the existing driver, including its
+active period; dropping it does not support restarting control with a new driver.
+The host must preserve this ownership boundary for the lifetime of the state.
+Each pass captures the then-current finite unassigned prefix of each queue,
+releases its lock, and assigns a full future period. Idle assignment uses
+completed + 1; assignment during an active period uses its successor. Submissions
+after capture remain unassigned until a later capture. The driver never chases
+an indefinitely growing producer list within one pass.
+The target is computed once per pass, before capture, without starting the GP.
+New assignments imply successor work; only passes without new assignments scan
+for retained waiting segments before deciding whether to start another GP.
+
+After completion, the driver promotes matching segments on every queue before
+starting another period. Eligibility is persistent and independent of numeric
+targets, so delayed execution remains eligible through any number of wraps.
+Queue handoffs use the same full-fence discipline as node/coordinator operations,
+including UP; this bookkeeping does not validate hardware quiescent observations.
+
+## Bounded Callback Execution
+
+An executor claims a queue and takes its eligible list under the queue lock,
+then invokes at most its supplied budget outside all RCU locks. The detached
+`CallbackBatch` owns the claim until it returns the unexecuted prefix to the
+front and releases the claim in the same queue transaction. New promotions may
+proceed concurrently but cannot overtake that prefix. A competing or recursive
+executor returns without waiting; other queues have independent execution claims.
+
+Outstanding accounting includes all accepted callbacks, including detached and
+currently invoking entries. It is reduced only after callback return, using the
+batch's own completed count rather than inspecting possibly freed nodes. Empty
+eligible lists therefore do not imply that prior callbacks have finished. This
+is bookkeeping for future drain support, not a drain API.
+
+Reposting accepts new work into the unassigned list and requires a new full
+period. The current finite batch does not chase those submissions. Budget return
+leaves persistent readiness for the carrier to recheck; wakeup/sleep handshakes,
+timer/IPI progress and context admission belong to host-service integration and
+are not supplied by this private deterministic engine.
 
 Only controlled task-context tests currently enter scopes. There is no public
 current-task RCU read interface, protected-data container, hardware-integrated
