@@ -78,6 +78,7 @@ fn find_cargo_tool(program: &str) -> Option<PathBuf> {
 pub(crate) fn check_dependencies(args: &HygieneFixArgs) -> Result<()> {
     ensure_cargo_shear_version()?;
     let root = workspace_root()?;
+    check_cargo_shear_ignores(&root)?;
 
     for relative_path in CARGO_WORKSPACES {
         if args.fix {
@@ -169,6 +170,78 @@ pub(crate) fn check_test_layout() -> Result<()> {
     )))
 }
 
+/// Fails when a crate with `<crate>/tests/*.rs` cannot compile those tests
+/// with a bare host Cargo invocation.
+pub(crate) fn check_host_tests() -> Result<()> {
+    let root = workspace_root()?;
+    let mut failures = Vec::new();
+    for manifest_path in workspace_member_manifests(&root)? {
+        let Some(crate_root) = manifest_path.parent() else {
+            continue;
+        };
+        let rust_files = tracked_rust_files_under(&root, crate_root)?;
+        if !has_cargo_integration_tests(crate_root, &rust_files) {
+            continue;
+        }
+        let manifest_content = fs::read_to_string(&manifest_path).with_path(&manifest_path)?;
+        let required_feature_tests =
+            required_feature_test_targets(&manifest_content).map_err(|error| {
+                Error::Message(format!(
+                    "failed to parse host test targets in {}: {error}",
+                    manifest_path.display()
+                ))
+            })?;
+        let display_path = manifest_path
+            .strip_prefix(&root)
+            .unwrap_or(&manifest_path)
+            .display();
+        eprintln!("checking host Cargo tests in {display_path}");
+        let status = Command::new("cargo")
+            .current_dir(&root)
+            .args(["test", "--manifest-path"])
+            .arg(&manifest_path)
+            .args(["--tests", "--no-run"])
+            .status()
+            .map_err(|source| Error::Spawn {
+                program: "cargo".into(),
+                source,
+            })?;
+        if !status.success() {
+            failures.push(display_path.to_string());
+        }
+        for test in required_feature_tests {
+            eprintln!(
+                "checking host Cargo test {} in {display_path} with features {}",
+                test.name,
+                test.required_features.join(",")
+            );
+            let status = Command::new("cargo")
+                .current_dir(&root)
+                .args(["test", "--manifest-path"])
+                .arg(&manifest_path)
+                .args(["--test", &test.name, "--no-run", "--features"])
+                .arg(test.required_features.join(","))
+                .status()
+                .map_err(|source| Error::Spawn {
+                    program: "cargo".into(),
+                    source,
+                })?;
+            if !status.success() {
+                failures.push(format!("{display_path} ({})", test.name));
+            }
+        }
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    failures.sort();
+    Err(Error::Message(format!(
+        "Cargo integration tests must compile under bare Cargo; fix or move tests out of \
+         <crate>/tests/:\n  {}",
+        failures.join("\n  ")
+    )))
+}
+
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<MetadataPackage>,
@@ -179,6 +252,25 @@ struct CargoMetadata {
 struct MetadataPackage {
     id: String,
     manifest_path: PathBuf,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RequiredFeatureTestTarget {
+    name: String,
+    required_features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct HostTestManifest {
+    #[serde(default)]
+    test: Vec<HostTestTarget>,
+}
+
+#[derive(Deserialize)]
+struct HostTestTarget {
+    name: String,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
 }
 
 fn workspace_member_manifests(root: &Path) -> Result<Vec<PathBuf>> {
@@ -247,6 +339,34 @@ fn tracked_rust_files_under(root: &Path, directory: &Path) -> Result<Vec<PathBuf
         .collect())
 }
 
+fn has_cargo_integration_tests(crate_root: &Path, rust_files: &[PathBuf]) -> bool {
+    rust_files.iter().any(|path| {
+        path.strip_prefix(crate_root)
+            .ok()
+            .is_some_and(is_cargo_integration_test_root)
+    })
+}
+
+fn is_cargo_integration_test_root(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| parent == Path::new("tests"))
+        && path.extension().is_some_and(|extension| extension == "rs")
+}
+
+fn required_feature_test_targets(
+    manifest: &str,
+) -> std::result::Result<Vec<RequiredFeatureTestTarget>, toml::de::Error> {
+    let manifest: HostTestManifest = toml::from_str(manifest)?;
+    Ok(manifest
+        .test
+        .into_iter()
+        .filter(|test| !test.required_features.is_empty())
+        .map(|test| RequiredFeatureTestTarget {
+            name: test.name,
+            required_features: test.required_features,
+        })
+        .collect())
+}
+
 fn collect_test_layout_violations(
     crate_name: &str,
     relative_path: &Path,
@@ -279,6 +399,14 @@ fn collect_test_layout_violations(
             "{crate_name}/{path}: Cargo tests must use #[test], not unittest #[def_test]"
         ));
     }
+    if (path.starts_with("ut-tests/") || path.starts_with("tests/"))
+        && has_handwritten_panic_expect_attr(content)
+    {
+        violations.push(format!(
+            "{crate_name}/{path}: test code must not hand-write unwrap/expect/panic \
+             #[expect]; rely on the test harness lint policy"
+        ));
+    }
 }
 
 fn is_src_test_file(path: &Path) -> bool {
@@ -303,6 +431,164 @@ fn has_host_test_attr(content: &str) -> bool {
 
 fn has_guest_test_marker(content: &str) -> bool {
     content.contains("#[def_test") || content.contains("unittest::def_test")
+}
+
+fn has_handwritten_panic_expect_attr(content: &str) -> bool {
+    content.lines().any(|line| {
+        let code = line
+            .split_once("//")
+            .map_or(line, |(code, _comment)| code)
+            .trim();
+        (code.starts_with("#[expect(") || code.starts_with("#![expect("))
+            && ["unwrap_used", "expect_used", "panic"]
+                .iter()
+                .any(|lint| code.contains(&format!("clippy::{lint}")))
+    })
+}
+
+fn check_cargo_shear_ignores(root: &Path) -> Result<()> {
+    let mut violations = Vec::new();
+    let mut manifests = workspace_member_manifests(root)?;
+    manifests.push(root.join("Cargo.toml"));
+    manifests.sort();
+    manifests.dedup();
+    for manifest_path in manifests {
+        let content = fs::read_to_string(&manifest_path).with_path(&manifest_path)?;
+        collect_cargo_shear_ignore_violations(root, &manifest_path, &content, &mut violations)?;
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    violations.sort();
+    Err(Error::Message(format!(
+        "cargo-shear ignored dependency entries need an adjacent reason comment:\n  {}",
+        violations.join("\n  ")
+    )))
+}
+
+fn collect_cargo_shear_ignore_violations(
+    root: &Path,
+    manifest_path: &Path,
+    content: &str,
+    violations: &mut Vec<String>,
+) -> Result<()> {
+    let manifest: toml::Table = toml::from_str(content).map_err(|error| {
+        Error::Message(format!(
+            "failed to parse {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let has_ignored =
+        has_cargo_shear_ignored(&manifest, &["package", "metadata", "cargo-shear"])
+            || has_cargo_shear_ignored(&manifest, &["workspace", "metadata", "cargo-shear"]);
+    if has_ignored && !ignored_entry_has_reason(content) {
+        violations.push(format!(
+            "{}: cargo-shear ignored entries must explain why the dependency is hidden",
+            manifest_path
+                .strip_prefix(root)
+                .unwrap_or(manifest_path)
+                .display()
+        ));
+    }
+    Ok(())
+}
+
+fn has_cargo_shear_ignored(manifest: &toml::Table, path: &[&str]) -> bool {
+    let mut value = toml::Value::Table(manifest.clone());
+    for key in path {
+        let Some(next) = value.get(key).cloned() else {
+            return false;
+        };
+        value = next;
+    }
+    value
+        .get("ignored")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|ignored| !ignored.is_empty())
+}
+
+fn ignored_entry_has_reason(manifest: &str) -> bool {
+    let mut current_section = "";
+    let mut pending_comments = Vec::new();
+    let mut found_ignored = false;
+    let mut all_ignored_have_reasons = true;
+    for raw_line in manifest.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') {
+            let (header, comment) = split_toml_line_comment(line);
+            if let Some(section) = toml_section_name(header) {
+                let section_leading_comments = std::mem::take(&mut pending_comments);
+                current_section = section;
+                if is_cargo_shear_section(section) {
+                    pending_comments = section_leading_comments;
+                    if comment.is_some_and(|comment| !comment.trim().is_empty()) {
+                        pending_comments.push(line);
+                    }
+                }
+            } else {
+                pending_comments.clear();
+            }
+            continue;
+        }
+        if line.is_empty() {
+            pending_comments.clear();
+            continue;
+        }
+        if line.starts_with('#') {
+            pending_comments.push(line);
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            pending_comments.clear();
+            continue;
+        };
+        if is_cargo_shear_ignored_key(current_section, key.trim(), value) {
+            found_ignored = true;
+            all_ignored_have_reasons &= !pending_comments.is_empty()
+                || split_toml_line_comment(value)
+                    .1
+                    .is_some_and(|comment| !comment.trim().is_empty());
+        }
+        pending_comments.clear();
+    }
+    found_ignored && all_ignored_have_reasons
+}
+
+fn split_toml_line_comment(line: &str) -> (&str, Option<&str>) {
+    line.split_once('#')
+        .map_or((line, None), |(before, comment)| (before.trim_end(), Some(comment)))
+}
+
+fn toml_section_name(header: &str) -> Option<&str> {
+    header
+        .strip_prefix('[')?
+        .strip_suffix(']')
+        .map(str::trim)
+}
+
+fn is_cargo_shear_section(section: &str) -> bool {
+    matches!(
+        section,
+        "package.metadata.cargo-shear" | "workspace.metadata.cargo-shear"
+    )
+}
+
+fn is_cargo_shear_ignored_key(section: &str, key: &str, value: &str) -> bool {
+    let full_key = if section.is_empty() {
+        key.to_owned()
+    } else {
+        format!("{section}.{key}")
+    };
+    if matches!(
+        full_key.as_str(),
+        "package.metadata.cargo-shear.ignored" | "workspace.metadata.cargo-shear.ignored"
+    ) {
+        return true;
+    }
+    matches!(
+        full_key.as_str(),
+        "package.metadata.cargo-shear" | "workspace.metadata.cargo-shear"
+    ) && value.contains("ignored")
 }
 
 fn ensure_licensure_version() -> Result<()> {
@@ -528,9 +814,11 @@ mod tests {
     use std::io;
 
     use super::{
-        cargo_install_list_has_version, collect_test_layout_violations, has_inline_test_module,
-        inherits_workspace_lints, is_src_test_file, reported_version, tool_spawn_error,
-        unexpected_tool_version,
+        cargo_install_list_has_version, collect_cargo_shear_ignore_violations,
+        collect_test_layout_violations, has_cargo_integration_tests, has_inline_test_module,
+        has_handwritten_panic_expect_attr, ignored_entry_has_reason,
+        inherits_workspace_lints, is_src_test_file, reported_version, required_feature_test_targets,
+        tool_spawn_error, unexpected_tool_version, RequiredFeatureTestTarget,
     };
 
     #[test]
@@ -610,6 +898,204 @@ mod tests {
                 .iter()
                 .any(|violation| violation.contains("Cargo tests must use #[test]"))
         );
+    }
+
+    #[test]
+    fn reports_handwritten_panic_expect_attrs_in_test_sources() {
+        assert!(has_handwritten_panic_expect_attr(
+            "#[expect(clippy::expect_used, reason = \"test scenario: setup\")]\nfn helper() {}"
+        ));
+        assert!(has_handwritten_panic_expect_attr(
+            "#![expect(clippy::panic, reason = \"test scenario: setup\")]\nfn helper() {}"
+        ));
+        assert!(!has_handwritten_panic_expect_attr(
+            "#[allow(clippy::unwrap_used, reason = \"test scenario: setup\")]\nfn helper() {}"
+        ));
+        assert!(!has_handwritten_panic_expect_attr(
+            "// #[expect(clippy::expect_used, reason = \"old text\")]\nfn helper() {}"
+        ));
+        assert!(!has_handwritten_panic_expect_attr(
+            "#[expect(\n    clippy::expect_used,\n    reason = \"test scenario: setup\"\n)]\nfn helper() {}"
+        ));
+
+        let mut violations = Vec::new();
+        collect_test_layout_violations(
+            "drivers/integration/kdriver",
+            "ut-tests/block_irq_unittest.rs".as_ref(),
+            "#[expect(clippy::expect_used, reason = \"test scenario: setup\")]\nfn helper() {}",
+            &mut violations,
+        );
+        collect_test_layout_violations(
+            "util/kerrno",
+            "tests/kerrno_host.rs".as_ref(),
+            "#![expect(clippy::panic, reason = \"test scenario: setup\")]\nfn helper() {}",
+            &mut violations,
+        );
+
+        assert_eq!(violations.len(), 2);
+        assert!(violations.iter().all(|violation| {
+            violation.contains("test code must not hand-write unwrap/expect/panic #[expect]")
+        }));
+    }
+
+    #[test]
+    fn recognizes_only_root_cargo_integration_tests() {
+        let crate_root = std::path::Path::new("/repo/task/demo");
+        let files = vec![
+            crate_root.join("tests/mutex.rs"),
+            crate_root.join("tests/common/mod.rs"),
+            crate_root.join("src/tests.rs"),
+            crate_root.join("ut-tests/lib.rs"),
+        ];
+
+        assert!(has_cargo_integration_tests(crate_root, &files));
+
+        let support_only = vec![
+            crate_root.join("tests/common/mod.rs"),
+            crate_root.join("src/tests.rs"),
+            crate_root.join("ut-tests/lib.rs"),
+        ];
+        assert!(!has_cargo_integration_tests(crate_root, &support_only));
+    }
+
+    #[test]
+    fn extracts_required_feature_host_tests() {
+        let targets = required_feature_test_targets(
+            r#"
+                [[test]]
+                name = "allocator"
+                path = "tests/allocator.rs"
+                required-features = ["full"]
+
+                [[test]]
+                name = "plain"
+                path = "tests/plain.rs"
+
+                [[test]]
+                name = "pkix_der"
+                path = "tests/pkix_der.rs"
+                required-features = ["pkix", "alloc"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            targets,
+            vec![
+                RequiredFeatureTestTarget {
+                    name: "allocator".to_owned(),
+                    required_features: vec!["full".to_owned()],
+                },
+                RequiredFeatureTestTarget {
+                    name: "pkix_der".to_owned(),
+                    required_features: vec!["pkix".to_owned(), "alloc".to_owned()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_shear_ignore_entries_need_reason_comments() {
+        assert!(!ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "# kirq is used only by cfg(unittest) tests.\n[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[package.metadata.cargo-shear] # kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\nignored = [\"kirq\"] # used only by cfg(unittest) tests\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[workspace.metadata.cargo-shear]\n# unittest is used only by cfg(unittest) tests.\nignored = [\"unittest\"]\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "[dependencies] # normal dependency section.\n[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\nignored-paths = [\"**/ut-tests/*.rs\"]\n# hidden because cfg(unittest) tests use it.\nignored = [\"unittest\"]\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\n# paths are ignored by layout convention.\nignored-paths = [\"**/ut-tests/*.rs\"]\nignored = [\"unittest\"]\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\nignored-paths = [\n# paths are ignored by layout convention.\n[\"**/ut-tests/*.rs\"],\n]\nignored = [\"unittest\"]\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "package.metadata.cargo-shear.ignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "# kirq is used only by cfg(unittest) tests.\npackage.metadata.cargo-shear.ignored = [\"kirq\"]\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "package.metadata.cargo-shear = { ignored = [\"kirq\"] }\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "package.metadata.cargo-shear = { ignored = [\"kirq\"] } # cfg(unittest) tests use kirq\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "[package.metadata]\ncargo-shear.ignored = [\"kirq\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[package.metadata]\n# kirq is used only by cfg(unittest) tests.\ncargo-shear.ignored = [\"kirq\"]\n"
+        ));
+        assert!(!ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n\n[workspace.metadata.cargo-shear]\nignored = [\"unittest\"]\n"
+        ));
+        assert!(ignored_entry_has_reason(
+            "[package.metadata.cargo-shear]\n# kirq is used only by cfg(unittest) tests.\nignored = [\"kirq\"]\n\n[workspace.metadata.cargo-shear]\n# unittest is used only by cfg(unittest) tests.\nignored = [\"unittest\"]\n"
+        ));
+
+        let mut violations = Vec::new();
+        collect_cargo_shear_ignore_violations(
+            "/repo".as_ref(),
+            "/repo/task/kworkng/Cargo.toml".as_ref(),
+            "[package]\nname = \"demo\"\n[package.metadata.cargo-shear]\nignored = [\"kirq\"]\n",
+            &mut violations,
+        )
+        .unwrap();
+
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("ignored entries must explain why"));
+
+        let mut workspace_violations = Vec::new();
+        collect_cargo_shear_ignore_violations(
+            "/repo".as_ref(),
+            "/repo/Cargo.toml".as_ref(),
+            "[workspace]\n[workspace.metadata.cargo-shear]\nignored = [\"unittest\"]\n",
+            &mut workspace_violations,
+        )
+        .unwrap();
+
+        assert_eq!(workspace_violations.len(), 1);
+        assert!(workspace_violations[0].contains("Cargo.toml"));
+
+        let mut dotted_violations = Vec::new();
+        collect_cargo_shear_ignore_violations(
+            "/repo".as_ref(),
+            "/repo/task/kworkng/Cargo.toml".as_ref(),
+            "[package]\nname = \"demo\"\nmetadata.cargo-shear.ignored = [\"kirq\"]\n",
+            &mut dotted_violations,
+        )
+        .unwrap();
+
+        assert_eq!(dotted_violations.len(), 1);
+
+        let mut inline_violations = Vec::new();
+        collect_cargo_shear_ignore_violations(
+            "/repo".as_ref(),
+            "/repo/task/kworkng/Cargo.toml".as_ref(),
+            "[package]\nname = \"demo\"\nmetadata.cargo-shear = { ignored = [\"kirq\"] }\n",
+            &mut inline_violations,
+        )
+        .unwrap();
+
+        assert_eq!(inline_violations.len(), 1);
     }
 
     #[test]

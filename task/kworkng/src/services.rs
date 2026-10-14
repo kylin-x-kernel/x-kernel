@@ -246,7 +246,7 @@ fn with_registry<R>(read: impl FnOnce(&Once<Services>) -> R) -> R {
     }
     #[cfg(all(unittest, not(feature = "system")))]
     {
-        let registry = tests::registry();
+        let registry = services_unittest::registry();
         read(registry.as_deref().unwrap_or(&SERVICES))
     }
 }
@@ -417,5 +417,8 @@ fn run(priority: BottomHalfPriority) {
     });
 }
 
-#[cfg(all(unittest, not(feature = "system")))]
-pub(crate) mod tests;
+#[cfg(not(feature = "system"))]
+unittest::path_mod_test!(
+    pub(crate) mod services_unittest,
+    "../ut-tests/services_unittest.rs",
+);

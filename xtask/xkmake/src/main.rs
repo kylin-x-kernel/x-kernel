@@ -102,6 +102,7 @@ fn run() -> Result<()> {
             HygieneCommand::Header(args) => hygiene::check_headers(&args),
             HygieneCommand::Lints => hygiene::check_lint_inheritance(),
             HygieneCommand::TestLayout => hygiene::check_test_layout(),
+            HygieneCommand::HostTests => hygiene::check_host_tests(),
         },
     }
 }

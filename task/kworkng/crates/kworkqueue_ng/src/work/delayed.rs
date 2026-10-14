@@ -452,8 +452,12 @@ impl TimerHandler for DelayedTimerHandler {
     }
 }
 
-#[cfg(unittest)]
-mod stop_tests;
+unittest::path_mod_test!(
+    delayed_stop_unittest,
+    "../../ut-tests/work_delayed_stop_unittest.rs"
+);
 
-#[cfg(unittest)]
-mod flush_tests;
+unittest::path_mod_test!(
+    delayed_flush_unittest,
+    "../../ut-tests/work_delayed_flush_unittest.rs"
+);

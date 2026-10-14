@@ -237,5 +237,7 @@ impl<S> Drop for WorkerManager<S> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    manager_unittest,
+    "../../ut-tests/normal_manager_unittest.rs"
+);

@@ -226,5 +226,7 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    execution_unittest,
+    "../../ut-tests/work_execution_unittest.rs"
+);

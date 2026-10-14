@@ -46,9 +46,6 @@ pub(crate) fn request_block_irq(
     )
 }
 
-/// Adapter tests: dispatch here is synchronous, so mock release has no escaped
-/// callbacks to wait for. Concurrent release is covered by kirq's own tests.
-#[unittest::mod_test]
-mod tests {
-    include!("tests/block_irq.rs");
-}
+// Adapter tests: dispatch here is synchronous, so mock release has no escaped
+// callbacks to wait for. Concurrent release is covered by kirq's own tests.
+unittest::path_mod_test!(block_irq_unittest, "../ut-tests/block_irq_unittest.rs");

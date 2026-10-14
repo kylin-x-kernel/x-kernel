@@ -102,5 +102,7 @@ impl Queue {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    shutdown_unittest,
+    "../../ut-tests/queue_shutdown_unittest.rs"
+);

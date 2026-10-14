@@ -58,9 +58,8 @@
 
 extern crate alloc;
 
-/// Controlled execution fixtures used by queue-core kernel integration tests.
-#[cfg(unittest)]
-pub mod test_support;
+// Controlled execution fixtures used by queue-core kernel integration tests.
+unittest::path_mod_test!(pub mod test_support, "../ut-tests/test_support.rs");
 
 mod bottom_half;
 pub use bottom_half::{

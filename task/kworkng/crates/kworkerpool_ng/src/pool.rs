@@ -246,5 +246,4 @@ impl WorkerPool {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(pool_unittest, "../ut-tests/pool_unittest.rs");

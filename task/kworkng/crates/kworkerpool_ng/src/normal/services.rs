@@ -117,5 +117,7 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalServices<S> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    services_unittest,
+    "../../ut-tests/normal_services_unittest.rs"
+);

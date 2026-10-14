@@ -86,5 +86,4 @@ impl PartitionWorkSource for QueuePartitionSource {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(source_unittest, "../../ut-tests/queue_source_unittest.rs");

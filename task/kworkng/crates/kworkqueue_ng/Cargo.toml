@@ -10,6 +10,11 @@ repository.workspace = true
 documentation.workspace = true
 description = "Prepared work lifecycle and per-CPU queue management"
 
+[package.metadata.cargo-shear]
+# kirq is used only by cfg(unittest) tests under ut-tests; cargo-shear ignores
+# those files as test-source layout by convention.
+ignored = ["kirq"]
+
 [features]
 stall-check = []
 self-wait-check = []

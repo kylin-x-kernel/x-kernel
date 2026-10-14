@@ -100,5 +100,4 @@ bitflags! {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tipc_unittest, "../ut-tests/tipc_unittest.rs");

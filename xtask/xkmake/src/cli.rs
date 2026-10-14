@@ -52,6 +52,8 @@ pub(crate) enum HygieneCommand {
     Lints,
     /// Check kernel crate test source layout.
     TestLayout,
+    /// Check that Cargo integration tests compile in a bare host Cargo build.
+    HostTests,
 }
 
 #[derive(Debug, Args)]

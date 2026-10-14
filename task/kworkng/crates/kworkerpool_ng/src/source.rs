@@ -120,5 +120,4 @@ impl PartitionDispatchState {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(source_unittest, "../ut-tests/source_unittest.rs");

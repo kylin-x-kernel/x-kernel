@@ -7,11 +7,6 @@ use unittest::{assert, assert_eq};
 
 use super::*;
 
-#[expect(
-    clippy::expect_used,
-    reason = "CG-021-no-panic-on-reachable-failure: test scenario: every caller supplies a \
-              nonempty participant fixture"
-)]
 fn coordinator<const CPUS: usize>(
     nodes: &[ReaderNode; CPUS],
     participants: [bool; CPUS],

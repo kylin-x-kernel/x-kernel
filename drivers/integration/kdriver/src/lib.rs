@@ -34,9 +34,11 @@ mod block_completion;
 mod block_completion_dispatch;
 #[cfg(feature = "block")]
 mod block_irq;
-#[cfg(all(unittest, feature = "virtio-blk"))]
-#[path = "tests/block_requests.rs"]
-mod block_request_tests;
+#[cfg(feature = "virtio-blk")]
+unittest::path_mod_test!(
+    block_requests_unittest,
+    "../ut-tests/block_requests_unittest.rs"
+);
 mod bus;
 pub mod driver_registry;
 mod enumeration;

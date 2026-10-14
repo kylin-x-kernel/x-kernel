@@ -345,5 +345,4 @@ impl<T> WorkState<T> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(state_unittest, "../../ut-tests/work_state_unittest.rs");

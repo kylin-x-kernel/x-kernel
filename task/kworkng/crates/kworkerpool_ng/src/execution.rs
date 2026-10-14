@@ -40,5 +40,4 @@ pub trait AcquiredExecution {
     fn run(self);
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(execution_unittest, "../ut-tests/execution_unittest.rs");

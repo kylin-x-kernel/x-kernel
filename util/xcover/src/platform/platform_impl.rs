@@ -9,7 +9,7 @@
 //! ## ELF (Linux)
 //!
 //! The linker auto-generates `__start___section` / `__stop___section` boundary
-//! symbols. We place fallback data in the sections so these symbols always exist.
+//! symbols when a final binary owns the corresponding sections.
 //!
 //! ## Mach-O (macOS)
 //!

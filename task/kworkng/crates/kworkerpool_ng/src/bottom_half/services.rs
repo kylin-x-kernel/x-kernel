@@ -86,5 +86,7 @@ impl<S> BottomHalfServices<S> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    services_unittest,
+    "../../ut-tests/bottom_half_services_unittest.rs"
+);

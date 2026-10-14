@@ -36,7 +36,7 @@ pub(super) fn wait_on_writeback(folio: &Arc<Mutex<Folio>>) {
         let is_complete = !folio.lock().is_under_writeback();
         #[cfg(unittest)]
         if !is_complete {
-            crate::tests::observe_writeback_wait(folio);
+            crate::pagecache_unittest::observe_writeback_wait(folio);
         }
         is_complete
     });

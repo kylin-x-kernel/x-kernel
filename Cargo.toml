@@ -25,10 +25,12 @@ exclude = [
     # TEE user-space apps (built separately with std toolchain)
     "tee_apps/*",
     # Standalone DRM userspace ABI regression workspace.
-    "io/drmdevice/tests",
+    "io/drmdevice/abi-tests/*",
 ]
 
 [workspace.metadata.cargo-shear]
+# unittest is used only by cfg(unittest) tests under ut-tests; cargo-shear
+# ignores those files as test-source layout by convention.
 ignored = ["unittest"]
 ignored-paths = ["**/ut-tests/*.rs", "**/host-tests/*.rs"]
 

@@ -9,6 +9,8 @@ homepage.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-shear]
+# kcpu and kspin are selected by platform features such as fp-simd/smp and are
+# not referenced directly in every platform configuration.
 ignored = ["kcpu", "kspin"]
 
 [features]

@@ -107,5 +107,4 @@ impl<T, H> Drop for DisableGuard<'_, T, H> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(disable_unittest, "../../ut-tests/work_disable_unittest.rs");

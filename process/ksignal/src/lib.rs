@@ -29,8 +29,7 @@
 extern crate log;
 extern crate alloc;
 
-#[path = "../ut-tests/signal_manager.rs"]
-mod signal_manager_tests;
+unittest::path_mod_test!(signal_manager_tests, "../ut-tests/signal_manager.rs");
 
 pub mod api;
 pub use api::{SignalDequeueAction, register_signal_observer, unregister_signal_observer};

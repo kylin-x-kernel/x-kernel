@@ -198,5 +198,7 @@ impl PendingList {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    pending_unittest,
+    "../../../ut-tests/queue_partition_pending_unittest.rs"
+);

@@ -114,5 +114,4 @@ impl CleanupWait {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(wait_unittest, "../../ut-tests/work_wait_unittest.rs");

@@ -169,5 +169,4 @@ impl Queue {
     }
 }
 
-#[cfg(unittest)]
-pub(crate) mod tests;
+unittest::path_mod_test!(pub(crate) mod queue_unittest, "../ut-tests/queue_unittest.rs");

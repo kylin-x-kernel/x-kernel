@@ -226,13 +226,13 @@
 
 extern crate alloc;
 
-#[cfg(all(unittest, not(feature = "system")))]
-mod owned_tests;
+#[cfg(not(feature = "system"))]
+unittest::path_mod_test!(owned_unittest, "../ut-tests/owned_unittest.rs");
 
-#[cfg(all(unittest, feature = "system"))]
-mod live_owned_tests;
-#[cfg(all(unittest, feature = "system"))]
-mod system_tests;
+#[cfg(feature = "system")]
+unittest::path_mod_test!(live_owned_unittest, "../ut-tests/live_owned_unittest.rs");
+#[cfg(feature = "system")]
+unittest::path_mod_test!(system_unittest, "../ut-tests/system_unittest.rs");
 
 mod defaults;
 pub use defaults::{DefaultQueue, ServiceError};

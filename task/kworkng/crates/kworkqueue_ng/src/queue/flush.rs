@@ -126,5 +126,4 @@ impl Queue {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(flush_unittest, "../../ut-tests/queue_flush_unittest.rs");

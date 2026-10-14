@@ -399,35 +399,5 @@ pub fn register_input_irq_handler() {
     }
 }
 
-#[cfg(all(unittest, any(feature = "pl011", feature = "ns16550-mmio")))]
-mod tests_irq_desc {
-    use kirq::IrqSource;
-    use unittest::{assert_eq, def_test};
-
-    use super::*;
-
-    /// `device_tree_irq_desc` must tag every parsed interrupt as device-tree
-    /// sourced and propagate the controller-local IRQ number. (It deliberately
-    /// does not over-assert the trigger/polarity encoding, which is owned by
-    /// the `kirq` constructors.)
-    #[def_test]
-    fn device_tree_irq_desc_tags_source_and_propagates_hwirq() {
-        let gic = of::InterruptInfo {
-            irq: 33,
-            trigger: of::InterruptTrigger::EdgeRising,
-            controller: of::InterruptControllerKind::Gic,
-        };
-        let desc = device_tree_irq_desc(gic);
-        assert_eq!(desc.source, IrqSource::DeviceTree);
-        assert_eq!(desc.hwirq, 33);
-
-        let plic = of::InterruptInfo {
-            irq: 16,
-            trigger: of::InterruptTrigger::LevelHigh,
-            controller: of::InterruptControllerKind::Plic,
-        };
-        let desc = device_tree_irq_desc(plic);
-        assert_eq!(desc.source, IrqSource::DeviceTree);
-        assert_eq!(desc.hwirq, 16);
-    }
-}
+#[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
+unittest::path_mod_test!(irq_desc_unittest, "../ut-tests/irq_desc_unittest.rs");

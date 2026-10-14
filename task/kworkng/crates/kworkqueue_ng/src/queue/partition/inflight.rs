@@ -102,5 +102,7 @@ impl QueueInFlight {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    inflight_unittest,
+    "../../../ut-tests/queue_partition_inflight_unittest.rs"
+);

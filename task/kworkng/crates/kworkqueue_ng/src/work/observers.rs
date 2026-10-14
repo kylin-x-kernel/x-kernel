@@ -90,5 +90,7 @@ impl CompletionObservers {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    observers_unittest,
+    "../../ut-tests/work_observers_unittest.rs"
+);

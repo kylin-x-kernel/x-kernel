@@ -122,8 +122,9 @@ impl Queue {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(delayed_unittest, "../../ut-tests/queue_delayed_unittest.rs");
 
-#[cfg(unittest)]
-mod modify_tests;
+unittest::path_mod_test!(
+    delayed_modify_unittest,
+    "../../ut-tests/queue_delayed_modify_unittest.rs"
+);

@@ -447,6 +447,7 @@ impl<H: Hal, T: Transport> BlockCompletionOperations for VirtIoBlkDev<H, T> {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests/requests.rs"]
-pub(super) mod tests;
+unittest::path_mod_test!(
+    pub(super) mod requests_unittest,
+    "../../ut-tests/blk_requests_unittest.rs",
+);

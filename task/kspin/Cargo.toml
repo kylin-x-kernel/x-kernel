@@ -11,6 +11,8 @@ description = "Spinlocks used for kernel space that can disable preemption or IR
 categories = ["os", "no-std"]
 
 [package.metadata.cargo-shear]
+# linkme is re-exported for lock-stat registration macros when stats are
+# enabled, which cargo-shear does not see as a normal direct use.
 ignored = ["linkme"]
 
 [features]

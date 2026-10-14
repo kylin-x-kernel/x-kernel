@@ -27,5 +27,4 @@ pub use writeback::WritebackRangeResult;
 /// Page index within a mapping.
 pub type PageIndex = u64;
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(pagecache_unittest, "../ut-tests/pagecache_unittest.rs");

@@ -123,5 +123,7 @@ impl<S> NormalService<S> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    runtime_unittest,
+    "../../ut-tests/normal_runtime_unittest.rs"
+);

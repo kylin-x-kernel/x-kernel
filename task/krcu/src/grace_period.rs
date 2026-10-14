@@ -181,6 +181,8 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
     }
 }
 
-#[cfg(any(test, unittest))]
+#[cfg(all(test, not(unittest)))]
 #[path = "../ut-tests/coordinator.rs"]
 mod tests;
+
+unittest::path_mod_test!(tests, "../ut-tests/coordinator.rs");

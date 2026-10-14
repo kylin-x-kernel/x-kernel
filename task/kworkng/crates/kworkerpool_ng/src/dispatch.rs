@@ -39,8 +39,7 @@ use intrusive_collections::{LinkedList, intrusive_adapter, linked_list::AtomicLi
 use kpoll::Completion;
 use kspin::SpinNoIrq;
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(dispatch_unittest, "../ut-tests/dispatch_unittest.rs");
 
 use crate::{
     execution::{AcquiredExecution, PartitionWorkSource, SourceRemainder},

@@ -10,6 +10,8 @@ documentation.workspace = true
 description = "x-kernel synchronization primitives"
 
 [package.metadata.cargo-shear]
+# linkme is re-exported for lock-stat registration macros when stats are
+# enabled, which cargo-shear does not see as a normal direct use.
 ignored = ["linkme"]
 
 [features]

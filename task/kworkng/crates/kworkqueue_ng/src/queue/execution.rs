@@ -29,5 +29,7 @@ impl Queue {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    execution_unittest,
+    "../../ut-tests/queue_execution_unittest.rs"
+);

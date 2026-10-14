@@ -10,6 +10,8 @@ repository.workspace = true
 documentation.workspace = true
 
 [package.metadata.cargo-shear]
+# These optional driver contracts are selected through feature wiring and may be
+# consumed only by the corresponding concrete driver configuration.
 ignored = ["display", "input", "kalloc", "vsock"]
 
 [features]

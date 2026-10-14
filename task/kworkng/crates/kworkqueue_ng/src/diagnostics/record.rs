@@ -74,5 +74,7 @@ impl StallRecord {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    record_unittest,
+    "../../ut-tests/diagnostics_record_unittest.rs"
+);

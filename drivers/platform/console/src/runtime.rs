@@ -158,7 +158,4 @@ pub fn unregister_console_device(id: DeviceId) -> Option<ClassDevice<CharDeviceI
     console_subsystem().lock().remove(id)
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("tests/runtime.rs");
-}
+unittest::path_mod_test!(runtime_unittest, "../ut-tests/runtime_unittest.rs");

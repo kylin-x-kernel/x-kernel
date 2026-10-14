@@ -315,6 +315,5 @@ impl KernelTraceOps for Kops {
     }
 }
 
-#[cfg(all(unittest, feature = "smp"))]
-#[path = "test_ktracing.rs"]
-mod tests;
+#[cfg(feature = "smp")]
+unittest::path_mod_test!(ktracing_unittest, "../ut-tests/ktracing_unittest.rs");

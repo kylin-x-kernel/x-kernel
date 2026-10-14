@@ -29,16 +29,4 @@ impl LocalIdAlloc {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    use super::*;
-
-    #[unittest::def_test]
-    fn exhausted_local_ids_return_errors_without_wrapping() {
-        let mut ids = LocalIdAlloc { next: u16::MAX - 1 };
-        assert_eq!(ids.alloc(), Ok(u16::MAX - 1));
-        assert_eq!(ids.alloc(), Err(DriverError::NoMemory));
-        assert_eq!(ids.alloc(), Err(DriverError::NoMemory));
-        assert_eq!(ids.next, u16::MAX);
-    }
-}
+unittest::path_mod_test!(local_id_unittest, "../../ut-tests/local_id_unittest.rs");

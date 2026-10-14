@@ -196,5 +196,4 @@ impl<S: PartitionWorkSource> NormalService<S> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(normal_unittest, "../ut-tests/normal_unittest.rs");

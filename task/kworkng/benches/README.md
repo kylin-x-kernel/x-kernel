@@ -57,9 +57,9 @@ workload. The following tests complement it:
 
 | Contract | Coverage |
 | --- | --- |
-| Reuse, CPU placement, normal/BH/high-BH progress | This release runner and src/system_tests.rs |
-| Delayed retiming, drain and final-owner release | This runner and src/live_owned_tests.rs |
-| Racing publication versus permanent shutdown | src/live_owned_tests.rs |
+| Reuse, CPU placement, normal/BH/high-BH progress | This release runner and ut-tests/system_unittest.rs |
+| Delayed retiming, drain and final-owner release | This runner and ut-tests/live_owned_unittest.rs |
+| Racing publication versus permanent shutdown | ut-tests/live_owned_unittest.rs |
 | IRQ submission allocation and capture destruction context | core/kruntime/src/tests_workqueue/allocation.rs |
 | Routing and admission races | crates/kworkqueue_ng/src/queue/tests/routing.rs |
 | Worker occupancy, retirement and retained demand | crates/kworkerpool_ng tests |

@@ -138,6 +138,7 @@ pub(super) fn close_device(id: DeviceId) {
     }
 }
 
-#[cfg(unittest)]
-#[path = "../../tests/virtio_block_activation.rs"]
-mod tests;
+unittest::path_mod_test!(
+    virtio_block_activation_unittest,
+    "../../../ut-tests/virtio_block_activation_unittest.rs"
+);

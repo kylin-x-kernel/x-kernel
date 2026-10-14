@@ -60,6 +60,7 @@ fn registration_error(error: PollRegisterError) -> DriverError {
     }
 }
 
-#[cfg(unittest)]
-#[path = "tests/rng_completion.rs"]
-mod tests;
+unittest::path_mod_test!(
+    rng_completion_unittest,
+    "../ut-tests/rng_completion_unittest.rs"
+);

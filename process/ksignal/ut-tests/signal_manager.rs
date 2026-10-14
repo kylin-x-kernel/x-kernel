@@ -64,11 +64,6 @@ fn observe_pending(
     let waker = Waker::from(observed.clone());
     let context = Context::from_waker(&waker);
     let mut registrations = kpoll::PollRegistrations::new();
-    #[expect(
-        clippy::unwrap_used,
-        reason = "CG-021-no-panic-on-reachable-failure: test scenario: a failed registration is \
-                  the setup failure the caller's test reports"
-    )]
     registrations
         .context(&context)
         .register_weak(source)

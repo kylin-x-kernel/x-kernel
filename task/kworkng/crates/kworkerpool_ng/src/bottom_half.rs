@@ -19,8 +19,7 @@ use crate::{PartitionDispatch, PartitionWorkSource};
 
 mod services;
 pub use services::{BottomHalfServices, PrepareError as BottomHalfPrepareError};
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(bottom_half_unittest, "../ut-tests/bottom_half_unittest.rs");
 mod wake;
 
 /// The two independently serviced kernel BH categories.

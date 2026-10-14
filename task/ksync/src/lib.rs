@@ -82,10 +82,14 @@
 
 pub use kspin as spin;
 
+unittest::path_mod_test!(lib_unittest, "../ut-tests/lib_unittest.rs");
+unittest::path_mod_test!(
+    mutex_stress_unittest,
+    "../ut-tests/mutex_stress_unittest.rs"
+);
 mod mutex;
 mod rwlock;
 mod semaphore;
-mod tests;
 mod util;
 
 #[cfg(not(feature = "stats"))]

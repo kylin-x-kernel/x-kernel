@@ -87,8 +87,12 @@ impl Default for Directory {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    directory_unittest,
+    "../../ut-tests/diagnostics_directory_unittest.rs"
+);
 
-#[cfg(unittest)]
-mod partition_tests;
+unittest::path_mod_test!(
+    directory_partition_unittest,
+    "../../ut-tests/diagnostics_directory_partition_unittest.rs"
+);

@@ -58,5 +58,7 @@ impl<T, H> Work<T, H> {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    cancellation_unittest,
+    "../../ut-tests/work_cancellation_unittest.rs"
+);

@@ -362,11 +362,17 @@ impl QueuePartition {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    delayed_unittest,
+    "../../../ut-tests/queue_partition_delayed_unittest.rs"
+);
 
-#[cfg(unittest)]
-mod timer_tests;
+unittest::path_mod_test!(
+    delayed_timer_unittest,
+    "../../../ut-tests/queue_partition_delayed_timer_unittest.rs"
+);
 
-#[cfg(unittest)]
-mod retime_tests;
+unittest::path_mod_test!(
+    delayed_retime_unittest,
+    "../../../ut-tests/queue_partition_delayed_retime_unittest.rs"
+);

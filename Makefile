@@ -167,7 +167,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout fmt hooks clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -371,6 +371,9 @@ check_lints:
 
 check_test_layout:
 	@$(XKMAKE) hygiene test-layout
+
+check_host_tests:
+	@$(XKMAKE) hygiene host-tests
 
 fmt:
 	@cargo +nightly-2026-03-08 fmt --all

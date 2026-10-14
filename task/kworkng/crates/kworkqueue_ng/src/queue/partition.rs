@@ -485,5 +485,7 @@ impl QueuePartition {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(
+    partition_unittest,
+    "../../ut-tests/queue_partition_unittest.rs"
+);

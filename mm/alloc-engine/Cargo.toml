@@ -34,6 +34,16 @@ unittest.workspace = true
 rand = { version = "0.8", features = ["small_rng"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
+[[test]]
+name = "allocator"
+path = "tests/allocator.rs"
+required-features = ["full"]
+
+[[test]]
+name = "buddy_stress"
+path = "tests/buddy_stress.rs"
+required-features = ["full"]
+
 [[bench]]
 name = "collections"
 harness = false

@@ -220,7 +220,7 @@ fn process_pending_devices() {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("tests/block_completion_dispatch.rs");
-}
+unittest::path_mod_test!(
+    block_completion_dispatch_unittest,
+    "../ut-tests/block_completion_dispatch_unittest.rs"
+);

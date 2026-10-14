@@ -10,6 +10,8 @@ documentation.workspace = true
 description = "Hardware abstraction layer, provides unified APIs for platform-specific operations"
 
 [package.metadata.cargo-shear]
+# linkme is kept for feature-gated registration wiring that cargo-shear does
+# not see as a direct code reference in every configuration.
 ignored = ["linkme"]
 ignored-paths = ["src/dummy.rs"]
 
