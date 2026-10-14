@@ -32,6 +32,10 @@ static TIMER_INIT_TICKS: AtomicU64 = AtomicU64::new(0);
 #[path = "resume_counter.rs"]
 mod resume_counter;
 
+#[cfg(any(feature = "arm-timer-resume-fixup", unittest))]
+#[path = "resume_notifications.rs"]
+mod resume_notifications;
+
 // Counter sampling and epoch updates must be one transaction across CPUs.
 // The clock is also read from timer IRQs, so local IRQs must be masked.
 #[cfg(feature = "arm-timer-resume-fixup")]
@@ -40,7 +44,8 @@ kspin::static_lock! {
         SpinNoIrq::new(resume_counter::ResumeCounter::new());
 }
 #[cfg(feature = "arm-timer-resume-fixup")]
-static IPI_FIXUP_PENDING: AtomicUsize = AtomicUsize::new(0);
+static IPI_FIXUP_PENDING: resume_notifications::ResumeNotifications<{ kbuild_config::NR_CPUS }> =
+    resume_notifications::ResumeNotifications::new();
 #[cfg(feature = "arm-timer-resume-fixup")]
 static REMOTE_FIXUP_REQUESTED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -314,9 +319,7 @@ pub fn dispatch_resume_fixup() {
 /// hotplug/cresume fixup (feature `arm-timer-resume-fixup`).
 pub fn handle_ipi_fixup() {
     let cpu_id = khal::percpu::this_cpu_id();
-    let bit = 1usize << cpu_id.as_usize();
-    let pending = IPI_FIXUP_PENDING.fetch_and(!bit, Ordering::AcqRel);
-    if pending & bit == 0 {
+    if !IPI_FIXUP_PENDING.take(cpu_id.as_usize()) {
         return;
     }
 
@@ -536,17 +539,14 @@ fn request_remote_timer_fixup() {
     }
 
     let current_cpu = khal::percpu::this_cpu_id();
-    let all_cpus_mask = if kcpu_id_map::nr_cpus() >= usize::BITS as usize {
-        usize::MAX
-    } else {
-        (1usize << kcpu_id_map::nr_cpus()) - 1
-    };
-    let remote_mask = all_cpus_mask & !(1usize << current_cpu.as_usize());
-    if remote_mask == 0 {
+    // AArch64 load_from_fdt filters enabled nodes and valid reg values before
+    // load_from_raw_cpu_ids enumerates them. Present logical IDs are therefore
+    // 0..nr_cpus(), even with disabled nodes or sparse hardware MPIDRs. The
+    // normalized MPIDR cannot equal the map's usize::MAX invalid sentinel.
+    if !IPI_FIXUP_PENDING.mark_peers(kcpu_id_map::nr_cpus(), current_cpu.as_usize()) {
         return;
     }
 
-    IPI_FIXUP_PENDING.fetch_or(remote_mask, Ordering::AcqRel);
     kirq::notify_cpu(
         kbuild_config::IPI_IRQ,
         kirq::TargetCpu::AllButSelf {

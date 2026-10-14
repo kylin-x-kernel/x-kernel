@@ -20,6 +20,7 @@ Wall-clock maintenance belongs to `ktime`.
 | `src/lib.rs` | Target-specific module selection and configuration provenance through `TimerSource`. |
 | `src/arm_generic.rs` | ARM physical or virtual counter, generic timer events, device-tree configuration, and optional counter-discontinuity repair. |
 | `src/resume_counter.rs` | Private ARM counter state and arithmetic regression tests. |
+| `src/resume_notifications.rs` | Per-CPU atomic recovery requests and capacity/coalescing tests. |
 | `src/riscv_sbi.rs` | RISC-V time counter and SBI timer events. |
 | `src/x86_lapic_tsc.rs` | TSC frequency discovery and elapsed-time conversion, with LAPIC one-shot events. |
 
@@ -220,3 +221,38 @@ Repeated detections before dispatch coalesce; repeated real discontinuities
 after dispatch still require new recovery. An unsynchronized or continuously
 oscillating counter violates the clock contract and can cause repeated local
 IRQs/IPIs; the guest cannot guarantee service in that environment.
+
+## Per-CPU resume notifications
+
+The optional ARM64 resume path stores one atomic pending flag per configured
+logical CPU instead of a machine-word bitmap. The dispatcher marks every active
+peer before sending AllButSelf IPI; each peer consumes only its own flag with an
+atomic swap. Repeated requests may coalesce before consumption; a request
+published after consumption remains pending. Topology must fit `NR_CPUS` and use
+contiguous logical CPU IDs. Invalid topology produces no notification or flag
+mutation. This change does not add RTC compensation or modify clock semantics.
+The exceptional notification path scans active CPUs; normal clock reads do not.
+
+Notification state regressions run as kernel unit tests through the existing
+AArch64 unittest pipeline, including when resume fixup is disabled. They cover
+130 logical flags, topology validation, coalescing, independent consumption and
+publication after consumption using deterministic sequences. These state tests
+do not claim simultaneous SMP execution or actual 130-CPU IPI routing coverage.
+No feature-specific Jenkins stage or standalone host CI entry is added.
+
+### AArch64 logical CPU topology contract
+
+The notification range is justified by the current AArch64 CPU-map loader,
+not by assuming hardware IDs are dense. `arch/kcpu_id_map/src/arch/aarch64.rs`
+loads through `CpuIdMap::load_from_fdt` in `arch/kcpu_id_map/src/cpu_id.rs`:
+`of::enabled_cpu_nodes` filters disabled nodes, `filter_map(of::cpu_node_reg)`
+removes nodes without valid register IDs, and only then
+`load_from_raw_cpu_ids` uses `enumerate()` to insert logical indices starting
+at zero, truncating at `NR_CPUS`. The only `CpuIdMap::insert` caller is this
+loader. Normalized MPIDRs are masked by `MPIDR_AFFINITY_MASK` and cannot equal
+the `usize::MAX` invalid sentinel. Thus no holes are introduced by disabled
+nodes or sparse hardware MPIDRs, and present logical IDs are exactly
+`0..nr_cpus()` once routing is initialized. The immutable `Once<CpuIdMap>`
+has no runtime removal/hotplug path. If this mapping contract changes to permit
+sparse logical IDs, the notification publisher must use explicit present IDs
+rather than a present count; the helper does not independently validate holes.
