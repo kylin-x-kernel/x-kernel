@@ -19,8 +19,8 @@ static READER_NODES: [ReaderNode; kbuild_config::NR_CPUS] =
 /// preemption excluded. Its storage must follow the task exit/GC protocol.
 pub(crate) unsafe fn note_context_switch(task: &TaskInner, cpu: LogicalCpuId) {
     // SAFETY: switch_to runs with IRQs/preemption excluded for its current task.
-    // Static nodes never move; the task remains Arc-owned while runnable and GC
-    // permanently retains exited tasks with residual read participation.
+    // Static nodes never move; the task remains Arc-owned while runnable, and
+    // finish_task_switch unlinks exited readers before releasing the old owner.
     unsafe { READER_NODES[cpu.as_usize()].enroll(&task.rcu_reader) };
 }
 

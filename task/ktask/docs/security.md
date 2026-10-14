@@ -7,13 +7,15 @@ It rejects missing or idle current tasks, interrupt-like/IRQ-masked contexts,
 and preemption protection when tracked. Explicit RCU read nesting also rejects
 sleeping and voluntary yielding, without preventing involuntary preemption.
 Only controlled tests enter these scopes; there is no reclamation capability.
-Scheduler enrollment borrows stable Arc-owned task storage. The per-CPU GC runs
-after leaving the exited task on that CPU and checks residual participation
-before moving or destroying it. Abandoned read scopes deliberately retain that
-allocation and all remaining owned resources once, with a diagnostic; this
-includes identity/runtime references and keeps diagnostic weak entries alive.
-The immutable runtime cannot simply be detached while shared task references
-may still borrow it. Normal outer exits remove their node first.
+Scheduler enrollment borrows stable Arc-owned task storage. On the incoming
+stack, `finish_task_switch` removes an exited task's abandoned RCU participation
+before releasing the outgoing owner or on-CPU marker. IRQs and migration remain
+excluded, old current is unpublished and the exited task cannot resume. The
+PREV_TASK lock is released before the original reader-node lock is acquired;
+diagnostics run after unlinking. Normal outer exits remove their node first.
+GC retains its ordinary final-ownership check before destroying task storage.
+Cleanup does not detach immutable runtime fields while shared task references
+may still borrow them, or unwind values on an abandoned Rust stack.
 No raw task pointer is sent to a deferred callback. IRQ/NMI read scope support
 is not implied by this task-context protocol.
 Sleep assertions and prepared waits

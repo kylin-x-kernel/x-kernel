@@ -40,6 +40,39 @@ impl TaskReader {
         !self.owner.load(Ordering::Acquire).is_null()
     }
 
+    /// Discharges abandoned scopes after the host permanently stops this task.
+    ///
+    /// Returns whether residual participation was found. Uses the same unlink
+    /// path as an ordinary outer exit; does not certify a CPU quiescent state
+    /// or run reclamation callbacks.
+    ///
+    /// # Safety
+    ///
+    /// The task must never resume: its stack is inactive and it is no longer
+    /// current on any CPU. No scope guard may subsequently run, and no task,
+    /// IRQ or NMI may enter, leave or enroll this reader. Keep the reader and
+    /// its owner node fixed and live through this call. Ordinary IRQs and
+    /// preemption must be excluded; this must not run in NMI context.
+    pub unsafe fn finish_task_exit(&self) -> bool {
+        let was_reading = self.nesting.swap(0, Ordering::AcqRel) != 0;
+        let was_enrolled = self.is_enrolled();
+        self.remove_enrollment();
+        was_reading || was_enrolled
+    }
+
+    fn remove_enrollment(&self) {
+        let owner = self.owner.load(Ordering::Acquire);
+        if !owner.is_null() {
+            // SAFETY: enrollment retains stable node/reader storage through
+            // removal. Only the owning task's outer exit or its exclusive
+            // post-switch terminal cleanup reaches this operation.
+            let node = unsafe { &*owner };
+            // SAFETY: the published owner names this reader's unique list;
+            // no competing scope exit or enrollment is permitted for it.
+            unsafe { node.remove(self) };
+        }
+    }
+
     /// Tests the original enrollment identity without dereferencing a raw owner.
     #[cfg(any(test, unittest))]
     pub fn is_enrolled_on(&self, node: &ReaderNode) -> bool {
@@ -52,7 +85,8 @@ impl TaskReader {
     /// The host uses the current task's state and forbids voluntary blocking.
     /// The token cannot escape through the return value or be moved into another
     /// task. Normal return (including an error result) balances nesting. An
-    /// execution path that abandons its stack leaves participation recorded.
+    /// execution path that abandons its stack leaves participation recorded
+    /// until the host performs [`Self::finish_task_exit`] after permanent exit.
     /// Once enrolled, only the owning task may enter/exit scopes, as required
     /// by [`ReaderNode::enroll`]. IRQ/NMI scope use is not supported.
     ///
@@ -116,8 +150,10 @@ impl TaskReader {
 
 /// Borrowed proof of a scope's participation in its task's reader accounting.
 ///
-/// Only [`TaskReader::with_read`] constructs and owns this guard. Callers cannot
-/// extract it, suppress its destruction or transfer its borrow to another task.
+/// Production code constructs and owns this guard through [`TaskReader::with_read`].
+/// Callers of that interface cannot extract it, suppress its destruction or
+/// transfer its borrow to another task. Private test fixtures construct guards
+/// directly to model overlapping task scopes with independently controlled exits.
 /// It provides no published-data access until the reclamation protocol exists.
 pub struct ReadGuard<'reader> {
     reader: &'reader TaskReader,
@@ -129,16 +165,7 @@ impl Drop for ReadGuard<'_> {
         let depth = self.reader.try_leave();
         assert!(depth.is_some(), "RCU read nesting underflow");
         if depth == Some(0) {
-            let owner = self.reader.owner.load(Ordering::Acquire);
-            if !owner.is_null() {
-                // SAFETY: enroll's host contract retains the node and reader at
-                // stable addresses. Only this task exits its scope; a scheduler
-                // cannot enroll the zero-depth task before removal completes.
-                let node = unsafe { &*owner };
-                // SAFETY: the non-null owner names this reader's unique list;
-                // this is its outer exit, and remove supplies IRQ-safe locking.
-                unsafe { node.remove(self.reader) };
-            }
+            self.reader.remove_enrollment();
         }
     }
 }
@@ -146,3 +173,7 @@ impl Drop for ReadGuard<'_> {
 #[cfg(any(test, unittest))]
 #[path = "../ut-tests/reader.rs"]
 mod tests;
+
+#[cfg(any(test, unittest))]
+#[path = "../ut-tests/grace_period.rs"]
+mod tests_grace_period;

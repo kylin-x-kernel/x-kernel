@@ -41,9 +41,12 @@ does not inspect this counter. `rcu::note_context_switch` enrolls an active read
 before same-task selection returns or an actual stack switch occurs; the common
 path includes migration helpers. CPU nodes have kernel lifetime and retain no
 owning task reference. The task retains its original node across migration;
-outer scope exit unlinks it. GC checks residual participation before attempting
-`Arc::try_unwrap`, permanently retaining abnormal exited readers instead of
-moving their linked storage or retrying them indefinitely.
+outer scope exit unlinks it. For permanently exited tasks, `finish_task_switch`
+clears residual reader participation after publishing incoming current and
+leaving the outgoing stack, but before releasing its owning reference or on-CPU
+marker. It diagnoses abandoned scopes and uses krcu's ordinary unlink path.
+GC still uses `Arc::try_unwrap` to wait for independent owners and destroy tasks
+in task context; it does not repair RCU lists or permanently retain readers.
 
 Owned timer preparation uses `ktimer_core::Timer::new_on` with a snapshot of the
 current logical CPU after platform per-CPU initialization. The platform accessor

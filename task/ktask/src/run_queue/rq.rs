@@ -806,7 +806,8 @@ impl RunQueue {
         };
 
         // SAFETY: IRQs/preemption are excluded and prev_task is this CPU's
-        // Arc-owned current task. Exited-task GC retains residual readers.
+        // Arc-owned current task. Post-switch cleanup unlinks exited readers
+        // before releasing the outgoing owner.
         unsafe { crate::rcu::note_context_switch(&prev_task, self.cpu_id) };
         if prev_task.ptr_eq(&next_task) {
             #[cfg(feature = "sched_stat")]
@@ -915,6 +916,19 @@ pub(crate) unsafe fn finish_task_switch() {
         .lock()
         .take()
         .expect("context switch must supply the outgoing task owner");
+    if prev_task.state() == TaskState::Exited {
+        // SAFETY: this task cannot resume, its stack is inactive and current
+        // already names the incoming task. IRQs/migration remain excluded;
+        // PREV_TASK's transferred Arc retains its storage through unlinking.
+        // Task-only scope admission excludes IRQ/NMI access to this reader.
+        let had_abandoned_read = unsafe { prev_task.rcu_reader.finish_task_exit() };
+        if had_abandoned_read {
+            warn!(
+                "task {} exited with an active RCU read scope",
+                prev_task.id_name()
+            );
+        }
+    }
     #[cfg(feature = "smp")]
     {
         // The caller excludes migration and runs on the destination
