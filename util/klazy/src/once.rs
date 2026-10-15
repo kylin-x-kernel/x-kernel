@@ -628,11 +628,8 @@ impl<'a> Drop for PanicGuard<'a> {
 
 // Gate before resolving the macro: boot loaders use this crate without an allocator.
 #[cfg(unittest)]
-#[unittest::mod_test]
-mod unittest_tests {
-    include!("../ut-tests/once_unittest.rs");
-}
+unittest::path_mod_test!(unittest_tests, "../ut-tests/once_unittest.rs");
 
 #[cfg(test)]
-#[path = "../host-tests/once_host.rs"]
+#[path = "../tests/host/once_host.rs"]
 mod once_host_tests;

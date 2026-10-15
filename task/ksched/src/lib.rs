@@ -12,14 +12,7 @@ mod entity;
 mod policy;
 mod ready_list;
 mod scheduler;
-/// Kernel unit tests for Deadline, RT, Fair, and Idle arbitration.
-///
-/// Stop stays unwired; FIFO/RR `set_attr` is rejected until the RT class
-/// admits them, and Deadline requires a valid `DlParams`.
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/scheduler.rs");
-}
+unittest::path_mod_test!(tests, "../ut-tests/scheduler.rs");
 
 extern crate alloc;
 

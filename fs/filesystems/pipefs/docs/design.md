@@ -15,6 +15,9 @@ Linux `fs/pipe.c` 为匿名 pipe 使用独立 `pipefs`，而不是 `anon_inodefs
 
 ## 范围
 
+内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的
+`unittest::path_mod_test!` 挂载为 `tests` 模块，在 `cfg(unittest)` 下编译。
+
 - `src/lib.rs`：pipefs 初始化、pipe inode/file 创建和动态 dentry 名称。
 - `kvfs::pipe`：共享 pipe/FIFO 数据结构与 file operation 算法，不属于本 crate 的
   filesystem instance state。

@@ -99,5 +99,5 @@ pub(crate) fn unwind_alloc(config: &BacktraceConfig, fp: usize) -> Result<alloc:
 }
 
 #[cfg(test)]
-#[path = "../host-tests/unwinder_host.rs"]
+#[path = "../tests/host/unwinder_host.rs"]
 mod unwinder_host_tests;

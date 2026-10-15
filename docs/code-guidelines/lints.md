@@ -30,6 +30,15 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
   由宏统一添加 `cfg(unittest)` 和测试 lint 豁免。只有必须 `include!` 的特殊场景才写成
   `#[mod_test] mod tests { include!("tests.rs"); }`；被 include 的文件不重复声明 cfg 或模块文档。
 - host 侧 `#[test]` 由 `clippy.toml` 的 `allow-*-in-tests` 覆盖。
+- 被无 allocator 引导程序复用的 crate（如 `klazy`），必须在 `path_mod_test!` 调用外保留
+  `#[cfg(unittest)]`：宏内部的 cfg 只删除展开后的测试模块，不能阻止宏解析引用带 `alloc`
+  的 `unittest` runtime。该保护仅在引导程序的 `cfg(unittest)` 为假时有效，且不会从
+  Cargo 构建图移除无条件声明的 `unittest` 依赖。标准 Makefile/XKMake 流程会为 boot helper
+  移除 `RUSTFLAGS` 并覆盖 `CARGO_ENCODED_RUSTFLAGS`，排除内核的 `--cfg unittest`；
+  直接用 Cargo 构建引导程序时也必须排除该标志，不能仅依赖外层 cfg。若要支持带该标志的
+  引导构建，需另行设计测试 feature 和 optional dependency 隔离，并验证 feature 合并行为。
+  此类迁移还须验证 x86 普通与 `UNITTEST=y` 的完整 `make build`，
+  仅编译内核或运行 AArch64 UT 无法覆盖 boot stub / UEFI loader。
 
 ## 新增 lint 与工具链升级
 

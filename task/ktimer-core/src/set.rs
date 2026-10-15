@@ -356,5 +356,5 @@ pub(crate) mod tests {
 }
 
 #[cfg(test)]
-#[path = "../host-tests/set_host.rs"]
+#[path = "../tests/host/set_host.rs"]
 mod slot_layout_tests;

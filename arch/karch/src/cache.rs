@@ -98,5 +98,5 @@ impl<T> DerefMut for CacheAligned<T> {
 }
 
 #[cfg(test)]
-#[path = "../host-tests/cache_host.rs"]
+#[path = "../tests/host/cache_host.rs"]
 mod cache_host_tests;

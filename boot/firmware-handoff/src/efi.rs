@@ -499,5 +499,5 @@ pub const fn memory_type_name(memory_type: MemoryType) -> &'static str {
 }
 
 #[cfg(test)]
-#[path = "../host-tests/efi.rs"]
+#[path = "../tests/host/efi.rs"]
 mod efi_tests;

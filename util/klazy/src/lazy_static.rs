@@ -131,5 +131,5 @@ macro_rules! __lazy_static_inner {
 }
 
 #[cfg(test)]
-#[path = "../host-tests/lazy_static_host.rs"]
+#[path = "../tests/host/lazy_static_host.rs"]
 mod lazy_static_host_tests;

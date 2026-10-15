@@ -219,5 +219,5 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
-#[path = "../host-tests/metadata.rs"]
+#[path = "../tests/host/metadata.rs"]
 mod metadata_tests;

@@ -118,5 +118,5 @@ unsafe impl Sync for LlvmProfileData {}
 unsafe impl Sync for ValueProfNode {}
 
 #[cfg(test)]
-#[path = "../../host-tests/abi_layout.rs"]
+#[path = "../../tests/host/abi_layout.rs"]
 mod abi_layout_tests;

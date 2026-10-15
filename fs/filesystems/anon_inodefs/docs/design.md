@@ -17,6 +17,9 @@ table 不进入该对象，也不按 mount 或 file 重复分配。
 
 ## 范围
 
+内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的
+`unittest::path_mod_test!` 挂载为 `tests` 模块，在 `cfg(unittest)` 下编译。
+
 - `src/lib.rs`：隐藏文件系统初始化、共享 inode、动态 dentry 名称和 file 创建。
 - `docs/design.md`：对象层次、启动顺序和生命周期。
 - `docs/security.md`：输入边界、并发初始化与失效模式。

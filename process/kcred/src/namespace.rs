@@ -91,7 +91,4 @@ pub fn initial_user_namespace() -> Arc<UserNamespace> {
     Arc::clone(INIT_USER_NS.call_once(|| Arc::new(UserNamespace::new_root())))
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/namespace_unittest.rs");
-}
+unittest::path_mod_test!(tests, "../ut-tests/namespace_unittest.rs");

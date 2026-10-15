@@ -9,6 +9,9 @@ membership 由 `kcgroup` 持有；进程查找和稳定 task identity 校验由 
 
 ## 范围
 
+内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的
+`unittest::path_mod_test!` 挂载为 `tests` 模块，在 `cfg(unittest)` 下编译。
+
 ```text
 src/
 ├── lib.rs         # crate 入口与公开导出

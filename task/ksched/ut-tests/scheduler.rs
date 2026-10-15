@@ -2,6 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! Kernel unit tests for Deadline, RT, Fair, and Idle arbitration.
+//!
+//! Stop remains an unwired rank, not a runnable class covered by these tests.
+//! Deadline attributes require valid `DlParams`; FIFO/RR are supported with valid
+//! RT priorities. Invalid-attribute cases check validation, not a blanket rejection
+//! of the RT class. See `task/ksched/docs/design.md` for the class contracts.
+
 extern crate alloc;
 
 use alloc::sync::Arc;

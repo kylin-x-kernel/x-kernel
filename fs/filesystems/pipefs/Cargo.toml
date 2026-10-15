@@ -9,6 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# ut-tests/lib.rs uses these for guest UT errors, poll events, timestamps and
+# splice destinations. cargo-shear excludes ut-tests; kernel UT needs normal dependencies.
+ignored = ["kerrno", "kpoll", "ktime_types", "memfs"]
+
 [dependencies]
 kcred.workspace = true
 kerrno.workspace = true

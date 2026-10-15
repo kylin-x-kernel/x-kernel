@@ -30,9 +30,9 @@ exclude = [
 
 [workspace.metadata.cargo-shear]
 # unittest is used only by cfg(unittest) tests under ut-tests; cargo-shear
-# ignores those files as test-source layout by convention.
+# also ignores path-mounted host unit tests under tests/host by layout convention.
 ignored = ["unittest"]
-ignored-paths = ["**/ut-tests/*.rs", "**/host-tests/*.rs"]
+ignored-paths = ["**/ut-tests/*.rs", "**/tests/host/*.rs"]
 
 [workspace.package]
 version = "0.3.0-dev"

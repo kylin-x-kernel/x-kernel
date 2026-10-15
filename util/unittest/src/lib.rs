@@ -26,6 +26,15 @@ macro_rules! ktest_println {
 /// together with `#[path = "..."]`. This macro keeps the same `cfg(unittest)`
 /// gate and module-level lint exemptions for tests moved out of production
 /// source files. Additional module attributes can be passed before `mod`.
+///
+/// Callers shared with allocator-free boot loaders must also put
+/// `#[cfg(unittest)]` on the macro invocation. The gate inside the expansion
+/// removes the test module, but resolving this macro still references the
+/// `unittest` runtime crate, which depends on `alloc`.
+/// This only prevents the reference when `cfg(unittest)` is false; it does not
+/// remove an unconditional Cargo dependency from the build graph. XKMake clears
+/// kernel unittest flags for boot helpers. Direct Cargo builds must likewise
+/// exclude `--cfg unittest`; the outer gate alone cannot isolate such builds.
 #[macro_export]
 macro_rules! path_mod_test {
     ($(#[$meta:meta])* $vis:vis mod $name:ident, $path:literal $(,)?) => {

@@ -319,5 +319,5 @@ fn exception_kind_from_ec(ec: Option<ESR_EL1::EC::Value>) -> ExceptionKind {
 }
 
 #[cfg(test)]
-#[path = "../../host-tests/aarch64_userspace_host.rs"]
+#[path = "../../tests/host/aarch64_userspace_host.rs"]
 mod userspace_host_tests;
