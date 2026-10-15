@@ -35,6 +35,7 @@ use crate::{
     poller::{PollBudget, PollProgress},
     router::{NeighborUpdatePolicy, Router},
     stack::{
+        device::StackDevice,
         ingress::{IngressProcessor, prepare_smoltcp_ingress},
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
     },
@@ -141,7 +142,11 @@ pub(crate) struct Service {
 impl Service {
     pub(crate) fn new(mut router: Router) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
+        let iface = Interface::new(
+            config,
+            &mut router.stack_device(),
+            to_smoltcp_instant(monotonic_time()),
+        );
 
         let service = Self {
             timer: ktask::Timer::new(NetworkTimer),
@@ -261,7 +266,7 @@ impl Service {
             poll_smoltcp_ingress_budgeted(
                 &mut iface,
                 current,
-                &mut router,
+                &mut router.stack_device(),
                 &mut sockets,
                 budget.rx_packets,
                 round_started_at,
@@ -273,7 +278,7 @@ impl Service {
         let mut stack_tx_passes = 0;
         let stack_tx_pass_limit = budget.tx_packets.max(1);
         loop {
-            let result = iface.poll_egress(current, &mut *router, &mut sockets);
+            let result = iface.poll_egress(current, &mut router.stack_device(), &mut sockets);
             if result == PollResult::None {
                 break;
             }
@@ -748,7 +753,11 @@ impl Service {
 
     fn rebuild_interface(&self, router: &mut Router, iface: &mut Interface) {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let mut new_iface = Interface::new(config, router, to_smoltcp_instant(monotonic_time()));
+        let mut new_iface = Interface::new(
+            config,
+            &mut router.stack_device(),
+            to_smoltcp_instant(monotonic_time()),
+        );
         let current_addrs = iface.ip_addrs().to_vec();
         new_iface.update_ip_addrs(|ip_addrs| {
             for addr in current_addrs {
@@ -913,7 +922,11 @@ impl Service {
     #[cfg(unittest)]
     pub(crate) fn replace_router_for_tests(&self, mut router: Router) {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let iface = Interface::new(config, &mut router, to_smoltcp_instant(monotonic_time()));
+        let iface = Interface::new(
+            config,
+            &mut router.stack_device(),
+            to_smoltcp_instant(monotonic_time()),
+        );
         *self.router.lock() = router;
         *self.iface.lock() = iface;
         self.sync_local_ipv4_views();
@@ -966,7 +979,7 @@ impl Service {
 fn poll_smoltcp_ingress_budgeted(
     iface: &mut Interface,
     current: SmoltcpInstant,
-    router: &mut Router,
+    device: &mut StackDevice<'_>,
     sockets: &mut SocketSet<'_>,
     budget_packets: usize,
     round_started_at: MonotonicInstant,
@@ -983,7 +996,7 @@ fn poll_smoltcp_ingress_budgeted(
             break;
         }
 
-        match iface.poll_ingress_single(current, router, sockets) {
+        match iface.poll_ingress_single(current, device, sockets) {
             PollIngressSingleResult::None => break,
             PollIngressSingleResult::PacketProcessed => {}
             PollIngressSingleResult::SocketStateChanged => {
@@ -1143,8 +1156,9 @@ mod tests {
     #[def_test(serial)]
     fn tx_capacity_wakes_after_router_unlock_before_deferred_return() {
         let mut router = Router::new();
+        let mut device = router.stack_device();
         let token =
-            smoltcp::phy::Device::transmit(&mut router, SmoltcpInstant::from_millis(0)).unwrap();
+            smoltcp::phy::Device::transmit(&mut device, SmoltcpInstant::from_millis(0)).unwrap();
         smoltcp::phy::TxToken::consume(token, 20, |bytes| bytes.fill(0));
         let service = Arc::new(Service::new(router));
         let probe = Arc::new(TxCapacityWakeProbe {
@@ -1219,7 +1233,7 @@ mod tests {
         let current = SmoltcpInstant::from_millis(10);
         let mut router = Router::new();
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
-        let mut iface = Interface::new(config, &mut router, current);
+        let mut iface = Interface::new(config, &mut router.stack_device(), current);
         let mut packets = Vec::from([
             PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
             PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx),
@@ -1230,7 +1244,7 @@ mod tests {
         let progress = poll_smoltcp_ingress_budgeted(
             &mut iface,
             current,
-            &mut router,
+            &mut router.stack_device(),
             &mut sockets,
             1,
             monotonic_time(),

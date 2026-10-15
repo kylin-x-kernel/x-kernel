@@ -402,6 +402,12 @@ All reads and writes to `SocketSet` must acquire the `SOCKET_SET.inner` mutex.
 
 Draining device receive queues, accessing routing state and inbound queues, and dispatching transmissions must acquire the internal Router mutex. The smoltcp Interface must be protected by a separate mutex.
 IPv4 validation and snooping run outside the Router lock.
+`StackDevice` borrows only the RX and data TX queues plus the MTU. The Router guard
+remains held while the service uses this adapter. Its TX token retains an exclusive
+queue borrow from the capacity check through enqueue; receiving also requires a
+TX slot so an admitted input can produce a response. Dropping an unused token does
+not consume capacity. The adapter cannot invoke physical-device operations.
+
 
 ### 4. Ring-Buffer Publication Rules
 

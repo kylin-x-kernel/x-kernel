@@ -76,6 +76,7 @@ net/knet/
     ├── stack/
     │   ├── ingress.rs
     │   ├── mod.rs
+    │   ├── device.rs
     │   ├── router.rs
     │   ├── socket_set.rs
     │   └── time.rs
@@ -219,10 +220,18 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | smoltcp | Provides IPv4/IPv6 processing for the smoltcp socket path. |
 | knet IPv4 / ICMPv4 | Validates and reassembles IPv4 packets, delivers UDP input, and handles ICMPv4 errors and responses. |
 | Router | Selects routes, fragments outgoing IPv4 packets, and dispatches RX/TX queues across devices. |
+| StackDevice | Borrows the admitted RX queue, data TX queue, and MTU for smoltcp; has no access to routes or physical devices. |
 | LoopbackDevice | Returns locally transmitted packets to the receive path. |
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
 | kclass network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
 | kclass vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
+
+`Router::stack_device()` constructs a temporary `StackDevice` for interface
+initialization, ingress, and egress. Router still owns and serializes the queues;
+this boundary separates the smoltcp adapter from routing and device dispatch
+without changing lock order, queue capacity, or loopback delivery. A later queue
+ownership change can replace the adapter's backing owner without exposing the
+routing table to smoltcp again.
 
 ### IPv4 Filter Table Model
 
