@@ -30,12 +30,6 @@ fn test_rlimit_accessors_update_selected_limit() {
             .unwrap(),
         Rlimit::new(1024, 1024)
     );
-    assert_eq!(
-        resources
-            .rlimit_values(linux_raw_sys::general::RLIMIT_NOFILE)
-            .unwrap(),
-        (1024, 1024)
-    );
 
     resources
         .set_rlimit(
@@ -49,12 +43,6 @@ fn test_rlimit_accessors_update_selected_limit() {
             .rlimit(linux_raw_sys::general::RLIMIT_NOFILE)
             .unwrap(),
         Rlimit::new(512, 1024)
-    );
-    assert_eq!(
-        resources
-            .rlimit_values(linux_raw_sys::general::RLIMIT_NOFILE)
-            .unwrap(),
-        (512, 1024)
     );
 }
 
@@ -123,4 +111,74 @@ fn test_shared_fd_table_lives_until_last_files_owner_exits() {
 
     second.exit_files();
     assert!(weak.upgrade().is_none());
+}
+
+#[def_test]
+fn test_rlimit_exchange_returns_replaced_pair_and_queries_without_mutation() {
+    let resources = ProcessResources::new(0x80000);
+    let resource = linux_raw_sys::general::RLIMIT_NOFILE;
+    let original = resources.rlimit(resource);
+    unittest::assert!(original.is_ok());
+    let original = original.unwrap();
+    let replacement = Rlimit::new(512, original.max);
+
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(replacement)),
+        Ok(original)
+    );
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, None),
+        Ok(replacement)
+    );
+    unittest::assert_eq!(resources.rlimit(resource), Ok(replacement));
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(replacement)),
+        Ok(replacement)
+    );
+
+    let lowered = Rlimit::new(128, 256);
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(lowered)),
+        Ok(replacement)
+    );
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(replacement)),
+        Err(kerrno::KError::OperationNotPermitted)
+    );
+    unittest::assert_eq!(resources.rlimit(resource), Ok(lowered));
+    resources.exit_files();
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, None),
+        Ok(lowered)
+    );
+}
+
+#[def_test]
+fn test_rlimit_exchange_rejects_invalid_updates_without_mutation() {
+    let resources = ProcessResources::new(0x80000);
+    let resource = linux_raw_sys::general::RLIMIT_NOFILE;
+    let original = resources.rlimit(resource);
+    unittest::assert!(original.is_ok());
+    let original = original.unwrap();
+
+    for invalid_resource in [linux_raw_sys::general::RLIM_NLIMITS, u32::MAX] {
+        unittest::assert_eq!(
+            resources.update_rlimit_and_get_old(invalid_resource, None),
+            Err(kerrno::KError::InvalidInput)
+        );
+        unittest::assert_eq!(
+            resources.update_rlimit_and_get_old(invalid_resource, Some(original)),
+            Err(kerrno::KError::InvalidInput)
+        );
+    }
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(Rlimit::new(2048, 1024))),
+        Err(kerrno::KError::InvalidInput)
+    );
+    unittest::assert_eq!(resources.rlimit(resource), Ok(original));
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(Rlimit::new(1024, 2048))),
+        Err(kerrno::KError::OperationNotPermitted)
+    );
+    unittest::assert_eq!(resources.rlimit(resource), Ok(original));
 }

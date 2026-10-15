@@ -13,8 +13,9 @@ close crosses into `kvfs` and may execute filesystem callbacks.
 
 There is no local unsafe code. `Arc` keeps snapshots and shared tables alive;
 `Option` models irreversible detachment. `rlimit` checks the index before array
-access and `set_rlimit` checks soft <= hard before modifying a pair. Public
-`rlimits` access is a trusted escape from those checks and must preserve them.
+access. `update_rlimit_and_get_old` checks soft <= hard and the currently
+stored hard cap before changing a pair. Public `rlimits` access is a trusted
+escape from those checks and must preserve them.
 
 ## Thread safety
 
@@ -24,6 +25,14 @@ locks. External callbacks must not be invoked while manually holding a table
 lock if they can acquire that table again. Detached snapshots are valid objects,
 but no longer prove membership in the process's table.
 
+For `Some` updates, limit validation, old-value capture and replacement use one
+limits write guard. Concurrent updating callers therefore receive the pair
+actually replaced, not a snapshot taken before another caller's update.
+`None` delegates to the checked `rlimit` read snapshot without mutation or an
+exclusive guard. Neither branch acquires another lock or copies user memory;
+both release their guard before returning, and callers must preserve that
+boundary. Failure returns no old value and leaves the stored pair intact.
+
 ## Threat analysis
 
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
@@ -32,6 +41,7 @@ but no longer prove membership in the process's table.
 | T-02 | Descriptor exhaustion | Medium | Repeated file insertion | `add_file` and `duplicate_file_from` pass the soft limit to the same lowest-free slot allocator in `FdTable`. Both bound the new FD number by that limit and capacity. Fixed-slot duplication only checks capacity, so syscall-level policy remains a caller obligation. |
 | T-03 | Access after process files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; previously cloned table/file references intentionally remain usable. |
 | T-04 | Reentrant filesystem deadlock | Medium | A close callback reacquires process resources | Removal precedes close and releases owner/table locks; callers of raw table APIs must preserve this ordering. |
+| T-05 | Stale old limit returned after concurrent replacement | Medium | A caller composes separate snapshot and setter operations | `update_rlimit_and_get_old` performs validation, snapshot and replacement under one write guard; standalone reads followed by setters remain separate operations. |
 
 ## Failure modes and effects (FMEA)
 
@@ -61,6 +71,8 @@ file release.
 ## Audit checklist
 
 - Preserve index and soft/hard validation on checked limit access.
+- Keep current-hard validation, old snapshot and replacement in one transaction.
+- Keep user copying and task coordination outside the limits guard.
 - Keep table -> limits ordering consistent with insertion.
 - Detach slots before executing close callbacks.
 - Reject attempts to replace a detached owner.

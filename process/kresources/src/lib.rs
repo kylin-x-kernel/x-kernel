@@ -73,17 +73,10 @@ impl ProcessResources {
         Ok(self.rlimits.read()[resource])
     }
 
-    /// Returns the current soft/hard pair for a specific resource.
-    ///
-    /// # Errors
-    ///
-    /// Returns `KError::InvalidInput` when `resource >= RLIM_NLIMITS`.
-    pub fn rlimit_values(&self, resource: u32) -> KResult<(u64, u64)> {
-        let limit = self.rlimit(resource)?;
-        Ok((limit.current, limit.max))
-    }
-
     /// Updates the limit for a specific resource.
+    ///
+    /// Use this setter when the replaced pair is not needed. Call
+    /// [`Self::update_rlimit_and_get_old`] to also return the pair replaced.
     ///
     /// # Errors
     ///
@@ -91,33 +84,52 @@ impl ProcessResources {
     /// Returns `KError::OperationNotPermitted` for any hard-limit increase.
     /// The old pair is unchanged on failure; capability-based increases are not supported.
     pub fn set_rlimit(&self, resource: u32, new_limit: Rlimit) -> KResult {
-        if resource >= RLIM_NLIMITS {
-            return Err(KError::InvalidInput);
-        }
-        if new_limit.current > new_limit.max {
-            return Err(KError::InvalidInput);
-        }
-
-        let limit = &mut self.rlimits.write()[resource];
-        if new_limit.max > limit.max {
-            // Raising the hard limit requires CAP_SYS_RESOURCE.
-            // Return EPERM until proper credential checks are in place.
-            return Err(KError::OperationNotPermitted);
-        }
-
-        *limit = new_limit;
+        self.update_rlimit_and_get_old(resource, Some(new_limit))?;
         Ok(())
     }
 
-    /// Updates the soft/hard pair for a specific resource.
+    /// Returns the old limit and optionally replaces it in one atomic operation.
+    ///
+    /// `None` returns a checked snapshot through [`Self::rlimit`] under a limits
+    /// read lock without changing the pair. `Some(new_limit)` returns the exact
+    /// pair replaced after checking the update against the current hard limit.
+    /// For an update, validation, the snapshot and replacement share one limits
+    /// write lock; a failed update returns no snapshot and changes no state.
+    ///
+    /// Requires sleepable task context. This method does not access user memory;
+    /// callers must copy inputs before calling and publish outputs after it returns.
     ///
     /// # Errors
     ///
     /// Returns `KError::InvalidInput` for an out-of-range resource or soft > hard.
-    /// Returns `KError::OperationNotPermitted` for any hard-limit increase.
-    /// The old pair is unchanged on failure; capability-based increases are not supported.
-    pub fn set_rlimit_values(&self, resource: u32, current: u64, max: u64) -> KResult {
-        self.set_rlimit(resource, Rlimit::new(current, max))
+    /// Returns `KError::OperationNotPermitted` for any hard-limit increase;
+    /// capability-based increases are not supported.
+    pub fn update_rlimit_and_get_old(
+        &self,
+        resource: u32,
+        new_limit: Option<Rlimit>,
+    ) -> KResult<Rlimit> {
+        let Some(new_limit) = new_limit else {
+            return self.rlimit(resource);
+        };
+        if resource >= RLIM_NLIMITS {
+            return Err(KError::InvalidInput);
+        }
+
+        let mut limits = self.rlimits.write();
+        let limit = &mut limits[resource];
+        let old_limit = *limit;
+        if new_limit.current > new_limit.max {
+            return Err(KError::InvalidInput);
+        }
+        if new_limit.max > old_limit.max {
+            // Raising the hard limit requires CAP_SYS_RESOURCE.
+            // Return EPERM until proper credential checks are in place.
+            return Err(KError::OperationNotPermitted);
+        }
+        *limit = new_limit;
+
+        Ok(old_limit)
     }
 
     /// Returns the attached file descriptor table.

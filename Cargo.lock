@@ -3002,6 +3002,7 @@ dependencies = [
  "kns",
  "kpoll",
  "kprocess",
+ "krlimit",
  "ksignal",
  "kspin",
  "ktask",

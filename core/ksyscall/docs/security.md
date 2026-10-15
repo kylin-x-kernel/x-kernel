@@ -188,8 +188,13 @@ writing any userspace output. Invalid resource IDs, input faults and rejected
 updates cannot overwrite the old-limit output object. An output fault after an
 applied update leaves that update in effect, following Linux behavior. No raw
 user references or new unsafe code are introduced. Existing target-process
-authorization and resource-owner locks are unchanged; separate limit snapshot
-and update calls retain their pre-existing concurrent-observer limitation.
+authorization and hard-limit policy are unchanged. When an update is requested,
+the owner validates, captures the old pair and replaces it under one limits
+write guard, so concurrent updates cannot make this syscall return a stale
+pre-update pair. Query-only calls take a checked snapshot under a read guard.
+Either guard is released before writing user memory; an output EFAULT still
+does not undo a successful update. The atomic contract covers one resource
+pair, not user copying, process liveness or authorization outside that owner lock.
 
 ## Optional time-query output and query-only clocks
 

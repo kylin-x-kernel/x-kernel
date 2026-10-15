@@ -10,7 +10,8 @@ callers. This crate does not locate the current task.
 
 ## Source scope and architecture
 
-The entire implementation and kernel unit tests are in `src/lib.rs`.
+The implementation is in `src/lib.rs`; kernel unit tests are in
+`ut-tests/lib.rs`, registered through `unittest::path_mod_test!`.
 
 ```text
 process runtime -> Arc<ProcessResources>
@@ -51,8 +52,16 @@ The files owner starts as `Some(table)` and `exit_files` changes it to `None`.
 Repeated exit is harmless. Replacement and unsharing reject `None` with
 `NoSuchProcess`; they cannot resurrect an exited owner.
 
-- Limit reads validate the resource index. Setters reject soft greater than hard
-  and reject every hard-limit increase until capability checks are implemented.
+- Limit reads validate the resource index. Passing `None` to
+  `update_rlimit_and_get_old` delegates to `rlimit` for a checked snapshot under
+  a limits read guard, so pure queries can share the lock. With `Some`, soft/hard
+  validation, comparison against the current hard cap, the old snapshot and
+  replacement share one limits write guard. The returned old pair is exactly
+  the one replaced.
+  `set_rlimit` is the ordinary typed setter for callers that do not need the old
+  pair; it delegates to that write transaction and discards the old value.
+  Every hard-limit increase remains rejected until capability checks are
+  implemented.
 - Insertion passes `RLIMIT_NOFILE.current` to `FdTable::add_file`. Fixed-slot
   duplication uses the table's capacity check, not that soft-limit policy.
   Minimum-based duplication passes a limit snapshot to `FdTable::duplicate_from`.

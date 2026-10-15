@@ -296,9 +296,13 @@ update. Resource validation also occurs when both pointers are NULL. A rejected
 input/update does not overwrite the output buffer; after a successful update,
 an output copy fault returns EFAULT without rolling back the applied limit,
 matching Linux copy ordering. Legacy getrlimit/setrlimit still require their
-respective output/input buffers. The resource owner's existing locking and
-hard-limit authorization policy remain unchanged; this adapter change does not
-make the separate snapshot and update operations atomic against other threads.
+respective output/input buffers. The adapter converts the copied input to a
+semantic `krlimit::Rlimit` and calls the owner's `update_rlimit_and_get_old` once.
+Query-only requests use the owner's checked read snapshot. For an update, one
+limits write guard covers validation against the current hard cap, old-value
+capture and replacement. The returned pair is therefore the one this update
+actually replaced despite concurrent updates. User copying remains outside
+either guard, and hard-limit authorization policy is unchanged.
 
 Linux `kernel/sys.c` copies a non-NULL `prlimit64` input before looking up the
 PID, so EFAULT takes priority over ESRCH. Legacy `getrlimit` checks the resource
@@ -314,6 +318,15 @@ The `prlimit_rejected_update_preserves_aliased_buffer` user/serial regression
 requests cur=2, max=1 with the same input/output buffer and checks InvalidInput
 without replacing that invalid pair with the old limit. This distinguishes
 update-before-output from the incorrect input/output/update ordering.
+
+The output-fault regression proves the destination is unwritable, submits a
+valid soft-limit change, and verifies EFAULT leaves the change applied before
+restoring the original pair. A separate user/serial fixture captures the current
+resource owner and starts eight kernel tasks against that same owner. Distinct
+soft values at a fixed hard cap must form one complete transition chain from
+the returned old values to the final query. All tasks join and the original
+soft limit is restored before assertions; completion order and timing are not
+used as the oracle. This tests owner concurrency, not user-thread syscall setup.
 
 ## Time-query argument compatibility
 
