@@ -803,6 +803,58 @@ IPv4 limited broadcast is replicated subject to interface binding. Other IPv4 de
 
 Sources: [`UDP send`](../src/transport/udp/socket.rs), [`Service::prepare_and_send_ipv4_packet`](../src/runtime/service.rs), [`Router`](../src/stack/router.rs), and [`EthernetDevice::send_ip_packet`](../src/device/ethernet.rs).
 
+### Unix Stream Control Data Delivery
+
+Unix stream control data (SCM_RIGHTS) is attached to **byte ranges**, not to
+datagram boundaries. A send that carries `SendOptions.ancillary` registers a
+record marked with the byte range `[start, end)` it is about to publish in the
+direction's shared `DirectionAncillary`. The consumer delivers the record when
+the `recv` that reaches that segment completes, and the read cap stops at the
+segment's end so a single `recvmsg` consumes at most one record -- the same
+stop point as Linux, which ends its read after the first fd-bearing skb.
+
+**Algorithm 4. Byte-marked control delivery**
+
+| Line | Operation |
+|---:|:---|
+| 1 | **send** registers the record `(start = sent_total, end = start + count, entries)` in `DirectionAncillary` before publishing the bytes. |
+| 2 | **send** publishes the bytes through `advance_write_index`; the cursor `sent_total` advances with the registration. |
+| 3 | A send registers its record only when it is about to publish at least one byte, immediately before `advance_write_index`. A failed read, a rejected liveness check, an exhausted record quota (`ENOBUFS`), or a closed consumer (`EPIPE`) publishes no byte and leaves no record. |
+| 4 | **recv** caps its copy at `min(occupied, record.end - recv_total)` for the oldest pending record: the read may span plain data and stop at the record's committed segment end. |
+| 5 | **recv** copies up to that cap, then retires the record its window reached (`pop_reached`) and delivers its entries to the caller. |
+| 6 | On `MSG_PEEK`, the read stops at the same cap but the record is **duplicated** (the shared entry-handle `Arc`) and kept for the later consuming recv; the ring and cursor are not advanced. |
+| 7 | On a consuming recv with a control buffer, the record is retired into `RecvOptions.ancillary`. |
+| 8 | On a consuming recv **without** a control buffer, the reached record is dropped instead of being inherited by a later `recvmsg`, and `RecvOptions.ancillary_discarded` reports the loss so the POSIX layer sets `MSG_CTRUNC`. |
+
+The registration-before-publish ordering at line 1 guarantees that a
+concurrently reading consumer which observes the published bytes always sees
+the registered segment and therefore never over-reads past it. Each
+`AncillaryData` is an `Arc`, so `MSG_PEEK` duplicates the record by cloning
+one handle (`scm_fp_dup`) without reopening the files, and the later
+consuming `recv` redeploys the same open file descriptions.
+
+The pending queue is a `VecDeque` retired from the front, so registering,
+reaching, and draining a record are all O(1). Delivery and the endpoint
+close move the entries out from under the `SpinNoPreempt` guard and deliver
+or drop them only after it is released: extending the receiver's sink
+allocates, and dropping the last file reference closes the file, which may
+take a sleepable mutex such as a pipe's internal lock.
+
+Retention in one direction is bounded: at most `MAX_PENDING_RECORDS` records
+holding at most `MAX_PENDING_ANCILLARY` entries in total, with
+`posix-net`'s per-`sendmsg` `SCM_MAX_FD` cap bounding the descriptors per
+record. Registration fails with `ENOBUFS` once either bound is reached, so a
+local peer cannot pin an unbounded number of file references behind a slow
+consumer. When the consumer's endpoint closes, `Channel::drop` drains its
+receive direction under the producer's `tx_order` lock, so the peer's passed
+file references are released even if the records were never received; a pipe
+write end passed but never received then lets the pipe reader observe EOF
+instead of blocking forever. The drained queue also rejects later
+registrations, which the send path reports as `EPIPE`.
+
+Sources: [`unix/stream.rs`](../src/unix/stream.rs) and
+[`unix/stream/channel.rs`](../src/unix/stream/channel.rs).
+
 ## Concurrency Model
 
 Concurrency is organized around a single owner for protocol progress, with finer-grained locks protecting socket, queue, and control-plane state.
@@ -956,9 +1008,43 @@ Read events register with the readable set, write events with the writable set, 
 
 Each `StreamEndpoint` uses `tx_order` to coordinate data publication and shutdown in its send direction. Send commits the write index under this lock, shutdown publishes closure under the corresponding direction lock, and peer recv uses the same lock for its final empty-queue and EOF checks. This ordering ensures that the receiver observes published data before EOF. If shutdown acquires the direction lock first, subsequent sends return `BrokenPipe`.
 
+Byte-marked control state for one direction lives in a `DirectionAncillary`
+shared by the two endpoints: a `SpinNoPreempt`-guarded queue of pending
+records plus the producer-written and consumer-consumed byte totals. The
+producer takes the guard to register a record before its bytes are
+published, so a consumer that observes the bytes always sees the record's
+segment; the consumer takes the guard to compute its read cap, to deliver or
+discard the reached record, and to advance its consumed total. Critical
+sections are short and never wrap a socket operation, and the lock is never
+acquired while holding both direction `tx_order` locks.
+
 A blocking send that encounters shutdown after making progress returns the number of bytes sent. A nonblocking send also returns a partial count after making progress, and returns `WouldBlock` only when no data has been sent and the ring buffer is full. A zero-length send returns 0 when the connection exists and the corresponding directions remain open at both ends.
 
 Bind records the Unix address, and `listen` enables connection reception. The listener queue is capped at `LISTEN_QUEUE_SIZE`; each request allocates its ring buffers only after reserving queue capacity. Shutting down the listener's read direction rejects new connections while preserving queued connections for `accept`.
+
+### Unix Stream Byte-Marked Control Data
+
+Unix stream `SCM_RIGHTS` is delivered by attaching a record to a byte range
+(`[start, end)` of the sending `sendmsg`) and stopping each `recv` at the
+reached record's segment end. Packet-mode control delivery cannot work on a
+stream because the receiver has no message boundary to consume. This
+matches Linux's `unix_stream_read_generic`, which ends the read after the
+first fd-bearing skb and delivers one control batch per `recvmsg`; the
+`scm_fp_dup` delivery point is reproduced by sharing each record's entries
+behind one `Arc`.
+
+`AncillaryData` is transported as `Arc<dyn Any + Send + Sync>` instead of
+`Box<dyn Any + Send + Sync>` so a `MSG_PEEK` can duplicate an opaque control
+payload without knowing its concrete type and without reopening the received
+files. The peer's open file description stays shared because the receiver
+installs the same `Arc<VfsFile>` reference into its descriptor table on
+every delivery.
+
+A no-control-buffer `recv` that reaches a record's segment drops the record.
+This avoids the stale-inheritance bug class where a later `recvmsg` that
+does provide a buffer silently receives control data from bytes the
+receiver already consumed, and the loss is reported as `MSG_CTRUNC` like
+Linux `scm_detach_fds`.
 
 ### Ethernet ARP Pending Queue
 
@@ -1015,6 +1101,9 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | Netlink sockets | Route sockets reject multicast subscriptions, userspace-peer destinations, and mixed query/mutation batches. Kobject-uevent sockets support group delivery, `SO_PASSCRED`, and validated no-op classic-BPF attach/detach compatibility. Connect, peer queries, and shutdown are unsupported. |
 | Socket options | Options unhandled by the selected protocol return `ENOPROTOOPT`. |
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
+| Unix stream control data | Byte-marked `SCM_RIGHTS` delivery with the segment-end barrier and `MSG_PEEK` duplication. Each `recvmsg` consumes at most one control record. Zero-length `sendmsg` with ancillary drops the control data because there is no byte to attach it to. Pending-record retention is bounded by `MAX_PENDING_RECORDS` / `MAX_PENDING_ANCILLARY`; a send beyond the quota fails with `ENOBUFS`. |
+| Unix stream `MSG_PEEK` | `MSG_PEEK` preserves the byte stream and duplicates control data (shared open file descriptions). It still stops at the reached record's segment end, so a peek limited by that barrier returns fewer bytes than the destination buffer size. |
+| Network namespaces | Socket, route, interface, and netlink tables are global, not per-network-namespace. `kns::NetNamespace` is a placeholder id, and `CLONE_NEWNET` / `setns` are not wired into `knet`. Pathname sockets already resolve through KVFS per operation, so cross-mount-namespace path views are consistent with the active mount namespace even though the binding registry itself is global. per-process netns isolation is tracked in the namespace subsystem, not here. |
 | vsock / TIPC bridge | Stream transport only; the bridge forwards bytes, excluding TIPC handles and memory references. |
 | Ethernet progress | Failed RX-scheduler attachment falls back to timeout polling. ARP pending traffic is subject to head-of-line blocking. |
 | Device attachment | Initialization attaches at most one NIC. vsock accepts one raw transport; a second registration returns `AlreadyExists`. |
@@ -1029,7 +1118,7 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 | TCP file close | Removes a `Closed` handle immediately when no reset is pending. Unread RX data causes abort, with the handle retained until RST is sent. Other handles remain in deferred close while the poller completes transmission and closure. Detached connections receive a 60-second reclamation deadline only in `FIN_WAIT_2`. |
 | TCP listener close | Marks the listener closed, drains child handles, and removes them from `SOCKET_SET`. |
 | Unix stream listener drop | Closes the listener queue, wakes waiters, clears the binding slot, and releases pending requests and ring buffers. |
-| Unix stream shutdown / channel drop | Publishes directional closure and wakes affected waiters; channel drop closes both directions before releasing buffers. Peer recv drains published data before EOF, and poll reports `RDHUP`. Discarded unread data records one peer `ConnectionReset`, consumed by recv or `SO_ERROR`. |
+| Unix stream shutdown / channel drop | Publishes directional closure and wakes affected waiters; channel drop closes both directions before releasing buffers. Pending byte-marked control records are dropped with the channel (received file references are released; no descriptor is installed). Peer recv drains published data before EOF, and poll reports `RDHUP`. Discarded unread data records one peer `ConnectionReset`, consumed by recv or `SO_ERROR`. |
 | UDP socket / PCB drop | Unregisters the socket from the PCB registry; PCB destruction releases receive and asynchronous-error queues. |
 | Raw socket drop | Shuts down both directions and removes the smoltcp handle. |
 | Packet socket drop | Releases queues and decrements the active-handler count. Later registration or publication prunes expired weak entries. |

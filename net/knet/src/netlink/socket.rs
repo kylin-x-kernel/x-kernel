@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use kcred::Cred;
@@ -258,7 +258,7 @@ impl SocketOps for NetlinkSocket {
                     && self.inner.general.pass_credentials()
                     && let Some(ancillary) = options.ancillary.as_deref_mut()
                 {
-                    ancillary.push(Box::new(crate::KernelAncillaryData::Credentials(
+                    ancillary.push(Arc::new(crate::KernelAncillaryData::Credentials(
                         crate::options::UnixCredentials {
                             pid: 0,
                             uid: 0,

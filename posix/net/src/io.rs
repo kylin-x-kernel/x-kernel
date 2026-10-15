@@ -10,7 +10,7 @@
 //! - Out-of-band data handling
 //! - Ancillary data (control messages)
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     any::TypeId,
     mem::{offset_of, size_of},
@@ -38,7 +38,7 @@ use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 
 use crate::{
     addr::SocketAddrExt,
-    cmsg::{CMsg, CMsgBuilder, push_ip_recverr_cmsg},
+    cmsg::{CMsg, CMsgBuilder, ScmFdBudget, push_ip_recverr_cmsg},
 };
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
@@ -112,6 +112,7 @@ fn parse_send_cmsgs(
 
     let mut ptr = control_ptr;
     let ptr_end = ptr.checked_add(control_len).ok_or(KError::InvalidInput)?;
+    let mut fd_budget = ScmFdBudget::default();
 
     while let Some(next) = ptr.checked_add(size_of::<cmsghdr>()) {
         if next > ptr_end {
@@ -124,7 +125,11 @@ fn parse_send_cmsgs(
             return Err(KError::InvalidInput);
         }
 
-        ancillary.push(Box::new(CMsg::parse(resources, hdr_ptr, hdr)?) as AncillaryData);
+        let cmsg = CMsg::parse(resources, hdr_ptr, hdr)?;
+        // Linux caps the descriptors of one `sendmsg` across all of its
+        // `SCM_RIGHTS` messages, not only within each message.
+        fd_budget.charge(cmsg.fd_count())?;
+        ancillary.push(Arc::new(cmsg) as AncillaryData);
         ptr += hdr.cmsg_len;
     }
 
@@ -140,20 +145,22 @@ enum SocketAncillary {
 fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
     // `AncillaryData` is the type-erased boundary between `posix-net` and `knet`.
     // Send-side cmsgs carry `posix-net`-owned `CMsg`, while receive-side
-    // asynchronous errors are produced by `knet` as `KernelAncillaryData`.
-    let type_id = ancillary.as_ref().type_id();
+    // asynchronous errors are produced by `knet` as `KernelAncillaryData`. The
+    // `Arc` payload is shared; each delivery clones the handle reference so a
+    // `MSG_PEEK` duplicates the open file descriptions without reopening them.
+    let type_id = (*ancillary).type_id();
     if type_id == TypeId::of::<CMsg>() {
-        let ancillary = ancillary.downcast::<CMsg>().ok()?;
-        return Some(match *ancillary {
-            CMsg::Rights { fds } => SocketAncillary::Rights { fds },
+        let ancillary = ancillary.clone().downcast::<CMsg>().ok()?;
+        return Some(match ancillary.as_ref() {
+            CMsg::Rights { fds } => SocketAncillary::Rights { fds: fds.clone() },
         });
     }
     if type_id == TypeId::of::<KernelAncillaryData>() {
-        let ancillary = ancillary.downcast::<KernelAncillaryData>().ok()?;
-        return Some(match *ancillary {
-            KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err),
+        let ancillary = ancillary.clone().downcast::<KernelAncillaryData>().ok()?;
+        return Some(match ancillary.as_ref() {
+            KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err.clone()),
             KernelAncillaryData::Credentials(credentials) => {
-                SocketAncillary::Credentials(credentials)
+                SocketAncillary::Credentials(credentials.clone())
             }
         });
     }
@@ -361,7 +368,22 @@ fn recv_impl(
 
     let mut ancillary = Vec::new();
     let mut reported_flags = RecvFlags::empty();
+    let mut ancillary_discarded = false;
 
+    // A Unix socket without a control buffer must let the transport decide the
+    // fate of the arrived control data: on a stream the read reaches a pending
+    // control record, so the record must be dropped instead of being kept for a
+    // later `recvmsg` (which would inherit stale ancillary data), and on a
+    // datagram the message's descriptors are dropped along with it. Both report
+    // the loss through `ancillary_discarded` for `MSG_CTRUNC`. Other socket
+    // types keep populating the vector because a caller can still recover flags
+    // or diagnostic data from it.
+    let ancillary_sink =
+        if output.cmsg_builder.is_none() && matches!(socket.as_ref(), Socket::Unix(_)) {
+            None
+        } else {
+            Some(&mut ancillary)
+        };
     let mut remote_addr =
         (!output.addr.is_null()).then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
     let recv = socket.recv(
@@ -369,8 +391,9 @@ fn recv_impl(
         RecvOptions {
             from: remote_addr.as_mut(),
             flags: recv_flags,
-            ancillary: Some(&mut ancillary),
+            ancillary: ancillary_sink,
             out_flags: Some(&mut reported_flags),
+            ancillary_discarded: Some(&mut ancillary_discarded),
         },
     )?;
     if let Some(out_flags) = output.out_flags {
@@ -412,7 +435,10 @@ fn recv_impl(
         if flags & MSG_ERRQUEUE != 0 {
             *msg_flags |= MSG_ERRQUEUE;
         }
-        if cmsg_truncated {
+        if cmsg_truncated || ancillary_discarded {
+            // `scm_detach_fds` reports MSG_CTRUNC whenever fd-carrying control
+            // data could not be emitted, including the empty-buffer case:
+            // `scm_max_fds` yields zero and the arrived fds are dropped.
             *msg_flags |= MSG_CTRUNC;
         }
     }

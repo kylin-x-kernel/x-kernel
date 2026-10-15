@@ -131,6 +131,32 @@ pub(crate) fn push_ip_recverr_cmsg(
     })
 }
 
+/// Maximum number of file descriptors one `sendmsg` may pass, matching Linux
+/// `SCM_MAX_FD`. A single `SCM_RIGHTS` message and the total across the
+/// message's control messages are both capped.
+const SCM_MAX_FD: usize = 253;
+
+/// Descriptor budget for one `sendmsg`, mirroring Linux's `struct scm_fp_list`:
+/// the total `SCM_RIGHTS` descriptors across the message's control messages may
+/// not exceed [`SCM_MAX_FD`].
+#[derive(Default)]
+pub(crate) struct ScmFdBudget {
+    charged: usize,
+}
+
+impl ScmFdBudget {
+    /// Charges one control message's descriptor count, rejecting a total above
+    /// the `SCM_MAX_FD` cap.
+    pub(crate) fn charge(&mut self, count: usize) -> KResult<()> {
+        let charged = self.charged + count;
+        if charged > SCM_MAX_FD {
+            return Err(KError::InvalidInput);
+        }
+        self.charged = charged;
+        Ok(())
+    }
+}
+
 /// Control message types for socket operations (ancillary data)
 pub(crate) enum CMsg {
     /// SCM_RIGHTS: file descriptor passing between processes
@@ -154,10 +180,8 @@ impl CMsg {
             .load_vm_vec(hdr.cmsg_len - size_of::<cmsghdr>())?;
         Ok(match (hdr.cmsg_level as u32, hdr.cmsg_type as u32) {
             (SOL_SOCKET, SCM_RIGHTS) => {
-                if data.len() % size_of::<i32>() != 0 {
-                    return Err(KError::InvalidInput);
-                }
-                let mut fds = Vec::new();
+                let fd_count = Self::rights_fd_count(data.len())?;
+                let mut fds = Vec::with_capacity(fd_count);
                 for fd in data.chunks_exact(size_of::<i32>()) {
                     #[expect(
                         clippy::unwrap_used,
@@ -178,6 +202,27 @@ impl CMsg {
                 return Err(KError::InvalidInput);
             }
         })
+    }
+
+    /// Returns the number of file descriptors this message carries.
+    pub(crate) fn fd_count(&self) -> usize {
+        match self {
+            Self::Rights { fds } => fds.len(),
+        }
+    }
+
+    /// Returns the descriptor count of one `SCM_RIGHTS` control body, rejecting
+    /// a body that is not a whole number of `i32`s or that exceeds the
+    /// per-message `SCM_MAX_FD` cap.
+    fn rights_fd_count(body_len: usize) -> KResult<usize> {
+        if !body_len.is_multiple_of(size_of::<i32>()) {
+            return Err(KError::InvalidInput);
+        }
+        let count = body_len / size_of::<i32>();
+        if count > SCM_MAX_FD {
+            return Err(KError::InvalidInput);
+        }
+        Ok(count)
     }
 }
 
@@ -263,5 +308,33 @@ mod tests {
             sock_extended_err_origin(SocketErrorOrigin::TxStatus),
             SO_EE_ORIGIN_TXSTATUS
         );
+    }
+
+    #[def_test]
+    fn scm_rights_body_caps_at_scm_max_fd() {
+        assert_eq!(
+            CMsg::rights_fd_count(SCM_MAX_FD * size_of::<i32>()),
+            Ok(SCM_MAX_FD)
+        );
+        assert_eq!(
+            CMsg::rights_fd_count((SCM_MAX_FD + 1) * size_of::<i32>()),
+            Err(KError::InvalidInput)
+        );
+        // A body that is not a whole number of descriptors is malformed.
+        assert_eq!(
+            CMsg::rights_fd_count(size_of::<i32>() - 1),
+            Err(KError::InvalidInput)
+        );
+        assert_eq!(CMsg::rights_fd_count(0), Ok(0));
+    }
+
+    #[def_test]
+    fn sendmsg_descriptor_budget_caps_at_scm_max_fd() {
+        let mut budget = ScmFdBudget::default();
+        assert_eq!(budget.charge(SCM_MAX_FD - 1), Ok(()));
+        assert_eq!(budget.charge(1), Ok(()));
+        // The total across a `sendmsg` is capped, not only each message.
+        assert_eq!(budget.charge(1), Err(KError::InvalidInput));
+        assert_eq!(ScmFdBudget::default().charge(SCM_MAX_FD), Ok(()));
     }
 }

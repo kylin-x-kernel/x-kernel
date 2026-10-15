@@ -256,17 +256,33 @@ impl UnixTransportOps for DgramTransport {
             if let Some(from) = options.from.as_mut() {
                 **from = SocketAddrEx::Unix(sender);
             }
-            if let Some(dst) = options.ancillary.as_mut() {
-                // Deliver identity before passed files so a short control
-                // buffer cannot spend the credential space on descriptors.
-                if self.options.pass_credentials()
-                    && let Some(credentials) = unix_sender_credentials
-                {
-                    dst.push(Box::new(crate::KernelAncillaryData::Credentials(
-                        credentials,
-                    )));
+            match options.ancillary.as_mut() {
+                Some(dst) => {
+                    // Deliver identity before passed files so a short control
+                    // buffer cannot spend the credential space on descriptors.
+                    if self.options.pass_credentials()
+                        && let Some(credentials) = unix_sender_credentials
+                    {
+                        dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
+                            credentials,
+                        )));
+                    }
+                    dst.extend(ancillary);
                 }
-                dst.extend(ancillary);
+                // The receive gave no control buffer: the datagram is consumed
+                // either way, but its control data cannot be delivered. Report
+                // the loss so the caller sets `MSG_CTRUNC`, like Linux
+                // `__scm_recv_common`, which also covers `SO_PASSCRED` sender
+                // credentials and not only passed file descriptions.
+                None => {
+                    let exposes_credentials =
+                        self.options.pass_credentials() && unix_sender_credentials.is_some();
+                    if (!ancillary.is_empty() || exposes_credentials)
+                        && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
+                    {
+                        *discarded = true;
+                    }
+                }
             }
 
             Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
@@ -374,7 +390,7 @@ mod tests {
             .unwrap()
             .downcast::<KernelAncillaryData>()
             .unwrap();
-        let KernelAncillaryData::Credentials(credentials) = *credentials else {
+        let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
             panic!("expected sender credentials");
         };
         assert_eq!(credentials.pid, 42);
@@ -433,12 +449,92 @@ mod tests {
                 .unwrap()
                 .downcast::<KernelAncillaryData>()
                 .unwrap();
-            let KernelAncillaryData::Credentials(credentials) = *credentials else {
+            let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
                 panic!("expected sender credentials");
             };
             assert_eq!(credentials.pid, pid);
             assert_eq!(credentials.uid, pid + 1000);
             assert_eq!(credentials.gid, pid + 2000);
         }
+    }
+
+    /// Opaque stand-in for the `SCM_RIGHTS` payload `posix-net` attaches to a
+    /// send; these transports treat ancillary data as type-erased.
+    struct PassedFiles;
+
+    fn recv_without_control_buffer(receiver: &DgramTransport) -> (u8, bool) {
+        let mut data = [0_u8; 1];
+        let mut discarded = false;
+        receiver
+            .recv(
+                &mut data[..],
+                RecvOptions {
+                    ancillary: None,
+                    ancillary_discarded: Some(&mut discarded),
+                    ..RecvOptions::default()
+                },
+            )
+            .unwrap();
+        (data[0], discarded)
+    }
+
+    #[def_test]
+    fn unix_dgram_without_control_buffer_reports_discarded_passed_files() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        sender
+            .send(
+                &b"x"[..],
+                SendOptions {
+                    ancillary: alloc::vec![Arc::new(PassedFiles) as AncillaryData],
+                    ..SendOptions::default()
+                },
+            )
+            .unwrap();
+
+        // The datagram is consumed, but its descriptors cannot be delivered:
+        // the caller must observe `MSG_CTRUNC` (`scm_detach_fds`).
+        assert_eq!(recv_without_control_buffer(&receiver), (b'x', true));
+    }
+
+    #[def_test]
+    fn unix_dgram_without_control_buffer_reports_nothing_without_passed_files() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        sender.send(&b"x"[..], SendOptions::default()).unwrap();
+
+        assert_eq!(recv_without_control_buffer(&receiver), (b'x', false));
+    }
+
+    #[def_test]
+    fn unix_dgram_without_control_buffer_reports_credentials_as_ctrunc() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::PassCredentials(&true))
+            .unwrap();
+        send_credentials(
+            &sender,
+            UnixCredentials {
+                pid: 42,
+                uid: 1000,
+                gid: 1001,
+            },
+        );
+
+        // Linux `__scm_recv_common` reports `MSG_CTRUNC` when no control buffer
+        // is supplied and the receive would have delivered `SO_PASSCRED`
+        // credentials, even without passed file descriptions.
+        assert_eq!(recv_without_control_buffer(&receiver), (b'x', true));
+    }
+
+    #[def_test]
+    fn unix_dgram_without_control_buffer_ignores_unexposed_credentials() {
+        let (sender, receiver) = DgramTransport::new_pair(7);
+        receiver
+            .set_option(SetSocketOption::PassCredentials(&true))
+            .unwrap();
+        // No sender snapshot was captured, so the receive exposes no
+        // credentials and dropping nothing is not reported.
+        sender.send(&b"x"[..], SendOptions::default()).unwrap();
+
+        assert_eq!(recv_without_control_buffer(&receiver), (b'x', false));
     }
 }

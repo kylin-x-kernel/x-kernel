@@ -115,6 +115,32 @@ pub(super) fn new_duplex_channel(
 /// stream direction. Shared between the sending and receiving endpoints so
 /// that a record can be attached when the sender publishes its bytes and
 /// released when the receiver consumes the first byte of that range.
+///
+/// Retention is bounded: at most [`MAX_PENDING_RECORDS`] records carrying at
+/// most [`MAX_PENDING_ANCILLARY`] entries per direction. Every entry is one
+/// `SCM_RIGHTS` control message whose descriptor count `posix-net` caps at
+/// `SCM_MAX_FD` (253), so one record never pins more descriptors than a single
+/// conforming `sendmsg` and the retained file references per direction are
+/// bounded at `MAX_PENDING_RECORDS * SCM_MAX_FD`. Without the bound a local
+/// peer could pin unbounded file references behind a slow consumer with
+/// one-byte sends.
+pub(super) const MAX_PENDING_RECORDS: usize = 256;
+pub(super) const MAX_PENDING_ANCILLARY: usize = 1024;
+
+/// Why the producer could not register a control record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EnqueueError {
+    /// The consumer closed this direction; the record could never be
+    /// delivered, so the send fails like a write to a closed peer.
+    ConsumerClosed,
+    /// The pending-record quota ([`MAX_PENDING_RECORDS`] records or
+    /// [`MAX_PENDING_ANCILLARY`] retained entries) is exhausted. Only the
+    /// consumer retiring a record frees capacity and that transition has no
+    /// wakeup a sender could wait on, so a send beyond the quota fails with
+    /// `ENOBUFS` immediately, leaving the round's bytes unpublished.
+    QuotaExceeded,
+}
+
 pub(super) struct DirectionAncillary {
     /// Total bytes ever produced on this direction (monotonic).
     pub(super) sent_total: u64,
@@ -125,7 +151,20 @@ pub(super) struct DirectionAncillary {
     /// stream position just past the sendmsg that carried the fds: reads
     /// stop there (the SCM_RIGHTS barrier), even when later plain-data
     /// sends leave no record boundary to infer it from.
-    pub(super) records: VecDeque<(u64, u64, Vec<AncillaryData>)>,
+    pub(super) records: VecDeque<(u64, u64, Arc<Vec<AncillaryData>>)>,
+    /// The entries live behind one `Arc` so a `MSG_PEEK` duplicates the
+    /// record by cloning a single handle: no entry buffer is copied or
+    /// re-allocated while the control guard is held, and every delivered
+    /// reference shares the peer's open file description.
+    /// Sum of `record.2.len()` across pending records. Counts retained
+    /// control messages and, together with the per-message `SCM_MAX_FD` cap,
+    /// bounds the file references the queue holds for a consumer that has
+    /// not caught up.
+    retained_ancillary: usize,
+    /// Set when the consumer closes its endpoint: the queue is drained then
+    /// and later registrations are rejected, so a producer cannot pin file
+    /// references behind a consumer that is gone.
+    consumer_closed: bool,
 }
 
 impl DirectionAncillary {
@@ -133,27 +172,86 @@ impl DirectionAncillary {
         Self {
             sent_total: 0,
             recv_total: 0,
-            records: VecDeque::new(),
+            // Reserve the whole quota so registering a record never grows the
+            // deque under the control guard. The cost is bounded at
+            // `MAX_PENDING_RECORDS` entries per direction (a
+            // `(u64, u64, Arc<Vec<_>>)` element is 24 bytes, ~6 KiB per
+            // direction and ~12 KiB per duplex channel), small next to the
+            // 64 KiB ring buffer of the same direction.
+            records: VecDeque::with_capacity(MAX_PENDING_RECORDS),
+            retained_ancillary: 0,
+            consumer_closed: false,
         }
+    }
+
+    /// Admits one control record for the byte range `[start, end)`.
+    ///
+    /// `payload` is consumed; a rejected admission returns it to the caller
+    /// together with the reason, so the payload can be dropped after the
+    /// caller's spin guards are released (dropping the last file reference
+    /// closes the file, which may take a sleepable mutex).
+    pub(super) fn enqueue_record(
+        &mut self,
+        start: u64,
+        end: u64,
+        payload: Arc<Vec<AncillaryData>>,
+    ) -> Result<(), (EnqueueError, Arc<Vec<AncillaryData>>)> {
+        if self.consumer_closed {
+            return Err((EnqueueError::ConsumerClosed, payload));
+        }
+        if self.records.len() >= MAX_PENDING_RECORDS
+            || self.retained_ancillary + payload.len() > MAX_PENDING_ANCILLARY
+        {
+            return Err((EnqueueError::QuotaExceeded, payload));
+        }
+        debug_assert!(
+            self.records.back().is_none_or(|last| last.1 <= start),
+            "records must stay in ascending position order"
+        );
+        self.retained_ancillary += payload.len();
+        self.records.push_back((start, end, payload));
+        Ok(())
     }
 
     /// Pops the oldest ancillary record whose first byte the receive cursor
     /// has reached, or `None` when the cursor has not reached any record
     /// yet. A record whose first byte sits exactly at the cursor is not
     /// reached until the cursor moves past it.
-    pub(super) fn pop_reached(&mut self) -> Option<(u64, u64, Vec<AncillaryData>)> {
+    pub(super) fn pop_reached(&mut self) -> Option<(u64, u64, Arc<Vec<AncillaryData>>)> {
         if self.records.front()?.0 >= self.recv_total {
             return None;
         }
-        self.records.pop_front()
+        let (start, end, payload) = self.records.pop_front()?;
+        self.retained_ancillary -= payload.len();
+        Some((start, end, payload))
     }
 
-    /// Takes every queued record regardless of the receive cursor: used when
-    /// the receiving end is going away, so nothing will ever consume them.
-    /// The queue is moved out wholesale (O(1), no allocation) so the caller
-    /// can release the records outside its spin-guard sections; dropping
-    /// them runs `VfsFile::release` and may block.
-    pub(super) fn take_all(&mut self) -> VecDeque<(u64, u64, Vec<AncillaryData>)> {
+    /// Duplicates the oldest record whose first byte lies before
+    /// `cursor_end`, without touching the queue or the cursor: a `MSG_PEEK`
+    /// shares the sender's entry handles (`scm_fp_dup`) and keeps the record
+    /// for the later consuming receive. Cloning the shared handle bumps
+    /// reference counts and never allocates, so it stays inside the guard.
+    pub(super) fn peek_reached(&self, cursor_end: u64) -> Option<Arc<Vec<AncillaryData>>> {
+        let (start, _, payload) = self.records.front()?;
+        if *start >= cursor_end {
+            return None;
+        }
+        Some(Arc::clone(payload))
+    }
+
+    /// Closes this direction's consumer side: pending records can no longer
+    /// be delivered, so they are drained and returned to the caller, and
+    /// later registrations are rejected with
+    /// [`EnqueueError::ConsumerClosed`].
+    ///
+    /// Draining is O(1) and performs no allocation, so it is safe under both
+    /// the control guard and the caller's `tx_order` guard. The caller must
+    /// drop the returned records after releasing its guards, because
+    /// dropping the last reference of a passed file (for example a pipe write
+    /// end) takes a sleepable mutex.
+    pub(super) fn close_consumer(&mut self) -> VecDeque<(u64, u64, Arc<Vec<AncillaryData>>)> {
+        self.consumer_closed = true;
+        self.retained_ancillary = 0;
         mem::take(&mut self.records)
     }
 }
@@ -189,12 +287,14 @@ impl Drop for Channel {
         // section that flags the close — the sender enqueues under the
         // peer's tx_order lock, so nothing can be enqueued afterwards — and
         // take the queue out (O(1), no allocation in the critical section)
-        // and release the fds without any spin guard held.
+        // and release the fds without any spin guard held. Closing also
+        // rejects later registrations: the peer's send observes rx_closed in
+        // the same critical section and reports `EPIPE`.
         let (is_rx_changed, has_unread_input, dead) = {
             let _tx_order = self.peer_endpoint.tx_order.lock();
             let is_rx_changed = !self.endpoint.rx_closed.swap(true, Ordering::AcqRel);
             let has_unread_input = self.rx.occupied_len() > 0;
-            let dead = self.rx_anc.lock().take_all();
+            let dead = self.rx_anc.lock().close_consumer();
             (is_rx_changed, has_unread_input, dead)
         };
         drop(dead);
@@ -216,11 +316,11 @@ impl Drop for Channel {
 
 #[unittest::mod_test]
 mod tests {
-    use alloc::{boxed::Box, collections::VecDeque, vec};
+    use alloc::{collections::VecDeque, sync::Arc, vec, vec::Vec};
 
     use unittest::{assert, assert_eq, def_test};
 
-    use super::DirectionAncillary;
+    use super::{DirectionAncillary, EnqueueError, MAX_PENDING_ANCILLARY, MAX_PENDING_RECORDS};
     use crate::socket::AncillaryData;
 
     fn ancillary_queue(records: &[(u64, u64, u32)]) -> DirectionAncillary {
@@ -228,10 +328,15 @@ mod tests {
             sent_total: 100,
             recv_total: 0,
             records: VecDeque::new(),
+            retained_ancillary: records.len(),
+            consumer_closed: false,
         };
         for (start, end, tag) in records {
-            anc.records
-                .push_back((*start, *end, vec![Box::new(*tag) as AncillaryData]));
+            anc.records.push_back((
+                *start,
+                *end,
+                Arc::new(vec![Arc::new(*tag) as AncillaryData]),
+            ));
         }
         anc
     }
@@ -285,5 +390,95 @@ mod tests {
         assert_eq!(tag(&anc.pop_reached().unwrap().2), 1);
         assert_eq!(tag(&anc.pop_reached().unwrap().2), 2);
         assert!(anc.records.is_empty());
+    }
+
+    #[def_test]
+    fn enqueue_record_quota_rejects_until_capacity_frees() {
+        let mut anc = DirectionAncillary {
+            sent_total: 0,
+            recv_total: 0,
+            records: VecDeque::new(),
+            retained_ancillary: 0,
+            consumer_closed: false,
+        };
+
+        // One-entry records each pin one retained entry; the quota accepts
+        // exactly MAX_PENDING_RECORDS of them, then fails the registration
+        // and hands the payload back to the caller.
+        for id in 0..MAX_PENDING_RECORDS as u32 {
+            assert!(
+                anc.enqueue_record(0, 1, Arc::new(vec![Arc::new(id) as AncillaryData]))
+                    .is_ok()
+            );
+        }
+        let (error, payload) = anc
+            .enqueue_record(0, 1, Arc::new(vec![Arc::new(u32::MAX) as AncillaryData]))
+            .unwrap_err();
+        assert_eq!(error, EnqueueError::QuotaExceeded);
+        assert_eq!(payload.len(), 1);
+    }
+
+    #[def_test]
+    fn enqueue_record_oversized_payload_rejects_on_an_empty_queue() {
+        let mut anc = DirectionAncillary {
+            sent_total: 0,
+            recv_total: 0,
+            records: VecDeque::new(),
+            retained_ancillary: 0,
+            consumer_closed: false,
+        };
+
+        // A single record whose entries exceed the retention bound is
+        // rejected even with nothing queued; each entry is one control
+        // message whose descriptor count `posix-net` caps at `SCM_MAX_FD`
+        // (253).
+        let oversized = Arc::new(
+            (0..=MAX_PENDING_ANCILLARY as u32)
+                .map(|id| Arc::new(id) as AncillaryData)
+                .collect::<Vec<_>>(),
+        );
+        let (error, payload) = anc.enqueue_record(0, 1, oversized).unwrap_err();
+        assert_eq!(error, EnqueueError::QuotaExceeded);
+        assert_eq!(payload.len(), MAX_PENDING_ANCILLARY + 1);
+    }
+
+    #[def_test]
+    fn close_consumer_drains_pending_records_and_rejects_registrations() {
+        let mut anc = DirectionAncillary {
+            sent_total: 0,
+            recv_total: 0,
+            records: VecDeque::new(),
+            retained_ancillary: 0,
+            consumer_closed: false,
+        };
+        assert!(
+            anc.enqueue_record(1, 2, Arc::new(vec![Arc::new(1_u32) as AncillaryData]))
+                .is_ok()
+        );
+        assert!(
+            anc.enqueue_record(
+                3,
+                4,
+                Arc::new(vec![
+                    Arc::new(2_u32) as AncillaryData,
+                    Arc::new(3_u32) as AncillaryData,
+                ])
+            )
+            .is_ok()
+        );
+
+        let drained = anc.close_consumer();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[1].2.len(), 2);
+        assert!(anc.records.is_empty());
+
+        // A closed consumer accepts no new registrations and hands the
+        // payload back: the endpoint close drained everything that could
+        // ever be delivered.
+        let (error, payload) = anc
+            .enqueue_record(5, 6, Arc::new(vec![Arc::new(4_u32) as AncillaryData]))
+            .unwrap_err();
+        assert_eq!(error, EnqueueError::ConsumerClosed);
+        assert_eq!(payload.len(), 1);
     }
 }

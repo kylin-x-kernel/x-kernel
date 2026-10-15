@@ -13,7 +13,7 @@ mod test_options;
 #[cfg(unittest)]
 mod test_state;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     fmt::{self, Debug},
@@ -145,7 +145,14 @@ impl RecvFlags {
     }
 }
 
-pub type AncillaryData = Box<dyn Any + Send + Sync>;
+/// Type-erased ancillary data carried between the socket layer and its
+/// callers.
+///
+/// An `Arc` is used instead of a `Box` so a control message can be duplicated
+/// without knowing its concrete type: on Unix stream sockets a `MSG_PEEK` that
+/// reaches a control-message boundary must return the same open file
+/// descriptions again (`scm_fp_dup`) without consuming the pending record.
+pub type AncillaryData = Arc<dyn Any + Send + Sync>;
 
 /// Options for initiating a socket connection.
 #[derive(Default, Debug, Clone, Copy)]
@@ -214,6 +221,14 @@ pub struct RecvOptions<'a> {
     pub flags: RecvFlags,
     pub ancillary: Option<&'a mut Vec<AncillaryData>>,
     pub out_flags: Option<&'a mut RecvFlags>,
+    /// Reports that control data reached the caller while `ancillary` was
+    /// `None` and was therefore dropped: a Unix stream control record that was
+    /// reached (a consuming receive drops it) or, on a Unix datagram, the
+    /// message's passed file descriptions or the sender credentials exposed by
+    /// `SO_PASSCRED`, which are consumed with the message. The caller must
+    /// report the loss as `MSG_CTRUNC`, mirroring `__scm_recv_common` and
+    /// `scm_detach_fds`. Other transports never set it.
+    pub ancillary_discarded: Option<&'a mut bool>,
 }
 impl Debug for RecvOptions<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,6 +236,10 @@ impl Debug for RecvOptions<'_> {
             .field("from", &self.from)
             .field("flags", &self.flags)
             .field("out_flags", &self.out_flags.as_ref().map(|_| ()))
+            .field(
+                "ancillary_discarded",
+                &self.ancillary_discarded.as_deref().map(|_| ()),
+            )
             .finish()
     }
 }
