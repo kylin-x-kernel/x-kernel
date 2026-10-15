@@ -8,7 +8,7 @@ use core::sync::atomic::{Ordering, fence};
 
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{PeriodId, ReaderNode};
+use crate::{PeriodId, ReaderNode, TaskReader};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
@@ -77,6 +77,14 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
         Some(period)
     }
 
+    pub(crate) fn is_participant(&self, cpu: usize) -> bool {
+        self.participants.get(cpu) == Some(&true)
+    }
+
+    pub(crate) fn needs_cpu_observation(&self, cpu: usize) -> bool {
+        self.is_participant(cpu) && self.nodes[cpu].needs_cpu_observation()
+    }
+
     fn start_initialization(&self) -> Option<PeriodId> {
         let mut state = self.state.lock();
         // Order prior withdrawal before this period's node observations, even
@@ -104,14 +112,34 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
     /// The identity must belong to the observation being supplied, never a
     /// cached identity held across an unbounded delay or counter wrap.
     pub(crate) fn observe_cpu(&self, cpu: usize, period: PeriodId) -> bool {
-        self.participants.get(cpu) == Some(&true) && self.nodes[cpu].observe_cpu(period)
+        self.is_participant(cpu) && self.nodes[cpu].observe_cpu(period)
+    }
+
+    /// # Safety
+    /// `reader` belongs to this CPU's outgoing current task. The caller retains
+    /// its stable storage and excludes IRQs/preemption throughout this method.
+    /// Only that task enters/exits its scopes; interrupt scopes are unsupported.
+    /// The enrolled task must follow ReaderNode::enroll's retirement contract.
+    pub(crate) unsafe fn note_context_switch(&self, cpu: usize, reader: &TaskReader) -> bool {
+        if !self.is_participant(cpu) {
+            return false;
+        }
+        // SAFETY: the scheduler retains its outgoing task and excludes concurrent
+        // scope execution/enrollment. Node enrollment precedes observation in
+        // one lock interval; observing the CPU never clears its reader boundary.
+        let Some(period) = (unsafe { self.nodes[cpu].note_context_switch(reader) }) else {
+            return false;
+        };
+        // The caller keeps IRQs/preemption excluded from the node snapshot
+        // through acceptance. Node and coordinator locks never nest.
+        self.accept_report(cpu, period)
     }
 
     /// Inspects a node afresh and submits its ready identity before unpinning.
     /// Caller must be in watched task/IRQ context, never NMI. Deferred work
     /// calls this method again rather than storing an earlier numeric report.
     pub(crate) fn report_node(&self, cpu: usize) -> bool {
-        if self.participants.get(cpu) != Some(&true) {
+        if !self.is_participant(cpu) {
             return false;
         }
         let _guard = NoPreemptIrqSave::new();

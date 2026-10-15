@@ -87,6 +87,7 @@ fn timer_notification_rejects_out_of_range_cpu() {
 fn bottom_half_and_existing_reasons_survive_boot_drain() {
     let pending = PendingWord::new();
     let reasons = NotificationFlags::BOTTOM_HALF
+        | NotificationFlags::RCU
         | NotificationFlags::HIGHPRI_BOTTOM_HALF
         | NotificationFlags::TIMER_REPROGRAM
         | NotificationFlags::RESCHEDULE;

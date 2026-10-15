@@ -16,6 +16,15 @@ enable the scheduler handler branch. Fixed BH notification support is independen
 保护线路开启、ENABLED 发布及 drain，不在退出时主动执行抢占检查。
 The protocol has no runtime shutdown or CPU-hotplug support.
 
+### RCU Notifications
+
+Fixed `notify_rcu` requests have their own pending bit alongside scheduler,
+timer and BH reasons. They retain the same publication/enable/drain handshake,
+including deferred self delivery. The receiver only raises `SoftirqVec::Rcu`;
+the task subsystem owns the action and GP wake. No reverse dependency on ktask,
+new callback queue, task wake or reclamation operation belongs to this transport.
+Callers install the action and prepare destination services before requesting it.
+
 ### Timer Reprogram Notifications
 
 The independent `timer-reprogram` feature exports `notify_timer_reprogram` and

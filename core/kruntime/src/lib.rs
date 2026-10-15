@@ -245,6 +245,18 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
 
     init_cpu_services();
 
+    #[cfg(all(unittest, feature = "smp"))]
+    self::mp::tests_startup_order::record_service_barrier(cpu_id);
+
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the sole GP task must prepare \
+                  successfully before later RCU integration can use it"
+    )]
+    // SAFETY: the CPU-service rendezvous above covers every discovered CPU's
+    // scheduler, timer and fixed notifications. ktask alone owns its RCU nodes.
+    unsafe { ktask::init_rcu_service() }.expect("RCU GP task preparation failed");
+
     // All target CPUs can now receive notifications and run worker tasks.
     // Publish services before exposing any work-producing drivers.
     #[expect(
@@ -271,9 +283,6 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
         batch_limit,
     )
     .expect("system workqueue services must be ready before driver initialization");
-
-    #[cfg(all(unittest, feature = "smp"))]
-    self::mp::tests_startup_order::record_service_barrier(cpu_id);
 
     #[cfg(feature = "fs")]
     fs_boot::init_device_discovery();
@@ -343,6 +352,8 @@ fn init_cpu_services() {
     // drivers, which may themselves wait for work on those CPUs.
     INITED_CPUS.fetch_add(1, Ordering::Release);
     while !is_init_ok() {
+        #[cfg(all(unittest, feature = "smp"))]
+        self::mp::tests_startup_order::record_service_wait();
         core::hint::spin_loop();
     }
 

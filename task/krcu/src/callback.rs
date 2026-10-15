@@ -10,7 +10,7 @@ use intrusive_collections::{LinkedListAtomicLink, UnsafeRef, intrusive_adapter};
 ///
 /// The core neither allocates nor frees this node. Its callback decides whether
 /// to release the enclosing object or retain it. No payload layout is imposed.
-pub(super) struct CallbackNode {
+pub struct CallbackNode {
     link: LinkedListAtomicLink,
     invoke_fn: unsafe fn(*mut CallbackNode),
 }
@@ -21,7 +21,7 @@ intrusive_adapter!(pub(super) CallbackAdapter = UnsafeRef<CallbackNode>: Callbac
 
 impl CallbackNode {
     /// Prepares an unlinked node without allocating storage.
-    pub(super) const fn new(invoke_fn: unsafe fn(*mut Self)) -> Self {
+    pub const fn new(invoke_fn: unsafe fn(*mut Self)) -> Self {
         Self {
             link: LinkedListAtomicLink::new(),
             invoke_fn,

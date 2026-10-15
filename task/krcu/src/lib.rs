@@ -4,9 +4,11 @@
 
 //! Internal task-reader, grace-period and retirement-callback bookkeeping.
 //!
-//! No public publication or reclamation API is exposed. The private node and
-//! coordinator/callback protocol has no hardware quiescent-observation integration.
+//! No ordinary consumer publication or reclamation API is exposed. The host
+//! connects scheduler observations; idle/user/interrupt watching is not integrated.
 //! A recorded scope alone is not permission to free or dereference retired data.
+//! [`CallbackState`] grants one host [`CallbackDriver`] and unsafe callback
+//! admission/execution; it does not start a task or publish runtime readiness.
 
 #![no_std]
 
@@ -20,14 +22,6 @@ type PeriodId = u8;
 #[cfg(not(any(test, unittest)))]
 type PeriodId = u64;
 
-#[cfg_attr(
-    not(any(test, unittest)),
-    expect(
-        dead_code,
-        reason = "CG-024-lint-exceptions: private callback storage is exercised by deterministic \
-                  tests before host service integration"
-    )
-)]
 mod callback;
 
 #[cfg_attr(
@@ -51,6 +45,10 @@ mod callback_queue;
 mod grace_period;
 mod node;
 mod reader;
+mod service;
 
+pub use callback::CallbackNode;
+pub use callback_queue::CallbackDriver;
 pub use node::ReaderNode;
 pub use reader::{ReadGuard, TaskReader};
+pub use service::CallbackState;

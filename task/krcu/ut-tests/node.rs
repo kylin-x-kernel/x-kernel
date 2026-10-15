@@ -9,6 +9,142 @@ use super::*;
 
 #[cfg_attr(test, test)]
 #[cfg_attr(not(test), unittest::def_test)]
+fn scheduler_reports_once_per_cpu_obligation_including_wrap() {
+    let node = ReaderNode::new();
+    let reader = TaskReader::new();
+    let _guard = kspin::NoPreemptIrqSave::new();
+    // SAFETY: stable isolated scheduler fixture under exclusion, no scopes.
+    assert_eq!(unsafe { node.note_context_switch(&reader) }, None);
+    for period in [PeriodId::MAX, 0, 1] {
+        assert!(node.begin_period(period));
+        assert!(node.needs_cpu_observation());
+        assert!(!node.observe_cpu(period.wrapping_sub(1)));
+        assert!(node.needs_cpu_observation());
+        // SAFETY: this fixture exclusively supplies its scheduler boundaries.
+        assert_eq!(unsafe { node.note_context_switch(&reader) }, Some(period));
+        assert!(!node.needs_cpu_observation());
+        // SAFETY: serial repeated boundary of the same retained fixture.
+        assert_eq!(unsafe { node.note_context_switch(&reader) }, None);
+        assert_eq!(node.ready_period(), Some(period));
+        assert!(node.finish_period(period));
+        assert!(!node.needs_cpu_observation());
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(not(test), unittest::def_test)]
+fn observed_cpu_still_enrolls_readers_for_the_next_period() {
+    let node = ReaderNode::new();
+    let inactive = TaskReader::new();
+    let reader = TaskReader::new();
+    let _guard = kspin::NoPreemptIrqSave::new();
+    assert!(node.begin_period(1));
+    // SAFETY: isolated stable outgoing-task fixture under exclusion.
+    assert_eq!(unsafe { node.note_context_switch(&inactive) }, Some(1));
+    let observed = reader.with_read(|_| {
+        // SAFETY: exclusive outgoing reader; storage outlives its scope exit.
+        let reported = unsafe { node.note_context_switch(&reader) };
+        let enrolled = reader.is_enrolled_on(&node);
+        let finished = node.finish_period(1);
+        let started = node.begin_period(2);
+        // SAFETY: exclusive subsequent scheduler boundary; reader stays blocked.
+        let next_report = unsafe { node.note_context_switch(&inactive) };
+        (
+            (reported, enrolled, finished, started),
+            (
+                next_report,
+                node.needs_cpu_observation(),
+                node.ready_period(),
+                node.finish_period(2),
+            ),
+        )
+    });
+    assert_eq!(
+        observed,
+        ((None, true, true, true), (None, false, None, false))
+    );
+    // CPU observation was already supplied. Reader exit makes the node ready
+    // for the GP scan without requiring another scheduler report.
+    assert_eq!(node.ready_period(), Some(2));
+    // SAFETY: isolated stable inactive outgoing task under scheduler exclusion.
+    assert_eq!(unsafe { node.note_context_switch(&inactive) }, None);
+    assert!(node.finish_period(2));
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(not(test), unittest::def_test)]
+fn idle_scheduler_path_preserves_startup_readers() {
+    let node = ReaderNode::new();
+    let reader = TaskReader::new();
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let observed = reader.with_read(|_| {
+        let was_pending = node.needs_cpu_observation();
+        // SAFETY: exclusive stable outgoing reader; no period exists yet.
+        let reported = unsafe { node.note_context_switch(&reader) };
+        let enrolled = reader.is_enrolled_on(&node);
+        let started = node.begin_period(1);
+        // SAFETY: serial scheduler boundary while the enrolled scope is active.
+        let next_report = unsafe { node.note_context_switch(&reader) };
+        (
+            (was_pending, reported, enrolled, started),
+            (
+                next_report,
+                node.needs_cpu_observation(),
+                node.ready_period(),
+            ),
+        )
+    });
+    assert_eq!(observed, ((false, None, true, true), (None, false, None)));
+    assert_eq!(node.ready_period(), Some(1));
+    assert!(node.finish_period(1));
+}
+
+#[cfg(test)]
+#[test]
+fn concurrent_start_cannot_lose_an_outgoing_reader() {
+    extern crate std;
+    let node = ReaderNode::new();
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let reader = TaskReader::new();
+            for _ in 0..32 {
+                reader.with_read(|_| {
+                    barrier.wait();
+                    let _guard = kspin::NoPreemptIrqSave::new();
+                    // SAFETY: this thread alone enrolls/exits its stable reader;
+                    // the other thread only drives period state under node locks.
+                    assert_eq!(unsafe { node.note_context_switch(&reader) }, None);
+                    barrier.wait();
+                    barrier.wait();
+                });
+                barrier.wait();
+            }
+        });
+        for period in 0..32 {
+            barrier.wait();
+            assert!(node.begin_period(period));
+            barrier.wait();
+            assert_eq!(node.reader_count(), 1);
+            assert_eq!(node.ready_period(), None);
+            assert!(!node.finish_period(period));
+            barrier.wait();
+            barrier.wait();
+            // When enrollment won the race, CPU observation is still owed.
+            // This fixture supplies a fresh boundary only after scope exit.
+            let inactive = TaskReader::new();
+            let _guard = kspin::NoPreemptIrqSave::new();
+            // SAFETY: worker scope has ended; no other scheduler touches this
+            // inactive reader, and the next period starts only on this thread.
+            unsafe { node.note_context_switch(&inactive) };
+            assert_eq!(node.ready_period(), Some(period));
+            assert!(node.finish_period(period));
+        }
+    });
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(not(test), unittest::def_test)]
 fn repeated_enrollment_keeps_original_owner_until_outer_exit() {
     let first = ReaderNode::new();
     let second = ReaderNode::new();

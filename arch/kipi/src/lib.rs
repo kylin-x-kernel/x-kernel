@@ -42,7 +42,7 @@ pub use notification::{RescheduleIpiIf, notify_reschedule};
 #[cfg(feature = "timer-reprogram")]
 pub use notification::{TimerReprogramIpiIf, notify_timer_reprogram};
 pub use notification::{
-    enable_fixed_notifications, notify_bottom_half, notify_highpri_bottom_half,
+    enable_fixed_notifications, notify_bottom_half, notify_highpri_bottom_half, notify_rcu,
 };
 use queue::IpiEventQueue;
 

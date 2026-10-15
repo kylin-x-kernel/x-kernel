@@ -2,6 +2,15 @@
 
 ## 信任模型
 
+### Fixed RCU Notification Boundary
+
+`notify_rcu` validates the destination but not RCU readiness. Its fixed reason
+only raises Rcu softirq; it cannot run callbacks or wake the GP task inline.
+IRQ-off scheduler callers must release their locks before reenabling interrupts.
+The destination action and services must exist before request publication; NMI
+and CPU-hotplug use are excluded. Boot-pending RCU reasons use the same retained
+word protocol and cannot overwrite scheduler, timer or BH reasons.
+
 ### Fixed Timer Notification Boundary
 
 `notify_timer_reprogram` accepts only a typed CPU identifier from trusted kernel
@@ -48,6 +57,11 @@ Serial transport integration tests temporarily replace Tasklet/High actions and
 restore them with kirq's scoped guards. They require quiescent production BH queues
 and acknowledge callbacks before restoring handlers. They do not establish global
 workng service lifetime/readiness or production-load performance acceptance.
+
+RCU transport tests leave the boot-owned Rcu action installed. Persistent
+unittest-only per-CPU counters observe delivery after the receiver marks the
+vector pending. They verify deferred delivery with IRQs masked, not one-to-one
+request acknowledgment: concurrent service requests may coalesce normally.
 
 固定通知 `notify_reschedule` 不要求普通回调队列 ready，但调用方必须已向合法
 目标的运行队列发布任务状态。CPU 范围/存在性由入口验证；静态槽不分配、不释放，

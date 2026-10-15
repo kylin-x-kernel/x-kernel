@@ -41,12 +41,74 @@ does not inspect this counter. `rcu::note_context_switch` enrolls an active read
 before same-task selection returns or an actual stack switch occurs; the common
 path includes migration helpers. CPU nodes have kernel lifetime and retain no
 owning task reference. The task retains its original node across migration;
-outer scope exit unlinks it. For permanently exited tasks, `finish_task_switch`
+outer scope exit unlinks it. After service construction the same hook also
+reports the CPU boundary, but only after enrollment. An active task remains a
+GP blocker on its original node. Before service construction the hook only
+enrolls, preserving startup readers. Reporting sends no notification and never
+enters a scheduler wake path; service progress must inspect retained node state
+separately. For permanently exited tasks, `finish_task_switch`
 clears residual reader participation after publishing incoming current and
 leaving the outgoing stack, but before releasing its owning reference or on-CPU
 marker. It diagnoses abandoned scopes and uses krcu's ordinary unlink path.
 GC still uses `Arc::try_unwrap` to wait for independent owners and destroy tasks
 in task context; it does not repair RCU lists or permanently retain readers.
+
+The boot-owned `rcu_gp` task holds the sole callback driver. Runtime starts it
+after all discovered CPUs have scheduler, timer and notification services. Its
+participant set uses discovered logical CPUs rather than all capacity slots.
+A short startup lock serializes duplicate rejection, softirq action installation
+and the one-shot driver claim, in that order. An action conflict does not consume
+the claim. Successful assignment cannot be undone or repeated; task creation
+and the sleepable acknowledgment wait occur after releasing the startup lock.
+The task prepares its own `PreparedTaskWait` and an inactive owned timer before
+publishing its waker; the startup task waits sleepably for that acknowledgment.
+This is controlled carrier integration, not ordinary RCU readiness: general
+callback admission and idle/user/interrupt observation are not yet connected.
+
+Demand is retained independently of wake hints and consumed before each pass.
+Task/timer callers publish demand before requesting Rcu softirq service. With
+IPIs, a fixed RCU notification marks the vector pending without waking tasks
+inline. The softirq action wakes the GP task when demand is retained and leaves
+that demand for it to consume. Independently, it executes at most 32 eligible
+callbacks on its own CPU outside bookkeeping locks, then re-raises Rcu if eligible
+work remains. Pending GP work alone never causes softirq re-raising. Existing
+softirq restart limits and ksoftirqd carry the remainder.
+Without IPIs, callers raise the vector directly and must release scheduler/RCU
+locks first because daemon wake may acquire scheduler locks. Neither route
+supports NMI; restricted scheduler producers are not yet connected. The
+task parks when idle with its progress timer cancelled. An active period keeps
+a 10 ms progress-check deadline across unrelated wakes; expiry requests another
+pass and never supplies quiescence evidence. After an initial or due progress
+round, the next interval starts from a fresh clock sample after scanning and
+notifications, not from the sample taken before that work. An early demanded
+pass preserves the existing deadline even if it expires during the pass.
+Deadline addition saturates at the
+timer's u64 nanosecond horizon, where delivery is not guaranteed. The kernel owns
+the task and state permanently; duplicate startup is rejected rather than
+reconstructing its driver. This follows Linux's split between a sole GP thread
+and separate observation/callback carriers, not Linux's pre-SMP startup ordering.
+
+When an active interval first starts, and at its progress deadlines, the GP task
+requests a reschedule IPI only for CPUs whose nodes still owe an observation.
+The query is a transient hint: a concurrent report can make a kick unnecessary,
+but sending or handling the IPI never clears an obligation. The real scheduler
+hook still enrolls active readers before reporting. Nodes blocked only by old
+readers receive no repeated kicks. Unrelated demand retains the existing deadline
+instead of causing another kick round. In the no-IPI single-CPU path the GP task's
+own parking supplies a scheduler boundary. This assistance is not the full Linux
+dynticks/watching protocol and cannot force an uncooperative CPU to schedule.
+
+Before each control pass the GP task rechecks retained node readiness, allowing
+an already-observed node to report after its last blocked reader exits. This
+inspection cannot discharge an unobserved CPU. After promotion, the task notifies
+each CPU with eligible callbacks; it never invokes callbacks itself. The current
+integration test submits unpublished owning objects and supplies real scheduler
+boundaries with per-CPU tasks. It checks target CPU, softirq context and completed
+counts across repeated workloads larger than the callback budget. This does not
+establish idle/no-tick progress or authorize ordinary protected-data consumers.
+An additional fixture submits on every CPU and parks until owning callback
+wakers report completion, without yielding helper tasks. Other interrupt sources
+are not disabled by that fixture; it is not proof of a completely tick-free run.
 
 Owned timer preparation uses `ktimer_core::Timer::new_on` with a snapshot of the
 current logical CPU after platform per-CPU initialization. The platform accessor

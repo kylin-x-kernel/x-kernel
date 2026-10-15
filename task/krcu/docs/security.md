@@ -77,12 +77,28 @@ coordinator lock. This exclusion is not itself an ABA proof: host integration
 must maintain a continuous RCU-watched interval to prevent an entire counter
 wrap during the gap. NMI must not enter these controls.
 
-No lock covers callback execution, waiting or user-memory access. The private
-control surface is not yet connected to actual CPU observations or a public
-reclamation API; tests of adjacent identities across wrap do not prove the
-missing hardware observation/lifetime protocol.
+No lock covers callback execution, waiting or user-memory access. The host
+connects scheduler observations and controlled callback delivery, not a general
+reclamation API. Tests of adjacent identities across wrap do not prove the
+remaining idle/user/interrupt observation and lifetime protocol.
 
 IRQ/NMI scope use requires deferred-cleanup integration not supplied here.
+The scheduler observation entry requires an outgoing current task and continuous
+IRQ/preemption exclusion. Enrollment precedes clearing the CPU obligation; a
+still-active task remains in the blocking suffix on its original node, including
+after migration. A ready identity is submitted before leaving that excluded
+interval. The API neither invokes callbacks nor wakes tasks under scheduler
+locks. Its contract excludes interrupt-context read scopes; those require the
+separate context-tracking integration before admission.
+
+The unlocked CPU-pending check can only skip work, never authorize completion.
+It cannot bypass enrollment of a previously unregistered reader. Period setup,
+observation and reader-boundary changes remain serialized by the node lock;
+observation retains its full fence. A racing setup missed by the check leaves
+the CPU obligation set and requires the host's continuing progress assistance.
+After observing a CPU with blocked readers, the GP readiness scan must continue
+until their exit; repeated scheduler calls no longer submit duplicate reports.
+
 The current removal path must not run in NMI. This module must not be used as
 a standalone concurrent reclamation algorithm.
 
@@ -117,11 +133,24 @@ Submission requires withdrawal before publication to the queue and retention
 until callback return. It is allocation-free but not NMI-safe. Queues own only
 nonowning links; dropping a queue is not cancellation or successful reclamation.
 Only one driver may assign their targets and start/finalize their coordinator.
-An exclusive driver borrow serializes its own passes, not arbitrary control calls
-through another shared coordinator reference. Its host must enforce that boundary.
-The unsafe constructor requires idle, empty initial state and grants exclusive
-control for its remaining lifetime. Moving the driver preserves an active GP;
-dropping it neither completes the GP nor permits reconstruction over that state.
+`CallbackState` owns and hides the coordinator/queues from the host. Its unsafe
+constructor requires exclusive ownership of participating node period controls.
+The safe `claim_driver` method grants control only once, even under competing
+claims; the flag is never reset on driver drop. Moving the driver preserves an
+active GP; losing it stalls progress rather than authorizing a fresh controller
+to assign work to an already-started period. An exclusive driver borrow serializes
+passes. Internal protocol fixtures using the private unsafe constructor must
+separately enforce this boundary. State and accepted storage must remain alive
+through execution; dropping either owner does not cancel accepted callbacks.
+
+Host submission checks the immutable participant set and the one-shot driver
+claim before touching the raw node. Rejected nodes remain caller-owned. These
+checks do not establish runtime readiness, payload transfer safety or withdrawal:
+the unsafe submission contract assigns those obligations to the host. Only the
+core constructs intrusive handles; the host transfers the original raw field
+pointer and must retain its provenance and containing allocation until invocation.
+The host execution entry checks CPU membership and delegates the bounded claim
+to the queue. It does not manufacture observations or bypass period eligibility.
 
 The driver captures before reserving the future period and promotes all due
 segments before another period starts. At most two live targets exist; matching
@@ -139,4 +168,7 @@ nonreturning task exit is an accepted cancellation mechanism for a batch.
 `invoke_ready` is unsafe because simulated observations or an invalid host context
 cannot authorize real reclamation. Its caller must certify observation validity,
 independent retirement obligations and nonblocking invocation/cleanup outside
-dependent locks. No public arbitrary callback API or automatic carrier is exposed.
+dependent locks. These host-integration operations are not an ordinary consumer
+API. The host connects controlled delivery and scheduler observations, but
+idle/user/IRQ/NMI watching is not yet integrated. `report_ready` only inspects
+retained readiness in watched context and cannot discharge an unobserved CPU.

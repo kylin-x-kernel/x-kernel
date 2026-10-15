@@ -45,10 +45,11 @@ independent task references may still delay destruction.
 ## Node Grace-Period Boundary
 
 The node lock protects both the reader list and an optional active period:
-its identity, outstanding CPU observation and first blocking reader. That reader
+its identity and first blocking reader. The CPU-observation obligation is one
+atomic boolean on the node; all writes still require the node lock. That reader
 and the list suffix after it block this period. The boundary is a nonowning
 `UnsafeRef` to retained list storage, not another task reference or a separate
-list. No additional atomic state or global lock is needed for this boundary.
+list. No additional global lock is needed for this boundary.
 
 Initialization includes the entire existing list in constant time. While the
 CPU still owes an observation, newly enrolled readers append to the blocking
@@ -68,8 +69,8 @@ match its identity; readiness alone is not global completion. Identity equality
 does not protect against an arbitrarily old value surviving a complete wrap.
 Report lifetime must be bounded under continuous IRQ/preemption exclusion in
 RCU-watched context, and deferred service must inspect nodes afresh. These node
-controls are crate-private and used by the coordinator, not connected to hardware
-observations or reclamation. Their locks include the same full fence as
+controls are crate-private and used by the coordinator; observation validity
+belongs to host integration. Their locks include the same full fence as
 enrollment/removal, including on UP; this is not a complete
 publication-to-reclamation memory-order proof.
 
@@ -106,9 +107,30 @@ use the RCU-local full-fence discipline without strengthening generic spinlocks.
 The coordinator exposes no waiter, callback or public numeric cookie. Completed
 identity is internal ordered bookkeeping, not an arbitrary-age comparison API.
 The callback driver latches due work as eligible before allowing the next period.
-The current private engine is driven by deterministic tests only;
-hardware observation validity, watched-context integration and full-wrap report
-lifetime safety remain outside this bookkeeping implementation.
+The portable engine is covered by deterministic tests; the host additionally
+connects scheduler boundaries and controlled callback delivery. Idle/user/IRQ/NMI
+watching and full-wrap report lifetime across those contexts remain separate
+integration obligations.
+
+The host scheduler calls `CallbackState::note_context_switch` with its outgoing
+task under continuous IRQ/preemption exclusion. When needed, enrollment and
+clearing the CPU obligation share one node-lock interval, ordered by the existing
+full fence. Initialization cannot split those operations. The
+node lock snapshots readiness; acceptance checks that identity under the
+coordinator lock without nesting locks or retaining identities in deferred work.
+Migration reports the destination CPU but leaves the reader on its original
+node. Calls before a period starts do not satisfy a future period. This task-only
+scheduler boundary is not idle/user watching or IRQ/NMI read-side integration.
+
+When the outgoing reader needs no enrollment and an Acquire load finds no CPU
+obligation, the scheduler skips both locks and the fence. The atomic is the sole
+obligation, not a cached period identity. Initialization publishes it with Release
+after preparing the period under the lock. A racing false can delay observation,
+but leaves the new obligation outstanding: the host must retain timed progress
+assistance. A true is rechecked under the node lock before observing its current
+period. The scheduler reports only on the CPU-observation transition; a node
+still blocked by old readers is later reported by the GP readiness scan. Fresh
+readers must still be enrolled after CPU observation, for future periods.
 
 Period identities use a private 64-bit integer in normal builds. Host and kernel
 unit tests narrow that same identity to eight bits, exercising the actual node
@@ -139,7 +161,7 @@ Allocation policy belongs to the containing object, not the queue. A borrowed
 stack-node test drains synchronously before its frame ends; it does not establish
 a production asynchronous waiter's notification-versus-return lifetime protocol.
 
-These private storage primitives are tested with unpublished fixture objects.
+These storage primitives are tested with unpublished fixture objects.
 They do not themselves establish GP eligibility or provide a public submission
 API. Real retirement additionally needs the queue protocol and validated hardware
 observations.
@@ -155,10 +177,34 @@ assignment/completion pass scans individual callbacks or allocates queue storage
 One `CallbackDriver` serializes assignment and all coordinator start/completion
 operations. It borrows the coordinator to allow concurrent observations/reports;
 this borrow does not permit another controller to drive the same coordinator.
-Construction is unsafe: the host grants exclusive control over an idle
-coordinator and empty queues. A handoff moves the existing driver, including its
-active period; dropping it does not support restarting control with a new driver.
-The host must preserve this ownership boundary for the lifetime of the state.
+The host constructs `CallbackState`, which owns the coordinator and queues.
+Its unsafe construction requires exclusive control of the participating nodes;
+existing enrolled readers are preserved. `claim_driver` grants exactly one driver
+using a one-shot atomic claim. Duplicate claims return `None`, including after
+the driver is dropped. A handoff moves the existing driver with its active period.
+The coordinator and queues are not exposed to competing host controllers. The
+crate-private unsafe driver constructor remains available for isolated protocol
+fixtures; ordinary host integration uses the checked claim instead.
+`CallbackDriver::advance` reports whether a period remains active, not a numeric
+cookie or an instruction to busy-loop. Task placement, notification and progress
+timers belong to the host. This boundary alone does not publish readiness or
+provide an ordinary RCU retirement API.
+
+The host-facing state accepts raw embedded `CallbackNode` pointers only after
+the driver claim and only for participating CPUs. Rejection does not access or
+consume the node. Successful submission transfers invocation ownership without
+allocation or wakeup; the host must establish readiness and publish retained
+demand afterward. A driver claim alone is not a readiness gate. `has_ready` and
+bounded `invoke_ready` let the host service eligible work without exposing queues
+or period identities. The carrier must recheck readiness after executing its
+budget. None of these operations records a CPU quiescent state or advances a GP.
+`report_ready` inspects retained node readiness without supplying a CPU
+observation. The host can revisit a node after its last blocked reader exits,
+including from the GP task's progress check, without caching a period identity.
+`needs_cpu_observation` reads only the current node's CPU obligation for progress
+assistance. A false result does not mean the node or GP is complete: old readers
+may still block it. No numeric identity escapes this query.
+
 Each pass captures the then-current finite unassigned prefix of each queue,
 releases its lock, and assigns a full future period. Idle assignment uses
 completed + 1; assignment during an active period uses its successor. Submissions
@@ -193,9 +239,11 @@ Reposting accepts new work into the unassigned list and requires a new full
 period. The current finite batch does not chase those submissions. Budget return
 leaves persistent readiness for the carrier to recheck; wakeup/sleep handshakes,
 timer/IPI progress and context admission belong to host-service integration and
-are not supplied by this private deterministic engine.
+are not supplied by this portable engine. The host currently connects real GP
+task and softirq execution for unpublished integration fixtures, not general
+consumer admission.
 
 Only controlled task-context tests currently enter scopes. There is no public
-current-task RCU read interface, protected-data container, hardware-integrated
-grace period or reclamation service. The task-only removal path is not usable from NMI;
+current-task RCU read interface, protected-data container or generally usable
+reclamation service. The task-only removal path is not usable from NMI;
 interrupt-context scope admission and deferred cleanup are not implemented.

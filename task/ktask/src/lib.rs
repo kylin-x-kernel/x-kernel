@@ -64,6 +64,7 @@ pub mod future;
 
 pub use self::{
     api::{sleep, sleep_until, yield_now, *},
+    rcu::init_service as init_rcu_service,
     softirqd::init_current_cpu as init_softirqd_current_cpu,
     timers::{CancelResult, Expiration, Timer, TimerControl, TimerHandler},
     tracing_hooks::register_sched_trace_hooks,

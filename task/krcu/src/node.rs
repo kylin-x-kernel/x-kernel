@@ -4,7 +4,7 @@
 
 //! Original-CPU ownership of preempted task readers.
 
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use intrusive_collections::{LinkedList, UnsafeRef, intrusive_adapter};
 use kspin::SpinNoIrq;
@@ -21,6 +21,9 @@ intrusive_adapter!(ReaderAdapter = UnsafeRef<TaskReader>: TaskReader {
 /// Migration retains the original node until the outer scope exits.
 pub struct ReaderNode {
     state: SpinNoIrq<NodeState>,
+    // Writes require the node lock. An unlocked false only skips observation;
+    // it never certifies quiescence or permits skipping reader enrollment.
+    is_cpu_pending: AtomicBool,
 }
 
 struct NodeState {
@@ -33,7 +36,6 @@ struct NodeState {
 /// task reference and must advance before the marked reader can be reclaimed.
 struct NodePeriod {
     id: PeriodId,
-    is_cpu_pending: bool,
     first_blocker: Option<UnsafeRef<TaskReader>>,
 }
 
@@ -45,6 +47,7 @@ impl ReaderNode {
                 readers: LinkedList::new(ReaderAdapter::NEW),
                 period: None,
             }),
+            is_cpu_pending: AtomicBool::new(false),
         }
     }
 
@@ -69,11 +72,23 @@ impl ReaderNode {
         // The owner-node lock orders enrollment with future GP observations,
         // including when the underlying UP lock is only an exclusion guard.
         fence(Ordering::SeqCst);
+        // SAFETY: the exclusive scheduler caller checked that this reader
+        // needs enrollment, and the node lock protects its destination list.
+        unsafe { self.enroll_locked(reader, &mut state) };
+    }
+
+    /// # Safety
+    /// The caller holds this node's state lock and satisfies `enroll`'s storage
+    /// and scheduler-exclusion contract. The reader is not enrolled anywhere.
+    unsafe fn enroll_locked(&self, reader: &TaskReader, state: &mut NodeState) {
         // SAFETY: the scheduler contract keeps embedded storage fixed and live
         // through removal. This outgoing reader is not in any other node.
         let borrowed = unsafe { UnsafeRef::from_raw(reader) };
-        let NodeState { readers, period } = &mut *state;
-        if let Some(period) = period.as_mut().filter(|period| period.is_cpu_pending) {
+        let NodeState { readers, period } = state;
+        if let Some(period) = period
+            .as_mut()
+            .filter(|_| self.is_cpu_pending.load(Ordering::Relaxed))
+        {
             // Before the CPU observation, enrollment must preserve protection
             // for this period. Append to the blocker suffix, never ahead of it.
             if period.first_blocker.is_none() {
@@ -132,6 +147,10 @@ impl ReaderNode {
 }
 
 impl ReaderNode {
+    pub(crate) fn needs_cpu_observation(&self) -> bool {
+        self.is_cpu_pending.load(Ordering::Acquire)
+    }
+
     /// Includes every existing reader and starts owing a CPU observation.
     /// An unfinished period cannot be overwritten, even by a duplicate start.
     pub(crate) fn begin_period(&self, id: PeriodId) -> bool {
@@ -142,22 +161,54 @@ impl ReaderNode {
         }
         state.period = Some(NodePeriod {
             id,
-            is_cpu_pending: true,
             first_blocker: state.readers.front().clone_pointer(),
         });
+        self.is_cpu_pending.store(true, Ordering::Release);
         true
     }
 
     /// Records an externally validated CPU observation for this exact period.
     /// This bookkeeping operation does not itself prove a quiescent boundary.
     pub(crate) fn observe_cpu(&self, id: PeriodId) -> bool {
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         fence(Ordering::SeqCst);
-        let Some(period) = state.period.as_mut().filter(|period| period.id == id) else {
+        let Some(_) = state.period.as_ref().filter(|period| period.id == id) else {
             return false;
         };
-        period.is_cpu_pending = false;
+        self.is_cpu_pending.store(false, Ordering::Release);
         true
+    }
+
+    /// Enrolls the outgoing reader and records a needed scheduler observation.
+    /// Returns a ready identity only for immediate reporting within that same
+    /// excluded interval, never for storage in deferred work.
+    ///
+    /// # Safety
+    /// The caller satisfies `enroll`'s scheduler and storage contract, and keeps
+    /// IRQs/preemption excluded through immediate coordinator acceptance.
+    pub(crate) unsafe fn note_context_switch(&self, reader: &TaskReader) -> Option<PeriodId> {
+        let needs_enrollment = reader.is_reading() && !reader.is_enrolled();
+        if !needs_enrollment && !self.is_cpu_pending.load(Ordering::Acquire) {
+            // A racing begin may be missed here, but its obligation stays set.
+            // The GP service retries observation assistance; no report is made.
+            return None;
+        }
+        let mut state = self.state.lock();
+        fence(Ordering::SeqCst);
+        if needs_enrollment {
+            // SAFETY: the outgoing reader cannot enter/exit or be enrolled by
+            // another scheduler, and this lock protects its destination list.
+            unsafe { self.enroll_locked(reader, &mut state) };
+        }
+        // Revalidate under the lock: the unlocked hint identifies no period.
+        // After CPU observation, old-reader completion is reported by the GP
+        // service's readiness scan, not by repeatedly reporting each switch.
+        if !self.is_cpu_pending.load(Ordering::Relaxed) {
+            return None;
+        }
+        let period = state.period.as_ref()?;
+        self.is_cpu_pending.store(false, Ordering::Release);
+        period.first_blocker.is_none().then_some(period.id)
     }
 
     /// Snapshots a locally ready period; it is not a global completion report.
@@ -169,7 +220,9 @@ impl ReaderNode {
         state
             .period
             .as_ref()
-            .filter(|period| !period.is_cpu_pending && period.first_blocker.is_none())
+            .filter(|period| {
+                !self.is_cpu_pending.load(Ordering::Relaxed) && period.first_blocker.is_none()
+            })
             .map(|period| period.id)
     }
 
@@ -178,7 +231,9 @@ impl ReaderNode {
         let mut state = self.state.lock();
         fence(Ordering::SeqCst);
         if !state.period.as_ref().is_some_and(|period| {
-            period.id == id && !period.is_cpu_pending && period.first_blocker.is_none()
+            period.id == id
+                && !self.is_cpu_pending.load(Ordering::Relaxed)
+                && period.first_blocker.is_none()
         }) {
             return false;
         }

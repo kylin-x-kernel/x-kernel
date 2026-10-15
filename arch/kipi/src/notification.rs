@@ -21,6 +21,7 @@ bitflags::bitflags! {
         const TIMER_REPROGRAM = 1 << 2;
         const BOTTOM_HALF = 1 << 3;
         const HIGHPRI_BOTTOM_HALF = 1 << 4;
+        const RCU = 1 << 5;
     }
 }
 
@@ -148,6 +149,21 @@ pub fn notify_highpri_bottom_half(cpu_id: LogicalCpuId) -> Result<()> {
     notify(cpu_id, NotificationFlags::HIGHPRI_BOTTOM_HALF)
 }
 
+/// Requests deferred RCU processing on an initialized destination CPU.
+///
+/// Publish RCU demand first and install the Rcu softirq action before calling.
+/// The receiver only marks that vector pending; it never directly wakes the GP
+/// task or executes callbacks. Requests coalesce and survive the boot handshake.
+/// After enablement every request sends an IPI, including requests to self.
+/// Does not allocate or sleep. IRQ-off scheduler paths may use this transport;
+/// release their locks before reenabling IRQs. NMI and CPU hotplug are unsupported.
+///
+/// # Errors
+/// Returns [`KipiError::InvalidCpuId`] for an out-of-range or absent CPU.
+pub fn notify_rcu(cpu_id: LogicalCpuId) -> Result<()> {
+    notify(cpu_id, NotificationFlags::RCU)
+}
+
 fn notify(cpu_id: LogicalCpuId, reason: NotificationFlags) -> Result<()> {
     let pending = PENDING
         .get(cpu_id.as_usize())
@@ -214,11 +230,18 @@ fn handle_bottom_half(reasons: NotificationFlags) {
     if reasons.contains(NotificationFlags::BOTTOM_HALF) {
         raise_softirq_irqoff(SoftirqVec::Tasklet);
     }
+    if reasons.contains(NotificationFlags::RCU) {
+        raise_softirq_irqoff(SoftirqVec::Rcu);
+        #[cfg(unittest)]
+        rcu_unittest::record_delivery();
+    }
 }
 
 #[cfg(unittest)]
 #[path = "../ut-tests/bottom_half_unittest.rs"]
 mod bottom_half_unittest;
+
+unittest::path_mod_test!(rcu_unittest, "../ut-tests/rcu_unittest.rs");
 
 #[unittest::mod_test]
 mod notification_unittest {

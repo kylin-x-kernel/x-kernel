@@ -14,5 +14,9 @@ intrusive-collections.workspace = true
 kspin.workspace = true
 unittest.workspace = true
 
+[dev-dependencies]
+# Host threads race node setup and enrollment; UP exclusion is not a mutex.
+kspin = { workspace = true, features = ["smp"] }
+
 [lints]
 workspace = true

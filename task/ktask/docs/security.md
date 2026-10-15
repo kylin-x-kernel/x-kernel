@@ -22,6 +22,42 @@ Sleep assertions and prepared waits
 share this gate to avoid inconsistent acceptance. This mitigates invalid-context service startup/stop;
 the caller remains responsible for dependency cycles and provider readiness.
 
+The scheduler RCU hook reports only after preserving the outgoing reader in its
+original node. IRQ/preemption exclusion spans enrollment, observation and report
+acceptance. Node and coordinator locks never nest, and this hook does not wake
+the GP task inline. A reported CPU is not evidence that its preempted task has
+exited the read scope. Idle/user/interrupt watching remains unintegrated.
+
+The GP task's readiness scan only reports previously recorded CPU observations
+whose old readers have drained. Timer expiry never fabricates an observation.
+Progress kicks use the existing fixed reschedule IPI, outside all RCU locks,
+only at the active interval's start or progress deadline. A stale pending hint
+can cause an unnecessary kick but cannot authorize completion. A CPU with only
+blocked old readers is not repeatedly kicked; their lifetimes remain authoritative.
+Callback promotion precedes destination notification. The Rcu softirq executes
+only eligible callbacks and restores any budget remainder through the core queue
+protocol before requesting another pass. No callback runs under an RCU lock or
+in the GP task. Admission remains limited to unpublished owning test fixtures
+with nonblocking cleanup; general read/context integration is still required
+before accepting ordinary consumer retirement.
+
+`init_rcu_service` requires all discovered CPU services to be initialized before
+creating the GP task. Static state retains its nodes and the one-shot driver
+claim; duplicate startup cannot replace an active controller. Serialized startup
+installs the action before claiming control.
+Registration conflict leaves control unclaimed; the existing action is untouched.
+The startup lock is never held across task creation or the acknowledgment wait.
+Allocation failure after assignment follows the fatal kernel policy, not rollback.
+The task publishes
+only its waker after preparing its task-bound wait and timer. No ordinary
+callback admission or general RCU-ready flag is published. The Rcu softirq action is
+installed before task activation. Fixed IPI notification only marks it pending;
+the action later wakes the GP task without clearing demand. The no-IPI fallback
+raises softirq directly and may wake its daemon, so it cannot be called under
+scheduler/RCU locks. Neither route supports NMI. No timeout can certify a reader's
+exit. Timer cancellation runs outside bookkeeping locks. Saturating deadline
+arithmetic validates representation, not progress at the host clock horizon.
+
 This document covers the security boundaries of the entire `task/ktask` crate:
 the `lib.rs` integration and `api.rs` entry points; task lifetime and context
 in `task.rs`; scheduling in `run_queue.rs`; blocking in `future/` and

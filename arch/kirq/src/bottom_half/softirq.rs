@@ -730,19 +730,20 @@ pub mod tests_softirq {
     fn test_softirq_group_registration_is_all_or_nothing() {
         let _wake_gate = begin_softirq_test();
         let _first = ScopedSoftirqAction::clear(SoftirqVec::IrqPoll);
-        let _second = ScopedSoftirqAction::install(SoftirqVec::Rcu, timer_action);
+        // Hrtimer has no production owner; Rcu belongs to the live GP service.
+        let _second = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, timer_action);
         let entries: [(SoftirqVec, super::SoftirqAction); 2] = [
             (SoftirqVec::IrqPoll, high_action),
-            (SoftirqVec::Rcu, high_action),
+            (SoftirqVec::Hrtimer, high_action),
         ];
         assert!(!super::open_softirqs(&entries));
         assert!(!super::is_softirq_open(SoftirqVec::IrqPoll));
         assert!(super::softirq_action_matches_for_tests(
-            SoftirqVec::Rcu,
+            SoftirqVec::Hrtimer,
             timer_action
         ));
         {
-            let _empty = ScopedSoftirqAction::clear(SoftirqVec::Rcu);
+            let _empty = ScopedSoftirqAction::clear(SoftirqVec::Hrtimer);
             assert!(super::open_softirqs(&entries));
             for (vec, action) in entries {
                 assert!(super::softirq_action_matches_for_tests(vec, action));
@@ -778,7 +779,7 @@ pub mod tests_softirq {
     fn reraise_action() {
         let calls = RERAISE_CALLS.fetch_add(1, Ordering::Relaxed);
         if calls == 0 {
-            raise_softirq(SoftirqVec::Rcu);
+            raise_softirq(SoftirqVec::Hrtimer);
         }
     }
 
@@ -868,9 +869,9 @@ pub mod tests_softirq {
         let _irq = kspin::NoPreemptIrqSave::new();
         let _wake_gate = begin_softirq_test();
         RERAISE_CALLS.store(0, Ordering::Relaxed);
-        let _rcu = ScopedSoftirqAction::install(SoftirqVec::Rcu, reraise_action);
+        let _hrtimer = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, reraise_action);
 
-        raise_softirq(SoftirqVec::Rcu);
+        raise_softirq(SoftirqVec::Hrtimer);
         assert_eq!(run_with_resched(|| false), SoftirqRunResult::Ran);
         assert_eq!(RERAISE_CALLS.load(Ordering::Relaxed), 2);
     }
@@ -902,15 +903,15 @@ pub mod tests_softirq {
         RERAISE_CALLS.store(0, Ordering::Relaxed);
         HIGH_ORDER.store(0, Ordering::Relaxed);
         let _high = ScopedSoftirqAction::install(SoftirqVec::High, high_action);
-        let _rcu = ScopedSoftirqAction::install(SoftirqVec::Rcu, reraise_action);
+        let _hrtimer = ScopedSoftirqAction::install(SoftirqVec::Hrtimer, reraise_action);
         raise_softirq(SoftirqVec::High);
-        raise_softirq(SoftirqVec::Rcu);
+        raise_softirq(SoftirqVec::Hrtimer);
         clear_softirq_diagnostics();
 
         assert_eq!(run_with_resched(|| true), SoftirqRunResult::Deferred);
         assert!(HIGH_ORDER.load(Ordering::Relaxed) != 0);
         assert_eq!(RERAISE_CALLS.load(Ordering::Relaxed), 1);
-        assert!(local_softirq_pending() & (1usize << SoftirqVec::Rcu.as_usize()) != 0);
+        assert!(local_softirq_pending() & (1usize << SoftirqVec::Hrtimer.as_usize()) != 0);
         assert_eq!(softirq_diagnostics().daemon_wake_requests, 1);
         assert_eq!(softirq_diagnostics().restart_limit_hits, 0);
 

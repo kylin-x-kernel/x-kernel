@@ -1,5 +1,14 @@
 # kruntime — 安全与可靠性分析
 
+## RCU Carrier Preparation
+
+The unsafe `ktask::init_rcu_service` call follows the all-CPU service rendezvous,
+which supplies its scheduler, timer and notification prerequisites. The boot
+task sleeps until the GP task has prepared its own wait and timer. Failure stops
+boot. This acknowledgment does not authorize ordinary callback admission or
+replace the remaining idle/user/interrupt observation and context requirements.
+The callback carrier is exercised only with controlled unpublished fixtures.
+
 ## Workqueue Publication Boundary
 
 The default-off `workqueue-bench` feature exposes a boot test path, not an
@@ -167,7 +176,7 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 |------|----------|----------|----------|----------|
 | T-01 | `.init_array` 槽位不是有效函数指针，`init_cb` 跳转到非法地址 | 高 | 链接脚本错误、恶意/损坏对象文件、内存破坏 | 仅信任注册宏生成条目；链接脚本保留并界定 `.init_array`；启动期集中调用 |
 | T-02 | `BootInfo` 内存表或 CPU 拓扑错误 | 高 | boot 层 bug、固件表异常、虚拟化环境错误 | 由 `khal::firmware` / `khal::mem` / `kcpu_id_map` 建立运行时视图；后续初始化只消费该视图 |
-| T-03 | Drivers use AP services before preparation completes | Medium | Publishing `INITED_CPUS` before local service setup, or entering drivers before the barrier | Mitigated by separate run-queue registration and service-completion barriers, Release/Acquire publication, and waiting before driver initialization; boot tests observe completion at the driver boundary. |
+| T-03 | Shared services or drivers use AP services before preparation completes | Medium | Publishing `INITED_CPUS` before local service setup, or starting RCU/drivers before the barrier | Mitigated by separate run-queue registration and service-completion barriers and Release/Acquire publication. Unittest holds AP publication until the primary enters its wait and observes completion at the pre-RCU initialization boundary. |
 | T-04 | 从核使用错误或重叠 boot stack | 高 | AP 启动循环越界、并发启动复用槽位 | `secondary_cpu_index < NR_CPUS - 1`；串行 `boot_ap` + `SCHED_READY_CPUS` 握手；每 AP 独立槽 |
 | T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
 | T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |

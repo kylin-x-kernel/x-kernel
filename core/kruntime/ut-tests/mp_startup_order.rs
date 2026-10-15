@@ -14,10 +14,20 @@ static COMPLETE: [AtomicBool; kbuild_config::NR_CPUS] =
 static RAN_EARLY: AtomicBool = AtomicBool::new(false);
 static QUEUED: AtomicUsize = AtomicUsize::new(0);
 static REMAINING: AtomicUsize = AtomicUsize::new(0);
-static SERVICES_READY_BEFORE_DRIVERS: AtomicBool = AtomicBool::new(false);
+static SERVICES_READY_BEFORE_RCU: AtomicBool = AtomicBool::new(false);
+static PRIMARY_WAITING_FOR_SERVICES: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn mark_complete(cpu_id: LogicalCpuId) {
+    // Hold AP publication until the primary actually enters the service wait.
+    // This boot-only handshake needs no scheduled task or timer to release it.
+    while !PRIMARY_WAITING_FOR_SERVICES.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
     COMPLETE[cpu_id.as_usize()].store(true, Ordering::Release);
+}
+
+pub(crate) fn record_service_wait() {
+    PRIMARY_WAITING_FOR_SERVICES.store(true, Ordering::Release);
 }
 
 pub(crate) fn record_service_barrier(primary: LogicalCpuId) {
@@ -27,7 +37,7 @@ pub(crate) fn record_service_barrier(primary: LogicalCpuId) {
             all_complete &= COMPLETE[cpu_id.as_usize()].load(Ordering::Acquire);
         }
     });
-    SERVICES_READY_BEFORE_DRIVERS.store(all_complete, Ordering::Release);
+    SERVICES_READY_BEFORE_RCU.store(all_complete, Ordering::Release);
 }
 
 pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
@@ -56,8 +66,11 @@ pub(crate) fn queue_early_tasks(primary: LogicalCpuId) {
 }
 
 #[def_test]
-fn cpu_services_are_ready_before_driver_initialization() {
-    assert!(SERVICES_READY_BEFORE_DRIVERS.load(Ordering::Acquire));
+fn cpu_services_are_ready_before_rcu_initialization() {
+    assert!(SERVICES_READY_BEFORE_RCU.load(Ordering::Acquire));
+    if kcpu_id_map::nr_cpus() > 1 {
+        assert!(PRIMARY_WAITING_FOR_SERVICES.load(Ordering::Acquire));
+    }
 }
 
 #[def_test]

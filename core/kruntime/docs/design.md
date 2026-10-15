@@ -1,5 +1,13 @@
 # kruntime — 设计文档
 
+## RCU Carrier Startup
+
+After the all-CPU service rendezvous, `late_init_main` calls
+`ktask::init_rcu_service` and waits sleepably for the GP task to prepare its own
+wait and timer. This precedes workqueue and driver startup. It does not enable
+ordinary RCU callback admission or advertise completed observation integration.
+Startup errors stop boot; an unprepared GP task is not reported as ready.
+
 ## System Workqueue Startup
 
 `late_init_main` calls `kworkng::runtime::init` after `init_cpu_services` has
@@ -210,6 +218,11 @@ An AP releases its startup preemption guard after publishing completion and then
 enters idle. No AP service initialization may wait for primary driver startup or
 for a task that cannot run until that guard is released. Otherwise the primary
 and AP would wait for each other. APs never call `SystemInitEntry`.
+
+The unittest startup fixture holds AP completion publication until the primary
+has entered its service wait. It observes completion immediately before RCU
+initialization, exercising the rendezvous without a timer or runnable-task
+dependency. Normal builds do not install this handshake.
 
 ### NMI 初始化时序
 

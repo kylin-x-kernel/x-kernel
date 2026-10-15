@@ -226,13 +226,23 @@ impl Drop for CallbackBatch<'_> {
 /// coordinator borrow permits concurrent validated observations/reports, not
 /// competing control. Exclusive `&mut self` serializes complete drive passes;
 /// retaining a shared coordinator reference alone does not enforce ownership.
-pub(super) struct CallbackDriver<'core, 'nodes, const CPUS: usize> {
+pub struct CallbackDriver<'core, 'nodes, const CPUS: usize> {
     coordinator: &'core GracePeriodCoordinator<'nodes, CPUS>,
     queues: &'core [CallbackQueue; CPUS],
     active_period: Option<PeriodId>,
 }
 
 impl<'core, 'nodes, const CPUS: usize> CallbackDriver<'core, 'nodes, CPUS> {
+    /// Runs one bounded assignment/completion pass for the host service task.
+    ///
+    /// Returns whether a period remains active and needs observations or a later
+    /// progress check. It does not mean the service must busy-loop: the host
+    /// should sleep until new demand or its progress deadline. No callback runs
+    /// here. Notifications and timer operations belong outside this call.
+    pub fn advance(&mut self) -> bool {
+        self.drive().is_some()
+    }
+
     /// Creates the sole controller for fresh callback queues.
     ///
     /// # Safety
