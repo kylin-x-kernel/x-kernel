@@ -6,15 +6,17 @@
 //!
 //! `ktime` is the system timekeeping owner: it derives realtime from the
 //! monotonic hardware clock exposed by [`khal::time`] plus a clock
-//! correlation, and owns initialization, runtime updates, and reads. `khal`
-//! stays a pure hardware time source; the `drivers/platform/rtc` crate only
+//! correlation, and owns cumulative sleep time, initialization, updates, and reads.
+//! `khal` stays a pure hardware time source; the `drivers/platform/rtc` crate only
 //! provides persistent-clock samples that boot code passes to
 //! [`initialize_realtime`].
 //!
 //! Semantics:
-//! - realtime advances 1:1 with monotonic time after initialization;
+//! - realtime advances 1:1 with monotonic time between explicit updates;
+//! - boottime is monotonic plus cumulative injected sleep time;
+//! - [`inject_sleeptime`] advances realtime and boottime without changing monotonic;
 //! - before any persistent clock is sampled, realtime falls back to the Unix
-//!   epoch plus elapsed monotonic time;
+//!   epoch plus elapsed monotonic time and injected sleep intervals;
 //! - [`set_realtime_checked`] re-bases the correlation so a caller-supplied
 //!   wall-clock timestamp takes effect immediately. Range validation (the Linux
 //!   rule that the wall clock may not move before `CLOCK_MONOTONIC`, plus an
@@ -28,7 +30,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use khal::time::monotonic_time;
 use kspin::SpinRwNoIrq;
-use ktime_types::{MonotonicInstant, NANOS_PER_SEC, SystemTime, TimeSpan};
+use ktime_types::{BoottimeInstant, MonotonicInstant, NANOS_PER_SEC, SystemTime, TimeSpan};
 
 /// Largest settable wall-clock second value, mirroring Linux `KTIME_SEC_MAX`
 /// (`include/linux/time64.h`): the upper bound `timespec64_valid()` accepts.
@@ -69,14 +71,89 @@ impl ClockCorrelation {
     }
 }
 
-static REALTIME_CORRELATION: SpinRwNoIrq<ClockCorrelation> =
-    SpinRwNoIrq::new(ClockCorrelation::FALLBACK);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Timekeeper {
+    correlation: ClockCorrelation,
+    sleep_time: TimeSpan,
+}
+
+impl Timekeeper {
+    const INITIAL: Self = Self {
+        correlation: ClockCorrelation::FALLBACK,
+        sleep_time: TimeSpan::ZERO,
+    };
+
+    fn snapshot(self, monotonic: MonotonicInstant) -> ClockSnapshot {
+        ClockSnapshot {
+            monotonic,
+            realtime: self.correlation.realtime_at(monotonic),
+            boottime: BoottimeInstant::from_span_since_origin(
+                monotonic
+                    .span_since_origin()
+                    .saturating_add(self.sleep_time),
+            ),
+        }
+    }
+
+    fn set_realtime_checked(
+        &mut self,
+        sample: SystemTime,
+        monotonic: MonotonicInstant,
+    ) -> Result<(), RealtimeOutOfRange> {
+        let min_allowed = SystemTime::UNIX_EPOCH
+            .checked_add(monotonic.span_since_origin())
+            .ok_or(RealtimeOutOfRange)?;
+        if sample < min_allowed || sample.unix_seconds() >= MAX_SETTABLE_UNIX_SECONDS {
+            return Err(RealtimeOutOfRange);
+        }
+        self.correlation = ClockCorrelation::new(monotonic, sample);
+        Ok(())
+    }
+
+    fn inject_sleeptime(
+        &mut self,
+        delta: TimeSpan,
+        monotonic: MonotonicInstant,
+    ) -> Result<(), SleepTimeError> {
+        if delta.is_zero() {
+            return Ok(());
+        }
+        let sleep_time = self
+            .sleep_time
+            .checked_add(delta)
+            .ok_or(SleepTimeError::OutOfRange)?;
+        // Reject an unrepresentable boottime before publishing either offset.
+        monotonic
+            .span_since_origin()
+            .checked_add(sleep_time)
+            .ok_or(SleepTimeError::OutOfRange)?;
+        let elapsed = monotonic
+            .checked_duration_since(self.correlation.monotonic_base)
+            .ok_or(SleepTimeError::InvalidMonotonicBaseline)?;
+        let realtime = self
+            .correlation
+            .realtime_base
+            .checked_add(elapsed)
+            .and_then(|now| now.checked_add(delta))
+            .ok_or(SleepTimeError::OutOfRange)?;
+        if realtime.unix_seconds() >= MAX_SETTABLE_UNIX_SECONDS {
+            return Err(SleepTimeError::OutOfRange);
+        }
+        // Validation is complete; commit the two clock offsets together.
+        self.correlation = ClockCorrelation::new(monotonic, realtime);
+        self.sleep_time = sleep_time;
+        Ok(())
+    }
+}
+
+static TIMEKEEPER: SpinRwNoIrq<Timekeeper> = SpinRwNoIrq::new(Timekeeper::INITIAL);
 static REALTIME_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClockSnapshot {
     monotonic: MonotonicInstant,
     realtime: SystemTime,
+    boottime: BoottimeInstant,
 }
 
 /// Initializes realtime from a persistent-clock sample.
@@ -88,12 +165,12 @@ pub fn initialize_realtime(sample: SystemTime) {
     if REALTIME_INITIALIZED.load(Ordering::Acquire) {
         return;
     }
-    let mut correlation = REALTIME_CORRELATION.write();
+    let mut timekeeper = TIMEKEEPER.write();
     if !REALTIME_INITIALIZED.load(Ordering::Relaxed) {
         // Sample monotonic while holding the write lock so the recorded base
         // matches the correlation we publish.
         let monotonic_base = monotonic_time();
-        *correlation = ClockCorrelation::new(monotonic_base, sample);
+        timekeeper.correlation = ClockCorrelation::new(monotonic_base, sample);
         REALTIME_INITIALIZED.store(true, Ordering::Release);
     }
 }
@@ -126,22 +203,12 @@ pub struct RealtimeOutOfRange;
 /// before `CLOCK_MONOTONIC` or beyond [`MAX_SETTABLE_UNIX_SECONDS`]
 /// (Linux `KTIME_SEC_MAX`).
 pub fn set_realtime_checked(sample: SystemTime) -> Result<(), RealtimeOutOfRange> {
-    let mut correlation = REALTIME_CORRELATION.write();
+    let mut timekeeper = TIMEKEEPER.write();
     // Sample monotonic under the write lock so validation and the recorded
     // base observe the same instant.
     let monotonic_base = monotonic_time();
 
-    let min_allowed = SystemTime::UNIX_EPOCH
-        .checked_add(monotonic_base.span_since_origin())
-        .ok_or(RealtimeOutOfRange)?;
-    if sample < min_allowed {
-        return Err(RealtimeOutOfRange);
-    }
-    if sample.unix_seconds() >= MAX_SETTABLE_UNIX_SECONDS {
-        return Err(RealtimeOutOfRange);
-    }
-
-    *correlation = ClockCorrelation::new(monotonic_base, sample);
+    timekeeper.set_realtime_checked(sample, monotonic_base)?;
     REALTIME_INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }
@@ -151,12 +218,8 @@ fn snapshot() -> ClockSnapshot {
     // Hold the read lock across the monotonic sample and the realtime
     // derivation so a concurrent writer cannot publish a new correlation in
     // between and produce a torn (monotonic, realtime) pair.
-    let correlation = REALTIME_CORRELATION.read();
-    let monotonic = monotonic_time();
-    ClockSnapshot {
-        monotonic,
-        realtime: correlation.realtime_at(monotonic),
-    }
+    let timekeeper = TIMEKEEPER.read();
+    timekeeper.snapshot(monotonic_time())
 }
 
 /// Samples realtime and monotonic time at the same instant.
@@ -174,10 +237,60 @@ pub fn realtime_and_monotonic() -> (SystemTime, MonotonicInstant) {
 /// Returns the current realtime timestamp.
 ///
 /// Before a persistent clock initializes realtime, the result falls back to
-/// the Unix epoch plus elapsed monotonic time.
+/// the Unix epoch plus elapsed monotonic time and injected sleep intervals.
 #[inline]
 pub fn realtime() -> SystemTime {
     snapshot().realtime
+}
+
+/// Returns the current boot-time instant, including injected sleep intervals.
+///
+/// Uses a single monotonic sample under the timekeeper read lock. This does not
+/// sleep and is valid in interrupt context and during early boot. Before any
+/// sleep interval is injected, its elapsed value equals monotonic time.
+#[inline]
+pub fn boottime() -> BoottimeInstant {
+    snapshot().boottime
+}
+
+/// The reason a confirmed sleep interval could not be applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SleepTimeError {
+    /// Cumulative sleep time or a clock value would exceed its supported range.
+    OutOfRange,
+    /// The monotonic sample precedes the recorded realtime correlation base.
+    ///
+    /// The caller must resolve the counter/baseline inconsistency before retrying;
+    /// reducing the sleep interval does not repair this condition.
+    InvalidMonotonicBaseline,
+}
+
+/// Adds a confirmed sleep interval to realtime and boottime atomically.
+///
+/// Monotonic time is unchanged. `TimeSpan` excludes negative intervals, and a
+/// zero interval is a successful no-op. This does not sleep and is valid in
+/// interrupt context; it performs no device reads or timer callbacks.
+///
+/// The caller must establish a suspend/resume boundary, exclude `delta` from
+/// the underlying monotonic clock, and ensure each interval is injected once.
+/// This function neither detects sleep nor repairs hardware counters. The
+/// caller must also arrange timer notification/rearming after the update and
+/// before allowing dependent timers to run. No production resume path is wired
+/// to this interface yet.
+///
+/// # Errors
+///
+/// Returns [`SleepTimeError::OutOfRange`] if either clock or cumulative sleep
+/// time cannot represent the update, or realtime would reach the upper bound
+/// enforced by [`set_realtime_checked`]. Returns
+/// [`SleepTimeError::InvalidMonotonicBaseline`] if the monotonic sample precedes
+/// the recorded correlation base. Either error leaves state unchanged.
+pub fn inject_sleeptime(delta: TimeSpan) -> Result<(), SleepTimeError> {
+    if delta.is_zero() {
+        return Ok(());
+    }
+    let mut timekeeper = TIMEKEEPER.write();
+    timekeeper.inject_sleeptime(delta, monotonic_time())
 }
 
 /// Converts a realtime deadline into the monotonic timer domain.
