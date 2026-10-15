@@ -373,3 +373,21 @@ maintains no separate clock state and does not change clock or suspend semantics
 The uptime regression brackets `sysinfo` with actual `clock_gettime(CLOCK_BOOTTIME)`
 reads and compares the rounded ABI values, without using the implementation
 helper as the expected-value source.
+
+### Signal number width validation
+
+Signal syscalls, POSIX timer notifications and clone exit-signal requests use
+`ksignal::Signo::from_raw` for the shared checked numeric boundary. The signal
+owner accepts valid signals 1..=64 and rejects primitive negative or wide
+values without truncation; these syscall frontends map rejection to `EINVAL`.
+Clone retains its full-width `u64` exit-signal input until this conversion.
+
+Zero keeps each frontend's existing meaning: kill-style probes bypass signal
+construction, a clone exit signal of zero means no notification, and explicit
+timer signal zero is invalid. A null timer event still defaults to `SIGALRM`
+with its timer ID; `SIGEV_NONE` and `SIGEV_THREAD_ID` keep their existing
+branches and validation order.
+
+Numeric boundary regressions live with `Signo`. Caller regressions exercise
+actual zero-probe, invalid-number rejection and nullable timer-event paths
+without signal delivery, user-memory access or timer creation.

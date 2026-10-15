@@ -227,3 +227,14 @@ policy and FD-table locking remain separate concerns.
 `sysinfo` saturates uptime conversion rather than wrapping into a negative ABI
 value; the existing zero-initialized carrier and checked user-memory write
 remain unchanged.
+
+### Signal number truncation
+
+Signal-number construction is centralized in `ksignal::Signo::from_raw`.
+Its checked primitive conversion rejects negative and out-of-width inputs
+before enum validation, so attacker-controlled high bits cannot alias a valid
+low-byte signal, including full-width clone exit-signal values. Syscall-specific
+zero handling and `EINVAL` mapping stay in these frontends. Existing credentials,
+target lookup, queue handling, timer ownership and user-memory checks are
+unchanged. Owner and caller regressions avoid signal delivery, usercopy and
+timer side effects; nullable and zero paths retain their original ordering.

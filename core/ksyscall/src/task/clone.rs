@@ -325,10 +325,7 @@ impl CloneRequest {
         if exit_signal == 0 {
             return Ok(None);
         }
-        if exit_signal > u8::MAX as u64 {
-            return Err(KError::InvalidInput);
-        }
-        Signo::from_repr(exit_signal as u8)
+        Signo::from_raw(exit_signal)
             .ok_or(KError::InvalidInput)
             .map(Some)
     }

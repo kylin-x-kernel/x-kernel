@@ -21,11 +21,6 @@ use posix_types::{
     TimeSpanLike, UserConstPtr, UserPtr, k_sigaction, k_sigaltstack, k_siginfo, k_sigset,
 };
 
-/// Converts a numeric signal number to [`Signo`].
-fn parse_signo(signo: u32) -> KResult<Signo> {
-    Signo::from_repr(signo as u8).ok_or(KError::InvalidInput)
-}
-
 /// Manipulates the signal mask for the current thread.
 ///
 /// See <https://man7.org/linux/man-pages/man2/rt_sigprocmask.2.html>.
@@ -72,7 +67,7 @@ pub(crate) fn sys_rt_sigaction(
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
-    let signo = parse_signo(signo)?;
+    let signo = Signo::from_raw(signo).ok_or(KError::InvalidInput)?;
     if matches!(signo, Signo::SIGKILL | Signo::SIGSTOP) {
         return Err(KError::InvalidInput);
     }
@@ -113,7 +108,7 @@ fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
     if signo == 0 {
         return Ok(None);
     }
-    let signo = parse_signo(signo)?;
+    let signo = Signo::from_raw(signo).ok_or(KError::InvalidInput)?;
     Ok(Some(SignalInfo::new_user(
         signo,
         code,
@@ -193,7 +188,7 @@ pub(crate) fn make_queue_signal_info(
         return Ok(None);
     }
 
-    let signo = parse_signo(signo)?;
+    let signo = Signo::from_raw(signo).ok_or(KError::InvalidInput)?;
     let mut sig: SignalInfo = sig.read_vm()?.into();
     sig.set_signo(signo);
     if kprocess::current_user_thread().pid() != tgid && (sig.code() >= 0 || sig.code() == SI_TKILL)
@@ -484,3 +479,5 @@ pub(crate) fn sys_signalfd4(
         .add_file(file, flags.contains(SignalfdFlags::CLOEXEC))
         .map(|fd| fd as _)
 }
+
+unittest::path_mod_test!(tests_signal_number, "../../ut-tests/task/signal_number.rs");

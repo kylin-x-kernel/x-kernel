@@ -15,10 +15,6 @@ use linux_raw_sys::general::{
 };
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr, k_sigevent};
 
-fn parse_signo(signo: i32) -> KResult<Signo> {
-    Signo::from_repr(signo as u8).ok_or(KError::InvalidInput)
-}
-
 fn parse_timespec(ts: linux_raw_sys::general::timespec) -> KResult<ktime_types::TimeSpan> {
     ts.try_into_time_span()
 }
@@ -46,7 +42,7 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
     match sevp.sigev_notify as u32 {
         SIGEV_NONE => Ok(PosixTimerCreateNotify::None),
         SIGEV_SIGNAL => Ok(PosixTimerCreateNotify::Signal {
-            signo: parse_signo(sevp.sigev_signo)?,
+            signo: Signo::from_raw(sevp.sigev_signo).ok_or(KError::InvalidInput)?,
             target_tid: None,
             value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw(sevp.sigev_value)),
         }),
@@ -69,7 +65,7 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
                 return Err(KError::InvalidInput);
             }
             Ok(PosixTimerCreateNotify::Signal {
-                signo: parse_signo(sevp.sigev_signo)?,
+                signo: Signo::from_raw(sevp.sigev_signo).ok_or(KError::InvalidInput)?,
                 target_tid: Some(tid),
                 value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw(sevp.sigev_value)),
             })
@@ -139,3 +135,8 @@ pub(crate) fn sys_timer_getoverrun(timerid: i32) -> KResult<isize> {
     let overrun = kprocess::current_user_process().get_posix_timer_overrun(timerid)?;
     Ok(overrun as isize)
 }
+
+unittest::path_mod_test!(
+    tests_signal_number,
+    "../../ut-tests/time/posix_timer_signal_number.rs"
+);

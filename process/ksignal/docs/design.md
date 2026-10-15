@@ -87,6 +87,16 @@ source. Neither change moves pending signals or rebinds captured weak sources.
 Final configuration release drops its source outside signal locks, waking any
 remaining registrations even if manager references are still retained.
 
+## Raw signal construction
+
+`Signo` owns numeric validity. Its `from_raw` constructor checks the input
+carrier before decoding the signal, so syscall and clone callers share one
+range and width boundary. The constructor has no process-state or user-memory
+access; `ksyscall` retains errno mapping and the distinct meanings of zero in
+signal probes, timer notifications and child-exit notification requests.
+The external `ut-tests/signal_number.rs` regressions cover signed, unsigned
+and wide input carriers. Existing typed signal operations keep their contracts.
+
 ## Queuing and delivery algorithm
 
 Each shared handler object owns a `pending_changed` poll source. Process send,

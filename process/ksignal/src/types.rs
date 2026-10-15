@@ -161,6 +161,21 @@ pub enum Signo {
 }
 
 impl Signo {
+    /// Decodes a raw signal number through a checked numeric conversion.
+    ///
+    /// Accepts carriers implementing `TryInto<u8>`, including `i32`, `u32`
+    /// and `u64`. Primitive integer values outside the byte range fail the
+    /// conversion rather than wrapping into another signal.
+    ///
+    /// # Returns
+    ///
+    /// Returns `None` if conversion fails or the converted value is not a
+    /// supported signal (`1..=64`). Zero is not a signal; callers retain any
+    /// syscall-specific meaning such as a permission probe or no exit signal.
+    pub fn from_raw<T: TryInto<u8>>(raw: T) -> Option<Self> {
+        Self::from_repr(raw.try_into().ok()?)
+    }
+
     /// Returns `true` if this is a real-time signal.
     pub fn is_realtime(&self) -> bool {
         *self >= Signo::SIGRTMIN
@@ -766,3 +781,5 @@ impl SignalStack {
         }
     }
 }
+
+unittest::path_mod_test!(tests_signal_number, "../ut-tests/signal_number.rs");

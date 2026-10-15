@@ -5,8 +5,8 @@
 All of `src/` is covered. Assets are signal state consistency (blocked sets,
 pending queues, actions), the integrity of the user handler frame, and the
 `siginfo` payloads consumed by user handlers. Trusted callers are `ksyscall`
-(ABI decoding and permission checks, e.g. kill permission and signo
-validation) and the posix process runtime. Untrusted inputs reaching this
+(ABI decoding, permission checks and syscall-specific zero-signal policy)
+and the posix process runtime. Untrusted inputs reaching this
 crate are: user-supplied `sigaction`/`siginfo`/`sigprocmask`/`sigaltstack`
 payloads (validated ABI values converted before the call), user stack memory
 holding signal frames, and the return address of the handler trampoline.
@@ -18,6 +18,7 @@ holding signal frames, and the return address of the handler trampoline.
 | User memory (via `osvm` `write_vm`) | kernel writes | handler frame (`ucontext`, `siginfo`, restorer push) |
 | User memory (direct deref) | kernel reads | `sigreturn` frame at user `sp` |
 | User ABI payloads via `ksyscall` | inbound | sigaction structs, siginfo (rt_sigqueueinfo), sigset words, sigaltstack |
+| Raw signal numbers via `Signo::from_raw` | inbound | checked numeric carrier conversion and signal validity; syscall-specific zero handling remains in `ksyscall` |
 | Alternate signal stack | user-controlled addresses | `sp`/`size` used for frame placement |
 | Signal trampoline page | kernel text mapped user-readable/exec | fixed `SIGNAL_TRAMPOLINE` vaddr |
 
@@ -47,7 +48,7 @@ treats payload fields as raw bits and never dereferences pointer-like values
 |---|---|---|---|---|
 | T-01 | Handler frame overwrite of unmapped/guard user stack | Medium | `SA_ONSTACK` with invalid `sigaltstack`, or stack exhaustion at dispatch | Frame write uses checked `write_vm`; failure is converted to `CoreDump` fatal exit instead of a kernel fault |
 | T-02 | `sigreturn` on a corrupted/forged frame | Medium | user changes `sp` or overwrites frame memory, then calls `rt_sigreturn` | Context restore treats frame contents as data; register/pc/sp are re-entered through the normal user-return path so a bad frame cannot corrupt kernel state. `saved` is user-writable, so on x86_64 the restored `MXCSR` is masked against the trusted feature mask before `FXRSTOR` (avoids kernel `#GP`); `sigmask` is range-limited by `SignalSet`. Residual risk: user can forge its own register/FP state, which is also true on Linux |
-| T-03 | Invalid `si_signo` from user `siginfo` reaching decode | Medium | `rt_sigqueueinfo` payload with signo 0 or >64 | `ksyscall` validates the signo before conversion; `SignalInfo::signo` documents the panic contract for unvalidated payloads. Residual: the crate itself trusts its callers here |
+| T-03 | Invalid signal number from user input reaching decode | Medium | invalid or truncating raw numeric argument, or unvalidated imported `siginfo` | `ksyscall` uses `Signo::from_raw` before producing signal payloads; primitive negative or out-of-width values cannot wrap into a valid signal. Zero probes stay separate. `SignalInfo::signo` still documents and relies on its existing validated-payload caller contract |
 | T-04 | Stale POSIX timer signal delivered after timer rearm | Low | timer signal dequeued after `timer_settime` changed the timer | dequeue observers compare the embedded `signal_seq`; stale signals are dropped (`kprocess` wiring) |
 | T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Standard signals coalesce to one instance; real-time queues are bounded by sender rate — matches Linux behavior; no additional kernel cap (accepted residual risk, same as Linux) |
 | T-06 | Observer table races | Low | re-registering an observer while signals dequeue | Table access is `SpinNoIrq`-serialized; overwrite is documented last-wins |
