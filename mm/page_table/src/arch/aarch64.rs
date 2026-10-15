@@ -205,17 +205,22 @@ pub struct A64PagingMetaData;
 impl PagingMetaData for A64PagingMetaData {
     type VirtAddr = VirtAddr;
 
-    // `INVALID_TO_VALID_NEEDS_TLBI` deliberately keeps the default `true`:
-    // treating an invalid→valid transition as flush-free (only `dsb ishst`,
-    // PR !852) correlated with KVM-killed vCPUs on aarch64 daily runs
-    // ("kvm run failed Function not implemented", Stage-2 aborts on IPA
-    // outside RAM, builds #78-#85). Fresh user mappings re-issue the
-    // conservative ASID-scoped `tlbi vale1is` (+ `dsb sy; isb`) until the
-    // root cause is proven otherwise.
-
+    // PR !917 reverted this policy after daily KVM vCPU failures (builds
+    // #78-#85). Recovery requires alloc_table() to complete the new table clear
+    // before parent publication; the final fresh-map fence is too late there.
+    // The same-baseline KVM exec control failed without that barrier and passed
+    // with it. See docs/design.md, "AArch64 Fresh-Map Recovery Evidence", for
+    // the architecture basis, original diagnostics, logs, and validation scope.
+    // Unmap retains its required invalidation; only fresh stores use the fence.
+    const INVALID_TO_VALID_NEEDS_TLBI: bool = false;
     const LEVELS: usize = 4;
     const PA_MAX_BITS: usize = 48;
     const VA_MAX_BITS: usize = 48;
+
+    #[inline]
+    fn fence_fresh_map() {
+        karch::dsb_ishst();
+    }
 
     fn vaddr_is_valid(vaddr: usize) -> bool {
         let top_bits = vaddr >> Self::VA_MAX_BITS;

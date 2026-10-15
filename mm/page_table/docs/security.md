@@ -63,6 +63,17 @@ that uniquely corresponds to that frame.
 `PageTableMut::next_table_mut_or_create()` request a new table. The unsafe
 write occurs only after frame allocation succeeds.
 
+On AArch64 the clear is followed by `karch::dsb_ishst()` before `alloc_table()`
+returns. A parent descriptor or TTBR can therefore expose only a completed
+clear, even to hardware walkers that do not observe the software lock. A
+finalization barrier after publishing the parent would leave a window in which
+old frame contents could be consumed as valid descriptors.
+
+This mitigation and its KVM evidence cover AArch64. The generic initialization
+ordering obligation is documented on `PagingMetaData`; other backends retain
+their existing protocols and require separate architecture review. This audit
+neither certifies their publication ordering nor establishes a missing barrier.
+
 ### 2. `table_of()` (`table64.rs`)
 
 ```rust
@@ -135,9 +146,13 @@ needed.
    translation can exist for a slot that was verified unused, so `map()`
    records a fence request instead of an invalidation, and `finish()` emits
    `fence_fresh_map()` once per boundary unless an invalidation already ran,
-   because that sequence ends in a stronger full-system barrier. Every other
-   transition (valid-to-valid replacement, permission change, unmap, teardown)
+   because that sequence already provides the architecture's publication barrier.
+   Every other transition (valid-to-valid replacement, permission change, unmap, teardown)
    still invalidates unconditionally.
+   On AArch64, each `karch` invalidation helper completes preceding PTE stores
+   with `dsb ishst` before issuing TLBI, then completes the invalidation with
+   DSB and ISB. A post-TLBI DSB alone does not order the PTE store before a
+   walker can refill the invalidated translation.
 4. **Injective p2v mapping**: `H::p2v()` must map distinct physical addresses to
    distinct virtual addresses; otherwise references created by `table_of` /
    `table_of_mut` may alias.
@@ -252,7 +267,9 @@ with a recording `PagingMetaData` implementation and frame-release handler:
 ### Fresh-Map Invalidation Policy Coverage
 
 The `table64.rs::tests` fresh-map cases run a recording `PagingMetaData` whose
-`INVALID_TO_VALID_NEEDS_TLBI` is `false`, which models AArch64:
+`INVALID_TO_VALID_NEEDS_TLBI` is `false`, modeling the batching contract used by
+AArch64's current fence-only policy. The recording metadata substitutes for the
+real architecture implementation:
 
 - `fresh_map_fences_once_without_invalidating` installs two pages into unused
   slots in one boundary and checks that no invalidation was issued, that the
@@ -263,18 +280,26 @@ The `table64.rs::tests` fresh-map cases run a recording `PagingMetaData` whose
   implementation keeping the default still reports a pending invalidation for
   the same fresh map.
 
-These tests use serial execution because they read process-wide counters. The
-page tables are never installed in hardware, so they validate the bookkeeping
-contract rather than real walker behaviour; the claim that AArch64 walkers
-cannot cache an invalid translation is an architecture property, not something
-these tests can prove.
+`aarch64_fresh_map_uses_publication_fence` only asserts the AArch64 policy
+flag. It does not detect removal of the `alloc_table()` or `fence_fresh_map()`
+DSB. Recording a hook invocation would not prove the instruction's presence or
+its ordering against a hardware walker either.
 
-These tests use serial execution and a scoped probe reset to isolate their
-recordings. The page tables are never installed in hardware. The destructor's
-real `dsb ishst` executes, but the metadata hook records rather than issuing
-TLBI; the assertions prove call scope and release order, not microarchitectural
-cache eviction or cross-CPU visibility. Barrier presence/order and the real
-`karch::flush_tlb_asid()` sequence still require architecture code review.
+The AArch64 policy test is selected by the kernel's compilation target, not
+by the CI build host; a cross-compiled AArch64 guest still includes it. This
+selection does not make its assertion a hardware-ordering test.
+
+The recording tests use serial execution and scoped probe resets to isolate
+process-wide counters. Their page tables are never installed in hardware.
+They validate bookkeeping and release order, not microarchitectural cache
+eviction or cross-CPU visibility. Invalid-entry caching is an architecture
+property. Barrier presence and placement, including the real
+`karch::flush_tlb_asid()` sequence, require architecture code review.
+The original AArch64 KVM single-factor exec control and recovery daily/Open
+POSIX runs provide separate hardware-facing regression evidence, with versioned
+logs and limits in
+[design.md](design.md#aarch64-fresh-map-recovery-evidence). Host unit tests and
+counter hooks cannot substitute for those runs.
 
 Run the tests on AArch64 through the project configuration/build flow:
 
@@ -361,3 +386,11 @@ When modifying this module, verify that:
 - [ ] Changes to `walk_page_table!` preserve both three-level and four-level traversal.
 - [ ] SMP TLB shootdown paths are tested with `feature = "smp"`.
 - [ ] `map`/`remap` cannot bypass `paddr_is_valid` / `vaddr_is_valid` checks.
+
+### AArch64 fresh-map publication
+
+Fresh invalid-to-valid mappings rely on table initialization completing before
+parent publication and the final `dsb ishst` before the mapping is used. Clearing
+an old mapping still queues invalidation even if the same virtual address is
+remapped in that batch. A fresh-map fence does not replace that invalidation or
+a caller's obligation to finish before reclaiming backing pages.

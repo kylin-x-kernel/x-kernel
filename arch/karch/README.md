@@ -5,6 +5,9 @@ Lightweight architecture-specific low-level operations for the x-kernel project.
 This crate provides a uniform API across all supported architectures (AArch64, x86_64, RISC-V, LoongArch64, ARM) for:
 
 - **TLB flush**: `flush_tlb(vaddr: Option<VirtAddr>)`
+  AArch64 flush helpers publish preceding page-table stores with `dsb ishst`
+  before TLBI, then complete invalidation with DSB and synchronize locally with
+  ISB. The post-TLBI barrier cannot substitute for the pre-TLBI store barrier.
 - **Store completion barrier** (AArch64): `dsb_ishst()` completes prior stores
   within the Inner Shareable domain, for example before TLB invalidation.
   Instruction-cache and TLB maintenance completion require a DSB covering

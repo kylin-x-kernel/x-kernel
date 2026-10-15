@@ -110,11 +110,13 @@ The following responsibilities belong to other layers:
 an address, and `finish()` clears it after emitting `fence_fresh_map()` once,
 skipped when the same boundary already invalidated something.
 
-No in-tree architecture currently opts in: AArch64 kept the default `true`
-after PR !852 correlated the flush-free fresh map with KVM-killed vCPUs on
-aarch64 daily runs ("kvm run failed Function not implemented", Stage-2 aborts
-on IPA outside RAM, builds #78-#85). The mechanism remains available pending
-a proven root cause.
+AArch64 opts in after completing new table initialization before parent
+publication. PR !917 (`a50f7be4`) previously reverted PR !852's fence-only
+policy after aarch64 daily KVM vCPU failures ("kvm run failed Function not
+implemented", reported Stage-2 aborts on IPA outside RAM, builds #78-#85).
+The recovery retains the final fresh-map fence and all required old-translation
+invalidations; its protocol basis and controlled KVM validation are recorded
+under [AArch64 Fresh-Map Recovery Evidence](#aarch64-fresh-map-recovery-evidence).
 
 | From | To | Trigger |
 |------|----|---------|
@@ -156,8 +158,24 @@ Three-level page tables (Sv39) skip P4 and start at P3.
 
 1. Walk the page table levels. If an intermediate entry is unused, call
    `alloc_table()` to allocate a new page table frame.
+   On AArch64, `alloc_table()` completes the frame's zeroing with `dsb ishst`
+   before returning. Only then may `next_table_mut_or_create()` publish the
+   parent descriptor. Hardware walkers do not take the software address-space
+   lock; a barrier deferred to `finish()` cannot prevent them from reaching
+   recycled frame contents in the meantime. Root frames use the same boundary
+   before their address can be installed in TTBR.
 2. Return a mutable PTE reference at the requested level.
 3. The caller writes the PTE contents.
+
+Initialization-before-publication is a separate architecture obligation from
+fresh-map finalization; see the `PagingMetaData` contract. The explicit DSB in
+`alloc_table()` is deliberately limited to AArch64, whose protocol and original
+KVM regression were checked for this fix. Other backends are unchanged and were
+not covered by that publication-ordering audit. Their walker, root-register and
+remote synchronization rules must be checked independently; neither the absence
+of this DSB nor the default `INVALID_TO_VALID_NEEDS_TLBI == true` establishes
+whether an additional barrier is required there. This scope does not assert
+that publication ordering is an AArch64-only concern.
 
 ### Region Mapping (`map_region`)
 
@@ -209,6 +227,21 @@ verify subtree skipping without timing thresholds.
    returns a `TlbFlushReceipt`.
 5. `Drop` calls `finish()` automatically to finalize pending invalidations.
 
+AArch64 invalidation helpers in `karch` issue `dsb ishst` **before** TLBI to
+publish the PTE changes, followed by a completion DSB and local ISB. A DSB after
+TLBI alone does not prevent a walker from refilling the old translation before
+the preceding PTE store is visible. Table initialization and invalidation are
+separate ordering obligations: the former precedes parent publication, while
+the latter precedes the invalidation instruction. Linux v6.18 follows this
+separation in [`pmd_install()`](https://github.com/torvalds/linux/blob/v6.18/mm/memory.c#L425)
+and [`__flush_tlb_page_nosync()`](https://github.com/torvalds/linux/blob/v6.18/arch/arm64/include/asm/tlbflush.h#L285).
+
+AArch64 fresh mappings use this fence-only path after new table frames have
+been initialized before publication. The finalization boundary emits `dsb ishst`
+when no invalidation is pending. This does not cancel an earlier unmap in the
+same batch: its queued invalidation is still completed, including the
+pre-TLBI publication barrier.
+
 Because `TlbFlushReceipt` reports only pending invalidations, a boundary that
 installed fresh mappings on a fence-only architecture returns a receipt with
 `had_pending() == false`. Callers that release a physical frame after removing
@@ -223,6 +256,46 @@ Before releasing a physical frame or object-owned page removed from a PTE,
 higher layers must call `finish()` and perform the release afterward.
 Relying only on `PageTableMut::drop` prevents forgotten flushes but does not
 express the required release-after-flush ordering in the resource lifecycle.
+
+### AArch64 Fresh-Map Recovery Evidence
+
+The architectural premise for `INVALID_TO_VALID_NEEDS_TLBI == false` is
+independent of the historical KVM failure. Arm-maintained
+[TF-A v2.13.0, TLB maintenance operations](https://trustedfirmware-a.readthedocs.io/en/v2.13.0/components/xlat-tables-lib-v2-design.html#tlb-maintenance-operations)
+explains that adding a dynamic region over invalid descriptors needs no TLBI:
+TLBs cannot architecturally retain invalid translation table entries. It cites
+Armv8-A rev C.a D4.10.1. This does not remove an old mapping's queued invalidation
+or the publication and context-synchronization obligations of its use path.
+
+The missing new-table ordering is fixed in `alloc_table()`: clearing the frame
+must complete before a parent descriptor or TTBR exposes it to a hardware
+walker, which does not acquire the software address-space lock. The final
+`fence_fresh_map()` runs after parent publication and cannot close that window.
+The pre-TLBI `dsb ishst` addresses a separate obligation: publish preceding PTE
+stores before retiring old translations when `finish()` has pending work.
+
+The original server was used for the controls and recovery runs: host
+4.19.90-89.11.v2401.ky10.aarch64, QEMU 10.0.11, KVM `-cpu host`, four vCPUs,
+1 GiB RAM. The narrow case repeats the original Open POSIX
+`sigaction_22-26.run-test` through dynamic exec, up to 5000 times per run.
+The saved command, patches, build-info, configuration and raw guest/Harness
+logs are linked below; these are executed results rather than policy assertions.
+
+| Fixed version and scope | Observed result | Evidence |
+| --- | --- | --- |
+| `cea097df`, original fence-only policy, no new-table publication barrier | Last progress 750, then KVM `Function not implemented`, Harness rc=1 | [Single-factor control and raw logs](https://gitee.com/wxyy1/x-kernel/blob/68898d2d142727c78118a55a1e7c6e4fa2dafcf2/docs/investigations/pr917-publication-acceptance-20261013.md) |
+| Same baseline, configuration and workload; only executable change is `dsb ishst` after the new table clear, before parent publication | Three runs of 5000 completed, all Harness rc=0; still no fresh-map TLBI | Same control record; its dirty bundle corresponds to the saved source patch |
+| Recovery `ef5cdad5` | 15000 exec, 75/75 page_table+memspace tests with coverage, original daily/Open POSIX 1376/1376 passed; original 417 exclusions retained | [Recovery report and raw artifacts](https://gitee.com/wxyy1/x-kernel/blob/e6a165d5d8a1110b8693b4e85c5673b98177b5e7/docs/investigations/pr917-publication-20261013.md) |
+| Rebase `af1d4a4b`, identical recovery patches over the ext4-only main change | Build, Clippy, fmt and one 5000-exec run passed | [Rebase report and raw artifacts](https://gitee.com/wxyy1/x-kernel/blob/2d68e2dd001cee3096a7af28250da2e61c7d32fe/docs/investigations/pr917-rebase-f9954af8-20261013.md) |
+
+Each result belongs to its listed version. The daily result covers the original
+`open-posix` case, not the complete daily suite. The single-factor comparison
+supports recovery under that fixed baseline and workload; it does not uniquely
+reconstruct the host fault IPA or cached translation, or imply that every other
+synchronization scheme without this barrier must fail. Unit tests validate
+policy and batching, not architectural DSB effects. Future changes must preserve
+the actual initialization-before-publication and finalization barriers; real
+walker regression coverage requires AArch64 KVM execution and instruction review.
 
 ### PTE Snapshots and Conditional Replacement
 

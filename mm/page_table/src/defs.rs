@@ -245,6 +245,10 @@ pub type PtResult<T = ()> = Result<T, PtError>;
 /// - `LEVELS` must be 3 or 4 (matching `walk_page_table!` macro support).
 /// - `PA_MAX_BITS` and `VA_MAX_BITS` must match the hardware configuration.
 /// - `flush_tlb()` must actually invalidate the relevant TLB entries.
+/// - New table frames must be initialized with the architecture's required
+///   ordering before a parent descriptor or root register exposes them to
+///   page-table walkers. This obligation is independent of the fresh-map
+///   invalidation policy; finalization hooks run after parent publication.
 /// - `INVALID_TO_VALID_NEEDS_TLBI` may only be `false` when the architecture
 ///   guarantees that no translation for an invalid entry can be cached, and
 ///   `fence_fresh_map()` then orders the entry write against other
@@ -270,7 +274,9 @@ pub trait PagingMetaData: Sync + Send {
     /// invalidation and only runs [`fence_fresh_map`](Self::fence_fresh_map).
     /// Architectures that may cache invalid entries must keep the default,
     /// otherwise a walker can keep using the stale invalid translation after
-    /// the entry became valid.
+    /// the entry became valid. Keeping the default does not by itself establish
+    /// initialization-before-publication ordering for newly allocated tables;
+    /// that separate obligation depends on the architecture's walker protocol.
     const INVALID_TO_VALID_NEEDS_TLBI: bool = true;
 
     /// Virtual address type for this architecture.
@@ -304,6 +310,10 @@ pub trait PagingMetaData: Sync + Send {
     /// writes are observable before another PE walks them. Architectures that
     /// invalidate on a fresh mapping never reach this hook, because the
     /// invalidation sequence already orders the write.
+    ///
+    /// This hook runs after new parent descriptors may have been published. It
+    /// cannot supply initialization-before-publication ordering for new table
+    /// frames; any ordering required at that earlier boundary is separate.
     ///
     /// Default: no barrier.
     #[inline]

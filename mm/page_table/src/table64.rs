@@ -298,6 +298,14 @@ impl<M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTable64<M, PT
             // `H::p2v()` returns a valid virtual address that uniquely maps the
             // frame with read-write access. The frame size is `PAGE_SIZE_4K`.
             unsafe { core::ptr::write_bytes(ptr, 0, PAGE_SIZE_4K) };
+            // A hardware walker does not acquire the address-space lock. Complete
+            // the clear before a parent descriptor or TTBR can expose this frame;
+            // a barrier in `finish()` would run after that publication window.
+            // This explicit DSB is scoped to the verified AArch64 KVM regression.
+            // Other backends retain their existing protocols; their publication
+            // ordering is outside this fix's architecture audit (docs/design.md).
+            #[cfg(target_arch = "aarch64")]
+            karch::dsb_ishst();
             Ok(paddr)
         } else {
             Err(PtError::NoMemory)
@@ -1020,8 +1028,8 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
                 }
             }
         }
-        // A pending invalidation already ends with a full-system barrier, so
-        // the weaker store-only fence is only needed when nothing was flushed.
+        // A pending invalidation provides the architecture's publication barrier,
+        // so only a flush-free fresh mapping needs its dedicated fence.
         if self.fresh_map && !had_pending {
             M::fence_fresh_map();
         }
@@ -1406,15 +1414,17 @@ mod tests {
         assert!(!modify.finish().had_pending());
     }
 
-    /// Pins the AArch64 fresh-map policy: flush-free invalid→valid
-    /// transitions (PR !852) correlated with KVM-killed vCPUs on aarch64
-    /// daily runs ("kvm run failed Function not implemented"). Re-landing
-    /// the optimization must be a deliberate, reviewed decision — flip this
-    /// assertion only with the root cause fixed.
+    /// Checks the policy flag, not the presence or effect of either DSB.
+    ///
+    /// These tables are not installed in hardware. A recording hook can check
+    /// calls but cannot prove ordering against real walkers. The original
+    /// AArch64 KVM exec control and daily/Open POSIX runs cover that regression;
+    /// see "AArch64 Fresh-Map Recovery Evidence" in docs/design.md for logs and
+    /// scope. Barrier presence and placement still require architecture review.
     #[cfg(target_arch = "aarch64")]
     #[def_test]
-    fn aarch64_fresh_map_keeps_conservative_tlbi() {
-        assert!(crate::arch::aarch64::A64PagingMetaData::INVALID_TO_VALID_NEEDS_TLBI);
+    fn aarch64_fresh_map_uses_publication_fence() {
+        assert!(!crate::arch::aarch64::A64PagingMetaData::INVALID_TO_VALID_NEEDS_TLBI);
     }
 
     #[cfg(target_arch = "aarch64")]
