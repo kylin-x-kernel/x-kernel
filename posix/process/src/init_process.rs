@@ -134,16 +134,11 @@ pub fn spawn_init_process(
             .fs_context()
             .expect("init process must have a live fs context");
         let fs_context = fs_context_ref.lock();
-        add_stdio(
-            &mut process
-                .resources()
-                .expect("init process must have live resources")
-                .fd_table()
-                .expect("init process must have a live fd table")
-                .write(),
-            &fs_context,
-        )
-        .expect("Failed to add stdio");
+        process
+            .resources()
+            .expect("init process must have live resources")
+            .with_fd_table(|table| add_stdio(&mut table.write(), &fs_context))
+            .expect("Failed to add stdio");
     }
 
     // Build a fresh user task carrying the runtime from construction (no

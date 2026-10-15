@@ -39,7 +39,7 @@ boundary. Failure returns no old value and leaves the stored pair intact.
 |---|---|---|---|---|
 | T-01 | Unauthorized hard-limit increase | High | A caller supplies a larger maximum | `set_rlimit` returns `OperationNotPermitted`; direct public lock access remains trusted and capability-based increases are unsupported. |
 | T-02 | Descriptor exhaustion | Medium | Repeated file insertion | `add_file` and `duplicate_file_from` pass the soft limit to the same lowest-free slot allocator in `FdTable`. Both bound the new FD number by that limit and capacity. Fixed-slot duplication only checks capacity, so syscall-level policy remains a caller obligation. |
-| T-03 | Access after process files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; previously cloned table/file references intentionally remain usable. |
+| T-03 | Access after process files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; temporary table references preserve storage but do not delay descriptor cleanup; snapshots of individual files remain usable. |
 | T-04 | Reentrant filesystem deadlock | Medium | A close callback reacquires process resources | Removal precedes close and releases owner/table locks; callers of raw table APIs must preserve this ordering. |
 | T-05 | Stale old limit returned after concurrent replacement | Medium | A caller composes separate snapshot and setter operations | `update_rlimit_and_get_old` performs validation, snapshot and replacement under one write guard; standalone reads followed by setters remain separate operations. |
 
@@ -82,3 +82,9 @@ Descriptor close retains the selected table until POSIX-lock cleanup completes.
 This prevents owner-address reuse after concurrent replacement. A blocking
 record-lock caller must revalidate the binding and fd under `with_fd_table`;
 a retained table reference alone does not prove current ownership.
+
+Binding references use `Arc<FdTableOwner>`; temporary table references cannot
+force unshare or postpone final descriptor cleanup. Only a live binding may be
+shared or used to insert descriptors. Temporary handles provide only read-only
+access, making repopulation of a retired table unavailable through safe APIs. Teardown removes slots under the table write lock
+and closes them after unlocking. Genuine remaining bindings retain their locks.

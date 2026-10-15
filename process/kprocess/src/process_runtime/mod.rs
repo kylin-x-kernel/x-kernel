@@ -585,14 +585,10 @@ fn finish_fork_runtime(
     process_runtime.set_oom_score_adj(parent.oom_score_adj());
     process_runtime.set_heap_top(parent.heap_top());
 
-    if matches!(config.fd_table, ForkFdTable::Shared) {
-        process_runtime
-            .resources()
-            .replace_fd_table(parent.resources().fd_table()?)?;
-    } else {
-        let fd_table = kfd::FdTable::clone_shared_from(&parent.resources().fd_table()?);
-        process_runtime.resources().replace_fd_table(fd_table)?;
-    }
+    let files = parent
+        .resources()
+        .fork_fd_table(matches!(config.fd_table, ForkFdTable::Shared))?;
+    process_runtime.resources().replace_fd_table(files)?;
 
     Ok(process_runtime)
 }

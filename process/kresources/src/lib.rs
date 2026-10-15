@@ -26,7 +26,7 @@ use alloc::sync::Arc;
 use core::{any::Any, ffi::c_int};
 
 use kerrno::{KError, KResult};
-use kfd::{FdSnapshot, FdTable, FileDescriptor};
+use kfd::{FdSnapshot, FdTable, FdTableOwner, FdTableRef, FileDescriptor};
 use krlimit::{Rlimit, Rlimits};
 use ksync::RwLock;
 use kvfs::VfsFile;
@@ -40,7 +40,7 @@ pub struct ProcessResources {
     /// Per-process resource limits.
     pub rlimits: RwLock<Rlimits>,
     /// The process-owned file descriptor table handle.
-    fd_table: RwLock<Option<Arc<RwLock<FdTable>>>>,
+    fd_table: RwLock<Option<Arc<FdTableOwner>>>,
 }
 
 impl ProcessResources {
@@ -51,7 +51,7 @@ impl ProcessResources {
     pub fn new(user_stack_size: usize) -> Arc<Self> {
         Arc::new(Self {
             rlimits: RwLock::new(Rlimits::new(user_stack_size)),
-            fd_table: RwLock::new(Some(FdTable::new_shared())),
+            fd_table: RwLock::new(Some(FdTableOwner::new_shared())),
         })
     }
 
@@ -132,14 +132,21 @@ impl ProcessResources {
         Ok(old_limit)
     }
 
-    /// Returns the attached file descriptor table.
+    /// Returns temporary read-only access to the attached file descriptor table.
+    ///
+    /// This pins storage and lock-owner identity, not descriptor ownership.
+    /// The last binding may drain its descriptors while this reference exists.
     ///
     /// # Errors
     ///
     /// Returns [`KError::NoSuchProcess`] after the process has released its
     /// files owner.
-    pub fn fd_table(&self) -> KResult<Arc<RwLock<FdTable>>> {
-        self.fd_table.read().clone().ok_or(KError::NoSuchProcess)
+    pub fn fd_table(&self) -> KResult<FdTableRef> {
+        self.fd_table
+            .read()
+            .as_ref()
+            .map(|owner| owner.reference())
+            .ok_or(KError::NoSuchProcess)
     }
 
     /// Accesses the current table while preventing replacement or detachment.
@@ -155,7 +162,7 @@ impl ProcessResources {
     ) -> KResult<R> {
         let owner = self.fd_table.read();
         let fd_table = owner.as_ref().ok_or(KError::NoSuchProcess)?;
-        access_fn(fd_table)
+        access_fn(fd_table.table())
     }
 
     fn close_descriptors(
@@ -262,9 +269,11 @@ impl ProcessResources {
         cloexec: bool,
     ) -> kerrno::KResult<c_int> {
         let binding = self.fd_table.read();
-        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let files = binding.as_ref().ok_or(KError::NoSuchProcess)?;
+        // Pin the POSIX identity through close, without extending binding ownership.
+        let _table = files.reference();
         let (owner, fd, replaced) = {
-            let mut table = table.write();
+            let mut table = files.table().write();
             let (fd, replaced) = table.duplicate_to(old_fd, new_fd, cloexec)?;
             (table.lock_owner(), fd, replaced)
         };
@@ -282,9 +291,11 @@ impl ProcessResources {
     /// descriptor's VFS close/flush error; the slot stays removed even on that error.
     pub fn close_file(&self, fd: c_int) -> kerrno::KResult {
         let binding = self.fd_table.read();
-        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let files = binding.as_ref().ok_or(KError::NoSuchProcess)?;
+        // Pin the POSIX identity through close, without extending binding ownership.
+        let _table = files.reference();
         let (descriptor, owner) = {
-            let mut table = table.write();
+            let mut table = files.table().write();
             (table.file_close_fd_locked(fd)?, table.lock_owner())
         };
         drop(binding);
@@ -319,9 +330,11 @@ impl ProcessResources {
     /// ignored; batch close operations ignore individual descriptor close errors.
     pub fn close_range(&self, first_fd: c_int, last_fd: c_int) -> KResult<()> {
         let binding = self.fd_table.read();
-        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let files = binding.as_ref().ok_or(KError::NoSuchProcess)?;
+        // Pin the POSIX identity through close, without extending binding ownership.
+        let _table = files.reference();
         let (descriptors, owner) = {
-            let mut table = table.write();
+            let mut table = files.table().write();
             (table.remove_range(first_fd, last_fd), table.lock_owner())
         };
         drop(binding);
@@ -350,9 +363,11 @@ impl ProcessResources {
     /// ignored; batch close operations ignore individual descriptor close errors.
     pub fn close_cloexec_files(&self) -> KResult<()> {
         let binding = self.fd_table.read();
-        let table = binding.as_ref().ok_or(KError::NoSuchProcess)?.clone();
+        let files = binding.as_ref().ok_or(KError::NoSuchProcess)?;
+        // Pin the POSIX identity through close, without extending binding ownership.
+        let _table = files.reference();
         let (descriptors, owner) = {
-            let mut table = table.write();
+            let mut table = files.table().write();
             (table.remove_cloexec_files(), table.lock_owner())
         };
         drop(binding);
@@ -362,8 +377,8 @@ impl ProcessResources {
 
     /// Releases this process's file descriptor table owner.
     ///
-    /// A table shared by multiple processes closes its descriptors when its
-    /// final owner is released.
+    /// The last binding closes its descriptors even when temporary table
+    /// references remain. Cleanup runs after releasing the binding lock.
     pub fn exit_files(&self) {
         let fd_table = self.fd_table.write().take();
         drop(fd_table);
@@ -387,7 +402,7 @@ impl ProcessResources {
                 return Ok(());
             }
 
-            let new_table = FdTable::clone_shared_from(table);
+            let new_table = FdTableOwner::copy_from(table);
             #[expect(
                 clippy::expect_used,
                 reason = "CG-021-no-panic-on-reachable-failure: The fd-table owner was checked \
@@ -401,13 +416,30 @@ impl ProcessResources {
         Ok(())
     }
 
+    /// Prepares a child's files owner, sharing only when `is_shared` is true.
+    ///
+    /// The binding guard protects descriptor ownership throughout a private
+    /// copy; a temporary table reference alone cannot exclude final cleanup.
+    ///
+    /// # Errors
+    /// Returns `NoSuchProcess` after files detachment.
+    pub fn fork_fd_table(&self, is_shared: bool) -> KResult<Arc<FdTableOwner>> {
+        let binding = self.fd_table.read();
+        let owner = binding.as_ref().ok_or(KError::NoSuchProcess)?;
+        Ok(if is_shared {
+            owner.clone()
+        } else {
+            FdTableOwner::copy_from(owner)
+        })
+    }
+
     /// Replaces the attached file descriptor table.
     ///
     /// # Errors
     ///
     /// Returns [`KError::NoSuchProcess`] after the files owner is released;
     /// an exited process cannot acquire a new table.
-    pub fn replace_fd_table(&self, table: Arc<RwLock<FdTable>>) -> KResult<Arc<RwLock<FdTable>>> {
+    pub fn replace_fd_table(&self, table: Arc<FdTableOwner>) -> KResult<Arc<FdTableOwner>> {
         let mut owner = self.fd_table.write();
         let old_table = owner.take().ok_or(KError::NoSuchProcess)?;
         *owner = Some(table);

@@ -14,10 +14,11 @@ There is no local `FileLike` trait or file-like downcast layer.
 - `src/lib.rs`: public re-exports and kernel tests.
 - `src/fd_table.rs`: `FdTable`, fixed-capacity slot operations and final cleanup.
 - `src/file_descriptor.rs`: `FileDescriptor` and `FdSnapshot` ownership.
+- `src/fd_table_owner.rs`: binding ownership and last-binding teardown.
 - `src/stat.rs`: `Kstat` and metadata/ABI conversions.
 
 ```text
-kresources -> Arc<RwLock<FdTable>>
+kresources -> Arc<FdTableOwner> -> Arc<RwLock<FdTable>>
                          |
        FlattenObjects<FileDescriptor, krlimit::FILE_LIMIT>
                          |
@@ -103,3 +104,21 @@ Merely dropping that value releases its `Arc` but is not the explicit descriptor
 flush operation. `FdTable::drop` removes and closes all remaining descriptors,
 ignoring individual close errors so one failure cannot prevent other cleanup.
 A snapshot or cloned table owner can intentionally delay final file release.
+
+## Binding ownership and temporary access
+
+`FdTableOwner` provides the ownership layer corresponding to Linux files_struct.
+Its shared Arc is retained by resource bindings and prepared shared forks. The
+underlying table has a separate Arc so blocking locks and readers can preserve
+its address without extending descriptor ownership. Unshare counts the outer
+owners only. Copying a table creates a fresh owner and POSIX identity.
+
+The last owner drains the table one descriptor at a time, taking its write lock
+only for removal. Close/flush and POSIX-lock removal run outside the lock, with
+the table's storage still pinned. Cleanup allocates no collection and continues
+on flush errors. Raw standalone tables retain their existing Drop cleanup;
+a table already drained by its binding owner has nothing left to close again.
+Temporary `FdTableRef` handles expose only a read-only view and preserve identity.
+The underlying Arc stays private and reads use a mapped guard, so observers
+cannot recover the writable lock. Writable borrows come from `FdTableOwner::table()`
+and cannot outlive the owner. Copying also requires a live owner.

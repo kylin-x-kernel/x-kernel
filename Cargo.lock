@@ -2822,7 +2822,6 @@ dependencies = [
  "kcpu_id_map",
  "kcred",
  "kerrno",
- "kfd",
  "khal",
  "kidentity",
  "kiface",

@@ -16,7 +16,7 @@ The implementation is in `src/lib.rs`; kernel unit tests are in
 ```text
 process runtime -> Arc<ProcessResources>
                        +-> RwLock<Rlimits>
-                       +-> RwLock<Option<Arc<RwLock<FdTable>>>> -> VfsFile
+                       +-> RwLock<Option<Arc<FdTableOwner>>> -> Arc<RwLock<FdTable>> -> VfsFile
 ```
 
 `new(user_stack_size)` builds default limits (stack size in bytes) and an empty
@@ -39,7 +39,10 @@ read guard through its callback, preventing concurrent detach during that table
 operation. Insertion takes owner, table, then limits locks. Callers using the
 public limits lock must not invert that order. `fd_table()` returns an independent
 strong reference; it can outlive detachment and must not be treated as evidence
-that the process still has a files owner.
+that the process still has a files owner. It does not keep descriptors open:
+last-binding cleanup drains the table while such references remain.
+`fork_fd_table()` prepares a shared or private binding under the binding guard. Only these owners
+participate in the sharing check used by unshare.
 
 `duplicate_file_from` snapshots the soft limit and releases the limits guard
 before taking owner/table locks, so it introduces no reverse nested lock order.
@@ -91,3 +94,13 @@ address-based POSIX owner cannot be reused during cleanup. Binding selection and
 slot removal share the outer owner read guard. Blocking record-lock callers must
 release that guard before waiting and revalidate the current binding with
 `with_fd_table` before reporting success.
+
+`FdTableOwner` separates binding lifetime from table-storage lifetime. There is
+no manually maintained owner count: `Arc<FdTableOwner>` counts sharing bindings,
+while temporary `FdTableRef` handles only pin storage and expose read-only access.
+Mutations use `with_fd_table` or borrow the owner under the binding guard; the
+writable table reference cannot escape that lifetime. Last-owner
+Drop removes and closes one descriptor at a time, outside table locks, without
+allocating a cleanup collection. Once drained, later table Drop closes nothing.
+The process-wide binding model is unchanged; per-thread bindings remain separate
+work. Existing blocking fcntl binding revalidation still handles real replacement.

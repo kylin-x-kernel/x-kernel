@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use krlimit::Rlimit;
 use unittest::def_test;
 
-use super::{FdTable, ProcessResources};
+use super::{FdTableOwner, ProcessResources};
 
 #[def_test]
 fn test_process_resources_default_limits() {
@@ -82,7 +82,7 @@ fn test_exit_files_detaches_fd_table() {
         Some(kerrno::KError::NoSuchProcess)
     );
     assert_eq!(
-        resources.replace_fd_table(FdTable::new_shared()).err(),
+        resources.replace_fd_table(FdTableOwner::new_shared()).err(),
         Some(kerrno::KError::NoSuchProcess)
     );
     resources.exit_files();
@@ -102,7 +102,7 @@ fn test_duplicate_file_from_rejects_detached_owner() {
 fn test_shared_fd_table_lives_until_last_files_owner_exits() {
     let first = ProcessResources::new(0x80000);
     let second = ProcessResources::new(0x80000);
-    let shared = first.fd_table().unwrap();
+    let shared = first.fork_fd_table(true).unwrap();
     let weak = Arc::downgrade(&shared);
     drop(second.replace_fd_table(shared).unwrap());
 
@@ -181,4 +181,36 @@ fn test_rlimit_exchange_rejects_invalid_updates_without_mutation() {
         Err(kerrno::KError::OperationNotPermitted)
     );
     unittest::assert_eq!(resources.rlimit(resource), Ok(original));
+}
+
+#[def_test]
+fn temporary_table_references_do_not_force_unshare() {
+    let resources = ProcessResources::new(0x80000);
+    let table = resources.fd_table().unwrap();
+    resources.unshare_fd_table().unwrap();
+    assert_eq!(
+        table.read().lock_owner(),
+        resources.fd_table().unwrap().read().lock_owner()
+    );
+}
+
+#[def_test]
+fn shared_bindings_still_copy_on_unshare() {
+    let first = ProcessResources::new(0x80000);
+    let second = ProcessResources::new(0x80000);
+    drop(
+        second
+            .replace_fd_table(first.fork_fd_table(true).unwrap())
+            .unwrap(),
+    );
+    let old_table = first.fd_table().unwrap();
+    second.unshare_fd_table().unwrap();
+    assert_eq!(
+        old_table.read().lock_owner(),
+        first.fd_table().unwrap().read().lock_owner()
+    );
+    assert_ne!(
+        old_table.read().lock_owner(),
+        second.fd_table().unwrap().read().lock_owner()
+    );
 }

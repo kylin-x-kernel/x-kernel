@@ -77,7 +77,7 @@ fn ofd_query_and_duplicate_close_lifetimes() {
 }
 
 #[def_test(user)]
-fn blocked_posix_lock_retries_after_files_replacement() {
+fn blocked_posix_lock_does_not_force_files_unshare() {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -86,14 +86,20 @@ fn blocked_posix_lock_retries_after_files_replacement() {
 
     let fd = memfd();
     let file = kprocess::current_resources().get_file(fd).unwrap();
+    let held_fd = memfd();
+    let held_file = kprocess::current_resources().get_file(held_fd).unwrap();
     let resources = kprocess::current_resources();
+    let original_table = resources.fd_table().unwrap();
     let mut lock = TestUserValue::from_value(flock(F_WRLCK, 0, 0, 0)).unwrap();
     let arg = lock.as_user_ptr() as usize;
+    sys_fcntl(held_fd, F_SETLK as _, arg).unwrap();
     sys_fcntl(fd, F_OFD_SETLK as _, arg).unwrap();
     let waiter = ktask::current().clone();
     let observed_wait = Arc::new(AtomicBool::new(false));
+    let released_before_wake = Arc::new(AtomicBool::new(false));
     let worker = ktask::spawn({
         let observed_wait = observed_wait.clone();
+        let released_before_wake = released_before_wake.clone();
         move || {
             // The held OFD lock prevents completion until this worker unlocks.
             // Bound failure and still release it so a regression cannot hang QEMU.
@@ -105,7 +111,21 @@ fn blocked_posix_lock_retries_after_files_replacement() {
                 ktask::yield_now();
             }
             resources.unshare_fd_table().unwrap();
-            resources.close_range(fd + 1, i32::MAX).unwrap();
+            resources.close_range(held_fd, held_fd).unwrap();
+            let probe = FileLock::new(
+                kvfs::FileLockOwner::ofd(&held_file),
+                0,
+                FileLockType::Write,
+                0,
+                0,
+            )
+            .unwrap();
+            // Check before releasing Y: cleanup of X must not depend on the
+            // blocked fcntl request returning and dropping its table reference.
+            released_before_wake.store(
+                held_file.test_lock(&probe).unwrap().is_none(),
+                Ordering::Release,
+            );
             file.set_lock(
                 &FileLock::new(
                     kvfs::FileLockOwner::ofd(&file),
@@ -123,8 +143,80 @@ fn blocked_posix_lock_retries_after_files_replacement() {
     assert_eq!(sys_fcntl(fd, F_SETLKW as _, arg), Ok(0));
     assert_eq!(worker.join(), 0);
     assert!(observed_wait.load(Ordering::Acquire));
+    assert!(released_before_wake.load(Ordering::Acquire));
+    assert_eq!(
+        original_table.read().lock_owner(),
+        kprocess::current_resources()
+            .fd_table()
+            .unwrap()
+            .read()
+            .lock_owner()
+    );
     lock.write(flock(F_WRLCK, 0, 0, 0));
     sys_fcntl(fd, F_OFD_GETLK as _, arg).unwrap();
     assert_eq!(lock.read().l_type as u32, F_WRLCK);
     sys_close(fd).unwrap();
+}
+
+#[def_test(user)]
+fn blocked_posix_lock_reinstalls_after_shared_files_unshare() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use ktask::TaskState;
+    use kvfs::{FileLock, FileLockOwner, FileLockType};
+
+    let resources = kprocess::current_resources();
+    let fd = memfd();
+    let file = resources.get_file(fd).unwrap();
+    // Keep the old binding alive through the final query: dropping it earlier
+    // would clean stale locks and hide a missing cleanup in the retry path.
+    let shared_files = resources.fork_fd_table(true).unwrap();
+    let old_owner = shared_files.table().read().lock_owner();
+    let mut lock = TestUserValue::from_value(flock(F_WRLCK, 0, 0, 0)).unwrap();
+    let arg = lock.as_user_ptr() as usize;
+    sys_fcntl(fd, F_OFD_SETLK as _, arg).unwrap();
+    let waiter = ktask::current().clone();
+    let observed_wait = Arc::new(AtomicBool::new(false));
+    let worker = ktask::spawn({
+        let observed_wait = observed_wait.clone();
+        move || {
+            for _ in 0..100000 {
+                if waiter.state() == TaskState::Blocked {
+                    observed_wait.store(true, Ordering::Release);
+                    break;
+                }
+                ktask::yield_now();
+            }
+            resources.unshare_fd_table().unwrap();
+            file.set_lock(
+                &FileLock::new(FileLockOwner::ofd(&file), 0, FileLockType::Unlock, 0, 0).unwrap(),
+                false,
+            )
+            .unwrap();
+        }
+    });
+    assert_eq!(sys_fcntl(fd, F_SETLKW as _, arg), Ok(0));
+    assert_eq!(worker.join(), 0);
+    assert!(observed_wait.load(Ordering::Acquire));
+    assert_ne!(
+        old_owner,
+        kprocess::current_resources()
+            .fd_table()
+            .unwrap()
+            .read()
+            .lock_owner()
+    );
+    lock.write(flock(F_WRLCK, 0, 0, 0));
+    sys_fcntl(fd, F_OFD_GETLK as _, arg).unwrap();
+    assert_eq!(lock.read().l_type as u32, F_WRLCK);
+    // Close an alias in the new binding. Its POSIX lock must disappear, and
+    // no lock may remain under the still-live old binding's identity.
+    let alias = sys_dup(fd).unwrap() as i32;
+    sys_close(alias).unwrap();
+    lock.write(flock(F_WRLCK, 0, 0, 0));
+    sys_fcntl(fd, F_OFD_GETLK as _, arg).unwrap();
+    assert_eq!(lock.read().l_type as u32, F_UNLCK);
+    sys_close(fd).unwrap();
+    drop(shared_files);
 }

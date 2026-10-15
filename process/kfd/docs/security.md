@@ -2,7 +2,7 @@
 
 ## Scope, assets, and external boundaries
 
-All four source files are covered. Assets include descriptor/file associations,
+The descriptor, ownership, snapshot and metadata modules are covered. Assets include descriptor/file associations,
 close-on-exec flags, stable snapshots, and metadata returned through Linux ABI
 structures. Kernel callers supply descriptors, files, and metadata. POSIX owns
 user-buffer access, descriptor-range ABI validation, and access authorization;
@@ -73,3 +73,15 @@ are intentionally stale, and external `Arc`s may delay final close.
 - Preserve per-descriptor flags when cloning tables.
 - Do not authorize current-FD operations from stale snapshots.
 - Validate actual byte initialization at metadata copyout boundaries.
+
+## Binding teardown
+
+`FdTableOwner` uses safe Arc ownership to distinguish bindings from temporary
+storage references. The last binding drains entries even when observers still
+pin the table; each entry is removed once under the write lock and closed after
+unlocking. This releases POSIX locks promptly and prevents a later storage Drop
+from repeating flushes. The retained storage also prevents reuse of the POSIX
+owner address during outstanding operations. Writable table borrows require a
+live owner. Temporary `FdTableRef` handles keep the storage Arc private and return
+a mapped read guard without access to its underlying lock, so safe callers
+cannot repopulate a retired table.

@@ -23,11 +23,13 @@
 extern crate alloc;
 
 mod fd_table;
+mod fd_table_owner;
 mod file_descriptor;
 mod stat;
 
 pub use self::{
     fd_table::FdTable,
+    fd_table_owner::{FdTableOwner, FdTableRef},
     file_descriptor::{FdSnapshot, FileDescriptor},
     stat::Kstat,
 };
@@ -93,6 +95,42 @@ mod tests {
                 kcred::initial_cred(),
             )
             .expect("fd table drop test file opens")
+    }
+
+    #[def_test(serial)]
+    fn last_binding_closes_descriptors_despite_retained_table_reference() {
+        use kvfs::{FileLock, FileLockOwner, FileLockType};
+
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let file = flush_count_test_file(flushes.clone(), Ok(()));
+        let binding = crate::FdTableOwner::new_shared();
+        let other_binding = binding.clone();
+        let table = binding.reference();
+        let fd = binding
+            .table()
+            .write()
+            .add_file(16, file.clone(), false)
+            .unwrap();
+        let owner = table.read().lock_owner();
+        file.set_lock(
+            &FileLock::new(owner, 1, FileLockType::Write, 0, 0).unwrap(),
+            false,
+        )
+        .unwrap();
+        let query = FileLock::new(FileLockOwner::Posix(1), 2, FileLockType::Write, 0, 0).unwrap();
+
+        drop(binding);
+        assert_eq!(flushes.load(Ordering::Relaxed), 0);
+        assert!(table.read().get_file(fd).is_ok());
+        assert!(file.test_lock(&query).unwrap().is_some());
+
+        drop(other_binding);
+        assert_eq!(flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(table.read().count(), 0);
+        assert!(file.test_lock(&query).unwrap().is_none());
+        // Storage reclamation must not flush already closed descriptors again.
+        drop(table);
+        assert_eq!(flushes.load(Ordering::Relaxed), 1);
     }
 
     // Anonymous files share one inode, so these lock-lifecycle cases must not

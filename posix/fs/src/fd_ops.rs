@@ -291,7 +291,7 @@ fn fcntl_lock(fd: c_int, cmd: u32, arg: usize) -> KResult<isize> {
             // turn an installation on an obsolete owner into success.
             let installed = resources.with_fd_table(|current| {
                 let descriptors = current.read();
-                let is_current = core::ptr::eq(current, table.as_ref());
+                let is_current = descriptors.lock_owner() == request.owner();
                 let is_open = descriptors
                     .get_file(fd)
                     .is_ok_and(|entry| alloc::sync::Arc::ptr_eq(&entry, &file));
