@@ -1,8 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LEG_ARCH=""
+FMT_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --leg)
+            LEG_ARCH="${2:?--leg requires guest arch (x86_64, aarch64, or riscv64)}"
+            shift 2
+            ;;
+        --fmt)
+            FMT_ONLY=1
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1 (expected --fmt or --leg <arch>)" >&2
+            exit 1
+            ;;
+    esac
+done
+if [ "${FMT_ONLY}" = 1 ] && [ -n "${LEG_ARCH}" ]; then
+    echo "--fmt and --leg are mutually exclusive" >&2
+    exit 1
+fi
+
 echo "==> Checking Rust build environment..."
-NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN}"
+if [ "${FMT_ONLY}" = 1 ]; then
+    echo "==> Prepare: rustfmt toolchain only"
+elif [ -n "${LEG_ARCH}" ]; then
+    echo "==> Arch CI leg (${LEG_ARCH}): limit rustup targets to this node only"
+fi
+NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN:?AUX_RUST_TOOLCHAIN is required}"
 CARGO_SHEAR_VERSION="1.13.2"
 LICENSURE_VERSION="0.8.1"
 
@@ -19,6 +47,51 @@ retry() {
         sleep 5
     done
 }
+
+# rustup downloads many components (especially on a fresh toolchains volume);
+# rsproxy.cn often needs longer backoff than the generic retry() sleep.
+retry_rustup_install() {
+    local raw="${RUSTUP_INSTALL_RETRIES:-}"
+    local attempts=6
+    case "${raw}" in
+        '')
+            attempts=6
+            ;;
+        *[!0-9]*)
+            echo "RUSTUP_INSTALL_RETRIES=${raw} is not a positive integer; using 6" >&2
+            attempts=6
+            ;;
+        *)
+            attempts="${raw}"
+            if [ "${attempts}" -lt 1 ]; then
+                echo "RUSTUP_INSTALL_RETRIES=${raw} is not a positive integer; using 1" >&2
+                attempts=1
+            fi
+            ;;
+    esac
+    local i
+    for i in $(seq 1 "${attempts}"); do
+        if "$@"; then
+            return 0
+        fi
+        if [ "${i}" = "${attempts}" ]; then
+            return 1
+        fi
+        local delay=$((15 * i))
+        echo "rustup install failed, retrying (${i}/${attempts}) in ${delay}s: $*" >&2
+        sleep "${delay}"
+    done
+    return 1
+}
+
+if [ "${FMT_ONLY}" = 1 ]; then
+    echo "==> Installing rustfmt toolchain: ${NIGHTLY_TOOLCHAIN}"
+    retry_rustup_install rustup toolchain install \
+        "${NIGHTLY_TOOLCHAIN}" --profile minimal --component rustfmt --no-self-update
+    echo "==> rustfmt"
+    cargo +"${NIGHTLY_TOOLCHAIN}" fmt --version
+    exit 0
+fi
 
 eval "$(
 python3 <<'PY_TOOLCHAIN'
@@ -53,7 +126,67 @@ dedup_words() {
     printf '%s\n' "$@" | awk 'NF && !seen[$0]++'
 }
 
-mapfile -t DEFAULT_TARGETS < <(dedup_words "${XKERNEL_TARGETS[@]}" "${DEFAULT_EXTRA_TARGETS[@]}")
+validate_leg_arch() {
+    case "${1}" in
+        x86_64 | aarch64 | riscv64) return 0 ;;
+        *)
+            echo "Unsupported arch CI leg: ${1} (expected x86_64, aarch64, or riscv64; must match Jenkins ciMatrixArchitectures())" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# Kernel triples for a CI leg: subset of rust-toolchain.toml [toolchain].targets by arch prefix.
+leg_toolchain_targets_for_arch() {
+    local arch="$1"
+    local t
+    for t in "${XKERNEL_TARGETS[@]}"; do
+        case "${arch}" in
+            x86_64)
+                case "${t}" in x86_64-*) printf '%s\n' "${t}" ;; esac
+                ;;
+            aarch64)
+                case "${t}" in aarch64-*) printf '%s\n' "${t}" ;; esac
+                ;;
+            riscv64)
+                case "${t}" in riscv64*) printf '%s\n' "${t}" ;; esac
+                ;;
+        esac
+    done
+}
+
+leg_host_musl_target() {
+    case "${1}" in
+        x86_64) printf '%s\n' x86_64-unknown-linux-musl ;;
+        aarch64) printf '%s\n' aarch64-unknown-linux-musl ;;
+        riscv64) printf '%s\n' riscv64gc-unknown-linux-musl ;;
+    esac
+}
+
+SKIP_NIGHTLY_INSTALL=""
+if [ -n "${LEG_ARCH}" ]; then
+    validate_leg_arch "${LEG_ARCH}"
+    mapfile -t _leg_kernel < <(leg_toolchain_targets_for_arch "${LEG_ARCH}")
+    if [ "${#_leg_kernel[@]}" -eq 0 ]; then
+        echo "No rust-toolchain.toml targets matched CI leg ${LEG_ARCH}" >&2
+        exit 1
+    fi
+    mapfile -t _leg_musl < <(leg_host_musl_target "${LEG_ARCH}")
+    LEG_MUSL_TARGET="${_leg_musl[0]}"
+    mapfile -t DEFAULT_TARGETS < <(dedup_words "${_leg_kernel[@]}" "${_leg_musl[@]}")
+    if [ "${#DEFAULT_TARGETS[@]}" -eq 0 ]; then
+        echo "Internal error: no rustup targets resolved for leg ${LEG_ARCH}" >&2
+        exit 1
+    fi
+    # riscv64 leg has no TEE stage; x86_64/aarch64 need nightly + host musl for libutee.
+    if [ "${LEG_ARCH}" = riscv64 ]; then
+        SKIP_NIGHTLY_INSTALL=1
+    fi
+else
+    # No --fmt / --leg: manual node warmup installs every triple from rust-toolchain.toml
+    # (including loongarch64) plus host musl extras. CI legs only accept ciMatrixArchitectures().
+    mapfile -t DEFAULT_TARGETS < <(dedup_words "${XKERNEL_TARGETS[@]}" "${DEFAULT_EXTRA_TARGETS[@]}")
+fi
 
 default_install_args=("${XKERNEL_TOOLCHAIN}" --profile minimal --no-self-update)
 for component in "${XKERNEL_COMPONENTS[@]}"; do
@@ -64,15 +197,23 @@ for target in "${DEFAULT_TARGETS[@]}"; do
 done
 
 nightly_install_args=("${NIGHTLY_TOOLCHAIN}" --profile minimal --component rustfmt --no-self-update)
-for target in "${NIGHTLY_TARGETS[@]}"; do
-    nightly_install_args+=(--target "${target}")
-done
+if [ -n "${LEG_ARCH}" ] && [ -z "${SKIP_NIGHTLY_INSTALL:-}" ]; then
+    nightly_install_args+=(--target "${LEG_MUSL_TARGET}")
+else
+    for target in "${NIGHTLY_TARGETS[@]}"; do
+        nightly_install_args+=(--target "${target}")
+    done
+fi
 
 echo "==> Installing x-kernel toolchain: ${XKERNEL_TOOLCHAIN}"
-retry 3 rustup toolchain install "${default_install_args[@]}"
+retry_rustup_install rustup toolchain install "${default_install_args[@]}"
 
-echo "==> Installing auxiliary nightly toolchain: ${NIGHTLY_TOOLCHAIN}"
-retry 3 rustup toolchain install "${nightly_install_args[@]}"
+if [ -z "${SKIP_NIGHTLY_INSTALL:-}" ]; then
+    echo "==> Installing auxiliary nightly toolchain: ${NIGHTLY_TOOLCHAIN}"
+    retry_rustup_install rustup toolchain install "${nightly_install_args[@]}"
+else
+    echo "==> Skipping auxiliary nightly toolchain on ${LEG_ARCH} leg (no TEE / rustfmt on this leg)"
+fi
 
 echo "==> Active default toolchain"
 cargo --version
@@ -173,5 +314,7 @@ licensure --version
 echo "==> Installed default targets"
 rustup target list --installed
 
-echo "==> Installed nightly targets"
-rustup +"${NIGHTLY_TOOLCHAIN}" target list --installed
+if [ -z "${SKIP_NIGHTLY_INSTALL:-}" ]; then
+    echo "==> Installed nightly targets"
+    rustup +"${NIGHTLY_TOOLCHAIN}" target list --installed
+fi

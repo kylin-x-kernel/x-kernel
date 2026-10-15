@@ -366,7 +366,18 @@ def _merge_ids_record(ids_file, name, check_id):
     return _update_ids_map(ids_file, _upd)
 
 
-def find_check_run_id_on_commit(token, owner, repo, head_sha, name):
+def _normalize_details_url(url):
+    return (url or "").rstrip("/")
+
+
+def _check_run_owned_by_build(run, details_url):
+    """Only backfill check-runs created for this Jenkins build (same details_url)."""
+    if not details_url:
+        return False
+    return _normalize_details_url(run.get("details_url")) == _normalize_details_url(details_url)
+
+
+def find_check_run_id_on_commit(token, owner, repo, head_sha, name, *, details_url=None):
     """按名称在 commit 上查找 check-run id（用于 ids 丢失时的补救）。"""
     matches = []
     page = 1
@@ -389,23 +400,38 @@ def find_check_run_id_on_commit(token, owner, repo, head_sha, name):
         page += 1
     if not matches:
         return None
+    if details_url:
+        owned = [run for run in matches if _check_run_owned_by_build(run, details_url)]
+        if not owned:
+            return None
+        matches = owned
     for run in matches:
         if run.get("status") == "in_progress":
             return int(run["id"])
     return int(max(matches, key=lambda r: int(r["id"]))["id"])
 
 
-def resolve_check_run_id(token, owner, repo, head_sha, name, ids_file):
-    _, id_map = _load_ids_map(ids_file)
+def resolve_check_run_id(
+    token, owner, repo, head_sha, name, ids_file, *, id_map=None, details_url=None,
+):
+    if id_map is None:
+        _, id_map = _load_ids_map(ids_file)
     check_id = id_map.get(name)
     if check_id is not None:
         return int(check_id)
     if not (token and head_sha):
         return None
-    found = find_check_run_id_on_commit(token, owner, repo, head_sha, name)
+    found = find_check_run_id_on_commit(
+        token, owner, repo, head_sha, name, details_url=details_url,
+    )
     if found is not None:
-        print(f"  resolved {name!r} check-run id={found} from Gitee API", file=sys.stderr)
+        print(
+            f"  resolved {name!r} check-run id={found} from Gitee API "
+            f"(details_url={details_url!r})",
+            file=sys.stderr,
+        )
         _merge_ids_record(ids_file, name, found)
+        id_map[name] = int(found)
     return found
 
 
@@ -475,7 +501,9 @@ def finish_stage_check(token, owner, repo, *, name, conclusion, head_sha=None,
                        log_artifact_url=None, ids_file=None):
     """stage 结束时按 ids 文件（或 commit API 回查）更新检查结论。"""
     path, _ = _load_ids_map(ids_file)
-    check_id = resolve_check_run_id(token, owner, repo, head_sha, name, ids_file)
+    check_id = resolve_check_run_id(
+        token, owner, repo, head_sha, name, ids_file, details_url=details_url,
+    )
     if check_id is None:
         print(f"ERROR: cannot resolve check-run id for stage {name!r} in {path}",
               file=sys.stderr)
@@ -547,6 +575,8 @@ def handle_stage_request(token, owner, repo, request, *, pr_db_id=None,
             token, owner, repo,
             name=name,
             conclusion=conclusion,
+            head_sha=head_sha,
+            details_url=details_url,
             output=output,
             log_artifact_url=log_artifact_url,
             ids_file=ids_file,
@@ -810,6 +840,16 @@ def check_run_started(ids_file, stage_name):
     return stage_name in id_map
 
 
+def stage_check_run_resolvable(
+    token, owner, repo, head_sha, stage_name, ids_file, *, id_map=None, details_url=None,
+):
+    """True if the stage has a check-run id locally or a same-build API backfill."""
+    return resolve_check_run_id(
+        token, owner, repo, head_sha, stage_name, ids_file,
+        id_map=id_map, details_url=details_url,
+    ) is not None
+
+
 def _resolve_pr_db_id(manifest, token, owner, repo, pr_db_id_fallback=None):
     pr_db_id = manifest.get("pr_db_id") or pr_db_id_fallback
     if pr_db_id:
@@ -838,6 +878,7 @@ def finish_stage_from_manifest(token, owner, repo, manifest, stage_name, *,
     if status == "not_run":
         check_id = resolve_check_run_id(
             token, owner, repo, head_sha, stage_name, ids_file,
+            details_url=details_url,
         )
         if check_id is None:
             return None, 0
@@ -864,6 +905,7 @@ def finish_stage_from_manifest(token, owner, repo, manifest, stage_name, *,
         log_artifact_url=log_url or None,
         ids_file=ids_file,
         head_sha=head_sha,
+        details_url=details_url,
     )
 
 
@@ -940,7 +982,10 @@ def handle_jenkins_manifest(token, owner, repo, manifest, *, pr_db_id_fallback=N
         last_code = 200
         skip_detail = "阶段未执行或构建已中止（fail-fast / 手动停止）"
         for name in all_stages:
-            check_id = id_map.get(name)
+            check_id = resolve_check_run_id(
+                token, owner, repo, head_sha, name, ids_file,
+                id_map=id_map, details_url=details_url,
+            )
             if check_id is None:
                 continue
             st = ci_stage_status(ci_results, name)
@@ -985,12 +1030,16 @@ def handle_jenkins_manifest(token, owner, repo, manifest, *, pr_db_id_fallback=N
 
     if action == "refresh_failed":
         _, _, all_stages = manifest_topology(manifest)
+        _, id_map = _load_ids_map(ids_file)
         last_code = 200
         for name in all_stages:
             st = (ci_results.get(name) or {}).get("status")
             if st != "failed":
                 continue
-            if not check_run_started(ids_file, name):
+            if not stage_check_run_resolvable(
+                token, owner, repo, head_sha, name, ids_file,
+                id_map=id_map, details_url=details_url,
+            ):
                 continue
             _, code = finish_stage_from_manifest(
                 token, owner, repo, manifest, name, pr_db_id=pr_id,
@@ -1001,12 +1050,16 @@ def handle_jenkins_manifest(token, owner, repo, manifest, *, pr_db_id_fallback=N
 
     if action == "reorder_sequential":
         sequential_stages, _, _ = manifest_topology(manifest)
+        _, id_map = _load_ids_map(ids_file)
         last_code = 200
         for name in reversed(sequential_stages):
             st = (ci_results.get(name) or {}).get("status")
             if not st or st == "not_run":
                 continue
-            if not check_run_started(ids_file, name):
+            if not stage_check_run_resolvable(
+                token, owner, repo, head_sha, name, ids_file,
+                id_map=id_map, details_url=details_url,
+            ):
                 continue
             _, code = finish_stage_from_manifest(
                 token, owner, repo, manifest, name, pr_db_id=pr_id,

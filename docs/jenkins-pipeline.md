@@ -1,8 +1,18 @@
 # Jenkins 流水线运行契约
 
-`Jenkinsfile` 按能力标签调度，不绑定节点名。任何承接 X-Kernel CI 的节点都必须
-满足本文契约；不满足契约的节点不得配置
+流水线顶层是 `agent none`，按架构分到不同节点，而不是绑在一个顶层 Docker Agent 上。
+
+| 角色 | 调度 | 做什么 |
+| --- | --- | --- |
+| Prepare / Post | 浮动节点池，标签 `xkernel-agent && docker && vhost-vsock && container-vsock` | checkout、只安装 rustfmt、`cargo fmt --check`；Post 汇总评论与 Check Run |
+| `x86_64` leg | 固定节点 `xkernel-amd64-01` | 该架构的工具链、Build、Run、输出收集 |
+| `aarch64` leg | 固定节点 `xkernel-arm64-01` | 同上 |
+| `riscv64` leg | 与 Prepare 相同的浮动节点池 | 同上 |
+
+浮动池里的节点必须满足本文契约；不满足契约的节点不得打上
 `xkernel-agent && docker && vhost-vsock && container-vsock`。
+`xkernel-amd64-01` 与 `xkernel-arm64-01` 按节点名调度，同样必须满足身份、设备和 volume 契约。
+节点名与标签以 `Jenkinsfile` 里的 `nativeGuestAgentLabels()`、`floatingGuestAgentLabel()` 为准。
 
 ## Agent 身份与目录
 
@@ -26,17 +36,20 @@ workspace：
 Remote root 只在节点创建时初始化一次，所有者为 `jenkins:jenkins`，模式为
 `0750`。Jenkinsfile 不引用这些宿主路径，只使用 Jenkins 分配的 `$WORKSPACE`。
 
-Jenkins Controller 不承接构建任务，executor 数必须为 `0`。节点至少配置以下
-label：
+Jenkins Controller 不承接构建任务，executor 数必须为 `0`。
+浮动池节点（Prepare、Post、riscv64）至少配置以下 label：
 
 ```text
 xkernel-agent docker vhost-vsock container-vsock
 ```
 
+`xkernel-amd64-01` 与 `xkernel-arm64-01` 按节点名调度，不依赖上述能力标签。
+
 ## 容器与设备
 
-流水线使用的 builder 镜像以 `Jenkinsfile` 顶部 `agent { docker { image ... } }` 中的引用
-为准。镜像的 Dockerfile 在仓库内的 `scripts/ci/docker/` 维护，构建、
+流水线使用的 builder 镜像以 `Jenkinsfile` 中 `ciBuilderImage()` 的返回值
+为准（Prepare 与各 arch leg 经 `withFloatingCiDocker` / `withArchCiAgent` 拉取）。
+镜像的 Dockerfile 在仓库内的 `scripts/ci/docker/` 维护，构建、
 检查和发布方法见该目录的 README。OCI index 只包含原生 `linux/amd64` 和
 `linux/arm64` 镜像。镜像默认用户是
 `jenkins`（`1000:1000`）；设备组 `36` 由流水线在运行时通过 `--group-add 36`
@@ -48,7 +61,13 @@ xkernel-agent docker vhost-vsock container-vsock
 
 ## Workspace
 
-流水线在一个顶层 Docker Agent 中执行，目录结构为：
+Prepare、每个 arch leg 和 Post 各有独立 workspace 与独立 builder 容器。
+Prepare 在 `.ci/source` checkout 之后，把源码和 Gitee Check Run 状态 stash 给各 leg；
+leg 在本节点 unstash，再在 `.ci/work` 里并行 Build 和 Run。
+同一架构的 Build 与 Run 留在该 leg 的同一个容器里。
+阶段日志和轻量覆盖率文件经 per-arch stash 回到 Post；覆盖率 HTML 与文档在 leg 上直接 `archiveArtifacts`。
+
+每个 workspace 的目录结构为：
 
 ```text
 $WORKSPACE/
@@ -71,9 +90,9 @@ $WORKSPACE/
 
 ## 构建输出与持久缓存
 
-`/xkernel-target` 是当前 Pipeline 容器独占的匿名 Docker volume，保存同一次
-Build 与 Run 阶段之间需要连续使用的 Cargo、boot 和 kernel 产物。它不跨
-Jenkins Build 共享。
+`/xkernel-target` 是当前容器独占的匿名 Docker volume。它只在同一 arch leg 的
+Build 与 Run 之间复用（boot、链接和 Cargo 中间产物），不跨架构、不跨 Prepare/Post，
+也不跨 Jenkins Build。各节点上的 named volume 也彼此独立：同名 volume 在不同节点上不是同一份数据。
 
 TEE storage tests use `/xkernel-target/libutee-<arch>` as a source/build cache
 within this container only. Each architecture has one script invocation and a
@@ -100,10 +119,13 @@ volume 时，递增 `Jenkinsfile` 中对应的后缀。Cargo 工具本体位于�
 `/usr/local/cargo`，与可变 Cargo 缓存分离。Cargo 的镜像源配置放在镜像的
 `/.cargo/config.toml`，不在缓存 volume 里，随镜像更新生效。
 
-镜像不内置项目 Rust toolchain。首次在新节点运行时，
-`scripts/ci/check_build_environment.sh` 根据 `rust-toolchain.toml` 安装固定
-版本到 Rustup volume；后续构建复用它。安装通过 volume 内文件锁串行化。
-rootfs 下载同样按架构加锁，并通过临时文件、完整性检查和原子替换避免并发
+镜像不内置项目 Rust toolchain。Prepare 只运行
+`scripts/ci/check_build_environment.sh --fmt`，在浮动节点的 Rustup volume 里安装
+`AUX_RUST_TOOLCHAIN` 的 `rustfmt`，供随后的 `cargo fmt --check`。
+各 leg 再运行 `scripts/ci/check_build_environment.sh --leg <arch>`，只在该节点安装
+这一架构的 kernel target；`x86_64` / `aarch64` 另外安装 nightly 与 host musl，供 TEE。
+不带参数调用同一脚本会安装全部架构的 target，仅用于手工预热，Prepare 不会这样调用。
+安装通过 volume 内文件锁串行化。rootfs 下载同样按架构加锁，并通过临时文件、完整性检查和原子替换避免并发
 读到半成品。
 
 Dylint 检查所需的工具都在镜像中：`cargo-dylint`、`dylint-link` 与其他 Cargo
@@ -114,11 +136,12 @@ Dylint 检查所需的工具都在镜像中：`cargo-dylint`、`dylint-link` 与
 Dockerfile 为准。镜像改动预装 toolchain 时，同时递增 Rustup volume 的后缀，
 否则已有节点看不到新预装的内容。
 
-Build 阶段并行运行 `Lint Check: dylint kplat-aarch64` 和
-`Lint Check: dylint kplat-x86_64`，执行仓库全部 Dylint lint。lint 只检查当前配置
-实际编译的代码，两个分支分别覆盖两种架构的专属代码。每个分支在独立 workspace 中
-使用对应平台的 `qemu_defconfig` 执行 `make defconfig`、`make dylint_test` 和
-`make dylint`，并使用独立的 `/xkernel-target/dylint-<platform>` 构建输出目录。
+`Lint Check: dylint kplat-aarch64` 在 aarch64 leg 上运行，
+`Lint Check: dylint kplat-x86_64` 在 x86_64 leg 上运行，两条腿彼此并行。
+lint 只检查当前配置实际编译的代码，因此两边分别覆盖对应架构的专属代码。
+每个检查在该 leg 的独立 workspace 中使用对应平台的 `qemu_defconfig` 执行
+`make defconfig`、`make dylint_test` 和 `make dylint`，并使用独立的
+`/xkernel-target/dylint-<platform>` 构建输出目录。
 aarch64 分支随后向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig`
 并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
 `static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都
@@ -128,8 +151,7 @@ aarch64 分支随后向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make oldd
 每个 Dylint 分支开始时运行 `scripts/ci/check_dylint_environment.sh`，只核对
 Dylint 工具、lint toolchain 及其组件和 driver 是否与仓库固定的版本一致
 （`xtask/xkmake/src/hygiene.rs` 的 `DYLINT_VERSION` 与
-`tools/lints/rust-toolchain.toml`），不一致时报错，不在节点上现场安装。通用的
-Setup 阶段不检查 Dylint 工具，不跑 Dylint 的流水线可以使用不含这些工具的镜像。
+`tools/lints/rust-toolchain.toml`），不一致时报错，不在节点上现场安装。通用的 Prepare rustfmt 安装不检查 Dylint 工具，不跑 Dylint 的流水线可以使用不含这些工具的镜像。
 修改上述两处版本之前，必须先发布新的镜像版本，并在同一改动中切换 `Jenkinsfile`
 的镜像引用、递增 Rustup volume 后缀。lint 库自身依赖的 crate 不随镜像 vendor，和内核
 crate 一样经 Cargo 镜像源下载并缓存在 Cargo volume 中。
@@ -155,6 +177,8 @@ X-Kernel、fork 和 starry-test-harness 均以公开仓库匿名拉取。Gitee T
 只用于更新 PR 评论、Check Run 与测试状态，不写入 Git remote，也不插入 shell
 命令。
 
-当前 Build 与 Run 阶段仍在同一个顶层 Docker Agent 内完成，因为 Run 依赖
-Build 阶段留在 `/xkernel-target` 的 boot、链接及 Cargo 中间产物。只有这些
-内容形成可归档、可校验的制品包后，才适合将两个阶段调度到不同节点。
+同一架构的 Build 与 Run 在该 leg 的同一个 builder 容器内完成，Run 使用
+Build 留在该容器 `/xkernel-target` 里的 boot、链接和 Cargo 中间产物。
+跨节点传递的是 stash 的源码、阶段日志、轻量覆盖率文件，以及 leg 上归档的
+覆盖率 HTML 与文档。leg 结束时的 `Collect: <arch> outputs` 把 stash 和归档
+结果写入 `ciResults` 与对应的 Gitee Check Run；收集失败时构建失败，PR 评论会标出该阶段。

@@ -12,7 +12,7 @@ ARG DYLINT_VERSION=6.0.4
 # Toolchain of the Dylint lint library, with the targets of the kernel
 # platforms it scans plus the ones the CI setup adds to the auxiliary nightly.
 ARG LINT_TOOLCHAIN=nightly-2026-03-08
-ARG LINT_TARGETS="aarch64-unknown-none-softfloat x86_64-unknown-none x86_64-unknown-linux-musl aarch64-unknown-linux-musl riscv64gc-unknown-linux-musl"
+ARG LINT_TARGETS="aarch64-unknown-none-softfloat x86_64-unknown-none riscv64gc-unknown-none-elf loongarch64-unknown-none-softfloat x86_64-unknown-linux-musl aarch64-unknown-linux-musl riscv64gc-unknown-linux-musl"
 
 FROM ${BASE_IMAGE} AS base
 
