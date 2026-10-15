@@ -243,3 +243,19 @@ zero handling and `EINVAL` mapping stay in these frontends. Existing credentials
 target lookup, queue handling, timer ownership and user-memory checks are
 unchanged. Owner and caller regressions avoid signal delivery, usercopy and
 timer side effects; nullable and zero paths retain their original ordering.
+
+### POSIX timer creation failure cleanup
+
+A failed timer-ID output copy does not leave the just-created timer attached
+to the process. Cleanup uses the existing process timer owner after the copy
+fault, outside its manager lock. A peer may already have deleted the timer, or
+runtime teardown may have removed it; a cleanup error does not replace the
+original user-memory error. This adds no user-pointer access under a lock,
+new owner API or unsafe code. The change covers failure cleanup, not a new
+two-phase timer-publication protocol for concurrent callers.
+
+The user-task regressions keep timers unarmed and use no waits or signal
+delivery. Each starts in a fresh process and checks owner lookup before and
+after the actual failed syscall. Assertion closures are followed by cleanup,
+so an expected failure against the old implementation also removes its leaked
+test timer before returning.

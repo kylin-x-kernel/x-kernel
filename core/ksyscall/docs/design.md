@@ -404,3 +404,21 @@ branches and validation order.
 Numeric boundary regressions live with `Signo`. Caller regressions exercise
 actual zero-probe, invalid-number rejection and nullable timer-event paths
 without signal delivery, user-memory access or timer creation.
+
+### POSIX timer creation output
+
+`timer_create` parses the optional notification and delegates creation to the
+current process owner before copying the timer ID to user memory. If that copy
+fails, the adapter deletes the newly created timer through the same owner and
+returns the original copy error. Notification parsing, clock validation and
+successful ID output retain their existing order. The timer manager lock is
+released before user copying; the allocator's monotonically advancing ID is
+not reset by rollback.
+
+This follows Linux's output-fault cleanup in
+[`do_timer_create`](https://github.com/torvalds/linux/blob/v6.6/kernel/time/posix-timers.c#L469-L495).
+Fresh user-task regressions exercise the actual create/gettime/delete syscalls
+with NULL and inaccessible ID outputs, a successful unarmed timer, and rejected
+clock/notification inputs. The failure cases check the freshly initialized
+owner's first ID before and after creation; they do not assume Linux assigns
+that number or that deleting a timer immediately reuses its ID.

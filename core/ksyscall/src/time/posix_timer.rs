@@ -75,6 +75,10 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
 }
 
 /// Creates a POSIX timer object for the current process.
+///
+/// A NULL `sevp` selects the default `SIGALRM` notification. The timer ID
+/// output is required; a failed output copy removes the newly created timer
+/// and returns the original user-memory error.
 pub(crate) fn sys_timer_create(
     clockid: i32,
     sevp: UserConstPtr<k_sigevent>,
@@ -83,7 +87,12 @@ pub(crate) fn sys_timer_create(
     let notify = parse_sigevent(sevp)?;
     let process = kprocess::current_user_process();
     let timer_id = process.create_posix_timer(clockid, notify)?;
-    timerid.write_vm(timer_id)?;
+    if let Err(error) = timerid.write_vm(timer_id) {
+        // A peer may already have deleted this timer, or runtime teardown may
+        // have removed it. Neither case should replace the original copy error.
+        let _ = process.delete_posix_timer(timer_id);
+        return Err(error.into());
+    }
     Ok(0)
 }
 
@@ -140,3 +149,5 @@ unittest::path_mod_test!(
     tests_signal_number,
     "../../ut-tests/time/posix_timer_signal_number.rs"
 );
+
+unittest::path_mod_test!(tests_create, "../../ut-tests/time/posix_timer_create.rs");
