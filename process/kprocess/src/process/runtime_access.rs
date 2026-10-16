@@ -546,11 +546,29 @@ impl Process {
 
     /// Updates POSIX timer signal accounting when a timer signal is dequeued.
     pub(crate) fn on_timer_signal_dequeued(&self, timer_id: i32, signal_seq: u32) -> KResult<bool> {
-        self.runtime().map(|runtime| {
-            runtime
-                .timer_manager()
-                .lock()
-                .on_timer_signal_dequeued(timer_id, signal_seq)
+        let runtime = self.runtime()?;
+        // The sample walks the thread table, so only pay for it when this
+        // dequeue will consume it: a stale generation or a timer whose clock
+        // ignores the totals never does. The read-only check deliberately
+        // bypasses `with_timer_manager_mut`; the mutation below goes through it.
+        let needs_cpu_times = runtime
+            .timer_manager()
+            .lock()
+            .posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq);
+        let (process_utime, process_stime) = if needs_cpu_times {
+            self.process_cpu_times()
+        } else {
+            (TimeSpan::ZERO, TimeSpan::ZERO)
+        };
+        self.with_timer_manager_mut(|manager| {
+            Ok(
+                manager.on_timer_signal_dequeued(
+                    timer_id,
+                    signal_seq,
+                    process_utime,
+                    process_stime,
+                ),
+            )
         })
     }
 

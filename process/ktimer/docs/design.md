@@ -75,6 +75,21 @@ POSIX timer notifications add a generation counter (`signal_seq`), bumped
 on every re-arm: a dequeued signal whose sequence no longer matches is
 dropped by `on_timer_signal_dequeued`.
 
+Expirations are collected by polling (the alarm task or the CPU-timer poll)
+while the notification is dequeued on the signal path, so `on_timer_signal_dequeued`
+catches the timer up to the delivery instant before it freezes the overrun
+count: intervals that elapse between the last collection and the delivery
+belong to the notification being delivered, and only intervals after it
+produce the next notification.
+
+A collected expiration count saturates when narrowed for the overrun counters,
+and the counters saturate on accumulation; `i32::MAX` clamping happens only at
+`timer_getoverrun()`. The delivered signal carries the count captured when the
+notification was generated (`siginfo.si_overrun`, and `ssi_overrun` for
+signalfd readers), so it can differ from `timer_getoverrun()`, which reports the
+count frozen at delivery — the same split as Linux's `it_overrun` and
+`it_overrun_last`.
+
 ## Algorithms
 
 - Missed-period advance: `skipped = overdue / interval + 1`; the deadline

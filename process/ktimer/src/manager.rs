@@ -305,6 +305,37 @@ impl ProcessTimerManager {
             .ok_or(KError::InvalidInput)
     }
 
+    /// Returns whether dequeuing `signal_seq` for `timer_id` consumes the
+    /// owner's sampled CPU totals.
+    ///
+    /// The dequeue path uses this read-only check to skip the process-wide
+    /// CPU-time sampling upfront: the sample walks the thread table, and it is
+    /// unused for a stale generation or for a timer whose clock ignores those
+    /// totals. The check applies the same admission rule
+    /// [`Self::on_timer_signal_dequeued`] applies before it mutates anything.
+    pub fn posix_timer_dequeue_needs_cpu_times(&self, timer_id: i32, signal_seq: u32) -> bool {
+        self.posix_timers
+            .get(&timer_id)
+            .is_some_and(|timer| timer.signal_seq() == signal_seq && timer.is_process_cpu())
+    }
+
+    /// Test observation of a POSIX timer's registered runtime alarm deadline.
+    #[cfg(unittest)]
+    pub(crate) fn posix_timer_alarm_deadline(
+        &self,
+        timer_id: i32,
+    ) -> Option<ktime_types::MonotonicInstant> {
+        self.posix_timers
+            .get(&timer_id)
+            .and_then(PosixTimer::alarm_deadline)
+    }
+
+    /// Test observation of a POSIX timer's current signal generation.
+    #[cfg(unittest)]
+    pub(crate) fn posix_timer_signal_seq(&self, timer_id: i32) -> Option<u32> {
+        self.posix_timers.get(&timer_id).map(PosixTimer::signal_seq)
+    }
+
     /// Removes all POSIX timers of the owner, used on exec (`execve` keeps
     /// itimers but not POSIX timers).
     pub fn clear_posix_timers(&mut self) {
@@ -315,17 +346,35 @@ impl ProcessTimerManager {
     ///
     /// Called from the signal-dequeue observer with the `timer_id` and
     /// `signal_seq` embedded in the pending signal. A matching sequence
-    /// clears the pending-signal state (freezing `last_overrun`); a stale
+    /// catches the timer up to the delivery instant — an interval that elapsed
+    /// since the last collection still belongs to this notification's overrun —
+    /// then clears the pending-signal state (freezing `last_overrun`); a stale
     /// sequence reports `false` so the signal is dropped.
+    ///
+    /// `process_utime`/`process_stime` must be the owner process's current
+    /// CPU-time totals; wall-clock-consuming timers read their clock
+    /// internally.
     ///
     /// # Returns
     ///
     /// `true` when the notification belongs to the current timer generation
     /// and should be delivered.
-    pub fn on_timer_signal_dequeued(&mut self, timer_id: i32, signal_seq: u32) -> bool {
+    pub fn on_timer_signal_dequeued(
+        &mut self,
+        timer_id: i32,
+        signal_seq: u32,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> bool {
+        let owner_pid = self.owner_pid;
         if let Some(timer) = self.posix_timers.get_mut(&timer_id) {
             if timer.signal_seq() != signal_seq {
                 return false;
+            }
+            if timer.catch_up_queued_overrun(process_utime, process_stime) {
+                // The catch-up advanced the interval schedule, so the alarm
+                // entry must follow the new deadline.
+                timer.arm_deadline(owner_pid);
             }
             timer.on_signal_dequeued();
             return true;
@@ -391,9 +440,10 @@ impl ProcessTimerManager {
 
 #[unittest::mod_test]
 mod tests {
+    use khal::time::monotonic_time;
     use ksignal::Signo;
     use ktime_types::TimeSpan;
-    use linux_raw_sys::general::CLOCK_PROCESS_CPUTIME_ID;
+    use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID};
     use posix_types::ITimerType;
     use unittest::def_test;
 
@@ -532,6 +582,213 @@ mod tests {
                 TimeSpan::ZERO,
             )
             .unwrap();
-        assert!(!manager.on_timer_signal_dequeued(timer_id, stale_signal_seq));
+        assert!(!manager.on_timer_signal_dequeued(
+            timer_id,
+            stale_signal_seq,
+            TimeSpan::from_nanos(1),
+            TimeSpan::ZERO,
+        ));
+    }
+
+    /// POSIX delivers at most one notification per pending timer signal. An
+    /// interval that elapses between the last collection (the alarm task) and
+    /// the delivery belongs to that notification's overrun, and must not be
+    /// delivered as a second signal.
+    #[def_test]
+    fn dequeued_notification_absorbs_intervals_due_before_delivery() {
+        let mut manager = ProcessTimerManager::new(1);
+        let timer_id = manager
+            .create_posix_timer(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGALRM,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        let (_, delivery) = manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::from_nanos(3),
+                TimeSpan::from_nanos(2),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(delivery.is_none());
+        // The first interval produces the notification; the two intervals that
+        // elapse afterwards are still uncollected when it is dequeued.
+        let delivery = manager
+            .poll_cpu_timers(TimeSpan::from_nanos(2), TimeSpan::ZERO)
+            .into_iter()
+            .next()
+            .expect("timer delivery");
+        let signal_seq = match delivery {
+            TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) => signal_seq,
+            _ => panic!("expected a POSIX timer signal"),
+        };
+        assert!(manager.on_timer_signal_dequeued(
+            timer_id,
+            signal_seq,
+            TimeSpan::from_nanos(8),
+            TimeSpan::ZERO,
+        ));
+        // Both elapsed intervals belong to the delivered notification.
+        assert_eq!(manager.get_posix_timer_overrun(timer_id), Ok(2));
+        // They were absorbed, so the timer stays quiet until the next interval.
+        assert!(
+            manager
+                .poll_cpu_timers(TimeSpan::from_nanos(8), TimeSpan::ZERO)
+                .is_empty()
+        );
+        assert_eq!(
+            manager
+                .poll_cpu_timers(TimeSpan::from_nanos(11), TimeSpan::ZERO)
+                .len(),
+            1
+        );
+    }
+
+    /// The dequeue catch-up advances the interval schedule, so the alarm entry
+    /// must follow the new deadline. Without the re-arm the next alarm wakeup
+    /// finds no expiry to report and a periodic timer silently stops
+    /// notifying.
+    #[def_test]
+    fn dequeued_notification_rearms_the_advanced_alarm() {
+        let mut manager = ProcessTimerManager::new(1);
+        let timer_id = manager
+            .create_posix_timer(
+                CLOCK_MONOTONIC as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        // Arm with an absolute deadline one second in the past: the arming
+        // itself reports the expirations (whatever the clock's granularity is)
+        // and re-arms the alarm for the advanced period.
+        let past = monotonic_time()
+            .span_since_origin()
+            .saturating_sub(TimeSpan::from_secs(1));
+        let (_, delivery) = manager
+            .set_posix_timer(
+                timer_id,
+                true,
+                TimeSpan::from_millis(1),
+                past,
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        let TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) =
+            delivery.expect("a past deadline expires on arming")
+        else {
+            panic!("expected a POSIX timer signal");
+        };
+        let armed_after_arming = manager
+            .posix_timer_alarm_deadline(timer_id)
+            .expect("arming re-arms the next period");
+        // The catch-up can only fold intervals the clock has already passed, so
+        // wait for the armed deadline in the clock's own domain: the bound is
+        // expressed on that same clock so a slow tick cannot end the wait
+        // early. A clock that stops advancing fails the assertion below rather
+        // than hanging the suite.
+        let wait_limit = armed_after_arming + TimeSpan::from_secs(5);
+        while armed_after_arming.saturating_duration_since(monotonic_time()) > TimeSpan::ZERO
+            && wait_limit.saturating_duration_since(monotonic_time()) > TimeSpan::ZERO
+        {
+            ktask::sleep(TimeSpan::from_millis(1));
+        }
+        assert!(manager.on_timer_signal_dequeued(
+            timer_id,
+            signal_seq,
+            TimeSpan::ZERO,
+            TimeSpan::ZERO,
+        ));
+        let armed_after_dequeue = manager
+            .posix_timer_alarm_deadline(timer_id)
+            .expect("the dequeue re-arms the advanced period");
+        assert!(
+            armed_after_dequeue.saturating_duration_since(armed_after_arming) > TimeSpan::ZERO,
+            "the dequeue must re-arm the advanced period: armed={armed_after_arming:?} now={:?}",
+            monotonic_time()
+        );
+    }
+
+    /// The dequeue sampling gate admits exactly the notifications the manager
+    /// will accept: a stale generation, a timer whose clock ignores the CPU
+    /// totals, and an unknown timer never need the sample.
+    #[def_test]
+    fn dequeue_cpu_time_gate_matches_the_manager_admission() {
+        let mut manager = ProcessTimerManager::new(1);
+        let timer_id = manager
+            .create_posix_timer(
+                CLOCK_PROCESS_CPUTIME_ID as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGALRM,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::from_nanos(3),
+                TimeSpan::from_nanos(2),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        let delivery = manager
+            .poll_cpu_timers(TimeSpan::from_nanos(2), TimeSpan::ZERO)
+            .into_iter()
+            .next()
+            .expect("timer delivery");
+        let TimerDelivery::Process(TimerSignal::Posix { signal_seq, .. }) = delivery else {
+            panic!("expected a POSIX timer signal");
+        };
+        assert!(manager.posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq));
+
+        // Re-arming bumps the generation: an in-flight notification from the
+        // previous one is dropped by the manager, so the dequeue path must not
+        // pay for the sample either.
+        manager
+            .set_posix_timer(
+                timer_id,
+                false,
+                TimeSpan::from_nanos(3),
+                TimeSpan::from_nanos(2),
+                TimeSpan::from_nanos(2),
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        assert!(!manager.posix_timer_dequeue_needs_cpu_times(timer_id, signal_seq));
+
+        // A wall-clock timer never consumes the sampled totals: assert with
+        // its own generation so the clock check, not the generation check,
+        // decides the answer.
+        let wall_clock_id = manager
+            .create_posix_timer(
+                CLOCK_MONOTONIC as i32,
+                PosixTimerCreateNotify::Signal {
+                    signo: Signo::SIGRTMIN,
+                    target_tid: None,
+                    value: PosixTimerSigValue::TimerId,
+                },
+            )
+            .unwrap();
+        let wall_clock_seq = manager
+            .posix_timer_signal_seq(wall_clock_id)
+            .expect("live timer");
+        assert!(!manager.posix_timer_dequeue_needs_cpu_times(wall_clock_id, wall_clock_seq));
+
+        // Unknown timers are not sampled.
+        assert!(!manager.posix_timer_dequeue_needs_cpu_times(i32::MAX, signal_seq));
     }
 }

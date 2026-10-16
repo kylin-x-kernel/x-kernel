@@ -173,6 +173,17 @@ pub(crate) struct PosixTimer {
     last_overrun: u32,
 }
 
+/// Narrows a collected expiration count for overrun accounting.
+///
+/// Overrun counters saturate instead of wrapping: a truncated count bypasses
+/// the `i32::MAX` clamp in [`PosixTimer::overrun`] and reports a number far
+/// below the real one (`2^32` expirations would even report zero). Linux keeps
+/// a wider `it_overrun` internally and clamps only at the ABI boundary, so
+/// saturating here preserves that observable behaviour.
+fn saturating_overrun(expirations: usize) -> u32 {
+    u32::try_from(expirations).unwrap_or(u32::MAX)
+}
+
 impl PosixTimer {
     pub(crate) fn new(
         clock: PosixTimerClock,
@@ -278,6 +289,41 @@ impl PosixTimer {
         self.signal_seq
     }
 
+    /// Folds intervals that are already due into the pending notification's
+    /// overrun count.
+    ///
+    /// The notification is dequeued for delivery on the signal path while its
+    /// expirations are collected by the alarm task, so an interval can elapse
+    /// between the last collection and the delivery. POSIX attributes those
+    /// expirations to the most recently delivered notification; leaving them
+    /// unaccounted would let the next collection emit a second signal for the
+    /// same timer instead of counting an overrun. Without a pending
+    /// notification there is nothing to attribute — those expirations belong
+    /// to the next notification.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the interval schedule advanced, i.e. the caller must re-arm
+    /// the alarm for the new deadline: a redundant re-arm re-enqueues an
+    /// identical entry in the global alarm heap, which is not de-duplicated.
+    pub(crate) fn catch_up_queued_overrun(
+        &mut self,
+        process_utime: TimeSpan,
+        process_stime: TimeSpan,
+    ) -> bool {
+        if !self.pending_signal {
+            return false;
+        }
+        let expirations = self.update(process_utime, process_stime);
+        if expirations == 0 {
+            return false;
+        }
+        self.queued_overrun = self
+            .queued_overrun
+            .saturating_add(saturating_overrun(expirations));
+        true
+    }
+
     pub(crate) fn on_signal_dequeued(&mut self) {
         if !self.pending_signal {
             return;
@@ -289,6 +335,12 @@ impl PosixTimer {
 
     pub(crate) fn overrun(&self) -> i32 {
         self.last_overrun.min(i32::MAX as u32) as i32
+    }
+
+    /// Test observation of the registered runtime alarm deadline.
+    #[cfg(unittest)]
+    pub(crate) fn alarm_deadline(&self) -> Option<MonotonicInstant> {
+        self.spec.alarm_deadline()
     }
 
     pub(crate) fn collect_delivery(
@@ -309,7 +361,7 @@ impl PosixTimer {
             return None;
         };
 
-        let expirations = expirations as u32;
+        let expirations = saturating_overrun(expirations);
         if self.pending_signal {
             self.queued_overrun = self.queued_overrun.saturating_add(expirations);
             // Do NOT update last_overrun here: timer_getoverrun must return the
@@ -386,5 +438,47 @@ mod tests {
                 .0,
             TimeSpan::from_secs(2)
         );
+    }
+
+    /// Overrun bookkeeping narrows and accumulates with saturation; the
+    /// `i32::MAX` clamp happens only at `timer_getoverrun()`. A truncating
+    /// narrowing drops exactly `2^32` expirations to zero and reports no
+    /// overrun at all.
+    #[def_test]
+    fn whole_counter_width_expirations_saturate_instead_of_wrapping() {
+        let mut timer = PosixTimer::new(
+            PosixTimerClock::ProcessCpu,
+            PosixTimerCreateNotify::Signal {
+                signo: Signo::SIGALRM,
+                target_tid: None,
+                value: PosixTimerSigValue::TimerId,
+            },
+            1,
+            1,
+        );
+        timer
+            .settime(
+                false,
+                TimeSpan::from_nanos(1),
+                TimeSpan::from_nanos(1),
+                TimeSpan::ZERO,
+                TimeSpan::ZERO,
+            )
+            .unwrap();
+        // The deadline is one nanosecond past the CPU-time origin, so a `2^32`
+        // nanosecond total leaves `2^32 - 1` overdue nanoseconds and `2^32`
+        // skipped periods at a one-nanosecond interval.
+        let expirations = timer.update(TimeSpan::from_nanos(1u64 << 32), TimeSpan::ZERO);
+        assert_eq!(expirations, 1usize << 32);
+
+        let delivery = timer
+            .collect_delivery(1, expirations)
+            .expect("expirations produce a notification");
+        let TimerDelivery::Process(TimerSignal::Posix { overrun, .. }) = delivery else {
+            panic!("expected a process-directed POSIX timer signal");
+        };
+        assert_eq!(overrun, i32::MAX);
+        timer.on_signal_dequeued();
+        assert_eq!(timer.overrun(), i32::MAX);
     }
 }

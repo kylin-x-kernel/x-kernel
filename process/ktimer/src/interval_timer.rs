@@ -130,6 +130,12 @@ impl ITimer {
         self.deadline
     }
 
+    /// Test observation of the runtime alarm registration.
+    #[cfg(unittest)]
+    pub(crate) fn alarm_deadline(&self) -> Option<MonotonicInstant> {
+        self.runtime_deadline
+    }
+
     pub(crate) fn set_alarm(
         &mut self,
         runtime_deadline: Option<MonotonicInstant>,
