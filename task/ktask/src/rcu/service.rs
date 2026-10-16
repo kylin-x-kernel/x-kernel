@@ -24,6 +24,18 @@ const PROGRESS_INTERVAL_NS: u64 = 10_000_000;
 const CALLBACK_BUDGET: usize = 32;
 static SERVICE: Once<GracePeriodTask> = Once::new();
 
+// Only controlled consumers can obtain the current-task reader until public
+// read-side admission and the complete context protocol are available.
+#[cfg(unittest)]
+#[path = "synchronize.rs"]
+mod synchronize;
+
+// The owning consumer remains confined to integration tests until the complete
+// idle/user/IRQ/NMI context protocol has been validated.
+#[cfg(unittest)]
+#[path = "owned.rs"]
+mod owned;
+
 struct GracePeriodTask {
     callbacks: CallbackState<'static, { kbuild_config::NR_CPUS }>,
     has_started: kspin::SpinNoPreempt<bool>,
@@ -204,9 +216,9 @@ fn process_callbacks() {
     }
     let cpu = khal::percpu::this_cpu_id().as_usize();
     // SAFETY: the softirq carrier excludes migration and holds no RCU lock.
-    // Admission is currently limited to retained, unpublished test objects with
-    // nonblocking callbacks; periods use real scheduler observations. Enabling
-    // ordinary consumers additionally requires the complete context integration.
+    // Admission is limited to controlled test objects and synchronous-wait
+    // markers, all retained through their nonblocking callbacks. Periods use
+    // real scheduler observations; general admission awaits context integration.
     unsafe { service.callbacks.invoke_ready(cpu, CALLBACK_BUDGET) };
     if service.callbacks.has_ready(cpu) {
         // Wait only for eligible work, never spin on a GP blocked by readers.

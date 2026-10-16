@@ -240,8 +240,9 @@ period. The current finite batch does not chase those submissions. Budget return
 leaves persistent readiness for the carrier to recheck; wakeup/sleep handshakes,
 timer/IPI progress and context admission belong to host-service integration and
 are not supplied by this portable engine. The host currently connects real GP
-task and softirq execution for unpublished integration fixtures, not general
-consumer admission.
+task and softirq execution for controlled fixtures and synchronous-wait markers.
+The task layer also validates owned replacement with scoped task readers; this
+does not open general consumer admission.
 
 Only controlled task-context tests currently enter scopes. There is no public
 current-task RCU read interface, protected-data container or generally usable

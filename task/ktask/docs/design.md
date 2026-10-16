@@ -65,6 +65,35 @@ publishing its waker; the startup task waits sleepably for that acknowledgment.
 This is controlled carrier integration, not ordinary RCU readiness: general
 callback admission and idle/user/interrupt observation are not yet connected.
 
+The synchronous-wait module, including its private unsafe `synchronize_rcu`
+helper, is compiled only with `cfg(unittest)`. It is not a public reclamation
+interface: external consumers cannot yet obtain a current-task reader. Public
+read-side admission and waiting must be exposed together after the complete
+context protocol is validated. Like Linux's callback/completion wait, it
+prepares the task waiter and registers completion before submitting a marker.
+The marker embeds its queue node and completion in one Arc allocation. Queue
+execution owns a strong reference independently of the waiter, so a resumed
+waiter cannot destroy storage still used by the notifying callback. Registration
+failure precedes submission; afterward the loop accepts only a completion token,
+not a signal or arbitrary wake. An RCU-local SeqCst fence follows the successful
+completion observation, including completion before parking or migration. The marker
+never owns a retired payload, and potentially sleeping destruction remains with
+the caller after successful return. This waits for a GP, not callback drainage.
+
+The owning integration consumer is compiled only with `cfg(unittest)` until
+complete context admission is validated. Its `Rcu<T>` retains one Box behind
+an atomic pointer; Acquire reads borrow both the container and the current task's
+read token. Reading remains unsafe because an arbitrary standalone TaskReader
+token is not proof of host participation. Synchronous replacement prepares the
+wait first, exchanges with AcqRel, waits without a writer lock, and reconstructs
+the old Box only after completion. Before then the old owner remains raw: an
+abandoned operation can leak it but cannot run its destructor early. Concurrent
+exchanges retain separate old allocations. Final exclusive container destruction
+needs no extra GP because outstanding reads and replacements borrow it.
+This follows Linux's withdrawal / unlock / synchronize / caller-cleanup split,
+not the implementation of `rcu_replace_pointer`, which itself neither waits nor
+provides concurrent-writer serialization.
+
 Demand is retained independently of wake hints and consumed before each pass.
 Task/timer callers publish demand before requesting Rcu softirq service. With
 IPIs, a fixed RCU notification marks the vector pending without waking tasks

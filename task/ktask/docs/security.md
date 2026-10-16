@@ -6,7 +6,7 @@
 It rejects missing or idle current tasks, interrupt-like/IRQ-masked contexts,
 and preemption protection when tracked. Explicit RCU read nesting also rejects
 sleeping and voluntary yielding, without preventing involuntary preemption.
-Only controlled tests enter these scopes; there is no reclamation capability.
+Only controlled tests enter these scopes; there is no general safe reclamation API.
 Scheduler enrollment borrows stable Arc-owned task storage. On the incoming
 stack, `finish_task_switch` removes an exited task's abandoned RCU participation
 before releasing the outgoing owner or on-CPU marker. IRQs and migration remain
@@ -37,9 +37,32 @@ blocked old readers is not repeatedly kicked; their lifetimes remain authoritati
 Callback promotion precedes destination notification. The Rcu softirq executes
 only eligible callbacks and restores any budget remainder through the core queue
 protocol before requesting another pass. No callback runs under an RCU lock or
-in the GP task. Admission remains limited to unpublished owning test fixtures
-with nonblocking cleanup; general read/context integration is still required
-before accepting ordinary consumer retirement.
+in the GP task. Admission remains limited to controlled test objects and
+synchronous-wait markers, whose callbacks and cleanup must not block. General
+read/context integration is still required before accepting ordinary consumer
+retirement.
+
+The private unsafe `synchronize_rcu` bridge and its wait machinery are compiled
+only for controlled task-reader integration tests, not exported to consumers.
+Its caller must exclude unsupported reader contexts, withdraw all
+publication routes and retain the old owner on preparation failure. Completion
+registration precedes callback admission; after admission the wait cannot return
+an interrupt error or treat a wake as GP completion. Callback and waiter own
+independent Arc references to the completion record. Only its nonblocking
+completion and queue storage are released in softirq, never the retired object.
+The initialized service has a permanent driver claim and fixed participants;
+submission from a running CPU cannot reject a prepared request. Violating that
+boot invariant is fatal, not a recoverable post-withdrawal failure.
+
+The owning container is not admitted outside kernel integration tests. Its
+unsafe read requires the current task's genuine scope; accepting an arbitrary
+TaskReader token as safe would permit reclamation while a reader is untracked.
+Only initialized pointers are published, and only the unique exchange owner
+reconstructs each removed Box after the GP. Shared containers require both
+Send and Sync payloads: writers may recover values allocated by other tasks.
+It exposes neither an unguarded reference nor mutable access. Final Drop requires the
+exclusive container owner and performs ordinary caller-context destruction;
+it cannot overlap a protected borrow or an in-progress replacement.
 
 `init_rcu_service` requires all discovered CPU services to be initialized before
 creating the GP task. Static state retains its nodes and the one-shot driver
