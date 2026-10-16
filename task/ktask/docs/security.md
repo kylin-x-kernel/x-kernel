@@ -368,6 +368,17 @@ Invariants:
 3. The stack is freed only after the task is no longer running and has no
    remaining refs (gc task + `Arc::try_unwrap`).
 
+`api.rs::init_scheduler_with_cpu_num` registers the permanent kernel root once,
+while boot still uses it and before any task is constructed.
+`task.rs::TaskContextCell::new` passes that root to
+`kcpu::TaskContext::new_kernel`; the architecture implementation initializes a
+kernel-only context without reading the creator's active user root. Kernel tasks
+retain no ownership of their creator's MM. The registered root is backed by the
+kernel-lifetime address space; secondary task construction reads the same
+initialized value. Shared-root architectures save the supplied permanent root;
+split-root architectures retain their separate user-root default. A user-task
+creator must explicitly install its runtime-owned root before publishing the task.
+
 `api.rs::replace_current_user_page_table` mutates only the running task's saved
 root and activates it on that CPU. Its unsafe caller must retain valid old/new
 roots, preserve kernel mappings, publish the matching process binding, prepare

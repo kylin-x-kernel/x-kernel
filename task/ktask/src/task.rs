@@ -174,7 +174,9 @@ struct TaskContextCell(UnsafeCell<TaskContext>);
 
 impl TaskContextCell {
     fn new() -> Self {
-        Self(UnsafeCell::new(TaskContext::new()))
+        Self(UnsafeCell::new(TaskContext::new_kernel(
+            *crate::api::KERNEL_PAGE_TABLE_ROOT,
+        )))
     }
 
     fn get_mut(&mut self) -> &mut TaskContext {
@@ -363,6 +365,8 @@ impl TaskInner {
     /// callers cannot weaken that execution invariant.
     /// The runtime is installed during construction;
     /// a user task can therefore never be observed without its runtime.
+    /// Before making the task runnable, callers must set its saved page-table
+    /// root through [`Self::ctx_mut`] to the address space retained by its runtime.
     pub fn new_user<F>(
         entry: F,
         name: String,

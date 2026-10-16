@@ -5,14 +5,6 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = include_str!("../README.md")]
-#![cfg_attr(
-    target_arch = "x86_64",
-    expect(
-        clippy::new_without_default,
-        reason = "CG-024-lint-exceptions: clippy::new_without_default: x86_64 TaskContext::new() \
-                  reads the live CR3, so it must not be Default"
-    )
-)]
 #![allow(
     clippy::panic,
     reason = "CG-021-no-panic-on-reachable-failure: case (b): 15 legacy trap-path panics \

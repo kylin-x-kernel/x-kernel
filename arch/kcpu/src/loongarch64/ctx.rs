@@ -336,8 +336,16 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
-    /// Creates a new default context for a new task.
-    pub fn new() -> Self {
+    /// Creates a kernel-only context independent of the creator's user root.
+    ///
+    /// `kernel_root` identifies the permanent kernel address space, already
+    /// active in PGDH. It is not installed in the separate user root (PGDL),
+    /// which keeps its zero default.
+    /// Call [`Self::init`] before first execution; a boot context instead has
+    /// its execution state saved by [`Self::switch_to`] when first switched out.
+    /// User-task callers must install their own retained root through
+    /// [`Self::set_page_table_root`] before making the task runnable.
+    pub fn new_kernel(_kernel_root: karch::HwPageTableRoot) -> Self {
         Self::default()
     }
 

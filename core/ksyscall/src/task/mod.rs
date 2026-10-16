@@ -30,6 +30,11 @@ mod thread;
 mod umask;
 mod wait;
 
+unittest::path_mod_test!(
+    mod kernel_task_root,
+    "../../ut-tests/task/kernel_task_root.rs"
+);
+
 pub(crate) use self::{
     clone::*, clone3::*, cpu_time::*, credentials::*, ctl::*, execve::*, exit::*, ids::*, job::*,
     limits::*, pidfd::*, restart::*, rusage::*, sched::*, signal::*, thread::*, umask::*, wait::*,

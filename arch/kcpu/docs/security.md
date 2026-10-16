@@ -217,10 +217,14 @@ if next_ctx.cr3 != self.cr3 {
 }
 ```
 
-**不变量**：`cr3`/`ttbr0_el1`/`satp`/`pgdl` 必须指向有效的页表根。
+**不变量**：共享根架构的 `cr3`/`satp` 必须指向任务运行期间有效的页表；
+独立根架构的内核页表由启动流程保持有效，用户任务的 `ttbr0_el1`/`pgdl`
+必须由运行时持有对应页表。内核任务沿用零用户根默认值，不访问用户地址区。
 
-**为何安全**：`TaskContext` 中的页表根由内核页表管理子系统提供，
-通过 `set_page_table_root()` 设置。
+**为何安全**：`TaskContext::new_kernel(kernel_root)` 显式接收永久内核根，
+不读取创建者当前用户根。x86_64/RISC-V 将其保存为任务根；AArch64/LoongArch
+保持零用户根默认值。构造函数不取得 MM 所有权，调用方必须保证永久内核映射
+持续有效，并在用户任务发布前通过 `set_page_table_root()` 安装其持有的用户根。
 
 ### 8. IDT 初始化中的 `transmute`（`x86_64/idt.rs:25-29`）
 
@@ -319,9 +323,10 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
    `ExceptionContext` 的 `repr(C)` 布局完全匹配。`trapframe_size` 编译期
    常量注入汇编确保尺寸一致。
 
-2. **页表有效性**：`TaskContext` 中的页表根（CR3/ttbr0_el1/satp/pgdl）
-   必须始终指向有效的页表。`switch_to` 写入硬件前不做验证，
-   由调用者保证。
+2. **页表有效性**：`new_kernel(kernel_root)` 的永久内核根必须持续有效。
+   共享根架构直接保存它；独立根架构的内核任务保持零用户根且不访问用户地址区。
+   用户任务必须在发布前安装其运行时持有的有效用户根。`switch_to` 写入硬件前
+   不验证页表或持有 MM 引用，由调用者保证生命周期与根的用途一致。
 
 3. **异常表已排序**：`fixup_exception` 使用二分查找，要求异常表在调用前
    已通过 `init_exception_table()` 排序。
@@ -364,7 +369,7 @@ CPU；`eret` 随后从 SPSR 恢复中断前的 DAIF 状态。
 | T-02 | trap frame 布局与汇编不一致导致寄存器错位 | 高 | 修改 `ExceptionContext` 字段顺序但未同步汇编 | `trapframe_size` 编译期常量注入汇编；`repr(C)` 保证内存布局可预测 |
 | T-03 | LoongArch64 `emulate_unaligned` 解码未知指令导致寄存器损坏 | 高 | 故障指令为非预期的操作码 | 未匹配的操作码返回 `Err(UnalignedError)`，不修改寄存器；trap handler panic 而非继续执行 |
 | T-04 | `active_exception_context()` 返回过期或 stale trapframe | 高 | trap handler 阻塞/迁移后原 CPU slot 未清理，或调用者持久保存快照来源 | API 只返回按值快照；context switch 挂起并清空当前 CPU slot、切回后恢复当前 CPU slot；guard Drop 用 CAS 恢复原始/当前 slot |
-| T-05 | `switch_to` 使用无效页表根导致 TLB 填充错误地址 | 高 | `TaskContext` 的页表根被错误设置 | `set_page_table_root` 接受 `HwPageTableRoot` 类型，由内核页表子系统保证有效性 |
+| T-05 | `switch_to` 使用无效页表根导致 TLB 填充错误地址 | 高 | `TaskContext` 的页表根被错误设置 | `new_kernel` 显式接收永久根；用户根由 `set_page_table_root` 安装，调用方保证页表有效期 |
 | T-06 | IDT/向量表条目指向错误地址 | 高 | 汇编符号名拼写错误或链接脚本问题 | `trap_handler_table` 为汇编定义的固定大小数组；IDT 初始化通过 `set_handler_addr` 填充 |
 | T-07 | 中断未关闭时调用 `switch_to` 或 `run` | 中 | 调用者违反调用约束 | `run()` 内部调用 `disable_local_irq()`；`switch_to` 要求调用者保证关中断 |
 | T-08 | `ExceptionContextGuard` 嵌套导致 per-CPU 指针被覆盖 | 低 | trap handler 执行期间再次触发异常 | `swap` 语义保存前一个值，guard drop 时用 CAS 恢复；深层嵌套通过 guard 链正确恢复，且不会覆盖后续新 trap |

@@ -221,14 +221,16 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
-    /// Creates a dummy context for a new task.
+    /// Creates a kernel-only context independent of the creator's user root.
     ///
-    /// Note the context is not initialized, it will be filled by [`switch_to`]
-    /// (for initial tasks) and [`init`] (for regular tasks) methods.
-    ///
-    /// [`init`]: TaskContext::init
-    /// [`switch_to`]: TaskContext::switch_to
-    pub fn new() -> Self {
+    /// `kernel_root` identifies the permanent kernel address space, already
+    /// active in TTBR1_EL1 (or TTBR0_EL2 in EL2). It is not installed in the
+    /// separate user root (TTBR0_EL1), which keeps its zero default.
+    /// Call [`Self::init`] before first execution; a boot context instead has
+    /// its execution state saved by [`Self::switch_to`] when first switched out.
+    /// User-task callers must install their own retained root through
+    /// [`Self::set_page_table_root`] before making the task runnable.
+    pub fn new_kernel(_kernel_root: karch::HwPageTableRoot) -> Self {
         Self::default()
     }
 

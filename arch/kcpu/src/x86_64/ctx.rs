@@ -431,18 +431,19 @@ impl TaskContext {
         frame_ptr as u64
     }
 
-    /// Creates a dummy context for a new task.
+    /// Creates a kernel-only context using the permanent kernel page-table root.
     ///
-    /// Note the context is not initialized, it will be filled by [`switch_to`]
-    /// (for initial tasks) and [`init`] (for regular tasks) methods.
-    ///
-    /// [`init`]: TaskContext::init
-    /// [`switch_to`]: TaskContext::switch_to
-    pub fn new() -> Self {
+    /// `kernel_root` must retain the kernel mappings for the task's lifetime.
+    /// This constructor does not read the creator's active address-space root.
+    /// Call [`Self::init`] before first execution; a boot context instead has
+    /// its execution state saved by [`Self::switch_to`] when first switched out.
+    /// User-task callers must install their own retained root through
+    /// [`Self::set_page_table_root`] before making the task runnable.
+    pub fn new_kernel(kernel_root: karch::HwPageTableRoot) -> Self {
         Self {
             kstack_top: va!(0),
             rsp: 0,
-            cr3: karch::read_kernel_page_table(),
+            cr3: kernel_root,
             #[cfg(feature = "fp-simd")]
             ext_state: ExtendedState::default(),
         }

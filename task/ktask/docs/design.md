@@ -403,16 +403,30 @@ Callers that need extra publication can finish registry or other externally
 visible state before the scheduler can see the task. User-process creation
 must keep that order.
 
+`init_scheduler()` captures the active permanent kernel page-table root before
+constructing the boot CPU's run queue. All tasks created through
+`TaskInner::new_common()` start with `TaskContext::new_kernel(kernel_root)`,
+including idle, gc, migration, PID-less, and Linux-visible kernel threads. `ktask` uses the same constructor on every
+architecture; `kcpu` defines the register semantics. Shared-root architectures
+use the supplied permanent root, while split-root architectures keep their
+separate user-root default and the already active kernel root. No constructor
+reads the creator's user root or borrows its MM without retaining an owner.
+The scheduler must be initialized after permanent kernel paging is active and
+before secondary schedulers or task construction.
+User-task callers install the root of their runtime-owned address space through
+`ctx_mut().set_page_table_root(...)` before publication; a user task must not
+rely on the constructor to inherit its creator's root.
+
 PID 1 has no special bootstrap conversion path. Late-init threads go through
 `posix-process::spawn_init_process` and construct a fresh `User` identity;
 the runtime is ready once at `new_user()`. `UserRuntimeSlot` is therefore an
 immutable container filled at construction (`ready()` builds, `get()` is
 read-only). There is no `EMPTY -> INSTALLING -> READY` state machine and no
-later `install_user_runtime()`. The page table is activated on first
-switch-in through `switch_page_table_root`. Exec uses the narrow unsafe
-`replace_current_user_page_table` for a running user task after kprocess
-publishes its replacement binding. The caller holds IRQ/preemption exclusion
-and retains both roots; ktask updates the saved context and hardware without
+later `install_user_runtime()`. The saved page table is activated on first
+switch-in; AArch64 refreshes its CPU-local ASID through `switch_page_table_root`.
+Exec uses the narrow unsafe `replace_current_user_page_table` for a running user
+task after kprocess publishes its replacement binding. The caller holds
+IRQ/preemption exclusion and retains both roots; ktask updates the saved context and hardware without
 allocation, callbacks or fallible work. AArch64 requires the caller's prepared
 ASID and the register writer's ISB; x86 CR3 writes flush translations; RISC-V
 and LoongArch use explicit local flushes (SFENCE.VMA and DBAR/INVTLB).
@@ -427,6 +441,7 @@ Boot CPU:
 
 ```text
 init_scheduler()
+  → retain the permanent kernel root for context construction
   → run_queue::init()
   → create the per-CPU idle task (pinned to this CPU)
   → create the per-CPU run queue (including the gc task)

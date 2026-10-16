@@ -32,6 +32,11 @@ pub use kcpu_id_map::KCpuMask;
 
 static CPU_NUM: AtomicUsize = AtomicUsize::new(1);
 
+// Capture the permanent root before user tasks can replace the active root.
+// TaskContext::new_kernel chooses the architecture's kernel-only context state.
+pub(crate) static KERNEL_PAGE_TABLE_ROOT: lazyinit::LazyInit<karch::HwPageTableRoot> =
+    lazyinit::LazyInit::new();
+
 pub(crate) type KTask = ksched::SchedTask<TaskInner>;
 pub(crate) type Scheduler = ksched::Scheduler<TaskInner>;
 
@@ -143,6 +148,11 @@ pub fn current_user_page_table_root() -> karch::HwPageTableRoot {
 }
 
 /// Initializes the task scheduler (for the primary CPU).
+///
+/// The permanent kernel page table must already be active. Its root is retained
+/// for kernel-context construction on every CPU. User-task callers must install
+/// their own address-space root before making a task runnable.
+/// Call this once, before secondary schedulers or other tasks are created.
 pub fn init_scheduler() {
     init_scheduler_with_cpu_num(kcpu_id_map::nr_cpus());
 }
@@ -150,6 +160,7 @@ pub fn init_scheduler() {
 /// Initializes the task scheduler with cpu_num (for the primary CPU).
 fn init_scheduler_with_cpu_num(cpu_num: usize) {
     info!("Initialize scheduling...");
+    KERNEL_PAGE_TABLE_ROOT.init_once(karch::read_kernel_page_table());
     CPU_NUM.store(cpu_num, core::sync::atomic::Ordering::Relaxed);
 
     crate::run_queue::init();
