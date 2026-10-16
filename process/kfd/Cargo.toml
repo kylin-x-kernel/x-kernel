@@ -9,6 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# ut-tests/lib.rs uses anon_inodefs::AnonInodeFs, kcred::initial_cred and
+# kpoll::IoEvents in guest cfg(unittest) fixtures; shear ignores ut-tests/.
+ignored = ["anon_inodefs", "kcred", "kpoll"]
+
 [dependencies]
 anon_inodefs.workspace = true
 flatten_objects.workspace = true

@@ -560,3 +560,22 @@ KVFS 传输层的检查阶段完成（见 `fs/kvfs/docs/design.md`）。
    执行。
 8. POSIX ACL 仍未实现权限计算、mode 同步和继承；KExt4 不把 core 中的 opaque ACL bytes
    作为普通 `system.posix_acl_*` xattr 暴露。
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/xattr.rs`: mounted by `src/xattr.rs` as `tests`.
+- `ut-tests/ioctl.rs`: mounted by `src/ioctl.rs` as `tests`.
+- `ut-tests/stat.rs`: mounted by `src/stat.rs` as `tests`.
+- `ut-tests/fd_ops.rs`: mounted by `src/fd_ops.rs` as `tests`.
+- `ut-tests/file.rs`: mounted by `src/file.rs` as `tests`.
+- `ut-tests/path.rs`: mounted by `src/path.rs` as `tests`.
+- `ut-tests/mount.rs`: mounted by `src/mount.rs` as `tests`.
+- `ut-tests/namei.rs`: mounted by `src/namei.rs` as `readlink_tests`.
+- `ut-tests/io_restart_tests.rs`: mounted by `src/io.rs` as `restart_tests`.
+- `ut-tests/io_transfer_count_tests.rs`: mounted by `src/io.rs` as `transfer_count_tests`.
+- `ut-tests/io_copy_file_range_checks_tests.rs`: mounted by `src/io.rs` as `copy_file_range_checks_tests`.

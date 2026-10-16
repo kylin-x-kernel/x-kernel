@@ -125,6 +125,17 @@ kernel-side `owner_dead` flag, and plain `FUTEX_WAIT` never returns
 
 ## Testing
 
-`table.rs`/`waiter.rs` unit tests cover same-key requeue, wake+move,
+`ut-tests/table.rs`/`ut-tests/waiter.rs` cover same-key requeue, wake+move,
 cancellation of requeued waiters, wake-wins-over-late-cancellation, route
 generation bumps, and single-terminal-transition invariants.
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/wake_op.rs`: mounted by `src/wake_op.rs` as `tests`.
+- `ut-tests/waiter.rs`: mounted by `src/waiter.rs` as `tests`.
+- `ut-tests/table.rs`: mounted by `src/table.rs` as `tests`.

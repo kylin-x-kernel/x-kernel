@@ -11,7 +11,7 @@ There is no local `FileLike` trait or file-like downcast layer.
 
 ## Scope and architecture
 
-- `src/lib.rs`: public re-exports and kernel tests.
+- `src/lib.rs`: public re-exports and the kernel test module mount.
 - `src/fd_table.rs`: `FdTable`, fixed-capacity slot operations and final cleanup.
 - `src/file_descriptor.rs`: `FileDescriptor` and `FdSnapshot` ownership.
 - `src/fd_table_owner.rs`: binding ownership and last-binding teardown.
@@ -122,3 +122,13 @@ Temporary `FdTableRef` handles expose only a read-only view and preserve identit
 The underlying Arc stays private and reads use a mapped guard, so observers
 cannot recover the writable lock. Writable borrows come from `FdTableOwner::table()`
 and cannot outlive the owner. Copying also requires a live owner.
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/stat.rs`: mounted by `src/stat.rs` as `tests`.
+- `ut-tests/lib.rs`: mounted by `src/lib.rs` as `tests`.

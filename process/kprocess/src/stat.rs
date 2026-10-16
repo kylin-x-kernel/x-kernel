@@ -232,32 +232,4 @@ impl fmt::Display for TaskStat {
     }
 }
 
-#[unittest::mod_test]
-mod tests_stat {
-    use unittest::def_test;
-
-    use super::TaskStat;
-
-    #[def_test]
-    fn test_taskstat_display_default() {
-        let stat = TaskStat::default();
-        let text = alloc::format!("{stat}");
-        let text = text.trim_end();
-        assert!(text.starts_with("0 ("));
-        assert!(text.ends_with(" 0"));
-    }
-
-    #[def_test]
-    fn test_taskstat_display_custom() {
-        let stat = TaskStat {
-            pid: 7,
-            comm: "init".into(),
-            state: 'R',
-            priority: 10,
-            nice: -10,
-            ..Default::default()
-        };
-        let text = alloc::format!("{stat}");
-        assert!(text.contains(" 10 -10 "));
-    }
-}
+unittest::path_mod_test!(tests_stat, "../ut-tests/stat.rs");

@@ -32,7 +32,7 @@ The analysis covers the entire crate, including feature-gated code and tests.
 | `src/publication.rs`, `src/process_domain.rs`, `src/lookup.rs`, `src/lifecycle.rs` | Directory slots, relation transaction lock, lookup and exit events/CPU totals. |
 | `src/process_group.rs`, `src/session.rs` | Group member slots, session groups and controlling terminal. |
 | `src/capability.rs`, `src/cgroup.rs`, `src/credentials.rs`, `src/job_control.rs`, `src/pidfd.rs`, `src/process_exit.rs`, `src/process_signals.rs`, `src/procfs.rs`, `src/ptrace.rs`, `src/resource_limits.rs`, `src/scheduler.rs`, `src/stat.rs`, `src/system_view.rs`, `src/timer_delivery.rs`, `src/wait_reap.rs` | Domain-specific public queries, updates, callbacks and snapshots. |
-| `src/tests.rs`, `src/process_runtime/tests_runtime_state.rs` | Process-domain and captured-MM regression cases; additional modules have inline tests. |
+| `ut-tests/lib.rs`, `ut-tests/process_runtime_runtime_state.rs` | Process-domain and captured-MM regression cases; the remaining regression modules also live in `ut-tests/`. |
 
 ```text
 TaskInner --owns user runtime--> Thread --owns--> ProcessRuntime
@@ -283,7 +283,7 @@ switch; extra task owners can delay that destruction. User cleanup must precede
 delivery and user return.
 
 Structural ownership and captured-view regressions live in
-`src/process_runtime/tests_runtime_state.rs`. Cross-crate scheduling and exec
+`ut-tests/process_runtime_runtime_state.rs`. Cross-crate scheduling and exec
 coverage lives in `core/ksyscall/src/task/tests/exit_tail.rs`.
 
 `LiveAddressSpace` captures an active MM user and the binding's heap marker under
@@ -356,3 +356,20 @@ held. Another test explicitly exits the leader before a sibling and checks that
 only the leader remains until reap. These definitions exercise real member exit
 and reap with never-run tasks; they do not execute an exec syscall or prove
 identity takeover. Their execution must be checked against this head's CI.
+
+## Kernel unit-test layout
+
+TIPC handle teardown coverage in `ut-tests/lib.rs` requires `KFEAT_TIPC=y`.
+The captured-MM cases retain their AArch64-specific ASID assertions.
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/lib.rs`: mounted by `src/lib.rs` as `tests`.
+- `ut-tests/pidfd.rs`: mounted by `src/pidfd.rs` as `pidfd_tests`.
+- `ut-tests/ptrace.rs`: mounted by `src/ptrace.rs` as `tests`.
+- `ut-tests/stat.rs`: mounted by `src/stat.rs` as `tests_stat`.
+- `ut-tests/thread_cpu_time.rs`: mounted by `src/thread/cpu_time.rs` as `tests`.
+- `ut-tests/process_runtime_runtime_state.rs`: mounted by `src/process_runtime/runtime_state.rs` as `tests`.

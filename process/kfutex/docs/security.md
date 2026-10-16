@@ -2,7 +2,7 @@
 
 ## Scope, assets, and boundaries
 
-All of `src/` is covered. Assets are waiter-list integrity (no
+All of `src/` and `ut-tests/` is covered. Assets are waiter-list integrity (no
 use-after-free of queue entries), the linearization guarantees of
 wait/wake/requeue, and kernel availability (bounded work per operation).
 Users control futex addresses, expected values, wake counts, bitsets,

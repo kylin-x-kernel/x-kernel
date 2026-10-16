@@ -3,6 +3,10 @@
 // See LICENSES for license details.
 
 //! POSIX network syscall implementations.
+//!
+//! Guest regression sources live in `ut-tests/` (cmsg, net_ioctl, opt and
+//! socket). Their original modules mount them with `unittest::path_mod_test!`;
+//! `#[def_test]` cases run through the configured `make unittest` kernel.
 
 #![no_std]
 

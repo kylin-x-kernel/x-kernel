@@ -158,7 +158,7 @@ Existing checks in [tipc tests](../../tipc/src/tests.rs) include
 `handle_table_close_detaches_handle_set_entries` and
 `handle_table_forgets_removed_handle_sets` (T-02), and
 `handle_set_is_not_sendable` (transfer restriction).
-[Process tests](../../../process/kprocess/src/tests.rs) include
+[Process tests](../../../process/kprocess/ut-tests/lib.rs) include
 `test_tipc_handles_close_before_process_exit_publication` (T-03 cleanup ordering).
 These cover the named conditions, not every race or failure above. For remaining
 controls, review the referenced lookup, command, wait, and cleanup branches

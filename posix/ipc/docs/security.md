@@ -89,8 +89,8 @@ shmat logs PID, virtual address, size and mapping flags. Trusted log access and
 provider page-reuse protections are external responsibilities; this crate does
 not redact logs or explicitly zero payload allocations on drop.
 
-Existing tests in `src/msg.rs` cover FIFO/type selection/accounting. Tests in
-`src/shm.rs` cover the bidirectional map, creator credentials, backing length and
+Existing tests in `ut-tests/msg.rs` cover FIFO/type selection/accounting. Tests in
+`ut-tests/shm.rs` cover the bidirectional map, creator credentials, backing length and
 marked-segment exit cleanup; they do not establish complete permission isolation.
 
 - Preserve copyout-before-message-removal and documented error branches.

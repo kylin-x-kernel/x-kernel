@@ -48,17 +48,4 @@ impl IoVec {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    use unittest::def_test;
-
-    use super::*;
-
-    #[def_test]
-    fn test_iovec_layout() {
-        assert_eq!(
-            core::mem::size_of::<IoVec>(),
-            core::mem::size_of::<*mut u8>() + core::mem::size_of::<isize>()
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../../ut-tests/io_iovec.rs");

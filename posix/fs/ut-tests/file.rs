@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
+// See LICENSES for license details.
+
+use alloc::sync::Arc;
+
+use super::*;
+
+#[unittest::def_test]
+fn initial_stdio_shares_read_write_console() {
+    let fs = fs_context::init_fs().lock().clone_for_process();
+    let mut fds = FdTable::default();
+    add_stdio(&mut fds, &fs).unwrap();
+    assert_eq!(fds.count(), 3);
+    let stdin = fds.get_file(0).unwrap();
+    assert!(stdin.is_stream(), "console I/O must not serialize on f_pos");
+    assert!(
+        stdin
+            .mode()
+            .contains(kvfs::FMode::READ | kvfs::FMode::WRITE)
+    );
+    for fd in [1, 2] {
+        assert!(Arc::ptr_eq(&stdin, &fds.get_file(fd).unwrap()));
+    }
+}

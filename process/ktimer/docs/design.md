@@ -138,3 +138,14 @@ Timers are created/deleted through the manager (`clear_posix_timers` on
 exec). Heap entries carry only `(deadline, pid)` and are garbage-collected
 by expiry or left harmless if stale; no explicit removal API exists.
 `ProcessTimerManager` is dropped with its owning process runtime.
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/interval_timer.rs`: mounted by `src/interval_timer.rs` as `tests`.
+- `ut-tests/posix_timer.rs`: mounted by `src/posix_timer.rs` as `tests`.
+- `ut-tests/manager.rs`: mounted by `src/manager.rs` as `tests`.

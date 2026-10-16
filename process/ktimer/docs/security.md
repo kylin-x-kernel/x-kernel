@@ -2,7 +2,7 @@
 
 ## Scope, assets, and boundaries
 
-All of `src/` is covered. Assets are timer-state consistency (deadlines in
+All of `src/` and `ut-tests/` is covered. Assets are timer-state consistency (deadlines in
 the right clock domain, overrun counts, notification generations) and the
 availability of the alarm task. The syscall layer is trusted to convert
 user ABI timespecs into validated `TimeSpan` values and to validate

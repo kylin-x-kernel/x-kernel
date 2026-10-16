@@ -101,3 +101,16 @@ split from semantic validation: the traits make copying sound, while the
 adapters keep the judgment calls (fd bounds, identity selectors such as
 negative `pid_t` values, permission checks) — this is the central design
 decision of the crate, and it is what keeps `osvm` free of ABI knowledge.
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/io_vector_buf.rs`: mounted by `src/io/vector_buf.rs` as `tests`.
+- `ut-tests/io_iovec.rs`: mounted by `src/io/iovec.rs` as `tests`.
+- `ut-tests/time_abi.rs`: mounted by `src/time/abi.rs` as `tests`.
+- `ut-tests/time_itimer.rs`: mounted by `src/time/itimer.rs` as `tests`.
+- `ut-tests/time_clock_ticks.rs`: mounted by `src/time/clock_ticks.rs` as `tests`.

@@ -369,3 +369,28 @@ Supporting host tests for the same storage algorithms requires isolating runtime
 dependencies at the existing capability and integration boundaries. Tests must
 not introduce a parallel device model, fabricate kernel linker symbols, or claim
 host-test success merely by skipping tests that cannot link.
+
+## Kernel unit-test layout
+
+The `ramdisk` and `ramdisk_static` modules require
+`KFEAT_DRIVER_RAMDISK=y` and `KFEAT_DRIVER_RAMDISK_STATIC=y`, respectively.
+For the static variant, supply the image path through `XKERNEL_RAMDISK_IMG`
+as consumed by `build.rs`. When collecting QEMU unit-test coverage from
+`disk.img`, set `KFEAT_ROOT_BLOCK="vda"` so the profile is written to the
+persistent virtio disk rather than the embedded RAM disk.
+The AHCI, BCM2835 SDHCI and SDMMC modules and their dependency declarations
+remain commented out in the current crate. Their relocated tests are preserved
+source, not registered or executed coverage; this layout migration does not
+reactivate those backends.
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/bcm2835sdhci.rs`: mounted by `src/bcm2835sdhci.rs` as `tests_bcm2835sdhci`.
+- `ut-tests/ahci.rs`: mounted by `src/ahci.rs` as `tests_ahci`.
+- `ut-tests/ramdisk.rs`: mounted by `src/ramdisk.rs` as `tests_ramdisk`.
+- `ut-tests/ramdisk_static.rs`: mounted by `src/ramdisk_static.rs` as `tests_ramdisk_static`.
+- `ut-tests/lib.rs`: mounted by `src/lib.rs` as `tests`.
+- `ut-tests/sdmmc.rs`: mounted by `src/sdmmc.rs` as `tests_sdmmc`.

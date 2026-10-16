@@ -803,34 +803,4 @@ pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> KResult<isize> {
     Ok(0)
 }
 
-#[unittest::mod_test]
-mod tests {
-    use linux_raw_sys::general::{MREMAP_DONTUNMAP, MREMAP_FIXED, MREMAP_MAYMOVE};
-    use unittest::def_test;
-
-    use super::MremapFlags;
-
-    #[def_test]
-    fn mremap_dontunmap_requires_equal_sizes() {
-        let flags = MremapFlags::from_raw(MREMAP_MAYMOVE | MREMAP_DONTUNMAP).unwrap();
-
-        assert!(flags.validate_args(0x2000, 0x3000).is_err());
-        assert!(flags.validate_args(0x2000, 0x2000).is_ok());
-    }
-
-    #[def_test]
-    fn mremap_fixed_and_dontunmap_require_maymove() {
-        assert!(
-            MremapFlags::from_raw(MREMAP_FIXED)
-                .unwrap()
-                .validate_args(0x2000, 0x2000)
-                .is_err()
-        );
-        assert!(
-            MremapFlags::from_raw(MREMAP_DONTUNMAP)
-                .unwrap()
-                .validate_args(0x2000, 0x2000)
-                .is_err()
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/mmap.rs");

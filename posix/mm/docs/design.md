@@ -249,3 +249,14 @@ This preserves the ownership split between:
 
 `brk` 在补建预映射范围或收缩范围失败时返回原 break，只有映射操作成功
 后才发布新 heap top，与超出初始范围扩展失败的既有 ABI 一致。
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/lib.rs`: mounted by `src/lib.rs` as `tests`.
+- `ut-tests/memfd.rs`: mounted by `src/memfd.rs` as `tests`.
+- `ut-tests/mmap.rs`: mounted by `src/mmap.rs` as `tests`.

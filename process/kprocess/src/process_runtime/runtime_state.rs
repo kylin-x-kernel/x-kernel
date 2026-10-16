@@ -281,7 +281,4 @@ impl Drop for ProcessRuntimeState {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("tests_runtime_state.rs");
-}
+unittest::path_mod_test!(tests, "../../ut-tests/process_runtime_runtime_state.rs");

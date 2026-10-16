@@ -149,36 +149,4 @@ impl FileOperations for PidfdFops {
     }
 }
 
-#[unittest::mod_test]
-mod pidfd_tests {
-    use unittest::def_test;
-
-    use super::*;
-    use crate::{process_exit, wait_reap};
-
-    #[def_test]
-    fn test_ioevents_constants() {
-        let events = IoEvents::IN;
-        assert!(events.contains(IoEvents::IN));
-    }
-
-    #[def_test(serial)]
-    fn test_pidfd_poll_becomes_readable_after_exit() {
-        let proc = Process::new_init(9000).fork(9001);
-        let pidfd = PidFd::new(&proc);
-
-        assert!(
-            !pidfd.poll().contains(IoEvents::IN),
-            "live process must not make pidfd readable"
-        );
-
-        process_exit::finalize_process_exit(&proc);
-
-        assert!(
-            pidfd.poll().contains(IoEvents::IN),
-            "exited zombie must make pidfd readable"
-        );
-
-        wait_reap::assert_reap_zombie_process(&proc);
-    }
-}
+unittest::path_mod_test!(pidfd_tests, "../ut-tests/pidfd.rs");

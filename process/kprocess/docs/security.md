@@ -46,6 +46,11 @@ is complete.
 
 ## Unsafe inventory
 
+Guest fixtures in `ut-tests/lib.rs` retain the raw-waker callbacks formerly
+in `src/tests.rs`. Their data pointers refer to leaked counters or observers;
+the vtables preserve that lifetime and never reclaim the pointed-to storage.
+These test-only callbacks remain outside production builds.
+
 The intrusive-list unsafe operation is in `src/process/tree.rs`,
 `Process::remove_child_slot_from_parent_locked`: `children.remove(slot)` operates
 on an intrusive list. Its SAFETY comment requires the process-domain lock to
@@ -193,8 +198,8 @@ and external syscall authorization are current limits. Resource-object or mm-ID
 availability does not prove a live fd table or active mappings. Optional TEE/TIPC
 paths require feature-specific validation.
 
-`src/tests.rs` exercises publication, PID reuse, rollback, parent/wait/exit,
-resource detach and related invariants. Inline tests cover ptrace checks, pidfd
+`ut-tests/lib.rs` exercises publication, PID reuse, rollback, parent/wait/exit,
+resource detach and related invariants. Other modules in `ut-tests/` cover ptrace checks, pidfd
 exit readiness and CPU accounting. Test source existence is not execution proof.
 
 ## Audit checklist

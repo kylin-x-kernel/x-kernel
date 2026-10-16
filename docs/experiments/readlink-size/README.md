@@ -32,7 +32,7 @@ exercise the legacy `readlink` syscall (30 assertions total).
 
 ## Validation
 
-The kernel regression tests in `posix/fs/src/namei.rs` call the real syscall
+The kernel regression tests in `posix/fs/ut-tests/namei.rs` call the real syscall
 entry with zero, negative, and minimum signed lengths and NULL user pointers.
 They check that length validation returns `InvalidInput` before user access;
 the x86_64 build also tests the legacy `readlink` entry. These tests are

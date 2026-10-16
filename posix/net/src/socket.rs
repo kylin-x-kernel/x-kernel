@@ -272,19 +272,4 @@ pub fn sys_socketpair(
     Ok(0)
 }
 
-#[unittest::mod_test]
-mod tests {
-    use unittest::{assert_eq, def_test};
-
-    use super::*;
-
-    #[def_test]
-    fn inet_raw_protocol_rejects_values_above_u8() {
-        assert_eq!(inet_raw_protocol(0).unwrap(), IpProtocol::from(0));
-        assert_eq!(inet_raw_protocol(255).unwrap(), IpProtocol::from(255));
-        assert_eq!(
-            inet_raw_protocol(256).unwrap_err(),
-            KError::from(LinuxError::EINVAL)
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/socket.rs");

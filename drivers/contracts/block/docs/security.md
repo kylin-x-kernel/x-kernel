@@ -9,6 +9,12 @@ adapters excluded from this document and audited separately; the
 registry, validation, and completion invariants below are the core's
 own.
 
+Core regression fixtures live in `ut-tests/lib.rs`; backend fixtures live
+in the corresponding `ut-tests/*.rs` files and retain the backend scope
+above. The static-ramdisk fixture's allocation and slice construction retain
+their local SAFETY contracts. AHCI, BCM2835 SDHCI and SDMMC test sources are
+currently unregistered, like their disabled backend modules.
+
 ## Trust Boundaries
 
 Driver-reported disk identity, initial capacity, logical block size, and I/O

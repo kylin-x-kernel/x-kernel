@@ -154,18 +154,4 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
         })
 }
 
-#[unittest::mod_test]
-mod tests {
-    use core::mem::size_of;
-
-    use unittest::def_test;
-
-    use super::{FIEMAP_MAX_EXTENTS, FiemapExtent, FiemapHeader};
-
-    #[def_test]
-    fn fiemap_abi_layout_matches_linux_uapi() {
-        assert_eq!(size_of::<FiemapHeader>(), 32);
-        assert_eq!(size_of::<FiemapExtent>(), 56);
-        assert_eq!(FIEMAP_MAX_EXTENTS, u32::MAX / 56);
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/ioctl.rs");

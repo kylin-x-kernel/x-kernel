@@ -69,7 +69,7 @@ and address-space facilities. They can sleep on mutexes and copy user memory;
 they must not run in interrupt context or early boot. Kernel tests can construct
 standalone queues and can construct segment backing using explicit credentials.
 A concrete queue usage sequence is `tests_msg::test_message_queue_remove_updates_accounting`
-in `src/msg.rs`: create, enqueue, remove and verify accounting.
+in `ut-tests/msg.rs`: create, enqueue, remove and verify accounting.
 
 The manager mutexes protect global indices; each queue/segment mutex protects
 its local metadata and contents. When both manager and object are needed, take
@@ -94,3 +94,13 @@ semantics are not fully checked.
 `IPC_SET` for shm replaces the user-supplied ABI structure, including fields
 normally maintained by the kernel. IPC namespaces, full Linux accounting and
 robust global ID exhaustion handling are not provided here.
+
+## Kernel unit-test layout
+
+Guest test sources live in `ut-tests/` and are mounted at their original
+module boundaries with `unittest::path_mod_test!`. They use `#[def_test]`
+and run in the configured kernel with `make unittest`, not host Cargo tests.
+The migration preserves module visibility, feature gates and execution modes.
+
+- `ut-tests/shm.rs`: mounted by `src/shm.rs` as `tests_shm`.
+- `ut-tests/msg.rs`: mounted by `src/msg.rs` as `tests_msg`.
