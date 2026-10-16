@@ -7,6 +7,11 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-shear]
+# cfg(unittest) helpers in ut-tests/test_support.rs use kcred::initial_cred;
+# cargo-shear ignores ut-tests sources, but guest UT needs a regular dependency.
+ignored = ["kcred"]
+
 [dependencies]
 anon = { workspace = true }
 karch = { workspace = true }

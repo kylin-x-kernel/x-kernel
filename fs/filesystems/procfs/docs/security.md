@@ -46,7 +46,7 @@ count can change immediately after observation and grants no admission guarantee
 ## Unsafe Inventory and Memory Safety
 
 There are no local `unsafe` blocks/functions or manual unsafe `Send`/`Sync`
-implementations in `src/`. Safety still depends on provider contracts:
+implementations in `src/` or `ut-tests/`. Safety still depends on provider contracts:
 
 - `MapsIter` retains a `LiveAddressSpace` active MM user, not merely a structural
   reference. `ProcessRuntimeState::address_space` in repository-relative

@@ -1,5 +1,8 @@
 # filemap — Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Position
 
 `filemap` is the MM-side bridge for file-backed mappings.

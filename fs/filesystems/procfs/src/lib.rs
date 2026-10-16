@@ -65,18 +65,4 @@ fn new_procfs_with_type(
     SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, root::builder)
 }
 
-#[unittest::mod_test]
-mod tests {
-    use unittest::{assert_eq, def_test};
-
-    use super::*;
-
-    #[def_test]
-    fn test_new_procfs_has_expected_name_and_flags() {
-        let fs = new_procfs(SuperBlockFlags::empty());
-
-        assert_eq!(fs.name(), "proc");
-        let stat = fs.stat().unwrap();
-        assert_eq!(stat.fs_type, 0x9fa0);
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

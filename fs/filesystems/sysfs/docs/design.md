@@ -1,5 +1,8 @@
 # sysfs — Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 Named KVFS cdev registrations use the same device-projection tree as hardware
 nodes, at `devices/virtual/<class>/<name>` with class/dev links and read-only
 identity attributes. Name, class, dev_t and availability come from the cdev
@@ -39,7 +42,7 @@ policy.
 
 ## Scope
 
-The crate currently consists of `src/lib.rs`. It owns filesystem registration,
+The production implementation is in `src/lib.rs`. It owns filesystem registration,
 the singleton superblock, device projection, dynamic tree lookup, symlink
 construction, input attributes, and user-triggered uevent files.
 

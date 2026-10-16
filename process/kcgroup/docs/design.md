@@ -1,9 +1,13 @@
 # kcgroup design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Purpose and scope
 
 `kcgroup` owns the canonical cgroup v2 hierarchy, pids controller accounting,
-and task membership. All implementation and kernel tests are in `src/lib.rs`.
+and task membership. The implementation is in `src/lib.rs`; its kernel tests
+are in `ut-tests/lib.rs`.
 `kprocess` integrates task publication, process-wide migration, and exit;
 cgroup2fs and syscall adapters provide authorization, ABI parsing, and views.
 They must not maintain parallel membership or controller state. This crate

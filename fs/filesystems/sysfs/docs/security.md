@@ -10,8 +10,8 @@ components by the cdev registration API; virtual uevent attributes are read-only
 
 ## Analysis scope
 
-This analysis covers the entire crate, which currently consists of
-`src/lib.rs`; no source module or test-only path is excluded. `kdevice` owns
+This analysis covers `src/lib.rs` and the kernel tests in `ut-tests/lib.rs`;
+no source module or test-only path is excluded. `kdevice` owns
 device-node identity, numbering, state, and ordered lifecycle callbacks;
 `kdevice-uevent` owns formatting and netlink delivery; KVFS owns filesystem
 dispatch, user-copy, mount, and permission contracts at the external

@@ -1,5 +1,8 @@
 # `mm/anon` Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 `mm/anon` owns the Linux-aligned anonymous object boundary.
 
 Current scope:

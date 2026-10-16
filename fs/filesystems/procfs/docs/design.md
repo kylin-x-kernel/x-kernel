@@ -1,5 +1,8 @@
 # procfs - Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 `/proc/devices` combines hardware topology records with snapshots of named
 KVFS cdev registrations. Virtual tty name/major values come from successful
 registrations, not hardcoded entries. Failed or removed cdevs are absent from

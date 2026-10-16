@@ -1,5 +1,9 @@
 # io/watchdog — Soft and Hard Lockup Watchdog Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+Enable `KFEAT_WATCHDOG=y` in the kernel configuration to include these tests.
+
 ## Purpose
 
 The optional `workqueue-stall-check` feature declares `WorkqueueStallCheck` through

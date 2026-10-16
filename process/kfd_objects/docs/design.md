@@ -1,5 +1,8 @@
 # kfd_objects — Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Purpose and scope
 
 This crate owns epoll, eventfd, signalfd and timerfd object state and file

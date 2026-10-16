@@ -8,6 +8,11 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-shear]
+# cfg(unittest) assertions in ut-tests/basic_nodes_root.rs use log::LevelFilter;
+# cargo-shear ignores ut-tests sources, but guest UT needs a regular dependency.
+ignored = ["log"]
+
 [features]
 default = []
 sysrq = ["ktask/snapshot"]

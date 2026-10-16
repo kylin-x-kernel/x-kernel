@@ -2,7 +2,7 @@
 
 ## Scope, trust model, and input boundaries
 
-The whole crate (`src/lib.rs`) is covered. Assets are canonical membership,
+The whole crate (`src/lib.rs` and `ut-tests/lib.rs`) is covered. Assets are canonical membership,
 stable task identities, pids quotas/counts, topology, and live-node reservations.
 Trusted kernel adapters supply child names, limit values, nodes, and task handles.
 The cgroup2fs/syscall layer must enforce mount visibility, credentials,

@@ -1,4 +1,7 @@
 # memfs — 设计文档
+
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 ## 定位
 
 `memfs` 提供纯内存文件系统的 inode 和目录树实现。普通文件内容通过

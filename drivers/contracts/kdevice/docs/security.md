@@ -4,7 +4,7 @@
 
 This analysis covers the entire `kdevice` crate: `src/lib.rs`,
 `src/bus/`, `src/device/`, `src/device_node.rs`, `src/driver/`,
-`src/lifecycle/`, `src/registry/`, and `src/topology/`. No modules are excluded; all
+`src/lifecycle/`, `src/registry/`, `src/topology/`, and `ut-tests/`. No modules are excluded; all
 state machines and locks are reachable from the lifecycle API audited
 below.
 

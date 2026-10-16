@@ -1,5 +1,9 @@
 # p9 — 设计文档
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+Enable `KFEAT_FS_9P=y` in the kernel configuration to include the `p9` tests.
+
 ## 定位
 
 `net/9p` 对应 Linux `net/9p`，拥有 transport-independent 的 9P2000.L client、fid 和

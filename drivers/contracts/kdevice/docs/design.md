@@ -1,5 +1,8 @@
 # kdevice — Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Purpose
 
 `kdevice` is x-kernel's shared device-model type crate. It provides the
