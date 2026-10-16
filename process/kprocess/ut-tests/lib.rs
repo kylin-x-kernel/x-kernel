@@ -25,7 +25,7 @@ use crate::{
     ProcessExitPublication, ProcessForkConfig, build_process_thread,
     process::INIT_PROC,
     process_exit, process_signals, procfs,
-    publication::{prepare_user_task, process_publication, task_identity_matches_thread},
+    publication::{prepare_user_task, process_publication},
     publish_user_task, scheduler, wait_reap,
 };
 
@@ -941,8 +941,8 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
 
 #[def_test(serial)]
 fn test_exit_owners_detach_before_process_exit_publication() {
-    let (proc, _task) = process_with_address_space(8_137, mapped_test_address_space());
-    let resources = proc.resources().expect("runtime must expose resources");
+    let (proc, task) = process_with_address_space(8_137, mapped_test_address_space());
+    let resources = task.as_thread().files();
     let signals = proc.signal_manager().unwrap();
 
     assert!(proc.address_space().is_ok());
@@ -958,7 +958,7 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     );
     proc.exit_signal_handlers().unwrap();
     proc.exit_mm().expect("runtime must be attached");
-    proc.exit_files().expect("runtime must be attached");
+    task.as_thread().files().exit_files();
     proc.exit_fs().expect("runtime must be attached");
     proc.exit_namespaces().expect("runtime must be attached");
 
@@ -976,7 +976,7 @@ fn test_exit_owners_detach_before_process_exit_publication() {
     assert_eq!(proc.uts_ns().err(), Some(kerrno::KError::NoSuchProcess));
 
     assert!(!proc.exit_mm().expect("owner release must be idempotent"));
-    proc.exit_files().expect("owner release must be idempotent");
+    task.as_thread().files().exit_files();
     proc.exit_fs().expect("owner release must be idempotent");
     proc.exit_namespaces()
         .expect("owner release must be idempotent");
@@ -1233,7 +1233,7 @@ fn abandoned_clone_releases_handlers_despite_retained_manager() {
 fn test_failed_fork_after_parent_files_exit_rolls_back_tree_relation() {
     let (parent, parent_task) = process_with_address_space(8_138, mapped_test_address_space());
     let child_count_before = parent.children().len();
-    parent.exit_files().expect("runtime must be attached");
+    parent_task.as_thread().files().exit_files();
 
     let err = match parent_task
         .as_thread()
@@ -1731,7 +1731,7 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
         String::from("--check"),
     ]);
     process
-        .set_exec_metadata(exe_path.clone(), cmdline.clone())
+        .set_exec_metadata(exe_path.clone(), cmdline.clone(), None)
         .expect("current process must expose mutable exec metadata");
     assert_eq!(
         process
@@ -1753,7 +1753,7 @@ fn test_current_process_mutation_helpers_preserve_process_boundary() {
         .set_heap_top(old_heap_top)
         .expect("current process must restore its previous heap top");
     process
-        .set_exec_metadata(old_exe_path, old_cmdline)
+        .set_exec_metadata(old_exe_path, old_cmdline, None)
         .expect("current process must restore its previous exec metadata");
 
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
@@ -2123,39 +2123,6 @@ fn test_publish_user_task_exposes_handle_before_activation() {
     );
 }
 
-#[def_test(serial)]
-fn test_prepare_user_task_rejects_mismatched_task_and_thread_identity() {
-    let task_number = kidentity::allocate_root_pid_handle().expect("task identity should allocate");
-    let mismatched_number =
-        kidentity::allocate_root_pid_handle().expect("mismatched identity should allocate");
-    let process = Process::new_init_with_task_number(task_number.clone());
-    let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
-    ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
-
-    let thread = build_process_thread(
-        process,
-        mismatched_number,
-        String::from("[mismatch-test]"),
-        Arc::new(vec![]),
-        Arc::new(ksync::Mutex::new(aspace)),
-        fs_context::copy_init_fs_struct(),
-        ksignal::api::SignalActions::default(),
-        initial_cred(),
-    );
-
-    let task = TaskInner::new_user(
-        || {},
-        String::from("mismatched-user-thread"),
-        task_number.clone(),
-        thread,
-    );
-    let task = prepare_task(task);
-    assert!(
-        !task_identity_matches_thread(&task),
-        "publication must reject inconsistent task/thread identities before visibility changes"
-    );
-}
-
 #[def_test(user, serial)]
 fn test_zombie_process_stays_published_until_reaped() {
     let (process, prepared) = build_prepared_test_user_task();
@@ -2320,15 +2287,53 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
         "retiring an older task must not disturb a republished live TID slot"
     );
 
+    // Membership is keyed by stable identity, so the forced-retired `first`
+    // task is still a live process member even though its TID slot was reused
+    // by `second`. Exiting `second` therefore must not be the last-member exit.
     assert!(
-        process.exit_thread(&second, 0),
-        "live reused tid owner must still be able to exit cleanly"
+        !process.exit_thread(&second, 0),
+        "an older live member must keep the process alive"
+    );
+    assert!(
+        process.exit_thread(&first, 0),
+        "the last live member must be able to exit cleanly"
     );
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = publication.unpublish_process_if_matches(&process);
     drop(first);
     drop(second);
+}
+
+#[def_test(serial)]
+fn test_exec_leader_takeover_moves_number_onto_survivor() {
+    let (process, leader_task) = build_prepared_test_user_task();
+    let published_leader = prepare_user_task(leader_task).publish().unwrap();
+    let leader = published_leader.task().clone();
+    let pid = process.pid();
+    assert_eq!(leader.as_thread().tid(), pid);
+
+    let survivor = publish_test_thread(&process, 1_175);
+    let survivor_tid = survivor.as_thread().tid();
+    assert_ne!(survivor_tid, pid);
+
+    // The `exec` sibling sweep retires the leader from the process first.
+    assert!(!process.exit_thread(&leader, 0));
+    assert_eq!(process.thread_count(), 1);
+
+    assert!(process.assume_leader_identity(&survivor));
+    assert_eq!(survivor.as_thread().tid(), pid);
+    assert!(
+        process_publication()
+            .task(pid)
+            .is_ok_and(|task| Arc::ptr_eq(&task, &survivor)),
+        "the group number must resolve to the surviving thread"
+    );
+    assert!(
+        process_publication().task(survivor_tid).is_err(),
+        "the survivor's old number entry must be gone"
+    );
+    assert_eq!(process.threads(), vec![pid]);
 }
 
 #[def_test(serial)]
@@ -2538,14 +2543,13 @@ fn process_with_tipc_handle(
 #[def_test(serial)]
 fn test_tipc_handles_close_before_process_exit_publication() {
     let handle = Arc::new(ExitObservingHandle::new());
-    let (process, _task, handle_id) = process_with_tipc_handle(8_140, handle.clone());
+    let (process, task, handle_id) = process_with_tipc_handle(8_140, handle.clone());
 
-    // Mirror the last-thread release sequence of `do_exit()`
-    // (posix/process/src/runtime.rs): mm, files, fs, and namespaces are
-    // released, then the TIPC handle table is closed, and only then is the
-    // process exit published.
+    // Check the exit publication contract of `do_exit()`: mm, files, fs,
+    // and namespaces are released before closing TIPC handles and publishing
+    // process completion.
     process.exit_mm().expect("runtime must be attached");
-    process.exit_files().expect("runtime must be attached");
+    task.as_thread().files().exit_files();
     process.exit_fs().expect("runtime must be attached");
     process.exit_namespaces().expect("runtime must be attached");
     process
@@ -2566,4 +2570,25 @@ fn test_tipc_handles_close_before_process_exit_publication() {
     assert!(handle.is_closed());
 
     wait_reap::assert_reap_zombie_process(&process);
+}
+
+#[def_test(user, serial)]
+fn task_files_unshare_preserves_siblings_and_clone_files_policy() {
+    let (process, task) = build_prepared_test_user_task();
+    let leader = task.as_thread();
+    let file = crate::PidFd::new_file(&process, kvfs::OpenFlags::READ_WRITE.bits(), initial_cred()).unwrap();
+    let fd = leader.files().add_file(1024, file.clone(), false).unwrap();
+    let sibling = leader.clone_thread_in_process().unwrap();
+    sibling.files().unshare_fd_table().unwrap();
+    sibling.files().close_file(fd).unwrap();
+    assert!(Arc::ptr_eq(&leader.files().get_file(fd).unwrap(), &file));
+    assert_eq!(sibling.files().get_file(fd).err(), Some(kerrno::KError::BadFileDescriptor));
+
+    let private = leader.prepare_thread_clone_with_files(false).unwrap().into_parts().0;
+    let shared = leader.clone_thread_in_process().unwrap();
+    shared.files().close_file(fd).unwrap();
+    assert_eq!(leader.files().get_file(fd).err(), Some(kerrno::KError::BadFileDescriptor));
+    assert!(Arc::ptr_eq(&private.files().get_file(fd).unwrap(), &file));
+    private.files().exit_files();
+    process.discard_unpublished();
 }

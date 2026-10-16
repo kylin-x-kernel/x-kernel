@@ -262,6 +262,25 @@ rejection is not a sandbox. See Linux's
 [seccomp entry points](https://github.com/torvalds/linux/blob/v6.12/kernel/seccomp.c#L2064-L2127)
 and [PR_SET_SECCOMP(2const)](https://man7.org/linux/man-pages/man2/PR_SET_SECCOMP.2const.html).
 
+`PR_SET_PDEATHSIG`/`PR_GET_PDEATHSIG` store the parent-death signal on the
+process identity.
+
+`waitid` and `execveat` share the wait and exec machinery with `wait4` and
+`execve`:
+
+- `task/wait.rs` implements `wait4`/`waitid` over one scan (the
+  `wait_reap::WaitChildSelector` built from `WaitPid`). `waitid` accepts
+  `P_ALL`/`P_PID`/`P_PGID`/`P_PIDFD`; `P_PIDFD` resolves `id` as a pidfd
+  file descriptor and waits on its target process. `WNOWAIT`/`WNOHANG`/
+  `WEXITED` are honored by the shared machinery.
+- `task/execve.rs` implements `execve`/`execveat` through a single
+  `run_exec`. `execveat` accepts `AT_EMPTY_PATH` (exec the file already
+  open on `dirfd`, e.g. a memfd) and `AT_SYMLINK_NOFOLLOW` (currently
+  treated as follow). A multi-threaded `exec`, or one whose thread is not the
+  group leader, runs `de_thread` (see `posix-process`) to replace the whole
+  thread group instead of failing; concurrent `exec` serializes on the process
+  `exec` gate.
+
 ## Non-goals
 
 `ksyscall` does not:

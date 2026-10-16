@@ -349,8 +349,9 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
    `path_mount()`；对应 Linux 的 syscall、`do_mount()` 和 `path_mount()` 分层。
 3. `path_mount()` 丢弃旧 mount magic，拒绝 `MS_NOUSER`，随后在操作分派前按本次 syscall
    捕获的 credential snapshot 校验 mount privilege（非特权调用返回 `EPERM`，对应 Linux
-   `path_mount()` 中的 `may_mount()`），并统一拒绝当前未实现
-   的 move、shared/slave/unbindable propagation 和 recursive-bind bits；随后从同一份
+   `path_mount()` 中的 `may_mount()`），并统一拒绝当前未实现的 move、shared/unbindable
+   propagation 和带挂载子树的 recursive-bind bits；`MS_PRIVATE`/`MS_SLAVE`（无共享传播
+   组，二者行为等价）与非递归 bind 受支持；随后从同一份
    `MS_*` 参数分别生成 superblock
    flags 和 per-mount `MountFlags`。remount 未显式指定
    atime 选项时保留目标 mount 当前的 atime flags；其它 user-settable per-mount flags
@@ -360,7 +361,9 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
    `reconfigure_mount()`、`remount()`、`attach_bind()` 或
    `mount_new()` 对象方法。
 5. 非递归 bind 要求非空 source，解析 source 后克隆源 mount；副本继承源 mount
-   flags，初次 `MS_BIND` 的普通 mount flags 不应用到副本。
+   flags，初次 `MS_BIND` 的普通 mount flags 不应用到副本。`MS_BIND | MS_REC` 仅在源
+   子树没有挂载时接受（此时与克隆单 mount 结果一致），否则返回 `EINVAL` 而不是静默
+   压平挂载树。
 6. 普通挂载像 Linux `do_new_mount()` 一样按 canonical type name 查询 KVFS
    `FileSystemType` 注册表，再构造包含 source、mount data、superblock flags 和 credential
    的 `FsContext`，再调用 `MntNamespace::mount_new()`。registry 和 `/proc/filesystems`
@@ -368,9 +371,16 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
 7. `mount_new()` 经类型对象的同步 `get_tree()` 进入 nodev 或
    `get_tree_bdev -> fill_super`；filesystem 解析 mount data，并把挂载后仍需保留的状态
    复制到自身 mount state，随后 VFS 把 detached mount graft 到 target。
-8. `MS_PRIVATE` 与可选的 `MS_REC` 要求 target 是 mount root。KVFS 当前不建模 shared
-   propagation group，所有 mount tree 已具有 private 语义，因此该请求作为幂等操作成功；
-   shared、slave 和 unbindable 请求仍被显式拒绝。
+8. `MS_PRIVATE`/`MS_SLAVE` 与可选的 `MS_REC` 要求 target 是 mount root；KVFS 当前不建模
+   shared propagation group，因此 slave 与 private 行为等价，两者都作为幂等操作成功（各自
+   校验非法 flags 组合）；shared 和 unbindable 请求仍被显式拒绝。
+9. `sys_pivot_root()` 解析两个路径后在 `MntNamespace::pivot_root()` 上执行 Linux
+   `do_pivot_root()` 语义（`put_old` 可与 `new_root` 重合，失败前置校验后单次更新
+   fs root 与 pwd），再按 Linux `chroot_fs_refs()` 语义遍历所有存活进程，把 root/pwd 恰为旧根
+   的 `FsStruct` 重定向到 `new_root`。
+10. `sys_umount2()` 支持 `MNT_DETACH`：经 `detach_tree()` 摘下整棵挂载子树而不做
+    busy 检查（OCI runtime 在 `pivot_root` 后用其卸载旧 root）；`MNT_FORCE`、
+    `MNT_EXPIRE`、`UMOUNT_NOFOLLOW` 仍被拒绝。
 
 ### readlink 长度 ABI
 

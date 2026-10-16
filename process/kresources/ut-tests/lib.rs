@@ -2,12 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
-
+use kfd::FdTableOwner;
 use krlimit::Rlimit;
 use unittest::def_test;
 
-use super::{FdTableOwner, ProcessResources};
+use super::{ProcessResources, TaskFiles};
 
 #[def_test]
 fn test_process_resources_default_limits() {
@@ -17,7 +16,6 @@ fn test_process_resources_default_limits() {
         resources.rlimits.read()[linux_raw_sys::general::RLIMIT_STACK].current,
         0x80000
     );
-    assert_eq!(resources.fd_table().unwrap().read().count(), 0);
 }
 
 #[def_test]
@@ -73,44 +71,40 @@ fn test_set_rlimit_rejects_invalid_or_privileged_updates() {
 
 #[def_test]
 fn test_exit_files_detaches_fd_table() {
-    let resources = ProcessResources::new(0x80000);
+    let files = TaskFiles::new(FdTableOwner::new_shared());
 
-    resources.exit_files();
+    files.exit_files();
 
-    assert_eq!(
-        resources.fd_table().err(),
-        Some(kerrno::KError::NoSuchProcess)
-    );
-    assert_eq!(
-        resources.replace_fd_table(FdTableOwner::new_shared()).err(),
-        Some(kerrno::KError::NoSuchProcess)
-    );
-    resources.exit_files();
+    assert_eq!(files.fd_table().err(), Some(kerrno::KError::NoSuchProcess));
+    assert_eq!(files.fork(true).err(), Some(kerrno::KError::NoSuchProcess));
 }
 
 #[def_test]
 fn test_duplicate_file_from_rejects_detached_owner() {
-    let resources = ProcessResources::new(0x80000);
-    resources.exit_files();
+    let files = TaskFiles::new(FdTableOwner::new_shared());
+    files.exit_files();
     assert_eq!(
-        resources.duplicate_file_from(0, 0, false),
+        files.duplicate_file_from(1024, 0, 0, false),
         Err(kerrno::KError::NoSuchProcess)
     );
 }
 
 #[def_test]
 fn test_shared_fd_table_lives_until_last_files_owner_exits() {
-    let first = ProcessResources::new(0x80000);
-    let second = ProcessResources::new(0x80000);
-    let shared = first.fork_fd_table(true).unwrap();
-    let weak = Arc::downgrade(&shared);
-    drop(second.replace_fd_table(shared).unwrap());
+    let first = TaskFiles::new(FdTableOwner::new_shared());
+    let second = first.fork(true).unwrap();
+    // A temporary reference must not count as a binding.
+    let reference = first.fd_table().unwrap();
+    let lock_owner = reference.read().lock_owner();
 
     first.exit_files();
-    assert!(weak.upgrade().is_some());
+    // The surviving binding still owns the descriptors.
+    assert_eq!(reference.read().lock_owner(), lock_owner);
+    assert!(second.fd_table().is_ok());
 
     second.exit_files();
-    assert!(weak.upgrade().is_none());
+    // The last binding drained the table even though `reference` is retained.
+    assert_eq!(reference.read().count(), 0);
 }
 
 #[def_test]
@@ -146,7 +140,8 @@ fn test_rlimit_exchange_returns_replaced_pair_and_queries_without_mutation() {
         Err(kerrno::KError::OperationNotPermitted)
     );
     unittest::assert_eq!(resources.rlimit(resource), Ok(lowered));
-    resources.exit_files();
+    // The files owner is per-task now; detaching it must not affect the limits.
+    TaskFiles::new(FdTableOwner::new_shared()).exit_files();
     unittest::assert_eq!(
         resources.update_rlimit_and_get_old(resource, None),
         Ok(lowered)
@@ -185,24 +180,19 @@ fn test_rlimit_exchange_rejects_invalid_updates_without_mutation() {
 
 #[def_test]
 fn temporary_table_references_do_not_force_unshare() {
-    let resources = ProcessResources::new(0x80000);
-    let table = resources.fd_table().unwrap();
-    resources.unshare_fd_table().unwrap();
+    let files = TaskFiles::new(FdTableOwner::new_shared());
+    let table = files.fd_table().unwrap();
+    files.unshare_fd_table().unwrap();
     assert_eq!(
         table.read().lock_owner(),
-        resources.fd_table().unwrap().read().lock_owner()
+        files.fd_table().unwrap().read().lock_owner()
     );
 }
 
 #[def_test]
 fn shared_bindings_still_copy_on_unshare() {
-    let first = ProcessResources::new(0x80000);
-    let second = ProcessResources::new(0x80000);
-    drop(
-        second
-            .replace_fd_table(first.fork_fd_table(true).unwrap())
-            .unwrap(),
-    );
+    let first = TaskFiles::new(FdTableOwner::new_shared());
+    let second = first.fork(true).unwrap();
     let old_table = first.fd_table().unwrap();
     second.unshare_fd_table().unwrap();
     assert_eq!(

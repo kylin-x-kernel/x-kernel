@@ -446,7 +446,9 @@ VFS 采用 Linux directory-locking ownership model：
 - unlink 和 rmdir 先锁父目录，再锁 victim inode；
 - link 先锁新父目录，再锁非目录 source inode；
 - same-directory rename 按 parent dentry identity 判定并只锁一次父目录；
-- cross-directory rename 先获取 superblock topology mutex，再按拓扑顺序锁父目录。
+- cross-directory rename 先获取 superblock topology mutex，再按拓扑顺序锁父目录。无祖先关系
+  时改用 `Dentry::namespace_lock_key()`（祖先 inode 指针链，再按指针）定序；`pivot_root`
+  的多个 inode 取锁使用同一规则。rename 的 participant inode 是其后的独立阶段，不属该全序。
 
 Slow lookup 对应 Linux `d_alloc_parallel()`：cache miss 的任务建立唯一 hashed negative
 dentry，设置 parallel-lookup 状态并持有该 dentry 的 lookup mutex 后调用 filesystem
@@ -619,6 +621,25 @@ topology；清理和最终 flush 仍继续执行。
 卸载在 parent mountpoint 的 inode namespace lock 下移除 parent child 索引、恢复被覆盖的
 mount，并清空 detached mount 的 parent location，使仍持有该 mount 的打开路径不能沿旧
 parent 返回已经离开的 namespace。
+
+`MntNamespace::pivot_root()`（`pivot_root(2)` 语义）把 namespace 的可见 root 换成
+`new_root` 指向的已注册 mount，并把原可见 root 挂载到 `put_old`（OCI runtime 随后以
+`umount2(MNT_DETACH)` 摘除）。要求：`new_root` 是已注册 mount 根、`put_old` 是目录且
+位于 `new_root` 子树内——允许 `put_old == new_root`（runc 的 `pivot_root(".", ".")`
+路径），`put_old` 被其他挂载覆盖时保留被覆盖层。手术在 registry mutex + 受影响 inode 的 namespace 写锁
+（按 `Dentry::namespace_lock_key()` 的全序、按 Arc 去重）下执行，并在持锁后就绪地复查旧可见
+root 仍挂在其自身 parent mountpoint（读栈可能早于取锁），不满足则返回错误而不是断言：先把 `new_root` 从原位置摘除并恢复其覆盖
+层，使其压栈到 namespace 的 structural root 之上，再把原可见 root 从其被 `new_root` 覆盖的
+位置取出（其自身覆盖链仍随后续 root 保留，对应 Linux 的 stack-preserving move），最后把
+原 root 挂到 `put_old`。所有可失败校验在首次修改前完成，保证失败的 pivot 不留下半编辑的
+树。`mount_edge_detach` 是共享的单边摘除原语（恢复 covers/删除 child 索引 + 清空
+location），供 pivot 与后续 MS_MOVE 复用。
+
+`MntNamespace::make_mount_private()`/`make_mount_slave()` 记录一次性传播属性。KVFS 尚无
+共享传播组，因此 slave 与 private 行为等价：没有共享 master 时 slave 不接收任何传播事件。
+两者各自校验调用（`MS_PRIVATE`/`MS_SLAVE` 可带 `MS_REC`/`MS_SILENT`，其余组合返回
+`EINVAL`），防止把非法 flags 静默吃掉。递归 bind（`MS_BIND | MS_REC`）仅在源子树挂载数为
+零时接受——此时与克隆单 mount 的结果一致；否则返回 `EINVAL` 而不是静默压平挂载树。
 
 ### pathname 与打开文件
 

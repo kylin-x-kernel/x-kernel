@@ -108,7 +108,7 @@ pub fn handle_net_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<Option<isize>>
 
     // Resolve the descriptor before command-specific handling so invalid
     // descriptors and non-socket files retain their distinct error paths.
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     if sock_from_file(&file).is_err() {
         return Err(KError::NotATty);
     }

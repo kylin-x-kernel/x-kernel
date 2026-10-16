@@ -7,8 +7,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult};
+use kidentity::TaskIdentityToken;
 use kspin::SpinNoIrq;
 use ktask::{KtaskRef, WeakKtaskRef};
 
@@ -16,24 +18,28 @@ use super::Process;
 use crate::{AsThread, Tid, process_domain, publication::process_publication};
 
 /// Published tasks and unreleased group-leader membership tracked per process.
+///
+/// Members are keyed by the task's stable [`TaskIdentityToken`], not by its
+/// current TID, so an `exec` leader takeover that moves a number does not have
+/// to re-index or migrate membership.
 #[derive(Default)]
 pub(super) struct ThreadMembership {
-    members: BTreeMap<Tid, Arc<ThreadMemberSlot>>,
+    members: BTreeMap<TaskIdentityToken, Arc<ThreadMemberSlot>>,
 }
 
 impl ThreadMembership {
-    pub(super) fn reserve_slot(&mut self, tid: Tid) -> Arc<ThreadMemberSlot> {
+    pub(super) fn reserve_slot(&mut self, token: TaskIdentityToken) -> Arc<ThreadMemberSlot> {
         // Runtime kidentity allocation is monotonic and checked: numbers are
         // never recycled on exit/drop or wrapped at exhaustion. Fixed-number
         // replacement fixtures exercise stale identity guards, not allocation.
         self.members
-            .entry(tid)
+            .entry(token)
             .or_insert_with(|| Arc::new(ThreadMemberSlot::new()))
             .clone()
     }
 
     fn exit_task(&mut self, task: &KtaskRef, is_leader: bool) {
-        if let Some(slot) = self.members.get(&task.as_thread().tid()) {
+        if let Some(slot) = self.members.get(&task.as_thread().identity_token()) {
             slot.exit_task(task, is_leader);
         }
         self.prune_stale();
@@ -56,8 +62,9 @@ impl ThreadMembership {
 
     fn thread_ids(&self) -> Vec<Tid> {
         self.members
-            .iter()
-            .filter_map(|(tid, slot)| slot.snapshot().map(|_| *tid))
+            .values()
+            .filter_map(|slot| slot.snapshot())
+            .map(|task| task.as_thread().tid())
             .collect()
     }
 
@@ -77,8 +84,9 @@ impl ThreadMembership {
 
     fn contains_published_tid(&self, tid: Tid) -> bool {
         self.members
-            .get(&tid)
-            .is_some_and(|slot| slot.snapshot().is_some())
+            .values()
+            .filter_map(|slot| slot.snapshot())
+            .any(|task| task.as_thread().tid() == tid)
     }
 
     fn representative_task(&self) -> KResult<KtaskRef> {
@@ -165,8 +173,40 @@ impl ThreadMemberSlot {
 }
 
 impl Process {
-    pub(crate) fn reserve_thread_member_slot(&self, tid: Tid) -> Arc<ThreadMemberSlot> {
-        self.thread_membership.lock().reserve_slot(tid)
+    pub(crate) fn reserve_thread_member_slot(
+        &self,
+        token: TaskIdentityToken,
+    ) -> Arc<ThreadMemberSlot> {
+        self.thread_membership.lock().reserve_slot(token)
+    }
+
+    /// Moves the thread-group identity onto `task` after a non-leader `exec`.
+    ///
+    /// `task` must be the process's sole surviving published thread. The number
+    /// directory entry moves once and the thread adopts the group number;
+    /// membership and cgroup key on the stable identity and need no change.
+    /// Signal routing still keys threads by number, so its registry entry is
+    /// re-keyed here. Call in sleepable context, before the new image is
+    /// installed; returns `false` when the precondition or directory move fails.
+    pub fn assume_leader_identity(&self, task: &KtaskRef) -> bool {
+        let thread = task.as_thread();
+        let old_tid = thread.tid();
+        let pid = self.pid();
+        // Verify the sole-survivor invariant for the leader case too, so a
+        // sibling published during the sweep is refused instead of being left
+        // running against the old address space.
+        if self.thread_count() != 1 || !self.contains_published_tid(old_tid) {
+            return false;
+        }
+        if old_tid == pid {
+            return true;
+        }
+        if !process_publication().move_task_number(task, old_tid, pid) {
+            return false;
+        }
+        thread.adopt_task_number(self.leader_task_number.clone());
+        thread.signal_manager().rebind_after_exec(pid);
+        true
     }
 
     /// Publishes a thread task into this [`Process`]'s membership table.
@@ -210,7 +250,10 @@ impl Process {
         let tid = task.as_thread().tid();
         {
             let mut group_exit = self.group_exit.lock();
-            if !group_exit.group_exited {
+            // A `de_thread` sweep target dies of the execing thread's SIGKILL,
+            // not of its own exit status, so it must not become the process exit
+            // code.
+            if !group_exit.group_exited && !task.as_thread().is_exec_sweep_target() {
                 group_exit.exit_code = exit_code;
             }
         }
@@ -220,6 +263,9 @@ impl Process {
             // Check the real boundary, including direct kprocess test callers.
             #[cfg(unittest)]
             assert!(task.as_thread().has_exit_address_space());
+            // Signal eligibility ends with live membership, not with the last
+            // external reference to the exiting task or a later sibling exec.
+            task.as_thread().signal_manager().exit();
             thread_membership.exit_task(task, tid == self.pid());
             thread_membership.has_no_published_tasks()
         };
@@ -276,6 +322,19 @@ impl Process {
     /// Marks the [`Process`] as group exited.
     pub(crate) fn group_exit(&self) {
         self.group_exit.lock().group_exited = true;
+    }
+
+    /// The parent-death signal recorded by `prctl(PR_SET_PDEATHSIG)` — the
+    /// signal this process should receive when its parent dies first. Zero
+    /// when unset. Storage only: the parent-exit delivery path is not wired
+    /// up yet (see `core/ksyscall/docs/security.md`).
+    pub fn pdeath_signal(&self) -> u32 {
+        self.pdeath_signal.load(Ordering::Relaxed)
+    }
+
+    /// Records the parent-death signal for this process.
+    pub fn set_pdeath_signal(&self, signo: u32) {
+        self.pdeath_signal.store(signo, Ordering::Relaxed);
     }
 
     /// The exit code of the [`Process`].

@@ -28,7 +28,7 @@ fn failed_reservation_does_not_leak_a_charge() {
     let membership = group
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(1))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
     assert_eq!(
         group.reserve_task().err(),
@@ -49,7 +49,7 @@ fn migration_ignores_target_limit_and_transfers_charge() {
     let membership = source
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(7))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
     membership.migrate(&target).unwrap();
     assert_eq!(source.pids_current(), Ok(0));
@@ -63,12 +63,12 @@ fn lowering_limit_below_current_is_allowed() {
     let _first = group
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(1))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
     let _second = group
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(2))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
     group.set_pids_max(Some(1)).unwrap();
     assert_eq!(group.pids_current(), Ok(2));
@@ -155,21 +155,17 @@ fn namespace_path_rejects_another_hierarchy() {
 #[def_test]
 fn duplicate_identity_commit_preserves_membership_and_rolls_back_charge() {
     let (root, group) = make_pids_group("duplicate");
-    let identity = kidentity::PidHandle::fixed_root(42);
-    let membership = group
-        .reserve_task()
-        .unwrap()
-        .commit(identity.clone())
-        .unwrap();
+    let token = kidentity::TaskIdentityToken::allocate();
+    let membership = group.reserve_task().unwrap().commit(token).unwrap();
 
     assert_eq!(
-        group.reserve_task().unwrap().commit(identity.clone()).err(),
+        group.reserve_task().unwrap().commit(token).err(),
         Some(KError::from(LinuxError::EEXIST))
     );
     assert_eq!(group.pids_current(), Ok(1));
     let members = group.member_tasks();
     assert_eq!(members.len(), 1);
-    assert!(Arc::ptr_eq(&members[0], &identity));
+    assert_eq!(members[0], token);
     assert_eq!(
         root.remove_child("duplicate"),
         Err(KError::from(LinuxError::EBUSY))
@@ -181,33 +177,17 @@ fn duplicate_identity_commit_preserves_membership_and_rolls_back_charge() {
 }
 
 #[def_test]
-fn reused_numeric_projection_keeps_distinct_stable_identities() {
+fn distinct_identity_tokens_keep_distinct_memberships() {
     let (_root, group) = make_pids_group("reused");
-    let first_identity = kidentity::PidHandle::fixed_root(43);
-    let second_identity = kidentity::PidHandle::fixed_root(43);
-    let first = group
-        .reserve_task()
-        .unwrap()
-        .commit(first_identity.clone())
-        .unwrap();
-    let second = group
-        .reserve_task()
-        .unwrap()
-        .commit(second_identity.clone())
-        .unwrap();
+    let first_token = kidentity::TaskIdentityToken::allocate();
+    let second_token = kidentity::TaskIdentityToken::allocate();
+    let first = group.reserve_task().unwrap().commit(first_token).unwrap();
+    let second = group.reserve_task().unwrap().commit(second_token).unwrap();
 
     let members = group.member_tasks();
     assert_eq!(members.len(), 2);
-    assert!(
-        members
-            .iter()
-            .any(|member| Arc::ptr_eq(member, &first_identity))
-    );
-    assert!(
-        members
-            .iter()
-            .any(|member| Arc::ptr_eq(member, &second_identity))
-    );
+    assert!(members.contains(&first_token));
+    assert!(members.contains(&second_token));
 
     drop(first);
     drop(second);
@@ -224,17 +204,14 @@ fn removed_cgroup_rejects_reservation_and_migration() {
         removed.reserve_task().err(),
         Some(KError::from(LinuxError::ENOENT))
     );
-    let membership = root
-        .reserve_task()
-        .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(9))
-        .unwrap();
+    let token = kidentity::TaskIdentityToken::allocate();
+    let membership = root.reserve_task().unwrap().commit(token).unwrap();
     assert_eq!(
         membership.migrate(&removed).err(),
         Some(KError::from(LinuxError::ENOENT))
     );
     assert!(Arc::ptr_eq(&membership.cgroup().unwrap(), &root));
-    assert_eq!(root.member_tasks()[0].root_nr(), 9);
+    assert!(root.member_tasks().contains(&token));
     assert!(!removed.has_pids_controller());
 }
 
@@ -245,7 +222,7 @@ fn failed_busy_removal_keeps_cgroup_active() {
     let membership = child
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(10))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
 
     assert_eq!(
@@ -262,7 +239,7 @@ fn detached_membership_is_observable_without_panicking() {
     let membership = group
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(11))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
 
     membership.detach();
@@ -287,7 +264,7 @@ fn subtree_control_activates_controller_for_direct_children() {
     let membership = child
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(12))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
 
     root.set_pids_subtree_enabled(true).unwrap();
@@ -303,7 +280,7 @@ fn non_root_internal_process_blocks_controller_delegation() {
     let _membership = child
         .reserve_task()
         .unwrap()
-        .commit(kidentity::PidHandle::fixed_root(13))
+        .commit(kidentity::TaskIdentityToken::allocate())
         .unwrap();
 
     assert_eq!(

@@ -411,6 +411,12 @@ waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清�
 
 ### Buffered read 与预读发布
 
+- mount 传播只覆盖 `MS_PRIVATE`/`MS_SLAVE`（无共享传播组，二者行为等价）与非递归
+  bind；`MS_SHARED`/`MS_UNBINDABLE` 及递归 bind 挂载子树的复制仍返回 `EINVAL`，
+  不静默压平挂载树。递归 bind 仅在源子树无挂载时接受，此时与非递归结果一致。
+
+### Buffered read 窗口提示的有效性
+
 批次引用只保活分配，不证明驻留或初始化；页锁内拒绝失效及非 uptodate 候选，
 回退普通查询和初始化。复制仍在页锁内按当前 EOF 限长，短复制立即停止。
 
@@ -443,6 +449,13 @@ waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清�
 - pipe private data 是否只保存 `PipeObject`，方向和 HUP snapshot 是否分别只来自
   `f_mode` 与 `pipe_generation`。
 - FIFO poll 注册是否按 file mode 选择 wait queue，而不是按用户 event mask。
+- 匿名对象（pipe 等）的 inode 是否使用 `metadata_only_inode_operations`，使
+  `fchown`/`fchmod` 的 owner/mode 更新在 KVFS 驻留 inode 上发布而不是被 `EOPNOTSUPP`
+  拒绝。
+- pivot_root 是否在任何 mutation 前完成全部可失败校验（new_root 为注册 mount 根、
+  put_old 可从 new_root 到达且不在当前 root 文件系统内、`put_old` 为目录），
+  在全部 inode namespace 锁（按 `namespace_lock_key` 全序、Arc 去重）就绪后
+  复查旧 root 仍挂在其自身 parent mountpoint，再改变拓扑。
 - pathname FIFO 时间更新是否只在一次成功的对外 I/O 后经 VFS policy 执行。
 - xattr raw flags 是否先转换为 `XattrSetFlags`，set/remove 是否检查只读 mount 并持有
   inode data lock，`trusted.*` 是否对非特权 list/get 隐藏名称和存在性，`security.*`

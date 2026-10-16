@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
+
 use kcpu_id_map::LogicalCpuId;
 use ktask::{TaskInner, UserTaskRuntime};
 
@@ -23,6 +25,18 @@ pub trait AsThread {
 }
 
 impl UserTaskRuntime for Thread {
+    fn task_number(&self) -> Arc<kidentity::PidHandle> {
+        Thread::task_number(self)
+    }
+
+    fn tid(&self) -> u32 {
+        Thread::tid(self)
+    }
+
+    fn identity_token(&self) -> kidentity::TaskIdentityToken {
+        Thread::identity_token(self)
+    }
+
     fn on_enter(&self) {
         // Exit cleanup can block after the final CPU time was published.
         if !self.is_exiting() {

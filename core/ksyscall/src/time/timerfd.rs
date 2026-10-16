@@ -37,7 +37,7 @@ pub(crate) fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
         kprocess::current_cred(),
     )?;
 
-    kprocess::current_resources()
+    kprocess::current_files()
         .add_file(file, flags & TFD_CLOEXEC != 0)
         .map(|fd| fd as _)
 }
@@ -62,7 +62,7 @@ pub(crate) fn sys_timerfd_settime(
     let value = new.it_value.try_into_time_span()?;
     let interval = new.it_interval.try_into_time_span()?;
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let tfd = TimerFd::from_file(&file)?;
     let (old_interval, old_remaining) = tfd.settime(absolute, value, interval)?;
 
@@ -80,7 +80,7 @@ pub(crate) fn sys_timerfd_settime(
 pub(crate) fn sys_timerfd_gettime(fd: i32, curr_value: UserPtr<itimerspec>) -> KResult<isize> {
     debug!("sys_timerfd_gettime <= fd: {fd}");
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let tfd = TimerFd::from_file(&file)?;
     let (interval, remaining) = tfd.gettime();
 

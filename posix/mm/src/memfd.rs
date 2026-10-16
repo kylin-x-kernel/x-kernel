@@ -7,7 +7,6 @@
 use core::ffi::c_char;
 
 use kerrno::{KError, KResult};
-use kprocess::current_user_process;
 use linux_raw_sys::general::{MFD_ALLOW_SEALING, MFD_CLOEXEC};
 use memfs::shmem::create_memfd_file;
 use posix_types::UserConstPtr;
@@ -52,8 +51,7 @@ pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> KResult<isize
         cred.clone(),
     )?
     .into_file(cred)?;
-    current_user_process()
-        .resources()?
+    kprocess::current_files()
         .add_file(file, flags.is_cloexec())
         .map(|fd| fd as _)
 }

@@ -2,7 +2,7 @@
 
 ## Scope, trust model, and external boundaries
 
-This analysis covers all of `src/lib.rs`. Assets are attached file handles,
+This analysis covers `src/lib.rs` and `src/files.rs`. Assets are attached file handles,
 open-file references, and soft/hard resource-limit pairs. Trusted kernel callers
 supply already resolved `Arc<VfsFile>` objects and integer descriptors; POSIX
 adapters own user-pointer copying, process-access authorization, and ABI parsing.
@@ -20,10 +20,15 @@ escape from those checks and must preserve them.
 ## Thread safety
 
 Owner, descriptor table, and limits use `ksync::RwLock`. Their nesting order is
-owner -> table -> limits on insertion. Close callbacks run after releasing these
+owner -> table; callers snapshot the limit before insertion. Close callbacks run after releasing these
 locks. External callbacks must not be invoked while manually holding a table
 lock if they can acquire that table again. Detached snapshots are valid objects,
-but no longer prove membership in the process's table.
+but no longer prove membership in the task's table.
+
+Each thread owns a distinct binding. Unshare replaces only that binding, so a
+sibling retains its descriptor-table owner. Removal holds the
+binding read guard through table mutation and pins the table across callbacks;
+concurrent detach cannot redirect the operation to a stale table.
 
 For `Some` updates, limit validation, old-value capture and replacement use one
 limits write guard. Concurrent updating callers therefore receive the pair
@@ -39,7 +44,7 @@ boundary. Failure returns no old value and leaves the stored pair intact.
 |---|---|---|---|---|
 | T-01 | Unauthorized hard-limit increase | High | A caller supplies a larger maximum | `set_rlimit` returns `OperationNotPermitted`; direct public lock access remains trusted and capability-based increases are unsupported. |
 | T-02 | Descriptor exhaustion | Medium | Repeated file insertion | `add_file` and `duplicate_file_from` pass the soft limit to the same lowest-free slot allocator in `FdTable`. Both bound the new FD number by that limit and capacity. Fixed-slot duplication only checks capacity, so syscall-level policy remains a caller obligation. |
-| T-03 | Access after process files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; temporary table references preserve storage but do not delay descriptor cleanup; snapshots of individual files remain usable. |
+| T-03 | Access after task files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; temporary table references preserve storage but do not delay descriptor cleanup; snapshots of individual files remain usable. |
 | T-04 | Reentrant filesystem deadlock | Medium | A close callback reacquires process resources | Removal precedes close and releases owner/table locks; callers of raw table APIs must preserve this ordering. |
 | T-05 | Stale old limit returned after concurrent replacement | Medium | A caller composes separate snapshot and setter operations | `update_rlimit_and_get_old` performs validation, snapshot and replacement under one write guard; standalone reads followed by setters remain separate operations. |
 

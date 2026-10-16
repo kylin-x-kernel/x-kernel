@@ -88,6 +88,8 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-11 | `riscv_hwprobe` consumes unvalidated user cpusets/pairs | Medium | bad pointers, oversized masks or pair counts causing huge kernel allocations (DoS) or corrupt ABI results | Pairs stream one by one (`read_vm`/`write_vm`, no bulk `Vec` allocation; an oversized `pair_count` only walks into unmapped pages and returns `EFAULT`); `cpusetsize` is clamped to `cpumask_size()` on both load and write; non-`0`/`WHICH_CPUS` `flags` return `EINVAL`; in value mode an empty intersection of the user cpuset with online CPUs returns `EINVAL`; `cpus == NULL && cpusetsize != 0` returns `EFAULT`; in WHICH_CPUS mode an empty cpuset means all online CPUs, unknown keys write `key=-1,value=0` and clear the output cpuset; key semantics live in the `kcpu` hwprobe helper |
 | T-12 | Syscall hot path reads unreliable RISC-V hardware state | Medium | S-mode reads of M-mode CSRs faulting, or capability divergence across CPUs | The source of truth is the FDT-initialized snapshot in `kcpu`; `ksyscall` only aggregates over the selected CPU mask |
 | T-13 | `get_robust_list` leaks another process's user addresses | High | target resolution | After resolving the target thread, `kprocess::ptrace::check_read_real_creds_access()` applies the uniform policy: same-thread-group exemption, asymmetric matching of caller real UID/GID against target real/effective/saved IDs, and the euid-0 approximation of `CAP_SYS_PTRACE`; otherwise `EPERM` |
+| T-14 | `waitid` copies signals across a raw `siginfo_t`-shaped buffer | Medium | `waitid(P_PID, ...)` status reporting | `siginfo_t` is registered as `posix_types::UserWrite` and written via `write_vm`; the payload is built by `ksignal::ChildExitSignalInfo`, the same source used for real SIGCHLD delivery |
+| T-15 | `execveat(AT_EMPTY_PATH)` execs an fd the caller cannot name | Medium | runc/crun self-reexec from a sealed memfd | The fd must reference an already-open file the caller owns; the image still goes through `kexec`'s execute-permission and ELF validation, and the resulting `/proc/self/exe` follows to the same opened backing file |
 
 ## Signal-wait reliability
 
@@ -133,6 +135,15 @@ registered wakeups rather than polling or a timer.
   credential reset and refuse elevation instead of silently dropping the
   guarantee.
 
+- `PR_SET_PDEATHSIG` records the signal on the process identity but does not
+  yet deliver it at parent-death reparenting, and — unlike Linux — does not
+  clear it when an exec changes the credentials.
+- `waitid` validates the option set and reports exits only: `WSTOPPED`/
+  `WCONTINUED` are accepted but stop/continue reports are not produced,
+  `rusage` is not populated, a `P_PIDFD` wait keys on the pid recorded when
+  the descriptor was created (pid reuse after close is not detected), and
+  pidfd `O_NONBLOCK` is not honored as `WNOHANG`.
+
 ## Audit checklist
 
 - After MM exchange, keep all fallible installation and process-update work
@@ -156,6 +167,10 @@ registered wakeups rather than polling or a timer.
   an owner state machine?
 - Is a new adapter placed near its owner rather than in a historical
   catch-all directory?
+- Is `waitid`'s `P_PIDFD` path resolving the fd through
+  `PidFd::from_file` (a downcast, not a raw `fd as pid`) before waiting?
+- Does `execveat(AT_EMPTY_PATH)` reuse an fd the caller already holds, and
+  does the resulting `exe_file` stay identical to the opened file?
 - Do all user-pointer accesses go through the existing wrapper types?
 - When merging similar syscall paths, are the per-ABI argument counts and
   flags respected separately?

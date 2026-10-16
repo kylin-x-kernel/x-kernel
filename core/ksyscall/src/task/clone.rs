@@ -233,7 +233,8 @@ impl CloneRequest {
         let curr = current();
         let current_thread = current_user_thread();
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
-            current_thread.prepare_thread_clone()?
+            current_thread
+                .prepare_thread_clone_with_files(self.flags.contains(CloneFlags::FILES))?
         } else {
             let exit_signal = Self::parse_exit_signal(self.exit_signal)?;
             current_thread.prepare_process_fork(ProcessForkConfig {
@@ -291,7 +292,7 @@ impl CloneRequest {
 
         let pidfd_install = if self.flags.contains(CloneFlags::PIDFD) {
             let pidfd_file = PidFd::new_file(&child_process, O_RDWR, kprocess::current_cred())?;
-            let resources = kprocess::current_resources();
+            let resources = kprocess::current_files();
             let fd = resources.add_file(pidfd_file, true)?;
             Some((resources, fd))
         } else {

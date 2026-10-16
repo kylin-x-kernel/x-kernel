@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
@@ -156,9 +156,21 @@ impl SchedulerState {
 
 /// Task-bound user-thread state, credentials, signals and shared process runtime.
 pub struct Thread {
-    task_number: Arc<kidentity::PidHandle>,
+    /// Stable identity token, allocated once and unchanged across an `exec`
+    /// leader takeover. Registries that must not be re-indexed when the number
+    /// moves (thread membership, cgroup membership) key on this token.
+    identity_token: kidentity::TaskIdentityToken,
+    /// Current number binding for this thread. It is stable for the task's life
+    /// except for an `exec` leader takeover, which moves the thread-group
+    /// number onto the surviving thread; registries key on the task object, not
+    /// on this number.
+    task_number: SpinNoIrq<Arc<kidentity::PidHandle>>,
+    /// Lock-free snapshot of the current numeric TID, kept in step with
+    /// `task_number` by the same critical section that moves it.
+    tid: AtomicU32,
     process: Arc<Process>,
     runtime: Arc<ProcessRuntime>,
+    files: kresources::TaskFiles,
     // Installed once before membership retirement; released only with Thread.
     exit_address_space: SpinNoIrq<Option<ExitAddressSpace>>,
     real_cred: RwLock<Arc<Cred>>,
@@ -170,6 +182,12 @@ pub struct Thread {
     nice: AtomicI32,
     scheduler: Mutex<SchedulerState>,
     is_exiting: AtomicBool,
+    /// Set while this thread is a `de_thread` sibling-sweep target.
+    ///
+    /// Its fatal-signal death must not mark the whole group exited or broadcast
+    /// a group kill; the execing thread orchestrates the sweep and must survive
+    /// it. See `exec_de_thread`.
+    exec_sweep_target: AtomicBool,
     accessing_user_memory: AtomicBool,
     pub(super) restart_block: Mutex<RestartSlot>,
     no_new_privileges: AtomicBool,
@@ -179,6 +197,25 @@ pub struct Thread {
 }
 
 impl Thread {
+    /// Returns this task's descriptor-table binding.
+    pub fn files(&self) -> &kresources::TaskFiles {
+        &self.files
+    }
+
+    /// Applies the caller's files transition and process-shared post-exec update.
+    ///
+    /// Unsharing first keeps close-on-exec from changing another task's files
+    /// or closing that table's descriptors. Call after retiring sibling threads.
+    ///
+    /// # Errors
+    /// Forwards detached-files and process-update errors. The caller must treat
+    /// failure after image commit as fatal; this operation does not roll back.
+    pub fn apply_exec_update(&self, update: crate::ProcessExecUpdate) -> KResult<()> {
+        self.files.unshare_fd_table()?;
+        self.files.close_cloexec_files()?;
+        self.process.apply_exec_update(update)
+    }
+
     /// Creates a new [`Thread`].
     pub(crate) fn new(
         process: Arc<Process>,
@@ -193,8 +230,16 @@ impl Thread {
             .root()
             .reserve_task()
             .expect("initial process must fit in the root cgroup");
-        Self::new_with_charge(process, runtime, task_number, cred, charge, false)
-            .expect("initial task identity must be unique")
+        Self::new_with_charge(
+            process,
+            runtime,
+            task_number,
+            cred,
+            charge,
+            false,
+            kresources::TaskFiles::new_shared(),
+        )
+        .expect("initial task identity must be unique")
     }
 
     fn new_with_charge(
@@ -204,14 +249,19 @@ impl Thread {
         cred: Arc<Cred>,
         charge: TaskCharge,
         no_new_privileges: bool,
+        files: kresources::TaskFiles,
     ) -> KResult<Box<Self>> {
         let tid = task_number.root_nr();
-        let cgroup = charge.commit(task_number.clone())?;
+        let identity_token = kidentity::TaskIdentityToken::allocate();
+        let cgroup = charge.commit(identity_token)?;
         Ok(Box::new(Thread {
-            task_number,
+            identity_token,
+            task_number: SpinNoIrq::new(task_number),
+            tid: AtomicU32::new(tid),
             signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
             process,
             runtime,
+            files,
             exit_address_space: SpinNoIrq::new(None),
             real_cred: RwLock::new(cred.clone()),
             cred: RwLock::new(cred),
@@ -221,6 +271,7 @@ impl Thread {
             nice: AtomicI32::new(NiceValue::default().as_i32()),
             scheduler: Mutex::new(SchedulerState::default()),
             is_exiting: AtomicBool::new(false),
+            exec_sweep_target: AtomicBool::new(false),
             accessing_user_memory: AtomicBool::new(false),
             restart_block: Mutex::new(RestartSlot::empty()),
             no_new_privileges: AtomicBool::new(no_new_privileges),
@@ -255,6 +306,9 @@ impl Thread {
     pub fn prepare_process_fork(&self, config: ProcessForkConfig) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
+        let files = self
+            .files
+            .fork(matches!(config.fd_table, crate::ForkFdTable::Shared))?;
         let (process_runtime, task_number) = fork_process_runtime(&self.process_runtime(), config)?;
         let thread = Self::new_with_charge(
             process_runtime.process().clone(),
@@ -263,6 +317,7 @@ impl Thread {
             self.subjective_cred(),
             charge,
             self.no_new_privileges(),
+            files,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
         Ok(PreparedUserClone {
@@ -290,6 +345,14 @@ impl Thread {
     /// Forwards cgroup reservation/commit and root thread-identity allocation
     /// errors. The sibling shares its process runtime and is not activated.
     pub fn prepare_thread_clone(&self) -> KResult<PreparedUserClone> {
+        self.prepare_thread_clone_with_files(true)
+    }
+
+    /// Prepares a sibling, sharing the table only when `CLONE_FILES` is set.
+    ///
+    /// # Errors
+    /// Forwards clone preparation and detached-files errors.
+    pub fn prepare_thread_clone_with_files(&self, is_shared: bool) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
         let task_number = allocate_thread_task_number()?;
@@ -300,6 +363,7 @@ impl Thread {
             self.subjective_cred(),
             charge,
             self.no_new_privileges(),
+            self.files.fork(is_shared)?,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
         Ok(PreparedUserClone {
@@ -310,7 +374,7 @@ impl Thread {
 
     /// Returns the user-visible thread identifier.
     pub fn tid(&self) -> Tid {
-        self.task_number.root_nr()
+        self.tid.load(Ordering::Relaxed)
     }
 
     /// Returns the task's canonical cgroup node.
@@ -464,6 +528,19 @@ impl Thread {
         self.is_exiting.store(true, Ordering::Release);
     }
 
+    /// Marks this thread as a `de_thread` sibling-sweep target.
+    ///
+    /// A sweep target's fatal death skips the group-exit marking and group-kill
+    /// broadcast in `do_exit`, so the execing thread survives the sweep.
+    pub fn mark_exec_sweep_target(&self) {
+        self.exec_sweep_target.store(true, Ordering::Release);
+    }
+
+    /// Returns whether this thread is a `de_thread` sibling-sweep target.
+    pub fn is_exec_sweep_target(&self) -> bool {
+        self.exec_sweep_target.load(Ordering::Acquire)
+    }
+
     /// Returns whether the thread is currently performing a user-memory access.
     pub fn is_accessing_user_memory(&self) -> bool {
         self.accessing_user_memory.load(Ordering::Acquire)
@@ -533,8 +610,25 @@ impl Thread {
         &self.signal
     }
 
-    pub(crate) fn task_number(&self) -> &Arc<kidentity::PidHandle> {
-        &self.task_number
+    pub(crate) fn task_number(&self) -> Arc<kidentity::PidHandle> {
+        self.task_number.lock().clone()
+    }
+
+    /// Adopts `number` as this thread's current number binding.
+    ///
+    /// Used by the `exec` leader takeover after the global number directory has
+    /// been moved; only the thread-local binding is updated here. The numeric
+    /// snapshot is written in the same critical section so `tid()` never sees
+    /// the two apart.
+    pub(crate) fn adopt_task_number(&self, number: Arc<kidentity::PidHandle>) {
+        let mut current = self.task_number.lock();
+        *current = number;
+        self.tid.store(current.root_nr(), Ordering::Relaxed);
+    }
+
+    /// Returns the stable identity token for this thread.
+    pub fn identity_token(&self) -> kidentity::TaskIdentityToken {
+        self.identity_token
     }
 
     pub(crate) fn process_runtime(&self) -> Arc<ProcessRuntime> {

@@ -642,6 +642,24 @@ impl Dentry {
         self.0.location.read().parent.clone()
     }
 
+    /// Returns a stable total-order key for this dentry's inode.
+    ///
+    /// The key is the chain of ancestor inode pointers from this mount's dentry
+    /// root down to this entry, so an ancestor always compares before its
+    /// descendant and unrelated entries fall back to a pointer comparison.
+    /// Multi-inode namespace-lock acquisitions (`rename`, `pivot_root`) sort by
+    /// this key so they share one total order and cannot ABBA.
+    pub(crate) fn namespace_lock_key(&self) -> Vec<usize> {
+        let mut chain = Vec::new();
+        let mut current = Some(self.clone());
+        while let Some(dentry) = current {
+            chain.push(Arc::as_ptr(&dentry.vfs_inode()) as usize);
+            current = dentry.parent();
+        }
+        chain.reverse();
+        chain
+    }
+
     /// Returns a snapshot of this entry's name within its parent directory.
     pub fn name_snapshot(&self) -> String {
         self.0.location.read().name.clone()
@@ -1419,7 +1437,14 @@ impl RenameData<'_> {
                 return Ok((true, Some(new_ancestor)));
             }
             if parent.ptr_eq(&old_root) {
-                return Ok((true, None));
+                // Unrelated directories. Order them ancestor-first then by a
+                // stable pointer key, the same rule `pivot_root` uses for its
+                // parent-directory locks, instead of the role-based old-first
+                // order.
+                return Ok((
+                    self.old_parent.namespace_lock_key() < self.new_parent.namespace_lock_key(),
+                    None,
+                ));
             }
             new_ancestor = parent;
         }

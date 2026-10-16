@@ -17,12 +17,14 @@ use core::{future::poll_fn, task::Poll};
 use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
 use kpoll::PollRegistrations;
-use kprocess::{Pid, Process, wait_reap};
+use kprocess::{Pid, Process, wait_reap, wait_reap::WaitedChild};
 use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
-    __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
+    __WALL, __WCLONE, __WNOTHREAD, P_ALL, P_PGID, P_PID, P_PIDFD, WCONTINUED, WEXITED, WNOHANG,
+    WNOWAIT, WUNTRACED, siginfo_t,
 };
 use osvm::{VirtMutPtr, VirtPtr};
+use posix_types::{UserConstPtr, UserPtr};
 
 bitflags! {
     #[derive(Debug, Clone, Copy)]
@@ -117,8 +119,11 @@ fn wait_reap_mode(options: WaitOptions) -> wait_reap::WaitReapMode {
     }
 }
 
+// `siginfo_t` is registered as a `posix_types::UserWrite` type (see
+// posix-types); bit-pattern copy to userspace matches the Linux ABI.
+
 enum WaitScanResult {
-    Ready(isize),
+    Ready(WaitedChild),
     NoWaitableChild,
     NoMatchingChild,
 }
@@ -126,7 +131,6 @@ enum WaitScanResult {
 fn scan_waitable_child(
     proc: &Arc<Process>,
     selector: WaitPid,
-    exit_code: *mut i32,
     options: WaitOptions,
 ) -> KResult<WaitScanResult> {
     match wait_reap::scan_waitable_child(
@@ -135,12 +139,7 @@ fn scan_waitable_child(
         wait_child_kind(options),
         wait_reap_mode(options),
     ) {
-        wait_reap::WaitChildScan::Ready(waited) => {
-            if let Some(exit_code) = exit_code.check_non_null() {
-                exit_code.write_vm(waited.exit_code())?;
-            }
-            Ok(WaitScanResult::Ready(waited.pid() as _))
-        }
+        wait_reap::WaitChildScan::Ready(waited) => Ok(WaitScanResult::Ready(waited)),
         wait_reap::WaitChildScan::NoMatchingChild => Ok(WaitScanResult::NoMatchingChild),
         wait_reap::WaitChildScan::NoWaitableChild => Ok(WaitScanResult::NoWaitableChild),
     }
@@ -185,16 +184,23 @@ mod wait_test_sync {
     }
 }
 
-fn wait_on_matching_children(
+/// Blocks until a matching child reports status, then invokes `on_ready`
+/// with the waited child. Shared by `wait4`/`waitpid` (writes the int exit
+/// status) and `waitid` (writes a `siginfo_t`). Returns the child PID, or 0
+/// under `WNOHANG` when no child is waitable.
+fn wait_on_matching_children_with(
     proc: &Arc<Process>,
     selector: WaitPid,
-    exit_code: *mut i32,
     options: WaitOptions,
+    mut on_ready: impl FnMut(&WaitedChild) -> KResult<()>,
 ) -> KResult<isize> {
     let current = current();
 
-    let check_children = || match scan_waitable_child(proc, selector, exit_code, options)? {
-        WaitScanResult::Ready(pid) => Ok(Some(pid)),
+    let mut check_children = || match scan_waitable_child(proc, selector, options)? {
+        WaitScanResult::Ready(waited) => {
+            on_ready(&waited)?;
+            Ok(Some(waited.pid() as _))
+        }
         WaitScanResult::NoMatchingChild => Err(KError::from(LinuxError::ECHILD)),
         WaitScanResult::NoWaitableChild if options.contains(WaitOptions::WNOHANG) => Ok(Some(0)),
         WaitScanResult::NoWaitableChild => Ok(None),
@@ -238,6 +244,120 @@ fn wait_on_matching_children(
 
         Poll::Pending
     }))
+}
+
+fn wait_on_matching_children(
+    proc: &Arc<Process>,
+    selector: WaitPid,
+    exit_code: *mut i32,
+    options: WaitOptions,
+) -> KResult<isize> {
+    wait_on_matching_children_with(proc, selector, options, |waited| {
+        if let Some(exit_code) = exit_code.check_non_null() {
+            exit_code.write_vm(waited.exit_code())?;
+        }
+        Ok(())
+    })
+}
+
+/// `waitid(2)`: wait for a child selected by `idtype`/`id` and report its
+/// status through a `siginfo_t`.
+///
+/// Supports the full `idtype_t` set (`P_ALL`, `P_PID`, `P_PGID`, `P_PIDFD`).
+/// `P_PIDFD` resolves `id` as a pidfd file descriptor and waits on its target
+/// process. `WNOWAIT`/`WNOHANG`/`WEXITED` are honored by the shared wait
+/// machinery; `WSTOPPED`/`WCONTINUED` are accepted for option validation but
+/// stop/continue reports are not produced yet, so the wait only completes on
+/// exit. The optional `rusage` argument is accepted but not populated (runc's
+/// `isWaitable` probe passes `NULL`). On success returns 0 with the child
+/// status in `siginfo`, matching Linux.
+pub(crate) fn sys_waitid(
+    idtype: u32,
+    id: u32,
+    siginfo: UserPtr<siginfo_t>,
+    options: u32,
+    _rusage: UserConstPtr<core::ffi::c_void>,
+) -> KResult<isize> {
+    // Linux exit.c: reject unknown bits and a request that names no report
+    // class at all (`WSTOPPED` shares the `WUNTRACED` bit). Only exit reports
+    // are implemented, so a request that asks solely for stop/continue is
+    // rejected rather than reporting and consuming an exit it did not ask for.
+    const WAITID_KNOWN: u32 = WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT;
+    if options & !WAITID_KNOWN != 0 || options & WEXITED == 0 {
+        return Err(KError::from(LinuxError::EINVAL));
+    }
+
+    // Linux `idtype_t`, matching the `P_*` constants (`u32`).
+    let selector = match idtype {
+        P_ALL => WaitPid::Any,
+        P_PID => {
+            if id == 0 {
+                return Err(KError::from(LinuxError::EINVAL));
+            }
+            WaitPid::Pid(id)
+        }
+        P_PGID => {
+            if id == 0 {
+                // Linux: `P_PGID` with id 0 waits on the caller's own group.
+                let current_thread = kprocess::current_user_thread();
+                WaitPid::Pgid(current_thread.process().group().pgid())
+            } else {
+                WaitPid::Pgid(id)
+            }
+        }
+        P_PIDFD => {
+            // P_PIDFD: `id` is a pidfd file descriptor referring to a process.
+            // Linux: a negative `id` is `EINVAL`, a closed or invalid descriptor
+            // is `EBADF`, and a valid descriptor that is not a pidfd is `EINVAL`.
+            let fd = id as i32;
+            if fd < 0 {
+                return Err(KError::from(LinuxError::EINVAL));
+            }
+            let file = kprocess::current_files().get_file(fd)?;
+            let pidfd =
+                kprocess::PidFd::from_file(&file).map_err(|_| KError::from(LinuxError::EINVAL))?;
+            WaitPid::Pid(pidfd.process().pid())
+        }
+        _ => return Err(KError::from(LinuxError::EINVAL)),
+    };
+    let options = WaitOptions::from_bits_truncate(options);
+
+    let current_thread = kprocess::current_user_thread();
+    let proc = current_thread.process();
+    let mut report: Option<siginfo_t> = None;
+    wait_on_matching_children_with(proc, selector, options, |waited| {
+        // Linux reports the child-exit payload via a SIGCHLD-style `siginfo_t`.
+        let cred = waited
+            .process()
+            .credentials_snapshot()
+            .unwrap_or_else(|_| kcred::initial_cred());
+        let (utime, stime) = waited.total_cpu_time();
+        let child = ksignal::ChildExitInfo::from_wait_status(
+            waited.pid(),
+            cred.ruid(),
+            waited.exit_code(),
+            utime,
+            stime,
+        );
+        report = Some(
+            ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child)
+                .into_signal_info()
+                .0,
+        );
+        Ok(())
+    })?;
+    if !siginfo.is_null() {
+        match report {
+            Some(value) => siginfo.write_vm(value)?,
+            None => {
+                // Linux writes a zeroed report for a `WNOHANG` poll with no
+                // waitable child (`si_pid = 0`); a `NULL` pointer is a no-op.
+                let zeros = [0_u8; core::mem::size_of::<siginfo_t>()];
+                UserPtr::<u8>::from(siginfo.as_ptr() as usize).write_vm_slice(&zeros)?;
+            }
+        }
+    }
+    Ok(0)
 }
 
 pub(crate) fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {

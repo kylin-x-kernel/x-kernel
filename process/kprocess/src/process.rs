@@ -3,13 +3,14 @@
 // See LICENSES for license details.
 
 //! Process structure and lifecycle management.
+mod exec_gate;
 mod exit;
 mod runtime_access;
 mod thread_membership;
 mod tree;
 
 use alloc::sync::{Arc, Weak};
-use core::fmt;
+use core::{fmt, sync::atomic::AtomicU32};
 
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
@@ -45,7 +46,12 @@ pub struct Process {
     thread_membership: SpinNoIrq<ThreadMembership>,
     cgroup_target: Mutex<Option<Arc<kcgroup::Cgroup>>>,
     group_exit: SpinNoIrq<ThreadGroupExitState>,
+    /// Process-wide `exec` serialization gate (Linux `cred_guard_mutex`).
+    exec_gate: exec_gate::ExecGate,
     lifecycle: ProcessLifecycleState,
+    /// Signal delivered to the parent's `wait` when this process's parent dies
+    /// first (`prctl(PR_SET_PDEATHSIG)`).
+    pdeath_signal: AtomicU32,
 
     // TODO: child subreaper9
     /// Current children linked under this process. Mutate only under
@@ -206,6 +212,8 @@ impl Process {
             thread_membership: SpinNoIrq::new(ThreadMembership::default()),
             cgroup_target: Mutex::new(None),
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
+            exec_gate: exec_gate::ExecGate::new(),
+            pdeath_signal: AtomicU32::new(0),
             lifecycle: ProcessLifecycleState::new(),
             children: SpinNoIrq::new(List::new()),
             parent_relation,

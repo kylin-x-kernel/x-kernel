@@ -71,6 +71,15 @@
    - Mitigation: The `TMPFS_TYPE` factory accepts only VFS-wide
      `SuperBlockFlags`; callers apply per-mount policy when attaching the mount.
 
+8. memfd 因模式过窄被 exec 拒绝（runc/crun self-reexec）。
+   - 防护：`create_memfd_file()` 创建 `0o777` 文件；exec 的 `MAY_EXEC` 因此通过。
+     显示路径 `/proc/self/fd/<n>` 与 `/proc/self/exe` 指向同一 opened backing file，
+     不引入可写可执行的内存映射。
+
+9. memfd seal 语义偏差。
+   - 防护：只允许添加 seal（`F_SEAL_SEAL` 之后拒绝一切新 seal）；
+     `MFD_ALLOW_SEALING` 未设置时创建即打 `F_SEAL_SEAL`，对齐 Linux。
+
 ## 故障模式与影响分析（FMEA）
 
 | 故障 | 条件 | 处理 | 影响 |

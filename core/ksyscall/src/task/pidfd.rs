@@ -20,7 +20,7 @@ pub(crate) fn sys_pidfd_open(pid: u32, flags: u32) -> KResult<isize> {
     }
 
     let process = kprocess::pidfd::open_target_process(pid)?;
-    kprocess::current_resources()
+    kprocess::current_files()
         .add_file(
             PidFd::new_file(&process, O_RDWR, kprocess::current_cred())?,
             true,
@@ -36,19 +36,12 @@ pub(crate) fn sys_pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> KResult
         return Err(KError::InvalidInput);
     }
 
-    let pidfd_file = kprocess::current_resources().get_file(pidfd)?;
+    let pidfd_file = kprocess::current_files().get_file(pidfd)?;
     let pidfd = PidFd::from_file(&pidfd_file)?;
-    pidfd
-        .live_process()?
-        .resources()?
-        .fd_table()?
-        .read()
-        .get(target_fd as usize)
-        .ok_or(KError::BadFileDescriptor)
-        .and_then(|fd| {
-            let fd = kprocess::current_resources().add_file(fd.file().clone(), true)?;
-            Ok(fd as isize)
-        })
+    let file = pidfd.get_file(target_fd)?;
+    kprocess::current_files()
+        .add_file(file, true)
+        .map(|fd| fd as isize)
 }
 
 /// Send a signal to the process referenced by the pidfd.
@@ -62,7 +55,7 @@ pub(crate) fn sys_pidfd_send_signal(
         return Err(KError::InvalidInput);
     }
 
-    let pidfd_file = kprocess::current_resources().get_file(pidfd)?;
+    let pidfd_file = kprocess::current_files().get_file(pidfd)?;
     let pidfd = PidFd::from_file(&pidfd_file)?;
     let process = pidfd.live_process()?;
     let pid = process.pid();

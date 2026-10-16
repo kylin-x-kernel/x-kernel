@@ -168,7 +168,7 @@ impl CMsg {
     /// Explicit SCM_CREDENTIALS sends are unsupported and return EINVAL.
     /// Accepting them would require validating the claimed identity first.
     pub(crate) fn parse(
-        resources: &kresources::ProcessResources,
+        resources: &kresources::TaskFiles,
         hdr_ptr: UserConstPtr<cmsghdr>,
         hdr: cmsghdr,
     ) -> KResult<Self> {

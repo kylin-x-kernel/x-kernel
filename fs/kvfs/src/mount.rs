@@ -345,6 +345,23 @@ impl MntNamespace {
         Ok(())
     }
 
+    /// Makes the mount rooted at `target` a slave.
+    ///
+    /// KVFS does not yet model shared propagation groups, so no mount can ever
+    /// have a shared master: a slave mount would receive no mount events and is
+    /// therefore behaviorally identical to a private mount. This operation only
+    /// validates the target and is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidInput`] unless `target` is the root of a
+    /// mount registered in this namespace.
+    pub fn make_mount_slave(&self, target: &Path) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        Self::registered_mount_at(&mounts, target)?;
+        Ok(())
+    }
+
     fn registered_mount_at<'a>(
         mounts: &HashMap<u64, Arc<Mount>>,
         target: &'a Path,
@@ -358,12 +375,46 @@ impl MntNamespace {
         Ok(mount)
     }
 
+    /// Linux `is_path_reachable(path_mnt, path.dentry, from)`: whether `path`
+    /// lies at or below `from`, walking across mount boundaries. Equality is
+    /// reachable, matching `is_subdir(dentry, dentry)`.
+    fn is_reachable_from(path: &Path, from: &Path) -> bool {
+        let mut current = path.clone();
+        loop {
+            if current.ptr_eq(from) {
+                return true;
+            }
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => return false,
+            }
+        }
+    }
+
     fn require_mount(mounts: &HashMap<u64, Arc<Mount>>, mount: &Arc<Mount>) -> VfsResult<()> {
         mounts
             .get(&mount.mount_id())
             .is_some_and(|registered| Arc::ptr_eq(registered, mount))
             .then_some(())
             .ok_or(VfsError::InvalidInput)
+    }
+
+    /// Returns whether a mount other than `path`'s own is attached at or below
+    /// `path` in this namespace.
+    ///
+    /// Recursive bind consults this to decide whether cloning a single mount
+    /// would flatten a source subtree. It walks the namespace's registered
+    /// mounts and tests each mountpoint against `path`, rather than only the
+    /// source mount's direct children.
+    pub fn has_mount_under(&self, path: &Path) -> bool {
+        let source = path.mount();
+        let mounts = self.mounts.lock();
+        mounts.values().any(|mount| {
+            !Arc::ptr_eq(mount, source)
+                && mount
+                    .location()
+                    .is_some_and(|loc| Self::is_reachable_from(&loc, path))
+        })
     }
 
     /// Unmounts one visible mount from this namespace.
@@ -392,6 +443,164 @@ impl MntNamespace {
         drop(mounts);
         Ok(())
     }
+
+    /// Pivots the namespace root to `new_root` and relocates the previous root
+    /// mount at `put_old` (Linux `pivot_root(2)`).
+    ///
+    /// Requirements mirror Linux `do_pivot_root()`:
+    /// - `new_root` must be the root of a mount registered in this namespace
+    ///   and must not be the current visible root mount (`new_mnt == root_mnt`
+    ///   is a loop, `EBUSY`);
+    /// - `put_old` must be a directory reachable from `new_root`
+    ///   (`is_path_reachable(old_mnt, old.dentry, &new)`) and must not live in
+    ///   the current root's filesystem (`old_mnt == root_mnt`, `EBUSY`).
+    ///   `put_old` may coincide with `new_root` itself — OCI runtimes pivot
+    ///   with `pivot_root(".", ".")`, leaving the old root covering the new
+    ///   root until they `umount2(MNT_DETACH)` it;
+    /// - both paths must resolve inside this namespace.
+    ///
+    /// After the call, `/` resolves to `new_root`'s filesystem and the previous
+    /// root mount is attached at `put_old` (OCI runtimes then detach it with
+    /// `umount2(MNT_DETACH)`). The caller is expected to retarget its
+    /// `FsStruct` root/pwd afterwards (the syscall adapter does this), matching
+    /// Linux `chroot_fs_refs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::ResourceBusy`] when `new_root` or `put_old` lies on
+    /// the current root filesystem (Linux `EBUSY`, "loop, on the same file
+    /// system"), [`VfsError::InvalidInput`] for other namespace-degenerate
+    /// pivots (no stacked visible root, `new_root` equal to the visible root,
+    /// `put_old` unreachable from `new_root`), and [`VfsError::NotADirectory`]
+    /// when `put_old` is not a directory.
+    pub fn pivot_root(
+        &self,
+        new_root: &Path,
+        put_old: &Path,
+        current_root: &Path,
+    ) -> VfsResult<()> {
+        let mounts = self.mounts.lock();
+        let new_mnt = Self::registered_mount_at(&mounts, new_root)?.clone();
+        // Linux resolves `pivot_root(2)` against the caller's root, which may
+        // differ from the namespace root after `chroot(2)`.
+        let old_mnt = current_root.clone().resolve_final_mount().mnt.clone();
+        let root_mount = self.root.clone();
+
+        // The caller's root must overmount the structural root: a bare root
+        // mount has nothing to pivot away from.
+        if Arc::ptr_eq(&old_mnt, &root_mount) {
+            return Err(VfsError::InvalidInput);
+        }
+        // The surgery below rearranges the namespace root stack, so it requires
+        // the caller's visible root to be the namespace's visible root. A
+        // caller root moved by `chroot(2)` is not supported yet; reject it
+        // instead of rearranging an unrelated mount.
+        if !Arc::ptr_eq(&old_mnt, &self.root_path().resolve_final_mount().mnt) {
+            return Err(VfsError::InvalidInput);
+        }
+        // Linux: `new_mnt == root_mnt || old_mnt == root_mnt` -> EBUSY ("loop,
+        // on the same file system").
+        if Arc::ptr_eq(&new_mnt, &old_mnt) || Arc::ptr_eq(put_old.mount(), &old_mnt) {
+            return Err(VfsError::ResourceBusy);
+        }
+        if !put_old.is_dir() {
+            return Err(VfsError::NotADirectory);
+        }
+        // Linux: `is_path_reachable(old_mnt, old.dentry, &new)`. `put_old`
+        // must lie inside `new_root`'s subtree; equality is allowed.
+        if !Self::is_reachable_from(put_old, new_root) {
+            return Err(VfsError::InvalidInput);
+        }
+
+        // Serialize against concurrent mount-tree mutation on every inode the
+        // surgery touches. Take the locks in the same total order as the rename
+        // path (an ancestor before its descendant, then a stable pointer
+        // tiebreak), so a concurrent multi-inode acquisition cannot ABBA against
+        // this surgery. Inodes are never taken twice because
+        // `lock_namespace_exclusive` is a non-reentrant write lock.
+        let new_parent_path = new_mnt.location().ok_or(VfsError::InvalidInput)?;
+        // Linux `root_parent`/`root_mp`: the old root's own parent mount and
+        // mountpoint, where `new_mnt` takes over. The visible root may sit
+        // anywhere in the stack over the structural root, not only at the
+        // direct child position.
+        let old_parent_path = old_mnt.location().ok_or(VfsError::InvalidInput)?;
+        let mut targets: Vec<(Arc<VfsInode>, Vec<usize>)> = Vec::new();
+        let mut push_target = |path: &Path| {
+            let inode = path.inode();
+            if !targets.iter().any(|(held, _)| Arc::ptr_eq(held, &inode)) {
+                targets.push((inode, path.dentry.namespace_lock_key()));
+            }
+        };
+        push_target(&old_parent_path);
+        push_target(&new_parent_path);
+        push_target(put_old);
+        targets.sort_by(|left, right| left.1.cmp(&right.1));
+        let _guards: Vec<_> = targets
+            .iter()
+            .map(|(inode, _)| inode.lock_namespace_exclusive())
+            .collect();
+
+        // Re-validate under the locks: the mount stacks read while resolving the
+        // paths may have changed before these inode locks were acquired. The
+        // surgery below assumes the old visible root is attached exactly at its
+        // own parent mountpoint, so verify it and fail instead of asserting
+        // inside the critical section.
+        let (old_parent_mount, old_parent_dentry) =
+            (old_parent_path.mnt.clone(), old_parent_path.dentry.clone());
+        if !old_parent_mount
+            .child_mount_at(&old_parent_dentry)
+            .is_some_and(|mounted| Arc::ptr_eq(&mounted, &old_mnt))
+        {
+            return Err(VfsError::InvalidInput);
+        }
+
+        // 1. Detach `new_mnt` from its old parent, restoring whatever mount it
+        //    covered at its original location.
+        let (new_parent_mount, new_parent_dentry) =
+            (new_parent_path.mnt.clone(), new_parent_path.dentry.clone());
+        mount_edge_detach(&new_parent_mount, &new_parent_dentry, &new_mnt);
+
+        // 2. Stack `new_mnt` over the old visible root at the old root's own
+        //    mountpoint (`attach_mnt(new_mnt, root_parent, root_mp)`),
+        //    temporarily holding the old root in its `covers` slot. The
+        //    re-validation above guarantees this returns the old visible root.
+        *new_mnt.covers.lock() = old_parent_mount.install_child_mount(&old_parent_dentry, &new_mnt);
+        *new_mnt.mnt_location.lock() = Some(old_parent_path);
+
+        // 3. Take the old visible root out of the stack. The chain it covered
+        //    at the root (usually empty) stays covered under `new_mnt`,
+        //    matching Linux's stack-preserving move.
+        let chain_below = old_mnt.covers.lock().take();
+        old_mnt.detach();
+        if let Some(chain) = chain_below {
+            *new_mnt.covers.lock() = Some(chain);
+        }
+
+        // 4. Attach the old root at `put_old`, preserving any mount stacked
+        //    there (it becomes `old_mnt`'s covered layer).
+        if let Some(covered) = put_old.mnt.install_child_mount(&put_old.dentry, &old_mnt) {
+            *old_mnt.covers.lock() = Some(covered);
+        }
+        *old_mnt.mnt_location.lock() = Some(put_old.clone());
+
+        drop(mounts);
+        Ok(())
+    }
+}
+
+/// Removes `mount` from `parent`'s child set at `dentry`, restoring whatever
+/// mount it covered there, and clears the mount's location pointer.
+///
+/// Infallible: callers hold the namespace registry lock and the affected inode
+/// namespace-exclusive locks (see [`MntNamespace::pivot_root`]).
+fn mount_edge_detach(parent: &Mount, dentry: &Dentry, mount: &Arc<Mount>) {
+    match mount.covers.lock().take() {
+        Some(covered) => {
+            parent.install_child_mount(dentry, &covered);
+        }
+        None => parent.remove_child_mount(dentry),
+    }
+    mount.detach();
 }
 
 /// Result of cloning a mount namespace and retargeting filesystem context paths.
@@ -1426,12 +1635,19 @@ impl Path {
         if self.is_dir() {
             return Err(VfsError::IsADirectory);
         }
+        if !self.is_regular_file() {
+            // Only regular files have a truncatable size. Linux returns EINVAL
+            // for pipes, sockets, devices and other special files, so refuse
+            // the length change at the common truncate boundary instead of
+            // letting a resident metadata update publish a fake `i_size`.
+            return Err(VfsError::InvalidInput);
+        }
 
         let inode = self.inode();
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
-        if self.is_regular_file() && !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
+        if !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;
         } else {
             self.dentry.update_metadata(MetadataUpdate {
@@ -1442,8 +1658,13 @@ impl Path {
         Ok(())
     }
 
-    /// Resolves overmounts visible from this path.
-    pub(crate) fn resolve_final_mount(self) -> Self {
+    /// Resolves overmounts visible from this path, returning the path bound to
+    /// the topmost covering mount.
+    ///
+    /// `umount` acts on the mounted path, so it resolves this before detaching;
+    /// `pivot_root` deliberately keeps the unresolved path for the relocated
+    /// filesystem root.
+    pub fn resolve_final_mount(self) -> Self {
         let mut path = self;
         while let Some(mountpoint) = path.mnt.child_mount_at(&path.dentry) {
             let entry = mountpoint.mnt.mnt_root.clone();
@@ -2174,6 +2395,233 @@ mod tests {
 
         assert!(Arc::ptr_eq(old_visible.mount(), &overmount));
         assert!(Arc::ptr_eq(cloned_visible.mount(), cloned.pwd.mount()));
+    }
+
+    #[def_test]
+    fn test_pivot_root_swaps_visible_root_and_relocates_old() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let new_root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let old_visible_root = namespace.visible_root_path();
+        let old_root_mount = old_visible_root.mount().clone();
+        let cred = kcred::initial_cred();
+
+        // New root: a fresh filesystem mounted at a directory of the old root
+        // (the OCI pattern mounts the container rootfs there and binds it).
+        let mnt_dir = lookup_child_in_mount(&old_visible_root, "mnt").unwrap();
+        let new_mnt = namespace.attach(&mnt_dir, &new_root_fs).unwrap();
+
+        // put_old lives inside the new root's own filesystem (`/.pivot_root`).
+        let put_old = new_mnt
+            .root_path()
+            .mkdir("oldroot", NodePermission::default(), &cred)
+            .unwrap();
+
+        namespace
+            .pivot_root(
+                &new_mnt.root_path(),
+                &put_old,
+                &namespace.visible_root_path(),
+            )
+            .unwrap();
+
+        // `/` now resolves to the new root's filesystem.
+        assert!(Arc::ptr_eq(namespace.visible_root_path().mount(), &new_mnt));
+        // The old root is reachable at put_old, inside the new root.
+        let relocated = lookup_child_in_mount(&new_mnt.root_path(), "oldroot")
+            .unwrap()
+            .resolve_final_mount();
+        assert!(Arc::ptr_eq(relocated.mount(), &old_root_mount));
+        // The structural root resolves through the new mount without gaps.
+        assert!(Arc::ptr_eq(
+            namespace.root_path().resolve_final_mount().mount(),
+            &new_mnt
+        ));
+        assert!(!Arc::ptr_eq(
+            namespace.visible_root_path().mount(),
+            &old_root_mount
+        ));
+    }
+
+    #[def_test]
+    fn test_pivot_root_rejects_plain_directory_new_root() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let visible = namespace.visible_root_path();
+        let cred = kcred::initial_cred();
+        let plain_dir = visible
+            .mkdir("plain", NodePermission::default(), &cred)
+            .unwrap();
+        let put_old = visible
+            .mkdir("oldroot", NodePermission::default(), &cred)
+            .unwrap();
+
+        assert_eq!(
+            namespace.pivot_root(&plain_dir, &put_old, &namespace.visible_root_path()),
+            Err(VfsError::InvalidInput),
+            "new_root must be a mount root"
+        );
+    }
+
+    #[def_test]
+    fn test_pivot_root_rejects_mounted_put_old() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let new_root_fs = mock_filesystem(StatFsFlags::empty());
+        let put_old_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let visible = namespace.visible_root_path();
+        let cred = kcred::initial_cred();
+        let new_mnt = namespace
+            .attach(
+                &visible
+                    .mkdir("first", NodePermission::default(), &cred)
+                    .unwrap(),
+                &new_root_fs,
+            )
+            .unwrap();
+        let put_old_mountpoint = visible
+            .mkdir("second", NodePermission::default(), &cred)
+            .unwrap();
+        namespace.attach(&put_old_mountpoint, &put_old_fs).unwrap();
+
+        assert_eq!(
+            namespace.pivot_root(
+                &new_mnt.root_path(),
+                &put_old_mountpoint,
+                &namespace.visible_root_path()
+            ),
+            Err(VfsError::ResourceBusy),
+            "put_old inside the old root's filesystem is a loop (Linux EBUSY)"
+        );
+    }
+
+    #[def_test]
+    fn test_pivot_root_allows_put_old_equal_to_new_root() {
+        // runc's `pivot_root(".", ".")` pattern: the relocated old root
+        // temporarily covers the new root until the caller detaches it.
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let new_root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let old_visible_root = namespace.visible_root_path();
+        let old_root_mount = old_visible_root.mount().clone();
+
+        let mnt_dir = lookup_child_in_mount(&old_visible_root, "mnt").unwrap();
+        let new_mnt = namespace.attach(&mnt_dir, &new_root_fs).unwrap();
+        let new_root_path = new_mnt.root_path();
+
+        namespace
+            .pivot_root(
+                &new_root_path,
+                &new_root_path,
+                &namespace.visible_root_path(),
+            )
+            .unwrap();
+
+        // The old root now overmounts the new root's own root dentry, so `/`
+        // fully resolves into the old root exactly as on Linux...
+        assert!(Arc::ptr_eq(
+            namespace.visible_root_path().mount(),
+            &old_root_mount
+        ));
+        // ...and the caller-detach (umount(".", MNT_DETACH)) uncovers it.
+        namespace
+            .detach_tree(&namespace.visible_root_path())
+            .unwrap();
+        assert!(Arc::ptr_eq(namespace.visible_root_path().mount(), &new_mnt));
+    }
+
+    #[def_test]
+    fn test_unresolved_root_path_resolves_covering_mount_after_pivot() {
+        // `umount` receives a `.`-style lookup that does not cross a covering
+        // mount; it must resolve the covering mount before detaching, as
+        // `sys_umount2` now does, so `umount(".", MNT_DETACH)` after
+        // `pivot_root(".", ".")` detaches the relocated old root.
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let new_root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let old_visible_root = namespace.visible_root_path();
+        let old_root_mount = old_visible_root.mount().clone();
+
+        let mnt_dir = lookup_child_in_mount(&old_visible_root, "mnt").unwrap();
+        let new_mnt = namespace.attach(&mnt_dir, &new_root_fs).unwrap();
+        let new_root_path = new_mnt.root_path();
+
+        namespace
+            .pivot_root(
+                &new_root_path,
+                &new_root_path,
+                &namespace.visible_root_path(),
+            )
+            .unwrap();
+
+        // The unresolved path still names the new root...
+        assert!(Arc::ptr_eq(new_root_path.mount(), &new_mnt));
+        // ...while resolving follows the covering old root that `umount` must
+        // detach instead.
+        let covering = new_root_path.resolve_final_mount();
+        assert!(Arc::ptr_eq(covering.mount(), &old_root_mount));
+        namespace.detach_tree(&covering).unwrap();
+        assert!(Arc::ptr_eq(namespace.visible_root_path().mount(), &new_mnt));
+    }
+
+    #[def_test]
+    fn test_pivot_root_rejects_put_old_outside_new_root() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let new_root_fs = mock_filesystem(StatFsFlags::empty());
+        let other_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let visible = namespace.visible_root_path();
+        let cred = kcred::initial_cred();
+        let new_mnt = namespace
+            .attach(
+                &visible
+                    .mkdir("newroot", NodePermission::default(), &cred)
+                    .unwrap(),
+                &new_root_fs,
+            )
+            .unwrap();
+        let other_mnt = namespace
+            .attach(
+                &visible
+                    .mkdir("other", NodePermission::default(), &cred)
+                    .unwrap(),
+                &other_fs,
+            )
+            .unwrap();
+        let put_old = other_mnt
+            .root_path()
+            .mkdir("oldroot", NodePermission::default(), &cred)
+            .unwrap();
+
+        assert_eq!(
+            namespace.pivot_root(
+                &new_mnt.root_path(),
+                &put_old,
+                &namespace.visible_root_path()
+            ),
+            Err(VfsError::InvalidInput),
+            "put_old must be reachable from new_root"
+        );
+    }
+
+    #[def_test]
+    fn test_pivot_root_rejects_current_visible_root_as_new_root() {
+        let root_fs = mock_filesystem(StatFsFlags::empty());
+        let namespace = MntNamespace::build_initial_mount_tree(&root_fs).unwrap();
+        let put_old = namespace
+            .visible_root_path()
+            .mkdir("oldroot", NodePermission::default(), &kcred::initial_cred())
+            .unwrap();
+
+        assert_eq!(
+            namespace.pivot_root(
+                &namespace.visible_root_path(),
+                &put_old,
+                &namespace.visible_root_path()
+            ),
+            Err(VfsError::ResourceBusy),
+            "pivoting onto the current visible root is the same-filesystem loop (Linux EBUSY)"
+        );
     }
 
     #[def_test]

@@ -109,6 +109,7 @@ different moments.
 | T-03 | Information disclosure or unwanted controls | High | An insufficiently restricted caller reaches process/diagnostic nodes or writes controls | VFS permissions apply; `printk` explicitly checks `file.cred().is_privileged()`. Other listed callbacks have no equivalent local privilege check, and task reads have no local ptrace-style policy. Deployment access policy and further credential checks require separate audit. |
 | T-04 | Resource pressure and lock contention | Medium | Many retained maps opens, large VMA lists, or repeated rewinds | Ownership cleanup releases buffers and MM users, but procfs imposes no local quota on retained views or scan work. |
 | T-05 | Ambiguous diagnostic text | Low | Names or paths contain separators/newlines | Mount sources are mangled; maps paths and several other strings are emitted verbatim. Consumers must not treat all output as escaped records. |
+| T-06 | Zombie `exe` link resolves after exit | Low | `/proc/<pid>/exe` read while the target is a zombie | Read/follow/readlink require the target thread to be live and its process not exited, so a zombie's link reports `ENOENT` like Linux; `getattr` still succeeds with size 0. |
 
 ## Failure Modes and Effects (FMEA)
 

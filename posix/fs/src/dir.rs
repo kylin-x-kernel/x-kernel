@@ -57,7 +57,7 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
 pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
-    let file = kprocess::current_resources().get_file(dirfd)?;
+    let file = kprocess::current_files().get_file(dirfd)?;
     if !file.is_dir() {
         return Err(KError::NotADirectory);
     }
@@ -227,7 +227,7 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
     );
 
     let mut buffer = DirBuffer::new(len);
-    let dir = kprocess::current_resources().get_file(fd)?;
+    let dir = kprocess::current_files().get_file(fd)?;
     let mut has_remaining = false;
 
     let mut sink = |name: &str, ino, node_type, offset| {

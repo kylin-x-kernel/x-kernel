@@ -57,6 +57,19 @@ pub enum ExecSource {
         /// Display path used for process metadata and script argv rewriting.
         display_path: Option<String>,
     },
+    /// Execute an already-open file (`execveat(AT_EMPTY_PATH)`, `fexecve`).
+    ///
+    /// The open backing file is used directly instead of reopening the recorded
+    /// path, so an anonymous `memfd` or a file renamed after opening still
+    /// executes as opened.
+    File {
+        /// The opened executable backing file.
+        file: Arc<VfsFile>,
+        /// Resolved location used for metadata and script resolution.
+        location: Path,
+        /// Display path used for process metadata and script argv rewriting.
+        display_path: String,
+    },
 }
 
 impl ExecSource {
@@ -86,6 +99,14 @@ impl ExecSource {
                 };
                 Ok((location.clone(), display_path))
             }
+            Self::File {
+                location,
+                display_path,
+                ..
+            } => {
+                location.permission(Permission::MAY_EXEC, cred)?;
+                Ok((location.clone(), display_path.clone()))
+            }
         }
     }
 }
@@ -108,6 +129,31 @@ impl ExecRequest {
     ) -> Self {
         Self {
             source: ExecSource::Path(path.into()),
+            args,
+            envs,
+            cred,
+        }
+    }
+
+    /// Creates an exec request from an already-open executable file.
+    ///
+    /// Linux's `execveat(AT_EMPTY_PATH)` and glibc `fexecve` execute the file
+    /// already open on a descriptor; the file is executed as opened rather than
+    /// reoponed through its recorded path.
+    pub fn from_file(
+        file: Arc<VfsFile>,
+        display_path: impl Into<String>,
+        args: Vec<String>,
+        envs: Vec<String>,
+        cred: Arc<Cred>,
+    ) -> Self {
+        let location = file.path().clone();
+        Self {
+            source: ExecSource::File {
+                file,
+                location,
+                display_path: display_path.into(),
+            },
             args,
             envs,
             cred,
@@ -176,7 +222,17 @@ impl ExecRequest {
     /// permission check using the supplied credential snapshot. No address space is modified.
     pub fn prepare(self) -> KResult<BinPrm> {
         let (location, display_path) = self.source.resolve(&self.cred)?;
-        let executable = open_exec_file(&location, self.cred.clone())?;
+        // Linux `alloc_bprm()` → `do_open_execat()` reopens the executable
+        // through its path, so an `O_PATH` descriptor — which carries no read
+        // permission — still executes the file it names. A readable descriptor
+        // keeps executing the file as opened, which is what makes a `memfd` or a
+        // file renamed after opening execute the opened image.
+        let executable = match &self.source {
+            ExecSource::File { file, .. } if !file.is_path() => file.clone(),
+            ExecSource::File { .. } | ExecSource::Path(_) | ExecSource::Resolved { .. } => {
+                open_exec_file(&location, self.cred.clone())?
+            }
+        };
         Ok(BinPrm {
             location,
             executable,
@@ -262,6 +318,16 @@ impl PreparedExecImage {
     pub fn with_partial_install_probe(mut self, probe: PartialInstallProbe) -> Self {
         self.partial_probe = Some(probe);
         self
+    }
+}
+
+impl PreparedExecImage {
+    /// Returns the executable file pinned by this prepared image.
+    ///
+    /// Exec uses it to publish `/proc/<pid>/exe`; the pinned reference keeps the
+    /// backing file alive independently of the ELF cache.
+    pub fn executable_file(&self) -> Arc<VfsFile> {
+        self.executable.cache_entry.borrow_file().clone()
     }
 }
 
@@ -1048,6 +1114,7 @@ mod tests {
         match request.source() {
             ExecSource::Path(path) => assert_eq!(path, "/bin/app"),
             ExecSource::Resolved { .. } => panic!("unexpected resolved source"),
+            ExecSource::File { .. } => panic!("unexpected file source"),
         }
         assert_eq!(request.args().len(), 2);
         assert_eq!(request.args()[0], "app");

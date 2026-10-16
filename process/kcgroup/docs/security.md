@@ -20,8 +20,9 @@ The crate denies unsafe code at its root.
 Hierarchy transaction locking serializes multi-node edits. Per-node locks
 protect maps/controller references, atomics protect count/limit snapshots, and
 membership locks protect attachment. A pending charge keeps its node reserved;
-commit transfers accounting to a task-owned membership exactly once. Strong
-`PidHandle` ownership preserves stable identity for the entire map entry.
+commit transfers accounting to a task-owned membership exactly once. Stable
+`TaskIdentityToken` ownership preserves identity for the entire membership entry
+across an `exec` leader takeover.
 
 Removal may complete only with no children, direct members, or reservations.
 Group migration validates all source hierarchies before altering counts.
@@ -37,7 +38,7 @@ Operation guards keep a node live, but do not freeze quota/delegation policy.
 | T-02 | New task bypasses pids quota | Medium | Fork publishes without an admission charge | `reserve_task` checks active controller limits and rolls partial counts back; callers must reserve before publication and commit exactly once. |
 | T-03 | Detached node accepts a task | Medium | Delayed task construction races removal | Lifecycle reservations pin the node; removal returns `EBUSY` while charges/operation guards exist. Inactive targets reject new admission/migration. |
 | T-04 | Mixed-hierarchy migration partially changes counts | Medium | Membership list includes another hierarchy | `migrate_group` checks all sources before mutations and returns `EXDEV`; overflow additions are rolled back. |
-| T-05 | Numeric reuse overwrites membership | High | Different tasks share a numeric projection | Map keys use handle pointer identity and retain strong references. Duplicate handle commit returns `EEXIST`; numeric registry uniqueness remains external. |
+| T-05 | Numeric reuse overwrites membership | High | Different tasks share a numeric projection | Membership is a set of stable `TaskIdentityToken`s, so distinct tasks never collide; duplicate commit returns `EEXIST`. Readers resolve the token to the live task and read the current pid. |
 | T-06 | Stale filesystem handle mutates removed node | Medium | File operation starts after removal | `begin_operation` returns `ENODEV`; adapters must acquire/retain its guard for their complete operation. |
 | T-07 | Limits collide with unlimited sentinel | Medium | Numeric input exceeds the supported PID domain | `set_pids_max` returns `EINVAL` above `PIDS_MAX_LIMIT`; only `None` selects unlimited. |
 | T-08 | Thread group split by migration/publication race | High | Prepared sibling publishes after group target changes | `kprocess` process gate and publication reconciliation are required in addition to the hierarchy transaction. |

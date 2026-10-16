@@ -228,7 +228,9 @@ fn prlimit_output_fault_preserves_successful_update() -> TestResult {
 fn concurrent_rlimit_exchanges_return_one_complete_transition_chain() {
     const WORKERS: usize = 8;
 
-    let resources = kprocess::current_resources();
+    let resources = kprocess::current_user_process()
+        .resources()
+        .expect("current process resources");
     let original = resources.rlimit(RLIMIT_CORE);
     assert!(original.is_ok());
     let original = original.unwrap();

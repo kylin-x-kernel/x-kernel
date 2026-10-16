@@ -41,7 +41,7 @@ fn do_poll(
         if fd.fd < 0 {
             continue;
         }
-        match kprocess::current_resources().get_file(fd.fd) {
+        match kprocess::current_files().get_file(fd.fd) {
             Ok(f) => {
                 fds.push((
                     f,

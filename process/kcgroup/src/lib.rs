@@ -21,7 +21,7 @@
 //! group.set_pids_max(Some(1)).unwrap();
 //! drop(operation);
 //! let identity = kidentity::allocate_root_pid_handle().unwrap();
-//! let member = group.reserve_task().unwrap().commit(identity).unwrap();
+//! let member = group.reserve_task().unwrap().commit(token).unwrap();
 //! assert_eq!(group.pids_current(), Ok(1));
 //! member.detach();
 //! root.remove_child("worker").unwrap();
@@ -33,7 +33,7 @@
 extern crate alloc;
 
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
@@ -85,16 +85,7 @@ pub struct Cgroup {
     pids_subtree_enabled: AtomicBool,
     lifecycle: AtomicU8,
     reservations: AtomicUsize,
-    member_tasks: Mutex<BTreeMap<TaskIdentityKey, Arc<kidentity::PidHandle>>>,
-}
-
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-struct TaskIdentityKey(usize);
-
-impl TaskIdentityKey {
-    fn new(task: &Arc<kidentity::PidHandle>) -> Self {
-        Self(Arc::as_ptr(task).addr())
-    }
+    member_tasks: Mutex<BTreeSet<kidentity::TaskIdentityToken>>,
 }
 
 struct CgroupHierarchy {
@@ -190,7 +181,7 @@ impl Cgroup {
             pids_subtree_enabled: AtomicBool::new(false),
             lifecycle: AtomicU8::new(Self::ACTIVE),
             reservations: AtomicUsize::new(0),
-            member_tasks: Mutex::new(BTreeMap::new()),
+            member_tasks: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -229,7 +220,7 @@ impl Cgroup {
             pids_subtree_enabled: AtomicBool::new(false),
             lifecycle: AtomicU8::new(Self::ACTIVE),
             reservations: AtomicUsize::new(0),
-            member_tasks: Mutex::new(BTreeMap::new()),
+            member_tasks: Mutex::new(BTreeSet::new()),
         });
         children.insert(name.to_string(), child.clone());
         Ok(child)
@@ -543,9 +534,9 @@ impl Cgroup {
         Ok(())
     }
 
-    /// Returns stable task identities directly attached to this node.
-    pub fn member_tasks(&self) -> Vec<Arc<kidentity::PidHandle>> {
-        self.member_tasks.lock().values().cloned().collect()
+    /// Returns the stable identity tokens of tasks directly attached to this node.
+    pub fn member_tasks(&self) -> Vec<kidentity::TaskIdentityToken> {
+        self.member_tasks.lock().iter().copied().collect()
     }
 
     /// Reserves one task charge for fork or clone.
@@ -660,8 +651,7 @@ impl TaskCharge {
     /// See the [crate example](crate) for controller setup and the
     /// reserve/commit/detach lifecycle. Filesystem adapters additionally acquire an
     /// operation guard before using a node and drop it when the operation finishes.
-    pub fn commit(mut self, task: Arc<kidentity::PidHandle>) -> KResult<TaskMembership> {
-        let task_key = TaskIdentityKey::new(&task);
+    pub fn commit(mut self, token: kidentity::TaskIdentityToken) -> KResult<TaskMembership> {
         assert_eq!(
             self.charged,
             self.controllers.len(),
@@ -675,17 +665,15 @@ impl TaskCharge {
                 "committing a task charge to inactive cgroup"
             );
             let mut member_tasks = cgroup.member_tasks.lock();
-            if member_tasks.contains_key(&task_key) {
+            if !member_tasks.insert(token) {
                 return Err(KError::from(LinuxError::EEXIST));
             }
-            member_tasks.insert(task_key, task.clone());
             cgroup.reservations.fetch_sub(1, Ordering::AcqRel);
         }
         self.reservation_held = false;
         self.charged = 0;
         Ok(TaskMembership {
-            task_key,
-            task,
+            token,
             cgroup: RwLock::new(Some(cgroup)),
         })
     }
@@ -704,8 +692,7 @@ impl Drop for TaskCharge {
 
 /// Canonical cgroup membership owned by one task/thread.
 pub struct TaskMembership {
-    task_key: TaskIdentityKey,
-    task: Arc<kidentity::PidHandle>,
+    token: kidentity::TaskIdentityToken,
     cgroup: RwLock<Option<Arc<Cgroup>>>,
 }
 
@@ -743,8 +730,8 @@ impl TaskMembership {
             return Err(KError::from(LinuxError::EBUSY));
         }
         let mut ordered = memberships.to_vec();
-        ordered.sort_unstable_by_key(|membership| membership.task_key);
-        ordered.dedup_by_key(|membership| membership.task_key);
+        ordered.sort_unstable_by_key(|membership| membership.token);
+        ordered.dedup_by_key(|membership| membership.token);
 
         let mut current = Vec::with_capacity(ordered.len());
         for membership in &ordered {
@@ -798,14 +785,8 @@ impl TaskMembership {
                 .zip(&target_lineage)
                 .take_while(|(source, target)| Arc::ptr_eq(source, target))
                 .count();
-            target
-                .member_tasks
-                .lock()
-                .insert(membership.task_key, membership.task.clone());
-            source_cgroup
-                .member_tasks
-                .lock()
-                .remove(&membership.task_key);
+            target.member_tasks.lock().insert(membership.token);
+            source_cgroup.member_tasks.lock().remove(&membership.token);
             for controller in source_lineage[shared..].iter().rev() {
                 controller.release_task();
             }
@@ -843,7 +824,7 @@ impl TaskMembership {
         let Some(cgroup) = self.cgroup.write().take() else {
             return;
         };
-        cgroup.member_tasks.lock().remove(&self.task_key);
+        cgroup.member_tasks.lock().remove(&self.token);
         for controller in cgroup.controller_lineage().iter().rev() {
             controller.release_task();
         }

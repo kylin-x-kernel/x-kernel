@@ -23,5 +23,6 @@ pub use inode::{
     InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, InodeUpdateTime, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
     WeakVfsInode, empty_inode_operations, get_next_ino, inode_init_owner,
+    metadata_only_inode_operations,
 };
 pub(crate) use inode::{get_or_try_init_inode, lookup_inode};

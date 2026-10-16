@@ -489,6 +489,38 @@ impl InodeOperations for EmptyInodeOperations {}
 static EMPTY_INODE_OPERATIONS: Lazy<Arc<EmptyInodeOperations>> =
     Lazy::new(|| Arc::new(EmptyInodeOperations));
 
+/// Inode operations for in-memory objects (anonymous pipes, ...) whose
+/// metadata lives entirely in the KVFS-resident inode.
+///
+/// `setattr` accepts the update unchanged so owner/mode/timestamp changes on
+/// such objects succeed exactly like their Linux counterparts (e.g.
+/// `fchown` on a pipe). KVFS publishes the returned values to the resident
+/// inode. A requested size change is refused: only regular files can change
+/// length, and the common truncate boundary already rejects special files.
+struct MetadataOnlyInodeOperations;
+
+impl InodeOperations for MetadataOnlyInodeOperations {
+    fn setattr(
+        &self,
+        _idmap: &MountIdmap,
+        _dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        if update.size.is_some() {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(update)
+    }
+}
+
+static METADATA_ONLY_INODE_OPERATIONS: Lazy<Arc<MetadataOnlyInodeOperations>> =
+    Lazy::new(|| Arc::new(MetadataOnlyInodeOperations));
+
+/// Returns inode operations for in-memory objects with resident metadata.
+pub fn metadata_only_inode_operations() -> Arc<dyn InodeOperations> {
+    METADATA_ONLY_INODE_OPERATIONS.clone()
+}
+
 #[derive(Clone, Copy, Debug)]
 struct InodeTimestamp {
     sec: i64,
@@ -3204,6 +3236,33 @@ mod tests {
         assert_eq!(
             inode.update_attributes_after_backing_change(&updated),
             Err(VfsError::InvalidInput)
+        );
+    }
+
+    #[def_test]
+    fn metadata_only_inode_operations_accepts_owner_changes() {
+        let ops = metadata_only_inode_operations();
+        let inode = VfsInode::new_dir(
+            Arc::new(EmptyInodeOperations),
+            VfsInodeInit::new(
+                1,
+                0,
+                Umode::new(NodeType::Directory, NodePermission::empty()),
+            ),
+        );
+        let dentry = Dentry::new_dir_from_inode(inode, None, String::new());
+        let update = MetadataUpdate {
+            owner: Some((1, 2)),
+            mode: Some(NodePermission::from_bits_truncate(0o600)),
+            ..Default::default()
+        };
+        let applied = ops
+            .setattr(&MountIdmap, &dentry, update.clone())
+            .expect("metadata-only ops must accept setattr");
+        assert_eq!(applied.owner, Some((1, 2)));
+        assert_eq!(
+            applied.mode.map(|mode| mode.bits()),
+            Some(NodePermission::from_bits_truncate(0o600).bits())
         );
     }
 }

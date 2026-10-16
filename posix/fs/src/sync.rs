@@ -12,7 +12,7 @@ pub fn sys_sync() -> KResult<isize> {
 }
 
 pub fn sys_syncfs(fd: i32) -> KResult<isize> {
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     file.sync_filesystem()?;
     Ok(0)
 }

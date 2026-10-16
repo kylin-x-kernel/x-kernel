@@ -315,10 +315,16 @@ pub fn create_memfd_file(
     } else {
         ShmemSealSet::SEAL
     };
+    // Linux creates memfd files with a fixed mode 0777 (`S_IFREG |
+    // S_IRWXUGO`), not subject to umask. An
+    // executable mode matters for `fexecve(memfd)` / `execveat(...,
+    // AT_EMPTY_PATH)`: runtimes (runc, crun) copy their own image into a
+    // memfd and re-execute it for CVE-2019-5736 hardening, which requires the
+    // memfd inode to permit execution.
     create_anonymous_file(
         ShmemObjectKind::Memfd,
         name,
-        NodePermission::from_bits_truncate(0o600),
+        NodePermission::from_bits_truncate(0o777),
         initial_seals,
         cred,
     )

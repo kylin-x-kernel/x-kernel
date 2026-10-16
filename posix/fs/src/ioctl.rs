@@ -119,7 +119,7 @@ fn ioctl_fiemap(file: &VfsFile, ioctl_arg: usize) -> KResult<isize> {
 /// of special files.
 pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> KResult<isize> {
     debug!("sys_ioctl <= fd: {fd}, cmd: {cmd}, arg: {arg}");
-    let f = kprocess::current_resources().get_file(fd)?;
+    let f = kprocess::current_files().get_file(fd)?;
     if cmd == FS_IOC_FIEMAP {
         return ioctl_fiemap(&f, arg);
     }

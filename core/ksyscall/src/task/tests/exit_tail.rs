@@ -290,6 +290,9 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
                 // window is held, and count two rejects before any activation.
                 let rejected = unsafe { kprocess::replace_current_address_space(target, false) };
                 assert_eq!(rejected, Err(kerrno::KError::InvalidInput));
+                // Multi-thread exec is now handled through `de_thread()` and
+                // no longer rejected up front; a missing path still fails while
+                // resolving the image, before any thread-group or MM change.
                 assert_eq!(
                     exec_owned(
                         &mut rejected_context,
@@ -298,7 +301,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
                         vec![],
                         None
                     ),
-                    Err(kerrno::KError::WouldBlock)
+                    Err(kerrno::KError::NotFound)
                 );
                 assert_eq!(format!("{rejected_context:?}"), before);
                 assert_eq!(process.mm_id().unwrap(), original_id);

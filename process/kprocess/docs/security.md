@@ -18,7 +18,7 @@ manager for observation or prepared notification does not retain that ownership;
 configuration operations reject inactive owners rather than recreating defaults.
 
 Protected assets are stable PID/TID bindings, parent/child membership, exit
-visibility, runtime mm/files/fs/ns ownership, objective/subjective credentials,
+visibility, runtime mm/fs/ns and per-thread files ownership, objective/subjective credentials,
 cgroup charge, signal recipients, timer generations and controlling-terminal
 identity. Possession of a `Process` reference is not by itself syscall authority.
 
@@ -74,9 +74,17 @@ Signal delivery during sleepable old-MM teardown would violate this contract.
 
 ## Memory and lifecycle invariants
 
-- A published task must carry the same stable handle as its Thread. Numeric ID
-  equality alone does not protect against reuse; retire/delete paths check object
-  identity and current slot state.
+- A task's identity is the task object; the numeric TID is a movable binding it
+  owns. `TaskIdentityToken` is allocated once per thread and never reused. The
+  number directory (`ProcessPublication::task_table`) is the only
+  number-indexed table; thread and cgroup membership key on the token. Retire
+  and delete paths still check slot object identity, so a reused number cannot
+  retire an unrelated task.
+- A number binding moves only in the sole-survivor `exec` takeover, in the
+  sleepable `exec_de_thread` phase after the sibling sweep and before the image
+  swap: the directory link moves once, the survivor adopts the group number,
+  and its signal-registry entry is re-keyed. No other path changes a live
+  task's number.
 - Parent link, child list, exit signal and reserved reparent slot form one
   relation. Mutate them under the domain write lock, never by independent updates.
 - Running → Zombie/Dead and Zombie → Dead consumption are domain transactions.
@@ -150,12 +158,14 @@ missing targets are ignored by delivery glue rather than reviving retired tasks.
 | T-01 | PID/TID reuse causes wrong-task removal or signal targeting | High | Old exit/rollback races a new numeric ID binding | Stable slots and Arc identity checks gate retirement/deletion; Reserved slots are not deleted as retired. Syscall target authorization remains external. |
 | T-02 | Double reap or inconsistent parent relation | Medium | Multiple waiters, reparent and exit race | Domain write transaction scans, claims Zombie, detaches and retires identity once; callers rescan after failed claim. |
 | T-03 | Intrusive-list removal corrupts memory | High | A foreign or concurrently unlinked slot is removed | Guard token, parent list lock and exact membership check enforce the documented unsafe preconditions. |
-| T-04 | Runtime references retain resources through zombie lifetime | Medium | Parent observes completion before files/fs/ns/mm detach | Lifecycle caller must detach owners first; weak runtime identity avoids owning the runtime. Existing live capabilities can deliberately prolong active-mm lifetime. |
+| T-04 | Runtime references retain resources through zombie lifetime | Medium | Parent observes completion before task files and runtime fs/ns/mm detach | Lifecycle caller must detach owners first; weak runtime identity avoids owning the runtime. Existing live capabilities can deliberately prolong active-mm lifetime. |
 | T-05 | Credential confusion permits cross-task inspection | High | Caller/target credentials differ or subjective override exists | Ptrace checks real credentials and commit rejects override; UID-zero privilege approximation and absent full capability/dumpability model are residual limitations. |
 | T-06 | Half-published fork becomes runnable | Medium | Parent writeback or cgroup migration fails | Staged publication and commit-before-activation; Drop rolls back. Already-exited/unusual rollback paths retain conservative state rather than deleting another identity. |
 | T-07 | Exit signal exposes state before autoreap commits | Medium | Signal handler/waiter runs while parent contract changes | Prepare outside domain, revalidate parent/exit-signal and retry, commit state before signal queueing/wakeup. Failed notification is logged; UID fallback can reduce payload accuracy. |
 | T-08 | Cgroup movement races child publication | Medium | Migration and clone operate concurrently | Process cgroup gate stabilizes authorization and reconciles unpublished membership; kcgroup owns group charge/migration invariants. |
 | T-09 | Exec failure leaves partially updated runtime | Medium | Close-on-exec cleanup returns error | Error propagates before metadata pair publication; earlier timer/heap/signal changes are not rolled back. Caller must handle exec failure state appropriately. |
+| T-10 | `de_thread` sweep kills sibling threads while another executor also sends signals | Medium | Exec races a second `kill`/`tgkill` | Concurrent `exec` serializes on the process `exec` gate, so only one thread sweeps; a spurious non-fatal wake cannot be mistaken for the winner's kill. The sweep owns each sibling and joins it before the address-space swap. Swept targets skip the group-exit marking and never record the process exit code, but a delivered fatal signal bumps the process fatal-signal epoch (the sweep's own kill bypasses it) and a concurrent `exit_group()` marks the group exited, so either aborts the exec with the racing signal instead of being absorbed or undone. |
+| T-11 | `/proc/<pid>/exe` follows to a backing file that outlives the process | Medium | Magic-link open races final exit | The backing `Arc<VfsFile>` is read from a snapshot; a concurrent teardown may detach owners, so the follow returns NotFound when the backing file is gone, never a stale path string alone. |
 
 ## Failure modes and handling
 
@@ -195,8 +205,11 @@ explicitly scrubbed on drop here.
 Root/global PID projection, missing subreaper support, representative-thread
 credentials, simplified ptrace privilege semantics, UID-zero child-exit fallback
 and external syscall authorization are current limits. Resource-object or mm-ID
-availability does not prove a live fd table or active mappings. Optional TEE/TIPC
-paths require feature-specific validation.
+availability does not prove a live fd table or active mappings. `de_thread`
+relies on the sibling threads being in the same process and reachable through
+the scheduler; an uncancellable sibling in uninterruptible kernel work delays
+the execing thread indefinitely (Linux has the same property). Optional
+TEE/TIPC paths require feature-specific validation.
 
 `ut-tests/lib.rs` exercises publication, PID reuse, rollback, parent/wait/exit,
 resource detach and related invariants. Other modules in `ut-tests/` cover ptrace checks, pidfd

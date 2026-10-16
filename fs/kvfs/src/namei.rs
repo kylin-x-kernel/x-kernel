@@ -740,6 +740,11 @@ impl<'a> Nameidata<'a> {
         let path = path.resolve_final_mount();
         if d_is_symlink(path.dentry())
             && flags.lookup_flags().follows_final()
+            // Magic links (e.g. `/proc/self/exe`, `/proc/self/fd/N`) are also
+            // symlinks, but must be followed through the magic-link machinery
+            // (`step_into` -> `follow_magic_link`) rather than `read_link`, so
+            // that `open` reaches the backing file rather than re-resolving the
+            // display path (which is stale for memfd-backed exe links).
             && d_inode(path.dentry()).magic_link().is_none()
         {
             self.reserve_link_follow()?;

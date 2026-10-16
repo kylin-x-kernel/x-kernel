@@ -8,7 +8,10 @@ process-runtime capabilities, signal targeting and timer-delivery integration.
 `Process` is a stable identity that can outlive runnable threads; its weak
 `ProcessRuntime` reference is separate from the externally visible exited state.
 `Thread` owns a strong runtime reference and its own objective/subjective
-credential pointers. `ProcessRuntime` is crate-private; external users operate
+credential pointers and `TaskFiles` binding. Threads share the underlying table
+only with `CLONE_FILES`; unshare and exec replace only the caller's binding.
+`current_files()` pins the current thread and applies its process's live limit,
+without storing a second binding or limit. `ProcessRuntime` is crate-private; external users operate
 through `Process`, `Thread` and the semantic facade modules.
 
 Syscall ABI decoding belongs to `ksyscall`; image loading belongs to `kexec`;
@@ -144,7 +147,8 @@ namespaces, allocates a root identity and validates/attaches the child relation.
 Shared fs while its parent is in exec returns WouldBlock; namespace errors map
 to InvalidInput/Unsupported or a mount error. `CallerParent` inherits the
 caller's current parent and exit-signal contract, rechecking it under the domain
-lock. Runtime preparation then clones/shares mm, signal actions and fd table;
+lock. Thread preparation clones/shares the caller's fd table; runtime preparation
+then clones/shares mm and signal actions;
 `AttachedForkProcess` rolls back the attached relation if preparation fails.
 The new thread starts from the caller's subjective credential snapshot and
 inherits no-new-privileges. Its restart-block starts empty; clone does not
@@ -174,8 +178,10 @@ still-running unpublished child relation; it does not retire an unrelated
 existing process identity. Retired slot deletion checks pointer identity and
 state to tolerate numeric ID reuse.
 
+Every exiting thread detaches its files before retiring thread membership, so
+last-thread completion cannot overtake a sibling's descriptor cleanup.
 Last-thread cleanup is orchestrated by `posix-process`: remove thread visibility,
-record final CPU time, detach mm/files/fs/ns and optional resources, then call
+record final CPU time, detach mm/fs/ns and optional resources, then call
 `complete_process_exit`. SIGCHLD preparation occurs outside the domain lock;
 parent/exit-signal changes cause retry. The domain transaction commits exit,
 autoreap and reparent; only then are signal queueing and parent wakeup performed.
@@ -190,12 +196,59 @@ entry outside that lock. `finish_thread_exit` retires TID visibility before late
 resource teardown, so external thread lookup stops targeting exit-tail tasks.
 
 Exec initializes the new image's heap marker when constructing its MM binding.
-The subsequent process update handles optional TA context, signal dispositions, POSIX timers,
-close-on-exec files and optional IPC/private state, then publishes path/cmdline
+The caller unshares its files and closes close-on-exec descriptors. The subsequent
+process update handles optional TA context, signal dispositions, POSIX timers
+and optional IPC/private state, then publishes path/cmdline
 under one `ExecMetadata` lock. A failure closing descriptors can occur after
 earlier changes: the operation is not an all-state rollback transaction. The
 combined metadata update is atomic, but separate path and cmdline calls need not
 observe the same generation across a concurrent exec.
+
+`de_thread`: `execve` serializes on the process-wide `exec` gate
+(`Process::acquire_exec_gate`, Linux `cred_guard_mutex`), so two sibling execs
+cannot SIGKILL and join each other in a mutual deadlock; the loser waits
+interruptibly and is killed by the winner's sweep. A multi-threaded process (Go
+runtimes, OCI container init) then SIGKILLs every sibling thread and joins them,
+so only the execing thread reaches the shared address-space swap. Each swept
+target is marked (`Thread::mark_exec_sweep_target`) so its fatal death skips the
+group-exit marking and group-kill broadcast, and the sweep runs whenever the
+execing thread is not the group leader — including when the leader already
+exited and this is the sole surviving non-leader, so the group pid moves onto
+the survivor. A genuine concurrent `exit_group()` still marks the group exited,
+and a delivered fatal `kill`/`tgkill` bumps the process signal manager's
+fatal-signal epoch (Linux `complete_signal` marking `SIGNAL_GROUP_EXIT`); a
+fatal signal every thread blocks stays pending and does not count. The sweep's
+own kill bypasses the counter, and `exec_de_thread` aborts the exec when either
+changed, terminating with the racing signal so the parent observes
+`WIFSIGNALED` instead of a clean exit or the sweep's SIGKILL.
+`execve` also installs
+the opened backing executable file (`with_exe_file`), replacing/inheriting the
+display path in `ExecMetadata` so `/proc/<pid>/exe` can follow to the real file
+across exec, fork, and the init process created via `fork` + `execve`.
+
+## Task identity and the number binding
+
+A task's *identity* is the task object itself; the numeric TID/PID is a
+*binding* it owns. `kidentity::TaskIdentityToken` is allocated once per thread
+and never reused, and `Thread` stores its current number in
+`SpinNoIrq<Arc<PidHandle>>` with an `AtomicU32` snapshot, so `tid()` is a
+lock-free read while the binding can change in one critical section.
+
+The single number-indexed table is `ProcessPublication::task_table` (TID →
+task). Registries that must not be re-indexed when a number moves key on the
+stable token instead: `ThreadMembership` (per-process thread membership) and
+`kcgroup`'s `member_tasks`. `ProcessPublication` also keeps a token → task
+directory so those registries resolve a live task and read the current number
+on demand.
+
+A non-leader `exec` therefore performs an O(1) takeover in the sleepable
+`exec_de_thread` phase: the survivor retires the dead leader's directory link
+and republishes its own under the group number
+(`ProcessPublication::move_task_number`), adopts the group number
+(`Thread::adopt_task_number`), and re-keys its process signal registry entry
+(routing still selects threads by number). Membership and cgroup need no
+change, and the address-space exchange stays a pure pointer swap in
+`replace_current_address_space`, with no identity work in its callback.
 
 ## Concurrency model
 
@@ -305,7 +358,11 @@ callers from reconstructing lifecycle policy from weak runtime references.
 Known limits include root/global PID semantics, no child-subreaper implementation,
 representative-thread credential snapshots, simplified ptrace privilege checks
 (effective UID zero substitutes for CAP_SYS_PTRACE), and no full authorization
-policy in signal/job-control facade helpers. Optional TEE/TIPC behavior exists
+policy in signal/job-control facade helpers. `PR_SET_PDEATHSIG` records the
+signal on the identity but delivery at parent-death reparenting is not yet
+wired. The init process is bootstrapped through the low-level
+`build_process_thread` path, so its backing `exe_file` is not stashed for
+`/proc/1/exe` (a documented follow-up). Optional TEE/TIPC behavior exists
 only with its Cargo feature enabled.
 
 ## Published tasks and unreleased thread-group members

@@ -73,6 +73,7 @@ must retain the ordering described in the design document.
 | T-04 | Process completion exposes still-held resources. | Medium | Last-thread teardown notifies a waiter before detach. | Release mm/files/fs/ns and IPC state before `complete_process_exit`; logged cleanup failures remain a diagnostic limitation. |
 | T-05 | Bootstrap input prevents system startup. | Medium | Empty argv or resolution/loading/publication failure. | Fail-stop panic with context; bootstrap recovery is intentionally not provided. |
 | T-06 | A pending termination signal leaves a thread blocked indefinitely. | Medium | A sender queues a signal between the signal check and a later interrupt-flag clear. | Clear old interrupt state before checking pending signals; retain later notifications through timer polling, preemption and userspace reentry. Recheck newly raised interrupts before reentry; CPU kick behavior is provided by the task layer. |
+| T-07 | `exec_de_thread` kills siblings while another executor also signals them. | Medium | Exec races a second `kill`/`tgkill`, or a sibling is in uninterruptible work. | The sweep is owned by the execing thread and joins every sibling before the address-space swap; a racing signal to an already-dying sibling is harmless. A sibling stuck in uninterruptible work delays the execing thread until it exits (Linux has the same property). |
 
 ## Failure-mode analysis
 
@@ -82,6 +83,7 @@ must retain the ordering described in the design document.
 | F-02 | Resource detach returns an error | Provider cleanup error | Cleanup may be incomplete | Resource lifetime or observer semantics can degrade | 2 | Log per-owner errors and continue the remaining teardown. |
 | F-03 | Init construction fails | Missing bootstrap prerequisites or invalid image | PID 1 never runs | Boot stops | 1 | Explicit assertions/expect messages identify the failed stage. |
 | F-04 | Group-exit signal delivery races thread exit | Concurrent sibling termination | A sibling may disappear | Best-effort group termination continues | 3 | Iterate currently published siblings and tolerate delivery errors. |
+| F-05 | `exec_de_thread` join never returns | A sibling ignores the thread-directed SIGKILL | Exec stalls | The process cannot replace its image | 2 | `SIGKILL` is uncatchable and delivery is best-effort, mirroring Linux `de_thread`; no timeout is imposed. |
 
 ## Privacy and limitations
 
@@ -107,3 +109,6 @@ are simplified, and PI robust-futex cleanup is skipped.
   syscall restart. Clear an `ERESTART_RESTARTBLOCK` slot in the same return
   that publishes `EINTR`, including when the later scan is the one that installs
   the handler.
+
+- `exec_de_thread` joins siblings before the address-space swap and undoes group-exit
+  bookkeeping; changing the exec path must keep the group-kill flush ordering.

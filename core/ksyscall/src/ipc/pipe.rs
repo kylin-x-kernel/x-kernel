@@ -35,7 +35,7 @@ pub(crate) fn sys_pipe2(fds: UserPtr<[c_int; 2]>, flags: u32) -> KResult<isize> 
         OpenFlags::empty()
     };
     let (read_file, write_file) = create_pipe_files(status_flags, kprocess::current_cred())?;
-    let resources = kprocess::current_resources();
+    let resources = kprocess::current_files();
     let read_fd = resources.add_file(read_file, cloexec)?;
     let write_fd = resources.add_file(write_file, cloexec).inspect_err(|_| {
         if let Err(err) = resources.close_file(read_fd) {

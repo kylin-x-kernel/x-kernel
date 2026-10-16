@@ -77,6 +77,37 @@ impl ThreadSignalManager {
         this
     }
 
+    /// Rebinds this thread's delivery target after an `exec` identity takeover.
+    ///
+    /// Routing selects threads by number, so the registry entry follows the
+    /// moved number; other registered managers retain their own identities and
+    /// lifecycle. The lookup compares object identity, so a reused TID cannot
+    /// rebind a successor's entry.
+    pub fn rebind_after_exec(self: &Arc<Self>, tid: u32) {
+        let this = Arc::downgrade(self);
+        let mut children = self.proc.children.lock();
+        if let Some((number, _)) = children
+            .iter_mut()
+            .find(|(_, child)| alloc::sync::Weak::ptr_eq(child, &this))
+        {
+            *number = tid;
+        }
+    }
+
+    /// Removes this thread from process-directed signal selection at exit.
+    ///
+    /// Call before retiring thread-group membership. A retained manager
+    /// reference must not keep an exited thread eligible for delivery. The
+    /// removal is idempotent and identity-compared, so a reused TID cannot
+    /// remove a successor.
+    pub fn exit(self: &Arc<Self>) {
+        let this = Arc::downgrade(self);
+        self.proc
+            .children
+            .lock()
+            .retain(|(_, child)| !alloc::sync::Weak::ptr_eq(child, &this));
+    }
+
     /// Dequeues a signal from the thread's pending signals.
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
@@ -297,12 +328,13 @@ impl ThreadSignalManager {
         let Some(handlers) = owner.as_ref() else {
             return false;
         };
-        let (ignored, is_blocked) = {
+        let (ignored, is_blocked, fatal) = {
             let actions = handlers.actions.lock();
             let is_blocked = self.signal_blocked(signo);
             (
                 super::process::signal_ignored_by(&actions, signo),
                 is_blocked,
+                super::process::signal_is_fatal(&actions, signo),
             )
         };
 
@@ -310,6 +342,13 @@ impl ThreadSignalManager {
             return false;
         }
 
+        // A fatal signal delivered to this thread terminates the whole process
+        // when it is not blocked; a blocked one stays pending (and survives
+        // `execve`) without marking the process as dying. Record it so a
+        // concurrent `exec` sibling sweep cannot absorb it.
+        if fatal && !is_blocked {
+            self.proc.note_fatal_signal(signo);
+        }
         if self.pending.lock().put_signal(sig) {
             self.possibly_has_signal.store(true, Ordering::Release);
         }
@@ -317,6 +356,31 @@ impl ThreadSignalManager {
         drop(owner);
         source.wake();
         !is_blocked
+    }
+
+    /// Delivers the `de_thread` sibling sweep's uncatchable kill.
+    ///
+    /// Unlike [`Self::send_signal`], it does not bump the fatal-signal epoch:
+    /// the execing thread orchestrates the sweep and must survive it, so this
+    /// kill must not abort its own exec. Returns whether the target should be
+    /// woken.
+    #[must_use]
+    pub fn deliver_sweep_kill(&self) -> bool {
+        let owner = self.proc.handlers.lock();
+        let Some(handlers) = owner.as_ref() else {
+            return false;
+        };
+        let source = handlers.pending_changed.clone();
+        if self
+            .pending
+            .lock()
+            .put_signal(SignalInfo::new_kernel(Signo::SIGKILL))
+        {
+            self.possibly_has_signal.store(true, Ordering::Release);
+        }
+        drop(owner);
+        source.wake();
+        true
     }
 
     /// Captures this thread's current shared arrival source without retaining it.

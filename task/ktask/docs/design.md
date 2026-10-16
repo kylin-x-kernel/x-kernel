@@ -318,6 +318,11 @@ defers intermediate writes and re-reads all sources after callbacks and wakes.
 Core overload backoff changes only the prepared service deadline, not scheduler
 deadlines. An empty prepared queue cannot disarm another source.
 
+`TaskInner` 在创建时记录单调时钟（`start_time_ns`，构造后不可变）。该时间戳由
+procfs 读取并换算成 `/proc/[pid]/stat` 的 `starttime` 字段（USER_HZ=100 刻度），
+供 runc 等运行时把它与持久化的 `InitProcessStartTime` 比较来判断进程是否仍是
+自己创建的那个。任务生命周期全程不修改它。
+
 `ktask/ipi` enables `kipi/timer-reprogram` and supplies `TimerReprogramIpiIf`.
 The endpoint only re-reads current deadlines and programs hardware; it does not
 dispatch callbacks, account runtime or mark a reschedule request. Notifications

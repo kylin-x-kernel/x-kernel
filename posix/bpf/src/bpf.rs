@@ -205,7 +205,7 @@ fn bpf_map_create(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::OperationNotSupported);
     }
 
-    let fd = kprocess::current_resources().add_file(
+    let fd = kprocess::current_files().add_file(
         BpfMap::new_file(
             attr.map_type,
             attr.key_size,
@@ -232,7 +232,7 @@ fn bpf_map_lookup_elem(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let map = kprocess::current_resources().get_file_private::<BpfMap>(attr.map_fd as _)?;
+    let map = kprocess::current_files().get_file_private::<BpfMap>(attr.map_fd as _)?;
     if map.map_type() != BPF_MAP_TYPE_ARRAY || map.key_size() != size_of::<u32>() as u32 {
         return Err(KError::OperationNotSupported);
     }
@@ -257,7 +257,7 @@ fn bpf_map_update_elem(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let map = kprocess::current_resources().get_file_private::<BpfMap>(attr.map_fd as _)?;
+    let map = kprocess::current_files().get_file_private::<BpfMap>(attr.map_fd as _)?;
     if map.map_type() != BPF_MAP_TYPE_ARRAY || map.key_size() != size_of::<u32>() as u32 {
         return Err(KError::OperationNotSupported);
     }
@@ -277,7 +277,7 @@ fn bpf_map_freeze(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
 
     let attr = UserConstPtr::<BpfMapFreezeAttrPrefix>::from(attr_ptr).read_vm()?;
-    let map = kprocess::current_resources().get_file_private::<BpfMap>(attr.map_fd as _)?;
+    let map = kprocess::current_files().get_file_private::<BpfMap>(attr.map_fd as _)?;
     map.freeze();
     Ok(0)
 }
@@ -304,7 +304,7 @@ fn bpf_prog_load(attr_ptr: usize, size: u32) -> KResult<isize> {
     let map_values = bind_program_map_values(&insns)?;
 
     let arc_insns: Arc<[u8]> = insns.into_boxed_slice().into();
-    let fd = kprocess::current_resources().add_file(
+    let fd = kprocess::current_files().add_file(
         BpfProgram::new_file(
             arc_insns,
             prefix.prog_type,
@@ -322,7 +322,7 @@ fn bpf_obj_pin(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
     let pathname = load_pathname(attr.pathname)?;
-    let file = kprocess::current_resources().get_file(attr.bpf_fd as _)?;
+    let file = kprocess::current_files().get_file(attr.bpf_fd as _)?;
     let program = BpfProgram::from_file(&file)?;
 
     let fs_struct = kprocess::current_fs_context();
@@ -353,7 +353,7 @@ fn bpf_obj_get(attr_ptr: usize, size: u32) -> KResult<isize> {
         &cred,
     )?;
     let program = bpffs::program_from_location(&location)?;
-    let fd = kprocess::current_resources().add_file(program.into_file(cred)?, true)?;
+    let fd = kprocess::current_files().add_file(program.into_file(cred)?, true)?;
     Ok(fd as isize)
 }
 
@@ -366,8 +366,7 @@ fn bpf_prog_test_run(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
 
     let attr = UserConstPtr::<BpfProgTestRunAttrPrefix>::from(attr_ptr).read_vm()?;
-    let program =
-        kprocess::current_resources().get_file_private::<BpfProgram>(attr.prog_fd as _)?;
+    let program = kprocess::current_files().get_file_private::<BpfProgram>(attr.prog_fd as _)?;
     let mut vm = kbpf::Vm::new();
     for map_value in program.map_values() {
         vm.add_read_only_memory(kbpf::ReadOnlyMemory::map_value(
@@ -395,7 +394,7 @@ fn bpf_obj_get_info_by_fd(attr_ptr: usize, size: u32) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    let program = kprocess::current_resources().get_file_private::<BpfProgram>(attr.bpf_fd as _)?;
+    let program = kprocess::current_files().get_file_private::<BpfProgram>(attr.bpf_fd as _)?;
     let info_len = (attr.info_len as usize).min(BPF_PROG_INFO_PREFIX_SIZE);
     let mut info = [0u8; BPF_PROG_INFO_PREFIX_SIZE];
     info[BPF_PROG_INFO_TYPE_OFFSET..BPF_PROG_INFO_TYPE_OFFSET + 4]
@@ -456,7 +455,7 @@ fn bind_program_map_values(insns: &[u8]) -> KResult<Arc<[BpfProgramMapValue]>> {
             continue;
         }
 
-        let map = kprocess::current_resources().get_file_private::<BpfMap>(map_fd as _)?;
+        let map = kprocess::current_files().get_file_private::<BpfMap>(map_fd as _)?;
         values.push(BpfProgramMapValue::new(map_id, map.snapshot_values()));
     }
 

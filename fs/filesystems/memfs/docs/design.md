@@ -116,6 +116,19 @@ caller's mount namespace and applies per-mount policy there.
 同步不能通过清除或驱逐 dirty folio 丢弃唯一的数据副本。
 FIFO 和设备 inode 在 VFS open 时安装专用 operation table，不继承该空操作。
 
+### memfd 与 exec
+
+`create_memfd_file()` 用模式 `0o777` 创建匿名 memfd 文件（对齐 Linux
+`shmem_file_setup` 配合 umask）。可执行位对 `fexecve(memfd)` /
+`execveat(dirfd, "", AT_EMPTY_PATH)` 是必需的：runc/crun 把自身镜像拷入 memfd 并
+重新 exec（CVE-2019-5736 自克隆加固），exec 的 `MAY_EXEC` 检查需要通过。memfd
+exec 的显示路径为调用方提供的 `/proc/self/fd/<n>`，`/proc/self/exe` 跟随同一
+已打开 backing file。
+
+memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_memfd_file`
+接收初始 seal：没有 `MFD_ALLOW_SEALING` 时立即置 `F_SEAL_SEAL`，此后不能再加
+任何 seal（对齐 Linux）。
+
 ## 并发模型
 
 - inode metadata 由 `Mutex<Metadata>` 保护。

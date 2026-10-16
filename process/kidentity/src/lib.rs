@@ -27,7 +27,7 @@
 extern crate alloc;
 
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use kerrno::{KError, KResult};
 use lazyinit::LazyInit;
@@ -99,6 +99,36 @@ impl Upid {
     /// Returns the owning namespace.
     pub fn ns(&self) -> &Arc<PidNamespace> {
         &self.ns
+    }
+}
+
+/// Stable, never-reused identity token for a task/thread.
+///
+/// Allocated once when the task is created and unchanged for its whole life,
+/// including across an `exec` leader takeover that moves the numeric TID.
+/// Registries that must not be re-indexed when a number moves key on this
+/// token; the numeric directory remains the only number-indexed table.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TaskIdentityToken(u64);
+
+impl TaskIdentityToken {
+    /// Allocates a fresh, process-lifetime-unique token.
+    pub fn allocate() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Returns the reserved token for runtimes without a user identity.
+    ///
+    /// Never handed out by [`Self::allocate`]; only test or kernel-only
+    /// runtimes that never join a token-indexed registry use it.
+    pub const fn unknown() -> Self {
+        Self(0)
+    }
+
+    /// Returns the raw token value for tracing and diagnostics.
+    pub fn as_u64(self) -> u64 {
+        self.0
     }
 }
 

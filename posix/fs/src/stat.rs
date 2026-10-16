@@ -244,7 +244,7 @@ pub fn sys_statfs(path: UserConstPtr<c_char>, buf: UserPtr<statfs>) -> KResult<i
 pub fn sys_fstatfs(fd: i32, buf: UserPtr<statfs>) -> KResult<isize> {
     debug!("sys_fstatfs <= fd: {fd}");
 
-    let resources = current_user_process().resources()?;
+    let resources = kprocess::current_files();
     let file = resources.get_file(fd)?;
     buf.write_vm(statfs(file.path())?)?;
     Ok(0)

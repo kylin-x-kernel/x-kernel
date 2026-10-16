@@ -6,7 +6,9 @@
 
 use core::mem::{align_of, offset_of, size_of};
 
-use linux_raw_sys::general::{__kernel_loff_t, __kernel_pid_t, flock64, stat, statfs, statx};
+use linux_raw_sys::general::{
+    __kernel_loff_t, __kernel_pid_t, flock64, siginfo_t, stat, statfs, statx,
+};
 
 use crate::{UserRead, UserWrite};
 
@@ -52,3 +54,6 @@ unsafe impl UserWrite for statfs {}
 // SAFETY: these Linux ABI structs are plain-old-data syscall carriers whose
 // byte representations may be copied across the user/kernel boundary as declared.
 unsafe impl UserWrite for statx {}
+// SAFETY: `siginfo_t` is a POD C struct (integer/union payload, no `Drop`) whose
+// in-memory layout is the kernel↔userspace ABI; copy-to-user is sound.
+unsafe impl UserWrite for siginfo_t {}

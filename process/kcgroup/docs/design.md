@@ -23,7 +23,7 @@ new-task limit. `TaskCharge` and `TaskMembership` separate those lifetimes.
 CgroupNamespace -> Arc<Cgroup> view root
 Cgroup -> strong children / weak parent / shared CgroupHierarchy
        -> optional PidsController
-       -> member_tasks: stable Arc<PidHandle> indexed by pointer identity
+       -> member_tasks: set of stable TaskIdentityToken
 reserve_task -> TaskCharge -> commit -> TaskMembership -> detach/drop
 ```
 
@@ -65,13 +65,14 @@ allowed and affects later admission.
 
 `reserve_task` increments a lifecycle reservation and charges each controller
 in root-to-leaf order. A failure drops the partial charge and releases counts.
-`TaskCharge::commit` checks duplicate pointer identity before publishing the
-strong `PidHandle` in the membership map. A duplicate returns `EEXIST` and rolls
-back the new charge; equal numeric projections in distinct handles are not the
-same identity. The higher task registry owns numeric uniqueness policy.
+`TaskCharge::commit` checks for a duplicate stable `TaskIdentityToken` before
+publishing it in the membership set. A duplicate returns `EEXIST` and rolls
+back the new charge. The token is allocated once per task and never reused, so
+it stays valid across an `exec` leader takeover, and readers resolve the live
+task from it to read the current pid.
 
-`migrate_group` sorts/deduplicates memberships by stable identity, locks their
-current nodes, validates every source hierarchy, and charges target-only
+`migrate_group` sorts/deduplicates memberships by stable identity token, locks
+their current nodes, validates every source hierarchy, and charges target-only
 controller suffixes before changing membership. It skips detached memberships
 and unchanged targets. Mixed hierarchies return `EXDEV` before counts change;
 count overflow rolls back added counts. Migration ignores pids limits but

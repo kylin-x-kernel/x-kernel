@@ -66,7 +66,11 @@ file 的所有权关系。
    inode private data 保存同一个 `PipeObject`。
 5. 在 pipefs hidden mount 上创建 write file，再 clone read file；两个 file private data
    保存同一个 pipe object，并使用共享匿名-pipe file operation table。
-6. dentry 自动继承 pipefs 默认 table，路径显示为 `pipe:[inode-number]`。
+6. inode 使用 `kvfs::metadata_only_inode_operations()`：pipe 的 owner/mode/timestamp
+   全部存续于 KVFS 驻留 inode，`setattr` 原样接受更新，因此 `fchown`/`fchmod` 作用于
+   匿名 pipe（runc 对容器 stdio pipe 做 `fchown`）会正确发布元数据，而不是被 inode-op
+   默认的 `EOPNOTSUPP` 拒绝。
+7. dentry 自动继承 pipefs 默认 table，路径显示为 `pipe:[inode-number]`。
 
 ## 并发模型
 

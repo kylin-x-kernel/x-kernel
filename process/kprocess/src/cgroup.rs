@@ -7,19 +7,18 @@ use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use kcgroup::Cgroup;
 use kerrno::KResult;
 
-use crate::{AsThread, Pid, current_user_process, procfs, scheduler};
+use crate::{AsThread, Pid, current_user_process, publication::process_publication, scheduler};
 
 /// Collects root-namespace process IDs directly represented in `cgroup`.
 ///
-/// Stale registry entries and task-number projections whose stable identity no
-/// longer matches the cgroup membership are omitted.
+/// Membership is keyed by the stable identity token, so this resolves each
+/// token to its live task and reads the current process id on demand; a stale
+/// or exited member is omitted.
 pub fn cgroup_member_process_ids(cgroup: &Cgroup) -> Vec<Pid> {
     let mut process_ids = BTreeSet::new();
-    for identity in cgroup.member_tasks() {
-        let Ok(task) = procfs::thread_task(identity.root_nr()) else {
-            continue;
-        };
-        if Arc::ptr_eq(task.as_thread().task_number(), &identity) {
+    let publication = process_publication();
+    for token in cgroup.member_tasks() {
+        if let Some(task) = publication.task_by_identity_token(token) {
             process_ids.insert(task.as_thread().process().pid());
         }
     }

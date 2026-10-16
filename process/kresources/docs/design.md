@@ -2,26 +2,26 @@
 
 ## Purpose and background
 
-`ProcessResources` owns the resource limits and detachable files owner of one
-process runtime. `kprocess` and POSIX adapters use it to access `kfd::FdTable` and
+`ProcessResources` owns process-wide resource limits. `TaskFiles` owns the
+detachable fd-table binding of one thread, matching Linux `task_struct.files`. `kprocess` and POSIX adapters use it to access `kfd::FdTable` and
 `krlimit::Rlimits`. Descriptor layout and close semantics belong to `kfd`/`kvfs`;
 credential policy, process lookup, fork flags, and syscall decoding belong to the
 callers. This crate does not locate the current task.
 
 ## Source scope and architecture
 
-The implementation is in `src/lib.rs`; kernel unit tests are in
+Limits are in `src/lib.rs`; task files are in `src/files.rs`; kernel unit tests are in
 `ut-tests/lib.rs`, registered through `unittest::path_mod_test!`.
 
 ```text
-process runtime -> Arc<ProcessResources>
-                       +-> RwLock<Rlimits>
-                       +-> RwLock<Option<Arc<FdTableOwner>>> -> Arc<RwLock<FdTable>> -> VfsFile
+process runtime -> Arc<ProcessResources> -> RwLock<Rlimits>
+thread -> TaskFiles -> RwLock<Option<Arc<FdTableOwner>>> -> Arc<RwLock<FdTable>> -> VfsFile
 ```
 
-`new(user_stack_size)` builds default limits (stack size in bytes) and an empty
-shared table. Callers can copy limits and use `replace_fd_table` to implement
-sharing or copying during fork. The public `rlimits` lock permits trusted kernel
+`ProcessResources::new(user_stack_size)` builds default limits (stack size in
+bytes). `TaskFiles::new` attaches an initial table; `fork(shared)` creates a
+separate binding to a shared or copied table. Sibling unshare cannot replace
+another thread's binding. The public `rlimits` lock permits trusted kernel
 callers to access the table directly; it does not enforce the setter policy.
 
 ## Execution context and concurrency
@@ -36,23 +36,25 @@ dependencies have initialized.
 The outer files-owner lock protects attachment, the inner table lock protects
 slots, and the limits lock protects limit pairs. `with_fd_table` holds an owner
 read guard through its callback, preventing concurrent detach during that table
-operation. Insertion takes owner, table, then limits locks. Callers using the
-public limits lock must not invert that order. `fd_table()` returns an independent
+operation. Mutating operations retain that guard through slot removal and pin
+the selected table until close callbacks finish. Callers read the descriptor
+limit before insertion; the limits lock is not nested with table locks. `fd_table()` returns an independent
 strong reference; it can outlive detachment and must not be treated as evidence
-that the process still has a files owner. It does not keep descriptors open:
+that the task still has a files owner. It does not keep descriptors open:
 last-binding cleanup drains the table while such references remain.
-`fork_fd_table()` prepares a shared or private binding under the binding guard. Only these owners
-participate in the sharing check used by unshare.
+`fork()` prepares a shared or private binding under the binding guard. Only these
+bindings participate in the sharing check used by unshare.
 
-`duplicate_file_from` snapshots the soft limit and releases the limits guard
-before taking owner/table locks, so it introduces no reverse nested lock order.
+`CurrentFiles::duplicate_file_from` snapshots the process soft limit before
+calling `TaskFiles::duplicate_file_from`, so the limits guard is released before
+taking binding/table locks. No reverse nested lock order is introduced.
 The owner read guard and a single table write guard cover source lookup and
 minimum-based allocation together. Detachment returns `NoSuchProcess`.
 
 ## State and resource flows
 
 The files owner starts as `Some(table)` and `exit_files` changes it to `None`.
-Repeated exit is harmless. Replacement and unsharing reject `None` with
+Repeated exit is harmless. Fork and unsharing reject `None` with
 `NoSuchProcess`; they cannot resurrect an exited owner.
 
 - Limit reads validate the resource index. Passing `None` to
@@ -80,10 +82,10 @@ Repeated exit is harmless. Replacement and unsharing reject `None` with
 
 ## Design decisions and cleanup
 
-The detachable owner separates a dead process object from live descriptors.
+The detachable binding separates an exited task object from live descriptors.
 Snapshot references and `CLONE_FILES` sharing can extend table/file lifetime;
-`exit_files` releases only this process's reference. The final `FdTable` drop
-closes its remaining entries. No custom `ProcessResources::drop` is needed.
+`exit_files` releases only this task's reference. The final `FdTable` drop
+closes its remaining entries. No custom `TaskFiles::drop` is needed.
 
 Limits are stored independently from descriptor ownership so they remain
 queryable after files are detached. This is storage and local policy, not an

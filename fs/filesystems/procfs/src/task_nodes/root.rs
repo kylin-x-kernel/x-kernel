@@ -370,8 +370,7 @@ impl ProcFdLink {
     fn display_target(&self) -> VfsResult<String> {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         task.as_thread()
-            .process()
-            .resources()?
+            .files()
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -472,8 +471,7 @@ impl MagicLinkOps for ProcFdLink {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let snapshot = task
             .as_thread()
-            .process()
-            .resources()?
+            .files()
             .snapshot_fd(self.fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -486,6 +484,169 @@ impl MagicLinkOps for ProcFdLink {
     }
 }
 
+/// Magic link backing `/proc/<pid>/exe`.
+///
+/// `readlink` reports the process executable display path; `open`/lookup
+/// follows to the opened backing executable file (set on exec), so runtimes
+/// can `open("/proc/self/exe")` and `fcntl(F_GET_SEALS)` it (runc/crun
+/// self-clone re-exec for CVE-2019-5736).
+struct ProcExeLink {
+    node: SimpleFsNode,
+    task: WeakKtaskRef,
+}
+
+impl ProcExeLink {
+    fn new(fs: Arc<SimpleFs>, task: WeakKtaskRef) -> Arc<Self> {
+        Arc::new(Self {
+            node: SimpleFsNode::new(
+                fs,
+                NodeType::Symlink,
+                NodePermission::from_bits_truncate(0o777),
+            ),
+            task,
+        })
+    }
+
+    /// Requires the same real-cred read access as a ptrace read.
+    ///
+    /// Only the outlets that expose the link's target content call this, matching
+    /// Linux's `proc_pid_get_link`; `getattr`/lstat does not. A kernel task has
+    /// no user credentials to compare and is treated as privileged.
+    fn check_access(&self) -> VfsResult<()> {
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let target = task.as_thread();
+        // A zombie keeps its task object until reaped, but Linux reports
+        // `ENOENT` for its `/proc/<pid>/exe`: the image it ran is gone.
+        if target.is_exiting() || target.process().is_exited() {
+            return Err(VfsError::NotFound);
+        }
+        if let Some(caller) = ktask::current().try_as_thread() {
+            kprocess::ptrace::check_read_real_creds_access(caller, target)
+                .map_err(|_| VfsError::OperationNotPermitted)?;
+        }
+        Ok(())
+    }
+
+    fn display_target(&self) -> VfsResult<String> {
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let process = task.as_thread().process();
+        // Render from the opened backing file so `readlink` and `follow` name
+        // the same object even when the exec display path is synthetic (e.g.
+        // `execveat(AT_EMPTY_PATH)` on a memfd).
+        let Some(file) = process.exe_file().ok().flatten() else {
+            return process.exe_path();
+        };
+        file.path()
+            .absolute_path()
+            .map(|path| path.to_string())
+            .or_else(|_| process.exe_path())
+    }
+
+    /// Returns the symlink's reported size.
+    ///
+    /// Linux's proc pid symlink inode keeps `i_size == 0`; the target string is
+    /// produced only by the access-checked read paths, so `stat` neither fails
+    /// nor reveals the target length.
+    fn target_len(&self) -> VfsResult<u64> {
+        Ok(0)
+    }
+}
+
+impl InodeOperations for ProcExeLink {
+    fn symlink_operations(&self) -> Option<&dyn InodeSymlinkOperations> {
+        Some(self)
+    }
+
+    fn getattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        path: Option<&kvfs::Path>,
+        request_mask: kvfs::GetattrRequestMask,
+        query_flags: kvfs::GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        let mut metadata = self.node.getattr(idmap, path, request_mask, query_flags)?;
+        metadata.size = self.target_len()?;
+        Ok(metadata)
+    }
+
+    fn setattr(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        self.node.setattr(idmap, dentry, update)
+    }
+}
+
+impl InodeSymlinkOperations for ProcExeLink {
+    fn get_link(
+        &self,
+        _dentry: Option<&Dentry>,
+        _inode: &kvfs::VfsInode,
+        _done: &mut kvfs::DelayedCall,
+    ) -> VfsResult<String> {
+        self.check_access()?;
+        self.display_target()
+    }
+}
+
+impl FileOperations for ProcExeLink {
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+        self.check_access()?;
+        let target = self.display_target()?;
+        let data = target.as_bytes();
+        if offset >= data.len() as u64 {
+            return Ok(0);
+        }
+        let data = &data[offset as usize..];
+        let read = data.len().min(buf.len());
+        buf[..read].copy_from_slice(&data[..read]);
+        Ok(read)
+    }
+
+    fn magic_link(self: Arc<Self>) -> Option<Arc<dyn MagicLinkOps>> {
+        Some(self)
+    }
+}
+
+impl MagicLinkOps for ProcExeLink {
+    fn readlink_display(&self) -> VfsResult<String> {
+        self.check_access()?;
+        self.display_target()
+    }
+
+    fn follow(&self, _intent: LookupIntent, flags: LookupFlags) -> VfsResult<ResolvedObject> {
+        if flags.rejects_magic_links() || !flags.follows_final() {
+            return Err(VfsError::FilesystemLoop);
+        }
+        self.check_access()?;
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let target = task.as_thread();
+        let exe_file = target
+            .process()
+            .exe_file()
+            .ok()
+            .flatten()
+            .ok_or(VfsError::NotFound)?;
+        Ok(ResolvedObject::location(exe_file.path().clone()))
+    }
+}
+
+fn proc_exe_link_child(
+    lookup: SimpleDirLookup<'_>,
+    name: &str,
+    link: Arc<ProcExeLink>,
+) -> VfsResult<Dentry> {
+    let init = link.node.inode_init().with_size(link.target_len()?);
+    let inode = VfsInode::new_file_with_flags(link, NodeFlags::NON_CACHEABLE, init);
+    Ok(lookup.file_from_inode(name, inode))
+}
+
 struct ThreadFdDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
@@ -496,9 +657,7 @@ impl SimpleDirOps for ThreadFdDir {
         let Some(task) = self.task.upgrade() else {
             return Ok(Box::new(iter::empty()));
         };
-        let Ok(resources) = task.as_thread().process().resources() else {
-            return Ok(Box::new(iter::empty()));
-        };
+        let resources = task.as_thread().files();
         let Ok(fd_table) = resources.fd_table() else {
             return Ok(Box::new(iter::empty()));
         };
@@ -515,8 +674,7 @@ impl SimpleDirOps for ThreadFdDir {
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
         let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
         task.as_thread()
-            .process()
-            .resources()?
+            .files()
             .snapshot_fd(fd as _)
             .map_err(|err| {
                 if err == VfsError::BadFileDescriptor {
@@ -886,19 +1044,7 @@ impl SimpleDirOps for ThreadDir {
                     }),
                 ),
             ),
-            "exe" => lookup.file(
-                name,
-                SimpleFile::new(fs.clone(), NodeType::Symlink, {
-                    let task_weak = task_weak.clone();
-                    move || {
-                        // Linux proc_exe_link() returns ENOENT when the task
-                        // is gone: readlink is path resolution, unlike reads
-                        // on an already-open status file.
-                        let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
-                        task.as_thread().process().exe_path()
-                    }
-                }),
-            ),
+            "exe" => proc_exe_link_child(lookup, name, ProcExeLink::new(fs.clone(), task_weak)),
             "fd" => {
                 let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
                 Ok(lookup.dir(

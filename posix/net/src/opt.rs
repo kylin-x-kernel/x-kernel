@@ -339,7 +339,7 @@ pub fn sys_getsockopt(
         .map_err(Into::into)
     }
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
 
     macro_rules! dispatch {
@@ -399,7 +399,7 @@ pub fn sys_setsockopt(
         val.cast::<T>().read_vm().map_err(KError::from)
     }
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
     if level == SOL_SOCKET && optname == SO_ATTACH_FILTER {
         if !supports_kobject_filter_compat(socket.as_ref()) {

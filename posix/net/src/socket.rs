@@ -38,7 +38,7 @@ use posix_types::{UserConstPtr, UserPtr};
 use crate::addr::SocketAddrExt;
 
 fn socket_from_fd(fd: i32) -> KResult<Arc<Socket>> {
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     sock_from_file(&file)
 }
 
@@ -128,7 +128,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
     let file = sock_alloc_file(socket, O_RDWR | (raw_ty & O_NONBLOCK), cred)?;
-    kprocess::current_resources()
+    kprocess::current_files()
         .add_file(file, cloexec)
         .map(|fd| fd as isize)
 }
@@ -146,7 +146,7 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> KResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
     socket.connect(
         addr,
@@ -188,7 +188,7 @@ pub fn sys_accept4(
 ) -> KResult<isize> {
     let cloexec = flags & O_CLOEXEC != 0;
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
     let socket = socket.accept(AcceptOptions {
         nonblocking: file.is_nonblocking(),
@@ -200,7 +200,7 @@ pub fn sys_accept4(
         O_RDWR | (flags & O_NONBLOCK),
         kprocess::current_cred(),
     )?;
-    let fd = kprocess::current_resources()
+    let fd = kprocess::current_files()
         .add_file(file, cloexec)
         .map(|fd| fd as isize)?;
 
@@ -260,7 +260,7 @@ pub fn sys_socketpair(
     let cred = kprocess::current_cred();
     let file1 = sock_alloc_file(sock1, O_RDWR | (raw_ty & O_NONBLOCK), cred.clone())?;
     let file2 = sock_alloc_file(sock2, O_RDWR | (raw_ty & O_NONBLOCK), cred)?;
-    let resources = kprocess::current_resources();
+    let resources = kprocess::current_files();
     let fd1 = resources.add_file(file1, cloexec)?;
     let fd2 = resources.add_file(file2, cloexec).inspect_err(|_| {
         if let Err(err) = resources.close_file(fd1) {

@@ -404,6 +404,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg4().into(),
         ) as _,
         Sysno::umount2 => sys_umount2(uctx.arg0().into(), uctx.arg1() as _) as _,
+        Sysno::pivot_root => sys_pivot_root(uctx.arg0().into(), uctx.arg1().into()),
 
         // pipe
         Sysno::pipe2 => sys_pipe2(uctx.arg0().into(), uctx.arg1() as _),
@@ -523,6 +524,14 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
         // task ops
         Sysno::execve => sys_execve(uctx, uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::execveat => sys_execveat(
+            uctx,
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+        ),
         Sysno::set_tid_address => sys_set_tid_address(uctx.arg0()),
         #[cfg(target_arch = "x86_64")]
         Sysno::arch_prctl => sys_arch_prctl(uctx, uctx.arg0() as _, uctx.arg1() as _),
@@ -573,6 +582,13 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::exit => sys_exit(uctx.arg0() as _),
         Sysno::exit_group => sys_exit_group(uctx.arg0() as _),
         Sysno::wait4 => sys_waitpid(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::waitid => sys_waitid(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2().into(),
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+        ),
         Sysno::getsid => sys_getsid(uctx.arg0() as i32),
         Sysno::setsid => sys_setsid(),
         Sysno::getpgid => sys_getpgid(uctx.arg0() as i32),

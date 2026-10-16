@@ -26,7 +26,7 @@ const SETFL_MASK: OpenFlags = OpenFlags::APPEND
 /// Closes the specified file descriptor.
 pub fn sys_close(fd: c_int) -> KResult<isize> {
     debug!("sys_close <= {fd}");
-    kprocess::current_resources().close_file(fd)?;
+    kprocess::current_files().close_file(fd)?;
     Ok(0)
 }
 
@@ -46,7 +46,7 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
     let flags = CloseRangeFlags::from_bits(flags).ok_or(KError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
 
-    let resources = kprocess::current_user_process().resources()?;
+    let resources = kprocess::current_files();
     if flags.contains(CloseRangeFlags::UNSHARE) {
         resources.unshare_fd_table()?;
     }
@@ -62,7 +62,7 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> KResult<isize> {
 
 /// Duplicates a file descriptor and optionally sets `CLOEXEC`.
 fn dup_fd(old_fd: c_int, cloexec: bool) -> KResult<isize> {
-    let resources = kprocess::current_user_process().resources()?;
+    let resources = kprocess::current_files();
     let new_fd = resources.duplicate_file(old_fd, cloexec)?;
     Ok(new_fd as _)
 }
@@ -84,7 +84,7 @@ fn dupfd_minimum_from_arg(arg: usize) -> c_int {
 }
 
 fn dup_fd_from_minimum(old_fd: c_int, arg: usize, cloexec: bool) -> KResult<isize> {
-    let resources = kprocess::current_user_process().resources()?;
+    let resources = kprocess::current_files();
     resources
         .duplicate_file_from(old_fd, dupfd_minimum_from_arg(arg), cloexec)
         .map(|fd| fd as _)
@@ -94,7 +94,7 @@ fn dup_fd_from_minimum(old_fd: c_int, arg: usize, cloexec: bool) -> KResult<isiz
 /// Duplicates a file descriptor to a specific target fd.
 pub fn sys_dup2(old_fd: c_int, new_fd: c_int) -> KResult<isize> {
     if old_fd == new_fd {
-        kprocess::current_resources().get_file(new_fd)?;
+        kprocess::current_files().get_file(new_fd)?;
         return Ok(new_fd as _);
     }
     sys_dup3(old_fd, new_fd, 0)
@@ -116,8 +116,7 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
 
-    kprocess::current_user_process()
-        .resources()?
+    kprocess::current_files()
         .duplicate_file_to(old_fd, new_fd, flags.contains(Dup3Flags::O_CLOEXEC))
         .map(|fd| fd as _)
 }
@@ -137,40 +136,38 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
             if O_NONBLOCK != O_NDELAY && flags & O_NDELAY != 0 {
                 flags |= O_NONBLOCK;
             }
-            kprocess::current_resources()
+            kprocess::current_files()
                 .get_file(fd)?
                 .replace_flags(SETFL_MASK, OpenFlags::from_bits_retain(flags));
             Ok(0)
         }
-        F_GETFL => Ok(kprocess::current_resources().get_file(fd)?.flags().bits() as _),
+        F_GETFL => Ok(kprocess::current_files().get_file(fd)?.flags().bits() as _),
         F_GETFD => {
-            let cloexec = kprocess::current_user_process().resources()?.cloexec(fd)?;
+            let cloexec = kprocess::current_files().cloexec(fd)?;
             Ok(if cloexec { FD_CLOEXEC as _ } else { 0 })
         }
         F_SETFD => {
             let cloexec = arg & FD_CLOEXEC as usize != 0;
-            kprocess::current_user_process()
-                .resources()?
-                .set_cloexec(fd, cloexec)?;
+            kprocess::current_files().set_cloexec(fd, cloexec)?;
             Ok(0)
         }
         F_GETPIPE_SZ => {
-            let file = kprocess::current_resources().get_file(fd)?;
+            let file = kprocess::current_files().get_file(fd)?;
             let pipe = PipeObject::from_file(&file)?;
             Ok(pipe.capacity() as _)
         }
         F_SETPIPE_SZ => {
-            let file = kprocess::current_resources().get_file(fd)?;
+            let file = kprocess::current_files().get_file(fd)?;
             let pipe = PipeObject::from_file(&file)?;
             pipe.resize(arg)?;
             Ok(pipe.capacity() as _)
         }
         F_GET_SEALS => {
-            let file = kprocess::current_resources().get_file(fd)?;
+            let file = kprocess::current_files().get_file(fd)?;
             Ok(shmem::seal_bits_for_location(file.path())? as _)
         }
         F_ADD_SEALS => {
-            let file = kprocess::current_resources().get_file(fd)?;
+            let file = kprocess::current_files().get_file(fd)?;
             file.verify_mode(FMode::WRITE)?;
             shmem::add_seals_for_location(file.path(), seal_bits_from_fcntl_arg(arg)?)?;
             Ok(0)
@@ -195,7 +192,7 @@ pub fn sys_flock(fd: c_int, operation: c_int) -> KResult<isize> {
         LOCK_UN => FileLockType::Unlock,
         _ => return Err(KError::InvalidInput),
     };
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     if file.is_path()
         || (kind != FileLockType::Unlock && !file.mode().intersects(FMode::READ | FMode::WRITE))
     {
@@ -231,8 +228,7 @@ fn lock_request(file: &VfsFile, owner: FileLockOwner, lock: &k_flock64) -> KResu
 }
 
 fn fcntl_lock(fd: c_int, cmd: u32, arg: usize) -> KResult<isize> {
-    let resources = kprocess::current_resources();
-    let mut table = resources.fd_table()?;
+    let mut table = kprocess::current_files().fd_table()?;
     let (file, files_owner) = {
         let table = table.read();
         (table.get_file(fd)?, table.lock_owner())
@@ -286,10 +282,11 @@ fn fcntl_lock(fd: c_int, cmd: u32, arg: usize) -> KResult<isize> {
             if is_ofd {
                 break;
             }
-            // Main still has a process-wide files binding. Validate both the
-            // binding and descriptor after waiting; a replaced table must not
-            // turn an installation on an obsolete owner into success.
-            let installed = resources.with_fd_table(|current| {
+            // The files binding is per-thread. Validate both the binding and
+            // descriptor after waiting; a table this thread unshared while
+            // blocked must not turn an installation on an obsolete owner into
+            // success.
+            let installed = kprocess::current_files().with_fd_table(|current| {
                 let descriptors = current.read();
                 let is_current = descriptors.lock_owner() == request.owner();
                 let is_open = descriptors
@@ -315,7 +312,7 @@ fn fcntl_lock(fd: c_int, cmd: u32, arg: usize) -> KResult<isize> {
             }
             // Preserve the original absolute range across retries (SEEK_CUR
             // and SEEK_END must not be re-evaluated after a blocking wait).
-            table = resources.fd_table()?;
+            table = kprocess::current_files().fd_table()?;
             let owner = table.read().lock_owner();
             request = FileLock::new(
                 owner,

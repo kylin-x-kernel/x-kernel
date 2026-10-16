@@ -56,7 +56,8 @@ impl PendingSignals {
             self.info_rt[signo as usize - 32].push_back(sig);
         } else {
             if !added {
-                // At most one standard signal can be pending.
+                // At most one standard signal instance stays pending; the
+                // first one wins, matching Linux standard-signal coalescing.
                 return false;
             }
             self.info_std[signo as usize] = Some(Box::new(sig));

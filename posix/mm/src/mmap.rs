@@ -484,7 +484,7 @@ pub fn sys_mmap(
 
     let process = current_user_process();
     let file = if !request.flags.is_anonymous() {
-        Some(process.resources()?.get_file(request.fd)?)
+        Some(kprocess::current_files().get_file(request.fd)?)
     } else {
         None
     };

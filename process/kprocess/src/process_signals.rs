@@ -9,7 +9,7 @@ use ksignal::{
     SigchldChildExitSignalInfo, SignalInfo,
     api::{PreparedChildExitSignal as PreparedKsignalChildExitSignal, ProcessSignalManager},
 };
-use ktask::{TaskInner, current};
+use ktask::{KtaskRef, TaskInner, current};
 
 use crate::{AsThread, Pid, Process, Thread, Tid, lookup};
 
@@ -160,6 +160,23 @@ pub fn send_to_thread(tgid: Option<Pid>, tid: Tid, sig: Option<SignalInfo>) -> K
         send_signal_thread_inner(&task, thread, sig);
     }
 
+    Ok(())
+}
+
+/// Delivers the `de_thread` sibling-sweep kill to `task`.
+///
+/// Deliberately bypasses the normal send path so it does not bump the
+/// fatal-signal epoch: the execing thread orchestrates the sweep and must
+/// survive it.
+///
+/// # Errors
+///
+/// Returns `KError::OperationNotPermitted` when `task` is not a user thread.
+pub fn send_sweep_kill(task: &KtaskRef) -> KResult<()> {
+    let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;
+    if thread.signal_manager().deliver_sweep_kill() {
+        task.interrupt();
+    }
     Ok(())
 }
 

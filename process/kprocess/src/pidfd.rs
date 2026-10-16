@@ -11,7 +11,7 @@ use kpoll::{Completion, IoEvents, PollContext, PollRegisterError, Pollable};
 use ktask::KtaskRef;
 use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 
-use crate::{Pid, Process, Tid, lookup};
+use crate::{AsThread, Pid, Process, Tid, lookup};
 
 /// Process capability file descriptor for monitoring process lifecycle changes.
 pub struct PidFd {
@@ -65,6 +65,26 @@ impl PidFd {
     /// Returns the published process identity.
     pub fn process(&self) -> &Arc<Process> {
         &self.process
+    }
+
+    /// Gets a descriptor from the referenced thread-group leader's files.
+    ///
+    /// The leader's own binding is used because threads may hold different
+    /// file tables; there is deliberately no fallback to another live thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NoSuchProcess` (ESRCH) when the leader has no resolvable task
+    /// or has detached its files -- including after the leader exits but before
+    /// a surviving thread takes over the group identity in `exec` -- and
+    /// `BadFileDescriptor` for an absent descriptor.
+    pub fn get_file(&self, fd: i32) -> KResult<Arc<VfsFile>> {
+        let task = lookup::task(self.live_process()?.pid())?;
+        let thread = task.as_thread();
+        if !Arc::ptr_eq(thread.process(), &self.process) {
+            return Err(KError::NoSuchProcess);
+        }
+        thread.files().get_file(fd)
     }
 
     /// Returns the referenced process only while it is still live.

@@ -283,8 +283,10 @@ kfd resources / kvfs / device and pipe implementations
 4. `copy_file_range` 对普通文件类型、同文件重叠和跨文件系统限制仍为 TODO。
 5. `mount` 支持已注册 nodev filesystem、已接入 `get_tree_bdev()` 的 block-backed type、
    非递归 bind、普通只读 remount、bind remount，以及普通新挂载的一页 opaque mount data
-   转交；支持对 mount root 幂等执行 `MS_PRIVATE[|MS_REC]`，不支持 move、recursive bind、
-   shared/slave/unbindable propagation、文件系统专用 reconfigure 和 lazy/force
+   转交；支持对 mount root 幂等执行 `MS_PRIVATE[|MS_REC]` 和 `MS_SLAVE[|MS_REC]`（无共享
+   传播组时两者行为等价），支持 `pivot_root` 与 `umount2(MNT_DETACH)`；不支持 move、
+   带挂载子树的 recursive bind（`MS_BIND|MS_REC` 仅在源子树无挂载时接受，否则返回
+   `EINVAL`）、shared/unbindable propagation、文件系统专用 reconfigure 和 force
    unmount。通用层支持 binary data 转交不等于具体 filesystem 已实现相应格式或选项。
 6. `preadv2` / `pwritev2` 当前只支持 `flags == 0`，
    非零 flags 返回 `Unsupported`。
@@ -311,6 +313,10 @@ kfd resources / kvfs / device and pipe implementations
 - [ ] 每个多步 pathname 操作只取得一次 credential snapshot，并传递给完整解析过程。
 - [ ] pathname 与 descriptor 操作没有混淆调用时 DAC 和 open-file authority。
 - [ ] mount/umount 新 flags 要么完整实现，要么显式拒绝。
+- [ ] `MS_PRIVATE`/`MS_SLAVE` 传播请求按各自 flags 集合校验（可带 `MS_REC`/`MS_SILENT`，
+  其余组合 `EINVAL`）；`MS_REC` 不伴随 `MS_BIND`/传播位时仍被拒绝。
+- [ ] `pivot_root` 在调用前完成全部 URL 校验，并按 `chroot_fs_refs()` 语义把所有 root/pwd 恰为旧根的
+  进程 `FsStruct` 重定向到 `new_root`（不仅调用方）；`umount2(MNT_DETACH)` 经 `detach_tree` 摘除而非静默同步卸载。
 - [ ] mount data 是否在 syscall 边界按一页 opaque bytes 有界复制，且 filesystem 只保存解析后的状态？
 - [ ] 新 filesystem type 通过 KVFS registry 接入，不在 syscall 层增加具体 crate 依赖或
   与 `/proc/filesystems` 分离的名称表。

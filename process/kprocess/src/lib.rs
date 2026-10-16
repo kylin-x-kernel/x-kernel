@@ -119,10 +119,10 @@ pub use stat::TaskStat;
 #[cfg(feature = "tee")]
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
-    AsThread, CpuTimeState, CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters,
-    Thread, current_fs_context, current_user_mm_id, current_user_process,
-    current_user_process_address_space, current_user_process_fs_context, current_user_thread,
-    current_user_tid, with_current_user_thread,
+    AsThread, CpuTimeState, CurrentFiles, CurrentThread, NiceValue, PreparedUserClone,
+    SchedulerParameters, Thread, current_files, current_fs_context, current_user_mm_id,
+    current_user_process, current_user_process_address_space, current_user_process_fs_context,
+    current_user_thread, current_user_tid, with_current_user_thread,
 };
 pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,
@@ -144,18 +144,6 @@ pub enum UserThreadRuntimeAction {
     /// The caller still delivers signals that became pending while the handler
     /// ran. It must not apply `restart_syscall` to the restored context.
     SkipSyscallRestart,
-}
-
-/// Returns the current process-owned resources.
-///
-/// # Panics
-///
-/// Panics outside a current user-thread runtime or when its process runtime
-/// is no longer reachable.
-pub fn current_resources() -> alloc::sync::Arc<kresources::ProcessResources> {
-    current_user_process()
-        .resources()
-        .expect("current user thread must still expose process resources")
 }
 
 /// Returns the current process umask.

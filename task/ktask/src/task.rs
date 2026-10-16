@@ -38,17 +38,15 @@ enum TaskIdentity {
         task_number: Arc<kidentity::PidHandle>,
     },
     User {
-        task_number: Arc<kidentity::PidHandle>,
         user_runtime: UserRuntimeSlot,
     },
 }
 
 impl TaskIdentity {
-    fn thread_pid(&self) -> Option<&Arc<kidentity::PidHandle>> {
+    fn thread_pid(&self) -> Option<Arc<kidentity::PidHandle>> {
         match self {
-            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
-                Some(task_number)
-            }
+            Self::KernelThread { task_number, .. } => Some(task_number.clone()),
+            Self::User { user_runtime } => user_runtime.get().map(UserTaskRuntime::task_number),
             Self::Idle | Self::Internal => None,
         }
     }
@@ -56,15 +54,23 @@ impl TaskIdentity {
     fn trace_id(&self) -> u64 {
         match self {
             Self::Idle | Self::Internal => 0,
-            Self::KernelThread { task_number, .. } | Self::User { task_number, .. } => {
-                task_number.root_nr() as u64
+            Self::KernelThread { task_number, .. } => task_number.root_nr() as u64,
+            Self::User { user_runtime } => {
+                user_runtime.get().map_or(0, |runtime| runtime.tid() as u64)
             }
+        }
+    }
+
+    fn identity_token(&self) -> Option<kidentity::TaskIdentityToken> {
+        match self {
+            Self::User { user_runtime } => user_runtime.get().map(UserTaskRuntime::identity_token),
+            Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
         }
     }
 
     fn user_runtime(&self) -> Option<&dyn UserTaskRuntime> {
         match self {
-            Self::User { user_runtime, .. } => user_runtime.get(),
+            Self::User { user_runtime } => user_runtime.get(),
             Self::Idle | Self::Internal | Self::KernelThread { .. } => None,
         }
     }
@@ -102,6 +108,26 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     /// Returns the latest valid hardware user page-table root for switch-in.
     fn switch_page_table_root(&self) -> Option<karch::HwPageTableRoot> {
         None
+    }
+
+    /// Returns the task's current number binding.
+    ///
+    /// The binding is stable for the life of the task except for an `exec`
+    /// leader takeover, which moves the thread-group number onto the surviving
+    /// thread. Registries key on the task object, not on this number. The
+    /// default is for runtimes that never carry a user-visible number.
+    fn task_number(&self) -> Arc<kidentity::PidHandle> {
+        kidentity::PidHandle::fixed_root(0)
+    }
+
+    /// Returns the current numeric TID as a lock-free snapshot.
+    fn tid(&self) -> u32 {
+        0
+    }
+
+    /// Returns the task's stable identity token.
+    fn identity_token(&self) -> kidentity::TaskIdentityToken {
+        kidentity::TaskIdentityToken::unknown()
     }
 
     /// Returns this runtime as [`Any`] for process-domain type recovery.
@@ -210,6 +236,11 @@ pub struct TaskInner {
     identity: TaskIdentity,
     name: SpinNoIrq<String>,
     is_init: bool,
+
+    /// Monotonic timestamp (nanoseconds since boot) taken when the task was
+    /// created. Immutable after construction; reported by procfs as the
+    /// `/proc/[pid]/stat` `starttime` field (converted to clock ticks).
+    start_time_ns: u64,
 
     entry: Cell<Option<Box<dyn FnOnce()>>>,
     state: AtomicU8,
@@ -376,19 +407,24 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
+        if user_runtime.identity_token() != kidentity::TaskIdentityToken::unknown() {
+            assert!(
+                Arc::ptr_eq(&task_number, &user_runtime.task_number()),
+                "a user task's identity must match its runtime number"
+            );
+        }
         Self::new_with_identity(
             entry,
             name,
             kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
-                task_number,
                 user_runtime: UserRuntimeSlot::ready(user_runtime),
             },
         )
     }
 
-    /// Returns the shared task-number handle, if the task has one.
-    pub fn task_number(&self) -> Option<&Arc<kidentity::PidHandle>> {
+    /// Returns the current task-number handle, if the task has one.
+    pub fn task_number(&self) -> Option<Arc<kidentity::PidHandle>> {
         self.identity.thread_pid()
     }
 
@@ -398,10 +434,14 @@ impl TaskInner {
     }
 
     /// Returns the scheduler-internal owner key.
+    ///
+    /// The key is the task's never-reused identity token, so it survives an
+    /// `exec` number takeover and cannot alias a later task at a reused
+    /// address; kernel, idle, and internal tasks fall back to their address.
     pub fn owner_key(&self) -> u64 {
-        self.task_number()
-            .map(|task_number| task_number.root_nr() as u64)
-            .unwrap_or_else(|| self as *const _ as usize as u64)
+        self.identity
+            .identity_token()
+            .map_or(self as *const _ as usize as u64, |token| token.as_u64())
     }
 
     /// Gets the name of the task.
@@ -416,7 +456,7 @@ impl TaskInner {
 
     /// Get a combined string of the task ID and name.
     pub fn id_name(&self) -> alloc::string::String {
-        alloc::format!("Task({}, {:?})", self.owner_key(), self.name())
+        alloc::format!("Task({}, {:?})", self.trace_id(), self.name())
     }
 
     /// Wait for the task to exit, and return the exit code.
@@ -649,6 +689,7 @@ impl TaskInner {
             identity,
             name: SpinNoIrq::new(name),
             is_init: false,
+            start_time_ns: khal::time::monotonic_time_nanos(),
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             // By default, the task is allowed to run on all CPUs.
@@ -723,6 +764,13 @@ impl TaskInner {
     #[inline]
     pub fn state(&self) -> TaskState {
         self.state.load(Ordering::Acquire).into()
+    }
+
+    /// Returns the monotonic timestamp (nanoseconds since boot) at which the
+    /// task was created.
+    #[inline]
+    pub fn start_time_ns(&self) -> u64 {
+        self.start_time_ns
     }
 
     #[inline]

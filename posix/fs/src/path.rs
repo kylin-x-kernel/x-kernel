@@ -10,7 +10,6 @@ use fs_context::FsStruct;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use kfd::Kstat;
-use kprocess::current_user_process;
 use kvfs::{Filename, LookupFlags, LookupIntent, Path};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
@@ -24,7 +23,7 @@ pub(crate) fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&FsStruct) -> KResult<R>) 
     let snapshot = if dirfd == AT_FDCWD {
         fs
     } else {
-        let file = kprocess::current_resources().get_file(dirfd)?;
+        let file = kprocess::current_files().get_file(dirfd)?;
         if !file.is_dir() {
             return Err(KError::NotADirectory);
         }
@@ -78,7 +77,7 @@ fn resolve_empty_path(dirfd: c_int, flags: u32) -> KResult<ResolveAtResult> {
     if flags & AT_EMPTY_PATH == 0 {
         return Err(KError::NotFound);
     }
-    let resources = current_user_process().resources()?;
+    let resources = kprocess::current_files();
     let file = resources.get_file(dirfd)?;
     Ok(ResolveAtResult::Path(file.path().clone()))
 }

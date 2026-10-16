@@ -65,10 +65,15 @@ fn test_per_mount_flags_preserve_mount_options() {
 
 #[def_test]
 fn private_propagation_accepts_optional_recursive_scope() {
-    assert!(super::validate_private_propagation_flags(linux_raw_sys::general::MS_PRIVATE).is_ok());
+    assert!(super::validate_propagation_flags(
+            linux_raw_sys::general::MS_PRIVATE,
+            linux_raw_sys::general::MS_PRIVATE
+        )
+        .is_ok());
     assert!(
-        super::validate_private_propagation_flags(
-            linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_REC
+        super::validate_propagation_flags(
+            linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_REC,
+            linux_raw_sys::general::MS_PRIVATE
         )
         .is_ok()
     );
@@ -77,8 +82,9 @@ fn private_propagation_accepts_optional_recursive_scope() {
 #[def_test]
 fn private_propagation_accepts_silent_flag() {
     assert!(
-        super::validate_private_propagation_flags(
-            linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_SILENT
+        super::validate_propagation_flags(
+            linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_SILENT,
+            linux_raw_sys::general::MS_PRIVATE
         )
         .is_ok()
     );
@@ -87,8 +93,9 @@ fn private_propagation_accepts_silent_flag() {
 #[def_test]
 fn private_propagation_rejects_unrelated_flags() {
     assert!(
-        super::validate_private_propagation_flags(
-            linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_RDONLY
+        super::validate_propagation_flags(
+            linux_raw_sys::general::MS_PRIVATE | linux_raw_sys::general::MS_RDONLY,
+            linux_raw_sys::general::MS_PRIVATE
         )
         .is_err()
     );
@@ -120,5 +127,33 @@ fn mount_privilege_uses_the_effective_uid_not_the_real_uid() {
     assert_eq!(
         super::require_mount_privilege(&cred),
         Err(kerrno::KError::OperationNotPermitted)
+    );
+}
+
+#[def_test]
+fn slave_propagation_accepts_recursive_scope_only() {
+    assert!(
+        super::validate_propagation_flags(
+            linux_raw_sys::general::MS_SLAVE | linux_raw_sys::general::MS_REC,
+            linux_raw_sys::general::MS_SLAVE
+        )
+        .is_ok()
+    );
+    // runc's `prepareRoot()` sends exactly `MS_SLAVE | MS_REC`.
+    assert!(
+        super::validate_propagation_flags(
+            linux_raw_sys::general::MS_SLAVE
+                | linux_raw_sys::general::MS_REC
+                | linux_raw_sys::general::MS_SILENT,
+            linux_raw_sys::general::MS_SLAVE
+        )
+        .is_ok()
+    );
+    assert!(
+        super::validate_propagation_flags(
+            linux_raw_sys::general::MS_SLAVE | linux_raw_sys::general::MS_PRIVATE,
+            linux_raw_sys::general::MS_SLAVE
+        )
+        .is_err()
     );
 }

@@ -14,12 +14,22 @@ use ksync::RwLock;
 pub(super) struct ExecMetadata {
     exe_path: String,
     cmdline: Arc<Vec<String>>,
+    /// Opened backing executable file, followed by `/proc/<pid>/exe`.
+    exe_file: Option<Arc<kvfs::VfsFile>>,
 }
 
 impl ExecMetadata {
     /// Creates a new executable metadata snapshot.
-    pub(super) fn new(exe_path: String, cmdline: Arc<Vec<String>>) -> Self {
-        Self { exe_path, cmdline }
+    pub(super) fn new(
+        exe_path: String,
+        cmdline: Arc<Vec<String>>,
+        exe_file: Option<Arc<kvfs::VfsFile>>,
+    ) -> Self {
+        Self {
+            exe_path,
+            cmdline,
+            exe_file,
+        }
     }
 
     /// Returns the executable path.
@@ -30,6 +40,11 @@ impl ExecMetadata {
     /// Returns the command-line arguments.
     pub(super) fn cmdline(&self) -> &Arc<Vec<String>> {
         &self.cmdline
+    }
+
+    /// Returns the opened backing executable file, if any.
+    pub(super) fn exe_file(&self) -> Option<Arc<kvfs::VfsFile>> {
+        self.exe_file.clone()
     }
 }
 
@@ -43,7 +58,7 @@ impl ProcessPosixState {
     /// Creates a new [`ProcessPosixState`].
     pub(super) fn new(exe_path: String, cmdline: Arc<Vec<String>>) -> Self {
         Self {
-            exec_metadata: RwLock::new(ExecMetadata::new(exe_path, cmdline)),
+            exec_metadata: RwLock::new(ExecMetadata::new(exe_path, cmdline, None)),
             oom_score_adj: AtomicI32::new(0),
         }
     }
@@ -54,8 +69,21 @@ impl ProcessPosixState {
     }
 
     /// Updates executable metadata after a successful exec.
-    pub(super) fn set_exec_metadata(&self, exe_path: String, cmdline: Arc<Vec<String>>) {
-        *self.exec_metadata.write() = ExecMetadata::new(exe_path, cmdline);
+    pub(super) fn set_exec_metadata(
+        &self,
+        exe_path: String,
+        cmdline: Arc<Vec<String>>,
+        exe_file: Option<Arc<kvfs::VfsFile>>,
+    ) {
+        // Replace first and drop the old snapshot outside the write lock: the
+        // replaced `ExecMetadata` owns an `Arc<VfsFile>` whose release path can
+        // take inode locks, and dropping it while the metadata lock is held
+        // would invert the lock order against readers of `/proc/<pid>/exe`.
+        let replaced = core::mem::replace(
+            &mut *self.exec_metadata.write(),
+            ExecMetadata::new(exe_path, cmdline, exe_file),
+        );
+        drop(replaced);
     }
 
     /// Returns the process OOM score adjustment.

@@ -69,8 +69,8 @@ pub use node::{
     InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
     InodeSymlinkOperations, InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags,
     VfsInode, VfsInodeInit, WeakVfsInode, cdev_add, cdev_add_named, cdev_del,
-    empty_inode_operations, get_next_ino, inode_init_owner, open_character_device,
-    registered_character_devices, subscribe_character_devices,
+    empty_inode_operations, get_next_ino, inode_init_owner, metadata_only_inode_operations,
+    open_character_device, registered_character_devices, subscribe_character_devices,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,

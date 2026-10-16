@@ -10,7 +10,7 @@ use alloc::{
 use core::{
     array,
     ops::{Index, IndexMut},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use kerrno::{KError, KResult};
@@ -101,6 +101,16 @@ pub struct ProcessSignalManager {
 
     /// Fast path indicator for pending signals
     pub(crate) has_pending: AtomicBool,
+
+    /// Packs the fatal-signal counter (high 32 bits) and the signal number of
+    /// the last accepted fatal signal (low 32 bits) into one word.
+    ///
+    /// `exec_de_thread` snapshots it and aborts the exec if the counter changed
+    /// during the sibling sweep, so a genuine fatal signal delivered to an
+    /// already-marked sweep target still terminates the process instead of being
+    /// absorbed. Packing both halves means a reader can never pair an old epoch
+    /// with a newer signal.
+    fatal_signal: AtomicU64,
 }
 
 /// Prepared Linux-style `SIGCHLD` child-exit notification.
@@ -149,6 +159,7 @@ impl ProcessSignalManager {
             default_restorer,
             children: SpinNoIrq::new(Vec::new()),
             has_pending: AtomicBool::new(false),
+            fatal_signal: AtomicU64::new(0),
         }
     }
 
@@ -359,7 +370,7 @@ impl ProcessSignalManager {
         let signo = sig.signo();
         let owner = self.handlers.lock();
         let handlers = owner.as_ref()?;
-        let (ignored, target_tid, has_blocked_thread) = {
+        let (ignored, fatal, target_tid, has_blocked_thread) = {
             let actions = handlers.actions.lock();
 
             // Keep the disposition snapshot and target-thread scan in one
@@ -369,6 +380,7 @@ impl ProcessSignalManager {
             let (target_tid, has_blocked_thread) = self.find_target_thread(signo);
             (
                 signal_ignored_by(&actions, signo),
+                signal_is_fatal(&actions, signo),
                 target_tid,
                 has_blocked_thread,
             )
@@ -376,6 +388,13 @@ impl ProcessSignalManager {
 
         if ignored && !has_blocked_thread {
             return None;
+        }
+        // A fatal group signal terminates the whole process when some thread can
+        // actually take it; record it before the queue so a concurrent `exec`
+        // sibling sweep cannot absorb it. A signal every thread blocks stays
+        // pending (and survives `execve`) without marking the process as dying.
+        if fatal && target_tid.is_some() {
+            self.note_fatal_signal(signo);
         }
         self.put_pending_signal(sig);
         let source = handlers.pending_changed.clone();
@@ -595,6 +614,53 @@ impl ProcessSignalManager {
         if self.pending.lock().put_signal(sig) {
             self.has_pending.store(true, Ordering::Release);
         }
+    }
+}
+
+/// Returns whether `signo`'s current disposition would terminate the process.
+///
+/// Mirrors Linux's `complete_signal` fatal branch: only a default
+/// terminate/core disposition is fatal; an ignored or user-handled signal is
+/// not.
+pub(super) fn signal_is_fatal(actions: &SignalActions, signo: Signo) -> bool {
+    match actions[signo].disposition {
+        SignalDisposition::Ignore | SignalDisposition::Handler(_) => false,
+        SignalDisposition::Default => matches!(
+            signo.default_action(),
+            DefaultSignalAction::Terminate | DefaultSignalAction::CoreDump
+        ),
+    }
+}
+
+impl ProcessSignalManager {
+    /// Records that a fatal signal was accepted for delivery.
+    ///
+    /// The counter is bumped and `signo` stored in one atomic update, so a
+    /// reader never observes the new epoch with an older signal number.
+    pub fn note_fatal_signal(&self, signo: Signo) {
+        let mut current = self.fatal_signal.load(Ordering::Acquire);
+        loop {
+            let epoch = ((current >> 32) as u32).wrapping_add(1);
+            let next = (u64::from(epoch) << 32) | u64::from(signo as u32);
+            match self.fatal_signal.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Returns one snapshot of the fatal-signal counter and last signal number.
+    ///
+    /// `exec_de_thread` takes it around the sibling sweep; a counter change
+    /// means a genuine fatal signal raced the sweep and must win over the exec.
+    pub fn fatal_signal_snapshot(&self) -> (u32, u32) {
+        let raw = self.fatal_signal.load(Ordering::Acquire);
+        ((raw >> 32) as u32, raw as u32)
     }
 
     /// Finds a suitable thread and reports whether any live thread blocks it.

@@ -123,3 +123,63 @@ pub fn with_current_user_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
     let thread = current_user_thread();
     f(&thread)
 }
+
+/// Current-task descriptor access, applying the process's live descriptor limit.
+/// This view owns only a task reference, not a second files binding.
+pub struct CurrentFiles(CurrentThread);
+
+impl Deref for CurrentFiles {
+    type Target = kresources::TaskFiles;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.files()
+    }
+}
+
+impl CurrentFiles {
+    /// Returns the current process's descriptor soft limit.
+    pub fn max_nofile(&self) -> u64 {
+        self.0.process_runtime().resources().max_nofile()
+    }
+
+    /// Installs an open file using the current process's descriptor soft limit.
+    ///
+    /// # Errors
+    /// Forwards table detachment and descriptor allocation errors.
+    pub fn add_file(&self, file: Arc<kvfs::VfsFile>, cloexec: bool) -> kerrno::KResult<i32> {
+        self.0.files().add_file(self.max_nofile(), file, cloexec)
+    }
+
+    /// Duplicates a descriptor at/above `minimum` using the live process limit.
+    ///
+    /// # Errors
+    /// Forwards source lookup, minimum, detachment and allocation errors.
+    pub fn duplicate_file_from(
+        &self,
+        fd: i32,
+        minimum: i32,
+        cloexec: bool,
+    ) -> kerrno::KResult<i32> {
+        self.0
+            .files()
+            .duplicate_file_from(self.max_nofile(), fd, minimum, cloexec)
+    }
+
+    /// Duplicates a descriptor using the current process's descriptor soft limit.
+    ///
+    /// # Errors
+    /// Forwards source lookup, table detachment and allocation errors.
+    pub fn duplicate_file(&self, fd: i32, cloexec: bool) -> kerrno::KResult<i32> {
+        self.0
+            .files()
+            .duplicate_file(self.max_nofile(), fd, cloexec)
+    }
+}
+
+/// Returns descriptor access for the current user task.
+///
+/// # Panics
+/// Dereferencing the view outside a user task panics.
+pub fn current_files() -> CurrentFiles {
+    CurrentFiles(current_user_thread())
+}

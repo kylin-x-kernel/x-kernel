@@ -157,8 +157,13 @@ present.
 Preparation builds argc/argv/env/aux data with `app_stack_region` and checks
 its configured stack capacity. The ready value owns these encoded bytes rather
 than retaining a second copy of the original argument strings. Installation maps
-an anonymous stack, populates/writes its pages, and maps an anonymous heap. The returned tuple is
-entry address and user SP.
+an anonymous stack, populates/writes its pages, and maps an anonymous heap. The
+returned tuple is entry address and user SP. The pinned backing executable is
+exposed through `PreparedExecImage::executable_file()`; exec installs it as the
+process `ExecMetadata` so `/proc/<pid>/exe` follows the same file that pinned the
+image, including `execveat(AT_EMPTY_PATH)` on a memfd. An `O_PATH` descriptor
+carries no read permission, so it is reopened through its recorded path like
+Linux `do_open_execat()` instead of being read through the descriptor.
 
 ## Commit boundary and error handling
 
@@ -222,7 +227,10 @@ exec syscall replaces only its own process binding, preserving independent
 CLONE_VM peers' old image, and distinguishes errors at the exchange boundary.
 Known constraints include stale cache contents, fixed
 rather than randomized load hints, missing `AT_HWCAP`/`AT_PLATFORM`, and no
-complete exec credential/namespace transaction within this crate.
+complete exec credential/namespace transaction within this crate. The init
+process bootstrap discards the backing executable because the low-level
+`build_process_thread` path does not install `ExecMetadata`; `/proc/1/exe` is
+therefore not backed by a followable file until a follow-up.
 
 ## Regression Support
 

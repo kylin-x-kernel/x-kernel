@@ -101,7 +101,7 @@ fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Tim
 }
 
 fn parse_send_cmsgs(
-    resources: &kresources::ProcessResources,
+    resources: &kresources::TaskFiles,
     control_ptr: usize,
     control_len: usize,
 ) -> KResult<Vec<AncillaryData>> {
@@ -169,7 +169,7 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
 }
 
 fn push_socket_cmsg(
-    resources: &kresources::ProcessResources,
+    resources: &kprocess::CurrentFiles,
     builder: &mut CMsgBuilder<'_>,
     ancillary: SocketAncillary,
 ) -> KResult<bool> {
@@ -234,7 +234,7 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let file = kprocess::current_resources().get_file(fd)?;
+    let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
     let mut send_flags = parse_send_flags(flags);
     if file.is_nonblocking() {
@@ -276,12 +276,8 @@ pub fn sys_sendto(
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.read_vm()?;
-    let resources = kprocess::current_resources();
-    let ancillary = parse_send_cmsgs(
-        resources.as_ref(),
-        msg.msg_control as usize,
-        msg.msg_controllen,
-    )?;
+    let resources = kprocess::current_files();
+    let ancillary = parse_send_cmsgs(&resources, msg.msg_control as usize, msg.msg_controllen)?;
     send_impl(
         fd,
         IoVectorBuf::from_iovecs(IoVec::load_from_user(
@@ -349,7 +345,7 @@ fn recv_impl(
 ) -> KResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
-    let resources = kprocess::current_user_process().resources()?;
+    let resources = kprocess::current_files();
     let file = resources.get_file(fd)?;
     let socket = sock_from_file(&file)?;
     let mut recv_flags = RecvFlags::empty();
@@ -413,7 +409,7 @@ fn recv_impl(
                 warn!("received unexpected ancillary");
                 continue;
             };
-            let push_result = push_socket_cmsg(resources.as_ref(), &mut builder, ancillary);
+            let push_result = push_socket_cmsg(&resources, &mut builder, ancillary);
 
             match push_result {
                 Ok(true) => {}
@@ -516,11 +512,11 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
     }
 
     let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
-    let resources = kprocess::current_resources();
+    let resources = kprocess::current_files();
     let mut sent = 0;
     for msg in msgvec_value.iter_mut() {
         let ancillary = parse_send_cmsgs(
-            resources.as_ref(),
+            &resources,
             msg.msg_hdr.msg_control as usize,
             msg.msg_hdr.msg_controllen,
         )?;

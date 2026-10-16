@@ -4,7 +4,7 @@
 
 //! User-thread runtime helpers used by process-related syscalls.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::ffi::c_long;
 
 use bytemuck::AnyBitPattern;
@@ -14,7 +14,7 @@ use kidentity::PidHandle;
 use kprocess::{
     AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
     current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
-    process_signals,
+    process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
 use ktask::{TaskInner, current};
@@ -312,6 +312,121 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     }
 }
 
+/// Terminates every sibling thread before `execve` swaps the address space
+/// (Linux `de_thread()`).
+///
+/// Concurrent `exec` is serialized on the process `exec` gate, so only one
+/// thread ever sweeps. Every sibling receives a thread-directed `SIGKILL` and is
+/// waited out, so only the execing thread remains when the caller proceeds. The
+/// swept targets are marked so their fatal death leaves the group-exit
+/// bookkeeping alone; a genuine concurrent `exit_group()` still marks it and
+/// aborts this exec. The sweep also runs when the execing thread is not the group
+/// leader, including the sole-surviving-non-leader case, so the group number
+/// moves onto it.
+///
+/// Returns `true` when this thread was made to exit and the caller must not swap
+/// the address space. Call only in the current user thread's sleepable context;
+/// `join` blocks until every sibling has fully exited.
+pub fn exec_de_thread() -> bool {
+    let thr = current_user_thread();
+    let process = thr.process();
+    let tid = thr.tid();
+
+    // Serialize concurrent `exec` before touching the thread group, matching
+    // Linux `cred_guard_mutex`: a losing thread waits here and the winner's
+    // sweep kills it, instead of two threads joining each other in a deadlock.
+    let Some(_gate) = process.acquire_exec_gate(&current(), &thr) else {
+        // Interrupted while waiting for the winner's takeover: its sweep SIGKILL
+        // is pending, so terminate through the signal path (a sweep target is
+        // exempt from the group-exit marking) rather than resume the old image.
+        do_exit_from_signal(Signo::SIGKILL as i32);
+        return true;
+    };
+
+    // A group exit already in flight (a sibling in `exit_group(2)`) must win
+    // over `exec`; Linux `de_thread` returns `-EAGAIN` in this case.
+    if process.is_group_exited() {
+        do_exit(process.exit_code(), true);
+        return true;
+    }
+
+    // Snapshot the fatal-signal counter: a genuine fatal signal delivered to an
+    // already-marked sweep target must abort this exec instead of being absorbed
+    // by the sweep exemption.
+    let fatal_snapshot = process
+        .signal_manager()
+        .ok()
+        .map(|manager| manager.fatal_signal_snapshot());
+
+    // A sibling can publish between the snapshot and the joins, so sweep until
+    // only this thread remains. Linux `de_thread` likewise waits for every
+    // other thread to exit; a thread that publishes after the sweep makes the
+    // leader-takeover precondition below fail, and that is fatal rather than a
+    // silent stale-image survivor.
+    loop {
+        let siblings: Vec<_> = scheduler::process_tasks(process.as_ref())
+            .into_iter()
+            .filter(|task| task.as_thread().tid() != tid)
+            .collect();
+        if siblings.is_empty() {
+            break;
+        }
+
+        for task in &siblings {
+            // Mark the target so its fatal death does not mark the whole group
+            // exited or broadcast a group kill; this thread orchestrates the
+            // sweep and must survive it.
+            task.as_thread().mark_exec_sweep_target();
+        }
+        for task in &siblings {
+            // Delivers the uncatchable kill and interrupts the target, so a
+            // sibling in interruptible sleep wakes to take it. The delivery
+            // bypasses the fatal-signal epoch so it cannot abort this exec.
+            let _ = process_signals::send_sweep_kill(task);
+        }
+        // Wait for every sibling to fully exit before touching the shared
+        // address space, mirroring Linux waiting on each thread's exit.
+        for task in siblings {
+            let _ = task.join();
+        }
+    }
+
+    // A concurrent genuine termination must win over this exec: a delivered
+    // fatal signal bumps the epoch. Sweep kills are excluded from it, so they
+    // cannot abort the exec they belong to. Terminate with the racing signal so
+    // the parent observes the real `WIFSIGNALED` status instead of a clean exit
+    // or the sweep's own SIGKILL. The epoch and signal number come from one
+    // packed snapshot, so they cannot be mismatched.
+    let racing_signal = process.signal_manager().ok().and_then(|manager| {
+        let (epoch, signo) = manager.fatal_signal_snapshot();
+        (fatal_snapshot.map(|snapshot| snapshot.0) != Some(epoch)).then_some(signo)
+    });
+    if let Some(signo) = racing_signal {
+        do_exit_from_signal(signo as i32);
+        return true;
+    }
+    // A group exit already marked without an epoch bump is `exit_group(2)`; its
+    // own exit code is authoritative.
+    if process.is_group_exited() {
+        do_exit(process.exit_code(), true);
+        return true;
+    }
+
+    // If the surviving thread is not the group leader, move the thread-group
+    // identity onto it here, while this phase can still sleep. The number
+    // directory entry moves once and the thread adopts the group number;
+    // membership and cgroup key on the stable identity and need no change, so
+    // the address-space exchange below stays a pure pointer swap. Takeover also
+    // re-verifies the single-survivor invariant; failing it is fatal, otherwise
+    // a late sibling would keep running against the old image.
+    if !process.assume_leader_identity(&current()) {
+        error!("exec_de_thread: leader identity takeover failed after the sibling sweep");
+        do_exit(Signo::SIGSEGV as i32, true);
+        return true;
+    }
+    false
+}
+
 /// Tears down the current user thread and optionally terminates its siblings.
 ///
 /// `exit_code` records the thread's status; `group_exit` requests SIGKILL for
@@ -324,6 +439,20 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
 ///
 /// The current-thread accessor panics if no user-thread runtime is installed.
 pub fn do_exit(exit_code: i32, group_exit: bool) {
+    do_exit_inner(exit_code, group_exit, false);
+}
+
+/// Tears down the current thread after a fatal signal.
+///
+/// A `de_thread` sibling-sweep target is exempt from the group-exit marking:
+/// the execing thread kills it on purpose and must survive the sweep. A target
+/// that instead reaches `exit_group(2)` goes through [`do_exit`] and still
+/// records the genuine group exit, so the exec aborts.
+pub(crate) fn do_exit_from_signal(exit_code: i32) {
+    do_exit_inner(exit_code, true, true);
+}
+
+fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     let curr = current();
     let thr = current_user_thread();
     let process = thr.process();
@@ -354,6 +483,9 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         error!("tee_session_release_state on thread exit: {e:#010X?}");
     }
 
+    // Release files before retiring membership so the last thread cannot
+    // publish process completion while a sibling still owns descriptors.
+    thr.files().exit_files();
     thr.detach_cgroup();
     let is_last_thread = process_exit::finish_thread_exit(process, &current(), exit_code);
 
@@ -384,9 +516,6 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             error!("clear_tee_runtime_private on process exit failed: {err:?}");
         }
 
-        if let Err(err) = process.exit_files() {
-            error!("exit_files on process exit failed: {err:?}");
-        }
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }
@@ -401,7 +530,13 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         process_exit::complete_process_exit(process);
     }
 
-    if group_exit && !process.is_group_exited() {
+    // A `de_thread` sweep target killed by the sweep's fatal signal must not
+    // mark the group exited or broadcast a group kill: the execing thread
+    // orchestrates that death and must survive it. The exemption applies only to
+    // signal deaths, so a sweep target that instead calls `exit_group(2)` still
+    // records the genuine group exit and makes the exec abort.
+    let sweep_exempt = signal_death && thr.is_exec_sweep_target();
+    if group_exit && !sweep_exempt && !process.is_group_exited() {
         process_exit::mark_group_exited(process);
         let sig = SignalInfo::new_kernel(Signo::SIGKILL);
         // `finish_thread_exit()` removed the current thread from the process
@@ -435,7 +570,7 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> KResult<()> {
         && process_signals::interrupt_thread(tid).is_ok()
     {
     } else {
-        do_exit(signo as i32, true);
+        do_exit_from_signal(signo as i32);
     }
 
     Ok(())
@@ -473,9 +608,9 @@ pub fn check_signals(
 
     let signo = sig.signo();
     match os_action {
-        SignalOsAction::Terminate => do_exit(signo as i32, true),
-        SignalOsAction::CoreDump => do_exit(128 + signo as i32, true),
-        SignalOsAction::Stop => do_exit(1, true),
+        SignalOsAction::Terminate => do_exit_from_signal(signo as i32),
+        SignalOsAction::CoreDump => do_exit_from_signal(128 + signo as i32),
+        SignalOsAction::Stop => do_exit_from_signal(1),
         SignalOsAction::Continue | SignalOsAction::Handler => {}
     }
     Some(os_action)
