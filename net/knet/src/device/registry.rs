@@ -2,26 +2,34 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Stable network interface IDs backed by compact device storage.
+//! Registered interfaces, link configuration, and aggregate protocol-stack MTU.
 
 use alloc::{boxed::Box, vec::Vec};
 
 use hashbrown::HashMap;
 use kerrno::LinuxError;
 
-use crate::device::{LinkKind, NetDevice, NetDeviceId};
+use crate::{
+    consts::STANDARD_MTU,
+    device::{LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice, NetDeviceId},
+};
 
 struct DeviceEntry {
     id: NetDeviceId,
     device: Box<dyn NetDevice>,
 }
 
-/// Maintains `slots[&entries[index].id] == index` for every stored entry.
+/// Owns registered devices and validates collection-wide link configuration.
+///
+/// Maintains `slots[&entries[index].id] == index` and refreshes the aggregate
+/// MTU on registration, removal, and successful MTU updates. Callers serialize
+/// registry access with the enclosing Router mutex.
 pub(crate) struct DeviceRegistry {
     entries: Vec<DeviceEntry>,
     slots: HashMap<NetDeviceId, usize>,
     next_ifindex: Option<i32>,
     loopback_registered: bool,
+    effective_mtu: usize,
 }
 
 impl DeviceRegistry {
@@ -31,7 +39,99 @@ impl DeviceRegistry {
             slots: HashMap::new(),
             next_ifindex: Some(2),
             loopback_registered: false,
+            effective_mtu: STANDARD_MTU,
         }
+    }
+
+    /// Returns the MTU advertised through the smoltcp device capabilities.
+    ///
+    /// Uses the minimum device IP MTU capped at 65535, or the default for an empty set.
+    pub(crate) fn effective_mtu(&self) -> usize {
+        self.effective_mtu
+    }
+
+    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
+        self.iter()
+            .enumerate()
+            .map(|(slot, device)| device.link_snapshot(self.id_at(slot).ifindex()))
+            .collect()
+    }
+
+    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
+        self.get_by_id(NetDeviceId::new(ifindex)?)
+            .map(|device| device.link_snapshot(ifindex))
+    }
+
+    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
+        NetDeviceId::new(ifindex)
+            .and_then(|id| self.slot(id))
+            .is_some()
+    }
+
+    pub(crate) fn device_id_by_name(&self, name: &str) -> Option<NetDeviceId> {
+        self.iter()
+            .position(|device| device.name() == name)
+            .map(|slot| self.id_at(slot))
+    }
+
+    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
+        self.get_by_id(NetDeviceId::new(ifindex)?)
+            .map(|device| device.link_send_snapshot())
+    }
+
+    /// Validates and applies a link update, preserving name uniqueness.
+    ///
+    /// Returns `Ok(true)` when the effective device MTU changed and the
+    /// smoltcp interface must be rebuilt to refresh its cached capabilities.
+    pub(crate) fn update_device_link(
+        &mut self,
+        ifindex: i32,
+        update: LinkConfigUpdate,
+    ) -> Result<bool, LinuxError> {
+        let slot = NetDeviceId::new(ifindex)
+            .and_then(|id| self.slot(id))
+            .ok_or(LinuxError::ENODEV)?;
+        let device = self.get_by_slot(slot).ok_or(LinuxError::ENODEV)?;
+        if let Some(name) = update.name.as_deref() {
+            crate::device::validate_interface_name(name)?;
+            if self
+                .iter()
+                .enumerate()
+                .any(|(other_slot, device)| other_slot != slot && device.name() == name)
+            {
+                return Err(LinuxError::EEXIST);
+            }
+        }
+        if let Some(mtu) = update.mtu {
+            device.link_kind().validate_mtu(mtu)?;
+        }
+
+        let is_mtu_changed = update.mtu.is_some_and(|mtu| mtu != device.mtu());
+        let effective_mtu = self.effective_mtu;
+
+        let LinkConfigUpdate { name, mtu, is_up } = update;
+        let device = self.get_mut_by_slot(slot).expect("validated device slot");
+        if let Some(mtu) = mtu {
+            device.set_mtu(mtu)?;
+        }
+        if let Some(name) = name {
+            device.set_name(name);
+        }
+        if let Some(is_up) = is_up {
+            device.set_link_up(is_up);
+        }
+        if is_mtu_changed {
+            self.recompute_effective_mtu();
+        }
+        Ok(self.effective_mtu != effective_mtu)
+    }
+
+    fn recompute_effective_mtu(&mut self) {
+        self.effective_mtu = self
+            .iter()
+            .map(|device| device.mtu().min(u16::MAX as usize))
+            .min()
+            .unwrap_or(STANDARD_MTU);
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -63,6 +163,7 @@ impl DeviceRegistry {
         let slot = self.entries.len();
         self.entries.push(DeviceEntry { id, device });
         self.slots.insert(id, slot);
+        self.recompute_effective_mtu();
         Ok(id)
     }
 
@@ -75,6 +176,7 @@ impl DeviceRegistry {
         for (new_slot, entry) in self.entries.iter().enumerate().skip(slot) {
             self.slots.insert(entry.id, new_slot);
         }
+        self.recompute_effective_mtu();
         removed_entry.device
     }
 
@@ -96,7 +198,7 @@ impl DeviceRegistry {
     }
 
     /// Returns the device at a storage slot, which can change after removal.
-    pub(crate) fn get_by_slot(&self, slot: usize) -> Option<&dyn NetDevice> {
+    fn get_by_slot(&self, slot: usize) -> Option<&dyn NetDevice> {
         self.entries.get(slot).map(|entry| entry.device.as_ref())
     }
 

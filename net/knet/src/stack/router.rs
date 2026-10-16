@@ -15,11 +15,8 @@ use smoltcp::wire::Ipv6Packet;
 use crate::network::router::ROUTE_PROTOCOL_KERNEL;
 use crate::{
     buf::{PacketBuf, PacketOwner},
-    consts::{SOCKET_BUFFER_SIZE, STANDARD_MTU},
-    device::{
-        DeviceRegistry, LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborUpdate,
-        NetDevice, NetDeviceId,
-    },
+    consts::SOCKET_BUFFER_SIZE,
+    device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId},
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
     network::{
         ipv4::{self, Ipv4Error, Ipv4Header},
@@ -72,7 +69,6 @@ pub(crate) struct Router {
     next_ipv4_identification: u16,
     pub(crate) devices: DeviceRegistry,
     pub(crate) table: RouteTable,
-    effective_mtu: usize,
 }
 
 pub(crate) struct RxDrain {
@@ -93,7 +89,6 @@ impl Router {
             next_ipv4_identification: 1,
             devices: DeviceRegistry::new(),
             table: RouteTable::new(),
-            effective_mtu: STANDARD_MTU,
         }
     }
 
@@ -105,7 +100,7 @@ impl Router {
         StackDevice::new(
             &mut self.rx_queue,
             &mut self.data_tx_queue,
-            self.effective_mtu,
+            self.devices.effective_mtu(),
         )
     }
 
@@ -244,7 +239,6 @@ impl Router {
     ) -> Result<NetDeviceId, LinuxError> {
         let id = self.devices.register(device)?;
         self.sync_device_ipv4_addrs();
-        self.recompute_effective_mtu();
         Ok(id)
     }
 
@@ -274,7 +268,6 @@ impl Router {
         self.rebuild_ipv4_address_routes();
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
-        self.recompute_effective_mtu();
         Some(())
     }
 
@@ -294,37 +287,6 @@ impl Router {
                 .any(|entry| entry.addr.is_directed_broadcast(address))
     }
 
-    /// Returns the MTU advertised through the smoltcp device capabilities.
-    pub(crate) fn effective_mtu(&self) -> usize {
-        self.effective_mtu
-    }
-
-    pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
-        self.devices
-            .iter()
-            .enumerate()
-            .map(|(slot, device)| device.link_snapshot(self.devices.id_at(slot).ifindex()))
-            .collect()
-    }
-
-    pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        let dev_index = self.device_slot(ifindex)?;
-        self.devices
-            .get_by_slot(dev_index)
-            .map(|device| device.link_snapshot(ifindex))
-    }
-
-    pub(crate) fn has_device(&self, ifindex: i32) -> bool {
-        self.device_slot(ifindex).is_some()
-    }
-
-    pub(crate) fn device_id_by_name(&self, name: &str) -> Option<NetDeviceId> {
-        self.devices
-            .iter()
-            .position(|device| device.name() == name)
-            .map(|slot| self.devices.id_at(slot))
-    }
-
     /// Returns the primary IPv4 address of the device named `name`.
     ///
     /// Device resolution and address lookup happen under one Router borrow so
@@ -336,7 +298,10 @@ impl Router {
     /// Returns `ENODEV` for an unknown device and `EADDRNOTAVAIL` when the
     /// device has no IPv4 address.
     pub(crate) fn interface_ipv4_addr(&self, name: &str) -> Result<Ipv4Cidr, LinuxError> {
-        let dev = self.device_id_by_name(name).ok_or(LinuxError::ENODEV)?;
+        let dev = self
+            .devices
+            .device_id_by_name(name)
+            .ok_or(LinuxError::ENODEV)?;
         self.ipv4_addrs
             .iter()
             .find(|entry| entry.dev == dev)
@@ -350,13 +315,6 @@ impl Router {
             .iter()
             .find(|entry| entry.dev == dev)
             .map(|entry| entry.addr)
-    }
-
-    pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
-        let dev_index = self.device_slot(ifindex)?;
-        self.devices
-            .get_by_slot(dev_index)
-            .map(|device| device.link_send_snapshot())
     }
 
     pub(crate) fn ipv4_addr_entries(&self) -> &[Ipv4AddrEntry] {
@@ -639,59 +597,6 @@ impl Router {
         Ok(())
     }
 
-    /// Applies a validated link update.
-    ///
-    /// Returns `Ok(true)` when the effective device MTU changed and the
-    /// smoltcp interface must be rebuilt to refresh its cached capabilities.
-    pub(crate) fn update_device_link(
-        &mut self,
-        ifindex: i32,
-        update: LinkConfigUpdate,
-    ) -> Result<bool, LinuxError> {
-        let dev = self.device_slot(ifindex).ok_or(LinuxError::ENODEV)?;
-        let device = self.devices.get_by_slot(dev).ok_or(LinuxError::ENODEV)?;
-        if let Some(name) = update.name.as_deref() {
-            crate::device::validate_interface_name(name)?;
-            if self
-                .devices
-                .iter()
-                .enumerate()
-                .any(|(other_dev, device)| other_dev != dev && device.name() == name)
-            {
-                return Err(LinuxError::EEXIST);
-            }
-        }
-        if let Some(mtu) = update.mtu {
-            device.link_kind().validate_mtu(mtu)?;
-        }
-
-        let is_mtu_changed = update.mtu.is_some_and(|mtu| mtu != device.mtu());
-        let effective_mtu = self.effective_mtu;
-
-        let LinkConfigUpdate { name, mtu, is_up } = update;
-        let device = self
-            .devices
-            .get_mut_by_slot(dev)
-            .expect("validated device slot");
-        if let Some(mtu) = mtu {
-            device.set_mtu(mtu)?;
-        }
-        if let Some(name) = name {
-            device.set_name(name);
-        }
-        if let Some(is_up) = is_up {
-            device.set_link_up(is_up);
-        }
-        if is_mtu_changed {
-            self.recompute_effective_mtu();
-        }
-        Ok(self.effective_mtu != effective_mtu)
-    }
-
-    fn device_slot(&self, ifindex: i32) -> Option<usize> {
-        self.devices.slot(NetDeviceId::new(ifindex)?)
-    }
-
     pub(crate) fn apply_neighbor_update(
         &mut self,
         update: NeighborUpdate,
@@ -794,15 +699,6 @@ impl Router {
                 entry.dev, entry.addr, scope,
             ));
         }
-    }
-
-    fn recompute_effective_mtu(&mut self) {
-        self.effective_mtu = self
-            .devices
-            .iter()
-            .map(|device| device.mtu().min(u16::MAX as usize))
-            .min()
-            .unwrap_or(STANDARD_MTU);
     }
 
     pub(crate) fn drain_rx_budgeted_into(
@@ -1114,7 +1010,7 @@ mod tests {
     use unittest::{assert, assert_eq, def_test};
 
     use super::*;
-    use crate::device::LoopbackDevice;
+    use crate::device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice};
 
     fn valid_ipv4_cidr(address: Ipv4Address, prefix_len: u8) -> Ipv4Cidr {
         Ipv4Cidr::new(address, prefix_len).unwrap()

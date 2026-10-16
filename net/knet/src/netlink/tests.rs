@@ -1399,7 +1399,7 @@ fn test_removed_interface_id_is_not_reused() {
 
     let eth2 = router.add_device(Box::new(ethernet("eth2", 4))).unwrap();
     assert_eq!(eth2.ifindex(), 4);
-    assert!(!router.has_device(eth0.ifindex()));
+    assert!(!router.devices.has_device(eth0.ifindex()));
 }
 
 #[def_test(serial)]

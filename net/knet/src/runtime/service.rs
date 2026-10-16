@@ -774,23 +774,29 @@ impl Service {
     }
 
     pub(crate) fn link_snapshots(&self) -> Vec<LinkSnapshot> {
-        self.router.lock().link_snapshots()
+        self.router.lock().devices.link_snapshots()
     }
 
     pub(crate) fn link_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSnapshot> {
-        self.router.lock().link_snapshot_for_ifindex(ifindex)
+        self.router
+            .lock()
+            .devices
+            .link_snapshot_for_ifindex(ifindex)
     }
 
     pub(crate) fn has_device(&self, ifindex: i32) -> bool {
-        self.router.lock().has_device(ifindex)
+        self.router.lock().devices.has_device(ifindex)
     }
 
     pub(crate) fn device_id_by_name(&self, name: &str) -> Option<NetDeviceId> {
-        self.router.lock().device_id_by_name(name)
+        self.router.lock().devices.device_id_by_name(name)
     }
 
     pub(crate) fn link_send_snapshot_for_ifindex(&self, ifindex: i32) -> Option<LinkSendSnapshot> {
-        self.router.lock().link_send_snapshot_for_ifindex(ifindex)
+        self.router
+            .lock()
+            .devices
+            .link_send_snapshot_for_ifindex(ifindex)
     }
 
     pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<crate::router::Ipv4AddrSnapshot> {
@@ -911,7 +917,7 @@ impl Service {
         update: LinkConfigUpdate,
     ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
-        let is_effective_mtu_changed = router.update_device_link(ifindex, update)?;
+        let is_effective_mtu_changed = router.devices.update_device_link(ifindex, update)?;
         if is_effective_mtu_changed {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
@@ -945,9 +951,9 @@ impl Service {
     /// removal cannot interleave with other control-plane mutations.
     pub(crate) fn remove_device_by_model_id(&self, id: kdevice::DeviceId) -> Option<()> {
         let mut router = self.router.lock();
-        let effective_mtu = router.effective_mtu();
+        let effective_mtu = router.devices.effective_mtu();
         router.remove_device_by_model_id(id)?;
-        if router.effective_mtu() != effective_mtu {
+        if router.devices.effective_mtu() != effective_mtu {
             let mut iface = self.iface.lock();
             self.rebuild_interface(&mut router, &mut iface);
         }
