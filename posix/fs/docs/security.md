@@ -74,6 +74,15 @@ kfd resources / kvfs / device and pipe implementations
 - 不把用户指针裸传给底层对象；
 - 不在绕过 VFS/fd 表权限检查的情况下构造对象引用。
 
+### getcwd 用户输出边界
+
+`getcwd` 的 NULL 输出地址不是查询模式；完成路径和容量检查后，
+所有实际输出均经过 `UserPtr::write_vm_slice`，坏地址返回 `EFAULT`。
+容量以 `usize` 接收，但只复制实际路径长度，巨大容量不会触发对应大小的分配。
+短容量在写入前返回 `ERANGE`，包括 NULL 地址与短容量同时出现的情况。
+回归测试使用独立进程的 `FsStruct` 和 `TestUserArray` 管理的映射，
+检查短缓冲区不写入、正常输出不越过路径末尾，以及未映射地址的错误返回。
+
 ## 内存安全不变量
 
 1. **用户内存只通过封装类型访问**：

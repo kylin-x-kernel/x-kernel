@@ -3994,6 +3994,7 @@ dependencies = [
  "osvm",
  "posix-types",
  "unittest",
+ "unittest_support",
 ]
 
 [[package]]

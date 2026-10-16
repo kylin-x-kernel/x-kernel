@@ -291,6 +291,17 @@ final lookup。syscall 复制并校验 ABI 参数后调用对应的
    `process/kexec::ExecRequest::from_resolved_with_display()`，loader 不再重新按
    procfs 字符串查找目标对象。
 
+### `getcwd` 输出契约
+
+`getcwd` 按 Linux 原始 syscall 接收无符号机器字大小的容量，先生成包含 NUL
+的路径，再比较容量，最后通过用户内存接口复制。容量不足返回 `ERANGE`；
+容量足够但输出地址无效返回 `EFAULT`。libc 的 `getcwd(NULL, 0)` 自动分配
+扩展由用户态实现，内核不会为 NULL 缓冲区返回成功。
+
+`dir.rs` 的 `getcwd_tests` 通过 `#[def_test(user)]` 创建独立进程和用户映射，
+直接调用 syscall 入口验证容量、返回字节数、写入范围和错误优先级；
+用例由现有内核 unittest 流程自动执行。
+
 ### `getdents64`
 
 1. 根据用户给定长度分配内核临时 `DirBuffer`。

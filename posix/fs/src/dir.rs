@@ -256,12 +256,14 @@ pub fn sys_getdents64(fd: i32, buf: UserPtr<u8>, len: usize) -> KResult<isize> {
 /// directory walk (`generic_getcwd`) when the syscall returns a value that
 /// exceeds the buffer — an invariant that breaks when we return a raw
 /// pointer.
-pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
-    let size: usize = size.try_into().map_err(|_| KError::BadAddress)?;
-    if buf.is_null() {
-        return Ok(0);
-    }
-
+///
+/// # Errors
+///
+/// Returns `KError::OutOfRange` if the unsigned buffer size cannot hold the
+/// path and terminator. Otherwise an invalid output pointer, including NULL,
+/// returns `KError::BadAddress`; the syscall does not allocate a user buffer.
+/// Path-rendering errors are propagated before checking the output buffer.
+pub fn sys_getcwd(buf: UserPtr<u8>, size: usize) -> KResult<isize> {
     let fs_context = kprocess::current_user_process().fs_context()?;
     let fs = fs_context.lock();
     let cwd = match fs.pwd().render_from(fs.root())? {
@@ -281,3 +283,5 @@ pub fn sys_getcwd(buf: UserPtr<u8>, size: isize) -> KResult<isize> {
         Err(KError::OutOfRange)
     }
 }
+
+unittest::path_mod_test!(getcwd_tests, "../ut-tests/getcwd.rs");
