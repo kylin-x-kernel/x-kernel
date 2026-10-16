@@ -134,7 +134,10 @@ kfd resources / kvfs / device and pipe implementations
    不应改变底层 `FileLike` 对象。
 2. `O_NONBLOCK` 和 `F_SETFL(O_NONBLOCK)` 必须修改 open file description 的
    `VfsFile::f_flags`，`nonblocking()` 只能从该字段派生。
-3. `AT_EMPTY_PATH` 是空路径按 fd 解析的必要条件。
+3. `AT_EMPTY_PATH` 是空路径解析的必要条件；只有实际的空字符串与
+   `AT_FDCWD` 组合才能选择持有引用的 cwd，其余情况查 fd 表。
+   内部 `None` 形式保持仅按 fd 解析，避免 `fstat/fchmod/fchown/f*xattr`
+   复用解析器时意外获得访问或修改 cwd 的能力。
 4. 非空绝对 `*at` pathname 必须忽略 `dirfd`；只有相对 pathname 才允许
    `dirfd` 查找失败影响结果。
 5. `AT_SYMLINK_NOFOLLOW` / `O_NOFOLLOW` 必须影响符号链接和 VFS magic-link follow。

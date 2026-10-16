@@ -144,7 +144,7 @@ user path pointer
 raw path string or AT_EMPTY_PATH
     │ path.rs helpers
     ├─ normal path ────────────────> kvfs::namei lookup
-    ├─ empty path + AT_EMPTY_PATH ─> dirfd fd object
+    ├─ empty path + AT_EMPTY_PATH ─> cwd (AT_FDCWD) or dirfd fd object
     └─ magic-link component ───────> kvfs::namei typed follow
 ```
 
@@ -153,6 +153,12 @@ raw path string or AT_EMPTY_PATH
 只负责把 syscall flags 转成 `LookupFlags` 与 `LookupIntent`。final 与
 non-final component 的普通 symlink、magic-link、`NO_MAGIC_LINKS` 和
 `O_NOFOLLOW` 规则都由 `kvfs::namei` 统一执行。
+
+空字符串配合 `AT_EMPTY_PATH`、`dirfd == AT_FDCWD` 时，通过 `with_fs` 快照克隆当前
+目录的 `Path`，然后释放锁再读取或修改 metadata；不重新解析 `.`，也不要求
+当前目录的搜索权限。`None` 保持现有的仅按 fd 解析约定：`fstat/fchmod/fchown`
+和 fd 形式的 xattr 接口通过它复用解析器，不能把 `AT_FDCWD` 错当成真实
+描述符。本次不扩展各个 syscall 对 NULL 用户 pathname 的接受范围。
 
 ### 文件数据流
 
@@ -216,8 +222,9 @@ syscall 层保留参数校验、用户 offset 回写及整个请求的重启决�
 3. 绝对非空路径不读取 `dirfd`；相对非空路径使用 `dirfd` 选择 base。
 4. namei 在同一条路径中处理 final/non-final symlink、magic-link、
    `AT_SYMLINK_NOFOLLOW` 和 `NO_MAGIC_LINKS`。
-5. 空路径配合 `AT_EMPTY_PATH` 返回 fd 对象对应的 VFS `Location` 或非 VFS
-   `FileLike`。
+5. `Some("")`、`AT_EMPTY_PATH` 和 `AT_FDCWD` 同时出现时，通过 `with_fs`
+   的上下文快照克隆 cwd `Path`；不解析 `.`，也不增加 cwd 搜索权限检查。
+   其余空路径及内部 `None` 形式按真实 fd 取得 `Path`。
 
 ### xattr syscall family
 

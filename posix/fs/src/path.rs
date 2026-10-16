@@ -95,6 +95,8 @@ fn resolve_filesystem_path(dirfd: c_int, path: &str, flags: u32, cred: &Cred) ->
     })
 }
 
+/// Resolves an `*at` target, including the current directory for an empty path
+/// with `AT_EMPTY_PATH` and `AT_FDCWD`. `None` retains descriptor-only resolution.
 pub(crate) fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<ResolveAtResult> {
     let cred = kprocess::current_cred();
     resolve_at_with_cred(dirfd, path, flags, &cred)
@@ -107,12 +109,19 @@ pub(crate) fn resolve_at_with_cred(
     cred: &Cred,
 ) -> KResult<ResolveAtResult> {
     match path {
+        Some("") if dirfd == AT_FDCWD && flags & AT_EMPTY_PATH != 0 => {
+            // None remains descriptor-only for fstat/fchmod/fchown/f*xattr.
+            // Clone cwd directly: resolving "." would add a search-permission check.
+            with_fs(dirfd, |fs| Ok(ResolveAtResult::Path(fs.pwd().clone())))
+        }
         Some(path) if !path.is_empty() => {
             resolve_filesystem_path(dirfd, path, flags, cred).map(ResolveAtResult::Path)
         }
         _ => resolve_empty_path(dirfd, flags),
     }
 }
+
+unittest::path_mod_test!(empty_path_tests, "../ut-tests/empty_path.rs");
 
 #[unittest::mod_test]
 mod tests {
