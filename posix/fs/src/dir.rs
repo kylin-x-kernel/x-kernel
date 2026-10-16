@@ -45,10 +45,23 @@ pub fn sys_chdir(path: UserConstPtr<c_char>) -> KResult<isize> {
 }
 
 /// Changes the current working directory by file descriptor.
+///
+/// Accepts directory descriptors, including `O_PATH`, but not the `AT_FDCWD`
+/// sentinel used by pathname-relative syscalls. The cwd is unchanged on error.
+///
+/// # Errors
+///
+/// Returns `KError::BadFileDescriptor` for an invalid fd and
+/// `KError::NotADirectory` for a non-directory. Search-permission and
+/// filesystem-context errors are propagated before committing the new cwd.
 pub fn sys_fchdir(dirfd: i32) -> KResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
-    let entry = with_fs(dirfd, |fs| Ok(fs.pwd().clone()))?;
+    let file = kprocess::current_resources().get_file(dirfd)?;
+    if !file.is_dir() {
+        return Err(KError::NotADirectory);
+    }
+    let entry = file.path().clone();
     entry.permission(
         Permission::MAY_EXEC | Permission::MAY_CHDIR,
         &kprocess::current_cred(),

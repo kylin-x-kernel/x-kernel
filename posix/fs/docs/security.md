@@ -103,6 +103,12 @@ kfd resources / kvfs / device and pipe implementations
    或提前 NUL 约束；`FsContext` 不保存用户指针，filesystem 若要在 `get_tree()` 返回后保留
    选项，必须只复制已解析状态。
 
+### fchdir 描述符边界
+
+`fchdir` 对所有输入都执行 fd 表查找，负值（包括 `AT_FDCWD`）和已关闭 fd
+返回 `EBADF`。非目录返回 `ENOTDIR`；目录继续执行当前凭据的搜索权限检查。
+只有完整验证成功才写入 cwd，不把路径 syscall 的特殊基目录标记当成有效 fd。
+
 ## 权限与语义不变量
 
 读写 syscall 只对已识别的文件等待中断请求信号重启，且必须在完成量汇总后转换。

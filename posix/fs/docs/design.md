@@ -201,6 +201,13 @@ syscall 层保留参数校验、用户 offset 回写及整个请求的重启决�
 7. 根据 `O_NONBLOCK`、`O_CLOEXEC` 设置对象和 descriptor 标志。
 8. 把打开的 file 加入当前进程 fd 表并返回 fd。
 
+### `fchdir` 的 fd 解析
+
+`fchdir` 直接从当前资源表取得目录对象，不复用为路径查找提供 `AT_FDCWD`
+语义的 `with_fs`。取得的 `Arc<VfsFile>` 保持对象存活；确认目录类型、检查
+搜索权限后，才更新当前进程的 cwd。`O_PATH` 目录描述符仍可用，非法 fd、
+非目录或权限失败均不改变 cwd。
+
 ### `resolve_at`
 
 1. `None` 或空路径必须配合 `AT_EMPTY_PATH`，否则返回 `NotFound`。
