@@ -232,6 +232,9 @@ They check that installation errors propagate through the caller's commitment
 policy. The fixture payload contains metadata, not executable user instructions.
 Probe mechanics and observation contracts are documented alongside the test
 interfaces in `src/loader.rs`; production loading has no injection selector.
+The partial-install observer is an owned closure capturing request-local peer
+state. This lets the syscall fixture wait for explicit acknowledgement without
+adding a scheduler dependency or a global handshake to the loader.
 
 File-private BSS page prefixes are capped at the actual executable size,
 including when the BSS offset lies beyond EOF within the same page. The

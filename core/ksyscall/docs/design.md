@@ -106,9 +106,12 @@ Regression coverage lives in `src/task/tests/exec_lifecycle.rs` and
 VM-sharing peer survival, retained-image identity, and exit-tail root lifetime
 across scheduling and CPU migration. Request-local unittest probes exercise
 post-commit failures without exposing a production fault-injection interface.
-The empty-MM activation probe waits on an explicit peer acknowledgement queue
-with a five-second deadline. It stays blocked until the parent verifies the
-boundary and wakes it, avoiding two periodic polls missing the blocked interval.
+The empty-MM activation and partial-install probes each wait on a dedicated peer
+acknowledgement queue with a five-second deadline. Each stays blocked until the
+parent verifies the boundary, publishes its acknowledgement and wakes the child,
+avoiding two periodic polls missing the blocked interval. The partial-install
+observer captures request-local handshake state without coupling the loader to
+the scheduler. Migration and memory checks still run after acknowledgement.
 Synthetic ELF fixtures verify installation, not execution of user instructions.
 The external harness `exec-mm-semantics` suite covers runnable-image behavior:
 successful exec, ordinary preparation errors, and VM-sharing peer isolation.

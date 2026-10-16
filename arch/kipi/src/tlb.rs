@@ -572,7 +572,4 @@ pub fn trigger_flush_all(vaddr: Option<VirtAddr>) {
     TlbFlushIf::flush_all_cpus(vaddr);
 }
 
-#[unittest::mod_test]
-mod tlb_unittest {
-    include!("../ut-tests/tlb_unittest.rs");
-}
+unittest::path_mod_test!(tlb_unittest, "../ut-tests/tlb_unittest.rs");

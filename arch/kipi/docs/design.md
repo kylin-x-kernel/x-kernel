@@ -1,5 +1,8 @@
 # kipi — 设计文档
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## 定位
 
 The `reschedule` feature selects fixed scheduler notifications; `ktask/ipi`

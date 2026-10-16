@@ -14,6 +14,11 @@ categories.workspace = true
 [lib]
 name = "device_res"
 
+[package.metadata.cargo-shear]
+# ut-tests/lib.rs uses kspin for mock provider and device cleanup locks.
+# cargo-shear excludes ut-tests; guest UT still needs this normal dependency.
+ignored = ["kspin"]
+
 [dependencies]
 kspin = { workspace = true }
 ktime_types = { workspace = true }

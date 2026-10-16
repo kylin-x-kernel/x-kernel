@@ -835,7 +835,6 @@ pub fn read_named_reserved_memory_regions<const N: usize>() -> ([NamedMemoryRegi
         ))
 }
 
-#[unittest::mod_test]
-mod unittest_tests {
-    include!("../ut-tests/of_unittest.rs");
-}
+// Gate macro resolution as well as the test module for early-boot consumers.
+#[cfg(unittest)]
+unittest::path_mod_test!(unittest_tests, "../ut-tests/of_unittest.rs");

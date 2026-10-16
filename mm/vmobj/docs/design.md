@@ -1,4 +1,7 @@
 # vmobj — 设计文档
+
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 ## 定位
 
 `vmobj` 提供 memory-management 主平面里的 object-neutral 公共语言。它不拥有 file-backed content，也不拥有 anonymous content；它负责的是：

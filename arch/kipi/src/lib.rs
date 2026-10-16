@@ -361,6 +361,4 @@ pub fn ipi_handler() {
     }
 }
 
-#[cfg(unittest)]
-#[path = "../ut-tests/lib_unittest.rs"]
-mod kipi_unittest;
+unittest::path_mod_test!(kipi_unittest, "../ut-tests/lib_unittest.rs");

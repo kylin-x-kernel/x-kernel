@@ -702,7 +702,10 @@ readiness precedence and Linux restart policy belong to their callers.
   delivery to a task running in user mode must take this path; a NOHZ lone
   runner has no periodic tick fallback.
 - `WaitQueue` wraps `event_listener` wait/notify and supports timeout and
-  predicate wait.
+  predicate wait. Both predicate variants recheck the condition after registering
+  the listener so a notification between the first check and registration cannot
+  postpone progress until the timeout. `ut-tests/wait_queue.rs` exercises this
+  ordering as well as an already-satisfied predicate and a genuine timeout.
 - `TaskInner::join()` uses `kpoll::Completion` as the per-task exit wait
   source. Exit publishes `exit_code`, then moves state to `Exited` and
   `complete_all()`. The joiner's real completion condition remains

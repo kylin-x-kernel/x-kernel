@@ -1,5 +1,8 @@
 # device-res — Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Purpose
 
 `device-res` provides the OS-neutral device resource description model and

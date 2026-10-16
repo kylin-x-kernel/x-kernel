@@ -250,13 +250,10 @@ pub struct PreparedExecImage {
 pub struct PartialInstallProbe {
     /// Counts successful arrivals after ELF mapping, before stack/heap mapping.
     pub hits: Arc<core::sync::atomic::AtomicUsize>,
-    /// Scalar handshake with an independent old-MM peer.
-    pub stage: Arc<core::sync::atomic::AtomicUsize>,
-    /// Optional destination validated by the caller against its original eligible CPUs.
-    pub target_cpu: Option<usize>,
     /// Observes borrowed mappings and schedules without reacquiring this MM.
     /// The peer must never require this MM mutex or an inverse lock.
-    pub observe: fn(&MmSpace, &core::sync::atomic::AtomicUsize, Option<usize>),
+    /// Captured request-local state owns the peer handshake and migration target.
+    pub observe: alloc::boxed::Box<dyn Fn(&MmSpace) + Send + Sync>,
 }
 
 #[cfg(unittest)]
@@ -742,7 +739,7 @@ pub fn load_prepared_user_app(
         probe
             .hits
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        (probe.observe)(uspace, &probe.stage, probe.target_cpu);
+        (probe.observe)(uspace);
         return Err(KError::NoMemory);
     }
     let ustack_top = VirtAddr::from_usize(kaddr_layout::USER_STACK_TOP);

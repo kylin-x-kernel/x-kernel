@@ -1,5 +1,10 @@
 # fat — 设计文档
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+Guest validation must enable `KFEAT_FS_FAT`; a crate filter alone does not
+enable the filesystem or register its tests.
+
 ## 定位
 
 `fat` 把 `axfatfs` 的 FAT 介质对象接入 KVFS。它拥有 FAT mount state、目录/文件 inode

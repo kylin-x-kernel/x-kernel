@@ -237,13 +237,11 @@ fn handle_bottom_half(reasons: NotificationFlags) {
     }
 }
 
-#[cfg(unittest)]
-#[path = "../ut-tests/bottom_half_unittest.rs"]
-mod bottom_half_unittest;
+unittest::path_mod_test!(bottom_half_unittest, "../ut-tests/bottom_half_unittest.rs");
 
 unittest::path_mod_test!(rcu_unittest, "../ut-tests/rcu_unittest.rs");
 
-#[unittest::mod_test]
-mod notification_unittest {
-    include!("../ut-tests/notification_unittest.rs");
-}
+unittest::path_mod_test!(
+    notification_unittest,
+    "../ut-tests/notification_unittest.rs"
+);

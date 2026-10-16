@@ -190,7 +190,4 @@ pub(crate) fn write_annotation(f: &mut fmt::Formatter<'_>, ip: usize) -> fmt::Re
     write!(f, " {name}+{:#x}/{:#x}", symbol.offset, symbol.size)
 }
 
-#[unittest::mod_test]
-mod tests_unittest {
-    include!("../ut-tests/symtab_unittest.rs");
-}
+unittest::path_mod_test!(tests_unittest, "../ut-tests/symtab_unittest.rs");

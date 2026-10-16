@@ -1,5 +1,8 @@
 # of — Design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Purpose
 
 `of` is the kernel's device-tree front end. It initializes one global DTB

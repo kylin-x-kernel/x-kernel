@@ -1,5 +1,8 @@
 # kns design
 
+Kernel unit tests live in `ut-tests/` and are mounted from their original
+source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+
 ## Purpose and background
 
 `kns` bundles process namespace references in `NsProxy`. Process runtime code

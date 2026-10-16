@@ -10,6 +10,8 @@ use ktime_types::TimeSpan;
 
 use crate::future::{block_on, timeout_at};
 
+unittest::path_mod_test!(tests, "../ut-tests/wait_queue.rs");
+
 /// A queue to store sleeping tasks.
 ///
 /// # Examples
@@ -110,6 +112,10 @@ impl WaitQueue {
                     return true;
                 }
                 listener!(self.event => listener);
+                // ACK may arrive between the first check and listener registration.
+                if condition() {
+                    return false;
+                }
                 // Notification and timeout both resume the loop, which rechecks the deadline.
                 let _ = timeout_at(Some(deadline), listener).await;
             }

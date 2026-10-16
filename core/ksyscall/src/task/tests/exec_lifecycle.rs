@@ -8,7 +8,7 @@
 //! SimpleFile has no folio reader and its bytes are not a runnable program.
 //! These tests do not enter userspace; exit_tail covers last-user MM retirement.
 
-use alloc::{format, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
@@ -111,6 +111,7 @@ impl Retirement {
 struct PeerSwitch {
     stage: Arc<AtomicUsize>,
     empty_acknowledgement: WaitQueue,
+    partial_acknowledgement: WaitQueue,
     cpu: usize,
     target_cpu: Option<usize>,
 }
@@ -269,11 +270,10 @@ impl ExecProbe {
         update: kprocess::ProcessExecUpdate,
     ) -> (kexec::PreparedExecImage, kprocess::ProcessExecUpdate) {
         let image = if self.case == Case::Partial {
+            let switch = self.switch.clone();
             image.with_partial_install_probe(kexec::PartialInstallProbe {
                 hits: self.partial_hits.clone(),
-                stage: self.switch.stage.clone(),
-                target_cpu: self.switch.target_cpu,
-                observe: observe_partial,
+                observe: Box::new(move |mm| observe_partial(mm, &switch)),
             })
         } else {
             image
@@ -449,7 +449,8 @@ fn new_image_migration(mm: &memspace::MmSpace, target: usize) -> impl FnOnce() +
     }
 }
 
-fn observe_partial(mm: &memspace::MmSpace, stage: &AtomicUsize, target_cpu: Option<usize>) {
+fn observe_partial(mm: &memspace::MmSpace, switch: &PeerSwitch) {
+    let stage = &switch.stage;
     let cpu = khal::percpu::this_cpu_id().as_usize();
     let check = capture_root(mm);
     check();
@@ -457,10 +458,19 @@ fn observe_partial(mm: &memspace::MmSpace, stage: &AtomicUsize, target_cpu: Opti
     // Release/acquire plus the peer's Blocked check proves an actual switch.
     assert!(karch::local_irq_enabled());
     stage.store(PARTIAL_READY, Ordering::Release);
-    bounded_wait(|| stage.load(Ordering::Acquire) == PARTIAL_ACKNOWLEDGED);
+    // Keep the blocked interval observable until the parent completes its checks.
+    // A timed polling wake would make the parent's Blocked observation transient.
+    assert!(
+        !switch
+            .partial_acknowledgement
+            .wait_timeout_until(TimeSpan::from_secs(5), || {
+                stage.load(Ordering::Acquire) == PARTIAL_ACKNOWLEDGED
+            }),
+        "exec partial peer acknowledgement timeout"
+    );
     assert_eq!(khal::percpu::this_cpu_id().as_usize(), cpu);
     check();
-    if let Some(target) = target_cpu {
+    if let Some(target) = switch.target_cpu {
         let mappings = mm.vmas().count();
         // Borrowed N stays locked by this task; scheduler and old peer do not need it.
         new_image_migration(mm, target)();
@@ -834,6 +844,7 @@ fn run_case_with_session(
     let switch = Arc::new(PeerSwitch {
         stage: Arc::new(AtomicUsize::new(0)),
         empty_acknowledgement: WaitQueue::new(),
+        partial_acknowledgement: WaitQueue::new(),
         cpu,
         target_cpu,
     });
@@ -871,6 +882,8 @@ fn run_case_with_session(
         switch.stage.store(acknowledged, Ordering::Release);
         if acknowledged == EMPTY_ACKNOWLEDGED {
             switch.empty_acknowledgement.notify_one(false);
+        } else if acknowledged == PARTIAL_ACKNOWLEDGED {
+            switch.partial_acknowledgement.notify_one(false);
         }
     };
     if let Some(retirement) = &retirement {

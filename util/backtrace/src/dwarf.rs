@@ -351,7 +351,4 @@ pub(crate) fn fmt_frames(f: &mut fmt::Formatter<'_>, frames: &[crate::Frame]) ->
     Ok(())
 }
 
-#[unittest::mod_test]
-mod tests_unittest {
-    include!("../ut-tests/dwarf_unittest.rs");
-}
+unittest::path_mod_test!(tests_unittest, "../ut-tests/dwarf_unittest.rs");

@@ -51,7 +51,4 @@ impl Default for IpiEventQueue {
     }
 }
 
-#[unittest::mod_test]
-pub(crate) mod tests_queue {
-    include!("../ut-tests/queue_unittest.rs");
-}
+unittest::path_mod_test!(pub(crate) mod tests_queue, "../ut-tests/queue_unittest.rs");

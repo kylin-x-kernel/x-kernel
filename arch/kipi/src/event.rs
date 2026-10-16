@@ -70,7 +70,4 @@ pub(crate) struct IpiEvent {
     pub callback: Callback,
 }
 
-#[unittest::mod_test]
-pub(crate) mod tests_event {
-    include!("../ut-tests/event_unittest.rs");
-}
+unittest::path_mod_test!(pub(crate) mod tests_event, "../ut-tests/event_unittest.rs");
