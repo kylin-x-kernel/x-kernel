@@ -400,6 +400,19 @@ impl ProcessRuntime {
         self.nsproxy.read().clone()
     }
 
+    /// Replaces the process namespace bundle installed in this runtime.
+    ///
+    /// Dropping the previous bundle releases the strong reference to the old
+    /// namespaces; namespace owners then release their own resources.
+    pub(crate) fn set_nsproxy(&self, nsproxy: Arc<NsProxy>) {
+        *self.nsproxy.write() = Some(nsproxy);
+    }
+
+    /// Replaces the process filesystem context installed in this runtime.
+    pub(crate) fn set_fs_context(&self, fs_context: Arc<Mutex<FsStruct>>) {
+        *self.fs_context.write() = Some(fs_context);
+    }
+
     /// Returns the UTS namespace while the namespace proxy remains attached.
     pub(crate) fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
         self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
@@ -496,7 +509,21 @@ pub(crate) fn fork_process_runtime(
     config: ProcessForkConfig,
 ) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
     let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
-    let leader_task_number = kidentity::allocate_root_pid_handle()?;
+    // Children take their numbers in the parent's `pid_ns_for_children` —
+    // the namespace `setns(CLONE_NEWPID)` retargets and a plain fork
+    // inherits, matching the setns(2) contract that only future children
+    // move. With CLONE_NEWPID that slot IS the fresh child namespace
+    // clone_for_child just created, so the leader reads 1 there plus a full
+    // ancestor chain; the root allocator serves forks whose slot is still
+    // the root namespace.
+    let alloc_ns = fs_namespaces.nsproxy.pid_ns_for_children();
+    let leader_task_number = if config.namespace_flags.contains(kns::NamespaceFlags::NEWPID) {
+        kidentity::PidHandle::allocate_in(alloc_ns)?
+    } else if alloc_ns.is_root() {
+        kidentity::allocate_root_pid_handle()?
+    } else {
+        kidentity::PidHandle::allocate_in(alloc_ns)?
+    };
     let process = parent.process().fork_with_tree_parent(
         leader_task_number.clone(),
         config.parent,

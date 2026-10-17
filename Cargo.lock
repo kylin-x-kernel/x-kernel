@@ -2652,10 +2652,12 @@ dependencies = [
 name = "kns"
 version = "0.3.0-dev"
 dependencies = [
+ "anon_inodefs",
  "bitflags 2.13.2",
  "fs_context",
  "kcgroup",
  "kcred",
+ "kerrno",
  "kidentity",
  "klazy",
  "ksync",
@@ -4214,8 +4216,10 @@ dependencies = [
  "khal",
  "klockstat",
  "klogger",
+ "kns",
  "kprocess",
  "ktask",
+ "ktime_types",
  "ktracing",
  "ktty",
  "kvfs",

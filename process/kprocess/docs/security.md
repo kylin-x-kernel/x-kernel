@@ -194,6 +194,14 @@ mapped. Timer delivery deliberately tolerates missing recipients. Current-helper
 initialization and publication assertions are invariant checks, not recoverable
 user-input validation. No crash-recovery mechanism is provided.
 
+`apply_prepared_unshare` installs an already-validated namespace bundle, then
+unshares the fd table. The `CLONE_FILES` step is the only fallible commit step;
+a failure after the bundle install leaves the process with the new namespaces
+and the old fd sharing, so callers must treat it as a process-fatal condition.
+`apply_setns` swaps the bundle and, for `CLONE_NEWNS`, retargets the fs
+root/pwd to the target mount namespace's visible root; the caller has already
+authorized the switch and rejected pseudo-isolation kinds.
+
 ## Privacy, limitations and verification
 
 Executable paths, command lines, IDs, user addresses, credentials and CPU stats
@@ -202,10 +210,11 @@ policy; this crate supplies snapshots and does not redact them. Debug/signal
 logs include process IDs and signal names. Credential and payload memory is not
 explicitly scrubbed on drop here.
 
-Root/global PID projection, missing subreaper support, representative-thread
-credentials, simplified ptrace privilege semantics, UID-zero child-exit fallback
-and external syscall authorization are current limits. Resource-object or mm-ID
-availability does not prove a live fd table or active mappings. `de_thread`
+Root/global PID lookup projection, fs-sharing detection limited to published
+threads, missing subreaper support, representative-thread credentials, simplified
+ptrace privilege semantics, UID-zero child-exit fallback and external syscall
+authorization are current limits. Resource-object or mm-ID availability does not
+prove a live fd table or active mappings. `de_thread`
 relies on the sibling threads being in the same process and reachable through
 the scheduler; an uncancellable sibling in uninterruptible kernel work delays
 the execing thread indefinitely (Linux has the same property). Optional

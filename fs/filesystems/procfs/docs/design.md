@@ -186,6 +186,14 @@ identities are placeholders. Mount reporting uses synthetic device identities
 and is not a globally frozen namespace snapshot. `printk` uses X-Kernel log-level
 values, not Linux console-loglevel semantics.
 
+`/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators
+(the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup, the
+`kidentity` PID-namespace counter for pid, and the fixed initial user
+namespace for user). These counters are independent, so a collision across
+subsystems is possible; Linux avoids it with one global nsfs inode space.
+A shared namespace-inode registry is a prerequisite for nsfs-style magic
+symlinks and bind-mount identity.
+
 ## Drop and Resource Release
 
 Task dentries and ordinary task-file closures generally hold weak task/process

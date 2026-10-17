@@ -9,11 +9,13 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+anon_inodefs.workspace = true
 bitflags.workspace = true
 fs_context.workspace = true
 kcgroup.workspace = true
 kidentity.workspace = true
 kcred.workspace = true
+kerrno.workspace = true
 klazy.workspace = true
 ksync.workspace = true
 kvfs.workspace = true

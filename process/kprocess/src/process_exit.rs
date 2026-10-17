@@ -58,7 +58,7 @@ pub fn finalize_process_exit_with_publication(
 pub fn complete_process_exit(process: &Arc<Process>) -> bool {
     let transition =
         process.finish_exit_in_process_domain(ProcessExitPublication::WaitableZombie, |parent| {
-            let siginfo = sigchld_child_exit_signal_info(process);
+            let siginfo = sigchld_child_exit_signal_info(process, parent);
             process_signals::prepare_child_exit_to_process_ref(parent, siginfo)
                 .map(|delivery| {
                     let autoreap = delivery.should_autoreap();
@@ -91,7 +91,7 @@ pub fn complete_process_exit(process: &Arc<Process>) -> bool {
         && signo != Signo::SIGCHLD
         && let Err(err) = process_signals::send_to_process_ref(
             &parent,
-            Some(child_exit_signal_info(process, signo).into_signal_info()),
+            Some(child_exit_signal_info(process, &parent, signo).into_signal_info()),
         )
     {
         warn!(
@@ -111,19 +111,33 @@ pub fn notify_child_exit(parent: &Process) {
     parent.notify_child_exit();
 }
 
-pub(crate) fn child_exit_signal_info(process: &Process, signo: Signo) -> ChildExitSignalInfo {
-    ChildExitSignalInfo::new(signo, child_exit_info(process))
+pub(crate) fn child_exit_signal_info(
+    process: &Process,
+    parent: &Process,
+    signo: Signo,
+) -> ChildExitSignalInfo {
+    ChildExitSignalInfo::new(signo, child_exit_info(process, parent))
 }
 
-pub(crate) fn sigchld_child_exit_signal_info(process: &Process) -> SigchldChildExitSignalInfo {
-    ChildExitSignalInfo::new_sigchld(child_exit_info(process))
+pub(crate) fn sigchld_child_exit_signal_info(
+    process: &Process,
+    parent: &Process,
+) -> SigchldChildExitSignalInfo {
+    ChildExitSignalInfo::new_sigchld(child_exit_info(process, parent))
 }
 
-fn child_exit_info(process: &Process) -> ChildExitInfo {
+fn child_exit_info(process: &Process, parent: &Process) -> ChildExitInfo {
     let (utime, stime) = process.process_cpu_times();
     let uid = process
         .credentials_snapshot()
         .map(|credentials| credentials.ruid())
         .unwrap_or(0);
-    ChildExitInfo::from_wait_status(process.pid(), uid, process.exit_code(), utime, stime)
+    // si_pid is filled per the waiting parent's active PID namespace
+    // (pid_nr_ns), keeping the SIGCHLD / signalfd -> wait -> kill round trip
+    // in one number space; the child keeps its root number internally.
+    let observer = parent.active_pid_namespace();
+    let pid = process
+        .number_in_namespace(&observer)
+        .unwrap_or_else(|| process.pid());
+    ChildExitInfo::from_wait_status(pid, uid, process.exit_code(), utime, stime)
 }

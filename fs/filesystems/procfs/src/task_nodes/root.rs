@@ -18,14 +18,16 @@ use kcred::Cred;
 use khal::paging::MappingFlags;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
+use ktime_types::SystemTime;
 #[cfg(feature = "tee")]
 use kvfs::DirMapping;
 use kvfs::{
-    CommandFile, Dentry, FileOperations, InodeOperations, InodeSymlinkOperations, LookupFlags,
-    LookupIntent, MagicLinkOps, Metadata, MetadataUpdate, NodeFlags, NodePermission, NodeType,
-    ResolvedObject, SeqFileInode, SeqIterator, SimpleDir, SimpleDirLookup, SimpleDirOps,
-    SimpleFile, SimpleFileOperation, SimpleFs, SimpleFsNode, VfsError, VfsFile, VfsInode,
-    VfsResult,
+    CommandFile, Dentry, DeviceId, FileOperations, GetattrQueryFlags, GetattrRequestMask,
+    InodeOperations, InodeSymlinkOperations, LookupFlags, LookupIntent, MagicLinkOps, Metadata,
+    MetadataUpdate, MountIdmap, NodeFlags, NodePermission, NodeType, Path, ResolvedObject,
+    SeqFileInode, SeqIterator, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFile,
+    SimpleFileOperation, SimpleFs, SimpleFsNode, Umode, VfsError, VfsFile, VfsFileBuilder,
+    VfsInode, VfsInodeInit, VfsResult,
 };
 
 #[cfg(feature = "tee")]
@@ -731,69 +733,220 @@ fn make_thread_dir(
     lookup.dir(name, SimpleDir::new_maker(fs, Arc::new(thread_dir)))
 }
 
-const PROC_NS_BASE: u64 = 0xf000_0000;
+/// Namespace kinds exposed through `/proc/<pid>/ns`.
+///
+/// Ordering matches Linux's proc directory listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcNsKind {
+    Mnt,
+    Pid,
+    PidForChildren,
+    Net,
+    Ipc,
+    Uts,
+    User,
+    Cgroup,
+}
 
-fn namespace_inode(kind: &str) -> u64 {
-    match kind {
-        "mnt" => PROC_NS_BASE + 1,
-        "pid" => PROC_NS_BASE + 2,
-        "net" => PROC_NS_BASE + 3,
-        "ipc" => PROC_NS_BASE + 4,
-        "uts" => PROC_NS_BASE + 5,
-        "user" => PROC_NS_BASE + 6,
-        "cgroup" => PROC_NS_BASE + 7,
-        _ => PROC_NS_BASE,
+impl ProcNsKind {
+    const ALL: [ProcNsKind; 8] = [
+        Self::Mnt,
+        Self::Pid,
+        Self::PidForChildren,
+        Self::Net,
+        Self::Ipc,
+        Self::Uts,
+        Self::User,
+        Self::Cgroup,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mnt => "mnt",
+            Self::Pid => "pid",
+            Self::PidForChildren => "pid_for_children",
+            Self::Net => "net",
+            Self::Ipc => "ipc",
+            Self::Uts => "uts",
+            Self::User => "user",
+            Self::Cgroup => "cgroup",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 }
 
-fn namespace_link_target(kind: &str) -> String {
-    format!("{kind}:[{}]", namespace_inode(kind))
+/// Returns the namespace-identity inode for `kind` of `task`.
+///
+/// The inode is the namespace's stable kernel identity, so two processes
+/// attached to the same namespace report the same number (Linux nsfs style),
+/// and `stat(2)` can distinguish namespaces. This is the identity used when a
+/// namespace file is bind-mounted.
+fn task_namespace_inode(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<u64> {
+    let process = task.as_thread().process();
+    Ok(match kind {
+        ProcNsKind::Mnt => process.mnt_ns()?.id().as_u64(),
+        // `ns/pid` is the namespace the task itself lives in
+        // (task_active_pid_ns); the children slot is the separate
+        // `ns/pid_for_children` entry below.
+        ProcNsKind::Pid => process.active_pid_namespace().id(),
+        ProcNsKind::PidForChildren => process.pid_ns_for_children()?.id(),
+        ProcNsKind::Net => process.net_ns()?.id().as_u64(),
+        ProcNsKind::Ipc => process.ipc_ns()?.id().as_u64(),
+        ProcNsKind::Uts => process.uts_ns()?.id().as_u64(),
+        ProcNsKind::Cgroup => process.cgroup_ns()?.id().as_u64(),
+        ProcNsKind::User => kcred::initial_user_namespace().id().as_u64(),
+    })
 }
 
-fn task_namespace_link_target(kind: &str, task: &KtaskRef) -> VfsResult<String> {
-    if kind == "cgroup" {
-        let id = task
-            .as_thread()
-            .process()
-            .cgroup_ns()
-            .map_err(|_| VfsError::NotFound)?
-            .id()
-            .as_u64();
-        Ok(format!("{kind}:[{id}]"))
-    } else {
-        Ok(namespace_link_target(kind))
+/// Snapshots the namespace of `kind` owned by `task` into an [`NsFd`].
+///
+/// The snapshot is taken at open time, pinning the current namespace object so
+/// the fd stays valid across later `unshare`/`setns` by the owning process.
+fn task_namespace_fd(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<kns::NsFd> {
+    let process = task.as_thread().process();
+    Ok(match kind {
+        ProcNsKind::Mnt => kns::NsFd::Mnt(process.mnt_ns()?),
+        ProcNsKind::Pid => kns::NsFd::Pid(process.active_pid_namespace()),
+        ProcNsKind::PidForChildren => kns::NsFd::Pid(process.pid_ns_for_children()?),
+        ProcNsKind::Net => kns::NsFd::Net(process.net_ns()?),
+        ProcNsKind::Ipc => kns::NsFd::Ipc(process.ipc_ns()?),
+        ProcNsKind::Uts => kns::NsFd::Uts(process.uts_ns()?),
+        ProcNsKind::Cgroup => kns::NsFd::Cgroup(process.cgroup_ns()?),
+        ProcNsKind::User => kns::NsFd::User(kcred::initial_user_namespace()),
+    })
+}
+
+/// A `/proc/<pid>/ns/<type>` file pinned to one namespace.
+///
+/// The inode number is the namespace identity (so `stat()` distinguishes
+/// namespaces and a bind mount preserves identity), and opening the file
+/// attaches an [`NsFd`] to the open description, which `setns(2)` downcasts.
+/// The file holds only a weak task reference: once the owning process exits,
+/// opening it fails with `ESRCH`, mirroring `get_proc_task()`.
+struct NsProcFile {
+    task: WeakKtaskRef,
+    kind: ProcNsKind,
+    inode: u64,
+}
+
+impl NsProcFile {
+    fn materialize(
+        lookup: SimpleDirLookup<'_>,
+        kind: ProcNsKind,
+        task: &KtaskRef,
+    ) -> VfsResult<Dentry> {
+        let inode = task_namespace_inode(kind, task)?;
+        let node = Arc::new(Self {
+            task: Arc::downgrade(task),
+            kind,
+            inode,
+        });
+        let private_data: Arc<dyn core::any::Any + Send + Sync> = node.clone();
+        let inode_operations: Arc<dyn InodeOperations> = node.clone();
+        let file_operations: Arc<dyn FileOperations> = node.clone();
+        let mode = Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(0o444),
+        );
+        let init = VfsInodeInit::new(inode, 0, mode).with_owner_links_and_rdev(
+            0,
+            0,
+            1,
+            DeviceId::default(),
+        );
+        let vfs_inode = VfsInode::new_file_with_operations(
+            private_data,
+            inode_operations,
+            file_operations,
+            NodeFlags::NON_CACHEABLE,
+            init,
+        );
+        Ok(lookup.file_from_inode(kind.name(), vfs_inode))
+    }
+
+    fn metadata(&self) -> Metadata {
+        Metadata {
+            device: 0,
+            inode: self.inode,
+            nlink: 1,
+            mode: Umode::new(
+                NodeType::RegularFile,
+                NodePermission::from_bits_truncate(0o444),
+            ),
+            uid: 0,
+            gid: 0,
+            size: 0,
+            block_size: 0,
+            blocks: 0,
+            rdev: DeviceId::default(),
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+        }
+    }
+}
+
+impl InodeOperations for NsProcFile {
+    fn getattr(
+        &self,
+        _idmap: &MountIdmap,
+        _path: Option<&Path>,
+        _request_mask: GetattrRequestMask,
+        _query_flags: GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        Ok(self.metadata())
+    }
+
+    fn setattr(
+        &self,
+        _idmap: &MountIdmap,
+        _dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        // Namespace files are immutable snapshots; accept metadata updates that
+        // do not mutate the identity so `chmod`/`touch` of time fields can
+        // still resolve, mirroring how pseudo files typically behave.
+        Ok(update)
+    }
+}
+
+impl FileOperations for NsProcFile {
+    fn open(self: Arc<Self>, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        let task = self.task.upgrade().ok_or(VfsError::NoSuchProcess)?;
+        let nsfd = task_namespace_fd(self.kind, &task)?;
+        file.set_private_data(Arc::new(nsfd));
+        Ok(())
+    }
+
+    fn supports_read(&self) -> bool {
+        true
+    }
+
+    fn read(&self, _file: &VfsFile, _buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
+        Ok(0)
     }
 }
 
 struct ThreadNsDir {
-    fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
 }
 
 impl SimpleDirOps for ThreadNsDir {
     fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         Ok(Box::new(
-            ["mnt", "pid", "net", "ipc", "uts", "user", "cgroup"]
+            ProcNsKind::ALL
                 .into_iter()
-                .map(Cow::Borrowed),
+                .map(|kind| Cow::Borrowed(kind.name())),
         ))
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
-        if !matches!(
-            name,
-            "mnt" | "pid" | "net" | "ipc" | "uts" | "user" | "cgroup"
-        ) {
-            return Err(VfsError::NotFound);
-        }
+        let kind = ProcNsKind::from_name(name).ok_or(VfsError::NotFound)?;
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        let target = task_namespace_link_target(name, &task)?;
-        lookup.file(
-            name,
-            SimpleFile::new(self.fs.clone(), NodeType::Symlink, move || {
-                Ok(target.clone())
-            }),
-        )
+        NsProcFile::materialize(lookup, kind, &task)
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -986,7 +1139,6 @@ impl SimpleDirOps for ThreadDir {
                     SimpleDir::new_maker(
                         fs.clone(),
                         Arc::new(ThreadNsDir {
-                            fs: fs.clone(),
                             task: Arc::downgrade(&task),
                         }),
                     ),

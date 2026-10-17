@@ -116,6 +116,28 @@ fn make_siginfo(signo: u32, code: i32) -> KResult<Option<SignalInfo>> {
     )))
 }
 
+/// Translates a caller-supplied process PID into the root number the process
+/// table is keyed on.
+///
+/// PID arguments are written in the caller's active PID namespace — the same
+/// view `getpid(2)`/`getppid(2)` and the `clone`/`fork` return value use — so
+/// a `CLONE_NEWPID` child passing its own `getpid()` (1) must resolve to
+/// itself, not to whatever holds the root number 1. A number no published
+/// process carries in the caller's namespace is `ESRCH`, matching Linux
+/// where a namespace-invisible PID does not exist; callers in the root
+/// namespace skip the work entirely. Root numbers leak through root-keyed
+/// surfaces such as the /proc listing until per-namespace procfs lands; the
+/// boundary deliberately does NOT paper over that leak by falling back,
+/// because doing so would let a namespace-internal caller reach outside it.
+fn translate_caller_pid(pid: Pid) -> KResult<Pid> {
+    let current = kprocess::current_user_thread();
+    let observer = current.process().active_pid_namespace();
+    if observer.is_root() {
+        return Ok(pid);
+    }
+    kprocess::Process::resolve_pid_in_namespace(pid, &observer).ok_or(KError::NoSuchProcess)
+}
+
 /// Sends a signal to a process or process group.
 ///
 /// See <https://man7.org/linux/man-pages/man2/kill.2.html>.
@@ -124,7 +146,10 @@ pub(crate) fn sys_kill(pid: i32, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_USER as _)?;
 
     match pid {
-        1.. => kprocess::process_signals::send_to_process(pid as _, sig)?,
+        1.. => {
+            let pid = translate_caller_pid(pid as _)?;
+            kprocess::process_signals::send_to_process(pid, sig)?
+        }
         0 => {
             let pgid = kprocess::current_user_thread().process().group().pgid();
             kprocess::process_signals::send_to_process_group(pgid, sig)?;
@@ -174,11 +199,15 @@ pub(crate) fn sys_tkill(tid: Pid, signo: u32) -> KResult<isize> {
 /// See <https://man7.org/linux/man-pages/man2/tgkill.2.html>.
 pub(crate) fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> KResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
+    let tgid = translate_caller_pid(tgid)?;
     kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
 
 /// Builds a queued signal payload for `rt_sigqueueinfo`-style syscalls.
+///
+/// `tgid` must already be in root space — callers that received it from user
+/// arguments translate it through [`translate_caller_pid`] first.
 pub(crate) fn make_queue_signal_info(
     tgid: Pid,
     signo: u32,
@@ -207,6 +236,7 @@ pub(crate) fn sys_rt_sigqueueinfo(
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
+    let tgid = translate_caller_pid(tgid)?;
     let sig = make_queue_signal_info(tgid, signo, sig)?;
     kprocess::process_signals::send_to_process(tgid, sig)?;
     Ok(0)
@@ -222,6 +252,7 @@ pub(crate) fn sys_rt_tgsigqueueinfo(
 ) -> KResult<isize> {
     posix_types::check_sigset_size(sigsetsize)?;
 
+    let tgid = translate_caller_pid(tgid)?;
     let sig = make_queue_signal_info(tgid, signo, sig)?;
     kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;
     Ok(0)

@@ -271,6 +271,15 @@ impl CloneRequest {
         let child_process = prepared.process().clone();
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();
+        // Linux reports the new task's number in the forking process's active
+        // PID namespace (pid_nr_ns): the leader number for a process fork,
+        // the thread's own TID for a thread clone. The projection uses the
+        // created task's OWN identity — the process's leader handle would
+        // report the thread-group number and break every pthread tid — and
+        // an identity without a projection in the observer's namespace keeps
+        // the root number, as does a root-namespace observer.
+        let observer = current_user_thread().process().active_pid_namespace();
+        let tid = task_number.number_in(&observer).unwrap_or(tid);
 
         if self.flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(self.child_tid);
@@ -369,17 +378,12 @@ impl CloneRequest {
             return Err(KError::from(LinuxError::EINVAL));
         }
 
-        // Unimplemented namespace flags: return ENOSYS. NEWPID is included
-        // here because, although the flag is parsed, full PID-namespace
-        // support is not wired up yet.
+        // Unimplemented namespace flags: return ENOSYS. These namespaces have
+        // no table isolation yet (see `kns::NsProxy::prepare_unshare`), so
+        // accepting their flags would create pseudo-isolation.
         let unimplemented =
             CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
         if ns.intersects(unimplemented) {
-            return Err(KError::from(LinuxError::ENOSYS));
-        }
-
-        // CLONE_NEWPID is not yet fully supported
-        if ns.contains(CloneFlags::NEWPID) {
             return Err(KError::from(LinuxError::ENOSYS));
         }
 
@@ -500,6 +504,13 @@ mod tests_clone {
         let mut req = CloneRequest::new();
         req.set_flags(CloneFlags::NEWPID | CloneFlags::PARENT);
         assert!(req.validate_namespace_flags().is_err());
+    }
+
+    #[def_test]
+    fn test_validate_accepts_newpid() {
+        let mut req = CloneRequest::new();
+        req.set_flags(CloneFlags::NEWPID);
+        assert!(req.validate_namespace_flags().is_ok());
     }
 
     #[def_test]

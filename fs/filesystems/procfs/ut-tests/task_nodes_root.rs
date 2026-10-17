@@ -8,9 +8,9 @@ use kvfs::SeqIterator;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{
-    MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, format_oom_score_adj,
-    format_task_status, maps_permissions, namespace_inode, namespace_link_target,
-    parse_oom_score_adj_input, render_maps_line, special_mapping_name,
+    MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, ProcNsKind, format_oom_score_adj,
+    format_task_status, maps_permissions, parse_oom_score_adj_input, render_maps_line,
+    special_mapping_name,
 };
 
 fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::Path {
@@ -95,20 +95,25 @@ fn test_maps_rewind_observes_captured_image_heap_updates() {
 }
 
 #[def_test]
-fn test_namespace_inode_has_expected_known_values() {
-    assert_eq!(namespace_inode("mnt"), 0xf000_0001);
-    assert_eq!(namespace_inode("pid"), 0xf000_0002);
-    assert_eq!(namespace_inode("net"), 0xf000_0003);
-}
-
-#[def_test]
-fn test_namespace_inode_unknown_uses_base_value() {
-    assert_eq!(namespace_inode("unknown"), 0xf000_0000);
-}
-
-#[def_test]
-fn test_namespace_link_target_formats_inode_reference() {
-    assert_eq!(namespace_link_target("mnt"), "mnt:[4026531841]");
+fn test_namespace_kind_names_cover_linux_set() {
+    assert_eq!(ProcNsKind::ALL.len(), 8);
+    for name in [
+        "mnt",
+        "pid",
+        "pid_for_children",
+        "net",
+        "ipc",
+        "uts",
+        "user",
+        "cgroup",
+    ] {
+        assert_eq!(
+            ProcNsKind::from_name(name).map(ProcNsKind::name),
+            Some(name),
+            "every Linux ns type must round-trip"
+        );
+    }
+    assert!(ProcNsKind::from_name("unknown").is_none());
 }
 
 #[def_test]

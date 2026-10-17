@@ -17,7 +17,7 @@ pub use exit::{
     ProcessExitPublication, WaitChildKind, WaitChildScan, WaitChildSelector, WaitReapMode,
     WaitedChild,
 };
-use kidentity::PidHandle;
+use kidentity::{PidHandle, PidNamespace};
 use ksignal::Signo;
 use kspin::SpinNoIrq;
 use ksync::{Mutex, MutexGuard};
@@ -76,12 +76,65 @@ impl Process {
     /// The [`Process`] ID.
     ///
     /// Returns the root/global PID number from the leader task-number handle.
-    /// This is stable under the current global-PID semantics. Once
-    /// `CLONE_NEWPID` is fully enabled across all syscall paths, callers that
-    /// need a namespace-relative view should use `nr_in(ns)` on the underlying
-    /// [`kidentity::PidHandle`] instead.
+    /// This is the number used for kernel-internal lookup tables; the
+    /// namespace-relative view that `getpid(2)` reports is
+    /// [`Process::visible_pid`].
     pub fn pid(&self) -> Pid {
         self.leader_task_number.root_nr()
+    }
+
+    /// Returns the PID the leader reports through `getpid(2)`: its number in
+    /// the PID namespace the process was created in (Linux
+    /// `task_active_pid_ns`), so a `CLONE_NEWPID` child reads 1 there.
+    /// `setns(CLONE_NEWPID)` retargets `pid_ns_for_children` and deliberately
+    /// does not change this view.
+    pub fn visible_pid(&self) -> Pid {
+        self.leader_task_number.active_nr()
+    }
+
+    /// Returns the PID namespace the process lives in — its leader's deepest
+    /// projection (Linux `task_active_pid_ns`). Every thread of the process
+    /// reports this view through `getpid(2)`/`getppid(2)`, so the syscall
+    /// boundary uses it as the observer namespace for PID arguments too.
+    pub fn active_pid_namespace(&self) -> Arc<PidNamespace> {
+        self.leader_task_number.active_ns().clone()
+    }
+
+    /// Returns the leader's exact number in `observer_ns`, or `None` when the
+    /// identity carries no projection there — Linux `pid_nr_ns` semantics.
+    /// This is the reporting-side inverse of allocation: the number a caller
+    /// in `observer_ns` uses to name this process (wait results, clone
+    /// return values).
+    pub fn number_in_namespace(&self, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
+        self.leader_task_number.number_in(observer_ns)
+    }
+
+    /// Returns the parent's PID as seen in this process's active PID
+    /// namespace, or `None` when the parent has no number there — Linux
+    /// `pid_nr_ns` semantics: a `CLONE_NEWPID` child's parent holds no
+    /// projection in the child's namespace, so `getppid(2)` reads 0 there.
+    /// Use [`Process::parent`] for the identity itself.
+    pub fn visible_parent_pid(&self) -> Option<Pid> {
+        let observer = self.leader_task_number.active_ns();
+        let parent = self.parent()?;
+        parent.leader_task_number.number_in(observer)
+    }
+
+    /// Translates a caller-visible PID into the root/global number the
+    /// internal lookup tables are keyed on.
+    ///
+    /// Linux resolves `kill(2)`-style PID arguments in the caller's active PID
+    /// namespace. The process table is root-keyed, so the syscall adapter
+    /// translates first: a namespace number such as the `1` that
+    /// `getpid(2)` reports inside a `CLONE_NEWPID` child maps back to the one
+    /// process carrying that projection. Returns `None` when no published
+    /// process matches — the caller turns that into `ESRCH`, matching Linux
+    /// where a namespace-invisible PID simply does not exist.
+    pub fn resolve_pid_in_namespace(nr: Pid, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
+        crate::lookup::published_processes()
+            .into_iter()
+            .find(|proc| proc.leader_task_number.number_in(observer_ns) == Some(nr))
+            .map(|proc| proc.pid())
     }
 
     /// Returns the exit signal configured for this process.

@@ -582,6 +582,8 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg4(),
         ),
         Sysno::clone3 => sys_clone3(uctx, uctx.arg0(), uctx.arg1()),
+        Sysno::unshare => sys_unshare(uctx.arg0()),
+        Sysno::setns => sys_setns(uctx.arg0(), uctx.arg1()),
         #[cfg(target_arch = "x86_64")]
         Sysno::fork => sys_fork(uctx),
         #[cfg(target_arch = "x86_64")]

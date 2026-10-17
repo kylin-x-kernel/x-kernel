@@ -39,8 +39,8 @@ core/ksyscall/
 │   ├── sys.rs
 │   ├── arch/         (mod, riscv_hwprobe)
 │   ├── task/         (clone, clone3, cpu_time, credentials, ctl, execve,
-│   │                  exit, ids, job, limits, pidfd, rusage, sched,
-│   │                  seccomp, signal, thread, umask, wait)
+│   │                  exit, ids, job, limits, namespace, pidfd, rusage,
+│   │                  sched, seccomp, signal, thread, umask, wait)
 │   ├── time/         (itimer, posix_timer, queries, sleep, timerfd)
 │   └── vfs/
 └── docs/             (design.md, security.md)
@@ -142,6 +142,15 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   to a future orderly-shutdown supervisor; `SW_SUSPEND` takes
   `suspend_to_ram()` (non-terminal: S3 via the platform sleep proxy, or a
   platform error back to the caller when absent/refused).
+- `task/namespace.rs`: `unshare` and `setns`. `unshare` decodes the flag set
+  (namespace bits plus `CLONE_FS`/`CLONE_FILES`), rejects unknown bits with
+  `EINVAL`, then runs `NsProxy::prepare_unshare` (privilege, shared-fs, and
+  unsupported-kind checks) and commits via `Process::apply_prepared_unshare`.
+  `setns` splits into the `NsFd` channel (nstype must be zero or match the
+  fd type) and the `PidFd` channel (nstype is an OR mask resolved against one
+  snapshot of the target bundle, Linux 5.8+ semantics), and commits via
+  `Process::apply_setns`. Net/User/Cgroup swaps are `EOPNOTSUPP`
+  (no pseudo-isolation); both channels sit behind the `has_sys_admin` gate.
 - `arch/`: architecture-specific system-info/control adapters (`arch/mod.rs`
   organizes per-architecture submodules via `cfg`, `lib.rs` declares the
   top-level `mod arch;`, and `sys.rs` only re-exports `crate::arch::*`),
@@ -245,9 +254,33 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 
 ## Container-related adapters
 
-Until unified user-namespace capability authorization exists, `clone` /
-`clone3` return `ENOSYS` for `CLONE_NEWCGROUP` instead of improvising
-namespace-creation permission with UID checks. `PR_SET_NO_NEW_PRIVS`
+`unshare`/`setns` implement the namespace system calls over `kns` two-phase
+validation and `kprocess` commit (see above). `clone`/`clone3` now accept
+`CLONE_NEWPID` (the child is allocated in a fresh child PID namespace) and
+`CLONE_NEWNS`/`CLONE_NEWUTS`/`CLONE_NEWIPC`, while `CLONE_NEWNET`,
+`CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return `ENOSYS`
+from the namespace-flag validator instead of improvising namespace creation
+without isolation. Until unified user-namespace capability authorization
+exists, both syscalls gate on the caller's privilege flag (effective UID zero
+as the `CAP_SYS_ADMIN` proxy): `unshare` through
+`UnshareContext::privileged`, and `setns` before either channel dispatches —
+joining any namespace without it is `EPERM`, standing in for Linux's per-type
+`ns_install` capability checks. The unshare flag gate follows
+`check_unshare_flags`: `CLONE_THREAD`/`CLONE_SIGHAND`/`CLONE_VM` are accepted
+as no-ops for a single-threaded caller and rejected with `EINVAL` only for a
+multithreaded one, and `CLONE_NEWNS` implies `CLONE_FS` as in
+`ksys_unshare`, so callers never need the explicit bit. The pidfd `setns`
+channel treats `nstype` as Linux's OR-combination mask: every requested slot
+is validated against the target process and committed together, unsupported
+kinds answer `EOPNOTSUPP`. `getpid`/`getppid` project the identity into the
+PID namespace the task was created in (`task_active_pid_ns` semantics, so a
+`CLONE_NEWPID` child reads 1 and its parent reads 0), `clone`/`fork` return
+the child's number in the forking process's namespace, and signal PID
+arguments (`kill`/`tgkill`/`sigqueue`) are translated through the caller's
+namespace with a root-number fallback for root-keyed sources such as
+/proc. Kernel-internal lookup stays root-keyed (see the known-limits note
+in `process/kns/docs/design.md`).
+`PR_SET_NO_NEW_PRIVS`
 records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports
 it back; the exec credential path consumes the flag via
 `Cred::apply_exec`, and because exec never elevates identity today the

@@ -6,7 +6,7 @@
 
 bitflags::bitflags! {
     /// Flags for namespace creation (CLONE_NEW* family).
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
     pub struct NamespaceFlags: u64 {
         /// Request a copy of the mount namespace.
         const NEWNS     = linux_raw_sys::general::CLONE_NEWNS as u64;

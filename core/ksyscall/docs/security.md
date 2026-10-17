@@ -90,10 +90,12 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-13 | `get_robust_list` leaks another process's user addresses | High | target resolution | After resolving the target thread, `kprocess::ptrace::check_read_real_creds_access()` applies the uniform policy: same-thread-group exemption, asymmetric matching of caller real UID/GID against target real/effective/saved IDs, and the euid-0 approximation of `CAP_SYS_PTRACE`; otherwise `EPERM` |
 | T-14 | `waitid` copies signals across a raw `siginfo_t`-shaped buffer | Medium | `waitid(P_PID, ...)` status reporting | `siginfo_t` is registered as `posix_types::UserWrite` and written via `write_vm`; the payload is built by `ksignal::ChildExitSignalInfo`, the same source used for real SIGCHLD delivery |
 | T-15 | `execveat(AT_EMPTY_PATH)` execs an fd the caller cannot name | Medium | runc/crun self-reexec from a sealed memfd | The fd must reference an already-open file the caller owns; the image still goes through `kexec`'s execute-permission and ELF validation, and the resulting `/proc/self/exe` follows to the same opened backing file |
-| T-16 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or an effective root credential, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
-| T-17 | A seccomp filter is not evaluated before dispatch, letting a denied syscall run | High | any syscall | `dispatch_irq_syscall` runs `evaluate_seccomp` before the `Sysno` match; the decision is applied to the context (`Errno` → retval, `KILL_PROCESS`/`KILL_THREAD`/`TRAP`/unrecognised → `do_exit(SIGSYS)`, a strict-mode violation → `do_exit(SIGKILL)` as Linux does, `USER_NOTIF`/`TRACE` → `ENOSYS`) before any handler runs |
-| T-18 | A malformed filter is installed and later kills the task, or a `TSYNC` drops a sibling's restriction | High | `seccomp(2)` program/flags | `SeccompFilter::new` validates instruction encoding and jump targets at install time (`EINVAL`); `TSYNC` refuses when a sibling's chain is not a prefix of the caller's (blocking TID / `ESRCH` with `TSYNC_ESRCH`), re-validates under each sibling's own lock before replacing its chain, and a mode change is refused (`EINVAL`) |
-| T-19 | User `sock_fprog`/`sock_filter` copy garbles the kernel or over-allocates | Medium | `seccomp(2)` buffer handling | The header and each instruction are decoded field-wise through the unaligned-safe `osvm` byte-copy path with a `BPF_MAXINSNS` bound checked before allocation, so no `#[repr(C)]` image or alignment requirement is imposed |
+| T-16 | Unprivileged caller creates namespaces | High | `unshare` with any `NEW*` bit | The ns owner checks `UnshareContext::privileged` (euid-0 `CAP_SYS_ADMIN` approximation) and returns `EPERM`; plain `CLONE_FS`/`CLONE_FILES` need no privilege |
+| T-17 | `setns` enters a namespace without authorization, a mismatched one, or an unsupported one | High | any fd without privilege; fd type / `nstype` mismatch; net/user/cgroup swap | Both channels sit behind the same euid-0 `CAP_SYS_ADMIN` proxy gate (`EPERM`), standing in for Linux's per-type install checks; NsFd channel rejects type mismatches with `EINVAL`; pidfd channel validates the whole `nstype` mask against the target before committing and answers `EOPNOTSUPP` for net/user/cgroup swaps; PID-namespace targets must be the caller's active namespace or a descendant (the `pidns_install` ancestor rule) |
+| T-18 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or an effective root credential, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
+| T-19 | A seccomp filter is not evaluated before dispatch, letting a denied syscall run | High | any syscall | `dispatch_irq_syscall` runs `evaluate_seccomp` before the `Sysno` match; the decision is applied to the context (`Errno` → retval, `KILL_PROCESS`/`KILL_THREAD`/`TRAP`/unrecognised → `do_exit(SIGSYS)`, a strict-mode violation → `do_exit(SIGKILL)` as Linux does, `USER_NOTIF`/`TRACE` → `ENOSYS`) before any handler runs |
+| T-20 | A malformed filter is installed and later kills the task, or a `TSYNC` drops a sibling's restriction | High | `seccomp(2)` program/flags | `SeccompFilter::new` validates instruction encoding and jump targets at install time (`EINVAL`); `TSYNC` refuses when a sibling's chain is not a prefix of the caller's (blocking TID / `ESRCH` with `TSYNC_ESRCH`), re-validates under each sibling's own lock before replacing its chain, and a mode change is refused (`EINVAL`) |
+| T-21 | User `sock_fprog`/`sock_filter` copy garbles the kernel or over-allocates | Medium | `seccomp(2)` buffer handling | The header and each instruction are decoded field-wise through the unaligned-safe `osvm` byte-copy path with a `BPF_MAXINSNS` bound checked before allocation, so no `#[repr(C)]` image or alignment requirement is imposed |
 
 ## Signal-wait reliability
 
@@ -133,6 +135,12 @@ registered wakeups rather than polling or a timer.
   setuid/setgid or file-capability support must consult the flag at the
   credential reset and refuse elevation instead of silently dropping the
   guarantee.
+- `unshare`'s and `setns`'s privilege checks are the euid-0 /
+  published-thread approximations documented in `kns`: both syscalls refuse
+  namespace creation or entry without the credential proxy, standing in for
+  Linux's per-type `CAP_SYS_ADMIN` install checks. Cross-process `CLONE_FS`
+  sharing is not counted, and PID-namespace setns does not model the Linux
+  ancestor-reachability rule.
 
 - seccomp supports `STRICT` and `FILTER` (with `TSYNC`) plus action queries.
   A `TRAP` or unrecognised filter return fails closed (`do_exit(SIGSYS)`), and
@@ -169,8 +177,11 @@ registered wakeups rather than polling or a timer.
   before testing reclamation. Tests must not supply the cleanup they verify.
 
 - cgroup/namespace flags may leave the `ENOSYS` list only when fully
-  implemented; adapters do not create a second membership or namespace-view
-  state.
+  implemented (currently `CLONE_NEWNET`/`CLONE_NEWCGROUP`/`CLONE_NEWUSER`/
+  `CLONE_NEWTIME`); adapters do not create a second membership or
+  namespace-view state.
+- `unshare`/`setns` never create a fake namespace switch: unsupported kinds
+  stay `EOPNOTSUPP`/`ENOSYS`, never a reference swap.
 - Does a new syscall implementation only adapt the ABI instead of copying
   an owner state machine?
 - Is a new adapter placed near its owner rather than in a historical

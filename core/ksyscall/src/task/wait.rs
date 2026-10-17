@@ -184,6 +184,23 @@ mod wait_test_sync {
     }
 }
 
+/// Translates a caller-supplied child PID into the root number the wait
+/// tables match on.
+///
+/// The argument is written in the caller's active PID namespace — the same
+/// view `clone`/`fork` report — so a number no published process carries
+/// there cannot name any child: `ECHILD`, mirroring Linux where a
+/// namespace-invisible PID does not exist. Root-namespace callers skip the
+/// work entirely.
+fn translate_wait_pid(proc: &Arc<Process>, pid: Pid) -> KResult<Pid> {
+    let observer = proc.active_pid_namespace();
+    if observer.is_root() {
+        return Ok(pid);
+    }
+    kprocess::Process::resolve_pid_in_namespace(pid, &observer)
+        .ok_or(KError::from(LinuxError::ECHILD))
+}
+
 /// Blocks until a matching child reports status, then invokes `on_ready`
 /// with the waited child. Shared by `wait4`/`waitpid` (writes the int exit
 /// status) and `waitid` (writes a `siginfo_t`). Returns the child PID, or 0
@@ -199,7 +216,15 @@ fn wait_on_matching_children_with(
     let mut check_children = || match scan_waitable_child(proc, selector, options)? {
         WaitScanResult::Ready(waited) => {
             on_ready(&waited)?;
-            Ok(Some(waited.pid() as _))
+            // Linux reports the reaped child's number in the caller's active
+            // PID namespace (pid_nr_ns), keeping the wait→kill round trip in
+            // one number space; the child keeps its root number internally.
+            let observer = proc.active_pid_namespace();
+            let reported = waited
+                .process()
+                .number_in_namespace(&observer)
+                .unwrap_or_else(|| waited.pid());
+            Ok(Some(reported as _))
         }
         WaitScanResult::NoMatchingChild => Err(KError::from(LinuxError::ECHILD)),
         WaitScanResult::NoWaitableChild if options.contains(WaitOptions::WNOHANG) => Ok(Some(0)),
@@ -287,6 +312,9 @@ pub(crate) fn sys_waitid(
         return Err(KError::from(LinuxError::EINVAL));
     }
 
+    let current_thread = kprocess::current_user_thread();
+    let proc = current_thread.process();
+
     // Linux `idtype_t`, matching the `P_*` constants (`u32`).
     let selector = match idtype {
         P_ALL => WaitPid::Any,
@@ -294,7 +322,7 @@ pub(crate) fn sys_waitid(
             if id == 0 {
                 return Err(KError::from(LinuxError::EINVAL));
             }
-            WaitPid::Pid(id)
+            WaitPid::Pid(translate_wait_pid(proc, id)?)
         }
         P_PGID => {
             if id == 0 {
@@ -322,8 +350,6 @@ pub(crate) fn sys_waitid(
     };
     let options = WaitOptions::from_bits_truncate(options);
 
-    let current_thread = kprocess::current_user_thread();
-    let proc = current_thread.process();
     let mut report: Option<siginfo_t> = None;
     wait_on_matching_children_with(proc, selector, options, |waited| {
         // Linux reports the child-exit payload via a SIGCHLD-style `siginfo_t`.
@@ -332,8 +358,15 @@ pub(crate) fn sys_waitid(
             .credentials_snapshot()
             .unwrap_or_else(|_| kcred::initial_cred());
         let (utime, stime) = waited.total_cpu_time();
+        // si_pid follows the same caller-namespace projection as the wait
+        // return value; Linux fills it per the waiting task's pid namespace.
+        let observer = proc.active_pid_namespace();
+        let reported_pid = waited
+            .process()
+            .number_in_namespace(&observer)
+            .unwrap_or_else(|| waited.pid());
         let child = ksignal::ChildExitInfo::from_wait_status(
-            waited.pid(),
+            reported_pid,
             cred.ruid(),
             waited.exit_code(),
             utime,
@@ -371,7 +404,7 @@ pub(crate) fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResul
     } else if pid == 0 {
         WaitPid::Pgid(proc.group().pgid())
     } else if pid > 0 {
-        WaitPid::Pid(pid as _)
+        WaitPid::Pid(translate_wait_pid(proc, pid as _)?)
     } else {
         WaitPid::Pgid(-pid as _)
     };

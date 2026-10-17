@@ -222,6 +222,55 @@ impl Process {
         self.runtime()?.uts_ns().ok_or(KError::NoSuchProcess)
     }
 
+    /// Returns the process namespace bundle while the runtime remains attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
+    /// has been released.
+    pub fn nsproxy(&self) -> KResult<Arc<kns::NsProxy>> {
+        self.runtime()?.nsproxy().ok_or(KError::NoSuchProcess)
+    }
+
+    /// Returns the process IPC namespace identity while its owner is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
+    /// has been released.
+    pub fn ipc_ns(&self) -> KResult<Arc<kns::IpcNamespace>> {
+        self.runtime()?
+            .nsproxy()
+            .map(|nsproxy| nsproxy.ipc_ns().clone())
+            .ok_or(KError::NoSuchProcess)
+    }
+
+    /// Returns the process network namespace identity while its owner is attached.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
+    /// has been released.
+    pub fn net_ns(&self) -> KResult<Arc<kns::NetNamespace>> {
+        self.runtime()?
+            .nsproxy()
+            .map(|nsproxy| nsproxy.net_ns().clone())
+            .ok_or(KError::NoSuchProcess)
+    }
+
+    /// Returns the PID namespace used for future children of this process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
+    /// has been released.
+    pub fn pid_ns_for_children(&self) -> KResult<Arc<kns::PidNamespace>> {
+        self.runtime()?
+            .nsproxy()
+            .map(|nsproxy| nsproxy.pid_ns_for_children().clone())
+            .ok_or(KError::NoSuchProcess)
+    }
+
     /// Returns the process mount namespace while its namespace owner is attached.
     ///
     /// # Errors
@@ -246,6 +295,108 @@ impl Process {
             .nsproxy()
             .map(|nsproxy| nsproxy.cgroup_ns().clone())
             .ok_or(KError::NoSuchProcess)
+    }
+
+    /// Returns whether the process `fs_struct` is shared with at least one
+    /// other task.
+    ///
+    /// Threads of the same process always share the filesystem context, and
+    /// `CLONE_FS` forks share it across processes. X-Kernel cannot count the
+    /// latter without a user counter, so the check covers published threads of
+    /// this process as the conservative in-range subset of Linux's `fs->users`.
+    pub fn fs_is_shared(&self) -> bool {
+        self.threads().len() > 1
+    }
+
+    /// Applies a validated [`kns::PreparedUnshare`] bundle to this process.
+    ///
+    /// Unshare preparation has already performed authorization and combination
+    /// checks; this only installs the precomputed namespace bundle and
+    /// optionally replaces the filesystem context (`NEWNS`/`CLONE_FS`). The
+    /// `CLONE_FILES` descriptor-table detach is thread-owned state: the syscall
+    /// adapter commits it on the calling thread after this bundle install, so
+    /// sibling threads keep their own bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime is gone.
+    pub fn apply_prepared_unshare(&self, prepared: kns::PreparedUnshare) -> KResult<()> {
+        let runtime = self.runtime()?;
+        runtime.set_nsproxy(prepared.nsproxy().clone());
+        if let Some(new_fs) = prepared.new_fs() {
+            runtime.set_fs_context(Arc::new(Mutex::new(new_fs.snapshot())));
+        }
+        Ok(())
+    }
+
+    /// Enters the namespaces of `new_proxy`, optionally retargeting the process
+    /// filesystem root/pwd into a mount namespace.
+    ///
+    /// `target_mnt` retargets the fs context so `CLONE_NEWNS` setns also
+    /// switches the VFS view. The caller has already authorized the switch and
+    /// validated that the namespace kind is supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the runtime is gone, or the
+    /// filesystem-context retarget error when the mount namespace's visible
+    /// root is not a directory. Nothing is committed when an error is
+    /// returned: the retarget is drafted on a snapshot before the bundle
+    /// install.
+    ///
+    /// # Examples
+    ///
+    /// The `kns` prepare/validate phase runs first; this commit installs the
+    /// already-validated result. For `setns(2)` on a mount-namespace fd, the
+    /// commit also retargets root/pwd into the target namespace:
+    ///
+    /// ```no_run
+    /// # fn enter_mount_ns(
+    /// #     process: &kprocess::Process,
+    /// #     nsfd: alloc::sync::Arc<kns::NsFd>,
+    /// # ) -> kerrno::KResult<()> {
+    /// // The NsFd channel already checked `nstype` and the caller's privilege.
+    /// let target_mnt = match &*nsfd {
+    ///     kns::NsFd::Mnt(ns) => Some(ns.clone()),
+    ///     _ => None,
+    /// };
+    /// let new_proxy = process
+    ///     .nsproxy()?
+    ///     .with_namespace(&nsfd)
+    ///     .expect("kind was validated before the commit");
+    /// process.apply_setns(new_proxy, target_mnt)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn apply_setns(
+        &self,
+        new_proxy: Arc<kns::NsProxy>,
+        target_mnt: Option<Arc<kns::MntNamespace>>,
+    ) -> KResult<()> {
+        let runtime = self.runtime()?;
+        // The filesystem retarget is the only fallible step, so it is drafted
+        // against a snapshot before anything is committed: a failed
+        // `CLONE_NEWNS` switch must leave the namespace bundle and the fs
+        // context exactly as they were.
+        let new_fs = match target_mnt {
+            Some(mnt_ns) => {
+                let current_fs = runtime.fs_context().ok_or(KError::NoSuchProcess)?;
+                let mut fs = current_fs.lock().snapshot();
+                // kvfs::Path carries dentry/mount identity rather than a comparable
+                // value, so the fs root and pwd are both retargeted to the target
+                // namespace's visible root. This mirrors the same-namespace reentry
+                // case that bind-mounted sandbox namespaces exercise.
+                let root = mnt_ns.visible_root_path();
+                fs.replace_root_and_pwd(root.clone(), root)?;
+                Some(fs)
+            }
+            None => None,
+        };
+        runtime.set_nsproxy(new_proxy);
+        if let Some(fs) = new_fs {
+            runtime.set_fs_context(Arc::new(Mutex::new(fs)));
+        }
+        Ok(())
     }
 
     /// Returns a live address-space capability while runtime remains attached.
