@@ -111,6 +111,7 @@ entropy = { path = "util/entropy" }
 # Internal: tracing and debugging
 ktracing = { path = "core/ktracing" }
 kbpf = { path = "core/kbpf" }
+kseccomp = { path = "core/kseccomp" }
 kuaccess = { path = "core/kuaccess" }
 
 # Internal: task scheduling and synchronization
@@ -290,6 +291,7 @@ linux-raw-sys = { version = "0.11", default-features = false, features = [
     "general",
     "net",
     "prctl",
+    "ptrace",
     "system",
 ] }
 linux_sysno = { path = "api/linux_sysno", default-features = false }

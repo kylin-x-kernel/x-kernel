@@ -92,6 +92,13 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     trace!("Syscall {sysno:?}");
 
+    // seccomp filters run before dispatch (Linux evaluates seccomp before
+    // the syscall handler). The current thread's mode/chain decides whether
+    // the syscall is allowed, gets an errno, or kills the process/thread.
+    if let Some(seccomp_decision) = evaluate_seccomp(uctx) {
+        return seccomp_decision;
+    }
+
     let result = match sysno {
         // fs ctl
         Sysno::ioctl => {
@@ -896,5 +903,112 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         UserThreadRuntimeAction::SkipSyscallRestart
     } else {
         UserThreadRuntimeAction::Continue
+    }
+}
+
+/// Evaluates the current thread's seccomp filters and, if a decision was
+/// reached, applies it to `uctx`.
+///
+/// Returns `Some(action)` when seccomp decided the syscall must not be
+/// dispatched normally: an errno was forced, or the process/thread was
+/// killed. Returns `None` when the syscall is allowed to proceed.
+fn evaluate_seccomp(uctx: &mut UserContext) -> Option<UserThreadRuntimeAction> {
+    use kseccomp::Decision;
+
+    let thread = kprocess::current_user_thread();
+    let data = kseccomp::SeccompData::new(
+        uctx.sysno() as i32,
+        audit_arch(),
+        uctx.ip() as u64,
+        [
+            uctx.arg0() as u64,
+            uctx.arg1() as u64,
+            uctx.arg2() as u64,
+            uctx.arg3() as u64,
+            uctx.arg4() as u64,
+            uctx.arg5() as u64,
+        ],
+    );
+    let decision = thread.seccomp().evaluate(&data);
+
+    match decision {
+        Decision::Allow => None,
+        Decision::Errno(errno) => {
+            uctx.set_retval(-(errno as i32) as usize);
+            Some(UserThreadRuntimeAction::Continue)
+        }
+        Decision::KillProcess => {
+            // Kill the whole process (`SECCOMP_RET_KILL_PROCESS`, or a strict
+            // mode violation, which Linux terminates with `SIGKILL`).
+            posix_process::do_exit(seccomp_kill_signal(&thread), true);
+            Some(UserThreadRuntimeAction::Continue)
+        }
+        Decision::KillThread => {
+            // Kill only the current thread.
+            posix_process::do_exit(seccomp_kill_signal(&thread), false);
+            Some(UserThreadRuntimeAction::Continue)
+        }
+        Decision::Unsupported => {
+            // `SECCOMP_RET_TRAP`, or a value with no recognised action, cannot
+            // be honoured; Linux terminates the thread with SIGSYS rather than
+            // letting the syscall through.
+            posix_process::do_exit(seccomp_kill_signal(&thread), false);
+            Some(UserThreadRuntimeAction::Continue)
+        }
+        Decision::UserNotif | Decision::Trace => {
+            // The filter asked for a facility this kernel does not implement;
+            // fail closed with ENOSYS rather than silently allowing.
+            uctx.set_retval(-LinuxError::ENOSYS.into_raw() as _);
+            Some(UserThreadRuntimeAction::Continue)
+        }
+    }
+}
+
+/// Returns the termination signal for a seccomp kill decision.
+///
+/// Linux's strict mode kills the offending thread with `SIGKILL`
+/// (`__secure_computing_strict`), while a filter returning
+/// `SECCOMP_RET_KILL_*` delivers `SIGSYS`.
+fn seccomp_kill_signal(thread: &kprocess::Thread) -> i32 {
+    if thread.seccomp().is_strict_allowlist() {
+        ksignal::Signo::SIGKILL as i32
+    } else {
+        ksignal::Signo::SIGSYS as i32
+    }
+}
+
+/// Returns the Linux audit architecture for the current build.
+///
+/// The value must match the target's `AUDIT_ARCH_*`: a filter that compares
+/// `arch` against a different constant would silently take its fallback
+/// branch.
+fn audit_arch() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        kseccomp::AUDIT_ARCH_X86_64
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        kseccomp::AUDIT_ARCH_AARCH64
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        kseccomp::AUDIT_ARCH_RISCV64
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        kseccomp::AUDIT_ARCH_LOONGARCH64
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64"
+    )))]
+    {
+        // The kernel does not target any other architecture today; a new one
+        // must add its `AUDIT_ARCH_*` above rather than reporting a wrong
+        // value to filters.
+        compile_error!("no seccomp audit architecture for this target");
     }
 }

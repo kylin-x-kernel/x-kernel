@@ -25,6 +25,7 @@ mod pidfd;
 mod restart;
 mod rusage;
 mod sched;
+mod seccomp;
 mod signal;
 mod thread;
 mod umask;
@@ -37,5 +38,6 @@ unittest::path_mod_test!(
 
 pub(crate) use self::{
     clone::*, clone3::*, cpu_time::*, credentials::*, ctl::*, execve::*, exit::*, ids::*, job::*,
-    limits::*, pidfd::*, restart::*, rusage::*, sched::*, signal::*, thread::*, umask::*, wait::*,
+    limits::*, pidfd::*, restart::*, rusage::*, sched::*, seccomp::*, signal::*, thread::*,
+    umask::*, wait::*,
 };

@@ -140,6 +140,18 @@ are separately published atomic flags. Group/session changes create or select a
 group and publish group/session identity together; existing-group movement
 requires the same session. The syscall owner checks additional leader/ID rules.
 
+Each `Thread` also carries a seccomp `SeccompContext` (mode + classic-BPF
+filter chain). It is installed only through `seccomp(2)` on the owning thread
+(or a `TSYNC` broadcast to published siblings, which first requires every
+sibling's chain to be a prefix of the caller's and re-validates that prefix
+under each sibling's own lock before replacing its chain, so a synchronization
+can never remove a restriction) and evaluated at syscall entry by `ksyscall`. A mode
+transition Linux refuses (`STRICT` ↔ `FILTER`) fails with `EINVAL` rather than
+replacing the chain, and the whole chain is bounded by Linux
+`MAX_INSNS_PER_PATH`. `fork`/`clone` copy the parent chain so children inherit
+the restriction; seccomp state survives exec (filters only ever remove allowlist
+membership).
+
 ## Critical flows
 
 Fork takes the process cgroup gate, reserves a child charge, clones/shares fs and

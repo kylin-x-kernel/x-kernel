@@ -1160,7 +1160,7 @@ impl Path {
         self.check_writable_mount()?;
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
-        let is_privileged = cred.is_privileged();
+        let is_privileged = cred.has_cap_chown();
 
         if uid.is_some_and(|uid| !is_privileged && (!is_owner || uid != metadata.uid)) {
             return Err(VfsError::OperationNotPermitted);
@@ -1187,12 +1187,12 @@ impl Path {
     pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
         self.check_writable_mount()?;
         let metadata = self.metadata();
-        if cred.fsuid() != metadata.uid && !cred.is_privileged() {
+        if cred.fsuid() != metadata.uid && !cred.has_cap_fowner() {
             return Err(VfsError::OperationNotPermitted);
         }
         if mode.contains(NodePermission::SET_GID)
             && !cred.in_group(metadata.gid)
-            && !cred.is_privileged()
+            && !cred.has_cap_fowner()
         {
             mode.remove(NodePermission::SET_GID);
         }
@@ -1221,10 +1221,10 @@ impl Path {
             (Some(SetattrTime::Current(_)), Some(SetattrTime::Current(_)))
         );
         if !is_touch {
-            if !is_owner && !cred.is_privileged() {
+            if !is_owner && !cred.has_cap_fowner() {
                 return Err(VfsError::OperationNotPermitted);
             }
-        } else if !is_owner && !cred.is_privileged() {
+        } else if !is_owner && !cred.has_cap_fowner() {
             self.permission(Permission::MAY_WRITE, cred)?;
         }
 

@@ -120,9 +120,10 @@ pub use stat::TaskStat;
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
     AsThread, CpuTimeState, CurrentFiles, CurrentThread, NiceValue, PreparedUserClone,
-    SchedulerParameters, Thread, current_files, current_fs_context, current_user_mm_id,
-    current_user_process, current_user_process_address_space, current_user_process_fs_context,
-    current_user_thread, current_user_tid, with_current_user_thread,
+    SchedulerParameters, SeccompContext, Thread, current_files, current_fs_context,
+    current_user_mm_id, current_user_process, current_user_process_address_space,
+    current_user_process_fs_context, current_user_thread, current_user_tid,
+    with_current_user_thread,
 };
 pub use timer_delivery::{
     dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,

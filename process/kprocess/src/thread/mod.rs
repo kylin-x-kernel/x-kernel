@@ -6,6 +6,7 @@ mod core;
 mod cpu_time;
 mod current;
 mod restart;
+mod seccomp;
 mod task_ext;
 
 pub use core::{CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters, Thread};
@@ -16,4 +17,5 @@ pub use current::{
     current_user_process_address_space, current_user_process_fs_context, current_user_thread,
     current_user_tid, with_current_user_thread,
 };
+pub use seccomp::SeccompContext;
 pub use task_ext::AsThread;

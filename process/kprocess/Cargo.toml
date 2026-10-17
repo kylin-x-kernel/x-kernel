@@ -28,6 +28,7 @@ klazy.workspace = true
 kpoll.workspace = true
 kidentity.workspace = true
 kresources.workspace = true
+kseccomp.workspace = true
 ksignal.workspace = true
 klogger.workspace = true
 kns.workspace = true
@@ -37,6 +38,7 @@ kspin = { workspace = true }
 ksync.workspace = true
 ktask.workspace = true
 ktimer.workspace = true
+linux_sysno.workspace = true
 lazyinit.workspace = true
 linked_list_r4l.workspace = true
 memaddr.workspace = true

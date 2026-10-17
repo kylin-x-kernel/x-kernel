@@ -95,6 +95,12 @@ fn do_mount(
     flags: u32,
     data: Option<&[u8]>,
 ) -> KResult<()> {
+    // mount(2) requires `CAP_SYS_ADMIN` in the initial user namespace, and
+    // all x-kernel mount operations (bind, remount, private, tmpfs) mutate
+    // the process-wide mount namespace.
+    if !cred.has_sys_admin() {
+        return Err(KError::OperationNotPermitted);
+    }
     let target = lookup_mount_path(process, dir_name, cred)?;
     path_mount(process, cred, dev_name, &target, fs_type, flags, data)
 }

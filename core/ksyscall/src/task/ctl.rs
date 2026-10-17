@@ -11,7 +11,7 @@
 
 use core::ffi::c_char;
 
-use kerrno::{KError, KResult, LinuxError};
+use kerrno::{KError, KResult};
 use ksignal::MAX_SIGNALS;
 use ktask::current;
 use kuaccess::vm_load_string;
@@ -74,7 +74,7 @@ pub(crate) fn sys_get_mempolicy(
 /// The first argument can be:
 /// - PR_SET_NAME: set the name of the calling thread, using the value pointed to by `arg2`
 /// - PR_GET_NAME: get the name of the calling
-/// - PR_SET_SECCOMP: reject strict/filter installation until seccomp is enforced
+/// - PR_SET_SECCOMP: install strict/filter mode through the `seccomp(2)` path
 /// - PR_CAPBSET_READ: return whether a capability is in the bounding set
 /// - PR_GET_KEEPCAPS / PR_SET_KEEPCAPS: query or set the keep-capabilities flag
 /// - PR_MCE_KILL: set the machine check exception policy
@@ -87,10 +87,11 @@ pub(crate) fn sys_get_mempolicy(
 /// Linux-like kernel on these (often merely probed) options, and avoids noisy
 /// warnings for each unimplemented option.
 ///
-/// Security restrictions are not successful no-ops: `PR_SET_SECCOMP` returns
-/// `ENOSYS` for strict/filter mode and `EINVAL` for any other mode. The mode
-/// retains its full `unsigned long` ABI width. No filter pointer is accessed
-/// and no seccomp or no-new-privileges state is changed on this path.
+/// Security restrictions are not successful no-ops: `PR_SET_SECCOMP` is the
+/// `prctl` spelling of the `seccomp(2)` install path (`arg2` is the mode with
+/// its full `unsigned long` ABI width, `arg3` the optional filter program,
+/// which strict mode ignores), and `PR_GET_SECCOMP` reports the thread's real
+/// mode. Any other mode value is `EINVAL`.
 #[expect(
     clippy::too_many_lines,
     reason = "CG-028-focused-functions: prctl dispatches many unrelated Linux operations; \
@@ -120,22 +121,29 @@ pub(crate) fn sys_prctl(
             write_vm_mem(arg2 as _, &buf)?;
         }
         PR_SET_SECCOMP => {
-            if !matches!(arg2, SECCOMP_MODE_STRICT | SECCOMP_MODE_FILTER) {
-                return Err(KError::InvalidInput);
-            }
-            // Reporting success would let callers trust a restriction that
-            // the syscall dispatch path does not enforce.
-            return Err(KError::from(LinuxError::ENOSYS));
+            // Linux `prctl_set_seccomp` is the `seccomp(2)` install path with
+            // no flags. The mode keeps `unsigned long` width, and strict mode
+            // always ignores the filter pointer.
+            let op = match arg2 {
+                SECCOMP_MODE_STRICT => linux_raw_sys::ptrace::SECCOMP_SET_MODE_STRICT,
+                SECCOMP_MODE_FILTER => linux_raw_sys::ptrace::SECCOMP_SET_MODE_FILTER,
+                _ => return Err(KError::InvalidInput),
+            };
+            let args = if arg2 == SECCOMP_MODE_STRICT {
+                core::ptr::null()
+            } else {
+                arg3 as *const ()
+            };
+            crate::task::sys_seccomp(op, 0, args)?;
         }
         PR_GET_SECCOMP => {
-            // Seccomp is not enforced, so mode 0 (disabled). Linux returns the
-            // mode directly as the prctl return value and never writes user
-            // memory: arg2..arg5 must all be zero, otherwise EINVAL
-            // (kernel/sys.c), so this does not touch `arg2`.
+            // Linux `prctl_get_seccomp` returns the thread's real mode as the
+            // return value and never writes user memory; arg2..arg5 must all be
+            // zero, otherwise EINVAL (kernel/sys.c).
             if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
                 return Err(KError::InvalidInput);
             }
-            return Ok(0);
+            return Ok(kprocess::current_user_thread().seccomp().linux_mode() as isize);
         }
         PR_GET_PDEATHSIG => {
             // Linux kernel/sys.c: `put_user(me->pdeath_signal, (int __user *)arg2)`.
@@ -247,7 +255,7 @@ pub(crate) fn sys_prctl(
 
 #[unittest::mod_test]
 mod tests {
-    use kerrno::{KError, LinuxError};
+    use kerrno::KError;
     use linux_raw_sys::prctl::*;
     use unittest::{assert_eq, def_test};
 
@@ -274,31 +282,67 @@ mod tests {
         assert_eq!(sys_prctl(PR_GET_KEEPCAPS, 0, 0, 0, 0), Ok(0));
     }
 
+    /// `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog)` installs through the
+    /// `seccomp(2)` path, and `PR_GET_SECCOMP` then reports mode 2.
+    ///
+    /// The program allows everything so the test thread stays usable; strict
+    /// mode cannot be exercised here because it would kill this thread at its
+    /// next non-allowlisted syscall (see `kprocess`'s seccomp context tests).
     #[def_test(user, serial)]
-    fn prctl_set_seccomp_requires_enforcement() {
-        let nnp_before = sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
-        for mode in [SECCOMP_MODE_STRICT, SECCOMP_MODE_FILTER] {
-            for filter_addr in [0, 1, usize::MAX] {
-                assert_eq!(
-                    sys_prctl(PR_SET_SECCOMP, mode, filter_addr, 0, 0),
-                    Err(KError::from(LinuxError::ENOSYS))
-                );
-                assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
-                assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), nnp_before);
-            }
+    fn prctl_set_seccomp_installs_a_filter_and_reports_the_mode() {
+        use linux_raw_sys::ptrace::{sock_filter, sock_fprog};
+        use unittest_support::{TestUserArray, TestUserValue};
+
+        let program = TestUserArray::<sock_filter, 1>::from_array([sock_filter {
+            code: 0x06, // BPF_RET | BPF_K
+            jt: 0,
+            jf: 0,
+            k: 0x7fff_0000,
+        }])
+        .unwrap();
+        let fprog = TestUserValue::from_value(sock_fprog {
+            len: 1,
+            filter: program.as_user_ptr(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            sys_prctl(
+                PR_SET_SECCOMP,
+                SECCOMP_MODE_FILTER,
+                fprog.as_user_ptr() as usize,
+                0,
+                0
+            ),
+            Ok(0)
+        );
+        assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(2));
+    }
+
+    #[def_test(user, serial)]
+    fn prctl_set_seccomp_filter_rejects_an_unreadable_program() {
+        // A null or bogus `sock_fprog` pointer must fail without installing.
+        let mode_before = sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0);
+        for filter_addr in [0, 1] {
+            assert!(
+                sys_prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, filter_addr, 0, 0).is_err(),
+                "an unreadable program must be rejected"
+            );
         }
+        assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), mode_before);
     }
 
     #[def_test(user, serial)]
     fn prctl_set_seccomp_rejects_invalid_modes() {
         let nnp_before = sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
+        let mode_before = sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0);
         for mode in [0, 3, 999, u32::MAX as usize, usize::MAX] {
             for filter_addr in [0, 1, usize::MAX] {
                 assert_eq!(
                     sys_prctl(PR_SET_SECCOMP, mode, filter_addr, 0, 0),
                     Err(KError::InvalidInput)
                 );
-                assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+                assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), mode_before);
                 assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), nnp_before);
             }
         }
@@ -318,10 +362,13 @@ mod tests {
     }
 
     #[def_test(user, serial)]
-    fn prctl_get_seccomp_returns_mode_zero_without_writing_arg2() {
+    fn prctl_get_seccomp_reports_a_valid_mode_without_writing_arg2() {
         // Linux returns the seccomp mode as the prctl return value and never
-        // writes user memory; with arg2..arg5 zero it reports mode 0.
-        assert_eq!(sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0), Ok(0));
+        // writes user memory.
+        assert!(matches!(
+            sys_prctl(PR_GET_SECCOMP, 0, 0, 0, 0),
+            Ok(mode) if (0..=2).contains(&mode)
+        ));
     }
 
     #[def_test(user, serial)]

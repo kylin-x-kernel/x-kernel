@@ -191,6 +191,7 @@ pub struct Thread {
     accessing_user_memory: AtomicBool,
     pub(super) restart_block: Mutex<RestartSlot>,
     no_new_privileges: AtomicBool,
+    seccomp: super::SeccompContext,
     cgroup: TaskMembership,
     #[cfg(feature = "tee")]
     tee_session_ctx: Mutex<Option<Box<dyn TeeSessionCtxTrait>>>,
@@ -275,6 +276,7 @@ impl Thread {
             accessing_user_memory: AtomicBool::new(false),
             restart_block: Mutex::new(RestartSlot::empty()),
             no_new_privileges: AtomicBool::new(no_new_privileges),
+            seccomp: super::SeccompContext::new(),
             cgroup,
             #[cfg(feature = "tee")]
             tee_session_ctx: Mutex::new(None),
@@ -320,6 +322,7 @@ impl Thread {
             files,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
+        thread.seccomp.inherit_from(&self.seccomp);
         Ok(PreparedUserClone {
             thread,
             task_number,
@@ -366,6 +369,7 @@ impl Thread {
             self.files.fork(is_shared)?,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
+        thread.seccomp.inherit_from(&self.seccomp);
         Ok(PreparedUserClone {
             thread,
             task_number,
@@ -408,6 +412,11 @@ impl Thread {
 
     pub(crate) fn cgroup_membership(&self) -> &TaskMembership {
         &self.cgroup
+    }
+
+    /// Returns the thread-local seccomp filter state.
+    pub fn seccomp(&self) -> &super::SeccompContext {
+        &self.seccomp
     }
 
     /// Returns the `clear_child_tid` user pointer for this thread.

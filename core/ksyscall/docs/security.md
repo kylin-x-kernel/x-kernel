@@ -90,6 +90,10 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-13 | `get_robust_list` leaks another process's user addresses | High | target resolution | After resolving the target thread, `kprocess::ptrace::check_read_real_creds_access()` applies the uniform policy: same-thread-group exemption, asymmetric matching of caller real UID/GID against target real/effective/saved IDs, and the euid-0 approximation of `CAP_SYS_PTRACE`; otherwise `EPERM` |
 | T-14 | `waitid` copies signals across a raw `siginfo_t`-shaped buffer | Medium | `waitid(P_PID, ...)` status reporting | `siginfo_t` is registered as `posix_types::UserWrite` and written via `write_vm`; the payload is built by `ksignal::ChildExitSignalInfo`, the same source used for real SIGCHLD delivery |
 | T-15 | `execveat(AT_EMPTY_PATH)` execs an fd the caller cannot name | Medium | runc/crun self-reexec from a sealed memfd | The fd must reference an already-open file the caller owns; the image still goes through `kexec`'s execute-permission and ELF validation, and the resulting `/proc/self/exe` follows to the same opened backing file |
+| T-16 | Seccomp filter install silently accepts unsupported flags or skips privilege gating | High | `seccomp(2)` flags / privilege check | `SECCOMP_ALLOWED_FLAGS` whitelist rejects unknown flags with `EINVAL`; both strict and filter install require `no_new_privileges` or an effective root credential, otherwise `EACCES` (Linux `seccomp_prepare_filter`) |
+| T-17 | A seccomp filter is not evaluated before dispatch, letting a denied syscall run | High | any syscall | `dispatch_irq_syscall` runs `evaluate_seccomp` before the `Sysno` match; the decision is applied to the context (`Errno` → retval, `KILL_PROCESS`/`KILL_THREAD`/`TRAP`/unrecognised → `do_exit(SIGSYS)`, a strict-mode violation → `do_exit(SIGKILL)` as Linux does, `USER_NOTIF`/`TRACE` → `ENOSYS`) before any handler runs |
+| T-18 | A malformed filter is installed and later kills the task, or a `TSYNC` drops a sibling's restriction | High | `seccomp(2)` program/flags | `SeccompFilter::new` validates instruction encoding and jump targets at install time (`EINVAL`); `TSYNC` refuses when a sibling's chain is not a prefix of the caller's (blocking TID / `ESRCH` with `TSYNC_ESRCH`), re-validates under each sibling's own lock before replacing its chain, and a mode change is refused (`EINVAL`) |
+| T-19 | User `sock_fprog`/`sock_filter` copy garbles the kernel or over-allocates | Medium | `seccomp(2)` buffer handling | The header and each instruction are decoded field-wise through the unaligned-safe `osvm` byte-copy path with a `BPF_MAXINSNS` bound checked before allocation, so no `#[repr(C)]` image or alignment requirement is imposed |
 
 ## Signal-wait reliability
 
@@ -121,19 +125,23 @@ registered wakeups rather than polling or a timer.
   `ioctl`, so SIOC* still hangs on the syscall adapter instead of the Linux
   `sock_ioctl` shape.
 - Capability, seccomp, and `no_new_privileges` security ABIs must not
-  return success inconsistent with actual enforcement. `PR_SET_SECCOMP`
-  rejects unknown modes with `EINVAL` and strict/filter installation with
-  `ENOSYS`. `seccomp(2)` rejects unknown operations with `EINVAL` and
-  recognized operations with `ENOSYS`. Neither path accesses the supplied
-  pointer or changes task state. This is explicit rejection, not seccomp
-  enforcement; flags, filters, and query buffers remain unimplemented.
-  `PR_SET_NO_NEW_PRIVS` records the flag on the calling thread and returns
-  success: the exec credential path consumes the flag
+  return success inconsistent with actual enforcement. `PR_SET_NO_NEW_PRIVS`
+  records the flag on the calling thread and returns success: the exec
+  credential path consumes the flag
   (`Cred::apply_exec`), and since exec never elevates identity today the
   promised "exec grants no privileges" holds unconditionally. Future
   setuid/setgid or file-capability support must consult the flag at the
   credential reset and refuse elevation instead of silently dropping the
   guarantee.
+
+- seccomp supports `STRICT` and `FILTER` (with `TSYNC`) plus action queries.
+  A `TRAP` or unrecognised filter return fails closed (`do_exit(SIGSYS)`), and
+  `USER_NOTIF`/`TRACE` fail closed with `ENOSYS`; neither is silently allowed.
+  A filter that the interpreter cannot execute is rejected at install time, and
+  a `TSYNC` never removes an existing restriction from a sibling.
+- `no_new_privileges` gates seccomp install; the full file-capability exec
+  transition semantics are still a `${kcred}` future step. The mount path
+  now requires the root-credential approximation of `CAP_SYS_ADMIN`.
 
 - `PR_SET_PDEATHSIG` records the signal on the process identity but does not
   yet deliver it at parent-death reparenting, and — unlike Linux — does not

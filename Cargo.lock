@@ -2830,6 +2830,7 @@ dependencies = [
  "kns",
  "kpoll",
  "kresources",
+ "kseccomp",
  "ksignal",
  "kspin",
  "ksync",
@@ -2839,6 +2840,7 @@ dependencies = [
  "kvfs",
  "lazyinit",
  "linked_list_r4l",
+ "linux_sysno",
  "memaddr",
  "memspace",
  "posix-types",
@@ -2929,6 +2931,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kseccomp"
+version = "0.3.0-dev"
+dependencies = [
+ "linux-raw-sys",
+ "unittest",
+]
+
+[[package]]
 name = "ksignal"
 version = "0.3.0-dev"
 dependencies = [
@@ -3002,6 +3012,7 @@ dependencies = [
  "kpoll",
  "kprocess",
  "krlimit",
+ "kseccomp",
  "ksignal",
  "kspin",
  "ktask",

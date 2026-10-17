@@ -205,6 +205,18 @@ impl Cred {
         self.euid == 0
     }
 
+    /// Reports whether the effective identity holds Linux `CAP_CHOWN`
+    /// (changing a file's owner regardless of the caller's ownership).
+    pub fn has_cap_chown(&self) -> bool {
+        self.is_privileged()
+    }
+
+    /// Reports whether the effective identity holds Linux `CAP_FOWNER`
+    /// (bypassing owner checks for metadata changes).
+    pub fn has_cap_fowner(&self) -> bool {
+        self.is_privileged()
+    }
+
     /// Returns whether this credential's real, effective, and saved IDs all
     /// match the real user and group IDs of `caller`.
     ///

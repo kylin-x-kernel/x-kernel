@@ -40,7 +40,7 @@ core/ksyscall/
 │   ├── arch/         (mod, riscv_hwprobe)
 │   ├── task/         (clone, clone3, cpu_time, credentials, ctl, execve,
 │   │                  exit, ids, job, limits, pidfd, rusage, sched,
-│   │                  signal, thread, umask, wait)
+│   │                  seccomp, signal, thread, umask, wait)
 │   ├── time/         (itimer, posix_timer, queries, sleep, timerfd)
 │   └── vfs/
 └── docs/             (design.md, security.md)
@@ -62,6 +62,15 @@ ksyscall::handle_syscall
     ├─ sync adapter ───────────> kfutex / kprocess
     └─ misc adapter ───────────> posix-mm / posix-net / ...
 ```
+
+The dispatch entry runs `evaluate_seccomp` before the `match` on `Sysno`: the
+current thread's seccomp chain (owned by `kprocess::Thread.seccomp()`) either
+allows the syscall, forces an errno, kills the process/thread with `SIGSYS`
+(`KILL_PROCESS`/`KILL_THREAD`, and fail-closed `TRAP`/unrecognised actions),
+or returns `ENOSYS` for the unimplemented `USER_NOTIF`/`TRACE` actions.
+The `sys_seccomp` adapter reads the user `sock_fprog` field-wise, builds a
+`kseccomp::SeccompFilter`, and installs it on the thread; `TSYNC` first checks
+every sibling can adopt the caller's chain without becoming more permissive.
 
 ## Design principles
 
@@ -243,22 +252,28 @@ records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports
 it back; the exec credential path consumes the flag via
 `Cred::apply_exec`, and because exec never elevates identity today the
 no-elevation contract holds unconditionally — future setuid/setgid or
-file-capability support must consult the flag there. seccomp likewise has
-no execution engine yet. `PR_SET_SECCOMP`
-recognizes only the strict/filter mode identifiers (1/2), returning `ENOSYS`
-instead of claiming installation; all other modes return `EINVAL`.
-`seccomp(2)` recognizes the Linux strict/filter and action/notification-size
-query operations (0/1/2/3), returning `ENOSYS`; unknown operations return
-`EINVAL`. Neither rejection path accesses user memory or changes task state.
-The prctl mode has `unsigned long` width; the syscall operation has
-`unsigned int` width, as in Linux's syscall boundary.
+file-capability support must consult the flag there.
 
-Recognizing an identifier does not implement its operation. Flags, filter
-contents, and query buffers are not validated. `ENOSYS` is this kernel's
-explicit unimplemented-feature policy, not a claim of Linux errno parity
-for recognized requests: Linux can reject an unsupported mode/configuration
-with `EINVAL`. Callers requiring confinement must handle failure; this
-rejection is not a sandbox. See Linux's
+`seccomp(2)` is implemented: `SECCOMP_SET_MODE_STRICT` installs the fixed
+`read`/`write`/`_exit`/`rt_sigreturn` allowlist, `SECCOMP_SET_MODE_FILTER`
+validates and appends a classic-BPF filter (with `TSYNC` applying it to the
+thread group only when that cannot remove a sibling's restriction), and
+`SECCOMP_GET_ACTION_AVAIL` answers action-constant queries. The filter is
+evaluated at syscall entry before dispatch. `PR_SET_SECCOMP` remains a
+`prctl` alias for the same install path. `USER_NOTIF`, `TRACE`, and
+`GET_NOTIF_SIZES` are not implemented: `GET_ACTION_AVAIL` reports them as
+`ENOSYS`, and a filter selecting `USER_NOTIF`/`TRACE` makes the syscall fail
+closed with `ENOSYS`.
+
+Install-time validation mirrors Linux `seccomp_check_filter`: the length bound,
+instruction encoding, and every jump target are checked before the filter is
+installed, so a program the interpreter cannot run is rejected with `EINVAL`
+instead of killing the task at its next syscall. The install gate returns
+`EACCES` when the caller has neither `CAP_SYS_ADMIN` nor `PR_SET_NO_NEW_PRIVS`,
+`PR_SET_SECCOMP` is the same install path with the mode as its argument, and a
+strict-mode violation terminates the thread with `SIGKILL` (a filter kill stays
+`SIGSYS`). The `arch` field reported to filters is the target's `AUDIT_ARCH_*`
+(x86_64/aarch64/riscv64/loongarch64). See Linux's
 [seccomp entry points](https://github.com/torvalds/linux/blob/v6.12/kernel/seccomp.c#L2064-L2127)
 and [PR_SET_SECCOMP(2const)](https://man7.org/linux/man-pages/man2/PR_SET_SECCOMP.2const.html).
 
