@@ -447,6 +447,20 @@ pub struct DrmCard {
     poll_rx: PollSet,
     sequence: AtomicU32,
     state: Mutex<ModesetState>,
+    /// Serializes "publish the state, then show it" across the property entry
+    /// points.
+    ///
+    /// `MODE_ATOMIC` and `set_one_property` both end with the same two steps:
+    /// store the committed `ModesetState`, then present its `plane_fb_id`.
+    /// Presenting after releasing `state` keeps the display call out of that
+    /// lock, but it also lets two committers interleave so that the older
+    /// framebuffer reaches the screen last; the scanout then keeps disagreeing
+    /// with what `MODE_OBJ_GETPROPERTIES` reports, and `present_fb` cannot tell
+    /// anyone because an unknown framebuffer is a silent no-op.
+    ///
+    /// Always taken before `state`, never while holding it, so the order is
+    /// `commit_lock` -> `state` -> the inner maps `apply_prop` touches.
+    commit_lock: Mutex<()>,
     legacy_crtc: Mutex<LegacyCrtcState>,
     dumbs: Mutex<BTreeMap<u32, DumbBuffer>>,
     next_dumb_handle: AtomicU32,
@@ -473,6 +487,7 @@ impl DrmCard {
             poll_rx: PollSet::new(),
             sequence: AtomicU32::new(0),
             state: Mutex::new(ModesetState::default()),
+            commit_lock: Mutex::new(()),
             legacy_crtc: Mutex::new(LegacyCrtcState::default()),
             dumbs: Mutex::new(BTreeMap::new()),
             next_dumb_handle: AtomicU32::new(FIRST_DUMB_HANDLE),
@@ -793,6 +808,14 @@ impl DeviceFileOps for DrmCard {
             <DrmModeObjGetProperties as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeObjGetProperties>::from(arg);
                 <DrmModeObjGetProperties as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
+            <DrmModeConnectorSetProperty as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeConnectorSetProperty>::from(arg);
+                <DrmModeConnectorSetProperty as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
+            <DrmModeObjSetProperty as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeObjSetProperty>::from(arg);
+                <DrmModeObjSetProperty as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
             <DrmModeGetProperty as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetProperty>::from(arg);
@@ -1149,6 +1172,108 @@ impl DrmIoctl for DrmModeGetPlane {
     }
 }
 
+impl DrmIoctl for DrmModeConnectorSetProperty {
+    // DRM_IOCTL_MODE_SETPROPERTY = DRM_IOWR(0xAB, struct
+    // drm_mode_connector_set_property): a 16-byte write-read.
+    const CMD: u32 = iowr::<DrmModeConnectorSetProperty>(DRM_TYPE, 0xAB);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, req: &mut Self) -> VfsResult<usize> {
+        // `drm_connector_property_set_ioctl()` is only a wrapper over
+        // `drm_mode_obj_set_property_ioctl()` with `obj_type` fixed to
+        // `DRM_MODE_OBJECT_CONNECTOR`, so the connector is the only target the
+        // request can name, and the write below is the one the object form
+        // performs.
+        if req.connector_id != CONNECTOR_ID {
+            return Err(VfsError::NotFound);
+        }
+        set_one_property(
+            dev,
+            DRM_MODE_OBJECT_CONNECTOR,
+            req.connector_id,
+            req.prop_id,
+            req.value,
+        )
+    }
+}
+
+impl DrmIoctl for DrmModeObjSetProperty {
+    // DRM_IOCTL_MODE_OBJ_SETPROPERTY = DRM_IOWR(0xBA, struct
+    // drm_mode_obj_set_property): 24 bytes after alignment, not 20.
+    const CMD: u32 = iowr::<DrmModeObjSetProperty>(DRM_TYPE, 0xBA);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, req: &mut Self) -> VfsResult<usize> {
+        // The object type travels in the request, so it has to agree with the id.
+        // This is the check MODE_ATOMIC applies to every entry of its object list,
+        // and it is what stops a client from writing a plane property onto the CRTC.
+        if object_type_of(req.obj_id) != Some(req.obj_type) {
+            return Err(VfsError::NotFound);
+        }
+        set_one_property(dev, req.obj_type, req.obj_id, req.prop_id, req.value)
+    }
+}
+
+/// Write one property from a non-atomic entry point.
+///
+/// The sequence is a copy of the one `MODE_ATOMIC` performs inline: apply to a
+/// copy of the state, commit the copy only if the write succeeded, publish a new
+/// mode blob if the write produced one, and refresh the scanout whenever the
+/// committed plane framebuffer is non-zero.  `MODE_ATOMIC` is deliberately left
+/// alone here: it carries `TEST_ONLY` and page-flip-event handling that this
+/// helper has no business absorbing.  Both here and there the commit is
+/// serialized by `commit_lock`, so a second committer cannot slip its own
+/// framebuffer in between the store and the present.
+///
+/// Errnos follow Linux's `drm_mode_obj_set_property_ioctl()`, whose `ret` starts
+/// at `-EINVAL`: a request that names an unknown object, or an object type that
+/// does not match the id, fails the `drm_mode_object_find()` lookup and answers
+/// `ENOENT`; a known object carrying an unknown property id reaches `out_unref`
+/// with `ret` untouched and answers `EINVAL`, as does an invalid value for a
+/// known property.  `DRM_IOCTL_MODE_SETPROPERTY` only wraps that function with
+/// `obj_type = DRM_MODE_OBJECT_CONNECTOR`, so these two entry points and
+/// `MODE_ATOMIC` all answer alike and a client cannot tell which one it used.
+fn set_one_property(
+    dev: &DrmCard,
+    obj_type: u32,
+    obj_id: u32,
+    prop_id: u32,
+    value: u64,
+) -> VfsResult<usize> {
+    // The store below and the present after it have to stay one operation for
+    // other committers, or the older framebuffer can reach the screen last.
+    let _commit = dev.commit_lock.lock();
+    let mut state = dev.state.lock();
+    let mut proposed = *state;
+    let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
+    if !dev.apply_prop(
+        obj_type,
+        obj_id,
+        prop_id,
+        value,
+        &mut proposed,
+        &mut new_mode_blob,
+    )? {
+        // Unknown property on a known object: Linux's
+        // `drm_mode_obj_set_property_ioctl()` leaves `ret` at its `-EINVAL`
+        // initialiser on this path; only a failed object lookup is `ENOENT`.
+        return Err(VfsError::InvalidInput);
+    }
+    let current_fb = proposed.plane_fb_id;
+    *state = proposed;
+    // Publish the blob before releasing `state`.  `apply_prop` takes the same two
+    // locks in this order, so doing the store here keeps that order; releasing
+    // `state` first would let a second writer commit its own `crtc_mode_id` in
+    // the gap, and `GET_BLOB` would then find a blob id that no longer matches the
+    // reference and answer with another mode's timings instead of an error.
+    if let Some(new_ref) = new_mode_blob {
+        *dev.mode_id_blob_ref.lock() = new_ref;
+    }
+    drop(state);
+    if current_fb != 0 {
+        dev.present_fb(current_fb);
+    }
+    Ok(0)
+}
+
 impl DrmIoctl for DrmModeObjGetProperties {
     const CMD: u32 = iowr::<DrmModeObjGetProperties>(DRM_TYPE, 0xB9);
 
@@ -1264,6 +1389,9 @@ impl DrmIoctl for DrmModeAtomic {
         let props: Vec<u32> = a.props_ptr.load_vm_vec(total_props)?;
         let values: Vec<u64> = a.prop_values_ptr.load_vm_vec(total_props)?;
 
+        // Same ordering as `set_one_property`: one committer at a time, so the
+        // commit and the present below cannot be split by another writer.
+        let _commit = dev.commit_lock.lock();
         let mut state = dev.state.lock();
         let mut proposed = *state;
         let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;

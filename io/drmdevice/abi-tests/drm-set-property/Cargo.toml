@@ -1,0 +1,9 @@
+[package]
+name = "drm-set-property-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "set_property.rs"

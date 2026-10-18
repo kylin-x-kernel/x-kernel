@@ -266,6 +266,46 @@ pub(crate) struct DrmModeDestroyDumb {
     pub handle: u32,
 }
 
+/// `struct drm_mode_connector_set_property`, the legacy connector-only setter.
+///
+/// `value` comes first and the structure is 16 bytes with no trailing padding, so
+/// `DRM_IOCTL_MODE_SETPROPERTY` carries size 0x10.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmModeConnectorSetProperty {
+    pub value: u64,
+    pub prop_id: u32,
+    pub connector_id: u32,
+}
+
+/// `struct drm_mode_obj_set_property`, the object-typed setter.
+///
+/// `value` at 0, `prop_id` at 8, `obj_id` at 12, `obj_type` at 16, and the uapi's
+/// 4 trailing pad bytes at 20, spelled out as `abi_pad` instead of left implicit.
+/// The hole cannot stay implicit because `handle_raw` writes the whole request
+/// back once the handler succeeds: an implicit hole would hand uninitialised
+/// kernel memory to user space and break what `UserWrite` promises.
+/// `DrmVersion`, `DrmModeFbCmd2`, `DrmModeGetPlaneRes` and
+/// `DrmModeObjGetProperties` name their padding for the same reason.
+///
+/// The size pins below keep that layout true: the size is part of the command
+/// word, so a layout change that went unnoticed would leave the handler
+/// registered under a number no client sends.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmModeObjSetProperty {
+    pub value: u64,
+    pub prop_id: u32,
+    pub obj_id: u32,
+    pub obj_type: u32,
+    pub abi_pad: u32,
+}
+
+// Pinned by matching array lengths rather than `assert!`: a mismatch is a type
+// error, so it needs no exception to the workspace's `-D warnings` policy.
+const _: [(); 16] = [(); core::mem::size_of::<DrmModeConnectorSetProperty>()];
+const _: [(); 24] = [(); core::mem::size_of::<DrmModeObjSetProperty>()];
+
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
 pub(crate) struct DrmModeGetPlaneRes {
