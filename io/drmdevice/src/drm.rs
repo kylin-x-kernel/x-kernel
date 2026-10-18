@@ -169,6 +169,62 @@ pub(crate) struct DrmModeGetConnector {
     pub pad: u32,
 }
 
+/// Legacy `struct drm_mode_fb_cmd`, as still issued by non-atomic clients.
+///
+/// Linux keeps both this and [`DrmModeFbCmd2`]: atomic clients use the latter,
+/// while older mode-setting code (Xorg's `modesetting` driver among them) uses
+/// this one. 7 x u32 = 28 bytes, which is exactly the `0x1c` size field encoded
+/// in `DRM_IOCTL_MODE_ADDFB` (`0xc01c64ae`) - two independent confirmations of
+/// the layout.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmModeFbCmd {
+    pub fb_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub bpp: u32,
+    pub depth: u32,
+    pub handle: u32,
+}
+
+/// `struct drm_mode_cursor`, the original cursor request.
+///
+/// 7 x u32 = 28 bytes = 0x1c, which is the size field encoded in
+/// `DRM_IOCTL_MODE_CURSOR` (`0xc01c64a3`).  `width`/`height` are part of the
+/// structure in `include/uapi/drm/drm_mode.h` and cannot be turned into padding:
+/// dropping them shifts `handle` and changes the command word, so a client that
+/// speaks the uapi would miss the handler entirely.
+///
+/// [`DrmModeCursor2`] adds the two hotspot offsets and is 36 bytes, matching
+/// `DRM_IOCTL_MODE_CURSOR2` (`0xc02464bb`).
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmModeCursor {
+    pub flags: u32,
+    pub crtc_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub handle: u32,
+}
+
+/// `struct drm_mode_cursor2`, which adds the hotspot offsets.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmModeCursor2 {
+    pub flags: u32,
+    pub crtc_id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub handle: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+}
+
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
 pub(crate) struct DrmModeFbCmd2 {

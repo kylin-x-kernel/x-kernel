@@ -63,11 +63,28 @@ pub(crate) const DRM_CAP_ADDFB2_MODIFIERS: u64 = 0x10;
 /// spec-level cursor dimensions.
 pub(crate) const DRM_CURSOR_COMPAT_SIZE: u64 = 64;
 
+// ======== SET_CLIENT_CAP capabilities ========
+
+// Values are Linux's (`include/uapi/drm/drm.h`); the numbering is part of the
+// uapi contract, because clients index their own state by it.
+pub(crate) const DRM_CLIENT_CAP_STEREO_3D: u64 = 1;
+pub(crate) const DRM_CLIENT_CAP_UNIVERSAL_PLANES: u64 = 2;
+pub(crate) const DRM_CLIENT_CAP_ATOMIC: u64 = 3;
+
 // ======== format modifiers ========
 
 pub(crate) const DRM_MODE_FB_MODIFIERS: u32 = 0x2;
+
 pub(crate) const DRM_FORMAT_MOD_INVALID: u64 = 0x00ff_ffff_ffff_ffff;
 pub(crate) const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+
+// ======== MODE_CURSOR flags ========
+
+// Linux `DRM_MODE_CURSOR_BO` / `_MOVE` (include/uapi/drm/drm_mode.h).
+/// Install or replace the cursor image (`handle` is meaningful).
+pub(crate) const DRM_MODE_CURSOR_BO: u32 = 0x01;
+/// Move the cursor to `x` / `y`.
+pub(crate) const DRM_MODE_CURSOR_MOVE: u32 = 0x02;
 
 // ======== format FourCCs ========
 

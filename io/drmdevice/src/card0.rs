@@ -182,7 +182,40 @@ impl DrmIoctl for DrmGetCap {
 impl DrmIoctl for DrmSetClientCap {
     const CMD: u32 = iow::<DrmSetClientCap>(DRM_TYPE, 0x0d);
 
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, _cap: &mut Self) -> VfsResult<usize> {
+    fn handle(_dev: &DrmCard, file: &Arc<DrmFile>, cap: &mut Self) -> VfsResult<usize> {
+        // Mirror Linux `drm_setclientcap()`: reject an unknown capability with
+        // EOPNOTSUPP and an out-of-range boolean with EINVAL, then remember what
+        // was granted.
+        //
+        // Answering Ok(0) to everything - which is what this used to do - turns
+        // every "does the driver support X?" probe into a false positive. Clients
+        // legitimately branch on this: a libdrm client that is told `atomic` was
+        // accepted will go on to issue atomic commits.  The granted bits are read
+        // back by `DrmModeAtomic`; see `DrmFile::client_caps` for why the other
+        // two are recorded rather than enforced.
+        //
+        // `STEREO_3D` and `UNIVERSAL_PLANES` are accepted even though nothing here
+        // implements stereoscopy or gated plane enumeration.  Linux's
+        // `drm_setclientcap()` does not ask the driver either: both are per-file
+        // client flags that govern what the client itself may send, so a driver
+        // that answered EOPNOTSUPP would be the one out of spec -- and a client
+        // that probes them before doing anything else would give up.  Only
+        // `ATOMIC` changes what this kernel acts on.
+        match cap.capability {
+            DRM_CLIENT_CAP_STEREO_3D | DRM_CLIENT_CAP_UNIVERSAL_PLANES | DRM_CLIENT_CAP_ATOMIC => {}
+            _ => return Err(VfsError::OperationNotSupported),
+        }
+        if cap.value > 1 {
+            return Err(VfsError::InvalidInput);
+        }
+        // Capability values are small and defined above, so the shift is in
+        // range by construction.
+        let bit = 1u64 << cap.capability;
+        if cap.value == 1 {
+            file.client_caps.fetch_or(bit, Ordering::Relaxed);
+        } else {
+            file.client_caps.fetch_and(!bit, Ordering::Relaxed);
+        }
         Ok(0)
     }
 }
@@ -208,10 +241,13 @@ impl DrmIoctl for DrmModeDirtyFb {
     const CMD: u32 = iowr::<DrmModeDirtyFb>(DRM_TYPE, 0xB1);
 
     fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, dirty: &mut Self) -> VfsResult<usize> {
-        // Linux's drm_mode_dirtyfb_ioctl() rejects an unknown fb_id with
-        // -EINVAL; present_fb is best-effort, so validate before calling it.
+        // Linux's drm_mode_dirtyfb_ioctl() reports an unknown fb_id as -ENOENT
+        // (drm_framebuffer_lookup), and callers distinguish the two: Xorg keeps
+        // its damage tracking enabled only when the generic path answers with
+        // ENOENT rather than EINVAL. present_fb is best-effort, so validate the
+        // identifier before calling it.
         if !dev.fbs.lock().contains_key(&dirty.fb_id) {
-            return Err(VfsError::InvalidInput);
+            return Err(VfsError::NotFound);
         }
         dev.present_fb(dirty.fb_id);
         Ok(0)
@@ -293,6 +329,21 @@ impl DrmIoctl for DrmModeCrtc {
     }
 }
 
+/// The fields of a legacy cursor request that this driver acts on.
+///
+/// `MODE_CURSOR` and `MODE_CURSOR2` differ only by the hotspot offsets, which a
+/// driver with no hardware cursor plane has nothing to apply, so both handlers
+/// reduce to the same request.  Grouping them also keeps `set_cursor` under
+/// clippy's argument-count threshold.
+#[derive(Debug, Clone, Copy)]
+struct CursorRequest {
+    crtc_id: u32,
+    flags: u32,
+    width: u32,
+    height: u32,
+    handle: u32,
+}
+
 struct DumbBuffer {
     width: u32,
     height: u32,
@@ -359,6 +410,19 @@ struct MasterState {
 struct DrmFile {
     masters: Arc<Mutex<MasterState>>,
     binding: Mutex<MasterBinding>,
+    /// Capabilities granted through `DRM_IOCTL_SET_CLIENT_CAP`, as a bitmask
+    /// indexed by the Linux `DRM_CLIENT_CAP_*` value.
+    ///
+    /// Linux keeps this on `drm_file`, i.e. per open file description, and so
+    /// does this driver: two clients of the same card must not share the
+    /// `atomic` / `universal_planes` bits they negotiated independently.
+    ///
+    /// Only `DRM_CLIENT_CAP_ATOMIC` is read back, by `DrmModeAtomic`, which
+    /// answers `EOPNOTSUPP` until the client has negotiated it.  The other
+    /// accepted bits are recorded because clients branch on the answer to the
+    /// setter, not because anything here acts on them: plane enumeration is the
+    /// same with or without `DRM_CLIENT_CAP_UNIVERSAL_PLANES`.
+    client_caps: AtomicU64,
 }
 
 impl Drop for DrmFile {
@@ -539,6 +603,7 @@ impl DeviceFileOps for DrmCard {
                 master: master.clone(),
                 is_master,
             }),
+            client_caps: AtomicU64::new(0),
         });
         if is_master {
             masters.active = Some(ActiveMaster {
@@ -753,6 +818,18 @@ impl DeviceFileOps for DrmCard {
                 let user_ptr = UserPtr::<DrmModeGetBlob>::from(arg);
                 <DrmModeGetBlob as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
+            <DrmModeCursor as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCursor>::from(arg);
+                <DrmModeCursor as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
+            <DrmModeCursor2 as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCursor2>::from(arg);
+                <DrmModeCursor2 as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
+            <DrmModeFbCmd as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeFbCmd>::from(arg);
+                <DrmModeFbCmd as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
             <DrmModeFbCmd2 as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeFbCmd2>::from(arg);
                 <DrmModeFbCmd2 as DrmIoctl>::handle_raw(self, &state, user_ptr)
@@ -936,10 +1013,17 @@ impl DrmIoctl for DrmModeCreateDumb {
     const CMD: u32 = iowr::<DrmModeCreateDumb>(DRM_TYPE, 0xB2);
 
     fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, c: &mut Self) -> VfsResult<usize> {
-        // Only BGRA8888 (32bpp) is supported, so the bpp == 0 / bpp > 64 /
-        // multiple-of-8 checks are subsumed by the bpp != 32 comparison and
-        // bytes_per_pixel is constant.
-        if c.width == 0 || c.height == 0 || c.bpp != 32 || c.flags != 0 {
+        // The backing store is always BGRA8888 (32bpp) and `bytes_per_pixel` is
+        // therefore constant, but 24bpp requests must still be accepted: Linux's
+        // generic dumb-buffer ioctl accepts them, and libdrm-based clients on
+        // the non-atomic path (Xorg's modesetting driver) ask for 24bpp and then
+        // hand that same value back to `ADDFB`. Rejecting it fails their
+        // initialisation before any framebuffer exists.
+        //
+        // `bpp == 0`, `bpp > 64` and the multiple-of-8 rule are still enforced,
+        // because the depth comes from user space and an unknown depth cannot be
+        // described to the scanout device.
+        if c.width == 0 || c.height == 0 || c.flags != 0 || !matches!(c.bpp, 24 | 32) {
             return Err(VfsError::InvalidInput);
         }
         if c.width > 16384 || c.height > 16384 {
@@ -1156,7 +1240,15 @@ impl DrmIoctl for DrmWaitVblank {
 impl DrmIoctl for DrmModeAtomic {
     const CMD: u32 = iowr::<DrmModeAtomic>(DRM_TYPE, 0xBC);
 
-    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, a: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, a: &mut Self) -> VfsResult<usize> {
+        // This is the consumer of the bitmap SET_CLIENT_CAP maintains: a client
+        // that never negotiated `DRM_CLIENT_CAP_ATOMIC` is told the atomic path
+        // is unavailable so it falls back to the legacy one, instead of being
+        // handed an interface it did not ask for.
+        if file.client_caps.load(Ordering::Relaxed) & (1u64 << DRM_CLIENT_CAP_ATOMIC) == 0 {
+            return Err(VfsError::OperationNotSupported);
+        }
+
         let known = DRM_MODE_ATOMIC_TEST_ONLY
             | DRM_MODE_ATOMIC_NONBLOCK
             | DRM_MODE_ATOMIC_ALLOW_MODESET
@@ -1272,6 +1364,73 @@ impl DrmIoctl for DrmModeGetBlob {
     }
 }
 
+impl DrmIoctl for DrmModeCursor {
+    const CMD: u32 = iowr::<DrmModeCursor>(DRM_TYPE, 0xA3);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, cursor: &mut Self) -> VfsResult<usize> {
+        dev.set_cursor(CursorRequest {
+            crtc_id: cursor.crtc_id,
+            flags: cursor.flags,
+            width: cursor.width,
+            height: cursor.height,
+            handle: cursor.handle,
+        })
+    }
+}
+
+impl DrmIoctl for DrmModeCursor2 {
+    const CMD: u32 = iowr::<DrmModeCursor2>(DRM_TYPE, 0xBB);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, cursor: &mut Self) -> VfsResult<usize> {
+        // The hotspot is only meaningful to a hardware cursor plane, which this
+        // driver does not expose; validating it would reject requests the device
+        // is happy to treat as a plain move.
+        dev.set_cursor(CursorRequest {
+            crtc_id: cursor.crtc_id,
+            flags: cursor.flags,
+            width: cursor.width,
+            height: cursor.height,
+            handle: cursor.handle,
+        })
+    }
+}
+
+impl DrmIoctl for DrmModeFbCmd {
+    const CMD: u32 = iowr::<DrmModeFbCmd>(DRM_TYPE, 0xAE);
+
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
+        // Legacy ADDFB. Translate the request into the modern form and reuse
+        // that implementation, so the two entry points cannot drift apart.
+        //
+        // bpp 24 is accepted on purpose: `DrmModeCreateDumb` backs every request
+        // with a 32bpp BGRA buffer and reports `pitch = width * 4`, and callers
+        // hand that same bpp straight back here.
+        //
+        // Unlike ADDFB2 there is no pixel_format field; the legacy ABI implies
+        // XRGB8888 for depth 24, which is what the driver implements.
+        // ADDFB always registers XRGB8888 below, so only accept the depths that
+        // format actually describes: 24 (RGB) and 32 (XRGB with a spare byte).
+        if f.handle == 0 || !matches!(f.bpp, 24 | 32) || !matches!(f.depth, 24 | 32) {
+            return Err(VfsError::InvalidInput);
+        }
+        let mut modern = DrmModeFbCmd2 {
+            fb_id: f.fb_id,
+            width: f.width,
+            height: f.height,
+            pixel_format: DRM_FORMAT_XRGB8888,
+            flags: 0,
+            handles: [f.handle, 0, 0, 0],
+            pitches: [f.pitch, 0, 0, 0],
+            offsets: [0; 4],
+            abi_pad: 0,
+            modifier: [0; 4],
+        };
+        <DrmModeFbCmd2 as DrmIoctl>::handle(dev, file, &mut modern)?;
+        f.fb_id = modern.fb_id;
+        Ok(0)
+    }
+}
+
 impl DrmIoctl for DrmModeFbCmd2 {
     const CMD: u32 = iowr::<DrmModeFbCmd2>(DRM_TYPE, 0xB8);
 
@@ -1329,6 +1488,51 @@ impl DrmIoctl for DrmModeFbCmd2 {
 }
 
 impl DrmCard {
+    /// Answer a legacy `MODE_CURSOR` / `MODE_CURSOR2` request.
+    ///
+    /// The bound display exposes a single primary plane, so there is no hardware
+    /// cursor to program.  A bare move is answered with success -- libdrm-based
+    /// clients such as Xorg's modesetting driver issue it once the CRTC is up and
+    /// treat a failure as an initialisation error -- but a request that installs
+    /// an image is refused with `EOPNOTSUPP`.  Accepting the image would tell the
+    /// client its hardware cursor works, and it would then stop drawing the
+    /// pointer itself while nothing appeared on screen.
+    ///
+    /// Validation otherwise matches Linux's `drm_mode_cursor_common()`: the CRTC
+    /// must exist, and a request that carries a handle must reference a live dumb
+    /// buffer of non-zero size.  Position and hotspot are accepted and dropped,
+    /// which is the same observable behaviour as a driver whose cursor plane is
+    /// disabled.
+    fn set_cursor(&self, request: CursorRequest) -> VfsResult<usize> {
+        if request.crtc_id != CRTC_ID {
+            return Err(VfsError::InvalidInput);
+        }
+        if request.flags & !(DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE) != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        // A BO request carries the cursor image.  Validate it first, so a
+        // malformed request is reported as such: the handle must name a buffer
+        // this device allocated, and width/height are the only size the request
+        // provides.  A BO with `handle == 0` hides the cursor and carries no
+        // image, which Linux accepts; MOVE only relocates, so its width/height
+        // are ignored.
+        if request.flags & DRM_MODE_CURSOR_BO != 0 && request.handle != 0 {
+            if request.width == 0
+                || request.height == 0
+                || !self.dumbs.lock().contains_key(&request.handle)
+            {
+                return Err(VfsError::InvalidInput);
+            }
+            // The image itself cannot be shown: there is no cursor plane, so
+            // answering Ok would tell the client its hardware cursor is installed
+            // and it would stop drawing the pointer while nothing appeared on
+            // screen.  Refusing is what keeps the software cursor, and it is the
+            // same answer this driver gave before MODE_CURSOR existed.
+            return Err(VfsError::OperationNotSupported);
+        }
+        Ok(0)
+    }
+
     fn present_fb(&self, fb_id: u32) {
         let (resource_id, width, height) = match self.fbs.lock().get(&fb_id) {
             Some(fb) => (fb.resource_id, fb.width, fb.height),

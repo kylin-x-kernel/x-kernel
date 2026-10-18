@@ -1,0 +1,9 @@
+[package]
+name = "drm-mode-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "mode.rs"
