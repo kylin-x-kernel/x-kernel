@@ -355,6 +355,7 @@ name = "block"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
+ "device-res",
  "driver_base",
  "kdevice",
  "kerrno",
@@ -1192,6 +1193,7 @@ name = "device-res-xkernel"
 version = "0.3.0-dev"
 dependencies = [
  "device-res",
+ "kalloc",
  "kdma",
  "khal",
  "kirq",

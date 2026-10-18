@@ -5,44 +5,31 @@
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-extern crate alloc;
-use alloc::vec;
 
 // Mock AHCI HAL for testing
 struct MockAhciHal;
 
-impl AhciHal for MockAhciHal {
-    unsafe fn read_ptr(&self, offset: usize) -> u32 {
-        // Mock implementation - return safe test values
-        match offset {
-            0x00 => 0x12345678, // Version register mock
-            0x04 => 0x00000003, // Global capabilities mock (2 ports)
-            _ => 0,
-        }
+impl AhciControllerHal for MockAhciHal {
+    fn virt_to_phys(address: usize) -> usize {
+        address
     }
 
-    unsafe fn write_ptr(&self, _offset: usize, _value: u32) {
-        // Mock implementation - no-op for tests
+    fn current_ms() -> u64 {
+        0
     }
 
-    fn timer_config(&self) -> (u64, u64) {
-        (1000000, 1000) // Mock timer config (1MHz, 1ms)
-    }
+    fn flush_dcache() {}
+}
 
-    unsafe fn allocate_coherent(&self, _size: usize, _align: usize) -> (usize, usize) {
-        // Mock allocation - return fake but valid addresses for testing
-        let vaddr = 0x1000_0000;
-        let paddr = 0x2000_0000;
-        (vaddr, paddr)
-    }
-
-    unsafe fn deallocate_coherent(&self, _vaddr: usize, _paddr: usize, _size: usize) {
-        // Mock deallocation - no-op for tests
-    }
+// SAFETY: this legacy fixture makes no coherent DMA claim and cannot admit
+// a hardware controller. Its original validation tables remain below.
+unsafe impl AhciHal for MockAhciHal {
+    const DMA_COHERENT: bool = false;
 }
 
 #[def_test]
 fn test_ahci_driver_interface_validation() {
+    assert!(!MockAhciHal::DMA_COHERENT);
     // Test input validation logic that would be present in a real AHCI driver
 
     // Test various error conditions that the AHCI driver should handle:
@@ -105,7 +92,7 @@ fn test_ahci_driver_boundary_conditions() {
     }
 
     fn mock_ahci_operation(buf_size: usize, buf_aligned: bool, block_in_range: bool) -> MockResult {
-        if buf_size % 512 != 0 || !buf_aligned {
+        if !buf_size.is_multiple_of(512) || !buf_aligned {
             return MockResult::InvalidInput;
         }
         if !block_in_range {

@@ -29,7 +29,7 @@ impl DeviceDriver for BcmSdhciDriver {
     }
 
     fn probe_device(&self, device: Arc<DeviceObject>) -> driver_base::DriverResult<()> {
-        match block::bcm2835sdhci::SDHCIDriver::try_new() {
+        match block::bcm2835sdhci::SDHCIDriver::new(crate::resource::resource_provider()) {
             Ok(dev) => {
                 let (index, first_minor) = super::allocate_mmc_disk()?;
                 let name = format!("{}{}", dev.name(), index);

@@ -6,7 +6,7 @@
 //!
 //! The OS-agnostic resource model in [`device_res`] describes *what* a driver
 //! needs; this crate binds those operations to X-Kernel's MMIO mapping, IRQ
-//! manager, coherent DMA allocator, and monotonic clock. For IRQs, this crate is the adapter
+//! manager, CPU and DMA allocators, and monotonic clock. For IRQs, this crate is the adapter
 //! between `device_res` vocabulary and `kirq`; the IRQ core does not depend on
 //! devres.
 
@@ -16,6 +16,7 @@ extern crate alloc;
 
 mod dma;
 mod irq;
+mod memory;
 mod mmio;
 mod time;
 

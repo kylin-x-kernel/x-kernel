@@ -15,6 +15,7 @@ needs onto the X-Kernel kernel subsystems:
 
 - `device_res::MmioOp` -> `memspace::iomap_device` / `memspace::iounmap`
 - `device_res::DmaOp` -> the `kdma` coherent / streaming DMA API
+- `device_res::CpuMemoryOp` -> ordinary fallible `kalloc` allocation
 - `device_res::IrqOp` -> the `kirq` shared hardirq and MSI-X API
 - `device_res::TimeOp` -> `khal::time::monotonic_time`
 
@@ -43,6 +44,7 @@ drivers/adapters/xkernel/device-res/src/
 ├── lib.rs   # the XKernelResourceProvider type and module boundaries
 ├── mmio.rs  # MmioOp -> memspace
 ├── dma.rs   # DmaOp -> kdma
+├── memory.rs # CpuMemoryOp -> ordinary kalloc storage
 ├── irq.rs   # IrqOp -> kirq
 └── time.rs  # TimeOp -> khal::time
 ```
@@ -92,8 +94,20 @@ parallel API that bypasses the provider contract.
 - `device-res` defines the resource capabilities drivers need and does not
   depend on X-Kernel kernel subsystems.
 - `device-res-xkernel` implements those capabilities and depends on
-  `kirq`, `memspace`, and `kdma`, but provides no driver-facing helpers and
+  `kirq`, `memspace`, `kdma`, and `kalloc`, but provides no driver-facing helpers and
   does not decide when the provider is installed.
 - `kdriver` owns device discovery, matching, probe/remove, provider
   custody, and the `DriverResult` wrapper; it does not implement provider
   traits.
+
+## Fallible ordinary CPU memory
+
+The `CpuMemoryOp` adapter calls the inherent
+`kalloc::global_allocator().alloc(Layout)` method and propagates exhaustion as
+`ResError::NoMemory`. It deliberately bypasses the `GlobalAlloc` implementation,
+whose OOM policy is fatal. Matching release uses the same allocator, pointer
+and layout. This host adapter is the layer allowed to depend on `kalloc`;
+portable device contracts retain only `Layout` and `CpuMemoryOp`.
+
+No `kdma` call, page-attribute conversion or device-sharing hook occurs for
+CPU storage. The existing coherent/streaming DMA adapters are unchanged.

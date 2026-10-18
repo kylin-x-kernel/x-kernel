@@ -5,8 +5,6 @@
 use unittest::def_test;
 
 use super::*;
-extern crate alloc;
-use alloc::vec;
 
 #[def_test]
 fn test_bcm2835_sdhci_interface_validation() {
@@ -15,9 +13,6 @@ fn test_bcm2835_sdhci_interface_validation() {
     #[derive(Debug, PartialEq)]
     enum SdhciError {
         InvalidCommand,
-        CardNotPresent,
-        TimeoutError,
-        CrcError,
         InvalidArgument,
     }
 
@@ -33,7 +28,7 @@ fn test_bcm2835_sdhci_interface_validation() {
     fn validate_sdhci_command(
         cmd: u8,
         arg: u32,
-        has_data: bool,
+        _has_data: bool,
         state: SdhciState,
     ) -> Result<(), SdhciError> {
         // Check if controller is in valid state
@@ -54,18 +49,10 @@ fn test_bcm2835_sdhci_interface_validation() {
 
         // Some commands should not have arguments
         match cmd {
-            0 => {
-                // CMD0 (GO_IDLE_STATE) - should have arg=0
-                if arg != 0 {
-                    return Err(SdhciError::InvalidArgument);
-                }
-            }
-            8 => {
-                // CMD8 (SEND_IF_COND) - has specific arg format
-                if (arg & 0xFFFF_F000) != 0 {
-                    return Err(SdhciError::InvalidArgument);
-                }
-            }
+            // CMD0 (GO_IDLE_STATE) should have arg=0.
+            0 if arg != 0 => return Err(SdhciError::InvalidArgument),
+            // CMD8 (SEND_IF_COND) has a specific arg format.
+            8 if (arg & 0xFFFF_F000) != 0 => return Err(SdhciError::InvalidArgument),
             _ => {} // Other commands - arg validation varies
         }
 
@@ -121,7 +108,7 @@ fn test_bcm2835_sdhci_timing_and_boundaries() {
         const MIN_FREQ: u32 = 400_000; // 400 kHz minimum for SD initialization
         const MAX_FREQ: u32 = 50_000_000; // 50 MHz maximum for standard SD
 
-        freq_hz >= MIN_FREQ && freq_hz <= MAX_FREQ
+        (MIN_FREQ..=MAX_FREQ).contains(&freq_hz)
     }
 
     // Test valid frequencies
@@ -172,7 +159,7 @@ fn test_bcm2835_sdhci_timing_and_boundaries() {
             return Err(DriverError::InvalidInput);
         }
 
-        if size % BLOCK_SIZE != 0 {
+        if !size.is_multiple_of(BLOCK_SIZE) {
             return Err(DriverError::InvalidInput);
         }
 

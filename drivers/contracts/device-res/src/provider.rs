@@ -19,11 +19,13 @@ use crate::{
     time::TimeOp,
 };
 
-/// Complete capability provider for ordinary device drivers.
+/// Combined MMIO, DMA, IRQ and time capabilities for device drivers.
 ///
 /// Host kernels may pass a concrete type implementing this trait into a driver
 /// framework. The individual operation traits remain split so framework code
 /// can require only the capability it is about to use.
+/// Ordinary CPU storage is requested separately through [`crate::CpuMemoryOp`];
+/// a DMA provider does not imply CPU allocation capability.
 pub trait ResourceProvider: MmioOp + DmaOp + IrqOp + TimeOp {}
 
 impl<T: ?Sized> ResourceProvider for T where T: MmioOp + DmaOp + IrqOp + TimeOp {}

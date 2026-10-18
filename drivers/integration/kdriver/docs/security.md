@@ -362,22 +362,29 @@ Callers:
 
 ### 6. AHCI Driver Probe
 
-Location: `src/driver_registry/block/ahci.rs:27,61`
+Location: `src/driver_registry/block/ahci.rs`
 
 ```rust
-// line 27: DMA ordering barrier (dbar 0 on LoongArch64, no-op elsewhere)
+// Ordering only: not data-cache clean/invalidate.
 karch::dma_read_barrier();
 
-// line 61: construct AHCI driver from raw MMIO vaddr
-let ahci = match unsafe { block::ahci::AhciDriver::<AhciHalImpl>::new(vaddr) } { ... };
+// Constructor first checks the HAL's explicit coherent-DMA capability.
+let ahci = match unsafe {
+    block::ahci::AhciDriver::<AhciHalImpl>::new(vaddr, resource::resource_provider())
+} { ... };
 ```
 
 Invariants:
 
 - `vaddr` comes from `iomap_first_mmio(device, "ahci")`, with its lifetime managed by devres.
 - The pointer returned by `iomap_first_mmio` remains valid while `device` is alive.
-- `karch::dma_read_barrier()` is a safe wrapper that executes `dbar 0` on LoongArch64
-  for AHCI DMA coherency and is a no-op on cache-coherent architectures.
+- `karch::dma_read_barrier()` only orders accesses; it does not establish cache
+  coherency for data or command memory. The SDK builds PRDT entries directly
+  from physical addresses and has no data-buffer cache-sync hook.
+- `AhciHalImpl` implements the unsafe `AhciHal` admission contract with
+  `DMA_COHERENT = cfg!(target_arch = "x86_64")`. All other hosts are rejected
+  before SDK initialization. Non-coherent AHCI requires a separate SDK/HAL
+  DMA/cache protocol and must not be enabled by merely setting the flag.
 
 Safety rationale:
 

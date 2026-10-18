@@ -6,11 +6,11 @@
 //!
 //! This crate describes the hardware resources a driver consumes (MMIO
 //! regions, I/O port ranges, interrupts, coherent/streaming DMA buffers, and
-//! small execution capabilities such as a monotonic clock)
+//! ordinary aligned CPU storage and small capabilities such as a monotonic clock)
 //! without binding to any particular kernel. A host kernel provides capability
-//! implementations — [`MmioOp`], [`DmaOp`], [`IrqOp`], [`TimeOp`] — to its
+//! implementations — [`MmioOp`], [`DmaOp`], [`CpuMemoryOp`], [`IrqOp`], [`TimeOp`] — to its
 //! driver framework; framework code then acquires resources through RAII
-//! handles ([`Io`], [`Irq`], [`DmaCoherent`]) or the device-managed `devm_*`
+//! handles ([`Io`], [`Irq`], [`DmaCoherent`], [`CpuBuffer`]) or the device-managed `devm_*`
 //! helpers.
 //!
 //! Keeping the OS-semantic operations (map/unmap, request/release IRQ,
@@ -23,6 +23,7 @@ extern crate alloc;
 
 mod dma;
 mod irq;
+mod memory;
 mod mmio;
 mod provider;
 mod time;
@@ -83,6 +84,7 @@ pub trait DeviceResource {
 
 pub use dma::*;
 pub use irq::*;
+pub use memory::*;
 pub use mmio::*;
 pub use provider::*;
 pub use time::*;

@@ -8,7 +8,8 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 `device-res` provides the OS-neutral device resource description model and
 provider contract. It is the single entry point through which the driver
 subsystem expresses "which kernel capabilities a driver needs", covering
-MMIO mapping, I/O ports, interrupts, DMA buffers, and the monotonic clock,
+MMIO mapping, I/O ports, interrupts, DMA buffers, ordinary aligned CPU storage,
+and the monotonic clock,
 and it decouples those semantics from concrete kernel implementations.
 
 Upstream subsystems that depend on this module include:
@@ -21,7 +22,7 @@ Upstream subsystems that depend on this module include:
 ## Non-Responsibilities
 
 - No concrete kernel behavior behind the provider traits: `MmioOp` /
-  `IrqOp` / `DmaOp` / `TimeOp` implementations belong to the host kernel's
+  `IrqOp` / `DmaOp` / `CpuMemoryOp` / `TimeOp` implementations belong to the host kernel's
   provider crate (in x-kernel, `device-res-xkernel`, backed by `memspace`,
   `kirq`, and `kdma`).
 - No global provider state or provider selection: the driver framework
@@ -61,6 +62,7 @@ drivers/contracts/device-res/
 │   ├── dma.rs
 │   ├── irq.rs
 │   ├── mmio.rs
+│   ├── memory.rs
 │   ├── provider.rs
 │   └── time.rs
 ├── Cargo.toml
@@ -110,7 +112,8 @@ drivers/contracts/device-res/
 |------|------|
 | `ResourceDesc` / `ResourceSet` | Describes one device's hardware resources (MMIO, I/O ports, interrupts, DMA) |
 | `MmioOp` / `IrqOp` / `DmaOp` / `TimeOp` traits | The capability backends a host kernel implements (map/unmap, request/release IRQ, alloc/free DMA, alloc/free MSI-X, monotonic time) |
-| `ResourceProvider` trait | Combined `MmioOp + IrqOp + DmaOp + TimeOp` trait the driver framework holds for the full capability set |
+| `ResourceProvider` trait | Combined `MmioOp + IrqOp + DmaOp + TimeOp` trait; CPU storage is requested separately |
+| `CpuMemoryOp` / `CpuBuffer` | Fallible ordinary aligned memory with an initialized exclusive byte view and paired release; no DMA mapping |
 | `Io` | RAII handle over an MMIO mapping, with register read/write methods using acquire/release fences |
 | `Irq` | RAII handle over an interrupt registration, released automatically on drop |
 | `DmaCoherent` | RAII handle over a coherent DMA buffer, freed automatically on drop |
@@ -192,8 +195,9 @@ devm_iomap_with_provider(provider, device, region, name)
 ## Concurrency Model
 
 - **Explicit provider**: the driver framework holds the provider; resource
-  handles store only `&'static dyn ...` references and add no shared
-  mutable state.
+  handles remember their creating provider and add no shared mutable state.
+  `CpuBuffer<'a>` borrows its provider for the local allocation lifetime; DMA,
+  MMIO and IRQ handles retain their existing static-provider requirement.
 - **RAII handles**: `Io`, `Irq`, and `DmaCoherent` are not `Sync` (they
   hold `NonNull` internally) and cannot be shared across threads. They may
   move between threads (`Send`), but only one thread holds a handle at a
@@ -277,3 +281,19 @@ allocation cookies. Those are internal state of the host IRQ core and its
 backends. In x-kernel this provider is implemented by
 `device-res-xkernel`, which forwards to `kirq::alloc_msix()`; `device-res`
 itself stays OS-neutral and does not depend on `kirq`.
+
+### Ordinary CPU storage is separate from DMA
+
+`CpuMemoryOp` supplies a fallible allocation for a nonempty `Layout` and
+releases its original pointer/layout. It is an unsafe implementation contract:
+providers must return unique live storage with the requested alignment.
+`CpuBuffer<'a>` retains that provider borrow, initializes all bytes, lends one
+exclusive byte slice, and releases exactly once. It adds no test-only storage
+variants or accounting fields. Tests inject providers through the same API.
+
+CPU staging neither needs nor creates a device bus address, DMA mapping,
+uncached mapping, or platform-sharing operation. Backends still own any actual
+DMA/cache protocol. `ResourceProvider` keeps its existing four capabilities;
+drivers that need CPU staging request `CpuMemoryOp` explicitly. Host adapters
+may use their ordinary fallible allocator without coupling portable drivers to
+that allocator.

@@ -1652,6 +1652,9 @@ impl Ext4DirSink for KvfsDirSink<'_, '_> {
     }
 }
 
+#[cfg(unittest)]
+mod read_tests;
+
 #[unittest::mod_test]
 mod tests {
     use alloc::vec::Vec;

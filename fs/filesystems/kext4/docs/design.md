@@ -87,6 +87,34 @@ Running、Committing、Checkpoint 和 Finished phase；FIFO 队列只保存该�
 属于它的 Checkpoint phase，不复制 commit payload，也不保存指回另一 coordinator 的引用。
 普通 mutation 不负责同步完成 home-block checkpoint。
 
+## 整块文件读取与缓存提交
+
+`Ext4SbInfo::read_inode_bytes` 按映射 run 读取文件。只有 initialized 映射、文件偏移位于
+filesystem block 边界且本段长度为整块倍数时，才把调用者已有的目标切片交给
+`FilesystemDevice::read_blocks`；省去该段临时零初始化 `Vec` 的分配和一次回拷。
+目标切片可以从任意字节地址开始；`BlockDeviceOperations` 在 trait 本身约定接受任意起点，
+由后端与既有 DMA 能力层解决设备地址对齐、连续性、映射及缓存维护要求。
+该契约也覆盖直接 trait 对象和 Arc 调用，不依赖 canonical BlockDevice 外层再包一层中转。
+ext4 不保存设备对齐常量或驱动清单，也不为设备地址要求额外创建回退缓冲。
+`FilesystemDevice` 负责 filesystem/device block 换算和长度、范围校验。
+部分块仍需 staging 来提取文件范围，与设备地址要求无关；驱动的 DMA/bounce buffer 所有权
+协议不变，这不是端到端零拷贝。
+
+部分首尾块继续用 staging buffer；hole 和 unwritten extent 仍只填零，返回长度仍受 inode
+EOF 限制。`read_at` 返回错误时目标缓冲可能已被后端修改，不能把其前缀当作成功读取。
+KVFS/PageCache 单页填充只有在 `read_folio` 成功后才能置 uptodate；ext4 批量 readahead
+只有在整段 backing read 成功后才调用 `complete_folio`。失败后的需求重试必须完整初始化
+目标页，才可供 buffered read 或文件映射使用。
+
+`file/read_tests.rs` 使用 1/2/4 KiB filesystem block 与 512 B/4 KiB device block 组合，覆盖
+对齐直读、非对齐切片回退、短缓冲、hole、unwritten 和非零 17 字节 EOF 尾块；mock 同样拒绝
+非 4 字节对齐的底层传输，但置于生产块适配器之后；非对齐调用仍须成功且内容正确，
+设备中转不得把失败块的暂存内容复制回调用者。`vfs/read_tests.rs` 让真实
+ext4 backing read 修改 17 字节前缀后持续返回 I/O 错误，验证单页保持非 uptodate、批量
+预读不发布前缀、buffered read 不复制失败内容，以及完整重试后的数据和 EOF 补零。可写 journal
+fixture 另验证失败读后的部分 buffered write：读错误持续时不能推进写入；成功重试必须先完整
+读页，随后只修改指定字节，读回保留其余数据，不能把失败前缀变成有效的 dirty 数据。
+
 ## 调用约束 / 执行上下文
 
 KExt4 核心 API 可能执行块设备 I/O、内存分配、JBD2 事务、checkpoint 和设备 flush，

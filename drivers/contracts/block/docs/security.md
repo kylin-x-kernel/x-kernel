@@ -12,8 +12,8 @@ own.
 Core regression fixtures live in `ut-tests/lib.rs`; backend fixtures live
 in the corresponding `ut-tests/*.rs` files and retain the backend scope
 above. The static-ramdisk fixture's allocation and slice construction retain
-their local SAFETY contracts. AHCI, BCM2835 SDHCI and SDMMC test sources are
-currently unregistered, like their disabled backend modules.
+their local SAFETY contracts. Kernel UT compiles AHCI and BCM2835 SDHCI with
+CPU controller fixtures; production SDKs/probes and SDMMC remain disabled.
 
 ## Trust Boundaries
 
@@ -41,6 +41,10 @@ format validation belongs to the filesystem consuming the device.
   the claim token owns release.
 - Every I/O buffer length is a multiple of the logical block size, and the
   complete sector extent lies within current capacity.
+- Buffer start addresses may be arbitrary. Device address, contiguous-memory,
+  DMA mapping and cache-maintenance requirements belong to the backend and its
+  provider, including when a caller bypasses the canonical view with a direct
+  operations trait object.
 - Block/sector conversions and offset/length multiplication and addition use
   checked arithmetic.
 - The operations object, `Gendisk`, and `BlockDevice` are all `Send + Sync`.
@@ -60,6 +64,53 @@ format validation belongs to the filesystem consuming the device.
 `drivers/contracts/block/src/lib.rs` contains no unsafe blocks. The MMIO/DMA
 safety boundaries of concrete hardware backends belong to each backend's own
 documentation.
+
+`word_io` uses `device_res::CpuBuffer` for initialized ordinary CPU storage.
+Its unsafe `CpuMemoryOp` implementation contract supplies unique storage of the
+requested length/alignment; the RAII handle releases through its original
+provider after every byte borrow ends. The block adapter contains no unsafe
+memory conversion and has no alternate test-only storage model. Test providers
+inject allocation failure and observe release at the same capability boundary.
+CPU alignment alone does not certify a device's DMA/cache handling; staging
+creates no DMA mapping, bus address, uncached mapping or platform-sharing hook.
+The backend must establish its DMA/cache protocol before submission for both
+aligned and staged buffers. The former statement of backend responsibility
+must not be interpreted as evidence that a legacy HAL supplies cache sync.
+
+The AHCI SDK translates data pointers directly into PRDT physical addresses;
+the host `flush_dcache` callback is only `dma_read_barrier`, without data-range
+clean/invalidate. The unsafe `AhciHal` contract now makes a coherent-DMA claim
+explicit. A false `DMA_COHERENT` rejects initialization before SDK/MMIO/DMA
+entry, including command initialization; the host reports true only on x86_64.
+Its new CPU fixture tests make SDK entry on a non-coherent HAL fail
+deterministically. Non-coherent AHCI support has not been implemented. Merely
+making unaligned scratch uncached would leave aligned data and SDK command
+allocations unprotected and is deliberately not treated as a fix.
+
+BCM's pinned SDK moves data between the CPU word slice and the MMIO DATA FIFO.
+For that PIO path, device DMA never accesses ordinary CPU scratch. Its cache
+attributes therefore do not require coherent DMA allocation.
+
+The adapter validates geometry and the complete range before I/O. One owned
+buffer, bounded by 64 KiB or one device block, is allocated fallibly before a
+device lock and is reclaimed on every return path. Already aligned requests
+allocate no buffer. Allocation failure returns `NoMemory` without invoking the
+device. Production allocation uses the fallible CPU-memory capability rather
+than the host GlobalAlloc OOM policy. Failed chunks are never guessed to be
+alignment errors or retried.
+Completed chunks may have side effects, so the adapter supplies no rollback or
+failure-atomicity guarantee. Disabled legacy backends require separate dependency
+and hardware validation before re-enablement.
+
+Under `cfg(unittest)`, the actual BCM adapter is compiled with a CPU controller
+fixture. Its `align_to[_mut]::<u32>` views rely on word_io's four-byte alignment,
+initialized owned/borrowed storage and whole-sector lengths. Runtime guards
+reject prefix/suffix residues and incompatible SDK block geometry. Tests cover
+unaligned multi-sector I/O, direct aligned borrowing, failure isolation, release
+and all error mappings. The fixture replaces only the controller, not the
+adapter's unsafe views. It supplies no MMIO/DMA/hardware evidence; production
+SDK/probe paths stay disabled. The explicit remaining checks are listed in
+[legacy-backend-checklist.md](legacy-backend-checklist.md).
 
 ## Failure Handling
 
@@ -85,7 +136,9 @@ before raising terminal notification.
 | Identity/range conflict | `AlreadyExists`; no partial disk is published |
 | Invalid logical block size or initial sector capacity | `InvalidInput`; no partial object is constructed |
 | Existing exclusive holder | `ResourceBusy`; no second holder is created |
-| Invalid, unaligned, or out-of-range I/O | `InvalidInput`; backend not called |
+| Invalid length, block geometry, or range | `InvalidInput`; backend not called |
+| Unaligned buffer address | Backend adapts it; address alone is not an error |
+| Bounce allocation failure | `NoMemory`; no device I/O |
 | Backend I/O/flush failure | `DriverError` propagated unchanged |
 | Write to a read-only disk | `ReadOnly`; KVFS maps it to Linux `EPERM` |
 | `BLKROSET 0` on an inherently read-only disk | Success; administrative state is cleared, inherent read-only remains effective |

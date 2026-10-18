@@ -3,10 +3,10 @@
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs`
-(`XKernelResourceProvider`), `src/mmio.rs`, `src/dma.rs`, `src/irq.rs`,
-and `src/time.rs` — the five provider-trait adapters. No modules are
+(`XKernelResourceProvider`), `src/mmio.rs`, `src/dma.rs`, `src/memory.rs`,
+`src/irq.rs`, and `src/time.rs`. No modules are
 excluded; the crate adds no state of its own and forwards to `memspace`
-/ `kirq` / `kdma`, whose own security documents cover those subsystems.
+/ `kirq` / `kdma` / `kalloc`, whose own security documents cover those subsystems.
 
 
 ## Trust Model
@@ -95,3 +95,15 @@ Invariants:
   `ResError::Unsupported`.
 - MSI-X is implemented on the x86_64 backend only; other architectures
   return `ResError::Unsupported`.
+
+## Ordinary CPU allocation
+
+The unsafe `CpuMemoryOp` implementation relies on the ordinary allocator's
+unique allocation, `Layout` alignment and internal synchronization. Its
+nonempty requests use the inherent fallible allocation entry, and its release
+requires the original live pointer/layout with no remaining borrows. The safe
+`CpuBuffer` owner enforces the pairing. This path does not create DMA resources
+or change mapping flags; drivers must separately perform any DMA/cache work.
+Tests exercise this host path at small, bounded-staging and larger-alignment
+sizes. Exhaustion is injected at the capability boundary rather than forcing
+the kernel out of memory.

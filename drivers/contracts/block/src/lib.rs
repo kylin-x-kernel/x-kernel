@@ -17,6 +17,7 @@ extern crate alloc;
 mod backing_dev;
 pub mod completion;
 mod ioctl;
+pub mod word_io;
 
 use alloc::{
     boxed::Box,
@@ -36,8 +37,18 @@ use kerrno::{KError, KResult};
 use klazy::Lazy;
 use ksync::Mutex;
 
-// #[cfg(feature = "bcm2835-sdhci")]
-// pub mod bcm2835sdhci;
+// Compile the actual adapter in kernel UT without enabling the legacy SDK or
+// probing hardware. Only the controller import is replaced by a test fixture.
+// Production re-enablement must extend this one predicate, not add a module.
+#[cfg(unittest)]
+pub mod bcm2835sdhci;
+unittest::path_mod_test!(mod bcm_controller_fixture, "../ut-tests/bcm_controller_fixture.rs");
+
+// Keep the production SDK disabled; kernel UT compiles this same adapter with
+// a CPU controller to check that non-coherent HALs never enter the SDK.
+#[cfg(unittest)]
+pub mod ahci;
+unittest::path_mod_test!(mod ahci_controller_fixture, "../ut-tests/ahci_controller_fixture.rs");
 
 #[cfg(feature = "ramdisk")]
 pub mod ramdisk;
@@ -50,8 +61,6 @@ pub mod ramdisk_image;
 
 mod queue;
 
-// #[cfg(feature = "ahci")]
-// pub mod ahci;
 // #[cfg(feature = "sdmmc")]
 // pub mod sdmmc;
 
@@ -105,12 +114,27 @@ pub trait BlockDeviceOperations: Send + Sync {
     ///
     /// The size of the buffer may exceed the block size, in which case multiple
     /// contiguous blocks will be read.
+    ///
+    /// The buffer may start at any byte address. Its length must still be a
+    /// multiple of the logical block size and the complete range must fit the
+    /// device. The backend and its DMA provider own any address alignment,
+    /// contiguous-memory, DMA mapping and cache-maintenance requirements; a
+    /// restricted backend must adapt the buffer rather than reject its address.
+    /// This applies to direct trait calls as well as `Arc` and `BlockDevice`
+    /// forwarding. An error may leave the destination partially modified;
+    /// successful-prefix or failure-atomic semantics are not implied.
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult;
 
     /// Writes blocked data to the given block.
     ///
     /// The size of the buffer may exceed the block size, in which case multiple
     /// contiguous blocks will be written.
+    ///
+    /// The buffer may start at any byte address. Length and device-range
+    /// requirements remain in force. The backend and its DMA provider must
+    /// satisfy device alignment, contiguous-memory and cache-maintenance
+    /// requirements, including for direct trait, `Arc` and `BlockDevice` calls.
+    /// Errors propagate without promising that no media blocks were changed.
     fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult;
 
     /// Flushes the device to write all pending data to the storage.
@@ -552,9 +576,13 @@ impl BlockDevice {
 
     /// Reads one or more contiguous logical blocks from this device view.
     ///
+    /// Accepts any buffer start address under the backend's
+    /// [`BlockDeviceOperations::read_block`] contract. This forwarding layer
+    /// validates length and range; it does not own a second bounce buffer.
+    ///
     /// # Errors
     ///
-    /// Returns [`DriverError::InvalidInput`] for an unaligned or out-of-range
+    /// Returns [`DriverError::InvalidInput`] for a non-block-sized or out-of-range
     /// request. Backend failures are propagated unchanged.
     pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         let backend_block = self.backend_block(block_id, buf.len())?;
@@ -563,10 +591,13 @@ impl BlockDevice {
 
     /// Writes one or more contiguous logical blocks to this device view.
     ///
+    /// Accepts any buffer start address under the backend's
+    /// [`BlockDeviceOperations::write_block`] contract.
+    ///
     /// # Errors
     ///
     /// Returns [`DriverError::ReadOnly`] when writes are prohibited and
-    /// [`DriverError::InvalidInput`] for an unaligned or out-of-range request.
+    /// [`DriverError::InvalidInput`] for a non-block-sized or out-of-range request.
     /// Backend failures are propagated unchanged.
     pub fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
         if self.is_read_only() {

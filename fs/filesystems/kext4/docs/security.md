@@ -39,6 +39,24 @@ KExt4 的 KVFS operation 实现信任 KVFS 已经提供内核拥有的 path name
 经检查，本 crate 使用 `#![forbid(unsafe_code)]`，不直接访问 MMIO/PIO，不管理 DMA
 所有权，不使用 FFI、inline assembly 或架构专有裸接口。
 
+## 读取缓冲与失败发布边界
+
+整块 initialized 文件读取复用调用者的 `&mut [u8]`，不引入 unsafe、用户指针解引用或
+新的 DMA 所有权。块 trait 对直读与部分块暂存缓冲都接受任意字节起点；后端及其 DMA 能力层
+负责设备地址对齐、连续性、映射与缓存维护。文件系统不以常量或 `Vec<u8>` 的偶然分配对齐
+代替设备契约，也不把缓冲要求转嫁给 `read_at` 调用者。
+这个约定不取消块长度/范围校验，也不承诺设备 I/O 失败原子性。
+hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
+请求外字节复制给调用者。
+
+块后端可能先修改目标前缀再返回错误，因此 `read_at` 不保证失败缓冲保持旧值，也不返回
+可发布的成功前缀。调用者必须传播错误，不能置 uptodate 或把失败内容复制到读迭代器。
+单页缓存失败保留不可读的非 uptodate folio；批量预读失败不提交任何新页，未消费 reservation
+由 PageCache 回收。完整重试成功后才允许发布；错误路径的缓冲内容不是有效文件数据。
+`vfs/read_tests.rs` 以真实 ext4 + KVFS + PageCache 链路验证上述隔离，并检查重试后的页未被
+标脏、17 字节 EOF 尾部补零。失败读后部分写入的测试还验证完整重新读页先于写入复制，
+只把成功写入后的完整数据标脏，不发布此前失败读污染的前缀。该验证不声称设备 I/O 具备失败原子性。
+
 ## unsafe 代码清单
 
 无。`fs/filesystems/kext4/src/lib.rs` 对整个 crate 禁止 unsafe code。Unsafe 或设备专有

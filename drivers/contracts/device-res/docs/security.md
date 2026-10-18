@@ -4,7 +4,8 @@
 
 This analysis covers the entire crate: `src/lib.rs` (handles, the MMIO
 access surface, `unsafe impl Send`), `src/dma.rs` (coherent handles),
-`src/irq.rs` (IRQ/MSI resources), `src/provider.rs`, and `src/time.rs`.
+`src/irq.rs` (IRQ/MSI resources), `src/memory.rs` (CPU-only storage),
+`src/provider.rs`, and `src/time.rs`.
 No modules are excluded; every unsafe item is enumerated in the
 inventory below. The host-side implementation lives in
 `device-res-xkernel` and is audited in its own security document.
@@ -277,3 +278,19 @@ When modifying `device-res`, verify:
   cleanup callback (no empty callbacks on failure).
 - [ ] New provider trait methods document their execution-context
   constraints.
+
+## CPU-only aligned storage
+
+`src/memory.rs` adds an unsafe `CpuMemoryOp` implementation boundary and two
+raw-memory operations: initialization of the complete allocation, and creation
+of its exclusive initialized byte view. The safe `CpuBuffer` API depends on the
+provider's size/alignment/uniqueness guarantees. Its lifetime retains the
+provider; drop returns the original pointer and layout once, after all views
+end. Zero-size requests are rejected before provider entry. Acquisition errors
+expose neither a handle nor uninitialized memory.
+
+The capability must not establish DMA mappings or change cache attributes.
+It grants no bus address or device access guarantee; those remain with the
+separate `DmaOp` protocol. The handle has no `Send`/`Sync` overrides. Tests
+cover initialization, alignment, matching release, empty requests and injected
+allocation failure; real memory exhaustion is not induced.

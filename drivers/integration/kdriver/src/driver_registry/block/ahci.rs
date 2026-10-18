@@ -11,7 +11,7 @@ use crate::driver_registry::{BoxedDriver, firmware_specs::AHCI};
 
 struct AhciHalImpl;
 
-impl block::ahci::AhciHal for AhciHalImpl {
+impl block::ahci::AhciControllerHal for AhciHalImpl {
     fn virt_to_phys(va: usize) -> usize {
         khal::mem::v2p(va.into()).as_usize()
     }
@@ -21,11 +21,17 @@ impl block::ahci::AhciHal for AhciHalImpl {
     }
 
     fn flush_dcache() {
-        // Orders the command-list/command-table stores before the DMA engine
-        // reads them; executes `dbar 0` on LoongArch64 and is a no-op on
-        // cache-coherent architectures.
+        // This is an ordering barrier, not a clean/invalidate operation on data
+        // or command memory. DMA_COHERENT gates SDK admission separately.
         karch::dma_read_barrier();
     }
+}
+
+// SAFETY: the x86_64 host uses hardware-coherent device DMA for ordinary cached
+// memory. Other architectures make no such claim and are rejected before the
+// SDK can submit command or data DMA. This is not a non-coherent cache protocol.
+unsafe impl block::ahci::AhciHal for AhciHalImpl {
+    const DMA_COHERENT: bool = cfg!(target_arch = "x86_64");
 }
 
 struct AhciDriver;
@@ -58,9 +64,11 @@ impl DeviceDriver for AhciDriver {
         // HBA registers reachable from `vaddr` satisfy `AhciDriver::new`'s
         // precondition of pointing to a valid, exclusively-accessible MMIO
         // window.
-        let ahci = match unsafe { block::ahci::AhciDriver::<AhciHalImpl>::new(vaddr) } {
-            Ok(d) => d,
-            Err(e) => return Err(e),
+        let ahci = match unsafe {
+            block::ahci::AhciDriver::<AhciHalImpl>::new(vaddr, crate::resource::resource_provider())
+        } {
+            Some(driver) => driver,
+            None => return Err(driver_base::DriverError::Io),
         };
         let (index, first_minor) = super::allocate_scsi_disk()?;
         let name = format!("{}{}", ahci.name(), index);

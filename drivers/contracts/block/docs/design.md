@@ -174,6 +174,82 @@ leading and trailing partial blocks reuse one read-modify-write scratch buffer.
 An ordinary write is not a durability barrier; only explicit `fsync` calls the
 backend `flush`.
 
+## Synchronous Buffer Address Contract
+
+`BlockDeviceOperations::read_block` and `write_block` accept a buffer beginning
+at any byte address. Whole-block lengths, range checks and read-only policy
+remain in force. The same contract applies when callers hold a backend trait
+object directly, through `Arc`, or through the canonical `BlockDevice`; putting
+a bounce buffer only around the canonical view would not cover direct calls.
+Buffer address alignment is distinct from request/block alignment.
+
+Each backend and its existing DMA provider owns hardware address alignment,
+contiguous-memory requirements, mapping and cache maintenance. The filesystem
+must not carry a list of driver-specific address restrictions. Synchronous
+callbacks must complete access to borrowed buffers before return.
+
+`word_io` supplies the CPU-address adapter for a backend that requires u32
+alignment. It validates block geometry, whole-block length and the complete
+device range before any transfer. An aligned, nonempty buffer goes directly to
+the callback, with no allocation or additional copy. An unaligned request uses
+one initialized, provider-owned `CpuBuffer` allocation; each successful read chunk is
+copied out, or each write chunk is copied in before submission. One buffer is
+reused for at most 64 KiB at a time, except that a larger device block requires
+one complete block. Allocation happens before the callback takes a device lock.
+Staging requests ordinary aligned CPU memory through `CpuMemoryOp`. The host
+adapter uses the ordinary allocator's inherent fallible entry, not the fatal
+`GlobalAlloc` entry that can abort even through Vec's try-reserve API. The
+initialized `CpuBuffer` owner releases through its original provider. There is
+no test-only storage variant or factory; tests inject providers through the
+same public path. CPU staging creates no DMA mapping or bus address and does
+not establish cache coherency. Before submitting DMA, a backend must establish
+a supported mapping/cache protocol for both direct and staged buffers. Naming
+that responsibility does not prove that a legacy HAL implements it.
+
+The pinned AHCI SDK inserts `Hal::virt_to_phys` results for data buffers into
+its PRDT and does not call a data-buffer mapping API. The host's SDK
+`flush_dcache` callback is only an ordering barrier, not data-cache maintenance.
+Consequently `AhciHal` now explicitly certifies hardware-coherent DMA through
+`DMA_COHERENT`; `AhciDriver::new` rejects false before entering the SDK. The
+host only opts in on x86_64. Non-coherent AHCI remains unsupported, including
+its command allocations: making only the unaligned scratch uncached would not
+fix cached aligned requests or command memory. Enabling it requires an actual
+SDK/HAL mapping/cache protocol, not changing the capability flag.
+
+BCM's pinned `read_block`/`write_block` path instead copies CPU words through
+the DATA FIFO. That PIO path keeps ordinary CPU staging; it has no data-buffer
+DMA mapping for a streaming pool or coherent allocator to replace.
+
+The existing streaming-DMA bounce pool is not a CPU scratch allocator: mapping
+registers device-visible addresses and unmapping performs direction-dependent
+copy-back and pool release. Using it here would introduce an unused DMA mapping
+and a second lifetime protocol. CPU staging instead acquires one ordinary
+buffer per unaligned request and reuses it across that request's chunks. No
+cross-request cache or measured performance improvement is claimed.
+
+Errors are returned without guessing whether an `InvalidInput` means alignment
+and without retrying a transfer. Allocation failure performs no I/O. A failed
+read chunk is not copied from the bounce buffer, but earlier successful chunks
+may already have changed the caller's output; aligned I/O can modify the output
+before failing. Writes may have changed earlier media blocks. Neither path
+promises atomic failure, a successful prefix result, or implicit durability.
+
+Legacy production backends remain disabled in the feature/dependency
+configuration. Kernel UT compiles the actual BCM and AHCI adapters against CPU
+controller fixtures. BCM exercises its word views, geometry guards, per-sector
+loop and CPU provider; AHCI exercises admission before SDK entry, direct
+forwarding and staged success/error/release paths. This does not enable either
+SDK, probe hardware or validate hardware DMA/cache handling. Keep one module
+declaration per adapter: production re-enablement must extend its existing
+`cfg(unittest)` predicate instead of appending another declaration. The absent
+Cargo features/dependencies remain commented. See [the re-enablement checklist](legacy-backend-checklist.md)
+for the remaining SDK, integration and hardware obligations.
+
+The [backend inventory](backend-buffer-contract.md) records each concrete and
+test-only trait implementation's address handling and its validation limits.
+It distinguishes caller-address checks from length/offset checks and static
+backing-store alignment; source review alone does not certify hardware.
+
 ## Generic Ioctls And Disk Sequence
 
 `BlockDevice::ioctl` handles generic block commands centrally. Geometry comes from

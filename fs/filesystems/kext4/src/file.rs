@@ -262,6 +262,12 @@ impl Ext4SbInfo {
     }
 
     /// Reads bytes from a regular file inode.
+    ///
+    /// The destination may begin at any byte address. Block backends own device
+    /// buffer requirements; filesystem staging only handles partial blocks.
+    ///
+    /// On failure, output contents may have been modified by backing I/O and
+    /// must not be published as a completed read.
     pub(crate) fn read_at(
         &self,
         inode: &Ext4Inode,
@@ -361,6 +367,21 @@ impl Ext4SbInfo {
                         .ok_or(Ext4Error::Overflow)?;
                     let read_len = (total - copied).min(max_bytes);
                     let first_block = FilesystemBlock::new(physical.get());
+                    if in_block == 0 && read_len.is_multiple_of(block_size_usize) {
+                        // The caller already owns this complete-block destination.
+                        // The block contract accepts any start address; device
+                        // alignment and DMA adaptation belong to the backend.
+                        // Avoid another filesystem allocation and copy.
+                        let block_count = u32::try_from(read_len / block_size_usize)
+                            .map_err(|_| Ext4Error::Overflow)?;
+                        self.read_blocks(
+                            first_block,
+                            block_count,
+                            &mut output[copied..copied + read_len],
+                        )?;
+                        copied += read_len;
+                        continue;
+                    }
                     let covered_bytes =
                         read_len.checked_add(in_block).ok_or(Ext4Error::Overflow)?;
                     let rounded_bytes = covered_bytes
@@ -1298,3 +1319,6 @@ mod unittests {
 
 #[cfg(unittest)]
 mod component_tests;
+
+#[cfg(unittest)]
+pub(crate) mod read_tests;

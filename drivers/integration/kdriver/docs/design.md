@@ -170,6 +170,12 @@ must not be described as the whole wakeup chain being allocation-free.
 | VirtIO driver family | Each VirtIO device type yields two `DeviceDriver` descriptors (PCI/MMIO) sharing one activation path |
 | Platform driver family | ramdisk, AHCI, bcm2835-sdhci, sdmmc, fxmac, and other platform device drivers |
 
+The disabled AHCI integration only admits the SDK on an explicitly
+hardware-coherent DMA host (currently x86_64). Its SDK `flush_dcache` callback
+is an ordering barrier, not cache clean/invalidate. Non-coherent hosts are
+rejected before SDK initialization; CPU alignment staging does not implement
+that missing DMA/cache protocol. Production features/SDK/probe remain disabled.
+
 ## Block Device Completion Processing
 
 `block_completion_dispatch` owns one `Arc<BlockIoReclaimer>` per device.
