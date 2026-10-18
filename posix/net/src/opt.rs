@@ -264,6 +264,7 @@ macro_rules! call_dispatch {
             (PROTO_TCP, TCP_NODELAY) => NoDelay as IntBool,
             (PROTO_TCP, TCP_MAXSEG) => MaxSegment as Int<usize>,
             (PROTO_TCP, TCP_INFO) => TcpInfo,
+            (PROTO_TCP, TCP_KEEPIDLE) => KeepIdle as Int<u32>,
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,

@@ -26,6 +26,11 @@ pub(crate) const RAW_RX_BUF_LEN: usize = 64 * 1024;
 pub(crate) const RAW_TX_BUF_LEN: usize = 64 * 1024;
 pub(crate) const LISTEN_QUEUE_SIZE: usize = 512;
 
+/// Default TCP keep-alive idle time in seconds, matching Linux tcp_keepalive_time.
+pub(crate) const TCP_KEEPIDLE_DEFAULT_SECS: u32 = 7200;
+/// Upper bound for TCP_KEEPIDLE, matching Linux MAX_TCP_KEEPIDLE.
+pub(crate) const TCP_KEEPIDLE_MAX_SECS: u32 = 32767;
+
 pub(crate) const SOCKET_BUFFER_SIZE: usize = 64;
 pub(crate) const ETHERNET_MAX_PENDING_PACKETS: usize = 128;
 

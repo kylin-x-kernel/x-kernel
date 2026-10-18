@@ -4,7 +4,7 @@
 
 | 角色 | 调度 | 做什么 |
 | --- | --- | --- |
-| Prepare / Post | 浮动节点池，标签 `xkernel-agent && docker && vhost-vsock && container-vsock` | checkout、只安装 rustfmt、`cargo fmt --check`；Post 汇总评论与 Check Run |
+| Prepare / Post | 浮动节点池，标签 `xkernel-agent && docker && vhost-vsock && container-vsock` | checkout、安装 rustfmt、`cargo fmt --check`；Post 汇总评论与 Check Run |
 | `x86_64` leg | 固定节点 `xkernel-amd64-01` | 该架构的工具链、Build、Run、输出收集 |
 | `aarch64` leg | 固定节点 `xkernel-arm64-01` | 同上 |
 | `riscv64` leg | 与 Prepare 相同的浮动节点池 | 同上 |

@@ -84,6 +84,7 @@ define_options! {
     NoDelay(bool),
     MaxSegment(usize),
     TcpInfo(()),
+    KeepIdle(u32),
 
     // ---- IP options ----
     Ttl(u8),

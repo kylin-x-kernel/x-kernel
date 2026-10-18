@@ -6,7 +6,7 @@
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use hashbrown::HashMap;
@@ -25,7 +25,7 @@ use smoltcp::{
 use crate::{
     AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
     SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
-    consts::{TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
+    consts::{TCP_KEEPIDLE_DEFAULT_SECS, TCP_KEEPIDLE_MAX_SECS, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, network_poller},
@@ -51,6 +51,11 @@ pub struct TcpSocket {
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
     poll_rx_closed: Arc<PollSet>,
+    /// TCP_KEEPIDLE in seconds (Linux default: tcp_keepalive_time).
+    /// TCP_KEEPINTVL/TCP_KEEPCNT are rejected with ENOPROTOOPT: the
+    /// transport models a single keep-alive interval with no probe-count
+    /// knob, and silently accepting inert options would hide that gap.
+    keep_idle_secs: AtomicU32,
 }
 
 impl TcpSocket {
@@ -68,6 +73,7 @@ impl TcpSocket {
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
+            keep_idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
         }
     }
 
@@ -89,6 +95,7 @@ impl TcpSocket {
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
+            keep_idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
@@ -112,6 +119,35 @@ impl TcpSocket {
     #[inline]
     fn is_listening(&self) -> bool {
         self.state() == State::Listening
+    }
+
+    /// Applies SO_KEEPALIVE to the transport using the configured
+    /// TCP_KEEPIDLE interval. Disabling clears the timer.
+    fn apply_keep_alive(&self, enabled: bool) {
+        self.with_smol_socket(|socket| {
+            if enabled {
+                let idle_secs = u64::from(self.keep_idle_secs.load(Ordering::Relaxed));
+                // Enabling reads the stored interval. While keep-alive is
+                // enabled, smoltcp does not expose a safe deadline reset, so
+                // TCP_KEEPIDLE updates are rejected by the setter below.
+                socket.set_keep_alive(Some(Duration::from_secs(idle_secs)));
+            } else {
+                socket.set_keep_alive(None);
+            }
+        });
+    }
+
+    /// Stores TCP_KEEPIDLE before keep-alive is enabled. Once smoltcp has an
+    /// active idle deadline, changing the interval is not immediately
+    /// observable through its public API, so that update is rejected.
+    fn set_keep_idle_secs(&self, idle_secs: u32) -> KResult {
+        self.with_smol_socket(|socket| {
+            if socket.keep_alive().is_some() {
+                return Err(KError::OperationNotSupported);
+            }
+            self.keep_idle_secs.store(idle_secs, Ordering::Relaxed);
+            Ok(())
+        })
     }
 
     fn with_smol_socket<R>(&self, f: impl FnOnce(&mut smol::Socket) -> R) -> R {
@@ -329,6 +365,9 @@ impl Configurable for TcpSocket {
             O::KeepAlive(keep_alive) => {
                 **keep_alive = self.with_smol_socket(|socket| socket.keep_alive().is_some());
             }
+            O::KeepIdle(secs) => {
+                **secs = self.keep_idle_secs.load(Ordering::Relaxed);
+            }
             O::MaxSegment(max_segment) => {
                 // TODO(mivik): get actual MSS
                 **max_segment = 1460;
@@ -362,10 +401,22 @@ impl Configurable for TcpSocket {
                 network_poller().notify(PollReason::Tx);
             }
             O::KeepAlive(keep_alive) => {
-                self.with_smol_socket(|socket| {
-                    socket.set_keep_alive(keep_alive.then(|| Duration::from_secs(75)));
-                });
+                // TCP_KEEPIDLE is enforced, not merely recorded: enabling
+                // keep-alive installs the configured idle time as the
+                // transport's (single) keep-alive interval.
+                // TCP_KEEPINTVL/TCP_KEEPCNT are rejected with ENOPROTOOPT:
+                // the transport has no per-phase knobs, and silently
+                // accepting inert options would hide that gap.
+                self.apply_keep_alive(*keep_alive);
                 network_poller().notify(PollReason::Timer);
+            }
+            O::KeepIdle(secs) => {
+                // Linux (net/ipv4/tcp.c) rejects TCP_KEEPIDLE outside
+                // 1..=TCP_KEEPIDLE_MAX_SECS with EINVAL.
+                if *secs == 0 || *secs > TCP_KEEPIDLE_MAX_SECS {
+                    return Err(KError::InvalidInput);
+                }
+                self.set_keep_idle_secs(*secs)?;
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -1059,5 +1110,78 @@ mod tests {
         let second = get_ephemeral_port(local_addr).unwrap();
         assert!((PORT_START..=PORT_END).contains(&second));
         assert_ne!(second, blocked.port);
+    }
+
+    #[def_test]
+    fn keepalive_uses_keepidle_as_transport_interval() {
+        let socket = TcpSocket::new();
+        socket.set_option(SetSocketOption::KeepIdle(&30)).unwrap();
+        socket
+            .set_option(SetSocketOption::KeepAlive(&true))
+            .unwrap();
+
+        // KEEPIDLE is enforced: enabling keep-alive installs the
+        // configured idle seconds as the transport's interval.
+        assert_eq!(
+            socket.with_smol_socket(|s| s.keep_alive()),
+            Some(Duration::from_secs(30))
+        );
+
+        let mut idle = 0_u32;
+        socket
+            .get_option(GetSocketOption::KeepIdle(&mut idle))
+            .unwrap();
+        assert_eq!(idle, 30);
+    }
+
+    #[def_test]
+    fn keepalive_rejects_keepidle_change_after_enabling() {
+        let socket = TcpSocket::new();
+        socket
+            .set_option(SetSocketOption::KeepAlive(&true))
+            .unwrap();
+        assert_eq!(
+            socket.set_option(SetSocketOption::KeepIdle(&45)),
+            Err(KError::OperationNotSupported)
+        );
+
+        let mut idle = 0_u32;
+        socket
+            .get_option(GetSocketOption::KeepIdle(&mut idle))
+            .unwrap();
+        assert_eq!(idle, TCP_KEEPIDLE_DEFAULT_SECS);
+    }
+
+    #[def_test]
+    fn keepalive_options_reject_invalid_values() {
+        let socket = TcpSocket::new();
+        // Linux range check on the enforced knob: 1..=TCP_KEEPIDLE_MAX_SECS,
+        // else EINVAL.
+        assert!(socket.set_option(SetSocketOption::KeepIdle(&0)).is_err());
+        assert!(
+            socket
+                .set_option(SetSocketOption::KeepIdle(&(TCP_KEEPIDLE_MAX_SECS + 1)))
+                .is_err()
+        );
+        assert!(
+            socket
+                .set_option(SetSocketOption::KeepIdle(&TCP_KEEPIDLE_MAX_SECS))
+                .is_ok()
+        );
+        // the boundary value itself is accepted and readable back
+        socket
+            .set_option(SetSocketOption::KeepIdle(&TCP_KEEPIDLE_MAX_SECS))
+            .unwrap();
+        let mut readback = 0_u32;
+        socket
+            .get_option(GetSocketOption::KeepIdle(&mut readback))
+            .unwrap();
+        assert_eq!(readback, TCP_KEEPIDLE_MAX_SECS);
+        // an out-of-range write does not clobber the last valid value
+        assert!(socket.set_option(SetSocketOption::KeepIdle(&0)).is_err());
+        socket
+            .get_option(GetSocketOption::KeepIdle(&mut readback))
+            .unwrap();
+        assert_eq!(readback, TCP_KEEPIDLE_MAX_SECS);
     }
 }
