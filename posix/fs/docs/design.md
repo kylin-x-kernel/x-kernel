@@ -118,6 +118,12 @@ core/ksyscall
 空路径 fd 和跟随 procfs magic link 时返回目标挂载身份，不重新解析路径。
 该字段使用现有挂载 ID，不增加或改变挂载生命周期。
 
+`statx` 请求中的 `STATX__RESERVED` 保留位，以及同时指定
+`AT_STATX_FORCE_SYNC` / `AT_STATX_DONT_SYNC` 的组合，在 pathname 复制和目标解析之前返回
+`EINVAL`，适用于普通 pathname、空字符串及无效 pathname 地址。
+该错误优先于空路径的 `ENOENT` 和用户地址的 `EFAULT`。零 mask 与其他未知请求位
+仍作为查询提示接受，维持接口的向前兼容性；该校验不改变同步策略或结果 mask。
+
 ### fd 生命周期
 
 ```text

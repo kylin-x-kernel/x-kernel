@@ -13,8 +13,8 @@ use kvfs::{
     SuperBlockFlags,
 };
 use linux_raw_sys::general::{
-    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, R_OK, STATX_MNT_ID, W_OK,
-    X_OK, stat, statfs, statx,
+    __kernel_fsid_t, AT_EACCESS, AT_EMPTY_PATH, AT_STATX_SYNC_TYPE, AT_SYMLINK_NOFOLLOW, R_OK,
+    STATX__RESERVED, STATX_MNT_ID, W_OK, X_OK, stat, statfs, statx,
 };
 use posix_types::{UserConstPtr, UserPtr};
 
@@ -65,13 +65,22 @@ pub fn sys_fstatat(
 ///
 /// Reports `STATX_MNT_ID` as valid for the same resolved object as the metadata,
 /// including empty-path descriptors and followed procfs magic links.
+/// Rejects the reserved request-mask bit and mutually exclusive sync modes
+/// before copying the pathname, resolving the target, or writing output.
+/// Other mask bits are hints.
 pub fn sys_statx(
     dirfd: c_int,
     path: UserConstPtr<c_char>,
     flags: u32,
-    _mask: u32,
+    mask: u32,
     statxbuf: UserPtr<statx>,
 ) -> KResult<isize> {
+    // Linux do_statx reports request errors before pathname errors, including
+    // an empty pathname without AT_EMPTY_PATH or an inaccessible user pointer.
+    if mask & STATX__RESERVED != 0 || flags & AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE {
+        return Err(KError::InvalidInput);
+    }
+
     let path = path
         .check_non_null()
         .map(UserConstPtr::load_string)
@@ -86,6 +95,8 @@ pub fn sys_statx(
 
     Ok(0)
 }
+
+unittest::path_mod_test!(statx_request_tests, "../ut-tests/statx_request.rs");
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_access(path: UserConstPtr<c_char>, mode: u32) -> KResult<isize> {

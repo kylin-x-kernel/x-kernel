@@ -173,6 +173,10 @@ kfd resources / kvfs / device and pipe implementations
 路径授权。解析、getattr 和用户写回错误沿原有 `KResult` 路径传播，最终通过
 既有 `UserPtr::write_vm` 写回完整 metadata。
 
+`statx` 的保留请求位和互斥同步标志在访问用户 pathname 和查找目标之前拒绝，不能因参数被
+静默忽略而把非法请求报告为成功；这些失败不写输出 buffer。其他未知 mask
+位不直接拒绝，以保留 Linux 查询请求的可扩展性。
+
 | 资源 | 并发条件 | 风险 |
 |------|----------|------|
 | fd 表 | 由当前进程 resources 内部锁保护 | close/dup/lookup 竞态会导致 fd 复用或对象泄漏 |
