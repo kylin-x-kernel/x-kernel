@@ -1,0 +1,9 @@
+[package]
+name = "drm-gem-close-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "gem_close.rs"

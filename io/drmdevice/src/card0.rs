@@ -9,7 +9,7 @@
 //! atomic-KMS path (`MODE_ATOMIC` + blob properties) used by modern compositors.
 
 use alloc::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     format,
     string::String,
     sync::{Arc, Weak},
@@ -246,6 +246,8 @@ impl DrmIoctl for DrmModeDirtyFb {
         // its damage tracking enabled only when the generic path answers with
         // ENOENT rather than EINVAL. present_fb is best-effort, so validate the
         // identifier before calling it.
+        // Serialize with `MODE_CLOSEFB`; see `MODE_CRTC_PAGE_FLIP`.
+        let _commit = dev.commit_lock.lock();
         if !dev.fbs.lock().contains_key(&dirty.fb_id) {
             return Err(VfsError::NotFound);
         }
@@ -461,6 +463,40 @@ pub struct DrmCard {
     /// Always taken before `state`, never while holding it, so the order is
     /// `commit_lock` -> `state` -> the inner maps `apply_prop` touches.
     commit_lock: Mutex<()>,
+    /// The framebuffer `present_fb` last put on screen.
+    ///
+    /// `legacy_crtc.fb_id` and `state.plane_fb_id` record what a client asked
+    /// for, but `MODE_CRTC_PAGE_FLIP` and `MODE_DIRTYFB` present without
+    /// touching either, so they cannot answer "is this framebuffer still on
+    /// screen?" on their own.
+    presented_fb: AtomicU32,
+    /// The scanout resource `present_fb` last handed to the host, or 0.
+    ///
+    /// Retirement has to keep this resource alive: this driver has no "stop
+    /// scanning" call, so the host keeps scanning the last resource it was
+    /// given until another one is presented.  "No framebuffer references it"
+    /// is therefore not enough on its own.
+    presented_resource: AtomicU32,
+    /// Resources whose scanout state is unknown.
+    ///
+    /// `present_scanout_resource()` issues `TRANSFER_TO_HOST_2D`, `SET_SCANOUT`
+    /// and `RESOURCE_FLUSH`; when one of them fails there is no way to tell how far
+    /// the host got, so the new resource joins this set and the previous scanout
+    /// target is still in `presented_resource`; both are held back from
+    /// retirement.  A set rather than a slot, because several failed presents can
+    /// pile up before one succeeds.  The next successful present settles all of
+    /// them at once: this driver has a single scanout slot (`SET_SCANOUT` replaces
+    /// the target), so nothing in the set can still be on screen afterwards.
+    unsettled: Mutex<BTreeSet<u32>>,
+    /// Dumb buffers whose handle was closed while a registered framebuffer
+    /// still named their scanout resource.
+    ///
+    /// A framebuffer only copies the resource id out of the dumb buffer, so the
+    /// resource and its backing have to outlive the handle.  Parked here and
+    /// destroyed by the last framebuffer that references them (`RMFB` /
+    /// `MODE_CLOSEFB`), which is the ordering the GEM object refcount gives
+    /// Linux for free.
+    retired_dumbs: Mutex<BTreeMap<u32, DumbBuffer>>,
     legacy_crtc: Mutex<LegacyCrtcState>,
     dumbs: Mutex<BTreeMap<u32, DumbBuffer>>,
     next_dumb_handle: AtomicU32,
@@ -488,6 +524,10 @@ impl DrmCard {
             sequence: AtomicU32::new(0),
             state: Mutex::new(ModesetState::default()),
             commit_lock: Mutex::new(()),
+            presented_fb: AtomicU32::new(0),
+            presented_resource: AtomicU32::new(0),
+            unsettled: Mutex::new(BTreeSet::new()),
+            retired_dumbs: Mutex::new(BTreeMap::new()),
             legacy_crtc: Mutex::new(LegacyCrtcState::default()),
             dumbs: Mutex::new(BTreeMap::new()),
             next_dumb_handle: AtomicU32::new(FIRST_DUMB_HANDLE),
@@ -797,6 +837,14 @@ impl DeviceFileOps for DrmCard {
                 let user_ptr = UserPtr::<DrmModeDestroyDumb>::from(arg);
                 <DrmModeDestroyDumb as DrmIoctl>::handle_raw(self, &state, user_ptr)
             }
+            <DrmGemClose as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmGemClose>::from(arg);
+                <DrmGemClose as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
+            <DrmModeCloseFb as DrmIoctl>::CMD => {
+                let user_ptr = UserPtr::<DrmModeCloseFb>::from(arg);
+                <DrmModeCloseFb as DrmIoctl>::handle_raw(self, &state, user_ptr)
+            }
             <DrmModeGetPlaneRes as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeGetPlaneRes>::from(arg);
                 <DrmModeGetPlaneRes as DrmIoctl>::handle_raw(self, &state, user_ptr)
@@ -926,8 +974,16 @@ impl DrmIoctl for DrmModeSetCrtc {
         if c.crtc_id != CRTC_ID {
             return Err(VfsError::InvalidInput);
         }
+        // `MODE_CLOSEFB` removes a framebuffer while holding this lock, so the
+        // binding written below cannot be outrun by a concurrent close.
+        let _commit = dev.commit_lock.lock();
         if c.fb_id == 0 && c.count_connectors == 0 {
             *dev.legacy_crtc.lock() = LegacyCrtcState::default();
+            // The CRTC no longer drives any framebuffer, so the framebuffer that
+            // was last presented is not in use any more and must be closeable.
+            // The resource marker stays: the host keeps scanning it until
+            // something else is presented.
+            dev.presented_fb.store(0, Ordering::Relaxed);
             return Ok(0);
         }
         if c.fb_id == 0 || !dev.fbs.lock().contains_key(&c.fb_id) {
@@ -1006,12 +1062,20 @@ impl DrmIoctl for DrmModeRmFb {
     const CMD: u32 = iowr::<u32>(DRM_TYPE, 0xAF);
 
     fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, fb_id: &mut Self) -> VfsResult<usize> {
-        dev.fbs.lock().remove(&fb_id.0);
+        // Same lock as `MODE_CLOSEFB`: the retirement below reads the scanout
+        // markers, which a concurrent present updates under this lock.
+        let _commit = dev.commit_lock.lock();
+        let removed = dev.fbs.lock().remove(&fb_id.0);
         {
             let mut legacy = dev.legacy_crtc.lock();
             if legacy.fb_id == fb_id.0 {
                 *legacy = LegacyCrtcState::default();
             }
+        }
+        // This may have been the last framebuffer naming a dumb buffer whose
+        // handle was closed earlier; that is when its resource is destroyed.
+        if let Some(fb) = removed {
+            retire_unused_dumb(dev, fb.resource_id);
         }
         Ok(0)
     }
@@ -1021,6 +1085,9 @@ impl DrmIoctl for DrmModeCrtcPageFlip {
     const CMD: u32 = iowr::<DrmModeCrtcPageFlip>(DRM_TYPE, 0xB0);
 
     fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
+        // `MODE_CLOSEFB` reads the presented markers under this lock, so
+        // presenting and closing cannot interleave.
+        let _commit = dev.commit_lock.lock();
         if f.crtc_id != CRTC_ID || !dev.fbs.lock().contains_key(&f.fb_id) {
             return Err(VfsError::InvalidInput);
         }
@@ -1122,25 +1189,187 @@ impl DrmIoctl for DrmModeMapDumb {
     }
 }
 
+/// Drop a dumb buffer's handle and release the host scanout resource behind it.
+///
+/// `DESTROY_DUMB` and `GEM_CLOSE` converge on the same state in Linux --
+/// `drm_mode_destroy_dumb_ioctl()` and `drm_gem_close_ioctl()` both end in
+/// `drm_gem_handle_delete()` -- so they share this path instead of keeping two
+/// copies of the teardown.  Returns `false` when the handle was never allocated;
+/// the two callers report that case differently, which is the one place where
+/// the legacy and the GEM spelling disagree.
+fn take_dumb(dev: &DrmCard, handle: u32) -> VfsResult<bool> {
+    // One critical section owns both the existence test and the removal, so two
+    // concurrent closes of the same handle cannot both reach the teardown.
+    let Some(dumb) = dev.dumbs.lock().remove(&handle) else {
+        return Ok(false);
+    };
+    // Resolve the display device before anything becomes visible: if it is gone,
+    // fail the ioctl instead of dropping the backing while the host still holds a
+    // scanout resource for it (dangling backing + leak).  The lookup happens after
+    // the handle test so that an unknown handle stays a silent miss -- the legacy
+    // `DESTROY_DUMB` contract -- even when the device has already been removed.
+    let device = match dev.display() {
+        Ok(device) => device,
+        Err(err) => {
+            dev.dumbs.lock().insert(handle, dumb);
+            return Err(err);
+        }
+    };
+    // A registered framebuffer only copies `resource_id` out of the dumb buffer
+    // and keeps no reference to the resource or its pages, so destroying them
+    // here would leave every framebuffer that still names the resource pointing
+    // at a detached scanout and freed backing -- and one of them may be on
+    // screen.  Park the buffer instead and let the last framebuffer that
+    // references it retire the resource; Linux gets this ordering from the GEM
+    // object refcount.
+    park_or_destroy(dev, device, dumb);
+    Ok(true)
+}
+
+/// Is `resource_id` on the scanout, or one whose fate a failed present left open?
+fn resource_on_scanout(dev: &DrmCard, resource_id: u32) -> bool {
+    dev.presented_resource.load(Ordering::Relaxed) == resource_id
+        || dev.unsettled.lock().contains(&resource_id)
+}
+
+/// Park `dumb` while anything still needs its resource, or destroy it.
+///
+/// Two things keep the resource alive: a registered framebuffer that copied its
+/// id out, and the host scanning it -- `present_fb` leaves the host pointed at
+/// the last resource it was given and this driver has no call that stops that.
+/// Parked buffers are retired by `sweep_retired_dumbs()` once another resource
+/// is presented.
+///
+/// The reference test and the insertion into the park table happen under the same
+/// `fbs` lock -- the order `retire_unused_dumb()` takes them in.  Without that, a
+/// close of the last framebuffer could slip in between the test and the
+/// insertion, and the parked entry would never be retired.
+fn park_or_destroy(dev: &DrmCard, device: &ClassDevice<DisplayDeviceImpl>, dumb: DumbBuffer) {
+    {
+        let fbs = dev.fbs.lock();
+        let referenced = fbs.values().any(|fb| fb.resource_id == dumb.resource_id);
+        let scanned = resource_on_scanout(dev, dumb.resource_id);
+        if referenced || scanned {
+            dev.retired_dumbs.lock().insert(dumb.resource_id, dumb);
+            return;
+        }
+    }
+    destroy_dumb(device, dumb);
+}
+
+/// Detach the scanout resource behind `dumb` and release its backing pages.
+fn destroy_dumb(device: &ClassDevice<DisplayDeviceImpl>, dumb: DumbBuffer) {
+    if let Err(err) = device.destroy_scanout_resource(dumb.resource_id) {
+        log::warn!(
+            "drm: failed to destroy scanout resource {}: {:?}",
+            dumb.resource_id,
+            err
+        );
+    }
+    // `dumb` (and the backing pages it owns) is released here.
+}
+
+/// Retire a parked dumb buffer once no framebuffer references its resource.
+///
+/// Called by the framebuffer teardown paths, which are the only places that can
+/// take the last reference away.
+fn retire_unused_dumb(dev: &DrmCard, resource_id: u32) {
+    // The host may still be scanning this resource even when no framebuffer
+    // names it any more: `RMFB` drops the framebuffer without stopping the
+    // scanout, and this driver has no call that would.  Such a buffer is left
+    // parked and retired by the next present of a different resource.
+    if resource_on_scanout(dev, resource_id) {
+        return;
+    }
+    // Same lock order as `park_or_destroy()`: `fbs` first, then the park table,
+    // so a concurrent park cannot be missed by this take.
+    let parked = {
+        let fbs = dev.fbs.lock();
+        if fbs.values().any(|fb| fb.resource_id == resource_id) {
+            return;
+        }
+        dev.retired_dumbs.lock().remove(&resource_id)
+    };
+    let Some(dumb) = parked else {
+        return;
+    };
+    // The display may already be gone; the resource went with it, and only the
+    // backing pages are left to release.
+    if let Ok(device) = dev.display() {
+        destroy_dumb(device, dumb);
+    }
+}
+
 impl DrmIoctl for DrmModeDestroyDumb {
     const CMD: u32 = iowr::<DrmModeDestroyDumb>(DRM_TYPE, 0xB4);
 
     fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, d: &mut Self) -> VfsResult<usize> {
-        let Some(resource_id) = dev.dumbs.lock().get(&d.handle).map(|b| b.resource_id) else {
-            return Ok(0);
-        };
-        // Resolve the display device *before* mutating guest state: if it is
-        // gone, fail the ioctl instead of dropping the backing while the host
-        // still holds a scanout resource for it (dangling backing + leak).
-        let device = dev.display()?;
-        dev.dumbs.lock().remove(&d.handle);
-        if let Err(err) = device.destroy_scanout_resource(resource_id) {
-            log::warn!(
-                "drm: failed to destroy scanout resource {}: {:?}",
-                resource_id,
-                err
-            );
+        // Legacy entry point: an unknown handle stays a silent success, because
+        // callers free a dumb buffer without ever reading the result.  GEM_CLOSE
+        // below is the entry point that is allowed to report the miss.
+        //
+        // `ADDFB2` holds this lock from reading a handle to registering the
+        // framebuffer, which is what keeps a close from destroying a resource
+        // the new framebuffer is about to name.
+        let _commit = dev.commit_lock.lock();
+        take_dumb(dev, d.handle)?;
+        Ok(0)
+    }
+}
+
+impl DrmIoctl for DrmGemClose {
+    // DRM_IOCTL_GEM_CLOSE = DRM_IOW(0x09, struct drm_gem_close): 8 bytes.
+    const CMD: u32 = iow::<DrmGemClose>(DRM_TYPE, 0x09);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, args: &mut Self) -> VfsResult<usize> {
+        // `drm_gem_close_ioctl()` rejects a non-zero `pad` and reports an unknown
+        // handle as EINVAL (through `drm_gem_handle_delete()`), not ENOENT.
+        if args.pad != 0 {
+            return Err(VfsError::InvalidInput);
         }
+        // See `MODE_DESTROY_DUMB`: this lock orders the close against `ADDFB2`.
+        let _commit = dev.commit_lock.lock();
+        if !take_dumb(dev, args.handle)? {
+            return Err(VfsError::InvalidInput);
+        }
+        Ok(0)
+    }
+}
+
+impl DrmIoctl for DrmModeCloseFb {
+    // DRM_IOCTL_MODE_CLOSEFB = DRM_IOWR(0xD0, struct drm_mode_closefb): 8 bytes.
+    const CMD: u32 = iowr::<DrmModeCloseFb>(DRM_TYPE, 0xD0);
+
+    fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, args: &mut Self) -> VfsResult<usize> {
+        // `drm_mode_closefb_ioctl()`: a non-zero `pad` is EINVAL, an unknown
+        // framebuffer is ENOENT, and a framebuffer that is still on screen is
+        // EBUSY.  That in-use check is the whole difference from RMFB (0xAF),
+        // which this driver implements as an unconditional removal: CLOSEFB
+        // tells a client its framebuffer is still on screen instead of pulling
+        // the scanout out from under it.
+        //
+        // "On screen" has three sources: the legacy CRTC binding, the plane
+        // property committed through `MODE_ATOMIC` / `set_one_property`, and
+        // whatever `present_fb` last put up -- `MODE_CRTC_PAGE_FLIP` and
+        // `MODE_DIRTYFB` present without touching either of the first two.
+        if args.pad != 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        // `MODE_SETCRTC` and the commit path take this lock too, so the binding
+        // cannot change between the checks below and the removal.
+        let _commit = dev.commit_lock.lock();
+        let Some(resource_id) = dev.fbs.lock().get(&args.fb_id).map(|fb| fb.resource_id) else {
+            return Err(VfsError::NotFound);
+        };
+        let legacy_bound = dev.legacy_crtc.lock().fb_id == args.fb_id;
+        let plane_bound = dev.state.lock().plane_fb_id == args.fb_id;
+        let presented = dev.presented_fb.load(Ordering::Relaxed) == args.fb_id;
+        if legacy_bound || plane_bound || presented {
+            return Err(VfsError::ResourceBusy);
+        }
+        dev.fbs.lock().remove(&args.fb_id);
+        // May have been the last framebuffer naming a parked dumb buffer.
+        retire_unused_dumb(dev, resource_id);
         Ok(0)
     }
 }
@@ -1242,6 +1471,7 @@ fn set_one_property(
     // other committers, or the older framebuffer can reach the screen last.
     let _commit = dev.commit_lock.lock();
     let mut state = dev.state.lock();
+    let previous_fb = state.plane_fb_id;
     let mut proposed = *state;
     let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
     if !dev.apply_prop(
@@ -1270,6 +1500,13 @@ fn set_one_property(
     drop(state);
     if current_fb != 0 {
         dev.present_fb(current_fb);
+    } else if previous_fb != 0 {
+        // This commit is the one that unbound the plane, so `MODE_CLOSEFB` must
+        // no longer refuse the framebuffer that was up there.  The resource
+        // marker stays: this driver has no call that stops the host from
+        // scanning it, so it is retired by the next present of another
+        // resource (`sweep_retired_dumbs`).
+        dev.presented_fb.store(0, Ordering::Relaxed);
     }
     Ok(0)
 }
@@ -1393,6 +1630,7 @@ impl DrmIoctl for DrmModeAtomic {
         // commit and the present below cannot be split by another writer.
         let _commit = dev.commit_lock.lock();
         let mut state = dev.state.lock();
+        let previous_fb = state.plane_fb_id;
         let mut proposed = *state;
         let mut new_mode_blob: Option<Option<Arc<Vec<u8>>>> = None;
         let mut idx = 0;
@@ -1427,6 +1665,10 @@ impl DrmIoctl for DrmModeAtomic {
         }
         if current_fb != 0 {
             dev.present_fb(current_fb);
+        } else if previous_fb != 0 {
+            // Unbinding the plane tears the scanout down; see the same branch
+            // in `set_one_property` -- the resource marker deliberately stays.
+            dev.presented_fb.store(0, Ordering::Relaxed);
         }
         if a.flags & DRM_MODE_PAGE_FLIP_EVENT != 0 {
             dev.queue_flip_event(a.user_data);
@@ -1563,6 +1805,10 @@ impl DrmIoctl for DrmModeFbCmd2 {
     const CMD: u32 = iowr::<DrmModeFbCmd2>(DRM_TYPE, 0xB8);
 
     fn handle(dev: &DrmCard, _file: &Arc<DrmFile>, f: &mut Self) -> VfsResult<usize> {
+        // The dumb handle is read here and the framebuffer is registered further
+        // down; `GEM_CLOSE` / `DESTROY_DUMB` take the same lock, so the handle
+        // cannot be closed (and its resource destroyed) in between.
+        let _commit = dev.commit_lock.lock();
         let handle = f.handles[0];
         if handle == 0 || f.offsets[0] != 0 {
             return Err(VfsError::InvalidInput);
@@ -1681,6 +1927,78 @@ impl DrmCard {
                 resource_id,
                 err
             );
+            // The host may already have switched (a later command in the same
+            // call can be the one that failed), so the new resource is held back
+            // as well: retirement skips both markers until a present succeeds.
+            self.unsettled.lock().insert(resource_id);
+            return;
+        }
+        // Remember what is actually being scanned out: `MODE_CLOSEFB` has to
+        // refuse to close a framebuffer that a page flip or a dirtyfb put up
+        // there, and neither of those records itself anywhere else.  The
+        // resource is recorded too, because retirement has to keep scanning
+        // targets alive after their framebuffer is gone.
+        self.presented_fb.store(fb_id, Ordering::Relaxed);
+        self.presented_resource
+            .store(resource_id, Ordering::Relaxed);
+        // A successful `SET_SCANOUT` replaces the one and only scanout target, so
+        // every earlier "unknown" resource is now provably off screen: the set can
+        // be dropped wholesale, otherwise an entry whose framebuffer is closed
+        // later would never be retired.  The resource just presented is tracked by
+        // `presented_resource` from here on.
+        self.unsettled.lock().clear();
+        // A new scanout target is up, so parked buffers that nothing else
+        // names may now be retired.
+        self.sweep_retired_dumbs();
+    }
+
+    /// Retire parked dumb buffers that nothing references and nothing scans.
+    ///
+    /// Called after a present: that is the moment the set of resources the host
+    /// is scanning changes, so it is when a parked buffer can become safe to
+    /// destroy.
+    fn sweep_retired_dumbs(&self) {
+        // Called from every present, including the per-frame page-flip path.  A
+        // parked entry can legitimately live as long as its framebuffer does (the
+        // close-the-handle-first sequence), so the empty check is only the cheap
+        // exit for clients that never close a handle early.
+        if self.retired_dumbs.lock().is_empty() {
+            return;
+        }
+        let presented = self.presented_resource.load(Ordering::Relaxed);
+        // Lock order matches the retirement paths: `fbs` -> `retired_dumbs` ->
+        // `unsettled`.  `park_or_destroy()` reads the unsettled set through
+        // `resource_on_scanout()` while holding `fbs`, and never takes `fbs` from
+        // inside any of them, so this nesting cannot invert.
+        let victims: Vec<u32> = {
+            let fbs = self.fbs.lock();
+            let retired = self.retired_dumbs.lock();
+            let unsettled = self.unsettled.lock();
+            let referenced: BTreeSet<u32> = fbs.values().map(|fb| fb.resource_id).collect();
+            retired
+                .keys()
+                .copied()
+                .filter(|resource_id| {
+                    *resource_id != presented
+                        && !unsettled.contains(resource_id)
+                        && !referenced.contains(resource_id)
+                })
+                .collect()
+        };
+        if victims.is_empty() {
+            return;
+        }
+        let Ok(device) = self.display() else {
+            return;
+        };
+        for resource_id in victims {
+            // Take the entry out under the lock and destroy it outside, like the
+            // other two retirement sites: `destroy_dumb` calls into the display
+            // backend and drops up to 8 MiB of backing.
+            let parked = self.retired_dumbs.lock().remove(&resource_id);
+            if let Some(dumb) = parked {
+                destroy_dumb(device, dumb);
+            }
         }
     }
 

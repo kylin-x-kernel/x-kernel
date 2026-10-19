@@ -266,6 +266,29 @@ pub(crate) struct DrmModeDestroyDumb {
     pub handle: u32,
 }
 
+/// `struct drm_gem_close`, the GEM spelling of the dumb-buffer release.
+///
+/// `DRM_IOCTL_GEM_CLOSE` is `DRM_IOW(0x09, struct drm_gem_close)`: 8 bytes, and
+/// Linux answers `EINVAL` for a non-zero `pad` before it looks at the handle.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmGemClose {
+    pub handle: u32,
+    pub pad: u32,
+}
+
+/// `struct drm_mode_closefb`, the checked form of `DRM_IOCTL_MODE_RMFB`.
+///
+/// `DRM_IOCTL_MODE_CLOSEFB` is `DRM_IOWR(0xD0, struct drm_mode_closefb)`.
+/// Linux checks `pad` first (`EINVAL`), then requires the framebuffer to exist
+/// (`ENOENT`), and refuses to close one that is still bound (`EBUSY`).
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmModeCloseFb {
+    pub fb_id: u32,
+    pub pad: u32,
+}
+
 /// `struct drm_mode_connector_set_property`, the legacy connector-only setter.
 ///
 /// `value` comes first and the structure is 16 bytes with no trailing padding, so
