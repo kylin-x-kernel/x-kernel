@@ -75,9 +75,9 @@ fn rcu_preempted_reader_remains_enrolled_until_outer_exit() {
             move || {
                 observer_result.store(
                     observer_task.rcu_reader.is_reading()
-                        && observer_task
-                            .rcu_reader
-                            .is_enrolled_on(crate::rcu::reader_node(cpu)),
+                        && observer_task.rcu_reader.is_enrolled_on(
+                            krcu_core::RcuContextIf::reader_node_for_tests(cpu.as_usize()),
+                        ),
                     Ordering::Release,
                 );
                 observer_finished.store(true, Ordering::Release);
@@ -97,7 +97,10 @@ fn rcu_preempted_reader_remains_enrolled_until_outer_exit() {
                     core::hint::spin_loop();
                 }
             });
-            task.rcu_reader.is_enrolled_on(crate::rcu::reader_node(cpu))
+            task.rcu_reader
+                .is_enrolled_on(krcu_core::RcuContextIf::reader_node_for_tests(
+                    cpu.as_usize(),
+                ))
         });
         let passed =
             observed.load(Ordering::Acquire) && still_enrolled && !task.rcu_reader.is_enrolled();
@@ -172,7 +175,9 @@ fn rcu_migration_preserves_original_reader_node() {
         }
         passed &= worker
             .rcu_reader
-            .is_enrolled_on(crate::rcu::reader_node(original));
+            .is_enrolled_on(krcu_core::RcuContextIf::reader_node_for_tests(
+                original.as_usize(),
+            ));
     }
     finish.store(true, Ordering::Release);
     let status = worker.join();

@@ -25,6 +25,13 @@
 
 ## 范围
 
+`NoPreempt::release_without_check` consumes one guard and restores only its
+preemption credit through `KernelGuardIf::enable_preempt_without_check`.
+It leaves IRQ state and outer credits unchanged. The completed normal IRQ
+adapter uses this before its explicit scheduler checkpoint, avoiding an earlier
+ordinary guard-drop check. Normal Drop behavior is unchanged; with preemption
+support disabled, or in host builds, release remains a no-op.
+
 `static_lock!` 在开启 stats 时导出 klockstat 的注册宏；关闭 stats 时原样输出
 static item，与 ksync 的入口一致。因此调用方不需要为统计配置复制锁定义。
 

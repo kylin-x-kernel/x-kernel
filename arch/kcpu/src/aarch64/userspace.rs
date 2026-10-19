@@ -141,6 +141,8 @@ impl UserContext {
     /// `on_user_exit` after restoring kernel context, before IRQ dispatch.
     /// Both callbacks run with local IRQs masked and must return with them
     /// masked, without sleeping or scheduling.
+    /// Between callbacks, kernel transfer code accesses only live context and
+    /// register state: no scheduling or RCU-protected lookup is permitted.
     pub fn run(
         &mut self,
         on_user_enter: impl FnOnce(),

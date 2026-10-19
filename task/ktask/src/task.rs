@@ -31,6 +31,11 @@ use memaddr::{VirtAddr, align_up_4k};
 
 use crate::{KCpuMask, KTask, KtaskRef, future::block_on, yield_now};
 
+enum PreemptCheckOrigin {
+    Task,
+    IrqExit,
+}
+
 enum TaskIdentity {
     Idle,
     Internal,
@@ -274,7 +279,7 @@ pub struct TaskInner {
 
     need_resched: AtomicBool,
     preempt_disable_count: AtomicUsize,
-    pub(crate) rcu_reader: krcu::TaskReader,
+    pub(crate) rcu_reader: krcu_core::TaskReader,
     #[cfg(unittest)]
     preempt_check_probe: tests_preempt_check::Probe,
 
@@ -705,7 +710,7 @@ impl TaskInner {
             on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
             need_resched: AtomicBool::new(false),
             preempt_disable_count: AtomicUsize::new(0),
-            rcu_reader: krcu::TaskReader::new(),
+            rcu_reader: krcu_core::TaskReader::new(),
             #[cfg(unittest)]
             preempt_check_probe: tests_preempt_check::Probe::new(),
             wake_sync_depth: AtomicUsize::new(0),
@@ -813,6 +818,23 @@ impl TaskInner {
         matches!(self.identity, TaskIdentity::Idle)
     }
 
+    /// Borrows this task's reader state for audited RCU host integration.
+    ///
+    /// This is not public consumer admission to RCU-protected objects.
+    ///
+    /// # Safety
+    /// Observer snapshots may inspect retained tasks, including non-current
+    /// tasks; snapshots alone do not authorize mutation or protected access.
+    /// Scope entry and exit must use only the current task, including strictly
+    /// nested handlers permitted by the host's context and watching contracts.
+    /// Enrollment and cleanup must obey the core reader contracts, including
+    /// exclusion, original-node lifetime, and exclusive stopped-task ownership
+    /// where required. The caller must retain the task for every use and must
+    /// not let this reference grant unrelated consumers read-side admission.
+    pub unsafe fn rcu_reader_for_integration(&self) -> &krcu_core::TaskReader {
+        &self.rcu_reader
+    }
+
     #[inline]
     pub(crate) fn set_preempt_pending(&self, pending: bool) {
         self.need_resched.store(pending, Ordering::Release)
@@ -867,9 +889,28 @@ impl TaskInner {
     }
 
     pub(crate) fn current_check_preempt_pending() {
+        Self::check_preempt_pending_from(PreemptCheckOrigin::Task);
+    }
+
+    /// Checks the completed normal IRQ tail, with IRQs still masked and the
+    /// architecture exception marker suspended. Outer guards still exclude
+    /// scheduling; this entry only exempts the tail's own IRQ mask.
+    pub(crate) fn current_check_preempt_pending_at_irq_exit() {
+        Self::check_preempt_pending_from(PreemptCheckOrigin::IrqExit);
+    }
+
+    fn check_preempt_pending_from(origin: PreemptCheckOrigin) {
         use kspin::NoPreemptIrqSave;
+        // Effective NMI scopes cannot enter the scheduler, even when the
+        // controller classified an IRQ-on entry rather than a dedicated trap.
+        if kirq::context::is_in_nmi() {
+            return;
+        }
+        #[cfg(unittest)]
+        crate::current().preempt_check_probe.record_check();
         loop {
             let curr = crate::current();
+            krcu_core::RcuContextIf::check_reader_cleanup();
             let need_resched = curr.need_resched.load(Ordering::Acquire);
             crate::run_queue::record_preempt_pending_check(need_resched);
             if !need_resched {
@@ -880,6 +921,12 @@ impl TaskInner {
             let in_exception = khal::context::in_exception_context();
             crate::run_queue::record_preempt_pending_blocked(can_preempt, in_exception);
             if !can_preempt || in_exception {
+                return;
+            }
+            // A plain IRQ-off region is an implicit RCU read-side region and
+            // must not be split by releasing an inner preemption guard. Only
+            // the completed IRQ tail may schedule under its entry IRQ mask.
+            if matches!(origin, PreemptCheckOrigin::Task) && !karch::local_irq_enabled() {
                 return;
             }
 

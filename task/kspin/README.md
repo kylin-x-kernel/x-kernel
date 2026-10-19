@@ -156,6 +156,10 @@ impl KernelGuardIf for MyKernelGuard {
         // Your implementation
     }
 
+    fn enable_preempt_without_check() {
+        // Restore one credit without checking pending work.
+    }
+
     fn disable_preempt() {
         // Your implementation
     }

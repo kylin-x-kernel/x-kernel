@@ -1,0 +1,23 @@
+[package]
+name = "krcu-core"
+description = "RCU reader accounting, grace periods and callback bookkeeping"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kiface.workspace = true
+intrusive-collections.workspace = true
+kspin.workspace = true
+unittest.workspace = true
+
+[dev-dependencies]
+# Host threads race node setup and enrollment; UP exclusion is not a mutex.
+kspin = { workspace = true, features = ["smp"] }
+
+[lints]
+workspace = true

@@ -3,10 +3,14 @@
 ## RCU Carrier Startup
 
 After the all-CPU service rendezvous, `late_init_main` calls
-`ktask::init_rcu_service` and waits sleepably for the GP task to prepare its own
+`krcu::init_service` and waits sleepably for the GP task to prepare its own
 wait and timer. This precedes workqueue and driver startup. It does not enable
 ordinary RCU callback admission or advertise completed observation integration.
 Startup errors stop boot; an unprepared GP task is not reported as ready.
+`krcu` owns service state, the GP task, progress timer and Rcu softirq action;
+`ktask` supplies generic execution support. The `krcu_core::RcuContextIf`
+provider is linked before this rendezvous and service startup, so early
+watching and reader enrollment do not depend on GP readiness.
 
 ## System Workqueue Startup
 

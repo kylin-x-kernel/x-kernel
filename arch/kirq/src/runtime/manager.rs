@@ -4,9 +4,10 @@
 
 //! IRQ manager public API and dispatch-entry orchestration.
 
+use krcu_core::RcuContextIf;
 use kspin::{SpinNoIrq, static_lock};
 
-use super::sync_wait::IrqSyncWaitIf;
+use super::{rcu::with_nmi_context, sync_wait::IrqSyncWaitIf};
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
     action::IrqAction,
@@ -683,7 +684,13 @@ fn finish_irq_teardown(virq: Virq) {
 /// fired — a pseudo-NMI preempting a critical section. The handler uses the
 /// lock-free NMI path which only touches the NMI table, never `IRQ_STATE`.
 pub fn handle_nmi(vector: usize) -> bool {
-    platform_dispatch_nmi(vector);
+    handle_nmi_with(vector, platform_dispatch_nmi)
+}
+
+fn handle_nmi_with(vector: usize, dispatch_fn: impl FnOnce(usize)) -> bool {
+    // SAFETY: the architecture adapter excludes ordinary IRQs and migration;
+    // controller dispatch completes all claims before returning to this stack.
+    unsafe { with_nmi_context(|| dispatch_fn(vector)) };
     true
 }
 
@@ -715,9 +722,16 @@ pub fn generic_handle_irq(claim: PendingIrq) -> Option<Virq> {
 /// The claim must be consumed on the CPU that acknowledged it.
 #[doc(hidden)]
 pub fn generic_handle_nmi(claim: DispatchedIrq) {
-    // NMI dispatch is keyed by raw hwirq and must not touch IRQ_STATE.
-    dispatch_nmi_handler(claim.irq());
-    claim.complete();
+    // SAFETY: the active controller claim belongs to this CPU in an IRQ/NMI
+    // entry. Neither handler dispatch nor claim completion may schedule.
+    unsafe {
+        with_nmi_context(|| {
+            // Keep effective NMI context through controller completion, even
+            // when classification happened inside an ordinary IRQ entry.
+            dispatch_nmi_handler(claim.irq());
+            claim.complete();
+        })
+    };
 }
 
 /// Handles a normal IRQ after an architecture trap adapter has masked local
@@ -738,30 +752,43 @@ pub fn generic_handle_nmi(claim: DispatchedIrq) {
 /// [`generic_handle_irq`] or [`generic_handle_nmi`]. For a claimed normal IRQ,
 /// the generic ordering is:
 ///
-/// 1. enter IRQ lifecycle hooks and generic hardirq context;
+/// 1. establish RCU watching, then enter lifecycle hooks and hardirq context;
 /// 2. claim, ack, and classify through [`IntrManagerIf::dispatch_irq`];
 /// 3. invoke the irqchip-selected generic IRQ or NMI helper;
 /// 4. complete the controller claim inside that helper;
 /// 5. leave generic hardirq context;
 /// 6. run the common IRQ-exit deferred hook;
-/// 7. leave lifecycle hooks.
+/// 7. leave lifecycle hooks, then finish the watching entry before returning
+///    to the HAL scheduling tail.
 ///
 /// As on Linux, an NMI discovered after entering from an IRQ-on context remains
 /// inside the outer IRQ lifecycle. Only its inner handler dispatch differs:
 /// it uses the lock-free NMI table rather than normal IRQ action state.
 pub fn handle_irq(vector: usize) -> bool {
+    handle_irq_with(vector, platform_dispatch_irq)
+}
+
+fn handle_irq_with(vector: usize, dispatch_fn: impl FnOnce(usize) -> Option<Virq>) -> bool {
+    // SAFETY: the HAL adapter masks ordinary IRQs and pins this CPU through
+    // dispatch and deferred work. End watching entry before its scheduling tail.
+    let interrupt_entry = unsafe { RcuContextIf::current_cpu_watching().enter_interrupt() };
     let lifecycle_guard = IrqLifecycleGuard::enter();
     let hardirq_context_guard = HardIrqContextGuard::enter();
 
     // The irqchip consumes every successful claim through one of the generic
     // helpers before returning. What remains here is the common outer
     // IRQ-entry tail, including IRQ-on NMI and spurious-claim cases.
-    let resolved_irq = platform_dispatch_irq(vector);
+    let resolved_irq = dispatch_fn(vector);
     run_irq_exit_tail_with_context(vector, resolved_irq, hardirq_context_guard);
 
-    let _ = lifecycle_guard;
+    drop(lifecycle_guard);
+    // SAFETY: controller, nested entries, deferred work and lifecycle hooks
+    // have finished without scheduling; the HAL exclusion is still held.
+    unsafe { interrupt_entry.exit() };
     true
 }
+
+unittest::path_mod_test!(tests_rcu_entry, "../../ut-tests/rcu_irq_entry.rs");
 
 #[cfg(unittest)]
 fn run_claimed_irq_tail(
@@ -2161,7 +2188,7 @@ pub mod tests_irq {
 
     #[def_test]
     fn test_synchronize_irq_rejects_hardirq_context() {
-        let _hardirq = crate::context::HardIrqContextGuard::enter();
+        let _hardirq = crate::context::test_support::ScopedHardIrqContext::enter();
 
         let err = try_synchronize_irq(0x3117).expect_err("context misuse must be an error");
         assert!(matches!(
@@ -2174,7 +2201,7 @@ pub mod tests_irq {
 
     #[def_test(serial)]
     fn test_free_irq_action_rejects_hardirq_context() {
-        let _hardirq = crate::context::HardIrqContextGuard::enter();
+        let _hardirq = crate::context::test_support::ScopedHardIrqContext::enter();
 
         let err = match try_free_irq_action(0x3118, crate::IrqActionToken::new(1)) {
             Err(err) => err,

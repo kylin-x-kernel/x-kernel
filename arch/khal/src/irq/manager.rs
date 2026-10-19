@@ -6,6 +6,18 @@
 
 use kcpu::excp::{IRQ, NMI, register_trap_handler};
 
+/// Scheduler checkpoint after normal IRQ dispatch and controller completion.
+///
+/// The trap adapter calls this with IRQs masked, its preemption guard released
+/// and the architecture exception marker suspended. The provider must retain
+/// outer preemption, interrupt-context and CPU-watching exclusions. Dedicated
+/// NMI entry must not use this checkpoint.
+#[kiface::interface]
+pub trait IrqExitIf {
+    /// Checks pending scheduling work without enabling local IRQs on return.
+    fn check_preempt_pending();
+}
+
 /// Pseudo-NMI trap entry adapter.
 ///
 /// Called by the architecture exception layer while handling an NMI-class trap.
@@ -30,14 +42,14 @@ pub fn irq_handler(vector: usize) -> bool {
     let guard = kspin::NoPreempt::new();
     let handled = kirq::handle_irq(vector);
 
-    // The architecture's EL1 exception guard is still active here. Dropping
-    // `NoPreempt` with that marker installed makes ktask reject a pending
-    // reschedule, and there is no second check after the guard later unwinds.
-    // Temporarily suspend the marker after the IRQ is completed so the normal
-    // enable-preempt hook can switch in this IRQ-tail safe point. If a switch
-    // occurs, this stack (and token) resume with the interrupted task.
+    // Release only this tail's preemption credit: ordinary guard release would
+    // check cleanup twice and cannot schedule under the entry IRQ mask anyway.
+    // Suspend the exception marker only for the completed-IRQ checkpoint, which
+    // retains outer exclusions. If switched out, this stack and token resume
+    // with the interrupted task.
     let suspended_exception = crate::context::suspend_active_exception_context();
-    drop(guard);
+    guard.release_without_check();
+    IrqExitIf::check_preempt_pending();
     crate::context::resume_active_exception_context(suspended_exception);
     handled
 }

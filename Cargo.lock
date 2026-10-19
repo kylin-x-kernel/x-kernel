@@ -2566,6 +2566,7 @@ dependencies = [
  "kcpu_slot",
  "kiface",
  "kpoll",
+ "krcu-core",
  "kspin",
  "log",
  "unittest",
@@ -2858,7 +2859,30 @@ dependencies = [
 name = "krcu"
 version = "0.3.0-dev"
 dependencies = [
+ "karch",
+ "kbuild_config",
+ "kcpu_id_map",
+ "kcpu_slot",
+ "kerrno",
+ "khal",
+ "kiface",
+ "kipi",
+ "kirq",
+ "klazy",
+ "kpoll",
+ "krcu-core",
+ "kspin",
+ "ktask",
+ "ktime_types",
+ "unittest",
+]
+
+[[package]]
+name = "krcu-core"
+version = "0.3.0-dev"
+dependencies = [
  "intrusive-collections",
+ "kiface",
  "kspin",
  "unittest",
 ]
@@ -2912,6 +2936,7 @@ dependencies = [
  "kirq",
  "klogger",
  "knet",
+ "krcu",
  "kspin",
  "ktask",
  "ktime",
@@ -3065,7 +3090,7 @@ dependencies = [
  "kirq",
  "klazy",
  "kpoll",
- "krcu",
+ "krcu-core",
  "ksched",
  "kspin",
  "ktime_types",
@@ -4089,6 +4114,7 @@ dependencies = [
  "kidentity",
  "klogger",
  "kprocess",
+ "krcu",
  "ksignal",
  "ksync",
  "ktask",

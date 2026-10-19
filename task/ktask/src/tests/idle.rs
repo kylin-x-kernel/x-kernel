@@ -46,7 +46,11 @@ fn arm_delivery_masks() -> (u64, Option<u64>) {
 
 #[def_test(serial)]
 fn retained_reschedule_skips_idle_without_consuming_request() {
+    use unittest::assert_eq;
+
     let guard = NoPreemptIrqSave::new();
+    let watching = krcu_core::RcuContextIf::current_cpu_watching();
+    let sequence = watching.sequence_for_test();
     let task = crate::current();
     let was_pending = task.is_preempt_pending();
     task.set_preempt_pending(true);
@@ -55,6 +59,7 @@ fn retained_reschedule_skips_idle_without_consuming_request() {
     task.set_preempt_pending(was_pending);
     assert!(!waited);
     assert!(remains_pending);
+    assert_eq!(watching.sequence_for_test(), sequence);
 }
 
 #[cfg(all(feature = "ipi", feature = "smp"))]
@@ -100,11 +105,17 @@ fn pending_timer_notification_wakes_idle_without_reschedule() {
     let task = crate::current().clone();
     let fired = Arc::new(AtomicBool::new(false));
     let callback_fired = fired.clone();
+    let callback_was_watched = Arc::new(AtomicBool::new(false));
+    let callback_watching = callback_was_watched.clone();
     // Core registration publishes the deadline without programming hardware;
     // the notification requests arbitration through the real IRQ path.
     let timer = ktimer_core::Timer::new(
         &crate::timers::PREPARED_TIMERS,
         move |_: crate::TimerControl<'_>, _: crate::Expiration| {
+            callback_watching.store(
+                krcu_core::RcuContextIf::current_cpu_watching().is_watching(),
+                Ordering::Release,
+            );
             callback_fired.store(true, Ordering::Release);
         },
     );
@@ -125,10 +136,25 @@ fn pending_timer_notification_wakes_idle_without_reschedule() {
     let mask = karch::save_irq_and_disable();
     #[cfg(target_arch = "aarch64")]
     let arm_masks = arm_delivery_masks();
+    let watching = krcu_core::RcuContextIf::current_cpu_watching();
+    let sequence = watching.sequence_for_test();
     // No task was made runnable: the pending hardware interrupt, not the
     // need_resched flag, must prevent indefinite sleep. The host runner must bound
     // the run because a broken wait cannot check a guest-side timeout.
+    let enroll_fn = |_: &krcu_core::ReadGuard<'_>| {
+        // SAFETY: retained current fixture under IRQ/preemption exclusion;
+        // the idle boundary below removes membership from this static node.
+        unsafe {
+            krcu_core::RcuContextIf::reader_node_for_tests(cpu.as_usize()).enroll(&task.rcu_reader)
+        };
+    };
+    // SAFETY: exclusive current-task fixture, cleaned by the idle boundary.
+    unsafe { task.rcu_reader.with_read_deferred(enroll_fn) };
+    let was_enrolled = task.rcu_reader.is_enrolled();
     let waited = super::idle_wait_if_no_work(&guard);
+    let cleaned_before_guard_release = !task.rcu_reader.is_enrolled();
+    let returned_sequence = watching.sequence_for_test();
+    let is_watched_after_wait = watching.is_watching();
     let is_irq_disabled = !karch::local_irq_enabled();
     let returned_mask = karch::save_irq_and_disable();
     #[cfg(target_arch = "aarch64")]
@@ -148,7 +174,14 @@ fn pending_timer_notification_wakes_idle_without_reschedule() {
     timer.cancel_sync();
     super::rearm_local_timer();
     assert!(waited);
+    assert!(was_enrolled);
+    assert!(cleaned_before_guard_release);
     assert!(delivered);
+    assert!(callback_was_watched.load(Ordering::Acquire));
+    assert!(is_watched_after_wait);
+    // The idle pair alone advances twice. IRQs delivered inside the wait can
+    // add crossings; ARM may instead deliver them after the guard is released.
+    assert!(returned_sequence.wrapping_sub(sequence) >= 2);
     assert!(is_irq_disabled);
     assert_eq!(returned_mask, mask);
     #[cfg(target_arch = "aarch64")]

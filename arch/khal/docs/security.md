@@ -38,6 +38,10 @@ generic `kirq` API。
 
 - `khal::irq` 不保存 `IRQ_STATE` 或 `NMI_TABLE`，避免与 `kirq` 形成重复活跃 state。
 - `NoPreempt` guard 必须覆盖整个 `kirq::handle_irq()` / `kirq::handle_nmi()` 调用。
+- `IrqExitIf` is reserved for the completed normal IRQ tail, after controller
+  completion and dispatch cleanup. It may exempt only the entry IRQ mask from
+  ordinary preemption checks, never outer preemption guards or NMI context.
+  The adapter restores the suspended exception marker after the checkpoint.
 
 ## 线程安全
 

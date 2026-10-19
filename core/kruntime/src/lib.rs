@@ -254,8 +254,8 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
                   successfully before later RCU integration can use it"
     )]
     // SAFETY: the CPU-service rendezvous above covers every discovered CPU's
-    // scheduler, timer and fixed notifications. ktask alone owns its RCU nodes.
-    unsafe { ktask::init_rcu_service() }.expect("RCU GP task preparation failed");
+    // scheduler, timer and fixed notifications. krcu owns its permanent nodes.
+    unsafe { krcu::init_service() }.expect("RCU GP task preparation failed");
 
     // All target CPUs can now receive notifications and run worker tasks.
     // Publish services before exposing any work-producing drivers.

@@ -1,5 +1,34 @@
 # kirq — 安全与可靠性分析
 
+## Interrupt Watching Boundary
+
+`krcu_core::RcuContextIf` is a static contract implemented by `krcu`, including
+before GP service startup. Watching lookup must not lock, allocate, look up a
+task or schedule; initialized CPU identity is required. It preserves the caller's
+IRQ mask, never enables previously disabled IRQs and does not change NMI exclusion.
+It is not a consumer read interface or a declaration of service readiness.
+The provider's CPU watching reference has permanent storage but does not pin the
+caller. Architecture IRQ adapters must exclude ordinary IRQs and migration
+until all controller, deferred and lifecycle work finishes. Explicit RCU entry
+exit occurs before the HAL can schedule. NMI scopes retain effective NMI state
+through watching exit, including nested dedicated/classified paths. Their atomic
+CPU-slot count requires initialized CPU storage and strictly nested same-CPU
+execution; it takes no lock and never forms an exclusive reference shared with
+NMI. Available stack space bounds nesting far below the address-sized counter.
+Only coarse classification bypasses the ordinary context lock in NMI; detailed
+snapshots are explicitly excluded. These hooks neither make the existing NMI
+handler table lock-free nor permit interrupt task-reader scopes or reclamation
+from a watching sample. Synthetic tests verify pairing and lock bypass, not
+hardware NMI entry or actual user instructions. The idle host separately brackets its
+architecture wait; its preemption exclusion must span the IRQ return tail,
+which must not access protected objects after watching exit. The
+controller-classified claim path and its hardware completion remain source-audited;
+the synthetic nested-scope test does not execute a real controller claim.
+The user-return host restores watching before IRQ dispatch, rather than keeping
+an unwatched CPU across the HAL scheduling tail. This does not supply x86 vector-2
+NMI dispatch or repair its SWAPGS window; those architecture capabilities are not
+advertised by the user-boundary integration.
+
 ## Softirq Group Registration Boundary
 
 `open_softirqs` accepts trusted kernel enum/function pairs, not raw or external

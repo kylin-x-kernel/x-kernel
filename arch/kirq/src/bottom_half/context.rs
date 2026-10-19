@@ -8,15 +8,17 @@
 //! infrastructure. It is intentionally separate from scheduler preemption
 //! accounting: `kspin` guards still control task preemption, while this module
 //! answers whether the current CPU is inside a hardirq handler, serving softirq
-//! work, or running with local bottom halves disabled.
+//! work, or running with local bottom halves disabled. Effective NMI scopes
+//! have a separate lock-free counter so coarse queries can bypass those locks.
 //!
 //! Hardirq, softirq, and BH-disabled contexts are all non-sleepable. Future
 //! IRQ-thread execution will need its own sleepable context model instead of
 //! being represented by [`is_in_interrupt_context`].
 
-use core::marker::PhantomData;
-#[cfg(any(unittest, feature = "irq_stat"))]
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    marker::PhantomData,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use kspin::{NoPreempt, NoPreemptIrqSave};
 
@@ -51,6 +53,52 @@ impl IrqContextState {
 kcpu_slot::cpu_slot_cell_with_template! {
     static IRQ_CONTEXT_STATE: kspin::SpinNoIrq<crate::bottom_half::context::IrqContextState> =
         unsafe { kspin::SpinNoIrq::new(crate::bottom_half::context::IrqContextState::empty()) };
+}
+
+// Unlike ordinary context counters, NMI entry must not take an interrupted
+// CPU's lock. These count effective scopes, not physical interrupt arrivals:
+// a dedicated NMI route can contain a nested controller-classified scope.
+kcpu_slot::cpu_slot! {
+    static NMI_SCOPE_DEPTH: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+}
+
+pub(crate) struct NmiContextGuard {
+    depth: &'static AtomicUsize,
+    cpu_local: PhantomData<*mut ()>,
+}
+
+impl NmiContextGuard {
+    /// # Safety
+    /// CPU slots must be initialized. Remain on this CPU with ordinary IRQs
+    /// excluded until this guard is dropped; nested entries must unwind first.
+    pub(crate) unsafe fn enter() -> Self {
+        let depth = NMI_SCOPE_DEPTH.current_shared();
+        // An address-sized count cannot overflow within a kernel stack's
+        // bounded nesting. RMW retains nested updates without exclusive borrows;
+        // acquire keeps the scope's work after effective NMI entry.
+        depth.fetch_add(1, Ordering::AcqRel);
+        Self {
+            depth,
+            cpu_local: PhantomData,
+        }
+    }
+}
+
+impl Drop for NmiContextGuard {
+    fn drop(&mut self) {
+        // Keep all scope work before removing effective NMI context.
+        self.depth.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Reports effective NMI context without locks, guards or scheduler access.
+///
+/// Requires initialized CPU slots. The observation describes this CPU at the
+/// call, not a transferable context token or a count of hardware NMI arrivals.
+#[inline]
+pub fn is_in_nmi() -> bool {
+    NMI_SCOPE_DEPTH.current_shared().load(Ordering::Relaxed) != 0
 }
 
 #[cfg(any(unittest, feature = "irq_stat"))]
@@ -120,6 +168,8 @@ impl IrqContextSnapshot {
 /// Coarse interrupt context level for diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterruptContextLevel {
+    /// Currently in an effective NMI scope, including controller classification.
+    Nmi,
     /// Ordinary task context.
     Task,
     /// Ordinary task context with local bottom halves disabled.
@@ -144,6 +194,8 @@ pub(crate) struct IrqContextDiagnostics {
 ///
 /// The function pins the current CPU and masks local IRQs while reading the
 /// per-CPU state so callers do not need to establish their own guard.
+/// This locking snapshot excludes NMI state and must not be called from NMI;
+/// use [`is_in_nmi`] or [`interrupt_context_level`] there.
 #[inline]
 pub fn irq_context_snapshot() -> IrqContextSnapshot {
     let _guard = NoPreemptIrqSave::new();
@@ -153,6 +205,9 @@ pub fn irq_context_snapshot() -> IrqContextSnapshot {
 /// Returns the current CPU's coarse interrupt context level.
 #[inline]
 pub fn interrupt_context_level() -> InterruptContextLevel {
+    if is_in_nmi() {
+        return InterruptContextLevel::Nmi;
+    }
     let snapshot = irq_context_snapshot();
     if snapshot.is_in_hardirq() {
         InterruptContextLevel::Hardirq
@@ -192,14 +247,14 @@ pub fn is_bh_disabled() -> bool {
     irq_context_snapshot().is_bh_disabled()
 }
 
-/// Returns whether the current CPU is in hardirq, softirq, or BH-disabled state.
+/// Returns whether the current CPU is in NMI, hardirq, softirq, or BH-disabled state.
 ///
 /// Prefer the more specific query helpers in new code. This combined predicate
 /// is intended for bottom-half gating and diagnostics. A future sleepable IRQ
 /// thread must not be reported through this predicate.
 #[inline]
 pub fn is_in_interrupt_context() -> bool {
-    irq_context_snapshot().is_in_interrupt_context()
+    is_in_nmi() || irq_context_snapshot().is_in_interrupt_context()
 }
 
 /// Returns current IRQ-context diagnostic counters.
@@ -262,6 +317,19 @@ pub mod test_support {
     use kspin::NoPreemptIrqSave;
 
     use super::HardIrqContextGuard;
+
+    /// Exercises the real software NMI context/watching pair without hardware.
+    ///
+    /// # Safety
+    /// The caller must initialize CPU slots and current, exclude ordinary IRQs
+    /// and migration, and retain that exclusion through return. The callback
+    /// must return normally on this stack, without scheduling or leaving nested
+    /// entries or protected work unfinished. This helper does not acquire a pin.
+    pub unsafe fn with_nmi_context<R>(operation_fn: impl FnOnce() -> R) -> R {
+        // SAFETY: the fixture supplies initialized, pinned CPU/current state
+        // and balanced nonscheduling execution, matching the real entry helper.
+        unsafe { crate::runtime::rcu::with_nmi_context(operation_fn) }
+    }
 
     /// Test-only hardirq context with local IRQs masked and preemption disabled.
     pub struct ScopedHardIrqContext {
@@ -574,6 +642,26 @@ pub mod tests_context {
         }
         assert!(!is_bh_disabled());
         assert!(!is_in_interrupt_context());
+    }
+
+    #[def_test]
+    fn test_nmi_classification_does_not_take_interrupted_context_lock() {
+        let pin = kspin::NoPreemptIrqSave::new();
+        let state = super::IRQ_CONTEXT_STATE.get(&pin).lock();
+        // SAFETY: synthetic NMI on this pinned, IRQ-masked CPU. The queries
+        // must bypass the ordinary context lock held by the interrupted code.
+        let observed = unsafe {
+            crate::runtime::rcu::with_nmi_context(|| {
+                (
+                    interrupt_context_level(),
+                    is_in_interrupt_context(),
+                    super::is_softirq_context(),
+                )
+            })
+        };
+        drop(state);
+        assert_eq!(observed, (InterruptContextLevel::Nmi, true, false));
+        assert!(!super::is_in_nmi());
     }
 
     #[def_test(serial)]

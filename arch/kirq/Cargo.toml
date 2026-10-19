@@ -20,6 +20,7 @@ karch = { workspace = true }
 kbuild_config = { workspace = true }
 kiface = { workspace = true }
 kpoll = { workspace = true }
+krcu-core = { workspace = true }
 kspin = { workspace = true }
 log = { workspace = true }
 kcpu_slot = { workspace = true }

@@ -26,6 +26,10 @@ impl NoOp {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Consumes the host no-op guard without a scheduling checkpoint.
+    #[inline(always)]
+    pub fn release_without_check(self) {}
 }
 
 impl Default for NoOp {
@@ -111,6 +115,18 @@ mod kernel {
         pub fn new() -> Self {
             <Self as BaseGuard>::acquire();
             Self
+        }
+
+        /// Releases this guard's preemption credit without checking pending work.
+        ///
+        /// IRQ state and outer preemption credits are unchanged. The caller must
+        /// arrange a subsequent scheduling checkpoint, such as the completed
+        /// IRQ tail. Ordinary guard destruction continues to check pending work.
+        #[inline]
+        pub fn release_without_check(self) {
+            let _guard = core::mem::ManuallyDrop::new(self);
+            #[cfg(feature = "preempt")]
+            crate::guard::KernelGuardIf::enable_preempt_without_check();
         }
     }
 

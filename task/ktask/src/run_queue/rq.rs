@@ -808,7 +808,10 @@ impl RunQueue {
         // SAFETY: IRQs/preemption are excluded and prev_task is this CPU's
         // Arc-owned current task. Post-switch cleanup unlinks exited readers
         // before releasing the outgoing owner.
-        unsafe { crate::rcu::note_context_switch(&prev_task, self.cpu_id) };
+        let observation = unsafe {
+            krcu_core::SchedulerObservation::new(&prev_task.rcu_reader, self.cpu_id.as_usize())
+        };
+        krcu_core::RcuContextIf::note_context_switch(observation);
         if prev_task.ptr_eq(&next_task) {
             #[cfg(feature = "sched_stat")]
             sched_stat_inc(&sched_stat_cpu(this_cpu_id()).switch_same);

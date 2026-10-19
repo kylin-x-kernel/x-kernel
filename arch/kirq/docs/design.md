@@ -1,5 +1,34 @@
 # kirq — 设计文档
 
+## Interrupt Watching And NMI Context
+
+The static `krcu_core::RcuContextIf::current_cpu_watching` contract borrows
+permanent CPU state owned by `krcu`. Its provider is linked before GP service
+readiness and requires initialized CPU identity, not a current task or GP task.
+`kirq` owns neither the provider nor the system RCU arrays and cleanup policy.
+Ordinary IRQ entry establishes watching before lifecycle hooks and hardirq
+bookkeeping, retaining it through controller completion, deferred execution and
+lifecycle exit. Its explicit exit precedes the HAL scheduling tail.
+Dedicated NMI entry and controller-classified NMI dispatch use the same nested
+scope operation. Effective NMI depth is established before watching entry and
+removed after watching exit; claim completion stays inside that scope.
+Depth counts scopes, not physical interrupts. This covers a dedicated entry
+which later invokes the common classified-claim helper without retiring the
+outer context early.
+
+NMI depth uses a shared atomic CPU slot, not the ordinary context lock.
+`is_in_nmi`, `interrupt_context_level`, `is_softirq_context` and the combined
+interrupt predicate can classify NMI without that lock. Detailed ordinary
+context snapshots remain unsuitable for NMI. Runtime lifecycle callbacks keep
+their existing locking mechanism and are not used to implement RCU entry.
+The idle host may enter quiescence around its architecture wait. An interrupt
+activating that CPU restores quiescence before returning to idle; the host's
+outer preemption guard excludes scheduling until idle restores watching.
+User-return callbacks restore watching before calling the IRQ dispatcher, so
+its HAL tail may schedule in watched state. The krcu GP service consumes
+ordered watching observations through krcu-core; kirq owns balanced interrupt entry
+and exit, not grace-period coordination.
+
 ## Atomic Softirq Group Registration
 
 `bottom_half/softirq.rs::open_softirqs` registers a bounded set of fixed actions

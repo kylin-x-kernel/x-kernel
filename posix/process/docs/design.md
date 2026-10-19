@@ -52,6 +52,17 @@ across its exit cleanup.
 
 ## Runtime and teardown flow
 
+`UserContext::run` owns the IRQ-masked user-transfer boundary. Its entry callback
+finishes user-time accounting, then calls `krcu::enter_user_quiescent`; its
+return callback calls `krcu::exit_user_quiescent` before kernel-time accounting.
+This follows Linux's accounting-before-EQS / watching-before-accounting order.
+The return callback precedes architecture IRQ dispatch as well as syscall/fault
+processing in this loop. No RCU read scope or protected borrow may span user
+execution; retained task/thread references use independent ownership. RCU
+system state, GP service and private read-admission policy belong to `krcu`,
+with algorithms in `krcu-core`, not POSIX. `ktask` retains task reader storage
+and scheduler boundaries. No public consumer read interface is opened here.
+
 The loop alternates user execution, trap handling, kernel CPU accounting and
 signal checks. The loop clears the previous trap's interrupt flag before the
 normal pending-signal check. A later clear happens only when another scan

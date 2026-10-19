@@ -71,8 +71,20 @@ pub(crate) fn run_user_thread_loop(
 
     while !thr.is_exiting() {
         let reason = uctx.run(
-            || thr.set_cpu_state(CpuTimeState::User),
-            || thr.set_cpu_state(CpuTimeState::Kernel),
+            || {
+                thr.set_cpu_state(CpuTimeState::User);
+                // SAFETY: UserContext masks IRQs and performs only audited
+                // RCU-free architecture transfer after this callback. The loop
+                // holds no RCU scope; task/thread references have independent ownership.
+                unsafe { krcu::enter_user_quiescent() };
+            },
+            || {
+                // SAFETY: UserContext restores kernel context on the same CPU
+                // with IRQs masked, before dispatching any returned trap. Restore
+                // watching before accounting can access ordinary kernel state.
+                unsafe { krcu::exit_user_quiescent() };
+                thr.set_cpu_state(CpuTimeState::Kernel);
+            },
         );
         let mut runtime_action = UserThreadRuntimeAction::Continue;
 

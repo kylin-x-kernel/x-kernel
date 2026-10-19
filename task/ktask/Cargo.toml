@@ -24,7 +24,7 @@ arm-timer-resume-fixup = []
 
 [dependencies]
 kerrno.workspace = true
-krcu.workspace = true
+krcu-core.workspace = true
 ktimer_core = { workspace = true, features = ["preempt"] }
 kidentity.workspace = true
 khal.workspace = true

@@ -42,6 +42,12 @@ pub(crate) type Scheduler = ksched::Scheduler<TaskInner>;
 
 #[kiface::provide]
 impl kspin::KernelGuardIf {
+    fn enable_preempt_without_check() {
+        if let Some(curr) = current_may_uninit() {
+            curr.enable_preempt(false);
+        }
+    }
+
     fn disable_preempt() {
         if let Some(curr) = current_may_uninit() {
             curr.disable_preempt();
@@ -51,6 +57,15 @@ impl kspin::KernelGuardIf {
     fn enable_preempt() {
         if let Some(curr) = current_may_uninit() {
             curr.enable_preempt(true);
+        }
+    }
+}
+
+#[kiface::provide]
+impl khal::irq::IrqExitIf {
+    fn check_preempt_pending() {
+        if current_may_uninit().is_some() {
+            TaskInner::current_check_preempt_pending_at_irq_exit();
         }
     }
 }
@@ -86,6 +101,65 @@ pub fn current_may_uninit() -> Option<CurrentTask> {
 /// Panics if the current task is not initialized.
 pub fn current() -> CurrentTask {
     CurrentTask::get()
+}
+
+/// Returns whether the current task's actual preemption-disable count is nonzero.
+///
+/// This does not infer exclusion from IRQ state or scheduler feature flags.
+/// Requires an initialized current task.
+pub fn current_preemption_disabled() -> bool {
+    current().preempt_section_held()
+}
+
+/// Marks the current task for rescheduling without waking it or scheduling.
+///
+/// Requires an initialized current task. A later normal scheduling checkpoint
+/// must consume the request; this function sends no progress notification.
+pub fn request_current_reschedule() {
+    current().set_preempt_pending(true);
+}
+
+/// Runs an operation with preemption disabled, deferring the exit-time check.
+///
+/// Removes only this helper's preemption credit on return or unwind, without
+/// checking pending work. The helper does not change IRQ state. The operation
+/// must not voluntarily block or consume this helper's preemption credit.
+/// The caller must arrange a later normal preemption checkpoint, including on
+/// unwind. This helper is not available in NMI context.
+///
+/// # Panics
+/// Panics in NMI context or if the current task is not initialized.
+pub fn with_preempt_check_deferred<R>(operation_fn: impl FnOnce() -> R) -> R {
+    struct DeferredPreemptCheck(CurrentTask);
+
+    impl Drop for DeferredPreemptCheck {
+        fn drop(&mut self) {
+            self.0.enable_preempt(false);
+        }
+    }
+
+    assert!(!kirq::context::is_in_nmi());
+    let task = current();
+    task.disable_preempt();
+    let _deferred_check = DeferredPreemptCheck(task);
+    operation_fn()
+}
+
+/// Current-task execution controls for deterministic unit-test fixtures.
+#[cfg(unittest)]
+pub mod test_support {
+    /// Reads the initialized current task's pending reschedule flag.
+    pub fn is_current_reschedule_pending() -> bool {
+        super::current().is_preempt_pending()
+    }
+
+    /// Sets the current task's pending flag without checking it or notifying a CPU.
+    ///
+    /// Fixtures must exclude competing flag writers while replacing/restoring
+    /// the flag, so they do not discard an unrelated scheduling request.
+    pub fn set_current_reschedule_pending(pending: bool) {
+        super::current().set_preempt_pending(pending);
+    }
 }
 
 /// Updates the current user task's saved root and activates it on this CPU.
@@ -422,8 +496,9 @@ impl kipi::TimerReprogramIpiIf {
 /// This is intended for task/user return paths that are about to resume normal
 /// execution outside interrupt or exception handling. It is a no-op before the
 /// current task is initialized, and it still obeys the normal preemption guards:
-/// a context switch is only performed when the current task can be preempted and
-/// the CPU is no longer inside an active exception context.
+/// a context switch requires enabled local IRQs, a preemptible current task and
+/// no active exception context. IRQ-masked callers leave the request pending;
+/// the completed normal IRQ tail has a separate scheduler checkpoint.
 pub fn check_preempt_pending() {
     if current_may_uninit().is_some() {
         crate::task::TaskInner::current_check_preempt_pending();
@@ -768,9 +843,26 @@ fn idle_wait_if_no_work(_guard: &NoPreemptIrqSave) -> bool {
     if current().is_preempt_pending() {
         return false;
     }
+    debug_assert!(!current().rcu_reader.is_reading());
+    debug_assert!(!kirq::context::is_in_interrupt_context());
+    // Finish membership before entering a possibly tickless quiescent window.
+    let task = current();
+    // SAFETY: the current task is retained under the caller's IRQ/preemption
+    // guard at this watched, non-NMI idle boundary, with no reader-node lock.
+    let cleanup = unsafe { krcu_core::ReaderCleanup::new(&task.rcu_reader) };
+    krcu_core::RcuContextIf::finish_reader_cleanup(cleanup);
+    let watching = krcu_core::RcuContextIf::current_cpu_watching();
+    // SAFETY: Only the idle loop and scope-free task tests call this helper.
+    // The guard pins this CPU through restoration; no protected reference or
+    // interrupt scope spans the wait. IRQ/NMI dispatch balances its activation,
+    // and the outer preemption guard prevents scheduling in the IRQ return tail.
+    unsafe { watching.enter_quiescent() };
     // SAFETY: The borrowed guard excludes preemption and normal IRQs. The
     // callers hold no runqueue lock and retain the ordinary task NMI state.
     unsafe { karch::idle_wait() };
+    // SAFETY: idle_wait returns on this CPU with IRQs masked and all interrupt
+    // entries balanced. Restore watching before guard release or bookkeeping.
+    unsafe { watching.exit_quiescent() };
     true
 }
 

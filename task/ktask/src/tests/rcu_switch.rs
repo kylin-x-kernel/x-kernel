@@ -72,10 +72,53 @@ fn same_task_selection_still_records_the_reader() {
         rq.inner
             .switch_to(crate::current(), task.clone(), super::TaskState::Running);
         task.rcu_reader
-            .is_enrolled_on(crate::rcu::reader_node(khal::percpu::this_cpu_id()))
+            .is_enrolled_on(krcu_core::RcuContextIf::reader_node_for_tests(
+                khal::percpu::this_cpu_id().as_usize(),
+            ))
     });
     assert!(was_enrolled);
     assert!(!task.rcu_reader.is_enrolled());
+}
+
+#[def_test]
+fn same_task_selection_cleans_deferred_reader_exit() {
+    let task = crate::current();
+    let (was_active, was_pending, is_clean) = {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        let select_current_fn = |_: &krcu_core::ReadGuard<'_>| {
+            let rq = crate::run_queue::current_run_queue::<kspin::NoPreemptIrqSave>();
+            rq.inner
+                .switch_to(crate::current(), task.clone(), super::TaskState::Running);
+            task.rcu_reader.is_reading()
+                && task
+                    .rcu_reader
+                    .is_enrolled_on(krcu_core::RcuContextIf::reader_node_for_tests(
+                        khal::percpu::this_cpu_id().as_usize(),
+                    ))
+        };
+        // SAFETY: this is the retained current task under IRQ/preemption
+        // exclusion, not an interrupt fixture. Same-task selection enrolls it
+        // without switching stacks. The following selection drains membership
+        // before the guard allows scheduling or the task owner is released.
+        let was_active = unsafe { task.rcu_reader.with_read_deferred(select_current_fn) };
+        let was_pending = !task.rcu_reader.is_reading()
+            && task
+                .rcu_reader
+                .is_enrolled_on(krcu_core::RcuContextIf::reader_node_for_tests(
+                    khal::percpu::this_cpu_id().as_usize(),
+                ));
+        let rq = crate::run_queue::current_run_queue::<kspin::NoPreemptIrqSave>();
+        rq.inner
+            .switch_to(crate::current(), task.clone(), super::TaskState::Running);
+        (
+            was_active,
+            was_pending,
+            !task.rcu_reader.is_reading() && !task.rcu_reader.is_enrolled(),
+        )
+    };
+    assert!(was_active);
+    assert!(was_pending);
+    assert!(is_clean);
 }
 
 #[def_test]

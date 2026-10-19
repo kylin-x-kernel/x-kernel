@@ -2,84 +2,61 @@
 
 ## Scope and trust model
 
-`api::is_sleepable_context` accepts no external input and adds no unsafe boundary.
-It rejects missing or idle current tasks, interrupt-like/IRQ-masked contexts,
-and preemption protection when tracked. Explicit RCU read nesting also rejects
-sleeping and voluntary yielding, without preventing involuntary preemption.
-Only controlled tests enter these scopes; there is no general safe reclamation API.
-Scheduler enrollment borrows stable Arc-owned task storage. On the incoming
-stack, `finish_task_switch` removes an exited task's abandoned RCU participation
-before releasing the outgoing owner or on-CPU marker. IRQs and migration remain
-excluded, old current is unpublished and the exited task cannot resume. The
-PREV_TASK lock is released before the original reader-node lock is acquired;
-diagnostics run after unlinking. Normal outer exits remove their node first.
-GC retains its ordinary final-ownership check before destroying task storage.
-Cleanup does not detach immutable runtime fields while shared task references
-may still borrow them, or unwind values on an abandoned Rust stack.
-No raw task pointer is sent to a deferred callback. IRQ/NMI read scope support
-is not implied by this task-context protocol.
-Sleep assertions and prepared waits
-share this gate to avoid inconsistent acceptance. This mitigates invalid-context service startup/stop;
-the caller remains responsible for dependency cycles and provider readiness.
+`ktask` retains each task's `krcu_core::TaskReader` and supplies safe scheduler,
+idle and preemption-cleanup boundaries. System reader nodes, watching storage,
+cleanup notifications and service policy belong to
+[`krcu`](../../../sync/krcu/docs/security.md). The permanently linked
+`krcu_core::RcuContextIf` provider is available before GP service readiness;
+availability of that provider is not permission to reclaim.
 
-The scheduler RCU hook reports only after preserving the outgoing reader in its
-original node. IRQ/preemption exclusion spans enrollment, observation and report
-acceptance. Node and coordinator locks never nest, and this hook does not wake
-the GP task inline. A reported CPU is not evidence that its preempted task has
-exited the read scope. Idle/user/interrupt watching remains unintegrated.
+`api::is_sleepable_context` rejects missing or idle current tasks,
+interrupt-like/IRQ-masked contexts, preemption protection and explicit reader
+nesting. Sleep assertions and prepared waits share this gate; voluntary yielding
+also rejects readers. Involuntary preemption remains allowed. Callers still
+own dependency-cycle and execution-provider readiness checks.
 
-The GP task's readiness scan only reports previously recorded CPU observations
-whose old readers have drained. Timer expiry never fabricates an observation.
-Progress kicks use the existing fixed reschedule IPI, outside all RCU locks,
-only at the active interval's start or progress deadline. A stale pending hint
-can cause an unnecessary kick but cannot authorize completion. A CPU with only
-blocked old readers is not repeatedly kicked; their lifetimes remain authoritative.
-Callback promotion precedes destination notification. The Rcu softirq executes
-only eligible callbacks and restores any budget remainder through the core queue
-protocol before requesting another pass. No callback runs under an RCU lock or
-in the GP task. Admission remains limited to controlled test objects and
-synchronous-wait markers, whose callbacks and cleanup must not block. General
-read/context integration is still required before accepting ordinary consumer
-retirement.
+Scheduler enrollment uses retained Arc-owned outgoing task storage with IRQs
+and preemption excluded, before same-task return or switching. The provider
+cleans zero-depth membership before observation and enrolls active readers
+before reporting. It cannot wake, allocate or schedule under the runqueue lock.
+A CPU report never substitutes for the original node's task-reader blocker.
+Scheduler and idle callers construct the core's immediate-use observation or
+cleanup contexts under their exclusions, then pass them to safe static methods.
+The unsafe construction contract remains in force through return; contexts
+cannot be saved for another boundary or treated as consumer read guards.
+The unsafe `TaskInner::rcu_reader_for_integration` accessor in `src/task.rs`
+does not admit unrelated consumers: scope mutation requires current or strictly
+nested handlers, and snapshots of retained non-current tasks grant no mutation
+or protected-access authority.
 
-The private unsafe `synchronize_rcu` bridge and its wait machinery are compiled
-only for controlled task-reader integration tests, not exported to consumers.
-Its caller must exclude unsupported reader contexts, withdraw all
-publication routes and retain the old owner on preparation failure. Completion
-registration precedes callback admission; after admission the wait cannot return
-an interrupt error or treat a wake as GP completion. Callback and waiter own
-independent Arc references to the completion record. Only its nonblocking
-completion and queue storage are released in softirq, never the retired object.
-The initialized service has a permanent driver claim and fixed participants;
-submission from a running CPU cannot reject a prepared request. Violating that
-boot invariant is fatal, not a recoverable post-withdrawal failure.
+The preemption checkpoint delegates once to `RcuContextIf::check_reader_cleanup`.
+The krcu provider owns NMI exclusion, ordinary context checks and the complete
+cleanup conditional. Active nesting preserves membership; cleanup itself
+supplies no CPU observation. Generic `current_preemption_disabled` only queries
+task state; `with_preempt_check_deferred` changes no IRQ state and restores its
+temporary credit without scheduling. Neither helper grants RCU admission.
+Ordinary preemption checks retain pending requests while local IRQs are masked,
+even when the count reaches zero, so an inner guard release cannot split an
+implicit IRQ-off region. Only the completed normal IRQ tail uses its distinct
+IRQ-exit checkpoint. `ktask` enables `kspin/preempt` independently of scheduler
+preemption; generic deferred-check scopes must balance that count without
+running a check from their own guard release.
 
-The owning container is not admitted outside kernel integration tests. Its
-unsafe read requires the current task's genuine scope; accepting an arbitrary
-TaskReader token as safe would permit reclamation while a reader is untracked.
-Only initialized pointers are published, and only the unique exchange owner
-reconstructs each removed Box after the GP. Shared containers require both
-Send and Sync payloads: writers may recover values allocated by other tasks.
-It exposes neither an unguarded reference nor mutable access. Final Drop requires the
-exclusive container owner and performs ordinary caller-context destruction;
-it cannot overlap a protected borrow or an in-progress replacement.
+Idle drains finished membership before entering quiescence. The same IRQ and
+preemption guard spans the wait and restoration; no reader or protected borrow
+may span it. Watching resumes before scheduling or timer bookkeeping, and the
+IRQ return tail outside kirq's watching scope remains RCU-free. User-mode
+transitions and scope-exit notification policy are owned by `krcu`, not `ktask`.
 
-`init_rcu_service` requires all discovered CPU services to be initialized before
-creating the GP task. Static state retains its nodes and the one-shot driver
-claim; duplicate startup cannot replace an active controller. Serialized startup
-installs the action before claiming control.
-Registration conflict leaves control unclaimed; the existing action is untouched.
-The startup lock is never held across task creation or the acknowledgment wait.
-Allocation failure after assignment follows the fatal kernel policy, not rollback.
-The task publishes
-only its waker after preparing its task-bound wait and timer. No ordinary
-callback admission or general RCU-ready flag is published. The Rcu softirq action is
-installed before task activation. Fixed IPI notification only marks it pending;
-the action later wakes the GP task without clearing demand. The no-IPI fallback
-raises softirq directly and may wake its daemon, so it cannot be called under
-scheduler/RCU locks. Neither route supports NMI. No timeout can certify a reader's
-exit. Timer cancellation runs outside bookkeeping locks. Saturating deadline
-arithmetic validates representation, not progress at the host clock horizon.
+On the incoming stack, `finish_task_switch` removes an exited task's abandoned
+participation before releasing its owner or on-CPU marker. Old current is
+unpublished, the task cannot resume, and IRQs/migration remain excluded.
+The PREV_TASK lock is released before taking the original reader-node lock;
+diagnostics follow unlinking. GC performs its ordinary final-ownership check.
+Cleanup neither detaches immutable runtime fields still borrowed by shared
+owners nor unwinds abandoned Rust stack values. No raw task pointer is sent
+to a deferred callback. This boundary does not establish general IRQ/NMI
+consumer admission or a progress guarantee without a later safe boundary.
 
 This document covers the security boundaries of the entire `task/ktask` crate:
 the `lib.rs` integration and `api.rs` entry points; task lifetime and context

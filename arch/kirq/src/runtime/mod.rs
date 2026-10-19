@@ -8,6 +8,7 @@ pub(crate) mod action;
 pub(crate) mod dispatch;
 pub(crate) mod manager;
 pub(crate) mod nmi;
+pub(crate) mod rcu;
 pub(crate) mod state;
 pub(crate) mod sync_wait;
 mod unhandled;

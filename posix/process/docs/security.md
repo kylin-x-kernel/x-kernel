@@ -37,8 +37,15 @@ registration is not proof that their pages remain accessible.
 
 ## Unsafe inventory and memory invariants
 
+User-transfer callbacks call `krcu::enter_user_quiescent` and
+`krcu::exit_user_quiescent`. POSIX owns their placement relative to accounting
+and trap dispatch, not the permanent watching state, reader cleanup policy or
+GP service. Those belong to `krcu`; task storage remains owned by `ktask`.
+These callbacks do not expose general consumer read or reclamation admission.
+
 | Location | Operation and necessary invariant | Guard/provider |
 |---|---|---|
+| `src/runtime.rs`, `run_user_thread_loop` callbacks | Enter/exit user quiescence with no protected borrow spanning the window; restore watching before accounting and trap dispatch. | IRQs are masked; only audited RCU-free architecture transfer runs between transitions. Entry accounting finishes before CPU selection, and exit accounting starts after watched restoration. No scheduling may span the quiescent window. |
 | `src/runtime.rs`, `run_user_thread_loop` (LoongArch only) | Calls unsafe `UserContext::emulate_unaligned`; the saved context must still describe the faulting misaligned instruction. | Only reached for the `Misaligned` exception returned by that context's `run`; matches its adjacent SAFETY explanation. |
 | `src/runtime.rs`, `exit_robust_list` | Forms a raw address of the embedded list sentinel without loading the field. | The pointer is the registered robust-list head; the address is used only for termination comparison, and actual contents are copied with `read_vm`, as stated by the SAFETY comment. |
 

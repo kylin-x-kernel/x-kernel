@@ -80,6 +80,14 @@ watchdog / perf 消费者
 `khal::irq` adapter 只有短生命周期的 `NoPreempt` guard，不持有全局 IRQ state。
 IRQ shared state、NMI table 和 lifecycle hooks 的锁模型都在 `kirq` 内部维护。
 
+After normal IRQ completion, the adapter suspends the architecture exception
+marker, releases its local guard without a pending-work check and invokes
+`IrqExitIf`. Guard release preserves outer credits and IRQ state; cleanup and
+scheduling checks belong to that single explicit entry. This is an explicit
+scheduler checkpoint under the entry IRQ mask, not an ordinary preempt-enable
+operation. Outer guards still exclude scheduling. The marker resumes on the
+interrupted task's stack; dedicated NMI dispatch never invokes this checkpoint.
+
 ## 设计决策
 
 ### 为什么保留 `khal::irq`

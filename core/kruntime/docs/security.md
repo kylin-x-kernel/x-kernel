@@ -2,12 +2,16 @@
 
 ## RCU Carrier Preparation
 
-The unsafe `ktask::init_rcu_service` call follows the all-CPU service rendezvous,
+The unsafe `krcu::init_service` call follows the all-CPU service rendezvous,
 which supplies its scheduler, timer and notification prerequisites. The boot
 task sleeps until the GP task has prepared its own wait and timer. Failure stops
 boot. This acknowledgment does not authorize ordinary callback admission or
 replace the remaining idle/user/interrupt observation and context requirements.
 The callback carrier is exercised only with controlled unpublished fixtures.
+The permanently linked `krcu_core::RcuContextIf` provider supports early
+watching and enrollment without claiming that timer/notification services or
+the GP task are ready. Runtime owns the startup ordering, not the RCU arrays,
+cleanup policy or service state, which belong to `krcu`.
 
 ## Workqueue Publication Boundary
 

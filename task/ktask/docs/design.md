@@ -33,111 +33,53 @@ new scheduling/diagnostic hooks should start here.
 
 ## Background
 
-Each task embeds `krcu::TaskReader` for explicit scoped read nesting. Controlled
-kernel tests exercise this accounting; no general RCU reclamation API is exposed.
-The sleepability predicate and blocking scheduler boundary reject active readers,
-and `yield_now` rejects voluntary yielding. Involuntary preemption eligibility
-does not inspect this counter. `rcu::note_context_switch` enrolls an active reader
-before same-task selection returns or an actual stack switch occurs; the common
-path includes migration helpers. CPU nodes have kernel lifetime and retain no
-owning task reference. The task retains its original node across migration;
-outer scope exit unlinks it. After service construction the same hook also
-reports the CPU boundary, but only after enrollment. An active task remains a
-GP blocker on its original node. Before service construction the hook only
-enrolls, preserving startup readers. Reporting sends no notification and never
-enters a scheduler wake path; service progress must inspect retained node state
-separately. For permanently exited tasks, `finish_task_switch`
-clears residual reader participation after publishing incoming current and
-leaving the outgoing stack, but before releasing its owning reference or on-CPU
-marker. It diagnoses abandoned scopes and uses krcu's ordinary unlink path.
-GC still uses `Arc::try_unwrap` to wait for independent owners and destroy tasks
-in task context; it does not repair RCU lists or permanently retain readers.
+Each task embeds `krcu_core::TaskReader`; `ktask` owns its storage and task
+lifetime, not system RCU state or consumer scope policy. Permanent CPU watching
+and reader-node arrays, cleanup notifications, and the GP service belong to
+[`krcu`](../../../sync/krcu/docs/design.md). The static
+`krcu_core::RcuContextIf` contract connects scheduler and idle boundaries to
+that owner without making `ktask` depend on the RCU service.
 
-The boot-owned `rcu_gp` task holds the sole callback driver. Runtime starts it
-after all discovered CPUs have scheduler, timer and notification services. Its
-participant set uses discovered logical CPUs rather than all capacity slots.
-A short startup lock serializes duplicate rejection, softirq action installation
-and the one-shot driver claim, in that order. An action conflict does not consume
-the claim. Successful assignment cannot be undone or repeated; task creation
-and the sleepable acknowledgment wait occur after releasing the startup lock.
-The task prepares its own `PreparedTaskWait` and an inactive owned timer before
-publishing its waker; the startup task waits sleepably for that acknowledgment.
-This is controlled carrier integration, not ordinary RCU readiness: general
-callback admission and idle/user/interrupt observation are not yet connected.
+Sleepability, blocking and voluntary yielding reject active reader nesting;
+involuntary preemption remains permitted. Before same-task selection returns
+or a real switch occurs, the scheduler calls `RcuContextIf::note_context_switch`
+with a `SchedulerObservation` constructed unsafely for the retained outgoing
+reader and CPU under IRQ/preemption exclusion. The static call consumes that
+context immediately; the core defines its safety contract.
+The provider drains finished membership, preserves active readers on their
+original node across migration, and reports only after enrollment. Before GP
+service construction it still maintains enrollment. No callback or wakeup runs
+inside this scheduler boundary.
 
-The synchronous-wait module, including its private unsafe `synchronize_rcu`
-helper, is compiled only with `cfg(unittest)`. It is not a public reclamation
-interface: external consumers cannot yet obtain a current-task reader. Public
-read-side admission and waiting must be exposed together after the complete
-context protocol is validated. Like Linux's callback/completion wait, it
-prepares the task waiter and registers completion before submitting a marker.
-The marker embeds its queue node and completion in one Arc allocation. Queue
-execution owns a strong reference independently of the waiter, so a resumed
-waiter cannot destroy storage still used by the notifying callback. Registration
-failure precedes submission; afterward the loop accepts only a completion token,
-not a signal or arbitrary wake. An RCU-local SeqCst fence follows the successful
-completion observation, including completion before parking or migration. The marker
-never owns a retired payload, and potentially sleeping destruction remains with
-the caller after successful return. This waits for a GP, not callback drainage.
+The preemption checkpoint makes one `RcuContextIf::check_reader_cleanup` call,
+even without a reschedule request. All RCU cleanup predicates, context checks
+and removal policy belong to `sync/krcu/src/context.rs`; cleanup is not
+a CPU observation. `current_preemption_disabled` queries the generic task
+preemption state. `with_preempt_check_deferred` balances temporary preemption
+credit without changing IRQ state or scheduling on restoration;
+`request_current_reschedule` retains a request without waking or sending an IPI.
+The RCU owner uses these capabilities for its cleanup and private scope exits;
+`ktask` does not own their notification policy.
 
-The owning integration consumer is compiled only with `cfg(unittest)` until
-complete context admission is validated. Its `Rcu<T>` retains one Box behind
-an atomic pointer; Acquire reads borrow both the container and the current task's
-read token. Reading remains unsafe because an arbitrary standalone TaskReader
-token is not proof of host participation. Synchronous replacement prepares the
-wait first, exchanges with AcqRel, waits without a writer lock, and reconstructs
-the old Box only after completion. Before then the old owner remains raw: an
-abandoned operation can leak it but cannot run its destructor early. Concurrent
-exchanges retain separate old allocations. Final exclusive container destruction
-needs no extra GP because outstanding reads and replacements borrow it.
-This follows Linux's withdrawal / unlock / synchronize / caller-cleanup split,
-not the implementation of `rcu_replace_pointer`, which itself neither waits nor
-provides concurrent-writer serialization.
+Like Linux `default_idle_call`'s `ct_cpuidle_enter/exit`, idle checks retained
+reschedule demand first, drains finished membership while watched, and brackets
+only `karch::idle_wait` with quiescence. One `NoPreemptIrqSave` spans CPU lookup,
+both transitions and the wait. Balanced IRQ/NMI entries may temporarily activate
+watching; their HAL return tail remains RCU-free and cannot schedule before idle
+restores watching. Restoration precedes guard release and timer repair.
+No explicit read scope or protected borrow may span the idle window.
 
-Demand is retained independently of wake hints and consumed before each pass.
-Task/timer callers publish demand before requesting Rcu softirq service. With
-IPIs, a fixed RCU notification marks the vector pending without waking tasks
-inline. The softirq action wakes the GP task when demand is retained and leaves
-that demand for it to consume. Independently, it executes at most 32 eligible
-callbacks on its own CPU outside bookkeeping locks, then re-raises Rcu if eligible
-work remains. Pending GP work alone never causes softirq re-raising. Existing
-softirq restart limits and ksoftirqd carry the remainder.
-Without IPIs, callers raise the vector directly and must release scheduler/RCU
-locks first because daemon wake may acquire scheduler locks. Neither route
-supports NMI; restricted scheduler producers are not yet connected. The
-task parks when idle with its progress timer cancelled. An active period keeps
-a 10 ms progress-check deadline across unrelated wakes; expiry requests another
-pass and never supplies quiescence evidence. After an initial or due progress
-round, the next interval starts from a fresh clock sample after scanning and
-notifications, not from the sample taken before that work. An early demanded
-pass preserves the existing deadline even if it expires during the pass.
-Deadline addition saturates at the
-timer's u64 nanosecond horizon, where delivery is not guaranteed. The kernel owns
-the task and state permanently; duplicate startup is rejected rather than
-reconstructing its driver. This follows Linux's split between a sole GP thread
-and separate observation/callback carriers, not Linux's pre-SMP startup ordering.
+`rcu_reader_for_integration` is an unsafe borrow for audited integration, not
+consumer admission. Its caller retains the task and obeys current-task,
+strictly nested handler and core mutation contracts. Private read, wait and
+owning-consumer fixtures live under `sync/krcu/ut-tests`; task-local tests retain
+coverage of reader lifetime and scheduler boundaries.
 
-When an active interval first starts, and at its progress deadlines, the GP task
-requests a reschedule IPI only for CPUs whose nodes still owe an observation.
-The query is a transient hint: a concurrent report can make a kick unnecessary,
-but sending or handling the IPI never clears an obligation. The real scheduler
-hook still enrolls active readers before reporting. Nodes blocked only by old
-readers receive no repeated kicks. Unrelated demand retains the existing deadline
-instead of causing another kick round. In the no-IPI single-CPU path the GP task's
-own parking supplies a scheduler boundary. This assistance is not the full Linux
-dynticks/watching protocol and cannot force an uncooperative CPU to schedule.
-
-Before each control pass the GP task rechecks retained node readiness, allowing
-an already-observed node to report after its last blocked reader exits. This
-inspection cannot discharge an unobserved CPU. After promotion, the task notifies
-each CPU with eligible callbacks; it never invokes callbacks itself. The current
-integration test submits unpublished owning objects and supplies real scheduler
-boundaries with per-CPU tasks. It checks target CPU, softirq context and completed
-counts across repeated workloads larger than the callback budget. This does not
-establish idle/no-tick progress or authorize ordinary protected-data consumers.
-An additional fixture submits on every CPU and parks until owning callback
-wakers report completion, without yielding helper tasks. Other interrupt sources
-are not disabled by that fixture; it is not proof of a completely tick-free run.
+For permanent task exit, `finish_task_switch` clears residual participation
+on the incoming stack, after publishing incoming current but before releasing
+the outgoing owner or on-CPU marker. It diagnoses abandoned scopes after unlinking.
+GC still waits for independent owners through `Arc::try_unwrap` and destroys
+tasks in task context; it neither repairs RCU lists nor retains readers forever.
 
 Owned timer preparation uses `ktimer_core::Timer::new_on` with a snapshot of the
 current logical CPU after platform per-CPU initialization. The platform accessor
@@ -532,7 +474,8 @@ The architecture returns IRQ-off even if it temporarily enabled delivery. The
 guard restores IRQs before allowing preemption. With timer-resume fixup enabled,
 an outer no-preempt guard keeps the before-wait sample and post-wait repair in
 one non-schedulable region, including repair logging and notifications after
-IRQ restoration. This path does not introduce RCU tracking or a periodic wake tick.
+IRQ restoration. RCU watching brackets only the architecture wait as described
+above; timer repair neither owns that state nor adds a periodic wake tick.
 
 ### Hardware timer drive and dynamic schedule timer
 
@@ -657,8 +600,10 @@ interface:
 
 - `disable_preempt()`: current task `preempt_disable_count += 1`
 - `enable_preempt(true)`: when the count reaches 0, check `need_resched`;
-  enter `preempt_resched()` only if this CPU is not inside an exception/IRQ
-  trapframe scope
+  enter `preempt_resched()` only with local IRQs enabled and outside an
+  exception/IRQ trapframe scope. An outer IRQ-only guard retains the request
+  even when an inner preemption guard is released. This preserves implicit
+  IRQ-off RCU protection without registering an explicit task reader.
 
 This binds the critical-section boundary to the preemption checkpoint so a
 task does not switch mid-lock. Exception/IRQ entry exposes whether this CPU
@@ -668,9 +613,15 @@ switch, so an ordinary task never observes a still-exceptional per-CPU
 trapframe.
 
 After IRQ dispatch completes and the interrupt controller is acked, `khal`
-temporarily suspends the active-exception mark before releasing the IRQ
-handler's `NoPreempt` guard. That lets `enable_preempt` consume pending at
-IRQ tail while IRQs are still off. The mark is restored before returning to
+temporarily suspends the active-exception mark and releases the IRQ handler's
+`NoPreempt` guard with `release_without_check`, then calls the explicit
+`IrqExitIf` scheduler checkpoint. Guard release only restores its count;
+RCU cleanup and pending-work inspection run at the explicit checkpoint.
+Only this completed-IRQ entry may consume pending while IRQs are still off;
+outer preemption guards and the NMI/exception exclusions remain effective.
+Dedicated NMI entry never invokes it. This separates ordinary preempt-enable
+from IRQ-return scheduling, as Linux does with `preempt_schedule` and
+`preempt_schedule_irq`. The mark is restored before returning to
 the interrupted task. Without that tail check, an IPI wake inside an EL1
 exception would leave pending until the next schedule timer or safe point.
 

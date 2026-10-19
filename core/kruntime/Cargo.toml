@@ -13,8 +13,8 @@ description = "Runtime library of X-kernel"
 default = []
 workqueue-bench = ["kworkng/bench"]
 
-smp = ["khal/smp", "ktask/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
-ipi = ["dep:kipi", "ktask/ipi"]
+smp = ["khal/smp", "ktask/smp", "krcu/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
+ipi = ["dep:kipi", "ktask/ipi", "krcu/ipi"]
 
 char = ["kdriver/char", "dep:ktty"]
 display = ["kdriver/display", "dep:fbdevice"]
@@ -65,6 +65,7 @@ memspace = { workspace = true }
 knet = { workspace = true, optional = true }
 kworkng = { workspace = true, features = ["system"] }
 ktask = { workspace = true }
+krcu.workspace = true
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 entropy.workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "krcu"
+description = "Kernel RCU context integration and grace-period service"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+ipi = ["dep:kipi", "ktask/ipi"]
+smp = ["ipi", "ktask/smp"]
+
+[dependencies]
+krcu-core.workspace = true
+ktask.workspace = true
+kirq.workspace = true
+khal.workspace = true
+karch.workspace = true
+kcpu_id_map.workspace = true
+kcpu_slot.workspace = true
+kbuild_config.workspace = true
+kspin.workspace = true
+kiface.workspace = true
+kerrno.workspace = true
+klazy.workspace = true
+ktime_types.workspace = true
+kpoll.workspace = true
+kipi = { workspace = true, optional = true }
+unittest.workspace = true
+
+[lints]
+workspace = true

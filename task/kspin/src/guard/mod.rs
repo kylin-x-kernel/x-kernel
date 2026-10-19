@@ -13,6 +13,10 @@ pub trait KernelGuardIf {
     /// Enable kernel preemption.
     fn enable_preempt();
 
+    /// Releases one preemption credit without checking pending work.
+    /// The caller supplies the subsequent explicit scheduling checkpoint.
+    fn enable_preempt_without_check();
+
     /// Disable kernel preemption.
     fn disable_preempt();
 }

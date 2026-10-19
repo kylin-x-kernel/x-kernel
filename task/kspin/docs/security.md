@@ -1,5 +1,10 @@
 # kspin - 安全与可靠性分析
 
+Explicit `NoPreempt::release_without_check` suppresses the consumed guard's
+Drop, preventing a second decrement. The provider removes exactly one credit
+without scheduling or RCU cleanup. The caller must supply a subsequent explicit
+checkpoint; this API does not clear pending requests or override outer guards.
+
 ## 概述
 
 `kspin` 是底层同步原语，
