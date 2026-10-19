@@ -5,6 +5,7 @@
 //! Buffered read boundaries, synchronous readahead and publication.
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::ops::ControlFlow;
 
 use iov_iter::{IovIterDest, IovSink, iov_iter_dest, iov_iter_kvec_dest};
 use kerrno::{KError, KResult};
@@ -69,6 +70,48 @@ fn buffered_read_crosses_windows_with_unaligned_eof_and_cache_holes() {
         );
     }
     assert!(output[copied..].iter().all(|byte| *byte == 0xff));
+}
+
+struct FailingSparseReadOps;
+static FAILING_SPARSE_READ_OPS: FailingSparseReadOps = FailingSparseReadOps;
+
+impl AddressSpaceOperations for FailingSparseReadOps {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+        assert!(mapping.invalidate_lock.try_write().is_none());
+        // Failed initialization must neither expose partial bytes nor turn
+        // the resident reservation into an absent sparse-file hole.
+        folio.data().fill(0x5a);
+        Err(KError::Io)
+    }
+}
+
+#[def_test]
+fn resident_access_preserves_initialization_errors_without_populating_holes() {
+    let inode = read_inode(&FAILING_SPARSE_READ_OPS, 2 * PAGE_SIZE_4K);
+    let mapping = inode.address_space();
+    {
+        let _invalidate = mapping.invalidate_lock.read();
+        assert_eq!(mapping.with_folio_or_create(1, |_| Ok(())), Err(KError::Io));
+    }
+    assert_eq!(mapping.nrpages(), 1);
+    let mut visited = Vec::new();
+    assert_eq!(
+        mapping.visit_resident_folios(0, 2, |index, folio| {
+            assert!(mapping.invalidate_lock.try_write().is_none());
+            assert!(folio.is_none());
+            visited.push(index);
+            Ok(ControlFlow::Continue(()))
+        }),
+        Err(KError::Io)
+    );
+    assert_eq!(visited, vec![0]);
+    assert_eq!(
+        mapping.visit_resident_folios(1, 1, |_, _| panic!(
+            "failed initialization must not appear as a hole"
+        )),
+        Err(KError::Io)
+    );
+    assert_eq!(mapping.nrpages(), 1);
 }
 
 struct ShortSink {

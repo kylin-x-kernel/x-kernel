@@ -172,6 +172,10 @@ model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内�
   `MappingPages` 由 AddressSpace 直接持有，不能作为可独立 clone 的缓存 owner 暴露给
   filemap 或文件系统。entries 与派生 dirty marks 由同一 mutex 维护，Folio 的引用
   继续独立保活页数据；该调整不改变 invalidate lock 或 mapping identity 校验。
+  Filesystem-owned `CacheResidency` is installed once during inode construction.
+  Callbacks run under the mapping index mutex; they must not reenter a mapping,
+  lock folios, perform I/O, or invert the index-to-provider lock order.
+  Cache entry removal reports removal even while physical references survive.
 - `SuperBlock` 的 operation table 与 filesystem-private state 分离，对应 Linux `s_op` 与
   `s_fs_info`。构造 API 只接受静态共享 operation table；filesystem callback 必须通过绑定到
   `&SuperBlock` 的 typed borrow 恢复 private state，不得取得可逃逸的 private owner、在
@@ -423,7 +427,7 @@ waker 调用和销毁均在锁外，关闭清理无需通知分配。关闭清�
 同步预读控制对象只在 invalidate shared lock 覆盖的 callback 内借用；完整数据通过
 游标顺序发布，长度不足不会生成有效缓存页，已有 resident 不被 backing 数据覆盖。
 缺页读取同样在该锁内检查 EOF 并完成发布，truncate exclusive 排除迟到的旧数据。
-用户复制不持 invalidate lock，每页锁定后重新检查 EOF；`prepared_end` 只抑制重复
+通用 buffered 用户复制不持 invalidate lock，每页锁定后重新检查 EOF；`prepared_end` 只抑制重复
 预读，不授权跳过缓存查找。预读失败可由按需读重试；按需读或复制失败时优先返回
 已完成前缀，没有前缀才报告错误。
 
@@ -527,3 +531,35 @@ this cost in access and resource policy.
 再获取 invalidate shared 并重采样 EOF，才发布后续窗口。
 并发 pread 可改变同一打开描述的历史，但不能绕过初始化、身份复核或截断保护。
 独立打开不共享策略状态，dup/fork 的同一打开描述引用共享状态。
+
+
+## Cache residency lifecycle
+
+The filesystem owns capacity policy and supplies one `CacheResidency` provider
+when constructing an inode mapping. The cache stores only ordinary folio handles;
+no entry or folio owns a quota field or a per-page provider reference. Under the
+index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
+including readahead cancellation, truncate and final mapping destruction, calls
+`remove_folios(count)` independently of external physical-page references.
+Providers must not reenter mappings, acquire folio locks, or perform I/O.
+For memfs, the provider is its filesystem-owned quota, so lock order is cache
+index -> quota limit; remount and statfs never acquire a cache index lock.
+Speculative physical storage remains outside the admission policy until insertion.
+
+
+Sparse-hole zero filling applies only to absent cache identities. A retained
+non-uptodate reservation retries initialization under the invalidate read lock;
+failed reads do not expose partial contents or silently replace them with zeros.
+An error after a copied prefix returns that prefix, while a first-page error is
+propagated.
+
+Filesystem sparse reads must not consume remaining quota by prefetching absent
+pages. Truncate invalidates retained read-batch entries before removing cache
+identity and returning the charge; references keep storage alive but cannot
+serve stale bytes or defer quota reuse.
+
+Filesystem-driven resident traversal uses one invalidate read guard per bounded
+31-page snapshot. Page callbacks may only consume data, cannot reenter the
+mapping, and must check EOF while guarded. Missing snapshot slots never allocate
+storage. Partial data before a later callback/initialization error remains visible
+to the filesystem caller, which decides its normal short-read completion.

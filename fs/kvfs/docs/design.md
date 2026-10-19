@@ -711,12 +711,24 @@ libfs helper。
 `i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
 `address_space::i_pages`；Folio 自身仍用 `Arc<Mutex<Folio>>` 保持引用和页锁生命周期。
 `read_folio` 从 Folio 自身获取稳定 index；AddressSpace 构造不再传入仅控制诊断的 mapping kind。
-`MappingPages` 不保存 length、object-id、views 或 invalidation
-lifecycle；writeback 的 EOF 也由 `AddressSpace` 从 inode 读取后传入。
+`MappingPages` 不保存 length、object-id 或 views。`AddressSpace` 持有 cache-invalidate
+lock，用于把 readahead 插入、writeback、page_mkwrite 与 truncate 串行到同一个
+mapping。writeback 的 EOF 仍由 `AddressSpace` 从 inode 读取后传入。
 构造 API 只接受 `&'static dyn AddressSpaceOperations`，因此 aops 不是 inode private object。
 Backing-store callbacks 只从当前 `AddressSpace` 的 `mapping->host` 借用唯一 filesystem-private
 inode，再经 host 的 `i_sb` 恢复 superblock；filesystem-private inode 因而不需要保存平行
 inode identity 或 superblock 回指。
+`InodeOperations::cache_residency()` supplies optional filesystem-owned admission
+and removal callbacks once, before inode publication. Resident hits perform no
+quota lookup or superblock recovery. The common cache contains no capacity policy.
+
+Memory-file sparse reads and native copies share a memfs-owned reader. The generic
+`AddressSpace::visit_resident_folios()` capability holds one invalidation read
+guard for at most 31 pages and performs one bounded index snapshot. Initialized
+resident hits then need only their folio lock. Retained initialization failures
+are retried, not reported as holes. The callback samples EOF and selects data or
+zeroes; no sparse policy or readahead is added to generic cache traversal.
+
 `VfsFile::mapping()` 借用 Linux `f_mapping` 对应物；MM 不接触底层 storage，只有确实需要
 超出 file borrow 的生命周期时才显式 clone 该 `Arc`。
 
@@ -917,7 +929,7 @@ credential。`child_names()` 可传播生命周期或后端错误，使旧目录
 按需读取同样先保留未初始化 folio，再持页锁读入；竞争者等待页锁后重新查找 resident，
 成功页不重复 I/O，失败页可重新初始化。`read_folio` 成功返回表示整页已初始化；
 文件系统负责本次读取边界与尾部清零，通用层不以完成后的 EOF 重验返回字节数。
-缓冲缺页路径从 EOF 检查到初始化完成持 invalidate shared lock，缓存索引锁不覆盖 I/O。复制期间不持 invalidate lock，锁定每页后重新读取
+缓冲缺页路径从 EOF 检查到初始化完成持 invalidate shared lock，缓存索引锁不覆盖 I/O。通用 buffered 复制期间不持 invalidate lock，锁定每页后重新读取
 inode EOF。单次读取的已准备末端只用于避免对失败预留重复发起预读，不保证缓存驻留。
 只有新发布的预留页携带窗口标记；在 folio 锁内完成标记消费与窗口决策，释放 folio 和策略锁后执行后续窗口。
 
@@ -1014,3 +1026,21 @@ changing the position. Seeking beyond EOF is allowed and reading there returns
 zero. Tests cover differently sized generations, EOF, backward seeks and
 invalid offsets. Snapshot operations do not advertise `CAN_WRITE`: write-mode
 writes fail with `InvalidInput`; read-only writes fail with `BadFileDescriptor`.
+
+## tmpfs quota integration with resident initialization
+
+The inode address space retains the invalidate lock covering EOF, cache
+reservation, synchronous initialization and truncate. The filesystem owns capacity policy and supplies one `CacheResidency` provider
+when constructing an inode mapping. The cache stores only ordinary folio handles;
+no entry or folio owns a quota field or a per-page provider reference. Under the
+index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
+including readahead cancellation, truncate and final mapping destruction, calls
+`remove_folios(count)` independently of external physical-page references.
+Providers must not reenter mappings, acquire folio locks, or perform I/O.
+For memfs, the provider is its filesystem-owned quota, so lock order is cache
+index -> quota limit; remount and statfs never acquire a cache index lock.
+Speculative physical storage remains outside the admission policy until insertion.
+
+The cache publishes non-uptodate reservations before filesystem I/O and keeps
+its index lock out of I/O, preserving the current main concurrency contract.
+Unconsumed readahead reservations release their charges before unlocking.

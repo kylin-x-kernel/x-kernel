@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 iov_iter.workspace = true
+kalloc.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 kvfs.workspace = true

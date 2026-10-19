@@ -3519,6 +3519,7 @@ dependencies = [
  "bitflags 2.13.2",
  "hashbrown 0.16.1",
  "iov_iter",
+ "kalloc",
  "kcred",
  "kerrno",
  "ksync",

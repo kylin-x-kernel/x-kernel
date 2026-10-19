@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use iov_iter::{IovIterDest, IovIterSource};
-use kvfs::{FileOperations, Kiocb, MAX_LFS_FILESIZE, SuperBlockFlags};
+use kvfs::{FileOperations, Kiocb, MAX_LFS_FILESIZE};
 use linux_raw_sys::general::{O_APPEND, O_RDONLY, O_RDWR};
 
 use super::*;
@@ -234,8 +234,9 @@ fn destination_ceiling_checks_before_copying() {
 /// Directory descriptors are rejected with `EISDIR` on either side.
 #[unittest::def_test]
 fn directory_sides_are_rejected_with_eisdir() {
-    let fs = memfs::shmem::new_tmpfs(SuperBlockFlags::empty());
-    let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
+    let backing =
+        memfs::shmem::create_memfd_file("copy-eisdir-root", false, kcred::initial_cred()).unwrap();
+    let root = backing.location().mount().root_path();
     let dir = kvfs::dentry_open(root, O_RDONLY, kcred::initial_cred()).unwrap();
     let input = memfd_file("copy-eisdir-src");
     fill(&input, 16);

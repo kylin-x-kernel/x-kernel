@@ -239,6 +239,12 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - 自旋锁没有面向 allocator corruption 的恢复协议；一旦 unsafe 不变量破坏，不能认为
   后续错误返回仍可保持系统安全。
 
+### 容量查询边界
+
+`total_pages()` 只在全局 page-allocator lock 下读取管理容量，不取得 byte-heap lock，
+也不发布或释放页。上层用其制定文件系统额度不构成物理内存 reservation；实际分配
+仍可能失败，不能把该容量值当成剩余内存或 admission 保证。
+
 ## 隐私分析
 
 普通 allocator 把 payload 视为不透明字节，不主动读取 caller 的 live 数据。但是：

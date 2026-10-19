@@ -265,7 +265,7 @@ fn failed_writeback_does_not_redirty_detached_folio() {
             // Model a detached in-flight reference directly: truncate now
             // waits for this callback to finish before removing the folio.
             let mut state = cache_during_io.state.lock();
-            state.entries.remove(&0);
+            state.remove_folio(0);
             state.dirty_marks.remove(&0);
             state.writeback_marks.remove(&0);
             drop(state);

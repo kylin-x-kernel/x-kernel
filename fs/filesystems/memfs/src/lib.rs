@@ -8,14 +8,17 @@
 
 extern crate alloc;
 
+mod quota;
+
 pub mod ramfs;
 pub mod shmem;
 
 use alloc::{borrow::ToOwned, string::String, sync::Arc};
-use core::{borrow::Borrow, cmp::Ordering};
+use core::{borrow::Borrow, cmp::Ordering, ops::ControlFlow};
 
 use hashbrown::HashMap;
 use iov_iter::{IovIterDest, IovIterSource, iov_iter_kvec_dest, iov_iter_kvec_source};
+use kalloc::global_allocator;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use ksync::Mutex;
@@ -31,8 +34,11 @@ use kvfs::{
     WriteEndRequest, get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
-use pagecache::Folio;
+use pagecache::{CacheResidency, Folio};
+use quota::PageQuota;
 use slab::Slab;
+
+static ZERO_PAGE: [u8; memaddr::PAGE_SIZE_4K] = [0; memaddr::PAGE_SIZE_4K];
 
 pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
 pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
@@ -42,15 +48,39 @@ fn tmpfs_get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |file_system_type, flags| {
-        Ok(shmem::new_tmpfs_with_type(file_system_type, flags))
+    let options = *context.private::<shmem::TmpfsContextOptions>()?;
+    let mount_options = options.mount_options();
+    get_tree_nodev(context, move |file_system_type, flags| {
+        Ok(shmem::new_tmpfs_with_type_and_mount_options(
+            file_system_type,
+            flags,
+            mount_options,
+        ))
     })
 }
 
-static TMPFS_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(tmpfs_get_tree);
+fn tmpfs_reconfigure(context: &mut FsContext<'_>) -> VfsResult<()> {
+    let options = *context.private::<shmem::TmpfsContextOptions>()?;
+    let Some(page_limit) = options.reconfigure_page_limit() else {
+        return Ok(());
+    };
+
+    let super_block = context.super_block()?;
+    let fs = super_block.private::<Arc<MemoryFs>>()?;
+    fs.try_set_page_limit(page_limit)?;
+    Ok(())
+}
+
+static TMPFS_CONTEXT_OPERATIONS: FsContextOperations =
+    FsContextOperations::with_reconfigure(tmpfs_get_tree, tmpfs_reconfigure);
 
 fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    let total_pages = global_allocator().total_pages();
     context.set_operations(&TMPFS_CONTEXT_OPERATIONS);
+    context.set_private(shmem::parse_tmpfs_context_options(
+        context.data(),
+        total_pages,
+    )?);
     Ok(())
 }
 
@@ -115,6 +145,7 @@ impl Borrow<str> for FileName {
 pub struct MemoryFs {
     fs_type: u32,
     inodes: Mutex<Slab<Arc<Inode>>>,
+    page_quota: Option<Arc<PageQuota>>,
 }
 
 static MEMFS_TYPE: FileSystemType = FileSystemType::internal("memfs");
@@ -146,9 +177,30 @@ impl MemoryFs {
         superblock_flags: SuperBlockFlags,
         root_mode: NodePermission,
     ) -> Arc<SuperBlock> {
+        Self::new_with_name_superblock_flags_root_metadata_and_page_quota(
+            file_system_type,
+            fs_type,
+            superblock_flags,
+            root_mode,
+            0,
+            0,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_name_superblock_flags_root_metadata_and_page_quota(
+        file_system_type: &'static FileSystemType,
+        fs_type: u32,
+        superblock_flags: SuperBlockFlags,
+        root_mode: NodePermission,
+        root_uid: u32,
+        root_gid: u32,
+        page_quota: Option<Arc<PageQuota>>,
+    ) -> Arc<SuperBlock> {
         let fs = Arc::new(Self {
             fs_type,
             inodes: Mutex::new(Slab::new()),
+            page_quota,
         });
         SuperBlock::new_with_flags_and_private(
             file_system_type,
@@ -163,8 +215,8 @@ impl MemoryFs {
                     None,
                     NodeType::Directory,
                     root_mode,
-                    0,
-                    0,
+                    root_uid,
+                    root_gid,
                     DeviceId::default(),
                 );
                 let root_inode = MemoryNode::vfs_inode_from_inode(super_block, &fs, root_ino);
@@ -175,6 +227,13 @@ impl MemoryFs {
 
     fn get(&self, ino: u64) -> Arc<Inode> {
         self.inodes.lock()[ino as usize - 1].clone()
+    }
+
+    fn try_set_page_limit(&self, page_limit: Option<usize>) -> VfsResult<()> {
+        if let Some(quota) = self.page_quota.as_ref() {
+            quota.try_set_max_pages(page_limit)?;
+        }
+        Ok(())
     }
 }
 
@@ -192,6 +251,10 @@ impl SuperBlockOperations for MemorySuperOperations {
         let mut stat = simple_statfs(fs.fs_type);
         stat.block_size =
             u32::try_from(super_block.block_size()).map_err(|_| VfsError::InvalidInput)?;
+        if let Some(quota) = fs.page_quota.as_ref() {
+            (stat.blocks, stat.blocks_free) = quota.statfs_pages();
+            stat.blocks_available = stat.blocks_free;
+        }
         Ok(stat)
     }
 }
@@ -451,6 +514,13 @@ impl MemoryNode {
 }
 
 impl InodeOperations for MemoryNode {
+    fn cache_residency(&self) -> Option<Arc<dyn CacheResidency>> {
+        self.fs
+            .page_quota
+            .as_ref()
+            .map(|quota| quota.clone() as Arc<dyn CacheResidency>)
+    }
+
     fn set_len(&self, vfs_inode: &VfsInode, len: u64) -> VfsResult<()> {
         self.inode.as_file()?;
         self.inode.metadata.lock().size = len;
@@ -734,8 +804,65 @@ impl InodeDirOperations for MemoryNode {
     }
 }
 
-/// The memfs native chunk copy: reads one chunk of `input` storage through
-/// the page-cache generic layer and writes it into `output` storage. Both
+// Both ordinary reads and native copies use this filesystem-owned algorithm:
+// holes supply zeroes without creating source pages or changing the quota.
+fn read_memory_file(iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
+    let inode = iocb.file().inode();
+    let mapping = iocb.file().mapping();
+    let mut offset = iocb.ki_pos();
+    let mut total = 0;
+    while iter.count() != 0 {
+        let file_len = inode.size();
+        if offset >= file_len {
+            break;
+        }
+        let page_offset = (offset % memaddr::PAGE_SIZE_4K as u64) as usize;
+        let count = (file_len - offset)
+            .min(iter.count() as u64)
+            .saturating_add(page_offset as u64)
+            .div_ceil(memaddr::PAGE_SIZE_4K as u64)
+            .min(pagecache::FolioBatch::CAPACITY as u64) as usize;
+        let mut is_done = false;
+        let result = mapping.visit_resident_folios(
+            offset / memaddr::PAGE_SIZE_4K as u64,
+            count,
+            |index, folio| {
+                debug_assert_eq!(index, offset / memaddr::PAGE_SIZE_4K as u64);
+                let page_offset = (offset % memaddr::PAGE_SIZE_4K as u64) as usize;
+                let step = inode
+                    .size()
+                    .saturating_sub(offset)
+                    .min((memaddr::PAGE_SIZE_4K - page_offset) as u64)
+                    as usize;
+                let copied = match folio {
+                    Some(folio) => {
+                        iter.copy_to_iter(&folio.data()[page_offset..page_offset + step])?
+                    }
+                    None => iter.copy_to_iter(&ZERO_PAGE[..step])?,
+                };
+                offset += copied as u64;
+                total += copied;
+                is_done = copied < memaddr::PAGE_SIZE_4K - page_offset || iter.count() == 0;
+                Ok(if is_done {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            },
+        );
+        match result {
+            Err(error) if total == 0 => return Err(error),
+            Err(_) => break,
+            Ok(_) if is_done => break,
+            Ok(_) => {}
+        }
+    }
+    iocb.advance(total);
+    Ok(total)
+}
+
+/// The memfs native chunk copy: reads source data through the sparse memfs
+/// reader and writes it into `output` storage. Both
 /// sides are already memfs inodes — the caller downcasts before coming here
 /// — so the copy never touches the generic buffered pump.
 fn move_copy_chunk(
@@ -749,7 +876,7 @@ fn move_copy_chunk(
     let read = {
         let mut iocb = Kiocb::new(input, input_pos);
         let mut iter = iov_iter_kvec_dest(&mut buf);
-        iocb.generic_file_read_iter(&mut iter)?
+        read_memory_file(&mut iocb, &mut iter)?
     };
     if read == 0 {
         return Ok(0);
@@ -830,7 +957,7 @@ impl FileOperations for MemoryNode {
             iocb.advance(copied);
             return Ok(copied);
         }
-        iocb.generic_file_read_iter(iter)
+        read_memory_file(iocb, iter)
     }
 
     fn write(&self, _file: &VfsFile, _buf: &[u8], _offset: u64) -> VfsResult<usize> {

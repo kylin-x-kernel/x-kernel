@@ -44,6 +44,7 @@ VfsInode
        -> i_pages: pagecache::MappingPages (直接持有)
             -> Mutex<MappingPagesState>
                  -> BTreeMap<PageIndex, Arc<Mutex<Folio>>> entries
+                 -> optional Arc<dyn CacheResidency> (one per mapping)
                  -> BTreeSet<PageIndex> dirty_marks (派生索引)
                  -> BTreeSet<PageIndex> writeback_marks (派生索引)
 ```
@@ -133,6 +134,9 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 - 本 crate 不拥有 inode data lock、mapped-view lock 或 MM lock；
 - 文件系统 I/O 在 folio-tree mutex 外执行；读入前将非 uptodate folio 纳入 resident tree，
   页锁串行化初始化，等待者释放索引锁睡眠并在醒来后重新查找身份；
+- `visit_resident_folios` 一次索引快照收集至多 31 页的驻留引用与位置；随后
+  逐页访问时，已初始化命中只取 folio 锁。非 uptodate/失效候选重新查找，
+  初始化错误不转为空洞；owner 持 invalidate shared 覆盖整个批次；
 - `with_folio` 仅暴露 uptodate 数据；初始化失败保留非 uptodate 页供重试，
   truncate 不将其部分内容标脏；`readahead_folios` 使用固定容量 FolioBatch 保留并锁定缺页段，
   回调返回后保持页锁，取得索引锁复核身份并摘除未消费后缀，再释放页锁；
@@ -192,3 +196,28 @@ Folio 的预读标记表示后续窗口的触发点，由 KVFS 在新预留页�
 
 批次读取在 folio 锁内复核初始化与失效状态后，可消费预读标记；callback 不改变数据、
 dirty 或驻留状态，也不等待其他 folio。预读 I/O 在 callback 返回、释放页锁后执行。
+
+## Residency admission and initialization
+
+The inode address space retains the invalidate lock covering EOF, cache
+reservation, synchronous initialization and truncate.
+The filesystem owns capacity policy and supplies one `CacheResidency` provider
+when constructing an inode mapping. The cache stores only ordinary folio handles;
+no entry or folio owns a quota field or a per-page provider reference. Under the
+index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
+including readahead cancellation, truncate and final mapping destruction, calls
+`remove_folios(count)` independently of external physical-page references.
+Providers must not reenter mappings, acquire folio locks, or perform I/O.
+For memfs, the provider is its filesystem-owned quota, so lock order is cache
+index -> quota limit; remount and statfs never acquire a cache index lock.
+Speculative physical storage remains outside the admission policy until insertion.
+
+The cache publishes non-uptodate reservations before filesystem I/O and keeps
+its index lock out of I/O, preserving the current main concurrency contract.
+Unconsumed readahead reservations release their charges before unlocking.
+
+`visit_resident_folios` snapshots only one bounded page range. Missing identities
+are reported as None from that snapshot and never reserved or initialized. This
+allows a filesystem to own its sparse algorithm without a cache policy flag.
+Callbacks may stop before the next page; errors retain earlier callback progress.
+The fixed FolioBatch and index array allocate no additional heap storage.

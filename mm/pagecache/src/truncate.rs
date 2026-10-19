@@ -120,7 +120,7 @@ impl MappingPages {
     pub(super) fn discard_folio(state: &mut MappingPagesState, folio: &mut Folio) {
         let index = folio.index();
         folio.invalidate();
-        state.entries.remove(&index);
+        state.remove_folio(index);
         state.dirty_marks.remove(&index);
         state.writeback_marks.remove(&index);
     }
@@ -186,10 +186,10 @@ impl Drop for MappingPages {
             let mut state = self.state.lock();
             state.dirty_marks.clear();
             state.writeback_marks.clear();
-            core::mem::take(&mut state.entries)
+            state.take_folios()
         };
-        for folio in entries.values() {
-            let mut folio = folio.lock();
+        for entry in entries.values() {
+            let mut folio = entry.lock();
             debug_assert!(!folio.is_under_writeback());
             // External references may outlive the container. Invalidate them
             // before Rust drops the entries and their derived marks.

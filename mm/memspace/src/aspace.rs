@@ -442,6 +442,15 @@ impl MmSpace {
     }
 
     fn install_runtime_mapping(&mut self, mut vma: VmArea, runtime: VmRuntimeRef) -> KResult {
+        // Refuse an overlapping range before the page table is touched and
+        // before object views are registered, so a rejected mapping leaves no
+        // partial state behind. Callers reach this from syscall paths (`brk`,
+        // `mmap`, `mremap`), where an overlap depends on the address-space
+        // state a user process drove it into, so it is a recoverable error and
+        // not a kernel invariant worth panicking over.
+        if self.vmas.overlaps(vma.range()) {
+            return Err(KError::AlreadyExists);
+        }
         runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
         vma.set_runtime(runtime.register_object_views(
             self.mm_id,
@@ -1066,6 +1075,12 @@ impl MmSpace {
     }
 
     /// Map a region using an explicit VMA metadata record and runtime reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::AlreadyExists`] if the range overlaps an installed VMA,
+    /// before editing page tables or registering object views for the incoming
+    /// mapping. Also propagates invalid-range and runtime mapping errors.
     pub fn map_runtime_vma(
         &mut self,
         vma: VmArea,
@@ -1457,6 +1472,7 @@ impl MmSpace {
                     | KErrorKind::InvalidData
                     | KErrorKind::InvalidInput
                     | KErrorKind::Io
+                    | KErrorKind::StorageFull
                     | KErrorKind::UnexpectedEof,
                 ) => PageFaultOutcome::BusError,
                 _ => {
@@ -1710,6 +1726,21 @@ mod tests {
     }
 
     #[def_test]
+    fn file_fault_capacity_failure_is_a_bus_error() {
+        let start = VirtAddr::from(0x1000_0000);
+        let mut aspace = MmSpace::new_empty_user(start, PAGE_SIZE_4K).unwrap();
+        let flags = MappingFlags::READ | MappingFlags::USER;
+        assert_eq!(
+            aspace.finish_file_backend_fault(start, flags, Err(KError::StorageFull)),
+            PageFaultOutcome::BusError
+        );
+        assert_eq!(
+            aspace.finish_file_backend_fault(start, flags, Err(KError::NoMemory)),
+            PageFaultOutcome::OutOfMemory
+        );
+    }
+
+    #[def_test]
     fn futex_backing_uses_mm_identity_for_private_mappings() {
         let start = VirtAddr::from_usize(0x4000);
         let flags = MappingFlags::READ | MappingFlags::WRITE;
@@ -1858,6 +1889,54 @@ mod tests {
             aspace.pgtbl.modify().query(start).is_ok(),
             "failed MADV_DONTNEED must leave existing PTEs intact"
         );
+    }
+
+    #[def_test]
+    fn overlapping_lazy_mapping_preserves_existing_mapping() {
+        let mut aspace = new_test_aspace();
+        let start = VirtAddr::from(0x5000usize);
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        map_shared(&mut aspace, start.as_usize(), PAGE_SIZE_4K, flags);
+        aspace
+            .write(start, b"kept")
+            .expect("seed the original mapping");
+        let original_frame = aspace
+            .pgtbl
+            .query(start)
+            .expect("original PTE must exist")
+            .0;
+
+        // The private backend maps lazily, so page-table overlap detection
+        // cannot protect the VMA insertion or its object-view registration.
+        let incoming = VmRuntimeRef::new_anon_private(start, PageSize::Size4K);
+        assert!(matches!(
+            aspace.map(start, PAGE_SIZE_4K * 2, MappingFlags::READ, false, incoming),
+            Err(KError::AlreadyExists)
+        ));
+
+        let mut contents = [0_u8; 4];
+        aspace
+            .read(start, &mut contents)
+            .expect("original contents must remain readable");
+        assert_eq!(contents, *b"kept");
+        assert_eq!(
+            aspace
+                .pgtbl
+                .query(start)
+                .expect("original PTE must exist")
+                .0,
+            original_frame
+        );
+        assert!(aspace.can_access_range(start, PAGE_SIZE_4K, flags));
+        assert_eq!(
+            aspace
+                .find_vma(start)
+                .expect("original VMA must remain installed")
+                .size(),
+            PAGE_SIZE_4K
+        );
+        assert!(aspace.find_vma(start + PAGE_SIZE_4K).is_none());
+        assert!(aspace.pgtbl.query(start + PAGE_SIZE_4K).is_err());
     }
 
     #[def_test]

@@ -195,7 +195,10 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
             reads.load(Ordering::Relaxed),
             if fail_first { 2 } else { 1 }
         );
-        assert!(Arc::ptr_eq(&cache.state.lock().entries[&0], &resident));
+        assert!(Arc::ptr_eq(
+            &cache.state.lock().entries[&0],
+            &resident
+        ));
     }
 
     // Use the same observer sequentially: the waiter must see the old locked
@@ -249,7 +252,10 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
     super::READ_WAIT_SIGNAL.lock().take();
     assert_eq!(pages_before_release, 2);
     assert_eq!(cache.nrpages(), 2);
-    assert!(!Arc::ptr_eq(&cache.state.lock().entries[&1], &reserved));
+    assert!(!Arc::ptr_eq(
+        &cache.state.lock().entries[&1],
+        &reserved
+    ));
     assert!(!reserved.lock().is_uptodate());
     cache.with_folio(1, |folio| {
         let folio = folio.unwrap();
@@ -295,4 +301,55 @@ fn readahead_releases_unconsumed_reservations_and_retains_attempted_reads() {
         )
         .unwrap();
     assert!(dirty_indices(&cache).is_empty());
+}
+
+#[def_test]
+fn resident_batch_preserves_sparse_positions_and_bounds_the_snapshot() {
+    use core::ops::ControlFlow;
+
+    let cache = new_cache();
+    for index in (0..crate::FolioBatch::CAPACITY + 5).step_by(2) {
+        write_cached(&cache, (index * PAGE_SIZE_4K) as u64, &[index as u8]).unwrap();
+    }
+    let mut visited = 0;
+    core::assert_eq!(
+        cache.visit_resident_folios(
+            0,
+            crate::FolioBatch::CAPACITY + 5,
+            |_| panic!("initialized resident hits must not reread storage"),
+            |index, folio| {
+                assert!(cache.state.try_lock().is_some(), "copy must run outside the index lock");
+                core::assert_eq!(index, visited);
+                if index % 2 == 0 {
+                    core::assert_eq!(folio.unwrap().data()[0], index as u8);
+                } else {
+                    assert!(folio.is_none());
+                }
+                visited += 1;
+                Ok(ControlFlow::Continue(()))
+            },
+        ),
+        Ok(crate::FolioBatch::CAPACITY)
+    );
+    core::assert_eq!(visited, crate::FolioBatch::CAPACITY as u64);
+    core::assert_eq!(cache.nrpages(), ((crate::FolioBatch::CAPACITY + 5).div_ceil(2)) as u64);
+}
+
+#[def_test]
+fn resident_batch_stops_before_initializing_the_next_page() {
+    use core::ops::ControlFlow;
+
+    let cache = new_cache();
+    write_cached(&cache, 0, b"first").unwrap();
+    core::assert_eq!(cache.with_folio_or_create(1, |_| Err(kerrno::KError::Io), |_| Ok(())), Err(kerrno::KError::Io));
+    core::assert_eq!(
+        cache.visit_resident_folios(0, 2,
+            |_| panic!("a short read must not initialize the following reservation"),
+            |index, folio| {
+                core::assert_eq!(index, 0);
+                core::assert_eq!(&folio.unwrap().data()[..5], b"first");
+                Ok(ControlFlow::Break(()))
+            }),
+        Ok(1)
+    );
 }

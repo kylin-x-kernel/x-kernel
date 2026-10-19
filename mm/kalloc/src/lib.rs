@@ -757,6 +757,13 @@ impl GlobalAllocator {
         self.balloc.lock().available_bytes()
     }
 
+    /// Returns the total number of allocatable pages managed by the page allocator.
+    ///
+    /// The total excludes allocator metadata such as the buddy free-head bitmap.
+    pub fn total_pages(&self) -> usize {
+        self.palloc.lock().total_pages()
+    }
+
     /// Returns the number of allocated pages in the page allocator.
     pub fn used_pages(&self) -> usize {
         self.palloc.lock().used_pages()

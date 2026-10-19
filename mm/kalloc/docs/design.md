@@ -293,8 +293,10 @@ free 到 per-CPU cache 的对象。
 - 快照不保证跨 CPU 或跨种类线性化，并发 allocation/free 可能使结果相对任一时刻的
   精确值暂时偏大或偏小；统计不参与 allocator ownership 或回收决策。
 
-`used_bytes()` / `available_bytes()` 展示中央 byte allocator 的视图；`used_pages()` /
-`available_pages()` 展示全局 buddy 的视图。byte heap backing、PCP block 和 per-CPU
+`used_bytes()` / `available_bytes()` 展示中央 byte allocator 的视图；`total_pages()` /
+`used_pages()` / `available_pages()` 展示全局 buddy 的视图。`total_pages()` 返回管理的
+总可分配页数（已用加空闲、排除 allocator 元数据），供 tmpfs 等上层选择默认容量；
+它不是当前空闲量，读取该值不预留内存，也不改变增长、分配或回收策略。byte heap backing、PCP block 和 per-CPU
 slab object 会使这些中央视图与 caller-live usage 存在预期差异。
 
 ### Allocation tracking

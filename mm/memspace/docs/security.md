@@ -127,12 +127,12 @@
 
 | 故障 | 条件 | 处理 | 影响 |
 |---|---|---|---|
-| VMA overlap | 插入路径未校验 | `VmAreaSet::try_insert()` 拒绝 | 避免地址空间歧义 |
+| VMA overlap | 插入路径未校验 | `install_runtime_mapping` 在改页表和注册 object view 之前先用 `VmAreaSet::overlaps()` 预检并返回 `AlreadyExists`，`VmAreaSet::try_insert()` 再拒绝一次 | 避免地址空间歧义；用户态 syscall 序列能触发的重叠退化为可恢复错误，不再 panic 整机 |
 | Runtime/backing mismatch | runtime 与 VMA metadata 不一致 | 返回 `BadAddress` 并记录 warning | fault/map 操作失败 |
 | Invalidate apply failure | runtime unmap 或 page-table path 失败 | request 回队，本轮 drain 停止 | stale PTE 延迟清除 |
 | COW conflict | object slot 或 PTE 变化 | 返回 retry-class outcome | fault retry |
 | OOM | frame 或页表分配失败 | 返回 `OutOfMemory` / `NoMemory` | syscall 或 fault 失败 |
-| File EOF fault | file object 拒绝越界页 | `BusError` outcome | 上层映射为 SIGBUS-class 行为 |
+| File backend fault | 文件页越界、I/O失败或配额耗尽 | `BusError` outcome | 上层投递 SIGBUS，普通 write 的 ENOSPC 不变 |
 | `mremap` source teardown destroys moved private backing | 误把 relocation 当 ordinary unmap | metadata-only retirement | 避免 moved mapping 指向已释放对象页 |
 | Stale mm user acquire | 最后一个 user release 与新 user acquire 并发 | 单原子状态 CAS；torn-down 后 upgrade/acquire 失败 | 避免退出清理后重新使用已清空映射 |
 
@@ -141,7 +141,9 @@
 - 地址空间编辑失败通过 `KResult` 返回。
 - Fault path 返回 `FaultOutcome`，不得在 `memspace` 边界压成 bool。
 - Retry-class fault 包括 ordinary retry 和 COW conflict retry。
-- `BusError` 表示 backing object 级错误，例如 mapped-file EOF/range fault。
+- `BusError` 表示 backing object 级错误，包括 mapped-file EOF/range fault、I/O
+  失败及 `StorageFull`。配额耗尽不表示地址权限错误，不应归为 SIGSEGV；分配失败
+  `NoMemory` 仍单独归类为 `OutOfMemory`。
 - Invalidate drain 失败只影响当前 request；request 保留在队列中等待下一边界。
 
 ## 已知限制

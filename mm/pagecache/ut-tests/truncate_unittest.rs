@@ -83,7 +83,8 @@ fn shrink_and_final_teardown_remove_multiple_sparse_batches() {
     cache
         .filemap_add_folio(super::folio_from_bytes(u64::MAX, b"last"))
         .unwrap_or_else(|_| panic!("fixture index is absent"));
-    let retained = cache.state.lock().entries[&((count - 1) as u64 * 2)].clone();
+    let retained = cache.state.lock().entries[&((count - 1) as u64 * 2)]
+        .clone();
     let new_len = (crate::FolioBatch::CAPACITY * 2 * PAGE_SIZE_4K + 1) as u64;
     cache.resize_cached_folios((count * 2 * PAGE_SIZE_4K) as u64, new_len);
     assert_eq!(cache.nrpages(), (crate::FolioBatch::CAPACITY + 1) as u64);
@@ -102,7 +103,8 @@ fn mapping_drop_cleans_retained_folios_across_batches() {
         let cache = new_cache();
         let count = crate::FolioBatch::CAPACITY * 2 + 1;
         write_cached(&cache, 0, &vec![0x5a; count * PAGE_SIZE_4K]).unwrap();
-        let retained = cache.state.lock().entries[&(crate::FolioBatch::CAPACITY as u64)].clone();
+        let retained = cache.state.lock().entries[&(crate::FolioBatch::CAPACITY as u64)]
+            .clone();
         assert!(retained.lock().is_dirty());
         retained
     };
@@ -217,9 +219,12 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
             replacement.mark_uptodate();
             replacement.mark_dirty();
             let mut state = cache.state.lock();
-            state
-                .entries
-                .insert(0, Arc::new(ksync::Mutex::new(replacement)));
+            state.entries.insert(
+                0,
+                Arc::new(ksync::Mutex::new(
+                    replacement,
+                )),
+            );
             state.dirty_marks.insert(0);
             state.writeback_marks.remove(&0);
         } else {

@@ -97,11 +97,16 @@ object owner
 
 ### VMA 插入
 
-1. 调用方构造 `VmArea` 和对应 `VmRuntimeRef`。
-2. `MmSpace::map_runtime_vma()` 校验 VMA 范围和 runtime backing 一致性。
-3. runtime 执行 eager map 或注册 lazy fault 入口。
-4. `VmAreaSet::try_insert()` 拒绝重叠 VMA。
-5. runtime 注册 file/anon object view 时使用当前 `mm_id` 和 `InvalidateHandle`。
+1. 调用方构造 `VmArea` 和对应 `VmRuntimeRef`，`MmSpace::map_runtime_vma()` 校验范围。
+2. `install_runtime_mapping()` 在修改页表或注册 incoming object view 前检查 VMA overlap，
+   重叠时返回 `AlreadyExists`，保留已安装映射的内容、权限和范围。
+3. runtime 执行 eager map 或准备 lazy fault 路径。
+4. 使用当前 `mm_id` 和 `InvalidateHandle` 注册 file/anon object view，再发布 VMA。
+5. `VmAreaSet::insert()` 的内部断言保护已通过预检的独占修改不变量。
+
+lazy private runtime 的 `map()` 本身不修改页表，不能依赖 page-table collision 拒绝重叠。
+回归同时检查这种请求返回错误、原物理页/内容/写权限保持、扩展后缀没有 VMA 或 PTE。
+该保护不解释上层为何选择了重叠地址，也不将任意上层 mmap/brk 错误视为已经解决。
 
 ### VMA 变形
 
@@ -284,3 +289,7 @@ dirty tracking.
 - `PageTableMut::finish()` 是释放 detached frames 前的 TLB finalization boundary。
 - `VmAreaSet` 清空后，VMA metadata 和 runtime references 一起释放。
 - File/anon object view guards 随 runtime/object 引用释放并注销 view。
+
+File-backed page faults classify backend capacity exhaustion (`StorageFull`)
+as `BusError`, alongside backend data and I/O failures. User runtime therefore
+delivers `SIGBUS`; this conversion does not change write syscall errno mapping.

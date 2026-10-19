@@ -4,6 +4,8 @@
 
 //! Cached folio access and generic buffered I/O.
 
+use core::ops::ControlFlow;
+
 use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
@@ -21,9 +23,38 @@ fn write_prefix_or_error(written: usize, error: VfsError) -> VfsResult<usize> {
 }
 
 impl AddressSpace {
-    /// Runs `f` with the cached folio at `index`, if present.
+    /// Runs `f` with the initialized resident folio at `index`, if present.
+    /// Missing or non-uptodate folios are reported as `None`.
     pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
         self.i_pages.with_folio(index, f)
+    }
+
+    /// Visits a bounded resident-page snapshot without populating holes.
+    ///
+    /// Holds one invalidate read guard through the batch, including EOF sampling
+    /// and data copying in `visit`. At most [`pagecache::FolioBatch::CAPACITY`]
+    /// pages are visited after a single index snapshot; absent pages are `None`.
+    /// Retained initialization failures propagate instead of becoming holes.
+    /// Callbacks must not reenter this mapping, change folio state, or wait for
+    /// another folio. Returns the number visited, including a breaking page.
+    ///
+    /// # Errors
+    ///
+    /// Propagates index-range overflow, filesystem initialization, or callback
+    /// errors. Earlier callback progress remains committed to its caller.
+    pub fn visit_resident_folios(
+        &self,
+        start: PageIndex,
+        count: usize,
+        visit: impl FnMut(PageIndex, Option<&mut Folio>) -> KResult<ControlFlow<()>>,
+    ) -> KResult<usize> {
+        let _invalidate = self.invalidate_lock.read();
+        self.i_pages.visit_resident_folios(
+            start,
+            count,
+            |folio| self.ops.read_folio(self, folio),
+            visit,
+        )
     }
 
     /// Runs `f` with the folio at `index`, materializing it when absent.

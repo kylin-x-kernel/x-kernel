@@ -21,7 +21,7 @@ mod writeback;
 
 pub use folio::Folio;
 pub use folio_batch::FolioBatch;
-pub use mapping_pages::MappingPages;
+pub use mapping_pages::{CacheResidency, MappingPages};
 pub use writeback::WritebackRangeResult;
 
 /// Page index within a mapping.

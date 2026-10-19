@@ -314,6 +314,13 @@ impl FiemapCapability<'_> {
 
 /// Inode operation table installed on VFS inodes.
 pub trait InodeOperations: Send + Sync + 'static {
+    /// Supplies filesystem-owned cache admission and removal accounting.
+    /// Called once while constructing the inode, before publication.
+    /// The provider must obey [`pagecache::CacheResidency`]'s lock contract.
+    fn cache_residency(&self) -> Option<Arc<dyn pagecache::CacheResidency>> {
+        None
+    }
+
     /// Changes a regular file's length while its inode data and address-space
     /// invalidate locks are held exclusively.
     ///
@@ -1669,6 +1676,7 @@ impl VfsInode {
             address_space_operations,
             init,
         } = parts;
+        let residency = inode_operations.cache_residency();
         Arc::new_cyclic(move |this| Self {
             identity: InodeIdentity::new(init.number),
             attributes,
@@ -1678,7 +1686,11 @@ impl VfsInode {
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
             private_data,
-            mapping: AddressSpace::new(this.clone(), address_space_operations),
+            mapping: AddressSpace::with_residency(
+                this.clone(),
+                address_space_operations,
+                residency,
+            ),
             special_state: InodeSpecialState::new(),
             file_locks: klazy::Once::new(),
         })

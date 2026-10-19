@@ -199,7 +199,8 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   `kill` / `tkill` / `tgkill` / `rt_sigqueueinfo` / `rt_tgsigqueueinfo` /
   `rt_sigreturn` / `rt_sigtimedwait` / `rt_sigsuspend` / `pause` / `sigaltstack` /
   `signalfd4`; owners in `kprocess` per-thread signal state, the `ksignal`
-  signal model, and `kfd_objects::Signalfd`. `pause` (x86_64 syscall 34) and
+  signal model, and `kfd_objects::Signalfd`. The queue variants use Linux's
+  exact argument count and do not validate a trailing `sigsetsize`. `pause` (x86_64 syscall 34) and
   `rt_sigsuspend` share the internal `wait_for_deliverable_signal` helper.
   Only `rt_sigsuspend` replaces the mask and saves the old mask for signal-frame
   restoration; `pause` changes neither mask. The helper checks unblocked pending

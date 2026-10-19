@@ -29,6 +29,127 @@ fn memfd_files_express_file_copy_support() {
 }
 
 #[def_test]
+fn tmpfs_context_defaults_to_half_of_total_pages() {
+    let options = parse_tmpfs_context_options(None, 256).unwrap();
+
+    assert_eq!(options.mount_page_limit(), Some(128));
+    assert_eq!(options.reconfigure_page_limit(), None);
+}
+
+#[def_test]
+fn tmpfs_context_parses_size_and_block_limits() {
+    let options = parse_tmpfs_context_options(Some(b"size=8192\0"), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), Some(2));
+    assert_eq!(options.reconfigure_page_limit(), Some(Some(2)));
+
+    let options = parse_tmpfs_context_options(Some(b"size=1m\0"), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), Some(256));
+
+    let options = parse_tmpfs_context_options(Some(b"size=50%\0"), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), Some(128));
+
+    let options = parse_tmpfs_context_options(Some(b"nr_blocks=3\0"), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), Some(3));
+
+    let options = parse_tmpfs_context_options(Some(b"nr_blocks=1k\0"), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), Some(1024));
+}
+
+#[def_test]
+fn tmpfs_percentage_size_rounds_up_partial_pages() {
+    let half = parse_tmpfs_context_options(Some(b"size=50%\0"), 257).unwrap();
+    assert_eq!(half.mount_page_limit(), Some(129));
+    let small = parse_tmpfs_context_options(Some(b"size=1%\0"), 128).unwrap();
+    assert_eq!(small.mount_page_limit(), Some(2));
+    let default = parse_tmpfs_context_options(None, 257).unwrap();
+    assert_eq!(default.mount_page_limit(), Some(128));
+}
+
+#[def_test]
+fn tmpfs_context_accepts_explicit_unlimited_size() {
+    for data in [
+        &b"size=0\0"[..],
+        &b"size=0k\0"[..],
+        &b"size=0%\0"[..],
+        &b"nr_blocks=0\0"[..],
+    ] {
+        let options = parse_tmpfs_context_options(Some(data), 256).unwrap();
+        assert_eq!(options.mount_page_limit(), None);
+        assert_eq!(options.reconfigure_page_limit(), Some(None));
+    }
+}
+
+#[def_test]
+fn tmpfs_context_parses_linux_compatibility_options() {
+    let options = parse_tmpfs_context_options(
+        Some(b"size=4096,mode=0700,uid=1000,gid=100,noswap\0"),
+        256,
+    )
+    .unwrap();
+
+    assert_eq!(options.mount_page_limit(), Some(1));
+    assert_eq!(options.root_mode.bits(), 0o700);
+    assert_eq!(options.root_uid, 1000);
+    assert_eq!(options.root_gid, 100);
+}
+
+#[def_test]
+fn tmpfs_rejects_unimplemented_inode_quotas() {
+    for data in [&b"nr_inodes=1\0"[..], &b"nr_inodes=1k\0"[..]] {
+        assert_eq!(
+            parse_tmpfs_context_options(Some(data), 256).map(|_| ()),
+            Err(VfsError::Unsupported)
+        );
+    }
+}
+
+#[def_test]
+fn tmpfs_accepts_unlimited_inode_requests() {
+    let options = parse_tmpfs_context_options(Some(b"nr_inodes=0\0"), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), Some(128));
+    assert_eq!(options.reconfigure_page_limit(), None);
+}
+
+#[def_test]
+fn tmpfs_context_rejects_unknown_or_malformed_options() {
+    for data in [
+        &b"size=one\0"[..],
+        &b"size=0x\0"[..],
+        &b"nr_blocks=1x\0"[..],
+        &b"nr_blocks=0x\0"[..],
+        &b"nr_inodes=1%\0"[..],
+        &b"mode=0800\0"[..],
+        &b"mode=\0"[..],
+        &b"uid=-1\0"[..],
+        &b"unknown=1\0"[..],
+    ] {
+        assert_eq!(
+            parse_tmpfs_context_options(Some(data), 256).unwrap_err(),
+            VfsError::InvalidInput
+        );
+    }
+}
+
+#[def_test]
+fn tmpfs_mount_options_apply_root_metadata() {
+    let fs = new_tmpfs_with_type_and_mount_options(
+        &TMPFS_TYPE,
+        SuperBlockFlags::empty(),
+        TmpfsMountOptions {
+            page_limit: Some(2),
+            root_mode: NodePermission::from_bits_truncate(0o700),
+            root_uid: 1000,
+            root_gid: 100,
+        },
+    );
+    let metadata = fs.root_dir().metadata();
+
+    assert_eq!(metadata.mode.permission().bits(), 0o700);
+    assert_eq!(metadata.uid, 1000);
+    assert_eq!(metadata.gid, 100);
+}
+
+#[def_test]
 fn shmem_write_seal_rejects_write_policy() {
     let state = ShmemObjectState::new(
         ShmemObjectKind::Memfd,

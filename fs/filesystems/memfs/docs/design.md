@@ -29,6 +29,7 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 - 目录、链接、符号链接和元数据维护
 - 基于 VFS `Cred` callback 的 inode owner 初始化
 - fd-only tmpfs/shmem anonymous regular-file factory and opened-file conversion
+- mounted tmpfs page quota, `size`/`nr_blocks` options, and `statfs` reporting
 - Static KVFS `FileSystemType` descriptor for `tmpfs`.
 
 ## 架构
@@ -36,6 +37,7 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 ```text
 MemoryFs
   -> Inode
+  -> Option<PageQuota> (mounted tmpfs; shared by all inodes)
 
 VFS-wide identity table: (SuperBlock, ino)
   -> VfsInode
@@ -92,22 +94,61 @@ than a memfs-backed pseudo sysfs.
 ### tmpfs mount entry
 
 The public VFS mount path enters `tmpfs_get_tree` in `src/lib.rs`. That entry
-passes the selected `FileSystemType` and VFS-wide `SuperBlockFlags` to
-`shmem::new_tmpfs_with_type`, which constructs the private `MemoryFs`
-superblock. After the factory returns, VFS attaches the superblock to the
-caller's mount namespace and applies per-mount policy there.
+parses the tmpfs context options, resolves the page limit and root metadata,
+and passes the selected `FileSystemType`, VFS-wide `SuperBlockFlags`, and
+mount options to `shmem::new_tmpfs_with_type_and_mount_options`, which
+constructs the private `MemoryFs` superblock. After the factory returns, VFS
+attaches the superblock to the caller's mount namespace and applies per-mount
+policy there.
+
+Without an explicit size, the mount limit is one half of `kalloc`'s allocatable
+physical pages, matching Linux's default tmpfs policy. `size=<bytes>` accepts
+`k`/`m`/`g`/`t` suffixes and `%` of total allocatable memory. Explicit byte and percentage sizes round up to a page, so `size=50%` of
+257 allocatable pages allows 129 pages; the unspecified default still uses
+integer half (128 pages). `nr_blocks` uses
+page units and accepts the same size suffixes. `size=0` and `nr_blocks=0`
+explicitly select unlimited. `mode`, `uid`, and `gid` select the root inode's
+metadata at initial mount; remount leaves those fields unchanged, as Linux does.
+`nr_inodes=0` is accepted as unlimited; nonzero inode limits return `Unsupported`
+because finite inode accounting is not implemented. `noswap` is accepted as a no-op because this tmpfs implementation
+has no swap backend. The page limit is a quota on actually resident folios, not a
+reservation and not a file logical-size sum.
+
+For a finite limit, `statfs()` reports the current maximum and available quota
+pages. For an unlimited limit, it reports zero block fields like Linux
+`shmem_statfs()`; zero means "no fixed capacity", not "the quota is exhausted".
+Reconfigure applies an explicitly requested new limit but does not evict
+existing pages. Like Linux, a finite limit may be lowered only to the current
+usage, and an unlimited instance cannot be retroactively limited; it may still
+become unlimited again. A requested finite limit below current usage returns
+`EINVAL` and preserves the old limit, matching Linux `shmem_reconfigure()`;
+`ENOSPC` is reserved for materialization beyond an installed limit.
+Anonymous shmem/memfd instances remain intentionally
+unbounded by a mount-size option.
 
 ### 读取普通文件
 
 1. KFS file path 找到 inode address-space mapping。
-2. `kvfs::AddressSpace` 读取或 materialize folio。
-3. 洞页返回零填充。
+2. memfs `MemoryNode::read_iter` owns sparse-hole handling and never invokes
+   generic readahead. It uses `AddressSpace::visit_resident_folios` to access the
+   common cache with invalidation excluded and EOF sampled under that guard.
+3. Existing uptodate pages supply bytes; retained failed reservations retry
+   initialization and preserve errors. Only an absent identity supplies zeroes
+   from memfs's static zero page, without allocation or admission.
+4. File-mapping faults materialize cache identities normally. Capacity failures
+   become BusError/SIGBUS; buffered write capacity failures remain ENOSPC.
 
 ### 写入普通文件
 
 1. KFS file path 找到 inode address-space mapping。
-2. `kvfs::AddressSpace` 写入 folio 并标记 dirty。
-3. inode-owned `AddressSpace` 继续提供共享 object identity 与 mmap contract。
+2. `kvfs::AddressSpace` materializes a missing folio through the tmpfs page
+   quota and writes into it.
+3. Candidate physical storage is prepared outside the cache index lock. The
+   winning resident identity is charged before publication; a rejected charge
+   returns `StorageFull` and the unpublished candidate is released. Candidate
+   allocation can fail before quota admission, so the quota is not a physical
+   memory reservation.
+4. inode-owned `AddressSpace` 继续提供共享 object identity 与 mmap contract。
 
 ### 文件同步
 
@@ -136,7 +177,15 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 - 同一 filesystem instance 的 VFS inode identity 由 VFS-wide table 按 `(SuperBlock, ino)` 串行
   初始化；`MemoryFs` 不增加 cache lock 或 cache 字段。
 - inode address-space 的 private page-cache storage、mapped views 与 MM object identity
-  由 `kvfs::AddressSpace` 内部同步保护。
+  由 `kvfs::AddressSpace` 内部同步保护；
+- `MemoryNode::cache_residency()` gives each newly constructed mapping one
+  reference to the filesystem quota; lookup never traverses weak inode or
+  superblock references on a resident access.
+- The generic cache serializes admission with winning identity publication and
+  removal. Its callbacks take the quota limit lock after the cache index mutex;
+  remount/statfs hold only the quota lock, never a mapping lock.
+- `statfs_pages()` samples the limit once under its read lock, so a concurrent
+  remount cannot mix total pages from one limit with free pages from another.
 
 ## 设计决策
 
@@ -146,7 +195,8 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
    内容对象。
 
 2. 符号链接仍由 `FileContent.symlink` 保存。
-   原因：symlink target 是小字符串元数据，不需要进入 page cache。
+   原因：当前 symlink 数据路径独立于 regular-file page cache。包括长 target 在内的
+   String 分配不计入 resident-folio quota；该额度不是文件系统全部内存的总预算。
 
 3. 匿名文件用私有 tmpfs mount 中的 regular file 表达。
    原因：这保持了 Linux `shmem_file_setup()` 的私有文件对象 + inode-owned page
@@ -162,7 +212,42 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
    The nodev factory only selects or creates the filesystem and superblock;
    every tmpfs mount creates a new instance.
 
+6. tmpfs size is enforced at folio materialization rather than file length.
+   原因：sparse holes do not consume pages, while a small file can dirty one
+   full page. Charging actual folios also makes truncate/unlink release quota
+   without a second accounting pass. A buffered-read hole is served from the
+   zero page, so it cannot consume the last quota page or turn `read(2)` into
+   `ENOSPC`. Mmap read faults deliberately materialize and charge a folio, as
+   Linux does for `shmem_fault()`; only the buffered-read path follows
+   `SGP_READ` and zero-fills holes.
+
 ## Drop / 资源释放
 
 - inode 释放时，`AddressSpace` 在最后一个引用释放时销毁，其直接持有的 `MappingPages` 随字段释放。
+- resident cache-entry removal releases its page-quota charge; `truncate(0)` and final
+  inode eviction therefore make capacity available again.
 - 目录删除逻辑由 `InodeRef` 和 nlink 维护。
+
+`quota.rs` owns the mount limit, usage and remount/statfs policy. Each mapping
+stores one lifecycle provider reference; entries are plain shared folio handles.
+Admission runs only for winning identities. Removal and final mapping destruction
+return capacity immediately, even if read batches still retain invalidated folios.
+
+Mounted tmpfs accepts `nr_inodes=0` as unlimited; nonzero inode limits remain
+unsupported. A file-backed fault that exhausts resident capacity becomes
+`BusError` and delivers `SIGBUS`; ordinary buffered writes still return `ENOSPC`.
+
+### Shared sparse reader and native copy
+
+`read_memory_file` is the common implementation for ordinary regular-file reads
+and `move_copy_chunk`. Both access the same inode mapping, zero-fill source
+holes without materialization, and preserve resident initialization failures.
+Native copies write that prefix through the ordinary destination write checks;
+a full quota does not prevent overwriting already resident destination pages.
+Neither source readahead nor source quota admission occurs on holes.
+
+Reads progress in batches of at most FolioBatch::CAPACITY (31) pages. Each batch
+holds one invalidate read guard and takes one index snapshot, instead of repeating
+both locks per page. Folio locks still serialize data copying. An unaligned EOF,
+a short sink, or a later initialization error returns the copied prefix and
+advances Kiocb by exactly that prefix. Sparse policy remains in memfs.

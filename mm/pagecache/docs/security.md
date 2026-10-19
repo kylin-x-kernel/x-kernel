@@ -113,3 +113,24 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 
 预读标记的设置与消费要求独占 folio 访问；标记只影响性能策略，不能替代 uptodate
 或 resident 身份检查。缓存历史查询返回瞬时提示，不延长驻留期或授权发布。
+
+## Cache residency lifecycle
+
+The filesystem owns capacity policy and supplies one `CacheResidency` provider
+when constructing an inode mapping. The cache stores only ordinary folio handles;
+no entry or folio owns a quota field or a per-page provider reference. Under the
+index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
+including readahead cancellation, truncate and final mapping destruction, calls
+`remove_folios(count)` independently of external physical-page references.
+Providers must not reenter mappings, acquire folio locks, or perform I/O.
+For memfs, the provider is its filesystem-owned quota, so lock order is cache
+index -> quota limit; remount and statfs never acquire a cache index lock.
+Speculative physical storage remains outside the admission policy until insertion.
+
+
+Resident batch traversal reports absent identities only from its bounded index
+snapshot. An existing non-uptodate or invalidated candidate is resolved again
+before exposing data; initialization errors are preserved. The owner holds
+invalidation shared through the batch, including EOF checks and user copies.
+Only one folio is locked at a time; callbacks cannot reenter this mapping or
+wait for another folio. An initialized hit takes no additional index lock.

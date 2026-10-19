@@ -5,8 +5,9 @@
 //! Cached folio lookup and materialization.
 
 use alloc::sync::Arc;
+use core::ops::ControlFlow;
 
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use ksync::Mutex;
 
 use crate::{Folio, FolioBatch, MappingPages, PageIndex};
@@ -80,6 +81,103 @@ impl MappingPages {
         }
     }
 
+    /// Visits a bounded snapshot of resident folios and holes in page order.
+    ///
+    /// Visits at most [`FolioBatch::CAPACITY`] pages, returning the number
+    /// visited, including the page on which `visit` breaks. One index lookup
+    /// collects all resident references; initialized hits subsequently take
+    /// only their folio lock. Holes are passed as `None` without allocation.
+    /// A non-uptodate or invalidated snapshot entry is resolved again, and
+    /// initialization failures propagate without visiting that page.
+    ///
+    /// The owner must exclude invalidation and sample EOF inside `visit`.
+    /// Callbacks must not reenter this mapping or wait for another folio;
+    /// `visit` must not modify data, dirty state, or residency. Task context
+    /// only. A hole describes the initial snapshot, even if a concurrent writer
+    /// subsequently creates that identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::InvalidInput`] if the bounded index range overflows,
+    /// or an error from initialization or `visit`. Earlier visits remain valid.
+    pub fn visit_resident_folios(
+        &self,
+        start: PageIndex,
+        count: usize,
+        read: impl Fn(&mut Folio) -> KResult<()>,
+        mut visit: impl FnMut(PageIndex, Option<&mut Folio>) -> KResult<ControlFlow<()>>,
+    ) -> KResult<usize> {
+        let count = count.min(FolioBatch::CAPACITY);
+        if count == 0 {
+            return Ok(0);
+        }
+        let end = start
+            .checked_add(count as u64)
+            .ok_or(KError::InvalidInput)?;
+        let mut batch = FolioBatch::new();
+        let mut indices = [0; FolioBatch::CAPACITY];
+        {
+            let state = self.state.lock();
+            for (&index, folio) in state.entries.range(start..end) {
+                indices[batch.len()] = index;
+                batch.push(folio.clone());
+            }
+        }
+        let mut slot = 0;
+        for (offset, index) in (start..end).enumerate() {
+            let result = if slot < batch.len() && indices[slot] == index {
+                let cached = batch.with_read_folio(slot, |folio| visit(index, Some(folio)));
+                slot += 1;
+                match cached {
+                    Some(result) => result,
+                    None => self.with_resident_folio(index, &read, |folio| visit(index, folio)),
+                }
+            } else {
+                visit(index, None)
+            };
+            if result?.is_break() {
+                return Ok(offset + 1);
+            }
+        }
+        Ok(count)
+    }
+
+    /// Accesses an existing folio, retrying initialization without creating holes.
+    ///
+    /// The owner excludes invalidation and rechecks EOF in `f`. A missing
+    /// identity is passed as `None`; an initialization failure is propagated
+    /// without calling `f`. Neither callback may reenter this mapping.
+    fn with_resident_folio<R>(
+        &self,
+        index: PageIndex,
+        read: impl FnOnce(&mut Folio) -> KResult<()>,
+        f: impl FnOnce(Option<&mut Folio>) -> KResult<R>,
+    ) -> KResult<R> {
+        loop {
+            let state = self.state.lock();
+            let Some(folio) = state.entries.get(&index).cloned() else {
+                drop(state);
+                return f(None);
+            };
+            let Some(mut locked) = folio.try_lock() else {
+                drop(state);
+                drop(folio.lock());
+                continue;
+            };
+            drop(state);
+            if !locked.is_uptodate() {
+                read(&mut locked)?;
+                locked.mark_uptodate();
+            }
+            let was_dirty = locked.is_dirty();
+            let result = f(Some(&mut locked));
+            if was_dirty != locked.is_dirty() {
+                self.reconcile_dirty_folio(&folio, &locked);
+            }
+            return result;
+        }
+    }
+
     /// Runs `f` with an initialized resident folio, reading it if necessary.
     ///
     /// An absent folio is installed before initialization. The folio mutex
@@ -100,16 +198,25 @@ impl MappingPages {
                 folio.clone()
             } else {
                 drop(state);
-                let folio = Arc::new(Mutex::new(Folio::new_zeroed(index)?));
+                #[cfg(unittest)]
+                crate::pagecache_unittest::observe_allocation(self);
+                let allocated = Folio::new_zeroed(index).map(|folio| Arc::new(Mutex::new(folio)));
                 state = self.state.lock();
                 if state.entries.contains_key(&index) {
-                    // A concurrent resident owns initialization. Release the
-                    // unused allocation outside the index lock and look it up.
+                    // Another allocator published while the index lock was
+                    // released. Even allocation failure must reuse its entry.
                     drop(state);
-                    drop(folio);
+                    drop(allocated);
                     continue;
                 }
-                state.entries.insert(index, folio.clone());
+                let folio = allocated?;
+                if let Err(error) = state.insert_folio(index, folio.clone()) {
+                    // Releasing unused physical storage may enter the
+                    // allocator; keep it outside the cache index mutex.
+                    drop(state);
+                    drop(folio);
+                    return Err(error);
+                }
                 folio
             };
             let Some(mut locked) = folio.try_lock() else {
@@ -142,10 +249,14 @@ impl MappingPages {
     /// A concurrent resident wins. On conflict, returns the incoming folio
     /// unchanged so the caller retains ownership of its data and dirty state.
     /// Dirty state is indexed in the same critical section as publication.
+    #[cfg(unittest)]
     pub fn filemap_add_folio(&self, mut folio: Folio) -> Result<(), Folio> {
         let index = folio.index();
         let mut state = self.state.lock();
         if state.entries.contains_key(&index) {
+            return Err(folio);
+        }
+        if state.admit_folio().is_err() {
             return Err(folio);
         }
         folio.mark_uptodate();

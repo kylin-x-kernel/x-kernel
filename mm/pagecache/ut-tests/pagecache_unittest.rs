@@ -16,6 +16,8 @@ use crate::{Folio, MappingPages, PageIndex};
 
 #[path = "mapping_pages_unittest.rs"]
 mod mapping_pages;
+#[path = "residency_unittest.rs"]
+mod residency;
 #[path = "truncate_unittest.rs"]
 mod truncate;
 #[path = "writeback_unittest.rs"]
@@ -106,5 +108,37 @@ pub(super) fn observe_read_wait(folio: &Arc<Mutex<Folio>>) {
     {
         entered.store(true, Ordering::Release);
         events.notify_all(false);
+    }
+}
+
+// Per-mapping, one-shot gate: only the first allocation pauses. Other test
+// mappings and the competing allocation can progress independently.
+pub(super) struct AllocationGate {
+    claimed: AtomicBool,
+    pub(super) entered: AtomicBool,
+    pub(super) released: AtomicBool,
+    pub(super) events: WaitQueue,
+}
+
+impl AllocationGate {
+    pub(super) fn new() -> Self {
+        Self {
+            claimed: AtomicBool::new(false),
+            entered: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            events: WaitQueue::new(),
+        }
+    }
+}
+
+pub(super) fn observe_allocation(mapping: &MappingPages) {
+    let gate = mapping.allocation_gate.lock().clone();
+    if let Some(gate) = gate
+        && !gate.claimed.swap(true, Ordering::AcqRel)
+    {
+        gate.entered.store(true, Ordering::Release);
+        gate.events.notify_all(false);
+        gate.events
+            .wait_until(|| gate.released.load(Ordering::Acquire));
     }
 }

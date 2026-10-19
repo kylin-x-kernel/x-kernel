@@ -23,7 +23,9 @@ impl MappingPages {
     /// readers can initialize them. Those readers must look up residency again.
     /// The owner must exclude invalidation throughout this call. The callback
     /// must not reenter the mapping or acquire locks needed by truncation.
-    /// Returns the number reserved, or an allocation error if none were prepared.
+    /// Returns the reserved prefix. Allocation or admission failures after a
+    /// nonempty prefix are partial success; an error is returned only when no
+    /// identity was reserved. Demand reads report a later admission failure.
     pub fn readahead_folios(
         &self,
         range: Range<PageIndex>,
@@ -34,9 +36,17 @@ impl MappingPages {
             if batch.is_full() || self.state.lock().entries.contains_key(&index) {
                 break;
             }
+            #[cfg(unittest)]
+            crate::pagecache_unittest::observe_allocation(self);
             let folio = match Folio::new_zeroed(index) {
                 Ok(folio) => folio,
-                Err(error) if batch.is_empty() => return Err(error),
+                Err(error) if batch.is_empty() => {
+                    return if self.state.lock().entries.contains_key(&index) {
+                        Ok(0)
+                    } else {
+                        Err(error)
+                    };
+                }
                 Err(_) => break,
             };
             batch.push(Arc::new(Mutex::new(folio)));
@@ -53,18 +63,22 @@ impl MappingPages {
         }
         let mut state = self.state.lock();
         let mut count = 0;
+        let mut charge_error = None;
         // Every batch folio has a guard in the matching leading slot.
         for (folio, guard) in batch.iter().zip(locked.iter().flatten()) {
             let index = guard.index();
             if state.entries.contains_key(&index) {
                 break;
             }
-            state.entries.insert(index, folio.clone());
+            if let Err(error) = state.insert_folio(index, folio.clone()) {
+                charge_error = Some(error);
+                break;
+            }
             count += 1;
         }
         drop(state);
         if count == 0 {
-            return Ok(0);
+            return charge_error.map_or(Ok(0), Err);
         }
         let consumed = {
             #[expect(

@@ -228,14 +228,13 @@ pub(crate) fn make_queue_signal_info(
 }
 
 /// Queues a real-time signal with additional information to a process.
+///
+/// Linux's ABI is `(pid, signo, siginfo *)`, without a signal-set size.
 pub(crate) fn sys_rt_sigqueueinfo(
     tgid: Pid,
     signo: u32,
     sig: UserConstPtr<k_siginfo>,
-    sigsetsize: usize,
 ) -> KResult<isize> {
-    posix_types::check_sigset_size(sigsetsize)?;
-
     let tgid = translate_caller_pid(tgid)?;
     let sig = make_queue_signal_info(tgid, signo, sig)?;
     kprocess::process_signals::send_to_process(tgid, sig)?;
@@ -243,15 +242,14 @@ pub(crate) fn sys_rt_sigqueueinfo(
 }
 
 /// Queues a real-time signal with additional information to a specific thread.
+///
+/// Linux's ABI is `(tgid, tid, signo, siginfo *)`, without a signal-set size.
 pub(crate) fn sys_rt_tgsigqueueinfo(
     tgid: Pid,
     tid: Pid,
     signo: u32,
     sig: UserConstPtr<k_siginfo>,
-    sigsetsize: usize,
 ) -> KResult<isize> {
-    posix_types::check_sigset_size(sigsetsize)?;
-
     let tgid = translate_caller_pid(tgid)?;
     let sig = make_queue_signal_info(tgid, signo, sig)?;
     kprocess::process_signals::send_to_thread(Some(tgid), tid, sig)?;

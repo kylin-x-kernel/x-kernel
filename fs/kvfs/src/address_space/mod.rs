@@ -7,7 +7,7 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use pagecache::MappingPages;
+use pagecache::{CacheResidency, MappingPages};
 use views::RegisteredView;
 use vmobj::{FileObjectId, MappingViewId, VmObjectId};
 
@@ -43,6 +43,14 @@ pub struct AddressSpace {
 impl AddressSpace {
     /// Creates an address space for `inode`.
     pub fn new(inode: WeakVfsInode, ops: &'static dyn AddressSpaceOperations) -> Arc<Self> {
+        Self::with_residency(inode, ops, None)
+    }
+
+    pub(crate) fn with_residency(
+        inode: WeakVfsInode,
+        ops: &'static dyn AddressSpaceOperations,
+        residency: Option<Arc<dyn CacheResidency>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inode,
             ops,
@@ -51,7 +59,7 @@ impl AddressSpace {
             )),
             invalidate_lock: RwLock::new(()),
             views: Mutex::new(BTreeMap::new()),
-            i_pages: MappingPages::new(),
+            i_pages: MappingPages::with_residency(residency),
         })
     }
 
