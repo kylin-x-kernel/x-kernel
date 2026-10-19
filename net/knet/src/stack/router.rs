@@ -16,7 +16,7 @@ use crate::network::router::ROUTE_PROTOCOL_KERNEL;
 use crate::{
     buf::{PacketBuf, PacketOwner},
     consts::SOCKET_BUFFER_SIZE,
-    device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId},
+    device::{DeviceRegistry, LinkKind, NeighborUpdate, NetDevice, NetDeviceId, RxPoll},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     network::{
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
@@ -49,6 +49,9 @@ pub(crate) struct Router {
 }
 
 pub(crate) struct RxDrain {
+    /// Work items reported by successful `RxPoll::Consumed` polls,
+    /// including handled or dropped frames absent from the batch.
+    /// Failed polls are excluded and reported separately in `error`.
     pub work_done: usize,
     pub has_more: bool,
     /// A failed device poll, distinct from an empty queue. Already collected
@@ -619,8 +622,8 @@ impl Router {
                     dev.poll_rx(ifindex, timestamp)
                 };
                 let packet = match packet {
-                    Ok(Some(packet)) => packet,
-                    Ok(None) => break,
+                    Ok(RxPoll::Consumed(packet)) => packet,
+                    Ok(RxPoll::Empty) => break,
                     Err(error) => {
                         self.next_rx_device = next_device_index(dev_index, device_count);
                         return RxDrain {
@@ -631,7 +634,9 @@ impl Router {
                     }
                 };
                 work_done += 1;
-                packets.push(packet);
+                if let Some(packet) = packet {
+                    packets.push(packet);
+                }
             }
             self.next_rx_device = next_device_index(dev_index, device_count);
         }
@@ -943,12 +948,11 @@ mod tests {
             self.link.link_send_snapshot()
         }
 
-        fn poll_rx(
-            &mut self,
-            _ifindex: i32,
-            _timestamp: MonotonicInstant,
-        ) -> KResult<Option<PacketBuf>> {
-            self.packet.take().map(Some).ok_or(KError::Io)
+        fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> KResult<RxPoll> {
+            self.packet
+                .take()
+                .map(|packet| RxPoll::Consumed(Some(packet)))
+                .ok_or(KError::Io)
         }
 
         fn has_rx_work(&self) -> bool {

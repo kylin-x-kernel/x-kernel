@@ -16,7 +16,7 @@ use crate::{
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, LINK_FLAG_LOOPBACK, LINK_FLAG_LOWER_UP, LINK_FLAG_RUNNING,
         LINK_FLAG_UP, LOOPBACK_MAX_MTU, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice,
-        net_rx,
+        RxPoll, net_rx,
     },
     ip::IpAddress,
 };
@@ -116,23 +116,22 @@ impl NetDevice for LoopbackDevice {
         }
     }
 
-    fn poll_rx(
-        &mut self,
-        ifindex: i32,
-        _timestamp: MonotonicInstant,
-    ) -> KResult<Option<PacketBuf>> {
+    fn poll_rx(&mut self, ifindex: i32, _timestamp: MonotonicInstant) -> KResult<RxPoll> {
         self.rx_ifindex = Some(ifindex);
         if !self.is_link_up() {
-            return Ok(None);
+            return Ok(RxPoll::Empty);
         }
         // Task-context fallback when NetRx did not run (unit tests, or the
         // vector is owned by another action). Stamped UDP is consumed first.
-        // A true result is a bounded-progress hint, not a missing packet:
-        // `has_rx_work` is checked again by Router after this poll, and the
-        // next round continues draining remaining work. Retrying here would make
-        // device polling unbounded while producers keep enqueueing packets.
+        // This fallback has its own entry-time round bound and is not charged
+        // to Router's device RX budget. Empty below can still follow successful
+        // UDP delivery. Do not retry until empty: concurrent producers could
+        // otherwise make this poll unbounded.
         net_rx::drain_pending();
-        Ok(net_rx::pop_deferred(ifindex))
+        Ok(match net_rx::pop_deferred(ifindex) {
+            Some(packet) => RxPoll::Consumed(Some(packet)),
+            None => RxPoll::Empty,
+        })
     }
 
     fn has_rx_work(&self) -> bool {

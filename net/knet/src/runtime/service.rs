@@ -57,6 +57,7 @@ struct SmoltcpIngressProgress {
 
 #[derive(Default)]
 struct DeviceRxProgress {
+    /// Consumed frames, including handled or dropped frames without an IP packet.
     packets: usize,
     has_reached_time_limit: bool,
     has_lock_contention: bool,

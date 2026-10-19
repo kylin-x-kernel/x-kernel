@@ -188,12 +188,12 @@ mod tests {
             .recv_datagram(RecvMode::Consume)
             .expect("NetRx should deliver the loopback datagram");
         assert_eq!(datagram.payload.as_slice(), b"x");
-        assert!(
+        assert!(matches!(
             device
                 .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
-                .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+            crate::device::RxPoll::Empty
+        ));
 
         clear_registry();
     }
@@ -221,10 +221,12 @@ mod tests {
             ktime_types::MonotonicInstant::ORIGIN,
         ));
 
-        let leftover = device
+        let crate::device::RxPoll::Consumed(Some(leftover)) = device
             .poll_rx(1, ktime_types::MonotonicInstant::ORIGIN)
             .unwrap()
-            .expect("unmatched UDP should remain for the task poller");
+        else {
+            panic!("unmatched UDP should remain for the task poller");
+        };
         assert!(leftover.udp_metadata().is_none());
 
         clear_registry();

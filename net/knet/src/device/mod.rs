@@ -126,6 +126,17 @@ pub(crate) struct NeighborUpdate {
     pub(crate) state: NeighborState,
 }
 
+/// Outcome charged to the Router's device RX budget.
+#[derive(Debug)]
+pub(crate) enum RxPoll {
+    /// No work item was consumed by the budgeted receive step.
+    /// Loopback may still have progressed its independent UDP fallback.
+    Empty,
+    /// One frame or deferred packet was consumed by the budgeted receive step.
+    /// Ethernet ARP handling and dropped frames yield `None`.
+    Consumed(Option<PacketBuf>),
+}
+
 /// Trait implemented by network device backends.
 pub(crate) trait NetDevice: Send + Sync {
     fn name(&self) -> &str;
@@ -150,12 +161,22 @@ pub(crate) trait NetDevice: Send + Sync {
         None
     }
 
-    /// Polls one received packet from the device.
+    /// Polls one budgeted device receive work item.
     ///
-    /// `Ok(None)` means no packet is available. Receive or buffer-recycling
-    /// failures are returned separately so the caller can end and report a
-    /// failed poll instead of treating a device error as an empty queue.
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<Option<PacketBuf>>;
+    /// Ethernet consumes at most one driver frame per call, returning after
+    /// handling or dropping it instead of searching for a deliverable packet.
+    /// [`RxPoll::Consumed`] charges one unit of RX budget even when the frame
+    /// produces no IP packet.
+    ///
+    /// Loopback first runs a separately bounded stamped-UDP fallback, whose
+    /// round limit is derived from the queue length at entry. That work is
+    /// outside the Router's device RX budget. It then polls at most one deferred
+    /// packet, returning [`RxPoll::Consumed`] only when it removes one.
+    /// [`RxPoll::Empty`] can therefore follow successful UDP fallback delivery.
+    ///
+    /// Receive or recycling failures end the caller's RX round through a
+    /// separate error result.
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<RxPoll>;
 
     /// Returns whether the device has RX work available without waiting.
     fn has_rx_work(&self) -> bool;

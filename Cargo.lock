@@ -2644,6 +2644,7 @@ dependencies = [
  "lazyinit",
  "linux-raw-sys",
  "log",
+ "net",
  "ringbuf",
  "smoltcp",
  "tipc",

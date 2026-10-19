@@ -30,7 +30,7 @@ use crate::{
     device::{
         IF_OPER_DOWN, IF_OPER_UNKNOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOOPBACK,
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
-        LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice, NetDeviceId,
+        LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice, NetDeviceId, RxPoll,
     },
     network::router::Rule,
     network::interface_address::Ipv4AddrEntry,
@@ -103,8 +103,8 @@ impl NetDevice for TestDevice {
         self.device_id
     }
 
-    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> kerrno::KResult<Option<PacketBuf>> {
-        Ok(None)
+    fn poll_rx(&mut self, _ifindex: i32, _timestamp: MonotonicInstant) -> kerrno::KResult<RxPoll> {
+        Ok(RxPoll::Empty)
     }
 
     fn has_rx_work(&self) -> bool {

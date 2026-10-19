@@ -4,8 +4,16 @@
 
 `knet` provides a kernel network stack for x-kernel, which combines driver-level network devices, protocol stack, socket objects, poll and wakeup mechanisms, Unix domain sockets, netlink, and optional vsock support into a unified `SocketOps` interface. It is mainly responsible for protocol state, routing, RX/TX progress, and socket semantics. It uses crate-local IPv4, UDP, and ICMPv4 data paths to handle UDP send and receive, fragmentation, and error reporting. smoltcp supplies TCP, raw IP, IPv6, and staged interface polling.
 
-`NetDevice::poll_rx` returns `KResult<Option<PacketBuf>>`: an empty queue is
-`Ok(None)`, while receive and recycling failures retain their mapped `KError`.
+`NetDevice::poll_rx` returns `KResult<RxPoll>`. Ethernet consumes at most one
+driver frame per call. `RxPoll::Empty` means the budgeted receive step consumed
+no frame or deferred packet;
+`RxPoll::Consumed` charges one unit of device RX budget and carries an optional
+IP packet. ARP, malformed frames, and filtered or unsupported traffic consume
+budget even when no packet reaches the IP stack. Receive and recycling failures
+retain their mapped `KError`.
+Loopback runs its stamped-UDP fallback with a separate entry-time round bound
+before polling one deferred packet. The fallback is outside the Router's device
+RX budget, so `RxPoll::Empty` can follow successful direct UDP delivery.
 `RxDrain` reports the failing interface and error alongside any earlier packets
 in the batch, and advances the device cursor. The service logs that error and
 ends the RX round after handling the partial batch. A packet decoded during a
@@ -20,11 +28,14 @@ The POSIX network layer in `posix/net` handles syscall arguments, user-memory ac
 
 ## Scope
 
-The source layout below includes protocol implementations and colocated tests.
+The layout below shows the implementation and the kernel unit-test directory.
+Tests in `ut-tests/` are loaded from their source modules with
+`unittest::path_mod_test!` under `cfg(unittest)`.
 
 ```text
 net/knet/
 ├── Cargo.toml
+├── ut-tests/
 └── src/
     ├── device/
     │   ├── ethernet.rs
@@ -696,7 +707,7 @@ Ethernet RX notifications use `NetRx` to wake RX poll sources and schedule `knet
 
 Each `Service::poll_budgeted` round first attempts pending IPv4 reassembly expiration and flushes retained ingress/control batches. It then dispatches queued TX, drains device RX, advances smoltcp, and uses the remaining TX and device-RX budgets for a second pass. Device RX and smoltcp ingress each have a separate allowance of `budget.rx_packets`.
 
-Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing Router. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
+Device draining rotates its starting position across devices, consuming each device until it is empty or the batch budget is exhausted. Its budget and progress counters include every successfully consumed Ethernet frame, including ARP and drops, so a stream without deliverable IP packets cannot bypass the batch bound or the service's time checks between batches. Only returned IP packets enter the ingress batch. Loopback retains its separately bounded stamped-UDP fallback before polling one deferred packet. IPv4 validation, destination filtering, reassembly, and UDP delivery run after releasing Router. Unmatched unicast UDP can generate ICMP port-unreachable responses; unsupported unicast IPv4 protocols can generate protocol-unreachable responses. ICMP errors are inspected for UDP before eligible packets enter the smoltcp batch. IPv6 enters that batch directly.
 
 The following pseudocode summarizes the round. Failed shared-state `try_lock` acquisitions retain pending batches and return `has_more = true`. Contention during reassembly expiration only defers that timer work, allowing the round to continue. Reusable batch mutexes and nested listener operations still use blocking locks.
 

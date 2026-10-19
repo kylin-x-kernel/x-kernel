@@ -37,6 +37,7 @@ pub(crate) enum PollReason {
 /// The budget for a single network polling round.
 #[derive(Clone, Copy)]
 pub(crate) struct PollBudget {
+    /// Device frames, including handled/dropped frames, and a separate stack allowance.
     pub rx_packets: usize,
     pub tx_packets: usize,
     pub timer_events: usize,
@@ -45,6 +46,7 @@ pub(crate) struct PollBudget {
 /// The progress made in a single network polling round.
 #[derive(Default)]
 pub(crate) struct PollProgress {
+    /// Device frames consumed, including frames not delivered to the IP stack.
     pub rx_packets: usize,
     pub tx_packets: usize,
     pub timer_events: usize,

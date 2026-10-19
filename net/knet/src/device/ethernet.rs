@@ -19,6 +19,8 @@ use kspin::{SpinNoIrq, static_lock};
 use ktime_types::{MonotonicInstant, TimeSpan};
 #[cfg(not(unittest))]
 use lazyinit::LazyInit;
+#[cfg(unittest)]
+use net as driver_net;
 
 use crate::{
     buf::{PacketBuf, PacketOwner},
@@ -26,7 +28,7 @@ use crate::{
     device::{
         IF_OPER_DOWN, IF_OPER_UP, LINK_FLAG_BROADCAST, LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST,
         LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind, LinkSendSnapshot, LinkSnapshot, NeighborState,
-        NeighborUpdate, NetDevice as NetDeviceOps,
+        NeighborUpdate, NetDevice as NetDeviceOps, RxPoll,
     },
     ip::{IpAddress, Ipv4Cidr},
     packet,
@@ -639,23 +641,19 @@ impl NetDeviceOps for EthernetDevice {
         Some(self.inner.id())
     }
 
-    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<Option<PacketBuf>> {
+    fn poll_rx(&mut self, ifindex: i32, timestamp: MonotonicInstant) -> KResult<RxPoll> {
         if !self.is_link_up() {
-            return Ok(None);
+            return Ok(RxPoll::Empty);
         }
-        loop {
-            let rx_buf: NetBufHandle = match self.inner.recv() {
-                Ok(buf) => buf,
-                Err(DriverError::WouldBlock) => return Ok(None),
-                Err(err) => return Err(map_dev_err(err)),
-            };
-            trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
-            let packet = self.handle_rx_frame(ifindex, rx_buf.data(), timestamp);
-            self.inner.recycle_rx(rx_buf).map_err(map_dev_err)?;
-            if packet.is_some() {
-                return Ok(packet);
-            }
-        }
+        let rx_buf: NetBufHandle = match self.inner.recv() {
+            Ok(buf) => buf,
+            Err(DriverError::WouldBlock) => return Ok(RxPoll::Empty),
+            Err(err) => return Err(map_dev_err(err)),
+        };
+        trace!("RECV {} bytes: {:02X?}", rx_buf.len(), rx_buf.data());
+        let packet = self.handle_rx_frame(ifindex, rx_buf.data(), timestamp);
+        self.inner.recycle_rx(rx_buf).map_err(map_dev_err)?;
+        Ok(RxPoll::Consumed(packet))
     }
 
     fn has_rx_work(&self) -> bool {
@@ -838,6 +836,8 @@ fn map_dev_err(err: DriverError) -> KError {
         _ => KError::BadState,
     }
 }
+
+unittest::path_mod_test!(rx_budget_tests, "../../ut-tests/ethernet_rx_budget.rs");
 
 #[unittest::mod_test]
 mod tests {
