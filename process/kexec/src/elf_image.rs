@@ -530,7 +530,4 @@ fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
     left.start < right.end && right.start < left.end
 }
 
-#[unittest::mod_test]
-pub(crate) mod tests {
-    include!("elf_image/tests.rs");
-}
+unittest::path_mod_test!(pub(crate) mod tests, "../ut-tests/elf_image.rs");

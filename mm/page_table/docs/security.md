@@ -2,6 +2,10 @@
 
 ## Trust Model
 
+The analysis includes production sources in `src/` and guest fixtures in
+`ut-tests/`. File-backed test modules retain their original module paths and
+`cfg(unittest)` boundary; extraction does not widen production unsafe access.
+
 ```text
 Callers (memspace, kexec, ...)
    │
@@ -252,7 +256,7 @@ external validation obligations, not new runtime checks in `page_table`.
 
 ### AArch64 Teardown Regression Coverage
 
-The `table64.rs::tests::aarch64_drop` tests run the actual AArch64 destructor
+The `table64::tests::aarch64_drop` tests in `ut-tests/table64.rs` run the actual AArch64 destructor
 with a recording `PagingMetaData` implementation and frame-release handler:
 
 - `user_drop_invalidates_latest_asid_before_freeing_frames` maps a page, completes
@@ -266,7 +270,7 @@ with a recording `PagingMetaData` implementation and frame-release handler:
 
 ### Fresh-Map Invalidation Policy Coverage
 
-The `table64.rs::tests` fresh-map cases run a recording `PagingMetaData` whose
+The `table64::tests` fresh-map cases in `ut-tests/table64.rs` run a recording `PagingMetaData` whose
 `INVALID_TO_VALID_NEEDS_TLBI` is `false`, modeling the batching contract used by
 AArch64's current fence-only policy. The recording metadata substitutes for the
 real architecture implementation:

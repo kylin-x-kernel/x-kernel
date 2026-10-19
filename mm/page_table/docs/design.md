@@ -35,8 +35,17 @@ page_table/
 │       ├── aarch64.rs
 │       ├── riscv.rs
 │       └── loongarch64.rs
+├── ut-tests/
+│   ├── defs.rs
+│   └── table64.rs
 └── Cargo.toml
 ```
+
+Guest tests are mounted from their original source modules with
+`unittest::path_mod_test!` under `cfg(unittest)`: `ut-tests/defs.rs` retains
+`defs::tests_page_table_defs`, and `ut-tests/table64.rs` retains `table64::tests`,
+including its nested `aarch64_drop` module. Architecture and `smp` gates and
+serial execution flags remain attached to the same tests and helpers.
 
 ## Boundaries and Delegated Responsibilities
 

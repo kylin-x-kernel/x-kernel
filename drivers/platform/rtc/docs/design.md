@@ -29,6 +29,11 @@ independent of timer queues and system timekeeping policy.
 - `src/ls7a.rs` samples the Loongson LS7A RTC TOY counters. The year and
   date/time halves are read non-atomically, so it re-samples until the year
   is stable to avoid pairing an old year with a new-year date.
+- `ut-tests/lib.rs` checks timestamp range validation; `ut-tests/ls7a.rs`
+  checks scripted LS7A samples. Each is mounted as `tests` from its original
+  source module with `unittest::path_mod_test!` under `cfg(unittest)`.
+  The LS7A cases also require the existing `ls7a` feature. These are guest
+  tests run through the configured kernel unittest runner.
 
 ```text
 firmware/platform description -> RtcConfig -> mapping -> device sample

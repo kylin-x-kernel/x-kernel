@@ -481,8 +481,22 @@ fn rejects_file_backed_segment_beyond_eof() {
 /// Builds a shared-page BSS fixture with program headers in the retained prefix.
 pub(crate) fn shared_page_bss_fixture() -> Vec<u8> {
     let segments = [
-        TestSegment { flags: 5, offset: 0, virtual_address: 0x400000, file_size: 0x1800, memory_size: 0x1800, alignment: 0x1000 },
-        TestSegment { flags: 6, offset: 0x1800, virtual_address: 0x401800, file_size: 0, memory_size: 0x800, alignment: 0x1000 },
+        TestSegment {
+            flags: 5,
+            offset: 0,
+            virtual_address: 0x400000,
+            file_size: 0x1800,
+            memory_size: 0x1800,
+            alignment: 0x1000,
+        },
+        TestSegment {
+            flags: 6,
+            offset: 0x1800,
+            virtual_address: 0x401800,
+            file_size: 0,
+            memory_size: 0x800,
+            alignment: 0x1000,
+        },
     ];
     let mut data = test_elf(2, current_machine(), 0x400300, &segments);
     let headers = data[64..176].to_vec();

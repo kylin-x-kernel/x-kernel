@@ -25,6 +25,12 @@ inode、namespace、open-file 和 directory-iteration 的 KVFS 适配；`net/9p`
 
 ## 架构
 
+内核单元测试位于 `ut-tests/file.rs`、`ut-tests/inode.rs` 和 `ut-tests/util.rs`。
+各文件通过 `unittest::path_mod_test!` 挂载到原源文件的私有 `tests` 模块中，
+仅在 `cfg(unittest)` 下编译。当前 AArch64 验证配置需同时启用 `KFEAT_FS_9P=y`
+和 `KFEAT_DRIVER_VIRTIO_9P=y`，以纳入 `v9fs` 及其所需的 VirtIO 9P 设备支持。
+这些测试与 `net/9p` 中协议客户端的测试相互独立。
+
 ```text
 SuperBlock private_data
         │

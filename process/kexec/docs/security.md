@@ -4,7 +4,7 @@
 
 This analysis covers all production code in `src/lib.rs`, `src/elf_image.rs`,
 `src/loader.rs`, and `src/lru_cache.rs`. Test-only modules, including
-`src/elf_image/tests.rs`, are excluded because they are not linked into a normal
+`ut-tests/elf_image.rs`, are excluded because they are not linked into a normal
 kernel image. Assets are the target address space, executable identity,
 file-derived mapping permissions/offsets, and owned argument/environment data.
 The loader trusts MM and VFS ownership contracts but not executable bytes,

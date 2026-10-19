@@ -5,8 +5,11 @@
 This analysis covers the entire crate: `src/lib.rs` (typed configs,
 device-tree discovery, mapping, dispatch, timestamp validation) plus
 the backend modules `src/pl031.rs`, `src/goldfish.rs`, `src/cmos.rs`,
-and `src/ls7a.rs`. No modules are excluded; backend register access is
-audited as part of the boundary descriptions below.
+and `src/ls7a.rs`, plus the guest fixtures in `ut-tests/lib.rs` and
+`ut-tests/ls7a.rs`. No modules are excluded; backend register access is
+audited as part of the boundary descriptions below. The fixtures check
+timestamp bounds and scripted LS7A samples without accessing real MMIO;
+the LS7A cases retain the backend's `ls7a` feature gate.
 
 Device-tree descriptions, MMIO register contents, and platform RTC values are
 external inputs. Platform initialization chooses which discovered or static

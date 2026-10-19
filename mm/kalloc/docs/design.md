@@ -56,6 +56,11 @@ mm/kalloc/
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
 │   └── tracking.rs     # 可选 allocation tracking
+├── ut-tests/
+│   ├── lib.rs
+│   ├── pcp.rs
+│   ├── slab_cache.rs
+│   └── tracking.rs
 └── docs/
     ├── design.md
     └── security.md
@@ -63,6 +68,11 @@ mm/kalloc/
 
 底层 buddy、slab、TLSF 等具体算法属于 `mm/alloc-engine`，本文只描述 `kalloc` 对
 它们的组合、同步和调用约束。
+
+内核单元测试通过 `unittest::path_mod_test!` 在对应的 `src/` 模块中挂载，
+仅在 `cfg(unittest)` 下编译。公开模块 `tests_kalloc`、`tests_tracking` 的名称和
+可见性保持不变；PCP 和 slab 测试保留各自私有的 `tests` 模块。
+`slab_cache` 测试需要启用 `slab` feature，`tracking` 测试需要启用 `tracking` feature。
 
 ## 配置
 

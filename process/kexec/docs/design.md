@@ -42,6 +42,11 @@ and `ElfCacheEntry`.
 `src/lru_cache.rs` is a private capacity-bounded cache using vector storage and
 indexed MRU/LRU links; its production capacity is 32.
 
+Guest unit tests live in `ut-tests/{elf_image,loader,lru_cache}.rs` and are
+mounted by `unittest::path_mod_test!` under their original source modules.
+The ELF fixtures remain crate-visible to the loader tests; normal builds
+exclude these modules through `cfg(unittest)`.
+
 The public interaction directions are:
 
 - `posix/process` prepares an owned image with `prepare_user_app_request`, then

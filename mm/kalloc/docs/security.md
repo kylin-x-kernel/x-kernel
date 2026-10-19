@@ -2,6 +2,11 @@
 
 ## Test Probe Boundary
 
+The audit scope includes guest fixtures in `ut-tests/lib.rs`, `ut-tests/pcp.rs`,
+`ut-tests/slab_cache.rs`, and `ut-tests/tracking.rs`, mounted in their original
+modules under `cfg(unittest)`. The slab and tracking feature gates are unchanged;
+test extraction does not change allocation ownership or unsafe invariants.
+
 The unittest-only allocation probe borrows a `NoPreemptIrqSave` guard and reads
 an existing per-CPU atomic counter through a published CPU area. It does not
 change allocator metadata or expose mutable references. The guard prevents task

@@ -120,28 +120,4 @@ pub fn allocations_in(range: Range<u64>, visitor: impl FnMut(&AllocationInfo)) {
     });
 }
 
-#[unittest::mod_test]
-pub mod tests_tracking {
-    use unittest::def_test;
-
-    use super::{allocations_in, disable_tracking, enable_tracking, tracking_enabled};
-
-    #[def_test]
-    fn test_tracking_toggle() {
-        disable_tracking();
-        assert!(!tracking_enabled());
-        enable_tracking();
-        assert!(tracking_enabled());
-        disable_tracking();
-        assert!(!tracking_enabled());
-    }
-
-    #[def_test]
-    fn test_allocations_in_empty() {
-        enable_tracking();
-        let mut count = 0usize;
-        allocations_in(0..0, |_| count += 1);
-        assert_eq!(count, 0);
-        disable_tracking();
-    }
-}
+unittest::path_mod_test!(pub mod tests_tracking, "../ut-tests/tracking.rs");

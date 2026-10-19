@@ -2,6 +2,10 @@
 
 ## 信任模型
 
+The analysis covers `src/` and the guest tests in `ut-tests/`. The extracted
+metadata transport fixtures remain inside their original test modules under
+`cfg(unittest)` and do not add a production transport or trust boundary.
+
 服务端 metadata、qid、目录项、目录 offset、symlink target 和文件内容均为外部输入。v9fs
 信任 KVFS 已完成 pathname、permission、mount namespace 和 user-memory boundary 检查；
 PDU length、tag、type 和字段边界由 `p9` client 验证。
