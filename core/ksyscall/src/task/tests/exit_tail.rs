@@ -70,15 +70,29 @@ pub(in crate::task) fn bounded_wait(condition: impl FnMut() -> bool) {
     bounded_wait_labeled("exit-tail", condition);
 }
 
+// Wall-clock deadlines misfire under virtualization: the host clock keeps
+// advancing while a starved vCPU makes no progress, so a correct kernel can
+// miss a 5 s deadline under host load (recurring riscv64 CI flakes). Bound
+// the waits by guest-side progress instead: every full 1 ms timeout is one
+// timer-and-scheduler round in which the peer could have run. A healthy
+// kernel settles each wait within a few hundred rounds, a hung kernel burns
+// the budget and panics with the label, and a host-starved vCPU accrues no
+// rounds at all. A fully hung guest still fails via the outer CI timeout.
+const MAX_WAIT_ROUNDS: usize = 10_000;
+
 fn bounded_wait_labeled(label: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = khal::time::monotonic_time() + TimeSpan::from_secs(5);
     let queue = WaitQueue::new();
+    let mut remaining = MAX_WAIT_ROUNDS;
     while !condition() {
-        assert!(
-            khal::time::monotonic_time() < deadline,
-            "exit-tail timeout: {label}"
-        );
-        queue.wait_timeout(TimeSpan::from_millis(1));
+        // Only full timeouts count as rounds; an early return means the task
+        // was notified, and the loop rechecks the condition before waiting.
+        if queue.wait_timeout(TimeSpan::from_millis(1)) {
+            remaining -= 1;
+            assert!(
+                remaining > 0,
+                "exit-tail timeout: {label} still unsatisfied after {MAX_WAIT_ROUNDS} timer rounds"
+            );
+        }
     }
 }
 
