@@ -16,20 +16,7 @@ mod pch_pic;
 
 // External vectors target CPU0; an unpinned SMP test may run elsewhere.
 #[cfg(not(feature = "smp"))]
-#[unittest::mod_test]
-mod tests {
-    use unittest::{assert, def_test};
-
-    #[def_test]
-    fn external_interrupt_parent_is_enabled_after_boot() {
-        // Read boot's persistent gate without changing live interrupt state.
-        assert!(
-            super::ecfg::read()
-                .lie()
-                .contains(super::LineBasedInterrupt::HWI1)
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/irq.rs");
 
 pub(crate) fn init() {
     eiointc::init();

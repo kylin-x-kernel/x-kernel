@@ -23,7 +23,7 @@ extern crate kworkqueue_ng;
 mod image_metadata;
 mod runtime;
 #[cfg(feature = "unittest")]
-mod unittest_simple;
+unittest::path_mod_test!(unittest_simple, "../ut-tests/simple.rs");
 
 #[kiface::provide]
 impl kruntime::SystemInitEntry {

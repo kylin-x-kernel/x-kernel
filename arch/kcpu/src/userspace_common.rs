@@ -81,26 +81,4 @@ pub(crate) fn init_exception_table() {
     ex_table.sort_unstable();
 }
 
-#[unittest::mod_test]
-pub(crate) mod tests_userspace_common {
-    use unittest::def_test;
-
-    use super::{ExceptionKind, ReturnReason};
-
-    #[def_test]
-    fn test_exception_kind_equality() {
-        assert_ne!(ExceptionKind::Breakpoint, ExceptionKind::Misaligned);
-    }
-
-    #[def_test]
-    fn test_exception_kind_variants_distinct() {
-        assert_ne!(ExceptionKind::IllegalInstruction, ExceptionKind::Other);
-        assert_ne!(ExceptionKind::Misaligned, ExceptionKind::Breakpoint);
-    }
-
-    #[def_test]
-    fn test_return_reason_match() {
-        let reason = ReturnReason::Syscall;
-        assert!(matches!(reason, ReturnReason::Syscall));
-    }
-}
+unittest::path_mod_test!(pub(crate) mod tests_userspace_common, "../ut-tests/userspace_common.rs");

@@ -4,7 +4,7 @@
 
 //! Simple unittest framework usage example.
 //!
-//! This module demonstrates how to use the `#[unittest]` macro to define
+//! This module demonstrates how to use the `#[def_test]` macro to define
 //! unit tests that are automatically collected and can be run with `unittest::test_run()`.
 
 // Ensure that all crates are correctly dependency-injected in unittests
@@ -13,7 +13,7 @@ extern crate ksyscall;
 use unittest::{TestResult, assert, assert_eq, assert_ne, def_test};
 
 // ============================================================================
-// Basic test examples using #[unittest] macro
+// Basic test examples using #[def_test] macro
 // ============================================================================
 
 /// Simple addition test

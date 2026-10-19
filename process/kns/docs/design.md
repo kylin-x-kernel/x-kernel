@@ -2,6 +2,8 @@
 
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+The namespace-fd cases in `ut-tests/nsfd.rs` retain the private
+`nsfd::tests_nsfd` module and the serial anonymous-file round-trip case.
 
 ## Purpose and background
 

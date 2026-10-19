@@ -95,5 +95,4 @@ impl core::fmt::Debug for AddressSpace {
     }
 }
 
-#[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/address_space/mod.rs");

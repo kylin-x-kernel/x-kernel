@@ -69,11 +69,7 @@ impl AddressSpace {
 }
 
 fn folio_from_bytes(index: u64, data: &[u8]) -> pagecache::Folio {
-    #[expect(
-        clippy::unwrap_used,
-        reason = "CG-021-no-panic-on-reachable-failure: test scenario: fixture allocation failure \
-                  aborts the test setup"
-    )]
+    // Fixture allocation failure aborts test setup.
     let mut folio = pagecache::Folio::new_zeroed(index).unwrap();
     folio.data()[..data.len()].copy_from_slice(data);
     folio

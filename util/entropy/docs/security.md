@@ -2,6 +2,14 @@
 
 ## Trust model and external boundaries
 
+The audit scope includes production code under `src/` and guest fixtures under
+`ut-tests/`. Test modules remain private children of their original parents,
+compiled only with `cfg(unittest)` and the existing source/architecture gates.
+The layout change adds no production entry point or hardware access path.
+Real-device fixtures retain serial execution and borrow boot-owned RNG handles;
+the controlled collector fixture retains its serial device-registration and
+cleanup sequence.
+
 Hardware, firmware and VMM-produced bytes enter through source adapters. This
 crate does not access user pointers, MMIO or DMA directly. VirtIO bytes depend
 on host trust expressed by enabling `entropy_virtio_rng`; the Hwrng class itself

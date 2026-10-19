@@ -41,6 +41,27 @@ Linux 对应关系：
 - `src/backend/*`
 - `src/iomap.rs`
 
+### 内核单元测试布局
+
+测试源码位于 crate 根目录的 `ut-tests/`，通过 `unittest::path_mod_test!`
+挂载到原源模块中，仅在 `cfg(unittest)` 下编译。模块名称、私有可见性和
+测试执行方式保持不变，`super` 仍指向原生产模块。
+
+| 测试文件 | 原模块路径 | 用例数 |
+| --- | --- | --- |
+| `ut-tests/lib.rs` | `tests_memspace` | 3 |
+| `ut-tests/aspace.rs` | `aspace::tests` | 16 |
+| `ut-tests/vma.rs` | `vma::tests` | 17 |
+| `ut-tests/fault.rs` | `fault::tests` | 2 |
+| `ut-tests/cpu_residency.rs` | `cpu_residency::tests_cpu_residency` | 3 |
+| `ut-tests/backend_private.rs` | `backend::private::tests` | 6 |
+| `ut-tests/backend_shared.rs` | `backend::shared::tests` | 1 |
+| `ut-tests/aarch64_asid.rs` | `aarch64_asid::tests` | 6 |
+
+共 8 个测试模块、54 个用例；`aarch64_asid` 保留父模块的 AArch64 架构门控，
+其他架构选择其余 48 个用例。测试没有额外的 feature 门控或 serial/user 标记。
+使用已配置内核的 guest unittest 流程验证，不通过 host Cargo 测试替代。
+
 ## 架构
 
 ```text

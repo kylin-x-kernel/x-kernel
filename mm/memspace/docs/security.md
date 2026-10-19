@@ -1,6 +1,11 @@
 # memspace — 安全与可靠性分析
 ## 信任模型
 
+分析范围包含 `src/` 的生产实现和 `ut-tests/` 的内核测试夹具。
+测试文件通过 `unittest::path_mod_test!` 挂载在原私有模块中，仅在
+`cfg(unittest)` 下编译；ASID 测试仍受父模块的 AArch64 架构门控。
+测试迁移不改变生产可见性、unsafe 前置条件或地址空间资源的生命周期。
+
 `memspace` 信任：
 
 - syscall、loader、kernel VM 调用方已完成输入来源校验；

@@ -154,9 +154,9 @@ implementation; inclusion does not by itself make the named API unsafe to call.
 | `src/control.rs`: `TimerControl::new`, `rearm` | Construction ties node, lock and lifetime to the running delivery; external ownership also covers any successor. Validated rearm stays on that owner, whose migration is blocked by running. |
 | `ut-tests/test_support.rs`: `with_armed_timer` | Internal stack node/handler survive exercise and synchronous drain. Driver preserves CPU/context/progress, requests hardware refresh when needed, and forbids unwinding from exercise/callback; no node escapes. |
 
-Inline test unsafe calls exercise the same node, tree and dispatch boundaries.
+Guest test unsafe calls exercise the same node, tree and dispatch boundaries.
 Their local owners must outlive every pending/running access and drain before
-assertions can end the test. SMP scenarios in `src/set.rs::tests` use local Arcs,
+assertions can end the test. SMP scenarios in `ut-tests/set_unittest.rs` use local Arcs,
 Release/Acquire handshakes and joined workers, not a global storage provider.
 Only the dispatch worker completes callback cleanup and clears running; a cancel
 observer must not do that work on its behalf.
@@ -223,8 +223,10 @@ metadata rather than production callback payloads.
 
 ## Validation and Known Limits
 
-- Inline tests in `deadline.rs`, `index.rs`, `cpu.rs`, `dispatch.rs`, `timer.rs` and
-  `set.rs` cover range checks, cache identity, state transitions and cleanup.
+- Guest tests in `ut-tests/{deadline,index,cpu,dispatch,timer,set}_unittest.rs`
+  cover range checks, cache identity, state transitions and cleanup. Their
+  `path_mod_test!` mounts preserve parent access and `cfg(unittest)`; extraction
+  does not change storage lifetimes, cleanup, or the host test entry point.
   `ktask` drives the two pinned worker scenarios and verifies CPU placement/join.
 - `benches/host/owned_checks.rs` counts actual owning-API operations after preparation
   and measures final release separately. The allocation probe includes a positive

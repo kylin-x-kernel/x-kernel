@@ -48,7 +48,5 @@ pub(super) unsafe fn dispatch_round(
     any_due
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/dispatch_unittest.rs");
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/dispatch_unittest.rs");

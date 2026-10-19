@@ -9,6 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# cfg(unittest) event fixtures use ktime_types::{MonotonicInstant, SystemTime,
+# TimeSpan} in ut-tests/event.rs, which cargo-shear ignores by workspace convention.
+ignored = ["ktime_types"]
+
 [features]
 input = ["kclass/input", "dep:inputdev"]
 serial = ["kclass/char", "dep:console_driver"]

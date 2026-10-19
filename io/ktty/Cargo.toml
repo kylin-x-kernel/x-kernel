@@ -9,6 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# Guest fixtures in ut-tests/tty_ntty.rs use kdevice::DeviceObject and DeviceId.
+# Workspace cargo-shear excludes ut-tests; cfg(unittest) requires a normal dependency.
+ignored = ["kdevice"]
+
 [dependencies]
 intrusive-collections.workspace = true
 kcred.workspace = true

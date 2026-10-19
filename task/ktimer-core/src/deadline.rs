@@ -36,7 +36,5 @@ pub struct Expiration {
     pub deadline_ns: u64,
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/deadline_unittest.rs");
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/deadline_unittest.rs");

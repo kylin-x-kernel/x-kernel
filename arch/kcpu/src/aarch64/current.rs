@@ -53,6 +53,7 @@ pub unsafe fn set_current_task_ptr(ptr: *const ()) {
 }
 
 #[cfg(unittest)]
-mod current_unittest {
-    include!("../../ut-tests/aarch64_current_unittest.rs");
-}
+unittest::path_mod_test!(
+    current_unittest,
+    "../../ut-tests/aarch64_current_unittest.rs"
+);

@@ -76,6 +76,40 @@ domain snapshot 发布，数据面只消费稳定的 `PendingIrq`/`IrqRef` claim
 reverse-map snapshot；trap adapter、irqchip backend、devres provider 各自只保留
 自己的适配责任。
 
+## 测试布局
+
+guest 测试和两个公共 fixture 模块位于 crate 根部 `ut-tests/`，通过
+`unittest::path_mod_test!` 在原父模块挂载。模块名、可见性和注册路径不变；
+`context::test_support`、`softirq::test_support` 的外部测试调用路径也不变。
+
+| 文件（相对 `ut-tests/`） | 用例数 | 附加门控 |
+| --- | --- | --- |
+| `backend_msi.rs` | 1 | 无 |
+| `backend_msi_unittest_tests.rs` | 1 | 非 x86_64 |
+| `bottom_half_context.rs` | 10 | 无，其中 9 例为 serial |
+| `bottom_half_context_test_support.rs` | 0 | fixture |
+| `bottom_half_deferred.rs` | 6 | 无，均为 serial |
+| `bottom_half_softirq.rs` | 17 | 无，均为 serial |
+| `bottom_half_softirq_test_support.rs` | 0 | fixture |
+| `runtime_action.rs` | 6 | 无 |
+| `runtime_manager.rs` | 49 | 无，其中 43 例为 serial |
+| `rcu_irq_entry.rs` | 2 | 无，其中 1 例为 serial |
+| `rcu_context.rs` | 1 | 无 |
+| `unhandled_unittest.rs` | 4 | 无 |
+
+共 12 个 guest 模块（含 2 个零用例 fixture）、97 例；x86_64 为 96 例。
+76 例保留 serial，无 user 用例。所有 guest 模块均要求 `cfg(unittest)`。
+`context::test_support::with_nmi_context` 保留主线的安全契约；新增 NMI 分类
+用例在持有普通上下文锁时验证查询绕过该锁。`tests_rcu_entry` 的独立挂载保留
+专用 NMI 和嵌套 IRQ/NMI 的 RCU watching 平衡检查。
+
+未处理 IRQ 计数的四例同时保留 host 覆盖：`tests/host/unhandled.rs` 使用
+`#[test]`，`ut-tests/unhandled_unittest.rs` 使用 `#[unittest::def_test]`。
+两份测试体相同，分别验证报告边界、抑制计数和饱和语义，后续修改需同步。
+host 挂载保留模块名 `unhandled_unittest`，条件为 `all(test, not(unittest))`；
+guest 宏调用另有外层 `cfg(unittest)`，独立 host 导入生产源码时无需解析
+`unittest`，两种挂载互斥。未将 host 测试转换为 guest 或引入公共测试 API。
+
 ## 范围
 
 ```text

@@ -166,11 +166,7 @@ impl IovSink for InvalidatingSink<'_> {
             // Remove only future pages: the current folio is still locked by
             // the copy callback. This models residency changing during a read.
             if self.truncate {
-                #[expect(
-                    clippy::unwrap_used,
-                    reason = "CG-021-no-panic-on-reachable-failure: test scenario: the sink \
-                              borrows the mapping of a live test inode"
-                )]
+                // The sink borrows the mapping of a live test inode.
                 self.mapping.inode().unwrap().set_len(PAGE_SIZE_4K as u64)?;
             } else {
                 self.mapping
@@ -242,11 +238,7 @@ struct ReadaheadOps;
 static READAHEAD_OPS: ReadaheadOps = ReadaheadOps;
 
 impl AddressSpaceOperations for ReadaheadOps {
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: test scenario: rereading a completed \
-                  readahead page is the regression this mock reports"
-    )]
+    // Rereading a completed readahead page is the regression this mock reports.
     fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
         // Initialize the isolated miss or retry the consumed, incomplete EOF page.
         assert!(mapping.invalidate_lock.try_write().is_none());
@@ -264,11 +256,7 @@ impl AddressSpaceOperations for ReadaheadOps {
         Ok(())
     }
 
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: test scenario: an unexpected readahead \
-                  request is the regression this mock reports"
-    )]
+    // An unexpected readahead request is the regression this mock reports.
     fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
         assert!(control.mapping().invalidate_lock.try_write().is_none());
         match control.index() {
@@ -375,11 +363,7 @@ static GATED_READ_OPS: GatedReadOps = GatedReadOps;
 impl AddressSpaceOperations for GatedReadOps {
     fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
         use core::sync::atomic::Ordering;
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: test scenario: the gated mapping \
-                      belongs to a live test inode"
-        )]
+        // The gated mapping belongs to a live test inode.
         let inode = control.mapping().inode().unwrap();
         let gate = inode.private::<ReadGate>()?;
         gate.entered.store(true, Ordering::Release);
@@ -534,11 +518,7 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
     if run.start == 4 {
         assert_eq!(run, &(4..8));
         // Model a competing publisher after the missing-run hint was sampled.
-        #[expect(
-            clippy::panic,
-            reason = "CG-021-no-panic-on-reachable-failure: test scenario: a resident first \
-                      hinted page is the regression this observer reports"
-        )]
+        // A resident first hinted page is the regression this observer reports.
         mapping
             .i_pages
             .filemap_add_folio(super::folio_from_bytes(
@@ -554,11 +534,7 @@ pub(crate) fn observe_readahead_run(mapping: &AddressSpace, run: &core::ops::Ran
 static CONFLICTED_READAHEAD_OPS: ReadaheadConflict = ReadaheadConflict;
 
 impl AddressSpaceOperations for ReadaheadConflict {
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: test scenario: a demand read of the \
-                  remaining run is the regression this mock reports"
-    )]
+    // A demand read of the remaining run is the regression this mock reports.
     fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
         panic!("the remaining run must be initialized by batch readahead");
     }
@@ -680,11 +656,7 @@ impl crate::FileOperations for BufferedReadOps {
     }
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "CG-021-no-panic-on-reachable-failure: test scenario: constructing a readable file \
-              from a live fixture inode"
-)]
+// Construct the readable file from a live fixture inode.
 fn open_read_inode(inode: Arc<VfsInode>) -> Arc<crate::VfsFile> {
     let sb = crate::nullfs::new_superblock();
     let mount = crate::Mount::new_root(&sb);

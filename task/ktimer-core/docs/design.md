@@ -288,8 +288,17 @@ make defconfig
 make unittest UNITTEST_CRATE=ktimer_core,ktask::tests_timer_routing
 ```
 
-Inline tests cover deadline boundaries, index identity, replacement, cancellation,
-one-shot dispatch and owning lifetimes. `set.rs` supplies two-worker scenarios;
+Guest tests in `ut-tests/{deadline,index,cpu,dispatch,timer,set}_unittest.rs`
+cover deadline boundaries, index identity, replacement, cancellation,
+one-shot dispatch and owning lifetimes. `unittest::path_mod_test!` mounts them
+under their original parent modules with `cfg(unittest)` and shared test lint
+exemptions. `set::tests` remains crate-visible for `test_support` re-exports;
+the other test modules remain private. The host-only slot-layout test remains
+in `tests/host/set_host.rs`, mounted under `cfg(test)` without changing its runner.
+Each guest mount also has an outer `cfg(unittest)` because the standalone host
+harness imports these production files without a `unittest` dependency; the
+outer gate prevents macro resolution in that build.
+`ut-tests/set_unittest.rs` supplies two-worker scenarios;
 `ktask` creates, pins and joins those workers. The cleanup scenario checks both
 callback and callback-local Drop phases before cancellation completes.
 These tasks actively drive modeled service, not a production timer IRQ.

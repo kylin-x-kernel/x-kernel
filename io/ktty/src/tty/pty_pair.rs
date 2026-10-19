@@ -370,6 +370,4 @@ pub fn pty_slave_numbers() -> Vec<u32> {
     numbers
 }
 
-#[cfg(unittest)]
-#[path = "../tests/pty_lifecycle.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/pty_lifecycle.rs");

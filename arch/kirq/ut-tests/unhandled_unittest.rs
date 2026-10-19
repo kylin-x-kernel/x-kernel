@@ -4,8 +4,7 @@
 
 use super::UnhandledIrqState;
 
-#[cfg_attr(test, test)]
-#[cfg_attr(unittest, unittest::def_test)]
+#[unittest::def_test]
 fn first_and_power_of_two_reports_account_for_every_event() {
     let mut state = UnhandledIrqState::new();
     let mut observed = 0;
@@ -22,8 +21,7 @@ fn first_and_power_of_two_reports_account_for_every_event() {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(unittest, unittest::def_test)]
+#[unittest::def_test]
 fn suppressed_tail_is_retained_until_the_next_report() {
     let mut state = UnhandledIrqState::new();
     for _ in 0..7 {
@@ -37,8 +35,7 @@ fn suppressed_tail_is_retained_until_the_next_report() {
     assert_eq!(state.suppressed, 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(unittest, unittest::def_test)]
+#[unittest::def_test]
 fn every_power_of_two_is_a_single_report_boundary() {
     for bit in 1..64 {
         let boundary = 1u64 << bit;
@@ -53,8 +50,7 @@ fn every_power_of_two_is_a_single_report_boundary() {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(unittest, unittest::def_test)]
+#[unittest::def_test]
 fn saturation_reports_once_and_never_wraps() {
     let mut state = UnhandledIrqState {
         count: u64::MAX - 1,

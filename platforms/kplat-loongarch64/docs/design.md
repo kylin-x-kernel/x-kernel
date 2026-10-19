@@ -58,8 +58,27 @@ platforms/kplat-loongarch64/
 │   │   └── pch_pic.rs  # LS7A PCH PIC (64 lines, MMIO)
 │   ├── mp.rs         # AP bring-up (CSR mailbox + IPI)
 │   └── power.rs      # SysCtrl provider, GED S5 power-off
+├── ut-tests/
+│   ├── irq.rs         # boot parent-gate check (non-SMP only)
+│   ├── irq_eiointc.rs # recording-backend EIOINTC tests
+│   └── irq_pch_pic.rs # recording-backend PCH PIC tests
 └── Cargo.toml
 ```
+
+## Guest Test Layout
+
+`unittest::path_mod_test!` mounts the three private `tests` modules at their
+original parents in `src/irq.rs`, `src/irq/eiointc.rs`, and
+`src/irq/pch_pic.rs`. Module paths, parent-private access, and guest
+registration are unchanged. All tests inherit the crate's LoongArch64 gate
+and require `cfg(unittest)`.
+
+The EIOINTC and PCH PIC files contain six and four cases respectively, using
+recording backends instead of live IOCSR/MMIO. The single boot parent-gate
+case reads live CPU-local ECFG and retains `#[cfg(not(feature = "smp"))]`:
+external vectors target CPU0, while an unpinned SMP test could run elsewhere.
+Thus non-SMP builds have 11 cases and SMP builds have 10. No case uses serial
+or user-mode flags.
 
 ## Architecture
 

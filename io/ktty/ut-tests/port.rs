@@ -202,7 +202,10 @@ fn test_canonical_kill_clears_pending_line() {
     let mut buf = [0; 8];
     assert_eq!(ldisc.read(&mut buf).unwrap(), 2);
     assert_eq!(&buf[..2], b"c\n");
-    assert_eq!(writer.written(), vec![b'a', b'b', b'^', b'U', b'c', b'\r', b'\n']);
+    assert_eq!(
+        writer.written(),
+        vec![b'a', b'b', b'^', b'U', b'c', b'\r', b'\n']
+    );
 }
 
 #[def_test]

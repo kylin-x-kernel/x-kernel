@@ -616,7 +616,4 @@ impl<R, W> Drop for TtyPort<R, W> {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("tests/port.rs");
-}
+unittest::path_mod_test!(tests, "../ut-tests/port.rs");

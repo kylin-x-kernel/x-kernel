@@ -350,10 +350,8 @@ impl<const N: usize> Default for TimerSet<N> {
     }
 }
 
-#[unittest::mod_test]
-pub(crate) mod tests {
-    include!("../ut-tests/set_unittest.rs");
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(pub(crate) mod tests, "../ut-tests/set_unittest.rs");
 
 #[cfg(test)]
 #[path = "../tests/host/set_host.rs"]

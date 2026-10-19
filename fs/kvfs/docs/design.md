@@ -1,5 +1,30 @@
 # kvfs - 设计文档
 
+## Test Layout
+
+Guest tests live in crate-root `ut-tests/`; `unittest::path_mod_test!`
+mounts them at their original private parents under `cfg(unittest)`.
+There are 25 mounts and 28 modules containing 250 guest cases. The
+`address_space::tests` mount retains its `read`, `truncate` and `writeback`
+children in `ut-tests/address_space/`, including shared fixtures and the
+`observe_readahead_run` re-export used by the production-side test hook.
+The other files mirror their source names, with nested names flattened:
+`node_dentry.rs`, `node_inode.rs`, `node_device.rs`, and
+`node_device_registration.rs`. The dentry module remains `tests_dentry`;
+other mounted guest modules remain `tests`.
+
+All guest cases retain their original assertions and parent access, without
+additional architecture/feature gates. Seventeen cases retain `serial`
+(seven superblock, nine device, one lock); none carries `user`.
+Production-owned `cfg(unittest)` hooks remain in place.
+The separate `path::test` host module is mounted from `tests/host/path.rs`
+under its original `cfg(test)`, with its one `#[test]` case unchanged.
+It is not a guest case or a standalone Cargo integration-test target.
+The guest mount in `src/path.rs` also has an outer `cfg(unittest)` so a
+standalone `rustc --test` wrapper can import this alloc/core-only source
+without resolving the kernel `unittest` crate.
+Guest validation uses the configured kernel unittest workflow.
+
 ## Named character-device registration
 
 `node/device/registration.rs` adds discoverable identities to the existing
@@ -124,7 +149,8 @@ list. An expired captured source must not fall back to the default path.
 - `src/address_space/`：inode-owned `AddressSpace`、其直接持有的 `MappingPages` 容器，以及
   writeback 与 truncate/invalidation 边界。`mod.rs` 定义对象和构造；`operations.rs`
   定义 callback 与默认实现；`filemap.rs`、`readahead.rs`、`writeback.rs`、`truncate.rs`
-  分别承载算法编排；`views.rs` 管理注册与失效通知；`tests/` 按算法组织回归。
+  分别承载算法编排；`views.rs` 管理注册与失效通知；crate 根目录的
+  `ut-tests/address_space/` 按算法组织回归。
 - `src/fiemap.rs`：与用户 ABI 解耦的 inode FIEMAP 请求状态、标志和安全输出接口。
 - `src/file.rs`：打开文件及其可变状态。
 - `src/file_ra.rs`：每次打开文件的预读历史、窗口选择与错误退让。

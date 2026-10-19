@@ -2,7 +2,10 @@
 
 ## Scope, assets, and boundaries
 
-All modules under `src/` are covered. Assets are namespace references, mount
+All modules under `src/` and guest fixtures under `ut-tests/` are covered.
+The namespace-fd fixtures remain private to `nsfd::tests_nsfd` and are compiled
+only under `cfg(unittest)`; the layout change adds no production entry point.
+Assets are namespace references, mount
 view selection, namespace file descriptors (`NsFd`), UTS name arrays, and the
 unshare two-phase validation. Kernel callers pass decoded flags, namespace
 handles, filesystem contexts, copied UTS bytes, and privilege/sharing facts

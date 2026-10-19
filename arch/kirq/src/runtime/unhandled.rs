@@ -49,8 +49,9 @@ impl UnhandledIrqState {
     }
 }
 
-#[cfg(any(test, unittest))]
-#[cfg_attr(unittest, unittest::mod_test)]
-mod unhandled_unittest {
-    include!("../../ut-tests/unhandled_unittest.rs");
-}
+#[cfg(all(test, not(unittest)))]
+#[path = "../../tests/host/unhandled.rs"]
+mod unhandled_unittest;
+
+#[cfg(unittest)]
+unittest::path_mod_test!(unhandled_unittest, "../../ut-tests/unhandled_unittest.rs");

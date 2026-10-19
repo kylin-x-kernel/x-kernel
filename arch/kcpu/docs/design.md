@@ -29,7 +29,7 @@ arch/kcpu/
 │   ├── active_exception_context.rs   # per-CPU 当前 trapframe 跟踪
 │   ├── userspace_common.rs           # ReturnReason、异常表修正
 │   ├── x86_64/
-│   │   ├── mod.rs                    # 导出 ExceptionContext(=TrapFrame)、TaskContext、单元测试
+│   │   ├── mod.rs                    # 导出 ExceptionContext(=TrapFrame)、TaskContext、测试挂载
 │   │   ├── ctx.rs                    # ExceptionContext（含 orig_rax）、ContextSwitchFrame、TaskContext
 │   │   ├── excp.rs / excp.S          # trap 入口、IRQ/PageFault 分发、syscall_entry
 │   │   ├── instrs.rs / copy_user.S   # user_copy + 异常表条目
@@ -61,9 +61,36 @@ arch/kcpu/
 │       ├── boot.rs                   # init_trap()
 │       ├── macros.rs                 # 汇编宏（STD/LDD、FP、异常表）
 │       └── unaligned.rs / unaligned.S # 非对齐访问指令模拟
+├── ut-tests/                         # guest 测试与辅助实现
+├── tests/host/                       # 保留 cfg(test) host 测试
 ├── Cargo.toml
 └── README.md
 ```
+
+## 测试布局
+
+guest 测试通过 `unittest::path_mod_test!` 挂载到原父模块，文件位于 crate 根部
+`ut-tests/`。模块名、可见性、`super` 访问及注册路径保持不变；原有外层架构
+条件和 `cfg(unittest)` 保留，宏也提供 guest 门控。
+
+| 文件（相对 `ut-tests/`） | 用例数 | 附加门控 |
+| --- | --- | --- |
+| `lib.rs` | 1 | 无 |
+| `excp.rs` | 3 | 无 |
+| `active_exception_context.rs` | 5 | 无，均为 serial |
+| `userspace_common.rs` | 3 | 无 |
+| `aarch64.rs` | 7 | AArch64 |
+| `aarch64_current_unittest.rs` | 1 | AArch64，原有文件改为 path 挂载 |
+| `x86_64.rs` | 6 | x86_64 |
+| `x86_64_userspace.rs` | 2 | x86_64 且 `fp-simd` |
+| `riscv.rs` | 4 | riscv32 或 riscv64 |
+| `riscv_hwprobe.rs` | 7 | riscv32 或 riscv64，其中 2 例为 serial |
+| `loongarch64.rs` | 5 | LoongArch64 |
+
+跨全部门控共 44 例、11 个模块，其中 7 例保留 serial，无 user 用例。
+单架构 guest 数量为 AArch64 20、x86_64 18（启用 `fp-simd` 后 20）、
+RISC-V 23、LoongArch64 17。`src/aarch64/userspace.rs` 原有 `cfg(test)`
+挂载的 `tests/host/aarch64_userspace_host.rs` 保持不变，2 个 host 用例不转换为 guest。
 
 ## 架构
 

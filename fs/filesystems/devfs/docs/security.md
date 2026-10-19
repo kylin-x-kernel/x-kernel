@@ -15,7 +15,12 @@ DeviceObjects for virtual terminals.
 
 This analysis covers the entire crate: `src/lib.rs`, `src/device_file.rs`,
 `src/dynamic.rs`, `src/root.rs`, and every module under `src/nodes/`, including
-feature-gated nodes. No in-crate source module is excluded. KVFS dispatch and
+feature-gated nodes, plus the guest fixtures in `ut-tests/`. The fixtures retain
+their original private module boundaries under `cfg(unittest)`; event and
+serial tests retain their node feature gates. Both PTS lifecycle and registration
+cases remain serial guest tests. Extraction does not widen production access
+or change fixture ownership and cleanup. No in-crate source module is excluded.
+KVFS dispatch and
 user-copy contracts, driver class handles, framebuffer storage, and DICE
 providers remain responsible for the invariants documented by their own
 interfaces.

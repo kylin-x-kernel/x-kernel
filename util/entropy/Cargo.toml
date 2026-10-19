@@ -9,6 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# kdevice is used by the cfg(unittest) collector fixture in ut-tests/virtio.rs
+# for device registration and cleanup; workspace cargo-shear excludes ut-tests.
+ignored = ["kdevice"]
+
 [features]
 default = []
 entropy_arch_cpu = ["dep:karch"]

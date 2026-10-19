@@ -22,24 +22,23 @@
 //! and resource operations performed by the caller's callback.
 //!
 //! # Examples
-//! The [owned lifecycle example] prepares a static set and an atomic handler,
+//! In `ut-tests/timer_unittest.rs`, `owned_timer_move_cancel_and_drop_preserve_storage`
+//! prepares a static set and an atomic handler,
 //! starts a one-shot, moves its owner, drives modeled CPU service, and checks
 //! callback counts, repeated cancellation and exactly-once destruction.
-//! The [future-only start example] demonstrates rejecting an elapsed deadline
-//! without replacing an existing future event. The [callback rearm example]
-//! shows explicit one-shot continuation followed by stopping, and the [programming
-//! example] shows locked deadline observation across replacements and cancellation.
+//! In the same file, `owned_wait_rejects_elapsed_without_replacing_pending_timer`
+//! demonstrates rejecting an elapsed deadline without replacing a future event.
+//! `bound_callback_rearms_and_then_stops` in `ut-tests/dispatch_unittest.rs`
+//! shows explicit one-shot continuation followed by stopping.
+//! `reprogram_reads_each_current_deadline_under_the_cpu_lock` in
+//! `ut-tests/set_unittest.rs` shows locked deadline observation across
+//! replacements and cancellation.
 //!
 //! These are executable kernel unit tests, not standalone userspace snippets.
 //! Configure `platforms/kplat-aarch64/qemu_defconfig` with `make defconfig`, then
 //! run `make unittest UNITTEST_CRATE=ktimer_core,ktask::tests_timer_routing`.
 //! The tests require initialized allocator/guard support and explicitly model CPU
 //! service; they do not demonstrate production hardware or IPI integration.
-//!
-//! [owned lifecycle example]: ../src/ktimer_core/timer.rs.html#241-261
-//! [future-only start example]: ../src/ktimer_core/timer.rs.html#263-279
-//! [callback rearm example]: ../src/ktimer_core/dispatch.rs.html#68-91
-//! [programming example]: ../src/ktimer_core/set.rs.html#357-404
 
 #![no_std]
 

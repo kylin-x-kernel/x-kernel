@@ -6,9 +6,15 @@ This analysis covers the entire crate: `src/lib.rs` (module wiring and
 default platform contracts), `src/init.rs` (boot handoff), `src/time.rs`
 (stable counter), `src/irq.rs` plus `src/irq/eiointc.rs` and
 `src/irq/pch_pic.rs` (interrupt hierarchy), `src/mp.rs` (SMP boot), and
-`src/power.rs` (power control). No modules are excluded. Firmware
+`src/power.rs` (power control), plus guest tests in `ut-tests/irq.rs`,
+`ut-tests/irq_eiointc.rs`, and `ut-tests/irq_pch_pic.rs`. No modules are excluded. Firmware
 descriptions are consumed through `of` and validated there; the raw
 IOCSR/MMIO accesses audited below are this crate's own boundary.
+
+The controller tests use local recording backends without live IOCSR/MMIO
+access. The non-SMP-only boot test reads ECFG without changing interrupt
+state. All three test modules remain private and require `cfg(unittest)`;
+the move adds no unsafe code or production trust boundary.
 
 ## Trust Model
 

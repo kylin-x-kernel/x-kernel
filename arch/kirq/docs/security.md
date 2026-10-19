@@ -50,6 +50,23 @@ executing BH-only callbacks inside a hardirq that interrupted softirq: an active
 softirq nesting count alone is insufficient. CPU pinning and pass serialization
 remain execution-provider obligations; the query changes no context state.
 
+## 测试审计范围
+
+测试审计范围包括 `ut-tests/` 的 guest 用例和 fixture，以及
+`tests/host/unhandled.rs` 的四例 host 测试。guest 模块保持原可见性及
+`cfg(unittest)`；host 模块使用 `cfg(all(test, not(unittest)))`。
+两份未处理 IRQ 计数测试使用局部 `UnhandledIrqState`，不注册真实 IRQ。
+迁移保留所有测试体、serial 标记和清理序列，不改变生产状态或 unsafe 契约。
+`ScopedHardIrqContext` 位于 `ut-tests/bottom_half_context_test_support.rs`。
+同文件的 `with_nmi_context` fixture 要求调用者初始化 CPU/current、排除普通
+IRQ 与迁移，并保证回调正常返回且不调度。`ut-tests/bottom_half_context.rs`
+保留持锁期间的 NMI 查询回归；`ut-tests/rcu_irq_entry.rs` 和
+`ut-tests/rcu_context.rs` 保留主线 RCU entry 平衡回归。
+管理器的两例 hardirq 拒绝测试使用 `ScopedHardIrqContext`，同时
+维持 CPU 固定和本地 IRQ 屏蔽，不能退回仅增加上下文计数的 guard。
+softirq 的作用域 fixture 位于 `ut-tests/bottom_half_softirq_test_support.rs`；
+二者仍通过原 `test_support` 模块提供测试期访问。
+
 ## 信任模型
 
 测试辅助 `ScopedHardIrqContext` 自己持有 `NoPreemptIrqSave`，先固定 CPU 并

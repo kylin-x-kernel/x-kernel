@@ -36,6 +36,22 @@ fs/filesystems/devfs/src/
     └── event.rs       # dynamic /dev/input directory and evdev operations
 ```
 
+## Guest unit-test layout
+
+Guest tests live in `ut-tests/{cpu_dma_latency,dtb,event,loop,null_zero_full,pts,random,serial}.rs`.
+Each file is mounted by `unittest::path_mod_test!` as the original private
+`nodes::<name>::tests` module under `cfg(unittest)`, preserving access to
+node-local fixtures and implementation details. The 33 cases include 11 event
+tests gated by the `input` feature and one UART numbering test gated by
+`serial`; the other 21 cases have no additional feature gate.
+
+`ut-tests/pts.rs` retains the two serial cases previously included from
+`src/tests/pts.rs` by `nodes::pts::tests`. They remain registered guest tests
+for retained-slave lifetime and character-device registration conflicts.
+The DTB snapshot case returns `Ignored` when firmware supplies no DTB.
+These cases run through the configured kernel unittest runner, not host Cargo
+tests; their source presence alone does not establish execution coverage.
+
 ## Architecture
 
 `nodes/tty_nodes.rs` asks ktty to register fixed VT aliases once, then projects

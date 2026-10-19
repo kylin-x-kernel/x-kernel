@@ -158,7 +158,5 @@ impl CpuTimers {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/cpu_unittest.rs");
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/cpu_unittest.rs");

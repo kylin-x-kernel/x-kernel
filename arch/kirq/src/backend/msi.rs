@@ -169,31 +169,10 @@ fn free_msi(virq: Virq) -> bool {
     })
 }
 
-#[unittest::mod_test]
-mod tests {
-    use unittest::def_test;
-
-    use super::MsiMessage;
-
-    #[def_test]
-    fn test_msi_message_accessors() {
-        let message = MsiMessage::new(0xfee0_0000, 0x80);
-        assert_eq!(message.address(), 0xfee0_0000);
-        assert_eq!(message.data(), 0x80);
-    }
-}
+unittest::path_mod_test!(tests, "../../ut-tests/backend_msi.rs");
 
 #[cfg(not(target_arch = "x86_64"))]
-#[unittest::mod_test]
-mod unittest_tests {
-    use unittest::def_test;
-
-    use super::{alloc_msix, free_msix};
-    use crate::IrqAffinity;
-
-    #[def_test]
-    fn test_msix_is_unsupported_without_backend() {
-        assert!(alloc_msix(IrqAffinity::Any).is_none());
-        assert!(!free_msix(0xffff_ffff));
-    }
-}
+unittest::path_mod_test!(
+    unittest_tests,
+    "../../ut-tests/backend_msi_unittest_tests.rs"
+);

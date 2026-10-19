@@ -6,6 +6,14 @@
 `unsafe` 代码：naked 函数、内联汇编、裸指针操作和 `transmute`。不正确的
 使用或不变量破损可能导致未定义行为、内存损坏或特权级泄露。
 
+## 测试审计范围
+
+审计范围包含 `ut-tests/` 中的 guest 测试及 `tests/host/` 中保留的 host 测试。
+guest 文件仍是原父模块的子模块，原有 public、crate-private 或 private 可见性
+不变。测试中的 unsafe、寄存器访问、per-CPU 状态恢复和 serial 属性均随原测试体
+迁移；不扩大生产 API 或改变生产 unsafe 契约。AArch64 的两例 host 测试仍由
+原 `cfg(test)` 挂载，不依赖 guest 注册。
+
 ## 信任模型
 
 LoongArch idle 返回修正仅在普通 IRQ 分支、保存的 PRMD.PPLV 为内核级时

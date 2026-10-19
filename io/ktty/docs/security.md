@@ -6,7 +6,12 @@ This analysis covers the entire `ktty` crate: `src/lib.rs`, `src/port.rs`,
 `src/tty/` (`mod.rs` ioctl boundary, `ntty.rs` console backend,
 `pty.rs` PTY backend, `pty_pair.rs` pair lifetime), and `src/terminal/` (`job.rs` job control,
 `ldisc.rs` line discipline, `termios.rs` attribute layout). No modules
-are excluded; the trust boundary toward `kprocess` and the user ABI is
+are excluded; guest fixtures in `ut-tests/` are included in this scope.
+The fixtures retain private parent modules, `cfg(unittest)`, and the original
+user/serial execution flags. The three former `include!` modules and the PTY
+lifecycle module remain registered. This extraction does not widen production
+visibility or change ioctl, worker, or device-lifetime contracts.
+The trust boundary toward `kprocess` and the user ABI is
 described in the sections below.
 
 User space can submit ioctl commands, user pointers, and PGIDs through

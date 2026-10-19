@@ -239,7 +239,5 @@ impl<H: TimerHandler + 'static, const N: usize> Drop for Timer<H, N> {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/timer_unittest.rs");
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/timer_unittest.rs");

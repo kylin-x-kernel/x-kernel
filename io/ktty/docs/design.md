@@ -1,5 +1,30 @@
 # ktty — Design
 
+## Guest Test Layout
+
+Guest tests live in crate-root `ut-tests/`, mounted with
+`unittest::path_mod_test!` under their original private module names and
+`cfg(unittest)`. Parent access and registration are unchanged, including
+the previously included port, connection and PTY fixtures.
+
+| Module | File under `ut-tests/` | Cases |
+| --- | --- | --- |
+| `port::tests` | `port.rs` | 20 |
+| `terminal::terminal_tests` | `terminal.rs` | 3 |
+| `terminal::termios::termios_tests` | `terminal_termios.rs` | 7 |
+| `tty::tests` | `tty.rs` | 2 |
+| `tty::tests_pty` | `tty_pty.rs` | 7 |
+| `tty::ntty::tests` | `tty_ntty.rs` | 5 |
+| `tty::pty_pair::tests` | `pty_lifecycle.rs` | 7 |
+| `tty::vt::tests` | `tty_vt.rs` | 5 |
+
+The eight modules contain 56 cases, with no additional architecture/feature
+gates. Nine cases retain `serial`, four retain `user`, and three carry both.
+The two native-connection cases still return Ignored when runtime stdout is
+unavailable. Test-only production hooks stay at their original owners.
+Run through the configured kernel guest unittest workflow, not host Cargo
+integration-test discovery.
+
 ## Fixed Virtual Console
 
 `tty/vt.rs` creates an independent `Tty<VtInput, VtOutput>` with its own
@@ -300,7 +325,7 @@ close operation does not make destruction of a retained inode IRQ-safe.
 - `src/port.rs`: backend contracts, prefetch, processing modes, work and wakeup.
 - `src/terminal/ldisc.rs`: supplied-byte processing, canonical mode, terminal
   read policy, echo and signal character handling.
-- `src/tests/port.rs`: terminal semantics and input transport regression tests.
+- `ut-tests/port.rs`: terminal semantics and input transport regression tests.
 - `src/terminal/termios.rs`: the `Termios` terminal attribute layout and
   flag/character constants shared by the ioctl boundary.
 - `src/tty/mod.rs`: TTY file operations and the `TC*`/`TIOC*` ioctl

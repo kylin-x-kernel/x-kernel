@@ -298,7 +298,5 @@ impl TimerIndex {
     }
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../ut-tests/index_unittest.rs");
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/index_unittest.rs");

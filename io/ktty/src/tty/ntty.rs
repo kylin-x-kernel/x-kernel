@@ -195,7 +195,4 @@ fn new_n_tty() -> Arc<NTtyDriver> {
     tty
 }
 
-#[unittest::mod_test]
-mod tests {
-    include!("../tests/connection.rs");
-}
+unittest::path_mod_test!(tests, "../../ut-tests/tty_ntty.rs");

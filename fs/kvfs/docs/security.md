@@ -1,5 +1,15 @@
 # kvfs - 安全与可靠性分析
 
+## Test Fixture Scope
+
+The audit scope includes guest fixtures under `ut-tests/` and the host-only
+path fixture under `tests/host/`. Guest modules remain private children of
+their original production parents and require `cfg(unittest)`; the host
+module retains `cfg(test)`. Address-space fixture nesting, readahead
+observation, and test-only production hooks remain unchanged.
+All 17 serial flags are preserved. Moving the fixtures adds no production
+entry point and changes no unsafe, registration, locking, or cleanup contract.
+
 ## Named cdev identities and projection
 
 Named registration validates class/name path components and rejects overlapping

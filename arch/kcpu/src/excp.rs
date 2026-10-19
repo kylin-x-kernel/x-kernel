@@ -54,27 +54,4 @@ macro_rules! handle_trap {
     }}
 }
 
-#[unittest::mod_test]
-pub mod tests_excp {
-    use unittest::def_test;
-
-    use super::*;
-
-    #[def_test]
-    fn test_irq_slice_empty_by_default() {
-        let count = IRQ.iter().count();
-        assert_eq!(IRQ.len(), count);
-    }
-
-    #[def_test]
-    fn test_page_fault_slice_empty_by_default() {
-        let count = PAGE_FAULT.iter().count();
-        assert_eq!(PAGE_FAULT.len(), count);
-    }
-
-    #[def_test]
-    fn test_page_fault_flags_bits() {
-        let flags = PageFaultFlags::empty();
-        assert!(flags.is_empty());
-    }
-}
+unittest::path_mod_test!(pub mod tests_excp, "../ut-tests/excp.rs");

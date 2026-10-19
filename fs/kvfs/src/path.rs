@@ -252,46 +252,8 @@ impl fmt::Display for PathBuf {
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
+#[path = "../tests/host/path.rs"]
+mod test;
 
-    #[test]
-    fn test_file_name() {
-        assert_eq!(Some("c"), Pathname::new("../a/b/c").file_name());
-        assert_eq!(Some("b"), Pathname::new("a/b/.").file_name());
-        assert_eq!(None, Pathname::new("a/..").file_name());
-    }
-}
-
-#[unittest::mod_test]
-mod tests {
-    use unittest::{assert, assert_eq, def_test};
-
-    use super::*;
-
-    #[def_test]
-    fn test_path_normalization() {
-        let path = PathBuf::from("/path/to/file");
-        assert_eq!(path.as_str(), "/path/to/file");
-
-        let root = PathBuf::from("/");
-        assert_eq!(root.as_str(), "/");
-
-        let empty = PathBuf::new();
-        assert_eq!(empty.as_str(), "");
-    }
-
-    #[def_test]
-    fn test_path_normalization_complex() {
-        let path = Pathname::new("/foo/bar/../baz/./qux/../file.txt");
-        let normalized = path.normalize().unwrap();
-        assert_eq!(normalized.as_str(), "/foo/baz/file.txt");
-
-        let path = Pathname::new("/../../../test");
-        assert!(path.normalize().is_none());
-
-        let path = Pathname::new("././././test");
-        let normalized = path.normalize().unwrap();
-        assert_eq!(normalized.as_str(), "/test");
-    }
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/path.rs");

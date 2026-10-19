@@ -64,6 +64,28 @@ or release outstanding DMA; those responsibilities stay with the driver/host.
 
 ## Validation
 
+Guest unit tests live in crate-root `ut-tests/` and are mounted with
+`unittest::path_mod_test!` in their original private parent modules.
+All seven modules retain `cfg(unittest)`, their module names and parent access.
+
+| Test file | Module | Cases | Additional gate |
+| --- | --- | --- | --- |
+| `ut-tests/lib.rs` | `tests` | 12 | None |
+| `ut-tests/source.rs` | `source::tests` | 8 | One case requires `entropy_virtio_rng`; existing in-body source gates remain |
+| `ut-tests/arch_cpu.rs` | `arch_cpu::tests` | 2 | `entropy_arch_cpu` |
+| `ut-tests/smccc_trng.rs` | `smccc_trng::tests` | 2 | `entropy_smccc_trng` and AArch64 |
+| `ut-tests/jitter.rs` | `jitter::tests` | 5 | `entropy_jitter` |
+| `ut-tests/virtio.rs` | `virtio::tests` | 2 | `entropy_virtio_rng` |
+| `ut-tests/virtio_real_device_tests.rs` | `virtio::real_device_tests` | 3 | `entropy_virtio_rng` |
+
+There are 34 cases across all gates: 19 without additional case/module gates,
+two CPU, five jitter, two AArch64 SMCCC, and six VirtIO-dependent cases.
+Four cases retain `serial`: the controlled collector case and all three
+real-device cases. No cases carry a `user` flag. The real-device module remains
+registered, requires a published VirtIO RNG device, and fails rather than skips
+when no device is present. Use the configured kernel guest unittest workflow;
+these files are not host Cargo integration-test targets.
+
 Controlled collector tests cover demand coalescing, return to idle, reuse,
 repeated read errors without new demand, successful recovery, and explicit
 terminal device failure.
