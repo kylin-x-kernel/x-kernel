@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
 use block::BlockDeviceOperations;
@@ -30,6 +30,7 @@ use crate::{
     journal::MountedJournal,
     mballoc::BlockGroupFreeExtentCache,
     orphan::OrphanInfo,
+    prealloc_space::{GroupPreallocKey, GroupPreallocSpace},
     types::{BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
 };
 
@@ -435,6 +436,28 @@ pub(crate) struct AllocatorState {
     pub(crate) has_orphan_present: bool,
     pub(crate) groups: Vec<GroupMutableState>,
     pub(crate) block_free_extent_caches: Vec<Option<BlockGroupFreeExtentCache>>,
+    /// Group-side index of the live speculative writeback prealloc spaces,
+    /// keyed by `(group, first physical block)` - the physical twin of the
+    /// per-inode maps (`Ext4Inode::prealloc_map`). A space's blocks are *not*
+    /// marked in the bitmap until a writeback run consumes it; once wired,
+    /// group scans exclude these ranges from this index (the role Linux's
+    /// in-core buddy marks play) and the ENOSPC discard enumerates it
+    /// group-locally (the role of `bb_prealloc_list`). Each twin carries a
+    /// strong owner reference (the `pa_inode` analog) so a group-driven
+    /// discard removes the inode-side entry in the same allocator-mutex
+    /// section; the close/evict hooks (wiring commit) will guarantee a twin
+    /// dies before its owner, so a missed hook leaks memory instead of
+    /// dangling.
+    ///
+    /// Both sides mutate only together, under the allocator mutex (lock
+    /// order: prealloc-space module). The free aggregate never deducts
+    /// spaces (Linux parity: statfs shows an unconsumed surplus as free);
+    /// crash or unmount drops them with zero disk residue.
+    pub(crate) preallocs_by_group: BTreeMap<GroupPreallocKey, GroupPreallocSpace>,
+    /// Sum of the live spaces' lengths (Linux `s_mb_preallocated`). The
+    /// conservation invariant (`== Σ preallocs_by_group[].phys_len`) is
+    /// debug-asserted after every mutation.
+    pub(crate) preallocated_blocks: u64,
 }
 
 /// A validated ext4 filesystem mount core.
@@ -688,6 +711,8 @@ impl Ext4SbInfo {
                 has_orphan_present: superblock.features().has_orphan_present(),
                 groups: group_states,
                 block_free_extent_caches,
+                preallocs_by_group: BTreeMap::new(),
+                preallocated_blocks: 0,
             }),
             delalloc_reserved_blocks: Mutex::new(0),
             superblock,

@@ -142,6 +142,7 @@ mod journal;
 mod mballoc;
 mod namei;
 mod orphan;
+mod prealloc_space;
 mod superblock;
 mod sync;
 mod truncate;

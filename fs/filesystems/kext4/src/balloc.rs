@@ -15,10 +15,11 @@ use crate::{
     },
     error::{CorruptKind, Ext4Error, Ext4Result},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest, ensure_block_group_free_cache_inner},
+    prealloc_space::{bit_in_ranges, range_end_containing},
     superblock::{
-        Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
-        ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, lock, replace_metadata_access_bytes,
-        set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
+        AllocatorState, Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits,
+        ensure_metadata_credits, ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, lock,
+        replace_metadata_access_bytes, set_ext4_bitmap_bit, validate_ext4_bitmap_range_set,
     },
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, PhysicalBlock},
 };
@@ -60,6 +61,31 @@ impl Ext4SbInfo {
         Ok(allocation.first_block_allocation())
     }
 
+    /// Warms the metadata cache for one group allocation attempt (block
+    /// bitmap, group descriptor, superblock).
+    ///
+    /// - `group`: the group about to be attempted.
+    ///
+    /// Call this *outside* the allocator lock: a cold-cache device read must
+    /// not serialize every allocator behind the mutex. The allocation
+    /// re-reads all three authoritatively under the lock, so this is pure
+    /// warm-up.
+    ///
+    /// Locking: must NOT hold the allocator mutex.
+    pub(crate) fn prefetch_group_allocation_metadata(
+        &self,
+        group: BlockGroupNumber,
+    ) -> Ext4Result<()> {
+        let bitmap_block = FilesystemBlock::new(
+            self.group_geometry(group)
+                .ok_or(Ext4Error::OutOfBounds)?
+                .block_bitmap(),
+        );
+        let (descriptor_block, ..) = self.group_descriptor_location(group)?;
+        let (superblock_block, ..) = self.primary_superblock_location()?;
+        self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])
+    }
+
     pub(crate) fn allocate_block_run_in_group(
         &self,
         group: BlockGroupNumber,
@@ -71,10 +97,49 @@ impl Ext4SbInfo {
         if min_len.get() == 0 || expected_len.get() == 0 || min_len > expected_len {
             return Err(Ext4Error::OutOfBounds);
         }
+        self.prefetch_group_allocation_metadata(group)?;
+        let mut alloc = lock(&self.allocator);
+        self.allocate_block_run_in_group_locked(
+            &mut alloc,
+            group,
+            goal,
+            min_len,
+            expected_len,
+            handle,
+        )
+    }
+
+    /// Group allocation with the allocator lock already held.
+    ///
+    /// - `alloc`: live allocator guard.
+    /// - `group`: the group to allocate from.
+    /// - `goal`: preferred first block, if any.
+    /// - `min_len`/`expected_len`: run length bounds.
+    /// - `handle`: journal handle marking the run.
+    ///
+    /// Split out of [`Self::allocate_block_run_in_group`] so the
+    /// speculative consume path can take a space and mark the run inside a
+    /// *single* lock section (exclusion must not lapse between selection and
+    /// mark). Callers that know the group beforehand warm the cache with
+    /// [`Self::prefetch_group_allocation_metadata`]; consume cannot (it
+    /// learns the group under this lock) and accepts the cold-read latency.
+    ///
+    /// Locking: caller must hold the allocator mutex.
+    pub(crate) fn allocate_block_run_in_group_locked(
+        &self,
+        alloc: &mut AllocatorState,
+        group: BlockGroupNumber,
+        goal: Option<FilesystemBlock>,
+        min_len: BlockCount,
+        expected_len: BlockCount,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<BlockRunAllocation> {
         let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
-        // Geometry and block locations come from frozen mount tables and
-        // need no lock; resolve them before the allocator lock so the
-        // critical section starts with every address already known.
+        // Geometry and block locations come from frozen mount tables and need
+        // no lock of their own. Callers warm the metadata cache outside the
+        // allocator lock (see prefetch_group_allocation_metadata); the
+        // authoritative reads happen under this lock regardless, so a cold
+        // cache costs latency here, never correctness.
         let range = self.block_group_range(group)?;
         let block_bitmap_checksum_bytes = self.block_bitmap_checksum_bytes()?;
         let bitmap_block = FilesystemBlock::new(
@@ -86,17 +151,6 @@ impl Ext4SbInfo {
             self.group_descriptor_location(group)?;
         let (superblock_block, superblock_offset, superblock_len) =
             self.primary_superblock_location()?;
-        // Warm the metadata cache outside the allocator lock so a
-        // cold-cache device read does not serialize every allocator behind
-        // the mutex; the authoritative snapshots are re-read inside the
-        // lock below. Prefetching the block bitmap of an uninit group
-        // costs one harmless cached read.
-        self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])?;
-
-        // The allocator lock still spans the in-lock read-modify-write so
-        // concurrent callers cannot select the same block from the same
-        // bitmap snapshot.
-        let mut alloc = lock(&self.allocator);
         let descriptor = alloc
             .groups
             .get(group_index)
@@ -136,8 +190,16 @@ impl Ext4SbInfo {
         } else {
             None
         };
+        // Prealloc spaces are not marked in the bitmap, so the free-extent
+        // cache (which mirrors the bitmap) does not see them.  Snapshot the
+        // group's prealloc ranges once under the allocator lock and reject
+        // those bits in the low-level scanner — the role Linux's buddy marks
+        // play.  The cache stays pure because spaces come and go after cache
+        // construction; `mark_allocated` would trip on blocks the cache never
+        // knew were occupied.
+        let prealloc_ranges = alloc.prealloc_bit_ranges_in_group(range);
         let suggested_goal = ensure_block_group_free_cache_inner(
-            &mut alloc,
+            alloc,
             group,
             range,
             &bitmap_bytes,
@@ -147,17 +209,50 @@ impl Ext4SbInfo {
                 expected_len,
             }),
             |block| self.is_system_zone_block(block),
-        )?;
+        )?
+        // A cache-suggested goal may fall inside a prealloc range that the
+        // cache cannot see; drop the hint rather than pointing the scanner at
+        // a block it must immediately skip.
+        .filter(|&g| {
+            range
+                .bit_index(g)
+                .is_ok_and(|bit| !bit_in_ranges(&prealloc_ranges, bit))
+        });
+        // The caller's own goal often lands on a preallocated range start (a
+        // writeback goal is the previous run's physical end, which is exactly
+        // where this inode's sampler files a space). Advance it past the
+        // range - or drop it when the range ends at the group's edge - so the
+        // scanner does not walk the whole range bit by bit: a goal is
+        // advisory, walking is not. A goal outside this group keeps its
+        // existing meaning (the scanner wraps to zero on its own).
+        let scan_goal = suggested_goal.or(goal).and_then(|goal| {
+            let bit = range.bit_index(goal).ok()?;
+            match range_end_containing(&prealloc_ranges, bit) {
+                Some(end_bit) => range.block_at(end_bit).ok(),
+                None => Some(goal),
+            }
+        });
         let allocation = match bitmap_allocator::allocate_block_run_from_bitmap(
             &mut bitmap_bytes,
             range,
-            suggested_goal.or(goal),
+            scan_goal,
             min_len,
             expected_len,
-            |block| self.is_system_zone_block(block),
+            |block| {
+                self.is_system_zone_block(block)
+                    || range
+                        .bit_index(block)
+                        .is_ok_and(|bit| bit_in_ranges(&prealloc_ranges, bit))
+            },
         ) {
             Ok(allocation) => allocation,
-            Err(Ext4Error::NoSpace) if min_len.get() == 1 => {
+            Err(Ext4Error::NoSpace) if min_len.get() == 1 && prealloc_ranges.is_empty() => {
+                // Only system zones can reject a clear-bit candidate (their
+                // bits are always set in a valid bitmap, so is_protected is
+                // unreachable for them).  Prealloc spaces, in contrast, are
+                // clear in the bitmap and rejected by is_protected — a
+                // one-block request that finds no acceptable bit is ordinary
+                // ENOSPC when prealloc spaces cover every free block.
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
             }
             Err(Ext4Error::NoSpace) => return Err(Ext4Error::NoSpace),
@@ -177,8 +272,13 @@ impl Ext4SbInfo {
         debug_assert!(
             (0..allocation.block_count().get()).all(|offset| range
                 .block_at(allocation.first_bitmap_bit() + offset)
-                .is_ok_and(|block| !self.is_system_zone_block(block))),
-            "block allocator handed out system-zone blocks"
+                .is_ok_and(|block| {
+                    !self.is_system_zone_block(block)
+                        && range
+                            .bit_index(block)
+                            .is_ok_and(|bit| !bit_in_ranges(&prealloc_ranges, bit))
+                })),
+            "block allocator handed out system-zone or preallocated blocks"
         );
 
         let mut descriptor_bytes = self

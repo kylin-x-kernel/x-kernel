@@ -134,7 +134,6 @@ impl BlockRunAllocation {
         }
     }
 
-    #[cfg(unittest)]
     pub(crate) const fn group(self) -> BlockGroupNumber {
         self.group
     }

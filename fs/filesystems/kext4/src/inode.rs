@@ -14,6 +14,7 @@ use crate::{
     extent::InodeMappingRoot,
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalHandle},
+    prealloc_space::InodePreallocMap,
     superblock::replace_metadata_access_bytes,
     sync::{self, Mutex, RwLock},
 };
@@ -740,6 +741,10 @@ pub struct Ext4Inode {
     number: InodeNumber,
     state: RwLock<Ext4InodeState>,
     writeback_lock: Mutex<()>,
+    /// Speculative prealloc spaces owned by this inode (Linux:
+    /// `i_prealloc_node`). They die with this inode object; see the
+    /// prealloc-space module for the lifecycle and locking.
+    prealloc_map: InodePreallocMap,
 }
 
 impl Ext4Inode {
@@ -757,6 +762,7 @@ impl Ext4Inode {
                 orphan: None,
             }),
             writeback_lock: Mutex::new(()),
+            prealloc_map: InodePreallocMap::new(),
         }
     }
 
@@ -821,6 +827,14 @@ impl Ext4Inode {
     fn update_state<R>(&self, f: impl FnOnce(&mut Ext4InodeState) -> R) -> R {
         let mut state = sync::write_lock(&self.state);
         f(&mut state)
+    }
+
+    /// This inode's speculative prealloc map. The lock inside is a leaf owned
+    /// by the prealloc-space module, which is also the only code that locks
+    /// it; see [`crate::prealloc_space`] for the lock order and the mutation
+    /// entries.
+    pub(crate) fn prealloc_map(&self) -> &InodePreallocMap {
+        &self.prealloc_map
     }
 
     fn metadata_snapshot(&self) -> Ext4InodeMetadata {
