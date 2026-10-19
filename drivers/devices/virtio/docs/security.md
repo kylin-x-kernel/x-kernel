@@ -160,6 +160,13 @@ GPU 像素 backing 由 DRM dumb buffer（或 fbdev shadow buffer）分配，并�
 **调用者**：
 - DRM dumb-buffer 生命周期管理代码
 
+`VirtIoGpu2d::active_scanout` 只缓存 scanout 0 已确认的 resource ID 与矩形，
+并与 control queue 操作共用同一个 GPU 状态锁。每次呈现仍先提交
+`TRANSFER_TO_HOST_2D`、最后提交 `RESOURCE_FLUSH`；只有 resource 或矩形发生变化时
+才发送 `SET_SCANOUT`。驱动仅在该命令成功后发布缓存状态，resource unref 成功后清除
+对应状态，因此设备错误不会把未确认的绑定当成已生效绑定，也不会让已销毁 resource
+继续命中复用路径。
+
 ### 3. `VirtIoNetDev::try_new()` 中的 `receive_begin`（`net.rs:216`）
 
 ```rust

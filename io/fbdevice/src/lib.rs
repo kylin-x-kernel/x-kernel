@@ -15,7 +15,8 @@
 //!
 //! Unlike Linux's fbcon-backed fbdev, this emulation deliberately does **not**
 //! run a background refresh task. A continuous `present_scanout_resource`
-//! (which calls `SET_SCANOUT` on virtio-gpu) would race an active DRM
+//! (which can call `SET_SCANOUT` on virtio-gpu when the resource or scanout
+//! rectangle changes) would race an active DRM
 //! compositor for the single physical scanout and cause flicker; fbdev
 //! emulation therefore defers to a DRM master and only presents the shadow when
 //! explicitly asked.

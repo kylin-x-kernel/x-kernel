@@ -166,7 +166,8 @@ scratch. Software backlog follows calling concurrency, not a 16-call cap.
 Uninit ──probe/query resolution──> Ready
 Ready ──create_scanout_resource──> ResourceAttached
 ResourceAttached ──present_scanout_resource──> ScanningOut
-ScanningOut ──present_scanout_resource(new resource)──> ScanningOut
+ScanningOut ──present_scanout_resource(same resource/geometry)──> ScanningOut
+ScanningOut ──present_scanout_resource(new resource/geometry)──> ScanningOut
 ResourceAttached / ScanningOut ──destroy_scanout_resource──> Ready
 Ready / ResourceAttached / ScanningOut ──设备错误──> Failed
 ```
@@ -176,7 +177,7 @@ Ready / ResourceAttached / ScanningOut ──设备错误──> Failed
 | Uninit | Ready | `try_new()` 完成 feature 协商、virtqueue 初始化并查询分辨率 |
 | Ready | ResourceAttached | DRM dumb buffer backing 被创建并 attach 到 virtio-gpu 2D resource |
 | ResourceAttached | ScanningOut | DRM modeset/page-flip 触发 transfer-to-host、set-scanout 和 flush |
-| ScanningOut | ScanningOut | page flip 切换到另一个已 attach 的 resource |
+| ScanningOut | ScanningOut | 同一 resource 与几何参数重复提交时复用已有 scanout 绑定；切换 resource 或几何参数时重新设置绑定 |
 | ResourceAttached / ScanningOut | Ready | dumb buffer 销毁，resource detach/unref |
 | Ready / ResourceAttached / ScanningOut | Failed | 设备返回不可恢复错误 |
 

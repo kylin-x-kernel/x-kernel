@@ -22,6 +22,34 @@ const QUEUE_TRANSMIT: u16 = 0;
 const QUEUE_CURSOR: u16 = 1;
 const SCANOUT_ID: u32 = 0;
 
+#[derive(Default)]
+struct ScanoutBinding {
+    active: Option<(u32, Rect)>,
+}
+
+impl ScanoutBinding {
+    fn needs_set_scanout(&self, resource_id: u32, rect: Rect) -> bool {
+        self.active != Some((resource_id, rect))
+    }
+
+    fn publish(&mut self, resource_id: u32, rect: Rect) {
+        self.active = Some((resource_id, rect));
+    }
+
+    fn clear_if_matches(&mut self, resource_id: u32) {
+        if self
+            .active
+            .is_some_and(|(active_resource, _)| active_resource == resource_id)
+        {
+            self.active = None;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.active = None;
+    }
+}
+
 /// The VirtIO GPU device driver.
 pub struct VirtIoGpuDev<H: Hal, T: Transport> {
     info: DisplayInfo,
@@ -118,6 +146,8 @@ struct VirtIoGpu2d<H: Hal, T: Transport> {
     _cursor_queue: VirtQueue<H, { QUEUE_SIZE as usize }>,
     queue_buf_send: Box<[u8]>,
     queue_buf_recv: Box<[u8]>,
+    /// Resource currently bound to scanout 0, protected by the GPU state lock.
+    active_scanout: ScanoutBinding,
 }
 
 impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
@@ -158,6 +188,7 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
             _cursor_queue: cursor_queue,
             queue_buf_send,
             queue_buf_recv,
+            active_scanout: ScanoutBinding::default(),
         })
     }
 
@@ -186,25 +217,36 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
 
     fn destroy_resource(&mut self, resource_id: u32) -> virtio_drivers::Result {
         self.resource_detach_backing(resource_id)?;
-        self.resource_unref(resource_id)
+        let result = self.resource_unref(resource_id);
+        if result.is_ok() {
+            self.active_scanout.clear_if_matches(resource_id);
+        }
+        result
     }
 
     fn present_resource(&mut self, resource_id: u32, rect: ScanoutRect) -> virtio_drivers::Result {
-        // Page-flip hot path: three dependent virtio commands, each a blocking
-        // host round trip. They cannot be merged into a single descriptor
-        // chain: the control queue depth (QUEUE_SIZE = 2) fits one
-        // request/response pair at a time, and TRANSFER_TO_HOST_2D must
-        // complete before SET_SCANOUT per the virtio-gpu spec. The three
-        // round trips are inherent to the protocol command granularity.
+        // Every present transfers the updated pixels and flushes the resource.
+        // SET_SCANOUT is needed only when the active resource or scanout
+        // rectangle changes. These commands remain synchronous, and transfer
+        // must complete before a new scanout binding is installed.
         let rect = Rect {
             x: rect.x,
             y: rect.y,
             width: rect.width,
             height: rect.height,
         };
-        self.transfer_to_host_2d(rect, 0, resource_id)?;
-        self.set_scanout(rect, SCANOUT_ID, resource_id)?;
-        self.resource_flush(rect, resource_id)
+        let result = (|| {
+            self.transfer_to_host_2d(rect, 0, resource_id)?;
+            if self.active_scanout.needs_set_scanout(resource_id, rect) {
+                self.set_scanout(rect, SCANOUT_ID, resource_id)?;
+                self.active_scanout.publish(resource_id, rect);
+            }
+            self.resource_flush(rect, resource_id)
+        })();
+        if result.is_err() {
+            self.active_scanout.clear();
+        }
+        result
     }
 
     fn request<Req: IntoBytes + Immutable, Rsp: FromBytes>(
@@ -412,7 +454,9 @@ impl CtrlHeader {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
+#[derive(
+    Debug, Copy, Clone, Default, Eq, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq,
+)]
 struct Rect {
     x: u32,
     y: u32,
@@ -462,7 +506,7 @@ struct ResourceAttachBacking {
 }
 
 #[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct ResourceDetachBacking {
     header: CtrlHeader,
     resource_id: u32,
@@ -470,7 +514,7 @@ struct ResourceDetachBacking {
 }
 
 #[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct ResourceUnref {
     header: CtrlHeader,
     resource_id: u32,
@@ -478,7 +522,7 @@ struct ResourceUnref {
 }
 
 #[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct SetScanout {
     header: CtrlHeader,
     rect: Rect,
@@ -487,7 +531,7 @@ struct SetScanout {
 }
 
 #[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct TransferToHost2D {
     header: CtrlHeader,
     rect: Rect,
@@ -497,10 +541,12 @@ struct TransferToHost2D {
 }
 
 #[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
+#[derive(Debug, FromBytes, Immutable, IntoBytes, KnownLayout)]
 struct ResourceFlush {
     header: CtrlHeader,
     rect: Rect,
     resource_id: u32,
     _padding: u32,
 }
+
+unittest::path_mod_test!(gpu_unittest, "../ut-tests/gpu_unittest.rs");

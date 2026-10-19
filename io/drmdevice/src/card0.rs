@@ -479,14 +479,16 @@ pub struct DrmCard {
     presented_resource: AtomicU32,
     /// Resources whose scanout state is unknown.
     ///
-    /// `present_scanout_resource()` issues `TRANSFER_TO_HOST_2D`, `SET_SCANOUT`
-    /// and `RESOURCE_FLUSH`; when one of them fails there is no way to tell how far
-    /// the host got, so the new resource joins this set and the previous scanout
-    /// target is still in `presented_resource`; both are held back from
-    /// retirement.  A set rather than a slot, because several failed presents can
-    /// pile up before one succeeds.  The next successful present settles all of
-    /// them at once: this driver has a single scanout slot (`SET_SCANOUT` replaces
-    /// the target), so nothing in the set can still be on screen afterwards.
+    /// `present_scanout_resource()` issues `TRANSFER_TO_HOST_2D`, conditionally
+    /// issues `SET_SCANOUT` when the active resource or rectangle changes, and
+    /// issues `RESOURCE_FLUSH`. When one of the commands fails, there is no way
+    /// to tell how far the host got, so the new resource joins this set and the
+    /// previous scanout target is still in `presented_resource`; both are held
+    /// back from retirement. A set rather than a slot, because several failed
+    /// presents can pile up before one succeeds. The next successful present
+    /// settles all of them at once: this driver has a single scanout slot
+    /// (`SET_SCANOUT` replaces the target), so nothing in the set can still be on
+    /// screen afterwards.
     unsettled: Mutex<BTreeSet<u32>>,
     /// Dumb buffers whose handle was closed while a registered framebuffer
     /// still named their scanout resource.
