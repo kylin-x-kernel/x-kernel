@@ -2,9 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Route rules, attributes, and table lookup.
+//! Route rules, configuration validation, address-derived routes, and lookup.
 
 use alloc::vec::Vec;
+
+use kerrno::LinuxError;
 
 pub(crate) use crate::netlink::{
     RT_SCOPE_HOST as ROUTE_SCOPE_HOST, RT_SCOPE_LINK as ROUTE_SCOPE_LINK,
@@ -13,8 +15,9 @@ pub(crate) use crate::netlink::{
     RTPROT_KERNEL as ROUTE_PROTOCOL_KERNEL,
 };
 use crate::{
-    device::NetDeviceId,
+    device::{DeviceRegistry, LinkKind, NetDeviceId},
     ip::{IpAddress, IpCidr, Ipv4Cidr},
+    network::interface_address::Ipv4AddrEntry,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +240,121 @@ impl RouteTable {
         self.rules.insert(idx, rule);
     }
 
+    /// Validates a configured route against the current device and address inventory.
+    pub(crate) fn add_configured_rule(
+        &mut self,
+        rule: Rule,
+        devices: &DeviceRegistry,
+        addrs: &[Ipv4AddrEntry],
+    ) -> Result<(), LinuxError> {
+        Self::validate_configured_route(rule, devices, addrs)?;
+        self.add_rule(rule);
+        Ok(())
+    }
+
+    /// Validates the replacement before removing the existing route.
+    pub(crate) fn replace_configured_rule(
+        &mut self,
+        existing: Rule,
+        replacement: Rule,
+        devices: &DeviceRegistry,
+        addrs: &[Ipv4AddrEntry],
+    ) -> Result<(), LinuxError> {
+        Self::validate_configured_route(replacement, devices, addrs)?;
+        self.remove_exact_rule(existing);
+        self.add_rule(replacement);
+        Ok(())
+    }
+
+    fn validate_configured_route(
+        rule: Rule,
+        devices: &DeviceRegistry,
+        addrs: &[Ipv4AddrEntry],
+    ) -> Result<(), LinuxError> {
+        if !rule.is_configured() {
+            return Err(LinuxError::EINVAL);
+        }
+        if rule.table != ROUTE_TABLE_MAIN || rule.route_type != ROUTE_TYPE_UNICAST {
+            return Err(LinuxError::EOPNOTSUPP);
+        }
+        if !matches!(rule.filter, IpCidr::Ipv4(_)) {
+            return Err(LinuxError::EAFNOSUPPORT);
+        }
+        if devices.slot(rule.dev).is_none() {
+            return Err(LinuxError::ENODEV);
+        }
+        if let Some(prefsrc) = rule.preferred_source()
+            && !matches!(prefsrc, IpAddress::Ipv4(address) if addrs.iter().any(|entry| entry.addr.address() == address))
+        {
+            return Err(LinuxError::EINVAL);
+        }
+        if let Some(gateway) = rule.via {
+            let IpAddress::Ipv4(gateway) = gateway else {
+                return Err(LinuxError::EAFNOSUPPORT);
+            };
+            if !gateway.is_unicast()
+                || addrs
+                    .iter()
+                    .any(|entry| entry.dev == rule.dev && entry.addr.is_directed_broadcast(gateway))
+            {
+                return Err(LinuxError::EINVAL);
+            }
+            if !addrs
+                .iter()
+                .any(|entry| entry.dev == rule.dev && entry.addr.contains_addr(&gateway.into()))
+            {
+                return Err(LinuxError::ENETUNREACH);
+            }
+        }
+        Ok(())
+    }
+
+    /// Refreshes local and connected routes while retaining configured routes.
+    ///
+    /// Every address must refer to a registered device. Callers retain the
+    /// enclosing Router lock across address mutation and route refresh.
+    pub(crate) fn rebuild_ipv4_address_routes(
+        &mut self,
+        devices: &DeviceRegistry,
+        addrs: &[Ipv4AddrEntry],
+    ) {
+        self.remove_ipv4_address_routes();
+        let loopback_dev = devices
+            .iter()
+            .position(|device| device.link_kind() == LinkKind::Loopback)
+            .map(|slot| devices.id_at(slot));
+        let mut connected = Vec::new();
+        for entry in addrs {
+            if let Some(loopback_dev) = loopback_dev {
+                self.add_rule(Rule::for_local_ipv4_address(
+                    loopback_dev,
+                    entry.dev,
+                    entry.addr,
+                ));
+            }
+
+            let network = entry.addr.network();
+            if entry.addr.prefix_len() == 32
+                || network.address().is_unspecified()
+                || connected.contains(&(entry.dev, network))
+            {
+                continue;
+            }
+            connected.push((entry.dev, network));
+            let device = devices
+                .get_by_id(entry.dev)
+                .expect("address device must be registered");
+            let scope = if device.link_kind() == LinkKind::Loopback {
+                ROUTE_SCOPE_HOST
+            } else {
+                ROUTE_SCOPE_LINK
+            };
+            self.add_rule(Rule::for_connected_ipv4_address(
+                entry.dev, entry.addr, scope,
+            ));
+        }
+    }
+
     pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
         self.rules
             .iter()
@@ -255,7 +373,7 @@ impl RouteTable {
         }
     }
 
-    pub(crate) fn remove_ipv4_address_routes(&mut self) {
+    fn remove_ipv4_address_routes(&mut self) {
         self.rules
             .retain(|rule| matches!(rule.origin, RuleOrigin::Configured));
     }

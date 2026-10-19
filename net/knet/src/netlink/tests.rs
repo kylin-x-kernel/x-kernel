@@ -33,7 +33,8 @@ use crate::{
         LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice, NetDeviceId,
     },
     network::router::Rule,
-    router::{Ipv4AddrEntry, Router},
+    network::interface_address::Ipv4AddrEntry,
+    router::Router,
     service::Service,
     socket::{
         SocketOps,
@@ -206,7 +207,7 @@ fn init_test_state() {
             broadcast: None,
         })
         .unwrap();
-    router.add_rule(Rule::new(
+    router.table.add_rule(Rule::new(
         valid_ipv4_cidr(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
         Some(crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(
             192, 168, 1, 1,

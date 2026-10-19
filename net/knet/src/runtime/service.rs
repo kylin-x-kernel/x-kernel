@@ -799,12 +799,16 @@ impl Service {
             .link_send_snapshot_for_ifindex(ifindex)
     }
 
-    pub(crate) fn ipv4_addr_snapshots(&self) -> Vec<crate::router::Ipv4AddrSnapshot> {
+    pub(crate) fn ipv4_addr_snapshots(
+        &self,
+    ) -> Vec<crate::network::interface_address::Ipv4AddrSnapshot> {
         self.router.lock().ipv4_addr_snapshots()
     }
 
     #[cfg(unittest)]
-    pub(crate) fn ipv4_addr_entries(&self) -> Vec<crate::router::Ipv4AddrEntry> {
+    pub(crate) fn ipv4_addr_entries(
+        &self,
+    ) -> Vec<crate::network::interface_address::Ipv4AddrEntry> {
         self.router.lock().ipv4_addr_entries().to_vec()
     }
 
@@ -817,7 +821,7 @@ impl Service {
 
     pub(crate) fn add_ipv4_addr(
         &self,
-        entry: crate::router::Ipv4AddrEntry,
+        entry: crate::network::interface_address::Ipv4AddrEntry,
         existing_action: ExistingIpv4AddrAction,
     ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
@@ -839,7 +843,7 @@ impl Service {
 
     pub(crate) fn remove_ipv4_addr(
         &self,
-        entry: crate::router::Ipv4AddrEntry,
+        entry: crate::network::interface_address::Ipv4AddrEntry,
     ) -> Result<bool, LinuxError> {
         let mut router = self.router.lock();
         if !router.remove_ipv4_addr(entry) {
@@ -872,7 +876,7 @@ impl Service {
     }
 
     pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
-        self.router.lock().route_snapshot()
+        self.router.lock().table.rules().to_vec()
     }
 
     pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<(), LinuxError> {
@@ -888,7 +892,7 @@ impl Service {
     }
 
     pub(crate) fn remove_route_rule(&self, route: Rule) {
-        self.router.lock().remove_exact_route_rule(route);
+        self.router.lock().table.remove_exact_rule(route);
     }
 
     pub(crate) fn set_ipv4_broadcast(
@@ -1131,8 +1135,7 @@ mod tests {
         device::LoopbackDevice,
         ip::{Ipv4Address, Ipv4Cidr},
         ipv4,
-        network::router::ROUTE_SCOPE_HOST,
-        router::Ipv4AddrEntry,
+        network::{interface_address::Ipv4AddrEntry, router::ROUTE_SCOPE_HOST},
     };
 
     const TEST_POLL_BUDGET: PollBudget = PollBudget {

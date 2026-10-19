@@ -69,8 +69,11 @@ use crate::{
     device::{EthernetDevice, LoopbackDevice},
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     listen_table::ListenTable,
-    network::router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
-    router::{Ipv4AddrEntry, Router},
+    network::{
+        interface_address::Ipv4AddrEntry,
+        router::{ROUTE_SCOPE_HOST, ROUTE_SCOPE_UNIVERSE, Rule},
+    },
+    router::Router,
     service::Service,
     socket_set::SocketSetWrapper,
 };
@@ -142,7 +145,7 @@ pub fn init_network() {
             reason = "CG-021-no-panic-on-reachable-failure: the fixed default-route IPv4 prefix \
                       length 0 is valid"
         )]
-        router.add_rule(Rule::new(
+        router.table.add_rule(Rule::new(
             Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 0).unwrap().into(),
             Some(IpAddress::Ipv4(
                 GATEWAY.parse().expect("Invalid gateway address"),

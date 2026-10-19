@@ -16,11 +16,13 @@ use crate::{
         ARPHRD_ETHER, ARPHRD_LOOPBACK, LINK_FLAG_UP, LinkConfigUpdate, LinkKind, NetDeviceId,
     },
     ip::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
-    network::router::{
-        ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TABLE_MAIN,
-        ROUTE_TYPE_UNICAST, RouteAttrs, Rule,
+    network::{
+        interface_address::Ipv4AddrEntry,
+        router::{
+            ROUTE_PROTOCOL_BOOT, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TABLE_MAIN,
+            ROUTE_TYPE_UNICAST, RouteAttrs, Rule,
+        },
     },
-    router::Ipv4AddrEntry,
 };
 
 static_lock! {
