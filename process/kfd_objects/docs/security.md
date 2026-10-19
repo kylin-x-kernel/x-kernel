@@ -87,7 +87,7 @@ mutex avoids unregister callbacks nesting under that lock.
 
 | ID | Threat / asset | Severity | Trigger | Existing response and residual risk |
 |---|---|---|---|---|
-| T-01 | Counter overflow or lost update corrupts readiness | Medium | Concurrent writes at the counter limit | Atomic conditional updates reject overflow and share readiness limits; constructor accepts raw `u64`, and semaphore reads currently expose pre-update count. |
+| T-01 | Counter overflow or lost update corrupts readiness | Medium | Concurrent writes at the counter limit | Atomic conditional updates reject overflow and share readiness limits; constructor accepts raw `u64`. Semaphore reads return one per decrement; ordinary reads return and consume the full count. |
 | T-02 | Invalid or concurrent timer programming destroys prior state | Medium | Deadline cannot be represented or replacement races read | Mitigate: validate before cancellation and return InvalidInput; programming mutex serializes read/replacement, and old delivery is drained before publishing a new setting. |
 | T-03 | Timer callback retains or accesses freed FD storage | High | Last owner release races a pending/running callback | Eliminate the FD ownership cycle: handler owns only independent data; owned timer Drop drains delivery before data release. Callers must permit delivery progress; there is no fixed teardown latency guarantee. |
 | T-04 | Signal record leaks uninitialized bytes | High | Kernel serializes a pending signal | Explicit fields and zero padding, size assertion and IntoBytes; union storage validity depends on SignalInfo construction. |

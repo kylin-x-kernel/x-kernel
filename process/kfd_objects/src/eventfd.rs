@@ -28,9 +28,9 @@ pub struct EventFd {
 impl EventFd {
     /// Creates a counter object with the supplied initial value and read mode.
     ///
-    /// Semaphore mode decrements by one; the current file read implementation
-    /// returns the pre-update counter in either mode. The syscall adapter
-    /// supplies the ABI-bounded initial value.
+    /// Semaphore reads return one and decrement by one; ordinary reads return
+    /// the entire counter and clear it. The syscall adapter supplies the
+    /// ABI-bounded initial value.
     pub fn new(initval: u64, semaphore: bool) -> Arc<Self> {
         Arc::new(Self {
             count: AtomicU64::new(initval),
@@ -104,7 +104,8 @@ impl EventfdFops {
 
             match result {
                 Ok(count) => {
-                    buf[..size_of::<u64>()].copy_from_slice(&count.to_ne_bytes());
+                    let value = if state.semaphore { 1 } else { count };
+                    buf[..size_of::<u64>()].copy_from_slice(&value.to_ne_bytes());
                     state.poll_tx.wake();
                     Ok(size_of::<u64>())
                 }

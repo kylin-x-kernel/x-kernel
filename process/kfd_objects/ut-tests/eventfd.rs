@@ -254,18 +254,64 @@ fn test_eventfd_write_then_read() {
 #[def_test]
 fn test_eventfd_semaphore_read_keeps_remaining_count() {
     let file = EventFd::new_file(3, true, 0, kcred::initial_cred()).expect("eventfd file opens");
-    let mut dst_buf = [0; size_of::<u64>()];
+    file.set_nonblocking(true);
+    let state = EventFd::from_file(&file).unwrap();
+    let mut bytes = [0; size_of::<u64>()];
     let mut pos = 0;
 
+    for remaining in [2, 1, 0] {
+        assert_eq!(file.read_from(&mut bytes, &mut pos), Ok(size_of::<u64>()));
+        assert_eq!(u64::from_ne_bytes(bytes), 1);
+        assert_eq!(state.count.load(Ordering::Acquire), remaining);
+        assert_eq!(file.poll().contains(IoEvents::IN), remaining != 0);
+        assert!(file.poll().contains(IoEvents::OUT));
+    }
+    bytes.fill(0xa5);
     assert_eq!(
-        file.read_from(&mut dst_buf, &mut pos).unwrap(),
-        size_of::<u64>()
+        file.read_from(&mut bytes, &mut pos),
+        Err(KError::WouldBlock)
     );
-    assert_eq!(u64::from_ne_bytes(dst_buf), 3);
+    assert_eq!(bytes, [0xa5; size_of::<u64>()]);
 
-    let events = file.poll();
-    assert!(events.contains(IoEvents::IN));
-    assert!(events.contains(IoEvents::OUT));
+    assert_eq!(
+        file.write_from(&2u64.to_ne_bytes(), &mut pos),
+        Ok(size_of::<u64>())
+    );
+    for remaining in [1, 0] {
+        assert_eq!(file.read_from(&mut bytes, &mut pos), Ok(size_of::<u64>()));
+        assert_eq!(u64::from_ne_bytes(bytes), 1);
+        assert_eq!(state.count.load(Ordering::Acquire), remaining);
+    }
+    assert_eq!(
+        file.read_from(&mut bytes, &mut pos),
+        Err(KError::WouldBlock)
+    );
+}
+
+#[def_test]
+fn eventfd_counter_mode_returns_accumulated_value_and_drains() {
+    let file = EventFd::new_file(3, false, 0, kcred::initial_cred()).expect("eventfd file opens");
+    file.set_nonblocking(true);
+    let mut bytes = [0; size_of::<u64>()];
+    let mut pos = 0;
+
+    assert_eq!(file.read_from(&mut bytes, &mut pos), Ok(size_of::<u64>()));
+    assert_eq!(u64::from_ne_bytes(bytes), 3);
+    assert!(!file.poll().contains(IoEvents::IN));
+    assert_eq!(
+        file.read_from(&mut bytes, &mut pos),
+        Err(KError::WouldBlock)
+    );
+    assert_eq!(
+        file.write_from(&9u64.to_ne_bytes(), &mut pos),
+        Ok(size_of::<u64>())
+    );
+    assert_eq!(file.read_from(&mut bytes, &mut pos), Ok(size_of::<u64>()));
+    assert_eq!(u64::from_ne_bytes(bytes), 9);
+    assert_eq!(
+        file.read_from(&mut bytes, &mut pos),
+        Err(KError::WouldBlock)
+    );
 }
 
 #[def_test]

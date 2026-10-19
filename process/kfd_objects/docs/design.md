@@ -99,10 +99,11 @@ Business deadlines retain their full clock representation; only core scheduling
 is capped at its u64-nanosecond runtime horizon, never truncated to an earlier
 business expiration.
 
-Eventfd read decrements by one in semaphore mode and by the whole counter
-otherwise. The current implementation copies the pre-update counter to the
-caller in both modes; it does not claim Linux's semaphore-mode return value of
-one. Write rejects `u64::MAX` and only commits when the new counter is below it.
+Eventfd reads return one and decrement the counter by one in semaphore mode.
+Ordinary reads return the entire pre-update counter and reset it to zero.
+A successful transfer is one native-endian `u64` in either mode; nonblocking
+reads of an empty counter return WouldBlock without copying data. Write rejects
+`u64::MAX` and only commits when the new counter is below it.
 
 Epoll `TriggerMode` has Level, Edge and OneShot `{ fired }` states. OneShot
 consumption sets `fired=true`; `modify` rearms by replacing configuration on the
@@ -161,5 +162,5 @@ Current timer clock selection treats MONOTONIC/BOOTTIME as monotonic and other
 IDs as realtime; the adapter must restrict accepted clock IDs. Signalfd mask
 filtering (including uncatchable signals) belongs to its syscall adapter. This
 backend does not promise complete Linux epoll graph/cycle validation, timer
-clock-change cancellation or semaphore-mode return compatibility. Timerfd
+clock-change cancellation. Timerfd
 teardown applies to final object ownership, not every descriptor close.
