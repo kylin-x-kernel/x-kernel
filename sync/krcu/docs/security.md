@@ -174,6 +174,39 @@ it cannot overlap a protected borrow or an in-progress replacement.
 
 ## Service Startup And Failure Handling
 
+Private callback admission checks NMI before ordinary guards, then watching and
+readiness before touching the supplied node. Rejected submissions retain caller
+ownership and do not request progress. Successful submission transfers ownership
+before notification; a callback may already have executed when the submitter
+returns. Callers must therefore never inspect the transferred node afterward.
+The synchronous marker releases its extra raw Arc reference on rejection before
+reporting a violated prepared-service invariant. This boundary remains test-only;
+it does not yet admit arbitrary callbacks or certify their destructors.
+
+The private prepared handle consumes a unique node owner rather than exposing
+repeatable raw submission. Its cancellation function is a separate unsafe
+contract: it must be safe without a GP and must not reclaim objects still used
+by protected readers. A rejected submission returns the handle unchanged, so
+the caller can retry; no implicit cancellation runs on rejection. The handle
+is Send only because construction certifies transferable storage and cleanup;
+it is not Sync and does not permit shared submission. Accepted submission
+suppresses Drop before publishing the node, including when invocation frees
+the enclosing allocation before submission returns. Neither path may access
+the node after its ownership is consumed.
+
+Admission and lifetime checks are independent:
+
+| Submission condition | Ownership result |
+| --- | --- |
+| Watched task, hardirq or softirq on an initialized participant | Success consumes the handle; invocation can finish before submission returns. |
+| NMI or unwatched execution | `InvalidInput`, with the unchanged handle returned and no cancellation or invocation. |
+| Service not ready or CPU outside the fixed participant set | `BadState`, without queue transfer. |
+
+Restoring an admissible context permits retry of the returned handle, but does
+not relax withdrawal or callback/destructor requirements. Rejection is neither
+a GP nor evidence that protected readers have stopped using the object.
+CPU participation checks do not implement CPU hotplug or teardown.
+
 `init_service` requires all discovered CPU services to be initialized before
 creating the GP task. Static state retains its nodes and the one-shot driver
 claim; duplicate startup cannot replace an active controller. Serialized startup
@@ -199,6 +232,7 @@ arithmetic validates representation, not progress at the host clock horizon.
 | `src/context.rs`: cleanup and switch reporting | Safe static methods consume immediate-use core contexts whose unsafe construction certifies the boundary; provider core calls retain exclusion, enrollment-before-observation and no callback/wakeup under scheduler locks. |
 | `src/context.rs`: user entry/exit | Same-CPU IRQ-masked pair, no protected borrow or scheduling across the unwatched window. |
 | `src/service.rs`: state construction, observation and invocation | One permanent controller; all admitted CPU services initialized; fresh ordered observations; eligible callbacks outside bookkeeping locks. |
+| `src/callback.rs`: preparation, submission and cancellation | Unique stable node with enclosing provenance; transferable resources; cancellation safe without a GP; accepted transfer suppresses cancellation before publication. |
 | `src/read.rs`, `src/synchronize.rs`, `src/owned.rs` | Test-only admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
 
 ## Failure Modes And Audit Limits

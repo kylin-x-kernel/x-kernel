@@ -5,14 +5,17 @@
 //! Task-bound synchronous waits; callback completion never destroys retired data.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{Ordering, fence};
+use core::{
+    ptr::NonNull,
+    sync::atomic::{Ordering, fence},
+};
 
 use kerrno::{KError, KResult};
 use kpoll::{Completion, PollRegisterError, PollRegistration};
 use krcu_core::CallbackNode;
 use ktask::future::PreparedTaskWait;
 
-use super::{GracePeriodTask, SERVICE};
+use super::{SERVICE, callback::PreparedCallback};
 
 #[repr(C)]
 struct GracePeriodCompletion {
@@ -25,7 +28,7 @@ const _: () = assert!(core::mem::offset_of!(GracePeriodCompletion, node) == 0);
 
 /// Prepared before withdrawal so no recoverable setup failure can abandon it.
 pub(super) struct PreparedGracePeriodWait {
-    service: &'static GracePeriodTask,
+    callback: PreparedCallback,
     completion: Arc<GracePeriodCompletion>,
     wait: PreparedTaskWait,
     _registration: PollRegistration,
@@ -49,8 +52,18 @@ impl PreparedGracePeriodWait {
                 PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
                 PollRegisterError::InvalidState => KError::InvalidInput,
             })?;
+        let record = Arc::into_raw(completion.clone());
+        // SAFETY: raw field projection preserves the original Arc provenance.
+        let node = unsafe { &raw const (*record).node }.cast_mut();
+        // SAFETY: Arc::into_raw is non-null and node is its initialized field.
+        let node = unsafe { NonNull::new_unchecked(node) };
+        // SAFETY: the independent raw Arc keeps this unqueued marker fixed.
+        // Cancellation releases only that reference, never retired user data;
+        // callback and cancellation both recover the same zero-offset Arc.
+        // Completion resources permit cross-CPU ownership and nonblocking drop.
+        let callback = unsafe { PreparedCallback::new(service, node, cancel_grace_period) };
         Ok(Self {
-            service,
+            callback,
             completion,
             wait,
             _registration: registration,
@@ -58,28 +71,27 @@ impl PreparedGracePeriodWait {
     }
 
     pub(super) fn submit_and_wait(mut self) {
-        let record = Arc::into_raw(self.completion.clone());
-        // SAFETY: projection retains the original Arc allocation provenance;
-        // only the node's interior-mutable linkage is modified by the queue.
-        let node = unsafe { &raw const (*record).node }.cast_mut();
-        {
-            let _pin = kspin::NoPreempt::new();
-            let cpu = khal::percpu::this_cpu_id().as_usize();
-            // SAFETY: preparation verified the permanent boot service. Every
-            // executing CPU belongs to its fixed participant set. This fresh
-            // node has one queue owner; the raw Arc remains owned by its
-            // nonblocking callback, independently of the waiter's Arc.
-            let accepted = unsafe { self.service.callbacks.submit(cpu, node) };
-            // Startup publishes the waker only after claiming the permanent
-            // driver, and every running CPU belongs to its fixed participant
-            // set. Rejection breaks that boot invariant and is fatal: an owning
-            // replacement may already have withdrawn its old allocation, so
-            // this is not a recoverable setup error after publication changed.
-            assert!(accepted, "prepared RCU wait requires a participating CPU");
-        }
-        // Raising the notification may enter the scheduler without IPIs.
-        // Leave queue locks and the submission pin before requesting progress.
-        self.service.request_pass();
+        // SAFETY: preparation verified the permanent boot service. Every
+        // executing CPU belongs to its fixed participant set. This fresh node
+        // has one queue owner; its raw Arc survives through the nonblocking
+        // callback, independently of the waiter's Arc. No RCU/scheduler lock
+        // is held by this sleepable synchronous path.
+        let submitted = unsafe { self.callback.submit() };
+        let is_accepted = match submitted {
+            Ok(()) => true,
+            Err((_, callback)) => {
+                drop(callback);
+                false
+            }
+        };
+        // Startup publishes the waker only after claiming the permanent
+        // driver, and every running CPU belongs to its fixed participant
+        // set. Rejection violates either that boot invariant or the caller's
+        // watched task-context requirement (NMI/unwatched entry is rejected).
+        // Either is fatal: an owning replacement may already have withdrawn
+        // its old allocation, so this is not a recoverable setup error after
+        // publication changed.
+        assert!(is_accepted, "prepared RCU wait requires valid admission");
         while !self.completion.completion.try_wait() {
             self.wait.park();
         }
@@ -87,6 +99,16 @@ impl PreparedGracePeriodWait {
         // when completion preceded park or the waiter resumed on another CPU.
         fence(Ordering::SeqCst);
     }
+}
+
+/// # Safety
+/// `node` is the provenance-preserving zero-offset projection of the independent
+/// raw Arc created in prepare. It has not been accepted or invoked. Consume
+/// exactly that strong reference; this marker owns no retired protected data.
+unsafe fn cancel_grace_period(node: *mut CallbackNode) {
+    // SAFETY: preparation transferred this exact Arc reference to the unique
+    // unsubmitted handle; no callback can concurrently consume it.
+    drop(unsafe { Arc::from_raw(node.cast::<GracePeriodCompletion>()) });
 }
 
 /// # Safety

@@ -2860,6 +2860,7 @@ dependencies = [
 name = "krcu"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc",
  "karch",
  "kbuild_config",
  "kcpu_id_map",

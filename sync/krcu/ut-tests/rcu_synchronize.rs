@@ -60,7 +60,8 @@ fn completion_before_park_retains_its_result() {
     unsafe { complete_grace_period(node) };
     assert!(prepared.completion.completion.try_wait());
     assert!(!prepared.completion.completion.try_wait());
-    assert_eq!(Arc::strong_count(&prepared.completion), 1);
+    // The unsubmitted handle still retains its independent cancellation owner.
+    assert_eq!(Arc::strong_count(&prepared.completion), 2);
 }
 
 #[def_test]

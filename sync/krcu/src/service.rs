@@ -24,6 +24,10 @@ const PROGRESS_INTERVAL_NS: u64 = 10_000_000;
 const CALLBACK_BUDGET: usize = 32;
 static SERVICE: Once<GracePeriodTask> = Once::new();
 
+#[cfg(unittest)]
+#[path = "callback.rs"]
+mod callback;
+
 // Only controlled consumers can obtain the current-task reader until public
 // read-side admission and the complete context protocol are available.
 #[cfg(unittest)]
@@ -100,6 +104,49 @@ pub unsafe fn init_service() -> KResult<()> {
 }
 
 impl GracePeriodTask {
+    /// Transfers a withdrawn node and requests progress without allocating.
+    ///
+    /// Rejection leaves the node untouched and caller-owned. NMI and unwatched
+    /// entry are rejected before queue access; readiness and CPU participation
+    /// are checked before transfer. This private admission boundary remains
+    /// test-only until the owning callback API is qualified.
+    ///
+    /// # Safety
+    /// On an admissible call, supply the unique, stable node and allocation
+    /// provenance required by `CallbackState::submit`. Its callback and all
+    /// cleanup must be nonblocking, non-unwinding and valid in softirq context.
+    /// Withdraw all publication routes before submission and retain this service
+    /// and callback resources through callback return. Hold no scheduler or RCU
+    /// bookkeeping lock:
+    /// notification without IPIs may wake the softirq daemon. On success do not
+    /// access the transferred node without independent ownership.
+    #[cfg(unittest)]
+    unsafe fn submit_callback(&self, node: *mut krcu_core::CallbackNode) -> KResult<()> {
+        if kirq::context::is_in_nmi() {
+            return Err(KError::InvalidInput);
+        }
+        {
+            let _guard = kspin::NoPreemptIrqSave::new();
+            if !krcu_core::RcuContextIf::current_cpu_watching().is_watching() {
+                return Err(KError::InvalidInput);
+            }
+            if self.waker.get().is_none() {
+                return Err(KError::BadState);
+            }
+            let cpu = khal::percpu::this_cpu_id().as_usize();
+            // SAFETY: the caller retains unique stable storage and supplies a
+            // withdrawn object with softirq-safe cleanup. The guard keeps CPU
+            // selection and queue transfer in one watched, non-NMI interval.
+            if !unsafe { self.callbacks.submit(cpu, node) } {
+                return Err(KError::BadState);
+            }
+        }
+        // Ownership is already transferred; never touch node here. Notification
+        // follows retained queue state and runs outside its lock and our guard.
+        self.request_pass();
+        Ok(())
+    }
+
     /// Returns whether a reschedule notification was successfully requested,
     /// not whether the destination handled it or completed reader cleanup.
     #[cfg(feature = "ipi")]

@@ -30,6 +30,11 @@ fn action_conflict_preserves_control_for_startup_retry() {
         waker: Once::new(),
         has_demand: AtomicBool::new(false),
     };
+    // SAFETY: no startup waker exists. Admission must reject before inspecting
+    // the deliberately absent node or claiming any callback ownership.
+    let rejected = unsafe { service.submit_callback(core::ptr::null_mut()) };
+    assert_eq!(rejected, Err(KError::BadState));
+    assert!(!service.has_demand.load(Ordering::Acquire));
     assert!(matches!(
         service.claim_driver_with_action(|| false),
         Err(KError::ResourceBusy)
@@ -64,6 +69,35 @@ fn gp_boot_prepares_notification_and_claims_control_once() {
     // exercises rejection before it creates another task or resets any state.
     let result = unsafe { init_service() };
     assert_eq!(result, Err(KError::BadState));
+}
+
+#[def_test(serial)]
+fn callback_admission_rejects_nmi_before_accessing_node() {
+    let service = SERVICE.get().unwrap();
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let reject_fn = || {
+        // SAFETY: NMI admission rejects before examining the absent node.
+        unsafe { service.submit_callback(core::ptr::null_mut()) }
+    };
+    // SAFETY: this controlled NMI is strictly nested under local exclusion.
+    // Its closure only exercises rejection and never acquires a queue lock.
+    let result = unsafe { kirq::context::test_support::with_nmi_context(reject_fn) };
+    assert_eq!(result, Err(KError::InvalidInput));
+}
+
+#[def_test(serial)]
+fn callback_admission_rejects_unwatched_before_accessing_node() {
+    let service = SERVICE.get().unwrap();
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let watching = krcu_core::RcuContextIf::current_cpu_watching();
+    // SAFETY: this CPU is pinned with IRQs excluded and no active read scope.
+    // Only the admission rejection runs before the paired restoration below.
+    unsafe { watching.enter_quiescent() };
+    // SAFETY: unwatched admission rejects without examining the absent node.
+    let result = unsafe { service.submit_callback(core::ptr::null_mut()) };
+    // SAFETY: same CPU/exclusion, no intervening scheduling or protected access.
+    unsafe { watching.exit_quiescent() };
+    assert_eq!(result, Err(KError::InvalidInput));
 }
 
 #[def_test(serial)]

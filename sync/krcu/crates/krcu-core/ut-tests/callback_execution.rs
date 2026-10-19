@@ -7,6 +7,10 @@ use unittest::{assert, assert_eq};
 
 use super::*;
 
+#[cfg(test)]
+#[path = "allocation.rs"]
+mod allocation;
+
 fn execute(queue: &CallbackQueue, budget: usize) -> usize {
     // SAFETY: deterministic fixtures retire no published data and hold no RCU
     // locks. Their owned callbacks use nonblocking operations and real queue/GP
@@ -165,6 +169,100 @@ fn finite_repost_requires_a_new_period_and_is_not_chased_by_current_batch() {
     assert_eq!(execute(&queues[0], 8), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(queues[0].outstanding(), 0);
+}
+
+#[repr(C)]
+struct SelfReposting {
+    node: CallbackNode,
+    queues: Arc<[CallbackQueue; 1]>,
+    calls: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+    remaining: usize,
+}
+
+impl SelfReposting {
+    fn enqueue(self: Box<Self>) {
+        let queues = self.queues.clone();
+        let object = Box::into_raw(self);
+        // SAFETY: raw field projection preserves the original Box provenance.
+        let node = unsafe { &raw mut (*object).node };
+        // SAFETY: this fixture owns the unqueued/detached node exclusively;
+        // its original allocation survives until the next invocation.
+        let node = unsafe { CallbackNode::from_raw(node) };
+        // SAFETY: unpublished fixture, no locks held. The test drives every GP
+        // and drains all reposts before releasing its coordinator and queues.
+        unsafe { queues[0].submit(node) };
+    }
+
+    /// # Safety
+    /// `node` is the unique detached projection transferred by enqueue. Recover
+    /// its original Box once; requeue or destroy it without subsequent access.
+    unsafe fn invoke(node: *mut CallbackNode) {
+        // SAFETY: enqueue preserves allocation provenance; the actual field
+        // offset restores the original Box base without a layout assumption.
+        let object = unsafe { node.byte_sub(core::mem::offset_of!(Self, node)) }.cast::<Self>();
+        // SAFETY: the detached callback exclusively owns the original allocation.
+        let mut object = unsafe { Box::from_raw(object) };
+        object.calls.fetch_add(1, Ordering::Relaxed);
+        if object.remaining != 0 {
+            object.remaining -= 1;
+            object.enqueue();
+        }
+    }
+}
+
+impl Drop for SelfReposting {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg_attr(test, test)]
+#[cfg_attr(not(test), unittest::def_test)]
+fn same_node_repost_cannot_reuse_completed_period() {
+    let nodes = [ReaderNode::new()];
+    let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
+    let queues = Arc::new([CallbackQueue::new()]);
+    // SAFETY: fresh isolated coordinator/queues, controlled only by this driver.
+    // All three invocations are drained before storage is released.
+    let mut driver = unsafe { CallbackDriver::new(&gp, &queues) };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let prepared = Box::new(SelfReposting {
+        node: CallbackNode::new(SelfReposting::invoke),
+        queues: queues.clone(),
+        calls: calls.clone(),
+        drops: drops.clone(),
+        remaining: 2,
+    });
+
+    let run_fn = || {
+        prepared.enqueue();
+        for period in 1..=3 {
+            assert_eq!(execute(&queues[0], 8), 0);
+            assert_eq!(driver.drive(), Some(period));
+            // Merely starting the successor GP cannot make the repost eligible.
+            assert_eq!(execute(&queues[0], 8), 0);
+            assert!(observe(&gp, period));
+            assert_eq!(driver.drive(), None);
+            assert_eq!(execute(&queues[0], 8), 1);
+            assert_eq!(calls.load(Ordering::Relaxed), usize::from(period));
+            let has_repost = period < 3;
+            assert_eq!(queues[0].outstanding(), usize::from(has_repost));
+            assert_eq!(drops.load(Ordering::Relaxed), usize::from(!has_repost));
+        }
+        #[cfg(not(test))]
+        {
+            unittest::TestResult::Ok
+        }
+    };
+    // Host allocation rejection starts only after all fixture storage exists.
+    // Kernel builds retain the same deterministic protocol checks without
+    // changing the allocator used by unrelated kernel tasks.
+    #[cfg(test)]
+    allocation::without_allocations(run_fn);
+    #[cfg(not(test))]
+    assert_eq!(run_fn(), unittest::TestResult::Ok);
 }
 
 #[cfg_attr(test, test)]

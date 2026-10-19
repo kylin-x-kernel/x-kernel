@@ -18,6 +18,7 @@ rendezvous; POSIX brackets user transfer with this crate's callbacks.
   bounded Rcu softirq callback execution.
 - `src/read.rs`, `src/synchronize.rs`, `src/owned.rs`: private
   `cfg(unittest)` scope policies, synchronous wait and owning consumer.
+- `src/callback.rs`: private one-shot ownership of prepared callback nodes.
 - `ut-tests/`: controlled host integration fixtures.
 - `crates/krcu-core/`: reusable algorithms and the static integration contract.
 
@@ -267,7 +268,70 @@ not boot-service notification, public container admission or weak-memory proof.
 
 ## Progress And Callback Execution
 
+The private `submit_callback` boundary pairs queue transfer with retained
+progress notification. It rejects NMI before taking any ordinary guard, and
+checks watching and service readiness under local IRQ/preemption exclusion.
+CPU selection and transfer share that exclusion; rejection leaves storage with
+the caller. Notification follows successful transfer outside queue locks and
+the local guard. Synchronous wait markers use this boundary. It allocates no
+storage and remains test-only while the owning asynchronous API is qualified.
+
+`PreparedCallback` holds a stable node pointer, the permanent service and an
+unsubmitted cancellation function. It does not allocate or impose a payload
+layout. Construction adopts the unique submission right; consuming submission
+suppresses cancellation before queue transfer and returns the same handle on
+rejection. On success only the queued callback owns invocation. There is no
+Clone or public raw-pointer access. Its unsafe constructor audits storage
+provenance, cross-CPU ownership and cancellation; unsafe submission separately
+audits withdrawal and nonblocking post-GP execution.
+
+Cancellation releases preparation, not protected data awaiting a GP. The
+synchronous wait embeds its node in its existing Arc allocation and prepares
+an independent raw Arc owner before withdrawal. Abandoning preparation drops
+that reference without completing the wait; accepted invocation completes it
+and drops the same reference. No additional heap wrapper is introduced.
+
+Callback validation separates protocol and carrier checks. An isolated core
+fixture reuses the same embedded node over three explicitly driven periods:
+neither the completed period nor merely starting its successor permits another
+invocation. Live service fixtures submit a preallocated node from a one-shot
+timer hardirq and repost the same allocation from its Rcu softirq callback.
+They check watched/non-sleepable execution, completion and exactly-once final
+destruction. The host core test rejects allocation on its own thread after
+preparing the fixture, through submission, period advancement and all reposts.
+A separate control verifies rejection and restoration; other test threads keep
+normal allocation. This does not inject failure into the kernel notification
+or scheduler path, and none of these fixtures measures latency. Timer delivery
+is an integration prerequisite, bounded by the external QEMU timeout.
+
+Live task, timer-hardirq and softirq-repost fixtures also compare kalloc's
+current-CPU cumulative successful heap-allocation bytes around accepted
+submission, including its notification request. The same IRQ/preemption guard
+spans both samples; remote allocations and local ordinary interrupt work cannot
+contaminate the interval, and frees cannot hide allocations. The observations
+are limited to `cfg(unittest)`. This observation neither counts failed attempts
+nor measures asynchronous IPI/softirq delivery after the guard is released;
+it is not whole-kernel OOM injection or NMI allocation attribution.
+
 Demand is retained independently of wake hints and consumed before each pass.
+Submission transfers its node before publishing demand and notifying, with no
+queue lock held across notification. Fixed IPI transport records an RCU reason
+bit and sends the controller notification; its receiver marks Rcu softirq
+pending, rather than invoking the GP waker inline. Without IPI transport,
+raising softirq may wake ksoftirqd in task context. That wake detaches existing
+poll registrations before invoking their wakers. The GP task's own waker is
+prepared at startup and unblocks its existing scheduler entity. These are
+distinct responsibilities: retained callback queues account for work, while
+notification and scheduler wakeups only request execution.
+
+The live prepared-submission burst fixture excludes local IRQ execution while
+submitting more than two callback budgets to its current CPU, then waits for
+every retained completion. It checks that pending-bit coalescing and budget
+continuation lose or duplicate no callbacks. It does not require one interrupt
+per submission or inject synchronous reentry into the IPI controller. Selecting
+one QEMU CPU does not disable the platform's Cargo `ipi` feature; such a run
+must not be reported as validation of the no-IPI wake branch.
+
 Task/timer callers publish demand before requesting Rcu softirq service. With
 IPIs, a fixed RCU notification marks the vector pending without waking tasks
 inline. The softirq action wakes the GP task when demand is retained and leaves
