@@ -14,6 +14,8 @@ use linux_raw_sys::general::{
 };
 use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
+use crate::cpuset::NativeCpuSet;
+
 const MAX_REALTIME_PRIORITY: i32 = 99;
 
 #[repr(C)]
@@ -31,18 +33,20 @@ pub(crate) fn sys_sched_yield() -> KResult<isize> {
 /// Returns the CPU affinity mask for `pid` (0 = caller; otherwise tid/tgid).
 pub(crate) fn sys_sched_getaffinity(
     pid: i32,
-    cpusetsize: usize,
+    cpusetsize: u32,
     user_mask: UserPtr<u8>,
 ) -> KResult<isize> {
-    if cpusetsize * 8 < kbuild_config::NR_CPUS {
+    // Validate the raw ABI length before PID lookup and user access.
+    if (cpusetsize as usize) < NativeCpuSet::BYTE_LEN
+        || !(cpusetsize as usize).is_multiple_of(NativeCpuSet::WORD_BYTES)
+    {
         return Err(KError::InvalidInput);
     }
 
     let task = affinity_target(pid)?;
-    let mask = task.cpumask();
-    let mask_bytes = mask.as_bytes();
-    user_mask.write_vm_slice(mask_bytes)?;
-    Ok(mask_bytes.len() as _)
+    let bytes = NativeCpuSet::from(&task.cpumask()).to_ne_bytes();
+    user_mask.write_vm_slice(&bytes)?;
+    Ok(bytes.len() as isize)
 }
 
 /// Updates the CPU affinity mask for `pid` (0 = caller; otherwise tid/tgid).
@@ -601,6 +605,73 @@ mod scheduler_query_tests {
             sys_sched_getparam(i32::MAX, UserPtr::default()),
             Err(KError::NoSuchProcess)
         );
+    }
+
+    fn getaffinity_raw(pid: i32, size_register: usize, pointer: usize) -> isize {
+        let mut context = khal::uspace::UserContext::new(0, 0x8000usize.into(), 0);
+        context.set_sysno(linux_sysno::Sysno::sched_getaffinity.id() as usize);
+        context.set_arg0(pid as usize);
+        context.set_arg1(size_register);
+        context.set_arg2(pointer);
+        core::assert_eq!(
+            crate::handle_syscall(&mut context),
+            kprocess::UserThreadRuntimeAction::Continue
+        );
+        context.retval() as isize
+    }
+
+    #[def_test(user, serial)]
+    fn scheduler_getaffinity_obeys_native_word_abi() {
+        let mut output = TestUserValue::from_value([0xa5u8; 24]).unwrap();
+        let pointer = output.as_user_ptr().addr() + 8;
+        for pid in [0, i32::MAX] {
+            for size in [0, 1, 7, 9, 15] {
+                assert_eq!(getaffinity_raw(pid, size, pointer), -22);
+                assert_eq!(output.read(), [0xa5; 24]);
+            }
+        }
+        assert_eq!(getaffinity_raw(i32::MAX, 1, 0), -22);
+        assert_eq!(getaffinity_raw(i32::MAX, 8, 0), -3);
+        assert_eq!(getaffinity_raw(0, 8, 0), -14);
+        let mut expected = 0u64;
+        for cpu in 0..kbuild_config::NR_CPUS {
+            if current().cpumask().get(cpu) {
+                expected |= 1u64 << cpu;
+            }
+        }
+        let expected_bytes = expected.to_ne_bytes();
+        // Length alignment applies to len, not to the user buffer address.
+        for offset in [1, 8] {
+            let pointer = output.as_user_ptr().addr() + offset;
+            for size in [8, 16, (u32::MAX as usize) & !7] {
+                output.write([0xa5; 24]);
+                assert_eq!(getaffinity_raw(0, size, pointer), 8);
+                let bytes = output.read();
+                assert_eq!(&bytes[..offset], &[0xa5; 24][..offset]);
+                assert_eq!(&bytes[offset..offset + 8], expected_bytes.as_slice());
+                assert_eq!(&bytes[offset + 8..], &[0xa5; 24][offset + 8..]);
+            }
+        }
+    }
+
+    #[def_test(user, serial)]
+    fn scheduler_getaffinity_truncates_len_to_u32_at_dispatch() {
+        let mut output = TestUserValue::from_value([0xa5u8; 24]).unwrap();
+        let pointer = output.as_user_ptr().addr() + 8;
+        for raw in [1usize << 61, usize::MAX, (1usize << 32) | 1] {
+            assert_eq!(getaffinity_raw(0, raw, pointer), -22);
+            assert_eq!(output.read(), [0xa5; 24]);
+        }
+        for raw in [(1usize << 32) | 8, (1usize << 61) | 8] {
+            output.write([0xa5; 24]);
+            assert_eq!(getaffinity_raw(0, raw, pointer), 8);
+            let bytes = output.read();
+            assert_eq!(&bytes[..8], &[0xa5; 8]);
+            assert_eq!(&bytes[16..], &[0xa5; 8]);
+            for byte in &bytes[9..16] {
+                assert_eq!(*byte, 0);
+            }
+        }
     }
 
     #[def_test(user, serial)]

@@ -514,7 +514,7 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg3().into(),
         ),
         Sysno::sched_getaffinity => {
-            sys_sched_getaffinity(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into())
+            sys_sched_getaffinity(uctx.arg0() as _, uctx.arg1() as u32, uctx.arg2().into())
         }
         Sysno::sched_setaffinity => {
             sys_sched_setaffinity(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2().into())

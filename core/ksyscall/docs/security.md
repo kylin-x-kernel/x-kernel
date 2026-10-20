@@ -293,3 +293,40 @@ delivery. Each starts in a fresh process and checks owner lookup before and
 after the actual failed syscall. Assertion closures are followed by cleanup,
 so an expected failure against the old implementation also removes its leaked
 test timer before returning.
+
+
+### sched_getaffinity native-word ABI regression
+
+The raw syscall decodes `len` as Linux's 32-bit `unsigned int`, validates its
+native `unsigned long` alignment and minimum mask size before PID lookup,
+and encodes CPU bits as zero-initialized native words. On the supported 64-bit
+platforms with NR_CPUS <= 8, it writes and returns 8 bytes; the internal compact
+KCpuMask representation is not the userspace ABI. A larger valid caller buffer
+is not filled beyond those 8 bytes. User-buffer addresses may be unaligned.
+
+The user/serial regressions traverse `handle_syscall` with actual argument
+registers. They reject lengths 0, 1, 7, 9 and 15 without modifying output,
+check EINVAL before ESRCH before EFAULT, and verify native-endian output,
+zero padding and surrounding sentinels. High-register-bit cases prove dispatch
+truncates len to u32: `1 << 61` and `usize::MAX` are invalid, while
+`(1 << 32) | 8` and `(1 << 61) | 8` act like length 8. These are raw-syscall
+return values; libc's sched_getaffinity wrapper returns zero on success.
+See [Linux v6.18 scheduler syscalls](https://github.com/torvalds/linux/blob/v6.18/kernel/sched/syscalls.c).
+This boundary fix does not establish a cause for earlier Chromium failures.
+
+
+### Shared native CPU-set representation
+
+The private `cpuset::NativeCpuSet` owns unsigned-long word count, byte length,
+native-endian encoding, and conversion to/from the compact `KCpuMask`.
+`sched_getaffinity` validates length against this type before target lookup,
+then copies the type's zero-padded output. Register-width decoding and error
+ordering remain in the syscall adapter. Conversion tests cover empty, sparse,
+alternating and full sets plus independently assembled native-word bytes.
+
+This change migrates only `sched_getaffinity`. As requested in review,
+`sched_setaffinity` and `riscv_hwprobe` retain their existing input-length policy
+and implementation; their later migration must add a byte-decoding entry to
+the shared type, keeping byte-count acceptance in each syscall. This change
+does not claim runtime coverage for configurations beyond the current
+NR_CPUS range or for a new architecture.
