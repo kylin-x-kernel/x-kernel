@@ -132,7 +132,7 @@ Linux 对齐、且不抬回 ms 尾的修法：
 否则找另一颗 idle CPU。不要回到「始终粘 home」——那会让一次 overflow 锁死拓扑。
 曾经 sticky + home 忙 → idle 把 RPS 从 ~450 打到 ~325；SIS 下被挤走的任务下次
 还能再找 idle。`wakeup_last_cpu` / `wakeup_idle_sibling` / `wakeup_fallback`
-区分三种结局。
+区分 Fair 的三种结局。RT 离开 home 记 `wakeup_rt_rank`，不混进 `wakeup_fallback`。
 
 Spawn 对齐 Linux idle-first，再比 `nr_home`。即将 idle 时 idle-pull：只从
 `nr_running >= 2` 的核偷 Ready && `!on_cpu` 的 waiter，只锁 src，经

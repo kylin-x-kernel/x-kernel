@@ -31,8 +31,9 @@ use crate::KtaskRef;
 
 /// Selects the run queue for spawn / first publish / affinity migrate-in.
 ///
-/// Uniprocessor: the only queue. SMP: Linux `find_idlest_cpu` ranking
-/// (idle-first, then `nr_home`, then the creating CPU).
+/// Uniprocessor: the only queue. SMP Fair: Linux `find_idlest_cpu`
+/// (idle-first, then `nr_home`, then the creating CPU). SMP RT:
+/// `find_lowest_rq` against `rt_preempt_rank`.
 #[inline]
 pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -47,8 +48,13 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
     #[cfg(feature = "smp")]
     {
-        // Spawn / migrate-in: find_idlest (not wake select_idle_sibling).
-        let index = select_run_queue_index(&task.cpumask(), true);
+        // Fair stays on find_idlest. RT uses find_lowest_rq. Production tasks
+        // stay Fair until sched_* calls Scheduler::set_attr.
+        let index = if task.sched_class() == ksched::SchedClass::Rt {
+            select_rt_cpu(task, this_cpu_id().as_usize(), &task.cpumask())
+        } else {
+            select_run_queue_index(&task.cpumask(), true)
+        };
         KRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -62,11 +68,20 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WakePlacement {
     /// `prev_cpu` was idle, or no idle CPU existed so Linux keeps prev.
+    /// RT also uses this when preempt-rank stays on home.
     PrevCpu,
     /// Home was busy; picked another `nr_running == 0` CPU.
     IdleSibling,
     /// Home not in `cpumask` and no idle CPU; spawn `find_idlest_cpu`.
+    ///
+    /// Fair only. An RT move off home is [`Self::RtRank`].
     Fallback,
+    /// RT preempt-rank chose a CPU other than home.
+    ///
+    /// Home may still be allowed. This is the normal RT wake when home's
+    /// runner is not preemptable, and also the pick when home is outside
+    /// the mask. It is not the Fair `find_idlest_cpu` fallback.
+    RtRank,
 }
 
 /// Selects a run queue for a task becoming runnable from a wakeup.
@@ -96,37 +111,13 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
                 WakePlacement::PrevCpu => sched_stat_inc(&stats.wakeup_last_cpu),
                 WakePlacement::IdleSibling => sched_stat_inc(&stats.wakeup_idle_sibling),
                 WakePlacement::Fallback => sched_stat_inc(&stats.wakeup_fallback),
+                WakePlacement::RtRank => sched_stat_inc(&stats.wakeup_rt_rank),
             }
         }
         #[cfg(not(feature = "sched_stat"))]
         let _ = place;
         KRunQueueRef {
             inner: get_run_queue(index),
-            state: irq_state,
-            _phantom: core::marker::PhantomData,
-        }
-    }
-}
-
-/// Returns the run queue that already owns `task` (`task.cpu_id()`).
-///
-/// This is a lookup, not a placement decision.
-#[inline]
-pub(crate) fn task_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
-    let irq_state = G::acquire();
-    #[cfg(not(feature = "smp"))]
-    {
-        let _ = task;
-        KRunQueueRef {
-            inner: current_run_queue_ref(),
-            state: irq_state,
-            _phantom: core::marker::PhantomData,
-        }
-    }
-    #[cfg(feature = "smp")]
-    {
-        KRunQueueRef {
-            inner: get_run_queue(task.cpu_id().as_usize()),
             state: irq_state,
             _phantom: core::marker::PhantomData,
         }
@@ -300,6 +291,9 @@ fn is_runqueue_idle(idx: usize) -> bool {
 #[cfg(feature = "smp")]
 #[inline]
 pub(super) fn wake_affinity_select(task: &KtaskRef) -> (usize, WakePlacement) {
+    if task.sched_class() == ksched::SchedClass::Rt {
+        return wake_rt(task);
+    }
     let cpumask = task.cpumask();
     let home = task.cpu_id().as_usize();
     let is_home_allowed = cpumask.get(home);
@@ -321,4 +315,104 @@ pub(super) fn wake_affinity_select(task: &KtaskRef) -> (usize, WakePlacement) {
             WakePlacement::Fallback,
         )
     }
+}
+
+/// Linux `select_task_rq_rt` / `find_lowest_rq`.
+///
+/// Stay on `hint` when this RT task can preempt the runner there. Otherwise
+/// pick the allowed CPU with the weakest runner that is still preemptable.
+/// If none, stay on `hint` when allowed so the waiter queues behind stronger RT.
+#[cfg(feature = "smp")]
+fn select_rt_cpu(task: &KtaskRef, hint: usize, cpumask: &KCpuMask) -> usize {
+    let prio = task.rt_priority_snapshot();
+    let index = find_lowest_rt_cpu(cpumask, hint, prio, |idx| {
+        RUN_QUEUES
+            .try_get(idx)
+            .map(|rq| rq.rt_preempt_rank.load(Ordering::Relaxed))
+    });
+    #[cfg(feature = "sched_stat")]
+    sched_stat_inc(&sched_stat_cpu(LogicalCpuId::new(index)).select_task);
+    index
+}
+
+/// Stay on `hint` when `prio` can preempt it. Otherwise pick the weakest
+/// still-preemptable runner. Equal ranks keep the first CPU in `cpumask`
+/// order. If none can be preempted, stay on `hint` when it is schedulable.
+///
+/// `rank_of` is [`ksched::Scheduler::rt_preempt_rank`]: the runner, or 255
+/// when that CPU's RT class is throttled. A higher RT waiter already queued
+/// there does not raise the rank, so a mid-priority task can land behind it
+/// when several CPUs share a rank. This pick does not track the highest
+/// queued RT priority.
+///
+/// `rank_of` returns [`None`] for a CPU that is not yet schedulable.
+///
+/// # Panics
+///
+/// Panics when `cpumask` is empty.
+#[cfg(feature = "smp")]
+pub(super) fn find_lowest_rt_cpu(
+    cpumask: &KCpuMask,
+    hint: usize,
+    prio: u8,
+    rank_of: impl Fn(usize) -> Option<u8>,
+) -> usize {
+    assert!(!cpumask.is_empty(), "No available CPU for task execution");
+
+    if cpumask.get(hint)
+        && let Some(rank) = rank_of(hint)
+        && prio > rank
+    {
+        return hint;
+    }
+
+    let mut best_cpu = None;
+    let mut best_rank = u8::MAX;
+    for cpu_id in cpumask.iter_logical() {
+        let idx = cpu_id.as_usize();
+        let Some(rank) = rank_of(idx) else {
+            continue;
+        };
+        if prio <= rank {
+            continue;
+        }
+        // `hint` is not in this scan: a preemptable hint already returned.
+        // Equal ranks therefore follow `cpumask` iteration order.
+        let is_better = best_cpu.is_none() || rank < best_rank;
+        if is_better {
+            best_rank = rank;
+            best_cpu = Some(idx);
+        }
+    }
+    if let Some(cpu) = best_cpu {
+        return cpu;
+    }
+    if cpumask.get(hint) && rank_of(hint).is_some() {
+        return hint;
+    }
+    cpumask
+        .iter_logical()
+        .map(|cpu| cpu.as_usize())
+        .find(|idx| rank_of(*idx).is_some())
+        .expect("No available CPU for task execution")
+}
+
+/// Wake CPU pick for RT. Hint is prev when allowed, otherwise the waker CPU.
+#[cfg(feature = "smp")]
+fn wake_rt(task: &KtaskRef) -> (usize, WakePlacement) {
+    let cpumask = task.cpumask();
+    let home = task.cpu_id().as_usize();
+    let is_home_allowed = cpumask.get(home);
+    let hint = if is_home_allowed {
+        home
+    } else {
+        this_cpu_id().as_usize()
+    };
+    let cpu = select_rt_cpu(task, hint, &cpumask);
+    let place = if is_home_allowed && cpu == home {
+        WakePlacement::PrevCpu
+    } else {
+        WakePlacement::RtRank
+    };
+    (cpu, place)
 }

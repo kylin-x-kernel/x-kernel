@@ -438,7 +438,7 @@ unsafe impl<T> ReadyItem for SchedTask<T> {
 
 #[cfg(unittest)]
 impl<T> SchedTask<T> {
-    fn test_token() -> RqLocked {
+    pub(crate) fn test_token() -> RqLocked {
         // SAFETY: kernel unittests run on one thread, so this read or write
         // cannot interleave with a `Scheduler` update of the same cell.
         unsafe { RqLocked::assume() }

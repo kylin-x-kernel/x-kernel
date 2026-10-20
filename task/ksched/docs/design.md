@@ -8,6 +8,7 @@
 秩，`pick_next` 返回空、`enqueue` 视为编程错误。用户任务仍由 `SchedTask::new`
 建成 Fair：`sched_setscheduler` / `sched_setattr` 只写线程快照，还不调用
 `Scheduler::set_attr`，所以生产路径上 `sched_class()` 目前仍是 Fair。
+`ktask` 在任务已经是 RT 时按 `find_lowest_rq` 选核，并在 idle 时保留节流定时器。
 
 ## 背景
 
@@ -130,8 +131,18 @@ Fair。同一 RT 优先级里，更高优先级 waiter 走 `wakeup_preempts`。�
 一个 RT 周期内 `used_ns` 达到 `SCHED_RT_RUNTIME_US` 后整类节流，`pick_next`
 跳过 RT，让 Fair 运行，直到周期边界 `advance` 清零。
 
-`rt_priority_snapshot` 是 Release/Acquire 的锁外优先级。这次没有选核，
-也没有把 runner 优先级写成每 CPU 原子。
+`rt_priority_snapshot` 是 Release/Acquire 的锁外优先级，供 `ktask` 选核。
+`Scheduler::rt_preempt_rank` 在 RQ 锁下读这颗 CPU：Fair/Idle 且 RT 类还能被
+选出时为 0，正在运行的 RT 为其优先级，Stop/Deadline 为 255。带宽节流在
+本 RQ 时钟尚未越过 `period_start_ns + rt_period_ns` 时也记 255（`is_throttled_at`），
+因为这段时间里 `pick_next` 不会再选出 RT；选核跳过这颗 CPU，只在没有其他
+可抢占 CPU 时退回 hint。队列被摘空后周期边界定时器仍保持武装，到点会清标志
+并改写这份快照。这个字节只描述 runner。已经排在 RT
+队列里、还没上 CPU 的更高优先级 waiter 不会抬高它，所以中等优先级的 RT
+任务可能被放到这颗 CPU 上，排在那个 waiter 后面。这一步不另存“最高排队
+RT 优先级”。`ktask` 在会改变这个字节的操作（记账/`charge`、替换 `curr`、
+`set_attr`）放下 RQ 锁之前把它写成每 CPU 原子，选核时不拿远端锁。只读的
+`next_event_ns` 不重发这份快照。
 
 ## 调用约束 / 执行上下文
 
@@ -273,9 +284,12 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 地址对不上。`Drop` 逐个 `pop_front`，清归属并释放链表持有的 `Arc`。
 
 节流是每 RQ 的：`account` 累加 runner 的墙钟，达到 runtime 后 `has_runnable`
-为假，`pick_next` 跳过本队列的 RT。`class_timer_ns` 只在仍节流且队列非空时
-指向本周期结束。队列被摘空后不再武装周期定时器；新的 waiter 由入队返回的
-`next_event_ns` 重新编程。
+为假，`pick_next` 跳过本队列的 RT。标志只在 `advance` 里清掉。
+`class_timer_ns` 在标志仍为真时指向本周期结束，队列已经被 block、migrate、
+exit 或 steal 摘空也一样：空闲 CPU 没有 tick，卸掉这个事件就会让节流标志和
+已发布的 255 停过周期边界。定时器到点后 `advance` 清标志并重新发布 rank，
+之后不再武装。选核读的 255 按 `is_throttled_at(now)` 判定，`now` 已经到达
+`period_start_ns + rt_period_ns` 就不再当成节流。
 `steal` 不看节流：idle-pull 可以把这些 waiter 摘到另一颗仍有 runtime 的
 CPU，占用记在目标 RQ 上。周期推进在 `advance` 里用绝对 `RqClock`，不另采样时钟。
 

@@ -13,7 +13,6 @@ use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 use kcpu_slot::cpu_slot_cell;
 use kspin::NoPreemptIrqSave;
 
-use crate::run_queue::task_run_queue;
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
 pub use crate::{
     task::{CurrentTask, TaskInner, TaskState, UserTaskRuntime},
@@ -597,25 +596,22 @@ where
     spawn_with_name(f, String::new())
 }
 
-/// Set the priority for current task.
+/// Set the nice value of the current task.
 ///
-/// The range of the priority is dependent on the underlying scheduler. For
-/// example, in the [CFS] scheduler, the priority is the nice value, ranging from
-/// -20 to 19.
+/// Only `nice` changes. FIFO/RR policy and RT priority stay as they are.
+/// The value is the Linux nice range `-20..=19`.
 ///
 /// Returns `true` if the priority is set successfully.
-///
-/// [CFS]: https://en.wikipedia.org/wiki/Completely_Fair_Scheduler
 pub fn set_prio(prio: isize) -> bool {
     current_run_queue::<NoPreemptIrqSave>().set_current_priority(prio)
 }
 
-/// Set the priority for the specified task.
+/// Set the nice value of `task`.
 ///
-/// The interpretation of `prio` depends on the configured scheduler. For
-/// fair schedulers, it matches the Linux nice range `-20..=19`.
+/// Only `nice` changes. FIFO/RR policy and RT priority stay as they are.
+/// The value is the Linux nice range `-20..=19`.
 pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
-    task_run_queue::<NoPreemptIrqSave>(task).set_task_priority(task, prio)
+    crate::run_queue::set_task_nice(task, prio)
 }
 
 /// Set the CPU affinity mask for `task`.
@@ -1061,6 +1057,7 @@ mod tests_api {
             assert!(text.contains("wakeup_last_cpu="));
             assert!(text.contains("wakeup_idle_sibling="));
             assert!(text.contains("wakeup_fallback="));
+            assert!(text.contains("wakeup_rt_rank="));
             assert!(text.contains("idle_pull="));
             assert!(text.contains("timer_irq_sched="));
             assert!(text.contains("timer_irq_stale="));

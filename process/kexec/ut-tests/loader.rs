@@ -172,7 +172,9 @@ fn prepared_image_survives_cache_clear_and_rejections_preserve_installed_mm() {
                 .any(|s| s == encoded)
         );
     }
-    assert!(super::ELF_LOADER.try_lock().is_some());
+    // Unit tests run on parallel workers. Another `prepare_user_app_request`
+    // may hold `ELF_LOADER`, so `try_lock` does not prove this task released
+    // it. `clear_elf_cache` waits for that guard; a leak here would deadlock.
     super::clear_elf_cache();
     let expected_stack = prepared.stack_data.clone();
     let expected_entry = prepared.entry;

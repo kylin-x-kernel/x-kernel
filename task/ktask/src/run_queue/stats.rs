@@ -25,6 +25,8 @@ pub(super) struct SchedCpuStats {
     pub(super) wakeup_last_cpu: AtomicU64,
     pub(super) wakeup_idle_sibling: AtomicU64,
     pub(super) wakeup_fallback: AtomicU64,
+    /// RT preempt-rank wake that left home. Separate from [`Self::wakeup_fallback`].
+    pub(super) wakeup_rt_rank: AtomicU64,
     pub(super) add_task: AtomicU64,
     pub(super) unblock_task: AtomicU64,
     pub(super) local_resched: AtomicU64,
@@ -62,6 +64,7 @@ impl SchedCpuStats {
             wakeup_last_cpu: AtomicU64::new(0),
             wakeup_idle_sibling: AtomicU64::new(0),
             wakeup_fallback: AtomicU64::new(0),
+            wakeup_rt_rank: AtomicU64::new(0),
             add_task: AtomicU64::new(0),
             unblock_task: AtomicU64::new(0),
             local_resched: AtomicU64::new(0),
@@ -110,10 +113,10 @@ pub(crate) fn dump_sched_stats() {
     for (cpu, stats) in SCHED_CPU_STATS.iter().enumerate() {
         khal::kprint_atomic!(
             "[sched_stat] cpu={} select_task={} select_wakeup={} wakeup_last_cpu={} \
-             wakeup_idle_sibling={} wakeup_fallback={} add_task={} unblock={} local_resched={} \
-             remote_resched={} remote_resched_fail={} tick_preempt={} timer_irq_sched={} \
-             timer_irq_soft={} timer_irq_periodic={} timer_irq_stale={} preempt_check={} \
-             preempt_need={} preempt_skip_disabled={} preempt_skip_exception={} \
+             wakeup_idle_sibling={} wakeup_fallback={} wakeup_rt_rank={} add_task={} unblock={} \
+             local_resched={} remote_resched={} remote_resched_fail={} tick_preempt={} \
+             timer_irq_sched={} timer_irq_soft={} timer_irq_periodic={} timer_irq_stale={} \
+             preempt_check={} preempt_need={} preempt_skip_disabled={} preempt_skip_exception={} \
              preempt_resched={} preempt_denied={} resched={} pick_idle={} idle_pull={} switch={} \
              switch_same={}\n",
             cpu,
@@ -122,6 +125,7 @@ pub(crate) fn dump_sched_stats() {
             stats.wakeup_last_cpu.load(Ordering::Relaxed),
             stats.wakeup_idle_sibling.load(Ordering::Relaxed),
             stats.wakeup_fallback.load(Ordering::Relaxed),
+            stats.wakeup_rt_rank.load(Ordering::Relaxed),
             stats.add_task.load(Ordering::Relaxed),
             stats.unblock_task.load(Ordering::Relaxed),
             stats.local_resched.load(Ordering::Relaxed),
@@ -175,10 +179,10 @@ pub(crate) fn sched_stats_text() -> String {
         let _ = writeln!(
             out,
             "[sched_stat] cpu={} select_task={} select_wakeup={} wakeup_last_cpu={} \
-             wakeup_idle_sibling={} wakeup_fallback={} add_task={} unblock={} local_resched={} \
-             remote_resched={} remote_resched_fail={} tick_preempt={} timer_irq_sched={} \
-             timer_irq_soft={} timer_irq_periodic={} timer_irq_stale={} preempt_check={} \
-             preempt_need={} preempt_skip_disabled={} preempt_skip_exception={} \
+             wakeup_idle_sibling={} wakeup_fallback={} wakeup_rt_rank={} add_task={} unblock={} \
+             local_resched={} remote_resched={} remote_resched_fail={} tick_preempt={} \
+             timer_irq_sched={} timer_irq_soft={} timer_irq_periodic={} timer_irq_stale={} \
+             preempt_check={} preempt_need={} preempt_skip_disabled={} preempt_skip_exception={} \
              preempt_resched={} preempt_denied={} resched={} pick_idle={} idle_pull={} switch={} \
              switch_same={}",
             cpu,
@@ -187,6 +191,7 @@ pub(crate) fn sched_stats_text() -> String {
             stats.wakeup_last_cpu.load(Ordering::Relaxed),
             stats.wakeup_idle_sibling.load(Ordering::Relaxed),
             stats.wakeup_fallback.load(Ordering::Relaxed),
+            stats.wakeup_rt_rank.load(Ordering::Relaxed),
             stats.add_task.load(Ordering::Relaxed),
             stats.unblock_task.load(Ordering::Relaxed),
             stats.local_resched.load(Ordering::Relaxed),

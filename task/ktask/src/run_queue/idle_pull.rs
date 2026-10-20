@@ -61,7 +61,14 @@ impl RunQueue {
             return true;
         }
         let now_ns = khal::time::monotonic_time_nanos();
-        let Some(removed) = self.with_sched(|s| s.dequeue(&stolen, now_ns)) else {
+        let Some(removed) = self.with_sched_rank(|s| {
+            // Enqueue dropped this lock. Another pull may already have moved
+            // the task; its entity is then owned by that run queue.
+            if stolen.cpu_id() != self.cpu_id {
+                return None;
+            }
+            s.dequeue(&stolen, now_ns)
+        }) else {
             return false;
         };
         migrate_entry(removed);
@@ -75,7 +82,9 @@ impl RunQueue {
         let now_ns = khal::time::monotonic_time_nanos();
         let stolen = {
             let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
-            self.with_sched(|s| s.steal(&mut |task| can_idle_pull_task(task, dest_idx), now_ns))?
+            self.with_sched_rank(|s| {
+                s.steal(&mut |task| can_idle_pull_task(task, dest_idx), now_ns)
+            })?
         };
         Some(stolen)
     }

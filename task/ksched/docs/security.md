@@ -176,7 +176,12 @@ IRQ/preempt 约束提供。
   把子任务打回 `SCHED_NORMAL`。
 - RT 带宽按每个 RQ 计算，没有跨 CPU 的根域带宽池。本 RQ 节流后不再
   `pick_next` 这些任务，但 idle-pull 仍可把它们摘到另一颗 CPU，改记那颗
-  CPU 的 runtime。跨 CPU 选核尚未接入，没有 Linux `cpupri` push/pull。
+  CPU 的 runtime。选核读 `rt_preempt_rank`：本周期尚未结束的节流 RQ 记为
+  255，与 Stop/Deadline 一样不视为可抢占，只在没有其他可抢占 CPU 时退回
+  hint。判定用 `is_throttled_at`（`now >= period_start_ns + rt_period_ns`
+  即不再节流）。队列被摘空后仍武装周期边界，空闲 CPU 到点会清标志并改写
+  已发布的 255，避免这颗核在低负载下一直被选核跳过。
+  没有 Linux `cpupri` push/pull。`sched_setscheduler` 仍不把任务送进这个类。
 
 ## 审计清单
 

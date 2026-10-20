@@ -294,7 +294,10 @@ Invariants:
    holds that CPU's IRQ/preempt exclusion. Local paths rely on IRQ/preempt
    off; cross-CPU paths rely on the dest RQ `SpinRaw` (`nr_running` /
    `nr_home` are atomics). Do not hold two `&mut RunQueue` aliases for the
-   same CPU.
+   same CPU. Boot `init` / `init_secondary` disable local IRQs before the
+   first scheduler `SpinRaw` and leave that mask in place; entry firmware
+   is not the source of the mask. AArch64 sets `DAIF.I` in SPSR only when
+   dropping from EL2/EL3.
 3. Each `RUN_QUEUES` slot is written once at that CPU's `init` /
    `init_secondary`.
 
@@ -462,7 +465,7 @@ Invariants:
 | T-10 | Absolute timer deadline truncates on integer conversion | High | `as_nanos()` `u128` is narrowed to `u64` | The raw owned timer API rejects deadlines beyond `u64` nanoseconds without changing the prior setting. Async waits saturate to that horizon. HAL backends clamp at the hardware register boundary. |
 | T-11 | An already-due schedule slot is rearmed repeatedly in a non-preemptible region | High | An immediate request is rewritten as a periodic 10 µs hrtick | A due slot only sets pending and is cleared immediately. Owned timer deadlines stay independent. |
 | T-12 | Idle-pull steals a still-`on_cpu` task | High | Remote steal after yield/preempt requeue and before `switch_to` finishes | Steal only Ready && `!on_cpu`. `can_idle_pull_task` rejects `on_cpu`. |
-| T-12a | Steal changes `cpu_id` and moves prev away | Medium | Wake follows the new CPU after idle-pull migrate-in | Wake uses `select_idle_sibling` (home if prev is idle, otherwise seek idle). Matches Linux musical chairs. |
+| T-12a | Steal changes `cpu_id` and moves prev away | Medium | Wake follows the new CPU after idle-pull migrate-in | Fair wake uses `select_idle_sibling` (home if prev is idle, otherwise seek idle). RT wake uses `find_lowest_rt_cpu`. |
 | T-12b | Idle-pull mid-state is missed by `setaffinity` | High | Ready on no RQ after steal and before dest enqueue | That window is mask-only, same as unpublished. Dest rechecks cpumask after enqueue and `migrate_entry`s if dest is not allowed. |
 
 ## Failure modes and handling
@@ -528,11 +531,14 @@ Known limits:
    scheduler lock so a remote CPU cannot snatch the buddy between two
    acquires. A running task must leave through unified `leave_current`.
    EEVDF `curr` is not a task-lifetime owner.
-2. `select_run_queue` is idle-first (`nr_running == 0`) then `nr_home`.
-   `select_wake_run_queue` matches `select_idle_sibling` (home if prev is
+2. Fair `select_run_queue` is idle-first (`nr_running == 0`) then `nr_home`.
+   Fair `select_wake_run_queue` matches `select_idle_sibling` (home if prev is
    idle, otherwise `nr_running == 0` from `load_count`; stay on prev if none idle; `find_idlest`
    only when home is outside the cpumask and no idle CPU exists). Do not add
-   a separate sticky-home idle overflow before SIS.
+   a separate sticky-home idle overflow before SIS. RT spawn and wake use
+   `find_lowest_rt_cpu` against `rt_preempt_rank` instead of idle-first.
+   The snapshot is written when the scheduler lock drops after `charge`, a
+   `curr` change, or `set_attr`. `next_event_ns` does not rewrite it.
 3. SMP must enable `ipi`: a remote wake's `kick` sets `need_resched`
    through IPI. `interrupt()` of a running task (signal delivery) uses the
    same IPI; otherwise a NOHZ lone runner never leaves user mode.
@@ -570,7 +576,10 @@ timer routing. Test source existence is not execution proof.
 - Idle-pull locks only src and goes through `steal_ready_task` /
   `enqueue_task` PLACE_LAG.
 - Idle-pull rechecks cpumask after dest enqueue and `migrate_entry`s if dest
-  is not allowed.
+  is not allowed. The undo dequeue also rechecks `cpu_id` under the dest
+  scheduler lock, so a task already moved to another CPU is left there.
+- Affinity dequeue of a ready task uses `dequeue_ready_on_owner`, which
+  retries when `cpu_id` moves between the lookup and the scheduler lock.
 - `setaffinity` of a Ready task that does not occupy a CPU (unpublished /
   idle-pull gap) is mask-only and succeeds; it does not spin or return
   `false`.
@@ -578,9 +587,17 @@ timer routing. Test source existence is not execution proof.
   block/migrate/exit.
 - `nr_home` is kept across block and discharged only on exit or a home
   change.
-- Spawn is idle-first (`nr_running == 0`) then `nr_home`.
+- Fair spawn is idle-first (`nr_running == 0`) then `nr_home`. RT spawn uses
+  `find_lowest_rt_cpu`.
 - `interrupt()` / unmasked signal delivery to a running task kicks the dest
   CPU (local `need_resched`, remote IPI) instead of relying only on waiter
   wake or a periodic tick.
-- Wake goes home if prev is idle, otherwise `select_idle_sibling`, and stays
-  on prev if no idle CPU exists.
+- Fair wake goes home if prev is idle, otherwise `select_idle_sibling`, and
+  stays on prev if no idle CPU exists. RT wake uses `find_lowest_rt_cpu`.
+- `set_prio` / `set_task_prio` keep the task's policy. Lock order is the
+  owner run-queue scheduler lock, then `sched_entity_lock`. `cpu_id` is
+  rechecked after both locks. A move retries; an unregistered owner panics
+  instead of spinning with the IRQ guard. `publish_task` and
+  `switch_to_local` store `cpu_id` only inside that hold. A deferred wake
+  records `wake_cpu` and leaves `cpu_id` on the CPU that still owns the
+  entity until enqueue.

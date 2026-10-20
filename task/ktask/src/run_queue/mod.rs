@@ -5,7 +5,7 @@
 //! Per-CPU run queue: ownership, placement, switch, and delayed reclaim.
 //!
 //! Submodules keep SMP placement out of the local leave/pick path:
-//! - `placement`: spawn idle-first, wake SIS, idle-pull source choice
+//! - `placement`: Fair spawn idle-first and wake SIS; RT uses `find_lowest_rt_cpu`
 //! - `rq`: leave / pick / switch / kick
 //! - `ownership`: `cpu_id` and `nr_running` / `nr_home` snapshots
 //! - `idle_pull`: steal a Ready `!on_cpu` waiter onto an about-to-idle CPU
@@ -14,9 +14,10 @@
 //! - `stats`: optional `sched_stat` counters
 //!
 //! Callers still enter through `current_run_queue`, `select_run_queue`,
-//! `select_wake_run_queue`, `task_run_queue`, and `enforce_affinity_placement`.
-//! Placement reads remote `nr_running` / `nr_home` without taking a remote
-//! scheduler lock; `ksched` only sees the already-chosen queue.
+//! `select_wake_run_queue`, and `enforce_affinity_placement`. Nice updates
+//! use `set_task_nice`, which locks the owner queue itself.
+//! Placement reads remote `nr_running` / `nr_home` / `rt_preempt_rank` without
+//! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
 mod gc;
 #[cfg(feature = "smp")]
@@ -34,7 +35,7 @@ mod tests;
 
 use alloc::collections::VecDeque;
 #[cfg(feature = "smp")]
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicU8, AtomicUsize};
 use core::{ptr::NonNull, sync::atomic::AtomicU64};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
@@ -45,8 +46,8 @@ use kspin::{BaseGuard, SpinRaw};
 use lazyinit::LazyInit;
 #[cfg(feature = "smp")]
 pub(crate) use migrate::enforce_affinity_placement;
-pub(crate) use placement::{select_run_queue, select_wake_run_queue, task_run_queue};
-pub(crate) use rq::{finish_task_switch, kick_running_task};
+pub(crate) use placement::{select_run_queue, select_wake_run_queue};
+pub(crate) use rq::{finish_task_switch, kick_running_task, set_task_nice};
 #[cfg(feature = "sched_stat")]
 pub(crate) use stats::note_timer_irq;
 pub(crate) use stats::{
@@ -240,6 +241,12 @@ pub(crate) struct RunQueue {
     /// two idle CPUs prefer the one with fewer sticky residents.
     #[cfg(feature = "smp")]
     nr_home: AtomicUsize,
+    /// Snapshot of [`ksched::Scheduler::rt_preempt_rank`] for RT CPU pick.
+    ///
+    /// Written under [`Self::scheduler`] with `nr_running`. Remote selection
+    /// reads it without that lock. A stale rank only mis-places one wakeup.
+    #[cfg(feature = "smp")]
+    rt_preempt_rank: AtomicU8,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -275,6 +282,11 @@ pub(crate) struct CurrentRunQueueRef<'a, G: BaseGuard> {
 }
 
 pub(crate) fn init() {
+    // First `publish_task` / `install_running` take `SpinRaw` before any
+    // `NoPreemptIrqSave` exists. AArch64 writes `DAIF.I` into SPSR only when
+    // dropping from EL2/EL3, so an EL1 entry can arrive with IRQs open.
+    // Leave them masked until `kruntime` enables them after handlers exist.
+    karch::disable_local_irq();
     let cpu_id = this_cpu_id();
 
     // Create the `idle` task (not current task).
@@ -313,6 +325,10 @@ pub(crate) fn init() {
 }
 
 pub(crate) fn init_secondary() {
+    // Same mask as `init`. Secondary entry also has no `NoPreemptIrqSave`
+    // before the first scheduler lock, and this mask stays until
+    // `rust_main_secondary` calls `enable_local_irq`.
+    karch::disable_local_irq();
     let cpu_id = this_cpu_id();
 
     // Put the subsequent execution into the `idle` task.

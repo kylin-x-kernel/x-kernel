@@ -10,10 +10,7 @@ use khal::percpu::this_cpu_id;
 use super::rq::request_remote_resched;
 #[cfg(feature = "smp")]
 use super::stats::record_remote_resched;
-use super::{
-    current_run_queue,
-    placement::{select_run_queue, task_run_queue},
-};
+use super::{current_run_queue, placement::select_run_queue, rq::dequeue_ready_on_owner};
 use crate::{KtaskRef, TaskInner, TaskState, api::current};
 
 /// The task routine for migrating the current task to the correct CPU.
@@ -39,13 +36,7 @@ pub(super) fn spawn_affinity_migration_task(migrated: KtaskRef) -> KtaskRef {
 }
 
 fn try_remove_ready_task(task: &KtaskRef) -> Option<KtaskRef> {
-    let rq = task_run_queue::<kspin::NoPreemptIrqSave>(task);
-    if !task.is_ready() {
-        return None;
-    }
-    let now_ns = khal::time::monotonic_time_nanos();
-    let removed = rq.inner.with_sched(|s| s.dequeue(task, now_ns))?;
-    Some(removed)
+    dequeue_ready_on_owner(task)
 }
 
 /// After [`KtaskRef::set_cpumask`], move the task off any CPU it currently

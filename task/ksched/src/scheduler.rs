@@ -402,6 +402,48 @@ impl<T> Scheduler<T> {
         self.curr.as_ref()
     }
 
+    /// RT placement rank of this run queue, read under its scheduler lock.
+    ///
+    /// Call only while that lock is held. `token()` then reads the runner's
+    /// `RqCell` priority. `ktask` publishes the returned byte for remote
+    /// placement, which compares the snapshot without taking this lock.
+    ///
+    /// `0` means Fair, Idle, or no runner, and the RT class can still be
+    /// picked: any RT priority can preempt. `1..=99` is the running RT
+    /// priority. `255` means Stop, Deadline, or a bandwidth-throttled RT
+    /// class. Throttle counts only while this RQ clock is still inside the
+    /// period (`RtClass::is_throttled_at`); past that boundary the CPU is
+    /// preemptable even if `advance` has not yet cleared the stored flag.
+    /// Placement skips 255 the same way it skips Stop or Deadline, and
+    /// falls back to the hint only when no allowed CPU is preemptable.
+    /// An empty throttled queue still reports the period boundary, so the
+    /// idle CPU's timer samples the clock and this byte is published again.
+    ///
+    /// The byte is the runner only. A higher RT waiter already queued on
+    /// this CPU does not raise it, so a later mid-priority RT task can be
+    /// placed here and wait behind that waiter. This step does not keep a
+    /// highest-queued snapshot.
+    pub fn rt_preempt_rank(&self) -> u8 {
+        // A Fair/Idle runner does not mean this CPU can start RT now. After
+        // `used_ns` hits the period runtime, `pick_next` skips the class
+        // until the period boundary, even though the runner itself looks
+        // preemptable. Judge that from the clock, not the stored flag:
+        // `advance` is the only writer that clears the flag, and a quiet
+        // RQ may not have run it yet.
+        if self.classes.rt.is_throttled_at(self.clock.now_ns()) {
+            return 255;
+        }
+        let tok = Self::token();
+        match &self.curr {
+            None => 0,
+            Some(curr) => match curr.sched_class() {
+                SchedClass::Idle | SchedClass::Fair => 0,
+                SchedClass::Rt => curr.rt_priority(tok).get(),
+                SchedClass::Stop | SchedClass::Deadline => 255,
+            },
+        }
+    }
+
     /// Derived: sum of class queues under the RQ lock (idle and the runner
     /// are excluded).
     pub fn nr_queued(&self) -> usize {

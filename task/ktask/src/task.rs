@@ -271,6 +271,16 @@ pub struct TaskInner {
     /// SeqCst with [`Self::on_cpu`]: see [`Self::arm_wake_enqueue`].
     #[cfg(feature = "smp")]
     wake_enqueue_flags: AtomicU8,
+    /// CPU a deferred wake should enqueue onto. `u32::MAX` means none.
+    ///
+    /// Kept separate from `cpu_id` so the running CPU's scheduler lock remains
+    /// the one that protects the entity until the destination enqueue.
+    #[cfg(feature = "smp")]
+    wake_cpu: AtomicU32,
+    /// Serializes entity updates that can otherwise run under two run-queue locks.
+    ///
+    /// Lock order is the run-queue scheduler lock, then this lock.
+    sched_entity_lock: kspin::SpinRaw<()>,
 
     /// Bitmask of CPUs this task has been scheduled on since the last TLB
     /// shootdown. Used to limit the scope of cross-CPU TLB invalidation.
@@ -707,6 +717,9 @@ impl TaskInner {
             #[cfg(feature = "smp")]
             wake_enqueue_flags: AtomicU8::new(0),
             #[cfg(feature = "smp")]
+            wake_cpu: AtomicU32::new(u32::MAX),
+            sched_entity_lock: kspin::SpinRaw::new(()),
+            #[cfg(feature = "smp")]
             on_cpu_mask: SpinNoIrq::new(KCpuMask::new()),
             need_resched: AtomicBool::new(false),
             preempt_disable_count: AtomicUsize::new(0),
@@ -967,6 +980,39 @@ impl TaskInner {
     pub(crate) fn set_cpu_id(&self, cpu_id: LogicalCpuId) {
         self.cpu_id
             .store(cpu_id.as_usize() as u32, Ordering::Release);
+    }
+
+    /// Lock the scheduler entity.
+    ///
+    /// [`kspin::SpinRaw`] does not disable IRQs or preemption. The caller
+    /// must already have both disabled, and must already hold this task's
+    /// run-queue scheduler lock, or be `task_rq_lock`, which takes that lock
+    /// first. Lock order is the scheduler lock, then this lock. Boot reaches
+    /// this lock from `publish_task` / `install_running` only after
+    /// `run_queue::init` or `init_secondary` has disabled local IRQs.
+    #[inline]
+    pub(crate) fn lock_sched_entity(&self) -> kspin::SpinRawGuard<'_, ()> {
+        self.sched_entity_lock.lock()
+    }
+
+    /// Remember the CPU a deferred wake should enqueue onto.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn set_wake_cpu(&self, cpu_id: LogicalCpuId) {
+        self.wake_cpu
+            .store(cpu_id.as_usize() as u32, Ordering::Release);
+    }
+
+    /// Take the deferred wake CPU, if a waker stored one.
+    #[cfg(feature = "smp")]
+    #[inline]
+    pub(crate) fn take_wake_cpu(&self) -> Option<LogicalCpuId> {
+        let raw = self.wake_cpu.swap(u32::MAX, Ordering::Acquire);
+        if raw == u32::MAX {
+            None
+        } else {
+            Some(LogicalCpuId::new(raw as usize))
+        }
     }
 
     /// Returns whether the task is running on a CPU.

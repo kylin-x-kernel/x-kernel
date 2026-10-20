@@ -155,7 +155,8 @@ task/ktask/
 
 `run_queue/` is split by duty. Callers still enter only through
 `current_run_queue` / `select_run_queue` / `select_wake_run_queue` /
-`task_run_queue` / `enforce_affinity_placement`. CPU choice lives in
+`enforce_affinity_placement`. Nice updates lock the owner queue in
+`set_task_nice`. CPU choice lives in
 `placement.rs` because it reads each CPU's `nr_running` / `nr_home`; `ksched`
 holds one RQ lock and never sees remote load. `rq.rs` owns local leave / pick /
 switch. `idle_pull.rs` steals across CPUs. `migrate.rs` only moves a task after
@@ -324,7 +325,10 @@ not reentrant under a held RQ guard.
 
 - Local schedule operations hold a `BaseGuard` via `CurrentRunQueueRef` /
   `KRunQueueRef`. `scheduler` then uses `SpinRaw` because IRQ/preempt
-  exclusion is already provided by the guard.
+  exclusion is already provided by the guard. Boot has no such guard yet:
+  `init` / `init_secondary` call `disable_local_irq` before the first
+  `publish_task` / `install_running` and do not restore that mask.
+  `kruntime` enables local IRQs only after interrupt handlers exist.
 - `placement.rs` only reads remote atomic heuristics. `ksched` operates only
   on the already-chosen RQ lock.
 - Idle-pull: `resched` drops the dest scheduler lock first, locks only src
@@ -390,6 +394,7 @@ Boot CPU:
 init_scheduler()
   → retain the permanent kernel root for context construction
   → run_queue::init()
+  → disable_local_irq() and leave IRQs masked
   → create the per-CPU idle task (pinned to this CPU)
   → create the per-CPU run queue (including the gc task)
   → install current as the main task
@@ -406,6 +411,7 @@ Secondary CPU:
 ```text
 init_scheduler_secondary()
   → run_queue::init_secondary()
+  → disable_local_irq() and leave IRQs masked
   → install current as the idle task
   → create this CPU's run queue (including the gc task)
 
@@ -487,8 +493,11 @@ deadline. They no longer depend on a fixed `TICKS_PER_SECOND` schedule tick:
 1. The IRQ entry first calls the `register_timer_irq_note` hook (watchdog
    hardlock heartbeat counts any timer IRQ, not only the 4s sample), then
    charges the current task with `update_current(elapsed_ns)` from
-   `now - last_accounted_ns` (idle is skipped; resched is requested only
-   when the request is exhausted). Only an expired schedule slot then runs
+   `now - last_accounted_ns` (idle runtime is not charged; resched is
+   requested only when the request is exhausted). The schedule deadline
+   stays armed while idle when a class still reports a future event, so a
+   throttled RT period boundary can wake the CPU. Only an expired schedule
+   slot then runs
    Linux `entity_tick` / `check_preempt_tick`: `need_resched` is set only
    when pick would change (eligible NEXT_BUDDY or an earlier deadline).
    Owned timer IRQs only account, so a later-deadline WF_SYNC wakee is not
@@ -746,19 +755,26 @@ exit completion.
   - `leave_current`: current running task leaves the execution slot (Yield /
     Preempt / Block / Migrate / Exit)
   - `switch_to_local`: local helper that `switch_to`s without the ready queue
-    (for example a migration task)
+    (for example a migration task). `cpu_id` is stored in the same scheduler
+    lock and entity lock as `install_current`
   - `set_owner_cpu`: only boot bring-up of main / idle before a run queue
     exists
 - SMP `switch_to` checks `next_task.cpu_id() == rq.cpu_id` so a task cannot
   switch onto the wrong queue.
-- `placement.rs` (`select_run_queue`) matches Linux fork `find_idlest_cpu`:
-  **idle-first** (`nr_running == 0`; a sleeper CPU still counts as idle),
-  then `nr_home`. After SIS is in place, landing a clone on a sleeper CPU is
+- `placement.rs` (`select_run_queue`) for Fair matches Linux fork
+  `find_idlest_cpu`: **idle-first** (`nr_running == 0`; a sleeper CPU still
+  counts as idle), then `nr_home`. RT uses `find_lowest_rt_cpu` against the
+  lock-free `rt_preempt_rank` snapshot. That byte is stored when the
+  scheduler lock drops after `charge`, a `curr` change, or `set_attr`. A
+  read-only `next_event_ns` (kick, timer rearm, post-switch) does not
+  recompute it. After SIS is in place, landing a clone
+  on a sleeper CPU is
   safe: the displaced worker can seek idle on the next wake. Among idle CPUs,
   lower `nr_home` still wins (an empty CPU beats a sleeper's CPU). Ties use
   `prefer_local`, then RR.
-- `placement.rs` (`select_wake_run_queue`) matches Linux `select_idle_sibling`:
-  go home if prev is idle, otherwise pick a `nr_running == 0` CPU.
+- `placement.rs` (`select_wake_run_queue`) for Fair matches Linux
+  `select_idle_sibling`: go home if prev is idle, otherwise pick a
+  `nr_running == 0` CPU. RT uses `wake_rt` / `find_lowest_rt_cpu` instead.
   `nr_running` is `refactor_ksched`'s `load_count`: queued plus a non-idle
   runner. Sticky-home plus "home busy → idle overflow" collapsed schbench to
   about 3-way parallelism (RPS ~450 → ~325). Under SIS the displaced worker
@@ -1052,6 +1068,8 @@ reclaim avoids use-after-free and a slow drop on the hot path.
 
 With the `sched_stat` feature, `ktask` keeps per-CPU base counters
 (placement, wake, local/remote resched, tick/preempt skips, switch).
+`wakeup_fallback` is the Fair `find_idlest_cpu` path. An RT wake that
+leaves home increments `wakeup_rt_rank` instead.
 `/proc/sched_stat` is a process-context snapshot. EEVDF additionally emits
 algorithm counters such as `wake_handoff` / `wake_sync_preempt`. A watchdog
 trigger calls `dump_sched_stats()` for allocation-free base output.

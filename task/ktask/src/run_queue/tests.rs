@@ -140,10 +140,10 @@ mod tests_wake_affinity {
     #[cfg(feature = "sched_stat")]
     use super::super::stats::sched_stat_cpu;
     use super::super::{
-        WakeEnqueue,
+        WakeEnqueue, current_run_queue,
         placement::{
             WakePlacement, can_idle_pull_task, find_idle_pull_src, find_idlest_cpu,
-            select_idle_cpu, select_wake_run_queue, wake_affinity_select,
+            find_lowest_rt_cpu, select_idle_cpu, select_wake_run_queue, wake_affinity_select,
         },
     };
     use crate::{KCpuMask, KtaskRef, TaskInner, TaskState};
@@ -220,6 +220,7 @@ mod tests_wake_affinity {
                 WakePlacement::PrevCpu => assert_eq!(idx, 1),
                 WakePlacement::IdleSibling => assert!(idx != 1 && task.cpumask().get(idx)),
                 WakePlacement::Fallback => panic!("home is still in cpumask"),
+                WakePlacement::RtRank => panic!("fair wake does not use RT rank"),
             }
         }
     }
@@ -241,6 +242,49 @@ mod tests_wake_affinity {
         }
     }
 
+    /// Home outside the mask is an RT rank pick, not the Fair `find_idlest` fallback.
+    ///
+    /// Keeping home allowed leaves the Fair/Idle runner at rank 0, so
+    /// `find_lowest_rt_cpu` stays on the hint and the `RtRank` arm never runs.
+    #[def_test]
+    fn wake_rt_off_home_is_rt_rank() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let home = khal::percpu::this_cpu_id().as_usize();
+            let dest = (home + 1) % kcpu_id_map::nr_cpus();
+            let task = test_task_on(home);
+            let now_ns = khal::time::monotonic_time_nanos();
+            let attr = ksched::SchedAttr {
+                policy: ksched::SchedPolicy::Fifo,
+                nice: ksched::Nice::DEFAULT,
+                rt_priority: ksched::RtPrio::new(1).expect("priority 1 is inside 1..=99"),
+                dl_params: None,
+            };
+            current_run_queue::<NoPreemptIrqSave>()
+                .inner
+                .with_sched_rank(|s| {
+                    s.set_attr(&task, attr, now_ns)
+                        .expect("FIFO task is admissible")
+                });
+            assert_eq!(task.sched_class(), ksched::SchedClass::Rt);
+
+            let mut mask = KCpuMask::new();
+            mask.set(dest, true);
+            task.set_cpumask(mask);
+
+            let (idx, place) = wake_affinity_select(&task);
+            assert_eq!(idx, dest);
+            assert_eq!(place, WakePlacement::RtRank);
+
+            #[cfg(feature = "sched_stat")]
+            {
+                let stats = sched_stat_cpu(LogicalCpuId::new(dest));
+                let before = stats.wakeup_rt_rank.load(Ordering::Relaxed);
+                drop(select_wake_run_queue::<NoPreemptIrqSave>(&task));
+                assert_eq!(stats.wakeup_rt_rank.load(Ordering::Relaxed), before + 1);
+            }
+        }
+    }
+
     #[def_test]
     fn wake_of_switching_task_defers_enqueue_without_spinning() {
         let task = test_task_on(0);
@@ -257,6 +301,43 @@ mod tests_wake_affinity {
         task.set_on_cpu(false);
     }
 
+    #[def_test]
+    fn deferred_wake_targets_recorded_cpu() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = test_task_on(0);
+            task.set_state(TaskState::Blocked);
+            task.set_on_cpu(true);
+
+            let (result, decision) = super::super::get_run_queue(1).put_task_with_state(
+                task.clone(),
+                TaskState::Blocked,
+                false,
+                true,
+            );
+
+            assert!(result == WakeEnqueue::Deferred);
+            assert!(decision.is_none());
+            assert_eq!(task.cpu_id().as_usize(), 0);
+            assert_eq!(task.take_wake_enqueue(), Some((false, true)));
+            assert_eq!(super::super::rq::claim_wake_cpu(&task).as_usize(), 1);
+            assert!(task.take_wake_cpu().is_none());
+            task.set_on_cpu(false);
+        }
+    }
+
+    #[def_test]
+    fn find_lowest_rt_cpu_prefers_preemptable_hint_then_cpumask_order() {
+        let mut mask = KCpuMask::new();
+        mask.set(0, true);
+        mask.set(1, true);
+        // Hint is preemptable, so placement stays there.
+        let hint = find_lowest_rt_cpu(&mask, 1, 5, |_| Some(1));
+        assert_eq!(hint, 1);
+        // Hint is not in the mask. Equal ranks keep the first CPU in mask order.
+        let tied = find_lowest_rt_cpu(&mask, 3, 5, |_| Some(2));
+        assert_eq!(tied, 0);
+    }
+
     #[cfg(feature = "sched_stat")]
     fn placement_counter(cpu: usize, place: WakePlacement) -> u64 {
         let stats = sched_stat_cpu(LogicalCpuId::new(cpu));
@@ -264,6 +345,7 @@ mod tests_wake_affinity {
             WakePlacement::PrevCpu => stats.wakeup_last_cpu.load(Ordering::Relaxed),
             WakePlacement::IdleSibling => stats.wakeup_idle_sibling.load(Ordering::Relaxed),
             WakePlacement::Fallback => stats.wakeup_fallback.load(Ordering::Relaxed),
+            WakePlacement::RtRank => stats.wakeup_rt_rank.load(Ordering::Relaxed),
         }
     }
 
@@ -554,5 +636,44 @@ mod tests_interrupt_kick {
             assert_eq!(DONE.load(Ordering::Acquire), 1);
             assert_eq!(FAILED.load(Ordering::Acquire), 0);
         }
+    }
+}
+
+#[unittest::mod_test]
+mod tests_rt_wire {
+    #[cfg(feature = "smp")]
+    use khal::percpu::this_cpu_id;
+    use ksched::{Nice, RtPrio, SchedAttr, SchedPolicy};
+    use kspin::NoPreemptIrqSave;
+    use unittest::{assert, assert_eq, def_test};
+
+    use super::super::current_run_queue;
+    use crate::{TaskInner, set_task_prio};
+
+    #[def_test]
+    fn set_task_prio_keeps_realtime_policy() {
+        let task = TaskInner::new_internal(|| {}, "nice-rt".into(), 4096).into_arc();
+        #[cfg(feature = "smp")]
+        task.set_cpu_id(this_cpu_id());
+        let now_ns = khal::time::monotonic_time_nanos();
+        let attr = SchedAttr {
+            policy: SchedPolicy::Fifo,
+            nice: Nice::DEFAULT,
+            rt_priority: RtPrio::new(10).expect("priority 10 is inside 1..=99"),
+            dl_params: None,
+        };
+        current_run_queue::<NoPreemptIrqSave>()
+            .inner
+            .with_sched_rank(|s| {
+                s.set_attr(&task, attr, now_ns)
+                    .expect("FIFO task is admissible")
+            });
+        assert!(set_task_prio(&task, 5));
+        let got = current_run_queue::<NoPreemptIrqSave>()
+            .inner
+            .with_sched(|s| s.attr(&task));
+        assert_eq!(got.policy, SchedPolicy::Fifo);
+        assert_eq!(got.rt_priority.get(), 10);
+        assert_eq!(got.nice.as_i32(), 5);
     }
 }

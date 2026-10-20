@@ -615,6 +615,23 @@ fn rt_rr_slice_survives_later_account() {
 }
 
 #[def_test]
+fn rt_rr_reentry_starts_a_full_slice() {
+    let mut s = sched();
+    let t = task(1);
+    s.set_attr(&t, rt_attr(SchedPolicy::Rr, 3), 0).unwrap();
+    enqueue_new(&mut s, t.clone());
+    assert_eq!(pick_id(&mut s, 0), 1);
+    let half = DEFAULT_RR_SLICE_NS / 2;
+    let _ = s.update(half, UpdateKind::Account);
+    let tok = SchedTask::<usize>::test_token();
+    // `pick_next` refills only a zero slice. A class change must not keep this remainder.
+    assert_eq!(t.rt().rr_left_ns.get(tok), DEFAULT_RR_SLICE_NS - half);
+    s.set_attr(&t, SchedAttr::DEFAULT, half).unwrap();
+    s.set_attr(&t, rt_attr(SchedPolicy::Rr, 3), half).unwrap();
+    assert_eq!(t.rt().rr_left_ns.get(tok), DEFAULT_RR_SLICE_NS);
+}
+
+#[def_test]
 fn rt_bandwidth_yields_to_fair() {
     let mut s = sched();
     let fair = task(1);
@@ -699,6 +716,30 @@ fn rt_lowered_priority_queues_at_head() {
 }
 
 #[def_test]
+fn rt_throttled_preempt_rank_is_not_preemptable() {
+    let mut s = sched();
+    let fair = task(1);
+    let rt = task(2);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
+    enqueue_new(&mut s, fair);
+    enqueue_new(&mut s, rt);
+    assert_eq!(pick_id(&mut s, 0), 2);
+    assert_eq!(s.rt_preempt_rank(), 5);
+    let throttled = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
+    assert!(throttled.resched);
+    // The RT task is still current, but this period will not pick the class.
+    assert_eq!(s.rt_preempt_rank(), 255);
+    assert_eq!(leave_pick(&mut s, DEFAULT_RT_RUNTIME_NS), 1);
+    assert_eq!(s.rt_preempt_rank(), 255);
+    let later = DEFAULT_RT_RUNTIME_NS + DEFAULT_RT_PERIOD_NS;
+    let resumed = s.update(later, UpdateKind::Account);
+    assert!(resumed.resched);
+    assert_eq!(s.rt_preempt_rank(), 0);
+    assert_eq!(leave_pick(&mut s, later), 2);
+    assert_eq!(s.rt_preempt_rank(), 5);
+}
+
+#[def_test]
 fn rt_throttle_lifts_after_skipped_periods() {
     let mut s = sched();
     let fair = task(1);
@@ -717,24 +758,29 @@ fn rt_throttle_lifts_after_skipped_periods() {
 }
 
 #[def_test]
-fn rt_throttle_without_waiter_disarms() {
+fn rt_throttle_without_waiter_keeps_period_event() {
     let mut s = sched();
     let rt = task(1);
     s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
-    enqueue_new(&mut s, rt.clone());
+    enqueue_new(&mut s, rt);
     assert_eq!(pick_id(&mut s, 0), 1);
     let throttled = s.update(DEFAULT_RT_RUNTIME_NS, UpdateKind::Account);
     assert!(throttled.resched);
     s.block_current(DEFAULT_RT_RUNTIME_NS);
     let next = s.pick_next(DEFAULT_RT_RUNTIME_NS);
     assert!(next.is_idle_class());
+    // The queue is empty, but the period boundary must stay armed so this
+    // idle CPU still samples the clock and drops the published 255.
+    assert_eq!(s.rt_preempt_rank(), 255);
+    assert!(s.next_event_ns().is_some_and(|ns| ns > 0));
+    let later = DEFAULT_RT_RUNTIME_NS + DEFAULT_RT_PERIOD_NS;
+    s.update(later, UpdateKind::Account);
     assert!(s.next_event_ns().is_none());
-    let woke = s.enqueue(rt, EnqueueKind::Wake { sync: false }, DEFAULT_RT_RUNTIME_NS);
-    assert!(woke.next_event_ns.is_some_and(|ns| ns > 0));
+    assert_eq!(s.rt_preempt_rank(), 0);
 }
 
 #[def_test]
-fn rt_steal_last_throttled_waiter_disarms() {
+fn rt_steal_last_throttled_waiter_keeps_period_event() {
     let mut s = sched();
     let rt = task(1);
     s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 5), 0).unwrap();
@@ -748,7 +794,12 @@ fn rt_steal_last_throttled_waiter_disarms() {
     assert!(s.next_event_ns().is_some());
     let stolen = s.steal(&mut |_| true, DEFAULT_RT_RUNTIME_NS);
     assert!(stolen.is_some());
+    assert_eq!(s.rt_preempt_rank(), 255);
+    assert!(s.next_event_ns().is_some_and(|ns| ns > 0));
+    let later = DEFAULT_RT_RUNTIME_NS + DEFAULT_RT_PERIOD_NS;
+    s.update(later, UpdateKind::Account);
     assert!(s.next_event_ns().is_none());
+    assert_eq!(s.rt_preempt_rank(), 0);
 }
 
 #[def_test]

@@ -48,6 +48,27 @@ impl<T> RtClass<T> {
         }
     }
 
+    /// Bandwidth for this period is spent. `pick_next` returns nothing until
+    /// `advance` clears the flag, including a task placed while it is set.
+    pub(crate) fn is_throttled(&self) -> bool {
+        // The method and the flag share this name. This reads the field.
+        self.is_throttled
+    }
+
+    /// Throttle as of `now`, using the same boundary as [`ClassOps::advance`].
+    ///
+    /// The stored flag stays set until a local `advance`. Placement still
+    /// treats the period as open once `now` has reached
+    /// `period_start_ns + rt_period_ns`, so a rank publish in that hold does
+    /// not wait for the flag to be cleared.
+    pub(crate) fn is_throttled_at(&self, now: u64) -> bool {
+        if !self.is_throttled() {
+            return false;
+        }
+        let period = self.rt_period_ns.max(1);
+        now < self.period_start_ns.saturating_add(period)
+    }
+
     fn idx(priority: u8) -> usize {
         assert!(
             (MIN_RT_PRIORITY..=MAX_RT_PRIORITY).contains(&priority),
@@ -137,7 +158,7 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn has_runnable(&self) -> bool {
-        self.occupied != 0 && !self.is_throttled
+        self.occupied != 0 && !self.is_throttled()
     }
 
     fn advance(&mut self, clk: &RqClock, _tok: RqLocked) {
@@ -211,7 +232,7 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
-        if self.is_throttled {
+        if self.is_throttled() {
             return None;
         }
         let prio = self.highest_ready_prio()?;
@@ -291,7 +312,7 @@ impl<T> ClassOps<T> for RtClass<T> {
                 // rotation or drop the reschedule.
             }
         }
-        expired || self.is_throttled
+        expired || self.is_throttled()
     }
 
     fn tick_preempts(&mut self, curr: &SchedTask<T>, clk: &RqClock, tok: RqLocked) -> bool {
@@ -305,7 +326,7 @@ impl<T> ClassOps<T> for RtClass<T> {
         if curr.rt().rr_rotate.get(tok) {
             return true;
         }
-        if self.is_throttled {
+        if self.is_throttled() {
             return false;
         }
         match self.highest_ready_prio() {
@@ -315,7 +336,7 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn curr_timer_ns(&self, curr: &SchedTask<T>, _clk: &RqClock, tok: RqLocked) -> Option<u64> {
-        if self.is_throttled {
+        if self.is_throttled() {
             return None;
         }
         let mut next = self.ns_until_throttle();
@@ -328,11 +349,12 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn class_timer_ns(&self, clk: &RqClock, _tok: RqLocked) -> Option<u64> {
-        // `is_throttled` lasts until the period boundary. Block, migrate,
-        // exit, and steal can empty the queue first. An empty queue has no
-        // one to wake, so a quiet idle CPU must disarm. A later enqueue
-        // recomputes `next_event_ns` and arms the boundary again.
-        if self.queued == 0 || !self.is_throttled {
+        // The flag is cleared only in `advance`. Block, migrate, exit, and
+        // steal can empty the queue before the boundary, and an idle CPU
+        // then has no tick and no `pick_next`. Dropping this event would
+        // leave the flag and the published rank at 255 after the period.
+        // Keep the boundary armed until `advance` clears the flag.
+        if !self.is_throttled() {
             return None;
         }
         Some(
@@ -351,11 +373,10 @@ impl<T> ClassOps<T> for RtClass<T> {
         tok: RqLocked,
     ) {
         let new_prio = task.rt_priority(tok).get();
-        let entered_rr = old.policy != SchedPolicy::Rr && task.policy(tok) == SchedPolicy::Rr;
-        if entered_rr {
+        if old.policy != SchedPolicy::Rr && task.policy(tok) == SchedPolicy::Rr {
             task.rt().rr_left_ns.set(self.rr_slice_ns, tok);
-        }
-        if task.policy(tok) != SchedPolicy::Rr {
+            task.rt().rr_rotate.set(false, tok);
+        } else if task.policy(tok) != SchedPolicy::Rr {
             task.rt().rr_rotate.set(false, tok);
         }
         if is_curr {
@@ -403,8 +424,11 @@ impl<T> ClassOps<T> for RtClass<T> {
     }
 
     fn switched_to(&mut self, task: &SchedTask<T>, _is_curr: bool, _clk: &RqClock, tok: RqLocked) {
-        if task.policy(tok) == SchedPolicy::Rr && task.rt().rr_left_ns.get(tok) == 0 {
+        // A class change skips `attr_changed`. A previous RR run can leave a
+        // partial slice; the new quantum starts full.
+        if task.policy(tok) == SchedPolicy::Rr {
             task.rt().rr_left_ns.set(self.rr_slice_ns, tok);
+            task.rt().rr_rotate.set(false, tok);
         }
     }
 }
