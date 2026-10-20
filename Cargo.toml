@@ -222,7 +222,7 @@ dice_driver = { path = "drivers/platform/dice", package = "dice-driver" }
 irq_driver = { path = "drivers/platform/irq", package = "irq-driver" }
 rtc_driver = { path = "drivers/platform/rtc", package = "rtc-driver" }
 timer_driver = { path = "drivers/platform/timer", package = "timer-driver" }
-x86_apic = { path = "drivers/platform/x86-apic", package = "x86-apic" }
+x86_apic = { path = "arch/x86-apic", package = "x86-apic" }
 
 # Internal: platform variants
 kplat-aarch64 = { path = "platforms/kplat-aarch64", default-features = false }

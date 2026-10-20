@@ -38,7 +38,7 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 ## Scope
 
 ```text
-drivers/platform/x86-apic/
+arch/x86-apic/
 ├── src/
 │   └── lib.rs        # LAPIC bring-up, IPIs, IO-APIC routing, MSI-X backend
 └── Cargo.toml
