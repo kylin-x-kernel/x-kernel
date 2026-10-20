@@ -28,7 +28,7 @@ echo "==> Checking Rust build environment..."
 if [ "${FMT_ONLY}" = 1 ]; then
     echo "==> Prepare: rustfmt toolchain only"
 elif [ -n "${LEG_ARCH}" ]; then
-    echo "==> Arch CI leg (${LEG_ARCH}): limit rustup targets to this node only"
+    echo "==> Arch CI leg (${LEG_ARCH}): prepare the complete project toolchain"
 fi
 NIGHTLY_TOOLCHAIN="${AUX_RUST_TOOLCHAIN:?AUX_RUST_TOOLCHAIN is required}"
 CARGO_SHEAR_VERSION="1.13.2"
@@ -136,25 +136,6 @@ validate_leg_arch() {
     esac
 }
 
-# Kernel triples for a CI leg: subset of rust-toolchain.toml [toolchain].targets by arch prefix.
-leg_toolchain_targets_for_arch() {
-    local arch="$1"
-    local t
-    for t in "${XKERNEL_TARGETS[@]}"; do
-        case "${arch}" in
-            x86_64)
-                case "${t}" in x86_64-*) printf '%s\n' "${t}" ;; esac
-                ;;
-            aarch64)
-                case "${t}" in aarch64-*) printf '%s\n' "${t}" ;; esac
-                ;;
-            riscv64)
-                case "${t}" in riscv64*) printf '%s\n' "${t}" ;; esac
-                ;;
-        esac
-    done
-}
-
 leg_host_musl_target() {
     case "${1}" in
         x86_64) printf '%s\n' x86_64-unknown-linux-musl ;;
@@ -164,28 +145,18 @@ leg_host_musl_target() {
 }
 
 SKIP_NIGHTLY_INSTALL=""
+# Rustup proxies honor every target in rust-toolchain.toml, even on a single
+# architecture leg. Install them under the caller's lock so later Cargo calls
+# cannot start an implicit installation alongside builds sharing this volume.
+mapfile -t DEFAULT_TARGETS < <(dedup_words "${XKERNEL_TARGETS[@]}" "${DEFAULT_EXTRA_TARGETS[@]}")
 if [ -n "${LEG_ARCH}" ]; then
     validate_leg_arch "${LEG_ARCH}"
-    mapfile -t _leg_kernel < <(leg_toolchain_targets_for_arch "${LEG_ARCH}")
-    if [ "${#_leg_kernel[@]}" -eq 0 ]; then
-        echo "No rust-toolchain.toml targets matched CI leg ${LEG_ARCH}" >&2
-        exit 1
-    fi
     mapfile -t _leg_musl < <(leg_host_musl_target "${LEG_ARCH}")
     LEG_MUSL_TARGET="${_leg_musl[0]}"
-    mapfile -t DEFAULT_TARGETS < <(dedup_words "${_leg_kernel[@]}" "${_leg_musl[@]}")
-    if [ "${#DEFAULT_TARGETS[@]}" -eq 0 ]; then
-        echo "Internal error: no rustup targets resolved for leg ${LEG_ARCH}" >&2
-        exit 1
-    fi
     # riscv64 leg has no TEE stage; x86_64/aarch64 need nightly + host musl for libutee.
     if [ "${LEG_ARCH}" = riscv64 ]; then
         SKIP_NIGHTLY_INSTALL=1
     fi
-else
-    # No --fmt / --leg: manual node warmup installs every triple from rust-toolchain.toml
-    # (including loongarch64) plus host musl extras. CI legs only accept ciMatrixArchitectures().
-    mapfile -t DEFAULT_TARGETS < <(dedup_words "${XKERNEL_TARGETS[@]}" "${DEFAULT_EXTRA_TARGETS[@]}")
 fi
 
 default_install_args=("${XKERNEL_TOOLCHAIN}" --profile minimal --no-self-update)

@@ -109,7 +109,7 @@ attempts use 5/10-second backoff, with per-operation retry and publication logs.
 | 容器路径 | 内容 |
 | --- | --- |
 | `/xkernel-cache/cargo` | Cargo registry、git 与元数据缓存 |
-| `/usr/local/rustup/toolchains` | 固定版本 Rust toolchain |
+| `/usr/local/rustup` | 固定版本 Rust toolchain、下载缓存和安装临时文件 |
 | `/xkernel-cache/rootfs` | 按架构校验后的 rootfs 模板 |
 
 镜像中的这些挂载点已经是 `1000:1000`。Docker 第一次创建 volume 时会把镜像中
@@ -122,11 +122,16 @@ volume 时，递增 `Jenkinsfile` 中对应的后缀。Cargo 工具本体位于�
 镜像不内置项目 Rust toolchain。Prepare 只运行
 `scripts/ci/check_build_environment.sh --fmt`，在浮动节点的 Rustup volume 里安装
 `AUX_RUST_TOOLCHAIN` 的 `rustfmt`，供随后的 `cargo fmt --check`。
-各 leg 再运行 `scripts/ci/check_build_environment.sh --leg <arch>`，只在该节点安装
-这一架构的 kernel target；`x86_64` / `aarch64` 另外安装 nightly 与 host musl，供 TEE。
-不带参数调用同一脚本会安装全部架构的 target，仅用于手工预热，Prepare 不会这样调用。
+各 leg 再运行 `scripts/ci/check_build_environment.sh --leg <arch>`，在该节点安装
+`rust-toolchain.toml` 声明的全部 target 及额外的 musl target，避免后续 Cargo
+调用触发隐式安装，与共享缓存的构建并发修改工具链。`x86_64` / `aarch64`
+另外安装 nightly 与 host musl，供 TEE。不带参数调用同一脚本可用于手工预热。
 安装通过 volume 内文件锁串行化。rootfs 下载同样按架构加锁，并通过临时文件、完整性检查和原子替换避免并发
 读到半成品。
+
+Rustup 必须挂载整个 `/usr/local/rustup`，使 `tmp` 和 `toolchains` 位于同一
+文件系统，支持安装时的原子改名。当前使用新卷 `xkernel-rustup-home-v5`；
+旧 `xkernel-rustup-toolchains-v4` 卷不迁入新卷，保留供排查或回退。
 
 Dylint 检查所需的工具都在镜像中：`cargo-dylint`、`dylint-link` 与其他 Cargo
 工具一起位于 `/usr/local/cargo/bin`；lint 库使用的 nightly toolchain 及其组件

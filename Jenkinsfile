@@ -42,7 +42,6 @@ pipeline {
         CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
         RUSTUP_DIST_SERVER = 'https://rsproxy.cn'
         RUSTUP_UPDATE_ROOT = 'https://rsproxy.cn/rustup'
-        RUSTUP_PERMIT_COPY_RENAME = '1'
         PYTHONUNBUFFERED = '1'
         TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
@@ -181,8 +180,8 @@ def ciBuilderDockerArgs() {
     return '--dns 223.5.5.5 ' +
         '--mount type=volume,dst=/xkernel-target ' +
         '--mount type=volume,src=xkernel-cargo-home-v2,dst=/xkernel-cache/cargo ' +
-        // Bump suffix when the builder image preinstalls new rustup targets (see Dockerfile_v3.1 LINT_TARGETS).
-        '--mount type=volume,src=xkernel-rustup-toolchains-v4,dst=/usr/local/rustup/toolchains ' +
+        // Keep Rustup temporary files and toolchains on the same filesystem.
+        '--mount type=volume,src=xkernel-rustup-home-v5,dst=/usr/local/rustup ' +
         '--mount type=volume,src=xkernel-rootfs-cache-v2,dst=/xkernel-cache/rootfs ' +
         '--device=/dev/kvm --device=/dev/vhost-vsock --group-add 36 ' +
         '--security-opt seccomp=unconfined --security-opt no-new-privileges=true'
