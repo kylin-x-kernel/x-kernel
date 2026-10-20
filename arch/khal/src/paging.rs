@@ -60,22 +60,5 @@ cfg_if::cfg_if! {
     }
 }
 
-#[unittest::mod_test]
-pub mod tests_paging {
-    use unittest::def_test;
-
-    use super::MappingFlags;
-
-    #[def_test]
-    fn test_mapping_flags_combine() {
-        let flags = MappingFlags::READ | MappingFlags::WRITE;
-        assert!(flags.contains(MappingFlags::READ));
-        assert!(flags.contains(MappingFlags::WRITE));
-    }
-
-    #[def_test]
-    fn test_mapping_flags_empty() {
-        let flags = MappingFlags::empty();
-        assert!(flags.is_empty());
-    }
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(pub mod tests_paging, "../ut-tests/paging.rs");

@@ -106,3 +106,23 @@ MSI-X vector allocation、APIC destination selection 和 MSI message composition
 
 `IPI_IRQ` 来自 Kconfig 生成常量。`kirq` 必须保持不依赖 `kbuild_config`，所以
 IPI 调用方直接使用 `kbuild_config::IPI_IRQ` 并调用 `kirq::notify_cpu()`。
+
+## crate 级 guest 测试布局
+
+以下补充覆盖 `khal` crate 的基础测试，不属于 IRQ adapter 专项测试。
+guest 测试位于 crate 根目录 `ut-tests/`，由原所属源码模块通过
+`unittest::path_mod_test!` 挂载，保留原公开模块名及注册路径：
+
+| 源码挂载点 | 测试文件 | 模块名 | 用例数 |
+|---|---|---|---|
+| `src/percpu.rs` | `ut-tests/percpu.rs` | `tests_percpu` | 1 |
+| `src/paging.rs` | `ut-tests/paging.rs` | `tests_paging` | 2 |
+| `src/mem/mod.rs` | `ut-tests/mem.rs` | `tests_mem` | 3 |
+| `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 2 |
+
+共 4 个模块、8 个用例，仅在 `cfg(unittest)` 下注册，无额外 feature、架构、
+`serial` 或 `user` 门控。x86_64、AArch64、RISC-V64 和 LoongArch64 的
+对应平台内核均选择这 8 个用例；使用平台 defconfig 与 `UNITTEST=y` 验证。
+CPU 身份测试依赖已初始化的平台 CPU 环境，不是独立 host 测试。
+所有挂载外显式保留 `#[cfg(unittest)]`，使非 UT 构建无需解析该 runtime 宏；
+这不改变 Cargo 依赖图，也不代替 boot helper 清除内核 UT 编译标志。

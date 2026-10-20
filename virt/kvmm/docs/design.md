@@ -42,6 +42,32 @@ virt/kvmm/src/
         └── guest_test.S  # Selftest guest (HLT + VMCALL loop)
 ```
 
+### Unit-test Layout
+
+Guest unit tests live in `ut-tests/` and are mounted with
+`unittest::path_mod_test!` under their original private modules:
+
+| File | Module | Cases | Gate |
+|---|---|---|---|
+| `ut-tests/vdev.rs` | `vdev::unittest_tests` | 1 | `unittest` |
+| `ut-tests/selftest.rs` | `selftest::tests` | 1 | `unittest`, AArch64 |
+| `ut-tests/arch/riscv64.rs` | `arch::riscv64::tests` | 1 | `unittest`, RISC-V |
+
+All three cases retain `serial` execution. AArch64 and RISC-V each register
+two cases; x86_64 registers only the common device-sequence case. These are
+kernel harness tests, not host Cargo tests. The runtime self-test entry points
+remain in `src/selftest.rs`. Assembly stays beside its architecture module,
+so the existing `include_str!` paths and guest symbols are unchanged.
+
+To run in a dedicated validation checkout, prepare `.config` from
+`platforms/kplat-aarch64/qemu_defconfig` or
+`platforms/kplat-riscv64/qemu_defconfig`, run `make defconfig`, enable
+`KFEAT_VMM=y` through `make menuconfig`, then run
+`make unittest UNITTEST_CRATE=kvmm`. Both defconfigs disable VMM by default.
+AArch64 requires EL2/VHE; XKMake enables QEMU virtualization for this config.
+RISC-V requires an H-extension CPU and HS-mode entry. The architecture gates
+remain on the source modules; relocating tests does not enable other platforms.
+
 ### VmmArch Trait
 
 ```rust

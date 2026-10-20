@@ -315,6 +315,14 @@ command.
 three-line header. XKMake passes tracked and non-ignored untracked Rust source
 files to licensure; deleted worktree paths and non-Rust files are not checked.
 
+`make check_test_layout` is a manual source-layout check. An `include!` call
+alone is not evidence of test code: production modules also include generated
+configuration and bindings. Recognized test-module markers are still checked
+when their module body uses `include!`. The checker does not expand macros or
+resolve dynamically generated include contents; passing it does not prove
+that such contents contain no misplaced tests. Existing textual marker checks
+are not a complete Rust syntax analysis.
+
 `make check_lints` runs `xkmake hygiene lints`. Every root workspace member,
 including implicit path-dependency members, must declare
 `[lints] workspace = true`; there is no opt-out list. `make clippy`,

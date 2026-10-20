@@ -81,6 +81,9 @@
 
 ## 已知限制
 
+- `ut-tests/device.rs` 的 3 个用例在内核 harness 中运行，仅使用本例拥有的 mock
+  内存和同步后端。固定 MMIO 地址是模型输入，不映射真实设备，也不注册 IRQ；
+  内核锁 guard 仍会执行正常的 IRQ/preempt 保护。这些用例不覆盖真实 VM 或 DMA。
 - 默认后端为内存 RAM 盘，非持久化。
 - 未实现 `VIRTIO_BLK_F_*` 之外的高级特性（discard/write-zeroes 等）。
 - 仅 MMIO 传输，不支持 PCI。

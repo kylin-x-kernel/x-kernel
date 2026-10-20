@@ -14,6 +14,7 @@ kspin.workspace = true
 ksync.workspace = true
 vdev-core.workspace = true
 vdev-virtio.workspace = true
+unittest.workspace = true
 
 [lints]
 workspace = true

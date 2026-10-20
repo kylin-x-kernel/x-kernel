@@ -3,8 +3,16 @@
 ## Scope and trust model
 
 This analysis covers the entire crate: `src/lib.rs`, `src/arm_generic.rs`,
-`src/riscv_sbi.rs`, and `src/x86_lapic_tsc.rs`, including the ARM
+`src/riscv_sbi.rs`, `src/x86_lapic_tsc.rs`, `src/resume_counter.rs`, and
+`src/resume_notifications.rs`, plus guest fixtures in `ut-tests/`, including the ARM
 `arm-timer-resume-fixup` and `vmm` paths.
+
+Extracted tests keep private parent access and the existing selection gates.
+The two resume suites run only in the kernel harness. Removing the duplicate
+host suites preserves their assertions in the guest suites and avoids divergent
+copies. Outer guest cfg gates avoid runtime macro references in non-UT builds.
+Layout changes neither widen production APIs nor change hardware
+access, state transitions, or existing lint exceptions.
 
 Platform boot code owns privilege level, CPU-local storage readiness, and
 initialization order. `of` supplies the parsed device tree. `x86_apic` owns APIC

@@ -31,6 +31,7 @@ virt/vdev/virtio-blk/
 │   ├── block/config.rs # VirtioBlockConfig 配置空间
 │   ├── constants/      # 块设备常量（复导出 vdev-virtio 通用常量）
 │   └── mmio/           # VirtioMmioBlockDevice + BlockDeviceEvent + 请求头
+├── ut-tests/device.rs  # 内核 harness 中的 3 个 mock 设备回归用例
 └── Cargo.toml
 ```
 
@@ -42,6 +43,21 @@ virt/vdev/virtio-blk/
 | `bus::VirtioBlkDevice` | 以 `GuestDma`/`IrqSender` 实现 `MmioDevice`，转发 MMIO 与 used-ring 中断 |
 | `mmio::BlockDeviceEvent` | MMIO 写之后 VMM 需要执行的动作 |
 | `selftest::vmm_selftest_virtio_blk` | 不开 VM 的完整驱动序列自测 |
+
+### 内核单元测试
+
+原 3 个 host `#[test]` 用例完整迁入 `ut-tests/device.rs`，通过
+`unittest::path_mod_test!` 保留私有 `mmio::device::tests` 模块，
+以 `#[unittest::def_test]` 注册超限请求、容量越界和 reset 清除延迟请求头用例。
+原断言及对 `process_request`、`pending_head` 的私有访问不变；
+`unittest` 使用 workspace 普通依赖，不增加业务公开接口。
+
+测试使用局部 Vec、mock 内存和同步 mock 后端，无需创建 VM、真实块设备或真实 IRQ。
+它们在 `cfg(unittest)` 下的内核 harness 执行，需要已初始化的 allocator 与
+IRQ/preempt guard 运行环境；每例独立构造设备和缓冲区，正常返回时释放资源。
+配置需将本 crate 链入内核，可沿现有 VMM 依赖路径启用 `KFEAT_VMM=y`，再使用
+`make unittest UNITTEST_CRATE=vdev_virtio_blk` 过滤运行。
+这些用例不再由 bare Cargo host harness 执行；`src/selftest.rs` 的可调用自测保持不变。
 
 ## 架构
 

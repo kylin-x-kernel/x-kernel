@@ -104,20 +104,5 @@ fn leak_class_label(loc: &'static Location) -> &'static str {
 }
 
 #[cfg(all(test, feature = "stats"))]
-mod tests {
-    use core::panic::Location;
-
-    use super::*;
-
-    #[test]
-    fn class_for_init_site_reuses_same_class() {
-        fn lookup() -> &'static LockClassStats {
-            class_for_init_site(Location::caller(), "Mutex")
-        }
-
-        let first = lookup();
-        let second = lookup();
-        assert!(core::ptr::eq(first, second));
-        assert_eq!(first.location(), second.location());
-    }
-}
+#[path = "../tests/host/runtime.rs"]
+mod tests;

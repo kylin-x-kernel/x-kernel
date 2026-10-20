@@ -5593,6 +5593,7 @@ version = "0.3.0-dev"
 dependencies = [
  "kspin",
  "log",
+ "unittest",
  "vdev-core",
 ]
 
@@ -5603,6 +5604,7 @@ dependencies = [
  "kspin",
  "ksync",
  "log",
+ "unittest",
  "vdev-core",
  "vdev-virtio",
 ]

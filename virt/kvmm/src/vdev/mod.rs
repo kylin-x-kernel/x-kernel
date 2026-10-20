@@ -18,19 +18,7 @@ pub mod dma;
 #[cfg(target_arch = "riscv64")]
 pub mod riscv64;
 
-#[unittest::mod_test]
-mod unittest_tests {
-    use unittest::{assert, def_test};
-    use vdev_virtio_blk::selftest::vmm_selftest_virtio_blk;
-
-    /// Full virtio-blk driver sequence against the vdev-virtio-blk device: negotiation,
-    /// queue programming, OUT/IN/FLUSH data path, used-ring accounting and
-    /// interrupt injection.
-    #[def_test(serial)]
-    fn test_virtio_blk_device_driver_sequence() {
-        assert!(vmm_selftest_virtio_blk());
-    }
-}
+unittest::path_mod_test!(unittest_tests, "../../ut-tests/vdev.rs");
 
 pub use vdev_core::{
     GuestDma, IrqController, IrqSender, MmioBus, MmioDevice, RxChannel, TxChannel, VcpuWaker,

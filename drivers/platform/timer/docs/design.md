@@ -19,8 +19,8 @@ Wall-clock maintenance belongs to `ktime`.
 | --- | --- |
 | `src/lib.rs` | Target-specific module selection and configuration provenance through `TimerSource`. |
 | `src/arm_generic.rs` | ARM physical or virtual counter, generic timer events, device-tree configuration, and optional counter-discontinuity repair. |
-| `src/resume_counter.rs` | Private ARM counter state and arithmetic regression tests. |
-| `src/resume_notifications.rs` | Per-CPU atomic recovery requests and capacity/coalescing tests. |
+| `src/resume_counter.rs` | Private ARM counter state and test mounts. |
+| `src/resume_notifications.rs` | Per-CPU atomic recovery requests and test mounts. |
 | `src/riscv_sbi.rs` | RISC-V time counter and SBI timer events. |
 | `src/x86_lapic_tsc.rs` | TSC frequency discovery and elapsed-time conversion, with LAPIC one-shot events. |
 
@@ -197,13 +197,42 @@ its event generation without releasing controller resources.
 
 ## Validation
 
-The x86 unit tests in `src/x86_lapic_tsc.rs` exercise frequency-source ordering,
+Guest tests live in crate-root `ut-tests/`, mounted by
+`unittest::path_mod_test!` as private `tests` children of their original parents.
+Names, parent access, registration and inherited architecture/feature gates
+remain unchanged. There are no serial or user flags.
+
+| File under `ut-tests/` | Cases | Gate beyond `cfg(unittest)` |
+| --- | --- | --- |
+| `lib.rs` | 1 | None |
+| `arm_generic.rs` | 4 | AArch64 |
+| `resume_notifications.rs` | 6 | AArch64; available even without resume fixup |
+| `resume_counter.rs` | 11 | AArch64 and `arm-timer-resume-fixup` |
+| `x86_lapic_tsc.rs` | 4 | x86_64 |
+
+Across all gates there are 26 cases: AArch64 selects 11 by default or 22 with
+`KFEAT_ARM_TIMER_RESUME_FIXUP=y`; x86_64 selects 5 and RISC-V64 selects 1.
+Resume fixup depends on `!KFEAT_NMI`; disable NMI before enabling this option
+and verify the resolved `.config` after `make olddefconfig`.
+There is no LoongArch backend or dependency from `kplat-loongarch64`; if the
+crate is linked on that target, only the single common case is available.
+`vmm` changes production timer selection but adds no test-selection gate.
+Use the configured kernel guest unittest workflow (`UNITTEST=y`).
+
+The resume helpers have one set of cases in `ut-tests/resume_counter.rs`
+(11 cases) and `ut-tests/resume_notifications.rs` (6 cases). These kernel UTs
+retain all assertions from the former host copies; there is no separate host
+suite or runner to maintain. With AArch64 resume fixup enabled and NMI disabled,
+`make unittest UNITTEST_CRATE=timer_driver` runs all 22 selected cases, including
+these 17 resume cases.
+
+The x86 unit tests in `ut-tests/x86_lapic_tsc.rs` exercise frequency-source ordering,
 lazy calibration and fallback, frequency calculations, and PIT sample-quality
 rules through simulated readers. They do not exercise port I/O or APIC hardware.
 Hardware validation must check both elapsed time against an independent clock
 and deadline delivery on each CPU, including long and already expired deadlines.
 
-Tests in `src/resume_counter.rs` cover the captured unsigned underflow, ordinary
+Tests in `ut-tests/resume_counter.rs` cover the captured unsigned underflow, ordinary
 and repeated resets, serialized CPU samples, 64-bit rollover and the ambiguous
 half-range boundary. Arithmetic tests do not replace hardware sleep validation.
 

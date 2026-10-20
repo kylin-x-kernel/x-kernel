@@ -22,6 +22,7 @@ tee_crypto/src/
 │   ├── mod.rs
 │   └── x509_verify.rs
 tests/
+├── host/pkix_*.rs      # private lib-test modules mounted from pkix_path
 ├── fixtures/pkix/      # DER fixtures for lib + integration tests
 ├── pkix_anchor_nc.rs
 └── pkix_stitch.rs
@@ -57,7 +58,8 @@ crate in this tree.
 ## Features
 
 - `pkix` — path validation + `x509_verify` helpers
-- `pkix-internal-tests` — large fixture test suite in `src/pkix_path/mod.rs`
+- `pkix-internal-tests` — 108 fixture cases in `tests/host/pkix_*.rs`,
+  mounted as the original private modules in `src/pkix_path/mod.rs`
   (optional, dev-only)
 
 ## Testing
@@ -79,7 +81,7 @@ cargo test --features pkix --test pkix_stitch
 
 | Command | Location | Coverage |
 |---------|----------|----------|
-| `--lib` + `pkix-internal-tests` | `src/pkix_path/mod.rs` | ECDSA/RSA verify helpers, `validate_path`, chain walk, policy fields, DN rules, required leaf policy OID |
+| `--lib` + `pkix-internal-tests` | `tests/host/pkix_*.rs` (except `pkix_serde_der.rs`) | ECDSA/RSA verify helpers, `validate_path`, chain walk, policy fields, DN rules, required leaf policy OID |
 | `--test pkix_anchor_nc` | `tests/pkix_anchor_nc.rs` | Permitted/excluded NC subtrees, malformed NC extension handling |
 | `--test pkix_stitch` | `tests/pkix_stitch.rs` | End-to-end sign/verify for ECDSA P-256, RSA PKCS#1 v1.5, SM2 via `x509_verify` helpers |
 
@@ -111,6 +113,9 @@ Then edit `src/pkix_path/mod.rs`:
 5. Fix patch artifacts: `#[cfg(feature = "pkix")]` / `doc(cfg(feature = "pkix"))` only
    (remove duplicated `any(feature = …)` and stale `p256`/`p384`/`rsa` doc labels).
 6. Apply the `x509-cert` 0.3 accessor migration (see checklist below).
+7. Extract host test modules to `tests/host/pkix_*.rs` and retain their
+   original private names and cfg gates with path-module declarations.
+   At this directory depth the adjusted DER fixture paths remain valid.
 
 Regression:
 

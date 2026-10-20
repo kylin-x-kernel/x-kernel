@@ -418,11 +418,30 @@ fn is_src_test_file(path: &Path) -> bool {
 
 fn has_inline_test_module(content: &str) -> bool {
     let compact: String = content.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact.contains("#[cfg(test)]mod")
-        || compact.contains("#[cfg(unittest)]mod")
-        || compact.contains("#[unittest::mod_test]mod")
-        || compact.contains("#[mod_test]mod")
-        || compact.contains("include!(")
+    [
+        "#[cfg(test)]",
+        "#[cfg(unittest)]",
+        "#[unittest::mod_test]",
+        "#[mod_test]",
+    ]
+    .iter()
+    .any(|marker| {
+        compact.match_indices(marker).any(|(offset, _)| {
+            let item = &compact[offset + marker.len()..];
+            let has_visibility = item.starts_with("pub");
+            let item = if let Some(visible) = item.strip_prefix("pub(") {
+                visible.split_once(')').map_or("", |(_, rest)| rest)
+            } else {
+                item.strip_prefix("pub").unwrap_or(item)
+            };
+            item.starts_with("mod")
+                && (!has_visibility
+                    || marker.contains("mod_test")
+                    || item.find('{').is_some_and(|body| {
+                        item.find(';').is_none_or(|declaration| body < declaration)
+                    }))
+        })
+    })
 }
 
 fn has_host_test_attr(content: &str) -> bool {
@@ -851,10 +870,55 @@ mod tests {
         assert!(has_inline_test_module("#[cfg(unittest)]\nmod copy_tests;"));
         assert!(has_inline_test_module("#[cfg(test)] mod tests { }"));
         assert!(has_inline_test_module("#[mod_test]\nmod tests { }"));
-        assert!(has_inline_test_module("mod tests { include!(\"../ut-tests/lib.rs\"); }"));
+        assert!(has_inline_test_module(
+            "#[mod_test] mod tests { include!(\"../ut-tests/lib.rs\"); }"
+        ));
         assert!(!has_inline_test_module(
             "unittest::path_mod_test!(tests, \"../ut-tests/lib.rs\");"
         ));
+    }
+
+    #[test]
+    fn production_includes_are_not_test_layout_evidence() {
+        for source in [
+            include_str!("../../../util/kbuild_config/src/lib.rs"),
+            r#"include!("generated_constants.rs");"#,
+            r#"include!(concat!(env!("OUT_DIR"), "/bindings.rs"));"#,
+            r#"// include!("example.rs") includes ordinary Rust code."#,
+            r##"const EXAMPLE: &str = r#"include!("example.rs");"#;"##,
+            "#[cfg(unittest)] pub mod ahci;",
+        ] {
+            let mut violations = Vec::new();
+            collect_test_layout_violations("demo", "src/lib.rs".as_ref(), source, &mut violations);
+            assert!(violations.is_empty(), "{source}: {violations:?}");
+        }
+    }
+
+    #[test]
+    fn test_module_includes_remain_layout_violations() {
+        for attribute in [
+            "#[cfg(test)]",
+            "#[cfg(unittest)]",
+            "#[mod_test]",
+            "#[unittest::mod_test]",
+        ] {
+            for visibility in ["", "pub ", "pub(crate) ", "pub(super) ", "pub(in crate::task) "] {
+                for include in [
+                    r#"include!("../ut-tests/cases.rs");"#,
+                    r#"include!(env!("TEST_CASES"));"#,
+                ] {
+                    let source = format!("{attribute}\n{visibility}mod tests {{\n{include}\n}}");
+                    let mut violations = Vec::new();
+                    collect_test_layout_violations(
+                        "demo",
+                        "src/lib.rs".as_ref(),
+                        &source,
+                        &mut violations,
+                    );
+                    assert_eq!(violations.len(), 1, "{source}: {violations:?}");
+                }
+            }
+        }
     }
 
     #[test]

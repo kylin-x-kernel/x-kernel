@@ -82,6 +82,14 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 
 - 本模块文档只覆盖 adapter；IRQ core 威胁模型见 `arch/kirq/docs/security.md`。
 
+## crate 级测试边界补充
+
+`ut-tests/{percpu,paging,mem,time}.rs` 保存从原源码模块迁出的 8 个 guest
+用例，通过 `path_mod_test!` 在原模块层级注册，挂载点外另有 `cfg(unittest)`。
+这些测试不含本地 `unsafe`，只检查 CPU 身份、映射标志、内存区域构造与时间值；
+不构成 IRQ/NMI 并发安全验证。迁移保留原测试体和可见性，未扩大生产 API，
+也未改变现有生产 lint 例外或上述 IRQ adapter 信任边界。
+
 ## 审计清单
 
 - `khal::irq` 是否仍只作为 adapter/facade，不新增 IRQ state。

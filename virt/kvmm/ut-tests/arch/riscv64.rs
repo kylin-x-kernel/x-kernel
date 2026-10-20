@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+//! RISC-V guest round-trip regression for host current-task and guest tp isolation.
+
 use super::{CAUSE_VS_ECALL, RiscvVcpu, hext_enter_guest, read_hstatus, write_hstatus};
 
 /// # Safety

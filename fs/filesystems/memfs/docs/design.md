@@ -1,7 +1,14 @@
 # memfs — 设计文档
 
-Kernel unit tests live in `ut-tests/` and are mounted from their original
-source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+## 测试布局
+
+guest 单元测试位于 crate 根目录 `ut-tests/`，通过 `unittest::path_mod_test!`
+挂载在原父模块下，保留私有 `tests` 模块名、父模块访问及 `cfg(unittest)`。
+`lib.rs` 包含 16 例，`shmem.rs` 包含 20 例，`quota.rs` 包含 2 例，共 38 例。
+没有额外架构或 feature 门控，也没有 serial/user 标记或 host 测试。
+四种内核目标在链接 memfs 后均选择这 38 例；`fs/boot` 无条件依赖 memfs，
+不需要新增文件系统 feature 开关。验证使用配置好的内核 `UNITTEST=y` 流程。
+
 ## 定位
 
 `memfs` 提供纯内存文件系统的 inode 和目录树实现。普通文件内容通过
@@ -25,6 +32,8 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 
 - `src/lib.rs`
 - `src/shmem.rs`
+- `src/quota.rs`、`src/ramfs.rs`
+- `ut-tests/lib.rs`、`ut-tests/shmem.rs`、`ut-tests/quota.rs`
 - regular-file inode 与 VFS address-space/page-cache 的连接
 - 目录、链接、符号链接和元数据维护
 - 基于 VFS `Cred` callback 的 inode owner 初始化

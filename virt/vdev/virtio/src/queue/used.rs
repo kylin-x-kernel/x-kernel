@@ -306,19 +306,4 @@ impl<T: GuestMemoryAccessor + Clone> UsedRing<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::NoGuestMemoryAccessor;
-
-    #[test]
-    fn layout_size_counts_header_elements_and_footer() {
-        // header (4) + 4 elements * 8 bytes + avail_event footer (2) = 38.
-        assert_eq!(UsedRing::<NoGuestMemoryAccessor>::layout_size(4), 38);
-        // Boundary: the largest queue size still counts the footer.
-        assert_eq!(
-            UsedRing::<NoGuestMemoryAccessor>::layout_size(256),
-            4 + 256 * 8 + 2
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../../ut-tests/used.rs");

@@ -42,8 +42,38 @@ drivers/contracts/net/
 │   ├── net_buf.rs    # NetBuf, NetBufHandle, NetBufBox, NetBufPool
 │   ├── fxmac.rs      # dormant Phytium FXMAC adapter (not compiled in)
 │   └── ixgbe.rs      # dormant ixgbe adapter (not compiled in)
+├── ut-tests/
+│   ├── net_buf.rs    # 2 reachable guest unit tests
+│   ├── fxmac.rs      # 2 dormant historical mock tests
+│   └── ixgbe.rs      # 2 dormant historical mock tests
 └── Cargo.toml
 ```
+
+## Guest Unit Tests
+
+Each source module mounts its file under `ut-tests/` with
+`unittest::path_mod_test!`. The module names and visibility remain
+`pub(crate) net_buf::tests_netbuf`, `pub fxmac::tests_fxmac`, and
+`pub ixgbe::tests_ixgbe`. The macro preserves the former `mod_test`
+`cfg(unittest)` gate and test lint exemptions; registration attributes,
+assertions, fixtures, and private access are unchanged. No dependency or
+public production API is added.
+
+Only the two netbuf cases are in the current compilation graph. They cover
+handle boundaries and local buffer-pool operations, require an initialized
+allocator and the kernel synchronization environment, and use no real NIC.
+They have no additional feature or architecture gate. A network-enabled
+kernel that links this contract can select them with
+`make unittest UNITTEST_CRATE=net`; the crate filter does not itself enable
+networking or add the crate to the kernel dependency graph.
+
+The other four cases remain uncompiled: both adapter module declarations,
+their feature declarations, and their SDK dependencies are commented out.
+Moving their tests does not enable them. They are historical mock/queue/frame
+tests rather than hardware integration tests, but still reference their
+parent adapter's types and imports. Re-enabling them would require separate
+SDK integration and test correctness work; six relocated cases must not be
+reported as six executed or validated cases.
 
 ## Architecture
 

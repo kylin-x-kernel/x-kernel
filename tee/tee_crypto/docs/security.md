@@ -4,6 +4,15 @@
 not a new cryptographic implementation except where glue code is required for
 TEE-compatible streaming, padding, XTS, or big-number behavior.
 
+## Test Fixture Scope
+
+Private host fixtures under `tests/host/` retain their original module
+parents and `cfg(test)` gates: the PKIX internal suite also requires
+`pkix-internal-tests`, and DER serde tests inherit the parent `serde` gate.
+Existing public-API integration tests and DER fixtures remain in `tests/`.
+The layout change adds no public API, runtime dependency, unsafe boundary,
+or guest registration and does not change cryptographic behavior.
+
 ## Trust Boundaries
 
 Inputs from `rust-libutee`, TA tests, object attributes, and serialized key

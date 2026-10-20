@@ -8,6 +8,12 @@ This analysis covers the entire `net` contract crate: `src/lib.rs` (the
 and `src/ixgbe.rs` adapters are not compiled into the crate and are
 excluded; they contain no reachable code in this configuration.
 
+Guest test bodies live in `ut-tests/` and retain their original source-module
+ownership through `unittest::path_mod_test!`. Only `ut-tests/net_buf.rs`
+(two cases) is reachable under `cfg(unittest)`; the two cases each in
+`ut-tests/fxmac.rs` and `ut-tests/ixgbe.rs` remain excluded with their dormant
+parents. No hardware, SDK dependency, or public API is enabled by relocation.
+
 
 ## Trust Model
 
@@ -83,6 +89,21 @@ All unsafe code lives in `src/net_buf.rs` (the dormant `fxmac.rs` /
   data into transmitted frames.
 - The handle type cannot structurally prevent misuse; the safety argument
   rests on the documented driver-side contract.
+
+## Test Coverage And Limits
+
+The two reachable netbuf tests use local Vec-backed handles and local pools;
+their backing allocations outlive handle access, and normally dropped buffers
+return their slots. They exercise fixed boundary inputs in the kernel harness,
+not real DMA or NIC interrupts. They do not prove safety for forged handles or
+concurrent device writes.
+
+The four dormant adapter cases are preserved historical mock tests, not
+validated coverage. Their raw-pointer fixtures and SDK-dependent parent code
+must be audited before any future enablement. In particular, the old fixtures
+use a boxed Vec object's address as both owner and packet-data pointer; that
+does not identify the Vec's backing byte allocation. Relocation preserves this
+unreachable code and does not claim it is safe to execute.
 
 ## Audit Checklist
 

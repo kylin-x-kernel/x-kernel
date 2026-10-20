@@ -33,8 +33,24 @@ virt/vdev/virtio/
 │   ├── constants/        # MMIO 寄存器、队列、通用常量
 │   ├── mmio/             # transport 寄存器解码 + VirtioMmioState 状态机
 │   └── queue/            # 描述符链、available/used ring、VirtioQueue
+├── ut-tests/            # kernel harness: descriptor 2 例，available/used 各 1 例
 └── Cargo.toml
 ```
+
+### 内核单元测试
+
+原 4 个 host `#[test]` 用例迁入 `ut-tests/{descriptor,available,used}.rs`，
+由原 queue 子模块通过 `unittest::path_mod_test!` 挂载私有 `tests` 模块，
+使用 `#[unittest::def_test]` 注册。原断言、fixture 和私有访问保留，
+测试入口从 Cargo host harness 改为 `cfg(unittest)` 下的内核 harness。
+`unittest` 使用 workspace 普通依赖；生产 API 与设备行为不变。
+
+这些用例使用局部内存或纯布局计算，不创建 VM、不访问真实设备。
+descriptor fixture 用内核 allocator 分配 Vec，执行需正常初始化的内核测试环境；
+测试之间不共享设备或缓冲区。配置需将本 crate 链入测试内核，
+可沿现有 VMM 依赖路径启用 `KFEAT_VMM=y`，再使用
+`make unittest UNITTEST_CRATE=vdev_virtio` 过滤运行。
+无需在测试内部执行 VM 初始化或 guest world switch，也不再由 bare Cargo host 测试运行。
 
 ## 架构
 

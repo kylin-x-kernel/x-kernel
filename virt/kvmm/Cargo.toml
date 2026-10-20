@@ -8,6 +8,11 @@ homepage.workspace = true
 repository.workspace = true
 description = "Architecture-independent virtual machine monitor for x-kernel"
 
+[package.metadata.cargo-shear]
+# ut-tests/vdev.rs uses this dependency in cfg(unittest) kernel builds;
+# cargo-shear ignores ut-tests/ paths by workspace convention.
+ignored = ["vdev-virtio-blk"]
+
 [features]
 default = []
 

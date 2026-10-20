@@ -1,4 +1,12 @@
 # memfs — 安全与可靠性分析
+
+## 测试审计范围
+
+审计范围包含生产源码及 `ut-tests/lib.rs`、`ut-tests/shmem.rs`、
+`ut-tests/quota.rs` 的 guest 用例和 fixture。测试仍为原父模块的私有子模块，
+仅在 `cfg(unittest)` 下编译；提取 quota 测试不改变容量计数、失败回滚、
+生产可见性或现有 lint 例外。三组测试没有新增 unsafe 或 host 注册。
+
 ## 信任模型
 
 `memfs` 信任 VFS 已完成路径解析和父目录权限检查，并信任 callback 传入的 `Cred`

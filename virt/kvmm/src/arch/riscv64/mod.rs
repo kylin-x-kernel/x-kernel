@@ -66,7 +66,7 @@ const CSR_HVIP: u16 = 0x645;
 pub struct RiscvHext;
 
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../../../ut-tests/arch/riscv64.rs");
 
 /// RISC-V vCPU state shared with the H-extension entry/exit assembly.
 #[repr(C)]

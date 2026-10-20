@@ -170,9 +170,18 @@ different semantics.
 
 ## Tests
 
-All crate-level tests live in `tee/tee_crypto/tests/` as Cargo integration
-tests. They import `tee_crypto` through public APIs, which prevents tests from
-accidentally depending on private implementation details.
+Public-API Cargo integration tests live directly in `tee/tee_crypto/tests/`.
+They import `tee_crypto` through public APIs.
+
+Private host unit tests live in `tests/host/`, mounted with `#[path]` in
+their original source parents. They remain part of the Cargo `--lib` test
+target, not independent integration targets. Eleven `pkix_path::tests_*`
+modules contain 108 cases under `cfg(all(test, feature = "pkix-internal-tests"))`.
+The four `pkix_path::serde_der::tests` cases retain `cfg(test)` plus their
+parent `pkix` and `serde` gates. There are no guest `def_test` cases.
+Module names, private access, feature selection and test bodies are preserved.
+DER fixture paths still resolve to `tests/fixtures/pkix/`; fixtures and the
+existing integration-test manifest entries are unchanged.
 
 Shared test helpers live under `tests/common/`. Each integration test compiles
 as an independent crate, so helper functions should stay small and tolerate

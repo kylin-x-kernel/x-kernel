@@ -95,6 +95,10 @@
 
 ## 已知限制
 
+- `ut-tests/` 的 4 个回归用例在内核 harness 中执行，覆盖固定 mock 输入与布局，
+  不覆盖真实 VM/DMA 隔离。descriptor fixture 的原始指针仅指向本例存活且不扩容的
+  Vec；其 translator 返回 `usize::MAX`，只能用于现有固定范围输入，不能用来证明
+  任意地址的边界安全。该测试约束在迁移中保持不变。
 - 仅实现 VirtIO MMIO 传输（version 2），不支持 PCI 传输。
 - event-index 尚未实现：传输不广告 `VIRTIO_F_RING_EVENT_IDX`，队列的
   `event_idx_enabled` 恒为 `false`。布局计算仍按包含 event-index footer 处理，

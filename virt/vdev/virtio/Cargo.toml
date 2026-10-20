@@ -12,6 +12,7 @@ description = "Reusable VirtIO MMIO transport, virtqueue, and device-model infra
 log.workspace = true
 kspin.workspace = true
 vdev-core.workspace = true
+unittest.workspace = true
 
 [lints]
 workspace = true

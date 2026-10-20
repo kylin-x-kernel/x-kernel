@@ -20,15 +20,4 @@ pub mod riscv_sbi;
 #[cfg(target_arch = "x86_64")]
 pub mod x86_lapic_tsc;
 
-#[unittest::mod_test]
-mod tests {
-    use ktime_types::{MonotonicInstant, TimeSpan};
-    use unittest::def_test;
-
-    #[def_test]
-    fn test_timer_deadline_nanos_clamps_large_instant() {
-        let deadline = MonotonicInstant::from_span_since_origin(TimeSpan::MAX);
-
-        assert_eq!(deadline.as_nanos_u64_saturating(), u64::MAX);
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

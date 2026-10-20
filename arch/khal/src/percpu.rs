@@ -8,15 +8,5 @@
 pub use kplat::cpu::ap_cpu_init as init_secondary;
 pub use kplat::cpu::{boot_cpu_init as init_primary, id as this_cpu_id, *};
 
-#[unittest::mod_test]
-pub mod tests_percpu {
-    use unittest::def_test;
-
-    use super::this_cpu_id;
-
-    #[def_test]
-    fn test_this_cpu_id_consistent() {
-        let id = this_cpu_id();
-        assert_eq!(id, this_cpu_id());
-    }
-}
+#[cfg(unittest)]
+unittest::path_mod_test!(pub mod tests_percpu, "../ut-tests/percpu.rs");

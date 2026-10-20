@@ -5,6 +5,14 @@
 `klockstat` 是只增型诊断模块：在既有锁路径上追加原子计数，不改变锁语义。
 主要风险在于信息暴露、统计精度与 `unsafe` 注册表访问边界。
 
+## Host Test Scope
+
+Host test fixtures in `tests/host/lib.rs` and `tests/host/runtime.rs`
+remain private children of their original source modules. They require
+`cfg(test)`, with the runtime fixture additionally gated by `stats`.
+Moving them changes no production API, registration lifetime, unsafe boundary,
+or feature selection, and introduces no guest test runtime dependency.
+
 ## 信任模型
 
 ```

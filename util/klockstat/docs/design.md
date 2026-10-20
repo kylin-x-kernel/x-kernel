@@ -22,6 +22,20 @@ util/klockstat-macros/
 - `ksync::Mutex` / `ksync::RwLock`
 - `kspin::SpinLock` 家族（`SpinNoIrq` 等）
 
+## Host Test Layout
+
+Host unit tests live in `tests/host/` and remain private path modules in
+their original parents, not separately discovered Cargo integration targets.
+`tests/host/lib.rs` preserves `tests` under `cfg(test)` (four cases);
+`tests/host/runtime.rs` preserves `runtime::tests` under
+`cfg(all(test, feature = "stats"))` (one case). There are no guest tests.
+The runtime test still compares two lookups from the same call site; it does
+not depend on a fixed source filename or line number.
+
+Validate on a host target with `cargo test -p klockstat --lib` and
+`cargo test -p klockstat --features stats --lib` (four and five cases).
+Use host-target Cargo settings without kernel `--cfg unittest`.
+
 ## Lock Class 模型
 
 每个 lock class 由 `(location, kind)` 标识：
