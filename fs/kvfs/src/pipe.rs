@@ -287,7 +287,7 @@ impl PipeObject {
             Ok(result)
         }))?;
         if matches!(result, Ok(count) if count > 0) {
-            self.wr_wait.wake();
+            ktask::with_wake_sync(|| self.wr_wait.wake());
         }
         result
     }
@@ -330,7 +330,7 @@ impl PipeObject {
             Ok(result)
         }))?;
         if matches!(result, Ok(count) if count > 0) {
-            self.rd_wait.wake();
+            ktask::with_wake_sync(|| self.rd_wait.wake());
         }
         result
     }
@@ -385,8 +385,10 @@ impl PipeObject {
             },
         ));
         if matches!(result, Ok(count) if count > 0) {
-            self.wr_wait.wake();
-            destination.rd_wait.wake();
+            ktask::with_wake_sync(|| {
+                self.wr_wait.wake();
+                destination.rd_wait.wake();
+            });
         }
         result
     }
@@ -404,7 +406,7 @@ impl PipeObject {
             };
 
             if read > 0 {
-                self.wr_wait.wake();
+                ktask::with_wake_sync(|| self.wr_wait.wake());
                 Ok(read)
             } else if !has_writers {
                 Ok(0)
@@ -463,7 +465,7 @@ impl PipeObject {
 
             if written > 0 {
                 written_total += written;
-                self.rd_wait.wake();
+                ktask::with_wake_sync(|| self.rd_wait.wake());
                 if written_total == size || nonblocking {
                     return Ok(written_total);
                 }
@@ -478,6 +480,8 @@ impl PipeObject {
         })
     }
 
+    // Open/close and resize are state notifications, not a data handoff, so
+    // they stay ordinary wakes as in Linux; only read/write/splice use sync.
     fn wake(&self, wake_readers: bool, wake_writers: bool) {
         if wake_readers {
             self.rd_wait.wake();

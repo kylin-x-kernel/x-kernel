@@ -18,7 +18,6 @@ use kcpu_id_map::LogicalCpuId;
 use khal::percpu::this_cpu_id;
 use kspin::BaseGuard;
 
-use super::KRunQueueRef;
 #[cfg(not(feature = "smp"))]
 use super::current_run_queue_ref;
 #[cfg(feature = "smp")]
@@ -27,6 +26,7 @@ use super::get_run_queue;
 use super::stats::{sched_stat_cpu, sched_stat_inc};
 #[cfg(feature = "smp")]
 use super::{KCpuMask, RUN_QUEUES, RunQueue};
+use super::{KRunQueueRef, WakeRunQueueRef};
 use crate::KtaskRef;
 
 /// Selects the run queue for spawn / first publish / affinity migrate-in.
@@ -82,27 +82,63 @@ pub(super) enum WakePlacement {
     /// runner is not preemptable, and also the pick when home is outside
     /// the mask. It is not the Fair `find_idlest_cpu` fallback.
     RtRank,
+    /// `WF_SYNC` and this CPU's only runner is the waker. The wakee is placed
+    /// on the waker CPU, which may differ from its previous `cpu_id`.
+    SyncHandoff,
+}
+
+/// Whether this wake carries the `with_wake_sync` hint.
+///
+/// Hardirq and softirq leave the architecture current pointer on the
+/// interrupted task, so that task's flag is not this wake. The context
+/// snapshot runs only when the flag is set: one snapshot yields both
+/// predicates, and ordinary wakes stay on the atomic load.
+///
+/// Known limit: the IRQ-exit tail drops the hardirq depth before deferred
+/// work, and `wake_softirqd` runs after the softirq batch guard is gone. Both
+/// predicates are then false while `current` is still the interrupted task, so
+/// a task inside `with_wake_sync` leaks the hint onto the local ksoftirqd
+/// wake. That daemon is pinned here, so placement does not move; the leak is
+/// the EEVDF sync mark and `wakeup_sync_handoff`. Closing it needs a kirq
+/// "left hardirq, not back in the interrupted task" predicate. Do not switch
+/// this check to `is_in_interrupt_context`: that also drops a real hint from
+/// a BH-disabled task, whose `current` is the waker.
+#[inline]
+pub(super) fn wake_carries_sync() -> bool {
+    let Some(curr) = crate::current_may_uninit() else {
+        return false;
+    };
+    if !curr.is_wake_sync() {
+        return false;
+    }
+    let snapshot = kirq::context::irq_context_snapshot();
+    !snapshot.is_in_hardirq() && !snapshot.is_serving_softirq()
 }
 
 /// Selects a run queue for a task becoming runnable from a wakeup.
 ///
 /// Linux `select_idle_sibling`: prev if idle, else an idle CPU in `cpumask`.
-/// See [`wake_affinity_select`].
+/// The sync hint is read once here ([`wake_carries_sync`]) and travels with the
+/// result. See [`wake_affinity_select`].
 #[inline]
-pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'static, G> {
+pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> WakeRunQueueRef<G> {
     let irq_state = G::acquire();
+    let is_wake_sync = wake_carries_sync();
     #[cfg(not(feature = "smp"))]
     {
         let _ = task;
-        KRunQueueRef {
-            inner: current_run_queue_ref(),
-            state: irq_state,
-            _phantom: core::marker::PhantomData,
+        WakeRunQueueRef {
+            rq: KRunQueueRef {
+                inner: current_run_queue_ref(),
+                state: irq_state,
+                _phantom: core::marker::PhantomData,
+            },
+            is_wake_sync,
         }
     }
     #[cfg(feature = "smp")]
     {
-        let (index, place) = wake_affinity_select(task);
+        let (index, place) = wake_affinity_select(task, is_wake_sync);
         #[cfg(feature = "sched_stat")]
         {
             let stats = sched_stat_cpu(LogicalCpuId::new(index));
@@ -112,14 +148,18 @@ pub(crate) fn select_wake_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueR
                 WakePlacement::IdleSibling => sched_stat_inc(&stats.wakeup_idle_sibling),
                 WakePlacement::Fallback => sched_stat_inc(&stats.wakeup_fallback),
                 WakePlacement::RtRank => sched_stat_inc(&stats.wakeup_rt_rank),
+                WakePlacement::SyncHandoff => sched_stat_inc(&stats.wakeup_sync_handoff),
             }
         }
         #[cfg(not(feature = "sched_stat"))]
         let _ = place;
-        KRunQueueRef {
-            inner: get_run_queue(index),
-            state: irq_state,
-            _phantom: core::marker::PhantomData,
+        WakeRunQueueRef {
+            rq: KRunQueueRef {
+                inner: get_run_queue(index),
+                state: irq_state,
+                _phantom: core::marker::PhantomData,
+            },
+            is_wake_sync,
         }
     }
 }
@@ -280,21 +320,68 @@ fn is_runqueue_idle(idx: usize) -> bool {
         .is_some_and(|rq| rq.nr_running.load(Ordering::Relaxed) == 0)
 }
 
+/// Waker CPU for a sync handoff, before idle search.
+///
+/// The hint only nominates a candidate (Linux `wake_affine_idle`:
+/// `nr_running` includes the waker, so 1 means nobody else is queued). Any
+/// placement rule may then veto it, and a vetoed wake falls through to the
+/// ordinary idle search. Affinity is the only veto today. An idle prev must
+/// not become one: that is the measured handoff (`lat_ctx` keeps the wakee
+/// off an idle home). `wake_wide` and domain limits can still be vetoes here.
+///
+/// `is_wake_sync` is already [`wake_carries_sync`]: hardirq and softirq have
+/// cleared the interrupted task's flag.
+#[cfg(feature = "smp")]
+pub(super) fn sync_handoff_target(
+    is_wake_sync: bool,
+    here_allowed: bool,
+    nr_running: usize,
+    here: usize,
+) -> Option<usize> {
+    let candidate = (is_wake_sync && nr_running == 1).then_some(here)?;
+    here_allowed.then_some(candidate)
+}
+
+/// Sync handoff onto the waker CPU, ahead of idle search.
+///
+/// This is stronger than Linux: an idle prev does not override the candidate.
+/// It suits peers that alternately block (`lat_ctx` 9.45 µs → 4.86 µs, because
+/// the wakee no longer waits for an IPI to an idle home). A pipeline whose two
+/// ends both compute can lose parallelism. That case is unmeasured and is an
+/// accepted cost; do not veto it by testing whether prev is idle or local.
+///
+/// `is_wake_sync` is the single hint from [`wake_carries_sync`]. This function
+/// does not read `current` or the IRQ context again.
+#[cfg(feature = "smp")]
+fn sync_handoff_cpu(cpumask: &KCpuMask, is_wake_sync: bool) -> Option<usize> {
+    if !is_wake_sync {
+        return None;
+    }
+    let here = this_cpu_id().as_usize();
+    let nr_running = RUN_QUEUES.try_get(here)?.nr_running.load(Ordering::Relaxed);
+    sync_handoff_target(is_wake_sync, cpumask.get(here), nr_running, here)
+}
+
 /// Wake placement analogue of Linux `select_idle_sibling`.
 ///
 /// Sticky-home plus "home busy → idle" overflow collapsed schbench to ~3-way
 /// parallelism (RPS ~450 → ~325) because the overflowed task never left.
 /// Linux keeps prev when it is idle, otherwise seeks an idle CPU; the next
 /// wake of the displaced worker can seek again (musical chairs, still ~4-way).
+/// A `WF_SYNC` waker that is alone on this CPU is the exception: unless a
+/// veto applies, the wakee takes this CPU ([`sync_handoff_cpu`]).
 ///
 /// No idle CPU: stay on prev if allowed. Home forbidden: spawn `find_idlest`.
 #[cfg(feature = "smp")]
 #[inline]
-pub(super) fn wake_affinity_select(task: &KtaskRef) -> (usize, WakePlacement) {
+pub(super) fn wake_affinity_select(task: &KtaskRef, is_wake_sync: bool) -> (usize, WakePlacement) {
     if task.sched_class() == ksched::SchedClass::Rt {
         return wake_rt(task);
     }
     let cpumask = task.cpumask();
+    if let Some(cpu) = sync_handoff_cpu(&cpumask, is_wake_sync) {
+        return (cpu, WakePlacement::SyncHandoff);
+    }
     let home = task.cpu_id().as_usize();
     let is_home_allowed = cpumask.get(home);
     let prev = is_home_allowed.then_some(home);

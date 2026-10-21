@@ -59,6 +59,7 @@ Wakeup latency chase:
 | `wakeup_idle_sibling` | home 忙，去了另一颗 idle CPU（SIS） |
 | `wakeup_fallback` | Fair：home 不在 cpumask 且无 idle，走 `find_idlest_cpu` |
 | `wakeup_rt_rank` | RT 按 preempt rank 离开 home。home 仍允许时也算这一项，不计入 `wakeup_fallback` |
+| `wakeup_sync_handoff` | `WF_SYNC` 且本核只有 waker，wakee 放到 waker 这颗核（可以不同于上次的 `cpu_id`） |
 | `idle_pull` | 即将 idle 时从忙核偷到一颗 Ready `!on_cpu` waiter |
 | `wake_sync_preempt` 随 p50 变好而升 | WF_SYNC 在干活 |
 | `[eevdf_wake] mark` vs `wake_sync_preempt` | 入队标上了但探测没赢 → 看同块 `probe_*` |

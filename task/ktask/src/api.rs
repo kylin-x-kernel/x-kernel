@@ -639,7 +639,14 @@ pub fn set_current_affinity(cpumask: KCpuMask) -> bool {
 ///
 /// Wakes issued while `f` runs may sync-preempt an eligible next-buddy on the
 /// wakee's run queue when the waker is expected to sleep soon (e.g. futex
-/// wake followed by wait). Nested calls are refcounted.
+/// wake followed by wait). Use it when the wakee consumes what the waker just
+/// produced (futex wake, pipe data, a signal); open/close-style state changes
+/// use ordinary wakes. On SMP, if this CPU's `nr_running`
+/// is 1, the wakee stays on this CPU instead of an idle sibling unless a
+/// placement veto applies (affinity today). A wake from hardirq or an active
+/// softirq drops the hint for both placement and the enqueue mark: `current`
+/// is the interrupted task. The IRQ-exit tail can still leak it onto the
+/// pinned ksoftirqd wake. Nested calls are refcounted.
 pub fn with_wake_sync<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,

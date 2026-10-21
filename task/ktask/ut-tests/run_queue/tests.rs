@@ -130,10 +130,13 @@ mod tests_blocked_resched {
 
 #[cfg(all(feature = "smp", unittest))]
 mod tests_wake_affinity {
-    #[cfg(feature = "sched_stat")]
-    use core::sync::atomic::Ordering;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     use kcpu_id_map::LogicalCpuId;
+    use kirq::softirq::{
+        SoftirqRunResult, SoftirqVec, raise_softirq,
+        test_support::{ScopedSoftirqAction, begin_softirq_test},
+    };
     use kspin::NoPreemptIrqSave;
     use unittest::{assert, assert_eq, def_test};
 
@@ -143,7 +146,8 @@ mod tests_wake_affinity {
         WakeEnqueue, current_run_queue,
         placement::{
             WakePlacement, can_idle_pull_task, find_idle_pull_src, find_idlest_cpu,
-            find_lowest_rt_cpu, select_idle_cpu, select_wake_run_queue, wake_affinity_select,
+            find_lowest_rt_cpu, select_idle_cpu, select_wake_run_queue, sync_handoff_target,
+            wake_affinity_select, wake_carries_sync,
         },
     };
     use crate::{KCpuMask, KtaskRef, TaskInner, TaskState};
@@ -215,13 +219,99 @@ mod tests_wake_affinity {
 
             // CPU1 is typically idle in this unittest; if the test itself runs
             // there, SIS may pick another idle CPU — still a legal wake.
-            let (idx, place) = wake_affinity_select(&task);
+            let (idx, place) = wake_affinity_select(&task, false);
             match place {
                 WakePlacement::PrevCpu => assert_eq!(idx, 1),
                 WakePlacement::IdleSibling => assert!(idx != 1 && task.cpumask().get(idx)),
+                WakePlacement::SyncHandoff => {
+                    panic!("unittest waker is not inside with_wake_sync")
+                }
                 WakePlacement::Fallback => panic!("home is still in cpumask"),
                 WakePlacement::RtRank => panic!("fair wake does not use RT rank"),
             }
+        }
+    }
+
+    #[def_test]
+    fn sync_handoff_target_matches_waker_load_and_affinity() {
+        assert_eq!(sync_handoff_target(true, true, 1, 2), Some(2));
+        assert_eq!(sync_handoff_target(false, true, 1, 2), None);
+        assert_eq!(sync_handoff_target(true, false, 1, 2), None);
+        assert_eq!(sync_handoff_target(true, true, 0, 2), None);
+        assert_eq!(sync_handoff_target(true, true, 2, 2), None);
+    }
+
+    #[def_test]
+    fn wake_sync_hint_follows_task_context_scope() {
+        assert!(!wake_carries_sync());
+        assert!(crate::with_wake_sync(wake_carries_sync));
+        let task = test_task_on(khal::percpu::this_cpu_id().as_usize());
+        assert!(crate::with_wake_sync(|| {
+            select_wake_run_queue::<NoPreemptIrqSave>(&task).is_wake_sync
+        }));
+        // `sync_handoff_cpu` reads this CPU and its `nr_running`. SyncHandoff
+        // must stay here; any other load falls through and is not a miss.
+        let (idx, place) = crate::with_wake_sync(|| wake_affinity_select(&task, true));
+        if place == WakePlacement::SyncHandoff {
+            assert_eq!(idx, khal::percpu::this_cpu_id().as_usize());
+        }
+    }
+
+    #[def_test(serial)]
+    fn wake_sync_hint_dropped_in_hardirq() {
+        let task = test_task_on(khal::percpu::this_cpu_id().as_usize());
+        let _irq = kirq::context::test_support::ScopedHardIrqContext::enter();
+        let (carries, selected) = crate::with_wake_sync(|| {
+            (
+                wake_carries_sync(),
+                select_wake_run_queue::<NoPreemptIrqSave>(&task).is_wake_sync,
+            )
+        });
+        assert!(!carries);
+        assert!(!selected);
+    }
+
+    static SOFTIRQ_WAKE_SYNC_SEEN: AtomicBool = AtomicBool::new(true);
+    static SOFTIRQ_SERVING_SEEN: AtomicBool = AtomicBool::new(false);
+
+    fn record_wake_sync_from_softirq() {
+        SOFTIRQ_SERVING_SEEN.store(kirq::context::is_serving_softirq(), Ordering::Release);
+        SOFTIRQ_WAKE_SYNC_SEEN.store(wake_carries_sync(), Ordering::Release);
+    }
+
+    #[def_test(serial)]
+    fn wake_sync_hint_dropped_in_softirq() {
+        let _wake_gate = begin_softirq_test();
+        // Keep IRQ tails and migration out of the raise-to-drain window.
+        let _irqs_off = NoPreemptIrqSave::new();
+        SOFTIRQ_WAKE_SYNC_SEEN.store(true, Ordering::Release);
+        SOFTIRQ_SERVING_SEEN.store(false, Ordering::Release);
+        let _action =
+            ScopedSoftirqAction::install(SoftirqVec::Block, record_wake_sync_from_softirq);
+
+        let ran = crate::with_wake_sync(|| {
+            raise_softirq(SoftirqVec::Block);
+            kirq::softirq::run_pending_softirqs()
+        });
+        assert_eq!(ran, SoftirqRunResult::Ran);
+        assert!(SOFTIRQ_SERVING_SEEN.load(Ordering::Acquire));
+        assert!(!SOFTIRQ_WAKE_SYNC_SEEN.load(Ordering::Acquire));
+    }
+
+    #[def_test]
+    fn sync_handoff_skips_when_waker_cpu_forbidden() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let here = khal::percpu::this_cpu_id().as_usize();
+            let other = usize::from(here == 0);
+            let task = test_task_on(other);
+            let mut mask = KCpuMask::new();
+            mask.set(other, true);
+            task.set_cpumask(mask);
+
+            let (idx, place) =
+                crate::with_wake_sync(|| wake_affinity_select(&task, wake_carries_sync()));
+            assert!(place != WakePlacement::SyncHandoff);
+            assert!(task.cpumask().get(idx));
         }
     }
 
@@ -233,7 +323,7 @@ mod tests_wake_affinity {
             mask.set(0, true);
             task.set_cpumask(mask);
 
-            let (idx, place) = wake_affinity_select(&task);
+            let (idx, place) = wake_affinity_select(&task, false);
             assert_eq!(idx, 0);
             assert!(matches!(
                 place,
@@ -271,7 +361,7 @@ mod tests_wake_affinity {
             mask.set(dest, true);
             task.set_cpumask(mask);
 
-            let (idx, place) = wake_affinity_select(&task);
+            let (idx, place) = wake_affinity_select(&task, false);
             assert_eq!(idx, dest);
             assert_eq!(place, WakePlacement::RtRank);
 
@@ -292,6 +382,7 @@ mod tests_wake_affinity {
         task.set_on_cpu(true);
 
         let (result, decision) = select_wake_run_queue::<NoPreemptIrqSave>(&task)
+            .rq
             .inner
             .put_task_with_state(task.clone(), TaskState::Blocked, false, true);
 
@@ -346,6 +437,7 @@ mod tests_wake_affinity {
             WakePlacement::IdleSibling => stats.wakeup_idle_sibling.load(Ordering::Relaxed),
             WakePlacement::Fallback => stats.wakeup_fallback.load(Ordering::Relaxed),
             WakePlacement::RtRank => stats.wakeup_rt_rank.load(Ordering::Relaxed),
+            WakePlacement::SyncHandoff => stats.wakeup_sync_handoff.load(Ordering::Relaxed),
         }
     }
 
@@ -359,7 +451,7 @@ mod tests_wake_affinity {
             all.set(1, true);
             task.set_cpumask(all);
 
-            let (idx, place) = wake_affinity_select(&task);
+            let (idx, place) = wake_affinity_select(&task, false);
             let before = placement_counter(idx, place);
             {
                 let _rq = select_wake_run_queue::<NoPreemptIrqSave>(&task);
@@ -369,7 +461,7 @@ mod tests_wake_affinity {
             let mut only0 = KCpuMask::new();
             only0.set(0, true);
             task.set_cpumask(only0);
-            let (idx0, place0) = wake_affinity_select(&task);
+            let (idx0, place0) = wake_affinity_select(&task, false);
             assert_eq!(idx0, 0);
             let before0 = placement_counter(idx0, place0);
             {

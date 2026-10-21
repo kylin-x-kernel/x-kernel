@@ -32,7 +32,6 @@ use super::{
 use crate::{
     KtaskRef, Scheduler, TaskInner,
     api::{current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer},
-    current_may_uninit,
     task::{CurrentTask, TaskState},
     tracing_hooks::{fire_context_switch, fire_task_wakeup},
 };
@@ -156,7 +155,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
     ///
     /// This function does nothing if the task is not in [`TaskState::Blocked`],
     /// which means the task is already unblocked by other cores.
-    pub(crate) fn unblock_task(&mut self, task: KtaskRef, resched: bool) {
+    pub(super) fn unblock_task(&mut self, task: KtaskRef, resched: bool, is_wake_sync: bool) {
         // Wakeups can originate in IRQ context; never allocate a task-name string.
         let task_id = task.trace_id();
         // Try to change the state of the task from `Blocked` to `Ready`,
@@ -166,7 +165,8 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         // target task can not be insert into the run queue until it finishes its scheduling process.
         // Account + PLACE + WF_SYNC share one scheduler lock so a remote CPU
         // cannot leave/pick between flush and nominate (HEAD had no flush).
-        let is_wake_sync = current_may_uninit().is_some_and(|c| c.is_wake_sync());
+        // Only `WakeRunQueueRef` calls this, so `is_wake_sync` is the hint
+        // that chose this queue.
         let (wake_enqueue, decision) =
             self.inner
                 .put_task_with_state(task, TaskState::Blocked, is_wake_sync, resched);

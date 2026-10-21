@@ -525,20 +525,36 @@ Known limits:
    EEVDF: wake PLACE_LAG plus a full-request deadline; involuntary preempt
    first `peer_preempts_curr` then decides `leave_current(Preempt)`; wake
    nominates NEXT_BUDDY even when `curr` is empty (covers the remote
-   leave→pick window). `with_wake_sync` (futex and `Task::interrupt`) may
-   sync-preempt an eligible buddy (still requires eligibility; does not
-   bypass EEVDF). NEXT_BUDDY and the sync mark are armed under one
+   leave→pick window). `with_wake_sync` (futex, `Task::interrupt`, and pipe
+   data handoff) may sync-preempt an eligible buddy (still requires
+   eligibility; skips the deadline compare that Linux `preempt_sync`
+   keeps). NEXT_BUDDY and the sync mark are armed under one
    scheduler lock so a remote CPU cannot snatch the buddy between two
    acquires. A running task must leave through unified `leave_current`.
    EEVDF `curr` is not a task-lifetime owner.
 2. Fair `select_run_queue` is idle-first (`nr_running == 0`) then `nr_home`.
    Fair `select_wake_run_queue` matches `select_idle_sibling` (home if prev is
    idle, otherwise `nr_running == 0` from `load_count`; stay on prev if none idle; `find_idlest`
-   only when home is outside the cpumask and no idle CPU exists). Do not add
-   a separate sticky-home idle overflow before SIS. RT spawn and wake use
-   `find_lowest_rt_cpu` against `rt_preempt_rank` instead of idle-first.
-   The snapshot is written when the scheduler lock drops after `charge`, a
-   `curr` change, or `set_attr`. `next_event_ns` does not rewrite it.
+   only when home is outside the cpumask and no idle CPU exists). A
+   `with_wake_sync` waker with `nr_running == 1` nominates this CPU
+   (`wake_affine_idle`). Unless `sync_handoff_target` vetoes it (affinity
+   only, today), the wakee stays here without an IPI to an idle sibling.
+   Linux may still choose an idle cache-sharing prev, so this handoff is
+   stronger and can serialize a two-sided compute pipeline. That pipeline is
+   unmeasured. Do not close it by vetoing an idle or remote prev: `lat_ctx`
+   depends on pulling the wakee off an idle home.
+   `select_wake_run_queue` reads one `wake_carries_sync` result and returns it
+   in `WakeRunQueueRef`, which is the only path to the EEVDF sync mark.
+   Hardirq and an active softirq clear that result. The IRQ-exit tail does
+   not: `wake_softirqd` runs after the hardirq depth and the softirq batch
+   guard are both gone, so the interrupted task's flag can mark the pinned
+   ksoftirqd wake. Do not treat that window with
+   `is_in_interrupt_context` (it also drops BH-disabled task context, where
+   `current` is the waker). Do not add a separate sticky-home idle overflow
+   before SIS. RT spawn and wake use `find_lowest_rt_cpu` against
+   `rt_preempt_rank` instead of idle-first. The snapshot is written when the
+   scheduler lock drops after `charge`, a `curr` change, or `set_attr`.
+   `next_event_ns` does not rewrite it.
 3. SMP must enable `ipi`: a remote wake's `kick` sets `need_resched`
    through IPI. `interrupt()` of a running task (signal delivery) uses the
    same IPI; otherwise a NOHZ lone runner never leaves user mode.
@@ -593,7 +609,11 @@ timer routing. Test source existence is not execution proof.
   CPU (local `need_resched`, remote IPI) instead of relying only on waiter
   wake or a periodic tick.
 - Fair wake goes home if prev is idle, otherwise `select_idle_sibling`, and
-  stays on prev if no idle CPU exists. RT wake uses `find_lowest_rt_cpu`.
+  stays on prev if no idle CPU exists. `with_wake_sync` and `nr_running == 1`
+  keeps the wakee on the waker CPU unless `sync_handoff_target` vetoes it. An
+  idle prev is not a veto. Hardirq and an active softirq do not apply that
+  handoff; the IRQ-exit tail can still leak it onto ksoftirqd's enqueue mark.
+  RT wake uses `find_lowest_rt_cpu`.
 - `set_prio` / `set_task_prio` keep the task's policy. Lock order is the
   owner run-queue scheduler lock, then `sched_entity_lock`. `cpu_id` is
   rechecked after both locks. A move retries; an unregistered owner panics

@@ -151,6 +151,7 @@ fn sched_stats_text_matches_feature_gates() {
         assert!(text.contains("wakeup_idle_sibling="));
         assert!(text.contains("wakeup_fallback="));
         assert!(text.contains("wakeup_rt_rank="));
+        assert!(text.contains("wakeup_sync_handoff="));
         assert!(text.contains("idle_pull="));
         assert!(text.contains("timer_irq_sched="));
         assert!(text.contains("timer_irq_stale="));

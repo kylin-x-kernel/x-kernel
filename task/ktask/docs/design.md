@@ -713,11 +713,23 @@ readiness precedence and Linux restart policy belong to their callers.
   fully loaded CPU that would turn a completed wake-before-block race into
   queueing delay for an unrelated runnable task.
 - A waker restores the task to `Ready` through
-  `select_wake_run_queue(...).unblock_task(..., true)`.
+  `select_wake_run_queue(...).unblock_task(..., true)`. Selection reads the
+  sync hint once (`wake_carries_sync`) and returns it inside
+  `WakeRunQueueRef`; `unblock_task` takes the EEVDF sync mark from there, so
+  placement and the mark cannot disagree.
 - SMP wake follows Linux `select_idle_sibling`: go home if `prev_cpu`
   (`task.cpu_id()`) is idle; otherwise pick a `nr_running == 0` CPU in the
   cpumask; if all are busy stay on prev; only if home is outside the cpumask
-  and no idle CPU exists does it use `find_idlest_cpu`.
+  and no idle CPU exists does it use `find_idlest_cpu`. A `with_wake_sync`
+  waker that is this CPU's only runner (`nr_running == 1`) nominates this
+  CPU (Linux `wake_affine_idle`); unless a veto in `sync_handoff_target`
+  applies, the wakee goes there without idle search. Hardirq and an active
+  softirq clear that hint before either use: the architecture current pointer
+  is still the interrupted task. The IRQ-exit tail is a known hole: hardirq
+  depth is already zero and the softirq batch guard has dropped before
+  `wake_softirqd`, so a task inside `with_wake_sync` leaks the hint onto the
+  pinned ksoftirqd wake (enqueue mark and `wakeup_sync_handoff` only).
+  Placement and the EEVDF sync mark share that one result.
 - `unblock_task(..., true)` sets `need_resched` on this CPU and, when
   `ipi + preempt` are available, requests the same on a remote CPU.
 - After waking `interrupt_waker`, `TaskInner::interrupt()` calls
@@ -794,7 +806,30 @@ exit completion.
   runner. Sticky-home plus "home busy → idle overflow" collapsed schbench to
   about 3-way parallelism (RPS ~450 → ~325). Under SIS the displaced worker
   can seek idle again (musical chairs, still about 4-way on average). Stay on
-  prev when no idle CPU exists.
+  prev when no idle CPU exists. `with_wake_sync` with `nr_running == 1` on
+  the waker CPU nominates that CPU (Linux `wake_affine_idle`). Pipe
+  read/write/splice data handoff, futex, and `Task::interrupt` take that
+  path; pipe open, close, and resize are state notifications and use
+  ordinary wakes, as in Linux.
+  - The candidate is final unless `sync_handoff_target` vetoes it, and
+    affinity is the only veto today. That is stronger than Linux, which
+    still runs `select_idle_sibling` and may return an idle cache-sharing
+    prev. Peers that alternately block gain (`lat_ctx` 9.45 µs → 4.86 µs,
+    no IPI to an idle home). Do not veto an idle or remote prev: that is the
+    measured path. A pipeline whose two ends both compute can be serialized
+    onto one CPU; that case is unmeasured and accepted. `wake_wide` and
+    domain rules can still be vetoes.
+  - The handoff stacks with `peer_preempts`: a sync-marked eligible buddy
+    preempts `curr` without the deadline compare, whereas Linux
+    `preempt_sync` still checks the runtime threshold and deadline order.
+    That preemption rule predates the sync placement, but pipe data wakes
+    now reach it too, so evaluate both migration and preemption effects,
+    not only the saved IPI.
+  `select_wake_run_queue` decides the hint once (`wake_carries_sync`): a wake
+  from hardirq or an active softirq does not carry it, because `current` is
+  the interrupted task. The IRQ-exit tail (`wake_softirqd` after both depths
+  are zero) can still leak it; see the limit above. The returned
+  `WakeRunQueueRef` carries that bool to the EEVDF sync mark.
 - There is no periodic balancer. Besides affinity and the wake SIS above,
   an about-to-idle CPU does a Linux-style idle-pull: steal one
   **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
@@ -1085,6 +1120,9 @@ With the `sched_stat` feature, `ktask` keeps per-CPU base counters
 (placement, wake, local/remote resched, tick/preempt skips, switch).
 `wakeup_fallback` is the Fair `find_idlest_cpu` path. An RT wake that
 leaves home increments `wakeup_rt_rank` instead.
+`wakeup_sync_handoff` counts a `WF_SYNC` placement onto the waker CPU and
+is separate from `wakeup_last_cpu`, because that CPU may not be the wakee's
+previous `cpu_id`.
 `/proc/sched_stat` is a process-context snapshot. EEVDF additionally emits
 algorithm counters such as `wake_handoff` / `wake_sync_preempt`. A watchdog
 trigger calls `dump_sched_stats()` for allocation-free base output.

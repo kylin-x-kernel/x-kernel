@@ -14,8 +14,8 @@
 //! - `stats`: optional `sched_stat` counters
 //!
 //! Callers still enter through `current_run_queue`, `select_run_queue`,
-//! `select_wake_run_queue`, and `enforce_affinity_placement`. Nice updates
-//! use `set_task_nice`, which locks the owner queue itself.
+//! `select_wake_run_queue`, and `enforce_affinity_placement`.
+//! Nice updates use `set_task_nice`, which locks the owner queue itself.
 //! Placement reads remote `nr_running` / `nr_home` / `rt_preempt_rank` without
 //! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
@@ -268,6 +268,23 @@ pub(crate) struct KRunQueueRef<'a, G: BaseGuard> {
     inner: &'a RunQueue,
     state: G::State,
     _phantom: core::marker::PhantomData<G>,
+}
+
+/// Run queue chosen for a wakeup, together with the sync hint that chose it.
+///
+/// The EEVDF wake mark in [`Self::unblock_task`] can only come from the same
+/// hint that placement used; callers have no separate flag to pass.
+pub(crate) struct WakeRunQueueRef<G: BaseGuard> {
+    rq: KRunQueueRef<'static, G>,
+    is_wake_sync: bool,
+}
+
+impl<G: BaseGuard> WakeRunQueueRef<G> {
+    /// Unblocks `task` on the selected queue with the placement's sync hint.
+    #[inline]
+    pub(crate) fn unblock_task(mut self, task: KtaskRef, resched: bool) {
+        self.rq.unblock_task(task, resched, self.is_wake_sync);
+    }
 }
 
 /// A reference to the current run queue with specific guard.

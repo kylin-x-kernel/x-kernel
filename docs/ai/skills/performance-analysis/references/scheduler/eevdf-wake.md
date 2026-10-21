@@ -84,9 +84,9 @@ Linux 对齐、且不抬回 ms 尾的修法：
    下次 pick 仅当 buddy **eligible 且不晚于** 当前最优 eligible（
    `!entity_before(best, buddy)`）时才优先，否则丢弃 one-shot hint，避免越过
    更早 deadline 的就绪任务 leapfrog。
-2. **WF_SYNC** — futex `drain_inactive` 与 `Task::interrupt()` 走
+2. **WF_SYNC** — futex `drain_inactive`、`Task::interrupt()` 与管道读写数据交接走
    `ktask::with_wake_sync`；eligible buddy 可 sync-preempt 半截 `curr`（即使
-   deadline 更晚）；随后 `prefer_sync_buddy` 保证 pick 仍交给该 buddy，不被刚
+   deadline 更晚，Linux `preempt_sync` 仍检查运行时间阈值和 deadline 顺序）；随后 `prefer_sync_buddy` 保证 pick 仍交给该 buddy，不被刚
    放回的 curr 抢回。
    NEXT_BUDDY 提名与 `mark_sync_wake_preempt` 必须同一次持锁；拆成两次加锁时，
    远端目标 CPU 会在中间 pick 走 buddy，本地 wake（本核 IRQ 关）仍成功、远程
@@ -133,6 +133,20 @@ Linux 对齐、且不抬回 ms 尾的修法：
 曾经 sticky + home 忙 → idle 把 RPS 从 ~450 打到 ~325；SIS 下被挤走的任务下次
 还能再找 idle。`wakeup_last_cpu` / `wakeup_idle_sibling` / `wakeup_fallback`
 区分 Fair 的三种结局。RT 离开 home 记 `wakeup_rt_rank`，不混进 `wakeup_fallback`。
+`WF_SYNC` 且本核只有 waker 时另计 `wakeup_sync_handoff`：
+wakee 放到 waker 这颗核，该核可以不同于 wakee 上次的 `cpu_id`。硬中断和正在
+服务的软中断里这次唤醒不携带 sync：`wake_carries_sync` 只判定一次，落位和
+`has_sync_wake` 用同一个结果。IRQ 退出尾部是已知缺口：hardirq 深度已归零、
+softirq 批次 guard 也已退出之后，`wake_softirqd` 仍可能把被打断任务的提示漏到
+本核 ksoftirqd 的入队标记和 `wakeup_sync_handoff` 上；ksoftirqd 绑本核，落点
+不变。不要改用 `is_in_interrupt_context`，那会丢掉 BH-disabled 任务上下文里的
+合法提示。sync 只提名本核，`sync_handoff_target` 可以否决（目前只有
+affinity）。不要用「prev 空闲」或「prev 不是本核」做否决：那正是 `lat_ctx`
+把 wakee 从空闲 home 拉过来的路径。Linux 之后还会走 `select_idle_sibling`，
+可能回到空闲且共享缓存的 prev，所以这里的交接比 Linux 更强。两端都在计算的
+管道流水可能被吸到同一颗核，这个场景未测，是接受的代价。分析时要同时看迁移、
+`wake_sync_preempt` 抢占和并行度，不能只看少掉的 IPI。管道只有读写/splice
+的数据交接带 sync，open、close、resize 是普通唤醒。
 
 Spawn 对齐 Linux idle-first，再比 `nr_home`。即将 idle 时 idle-pull：只从
 `nr_running >= 2` 的核偷 Ready && `!on_cpu` 的 waiter，只锁 src，经
