@@ -167,7 +167,7 @@ _HOOKS_BOOTSTRAP := $(shell \
 .PHONY: unittest unittest_no_fail_fast
 .PHONY: defconfig oldconfig olddefconfig menuconfig saveconfig savedefconfig gen-const
 .PHONY: rootfs uapps rootfs-uapps teefs disk_img ramdisk_img
-.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks rebase clean distclean symbolize
+.PHONY: install-tools check_deps deps check_header header check_lints check_test_layout check_host_tests fmt hooks clean distclean symbolize
 .PHONY: ci-test
 
 all: build
@@ -387,11 +387,6 @@ hooks:
 	@git config core.hooksPath "$$(git rev-parse --show-toplevel)/.githooks"
 	@echo "x-kernel: git hooks enabled -> $$(git config --get core.hooksPath)"
 
-# Catch the current branch up to origin/main before pushing: the CI would
-# reject a stale branch as DIVERGED (the pre-push hook checks the same).
-# --autostash lets a dirty worktree survive the rebase untouched.
-rebase:
-	@git pull --rebase --autostash origin main
 
 ci-test: build
 	@set -eu; \

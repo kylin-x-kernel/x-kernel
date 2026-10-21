@@ -74,7 +74,7 @@ assert_no_fetch() {
     printf 'PASS: %s (no fetch)\n' "$1"
 }
 
-BEHIND_COUNT=3 run_case blocked_when_behind 1 'make rebase' rev-list
+BEHIND_COUNT=3 run_case blocked_when_behind 1 'pull --rebase' rev-list
 BEHIND_COUNT=3 run_case blocked_output_names_the_base 1 'behind origin/main'
 BEHIND_COUNT=0 run_case pass_when_current 0 '' ''
 SKIP_REBASE=1 BEHIND_COUNT=3 run_case skip_rebase_pushes_anyway 0 '' ''

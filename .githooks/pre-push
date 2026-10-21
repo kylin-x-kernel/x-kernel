@@ -27,7 +27,7 @@ behind="$(git rev-list --count "HEAD..origin/main" 2>/dev/null)" || {
 [ "$behind" -gt 0 ] || exit 0
 
 echo "❌ pre-push: $BRANCH is $behind commit(s) behind origin/main (the check assumes the PR targets main); the CI would reject it as DIVERGED." >&2
-echo "   catch up first:  make rebase" >&2
+echo "   catch up first:  git pull --rebase --autostash origin main" >&2
 echo "   then push again:  git push --force-with-lease   # not pushed before: plain git push" >&2
 echo "   push anyway now:  SKIP_REBASE=1 git push ..." >&2
 exit 1
