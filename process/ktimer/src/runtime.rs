@@ -11,21 +11,26 @@
 
 extern crate alloc;
 
-use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap};
-use core::cmp::Ordering;
+use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap, sync::Arc};
+use core::{
+    cmp::Ordering,
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+};
 
 use event_listener::{Event, listener};
+use futures_util::{FutureExt, select_biased};
 use khal::time::monotonic_time;
 use klazy::Once;
 use ksync::{Mutex, static_lock};
 use ktask::future::{block_on, timeout_at};
 use ktime_types::MonotonicInstant;
 
-use crate::Pid;
+use crate::{Pid, interval_timer::TimerInstant};
 
 struct Entry {
-    deadline: MonotonicInstant,
+    deadline: TimerInstant,
     pid: Pid,
+    ticket: Arc<AlarmTicket>,
 }
 
 impl PartialEq for Entry {
@@ -51,21 +56,84 @@ impl Ord for Entry {
     }
 }
 
-static_lock! {
-    static ALARM_LIST: Mutex<BinaryHeap<Entry>> = Mutex::new(BinaryHeap::new());
+#[derive(Default)]
+struct AlarmQueues {
+    monotonic: BinaryHeap<Entry>,
+    realtime: BinaryHeap<Entry>,
+    boottime: BinaryHeap<Entry>,
 }
+impl AlarmQueues {
+    fn queue(&mut self, deadline: TimerInstant) -> Option<&mut BinaryHeap<Entry>> {
+        match deadline {
+            TimerInstant::Monotonic(_) => Some(&mut self.monotonic),
+            TimerInstant::Realtime(_) => Some(&mut self.realtime),
+            TimerInstant::Boottime(_) => Some(&mut self.boottime),
+            TimerInstant::ProcessCpu(_) => None,
+        }
+    }
 
+    fn earliest(&self) -> Option<(MonotonicInstant, TimerInstant)> {
+        self.earliest_with(|deadline| match deadline {
+            TimerInstant::Monotonic(deadline) => Some(deadline),
+            TimerInstant::Realtime(deadline) => {
+                Some(ktime::realtime_deadline_to_monotonic(deadline))
+            }
+            TimerInstant::Boottime(deadline) => {
+                Some(ktime::boottime_deadline_to_monotonic(deadline))
+            }
+            TimerInstant::ProcessCpu(_) => None,
+        })
+    }
+
+    fn earliest_with(
+        &self,
+        convert: impl Fn(TimerInstant) -> Option<MonotonicInstant>,
+    ) -> Option<(MonotonicInstant, TimerInstant)> {
+        [&self.monotonic, &self.realtime, &self.boottime]
+            .into_iter()
+            .filter_map(|queue| queue.peek())
+            .filter_map(|entry| convert(entry.deadline).map(|runtime| (runtime, entry.deadline)))
+            .min_by_key(|(runtime, _)| *runtime)
+    }
+}
+static_lock! {
+    static ALARM_LIST: Mutex<AlarmQueues> = Mutex::new(AlarmQueues {
+        monotonic: BinaryHeap::new(), realtime: BinaryHeap::new(), boottime: BinaryHeap::new(),
+    });
+}
 static EVENT_NEW_TIMER: Event = Event::new();
 static EXPIRED_TASK_HANDLER: Once<fn(Pid)> = Once::new();
 
-pub(super) fn enqueue_alarm(deadline: MonotonicInstant, pid: Pid) {
+pub(crate) struct AlarmTicket(AtomicBool);
+impl AlarmTicket {
+    fn new() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    pub(crate) fn is_queued(&self) -> bool {
+        self.0.load(AtomicOrdering::Acquire)
+    }
+
+    pub(crate) fn consume(&self) {
+        self.0.store(false, AtomicOrdering::Release);
+    }
+}
+
+pub(super) fn enqueue_alarm(deadline: TimerInstant, pid: Pid) -> Option<Arc<AlarmTicket>> {
     let mut guard = ALARM_LIST.lock();
-    let should_wake = guard.peek().is_none_or(|it| it.deadline > deadline);
-    guard.push(Entry { deadline, pid });
+    let queue = guard.queue(deadline)?;
+    let should_wake = queue.peek().is_none_or(|it| it.deadline > deadline);
+    let ticket = Arc::new(AlarmTicket::new());
+    queue.push(Entry {
+        deadline,
+        pid,
+        ticket: ticket.clone(),
+    });
     drop(guard);
     if should_wake {
         EVENT_NEW_TIMER.notify(1);
     }
+    Some(ticket)
 }
 
 /// Registers the callback used to handle expired timer owners.
@@ -79,51 +147,44 @@ pub fn register_expired_task_handler(handler: fn(Pid)) {
 
 async fn alarm_task() {
     loop {
-        let next_deadline = {
-            let guard = ALARM_LIST.lock();
-            guard.peek().map(|entry| entry.deadline)
-        };
-
-        let Some(deadline) = next_deadline else {
-            listener!(EVENT_NEW_TIMER => listener);
-            if !ALARM_LIST.lock().is_empty() {
-                continue;
-            }
-            listener.await;
-            continue;
-        };
-
-        let now = monotonic_time();
-        if deadline <= now {
-            let expired_entry = {
-                let mut guard = ALARM_LIST.lock();
-                match guard.peek() {
-                    Some(entry) if entry.deadline <= now => guard.pop(),
-                    _ => None,
+        // Listeners precede both the queue and clock snapshots.
+        listener!(EVENT_NEW_TIMER => new_timer);
+        let realtime = ktime::clock_change_listener(ktime::ClockDomain::Realtime);
+        let boottime = ktime::clock_change_listener(ktime::ClockDomain::Boottime);
+        let (next, expired) = {
+            let mut queues = ALARM_LIST.lock();
+            let next = queues.earliest();
+            let expired = next.and_then(|(deadline, original)| {
+                if deadline <= monotonic_time() {
+                    queues.queue(original).and_then(BinaryHeap::pop)
+                } else {
+                    None
                 }
-            };
-
-            if let (Some(handler), Some(entry)) = (EXPIRED_TASK_HANDLER.get(), expired_entry) {
+            });
+            (next, expired)
+        };
+        if let Some(entry) = expired {
+            entry.ticket.consume();
+            if let Some(handler) = EXPIRED_TASK_HANDLER.get() {
                 handler(entry.pid);
             }
-        } else {
-            listener!(EVENT_NEW_TIMER => listener);
-            if ALARM_LIST
-                .lock()
-                .peek()
-                .is_none_or(|entry| entry.deadline != deadline)
-            {
-                continue;
-            }
-
-            // Notification and timeout both lead to rereading the alarm heap.
-            let _ = timeout_at(Some(deadline), listener).await;
+            continue;
+        }
+        // Clock changes invalidate conversions, never original heap ordering.
+        // A registration failure falls back to a bounded retry, not a busy loop.
+        let failed = select_biased! {
+            _ = timeout_at(next.map(|(deadline, _)| deadline), new_timer).fuse() => false,
+            result = realtime.fuse() => result.is_err(),
+            result = boottime.fuse() => result.is_err(),
+        };
+        if failed {
+            ktask::future::sleep(ktime_types::TimeSpan::from_millis(1)).await;
         }
     }
 }
 
 /// Spawns the global alarm task that waits on the earliest queued
-/// `MonotonicInstant` deadline and invokes the expired-owner handler.
+/// deadline across the three wall-clock domains and invokes the owner handler.
 ///
 /// Called once during kernel/process subsystem bring-up; the task runs for
 /// the lifetime of the kernel.
@@ -134,3 +195,5 @@ pub fn spawn_alarm_task() {
         kbuild_config::TASK_STACK_SIZE,
     );
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/runtime.rs");

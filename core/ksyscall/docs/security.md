@@ -330,3 +330,19 @@ and implementation; their later migration must add a byte-decoding entry to
 the shared type, keeping byte-count acceptance in each syscall. This change
 does not claim runtime coverage for configurations beyond the current
 NR_CPUS range or for a new architecture.
+
+### Clock-wait inputs
+
+User `timespec` values pass the existing conversion validation; relative
+BOOTTIME addition uses `checked_add`. Wait-registration errors propagate to
+the caller. Time-injection authorization and source validation belong outside
+the syscall wait layer.
+
+### Signed clock-ID validation
+
+Queries, wall-clock setting, clock sleeps and timerfd creation share the signed
+`time::clock_id::parse_clock_id` boundary. Unsupported negative/dynamic and unknown positive
+IDs return InvalidInput before user-memory access. Recognizing an enum does not
+grant support for every syscall: the existing setter, sleep and timerfd subsets
+and their error ordering remain enforced. The timerfd backend accepts only
+`TimerFdClock`, so invalid integer IDs cannot silently select REALTIME.

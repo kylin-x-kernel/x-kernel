@@ -29,6 +29,7 @@ ktimer_core = { workspace = true, features = ["preempt"] }
 kidentity.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
+ktime.workspace = true
 kirq.workspace = true
 kcpu_id_map.workspace = true
 kcpu_slot.workspace = true
@@ -38,10 +39,7 @@ kpoll = { workspace = true }
 ksched = { workspace = true }
 kiface = { workspace = true }
 event-listener = { workspace = true }
-futures-util = { version = "0.3", default-features = false, features = [
-    "alloc",
-    "async-await-macro",
-] }
+futures-util.workspace = true
 kspin = { workspace = true, features = ["preempt"] }
 lazyinit = { workspace = true }
 log = { workspace = true }

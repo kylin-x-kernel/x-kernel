@@ -6,34 +6,33 @@
 
 use kerrno::{KError, KResult};
 use khal::time::monotonic_time;
-use ktime_types::{SystemTime, TimeSpan};
-use linux_raw_sys::general::{
-    __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
-    CLOCK_MONOTONIC_RAW, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME, CLOCK_REALTIME_COARSE,
-    CLOCK_THREAD_CPUTIME_ID, timespec, timeval, timezone,
-};
+use ktime_types::{ClockId, SystemTime, TimeSpan};
+use linux_raw_sys::general::{__kernel_clockid_t, timespec, timeval, timezone};
 use posix_types::{SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
+
+use super::clock_id::parse_clock_id;
 
 /// Returns the current time from the specified clock.
 pub(crate) fn sys_clock_gettime(
     clock_id: __kernel_clockid_t,
     ts: UserPtr<timespec>,
 ) -> KResult<isize> {
-    let value = match clock_id as u32 {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => timespec::from_system_time(ktime::realtime()),
-        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
+    let clock = parse_clock_id(clock_id).ok_or_else(|| {
+        warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
+        KError::InvalidInput
+    })?;
+    let value = match clock {
+        ClockId::Realtime | ClockId::RealtimeCoarse => {
+            timespec::from_system_time(ktime::realtime())
+        }
+        ClockId::Boottime => timespec::from_time_span(ktime::boottime().span_since_origin()),
+        ClockId::Monotonic | ClockId::MonotonicRaw | ClockId::MonotonicCoarse => {
             timespec::from_time_span(monotonic_time().span_since_origin())
         }
-        CLOCK_PROCESS_CPUTIME_ID => {
+        ClockId::ProcessCpu => {
             timespec::from_time_span(kprocess::current_user_process().process_cpu_time())
         }
-        CLOCK_THREAD_CPUTIME_ID => {
-            timespec::from_time_span(kprocess::current_user_thread().cpu_time())
-        }
-        _ => {
-            warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
-            return Err(KError::InvalidInput);
-        }
+        ClockId::ThreadCpu => timespec::from_time_span(kprocess::current_user_thread().cpu_time()),
     };
     ts.write_vm(value)?;
     Ok(0)
@@ -85,13 +84,14 @@ pub(crate) fn sys_settimeofday(
     set_wall_time(ts.read_vm()?.try_into_system_time()?)
 }
 
-/// Sets `CLOCK_REALTIME` (or its coarse variant) from a `timespec` value.
+/// Sets `CLOCK_REALTIME` from a `timespec` value.
 pub(crate) fn sys_clock_settime(
     clock_id: __kernel_clockid_t,
     ts: UserConstPtr<timespec>,
 ) -> KResult<isize> {
     // Coarse clocks are query-only on Linux, even though gettime accepts them.
-    if clock_id as u32 != CLOCK_REALTIME {
+    let clock = parse_clock_id(clock_id).ok_or(KError::InvalidInput)?;
+    if clock != ClockId::Realtime {
         return Err(KError::InvalidInput);
     }
     let Some(ts) = ts.check_non_null() else {
@@ -105,20 +105,10 @@ pub(crate) fn sys_clock_getres(
     clock_id: __kernel_clockid_t,
     res: UserPtr<timespec>,
 ) -> KResult<isize> {
-    match clock_id as u32 {
-        CLOCK_REALTIME
-        | CLOCK_REALTIME_COARSE
-        | CLOCK_MONOTONIC
-        | CLOCK_MONOTONIC_RAW
-        | CLOCK_MONOTONIC_COARSE
-        | CLOCK_BOOTTIME
-        | CLOCK_PROCESS_CPUTIME_ID
-        | CLOCK_THREAD_CPUTIME_ID => {}
-        _ => {
-            warn!("Called sys_clock_getres for unsupported clock {clock_id}");
-            return Err(KError::InvalidInput);
-        }
-    }
+    let _clock = parse_clock_id(clock_id).ok_or_else(|| {
+        warn!("Called sys_clock_getres for unsupported clock {clock_id}");
+        KError::InvalidInput
+    })?;
     if let Some(res) = res.check_non_null() {
         res.write_vm(timespec::from_time_span(TimeSpan::from_micros(1)))?;
     }

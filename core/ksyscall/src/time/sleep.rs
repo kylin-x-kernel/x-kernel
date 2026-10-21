@@ -6,12 +6,11 @@
 
 use kerrno::{KError, KResult};
 use ktask::future::{block_on, interruptible, sleep};
-use ktime_types::TimeSpan;
-use linux_raw_sys::general::{
-    __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW, CLOCK_REALTIME, TIMER_ABSTIME,
-    timespec,
-};
+use ktime_types::{ClockId, TimeSpan};
+use linux_raw_sys::general::{__kernel_clockid_t, TIMER_ABSTIME, timespec};
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
+
+use super::clock_id::parse_clock_id;
 
 fn sleep_impl(duration: TimeSpan) -> (KResult<()>, TimeSpan) {
     debug!("sleep_impl <= {duration:?}");
@@ -50,22 +49,54 @@ pub(crate) fn sys_clock_nanosleep(
     req: UserConstPtr<timespec>,
     rem: UserPtr<timespec>,
 ) -> KResult<isize> {
-    match clock_id as u32 {
-        CLOCK_REALTIME | CLOCK_MONOTONIC => {}
-        CLOCK_MONOTONIC_RAW => return Err(KError::OperationNotSupported),
-        _ => {
+    let clock = parse_clock_id(clock_id).ok_or_else(|| {
+        warn!("Unsupported clock_id: {clock_id}");
+        KError::InvalidInput
+    })?;
+    match clock {
+        ClockId::Realtime | ClockId::Monotonic | ClockId::Boottime => {}
+        ClockId::MonotonicRaw => return Err(KError::OperationNotSupported),
+        ClockId::ProcessCpu
+        | ClockId::ThreadCpu
+        | ClockId::RealtimeCoarse
+        | ClockId::MonotonicCoarse => {
             warn!("Unsupported clock_id: {clock_id}");
             return Err(KError::InvalidInput);
         }
-    };
+    }
 
     let absolute = flags & TIMER_ABSTIME != 0;
     let raw_req = req.read_vm()?;
-    let duration = if absolute && clock_id as u32 == CLOCK_REALTIME {
-        posix_types::try_into_realtime_deadline(raw_req)?
-            .duration_since(ktime::realtime())
-            .unwrap_or(TimeSpan::ZERO)
-    } else if absolute {
+    if absolute && clock == ClockId::Realtime {
+        let deadline = posix_types::try_into_realtime_deadline(raw_req)?;
+        block_on(interruptible(ktask::future::sleep_until_realtime(deadline)))
+            .map_err(KError::from)??;
+        return Ok(0);
+    }
+    if clock == ClockId::Boottime {
+        let value = raw_req.try_into_time_span()?;
+        let start = ktime::boottime();
+        let deadline = if absolute {
+            ktime_types::BoottimeInstant::from_span_since_origin(value)
+        } else {
+            start.checked_add(value).ok_or(KError::InvalidInput)?
+        };
+        let result = block_on(interruptible(ktask::future::sleep_until_boottime(deadline)));
+        match result {
+            Ok(result) => {
+                result?;
+                return Ok(0);
+            }
+            Err(error) => {
+                if !absolute && let Some(rem) = rem.check_non_null() {
+                    let remaining = deadline.saturating_duration_since(ktime::boottime());
+                    rem.write_vm(timespec::from_time_span(remaining))?;
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    let duration = if absolute {
         raw_req
             .try_into_time_span()?
             .saturating_sub(khal::time::monotonic_time().span_since_origin())

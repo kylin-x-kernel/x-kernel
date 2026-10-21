@@ -601,3 +601,10 @@ timer routing. Test source existence is not execution proof.
   `switch_to_local` store `cpu_id` only inside that hold. A deferred wake
   records `wake_cpu` and leaves `cpu_id` on the CPU that still owns the
   entity until enqueue.
+
+### Adjustable-clock waits
+
+Registration errors propagate rather than being swallowed or treated as expiration.
+Generation is sampled before reading the deadline predicate and rechecked after
+registration. The IRQ-waker and cancellation-context restrictions of `TimerFuture`
+still apply.

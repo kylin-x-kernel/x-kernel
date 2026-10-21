@@ -65,10 +65,10 @@ handler is a `fn` pointer published once.
 All fallible APIs return `KResult`; user-visible failures are `EINVAL`
 (unknown timer, unsupported clock, unrepresentable deadline, ID
 exhaustion). Documented panics are internal-invariant assertions
-(clock-domain mismatch in `runtime_deadline`, monotonic-ITIMER arm) and
+(clock-domain mismatch in interval accounting, monotonic-ITIMER arm) and
 one structural re-lookup `expect` in `set_posix_timer` — none reachable
-from validated user input. No retries or degraded modes exist; timers
-either fire or the operation fails cleanly.
+from validated user input. Clock-change poll-registration failure uses a bounded retry in the alarm
+task; syscall-side registration errors propagate to the caller.
 
 ## Privacy analysis
 
@@ -77,8 +77,7 @@ user file or memory content is processed.
 
 ## Known limitations
 
-- `CLOCK_BOOTTIME` currently shares the monotonic reading; suspend time is
-  not accumulated separately.
+- BOOTTIME includes explicitly injected sleep time; no PM source is wired here.
 - CPU-time timers poll on the user-return path, so a process spinning in
   kernel context without returning to user mode delays its own CPU timer
   expirations.
@@ -87,9 +86,23 @@ user file or memory content is processed.
 ## Audit checklist
 
 - New clock support must add a distinct `TimerInstant` variant plus
-  `checked_add`/`saturating_duration_since`/`runtime_deadline` arms.
+  `checked_add`/`saturating_duration_since` and per-domain alarm queue handling.
 - ABI integers must be converted to `TimeSpan`/`SystemTime` before
   entering the manager.
-- The alarm queue must only ever receive `MonotonicInstant` deadlines.
+- Each alarm heap must contain only its own clock domain; CPU-time deadlines stay out.
 - Any new notification path must carry the current `signal_seq` and be
   validated at dequeue.
+
+### Clock changes and queues
+
+The background task prepares event listeners before reading queues or converting
+deadlines; callbacks run outside the queue lock. Registration failures retry after
+a bounded sleep to avoid losing the task or busy-looping. CPU deadlines stay out
+of the wall-clock alarm queues. This layer neither detects platform resume nor
+interprets RTC differences as confirmed sleep.
+
+## Alarm recheck after rollback
+
+Dequeuing consumes the alarm ticket before calling the owner. Even zero-expiration
+rechecks restore a consumed alarm; queued tickets avoid duplicate rearm on scans.
+The regression uses an explicit rollback sample and does not alter global time.

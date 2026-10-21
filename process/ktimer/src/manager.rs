@@ -99,11 +99,14 @@ impl ProcessTimerManager {
 
             // Wall-clock timers read their own clock internally; CPU time args are unused.
             let expirations = timer.update(TimeSpan::ZERO, TimeSpan::ZERO);
+            // A consumed queue entry is only a hint. If the wall clock moved
+            // back before update, renew its scheduling without duplicating a
+            // still-queued ticket. The ticket also deduplicates repeated polls.
+            timer.arm_deadline(owner_pid);
             if expirations == 0 {
                 continue;
             }
 
-            timer.arm_deadline(owner_pid);
             if let Some(delivery) = timer.collect_delivery(*timer_id, expirations) {
                 deliveries.push(delivery);
             }
@@ -434,7 +437,7 @@ impl ProcessTimerManager {
             )]
             _ => panic!("ITIMER_REAL deadline must use the monotonic clock"),
         });
-        timer.set_alarm(deadline, Some(owner_pid));
+        timer.set_alarm(deadline.map(TimerInstant::Monotonic), Some(owner_pid));
     }
 }
 

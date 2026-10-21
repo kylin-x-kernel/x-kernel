@@ -62,7 +62,9 @@ access requires a current user thread; a kernel task gets
 `OperationNotPermitted` on read and ERR readiness. Object construction itself
 requires no current credentials because the caller supplies them.
 
-Timer polling/rearming requires initialized clock/timer/scheduler services.
+Timer accounting requires initialized clock services. REALTIME/BOOTTIME construction
+requires task context and initialized normal-work services; construction propagates
+service errors. Poll only checks readiness and never programs hardware.
 Timer settime and read serialize through a sleepable programming mutex. Neither
 may run in IRQ context or while holding a lock needed by a pending callback.
 Final TimerFd owner release synchronously drains delivery and must not prevent
@@ -79,7 +81,7 @@ calls that can block.
 
 ## State machines and algorithms
 
-Timer state is disarmed (`deadline=None`) or armed with a monotonic/realtime
+Timer state is disarmed (`deadline=None`) or armed with a monotonic/realtime/boottime
 deadline. Expiration of a one-shot timer increments the saturated count and
 clears the deadline. A periodic timer counts overdue periods and advances its
 deadline by that many intervals; representational overflow can clear the next
@@ -131,16 +133,17 @@ before invoking the handler, so that direction is not inverted. The callback,
 poll and gettime never acquire the programming mutex. Wake calls are outside
 the inner lock; settime also drops the programming mutex before waking.
 
-The FD owns a timer whose handler contains the clock/count/poll state directly.
-FD operations borrow it through `Timer::handler()`; no separate data Arc or
-back-reference to the FD is needed. Timer Drop drains delivery before destroying
-the handler. The primary objects use two allocations: `Arc<TimerFd>` and the
-core's stable node/handler allocation. `PollSet` has its own unchanged internal
-allocation; this is not a two-allocation claim for complete file creation.
-Last owner release reclaims pending one-shot or periodic storage; closing one
-duplicated file descriptor does not imply final release. Allocation occurs
-during construction, not each start/rearm/cancel. Arbitrary poll registration
-and waker costs are outside this timer-storage guarantee.
+The FD owns an Arc runtime containing the timer and programming mutex.
+REALTIME/BOOTTIME objects also own a persistent clock subscription and prepared
+normal work. The observer accounts committed clock samples without an I/O waiter;
+normal work serializes cancellation and reprogramming. Observer callbacks release
+inner state before queueing work and never acquire the programming mutex.
+Final FD release marks the runtime closed, unregisters, then drains delivery.
+Late callbacks/work cannot rearm a closed runtime. The prepared work captures a
+strong runtime reference: observer destruction in IRQ context releases its direct
+runtime field before WorkHandle defers capture reclamation to task context.
+This prevents final timer destruction in the clock notification IRQ path.
+Registration and work storage are allocated at construction, not on clock writes.
 
 Signalfd mask changes release the RwLock before notifying the updater's shared
 signal source. Reads consume pending without a file-level broadcast. Signal queues belong to
@@ -158,9 +161,28 @@ targets can be removed while polling.
 Keeping backend state here allows syscall adapters to handle descriptor lookup
 without creating process dependencies for each object. Stable MOD identities
 prevent queued events from referring to an abandoned configuration object.
-Current timer clock selection treats MONOTONIC/BOOTTIME as monotonic and other
-IDs as realtime; the adapter must restrict accepted clock IDs. Signalfd mask
+Timer deadlines preserve MONOTONIC, BOOTTIME and absolute REALTIME; relative
+REALTIME uses MONOTONIC. The adapter validates signed ABI IDs and passes a `TimerFdClock` enum. Signalfd mask
 filtering (including uncatchable signals) belongs to its syscall adapter. This
 backend does not promise complete Linux epoll graph/cycle validation, timer
 clock-change cancellation. Timerfd
 teardown applies to final object ownership, not every descriptor close.
+
+### timerfd clock changes
+
+BOOTTIME uses `BoottimeInstant`; relative REALTIME selects MONOTONIC when armed,
+while absolute REALTIME keeps `SystemTime`. Old settings are accounted in their
+original domain before replacement. REALTIME/BOOTTIME files hold runtime
+subscriptions from creation, independent of read/poll/epoll registration.
+Observers immediately account expirations using the committed sample, then normal
+work rearms the timer. A forward step past a deadline followed by a rollback does
+not erase accumulated expirations. Arming identities reject delayed updates from
+before the current arming. `settime` wakes only for actual expiration, without an
+extra broadcast for domain changes.
+
+### Typed timerfd clock selection
+
+`TimerFd::new` and `new_file` accept `TimerFdClock` (Realtime, Monotonic or
+Boottime). Handler state, current-time selection and absolute-deadline conversion
+use this enum with exhaustive matches. The backend no longer defaults unknown
+integer IDs to REALTIME. Relative REALTIME still selects a monotonic deadline.

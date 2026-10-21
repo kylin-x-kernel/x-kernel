@@ -117,6 +117,81 @@ pub async fn sleep_until(deadline: MonotonicInstant) {
         .await;
 }
 
+/// Waits for an absolute BOOTTIME deadline, including injected sleep time.
+///
+/// Poll in task context. Clock registration errors are returned to the caller.
+/// The same IRQ-waker and cancellation constraints as [`sleep_until`] apply.
+///
+/// # Errors
+/// Forwards poll registration errors and timer-provider start errors. The
+/// deadline is clamped, so a provider InvalidInput indicates CPU routing/setup
+/// inconsistency rather than an out-of-range user deadline.
+pub async fn sleep_until_boottime(deadline: ktime_types::BoottimeInstant) -> Result<(), KError> {
+    sleep_until_clock(
+        ktime::ClockDomain::Boottime,
+        || ktime::boottime() >= deadline,
+        || ktime::boottime_deadline_to_monotonic(deadline),
+    )
+    .await
+}
+
+/// Waits for an absolute REALTIME deadline, tracking wall-clock changes.
+///
+/// Relative REALTIME waits must use [`sleep`] instead. Poll in task context;
+/// registration errors and the cancellation constraints of [`sleep_until`] apply.
+///
+/// # Errors
+/// Forwards poll registration and timer-provider errors, as described by
+/// [`sleep_until_boottime`].
+pub async fn sleep_until_realtime(deadline: ktime_types::SystemTime) -> Result<(), KError> {
+    sleep_until_clock(
+        ktime::ClockDomain::Realtime,
+        || ktime::realtime() >= deadline,
+        || ktime::realtime_deadline_to_monotonic(deadline),
+    )
+    .await
+}
+
+async fn sleep_until_clock(
+    clock: ktime::ClockDomain,
+    is_due: impl Fn() -> bool,
+    timer_deadline: impl Fn() -> MonotonicInstant,
+) -> Result<(), KError> {
+    loop {
+        // Capture generation before the clock snapshot, so an update during
+        // timer preparation cannot strand this waiter on a stale deadline.
+        let mut change = ktime::clock_change_listener(clock);
+        if is_due() {
+            return Ok(());
+        }
+        let horizon = MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(u64::MAX));
+        let mut timer = TimerFuture::new(timer_deadline().min(horizon))?;
+        let is_complete = core::future::poll_fn(|cx| {
+            // Every poll checks the original domain, including spurious wakes
+            // and changes that arrive before the notification is polled.
+            if is_due() {
+                return Poll::Ready(Ok(true));
+            }
+            match Pin::new(&mut change).poll(cx) {
+                Poll::Ready(Ok(())) => return Poll::Ready(Ok(false)),
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(super::poll::map_register_error(error)));
+                }
+                Poll::Pending => {}
+            }
+            if Pin::new(&mut timer).poll(cx).is_ready() {
+                Poll::Ready(Ok(false))
+            } else {
+                Poll::Pending
+            }
+        })
+        .await?;
+        if is_complete {
+            return Ok(());
+        }
+    }
+}
+
 /// Error returned by [`timeout`] and [`timeout_at`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct Elapsed(());

@@ -65,7 +65,7 @@ pub async fn poll_io_with_cause<P: Pollable, F: FnMut() -> KResult<T>, T>(
     .await
 }
 
-fn map_register_error(error: PollRegisterError) -> KError {
+pub(super) fn map_register_error(error: PollRegisterError) -> KError {
     match error {
         PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
         PollRegisterError::InvalidState => KError::InvalidInput,

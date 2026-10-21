@@ -13,6 +13,8 @@ description = "System timekeeping layer for X-Kernel: realtime correlation over 
 khal.workspace = true
 ktime_types.workspace = true
 kspin.workspace = true
+kpoll.workspace = true
+klazy.workspace = true
 unittest.workspace = true
 
 [lints]

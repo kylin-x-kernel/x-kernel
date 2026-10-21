@@ -1101,3 +1101,12 @@ trigger calls `dump_sched_stats()` for allocation-free base output.
 ## Scheduler trace state
 
 The optional switch callback receives the outgoing task state from the leave decision (`Running=1`, `Ready=2`, `Blocked=3`, `Exited=4`). Consumers can distinguish runnable delay from blocking when combined with wakeup events and embedded event timestamps. The leave path passes this state explicitly through reschedule and switch; a concurrent waker changing Blocked to Ready cannot overwrite the recorded block decision. The private local-helper switch also accepts an explicit leave-decision state. Its sole caller, `migrate_current`, transitions the outgoing task to Ready and passes Ready at that call site; the helper does not hardcode a migration-specific state. Callbacks run with interrupts disabled and must not block or schedule.
+
+### Adjustable-clock waits
+
+`sleep_until_boottime` / `sleep_until_realtime` prepare clock-change listeners
+in task context and preserve the original deadlines. Each poll checks the original
+clock domain before the change listener and underlying monotonic timer. A clock
+change or old timer expiration triggers reconversion; a backward REALTIME step
+extends an absolute wait. Relative REALTIME keeps ordinary monotonic sleep.
+Cancellation releases poll registrations and synchronously cancels the owned timer.

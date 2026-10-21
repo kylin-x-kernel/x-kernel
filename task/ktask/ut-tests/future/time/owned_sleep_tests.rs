@@ -18,6 +18,22 @@ impl Wake for WakeCount {
 }
 
 #[def_test(serial)]
+fn original_clock_is_checked_on_every_poll() {
+    let due = core::cell::Cell::new(false);
+    let mut future = core::pin::pin!(sleep_until_clock(
+        ktime::ClockDomain::Boottime,
+        || due.get(),
+        || monotonic_time() + TimeSpan::from_secs(60),
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(future.as_mut().poll(&mut cx).is_pending());
+    // No clock notification or core timer expiration: a poll must still
+    // observe the original predicate, not rely on the converted timer.
+    due.set(true);
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+}
+
+#[def_test(serial)]
 fn ready_operation_wins_at_expired_timeout() {
     assert_eq!(
         crate::future::block_on(timeout_at(

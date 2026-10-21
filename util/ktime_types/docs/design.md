@@ -8,6 +8,7 @@ realtime 的关联。
 
 ## 范围
 
+- `src/clock_id.rs`：跨模块传递的 `ClockId` 语义枚举；不绑定 Linux ABI 数值。
 - `src/span.rs`：`TimeSpan` 非负时间长度。
 - `src/instant.rs`：由 marker 类型区分的 `Instant<C>` 时钟域时刻。
 - `src/system_time.rs`：带符号的 Unix 墙钟时间。
@@ -49,3 +50,6 @@ API 边界，并通过名称明确为向下取整。
 - `SystemTime` 的 checked 加减直接处理秒和纳秒分量，避免高频墙钟路径经过
   `i128` 总纳秒的乘除规范化。
 - checked 和 saturating 运算供外部输入及非严格排序路径使用；运算符只用于已建立顺序和范围不变量的内部路径。
+
+`ClockId` 仅标识时钟种类，不保证每个操作都支持所有种类，也不保证每种标识均有独立时钟源。
+Linux 编号解析及 timerfd 支持集转换由 `ksyscall` 边界完成；本 crate 不依赖 Linux ABI 或文件对象。

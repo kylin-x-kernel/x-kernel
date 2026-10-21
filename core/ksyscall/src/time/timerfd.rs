@@ -12,19 +12,19 @@
 use kerrno::{KError, KResult};
 use kfd_objects::timerfd::TimerFd;
 use linux_raw_sys::general::{
-    CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_REALTIME, O_RDWR, TFD_CLOEXEC, TFD_NONBLOCK,
-    TFD_TIMER_ABSTIME, itimerspec, timespec,
+    O_RDWR, TFD_CLOEXEC, TFD_NONBLOCK, TFD_TIMER_ABSTIME, itimerspec, timespec,
 };
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
+
+use super::clock_id::{parse_clock_id, timerfd_clock};
 
 /// Creates a timerfd file descriptor.
 pub(crate) fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
     debug!("sys_timerfd_create <= clock_id: {clock_id}, flags: {flags:#x}");
 
-    match clock_id as u32 {
-        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => {}
-        _ => return Err(KError::InvalidInput),
-    }
+    let clock = parse_clock_id(clock_id)
+        .and_then(timerfd_clock)
+        .ok_or(KError::InvalidInput)?;
 
     let unknown = flags & !(TFD_CLOEXEC | TFD_NONBLOCK);
     if unknown != 0 {
@@ -32,7 +32,7 @@ pub(crate) fn sys_timerfd_create(clock_id: i32, flags: u32) -> KResult<isize> {
     }
 
     let file = TimerFd::new_file(
-        clock_id as u32,
+        clock,
         O_RDWR | (flags & TFD_NONBLOCK),
         kprocess::current_cred(),
     )?;

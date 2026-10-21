@@ -136,3 +136,46 @@ They use explicit source readiness and injected errors, not timing thresholds.
 - Drop registration owners outside their mutex; verify callback lock context.
 - Keep IRQ-reachable epoll wake paths on IRQ-safe state and avoid task-only locks.
 - Keep limitations aligned with implementation rather than assumed Linux behavior.
+
+### timerfd adjustable-clock contract
+
+REALTIME/BOOTTIME construction prepares persistent subscriptions and normal work;
+MONOTONIC does not require this work source. Observers account committed samples
+under IRQ-safe state locking, then enqueue after unlocking, without programming
+hardware or invoking user wakers. Normal work cancels and rearms under the
+programming mutex; wakes occur outside all state locks. Final FD release marks
+closed before unsubscribing and draining; late observers/work cannot rearm.
+Observer field destruction order and the work capture's strong reference ensure
+final runtime reclamation happens in task context. Arming identities filter old
+updates; periodic deadlines only advance, so delayed samples from the same arming
+cannot undo accumulated counts. Isolated-sample UT does not replace live global
+clock adjustment, real IRQ or end-to-end PM validation.
+
+Consecutive updates coalesce into queued normal work: AlreadyQueued is expected
+and does not panic. Running work permits one pending successor; unclaimed work
+samples time and state after the publication, so coalescing preserves the final
+rearm. Regressions cover out-of-order/duplicate updates and queued work at close.
+
+### Implicit worker routing
+
+`queue_default(None)` uses one retained normal queue, not an explicit submitting CPU.
+In `task/kworkng/crates/kworkqueue_ng/src/queue/routing.rs`, `resolve_target`
+selects the unfinished owner's CPU before the CurrentCpu policy is consulted.
+`queue/partition.rs::accept_from_queue` revalidates owner identity under Work state;
+changed ownership returns Retry. `work/state.rs::can_accept_on` therefore sees the
+same owner partition, and allows a running occurrence's pending successor.
+OwnerConflict requires another queue or an explicit conflicting target, neither
+of which this observer supplies. It is not a valid coalescing acknowledgement.
+The CurrentCpu regression in `queue_routing_unittest.rs` changes the caller CPU
+while work runs, checks the successor stays on its owner CPU without sampling the
+new caller CPU, checks duplicate pending returns AlreadyQueued, and permits
+migration only after full retirement. This is an isolated route/state test, not
+a proof of ARM weak-memory behavior or real CPU migration timing.
+
+### Timerfd clock input boundary
+
+The syscall adapter validates raw signed clock IDs before file creation and
+passes `TimerFdClock` to the backend. Constructor and handler state cannot carry
+unsupported integer clocks; exhaustive clock matches prevent an unknown ID from
+falling through to REALTIME. Open-flag validation and credential capture are
+unchanged.

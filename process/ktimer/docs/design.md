@@ -19,7 +19,7 @@ process/ktimer/src/
 ├── interval_timer.rs ITimer state: interval, deadline, missed-period advance, alarm arming
 ├── posix_timer.rs   POSIX clock selection, absolute/relative deadlines, overrun bookkeeping
 ├── manager.rs       per-process timer set and poll entry points
-└── runtime.rs       global (MonotonicInstant, pid) alarm heap and alarm task
+└── runtime.rs       per-domain alarm heaps and alarm task
 ```
 
 ## Architecture
@@ -33,7 +33,7 @@ syscall ABI -> TimeSpan/SystemTime conversions (ksyscall)
              \              /
         TimerInstant deadlines (Realtime|Monotonic|Boottime|ProcessCpu)
                       |
-     runtime_deadline -> global alarm heap (MonotonicInstant, Pid)
+     runtime_deadline -> per-domain alarm heaps (TimerInstant, Pid)
                       |
         alarm task -> expired-owner callback -> kprocess poll
                       |
@@ -55,7 +55,7 @@ notification and overrun state.
   kernel CPU totals of the same process; CPU timers are pure polling, no
   interrupts.
 - The alarm task (`spawn_alarm_task`) is a sleepable kernel task using
-  `timeout_at` on the earliest `MonotonicInstant`; the expired-owner
+  `timeout_at` on the current conversion of the earliest deadline; the expired-owner
   callback re-enters `kprocess` polling and may therefore block on the
   process runtime mutex.
 - `register_expired_task_handler`/`spawn_alarm_task` are one-time
@@ -149,3 +149,22 @@ The migration preserves module visibility, feature gates and execution modes.
 - `ut-tests/interval_timer.rs`: mounted by `src/interval_timer.rs` as `tests`.
 - `ut-tests/posix_timer.rs`: mounted by `src/posix_timer.rs` as `tests`.
 - `ut-tests/manager.rs`: mounted by `src/manager.rs` as `tests`.
+- `ut-tests/runtime.rs`: mounted by `src/runtime.rs` as `tests`.
+
+### Preserve alarm clock domains
+
+The alarm queues maintain separate min-heaps for MONOTONIC, REALTIME and BOOTTIME,
+ordered within their original domains. The background task compares current
+monotonic conversions of the three heap heads and listens for new timers and both
+clock-change events. Changes trigger a new head comparison rather than permanently
+ordering deadlines with stale offsets. Relative REALTIME arming uses MONOTONIC;
+rearming snapshots the old domain before replacing the setting and updating
+`armed_clock`. ITIMER_REAL and CPU timers retain their existing semantics.
+
+## Consumed alarm tickets
+
+Each queued wall-clock alarm owns a ticket. Dispatch consumes it before owner
+rechecking. A rollback can make that recheck find no expiration; the owner still
+rearms if the previous ticket was consumed. An unchanged live ticket suppresses
+duplicate entries. Replacing a POSIX timer snapshots the old clock domain before
+replacing its spec, avoiding old-deadline interpretation in the new domain.

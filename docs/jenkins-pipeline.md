@@ -131,7 +131,15 @@ volume 时，递增 `Jenkinsfile` 中对应的后缀。Cargo 工具本体位于�
 
 Rustup 必须挂载整个 `/usr/local/rustup`，使 `tmp` 和 `toolchains` 位于同一
 文件系统，支持安装时的原子改名。当前使用新卷 `xkernel-rustup-home-v5`；
-旧 `xkernel-rustup-toolchains-v4` 卷不迁入新卷，保留供排查或回退。
+主线此前使用的 `xkernel-rustup-toolchains-v4`，以及本 PR 早期验证中使用的
+`xkernel-rustup-toolchains-v5`，都只挂载 toolchains 子目录，与当前 home 卷不同。
+这两个旧卷均不迁入新卷，保留供排查；当前流水线不再引用它们。
+
+整个 home 挂载也会持久化 Rustup settings。镜像的 `rustup default none` 仅是
+新卷初始状态；首次运行时安装可能写入默认 channel，后续容器会保留该设置。
+项目构建通过仓库 `rust-toolchain.toml` 或显式 `+toolchain` 选择版本，
+不依赖这个历史默认值。Setup 在源码目录执行的 active-toolchain 探测同样受
+仓库配置约束，不等同于读取 settings 中的全局默认值。
 
 Dylint 检查所需的工具都在镜像中：`cargo-dylint`、`dylint-link` 与其他 Cargo
 工具一起位于 `/usr/local/cargo/bin`；lint 库使用的 nightly toolchain 及其组件

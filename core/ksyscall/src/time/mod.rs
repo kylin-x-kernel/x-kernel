@@ -4,6 +4,7 @@
 
 //! Time-related syscall adapters.
 
+mod clock_id;
 mod itimer;
 mod posix_timer;
 mod queries;

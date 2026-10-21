@@ -4,6 +4,8 @@
 
 //! Legacy `setitimer` state and scheduling policy.
 
+use alloc::sync::Arc;
+
 use ksignal::Signo;
 use ktime_types::{BoottimeInstant, MonotonicInstant, ProcessCpuInstant, SystemTime, TimeSpan};
 use posix_types::ITimerType;
@@ -20,7 +22,7 @@ pub(crate) fn timer_signal(timer_type: ITimerType) -> Signo {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum TimerInstant {
     Realtime(SystemTime),
     Monotonic(MonotonicInstant),
@@ -68,8 +70,9 @@ impl TimerInstant {
 pub(crate) struct ITimer {
     interval: TimeSpan,
     deadline: Option<TimerInstant>,
-    runtime_deadline: Option<MonotonicInstant>,
+    runtime_deadline: Option<TimerInstant>,
     alarm_pid: Option<Pid>,
+    alarm_ticket: Option<Arc<runtime::AlarmTicket>>,
 }
 
 impl ITimer {
@@ -91,13 +94,18 @@ impl ITimer {
     ) -> (TimeSpan, TimeSpan) {
         let old = self.snapshot(now);
 
+        self.replace(interval, deadline);
+        old
+    }
+
+    pub(crate) fn replace(&mut self, interval: TimeSpan, deadline: Option<TimerInstant>) {
         *self = Self {
             interval,
             deadline,
             runtime_deadline: None,
             alarm_pid: None,
+            alarm_ticket: None,
         };
-        old
     }
 
     pub(crate) fn update(&mut self, now: TimerInstant) -> usize {
@@ -112,6 +120,7 @@ impl ITimer {
 
         self.runtime_deadline = None;
         self.alarm_pid = None;
+        self.alarm_ticket = None;
 
         if self.interval.is_zero() {
             self.deadline = None;
@@ -133,23 +142,30 @@ impl ITimer {
     /// Test observation of the runtime alarm registration.
     #[cfg(unittest)]
     pub(crate) fn alarm_deadline(&self) -> Option<MonotonicInstant> {
-        self.runtime_deadline
+        self.runtime_deadline.map(|deadline| match deadline {
+            TimerInstant::Monotonic(deadline) => deadline,
+            TimerInstant::Realtime(deadline) => ktime::realtime_deadline_to_monotonic(deadline),
+            TimerInstant::Boottime(deadline) => ktime::boottime_deadline_to_monotonic(deadline),
+            TimerInstant::ProcessCpu(_) => MonotonicInstant::ORIGIN,
+        })
     }
 
-    pub(crate) fn set_alarm(
-        &mut self,
-        runtime_deadline: Option<MonotonicInstant>,
-        pid: Option<Pid>,
-    ) {
+    pub(crate) fn set_alarm(&mut self, runtime_deadline: Option<TimerInstant>, pid: Option<Pid>) {
+        if self.runtime_deadline == runtime_deadline
+            && self.alarm_pid == pid
+            && self
+                .alarm_ticket
+                .as_ref()
+                .is_some_and(|ticket| ticket.is_queued())
+        {
+            return;
+        }
         self.runtime_deadline = runtime_deadline;
         self.alarm_pid = pid;
-        self.renew_alarm();
-    }
-
-    fn renew_alarm(&self) {
-        if let (Some(runtime_deadline), Some(pid)) = (self.runtime_deadline, self.alarm_pid) {
-            runtime::enqueue_alarm(runtime_deadline, pid);
-        }
+        self.alarm_ticket = match (runtime_deadline, pid) {
+            (Some(deadline), Some(pid)) => runtime::enqueue_alarm(deadline, pid),
+            _ => None,
+        };
     }
 }
 

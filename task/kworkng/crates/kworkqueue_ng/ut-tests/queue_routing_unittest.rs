@@ -268,3 +268,38 @@ fn disable_rejects_final_admission_and_preserves_rotation() {
     );
     assert!(work.cancel_pending());
 }
+
+/// Implicit resubmission keeps a running owner even when the caller CPU changes.
+///
+/// # Panics
+/// Panics if CurrentCpu overrides an unfinished owner or loses its successor.
+#[def_test]
+fn current_cpu_policy_reuses_running_owner_across_submitters() {
+    let queue = queue(CpuPolicy::CurrentCpu);
+    let work = pin!(Work::with_callback(|| {}));
+    let caller = Cell::new(cpu(0));
+    let samples = Cell::new(0);
+    let current_cpu = || {
+        samples.set(samples.get() + 1);
+        caller.get()
+    };
+    // SAFETY: pinned Work is retained through every explicit run below.
+    assert_eq!(unsafe { queue.submit(&work, None, current_cpu) }, Ok(cpu(0)));
+    let running = queue.claim_with_demand(cpu(0)).0.unwrap();
+    caller.set(cpu(2));
+    // SAFETY: the same queue and pinned Work retain unfinished ownership.
+    assert_eq!(unsafe { queue.submit(&work, None, current_cpu) }, Ok(cpu(0)));
+    assert_eq!(samples.get(), 1);
+    assert!(queue.claim_with_demand(cpu(2)).0.is_none());
+    assert_eq!(
+        // SAFETY: another implicit update coalesces into that pending successor.
+        unsafe { queue.submit(&work, None, current_cpu) },
+        Err(SubmitError::AlreadyQueued)
+    );
+    running.run();
+    queue.claim_with_demand(cpu(0)).0.unwrap().run();
+    // SAFETY: all earlier occurrences retired, so this retained Work may migrate.
+    assert_eq!(unsafe { queue.submit(&work, None, current_cpu) }, Ok(cpu(2)));
+    assert_eq!(samples.get(), 2);
+    queue.claim_with_demand(cpu(2)).0.unwrap().run();
+}

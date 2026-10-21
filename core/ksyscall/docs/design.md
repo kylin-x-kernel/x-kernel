@@ -537,3 +537,23 @@ and implementation; their later migration must add a byte-decoding entry to
 the shared type, keeping byte-count acceptance in each syscall. This change
 does not claim runtime coverage for configurations beyond the current
 NR_CPUS range or for a new architecture.
+
+### Generic clock consumers
+
+`CLOCK_BOOTTIME` queries and `sysinfo.uptime` use `ktime::boottime`.
+`clock_nanosleep` waits in the original domain for absolute REALTIME and
+relative/absolute BOOTTIME requests. Relative REALTIME and MONOTONIC keep
+monotonic waits. Interrupted relative BOOTTIME waits calculate remaining time
+in BOOTTIME; absolute waits do not write remaining time.
+
+### Typed clock-ID boundary
+
+`time/clock_id.rs` parses signed ABI clock IDs into the shared `ktime_types::ClockId` once for queries,
+wall-clock setting, clock sleeps and timerfd creation. Unsupported values,
+including negative FD-encoded clocks, remain rejected. Each operation restricts
+the parsed enum to its existing supported set; MONOTONIC_RAW sleep still returns
+OperationNotSupported. Raw signed values remain available for diagnostics only.
+Timerfd creation maps the accepted enum to the backend's `TimerFdClock`, which
+is retained through construction and arming; raw ABI IDs do not enter the backend.
+`ut-tests/time_clock_id.rs` checks ABI identity, negative/unknown rejection before
+user-memory access and operation-specific restrictions.

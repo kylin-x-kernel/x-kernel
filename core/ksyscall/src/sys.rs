@@ -119,7 +119,7 @@ fn sysinfo_uptime_seconds(elapsed: TimeSpan) -> isize {
 pub(crate) fn sys_sysinfo(info: UserPtr<k_sysinfo>) -> KResult<isize> {
     let mut kinfo = k_sysinfo::default();
     // Keep uptime on the same clock source as CLOCK_BOOTTIME.
-    kinfo.uptime = sysinfo_uptime_seconds(khal::time::monotonic_time().span_since_origin()) as _;
+    kinfo.uptime = sysinfo_uptime_seconds(ktime::boottime().span_since_origin()) as _;
     kinfo.procs = kprocess::system_view::process_count() as _;
     kinfo.mem_unit = 1;
 

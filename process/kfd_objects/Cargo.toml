@@ -18,6 +18,7 @@ kcred.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 ktime.workspace = true
+kworkng.workspace = true
 kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true

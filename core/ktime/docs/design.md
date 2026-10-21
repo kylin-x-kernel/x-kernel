@@ -58,39 +58,69 @@ khal -> ktime_types
   （`InvalidMonotonicBaseline`），后者需要调用方处理计数器/基准一致性。
 - 读取 boottime 对表示范围溢出采用饱和处理，避免未来底层流逝时间导致回绕。
 
+## 时钟变化通知
+
+`change.rs` 持有独立 REALTIME / BOOTTIME 的 `kpoll::PollEvent`。
+墙钟设置和首次初始化仅发布 REALTIME；非零睡眠注入同时发布两个域。
+失败更新及零注入不发布。状态与事件 generation 在 TIMEKEEPER 写锁内提交，
+先释放该锁，再唤醒，waker 不得在时间锁内执行。
+
+订阅者在任务上下文预先初始化通知源，先读取 generation，再读取时间谓词，
+注册后重新检查 generation / 原时钟截止时间。`ClockChangeListener` 将此规则
+封装为一次性 Future；Drop 注销。通知仅提示重算，不代表定时器已经到期。
+一次性等待只公开 `ClockChangeListener` 与构造函数；generation 采样留在模块内部，
+不暴露无消费者的底层注册 API。timerfd 运行时使用独立持久观察者。
+
+通知源首次创建可能分配内存；只有订阅 API 触发创建，写路径只读取已存在的
+源，不在 IRQ 中首次分配。已注册 waker 必须支持 IRQ 安全唤醒。
+两个 domain 的 generation 均按 usize 回绕，假定单个等待不会跨越 usize::MAX 次更新。
+
 ## 调用约束 / 执行上下文
 
-所有接口可在中断、早期启动和普通任务上下文使用；
-内部锁为自旋锁，不阻塞、不睡眠。
+读时、初始化、设置及睡眠注入使用 IRQ 安全自旋锁；注册/等待 API 只用于任务
+上下文。唤醒成本随等待者数量增长，调用者不得持有被这些 waker 重入的外层锁。
+此设计复用 kpoll 的注册与清理能力，没有新增 CI stage。
 
 ## 睡眠补偿边界
 
-算法对应 Linux `kernel/time/timekeeping.c` 中
-`__timekeeping_inject_sleeptime()` 的核心时钟语义：REALTIME 和 BOOTTIME
-增加 delta，MONOTONIC 不增加 delta。状态布局沿用本项目关联模型。
+通用层仅接收经过确认、尚未计入 MONOTONIC 的睡眠时间；调用者负责正式
+suspend/resume 事务、底层时钟冻结及基准恢复、来源选择和恰好一次结算。
+本 PR 不接入 RTC 观测、ARM64 fixup、PM 生产调用方或宿主协议。
 
-调用者必须先建立真实 suspend/resume 边界，保证传入的是尚未计入
-MONOTONIC 的非负睡眠时间，并且每次睡眠仅结算一次。底层时钟的冻结、
-恢复基准和回退修复属于 PM/架构工作，不能由此接口推断。
-
-本阶段没有生产调用方，不改变 `CLOCK_BOOTTIME` syscall、`sysinfo.uptime`
-或现有 timer 行为。后续 PM 集成必须在恢复依赖这些时钟的执行之前，完成
-时间注入及 timer 通知/重臂；该接口不具备 Linux 外层
-`timekeeping_inject_sleeptime64()` 的 timer 通知功能。
-
-后续 BOOTTIME 消费者接入清单：
-
-- `core/ksyscall/src/time/queries.rs`：`CLOCK_BOOTTIME` 读取。
-- `core/ksyscall/src/sys.rs`：`sysinfo.uptime`。
-- `process/ktimer/src/posix_timer.rs`：BOOTTIME 定时器及截止时间换算。
-- `process/kfd_objects/src/timerfd.rs`：BOOTTIME timerfd。
-- `fs/filesystems/devfs/src/nodes/event.rs`：BOOTTIME 事件时间戳。
-
-这些消费者应统一使用 `ktime::boottime()`，定时器同时完成恢复通知与重臂，
-并用非零睡眠补偿的集成用例验证，不能仅验证未注入时与 MONOTONIC 相等。
+BOOTTIME / 绝对 REALTIME 等待与定时器保留原始域截止时间，转换到单调时钟
+只是当前硬件定时器的编程快照；时钟变化后必须重算。
+MONOTONIC 与相对 REALTIME 不订阅时钟变化。ITIMER_REAL 沿用 MONOTONIC。
+`CLOCK_BOOTTIME` 和 `sysinfo.uptime` 读取通用 BOOTTIME。
+事件输入历史时间戳的 BOOTTIME 接入留待独立改动，本 PR 不改变其数据布局。
 
 ## 验证
 
-单元测试使用独立 `Timekeeper` 和显式 monotonic 样本，不修改运行内核的
-全局时钟。覆盖运行时间与睡眠时间的分离、重复及小数秒累计、墙钟设置对
-BOOTTIME 的独立性、零增量、范围和累计溢出回滚、底层计数回退。
+时间算术使用独立 Timekeeper；通知测试使用独立 Changes / PollEvent，
+不注入运行内核的全局睡眠时间。消费者测试覆盖原域检查、周期累计和相对/
+绝对 REALTIME 交替武装。UT 不替代正式 PM 或真实宿主休眠测试。
+
+## 持久运行时观察者
+
+`observer.rs` 在一次性 poll 监听之外提供持久运行时订阅。
+`ClockReading` 及其更新序号在 TIMEKEEPER 锁内采样；回调在解锁后使用该次
+提交的快照执行。注册表保存弱引用，通过写时复制保持已取得的通知快照不变。
+通知在表锁内克隆 Arc，锁外调用观察者；通知本身不分配内存。
+释放注册凭据会停用订阅，与观察者 Arc 是否仍存活无关；已取得的回调仍可能完成。
+替换注册表时清理失效弱引用槽位，存储可能保留此前的并发高水位。
+回调和观察者最终析构必须兼容 IRQ 上下文，通知遍历成本为 O(N)。
+
+只有表 Arc 唯一且 Vec 有剩余容量时，注册才在 IRQ 锁内原地追加且不分配。
+否则在锁外清理失效槽位并准备几何扩容的新表，再在锁内校验并替换。
+持有旧 Arc 会禁止原地修改，因此指针校验能检测替换和注册竞争。
+无并发快照时，连续注册的表维护成本为摊还 O(1)。128 个订阅的回归约束
+替换次数，并检查通知及注销。已有通知快照时，注册仍需 O(N) 复制，
+暂时保留两张表；并发注册可能重试。该回归不是延迟上界或扩展性基准，
+持续重叠的通知快照仍可能导致反复复制。
+
+替换表根据清理后的存活项数量预留容量，不使用旧槽位数量。
+反复创建/关闭会回收失效槽位，容量不会随历史注册次数持续增长。
+独立的 4096 次注册/释放回归检查表长度和容量有界，并确认已关闭订阅
+不再收到通知；它不是堆内存或延迟基准。替换前仍可能保留此前的并发高水位。
+
+通知和观察者回归分别放在 `ut-tests/change.rs`、`ut-tests/observer.rs`，
+由对应生产模块通过 `unittest::path_mod_test!` 挂载，保留私有接口测试边界。

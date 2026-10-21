@@ -36,13 +36,20 @@ scripts/ci/docker/
 ## 镜像内容与缓存 volume
 
 流水线把几个节点本地 named volume 挂到镜像的 `/xkernel-cache/*` 和
-`/usr/local/rustup/toolchains` 上（见 `Jenkinsfile`）。镜像放在这些目录下的
+整个 `/usr/local/rustup` 上（见 `Jenkinsfile`）。镜像放在这些目录下的
 内容只会复制进新建的 volume，已有 volume 看不到：
 
-- 预装到 `/usr/local/rustup/toolchains` 的 toolchain 有变化时，同时递增
-  `Jenkinsfile` 中 Rustup volume 名称的后缀，让节点新建 volume。
+- `/usr/local/rustup` 中预装的 toolchain、settings 或其他需随镜像更新的内容
+  有变化，或缓存损坏需要重新初始化时，递增 `Jenkinsfile` 中 Rustup volume
+  名称的后缀，让节点新建 volume。整个 Rustup home（包括 downloads、tmp 和
+  settings）与 toolchains 一起持久化，已有 volume 不会自动获得镜像更新。
 - 每个容器都必须看到的内容（例如预先构建的 Dylint driver）放在这些挂载点
   之外。
+
+镜像的 `rustup default none` 是新卷的初始状态；运行时安装工具链可能设置并
+持久化默认 channel。项目构建按仓库 `rust-toolchain.toml` 或显式 `+toolchain`
+选择版本，不依赖节点默认值。卷布局与旧卷说明见
+[流水线运行契约](../../../docs/jenkins-pipeline.md)。
 
 ## 构建与检查
 

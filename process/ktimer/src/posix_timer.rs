@@ -100,9 +100,7 @@ impl PosixTimerClock {
         match self {
             Self::Realtime => TimerInstant::Realtime(ktime::realtime()),
             Self::Monotonic => TimerInstant::Monotonic(khal::time::monotonic_time()),
-            Self::Boottime => TimerInstant::Boottime(BoottimeInstant::from_span_since_origin(
-                khal::time::monotonic_time().span_since_origin(),
-            )),
+            Self::Boottime => TimerInstant::Boottime(ktime::boottime()),
             Self::ProcessCpu => {
                 TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
                     process_utime.saturating_add(process_stime),
@@ -129,25 +127,6 @@ impl PosixTimerClock {
         }
     }
 
-    fn runtime_deadline(self, deadline: TimerInstant) -> Option<MonotonicInstant> {
-        match (self, deadline) {
-            (Self::Realtime, TimerInstant::Realtime(deadline)) => {
-                Some(ktime::realtime_deadline_to_monotonic(deadline))
-            }
-            (Self::Monotonic, TimerInstant::Monotonic(deadline)) => Some(deadline),
-            (Self::Boottime, TimerInstant::Boottime(deadline)) => Some(
-                MonotonicInstant::from_span_since_origin(deadline.span_since_origin()),
-            ),
-            (Self::ProcessCpu, TimerInstant::ProcessCpu(_)) => None,
-            #[expect(
-                clippy::panic,
-                reason = "CG-021-no-panic-on-reachable-failure: A POSIX timer's deadline is built \
-                          from its own clock id, so the clock and deadline domains match"
-            )]
-            _ => panic!("POSIX timer deadline clock-domain mismatch"),
-        }
-    }
-
     fn needs_alarm_task(self) -> bool {
         !matches!(self, Self::ProcessCpu)
     }
@@ -165,6 +144,7 @@ enum PosixTimerNotify {
 
 pub(crate) struct PosixTimer {
     clock: PosixTimerClock,
+    armed_clock: PosixTimerClock,
     spec: ITimer,
     notify: PosixTimerNotify,
     signal_seq: u32,
@@ -209,6 +189,7 @@ impl PosixTimer {
 
         Self {
             clock,
+            armed_clock: clock,
             spec: ITimer::default(),
             notify,
             signal_seq,
@@ -224,7 +205,7 @@ impl PosixTimer {
         process_stime: TimeSpan,
     ) -> (TimeSpan, TimeSpan) {
         self.spec
-            .snapshot(self.clock.now(process_utime, process_stime))
+            .snapshot(self.armed_clock.now(process_utime, process_stime))
     }
 
     pub(crate) fn settime(
@@ -235,20 +216,28 @@ impl PosixTimer {
         process_utime: TimeSpan,
         process_stime: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
-        let now = self.clock.now(process_utime, process_stime);
+        let armed_clock = if !absolute && self.clock == PosixTimerClock::Realtime {
+            PosixTimerClock::Monotonic
+        } else {
+            self.clock
+        };
+        let now = armed_clock.now(process_utime, process_stime);
         let deadline = if value.is_zero() {
             None
         } else {
             Some(
                 if absolute {
-                    self.clock.absolute_deadline(value)
+                    armed_clock.absolute_deadline(value)
                 } else {
                     now.checked_add(value)
                 }
                 .ok_or(KError::InvalidInput)?,
             )
         };
-        let old = self.spec.set(now, interval, deadline);
+        let old = self.snapshot(process_utime, process_stime);
+        // Snapshot in the old domain before replacing the armed clock.
+        self.spec.replace(interval, deadline);
+        self.armed_clock = armed_clock;
         self.pending_signal = false;
         self.queued_overrun = 0;
         self.last_overrun = 0;
@@ -257,7 +246,7 @@ impl PosixTimer {
 
     pub(crate) fn update(&mut self, process_utime: TimeSpan, process_stime: TimeSpan) -> usize {
         self.spec
-            .update(self.clock.now(process_utime, process_stime))
+            .update(self.armed_clock.now(process_utime, process_stime))
     }
 
     pub(crate) fn needs_alarm_task(&self) -> bool {
@@ -276,7 +265,7 @@ impl PosixTimer {
         let runtime_deadline = self
             .spec
             .deadline()
-            .and_then(|deadline| self.clock.runtime_deadline(deadline));
+            .filter(|_| self.armed_clock.needs_alarm_task());
         self.spec
             .set_alarm(runtime_deadline, runtime_deadline.map(|_| owner_pid));
     }

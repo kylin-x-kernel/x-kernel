@@ -2413,6 +2413,7 @@ dependencies = [
  "ktime",
  "ktime_types",
  "kvfs",
+ "kworkng",
  "linux-raw-sys",
  "posix-types",
  "unittest",
@@ -3094,6 +3095,7 @@ dependencies = [
  "krcu-core",
  "ksched",
  "kspin",
+ "ktime",
  "ktime_types",
  "ktimer-core",
  "lazyinit",
@@ -3107,6 +3109,8 @@ name = "ktime"
 version = "0.3.0-dev"
 dependencies = [
  "khal",
+ "klazy",
+ "kpoll",
  "kspin",
  "ktime_types",
  "unittest",
@@ -3124,6 +3128,7 @@ name = "ktimer"
 version = "0.3.0-dev"
 dependencies = [
  "event-listener",
+ "futures-util",
  "kbuild_config",
  "kerrno",
  "khal",

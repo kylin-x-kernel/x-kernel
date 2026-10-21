@@ -14,6 +14,7 @@
 #![no_std]
 #![deny(unsafe_code)]
 
+mod clock_id;
 mod frequency;
 mod instant;
 mod span;
@@ -21,6 +22,7 @@ mod system_time;
 mod timestamp;
 mod units;
 
+pub use clock_id::ClockId;
 pub use frequency::Frequency;
 pub use instant::{
     Boottime, BoottimeInstant, Instant, Monotonic, MonotonicInstant, ProcessCpu, ProcessCpuInstant,

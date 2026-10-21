@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+futures-util.workspace = true
 event-listener = { workspace = true, default-features = false }
 kbuild_config.workspace = true
 kerrno.workspace = true
