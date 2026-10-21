@@ -5,6 +5,7 @@
 //! Route rules, configuration validation, address-derived routes, and lookup.
 
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 use kerrno::LinuxError;
 
@@ -37,9 +38,16 @@ enum RuleOrigin {
     Configured,
     Ipv4Address {
         owner_dev: NetDeviceId,
-        addr: Ipv4Cidr,
         kind: Ipv4AddressRouteKind,
     },
+}
+
+/// Matches an address-derived route by origin and destination prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AddressRouteId {
+    owner_dev: NetDeviceId,
+    filter: IpCidr,
+    kind: Ipv4AddressRouteKind,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -164,11 +172,7 @@ impl Rule {
             route_type: ROUTE_TYPE_UNICAST,
             prefsrc: Some(source),
             source: RuleSource::Fixed(source),
-            origin: RuleOrigin::Ipv4Address {
-                owner_dev,
-                addr: owner_addr,
-                kind,
-            },
+            origin: RuleOrigin::Ipv4Address { owner_dev, kind },
         }
     }
 
@@ -181,6 +185,17 @@ impl Rule {
 
     pub(crate) fn is_configured(self) -> bool {
         matches!(self.origin, RuleOrigin::Configured)
+    }
+
+    fn address_route_id(self) -> Option<AddressRouteId> {
+        match self.origin {
+            RuleOrigin::Configured => None,
+            RuleOrigin::Ipv4Address { owner_dev, kind } => Some(AddressRouteId {
+                owner_dev,
+                filter: self.filter,
+                kind,
+            }),
+        }
     }
 
     fn same_route_as(self, other: Self) -> bool {
@@ -204,40 +219,64 @@ pub(crate) struct RouteAttrs {
     pub prefsrc: Option<IpAddress>,
 }
 
-// TODO(mivik): optimize
-pub(crate) struct RouteTable {
-    rules: Vec<Rule>,
+struct RouteEntry {
+    rule: Rule,
+    insertion_order: u64,
 }
-impl RouteTable {
-    pub(crate) fn new() -> Self {
-        Self { rules: Vec::new() }
-    }
 
-    pub(crate) fn add_rule(&mut self, rule: Rule) {
-        let rank = (
-            rule.filter.prefix_len(),
+impl RouteEntry {
+    // Larger keys win: longest prefix, local host route, then oldest entry.
+    fn selection_key(&self) -> (u8, bool, Reverse<u64>) {
+        (
+            self.rule.filter.prefix_len(),
             matches!(
-                rule.origin,
+                self.rule.origin,
                 RuleOrigin::Ipv4Address {
                     kind: Ipv4AddressRouteKind::Local,
                     ..
                 }
-            ) as u8,
-        );
-        let idx = self.rules.partition_point(|existing| {
-            let existing_rank = (
-                existing.filter.prefix_len(),
-                matches!(
-                    existing.origin,
-                    RuleOrigin::Ipv4Address {
-                        kind: Ipv4AddressRouteKind::Local,
-                        ..
-                    }
-                ) as u8,
-            );
-            existing_rank >= rank
+            ),
+            Reverse(self.insertion_order),
+        )
+    }
+}
+
+/// Owns route precedence through explicit selection keys.
+///
+/// Entries are sorted by selection key for lookup; their indices are not identities.
+pub(crate) struct RouteTable {
+    entries: Vec<RouteEntry>,
+    next_insertion_order: u64,
+}
+impl RouteTable {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            next_insertion_order: 0,
+        }
+    }
+
+    /// Adds a route after all existing routes of equal selection priority.
+    pub(crate) fn add_rule(&mut self, rule: Rule) {
+        self.push_rule(rule);
+        self.sort_entries();
+    }
+
+    fn push_rule(&mut self, rule: Rule) {
+        if self.next_insertion_order == u64::MAX {
+            // Compact live sequence numbers before reuse, preserving precedence.
+            self.entries
+                .sort_unstable_by_key(|entry| entry.insertion_order);
+            for (index, entry) in self.entries.iter_mut().enumerate() {
+                entry.insertion_order = index as u64;
+            }
+            self.next_insertion_order = self.entries.len() as u64;
+        }
+        self.entries.push(RouteEntry {
+            rule,
+            insertion_order: self.next_insertion_order,
         });
-        self.rules.insert(idx, rule);
+        self.next_insertion_order += 1;
     }
 
     /// Validates a configured route against the current device and address inventory.
@@ -253,6 +292,7 @@ impl RouteTable {
     }
 
     /// Validates the replacement before removing the existing route.
+    /// A successful replacement receives a new insertion order, like delete/add.
     pub(crate) fn replace_configured_rule(
         &mut self,
         existing: Rule,
@@ -309,84 +349,117 @@ impl RouteTable {
         Ok(())
     }
 
-    /// Refreshes local and connected routes while retaining configured routes.
+    /// Synchronizes derived routes by identity while retaining their precedence.
     ///
     /// Every address must refer to a registered device. Callers retain the
-    /// enclosing Router lock across address mutation and route refresh.
-    pub(crate) fn rebuild_ipv4_address_routes(
+    /// enclosing Router lock across address mutation and route refresh. The
+    /// slice preserves address order within each device to select the first
+    /// supporting source for shared routes. New identities receive new orders.
+    /// Existing route identities retain their order even if their source changes.
+    pub(crate) fn sync_ipv4_address_routes(
         &mut self,
         devices: &DeviceRegistry,
         addrs: &[Ipv4AddrEntry],
     ) {
-        self.remove_ipv4_address_routes();
         let loopback_dev = devices
             .iter()
             .position(|device| device.link_kind() == LinkKind::Loopback)
             .map(|slot| devices.id_at(slot));
-        let mut connected = Vec::new();
+        let mut desired = Vec::new();
         for entry in addrs {
+            let dev = entry.dev;
             if let Some(loopback_dev) = loopback_dev {
-                self.add_rule(Rule::for_local_ipv4_address(
-                    loopback_dev,
-                    entry.dev,
-                    entry.addr,
-                ));
+                Self::push_address_route(
+                    &mut desired,
+                    Rule::for_local_ipv4_address(loopback_dev, dev, entry.addr),
+                );
             }
 
             let network = entry.addr.network();
-            if entry.addr.prefix_len() == 32
-                || network.address().is_unspecified()
-                || connected.contains(&(entry.dev, network))
-            {
+            if entry.addr.prefix_len() == 32 || network.address().is_unspecified() {
                 continue;
             }
-            connected.push((entry.dev, network));
             let device = devices
-                .get_by_id(entry.dev)
+                .get_by_id(dev)
                 .expect("address device must be registered");
             let scope = if device.link_kind() == LinkKind::Loopback {
                 ROUTE_SCOPE_HOST
             } else {
                 ROUTE_SCOPE_LINK
             };
-            self.add_rule(Rule::for_connected_ipv4_address(
-                entry.dev, entry.addr, scope,
-            ));
+            Self::push_address_route(
+                &mut desired,
+                Rule::for_connected_ipv4_address(dev, entry.addr, scope),
+            );
+        }
+
+        self.entries.retain(|entry| {
+            entry.rule.is_configured()
+                || desired
+                    .iter()
+                    .any(|rule| rule.address_route_id() == entry.rule.address_route_id())
+        });
+        for rule in desired {
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|entry| entry.rule.address_route_id() == rule.address_route_id())
+            {
+                entry.rule = rule;
+            } else {
+                self.push_rule(rule);
+            }
+        }
+        self.sort_entries();
+    }
+
+    fn push_address_route(routes: &mut Vec<Rule>, route: Rule) {
+        if !routes
+            .iter()
+            .any(|existing| existing.address_route_id() == route.address_route_id())
+        {
+            routes.push(route);
         }
     }
 
+    fn sort_entries(&mut self) {
+        self.entries
+            .sort_unstable_by_key(|entry| Reverse(entry.selection_key()));
+    }
+
+    /// Selects the first matching route in selection-key order.
     pub(crate) fn lookup(&self, dst: &IpAddress) -> Option<&Rule> {
-        self.rules
+        self.entries
             .iter()
+            .map(|entry| &entry.rule)
             .find(|rule| rule.filter.contains_addr(dst))
     }
 
-    pub(crate) fn rules(&self) -> &[Rule] {
-        &self.rules
+    /// Projects a control-plane snapshot in route selection order.
+    pub(crate) fn snapshot(&self) -> Vec<Rule> {
+        self.entries.iter().map(|entry| entry.rule).collect()
     }
 
     pub(crate) fn remove_exact_rule(&mut self, route: Rule) {
-        if let Some(index) = self.rules.iter().position(|rule| {
-            matches!(rule.origin, RuleOrigin::Configured) && rule.same_route_as(route)
+        if let Some(index) = self.entries.iter().position(|entry| {
+            let rule = entry.rule;
+            rule.is_configured() && rule.same_route_as(route)
         }) {
-            self.rules.remove(index);
+            self.entries.remove(index);
         }
     }
 
-    fn remove_ipv4_address_routes(&mut self) {
-        self.rules
-            .retain(|rule| matches!(rule.origin, RuleOrigin::Configured));
-    }
-
     pub(crate) fn remove_configured_routes_with_source(&mut self, source: IpAddress) {
-        self.rules.retain(|rule| {
+        self.entries.retain(|entry| {
+            let rule = entry.rule;
             !matches!(rule.origin, RuleOrigin::Configured)
                 || rule.preferred_source() != Some(source)
         });
     }
 
     pub(crate) fn remove_device(&mut self, dev: NetDeviceId) {
-        self.rules.retain(|rule| {
+        self.entries.retain(|entry| {
+            let rule = entry.rule;
             rule.dev != dev
                 && !matches!(
                     rule.origin,
@@ -395,3 +468,5 @@ impl RouteTable {
         });
     }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/network/router/tests.rs");

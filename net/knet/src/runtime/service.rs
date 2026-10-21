@@ -861,7 +861,7 @@ impl Service {
     }
 
     pub(crate) fn route_snapshot(&self) -> Vec<Rule> {
-        self.router.lock().table.rules().to_vec()
+        self.router.lock().table.snapshot()
     }
 
     pub(crate) fn add_route_rule(&self, rule: Rule) -> Result<(), LinuxError> {

@@ -874,18 +874,30 @@ fn test_add_and_delete_route() {
         scope: wire_route::SCOPE_UNIVERSE,
         route_type: RTN_UNICAST,
         oif: 2,
-        dst: Some(IpAddress::Ipv4(Ipv4Address::new(172, 16, 0, 0))),
+        dst: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 0))),
         src: None,
-        gateway: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 1))),
+        gateway: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 3))),
         prefsrc: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 2))),
     };
 
-    add_route(req, NLM_F_CREATE | NLM_F_EXCL).unwrap();
+    assert_eq!(add_route(req, NLM_F_CREATE | NLM_F_EXCL), Err(LinuxError::EEXIST));
+    // SIOCADDRT allows a configured route alongside the connected route.
+    crate::control::add_ipv4_route(
+        Some(core::net::Ipv4Addr::new(192, 168, 1, 0)),
+        24,
+        Some(core::net::Ipv4Addr::new(192, 168, 1, 1)),
+        Some("eth0"),
+    )
+    .unwrap();
+    add_route(req, NLM_F_REPLACE).unwrap();
     assert!(
         SERVICE
             .route_snapshot()
             .iter()
-            .any(|route| route.filter.prefix_len() == req.dst_len && route.via.is_some())
+            .any(|route| {
+                route.filter.prefix_len() == req.dst_len
+                    && route.via == Some(crate::ip::Ipv4Address::new(192, 168, 1, 3).into())
+            })
     );
 
     del_route(req).unwrap();

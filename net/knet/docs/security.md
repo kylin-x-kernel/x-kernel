@@ -539,10 +539,7 @@ Derived state bits in `ifi_change` are preserved according to Linux `IFF_VOLATIL
 
 ### 25. IPv4 Address Lifecycle
 
-Configured-route updates are validated by `RouteTable` against the device and
-address inventory borrowed under the Router lock. Replacement validation must
-complete before removing the old rule. Address mutations and rebuilding their
-local and connected routes remain in the same Router critical section.
+`RouteTable` validates configured routes against the device and address inventory under the Router lock; rejected replacements preserve the old route. Address mutations and derived-route synchronization share that critical section. Surviving identities retain insertion precedence when preferred sources change; removing and recreating an identity starts a new route lifetime.
 
 After an address or its device is removed, Router address entries, automatic routes, IngressProcessor, the smoltcp Interface, and device projections must be refreshed while holding the Router lock once.
 Legacy ioctl updates target only the primary address entry and preserve other addresses on the same device. Netmask updates must preserve address scope and custom broadcast addresses.

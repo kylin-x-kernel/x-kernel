@@ -242,7 +242,7 @@ impl Router {
             }
         }
         self.table
-            .rebuild_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
         self.sync_device_ipv4_addrs();
         self.adjust_rx_device_cursor_after_remove(pos);
         Some(())
@@ -332,7 +332,7 @@ impl Router {
 
         self.ipv4_addrs.push(entry);
         self.table
-            .rebuild_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
         self.sync_device_ipv4_addrs();
         Ok(())
     }
@@ -383,7 +383,7 @@ impl Router {
         };
         self.remove_ipv4_source_state_if_unowned(old.addr.address());
         self.table
-            .rebuild_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
         self.sync_device_ipv4_addrs();
         Ok(())
     }
@@ -402,7 +402,7 @@ impl Router {
         let old = self.ipv4_addrs.remove(primary_index);
         self.remove_ipv4_source_state_if_unowned(old.addr.address());
         self.table
-            .rebuild_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
         self.sync_device_ipv4_addrs();
         Ok(())
     }
@@ -417,7 +417,7 @@ impl Router {
 
         self.remove_ipv4_source_state_if_unowned(entry.addr.address());
         self.table
-            .rebuild_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
         self.sync_device_ipv4_addrs();
         true
     }
@@ -501,7 +501,7 @@ impl Router {
         }
 
         self.table
-            .rebuild_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
+            .sync_ipv4_address_routes(&self.devices, &self.ipv4_addrs);
         self.sync_device_ipv4_addrs();
         Ok(())
     }

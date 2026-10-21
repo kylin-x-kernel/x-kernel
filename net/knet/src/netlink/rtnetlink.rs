@@ -419,14 +419,19 @@ pub(super) fn add_route(request: RouteRequest, flags: u16) -> Result<(), LinuxEr
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
-    let existing = SERVICE
+    let mut matching = SERVICE
         .route_snapshot()
         .into_iter()
-        .find(|route| same_route_key(*route, &request));
-    if let Some(existing) = existing {
-        if flags & NLM_F_EXCL != 0 || flags & NLM_F_REPLACE == 0 || !existing.is_configured() {
+        .filter(|route| same_route_key(*route, &request))
+        .peekable();
+    if matching.peek().is_some() {
+        if flags & NLM_F_EXCL != 0 || flags & NLM_F_REPLACE == 0 {
             return Err(LinuxError::EEXIST);
         }
+        // Derived routes count as conflicts but cannot be replacement targets.
+        let existing = matching
+            .find(|route| route.is_configured())
+            .ok_or(LinuxError::EEXIST)?;
         SERVICE.replace_route_rule(existing, rule)?;
     } else if flags & NLM_F_CREATE == 0 {
         return Err(LinuxError::ENOENT);
