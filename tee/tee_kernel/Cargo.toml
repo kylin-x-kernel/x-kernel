@@ -18,6 +18,11 @@ csv_huk_key = ["dep:kcpu"]
 dice_huk_key = ["dep:dice_driver", "dep:xdice"]
 virtcca_huk_key = []
 
+[package.metadata.cargo-shear]
+# The cfg(unittest) tee_svc_cryp fixtures use zerocopy::IntoBytes under
+# ut-tests/, which cargo-shear ignores; they are part of the kernel target.
+ignored = ["zerocopy"]
+
 [dependencies]
 unittest.workspace = true
 unittest_support.workspace = true

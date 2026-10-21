@@ -1,5 +1,12 @@
 # ksyscall design
 
+## Test Layout
+
+Guest cases and exec/exit-tail fixtures live in `ut-tests/`, mounted at their
+original scopes through `unittest::path_mod_test!`. Module names, architecture
+gates and user/serial registrations remain unchanged. The exit-tail handshake
+itself is not changed by this directory migration.
+
 ## Purpose
 
 `ksyscall` is the X-Kernel syscall adapter crate. It:
@@ -110,8 +117,8 @@ block installs the image and applies metadata. All its temporary MM owners/locks
 drop before fatal SIGSEGV cleanup. There is no rollback to the old user image.
 Credential, TEE-session, IPC and context setup retain their success-tail roles.
 
-Regression coverage lives in `src/task/tests/exec_lifecycle.rs` and
-`src/task/tests/exit_tail.rs`. It checks the commitment boundary, independent
+Regression coverage lives in `ut-tests/task/tests/exec_lifecycle.rs` and
+`ut-tests/task/tests/exit_tail.rs`. It checks the commitment boundary, independent
 VM-sharing peer survival, retained-image identity, and exit-tail root lifetime
 across scheduling and CPU migration. Request-local unittest probes exercise
 post-commit failures without exposing a production fault-injection interface.

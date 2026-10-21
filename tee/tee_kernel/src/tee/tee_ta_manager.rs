@@ -168,21 +168,4 @@ pub(super) fn tee_ta_get_session(handle: u32) -> TeeResult<SessionIdentity> {
     })
 }
 
-#[unittest::mod_test]
-mod tests {
-    #[test]
-    fn validated_payload_len_accepts_within_limit() {
-        assert_eq!(
-            validated_payload_len(TEE_TA_MAX_FRAME_PAYLOAD_LEN).unwrap(),
-            TEE_TA_MAX_FRAME_PAYLOAD_LEN
-        );
-    }
-
-    #[test]
-    fn validated_payload_len_rejects_oversized_frames() {
-        assert_eq!(
-            validated_payload_len(TEE_TA_MAX_FRAME_PAYLOAD_LEN + 1),
-            Err(TEE_ERROR_GENERIC)
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../../ut-tests/tee/tee_ta_manager/tests.rs");

@@ -9,7 +9,7 @@ mod slot;
 mod sync;
 
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/buffer/tests.rs");
 
 pub(crate) use access::{MetadataBuffer, MetadataWriteAccess};
 #[cfg(unittest)]

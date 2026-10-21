@@ -126,50 +126,9 @@ pub(crate) fn sys_clock_getres(
 }
 
 #[cfg(all(unittest, target_arch = "x86_64"))]
-mod tests {
-    use posix_types::UserPtr;
-    use unittest::def_test;
+unittest::path_mod_test!(tests, "../../ut-tests/time/queries/tests.rs");
 
-    #[def_test]
-    fn time_with_null_tloc_returns_current_epoch_seconds() {
-        let before = ktime::realtime().unix_seconds() as isize;
-        let seconds = super::sys_time(UserPtr::default()).expect("time(NULL) must succeed");
-        let after = ktime::realtime().unix_seconds() as isize;
-
-        assert!((before..=after).contains(&seconds));
-    }
-}
-
-#[unittest::mod_test]
-mod tests_time_query_arguments {
-    use kerrno::KError;
-    use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_REALTIME_COARSE, timespec};
-    use posix_types::{UserConstPtr, UserPtr};
-    use unittest::{assert, assert_eq, def_test};
-
-    #[def_test]
-    fn gettimeofday_accepts_null_timeval() {
-        assert_eq!(super::sys_gettimeofday(UserPtr::default()), Ok(0));
-    }
-
-    #[def_test(user, serial)]
-    fn clock_settime_rejects_query_only_clocks_before_reading_time() {
-        // Address 1 is outside the valid user range. Prove BadAddress from
-        // access validation; this does not exercise a page fault during copying.
-        let invalid = UserConstPtr::<timespec>::from(1usize);
-        assert!(matches!(
-            invalid.read_vm().map_err(KError::from),
-            Err(KError::BadAddress)
-        ));
-        for clock in [CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC] {
-            assert_eq!(
-                super::sys_clock_settime(clock as _, invalid),
-                Err(KError::InvalidInput)
-            );
-            assert_eq!(
-                super::sys_clock_settime(clock as _, UserConstPtr::default()),
-                Err(KError::InvalidInput)
-            );
-        }
-    }
-}
+unittest::path_mod_test!(
+    tests_time_query_arguments,
+    "../../ut-tests/time/queries/tests_time_query_arguments.rs"
+);

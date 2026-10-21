@@ -10,9 +10,9 @@ repository.workspace = true
 documentation.workspace = true
 
 [package.metadata.cargo-shear]
-# Used in ut-tests/rcu_callback.rs via unittest::path_mod_test!, which shear
-# does not follow. All calls are restricted to cfg(unittest).
-ignored = ["kalloc"]
+# kalloc is used in ut-tests/rcu_callback.rs; kpoll supplies Completion in
+# ut-tests/synchronize.rs. Both are cfg(unittest) code ignored by cargo-shear.
+ignored = ["kalloc", "kpoll"]
 
 [features]
 default = []

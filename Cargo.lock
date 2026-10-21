@@ -2642,7 +2642,6 @@ dependencies = [
  "kvfs",
  "kworkng",
  "lazyinit",
- "linux-raw-sys",
  "log",
  "net",
  "ringbuf",

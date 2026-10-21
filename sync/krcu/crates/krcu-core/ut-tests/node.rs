@@ -2,13 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn deferred_outer_exit_never_relocks_its_owner_node() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -38,8 +36,7 @@ fn deferred_outer_exit_never_relocks_its_owner_node() {
     assert_eq!(node.reader_count(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn scheduler_reports_once_per_cpu_obligation_including_wrap() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -62,8 +59,7 @@ fn scheduler_reports_once_per_cpu_obligation_including_wrap() {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn observed_cpu_still_enrolls_readers_for_the_next_period() {
     let node = ReaderNode::new();
     let inactive = TaskReader::new();
@@ -102,8 +98,7 @@ fn observed_cpu_still_enrolls_readers_for_the_next_period() {
     assert!(node.finish_period(2));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn idle_scheduler_path_preserves_startup_readers() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -130,52 +125,7 @@ fn idle_scheduler_path_preserves_startup_readers() {
     assert!(node.finish_period(1));
 }
 
-#[cfg(test)]
-#[test]
-fn concurrent_start_cannot_lose_an_outgoing_reader() {
-    extern crate std;
-    let node = ReaderNode::new();
-    let barrier = std::sync::Barrier::new(2);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            let reader = TaskReader::new();
-            for _ in 0..32 {
-                reader.with_read(|_| {
-                    barrier.wait();
-                    let _guard = kspin::NoPreemptIrqSave::new();
-                    // SAFETY: this thread alone enrolls/exits its stable reader;
-                    // the other thread only drives period state under node locks.
-                    assert_eq!(unsafe { node.note_context_switch(&reader) }, None);
-                    barrier.wait();
-                    barrier.wait();
-                });
-                barrier.wait();
-            }
-        });
-        for period in 0..32 {
-            barrier.wait();
-            assert!(node.begin_period(period));
-            barrier.wait();
-            assert_eq!(node.reader_count(), 1);
-            assert_eq!(node.ready_period(), None);
-            assert!(!node.finish_period(period));
-            barrier.wait();
-            barrier.wait();
-            // When enrollment won the race, CPU observation is still owed.
-            // This fixture supplies a fresh boundary only after scope exit.
-            let inactive = TaskReader::new();
-            let _guard = kspin::NoPreemptIrqSave::new();
-            // SAFETY: worker scope has ended; no other scheduler touches this
-            // inactive reader, and the next period starts only on this thread.
-            unsafe { node.note_context_switch(&inactive) };
-            assert_eq!(node.ready_period(), Some(period));
-            assert!(node.finish_period(period));
-        }
-    });
-}
-
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn repeated_enrollment_keeps_original_owner_until_outer_exit() {
     let first = ReaderNode::new();
     let second = ReaderNode::new();
@@ -206,8 +156,7 @@ fn repeated_enrollment_keeps_original_owner_until_outer_exit() {
     assert_eq!(first.reader_count(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn removal_preserves_other_readers_and_inactive_tasks_do_not_enroll() {
     let node = ReaderNode::new();
     let first = TaskReader::new();

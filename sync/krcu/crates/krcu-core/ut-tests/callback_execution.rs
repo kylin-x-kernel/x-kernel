@@ -2,14 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
-
-#[cfg(test)]
-#[path = "allocation.rs"]
-mod allocation;
 
 fn execute(queue: &CallbackQueue, budget: usize) -> usize {
     // SAFETY: deterministic fixtures retire no published data and hold no RCU
@@ -30,8 +25,7 @@ fn submit_ordered(queue: &CallbackQueue, order: &Arc<AtomicUsize>, id: usize) {
     unsafe { queue.submit(node) };
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn budget_limits_execution_without_replaying_completed_callbacks() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -62,8 +56,7 @@ fn budget_limits_execution_without_replaying_completed_callbacks() {
     assert_eq!(execute(&queues[0], 1), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn detached_batch_stays_outstanding_and_precedes_newly_eligible_work() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -97,8 +90,7 @@ fn detached_batch_stays_outstanding_and_precedes_newly_eligible_work() {
     assert_eq!(queues[0].outstanding(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn running_callback_remains_outstanding_and_recursive_executor_cannot_overtake() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -132,8 +124,7 @@ fn running_callback_remains_outstanding_and_recursive_executor_cannot_overtake()
     assert_eq!(queues[0].outstanding(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn finite_repost_requires_a_new_period_and_is_not_chased_by_current_batch() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -171,54 +162,11 @@ fn finite_repost_requires_a_new_period_and_is_not_chased_by_current_batch() {
     assert_eq!(queues[0].outstanding(), 0);
 }
 
-#[repr(C)]
-struct SelfReposting {
-    node: CallbackNode,
-    queues: Arc<[CallbackQueue; 1]>,
-    calls: Arc<AtomicUsize>,
-    drops: Arc<AtomicUsize>,
-    remaining: usize,
-}
+#[path = "../tests/support/reposting.rs"]
+mod reposting;
+use reposting::SelfReposting;
 
-impl SelfReposting {
-    fn enqueue(self: Box<Self>) {
-        let queues = self.queues.clone();
-        let object = Box::into_raw(self);
-        // SAFETY: raw field projection preserves the original Box provenance.
-        let node = unsafe { &raw mut (*object).node };
-        // SAFETY: this fixture owns the unqueued/detached node exclusively;
-        // its original allocation survives until the next invocation.
-        let node = unsafe { CallbackNode::from_raw(node) };
-        // SAFETY: unpublished fixture, no locks held. The test drives every GP
-        // and drains all reposts before releasing its coordinator and queues.
-        unsafe { queues[0].submit(node) };
-    }
-
-    /// # Safety
-    /// `node` is the unique detached projection transferred by enqueue. Recover
-    /// its original Box once; requeue or destroy it without subsequent access.
-    unsafe fn invoke(node: *mut CallbackNode) {
-        // SAFETY: enqueue preserves allocation provenance; the actual field
-        // offset restores the original Box base without a layout assumption.
-        let object = unsafe { node.byte_sub(core::mem::offset_of!(Self, node)) }.cast::<Self>();
-        // SAFETY: the detached callback exclusively owns the original allocation.
-        let mut object = unsafe { Box::from_raw(object) };
-        object.calls.fetch_add(1, Ordering::Relaxed);
-        if object.remaining != 0 {
-            object.remaining -= 1;
-            object.enqueue();
-        }
-    }
-}
-
-impl Drop for SelfReposting {
-    fn drop(&mut self) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn same_node_repost_cannot_reuse_completed_period() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -251,22 +199,14 @@ fn same_node_repost_cannot_reuse_completed_period() {
             assert_eq!(queues[0].outstanding(), usize::from(has_repost));
             assert_eq!(drops.load(Ordering::Relaxed), usize::from(!has_repost));
         }
-        #[cfg(not(test))]
         {
             unittest::TestResult::Ok
         }
     };
-    // Host allocation rejection starts only after all fixture storage exists.
-    // Kernel builds retain the same deterministic protocol checks without
-    // changing the allocator used by unrelated kernel tasks.
-    #[cfg(test)]
-    allocation::without_allocations(run_fn);
-    #[cfg(not(test))]
     assert_eq!(run_fn(), unittest::TestResult::Ok);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn prepared_burst_has_no_fixed_queue_capacity() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();

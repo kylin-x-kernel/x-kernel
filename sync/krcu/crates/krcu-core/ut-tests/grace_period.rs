@@ -4,7 +4,6 @@
 
 //! Deterministic node transactions, not hardware quiescent-state observations.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
@@ -22,8 +21,7 @@ fn enter(reader: &TaskReader) -> ReadGuard<'_> {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn initialization_and_enrollment_in_either_order_preserve_old_reader() {
     for initialize_first in [false, true] {
         let node = ReaderNode::new();
@@ -60,8 +58,7 @@ fn initialization_and_enrollment_in_either_order_preserve_old_reader() {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn reader_exit_does_not_discharge_the_cpu_obligation() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -88,8 +85,7 @@ fn reader_exit_does_not_discharge_the_cpu_obligation() {
     assert_eq!(observed, (true, None, false, false, true, Some(3)));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn reader_removed_before_initialization_is_not_a_blocker() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -107,8 +103,7 @@ fn reader_removed_before_initialization_is_not_a_blocker() {
     assert_eq!(observed, (true, None, true, Some(1)));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn fresh_readers_do_not_extend_current_period_but_block_the_next() {
     let node = ReaderNode::new();
     let old = TaskReader::new();
@@ -171,8 +166,7 @@ fn fresh_readers_do_not_extend_current_period_but_block_the_next() {
     );
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn blocker_boundary_advances_without_waiting_for_new_list_head() {
     let node = ReaderNode::new();
     let first = TaskReader::new();
@@ -215,8 +209,7 @@ fn blocker_boundary_advances_without_waiting_for_new_list_head() {
     assert_eq!(observed, (true, None, None, Some(9), 1));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn terminal_exit_advances_the_original_nodes_blocker_boundary() {
     let original = ReaderNode::new();
     let destination = ReaderNode::new();
@@ -254,8 +247,7 @@ fn terminal_exit_advances_the_original_nodes_blocker_boundary() {
     assert!(!exited.is_enrolled());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn withdrawal_waits_for_old_readers_without_waiting_for_later_versions() {
     for initialize_first in [false, true] {
         let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
@@ -346,8 +338,7 @@ fn withdrawal_waits_for_old_readers_without_waiting_for_later_versions() {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn migrated_terminal_reader_releases_original_node_for_global_completion() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = GracePeriodCoordinator::new(&nodes, [true, true]).expect("nonempty fixture");

@@ -389,6 +389,14 @@ fn collect_test_layout_violations(
             "{crate_name}/{path}: use unittest::path_mod_test! with files under ut-tests/"
         ));
     }
+    if path.starts_with("src/")
+        && !is_src_test_file(relative_path)
+        && has_test_attribute(content, &["test", "def_test"])
+    {
+        violations.push(format!(
+            "{crate_name}/{path}: test functions must live in tests/ (host) or ut-tests/ (guest)"
+        ));
+    }
     if path.starts_with("ut-tests/") && has_host_test_attr(content) {
         violations.push(format!(
             "{crate_name}/{path}: ut-tests must use #[def_test], not #[test]"
@@ -403,8 +411,8 @@ fn collect_test_layout_violations(
         && has_handwritten_panic_expect_attr(content)
     {
         violations.push(format!(
-            "{crate_name}/{path}: test code must not hand-write unwrap/expect/panic \
-             #[expect]; rely on the test harness lint policy"
+            "{crate_name}/{path}: test code must not hand-write unwrap/expect/panic #[expect]; \
+             rely on the test harness lint policy"
         ));
     }
 }
@@ -445,11 +453,173 @@ fn has_inline_test_module(content: &str) -> bool {
 }
 
 fn has_host_test_attr(content: &str) -> bool {
-    content.contains("#[test]")
+    has_test_attribute(content, &["test"])
 }
 
 fn has_guest_test_marker(content: &str) -> bool {
-    content.contains("#[def_test") || content.contains("unittest::def_test")
+    has_test_attribute(content, &["def_test"])
+}
+
+fn has_test_attribute(content: &str, names: &[&str]) -> bool {
+    use proc_macro2::{Delimiter, Group, TokenStream, TokenTree};
+
+    // An attribute identifier must occur literally even inside cfg_attr. This
+    // only rejects impossible matches; tokens still decide all candidates.
+    if !names.iter().any(|name| content.contains(name)) {
+        return false;
+    }
+
+    fn matches_meta(meta: &syn::Meta, names: &[&str]) -> bool {
+        if meta
+            .path()
+            .segments
+            .last()
+            .is_some_and(|part| names.iter().any(|name| part.ident == *name))
+        {
+            return true;
+        }
+        let syn::Meta::List(list) = meta else {
+            return false;
+        };
+        if !list.path.is_ident("cfg_attr") {
+            return false;
+        }
+        list.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        )
+        .is_ok_and(|args| args.iter().skip(1).any(|attr| matches_meta(attr, names)))
+    }
+
+    fn matches_attribute(group: &Group, names: &[&str]) -> bool {
+        group.delimiter() == Delimiter::Bracket
+            && syn::parse2::<syn::Meta>(group.stream()).is_ok_and(|meta| matches_meta(&meta, names))
+    }
+
+    fn contains_attribute(tokens: TokenStream, names: &[&str]) -> bool {
+        let mut tokens = tokens.into_iter().peekable();
+        while let Some(token) = tokens.next() {
+            if matches!(&token, TokenTree::Punct(punct) if punct.as_char() == '#') {
+                if matches!(tokens.peek(), Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
+                {
+                    tokens.next();
+                }
+                if let Some(TokenTree::Group(group)) = tokens.peek()
+                    && matches_attribute(group, names)
+                {
+                    return true;
+                }
+            }
+            if let TokenTree::Group(group) = token
+                && contains_attribute(group.stream(), names)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    // Tokenization excludes comment/string contents without trying to evaluate
+    // platform cfgs. Keep malformed source conservative until rustc diagnoses it.
+    content.parse().map_or_else(
+        |_| {
+            names
+                .iter()
+                .any(|name| content.contains(&format!("#[{name}")))
+        },
+        |tokens| contains_attribute(tokens, names),
+    )
+}
+
+#[cfg(test)]
+mod test_attribute_tokens {
+    use super::{
+        collect_test_layout_violations, has_guest_test_marker, has_host_test_attr, has_test_attribute,
+    };
+
+    #[test]
+    fn combined_scan_matches_individual_attribute_queries() {
+        for source in [
+            "fn ordinary() {}",
+            "fn latest_value() {} // test is not an attribute",
+            "#[test] fn host() {}",
+            "#[unittest::def_test] fn guest() {}",
+            "#[cfg_attr(any(), cfg_attr(all(), unittest::def_test))] fn guest() {}",
+            "#[test] fn host() {} #[unittest::def_test] fn guest() {}",
+            "#[cfg_attr(test, inline)] fn ordinary() {}",
+            "const DOC: &str = r#\"#[test] #[def_test]\"#;",
+            "/* #[test] */ fn ordinary() {}",
+            "#[test] fn unfinished( {",
+        ] {
+            assert_eq!(
+                has_test_attribute(source, &["test", "def_test"]),
+                has_host_test_attr(source) || has_guest_test_marker(source),
+                "{source}",
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_test_functions_cannot_hide_in_production_sources() {
+        for source in [
+            "#[unittest::def_test(user)] fn example() {}",
+            "#[cfg(any())] #[test] fn example() {}",
+        ] {
+            let mut violations = Vec::new();
+            collect_test_layout_violations(
+                "demo",
+                "src/ordinary.rs".as_ref(),
+                source,
+                &mut violations,
+            );
+            assert_eq!(violations.len(), 1, "{source}");
+        }
+        let mut violations = Vec::new();
+        collect_test_layout_violations(
+            "demo",
+            "src/ordinary.rs".as_ref(),
+            "//! #[def_test] example\nfn ordinary() {}",
+            &mut violations,
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn comments_and_strings_do_not_register_tests() {
+        for source in [
+            "//! In-crate `#[def_test]` cases exercise transitions.",
+            "/* outer /* #[test] */ #[unittest::def_test] */",
+            "const DOC: &str = r###\"#[test] #[def_test]\"###;",
+            "#[doc = \"#[test] unittest::def_test\"] fn ordinary() {}",
+        ] {
+            assert!(!has_guest_test_marker(source), "{source}");
+            assert!(!has_host_test_attr(source), "{source}");
+        }
+    }
+
+    #[test]
+    fn attributes_survive_spacing_comments_and_disabled_cfgs() {
+        for source in [
+            "#[def_test] fn example() {}",
+            "# [ unittest /* separator */ :: def_test (user, serial) ] fn example() {}",
+            "#[cfg(any())] mod hidden { #[unittest::def_test] fn example() {} }",
+            "macro_rules! cases { () => { #[def_test] fn example() {} }; }",
+            "#[cfg_attr(any(), unittest::def_test(user))] fn example() {}",
+            "#[cfg_attr(any(), cfg_attr(all(), unittest::def_test))] fn example() {}",
+        ] {
+            assert!(has_guest_test_marker(source), "{source}");
+        }
+        assert!(has_host_test_attr(
+            "# /* comment */ [ test ] fn example() {}"
+        ));
+        assert!(!has_host_test_attr("#[test_case] fn example() {}"));
+        assert!(!has_guest_test_marker("#[def_test_helper] fn example() {}"));
+        assert!(has_host_test_attr(
+            "#[cfg_attr(test, test)] fn example() {}"
+        ));
+        assert!(!has_guest_test_marker(
+            "#[cfg_attr(any(), doc = \"#[def_test]\")] fn ordinary() {}"
+        ));
+    }
 }
 
 fn has_handwritten_panic_expect_attr(content: &str) -> bool {

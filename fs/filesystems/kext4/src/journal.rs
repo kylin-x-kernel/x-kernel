@@ -1023,10 +1023,10 @@ impl Ext4SbInfo {
 }
 
 #[cfg(unittest)]
-pub(crate) mod tests;
+unittest::path_mod_test!(pub(crate) mod tests, "../ut-tests/journal/tests.rs");
 
 #[cfg(unittest)]
-mod recovery_tests;
+unittest::path_mod_test!(recovery_tests, "../ut-tests/journal/recovery_tests.rs");
 
 #[cfg(unittest)]
-mod component_tests;
+unittest::path_mod_test!(component_tests, "../ut-tests/journal/component_tests.rs");

@@ -288,4 +288,4 @@ fn file_block_count(size: u64, block_size: u32) -> Ext4Result<u64> {
 }
 
 #[cfg(unittest)]
-mod component_tests;
+unittest::path_mod_test!(component_tests, "../ut-tests/truncate/component_tests.rs");

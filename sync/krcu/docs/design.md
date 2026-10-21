@@ -16,10 +16,11 @@ rendezvous; POSIX brackets user transfer with this crate's callbacks.
   the static `RcuContextIf` provider and user-boundary callbacks.
 - `src/service.rs`: service state, sole GP driver/task, progress timer and
   bounded Rcu softirq callback execution.
-- `src/read.rs`, `src/synchronize.rs`, `src/owned.rs`: private
+- `ut-tests/read.rs`, `ut-tests/synchronize.rs`, `ut-tests/owned.rs`: private
   `cfg(unittest)` scope policies, synchronous wait and owning consumer.
-- `src/callback.rs`: private one-shot ownership of prepared callback nodes.
-- `ut-tests/`: controlled host integration fixtures.
+- `ut-tests/callback.rs`: private one-shot ownership of prepared callback nodes.
+- `ut-tests/`: controlled kernel integration fixtures, including the private
+  `read` adapter compiled only under `cfg(unittest)`.
 - `crates/krcu-core/`: reusable algorithms and the static integration contract.
 
 `krcu_core::RcuContextIf` is defined in the core's `src/integration.rs` and

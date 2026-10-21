@@ -7,4 +7,4 @@
 pub(crate) use posix_fs::*;
 
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/vfs/tests.rs");

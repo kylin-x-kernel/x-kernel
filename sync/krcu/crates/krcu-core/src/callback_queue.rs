@@ -305,6 +305,8 @@ impl<'core, 'nodes, const CPUS: usize> CallbackDriver<'core, 'nodes, CPUS> {
     }
 }
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/callback_queue.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/callback_queue.rs");
+
+#[cfg(test)]
+#[path = "../tests/host/callback_execution.rs"]
+mod host_tests;

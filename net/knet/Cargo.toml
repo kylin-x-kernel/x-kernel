@@ -35,7 +35,6 @@ kvfs = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
 kpoll = { workspace = true }
 tipc = { workspace = true, optional = true }
-linux-raw-sys = { workspace = true, features = ["general"] }
 bitflags = { workspace = true }
 enum_dispatch = { workspace = true }
 etherparse = { workspace = true }

@@ -1,5 +1,16 @@
 # TEE Session Lifecycle
 
+## Test Layout
+
+Guest tests and the filesystem hash-tree fixture live in `ut-tests/`, mounted
+with `unittest::path_mod_test!`. Architecture-specific HUK tests retain their
+feature gates. File-path, protocol, payload-length and UUID cases previously
+used host `#[test]` inside guest-only modules; they now use `#[def_test]` so
+the guest runner registers them. Their assertions are unchanged.
+The standalone HUK derivation and object-table cases are also file-backed;
+their names gain a `tests` module component, with their guest execution modes
+and assertions preserved.
+
 ## Scope and Ownership
 
 This document covers session ownership in `src/tee/tee_session.rs` and its
@@ -43,7 +54,7 @@ context, whereas successful exec only releases session ownership.
 ## Regression Coverage
 
 The unittest-only `ExecSessionFixture` in `src/tee/tee_session.rs` supports
-`core/ksyscall/src/task/tests/exec_lifecycle.rs`. It checks session retention
+`core/ksyscall/ut-tests/task/tests/exec_lifecycle.rs`. It checks session retention
 until fatal cleanup, success-only slot removal and eventual resource release.
 These tests use transient resources and do not cover persistent storage,
 signed-TA loading or execution of user TA instructions.

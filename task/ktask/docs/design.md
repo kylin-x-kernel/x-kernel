@@ -1,5 +1,20 @@
 # ktask — Design
 
+## Test Layout
+
+Guest cases and scheduler probes live in `ut-tests/`, mounted by
+`unittest::path_mod_test!` at their original scopes. SMP gates remain on
+timer-routing and on-CPU tests.
+
+The former host `src/tests.rs` required real scheduler initialization and is
+now `ut-tests/task_lifecycle.rs`, using the boot-initialized scheduler.
+Spawn/yield, floating-point value preservation, wait queues, join exit codes
+and deferred activation remain covered. The IRQ completion case is already
+covered by `ut-tests/irq_wait/tests.rs` and is not duplicated. Fixtures join
+workers and use persistent wait predicates instead of relying on a yield to
+imply waiter enrollment. The floating-point value test does not establish
+hardware FP-register coverage on soft-float targets.
+
 ## Purpose and ownership
 
 `is_sleepable_context` provides a nonblocking context query for execution-service

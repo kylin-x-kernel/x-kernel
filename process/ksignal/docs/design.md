@@ -1,5 +1,9 @@
 # ksignal design
 
+The process-handler ownership regressions live in `ut-tests/process_handlers.rs`,
+mounted under `api::process::handler_tests` with `unittest::path_mod_test!`.
+Only their module location changes; handler lifecycle and assertions do not.
+
 ## Purpose
 
 `ksignal` owns the Linux signal data model and the per-process/per-thread

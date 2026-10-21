@@ -190,8 +190,4 @@ impl<'nodes, const CPUS: usize> CallbackState<'nodes, CPUS> {
     }
 }
 
-#[cfg(all(test, not(unittest)))]
-#[path = "../ut-tests/service.rs"]
-mod tests;
-
 unittest::path_mod_test!(tests, "../ut-tests/service.rs");

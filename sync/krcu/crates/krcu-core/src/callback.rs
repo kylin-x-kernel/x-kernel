@@ -75,6 +75,4 @@ impl CallbackNode {
     }
 }
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/callback.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/callback.rs");

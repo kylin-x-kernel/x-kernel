@@ -217,15 +217,15 @@ symbolize:
 	@$(XKMAKE) symbolize $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS) $(if $(strip $(LOG)),--log $(LOG))
 
 clippy:
-	@$(MAKE) --no-print-directory check_deps check_header check_lints
+	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
 	@$(XKMAKE) clippy $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint:
-	@$(MAKE) --no-print-directory check_deps check_header check_lints
+	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
 	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 dylint_test:
-	@$(MAKE) --no-print-directory check_deps check_header check_lints
+	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
 	@$(XKMAKE) dylint --self-test $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
 
 doc:
@@ -366,8 +366,12 @@ check_header:
 header:
 	@$(XKMAKE) hygiene header --fix
 
-check_lints:
+check_lints: check_hooks
 	@$(XKMAKE) hygiene lints
+
+.PHONY: check_hooks
+check_hooks:
+	@bash .githooks/tests/pre-commit.sh
 
 check_test_layout:
 	@$(XKMAKE) hygiene test-layout

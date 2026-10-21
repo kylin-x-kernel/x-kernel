@@ -1300,70 +1300,13 @@ extern "C" fn task_entry() -> ! {
 }
 
 #[cfg(unittest)]
-#[path = "tests/preempt_check.rs"]
-mod tests_preempt_check;
+unittest::path_mod_test!(tests_preempt_check, "../ut-tests/tests/preempt_check.rs");
 
 #[cfg(unittest)]
-#[path = "tests/current_task.rs"]
-mod tests_current_task;
+unittest::path_mod_test!(tests_current_task, "../ut-tests/tests/current_task.rs");
 
 #[cfg(unittest)]
-#[path = "tests/rcu_reader.rs"]
-mod tests_rcu_reader;
+unittest::path_mod_test!(tests_rcu_reader, "../ut-tests/tests/rcu_reader.rs");
 
 #[cfg(all(feature = "smp", unittest))]
-mod tests_on_cpu_mask {
-    use unittest::{assert, assert_eq, def_test};
-
-    use super::*;
-
-    fn new_test_task() -> TaskInner {
-        TaskInner::new_common(TaskIdentity::Internal, "test".into())
-    }
-
-    #[def_test]
-    fn test_on_cpu_mask_initially_empty() {
-        let task = new_test_task();
-        assert!(task.on_cpu_mask().is_empty());
-    }
-
-    #[def_test]
-    fn test_set_on_cpu_mask_bit() {
-        if kcpu_id_map::nr_cpus() >= 2 {
-            let task = new_test_task();
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
-            assert!(task.on_cpu_mask().get(0));
-            assert!(!task.on_cpu_mask().get(1));
-        }
-    }
-
-    #[def_test]
-    fn test_reset_on_cpu_mask() {
-        if kcpu_id_map::nr_cpus() >= 3 {
-            let task = new_test_task();
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(1));
-            task.reset_on_cpu_mask(LogicalCpuId::new(2));
-            let mask = task.on_cpu_mask();
-            assert!(!mask.get(0));
-            assert!(!mask.get(1));
-            assert!(mask.get(2));
-        }
-    }
-
-    #[def_test]
-    fn test_on_cpu_mask_multiple_bits() {
-        if kcpu_id_map::nr_cpus() >= 4 {
-            let task = new_test_task();
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(0));
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(2));
-            task.set_on_cpu_mask_bit(LogicalCpuId::new(3));
-            let mask = task.on_cpu_mask();
-            assert_eq!(mask.len(), 3);
-            assert!(mask.get(0));
-            assert!(!mask.get(1));
-            assert!(mask.get(2));
-            assert!(mask.get(3));
-        }
-    }
-}
+unittest::path_mod_test!(tests_on_cpu_mask, "../ut-tests/task/tests_on_cpu_mask.rs");

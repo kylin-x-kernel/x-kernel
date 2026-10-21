@@ -1,5 +1,12 @@
 # KExt4 — 设计文档
 
+## Test Layout
+
+Guest unit, component and recovery tests live under `ut-tests/`, mirroring the
+owning source module. Shared fault devices and superblock fixtures live there
+too. `unittest::path_mod_test!` retains private implementation access without
+turning these kernel fixtures into Cargo host integration tests.
+
 ## 定位
 
 `fs/filesystems/kext4` 是 X-Kernel 的 ext4 文件系统实现。它同时拥有 KVFS operation

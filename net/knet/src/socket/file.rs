@@ -137,15 +137,3 @@ impl Pollable for Socket {
         }
     }
 }
-
-#[unittest::mod_test]
-mod socket_tests {
-    use linux_raw_sys::general::S_IFSOCK;
-    use unittest::def_test;
-
-    /// Test S_IFSOCK constant
-    #[def_test]
-    fn test_socket_mode_constant() {
-        assert_eq!(S_IFSOCK, 0o140000);
-    }
-}

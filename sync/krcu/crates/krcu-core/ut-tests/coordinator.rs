@@ -2,7 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
@@ -14,16 +13,14 @@ fn coordinator<const CPUS: usize>(
     GracePeriodCoordinator::new(nodes, participants).expect("nonempty participant fixture")
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn empty_participant_sets_are_rejected() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     assert!(GracePeriodCoordinator::new(&nodes, [false, false]).is_none());
     assert!(GracePeriodCoordinator::new(&[], []).is_none());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn early_reports_cannot_bypass_the_initialization_gate() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);
@@ -71,8 +68,7 @@ fn early_reports_cannot_bypass_the_initialization_gate() {
     assert_eq!(gp.completed_period(), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn partial_finalization_neither_publishes_completion_nor_allows_restart() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);
@@ -107,8 +103,7 @@ fn partial_finalization_neither_publishes_completion_nor_allows_restart() {
     );
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn only_admitted_nodes_owe_reports_and_duplicates_do_not_clear_peers() {
     let nodes: [ReaderNode; 3] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, false, true]);
@@ -157,8 +152,7 @@ fn only_admitted_nodes_owe_reports_and_duplicates_do_not_clear_peers() {
     assert!(nodes[1].begin_period(8));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn nearby_stale_reports_cannot_complete_the_next_period_across_wrap() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);
@@ -207,8 +201,7 @@ fn nearby_stale_reports_cannot_complete_the_next_period_across_wrap() {
     );
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn cpu_report_cannot_discharge_an_enrolled_old_reader() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);
@@ -235,8 +228,7 @@ fn cpu_report_cannot_discharge_an_enrolled_old_reader() {
     assert!(!reader.is_enrolled());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn delayed_node_inspection_uses_current_obligations_after_multiple_wraps() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);
@@ -282,8 +274,7 @@ fn delayed_node_inspection_uses_current_obligations_after_multiple_wraps() {
     assert_eq!(expected, 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn pending_reporter_cpu_bounds_capture_to_the_following_period() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);

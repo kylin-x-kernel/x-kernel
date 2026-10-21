@@ -2,13 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn nested_scopes_balance_on_error_return() {
     let reader = TaskReader::new();
     let (outer, inner, after_inner, result) = reader.with_read(|_| {
@@ -22,8 +20,7 @@ fn nested_scopes_balance_on_error_return() {
     assert!(!reader.is_reading());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn nesting_never_wraps() {
     let reader = TaskReader::new();
     assert_eq!(reader.try_leave(), None);
@@ -36,8 +33,7 @@ fn nesting_never_wraps() {
     assert_eq!(reader.nesting.load(Ordering::Acquire), usize::MAX - 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn deferred_exit_retains_blocker_until_original_node_cleanup() {
     let node = ReaderNode::new();
     let other = ReaderNode::new();
@@ -70,8 +66,7 @@ fn deferred_exit_retains_blocker_until_original_node_cleanup() {
     assert!(!unsafe { reader.finish_deferred_cleanup() });
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn deferred_cleanup_does_not_supply_cpu_observation() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -94,8 +89,7 @@ fn deferred_cleanup_does_not_supply_cpu_observation() {
     assert!(!reader.is_enrolled());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn terminal_cleanup_removes_zero_depth_deferred_membership() {
     let node = ReaderNode::new();
     let reader = TaskReader::new();
@@ -114,8 +108,7 @@ fn terminal_cleanup_removes_zero_depth_deferred_membership() {
     assert_eq!(node.reader_count(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn terminal_cleanup_balances_unenrolled_nesting() {
     let reader = TaskReader::new();
     let (inactive, active, repeated) = {
@@ -137,8 +130,7 @@ fn terminal_cleanup_balances_unenrolled_nesting() {
     assert!(!reader.is_enrolled());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn terminal_cleanup_unlinks_original_node_without_removing_other_readers() {
     let original = ReaderNode::new();
     let destination = ReaderNode::new();

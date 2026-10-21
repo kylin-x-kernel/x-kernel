@@ -12,7 +12,7 @@ pub(crate) use map::InodeMappingRoot;
 pub(crate) use mutate::ordered_writeback_credit_bound;
 
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/extent/tests.rs");
 
 use crate::{BlockCount, PhysicalBlock};
 
@@ -60,7 +60,7 @@ pub(crate) enum ExtentMappingState {
 }
 
 #[cfg(unittest)]
-mod component_tests;
+unittest::path_mod_test!(component_tests, "../../ut-tests/extent/component_tests.rs");
 
 #[cfg(unittest)]
-mod legacy_tests;
+unittest::path_mod_test!(legacy_tests, "../../ut-tests/extent/legacy_tests.rs");

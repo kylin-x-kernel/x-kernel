@@ -240,7 +240,7 @@ therefore not backed by a followable file until a follow-up.
 ## Regression Support
 
 Unittest-only ELF fixtures and request-local partial-install probes support the
-exec lifecycle tests in `core/ksyscall/src/task/tests/exec_lifecycle.rs`.
+exec lifecycle tests in `core/ksyscall/ut-tests/task/tests/exec_lifecycle.rs`.
 They check that installation errors propagate through the caller's commitment
 policy. The fixture payload contains metadata, not executable user instructions.
 Probe mechanics and observation contracts are documented alongside the test

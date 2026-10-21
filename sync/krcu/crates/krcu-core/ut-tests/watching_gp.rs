@@ -2,7 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::{tests::quiescent, *};
@@ -18,8 +17,7 @@ fn observe<const CPUS: usize>(
     unsafe { gp.observe_watching(cpu, watching) }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn currently_quiescent_cpu_can_report_without_a_scheduler_switch() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -33,8 +31,7 @@ fn currently_quiescent_cpu_can_report_without_a_scheduler_switch() {
     assert_eq!(observed, (Some(1), true, Some(1)));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn active_interrupt_blocks_quiescence_until_its_exit() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -53,8 +50,7 @@ fn active_interrupt_blocks_quiescence_until_its_exit() {
     assert_eq!(observed, (Some(1), (false, None), (true, Some(1))));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn watched_samples_require_a_crossing_after_this_periods_snapshot() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -76,8 +72,7 @@ fn watched_samples_require_a_crossing_after_this_periods_snapshot() {
     assert_eq!(gp.try_complete_period(), None);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn quiescent_cpu_does_not_release_its_preempted_task_reader() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -105,8 +100,7 @@ fn quiescent_cpu_does_not_release_its_preempted_task_reader() {
     assert_eq!(gp.try_complete_period(), Some(1));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn full_watching_wrap_alias_does_not_certify_quiescence() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -123,8 +117,7 @@ fn full_watching_wrap_alias_does_not_certify_quiescence() {
     assert_eq!(gp.try_complete_period(), Some(1));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn period_wrap_and_absent_cpus_do_not_reuse_observations() {
     let nodes = [ReaderNode::new(), ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true, false]).unwrap();

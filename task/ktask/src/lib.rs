@@ -27,8 +27,7 @@ compile_error!(
     "ktask's SMP run queues require the `ipi` feature so remote runnable tasks can wake a NOHZ CPU"
 );
 
-#[cfg(test)]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/task_lifecycle.rs");
 
 #[macro_use]
 extern crate log;
@@ -40,10 +39,10 @@ extern crate alloc;
 extern crate ktimer_core;
 
 #[cfg(all(unittest, feature = "smp"))]
-mod tests_timer_routing;
+unittest::path_mod_test!(tests_timer_routing, "../ut-tests/tests_timer_routing.rs");
 
 #[cfg(unittest)]
-mod tests_timer_irq;
+unittest::path_mod_test!(tests_timer_irq, "../ut-tests/tests_timer_irq.rs");
 
 #[macro_use]
 mod api;

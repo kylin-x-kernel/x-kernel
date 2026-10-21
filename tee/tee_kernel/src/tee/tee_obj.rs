@@ -176,14 +176,4 @@ pub(super) fn tee_obj_close_all() -> TeeResult {
     Ok(())
 }
 
-#[unittest::def_test(user)]
-fn test_tee_obj_add_get() {
-    let obj = TeeObj {
-        busy: true,
-        ..Default::default()
-    };
-    let obj_id = tee_obj_add(obj).expect("Failed to add TeeObj");
-    info!("Added TeeObj with id {}", obj_id);
-    let retrieved_obj = tee_obj_get(obj_id).expect("Failed to get TeeObj");
-    assert!(retrieved_obj.lock().busy);
-}
+unittest::path_mod_test!(tests, "../../ut-tests/tee/tee_obj.rs");

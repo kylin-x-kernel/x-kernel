@@ -31,7 +31,7 @@ mod rq;
 mod stats;
 
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../../ut-tests/run_queue/tests.rs");
 
 use alloc::collections::VecDeque;
 #[cfg(feature = "smp")]

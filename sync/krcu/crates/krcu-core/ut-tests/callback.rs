@@ -6,7 +6,6 @@ use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use intrusive_collections::{LinkedList, container_of};
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
@@ -62,8 +61,7 @@ impl Drop for OwnedObject {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn unqueued_embedded_node_does_not_invoke_on_owner_drop() {
     let invoked = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -72,8 +70,7 @@ fn unqueued_embedded_node_does_not_invoke_on_owner_drop() {
     assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn embedded_callback_releases_its_original_object() {
     let invoked = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -122,8 +119,7 @@ impl BorrowedRequest<'_> {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn one_list_supports_owned_and_stack_backed_nodes() {
     let invoked = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));

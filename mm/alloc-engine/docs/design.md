@@ -1,5 +1,12 @@
 # alloc-engine: buddy page allocation
 
+## Test Layout
+
+Private allocator guest cases live in `ut-tests/` and are mounted with
+`unittest::path_mod_test!`, retaining allocator feature gates. Host integration
+tests remain in `tests/`; run `cargo test -p alloc-engine --features full
+--tests`. The guest runner does not replace these host stress tests.
+
 ## Purpose and boundaries
 
 `BuddyAllocator` owns free-space bookkeeping for caller-supplied writable memory.

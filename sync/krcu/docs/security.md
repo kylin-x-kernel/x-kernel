@@ -232,8 +232,8 @@ arithmetic validates representation, not progress at the host clock horizon.
 | `src/context.rs`: cleanup and switch reporting | Safe static methods consume immediate-use core contexts whose unsafe construction certifies the boundary; provider core calls retain exclusion, enrollment-before-observation and no callback/wakeup under scheduler locks. |
 | `src/context.rs`: user entry/exit | Same-CPU IRQ-masked pair, no protected borrow or scheduling across the unwatched window. |
 | `src/service.rs`: state construction, observation and invocation | One permanent controller; all admitted CPU services initialized; fresh ordered observations; eligible callbacks outside bookkeeping locks. |
-| `src/callback.rs`: preparation, submission and cancellation | Unique stable node with enclosing provenance; transferable resources; cancellation safe without a GP; accepted transfer suppresses cancellation before publication. |
-| `src/read.rs`, `src/synchronize.rs`, `src/owned.rs` | Test-only admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
+| `ut-tests/callback.rs`: preparation, submission and cancellation | Unique stable node with enclosing provenance; transferable resources; cancellation safe without a GP; accepted transfer suppresses cancellation before publication. |
+| `ut-tests/read.rs`, `ut-tests/synchronize.rs`, `ut-tests/owned.rs` | Test-only admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
 
 ## Failure Modes And Audit Limits
 

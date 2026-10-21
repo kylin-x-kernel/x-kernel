@@ -283,12 +283,14 @@ impl ReaderNode {
     }
 }
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/node.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/node.rs");
 
 impl Default for ReaderNode {
     fn default() -> Self {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/host/node.rs"]
+mod host_tests;

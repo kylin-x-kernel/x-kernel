@@ -136,10 +136,6 @@ impl InterruptEntry<'_> {
     }
 }
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/watching.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/watching.rs");
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/watching_gp.rs"]
-mod tests_gp;
+unittest::path_mod_test!(tests_gp, "../ut-tests/watching_gp.rs");

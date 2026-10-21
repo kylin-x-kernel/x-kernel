@@ -154,26 +154,4 @@ pub(crate) fn get_huk_key(huk_key: &mut [u8]) -> TeeResult {
     Ok(())
 }
 #[cfg(feature = "csv_huk_key")]
-#[unittest::mod_test]
-pub(crate) mod tests_hygon_csv_get_sealing_key {
-    use unittest::assert;
-
-    use super::*;
-
-    #[unittest::def_test]
-    fn test_hygon_csv_get_sealing_key() {
-        let result = get_sealing_key();
-        assert!(result.is_ok());
-        let key_buf = result.unwrap();
-        assert!(key_buf.len() == 32);
-        assert!(key_buf.iter().any(|&x| x != 0));
-
-        let result2 = get_sealing_key();
-        assert!(result2.is_ok());
-        let key_buf2 = result2.unwrap();
-        assert!(key_buf2.len() == 32);
-        assert!(key_buf2.iter().any(|&x| x != 0));
-
-        assert!(key_buf == key_buf2);
-    }
-}
+unittest::path_mod_test!(pub(crate) mod tests_hygon_csv_get_sealing_key, "../../../../ut-tests/tee/arch/x86_64/hygon_csv/tests_hygon_csv_get_sealing_key.rs");

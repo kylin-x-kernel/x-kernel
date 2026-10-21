@@ -553,7 +553,7 @@ Known limits:
 5. The `unsafe` surface is still large and should keep shrinking into
    smaller wrappers with complete `SAFETY` comments.
 
-`src/run_queue/tests.rs` and `src/tests.rs` cover wake affinity, blocked
+`ut-tests/run_queue/tests.rs` and `ut-tests/task_lifecycle.rs` cover wake affinity, blocked
 resched, and related invariants. `tests_timer_routing.rs` covers prepared
 timer routing. Test source existence is not execution proof.
 

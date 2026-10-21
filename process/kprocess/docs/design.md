@@ -353,7 +353,7 @@ delivery and user return.
 
 Structural ownership and captured-view regressions live in
 `ut-tests/process_runtime_runtime_state.rs`. Cross-crate scheduling and exec
-coverage lives in `core/ksyscall/src/task/tests/exit_tail.rs`.
+coverage lives in `core/ksyscall/ut-tests/task/tests/exit_tail.rs`.
 
 `LiveAddressSpace` captures an active MM user and the binding's heap marker under
 that same lock. Its `heap_top()` reads the captured atomic without reacquiring the

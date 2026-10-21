@@ -315,13 +315,27 @@ command.
 three-line header. XKMake passes tracked and non-ignored untracked Rust source
 files to licensure; deleted worktree paths and non-Rust files are not checked.
 
-`make check_test_layout` is a manual source-layout check. An `include!` call
+`make check_test_layout` checks source layout without a platform `.config`.
+The pre-commit hook delegates it to Clippy for configured Rust commits, and
+runs it directly for manifest-only changes, deletions, or when Clippy is skipped.
+Each path checks layout once. Check failures, including toolchain/setup failures,
+block the commit rather than silently passing. `make clippy`, `make dylint`, and `make dylint_test` also run
+it before their other checks; Jenkins already invokes `make clippy`, so layout
+violations block CI through that existing entry point. Hooks inspect the working
+tree, not an isolated index snapshot; CI checks the committed tree. `SKIP_ALL=1`
+bypasses local hook checks only, not CI. `make check_host_tests` remains manual.
+`make check_hooks` runs the hook dispatch regression suite without building a
+kernel; `make check_lints` depends on it, so the existing lint/CI paths run it too.
+
+An `include!` call
 alone is not evidence of test code: production modules also include generated
 configuration and bindings. Recognized test-module markers are still checked
 when their module body uses `include!`. The checker does not expand macros or
 resolve dynamically generated include contents; passing it does not prove
-that such contents contain no misplaced tests. Existing textual marker checks
-are not a complete Rust syntax analysis.
+that such contents contain no misplaced tests. Host/guest test attributes are
+recognized from Rust tokens, excluding comments and string literals. The inline
+module checks remain textual; neither mechanism expands macros or evaluates
+cfg conditions, and neither is a complete Rust semantic analysis.
 
 `make check_lints` runs `xkmake hygiene lints`. Every root workspace member,
 including implicit path-dependency members, must declare

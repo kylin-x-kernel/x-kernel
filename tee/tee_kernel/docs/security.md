@@ -59,6 +59,6 @@ HUK support and TA signature enforcement are outside this analysis.
   when checking cleanup and final reclamation.
 
 The `ExecSessionFixture` regressions in
-`core/ksyscall/src/task/tests/exec_lifecycle.rs` verify these lifecycle
+`core/ksyscall/ut-tests/task/tests/exec_lifecycle.rs` verify these lifecycle
 distinctions with transient objects, enumerators and a keyless crypto operation.
 They do not validate persistent backends or secret erasure.

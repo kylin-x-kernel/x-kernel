@@ -12,11 +12,7 @@
 use kerrno::KResult;
 use posix_process::do_exit;
 
-#[unittest::mod_test]
-pub(super) mod exit_tail {
-    //! Real exit tails exercise saved roots through blocking, migration and exec.
-    include!("tests/exit_tail.rs");
-}
+unittest::path_mod_test!(pub(super) mod exit_tail, "../../ut-tests/task/tests/exit_tail.rs");
 
 pub(crate) fn sys_exit(exit_code: i32) -> KResult<isize> {
     do_exit(exit_code << 8, false);

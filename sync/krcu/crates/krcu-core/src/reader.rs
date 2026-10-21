@@ -233,10 +233,6 @@ impl Drop for ReadGuard<'_> {
     }
 }
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/reader.rs"]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/reader.rs");
 
-#[cfg(any(test, unittest))]
-#[path = "../ut-tests/grace_period.rs"]
-mod tests_grace_period;
+unittest::path_mod_test!(tests_grace_period, "../ut-tests/grace_period.rs");

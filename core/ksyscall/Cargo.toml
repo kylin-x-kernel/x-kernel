@@ -21,6 +21,11 @@ tee = [
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
 ebpf = ["dep:posix-bpf", "posix-bpf/ebpf"]
 
+[package.metadata.cargo-shear]
+# kaddr_layout, kspin and unittest_support are used by cfg(unittest) fixtures
+# under ut-tests/ (including exec_lifecycle), which cargo-shear ignores.
+ignored = ["kaddr_layout", "kspin", "unittest_support"]
+
 [dependencies]
 pipefs.workspace = true
 kalloc.workspace = true

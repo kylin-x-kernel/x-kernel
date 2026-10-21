@@ -2008,77 +2008,12 @@ fn is_inode_physical_block_valid(
     true
 }
 
-#[unittest::mod_test]
-mod unittests {
-    use unittest::{assert_eq, def_test};
-
-    use super::*;
-
-    #[def_test]
-    fn mount_hash_policy_matches_linux_signedness_order() {
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(0, false, 0),
-            Ok(0)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(0, false, EXT2_FLAGS_SIGNED_HASH),
-            Ok(0)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(0, false, EXT2_FLAGS_UNSIGNED_HASH),
-            Ok(0)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(
-                0,
-                false,
-                EXT2_FLAGS_SIGNED_HASH | EXT2_FLAGS_UNSIGNED_HASH,
-            ),
-            Ok(0)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(0, true, 0),
-            Ok(DX_HASH_UNSIGNED_OFFSET)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(0, true, EXT2_FLAGS_SIGNED_HASH),
-            Ok(0)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(0, true, EXT2_FLAGS_UNSIGNED_HASH),
-            Ok(DX_HASH_UNSIGNED_OFFSET)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(
-                0,
-                true,
-                EXT2_FLAGS_SIGNED_HASH | EXT2_FLAGS_UNSIGNED_HASH,
-            ),
-            Ok(DX_HASH_UNSIGNED_OFFSET)
-        );
-    }
-
-    #[def_test]
-    fn mount_hash_policy_rejects_invalid_default_hash() {
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(5, false, 0),
-            Ok(0)
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(DX_HASH_SIPHASH, false, 0),
-            Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryHash))
-        );
-        assert_eq!(
-            Ext4SbInfo::resolve_directory_hash_unsigned(u8::MAX, true, 0),
-            Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryHash))
-        );
-    }
-}
+unittest::path_mod_test!(unittests, "../ut-tests/superblock/unittests.rs");
 
 #[cfg(unittest)]
-pub(crate) mod test_fixtures;
+unittest::path_mod_test!(pub(crate) mod test_fixtures, "../ut-tests/superblock/test_fixtures.rs");
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/superblock/tests.rs");
 
 fn validate_group(
     superblock: &Ext4DiskSuperblock,
@@ -2143,4 +2078,4 @@ fn validate_group(
 }
 
 #[cfg(unittest)]
-pub(crate) mod fault_device;
+unittest::path_mod_test!(pub(crate) mod fault_device, "../ut-tests/superblock/fault_device.rs");

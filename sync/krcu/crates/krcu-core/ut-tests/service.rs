@@ -6,7 +6,6 @@ use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicPtr, AtomicUsize};
 
 use intrusive_collections::container_of;
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
@@ -51,8 +50,7 @@ unsafe fn reclaim_published_value(node: *mut CallbackNode) {
     drop(unsafe { Box::from_raw(allocation) });
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn interrupt_borrow_delays_retirement_until_quiescent_return() {
     let nodes = [ReaderNode::new()];
     let watching = crate::CpuWatching::new();
@@ -132,8 +130,7 @@ fn interrupt_borrow_delays_retirement_until_quiescent_return() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn watching_report_does_not_make_an_old_readers_callback_eligible() {
     let nodes = [ReaderNode::new()];
     let watching = crate::CpuWatching::new();
@@ -187,8 +184,7 @@ fn watching_report_does_not_make_an_old_readers_callback_eligible() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn driver_claim_is_not_released_by_drop_or_move() {
     let nodes = [ReaderNode::new()];
     // SAFETY: isolated nodes have no other controller or active period.
@@ -227,8 +223,7 @@ fn driver_claim_is_not_released_by_drop_or_move() {
     assert_eq!(state.queues[0].outstanding(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn rejected_submission_preserves_node_for_participating_cpu() {
     let nodes = [ReaderNode::new(), ReaderNode::new()];
     // SAFETY: fresh isolated nodes have no other controller.
@@ -263,8 +258,7 @@ fn rejected_submission_preserves_node_for_participating_cpu() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn execution_waits_for_promotion_and_preserves_budget_remainder() {
     let nodes = [ReaderNode::new()];
     // SAFETY: this test exclusively controls the isolated node.
@@ -308,8 +302,7 @@ fn execution_waits_for_promotion_and_preserves_budget_remainder() {
     assert_eq!(state.queues[0].outstanding(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn abandoned_active_driver_cannot_be_recreated() {
     let nodes = [ReaderNode::new()];
     // SAFETY: isolated nodes and no other controller.
@@ -323,8 +316,7 @@ fn abandoned_active_driver_cannot_be_recreated() {
     assert!(state.claim_driver().is_none());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn empty_participants_are_rejected_without_consuming_nodes() {
     let nodes = [ReaderNode::new(), ReaderNode::new()];
     // SAFETY: fresh nodes; the rejected construction does not acquire control.
@@ -341,8 +333,7 @@ fn empty_participants_are_rejected_without_consuming_nodes() {
     assert_eq!(state.coordinator.try_complete_period(), Some(period));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn startup_preserves_an_enrolled_reader_until_its_outer_exit() {
     let nodes = [ReaderNode::new()];
     let reader = TaskReader::new();
@@ -378,8 +369,7 @@ fn startup_preserves_an_enrolled_reader_until_its_outer_exit() {
     assert_eq!(state.coordinator.try_complete_period(), Some(period));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn scheduler_observation_keeps_a_migrating_reader_blocking() {
     let nodes = [ReaderNode::new(), ReaderNode::new()];
     // SAFETY: isolated stable nodes have one controller and no active period.
@@ -431,8 +421,7 @@ fn scheduler_observation_keeps_a_migrating_reader_blocking() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn scheduler_boundary_before_period_does_not_satisfy_a_future_period() {
     let nodes = [ReaderNode::new()];
     let reader = TaskReader::new();
@@ -453,8 +442,7 @@ fn scheduler_boundary_before_period_does_not_satisfy_a_future_period() {
     assert_eq!(state.coordinator.try_complete_period(), Some(period));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn progress_hint_stops_after_cpu_report_even_with_a_blocked_reader() {
     let nodes = [ReaderNode::new(), ReaderNode::new()];
     let reader = TaskReader::new();

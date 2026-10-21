@@ -6,7 +6,6 @@ use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::AtomicUsize;
 
 use intrusive_collections::container_of;
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
@@ -75,8 +74,7 @@ fn eligible_count(queue: &CallbackQueue) -> usize {
     queue.lock().eligible.iter().count()
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn moving_driver_preserves_active_period_and_successor_work() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -102,8 +100,7 @@ fn moving_driver_preserves_active_period_and_successor_work() {
     assert_eq!(queues[0].outstanding(), 0);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn callbacks_on_either_side_of_start_require_distinct_periods() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -129,8 +126,7 @@ fn callbacks_on_either_side_of_start_require_distinct_periods() {
     assert_eq!(driver.drive(), None);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn submission_after_prefix_capture_does_not_join_that_prefix() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -156,8 +152,7 @@ fn submission_after_prefix_capture_does_not_join_that_prefix() {
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn old_reader_blocks_execution_after_all_cpu_reports() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
@@ -189,8 +184,7 @@ fn old_reader_blocks_execution_after_all_cpu_reports() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn eligibility_on_every_queue_survives_multiple_counter_wraps() {
     let nodes = [ReaderNode::new(), ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true, true]).unwrap();
@@ -224,8 +218,7 @@ fn eligibility_on_every_queue_survives_multiple_counter_wraps() {
     assert_eq!(immediate.load(Ordering::Relaxed), periods + 1);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn repeated_captures_merge_the_successor_segment_in_submission_order() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();

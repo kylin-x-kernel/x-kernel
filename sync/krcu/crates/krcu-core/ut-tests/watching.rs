@@ -2,7 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-#[cfg(not(test))]
 use unittest::{assert, assert_eq};
 
 use super::*;
@@ -28,8 +27,7 @@ fn interrupt<R>(cpu: &CpuWatching, body_fn: impl FnOnce() -> R) -> R {
     result
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn idle_and_user_windows_return_to_watched_execution() {
     let cpu = CpuWatching::new();
     assert!(cpu.is_watching());
@@ -42,8 +40,7 @@ fn idle_and_user_windows_return_to_watched_execution() {
     }
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn nested_interrupts_preserve_watched_kernel_state() {
     let cpu = CpuWatching::new();
     let before = cpu.sample();
@@ -56,8 +53,7 @@ fn nested_interrupts_preserve_watched_kernel_state() {
     assert_eq!(cpu.sample(), before);
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn only_outer_activation_restores_quiescence() {
     let cpu = CpuWatching::new();
     let observed = quiescent(&cpu, || {
@@ -76,8 +72,7 @@ fn only_outer_activation_restores_quiescence() {
     assert!(cpu.is_watching());
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn completed_interrupt_history_survives_later_crossings() {
     let cpu = CpuWatching::new();
     let observed = quiescent(&cpu, || {
@@ -101,8 +96,7 @@ fn completed_interrupt_history_survives_later_crossings() {
     assert_eq!(observed, (true, false, (true, true), false, true));
 }
 
-#[cfg_attr(test, test)]
-#[cfg_attr(not(test), unittest::def_test)]
+#[unittest::def_test]
 fn sequence_wrap_preserves_state_without_certifying_progress() {
     let cpu = CpuWatching {
         sequence: AtomicUsize::new(usize::MAX),

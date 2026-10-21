@@ -167,7 +167,7 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 }
 
 #[cfg(unittest)]
-mod prepared_tests;
+unittest::path_mod_test!(prepared_tests, "../../ut-tests/future/prepared_tests.rs");
 
 /// Error returned by [`interruptible`].
 #[derive(Debug, PartialEq, Eq)]

@@ -16,10 +16,12 @@ kernel-image-metadata = { path = "../../boot/kernel-image-metadata" }
 lcov2cobertura = "1.0.9"
 libc = "0.2"
 log = "0.4"
+proc-macro2 = "1"
 scroll = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+syn = "2"
 thiserror = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 toml = "1.1.2"

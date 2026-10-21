@@ -3555,7 +3555,7 @@ fn put_u32(output: &mut [u8], offset: usize, value: u32) -> Ext4Result<()> {
 }
 
 #[cfg(unittest)]
-mod tests;
+unittest::path_mod_test!(tests, "../ut-tests/namei/tests.rs");
 
 #[cfg(unittest)]
-mod component_tests;
+unittest::path_mod_test!(component_tests, "../ut-tests/namei/component_tests.rs");

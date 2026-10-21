@@ -601,4 +601,4 @@ impl Ext4SbInfo {
 }
 
 #[cfg(unittest)]
-mod component_tests;
+unittest::path_mod_test!(component_tests, "../ut-tests/ialloc/component_tests.rs");

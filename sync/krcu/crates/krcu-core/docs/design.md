@@ -24,6 +24,21 @@ The contract is distinct from isolated core instances and exposes no consumer
 read, synchronize or owned-data API. Private consumer fixtures live in
 `sync/krcu/ut-tests`; algorithm tests remain local to this crate.
 
+Algorithm cases under `ut-tests/` use `#[unittest::def_test]` and are mounted
+with `unittest::path_mod_test!`. Cases already covered by guest UT are not
+also registered with the host harness.
+
+`tests/host/` retains only host-specific coverage: two threads racing period
+initialization against reader enrollment, thread-local allocation rejection,
+and callback reposting while allocations are rejected. These are private
+`cfg(test)` file modules run by `cargo test -p krcu-core --lib`, not independent
+Cargo integration targets; this preserves access to the internal protocol
+without widening production APIs. The host dev-dependency enables `kspin/smp`
+so concurrent host threads use real locks. The guest repost case checks the
+protocol without changing the kernel allocator; it does not replace the host
+allocation-rejection check. Both use `tests/support/reposting.rs` for the owned
+callback fixture, so its unsafe allocation and repost lifecycle has one source.
+
 Scope entry increments nesting, an internally owned guard covers the callback,
 and guard destruction decrements nesting. A higher-ranked callback receives only
 a borrowed token. Nested scopes remain active until the outer scope exits.

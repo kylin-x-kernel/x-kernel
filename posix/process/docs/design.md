@@ -1,5 +1,9 @@
 # posix-process — Design
 
+The x86 syscall-restart guest regressions live in `ut-tests/runtime/tests.rs`,
+mounted at their original scope with `unittest::path_mod_test!`. Their
+`target_arch = "x86_64"` gate is retained; no architecture API is widened.
+
 ## Purpose and scope
 
 This crate orchestrates user-thread execution, PID 1 construction and exit.

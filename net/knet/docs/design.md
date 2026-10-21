@@ -1,5 +1,13 @@
 # knet — Design
 
+## Test Layout
+
+Guest tests live in `ut-tests/`, mirroring the source module hierarchy, and
+use `unittest::path_mod_test!` at the original scope. Netlink and socket test
+helpers move with their cases. Runtime timer probes retain their original
+hang bounds and observe the boot-created service; migration does not install
+another service or change its registration.
+
 ## Role
 
 `knet` provides a kernel network stack for x-kernel, which combines driver-level network devices, protocol stack, socket objects, poll and wakeup mechanisms, Unix domain sockets, netlink, and optional vsock support into a unified `SocketOps` interface. It is mainly responsible for protocol state, routing, RX/TX progress, and socket semantics. It uses crate-local IPv4, UDP, and ICMPv4 data paths to handle UDP send and receive, fragmentation, and error reporting. smoltcp supplies TCP, raw IP, IPv6, and staged interface polling.

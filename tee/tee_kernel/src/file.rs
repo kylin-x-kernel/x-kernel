@@ -98,46 +98,4 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> KResult<Resol
     })
 }
 
-#[unittest::mod_test]
-mod tests {
-    #[test]
-    fn validate_tee_path_allows_tee_root() {
-        assert_eq!(
-            validate_tee_path("/tee/object.bin").unwrap(),
-            "/tee/object.bin"
-        );
-    }
-
-    #[test]
-    fn validate_tee_path_allows_tee_directory_root() {
-        // Trailing slash is stripped by normalize(); the root itself must still match.
-        assert_eq!(validate_tee_path("/tee/").unwrap(), "/tee");
-    }
-
-    #[test]
-    fn validate_tee_path_allows_tmp_root() {
-        assert_eq!(validate_tee_path("/tmp/test.txt").unwrap(), "/tmp/test.txt");
-    }
-
-    #[test]
-    fn validate_tee_path_allows_tmp_directory_root() {
-        assert_eq!(validate_tee_path("/tmp/").unwrap(), "/tmp");
-    }
-
-    #[test]
-    fn validate_tee_path_rejects_parent_dir() {
-        assert!(validate_tee_path("/tee/../etc/passwd").is_err());
-        assert!(validate_tee_path("../etc/passwd").is_err());
-    }
-
-    #[test]
-    fn validate_tee_path_rejects_outside_roots() {
-        assert!(validate_tee_path("/etc/passwd").is_err());
-        assert!(validate_tee_path("/var/log/messages").is_err());
-    }
-
-    #[test]
-    fn validate_tee_path_rejects_relative_paths() {
-        assert!(validate_tee_path("test.txt").is_err());
-    }
-}
+unittest::path_mod_test!(tests, "../ut-tests/file/tests.rs");

@@ -204,7 +204,7 @@ registered wakeups rather than polling or a timer.
   return value. Publishing `EINTR` for a handler must clear the slot in that
   same return.
 
-The exec and exit-tail regressions in `src/task/tests/` cover the exec
+The exec and exit-tail regressions in `ut-tests/task/tests/` cover the exec
 boundaries above. Synthetic-image and injected-error cases do not establish
 real user-program execution or allocator-exhaustion behavior.
 

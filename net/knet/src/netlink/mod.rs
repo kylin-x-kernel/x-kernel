@@ -22,10 +22,7 @@ use crate::general::GeneralOptions;
 
 mod rtnetlink;
 mod socket;
-#[unittest::mod_test]
-mod tests {
-    include!("tests.rs");
-}
+unittest::path_mod_test!(tests, "../../ut-tests/netlink/tests.rs");
 mod wire;
 
 pub use socket::{NetlinkSocket, publish_kobject_uevent};

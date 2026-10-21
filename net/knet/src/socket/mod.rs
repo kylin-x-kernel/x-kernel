@@ -9,9 +9,9 @@ pub mod options;
 pub(crate) mod state;
 
 #[cfg(unittest)]
-mod test_options;
+unittest::path_mod_test!(test_options, "../../ut-tests/socket/test_options.rs");
 #[cfg(unittest)]
-mod test_state;
+unittest::path_mod_test!(test_state, "../../ut-tests/socket/test_state.rs");
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{

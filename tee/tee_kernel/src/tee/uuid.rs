@@ -86,24 +86,4 @@ pub(super) fn ta_unix_socket_path(uuid: &str) -> TeeResult<String> {
     Ok(Uuid::parse_str(uuid)?.ta_unix_socket_path())
 }
 
-#[unittest::mod_test]
-mod tests {
-    #[test]
-    fn ta_unix_socket_path_valid_uuid() {
-        let path = ta_unix_socket_path("936da01f-9abd-4d9d-80c7-02af85c822a8").unwrap();
-        assert_eq!(path, "/tmp/936da01f-9abd-4d9d-80c7-02af85c822a8.sock");
-    }
-
-    #[test]
-    fn ta_unix_socket_path_rejects_path_traversal() {
-        assert_eq!(ta_unix_socket_path("../evil"), Err(TEE_ERROR_BAD_FORMAT));
-    }
-
-    #[test]
-    fn ta_unix_socket_path_rejects_slashes() {
-        assert_eq!(
-            ta_unix_socket_path("../../etc/passwd"),
-            Err(TEE_ERROR_BAD_FORMAT)
-        );
-    }
-}
+unittest::path_mod_test!(tests, "../../ut-tests/tee/uuid/tests.rs");

@@ -5,8 +5,7 @@
 //! Leave, pick, switch, resched kick, and run-queue operations.
 
 #[cfg(unittest)]
-#[path = "../tests/rcu_switch.rs"]
-mod tests_rcu_switch;
+unittest::path_mod_test!(tests_rcu_switch, "../../ut-tests/tests/rcu_switch.rs");
 
 use alloc::sync::Arc;
 #[cfg(feature = "smp")]

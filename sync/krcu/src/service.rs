@@ -24,21 +24,15 @@ const PROGRESS_INTERVAL_NS: u64 = 10_000_000;
 const CALLBACK_BUDGET: usize = 32;
 static SERVICE: Once<GracePeriodTask> = Once::new();
 
-#[cfg(unittest)]
-#[path = "callback.rs"]
-mod callback;
+unittest::path_mod_test!(callback, "../ut-tests/callback.rs");
 
 // Only controlled consumers can obtain the current-task reader until public
 // read-side admission and the complete context protocol are available.
-#[cfg(unittest)]
-#[path = "synchronize.rs"]
-mod synchronize;
+unittest::path_mod_test!(synchronize, "../ut-tests/synchronize.rs");
 
 // The owning consumer remains confined to integration tests until the complete
 // idle/user/IRQ/NMI context protocol has been validated.
-#[cfg(unittest)]
-#[path = "owned.rs"]
-mod owned;
+unittest::path_mod_test!(owned, "../ut-tests/owned.rs");
 
 struct GracePeriodTask {
     callbacks: CallbackState<'static, { kbuild_config::NR_CPUS }>,

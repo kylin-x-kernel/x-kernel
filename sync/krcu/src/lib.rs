@@ -14,12 +14,9 @@
 extern crate alloc;
 
 mod context;
-#[cfg(unittest)]
-mod read;
+unittest::path_mod_test!(read, "../ut-tests/read.rs");
 mod service;
-#[cfg(unittest)]
-#[path = "../ut-tests/support.rs"]
-mod test_support;
+unittest::path_mod_test!(test_support, "../ut-tests/support.rs");
 
 pub use context::{enter_user_quiescent, exit_user_quiescent};
 pub use service::init_service;
