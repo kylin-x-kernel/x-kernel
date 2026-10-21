@@ -542,7 +542,7 @@ Derived state bits in `ifi_change` are preserved according to Linux `IFF_VOLATIL
 `RouteTable` validates configured routes against the device and address inventory under the Router lock; rejected replacements preserve the old route. Address mutations and derived-route synchronization share that critical section. Surviving identities retain insertion precedence when preferred sources change; removing and recreating an identity starts a new route lifetime.
 
 After an address or its device is removed, Router address entries, automatic routes, IngressProcessor, the smoltcp Interface, and device projections must be refreshed while holding the Router lock once.
-Legacy ioctl updates target only the primary address entry and preserve other addresses on the same device. Netmask updates must preserve address scope and custom broadcast addresses.
+Legacy ioctl updates target only the primary address entry and preserve other addresses on the same device. Netmask updates preserve address scope and custom broadcast addresses unless the resulting CIDR already exists on the device. In that case the old entry is removed, the existing target is preserved, and routes and address projections are synchronized before reporting success.
 When the last instance of an address value disappears, configured routes in Router that depend on that `prefsrc` must be removed at the same time.
 Device removal must delete the device's routes, addresses, and neighbors while preserving every surviving interface ID.
 

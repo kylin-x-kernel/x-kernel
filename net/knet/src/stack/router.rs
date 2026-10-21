@@ -478,6 +478,19 @@ impl Router {
             return Ok(());
         }
 
+        let addr =
+            Ipv4Cidr::new(old.addr.address(), prefix_len).expect("prefix length was validated");
+        if self
+            .ipv4_addrs
+            .iter()
+            .any(|entry| entry.dev == dev && entry.addr == addr)
+        {
+            // Linux drops the old entry when netmask reinsertion collides,
+            // and SIOCSIFNETMASK still reports success.
+            self.remove_ipv4_addr(old);
+            return Ok(());
+        }
+
         let old_derived_broadcast = old.addr.broadcast();
         let has_broadcast_flag = self
             .devices
@@ -492,8 +505,7 @@ impl Router {
             .iter_mut()
             .find(|entry| entry.dev == dev)
             .ok_or(LinuxError::EADDRNOTAVAIL)?;
-        entry.addr =
-            Ipv4Cidr::new(old.addr.address(), prefix_len).expect("prefix length was validated");
+        entry.addr = addr;
         if should_recalculate_broadcast {
             entry.broadcast = None;
         } else if entry.broadcast.is_none() {
