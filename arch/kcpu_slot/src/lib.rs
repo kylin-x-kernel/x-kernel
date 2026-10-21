@@ -37,8 +37,8 @@ pub use single_instr::{
 };
 pub use static_slot::{CpuSlot, CpuSlotCell, StaticSlotValue};
 
-/// Platform contract for saving and disabling local IRQs around the
-/// single-instruction fallback.
+/// Platform contract for saving and disabling local IRQs around scoped slot
+/// access and the single-instruction fallback.
 ///
 /// Architectures without a true single-instruction per-CPU access implement
 /// [`SingleInstructionLoad`] and friends by masking local IRQs, touching the

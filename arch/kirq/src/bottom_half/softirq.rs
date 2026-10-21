@@ -316,8 +316,8 @@ pub fn raise_softirq_irqoff(vec: SoftirqVec) {
 
 /// Returns the current CPU's pending softirq bit mask.
 pub fn local_softirq_pending() -> usize {
-    let guard = NoPreemptIrqSave::new();
-    SOFTIRQ_PENDING.current(&guard).load(Ordering::Acquire) & SOFTIRQ_VALID_MASK
+    SOFTIRQ_PENDING
+        .with_current_irq_disabled(|pending| pending.load(Ordering::Acquire) & SOFTIRQ_VALID_MASK)
 }
 
 /// Runs pending softirqs on the current CPU when context permits it.
@@ -424,10 +424,9 @@ pub fn softirq_action_matches_for_tests(vec: SoftirqVec, action: SoftirqAction) 
 /// Clears a pending softirq bit on the current CPU.
 #[cfg(unittest)]
 pub fn clear_softirq_pending_for_tests(vec: SoftirqVec) {
-    let guard = NoPreemptIrqSave::new();
-    SOFTIRQ_PENDING
-        .current(&guard)
-        .fetch_and(!vec.bit(), Ordering::Release);
+    SOFTIRQ_PENDING.with_current_irq_disabled(|pending| {
+        pending.fetch_and(!vec.bit(), Ordering::Release);
+    });
 }
 
 unittest::path_mod_test!(pub mod test_support, "../../ut-tests/bottom_half_softirq_test_support.rs");

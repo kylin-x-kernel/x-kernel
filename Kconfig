@@ -354,6 +354,7 @@ source "mm/Kconfig"
 source "net/Kconfig"
 source "tee/Kconfig"
 source "task/Kconfig"
+source "sync/krcu/Kconfig"
 source "core/kbpf/Kconfig"
 source "virt/Kconfig"
 

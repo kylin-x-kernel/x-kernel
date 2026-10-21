@@ -1,0 +1,33 @@
+menu "RCU validation"
+
+config KFEAT_RCU_TORTURE
+    bool "Run RCU ownership stress instead of userspace"
+    depends on !KFEAT_WORKQUEUE_BENCH
+    default n
+    help
+      Explicit release-only validation after runtime initialization.
+      Does not run under UNITTEST. Reports progress independently of log level
+      and powers off after successful completion. Not a performance benchmark.
+
+config RCU_TORTURE_SECONDS
+    usize "RCU ownership stress duration in seconds"
+    depends on KFEAT_RCU_TORTURE
+    range 1 86400
+    default 1800
+    help
+      Complete and verify whole finite batches until this duration elapses.
+      Use an external timeout: a stalled batch must fail, not be abandoned.
+      Boot and final batch completion may extend the total runtime.
+
+config KFEAT_RCU_BENCH
+    bool "Measure RCU read costs and wait latency instead of userspace"
+    depends on !KFEAT_WORKQUEUE_BENCH && !KFEAT_RCU_TORTURE
+    default n
+    help
+      Release-only sequential prepared submission, completion and sync waits.
+      Also measures baseline, empty read scopes and scoped object read batches.
+      Runs separately from torture, with one warmup and three measured rounds
+      on each present CPU. Prints raw samples and powers off on completion.
+      Not a throughput benchmark; do not enable UNITTEST or coverage.
+
+endmenu

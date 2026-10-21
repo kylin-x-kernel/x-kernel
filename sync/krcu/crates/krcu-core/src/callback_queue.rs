@@ -87,15 +87,61 @@ impl CallbackQueue {
         state.outstanding += 1;
     }
 
-    fn capture(&self) -> CallbackList {
-        self.lock().unassigned.take()
+    /// Appends a marker after all outstanding work without requiring its own GP.
+    /// An empty queue returns false without accessing or consuming the marker.
+    ///
+    /// # Safety
+    /// On acceptance, `node` must satisfy CallbackNode::from_raw's unique stable
+    /// storage and invocation contract. It must be a completion marker safe to
+    /// invoke without a GP of its own, not a normal retirement callback. Prepare
+    /// its completion accounting before publication and retain all resources
+    /// through invocation. Retain this queue and permit IRQ-safe locking, never
+    /// NMI. No callback or notification runs here; the host must request service.
+    pub(super) unsafe fn enqueue_drain_marker(&self, node: *mut CallbackNode) -> bool {
+        let mut state = self.lock();
+        if state.outstanding == 0 {
+            return false;
+        }
+        // SAFETY: acceptance transfers the caller's unique stable marker. Its
+        // callback needs only preceding callback completion, not a new GP.
+        let marker = unsafe { CallbackNode::from_raw(node) };
+        if !state.unassigned.is_empty() {
+            state.unassigned.push_back(marker);
+        } else {
+            // Slots are reused, so array order is not temporal order. Both
+            // occupied targets are adjacent; wrapping addition also handles
+            // the successor whose numeric value is zero.
+            let last = match (state.waiting[0].period, state.waiting[1].period) {
+                (Some(first), Some(second)) => {
+                    debug_assert!(
+                        first.wrapping_add(1) == second || second.wrapping_add(1) == first
+                    );
+                    Some(usize::from(first.wrapping_add(1) == second))
+                }
+                (Some(_), None) => Some(0),
+                (None, Some(_)) => Some(1),
+                (None, None) => None,
+            };
+            if let Some(index) = last {
+                state.waiting[index].callbacks.push_back(marker);
+            } else {
+                // Outstanding includes detached/invoking work. Its exclusive
+                // executor returns any remainder ahead of this marker before
+                // releasing the claim, even when eligible was empty here.
+                state.eligible.push_back(marker);
+            }
+        }
+        state.outstanding += 1;
+        true
     }
 
-    fn assign(&self, prefix: CallbackList, period: PeriodId) {
-        if prefix.is_empty() {
-            return;
-        }
+    /// Assigns the current finite prefix without hiding it from queue observers.
+    /// Returns whether any callbacks were assigned; later submissions stay pending.
+    fn assign_pending(&self, period: PeriodId) -> bool {
         let mut state = self.lock();
+        if state.unassigned.is_empty() {
+            return false;
+        }
         let index = state
             .waiting
             .iter()
@@ -112,10 +158,14 @@ impl CallbackQueue {
             "RCU callback target outside two-period window"
         );
         if let Some(index) = index {
+            // Keep capture and assignment under one lock so queue-tail users
+            // never mistake a temporarily detached prefix for absent work.
+            let prefix = state.unassigned.take();
             let segment = &mut state.waiting[index];
             segment.period = Some(period);
             segment.callbacks.back_mut().splice_after(prefix);
         }
+        true
     }
 
     fn promote(&self, completed: PeriodId) {
@@ -276,9 +326,7 @@ impl<'core, 'nodes, const CPUS: usize> CallbackDriver<'core, 'nodes, CPUS> {
         );
         let mut has_assigned_work = false;
         for queue in self.queues {
-            let prefix = queue.capture();
-            has_assigned_work |= !prefix.is_empty();
-            queue.assign(prefix, target);
+            has_assigned_work |= queue.assign_pending(target);
         }
         if let Some(active) = self.active_period {
             let Some(completed) = self.coordinator.try_complete_period() else {

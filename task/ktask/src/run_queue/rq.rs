@@ -985,9 +985,12 @@ pub(crate) unsafe fn finish_task_switch() {
         // SAFETY: this task cannot resume, its stack is inactive and current
         // already names the incoming task. IRQs/migration remain excluded;
         // PREV_TASK's transferred Arc retains its storage through unlinking.
-        // Task-only scope admission excludes IRQ/NMI access to this reader.
-        let had_abandoned_read = unsafe { prev_task.rcu_reader.finish_task_exit() };
-        if had_abandoned_read {
+        // The inactive outgoing task cannot be observed by incoming IRQ/NMI scopes.
+        let outcome = unsafe { prev_task.rcu_reader.finish_task_exit() };
+        if outcome.needs_progress {
+            krcu_core::RcuContextIf::request_completion_pass();
+        }
+        if outcome.had_participation {
             warn!(
                 "task {} exited with an active RCU read scope",
                 prev_task.id_name()

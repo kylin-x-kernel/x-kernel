@@ -122,6 +122,22 @@ impl<T: 'static> CpuSlot<T> {
         (self.offset_fn)()
     }
 
+    /// Accesses this CPU's shared value with ordinary IRQs temporarily masked.
+    ///
+    /// The slot area must already be initialized. The callback must not block,
+    /// schedule, change the CPU base, or enable ordinary IRQs. The original IRQ
+    /// mask is restored on return or unwind, without preemption accounting or
+    /// scheduler checks. NMI is not excluded; `T: Sync` remains required.
+    /// The borrowed slot cannot escape the callback.
+    #[inline]
+    pub fn with_current_irq_disabled<R>(&self, access_fn: impl for<'a> FnOnce(&'a T) -> R) -> R
+    where
+        T: Sync,
+    {
+        let _irq = crate::guard::LocalIrqGuard::new();
+        access_fn(self.current_shared())
+    }
+
     /// Shares the pinned CPU's value when the payload is intrinsically safe
     /// for concurrent shared access, such as an atomic value.
     pub fn current<'a>(&'a self, pin: &'a impl CpuPin) -> &'a T

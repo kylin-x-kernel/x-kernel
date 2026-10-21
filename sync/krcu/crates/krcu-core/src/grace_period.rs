@@ -4,7 +4,7 @@
 
 //! Flat coordination of node obligations, without hardware observation or waiters.
 
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
@@ -37,6 +37,7 @@ pub(crate) struct GracePeriodCoordinator<'nodes, const CPUS: usize> {
     nodes: &'nodes [ReaderNode; CPUS],
     participants: [bool; CPUS],
     state: SpinNoIrq<PeriodState<CPUS>>,
+    needs_completion_pass: AtomicBool,
 }
 
 impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
@@ -56,6 +57,7 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
                 phase: Phase::Idle,
                 pending: [false; CPUS],
             }),
+            needs_completion_pass: AtomicBool::new(false),
         })
     }
 
@@ -85,6 +87,10 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
         self.is_participant(cpu) && self.nodes[cpu].needs_cpu_observation()
     }
 
+    pub(crate) fn needs_completion_pass(&self) -> bool {
+        self.needs_completion_pass.load(Ordering::Acquire)
+    }
+
     fn start_initialization(&self) -> Option<PeriodId> {
         let mut state = self.state.lock();
         // Order prior withdrawal before this period's node observations, even
@@ -94,6 +100,7 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
             return None;
         }
         state.pending = self.participants;
+        self.needs_completion_pass.store(false, Ordering::Release);
         state.phase = Phase::Initializing;
         Some(state.completed.wrapping_add(1))
     }
@@ -185,6 +192,11 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
             return false;
         }
         state.pending[cpu] = false;
+        if !state.pending.iter().any(|&is_pending| is_pending) {
+            // Only a wake hint: the driver still checks the initialization gate
+            // and finalizes every node before making callbacks eligible.
+            self.needs_completion_pass.store(true, Ordering::Release);
+        }
         true
     }
 
@@ -223,6 +235,7 @@ impl<'nodes, const CPUS: usize> GracePeriodCoordinator<'nodes, CPUS> {
         debug_assert_eq!(state.completed.wrapping_add(1), period);
         state.completed = period;
         state.phase = Phase::Idle;
+        self.needs_completion_pass.store(false, Ordering::Release);
     }
 
     /// Reads ordered internal progress, not a wrap-safe predicate for waiters.

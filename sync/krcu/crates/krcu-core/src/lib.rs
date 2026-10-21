@@ -55,6 +55,6 @@ pub use callback::CallbackNode;
 pub use callback_queue::CallbackDriver;
 pub use integration::{RcuContextIf, ReaderCleanup, SchedulerObservation};
 pub use node::ReaderNode;
-pub use reader::{ReadGuard, TaskReader};
+pub use reader::{ReadGuard, ReaderCleanupOutcome, TaskReader};
 pub use service::CallbackState;
 pub use watching::{CpuWatching, InterruptEntry};

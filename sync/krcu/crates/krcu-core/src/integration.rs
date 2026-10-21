@@ -101,6 +101,13 @@ pub trait RcuContextIf {
     /// until this call returns. The provider must not schedule or wake inline.
     fn finish_reader_cleanup(context: ReaderCleanup<'_>);
 
+    /// Requests a service pass after cleanup made an original node ready.
+    ///
+    /// This is a hint, not a period report. May run with scheduler locks held:
+    /// never allocate, wake inline or schedule. NMI callers must be ignored;
+    /// without a safe deferred carrier, retain periodic progress instead.
+    fn request_completion_pass();
+
     /// Registers the outgoing reader before reporting a scheduler observation.
     ///
     /// The caller retains the context established by `SchedulerObservation::new`.

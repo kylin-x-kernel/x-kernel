@@ -11,6 +11,23 @@ use unittest::{assert, assert_eq};
 use super::*;
 use crate::callback::CallbackNode;
 
+#[unittest::def_test]
+fn drain_marker_rejection_does_not_access_absent_storage() {
+    let nodes = [ReaderNode::new(), ReaderNode::new()];
+    // SAFETY: fresh isolated nodes, with no other coordinator or outstanding work.
+    let state = unsafe { CallbackState::new(&nodes, [true, false]) }.unwrap();
+    // SAFETY: no driver is claimed; rejection must not inspect the absent node.
+    assert!(!unsafe { state.enqueue_drain_marker(0, core::ptr::null_mut()) });
+    let mut driver = state.claim_driver().unwrap();
+    for cpu in 0..3 {
+        // SAFETY: CPU0 has no work, CPU1 is excluded, CPU2 is out of range.
+        // All return before inspecting or taking ownership of the absent node.
+        assert!(!unsafe { state.enqueue_drain_marker(cpu, core::ptr::null_mut()) });
+    }
+    assert!(!driver.advance());
+    assert!(!state.has_ready(0));
+}
+
 #[repr(C)]
 struct Retirement {
     node: CallbackNode,

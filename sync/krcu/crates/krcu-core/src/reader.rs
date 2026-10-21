@@ -9,6 +9,16 @@ use core::{
 
 use crate::ReaderNode;
 
+/// Result of discharging a task's read participation at a safe boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReaderCleanupOutcome {
+    /// Cleanup discharged nesting or enrollment, rather than an already idle reader.
+    pub had_participation: bool,
+    /// Removal satisfied the original node's last reader obligation after CPU observation.
+    /// This is only a service notification hint, never permission to reclaim.
+    pub needs_progress: bool,
+}
+
 /// Read nesting owned by one task, independent of its current CPU.
 ///
 /// Scheduler integration must use the current task's instance, not a temporary
@@ -42,7 +52,7 @@ impl TaskReader {
 
     /// Discharges abandoned scopes after the host permanently stops this task.
     ///
-    /// Returns whether residual participation was found. Uses the same unlink
+    /// Returns residual participation and a progress hint. Uses the same unlink
     /// path as an ordinary outer exit; does not certify a CPU quiescent state
     /// or run reclamation callbacks.
     ///
@@ -53,16 +63,16 @@ impl TaskReader {
     /// IRQ or NMI may enter, leave or enroll this reader. Keep the reader and
     /// its owner node fixed and live through this call. Ordinary IRQs and
     /// preemption must be excluded; this must not run in NMI context.
-    pub unsafe fn finish_task_exit(&self) -> bool {
+    pub unsafe fn finish_task_exit(&self) -> ReaderCleanupOutcome {
         let was_reading = self.nesting.swap(0, Ordering::AcqRel) != 0;
-        let was_enrolled = self.is_enrolled();
-        self.remove_enrollment();
-        was_reading || was_enrolled
+        let mut outcome = self.remove_enrollment();
+        outcome.had_participation |= was_reading;
+        outcome
     }
 
-    fn remove_enrollment(&self) {
+    fn remove_enrollment(&self) -> ReaderCleanupOutcome {
         if !self.is_enrolled() {
-            return;
+            return ReaderCleanupOutcome::default();
         }
         // A switch after nesting reaches zero may finish deferred cleanup.
         // Re-read ownership under exclusion before borrowing the original list.
@@ -75,13 +85,19 @@ impl TaskReader {
             let node = unsafe { &*owner };
             // SAFETY: the published owner names this reader's unique list;
             // no competing scope exit or enrollment is permitted for it.
-            unsafe { node.remove(self) };
+            let needs_progress = unsafe { node.remove(self) };
+            return ReaderCleanupOutcome {
+                had_participation: true,
+                needs_progress,
+            };
         }
+        ReaderCleanupOutcome::default()
     }
 
     /// Unlinks a finished reader, retaining membership if a scope has reentered.
     ///
-    /// Returns whether membership was removed. Does not certify CPU quiescence,
+    /// Reports removed membership and whether it made the original node ready.
+    /// Retained active scopes return an empty outcome. Does not certify CPU quiescence,
     /// wake the grace-period service or invoke callbacks.
     ///
     /// # Safety
@@ -91,13 +107,11 @@ impl TaskReader {
     /// this must not run in NMI or while holding the owner node's lock. Nested
     /// NMI scopes must use only `with_read_deferred` and return balanced, without
     /// changing enrollment. Retain stable reader/node storage through removal.
-    pub unsafe fn finish_deferred_cleanup(&self) -> bool {
+    pub unsafe fn finish_deferred_cleanup(&self) -> ReaderCleanupOutcome {
         if self.is_reading() {
-            return false;
+            return ReaderCleanupOutcome::default();
         }
-        let was_enrolled = self.is_enrolled();
-        self.remove_enrollment();
-        was_enrolled
+        self.remove_enrollment()
     }
 
     /// Tests the original enrollment identity without dereferencing a raw owner.
@@ -116,6 +130,11 @@ impl TaskReader {
     /// until the host performs [`Self::finish_task_exit`] after permanent exit.
     /// Once enrolled, only the owning task may enter/exit scopes, as required
     /// by [`ReaderNode::enroll`]. IRQ/NMI scope use is not supported.
+    ///
+    /// Outer exit unlinks enrollment but does not notify a grace-period service.
+    /// The host must independently drive progress. Hosts needing the last-reader
+    /// notification use [`Self::with_read_deferred`] and consume the outcome of
+    /// [`Self::finish_deferred_cleanup`] at a safe boundary.
     ///
     /// A token borrow cannot outlive the scope:
     ///
@@ -228,6 +247,8 @@ impl Drop for ReadGuard<'_> {
         let depth = self.reader.try_leave();
         assert!(depth.is_some(), "RCU read nesting underflow");
         if depth == Some(0) && self.can_unlink_on_exit {
+            // This primitive has no host notifier; its caller drives progress.
+            // Deferred host integration consumes the hint at its cleanup boundary.
             self.reader.remove_enrollment();
         }
     }

@@ -12,6 +12,7 @@ use ktask::future::PreparedTaskWait;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
+use crate::{CallbackNode, PreparedCallback};
 
 struct Counts {
     invoked: AtomicUsize,
@@ -139,7 +140,26 @@ fn adopt_probe(object: Box<Probe>) -> PreparedCallback {
     // SAFETY: unpublished Box storage is fixed and exclusively transferred.
     // Both cleanup paths recover its actual field offset and release it once.
     // Its Arc counters/waker are transferable and permit nonblocking cleanup.
-    unsafe { PreparedCallback::new(super::super::SERVICE.get().unwrap(), node, cancel_probe) }
+    unsafe { PreparedCallback::new(node, cancel_probe) }
+}
+
+#[def_test(serial)]
+fn public_callback_submission_and_drain_release_owner_once() {
+    let counts = Counts::new();
+    let wait = PreparedTaskWait::prepare().unwrap();
+    let prepared = prepare_probe(&counts, wait.waker(), 0);
+    // SAFETY: this fresh probe was never published, owns transferable storage
+    // and has nonblocking cleanup. No scheduler or RCU lock is held.
+    let submitted = unsafe { prepared.submit() };
+    assert!(submitted.is_ok());
+    // SAFETY: no producer remains, callback code is permanent and counts/wait
+    // storage remains live. This task holds no resource needed by the callback.
+    assert_eq!(unsafe { crate::drain_callbacks() }, Ok(()));
+    assert_eq!(counts.completed.load(Ordering::Acquire), 1);
+    assert_eq!(counts.invoked.load(Ordering::Relaxed), 7);
+    assert_eq!(counts.cancelled.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.dropped.load(Ordering::Relaxed), 1);
+    assert!(!counts.has_invalid_context.load(Ordering::Acquire));
 }
 
 #[def_test]

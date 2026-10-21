@@ -83,7 +83,6 @@ pub(crate) fn current_reader(task: &ktask::CurrentTask) -> &TaskReader {
     unsafe { task.rcu_reader_for_integration() }
 }
 
-#[cfg(unittest)]
 pub(crate) fn request_reader_cleanup(task: &ktask::CurrentTask) {
     let guard = kspin::NoPreemptIrqSave::new();
     let reader = current_reader(task);
@@ -116,11 +115,20 @@ pub(crate) unsafe fn finish_reader_cleanup(reader: &TaskReader) {
         .swap(false, Ordering::AcqRel);
     // SAFETY: caller supplies current, stable storage at a permitted excluded
     // boundary; the core rechecks nesting and removes only the original owner.
-    unsafe { reader.finish_deferred_cleanup() };
+    let outcome = unsafe { reader.finish_deferred_cleanup() };
+    if outcome.needs_progress {
+        service::request_completion_pass();
+    }
 }
 
 #[kiface::provide]
 impl RcuContextIf {
+    fn request_completion_pass() {
+        if !kirq::context::is_in_nmi() {
+            service::request_completion_pass();
+        }
+    }
+
     fn current_cpu_watching() -> &'static CpuWatching {
         &current_state().watching
     }
@@ -158,8 +166,8 @@ fn check_reader_cleanup() {
         && !ktask::current_preemption_disabled()
         && !khal::context::in_exception_context()
     {
-        // Context queries release guards themselves; exclude preemption first
-        // so those checks cannot recursively enter this cleanup checkpoint.
+        // Exclusion covers owner lookup and reader removal, not merely the
+        // context queries, which provide their own snapshot protection.
         let guard = kspin::NoPreemptIrqSave::new();
         if RcuContextIf::current_cpu_watching().is_watching()
             && !kirq::context::is_in_interrupt_context()
@@ -243,7 +251,10 @@ unsafe fn note_context_switch(reader: &TaskReader, cpu: LogicalCpuId) {
         // SAFETY: this is the outgoing current task under the caller's IRQ and
         // preemption exclusion. Task retirement retains its embedded reader;
         // the service reports only after enrollment and does not wake inline.
-        unsafe { callbacks.note_context_switch(cpu.as_usize(), reader) };
+        let reported = unsafe { callbacks.note_context_switch(cpu.as_usize(), reader) };
+        if reported && callbacks.needs_completion_pass() {
+            service::request_completion_pass();
+        }
         return;
     }
     // SAFETY: switch_to runs with IRQs/preemption excluded for its current task.

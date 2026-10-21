@@ -6,6 +6,26 @@ use core::{marker::PhantomData, ptr::NonNull};
 
 pub use kcpu_id_map::LogicalCpuId as CpuId;
 
+pub(crate) struct LocalIrqGuard {
+    saved_state: usize,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+impl LocalIrqGuard {
+    pub(crate) fn new() -> Self {
+        Self {
+            saved_state: crate::CpuLocalIrqIf::save_and_disable(),
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
+impl Drop for LocalIrqGuard {
+    fn drop(&mut self) {
+        crate::CpuLocalIrqIf::restore(self.saved_state);
+    }
+}
+
 /// Exclusive access to one CPU's slot area during CPU bring-up.
 ///
 /// The token exists after the template has been copied and selected in the

@@ -20,6 +20,8 @@
 //! - `arm-timer-resume-fixup`: repair virtual timer regressions after idle/WFI
 //! - `rootfs-secondary-block`: mount the secondary block device as the root FS
 //! - `workqueue-bench`: opt-in release workqueue benchmarks before userspace
+//! - `rcu-torture`: opt-in release RCU ownership stress before userspace
+//! - `rcu-bench`: opt-in release RCU callback latency measurements before userspace
 //!
 //! All features are optional and disabled by default.
 
@@ -27,16 +29,27 @@
 
 extern crate alloc;
 
-/// Runs the explicitly configured workqueue test workload before userspace.
+/// Runs an explicitly configured release validation workload before userspace.
 ///
 /// Call once in sleepable boot context after runtime initialization. With
-/// `workqueue-bench` enabled outside unit tests, completion powers off the
-/// machine; otherwise this is a no-op.
+/// A boot benchmark or torture feature enabled outside unit tests, completion
+/// powers off the machine; otherwise this is a no-op.
 ///
 /// # Panics
 /// The opt-in runner panics on invalid duration, submission/drain errors,
-/// callback count or placement mismatches, and failed task joins.
+/// content/ownership errors, callback count or placement mismatches, and failed
+/// task joins.
 pub fn run_boot_benchmarks() {
+    #[cfg(all(feature = "rcu-bench", not(unittest)))]
+    {
+        krcu::benchmarks::run();
+        khal::power::power_off();
+    }
+    #[cfg(all(feature = "rcu-torture", not(unittest)))]
+    {
+        krcu::torture::run(kbuild_config::RCU_TORTURE_SECONDS);
+        khal::power::power_off();
+    }
     #[cfg(all(feature = "workqueue-bench", not(unittest)))]
     {
         kworkng::benchmarks::run(kbuild_config::WORKQUEUE_SOAK_SECONDS);

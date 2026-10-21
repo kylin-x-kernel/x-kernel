@@ -62,6 +62,26 @@ impl Drop for ArmedProbe<'_> {
 }
 
 #[def_test(serial)]
+fn irq_context_queries_do_not_enter_preemption_checks() {
+    let task = crate::current();
+    // Exclude real IRQ tails from the observation, without a preemption credit
+    // that could hide a query's own zero-count guard release.
+    let _irq = kspin::IrqSave::new();
+    assert!(task.can_preempt(0));
+    let before = task.preempt_check_probe.checks.load(Ordering::Relaxed);
+    let snapshot = kirq::context::irq_context_snapshot();
+    let is_interrupt = kirq::context::is_in_interrupt_context();
+    let is_exception = khal::context::in_exception_context();
+    let _pending = kirq::softirq::local_softirq_pending();
+    let after = task.preempt_check_probe.checks.load(Ordering::Relaxed);
+    assert_eq!(after, before);
+    assert_eq!(is_interrupt, snapshot.is_in_interrupt_context());
+    assert!(!is_exception);
+    assert!(task.can_preempt(0));
+    assert!(!karch::local_irq_enabled());
+}
+
+#[def_test(serial)]
 fn irq_exclusion_defers_preemption_after_inner_guard_release() {
     let task = crate::current();
     let probe = &task.preempt_check_probe;

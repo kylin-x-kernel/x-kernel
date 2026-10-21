@@ -21,6 +21,43 @@ fn empty_participant_sets_are_rejected() {
 }
 
 #[unittest::def_test]
+fn completion_wake_hint_requires_all_reports_and_resets_between_periods() {
+    let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
+    let gp = coordinator(&nodes, [true, true]);
+    assert!(!gp.needs_completion_pass());
+    assert_eq!(gp.begin_period(), Some(1));
+    assert!(gp.observe_cpu(0, 1) && gp.report_node(0));
+    assert!(!gp.needs_completion_pass());
+    assert!(!gp.report_node(0));
+    assert!(!gp.needs_completion_pass());
+    assert!(gp.observe_cpu(1, 1) && gp.report_node(1));
+    assert!(gp.needs_completion_pass());
+    assert_eq!(gp.try_complete_period(), Some(1));
+    assert!(!gp.needs_completion_pass());
+    assert_eq!(gp.begin_period(), Some(2));
+    assert!(!gp.accept_report(0, 1));
+    assert!(!gp.needs_completion_pass());
+    assert!(gp.observe_cpu(0, 2) && gp.report_node(0));
+    assert!(gp.observe_cpu(1, 2) && gp.report_node(1));
+    assert!(gp.needs_completion_pass());
+    assert_eq!(gp.try_complete_period(), Some(2));
+}
+
+#[unittest::def_test]
+fn early_completion_wake_does_not_bypass_initialization() {
+    let nodes = [ReaderNode::new()];
+    let gp = coordinator(&nodes, [true]);
+    assert_eq!(gp.start_initialization(), Some(1));
+    assert!(nodes[0].begin_period(1));
+    assert!(gp.observe_cpu(0, 1) && gp.report_node(0));
+    assert!(gp.needs_completion_pass());
+    assert_eq!(gp.try_complete_period(), None);
+    gp.finish_initialization(1);
+    assert_eq!(gp.try_complete_period(), Some(1));
+    assert!(!gp.needs_completion_pass());
+}
+
+#[unittest::def_test]
 fn early_reports_cannot_bypass_the_initialization_gate() {
     let nodes: [ReaderNode; 2] = core::array::from_fn(|_| ReaderNode::new());
     let gp = coordinator(&nodes, [true, true]);
@@ -216,14 +253,27 @@ fn cpu_report_cannot_discharge_an_enrolled_old_reader() {
             let cpus = gp.observe_cpu(0, 1) && gp.observe_cpu(1, 1);
             let blocked = gp.report_node(0);
             let peer = gp.report_node(1);
-            (started, cpus, blocked, peer, gp.try_complete_period())
+            (
+                started,
+                cpus,
+                blocked,
+                peer,
+                gp.try_complete_period(),
+                gp.needs_completion_pass(),
+            )
         });
         let after_exit = gp.report_node(0);
-        (during, after_exit, gp.try_complete_period())
+        let needs_pass = gp.needs_completion_pass();
+        (during, after_exit, needs_pass, gp.try_complete_period())
     };
     assert_eq!(
         observed,
-        ((Some(1), true, false, true, None), true, Some(1))
+        (
+            (Some(1), true, false, true, None, false),
+            true,
+            true,
+            Some(1)
+        )
     );
     assert!(!reader.is_enrolled());
 }

@@ -37,7 +37,7 @@ pub(super) struct PreparedGracePeriodWait {
 impl PreparedGracePeriodWait {
     pub(super) fn prepare() -> KResult<Self> {
         let wait = PreparedTaskWait::prepare()?;
-        let service = SERVICE
+        SERVICE
             .get()
             .filter(|service| service.waker.get().is_some())
             .ok_or(KError::BadState)?;
@@ -61,7 +61,7 @@ impl PreparedGracePeriodWait {
         // Cancellation releases only that reference, never retired user data;
         // callback and cancellation both recover the same zero-offset Arc.
         // Completion resources permit cross-CPU ownership and nonblocking drop.
-        let callback = unsafe { PreparedCallback::new(service, node, cancel_grace_period) };
+        let callback = unsafe { PreparedCallback::new(node, cancel_grace_period) };
         Ok(Self {
             callback,
             completion,
@@ -139,16 +139,16 @@ unsafe fn complete_grace_period(node: *mut CallbackNode) {
 /// registration cannot be stored. No callback is submitted on error.
 ///
 /// # Safety
-/// Limited to controlled task-reader integration: every protected access must
-/// use its current task's scoped reader in watched kernel execution. IRQ/NMI,
-/// idle and user-context reader integration is not supplied by this interface.
+/// Call from watched kernel task execution.
+/// Every protected access must use this kernel's RCU participation protocol,
+/// such as `crate::with_read`, not an independent `krcu-core::TaskReader`.
 /// Withdraw every relevant publication route before calling, and retain the
 /// old object until successful return. Hold no lock needed by a reader or the
 /// service. An error does not authorize reclamation. The boot-owned service
 /// and participating CPUs must remain available throughout the wait.
-unsafe fn synchronize_rcu() -> KResult<()> {
+pub unsafe fn synchronize_rcu() -> KResult<()> {
     PreparedGracePeriodWait::prepare()?.submit_and_wait();
     Ok(())
 }
 
-unittest::path_mod_test!(tests, "rcu_synchronize.rs");
+unittest::path_mod_test!(tests, "../ut-tests/rcu_synchronize.rs");

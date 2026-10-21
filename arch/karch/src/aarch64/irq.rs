@@ -278,7 +278,16 @@ pub fn save_irq_and_disable() -> usize {
     #[cfg(feature = "nmi-pseudo")]
     if pmr::is_ready() {
         let prev = pmr::read();
-        pmr::write(pmr::NMI_ONLY);
+        // PMR writes are self-synchronizing: an identical mask is already effective.
+        // Arm IHI 0069, ICC_PMR_EL1, specifies this synchronization property.
+        // Arm's "Critical Interrupt Prioritization" (September 2014), Example 1,
+        // also permits conditional masking based on the current PMR value.
+        // Linux arch/arm64/include/asm/irqflags.h::__pmr_local_irq_save likewise
+        // skips the write when the saved priority mask already disables IRQs.
+        // Skip only that redundant write; restore still writes the saved value.
+        if prev != pmr::NMI_ONLY {
+            pmr::write(pmr::NMI_ONLY);
+        }
         // PMR is an 8-bit register; the token encoding stores it in
         // bits 0-7 with TOKEN_BIT (bit 31) as the discriminator.
         return TOKEN_BIT | (prev as usize);

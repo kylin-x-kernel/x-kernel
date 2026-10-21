@@ -2,6 +2,17 @@
 
 ## Trust Boundary And Assets
 
+The default-off `torture` feature compiles an explicit release validation runner,
+excluded under `cfg(unittest)`. It is not a userspace service. The boot adapter
+selects it instead of userspace and powers off after successful completion.
+Every finite batch retains its resources until workers join; a timeout must
+fail externally, not force reclamation. Assertions and unfiltered output are
+intentional test behavior, absent from normal configurations.
+The separate default-off `bench` runner follows the same exclusion and lifetime
+rules. It submits unpublished records, checks same-CPU callback timestamps and
+drains each record before releasing observation storage. Invalid measurements
+fail; timing never grants permission to free a record without completion.
+
 This crate owns permanent reader nodes, per-CPU watching and cleanup notifications
 and service state. It trusts `ktask` to retain embedded task readers and supply
 excluded scheduler/cleanup boundaries, `kirq` to balance interrupt entry/exit,
@@ -17,6 +28,12 @@ notifications never establish reader retirement. Incorrect kernel callers can
 violate the unsafe lifecycle contract; the service does not validate arbitrary
 foreign reader pointers or independently prove architecture entry ordering.
 
+Reader cleanup requests progress only after releasing its original node lock.
+The IPI carrier defers wakeup so terminal cleanup may retain scheduler locks;
+it does not invoke callbacks or reschedule inline. NMI cannot invoke this
+cleanup path, and the static notification adapter ignores NMI requests.
+Without IPI, periodic inspection remains responsible for progress.
+
 ## Watching And Reader Lifetimes
 
 The RCU watching provider returns a permanent CPU object, not proof of CPU
@@ -31,13 +48,27 @@ No lazy initialization, task lookup, allocation
 or node locking occurs in this provider. Effective NMI classification bypasses
 the ordinary context lock and blocks scheduler preemption probes. This does not
 admit general task-reader scopes in NMI. Safe task-boundary cleanup is implemented;
-interrupt-scope admission is limited to controlled unittest fixtures.
+interrupt-scope admission requires an initialized, already-watched handler.
 
 `api::is_sleepable_context` accepts no external input and adds no unsafe boundary.
 It rejects missing or idle current tasks, interrupt-like/IRQ-masked contexts,
 and preemption protection when tracked. Explicit RCU read nesting also rejects
 sleeping and voluntary yielding, without preventing involuntary preemption.
-Only controlled tests enter these scopes; there is no general safe reclamation API.
+The public crate-level `with_read` lends a `ReadScope` constructed only after
+establishing current-task participation. Its private field borrows the actual
+core guard; standalone core tokens cannot forge it. It is neither Send nor Sync,
+and the owning guard cannot be moved out or forgotten by safe callers.
+The container's safe `with_read` method delegates to that same host scope.
+Task admission masks ordinary IRQs before the NMI/exception slot lookups and
+keeps the CPU fixed through watching/context validation. Atomic slot storage
+being permanent does not make an unpinned lookup a current-CPU observation.
+NMI is rejected before task preemption accounting. Context queries suppress
+their own guard-release checks; admission restores IRQs before the callback,
+preserving preemptible and migrating reads.
+Both higher-ranked closures forbid returning a protected allocation borrow.
+It retains the container borrow throughout the scope; copied or independently
+owned results may outlive it. Private raw reads still require their explicit
+task/interrupt participation proof.
 Scheduler enrollment borrows stable Arc-owned task storage. On the incoming
 stack, `finish_task_switch` removes an exited task's abandoned RCU participation
 before releasing the outgoing owner or on-CPU marker. IRQs and migration remain
@@ -76,15 +107,15 @@ Only the completed normal IRQ tail uses the distinct IRQ-exit checkpoint under
 its entry mask; existing outer counts, NMI and exception exclusions still apply.
 User/idle entry also drains while still watched and before any quiescent window.
 These hooks do not authorize NMI cleanup or guarantee delivery when no further
-safe boundary occurs. General interrupt-context scope admission remains closed.
-The private unittest interrupt entry requires initialized, retained current and
+safe boundary occurs.
+The public interrupt entry requires initialized, retained current and
 already-active watching. Strictly nested scopes finish before handler return,
 without scheduling, migration, enrollment changes or stack abandonment. NMI
 entry checks the lock-free context marker first and acquires no guard or lock;
 exit only decrements nesting. Existing ownership and cleanup demand remain the
 interrupted task's responsibility. These fixtures do not validate early entry
 windows or real hardware NMI delivery.
-The unittest-only host task scope borrows current across involuntary migration;
+The host task scope borrows current across involuntary migration;
 it does not cache a CPU or dereference a remembered node. The core scope guard
 ends nesting before its outer task-exit policy runs. A returned exclusion guard
 may keep cleanup deferred, in which case the exit sets need_resched and a local
@@ -102,7 +133,11 @@ received in an unsuitable context cannot discard the pending cleanup request.
 The scheduler RCU hook reports only after preserving the outgoing reader in its
 original node. IRQ/preemption exclusion spans enrollment, observation and report
 acceptance. Node and coordinator locks never nest, and this hook does not wake
-the GP task inline. A reported CPU is not evidence that its preempted task has
+the GP task inline. With IPIs, an accepted report and a completion-pass hint
+publish demand through the fixed RCU reason; no ordinary scheduler wake occurs
+under the runqueue lock. Without IPIs the timed pass remains responsible.
+The hint cannot bypass initialization or finalization, and is never used as
+permission to reclaim. A reported CPU is not evidence that its preempted task has
 exited the read scope. Idle quiescence spans only the architecture wait under
 IRQ/preemption exclusion, with no active explicit task scope. Watching resumes
 before guard release or timer bookkeeping. IRQ return glue outside kirq's
@@ -126,16 +161,14 @@ demand does; reader lifetimes remain authoritative in either case.
 Callback promotion precedes destination notification. The Rcu softirq executes
 only eligible callbacks and restores any budget remainder through the core queue
 protocol before requesting another pass. No callback runs under an RCU lock or
-in the GP task. Admission remains limited to controlled test objects and
-synchronous-wait markers, whose callbacks and cleanup must not block. General
-read/context integration is still required before accepting ordinary consumer
-retirement.
+in the GP task. Prepared handles and synchronous-wait markers transfer nodes
+under the unsafe nonblocking callback/destructor contract. Public
+owning replacement destroys retired payloads in its calling task, not softirq.
 
-## Private Consumer Ownership
+## Consumer Ownership
 
-The private unsafe `synchronize_rcu` bridge and its wait machinery are compiled
-only for controlled task-reader integration tests, not exported to consumers.
-Its caller must exclude unsupported reader contexts, withdraw all
+The public unsafe `synchronize_rcu` and owning replacement share private wait
+machinery. Standalone callers exclude unsupported reader contexts, withdraw all
 publication routes and retain the old owner on preparation failure. Completion
 registration precedes callback admission; after admission the wait cannot return
 an interrupt error or treat a wake as GP completion. Callback and waiter own
@@ -145,9 +178,11 @@ The initialized service has a permanent driver claim and fixed participants;
 submission from a running CPU cannot reject a prepared request. Violating that
 boot invariant is fatal, not a recoverable post-withdrawal failure.
 
-The owning container is not admitted outside kernel integration tests. Its
-unsafe read requires the current task's genuine scope; accepting an arbitrary
-TaskReader token as safe would permit reclamation while a reader is untracked.
+The owning container exposes scoped task/interrupt reads and task-context replacement.
+Its safe `read` requires the host-issued `ReadScope` and bounds its result by
+both input borrows. Both read entry points lend the same host-issued token;
+accepting an arbitrary TaskReader token in the public safe
+method would permit reclamation while a reader is untracked.
 Controlled hardirq readers must already be watched, retain initialized current,
 and finish their strictly nested scope before handler return without scheduling.
 The CPU cannot cross a later quiescent boundary while that borrow is active.
@@ -180,10 +215,11 @@ ownership and do not request progress. Successful submission transfers ownership
 before notification; a callback may already have executed when the submitter
 returns. Callers must therefore never inspect the transferred node afterward.
 The synchronous marker releases its extra raw Arc reference on rejection before
-reporting a violated prepared-service invariant. This boundary remains test-only;
-it does not yet admit arbitrary callbacks or certify their destructors.
+reporting a violated prepared-service invariant. The raw transfer boundary stays
+private. Public prepared handles require callers to certify callback code and
+destructors; runtime context checks cannot establish that safety contract.
 
-The private prepared handle consumes a unique node owner rather than exposing
+The public prepared handle consumes a unique node owner rather than exposing
 repeatable raw submission. Its cancellation function is a separate unsafe
 contract: it must be safe without a GP and must not reclaim objects still used
 by protected readers. A rejected submission returns the handle unchanged, so
@@ -192,7 +228,9 @@ is Send only because construction certifies transferable storage and cleanup;
 it is not Sync and does not permit shared submission. Accepted submission
 suppresses Drop before publishing the node, including when invocation frees
 the enclosing allocation before submission returns. Neither path may access
-the node after its ownership is consumed.
+the node after its ownership is consumed. Preparation carries no service
+reference and requires no service lookup. If submission finds no service, it
+returns the untouched handle; cancellation remains its owner's responsibility.
 
 Admission and lifetime checks are independent:
 
@@ -215,8 +253,8 @@ Registration conflict leaves control unclaimed; the existing action is untouched
 The startup lock is never held across task creation or the acknowledgment wait.
 Allocation failure after assignment follows the fatal kernel policy, not rollback.
 The task publishes
-only its waker after preparing its task-bound wait and timer. No ordinary
-callback admission or general RCU-ready flag is published. The Rcu softirq action is
+only its waker after preparing its task-bound wait and timer. The callback
+admission check uses that readiness acknowledgment. The Rcu softirq action is
 installed before task activation. Fixed IPI notification only marks it pending;
 the action later wakes the GP task without clearing demand. The no-IPI fallback
 raises softirq directly and may wake its daemon, so it cannot be called under
@@ -232,8 +270,9 @@ arithmetic validates representation, not progress at the host clock horizon.
 | `src/context.rs`: cleanup and switch reporting | Safe static methods consume immediate-use core contexts whose unsafe construction certifies the boundary; provider core calls retain exclusion, enrollment-before-observation and no callback/wakeup under scheduler locks. |
 | `src/context.rs`: user entry/exit | Same-CPU IRQ-masked pair, no protected borrow or scheduling across the unwatched window. |
 | `src/service.rs`: state construction, observation and invocation | One permanent controller; all admitted CPU services initialized; fresh ordered observations; eligible callbacks outside bookkeeping locks. |
-| `ut-tests/callback.rs`: preparation, submission and cancellation | Unique stable node with enclosing provenance; transferable resources; cancellation safe without a GP; accepted transfer suppresses cancellation before publication. |
-| `ut-tests/read.rs`, `ut-tests/synchronize.rs`, `ut-tests/owned.rs` | Test-only admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
+| `src/callback.rs`: preparation, submission and cancellation | Unique stable node with enclosing provenance; transferable resources; cancellation safe without a GP; accepted transfer suppresses cancellation before publication. |
+| `src/drain.rs`: marker insertion and completion | Serialized installations, permanent marker storage, count before publication, no marker access after decrement, independently retained notifier storage. |
+| `src/read.rs`, `src/synchronize.rs`, `src/owned.rs` | Scoped task admission; retained current and valid context; unique withdrawn ownership and independent callback/waiter lifetimes. |
 
 ## Failure Modes And Audit Limits
 
@@ -242,7 +281,7 @@ arithmetic validates representation, not progress at the host clock horizon.
 | Early service startup or competing node controller | Invalid observations or corrupted lifecycle | Runtime rendezvous, single startup claim and permanent storage. |
 | Cleanup notification mistaken for quiescence | Premature callback eligibility | Notifications are hints; only validated observations and drained readers complete a GP. |
 | Lost or delayed progress delivery | Retained callbacks and storage | Persistent demand and timed assistance; no completion inferred from timeout, no hard delivery bound. |
-| Callback blocks or abandons its stack | Softirq stall or unreleased execution claim | Only controlled nonblocking callbacks admitted; no general consumer interface. |
+| Callback blocks or abandons its stack | Softirq stall or unreleased execution claim | Unsafe submission requires nonblocking, non-unwinding callbacks and cleanup; runtime checks cannot verify arbitrary callback code. |
 | Invalid user/IRQ/NMI boundary | Untracked protected access | Explicit host contracts; modeled tests do not qualify unaudited hardware entry paths. |
 
 The crate does not process user-private payload contents or promise memory
@@ -250,3 +289,13 @@ scrubbing. Test source documents coverage, not a new execution result.
 Audit provider availability separately from service readiness, keep cleanup
 local, retain node/task storage through unlink, and preserve the evidence limits
 above when changing context admission.
+
+Callback drain is admitted only in sleepable watched task context, never from a
+callback or read scope. Callers must hold no resource needed by callbacks or GP
+progress. All recoverable preparation failures precede marker publication;
+installed drains cannot be interrupted or timed out into returning early. The
+fixed participating CPU set and service remain live. Marker callbacks release
+their slot lock before waking the waiter and do not acquire the serialization
+mutex. Completion authorizes disposal only of resources owned by the completed
+callbacks, not downstream work they scheduled. Stopping producers/reposts is
+the teardown owner's responsibility, not an effect of drain.

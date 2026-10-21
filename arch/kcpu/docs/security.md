@@ -107,6 +107,12 @@ AArch64 硬件 NMI 可打断普通 IRQ handler，但不得打断最终 ELR/SPSR 
 并保持到 `eret`；保存的 SPSR 不变。该操作受当前 CPU 的 FEAT_NMI readiness
 门控，降级运行不访问 ALLINT。用户态返回同样在替换 SP_EL0 之前屏蔽硬件 NMI。
 
+The boolean `in_exception_context()` query pins CPU-slot selection and load
+with architecture IRQ save/restore. Permanent atomic storage alone does not
+prevent a migrating caller from observing the previous CPU. This query does
+not dereference the stored pointer; its guarantee does not extend to subsequent
+caller operations or replace the trapframe snapshot's lifetime requirements.
+
 ### 1. `ExceptionContextGuard::new` / `Drop`（`active_exception_context.rs`）
 
 ```rust

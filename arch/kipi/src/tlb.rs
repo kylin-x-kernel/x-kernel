@@ -39,7 +39,7 @@ use kcpu_id_map::{KCpuMask, KCpuMaskExt, LogicalCpuId, for_each_present_logical_
 use kcpu_slot::cpu_slot_cell;
 use khal::percpu::this_cpu_id;
 use kirq::TargetCpu;
-use kspin::{NoPreempt, NoPreemptIrqSave};
+use kspin::NoPreempt;
 use ktime_types::TimeSpan;
 use memaddr::VirtAddr;
 use page_table::TlbFlushIf;
@@ -57,6 +57,12 @@ static REQUEST_SLOTS: [ShootdownRequestSlot; kbuild_config::NR_CPUS] =
 /// TLB IPI. The target CPU snapshots its local epoch at IPI entry and skips the
 /// O(NR_CPUS) slot scan when no epoch change has occurred since the last TLB
 /// scan on that CPU.
+///
+/// This epoch is a scan hint, not a completion acknowledgement: completion is
+/// tracked by each request slot's per-target sequence. Local scalar accesses
+/// do not serialize the whole scan against a nested IPI. If a nested scan
+/// stores a newer epoch before the outer scan stores its entry snapshot, the
+/// older hint forces another scan rather than absorbing the newer request.
 static PENDING_EPOCH_BY_CPU: [AtomicU64; kbuild_config::NR_CPUS] =
     [const { AtomicU64::new(0) }; kbuild_config::NR_CPUS];
 
@@ -384,14 +390,14 @@ fn current_pending_epoch(cpu: usize) -> u64 {
 
 #[inline]
 fn last_handled_pending_epoch() -> u64 {
-    let guard = NoPreemptIrqSave::new();
-    LAST_HANDLED_PENDING_EPOCH.read(&guard)
+    LAST_HANDLED_PENDING_EPOCH.load_current()
 }
 
 #[inline]
 fn set_last_handled_pending_epoch(epoch: u64) {
-    let guard = NoPreemptIrqSave::new();
-    LAST_HANDLED_PENDING_EPOCH.write(&guard, epoch);
+    // One local scalar store needs no transaction guard. Masking IRQs only
+    // around this store would not prevent a nested scan before the store.
+    LAST_HANDLED_PENDING_EPOCH.store_current(epoch);
 }
 
 /// Shared shootdown logic: publish `vaddr`, send IPIs to every CPU set in

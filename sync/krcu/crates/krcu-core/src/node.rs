@@ -108,12 +108,15 @@ impl ReaderNode {
             .store(core::ptr::from_ref(self).cast_mut(), Ordering::Release);
     }
 
+    /// Removes membership and returns a hint only on the transition to ready.
+    /// The caller may notify its service after this node lock has been released.
+    ///
     /// # Safety
     /// The reader belongs to this node, which remains live and fixed. Only the
     /// task's outer exit, deferred cleanup or exclusive terminal cleanup may
     /// remove it; no concurrent enrollment/removal is allowed. The caller keeps
     /// normal IRQs/preemption excluded from owner lookup through this removal.
-    pub(super) unsafe fn remove(&self, reader: &TaskReader) {
+    pub(super) unsafe fn remove(&self, reader: &TaskReader) -> bool {
         let mut state = self.state.lock();
         fence(Ordering::SeqCst);
         debug_assert!(
@@ -129,6 +132,7 @@ impl ReaderNode {
             removed.is_some(),
             "enrolled RCU reader missing from owner node"
         );
+        let mut needs_progress = false;
         if let Some(period) = period
             && period
                 .first_blocker
@@ -138,8 +142,11 @@ impl ReaderNode {
             // remove advances the cursor to the next list member. Any
             // non-blocking readers are before this suffix, never after it.
             period.first_blocker = cursor.as_cursor().clone_pointer();
+            needs_progress =
+                period.first_blocker.is_none() && !self.is_cpu_pending.load(Ordering::Acquire);
         }
         reader.owner.store(core::ptr::null_mut(), Ordering::Release);
+        needs_progress
     }
 
     /// Number of retained readers for isolated node and scheduler tests.

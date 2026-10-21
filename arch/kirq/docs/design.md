@@ -19,7 +19,11 @@ outer context early.
 NMI depth uses a shared atomic CPU slot, not the ordinary context lock.
 `is_in_nmi`, `interrupt_context_level`, `is_softirq_context` and the combined
 interrupt predicate can classify NMI without that lock. Detailed ordinary
-context snapshots remain unsuitable for NMI. Runtime lifecycle callbacks keep
+context snapshots remain unsuitable for NMI. Snapshot queries mask IRQs before
+selecting the CPU slot and balance their internal preemption credit without
+running scheduler/RCU checks. They are observations, not scheduling checkpoints;
+normal IRQ tails and other explicit checkpoints retain pending-work handling.
+Runtime lifecycle callbacks keep
 their existing locking mechanism and are not used to implement RCU entry.
 The idle host may enter quiescence around its architecture wait. An interrupt
 activating that CPU restores quiescence before returning to idle; the host's

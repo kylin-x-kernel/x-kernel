@@ -25,6 +25,7 @@ fn action_conflict_preserves_control_for_startup_retry() {
     let callbacks = unsafe { CallbackState::new(&NODES, core::array::from_fn(|cpu| cpu == 0)) }
         .unwrap();
     let service = GracePeriodTask {
+        drain: drain::CallbackDrain::new(),
         callbacks,
         has_started: kspin::SpinNoPreempt::new(false),
         waker: Once::new(),
@@ -191,8 +192,8 @@ unsafe fn finish_probe(node: *mut CallbackNode) {
         crate::context::needs_reader_cleanup(cpu),
         karch::local_irq_enabled(),
     );
-    let scopes_were_active = crate::read::with_interrupt_read(|_| {
-        let inner_was_active = crate::read::with_interrupt_read(|_| {
+    let scopes_were_active = crate::with_interrupt_read(|_| {
+        let inner_was_active = crate::with_interrupt_read(|_| {
             crate::test_support::reader(&task).is_reading()
                 && kirq::context::is_softirq_context()
                 && krcu_core::RcuContextIf::current_cpu_watching().is_watching()
@@ -481,6 +482,7 @@ fn cleanup_demand_kicks_an_already_observed_cpu() {
     let callbacks =
         unsafe { CallbackState::new(&NODES, core::array::from_fn(|id| id == cpu)) }.unwrap();
     let service = GracePeriodTask {
+        drain: drain::CallbackDrain::new(),
         callbacks,
         has_started: kspin::SpinNoPreempt::new(false),
         waker: Once::new(),

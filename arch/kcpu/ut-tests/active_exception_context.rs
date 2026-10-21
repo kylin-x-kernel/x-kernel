@@ -8,6 +8,38 @@ use super::*;
 use crate::ExceptionContext;
 
 #[def_test(serial)]
+fn scoped_slot_access_restores_irq_mask_on_nested_error_return() {
+    let was_enabled = karch::local_irq_enabled();
+    let result = ACTIVE_EXCEPTION_CONTEXT_PTR.with_current_irq_disabled(|outer| {
+        assert!(!karch::local_irq_enabled());
+        ACTIVE_EXCEPTION_CONTEXT_PTR.with_current_irq_disabled(|inner| {
+            assert!(core::ptr::eq(outer, inner));
+            assert!(!karch::local_irq_enabled());
+        });
+        assert!(!karch::local_irq_enabled());
+        Err::<(), _>(outer.load(Ordering::Relaxed))
+    });
+    assert!(result.is_err());
+    assert_eq!(karch::local_irq_enabled(), was_enabled);
+}
+
+#[def_test(serial)]
+fn exception_query_preserves_irq_mask() {
+    let was_enabled = karch::local_irq_enabled();
+    let was_active = in_exception_context();
+    assert_eq!(karch::local_irq_enabled(), was_enabled);
+    let irq_state = karch::save_irq_and_disable();
+    let masked_active = in_exception_context();
+    // SAFETY: ordinary IRQs remain masked until restore_irq below.
+    assert_eq!(unsafe { in_exception_context_irqoff() }, masked_active);
+    let remains_masked = !karch::local_irq_enabled();
+    karch::restore_irq(irq_state);
+    assert_eq!(masked_active, was_active);
+    assert!(remains_masked);
+    assert_eq!(karch::local_irq_enabled(), was_enabled);
+}
+
+#[def_test(serial)]
 fn test_active_exception_context_none() {
     assert!(active_exception_context().is_none());
     assert!(!in_exception_context());
@@ -20,6 +52,11 @@ fn test_guard_sets_and_restores() {
         let _guard = ExceptionContextGuard::new(&ctx);
         assert!(active_exception_context().is_some());
         assert!(in_exception_context());
+        let irq_state = karch::save_irq_and_disable();
+        // SAFETY: this query runs before restoring the saved IRQ state.
+        let is_active = unsafe { in_exception_context_irqoff() };
+        karch::restore_irq(irq_state);
+        assert!(is_active);
     }
     assert!(active_exception_context().is_none());
     assert!(!in_exception_context());

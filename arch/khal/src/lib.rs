@@ -87,8 +87,9 @@ pub use firmware::cmdline;
 pub mod context {
     pub use kcpu::{
         SuspendedExceptionContext, TaskContext, TrapFrame, active_exception_context,
-        current_task_ptr, in_exception_context, resume_active_exception_context,
-        set_current_task_ptr, suspend_active_exception_context, with_active_exception_context,
+        current_task_ptr, in_exception_context, in_exception_context_irqoff,
+        resume_active_exception_context, set_current_task_ptr, suspend_active_exception_context,
+        with_active_exception_context,
     };
 }
 

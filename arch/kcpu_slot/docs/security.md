@@ -7,6 +7,12 @@
 `kcpu_slot` 的不安全边界集中在三个位置：架构寄存器读写、模板复制和 slot 指针
 运算。
 
+`CpuSlot::with_current_irq_disabled` retains `T: Sync`: masking ordinary IRQs
+does not exclude NMI or remote access. It returns no slot borrow and restores
+the caller's IRQ mask on return or unwind. Callbacks must not block, schedule,
+enable ordinary IRQs, or change the CPU base. It adds no mutable-reference or
+pointed-object lifetime guarantee; those remain the payload owner's duty.
+
 调用者必须保证：
 
 1. 模板 LMA 来自与 linker script 同一镜像，`begin_cpu_init` 的目标区域对该 CPU

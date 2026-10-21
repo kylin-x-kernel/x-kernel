@@ -61,6 +61,9 @@ fn execute_all(queue: &CallbackQueue) {
 #[path = "callback_execution.rs"]
 mod execution;
 
+#[path = "callback_drain.rs"]
+mod drain;
+
 fn observe<const CPUS: usize>(gp: &GracePeriodCoordinator<'_, CPUS>, period: PeriodId) -> bool {
     let mut observed = true;
     for cpu in 0..CPUS {
@@ -127,7 +130,7 @@ fn callbacks_on_either_side_of_start_require_distinct_periods() {
 }
 
 #[unittest::def_test]
-fn submission_after_prefix_capture_does_not_join_that_prefix() {
+fn assignment_keeps_prefix_visible_and_excludes_later_submission() {
     let nodes = [ReaderNode::new()];
     let gp = GracePeriodCoordinator::new(&nodes, [true]).unwrap();
     let queues = [CallbackQueue::new()];
@@ -135,21 +138,30 @@ fn submission_after_prefix_capture_does_not_join_that_prefix() {
     // controller and drains all work before releasing the storage.
     let mut driver = unsafe { CallbackDriver::new(&gp, &queues) };
     let calls = Arc::new(AtomicUsize::new(0));
+    let target = gp.completed_period().wrapping_add(1);
+    assert!(!queues[0].assign_pending(target));
     submit(&queues[0], &calls);
-    // Pause the actual capture/assignment transactions, without a production
-    // observer hook or relying on wall-clock scheduling to hit the window.
-    let prefix = queues[0].capture();
     submit(&queues[0], &calls);
-    queues[0].assign(prefix, gp.completed_period().wrapping_add(1));
+    assert!(queues[0].assign_pending(target));
+    {
+        let state = queues[0].lock();
+        assert!(state.unassigned.is_empty());
+        assert_eq!(state.waiting[0].period, Some(target));
+        assert_eq!(state.waiting[0].callbacks.iter().count(), 2);
+        assert_eq!(state.outstanding, 2);
+    }
+    // A submission after the atomic capture/assignment stays in the next
+    // prefix even though initialization of this period has not begun yet.
+    submit(&queues[0], &calls);
     driver.active_period = gp.begin_period();
     assert!(observe(&gp, 1));
     assert_eq!(driver.drive(), Some(2));
-    assert_eq!(eligible_count(&queues[0]), 1);
+    assert_eq!(eligible_count(&queues[0]), 2);
     execute_all(&queues[0]);
     assert!(observe(&gp, 2));
     assert_eq!(driver.drive(), None);
     execute_all(&queues[0]);
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
 }
 
 #[unittest::def_test]

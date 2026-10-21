@@ -61,6 +61,12 @@ pending flag duplicates that state. Reentry preserves the original owner;
 `finish_deferred_cleanup` does nothing while nesting is nonzero. A later normal
 outer exit, explicit safe-context cleanup or terminal task cleanup unlinks it.
 Cleanup removes only task membership, not a CPU observation obligation.
+Cleanup returns `ReaderCleanupOutcome`: participation found and a progress hint.
+The original node sets the hint under its lock only when removing the last
+old blocker with its CPU obligation already satisfied. The hint has no period
+identity and grants no reclamation permission; a host may request a fresh
+service scan after the node lock is released. Isolated ordinary core scopes
+do not notify a system service.
 
 This separates the same responsibilities as Linux's NMI special-unlock return
 and safe-context deferred cleanup (`kernel/rcu/tree_plugin.h`). The host must
@@ -316,8 +322,19 @@ including from the GP task's progress check, without caching a period identity.
 assistance. A false result does not mean the node or GP is complete: old readers
 may still block it. No numeric identity escapes this query.
 
-Each pass captures the then-current finite unassigned prefix of each queue,
-releases its lock, and assigns a full future period. Idle assignment uses
+`needs_completion_pass` is a lockless wake hint, set under the coordinator lock
+when acceptance clears the final pending report. It resets on finalization and
+new initialization. It may be set during initialization; only the driver may
+close that gate and finalize nodes. The hint never authorizes reclamation or
+callback invocation. Hosts may test it after an accepted scheduler report and
+notify outside core locks; a race with driver progress only suppresses an
+obsolete wake or requests an extra pass. This follows Linux's last-report GP
+wakeup responsibility without embedding a scheduler or waker in the core.
+
+Each pass captures the then-current finite unassigned prefix of each queue
+and assigns a full future period under the same queue lock. No pending prefix
+is detached across a lock release, so queue-tail inspection sees all work not
+owned by the callback executor. Idle assignment uses
 completed + 1; assignment during an active period uses its successor. Submissions
 after capture remain unassigned until a later capture. The driver never chases
 an indefinitely growing producer list within one pass.
@@ -343,22 +360,46 @@ executor returns without waiting; other queues have independent execution claims
 Outstanding accounting includes all accepted callbacks, including detached and
 currently invoking entries. It is reduced only after callback return, using the
 batch's own completed count rather than inspecting possibly freed nodes. Empty
-eligible lists therefore do not imply that prior callbacks have finished. This
-is bookkeeping for future drain support, not a drain API.
+eligible lists therefore do not imply that prior callbacks have finished.
+
+## Callback Drain Markers
+
+`CallbackState::enqueue_drain_marker` appends an existing node after a CPU's
+outstanding callbacks under that queue's lock. It returns false without touching
+the node for an unclaimed driver, absent CPU or queue with no outstanding work.
+It neither waits nor notifies; it is a host integration primitive, not a complete
+drain API.
+
+The marker inherits the last nonempty segment's eligibility: unassigned first,
+otherwise the newest waiting target, otherwise eligible. Waiting slots are
+reused, so the newest target is determined by their adjacent wrapping period
+identities, not their array indices or numeric maximum. A marker never requires
+an independent GP and must not be used to retire a newly withdrawn object.
+This follows Linux's `rcu_segcblist_entrain` responsibility.
+
+When only detached/executing work remains, the marker enters the eligible list.
+The existing exclusive execution claim prevents it from running before the old
+callback returns; any unexecuted batch remainder is restored ahead of it. A
+later repost stays after the marker and needs its own GP, so markers do not
+chase indefinitely resubmitting producers.
+
+The host must prepare marker ownership and completion accounting before making
+the node visible, then request service. Successful insertion can be followed by
+execution before the insertion call returns. Across CPUs the host must retain a
+setup reference until installation ends; a first marker must not complete the
+whole operation while later markers are still being prepared or installed.
+Sleepable caller serialization, notification lifetime and stop-producers /
+wait / destroy sequencing are host responsibilities not supplied by this core.
+
+## Callback Reposting And Host Integration
 
 Reposting accepts new work into the unassigned list and requires a new full
 period. The current finite batch does not chase those submissions. Budget return
 leaves persistent readiness for the carrier to recheck; wakeup/sleep handshakes,
 timer/IPI progress and context admission belong to host-service integration and
-are not supplied by this portable engine. The host currently connects real GP
-task and softirq execution for controlled fixtures and synchronous-wait markers.
-The task layer also validates owned replacement with scoped task readers; this
-does not open general consumer admission.
-
-Controlled tests enter task scopes, strictly nested IRQ/NMI software contexts,
-and real softirq callback scopes. There is no public
-current-task RCU read interface, protected-data container or generally usable
-reclamation service. The task-only removal path is not usable from NMI;
-general interrupt-context admission remains closed. Host deferred cleanup runs
+are not supplied by this portable engine. The host's public scope, container and
+reclamation contracts are defined in [krcu](../../../docs/design.md).
+The task-only removal path is not usable from NMI; host deferred cleanup runs
 at safe task boundaries, with retained demand serviced by an active GP's progress
-kicks. These controlled fixtures do not establish hardware NMI read admission.
+kicks. Controlled IRQ/NMI software-context fixtures do not establish hardware
+NMI delivery.

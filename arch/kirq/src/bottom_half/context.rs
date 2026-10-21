@@ -198,7 +198,6 @@ pub(crate) struct IrqContextDiagnostics {
 /// use [`is_in_nmi`] or [`interrupt_context_level`] there.
 #[inline]
 pub fn irq_context_snapshot() -> IrqContextSnapshot {
-    let _guard = NoPreemptIrqSave::new();
     current_state_snapshot()
 }
 
@@ -400,12 +399,14 @@ impl Drop for LocalBhGuard {
 
 #[inline]
 fn current_state_snapshot() -> IrqContextSnapshot {
-    // Nested save/restore is near-free on already-masked entry paths, and the
-    // guard gives the copy real CPU-local exclusion.
-    let pin = NoPreemptIrqSave::new();
-    // The guard-bounded accessor selects this CPU's permanently allocated
-    // lock; the lock provides synchronized access to the state itself.
-    IRQ_CONTEXT_STATE.get(&pin).lock().snapshot()
+    let _irq = kspin::IrqSave::new();
+    // Queries are also used by scheduler/RCU checks. Keep the lock's guard
+    // release from recursively entering those checks, then balance our credit
+    // without creating a scheduling checkpoint. IRQ exclusion pins the slot.
+    let preempt = NoPreempt::new();
+    let snapshot = IRQ_CONTEXT_STATE.shared_current().lock().snapshot();
+    preempt.release_without_check();
+    snapshot
 }
 
 /// Returns the current CPU IRQ-context snapshot when the caller already masked

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! GP task and bounded softirq execution. Ordinary callback admission is closed.
+//! GP task and bounded softirq execution. Raw callback admission stays private.
 
 use core::{
     sync::atomic::{AtomicBool, Ordering},
@@ -24,17 +24,25 @@ const PROGRESS_INTERVAL_NS: u64 = 10_000_000;
 const CALLBACK_BUDGET: usize = 32;
 static SERVICE: Once<GracePeriodTask> = Once::new();
 
-unittest::path_mod_test!(callback, "../ut-tests/callback.rs");
+#[path = "callback.rs"]
+mod callback;
 
-// Only controlled consumers can obtain the current-task reader until public
-// read-side admission and the complete context protocol are available.
-unittest::path_mod_test!(synchronize, "../ut-tests/synchronize.rs");
+#[path = "drain.rs"]
+mod drain;
 
-// The owning consumer remains confined to integration tests until the complete
-// idle/user/IRQ/NMI context protocol has been validated.
-unittest::path_mod_test!(owned, "../ut-tests/owned.rs");
+#[path = "synchronize.rs"]
+mod synchronize;
+
+#[path = "owned.rs"]
+mod owned;
+
+pub use callback::PreparedCallback;
+pub use drain::drain_callbacks;
+pub use owned::Rcu;
+pub use synchronize::synchronize_rcu;
 
 struct GracePeriodTask {
+    drain: drain::CallbackDrain,
     callbacks: CallbackState<'static, { kbuild_config::NR_CPUS }>,
     has_started: kspin::SpinNoPreempt<bool>,
     waker: Once<Waker>,
@@ -45,9 +53,20 @@ pub(super) fn callbacks() -> Option<&'static CallbackState<'static, { kbuild_con
     SERVICE.get().map(|service| &service.callbacks)
 }
 
+/// Scheduler callers still hold exclusion/possibly runqueue locks. Only the
+/// IPI carrier can defer the wake without entering the scheduler inline.
+/// Without IPIs the existing progress timer remains the fallback.
+pub(super) fn request_completion_pass() {
+    #[cfg(feature = "ipi")]
+    if let Some(service) = SERVICE.get() {
+        service.request_pass();
+    }
+}
+
 /// Prepares the GP task and waits sleepably for its parking/timer resources.
 ///
-/// This is carrier setup, not general RCU readiness or callback admission.
+/// Successful return makes the permanent service ready for owning replacement,
+/// prepared callback submission and draining; each still checks its context.
 /// The participating CPU set is fixed from discovery, not configured capacity.
 ///
 /// # Errors
@@ -74,6 +93,7 @@ pub unsafe fn init_service() -> KResult<()> {
         let callbacks = unsafe { CallbackState::new(&READER_NODES, participants) }
             .expect("RCU startup requires a discovered boot CPU");
         GracePeriodTask {
+            drain: drain::CallbackDrain::new(),
             callbacks,
             has_started: kspin::SpinNoPreempt::new(false),
             waker: Once::new(),
@@ -102,8 +122,8 @@ impl GracePeriodTask {
     ///
     /// Rejection leaves the node untouched and caller-owned. NMI and unwatched
     /// entry are rejected before queue access; readiness and CPU participation
-    /// are checked before transfer. This private admission boundary remains
-    /// test-only until the owning callback API is qualified.
+    /// are checked before transfer. Owning prepared handles transfer nodes
+    /// through this private boundary.
     ///
     /// # Safety
     /// On an admissible call, supply the unique, stable node and allocation
@@ -114,7 +134,6 @@ impl GracePeriodTask {
     /// bookkeeping lock:
     /// notification without IPIs may wake the softirq daemon. On success do not
     /// access the transferred node without independent ownership.
-    #[cfg(unittest)]
     unsafe fn submit_callback(&self, node: *mut krcu_core::CallbackNode) -> KResult<()> {
         if kirq::context::is_in_nmi() {
             return Err(KError::InvalidInput);
@@ -324,9 +343,9 @@ fn process_callbacks() {
     }
     let cpu = khal::percpu::this_cpu_id().as_usize();
     // SAFETY: the softirq carrier excludes migration and holds no RCU lock.
-    // Admission is limited to controlled test objects and synchronous-wait
+    // Admission is limited to internal owning adapters and synchronous-wait
     // markers, all retained through their nonblocking callbacks. Periods use
-    // real scheduler/watching observations; general admission remains closed.
+    // real scheduler/watching observations; raw admission remains private.
     unsafe { service.callbacks.invoke_ready(cpu, CALLBACK_BUDGET) };
     if service.callbacks.has_ready(cpu) {
         // Wait only for eligible work, never spin on a GP blocked by readers.

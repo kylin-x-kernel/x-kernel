@@ -29,6 +29,13 @@ trigger are removed. Only prepared workqueue services are linked.
 runtime initialization, through `run_boot_benchmarks` instead of userspace.
 The kworkng runner uses already published services and powers off on completion.
 The default configuration and unit-test entry do not execute this path.
+`KFEAT_RCU_TORTURE` uses the same post-initialization handoff for the RCU
+ownership stress runner, with a separately configured duration. Kconfig excludes
+simultaneous selection with the workqueue runner. Neither workload belongs to
+normal boot or default UT; RCU owns its assertions, reporting and cleanup, while
+kruntime only invokes the runner and powers off on successful return.
+`KFEAT_RCU_BENCH` selects the independent callback/synchronous-wait runner through the
+same handoff. Kconfig excludes both stress runners while it is selected.
 
 ## 定位
 

@@ -237,7 +237,7 @@ fn terminal_exit_advances_the_original_nodes_blocker_boundary() {
         let destination_ready = destination.ready_period();
         drop(survivor_scope);
         (
-            began && entered && cpu && cleaned,
+            began && entered && cpu && cleaned.had_participation,
             with_survivor,
             destination_ready,
             original.ready_period(),
@@ -366,7 +366,7 @@ fn migrated_terminal_reader_releases_original_node_for_global_completion() {
         (
             entered && kept_original && cpus && destination_report && original_blocked,
             began,
-            cleaned && original_report,
+            cleaned.had_participation && cleaned.needs_progress && original_report,
             gp.try_complete_period(),
         )
     };

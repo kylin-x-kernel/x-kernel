@@ -11,6 +11,22 @@ use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
+use crate::Rcu;
+
+#[def_test]
+fn scoped_read_update_example_preserves_owned_results() {
+    let value = Rcu::new(Box::new(alloc::string::String::from("old")));
+    let copied = value.with_read(|text| text.clone());
+    let (is_same_value, nested_length) =
+        value.with_read(|outer| value.with_read(|inner| (outer == inner, inner.len())));
+    assert!(is_same_value);
+    assert_eq!(nested_length, 3);
+    let old = value.replace_sync(Box::new(alloc::string::String::from("new"))).unwrap();
+    assert_eq!(*old, "old");
+    drop(old);
+    assert_eq!(copied, "old");
+    assert_eq!(value.with_read(|text| text.clone()), "new");
+}
 
 #[def_test]
 fn owned_container_accepts_send_only_and_shared_payloads() {
@@ -39,20 +55,16 @@ fn failed_preparation_preserves_publication_and_new_owner() {
     assert_eq!(error, KError::InvalidInput);
     assert_eq!(&*returned as *const u64, new_address);
     assert_eq!(*returned, 22);
-    let observed = crate::read::with_task_read(|token| {
-        // SAFETY: this is the current task's scope and the boot service is live.
-        *unsafe { value.read(token) }
-    });
+    let observed = value.with_read(|value| *value);
     assert_eq!(observed, 11);
 }
 
 #[def_test]
 fn replacement_inside_read_scope_leaves_both_owners_unchanged() {
     let value = Rcu::new(Box::new(11_u64));
-    let (result, observed) = crate::read::with_task_read(|token| {
+    let (result, observed) = crate::with_read(|token| {
         let result = value.replace_sync(Box::new(22));
-        // SAFETY: current task scope protects this read; only copied data leaves.
-        let observed = *unsafe { value.read(token) };
+        let observed = *value.read(token);
         (result, observed)
     });
     let (error, returned) = result.unwrap_err();
@@ -91,11 +103,7 @@ fn payload(version: usize, probe: &Arc<OwnershipProbe>) -> Box<Payload> {
 }
 
 fn version(value: &Rcu<Payload>) -> usize {
-    crate::read::with_task_read(|token| {
-        // SAFETY: this live container is read only through the current task's
-        // scope in kernel execution; its data does not escape the token.
-        unsafe { value.read(token) }.version
-    })
+    value.with_read(|value| value.version)
 }
 
 fn replace_in_task(value: &Arc<Rcu<Payload>>, next: usize, probe: &Arc<OwnershipProbe>) -> ktask::KtaskRef {
@@ -125,10 +133,9 @@ fn overlapping_replacements_keep_old_readers_and_return_distinct_owners() {
     let reader_probe = probe.clone();
     let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
-            crate::read::with_task_read(|token| {
-                // SAFETY: the current task's scope protects this retained borrow;
-                // involuntary preemption is allowed but no blocking API is used.
-                let old = unsafe { reader_value.read(token) };
+            crate::with_read(|token| {
+                // Keep the first version across preemption without blocking.
+                let old = reader_value.read(token);
                 reader_probe.has_reader_entered.store(true, Ordering::Release);
                 while !reader_probe.can_reader_exit.load(Ordering::Acquire) {
                     core::hint::spin_loop();
@@ -223,17 +230,13 @@ struct SoftirqReads {
 /// must be initialized and the caller must retain the container throughout.
 unsafe fn read_from_controlled_nmi(value: &Rcu<Payload>) -> (usize, bool) {
     let read_fn = || {
-            crate::read::with_interrupt_read(|token| {
-                // SAFETY: the audited software NMI entry established watching
-                // and retains current. No reference escapes this strict scope.
-                let borrowed = unsafe { value.read(token) };
+            crate::with_interrupt_read(|token| {
+                let borrowed = value.read(token);
                 let version = borrowed.version;
                 let intact = (1..=3).contains(&version)
                     && borrowed.probe.drops[version - 1].load(Ordering::Acquire) == 0;
-                let nested = crate::read::with_interrupt_read(|inner_token| {
-                    // SAFETY: same retained NMI/current and container; this
-                    // inner borrow finishes before the outer scope resumes.
-                    let inner = unsafe { value.read(inner_token) };
+                let nested = crate::with_interrupt_read(|inner_token| {
+                    let inner = value.read(inner_token);
                     core::ptr::eq(inner, borrowed)
                 });
                 (version, intact && nested && crate::test_support::reader(&ktask::current()).is_reading())
@@ -257,9 +260,8 @@ fn controlled_nmi_reads_task_and_quiescent_origin_publications() {
             let watching = krcu_core::RcuContextIf::current_cpu_watching();
             let cpu = khal::percpu::this_cpu_id();
             let before = (crate::test_support::reader(&task).is_enrolled(), crate::context::needs_reader_cleanup(cpu));
-            valid &= crate::read::with_task_read(|token| {
-                // SAFETY: watched current-task scope retains the outer borrow.
-                let outer = unsafe { value.read(token) };
+            valid &= crate::with_read(|token| {
+                let outer = value.read(token);
                 // SAFETY: outer guard excludes IRQs and migration; current and
                 // container remain live through the nested software NMI.
                 let observed = unsafe { read_from_controlled_nmi(&value) };
@@ -323,10 +325,8 @@ unsafe fn read_from_softirq(node: *mut krcu_core::CallbackNode) {
     {
         reads.has_invalid_read.store(true, Ordering::Release);
     } else {
-        crate::read::with_interrupt_read(|token| {
-            // SAFETY: real watched softirq retains current and forbids scheduling.
-            // This borrow ends before callback return; reader retains the container.
-            let borrowed = unsafe { reader.value.read(token) };
+        crate::with_interrupt_read(|token| {
+            let borrowed = reader.value.read(token);
             let version = borrowed.version;
             if !(1..=3).contains(&version)
                 || borrowed.probe.drops[version - 1].load(Ordering::Acquire) != 0
@@ -431,7 +431,7 @@ fn timer_irq_reads_each_publication_before_final_reclamation() {
     let irq_invalid = has_invalid_read.clone();
     let timer = ktask::Timer::new(move |control: ktask::TimerControl<'_>, _: ktask::Expiration| {
         // Do not assert or wait inside the handler. A wrong context must be
-        // recorded before attempting the unsafe consumer's admission boundary.
+        // recorded before attempting the read scope's admission boundary.
         if kirq::context::interrupt_context_level() != kirq::context::InterruptContextLevel::Hardirq
             || !krcu_core::RcuContextIf::current_cpu_watching().is_watching()
             || karch::local_irq_enabled()
@@ -439,11 +439,8 @@ fn timer_irq_reads_each_publication_before_final_reclamation() {
             irq_invalid.store(true, Ordering::Release);
             return;
         }
-        let observed = crate::read::with_interrupt_read(|token| {
-            // SAFETY: real watched timer hardirq retains current and excludes
-            // scheduling. The borrowed value ends before this handler returns;
-            // the captured Arc keeps its container alive through cancellation.
-            let borrowed = unsafe { irq_value.read(token) };
+        let observed = crate::with_interrupt_read(|token| {
+            let borrowed = irq_value.read(token);
             let version = borrowed.version;
             if !(1..=3).contains(&version)
                 || irq_probe.drops[version - 1].load(Ordering::Acquire) != 0
@@ -523,10 +520,9 @@ fn migrated_reader_keeps_old_owner_until_scope_exit() {
     let destination = LogicalCpuId::new(1);
     let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
-            crate::read::with_task_read(|token| {
-                // SAFETY: this current-task scope protects the borrow across
-                // involuntary migration; it neither blocks nor yields.
-                let old = unsafe { reader_value.read(token) };
+            crate::with_read(|token| {
+                // Keep the borrowed version through involuntary migration.
+                let old = reader_value.read(token);
                 reader_probe.has_reader_entered.store(true, Ordering::Release);
                 while !reader_probe.can_reader_exit.load(Ordering::Acquire) {
                     if khal::percpu::this_cpu_id() == destination {

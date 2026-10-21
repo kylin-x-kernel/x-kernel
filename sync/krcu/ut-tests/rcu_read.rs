@@ -6,14 +6,57 @@
 
 use unittest::{assert, assert_eq, def_test};
 
-use super::{with_interrupt_read, with_task_read};
+use super::with_task_read;
+use crate::with_interrupt_read;
+
+#[def_test]
+fn task_entry_restores_exclusion_before_nested_read_bodies() {
+    let state_fn = || {
+        (
+            karch::local_irq_enabled(),
+            ktask::current_preemption_disabled(),
+        )
+    };
+    assert_eq!(state_fn(), (true, false));
+    let read_state_fn = || {
+        crate::with_read(|_| {
+            let outer = state_fn();
+            let inner = crate::with_read(|_| state_fn());
+            (outer, inner, state_fn())
+        })
+    };
+    assert_eq!(
+        read_state_fn(),
+        ((true, false), (true, false), (true, false))
+    );
+    {
+        let _irq = kspin::IrqSave::new();
+        assert_eq!(
+            read_state_fn(),
+            ((false, false), (false, false), (false, false))
+        );
+        assert_eq!(state_fn(), (false, false));
+    }
+    {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        assert_eq!(
+            read_state_fn(),
+            ((false, true), (false, true), (false, true))
+        );
+        assert_eq!(state_fn(), (false, true));
+    }
+    assert_eq!(state_fn(), (true, false));
+}
 
 fn enroll_current() {
     let _guard = kspin::NoPreemptIrqSave::new();
     let task = ktask::current();
     // SAFETY: retained active current reader under IRQ/preemption exclusion;
     // the permanent host node outlives this scope and all cleanup boundaries.
-    unsafe { crate::context::reader_node(khal::percpu::this_cpu_id()).enroll(crate::test_support::reader(&task)) };
+    unsafe {
+        crate::context::reader_node(khal::percpu::this_cpu_id())
+            .enroll(crate::test_support::reader(&task))
+    };
 }
 
 #[def_test]
@@ -22,7 +65,10 @@ fn nested_task_scopes_keep_membership_until_outer_error_return() {
     let result = with_task_read(|_| {
         enroll_current();
         let inner_active = with_task_read(|_| crate::test_support::reader(&task).is_reading());
-        Err::<(), _>((inner_active, crate::test_support::reader(&task).is_enrolled()))
+        Err::<(), _>((
+            inner_active,
+            crate::test_support::reader(&task).is_enrolled(),
+        ))
     });
     assert_eq!(result, Err((true, true)));
     assert!(!crate::test_support::reader(&task).is_reading());
@@ -40,7 +86,8 @@ fn returned_preempt_guard_retains_membership_and_requests_cleanup() {
         ktask::test_support::set_current_reschedule_pending(false);
         guard
     });
-    let retained = !crate::test_support::reader(&task).is_reading() && crate::test_support::reader(&task).is_enrolled();
+    let retained = !crate::test_support::reader(&task).is_reading()
+        && crate::test_support::reader(&task).is_enrolled();
     let requested = ktask::test_support::is_current_reschedule_pending();
     // Observe the request without forcing a real switch in this local test.
     ktask::test_support::set_current_reschedule_pending(false);
@@ -108,11 +155,13 @@ fn cleanup_demand_survives_reentry_and_is_consumed_locally() {
         // SAFETY: retained current task at an excluded task boundary; the
         // helper must leave active nesting and its original owner untouched.
         unsafe { crate::context::finish_reader_cleanup(crate::test_support::reader(&task)) };
-        crate::context::needs_reader_cleanup(cpu) && crate::test_support::reader(&task).is_enrolled()
+        crate::context::needs_reader_cleanup(cpu)
+            && crate::test_support::reader(&task).is_enrolled()
     });
     // SAFETY: the scope has returned; same current task and exclusion as above.
     unsafe { crate::context::finish_reader_cleanup(crate::test_support::reader(&task)) };
-    let consumed = !crate::context::needs_reader_cleanup(cpu) && !crate::test_support::reader(&task).is_enrolled();
+    let consumed = !crate::context::needs_reader_cleanup(cpu)
+        && !crate::test_support::reader(&task).is_enrolled();
     // A notification after consumption must remain visible, even without an
     // owner. This is deterministic sequencing, not an injected NMI race.
     crate::context::request_local_cleanup_for_tests();
@@ -142,10 +191,18 @@ fn nested_irq_and_nmi_scopes_preserve_the_outer_task_reader() {
                     })
                 })
             };
-            (nmi, crate::test_support::reader(&task).is_reading(), crate::test_support::reader(&task).is_enrolled())
+            (
+                nmi,
+                crate::test_support::reader(&task).is_reading(),
+                crate::test_support::reader(&task).is_enrolled(),
+            )
         });
         drop(irq);
-        (inside, crate::test_support::reader(&task).is_reading(), crate::test_support::reader(&task).is_enrolled())
+        (
+            inside,
+            crate::test_support::reader(&task).is_reading(),
+            crate::test_support::reader(&task).is_enrolled(),
+        )
     });
     assert_eq!(observed, ((true, true, true), true, true));
     assert!(!crate::test_support::reader(&task).is_reading());
@@ -201,7 +258,9 @@ fn quiescent_origin_nmi_scope_restores_watching_without_enrollment() {
     // software NMI entry activates watching before this scoped reader.
     let active_in_nmi = unsafe {
         kirq::context::test_support::with_nmi_context(|| {
-            with_interrupt_read(|_| watching.is_watching() && crate::test_support::reader(&task).is_reading())
+            with_interrupt_read(|_| {
+                watching.is_watching() && crate::test_support::reader(&task).is_reading()
+            })
         })
     };
     let restored_quiescence = !watching.is_watching();

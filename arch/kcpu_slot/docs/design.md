@@ -10,6 +10,16 @@ unsafe 边界的现状、目标能力模型和分阶段收敛方案见
 
 ## API 约束
 
+- `CpuSlot::with_current_irq_disabled` provides scoped shared access for
+  `T: Sync`. It uses `CpuLocalIrqIf` before selecting the CPU slot and restores
+  the original IRQ mask through a private RAII guard. It neither changes task
+  preemption accounting nor invokes scheduler checks. The callback must not
+  block, schedule, enable IRQs, or change the CPU base. Its slot borrow cannot
+  escape. This is not a lock and does not exclude NMI or remote atomic access.
+  Use it for bounded shared observations or atomic updates. Keep an existing
+  pin when exclusion spans queue selection and submission, multiple mutable
+  slots, initialization, or a later context switch. Do not use it inside the
+  IRQ-mask provider itself: that would recurse through `CpuLocalIrqIf`.
 - `cpu_slot!` 用于按位可复制的静态模板；复杂初始化应由上层为每个 CPU 单独构造。
 - `cpu_slot_cell!` 提供 `UnsafeCell<T>`，只允许在调用者已建立排他性或本地 CPU
   访问协议时使用；`CpuSlotCell::read`/`write` 提供单字读写的便捷入口，读改写

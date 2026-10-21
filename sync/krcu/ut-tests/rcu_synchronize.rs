@@ -8,6 +8,25 @@
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
+use crate::synchronize_rcu;
+
+#[def_test]
+fn public_scope_rejects_wait_and_protects_multiple_containers() {
+    let left = crate::Rcu::new(alloc::boxed::Box::new(11));
+    let right = crate::Rcu::new(alloc::boxed::Box::new(22));
+    let (sum, wait_result) = crate::with_read(|scope| {
+        let sum = *left.read(scope) + *right.read(scope);
+        // SAFETY: no data is retired; this checks rejection before any marker
+        // is submitted. InvalidInput must not be interpreted as GP completion.
+        let result = unsafe { crate::synchronize_rcu() };
+        (sum, result)
+    });
+    assert_eq!(sum, 33);
+    assert_eq!(wait_result, Err(KError::InvalidInput));
+    // SAFETY: the scope ended, no reader-needed lock or resource is held,
+    // and the boot service remains available. No data is retired by this test.
+    assert_eq!(unsafe { crate::synchronize_rcu() }, Ok(()));
+}
 
 #[def_test]
 fn masked_context_is_rejected_before_submission() {

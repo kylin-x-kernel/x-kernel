@@ -33,13 +33,24 @@ cpu_slot! {
 }
 
 /// Returns whether the current CPU is executing inside an exception context.
+///
+/// Pins the slot lookup and load by temporarily masking ordinary IRQs, then
+/// restores the caller's mask. This is a snapshot, not a lasting context token;
+/// it neither changes preemption accounting nor invokes scheduler checks.
 #[inline]
 pub fn in_exception_context() -> bool {
-    // SAFETY: the slot reference names this CPU's per-CPU
-    // data area. The pointer is normally written by this CPU's exception guard
-    // while IRQs are off. A delayed guard drop may restore its original slot
-    // after the task migrated, but that path uses CAS and does not publish data
-    // to other CPUs, so Relaxed ordering is sufficient for this diagnostic state.
+    // Only pointer presence is observed; no trapframe data is dereferenced.
+    ACTIVE_EXCEPTION_CONTEXT_PTR.with_current_irq_disabled(|slot| slot.load(Ordering::Relaxed) != 0)
+}
+
+/// Observes exception presence without changing IRQ or preemption state.
+///
+/// # Safety
+/// Ordinary IRQs must remain masked throughout this call, preventing migration
+/// between selecting the current CPU's slot and loading its value.
+#[inline]
+pub unsafe fn in_exception_context_irqoff() -> bool {
+    debug_assert!(!karch::local_irq_enabled());
     ACTIVE_EXCEPTION_CONTEXT_PTR
         .current_shared()
         .load(Ordering::Relaxed)

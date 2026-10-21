@@ -241,6 +241,11 @@ TaskContext       (每架构定义，callee-saved 寄存器用于上下文切换
   用户指针，不会因用户空间地址错误而 panic。
 - **`active_exception_context()`**：可在任意上下文调用（包括 NMI 类上下文），
   返回 best-effort 快照。
+- **`in_exception_context()`**: masks ordinary IRQs around CPU-slot selection
+  and the pointer-presence load, then restores the original mask. Callers need
+  no exclusion for this boolean snapshot. It does not dereference the frame,
+  alter preemption accounting, or invoke scheduler/RCU checks. Protection for
+  a subsequent queue operation or reader removal remains the caller's duty.
 - **FP/SIMD 保存恢复**：受 `fp-simd` feature 控制。未启用时跳过 FP 状态操作。
 - **TLS 边界**：内核任务不分配 TLS，也不在调度时切换 TLS 寄存器。
   用户态 TLS 仍属于 `UserContext`，由用户态进入/退出路径保存恢复。

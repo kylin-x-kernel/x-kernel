@@ -12,6 +12,8 @@ description = "Runtime library of X-kernel"
 [features]
 default = []
 workqueue-bench = ["kworkng/bench"]
+rcu-torture = ["krcu/torture"]
+rcu-bench = ["krcu/bench"]
 
 smp = ["khal/smp", "ktask/smp", "krcu/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
 ipi = ["dep:kipi", "ktask/ipi", "krcu/ipi"]

@@ -2,11 +2,65 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Private scope policies for controlled task and interrupt consumers.
+//! Scoped participation for tasks and initialized interrupt handlers.
 
 use krcu_core::ReadGuard;
 
 use crate::context::current_reader;
+
+/// Borrowed proof of participation in a task or interrupt kernel RCU read scope.
+///
+/// Only this crate constructs the token, after establishing host participation.
+/// It borrows the internal guard, cannot be cloned or transferred to another
+/// task, and performs no allocation or reference-count update. The scope owns
+/// cleanup: forgetting a borrowed token does not suppress it.
+///
+/// A standalone core reader cannot manufacture host participation:
+///
+/// ```compile_fail
+/// krcu_core::TaskReader::new().with_read(|guard| {
+///     let _forged = krcu::ReadScope { _guard: guard };
+/// });
+/// ```
+pub struct ReadScope<'reader> {
+    _guard: &'reader ReadGuard<'reader>,
+}
+
+/// Runs a task-context read scope that may borrow several RCU containers.
+///
+/// Nested scopes are allowed. The closure may be involuntarily preempted or
+/// migrated, but must not voluntarily sleep/yield, change watching state or
+/// return holding an RCU bookkeeping lock. It may return copied or independently
+/// owned results, not a scope-bound reference. Multiple reads are protected from
+/// reclamation; they do not form an atomic snapshot across publications.
+///
+/// # Panics
+/// Panics outside initialized watched task context, including exception,
+/// IRQ/NMI and BH-disabled contexts, or if read nesting overflows.
+///
+/// A token cannot escape or be moved out to suppress internal cleanup:
+///
+/// ```compile_fail
+/// let escaped = krcu::with_read(|scope| scope);
+/// let _ = escaped;
+/// ```
+///
+/// ```compile_fail
+/// krcu::with_read(|scope| core::mem::forget(*scope));
+/// ```
+///
+/// Even scoped threads cannot transfer the token to another execution context:
+///
+/// ```compile_fail
+/// krcu::with_read(|token| {
+///     std::thread::scope(|threads| {
+///         threads.spawn(move || { let _token = token; });
+///     });
+/// });
+/// ```
+pub fn with_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadScope<'_>) -> R) -> R {
+    with_task_read(|guard| read_fn(&ReadScope { _guard: guard }))
+}
 
 /// Runs a current-task read scope without pinning its callback to a CPU.
 ///
@@ -17,16 +71,22 @@ use crate::context::current_reader;
 /// No token borrow may escape. Permanent task exit uses terminal cleanup, not
 /// this stack's destructor. This private entry rejects interrupt/BH contexts.
 pub(super) fn with_task_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadGuard<'_>) -> R) -> R {
-    assert!(!kirq::context::is_in_nmi());
-    assert!(!khal::context::in_exception_context());
-    let task = ktask::current();
-    {
-        // Context queries release their own guards. Keep an outer credit so
-        // those releases cannot recursively enter the preemption probe.
-        let _guard = kspin::NoPreemptIrqSave::new();
+    let task = {
+        // Pin before selecting any per-CPU context slot: a permanent atomic
+        // reference remains valid after migration but then names another CPU.
+        // Reject NMI before touching task preemption accounting.
+        let irq = kspin::IrqSave::new();
+        assert!(!kirq::context::is_in_nmi());
+        // SAFETY: irq retains ordinary IRQ exclusion through this snapshot.
+        assert!(!unsafe { khal::context::in_exception_context_irqoff() });
+        let task = ktask::current();
         assert!(krcu_core::RcuContextIf::current_cpu_watching().is_watching());
         assert!(!kirq::context::is_in_interrupt_context());
-    }
+        // Context queries do not run scheduler/RCU checks on return. IRQ
+        // exclusion alone pins admission; the read body remains preemptible.
+        drop(irq);
+        task
+    };
     let _exit = TaskReadExit { task: &task };
     // SAFETY: current's storage remains live across involuntary switches and
     // migration. Only this task and strictly nested interrupt scopes use it.
@@ -40,16 +100,26 @@ pub(super) fn with_task_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadGua
 /// The callback must return before that handler exits, without blocking,
 /// scheduling, migration, changing watching or enrollment, or abandoning its
 /// stack. Current must already be initialized and retained by interrupt entry.
-/// BH-disabled task context alone is not a handler. This unittest-only entry
-/// does not authorize unaudited architecture entry windows or public consumers.
+/// BH-disabled task context alone is not a handler. This entry supports handlers
+/// after the kernel's balanced interrupt entry has established watching, not
+/// early architecture entry windows. Use the token with [`crate::Rcu::read`].
 ///
 /// Normal entry/exit only accounts nesting; NMI takes no locks or guards. An
 /// interrupt cannot create enrollment, so it leaves an interrupted task's
 /// existing owner and cleanup notification for that task's continuation. Nesting
 /// overflow/underflow remains a fatal invariant violation, not a recovery path.
-pub(super) fn with_interrupt_read<R>(
-    read_fn: impl for<'scope> FnOnce(&'scope ReadGuard<'_>) -> R,
-) -> R {
+///
+/// # Panics
+/// Panics outside watched hardirq, serving-softirq or NMI context, if current
+/// is not initialized, or if nesting overflows.
+///
+/// The token cannot escape the handler's read scope:
+///
+/// ```compile_fail
+/// let escaped = krcu::with_interrupt_read(|scope| scope);
+/// let _ = escaped;
+/// ```
+pub fn with_interrupt_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadScope<'_>) -> R) -> R {
     // This query checks the lock-free NMI counter first, before considering
     // ordinary context locks. Never replace it with an unconditional snapshot.
     assert!(matches!(
@@ -64,7 +134,9 @@ pub(super) fn with_interrupt_read<R>(
     // current. Strictly nested scopes finish on this stack and never alter
     // enrollment. The interrupted task's normal/terminal exit retains its
     // cleanup responsibility; this path must not run TaskReadExit in NMI.
-    unsafe { current_reader(&task).with_read_deferred(read_fn) }
+    unsafe {
+        current_reader(&task).with_read_deferred(|guard| read_fn(&ReadScope { _guard: guard }))
+    }
 }
 
 struct TaskReadExit<'task> {
@@ -90,4 +162,4 @@ impl Drop for TaskReadExit<'_> {
     }
 }
 
-unittest::path_mod_test!(tests, "rcu_read.rs");
+unittest::path_mod_test!(tests, "../ut-tests/rcu_read.rs");

@@ -19,6 +19,13 @@ The default-off `workqueue-bench` feature exposes a boot test path, not an
 untrusted runtime request. It intentionally suppresses userspace and powers off
 after the kworkng workload. Production deployment must leave this feature off;
 test automation must impose a host timeout for stalled waits or joins.
+The independent default-off `rcu-torture` boot path has the same deployment and
+timeout constraints. Kconfig excludes simultaneous selection of these runners.
+Its ownership assertions and resource cleanup belong to krcu; runtime only
+invokes it after initialization and powers off on successful return.
+The default-off `rcu-bench` path has the same constraints and is mutually
+exclusive with the stress runners in Kconfig. Measurement PASS confirms the
+runner completed its checks, not that a performance threshold was achieved.
 
 The protected asset is the kernel-lifetime `kworkng` service set and its per-CPU
 execution providers. Publishing work before remote CPU services exist could lose

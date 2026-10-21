@@ -944,7 +944,10 @@ impl TaskInner {
             }
 
             let mut rq = crate::current_run_queue::<NoPreemptIrqSave>();
-            if curr.need_resched.load(Ordering::Acquire) && !khal::context::in_exception_context() {
+            if curr.need_resched.load(Ordering::Acquire)
+                // SAFETY: the run-queue guard retains IRQ exclusion through the query.
+                && !unsafe { khal::context::in_exception_context_irqoff() }
+            {
                 rq.preempt_resched()
             }
             #[cfg(unittest)]

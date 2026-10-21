@@ -80,6 +80,16 @@ impl<'nodes, const CPUS: usize> CallbackState<'nodes, CPUS> {
         unsafe { self.coordinator.note_context_switch(cpu, reader) }
     }
 
+    /// Hint to wake the sole driver after accepting a node report.
+    ///
+    /// All reports have arrived, but initialization/finalization may still be
+    /// pending. This is not permission to reclaim or execute callbacks. A race
+    /// with driver progress may suppress an obsolete wake or request an extra
+    /// pass for a later period. The driver remains the completion authority.
+    pub fn needs_completion_pass(&self) -> bool {
+        self.coordinator.needs_completion_pass()
+    }
+
     /// Rechecks retained node readiness after a blocked reader may have exited.
     ///
     /// Returns whether a ready report was accepted. This does not supply a CPU
@@ -158,6 +168,35 @@ impl<'nodes, const CPUS: usize> CallbackState<'nodes, CPUS> {
         // storage, permits IRQ-safe locking and supplies nonblocking cleanup.
         unsafe { self.queues[cpu].submit(node) };
         true
+    }
+
+    /// Appends a completion marker behind this CPU's outstanding callbacks.
+    ///
+    /// Returns false without accessing `node` when no driver is claimed, the CPU
+    /// does not participate, or no callbacks remain outstanding. Ownership then
+    /// stays with the caller. Success transfers the marker without allocation
+    /// or wakeup and does not require an additional GP. Detached and executing
+    /// callbacks count as outstanding. This is not a complete drain operation:
+    /// the host must prepare accounting before publication, visit all relevant
+    /// CPUs, request execution and wait outside bookkeeping locks.
+    ///
+    /// # Safety
+    /// On acceptance, provide a unique stable node and enclosing provenance as
+    /// required by `submit`. Unlike retirement, its callback must be safe without
+    /// a GP of its own: it acknowledges preceding callback completion only.
+    /// Retain state, marker storage, callback code and notification resources
+    /// through invocation. Invocation/destruction must not block, unwind or wait
+    /// on RCU. Call in watched task/IRQ context with ordinary IRQ-safe locking
+    /// permitted, never NMI. Establish host-service readiness before admission.
+    #[must_use = "an unneeded or rejected marker remains caller-owned"]
+    pub unsafe fn enqueue_drain_marker(&self, cpu: usize, node: *mut CallbackNode) -> bool {
+        if !self.is_driver_claimed.load(Ordering::Acquire) || !self.coordinator.is_participant(cpu)
+        {
+            return false;
+        }
+        // SAFETY: the host supplies a unique retained marker with nonblocking
+        // cleanup and no independent GP requirement, in a permitted context.
+        unsafe { self.queues[cpu].enqueue_drain_marker(node) }
     }
 
     /// Reports queued eligibility, not completion of detached callback execution.

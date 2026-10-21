@@ -30,6 +30,12 @@ error values, release nesting. The borrowed token cannot escape the scope or
 move to another task. Payload lifetimes and reclamation are outside the current
 API; observing a zero counter is not by itself a reclamation guarantee.
 
+The coordinator's atomic `needs_completion_pass` is only a notification hint.
+All writes occur under its state lock; the final accepted report sets it and
+finalization/new initialization clear it. Readers of the hint cannot skip the
+phase gate, node finalization or callback promotion. A stale hint can cause an
+extra driver pass, not early reclamation. Core code never invokes a waker.
+
 | Failure | Consequence | Handling |
 | --- | --- | --- |
 | Nesting overflow or unbalanced decrement | False inactive/active accounting | Checked update leaves state unchanged; guard boundary asserts the invariant |
@@ -95,6 +101,12 @@ watched, IRQ/preemption-excluded interval, without nesting bookkeeping locks.
   rather than allowing early reclamation. It does not certify CPU quiescence.
 
 ## Node Completion Boundary
+
+Cleanup's `needs_progress` is only a hint computed while holding the original
+node lock. It contains no period identity and cannot authorize completion or
+reclamation. A delayed or redundant notification must be followed by the
+coordinator's existing readiness and identity checks. No notifier runs under
+the node lock; standalone core fixtures do not call the kernel provider.
 
 The first-blocker reference never escapes the node lock and must always name a
 member of that node's retained list. Removal advances it before publishing the
@@ -204,9 +216,11 @@ pointer and must retain its provenance and containing allocation until invocatio
 The host execution entry checks CPU membership and delegates the bounded claim
 to the queue. It does not manufacture observations or bypass period eligibility.
 
-The driver captures before reserving the future period and promotes all due
-segments before another period starts. At most two live targets exist; matching
-identity is valid only within that bounded control protocol. Once promoted, no
+The driver captures and assigns each pending prefix under one queue lock before
+reserving the future period; queue observers cannot miss a prefix in transit.
+It promotes all due segments before another period starts. At most two live
+targets exist; matching identity is valid only within that bounded control
+protocol. Once promoted, no
 callback relies on an ancient numeric target. Queue locks never nest with node or
 coordinator locks and no callback executes under any of them.
 
@@ -216,6 +230,17 @@ so neither a competing executor nor a later marker can pass the batch. Counts
 remain conservative until callbacks return; no execution bookkeeping uses a
 node after invocation. A callback must return normally: neither panic/unwind nor
 nonreturning task exit is an accepted cancellation mechanism for a batch.
+
+Drain markers are not retirement submissions. `enqueue_drain_marker` may make
+a marker immediately eligible without a new GP, so its unsafe caller must
+supply completion-only code safe after prior callback return. Ordinary retired
+data still needs `submit` and a full future GP. Marker storage and notification
+resources must be independently retained through invocation; acceptance can be
+followed by execution before the submitting call returns. Rejection leaves the
+node untouched and caller-owned. The host counts each contribution before
+publication and prevents completion while installation is still in progress.
+Stopping producers/reposts and draining separately queued downstream work are
+the resource owner's obligations, not properties of marker insertion.
 
 `invoke_ready` is unsafe because simulated observations or an invalid host context
 cannot authorize real reclamation. Its caller must certify observation validity,

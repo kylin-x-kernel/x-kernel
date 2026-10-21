@@ -32,7 +32,7 @@ fn deferred_outer_exit_never_relocks_its_owner_node() {
     let cleaned = unsafe { reader.finish_deferred_cleanup() };
     assert!(nested);
     assert!(pending);
-    assert!(cleaned);
+    assert!(cleaned.had_participation);
     assert_eq!(node.reader_count(), 0);
 }
 

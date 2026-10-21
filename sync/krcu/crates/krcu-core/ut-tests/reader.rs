@@ -7,6 +7,59 @@ use unittest::{assert, assert_eq};
 use super::*;
 
 #[unittest::def_test]
+fn cleanup_requests_progress_only_for_the_last_observed_blocker() {
+    for is_terminal in [false, true] {
+        let original = ReaderNode::new();
+        let destination = ReaderNode::new();
+        let first = TaskReader::new();
+        let last = TaskReader::new();
+        let newer = TaskReader::new();
+        let _guard = kspin::NoPreemptIrqSave::new();
+        for reader in [&first, &last] {
+            assert!(reader.try_enter());
+            // SAFETY: isolated active fixture, fixed storage and exclusion;
+            // cleanup below balances the synthetic scope without a live guard.
+            unsafe { original.enroll(reader) };
+        }
+        assert!(original.begin_period(1));
+        assert!(original.observe_cpu(1));
+        assert!(newer.try_enter());
+        // SAFETY: distinct isolated reader enters after the CPU observation.
+        unsafe { original.enroll(&newer) };
+        // SAFETY: serialized migration cannot change the last reader's owner.
+        unsafe { destination.enroll(&last) };
+        assert_eq!(first.try_leave(), Some(0));
+        // SAFETY: inactive exclusive fixture, no node lock held.
+        let first_exit = unsafe { first.finish_deferred_cleanup() };
+        assert!(first_exit.had_participation);
+        assert!(!first_exit.needs_progress);
+        assert_eq!(original.ready_period(), None);
+        let last_exit = if is_terminal {
+            // SAFETY: synthetic abandoned scope has no continuing execution.
+            unsafe { last.finish_task_exit() }
+        } else {
+            assert_eq!(last.try_leave(), Some(0));
+            // SAFETY: exclusive inactive fixture under exclusion.
+            unsafe { last.finish_deferred_cleanup() }
+        };
+        assert!(last_exit.had_participation);
+        assert!(last_exit.needs_progress);
+        assert_eq!(original.ready_period(), Some(1));
+        assert_eq!(destination.reader_count(), 0);
+        // The newer reader does not block this period and cannot notify twice.
+        assert_eq!(newer.try_leave(), Some(0));
+        // SAFETY: inactive exclusive fixture with retained original node.
+        let newer_exit = unsafe { newer.finish_deferred_cleanup() };
+        assert!(newer_exit.had_participation);
+        assert!(!newer_exit.needs_progress);
+        // SAFETY: repeated cleanup of the same stable inactive fixture.
+        let repeated = unsafe { last.finish_deferred_cleanup() };
+        assert_eq!(repeated, ReaderCleanupOutcome::default());
+        assert!(original.finish_period(1));
+    }
+}
+
+#[unittest::def_test]
 fn nested_scopes_balance_on_error_return() {
     let reader = TaskReader::new();
     let (outer, inner, after_inner, result) = reader.with_read(|_| {
@@ -56,14 +109,18 @@ fn deferred_exit_retains_blocker_until_original_node_cleanup() {
         unsafe { other.enroll(&reader) };
         // SAFETY: exclusive fixture, IRQ/preemption excluded, no node lock held.
         let cleaned = unsafe { reader.finish_deferred_cleanup() };
-        (cleaned, reader.is_enrolled_on(&node), node.ready_period())
+        (
+            cleaned.had_participation,
+            reader.is_enrolled_on(&node),
+            node.ready_period(),
+        )
     });
     assert_eq!(reentered, (false, true, None));
     assert!(!reader.is_enrolled());
     assert_eq!(node.ready_period(), Some(1));
     assert_eq!(other.reader_count(), 0);
     // SAFETY: inactive isolated fixture remains stable and excluded.
-    assert!(!unsafe { reader.finish_deferred_cleanup() });
+    assert!(!unsafe { reader.finish_deferred_cleanup() }.had_participation);
 }
 
 #[unittest::def_test]
@@ -79,7 +136,9 @@ fn deferred_cleanup_does_not_supply_cpu_observation() {
     unsafe { reader.with_read_deferred(enroll_fn) };
     assert!(node.begin_period(1));
     // SAFETY: reader is inactive; no interrupt or other task can change it.
-    assert!(unsafe { reader.finish_deferred_cleanup() });
+    let outcome = unsafe { reader.finish_deferred_cleanup() };
+    assert!(outcome.had_participation);
+    assert!(!outcome.needs_progress);
     assert_eq!(node.reader_count(), 0);
     assert_eq!(node.ready_period(), None);
     assert!(node.observe_cpu(1));
@@ -104,7 +163,7 @@ fn terminal_cleanup_removes_zero_depth_deferred_membership() {
     assert!(!reader.is_reading());
     assert!(reader.is_enrolled());
     // SAFETY: fixture is permanently inactive, with no live guard or interrupt.
-    assert!(unsafe { reader.finish_task_exit() });
+    assert!(unsafe { reader.finish_task_exit() }.had_participation);
     assert_eq!(node.reader_count(), 0);
 }
 
@@ -121,7 +180,11 @@ fn terminal_cleanup_balances_unenrolled_nesting() {
         let active = unsafe { reader.finish_task_exit() };
         // SAFETY: the same exclusive fixture remains inactive and stable.
         let repeated = unsafe { reader.finish_task_exit() };
-        (inactive, entered && active, repeated)
+        (
+            inactive.had_participation,
+            entered && active.had_participation,
+            repeated.had_participation,
+        )
     };
     assert!(!inactive);
     assert!(active);
@@ -153,7 +216,7 @@ fn terminal_cleanup_unlinks_original_node_without_removing_other_readers() {
             // both nodes and the reader are retained and updates are exclusive.
             let cleaned = unsafe { exited.finish_task_exit() };
             (
-                entered && cleaned,
+                entered && cleaned.had_participation,
                 original.reader_count(),
                 destination.reader_count(),
                 survivor.is_enrolled_on(&original),

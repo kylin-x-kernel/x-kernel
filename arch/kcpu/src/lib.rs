@@ -44,8 +44,8 @@ mod active_exception_context;
 
 pub use active_exception_context::{
     ExceptionContextGuard, SuspendedExceptionContext, active_exception_context,
-    in_exception_context, resume_active_exception_context, suspend_active_exception_context,
-    with_active_exception_context,
+    in_exception_context, in_exception_context_irqoff, resume_active_exception_context,
+    suspend_active_exception_context, with_active_exception_context,
 };
 
 mod userspace_common;

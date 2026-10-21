@@ -1,5 +1,6 @@
 [package]
 name = "krcu"
+autobenches = false
 description = "Kernel RCU context integration and grace-period service"
 version.workspace = true
 edition.workspace = true
@@ -16,6 +17,8 @@ ignored = ["kalloc", "kpoll"]
 
 [features]
 default = []
+torture = ["dep:klogger"]
+bench = ["dep:klogger"]
 ipi = ["dep:kipi", "ktask/ipi"]
 smp = ["ipi", "ktask/smp"]
 
@@ -23,6 +26,7 @@ smp = ["ipi", "ktask/smp"]
 # Kernel clippy adds cfg(unittest) after Cargo resolves dependencies, so this
 # test-only observation dependency cannot use a cfg(unittest) target table.
 kalloc.workspace = true
+klogger = { workspace = true, optional = true }
 krcu-core.workspace = true
 ktask.workspace = true
 kirq.workspace = true
@@ -32,6 +36,7 @@ kcpu_id_map.workspace = true
 kcpu_slot.workspace = true
 kbuild_config.workspace = true
 kspin.workspace = true
+ksync.workspace = true
 kiface.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
