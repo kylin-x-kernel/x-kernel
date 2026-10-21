@@ -152,6 +152,26 @@ impl Ext4MetadataIo {
             .replace_checkpoint_bytes(block, transaction, bytes)
     }
 
+    /// Reclaims retired checkpoint targets without scanning unrelated buffers.
+    ///
+    /// Pinned blocks and blocks with newer metadata ownership remain cached.
+    pub(crate) fn reclaim_checkpointed_blocks(&self, blocks: &[FilesystemBlock]) -> usize {
+        self.cache.reclaim_blocks(blocks)
+    }
+
+    /// Services the metadata cache's retention demand within a scan budget.
+    ///
+    /// Call after a mounted core access has completed, while its mount guard
+    /// still excludes allocation/prefetch mutation. This adds no device I/O.
+    pub(crate) fn reclaim_cache(&self, scan_limit: usize) -> usize {
+        self.cache.reclaim_for_pressure(scan_limit)
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn cached_block_count(&self) -> usize {
+        self.cache.cached_block_count()
+    }
+
     pub(crate) fn reclaim_unused(&self, limit: usize) -> usize {
         self.cache.reclaim_unused(limit)
     }

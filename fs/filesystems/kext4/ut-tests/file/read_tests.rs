@@ -157,22 +157,33 @@ impl BlockDeviceOperations for ReadStorage {
     }
 }
 
+pub(crate) fn read_fixture(
+    block_size: usize,
+    device_block_size: usize,
+) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
+    read_fixture_with_blocks(block_size, device_block_size, 32)
+}
+
 #[expect(
     clippy::unwrap_used,
     reason = "CG-021-no-panic-on-reachable-failure: test scenario: malformed synthetic metadata \
               must abort fixture setup, not mask a read-contract regression"
 )]
-pub(crate) fn read_fixture(
+pub(crate) fn read_fixture_with_blocks(
     block_size: usize,
     device_block_size: usize,
+    block_count: usize,
 ) -> (Ext4SbInfo, Ext4Inode, Arc<ReadDevice>, Vec<u8>) {
     // One group, 32 inodes, three inline extents. Keep the small image
     // read-only: allocation, root-directory and journal fixtures are unrelated.
     let first_data_block = usize::from(block_size == 1024);
     let descriptor_block = first_data_block + 1;
     let inode_table_block = descriptor_block + 3;
-    let mut image = vec![0; 32 * block_size];
+    let mut image = vec![0; block_count * block_size];
     let mut superblock = allocator_superblock(0, 0);
+    put_u32(&mut superblock, 0x04, block_count as u32);
+    put_u32(&mut superblock, 0x20, block_count as u32);
+    put_u32(&mut superblock, 0x24, block_count as u32);
     put_u32(&mut superblock, 0x14, first_data_block as u32);
     let log_block_size = (block_size / 1024).trailing_zeros();
     put_u32(&mut superblock, 0x18, log_block_size);

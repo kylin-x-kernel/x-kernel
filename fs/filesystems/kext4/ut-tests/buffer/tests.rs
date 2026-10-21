@@ -16,9 +16,9 @@ use crate::{
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
 };
 
-const TEST_BLOCK_SIZE: usize = 512;
+pub(super) const TEST_BLOCK_SIZE: usize = 512;
 
-struct TestDevice {
+pub(super) struct TestDevice {
     bytes: crate::sync::Mutex<Box<[u8]>>,
     read_count: AtomicUsize,
     write_count: AtomicUsize,
@@ -28,7 +28,7 @@ struct TestDevice {
 }
 
 impl TestDevice {
-    fn new(block_count: usize, failures: usize, delay: TimeSpan) -> Self {
+    pub(super) fn new(block_count: usize, failures: usize, delay: TimeSpan) -> Self {
         let mut bytes = vec![0; block_count * TEST_BLOCK_SIZE];
         for (index, byte) in bytes.iter_mut().enumerate() {
             *byte = index as u8;
@@ -117,7 +117,7 @@ impl BlockDeviceOperations for TestDevice {
     }
 }
 
-fn cache_for(device: Arc<TestDevice>) -> MetadataBlockCache {
+pub(super) fn cache_for(device: Arc<TestDevice>) -> MetadataBlockCache {
     let block_count = device.num_blocks();
     let device: Arc<dyn BlockDeviceOperations> = device;
     let filesystem_device = FilesystemDevice::open(device, TEST_BLOCK_SIZE, block_count).unwrap();
@@ -146,6 +146,203 @@ fn repeated_reads_share_one_cached_block_and_pins_prevent_reclaim() {
     drop(second);
     assert_eq!(cache.reclaim_unused(1), 1);
     assert_eq!(cache.cached_block_count(), 0);
+}
+
+#[def_test]
+fn targeted_reclaim_preserves_pins_and_unselected_cached_blocks() {
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
+    let cache = cache_for(device.clone());
+    let pinned = cache.read(FilesystemBlock::new(1)).unwrap();
+    drop(cache.read(FilesystemBlock::new(2)).unwrap());
+    drop(cache.read(FilesystemBlock::new(3)).unwrap());
+    assert_eq!(
+        cache.reclaim_blocks(&[FilesystemBlock::new(1), FilesystemBlock::new(2)]),
+        1
+    );
+    assert_eq!(cache.cached_block_count(), 2);
+    drop(cache.read(FilesystemBlock::new(3)).unwrap());
+    assert_eq!(device.read_count.load(Ordering::Relaxed), 3);
+    drop(pinned);
+    assert_eq!(cache.reclaim_blocks(&[FilesystemBlock::new(1)]), 1);
+    assert_eq!(cache.cached_block_count(), 1);
+}
+
+#[def_test]
+fn incremental_reclaim_bounds_inspection_and_revisits_released_pins() {
+    let device = Arc::new(TestDevice::new(5, 0, TimeSpan::ZERO));
+    let cache = cache_for(device.clone());
+    let pinned = cache.read(FilesystemBlock::new(1)).unwrap();
+    let access = cache
+        .write_access(FilesystemBlock::new(2), TransactionId::new(9))
+        .unwrap();
+    access.mark_dirty().unwrap();
+    drop(access);
+    for block in [3, 4] {
+        drop(cache.read(FilesystemBlock::new(block)).unwrap());
+    }
+
+    assert_eq!(cache.reclaim_unused_incremental(0), 0);
+    assert_eq!(cache.reclaim_unused_incremental(2), 0);
+    assert_eq!(cache.cached_block_count(), 4);
+    // The budget counts inspected slots, so the next visit reaches clean slots
+    // beyond the pinned and dirty entries rather than starting over at them.
+    assert_eq!(cache.reclaim_unused_incremental(2), 2);
+    assert_eq!(cache.cached_block_count(), 2);
+    drop(pinned);
+    // The cursor's last key was removed; wrapping still revisits the old pin.
+    assert_eq!(cache.reclaim_unused_incremental(2), 1);
+    assert_eq!(cache.cached_block_count(), 1);
+    assert_eq!(
+        cache.buffer_state(FilesystemBlock::new(2)).unwrap(),
+        MetadataBufferState::Dirty(TransactionId::new(9))
+    );
+    assert_eq!(device.write_count.load(Ordering::Relaxed), 0);
+    assert_eq!(device.flush_count.load(Ordering::Relaxed), 0);
+}
+
+#[def_test]
+fn incremental_reclaim_finishes_a_sweep_despite_new_higher_keys() {
+    let device = Arc::new(TestDevice::new(6, 0, TimeSpan::ZERO));
+    let cache = cache_for(device);
+    let old_pin = cache.read(FilesystemBlock::new(1)).unwrap();
+    drop(cache.read(FilesystemBlock::new(2)).unwrap());
+    drop(cache.read(FilesystemBlock::new(3)).unwrap());
+    assert_eq!(cache.reclaim_unused_incremental(1), 0);
+    drop(old_pin);
+    let first_new_pin = cache.read(FilesystemBlock::new(4)).unwrap();
+    assert_eq!(cache.reclaim_unused_incremental(1), 1);
+    let second_new_pin = cache.read(FilesystemBlock::new(5)).unwrap();
+    assert_eq!(cache.reclaim_unused_incremental(1), 1);
+    // The old sweep ended at block 3. Visit the released block 1 before the
+    // newly appended pins instead of indefinitely following growing keys.
+    assert_eq!(cache.reclaim_unused_incremental(1), 1);
+    assert_eq!(cache.cached_block_count(), 2);
+    drop(first_new_pin);
+    drop(second_new_pin);
+    assert_eq!(cache.reclaim_unused_incremental(2), 2);
+}
+
+#[def_test]
+fn incremental_reclaim_preserves_frozen_images_until_checkpoint_and_unpin() {
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
+    let cache = cache_for(device);
+    let block = FilesystemBlock::new(1);
+    let transaction = TransactionId::new(13);
+    let access = cache.write_access(block, transaction).unwrap();
+    access.mark_dirty().unwrap();
+    drop(access);
+    let frozen = cache.journal_commit_block(block, transaction).unwrap();
+    drop(cache.read(FilesystemBlock::new(2)).unwrap());
+
+    assert_eq!(cache.reclaim_unused_incremental(4), 1);
+    assert_eq!(cache.cached_block_count(), 1);
+    cache.checkpoint_block(block, transaction).unwrap();
+    assert_eq!(cache.reclaim_unused_incremental(4), 0);
+    drop(frozen);
+    assert_eq!(cache.reclaim_unused_incremental(4), 1);
+    assert_eq!(cache.reclaim_unused_incremental(4), 0);
+}
+
+#[def_test]
+fn cache_invalidation_resets_incremental_reclaim_position() {
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
+    let cache = cache_for(device);
+    let old_pin = cache.read(FilesystemBlock::new(1)).unwrap();
+    assert_eq!(cache.reclaim_unused_incremental(1), 0);
+    cache.invalidate_all();
+    drop(cache.read(FilesystemBlock::new(0)).unwrap());
+    let new_pin = cache.read(FilesystemBlock::new(2)).unwrap();
+    assert_eq!(cache.reclaim_unused_incremental(1), 1);
+    drop(old_pin);
+    drop(new_pin);
+    assert_eq!(cache.reclaim_unused_incremental(1), 1);
+}
+
+#[def_test]
+fn cache_pressure_reclaims_unrelated_clean_blocks_without_checkpoints() {
+    let retained = cache::METADATA_CACHE_RETAINED_BYTES / TEST_BLOCK_SIZE;
+    let device = Arc::new(TestDevice::new(retained + 256, 0, TimeSpan::ZERO));
+    let cache = cache_for(device.clone());
+    let io = Ext4MetadataIo {
+        cache: cache.clone(),
+    };
+    let pinned = cache.read(FilesystemBlock::new(1)).unwrap();
+    let transaction = TransactionId::new(17);
+    for block in [2, 3] {
+        let access = cache
+            .write_access(FilesystemBlock::new(block), transaction)
+            .unwrap();
+        access.mark_dirty().unwrap();
+    }
+    let frozen = cache
+        .journal_commit_block(FilesystemBlock::new(3), transaction)
+        .unwrap();
+    for block in 4..retained + 132 {
+        drop(cache.read(FilesystemBlock::new(block as u64)).unwrap());
+    }
+    assert!(cache.cached_block_count() > retained);
+    // No transaction retires and no full scan runs. Cache demand alone drives
+    // bounded progress, while dirty, externally pinned and frozen data survive.
+    for _ in 0..4 {
+        assert!(io.reclaim_cache(64) <= 64);
+    }
+    assert!(cache.cached_block_count() <= retained);
+    assert_eq!(io.reclaim_cache(64), 0);
+    assert_eq!(
+        cache.buffer_state(FilesystemBlock::new(2)).unwrap(),
+        MetadataBufferState::Dirty(transaction)
+    );
+    assert_eq!(
+        cache.buffer_state(FilesystemBlock::new(3)).unwrap(),
+        MetadataBufferState::Clean
+    );
+    assert_eq!(device.write_count.load(Ordering::Relaxed), 0);
+    assert_eq!(device.flush_count.load(Ordering::Relaxed), 0);
+    let reads = device.read_count.load(Ordering::Relaxed);
+    cache
+        .checkpoint_block(FilesystemBlock::new(3), transaction)
+        .unwrap();
+    assert_eq!(device.write_count.load(Ordering::Relaxed), 1);
+    assert_eq!(device.read_count.load(Ordering::Relaxed), reads);
+    drop(frozen);
+    drop(pinned);
+}
+
+#[def_test]
+fn full_reclaim_restarts_the_cursor_before_new_lower_keys() {
+    let cache = cache_for(Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO)));
+    let first_pin = cache.read(FilesystemBlock::new(1)).unwrap();
+    let last_pin = cache.read(FilesystemBlock::new(3)).unwrap();
+    assert_eq!(cache.reclaim_unused_incremental(1), 0);
+    assert_eq!(cache.reclaim_unused(usize::MAX), 0);
+    drop(cache.read(FilesystemBlock::new(0)).unwrap());
+    assert_eq!(cache.reclaim_unused_incremental(1), 1);
+    drop(first_pin);
+    drop(last_pin);
+    assert_eq!(cache.reclaim_unused(usize::MAX), 2);
+}
+
+#[def_test]
+fn cache_pressure_respects_retention_and_zero_scan_budget() {
+    let retained = cache::METADATA_CACHE_RETAINED_BYTES / TEST_BLOCK_SIZE;
+    let cache = cache_for(Arc::new(TestDevice::new(retained + 8, 0, TimeSpan::ZERO)));
+    for block in 0..4 {
+        drop(cache.read(FilesystemBlock::new(block)).unwrap());
+    }
+    assert_eq!(cache.reclaim_for_pressure(64), 0);
+    assert_eq!(cache.cached_block_count(), 4);
+    for block in 4..retained + 4 {
+        drop(cache.read(FilesystemBlock::new(block as u64)).unwrap());
+    }
+    // Repeated maintenance never turns a zero budget into a periodic full scan.
+    for _ in 0..32 {
+        assert_eq!(cache.reclaim_for_pressure(0), 0);
+    }
+    assert_eq!(cache.cached_block_count(), retained + 4);
+    assert_eq!(cache.reclaim_for_pressure(2), 2);
+    assert_eq!(cache.cached_block_count(), retained + 2);
+    assert_eq!(cache.reclaim_for_pressure(2), 2);
+    assert_eq!(cache.reclaim_for_pressure(2), 0);
 }
 
 #[def_test]

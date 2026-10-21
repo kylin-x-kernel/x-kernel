@@ -17,8 +17,7 @@ use crate::{
         JournalCommitBlock, JournalCredits, JournalHandle, JournalPersistedCommit,
         JournalReplayApplied, JournalReplayReport, JournalSuperblock, JournalTransactions,
         RuntimeTransaction, TransactionId, enable_superblock_revoke,
-        finish_journal_checkpoint_batch, journal_checkpoint_prefix_len,
-        journal_transaction_blocks_required, mark_superblock_empty, persist_journal_commit,
+        finish_journal_checkpoint_batch, mark_superblock_empty, persist_journal_commit,
     },
     superblock::{
         Ext4Recovery, Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal,
@@ -440,10 +439,7 @@ impl Ext4SbInfo {
                         .as_ref()
                         .is_some_and(|journal| journal.has_pending_checkpoints()) =>
                 {
-                    let required_blocks =
-                        journal_transaction_blocks_required(&journal.superblock(), &commit)?;
-                    let result = self.run_checkpoint_worker_inner(Some(required_blocks));
-                    result.map_err(|error| self.fail_journal_operation(error))?;
+                    self.run_checkpoint_worker_inner(Some(&commit))?;
                 }
                 Err(error) => return Err(error),
             }
@@ -482,27 +478,25 @@ impl Ext4SbInfo {
         result.map_err(|error| self.fail_journal_operation(error))
     }
 
-    /// Reclaims a sufficient prefix for an append, or drains for explicit sync.
-    fn run_checkpoint_worker_inner(&mut self, required_blocks: Option<usize>) -> Ext4Result<()> {
+    /// Restores an append plus transaction budget, or drains for explicit sync.
+    fn run_checkpoint_worker_inner(
+        &mut self,
+        append: Option<&Arc<RuntimeTransaction>>,
+    ) -> Ext4Result<()> {
         let journal = self
             .journal
             .as_ref()
             .cloned()
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-        let pending = journal.transactions.checkpoint_batch()?;
-        if pending.is_empty() {
-            return Ok(());
-        }
-        let checkpoint_count = match required_blocks {
-            Some(required_blocks) => journal_checkpoint_prefix_len(
-                &journal.superblock(),
-                pending.iter().map(|(_, persisted)| persisted),
-                required_blocks,
-            )?,
-            None => pending.len(),
+        let (batch, next_oldest) = match append {
+            Some(commit) => {
+                let selected = journal
+                    .transactions
+                    .checkpoint_batch_for_append(&journal.superblock(), commit)?;
+                (selected.transactions, selected.next_oldest)
+            }
+            None => (journal.transactions.checkpoint_batch()?, None),
         };
-        let (batch, remaining) = pending.split_at(checkpoint_count);
-        let next_oldest = remaining.first().map(|(_, persisted)| persisted);
         let Some((last, _)) = batch.last() else {
             return Ok(());
         };
@@ -513,13 +507,13 @@ impl Ext4SbInfo {
         let recovery_flag_policy = journal.checkpoint_policy(last.id())?;
         // Validate selected policies before consuming any frozen image. Recovery
         // cleanup is needed only when this batch leaves no pending transaction.
-        for (commit, _) in batch {
+        for (commit, _) in &batch {
             journal.checkpoint_policy(commit.id())?;
         }
         // The mount write lock excludes append, mutation and other checkpoint
         // workers. Preserve frozen-version order when transactions share blocks.
         let writeback_result = (|| {
-            for (commit, _) in batch {
+            for (commit, _) in &batch {
                 self.metadata_io.write_checkpoint_committed(commit)?;
             }
             self.flush_device()
@@ -530,16 +524,17 @@ impl Ext4SbInfo {
         }
         self.finish_metadata_journal_checkpoint_batch_with_policy(
             batch.iter().map(|(_, persisted)| persisted),
-            next_oldest,
+            next_oldest.as_ref(),
             recovery_flag_policy,
         )?;
         // Keep the selected prefix and its space reserved until both barriers have
         // succeeded. Any I/O error reaches the worker's journal-abort wrapper.
-        for (commit, _) in batch {
+        for (commit, _) in &batch {
+            let blocks = commit.metadata_blocks()?;
             journal.transactions.finish_checkpoint(commit)?;
             journal.remove_checkpoint_policy(commit.id())?;
+            let _ = self.metadata_io.reclaim_checkpointed_blocks(&blocks);
         }
-        let _ = self.metadata_io.reclaim_unused(usize::MAX);
         Ok(())
     }
 

@@ -190,7 +190,9 @@ fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     let options = *context.private::<Ext4MountOptions>()?;
     let super_block = context.super_block()?;
     if let Some(statfs_mode) = options.statfs_mode {
-        sync::write_lock(super_block.private::<sync::RwLock<Ext4SbInfo>>()?)
+        super_block
+            .private::<vfs::Ext4Mount>()?
+            .write()
             .set_statfs_mode(statfs_mode);
     }
     Ok(())

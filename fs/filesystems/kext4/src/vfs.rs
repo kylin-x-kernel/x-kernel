@@ -28,7 +28,6 @@ use crate::{
     Ext4XattrSetMode, InodeKind, InodeNumber, LogicalBlock,
     disk::inode::EXT4_ROOT_INO,
     superblock::{Ext4SbInfo, Ext4StatFsMode},
-    sync::{self, RwLock},
 };
 
 // Bounds phased eviction to at most 1 MiB of block-allocation work per
@@ -308,16 +307,18 @@ fn applied_metadata_update(requested: MetadataUpdate, applied: Ext4InodeStat) ->
     }
 }
 
-type SharedExt4SbInfo = RwLock<Ext4SbInfo>;
+mod mount;
 
-fn ext4_private(super_block: &SuperBlock) -> VfsResult<&SharedExt4SbInfo> {
-    super_block.private::<SharedExt4SbInfo>()
+pub(crate) use mount::Ext4Mount;
+
+fn ext4_private(super_block: &SuperBlock) -> VfsResult<&Ext4Mount> {
+    super_block.private::<Ext4Mount>()
 }
 
 /// Static ext4 superblock operation table.
 ///
-/// Mount-private identity lives only in the `Ext4SbInfo` installed as KVFS
-/// superblock private data, matching Linux's separate `s_op` and `s_fs_info`.
+/// Mount-private identity lives in the `Ext4Mount` installed as KVFS superblock
+/// private data. The operation table remains shared across mounts.
 pub(crate) struct Ext4SuperOperations;
 
 static EXT4_SUPER_OPERATIONS: Ext4SuperOperations = Ext4SuperOperations;
@@ -363,7 +364,7 @@ impl Ext4SuperOperations {
         };
         let block_size = u64::from(state.layout().block_size());
         let max_file_size = state.extent_max_file_size().map_err(into_vfs_err)?;
-        let ext4 = RwLock::new(state);
+        let ext4 = Ext4Mount::new(state);
         super_block.initialize_with_private(
             &EXT4_SUPER_OPERATIONS,
             ext4,
@@ -376,7 +377,8 @@ impl Ext4SuperOperations {
                     })?;
                 let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
                 if !is_read_only {
-                    sync::write_lock(ext4_private(super_block)?)
+                    ext4_private(super_block)?
+                        .write()
                         .persist_directory_hash_policy()
                         .map_err(into_vfs_err)?;
                 }
@@ -388,7 +390,8 @@ impl Ext4SuperOperations {
     fn iget(super_block: &Arc<SuperBlock>, number: InodeNumber) -> VfsResult<Arc<VfsInode>> {
         let ext4 = ext4_private(super_block)?;
         super_block.get_or_try_init_inode(u64::from(number.get()), || {
-            let private = sync::read_lock(ext4)
+            let private = ext4
+                .read()
                 .load_inode_private(number)
                 .map_err(into_vfs_err)?;
             Self::new_vfs_inode(super_block, ext4, private)
@@ -408,7 +411,7 @@ impl Ext4SuperOperations {
 
     fn new_vfs_inode(
         super_block: &Arc<SuperBlock>,
-        ext4: &SharedExt4SbInfo,
+        ext4: &Ext4Mount,
         private: Ext4Inode,
     ) -> VfsResult<Arc<VfsInode>> {
         let node_type = inode_kind_to_vfs(private.kind());
@@ -429,7 +432,7 @@ impl Ext4SuperOperations {
             metadata.ctime,
         );
         let cached_link = if node_type == NodeType::Symlink {
-            match sync::read_lock(ext4).fast_symlink_target(&private) {
+            match ext4.read().fast_symlink_target(&private) {
                 Ok(Some(target)) => core::str::from_utf8(&target).ok().map(String::from),
                 _ => None,
             }
@@ -448,11 +451,11 @@ impl Ext4SuperOperations {
         Ok(inode)
     }
 
-    fn max_file_size(ext4: &SharedExt4SbInfo, super_block: &SuperBlock, inode: &Ext4Inode) -> u64 {
+    fn max_file_size(ext4: &Ext4Mount, super_block: &SuperBlock, inode: &Ext4Inode) -> u64 {
         if inode.has_extents() {
             super_block.max_file_size()
         } else {
-            sync::read_lock(ext4).bitmap_max_file_size()
+            ext4.read().bitmap_max_file_size()
         }
     }
 }
@@ -466,12 +469,12 @@ impl SuperBlockOperations for Ext4SuperOperations {
         )]
         let ext4 = ext4_private(super_block)
             .expect("ext4 fill_super must install private state before timestamp capabilities");
-        sync::read_lock(ext4).timestamp_limits()
+        ext4.read().timestamp_limits()
     }
 
     fn statfs(&self, super_block: &SuperBlock) -> VfsResult<StatFs> {
         let ext4 = ext4_private(super_block)?;
-        let stat = sync::read_lock(ext4).statfs().map_err(into_vfs_err)?;
+        let stat = ext4.read().statfs().map_err(into_vfs_err)?;
         Ok(StatFs {
             fs_type: 0xef53,
             block_size: stat.block_size,
@@ -486,7 +489,8 @@ impl SuperBlockOperations for Ext4SuperOperations {
     }
 
     fn sync_fs(&self, super_block: &SuperBlock) -> VfsResult<()> {
-        sync::write_lock(ext4_private(super_block)?)
+        ext4_private(super_block)?
+            .write()
             .sync_filesystem()
             .map_err(into_vfs_err)
     }
@@ -496,25 +500,26 @@ impl SuperBlockOperations for Ext4SuperOperations {
         let private = inode.private::<Ext4Inode>()?;
         let super_block = inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
-        sync::read_lock(ext4)
+        ext4.read()
             .release_all_delalloc(private)
             .map_err(into_vfs_err)?;
         if inode.link_count() != 0 {
             return Ok(());
         }
         let timestamp = current_ext4_timestamp(inode);
-        sync::write_lock(ext4)
+        ext4.write()
             .eviction_prepare(private)
             .map_err(into_vfs_err)?;
         loop {
-            let (_, is_done) = sync::write_lock(ext4)
+            let (_, is_done) = ext4
+                .write()
                 .eviction_release_batch(private, EVICTION_BATCH_BLOCKS)
                 .map_err(into_vfs_err)?;
             if is_done {
                 break;
             }
         }
-        sync::write_lock(ext4)
+        ext4.write()
             .eviction_finish(private, timestamp)
             .map_err(into_vfs_err)
     }
@@ -841,7 +846,7 @@ fn ensure_same_super_block(left: &Arc<SuperBlock>, right: &Arc<SuperBlock>) -> V
 }
 
 fn check_write_limit(
-    ext4: &SharedExt4SbInfo,
+    ext4: &Ext4Mount,
     super_block: &SuperBlock,
     inode: &Ext4Inode,
     pos: u64,
@@ -861,7 +866,7 @@ fn check_write_limit(
 }
 
 fn reserve_delalloc_range(
-    ext4: &SharedExt4SbInfo,
+    ext4: &Ext4Mount,
     inode: &Ext4Inode,
     pos: u64,
     len: usize,
@@ -875,13 +880,13 @@ fn reserve_delalloc_range(
     // Ext4Inode::reserve_delalloc_range, so reserves on different inodes never
     // queue behind each other. Holders of the mount write lock (writeback,
     // fsync, set_len) still exclude this shared guard.
-    sync::read_lock(ext4)
+    ext4.read()
         .reserve_delalloc_range(inode, LogicalBlock::new(first), block_count)
         .map_err(into_vfs_err)
 }
 
 fn release_delalloc_range(
-    ext4: &SharedExt4SbInfo,
+    ext4: &Ext4Mount,
     inode: &Ext4Inode,
     pos: u64,
     len: usize,
@@ -890,13 +895,13 @@ fn release_delalloc_range(
     let Some((first, block_count)) = logical_block_range(pos, len, block_size)? else {
         return Ok(());
     };
-    sync::read_lock(ext4)
+    ext4.read()
         .release_delalloc_range(inode, LogicalBlock::new(first), block_count)
         .map_err(into_vfs_err)
 }
 
 fn finish_delalloc_write(
-    ext4: &SharedExt4SbInfo,
+    ext4: &Ext4Mount,
     inode: &Ext4Inode,
     request: WriteEndRequest,
     accepted: usize,
@@ -925,7 +930,7 @@ fn finish_delalloc_write(
     if release_start >= requested_end {
         return Ok(());
     }
-    sync::read_lock(ext4)
+    ext4.read()
         .release_delalloc_range(
             inode,
             LogicalBlock::new(release_start),
@@ -945,13 +950,13 @@ impl InodeOperations for Ext4Inode {
         let is_visible_shrink = len < visible_size;
         let is_disk_shrink = len < disk_size;
         {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .prepare_regular_inode_truncate(self, len, current_ext4_timestamp(vfs_inode))
                 .map_err(into_vfs_err)?
         }
         vfs_inode.truncate_setsize(len)?;
-        let mut state = sync::write_lock(ext4);
+        let mut state = ext4.write();
         if is_visible_shrink {
             let first_unneeded = first_logical_block_after_len(len, super_block.block_size());
             state
@@ -1009,7 +1014,7 @@ impl InodeOperations for Ext4Inode {
         }
         let super_block = dentry.super_block().ok_or(VfsError::InvalidInput)?;
         let ext4 = ext4_private(&super_block)?;
-        let mut state = sync::write_lock(ext4);
+        let mut state = ext4.write();
 
         let ctime = update
             .ctime
@@ -1043,7 +1048,7 @@ impl InodeOperations for Ext4Inode {
         let (namespace, suffix) = parse_xattr_name(name)?;
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
-        sync::read_lock(ext4)
+        ext4.read()
             .get_xattr(self, namespace, suffix)
             .map_err(into_xattr_vfs_err)?
             .ok_or_else(|| VfsError::from(LinuxError::ENODATA))
@@ -1061,7 +1066,7 @@ impl InodeOperations for Ext4Inode {
             inner: sink,
             error: None,
         };
-        sync::read_lock(ext4)
+        ext4.read()
             .list_xattrs(self, &mut sink)
             .map_err(into_xattr_vfs_err)?;
         sink.finish()
@@ -1079,7 +1084,7 @@ impl InodeOperations for Ext4Inode {
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
         let mode = xattr_set_mode(flags);
-        sync::write_lock(ext4)
+        ext4.write()
             .set_xattr_with_mode(
                 self,
                 namespace,
@@ -1095,7 +1100,7 @@ impl InodeOperations for Ext4Inode {
         let (namespace, suffix) = parse_xattr_name(name)?;
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
-        sync::write_lock(ext4)
+        ext4.write()
             .remove_xattr(self, namespace, suffix, current_ext4_timestamp(inode))
             .map_err(into_xattr_vfs_err)
     }
@@ -1132,7 +1137,7 @@ impl InodeFiemapOperations for Ext4Inode {
                 block_size,
             },
             |logical| {
-                sync::read_lock(ext4)
+                ext4.read()
                     .report_mapping(self, LogicalBlock::new(logical))
                     .map_err(into_vfs_err)
             },
@@ -1151,7 +1156,8 @@ impl InodeSymlinkOperations for Ext4Inode {
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
         let mut target = vec![0; usize::try_from(self.size()).map_err(|_| VfsError::InvalidInput)?];
-        let read = sync::read_lock(ext4)
+        let read = ext4
+            .read()
             .read_link_at(self, 0, &mut target)
             .map_err(into_vfs_err)?;
         target.truncate(read);
@@ -1169,10 +1175,7 @@ impl InodeDirOperations for Ext4Inode {
         let super_block = dir.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         let name = dentry.name();
-        let entry = match sync::read_lock(ext4)
-            .lookup(self, name)
-            .map_err(into_vfs_err)?
-        {
+        let entry = match ext4.read().lookup(self, name).map_err(into_vfs_err)? {
             Some(entry) => entry,
             None => return Ok(None),
         };
@@ -1197,7 +1200,7 @@ impl InodeDirOperations for Ext4Inode {
         let ext4 = ext4_private(&super_block)?;
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .create_regular_file(
                     self,
@@ -1226,7 +1229,7 @@ impl InodeDirOperations for Ext4Inode {
         let name = dentry.name();
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .create_directory(
                     self,
@@ -1262,7 +1265,7 @@ impl InodeDirOperations for Ext4Inode {
         };
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .create_special_file(
                     self,
@@ -1299,7 +1302,7 @@ impl InodeDirOperations for Ext4Inode {
             cred,
         );
         let child = {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .create_symlink(
                     self,
@@ -1328,7 +1331,7 @@ impl InodeDirOperations for Ext4Inode {
         let name = dentry.name();
         let target: Arc<Self> = old_dentry.downcast()?;
         {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .link(self, name.as_bytes(), &target, current_ext4_timestamp(dir))
                 .map_err(into_vfs_err)?
@@ -1345,7 +1348,7 @@ impl InodeDirOperations for Ext4Inode {
         let name = dentry.name();
         let child: Arc<Self> = dentry.downcast()?;
         {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             if dentry.is_dir() {
                 state
                     .remove_directory(self, name.as_bytes(), &child, current_ext4_timestamp(dir))
@@ -1383,7 +1386,7 @@ impl InodeDirOperations for Ext4Inode {
             None
         };
         {
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .rename(
                     self,
@@ -1413,10 +1416,12 @@ fn read_backing_at(mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsRe
     // a completed read into an error; bytes not read are the zero-filled tail.
     let expected = inode.size().saturating_sub(offset).min(buf.len() as u64) as usize;
     let read = match inode.kind() {
-        InodeKind::RegularFile => sync::read_lock(ext4)
+        InodeKind::RegularFile => ext4
+            .read()
             .read_at(inode, offset, buf)
             .map_err(into_vfs_err),
-        InodeKind::Symlink => sync::read_lock(ext4)
+        InodeKind::Symlink => ext4
+            .read()
             .read_link_at(inode, offset, buf)
             .map_err(into_vfs_err),
         _ => Err(VfsError::InvalidInput),
@@ -1489,7 +1494,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             let visible_size = vfs_inode.size();
             let disk_size = inode.disk_size();
             let write_end = offset.saturating_add(data.len() as u64);
-            let mut state = sync::write_lock(ext4);
+            let mut state = ext4.write();
             state
                 .writeback_ordered_at(inode, offset, data, visible_size, timestamp, intent)
                 .map_err(|failure| {
@@ -1575,7 +1580,7 @@ impl FileOperations for Ext4Inode {
         kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
-        sync::write_lock(ext4)
+        ext4.write()
             .sync_inode(self, Ext4SyncIntent::from_data_only(data_only))
             .map_err(into_vfs_err)
     }
@@ -1589,7 +1594,7 @@ impl FileOperations for Ext4Inode {
         }
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
-        sync::write_lock(ext4)
+        ext4.write()
             .discard_regular_inode_preallocations(self)
             .inspect_err(|error| {
                 error!(
@@ -1616,7 +1621,7 @@ impl FileDirOperations for Ext4Inode {
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
         let mut sink = KvfsDirSink { ctx, count: 0 };
-        sync::read_lock(ext4)
+        ext4.read()
             .read_dir_from(self, Ext4DirPos::new(sink.ctx.pos()), &mut sink)
             .map_err(into_vfs_err)?;
         Ok(sink.count)

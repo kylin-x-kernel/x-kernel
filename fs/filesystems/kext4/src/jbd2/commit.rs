@@ -274,10 +274,6 @@ pub(crate) fn persist_journal_commit(
     blocks: &[JournalCommitBlock],
 ) -> Ext4Result<(JournalPersistedCommit, JournalSuperblock)> {
     let required_blocks = journal_blocks_required(superblock, commit, blocks)?;
-    let capacity = log_capacity(superblock)?;
-    if required_blocks >= capacity {
-        return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
-    }
 
     let (sequence, tail, start, needs_activation) = match superblock.start() {
         JournalStart::Zero => {
@@ -350,35 +346,60 @@ pub(crate) fn finish_journal_checkpoint_batch<'a>(
     }
 }
 
-/// Selects the shortest pending prefix that leaves room for an append.
+/// Computes the usable log space to restore before retrying an append.
 ///
-/// The iterator must cover the complete persisted FIFO in log order. The caller
-/// serializes append and checkpoint with the mount write lock. Space accounting
-/// uses the same circular-log and spare-block rules as the append path.
-pub(crate) fn journal_checkpoint_prefix_len<'a>(
+/// One credit owns a metadata block or a revoke record. For credit limit `L`,
+/// metadata count `m`, revoke count `r`, descriptor capacity `D` and revoke
+/// capacity `R`, credit accounting ensures `m + r <= L`. Both capacities are
+/// validated as nonzero, so `ceil(r / R) <= r` and the encoded block count is:
+///
+/// ```text
+/// m + ceil(m / D) + ceil(r / R) + 1
+///     <= m + r + ceil(m / D) + 1
+///     <= L + ceil(L / D) + 1
+/// ```
+///
+/// The final block is the commit record. This bound needs no ordering between
+/// `D` and `R`: replacing metadata with a revoke saves one full metadata block,
+/// which pays for at most one revoke block, even when control-block rounding
+/// adds a block. The optional next-transaction reserve is capped to keep a legal
+/// append progressing in a small ring; a capped reserve may not fit the next
+/// transaction without another checkpoint.
+pub(super) fn journal_checkpoint_target_blocks(
     superblock: &JournalSuperblock,
-    mut persisted: impl DoubleEndedIterator<Item = &'a JournalPersistedCommit>,
-    required_blocks: usize,
+    commit: &RuntimeTransaction,
+    transaction_credits: u32,
 ) -> Ext4Result<usize> {
-    if required_blocks >= log_capacity(superblock)? {
-        return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
+    let required = journal_transaction_blocks_required(superblock, commit)?;
+    let capacity = usable_log_capacity(superblock)?;
+    let budget = journal_log_blocks_for_counts(
+        superblock,
+        usize::try_from(transaction_credits).map_err(|_| Ext4Error::Overflow)?,
+        0,
+    )?;
+    Ok(required.saturating_add(budget).min(capacity))
+}
+
+/// Tests a candidate tail against the append plus next-transaction budget.
+///
+/// `reclaimed` is the last selected transaction; `newest` supplies the unchanged
+/// append head. The normal space check preserves the ring's one-block gap.
+pub(super) fn journal_checkpoint_target_reached(
+    superblock: &JournalSuperblock,
+    reclaimed: &JournalPersistedCommit,
+    newest: &JournalPersistedCommit,
+    target_blocks: usize,
+) -> Ext4Result<bool> {
+    match ensure_log_space(
+        superblock,
+        reclaimed.log.head(),
+        newest.log.head(),
+        target_blocks,
+    ) {
+        Ok(()) => Ok(true),
+        Err(Ext4Error::JournalBusy) => Ok(false),
+        Err(error) => Err(error),
     }
-    let newest = persisted
-        .next_back()
-        .ok_or(Ext4Error::InvalidJournalTransaction)?;
-    for (index, checkpoint) in persisted.chain(core::iter::once(newest)).enumerate() {
-        match ensure_log_space(
-            superblock,
-            checkpoint.log.head(),
-            newest.log.head(),
-            required_blocks,
-        ) {
-            Ok(()) => return Ok(index + 1),
-            Err(Ext4Error::JournalBusy) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(Ext4Error::InvalidJournalTransaction)
 }
 
 /// Writes descriptor, data, and commit blocks for one committing transaction.
@@ -551,31 +572,38 @@ fn journal_blocks_required(
 }
 
 /// Counts descriptor, metadata, revoke and commit blocks for a frozen transaction.
-pub(crate) fn journal_transaction_blocks_required(
+fn journal_transaction_blocks_required(
     superblock: &JournalSuperblock,
     commit: &RuntimeTransaction,
 ) -> Ext4Result<usize> {
-    validate_supported_features(superblock)?;
-    let revoked_blocks = commit.revoked_blocks()?;
-    if !revoked_blocks.is_empty() && !has_revoke(superblock) {
-        return Err(Ext4Error::InvalidJournalTransaction);
-    }
-    let metadata_blocks = commit.metadata_blocks()?;
-
-    let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
-    let descriptor_capacity = descriptor_tag_capacity(superblock, block_size)?;
-    let revoke_capacity = revoke_block_capacity(superblock, block_size)?;
-    let descriptor_count = metadata_blocks.len().div_ceil(descriptor_capacity);
-    let revoke_block_count = revoked_blocks.len().div_ceil(revoke_capacity);
-    let total = descriptor_count
-        .checked_add(metadata_blocks.len())
-        .and_then(|count| count.checked_add(revoke_block_count))
-        .and_then(|count| count.checked_add(1))
-        .ok_or(Ext4Error::Overflow)?;
-    if total > log_capacity(superblock)? {
+    let total = journal_log_blocks_for_counts(
+        superblock,
+        commit.metadata_blocks()?.len(),
+        commit.revoked_blocks()?.len(),
+    )?;
+    if total > usable_log_capacity(superblock)? {
         return Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge));
     }
     Ok(total)
+}
+
+fn journal_log_blocks_for_counts(
+    superblock: &JournalSuperblock,
+    metadata_blocks: usize,
+    revoke_records: usize,
+) -> Ext4Result<usize> {
+    validate_supported_features(superblock)?;
+    if revoke_records != 0 && !has_revoke(superblock) {
+        return Err(Ext4Error::InvalidJournalTransaction);
+    }
+    let block_size = usize::try_from(superblock.block_size()).map_err(|_| Ext4Error::Overflow)?;
+    let descriptor_capacity = descriptor_tag_capacity(superblock, block_size)?;
+    let revoke_capacity = revoke_block_capacity(superblock, block_size)?;
+    metadata_blocks
+        .checked_add(metadata_blocks.div_ceil(descriptor_capacity))
+        .and_then(|count| count.checked_add(revoke_records.div_ceil(revoke_capacity)))
+        .and_then(|count| count.checked_add(1))
+        .ok_or(Ext4Error::Overflow)
 }
 
 fn ensure_log_space(
@@ -587,13 +615,8 @@ fn ensure_log_space(
     validate_start(superblock, tail)?;
     validate_start(superblock, head)?;
     let used_blocks = log_distance(superblock, tail, head)?;
-    let free_blocks = log_capacity(superblock)?
-        .checked_sub(used_blocks)
-        .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-
-    // Keep one block free so an active ring never has an ambiguous head ==
-    // tail state and an append cannot overwrite the oldest live descriptor.
-    if required_blocks >= free_blocks {
+    let capacity = usable_log_capacity(superblock)?;
+    if used_blocks > capacity || required_blocks > capacity - used_blocks {
         return Err(Ext4Error::JournalBusy);
     }
     Ok(())
@@ -624,6 +647,17 @@ fn log_capacity(superblock: &JournalSuperblock) -> Ext4Result<usize> {
             .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?,
     )
     .map_err(|_| Ext4Error::Overflow)
+}
+
+/// Maximum occupied blocks in an active ring.
+///
+/// Keep one block free so head == tail cannot also describe a full ring. Append
+/// admission, oversized-transaction rejection and checkpoint targets share this
+/// limit; a capped target must remain attainable after draining the journal.
+fn usable_log_capacity(superblock: &JournalSuperblock) -> Ext4Result<usize> {
+    log_capacity(superblock)?
+        .checked_sub(1)
+        .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))
 }
 
 fn descriptor_tag_capacity(superblock: &JournalSuperblock, block_size: usize) -> Ext4Result<usize> {

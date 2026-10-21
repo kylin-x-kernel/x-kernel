@@ -19,6 +19,14 @@ const UUID: [u8; 16] = [0x5a; 16];
 const BLOCK_SIZE: usize = 1024;
 const JOURNAL_BLOCKS: u32 = 1024;
 const SEQUENCE: u32 = 42;
+const REVOKE_FEATURE_COMBINATIONS: [u32; 6] = [
+    FEATURE_INCOMPAT_REVOKE,
+    FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_64BIT,
+    FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_CSUM_V2,
+    FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_CSUM_V2 | FEATURE_INCOMPAT_64BIT,
+    FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_CSUM_V3,
+    FEATURE_INCOMPAT_REVOKE | FEATURE_INCOMPAT_CSUM_V3 | FEATURE_INCOMPAT_64BIT,
+];
 
 struct TestJournal {
     blocks: RefCell<BTreeMap<u32, Vec<u8>>>,
@@ -591,7 +599,174 @@ fn append_space_keeps_one_block_between_head_and_tail() {
 }
 
 #[def_test]
-fn checkpoint_prefix_reserves_append_space_across_ring_wrap() {
+fn capped_checkpoint_targets_fit_an_empty_small_ring() {
+    let (append, blocks) =
+        committed_blocks(&[(FilesystemBlock::new(1100), vec![0xab; BLOCK_SIZE])]);
+    for capacity in [3, 4, 11] {
+        let mut bytes = journal_superblock_bytes(0, 0, SEQUENCE);
+        put_be_u32(&mut bytes, 20, JOURNAL_BLOCKS - capacity).unwrap();
+        let superblock =
+            JournalSuperblock::decode(&bytes, BLOCK_SIZE as u32, JOURNAL_BLOCKS, UUID).unwrap();
+        let journal = TestJournal::with_superblock(&superblock);
+        if capacity == 3 {
+            // The transaction itself needs three blocks: the spare cannot
+            // be consumed even when no previous transaction is active.
+            assert_eq!(
+                journal_checkpoint_target_blocks(&superblock, &append, 20),
+                Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
+            );
+            assert_eq!(
+                persist_journal_commit(&superblock, &journal, None, &append, &blocks)
+                    .map(|_| ()),
+                Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
+            );
+            continue;
+        }
+        let target = journal_checkpoint_target_blocks(&superblock, &append, 20).unwrap();
+        assert_eq!(target, usable_log_capacity(&superblock).unwrap());
+        // Draining to any head, including the last ring block, must make
+        // the capped target attainable rather than exhausting the FIFO.
+        for head in [
+            superblock.first_log_block(),
+            JournalBlock::new(JOURNAL_BLOCKS - 1),
+        ] {
+            assert_eq!(ensure_log_space(&superblock, head, head, target), Ok(()));
+            assert_eq!(
+                ensure_log_space(&superblock, head, head, target + 1),
+                Err(Ext4Error::JournalBusy)
+            );
+        }
+        persist_journal_commit(&superblock, &journal, None, &append, &blocks).unwrap();
+    }
+}
+
+#[def_test]
+fn checkpoint_budget_includes_format_overhead_and_bounds_revoke_mixtures() {
+    let (append, _) = committed_blocks(&[(FilesystemBlock::new(1100), vec![0xab; BLOCK_SIZE])]);
+    for features in REVOKE_FEATURE_COMBINATIONS {
+        let superblock = journal_superblock(0, features, SEQUENCE);
+        let tags = descriptor_tag_capacity(&superblock, BLOCK_SIZE).unwrap();
+        let revokes = revoke_block_capacity(&superblock, BLOCK_SIZE).unwrap();
+        for credits in [
+            0,
+            1,
+            tags - 1,
+            tags,
+            tags + 1,
+            revokes,
+            revokes + 1,
+            2 * revokes + 1,
+        ] {
+            let budget = credits + credits.div_ceil(tags) + 1;
+            let required = journal_transaction_blocks_required(&superblock, &append).unwrap();
+            assert_eq!(
+                journal_checkpoint_target_blocks(&superblock, &append, credits as u32),
+                Ok(required + budget)
+            );
+            for revoke_count in 0..=credits {
+                let actual = journal_log_blocks_for_counts(
+                    &superblock,
+                    credits - revoke_count,
+                    revoke_count,
+                )
+                .unwrap();
+                assert!(
+                    actual <= budget,
+                    "mixed records exceed the transaction budget"
+                );
+            }
+        }
+    }
+}
+
+#[def_test]
+fn checkpoint_budget_bounds_mixtures_at_all_block_size_and_format_boundaries() {
+    for block_size in [1024, 2048, 4096, 8192, 16384, 32768, 65536] {
+        let (append, _) =
+            committed_blocks(&[(FilesystemBlock::new(1100), vec![0xab; block_size as usize])]);
+        for features in REVOKE_FEATURE_COMBINATIONS {
+            let bytes =
+                journal_superblock_bytes_with_block_size(0, features, SEQUENCE, block_size);
+            let superblock =
+                JournalSuperblock::decode(&bytes, block_size, JOURNAL_BLOCKS, UUID).unwrap();
+            let tags = descriptor_tag_capacity(&superblock, block_size as usize).unwrap();
+            let revokes = revoke_block_capacity(&superblock, block_size as usize).unwrap();
+            let required = journal_transaction_blocks_required(&superblock, &append).unwrap();
+            for credits in [
+                0,
+                1,
+                tags - 1,
+                tags,
+                tags + 1,
+                revokes - 1,
+                revokes,
+                revokes + 1,
+                2 * revokes + 1,
+            ] {
+                let budget = credits + credits.div_ceil(tags) + 1;
+                let target = (required + budget).min(log_capacity(&superblock).unwrap() - 1);
+                assert_eq!(
+                    journal_checkpoint_target_blocks(&superblock, &append, credits as u32),
+                    Ok(target)
+                );
+                // Sample both sides of descriptor/revoke rounding boundaries;
+                // the 1 KiB test exhausts all splits without making large
+                // block formats pay a quadratic capacity scan in the suite.
+                for revoke_count in [
+                    0,
+                    1,
+                    revokes - 1,
+                    revokes,
+                    revokes + 1,
+                    credits / 2,
+                    credits.saturating_sub(tags - 1),
+                    credits.saturating_sub(tags),
+                    credits.saturating_sub(tags + 1),
+                    credits.saturating_sub(1),
+                    credits,
+                ] {
+                    if revoke_count > credits {
+                        continue;
+                    }
+                    let actual = journal_log_blocks_for_counts(
+                        &superblock,
+                        credits - revoke_count,
+                        revoke_count,
+                    )
+                    .unwrap();
+                    assert!(
+                        actual <= budget,
+                        "block_size={block_size}, features={features:#x}, credits={credits}, \
+                         revokes={revoke_count}, actual={actual}, budget={budget}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[def_test]
+fn checkpoint_budget_pays_for_revoke_rounding_with_a_saved_metadata_block() {
+    for features in REVOKE_FEATURE_COMBINATIONS {
+        let superblock = journal_superblock(0, features, SEQUENCE);
+        let tags = descriptor_tag_capacity(&superblock, BLOCK_SIZE).unwrap();
+        let revokes = revoke_block_capacity(&superblock, BLOCK_SIZE).unwrap();
+        let credits = tags;
+        let metadata = credits - 1;
+        let revoke_count: usize = 1;
+        let control_blocks = metadata.div_ceil(tags) + revoke_count.div_ceil(revokes);
+        // Mixed control blocks exceed the all-metadata descriptor count,
+        // but the saved payload block exactly covers the extra control block.
+        assert!(control_blocks > credits.div_ceil(tags));
+        assert_eq!(
+            journal_log_blocks_for_counts(&superblock, metadata, revoke_count),
+            Ok(credits + credits.div_ceil(tags) + 1)
+        );
+    }
+}
+
+#[def_test]
+fn checkpoint_targets_preserve_the_spare_block_across_ring_wrap() {
     for head in [JOURNAL_BLOCKS - 11, JOURNAL_BLOCKS - 4] {
         let mut bytes = journal_superblock_bytes(0, 0, SEQUENCE);
         put_be_u32(&mut bytes, 20, JOURNAL_BLOCKS - 11).unwrap();
@@ -611,23 +786,34 @@ fn checkpoint_prefix_reserves_append_space_across_ring_wrap() {
             pending.push(persisted);
             superblock = active;
         }
-        // Reclaiming three blocks leaves five free; equality still requires
-        // a second transaction because an append must retain one spare.
+        // Reclaiming three blocks leaves five free; equality still fails
+        // because the active ring must retain one spare block.
         assert_eq!(
-            journal_checkpoint_prefix_len(&superblock, pending.iter(), 4),
-            Ok(1)
+            journal_checkpoint_target_reached(&superblock, &pending[0], &pending[2], 4),
+            Ok(true)
         );
         assert_eq!(
-            journal_checkpoint_prefix_len(&superblock, pending.iter(), 5),
-            Ok(2)
+            journal_checkpoint_target_reached(&superblock, &pending[0], &pending[2], 5),
+            Ok(false)
         );
         assert_eq!(
-            journal_checkpoint_prefix_len(&superblock, pending.iter(), 8),
-            Ok(3)
+            journal_checkpoint_target_reached(&superblock, &pending[1], &pending[2], 5),
+            Ok(true)
         );
         assert_eq!(
-            journal_checkpoint_prefix_len(&superblock, pending.iter(), 11),
-            Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
+            journal_checkpoint_target_reached(&superblock, &pending[1], &pending[2], 8),
+            Ok(false)
+        );
+        assert_eq!(
+            journal_checkpoint_target_reached(&superblock, &pending[2], &pending[2], 10),
+            Ok(true)
+        );
+        let (append, _) =
+            committed_blocks(&[(FilesystemBlock::new(1100), vec![0xab; BLOCK_SIZE])]);
+        // An oversized next-transaction budget cannot prevent a legal append.
+        assert_eq!(
+            journal_checkpoint_target_blocks(&superblock, &append, 20),
+            Ok(10)
         );
     }
 }
@@ -758,10 +944,19 @@ fn journal_superblock_bytes(
     incompat: u32,
     sequence: u32,
 ) -> [u8; JOURNAL_SUPERBLOCK_SIZE] {
+    journal_superblock_bytes_with_block_size(start, incompat, sequence, BLOCK_SIZE as u32)
+}
+
+fn journal_superblock_bytes_with_block_size(
+    start: u32,
+    incompat: u32,
+    sequence: u32,
+    block_size: u32,
+) -> [u8; JOURNAL_SUPERBLOCK_SIZE] {
     let mut bytes = [0; JOURNAL_SUPERBLOCK_SIZE];
     put_be_u32(&mut bytes, 0, JBD2_MAGIC_NUMBER).unwrap();
     put_be_u32(&mut bytes, 4, 4).unwrap();
-    put_be_u32(&mut bytes, 12, BLOCK_SIZE as u32).unwrap();
+    put_be_u32(&mut bytes, 12, block_size).unwrap();
     put_be_u32(&mut bytes, 16, JOURNAL_BLOCKS).unwrap();
     put_be_u32(&mut bytes, 20, 1).unwrap();
     put_be_u32(&mut bytes, 24, sequence).unwrap();

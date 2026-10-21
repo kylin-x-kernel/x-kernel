@@ -34,7 +34,7 @@ fn cached_file(
     let super_block = SuperBlock::new_with_flags_and_private(
         &crate::FILE_SYSTEM_TYPE,
         &EXT4_SUPER_OPERATIONS,
-        RwLock::new(filesystem),
+        Ext4Mount::new(filesystem),
         flags,
         PAGE_SIZE_4K as u64,
         u64::MAX,
@@ -178,4 +178,214 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     });
     assert_eq!(file.read_from(&mut output, &mut 0), Ok(PAGE_SIZE_4K));
     assert_eq!(output, expected);
+}
+
+#[def_test]
+fn read_only_mount_access_reclaims_metadata_without_checkpoint_activity() {
+    // 1152 resident 4-KiB blocks exceed the 4-MiB retention allowance.
+    let (filesystem, private, device, _) =
+        crate::file::read_tests::read_fixture_with_blocks(PAGE_SIZE_4K, 512, 1152);
+    let (super_block, _file) = cached_file(
+        filesystem,
+        private,
+        SuperBlockFlags::RDONLY,
+        OpenFlags::empty(),
+    );
+    let mount = ext4_private(&super_block).unwrap();
+    {
+        let state = mount.read();
+        state.metadata_io.invalidate_all();
+        for block in 0..1152 {
+            drop(
+                state
+                    .read_metadata_block(crate::FilesystemBlock::new(block))
+                    .unwrap(),
+            );
+        }
+        // Reading metadata itself never evicts; maintenance starts at drop.
+        assert_eq!(state.metadata_io.cached_block_count(), 1152);
+    }
+    let reads = device.destinations.lock().len();
+    {
+        let state = mount.read();
+        assert_eq!(state.metadata_io.cached_block_count(), 1088);
+    }
+    {
+        let state = mount.read();
+        assert_eq!(state.metadata_io.cached_block_count(), 1024);
+    }
+    assert_eq!(device.destinations.lock().len(), reads);
+}
+
+#[def_test]
+fn mount_cache_maintenance_preserves_allocator_prefetch_window() {
+    let (filesystem, private, device, _) =
+        crate::file::read_tests::read_fixture_with_blocks(PAGE_SIZE_4K, 512, 1152);
+    let (super_block, _file) = cached_file(
+        filesystem,
+        private,
+        SuperBlockFlags::RDONLY,
+        OpenFlags::empty(),
+    );
+    let mount = ext4_private(&super_block).unwrap();
+    {
+        let state = mount.write();
+        state.metadata_io.invalidate_all();
+        let block = crate::FilesystemBlock::new(0);
+        state.prefetch_metadata_blocks(&[block]).unwrap();
+        for index in 1..1152 {
+            drop(
+                state
+                    .read_metadata_block(crate::FilesystemBlock::new(index))
+                    .unwrap(),
+            );
+        }
+        let reads = device.destinations.lock().len();
+        // Pressure cannot evict the prefetched slot before the allocator's
+        // authoritative re-read inside the same mounted operation.
+        let _allocator = crate::sync::mutex_lock(&state.allocator);
+        drop(state.read_metadata_block(block).unwrap());
+        assert_eq!(device.destinations.lock().len(), reads);
+        assert_eq!(state.metadata_io.cached_block_count(), 1152);
+    }
+    let state = mount.read();
+    // The authoritative re-read earns block 0 a second chance; the other 63
+    // inspected entries can retire after the allocator window closes.
+    assert_eq!(state.metadata_io.cached_block_count(), 1089);
+}
+
+#[derive(Clone, Copy)]
+enum MetadataReadPattern {
+    Cyclic,
+    HotAndCold { first_hot: usize },
+}
+
+enum MetadataReclaimBoundary {
+    EachAccess,
+    EndOfTrace,
+}
+
+#[derive(Default, Debug)]
+struct MetadataReadCounts {
+    hot_reloads: usize,
+    total_reloads: usize,
+    resident_blocks: usize,
+}
+
+/// Counts I/O after warming the same metadata trace. Holding the reference guard
+/// until the end models the old read-only path without periodic cache eviction;
+/// the other run drops a real mount guard after every logical access.
+fn metadata_read_trace(
+    pattern: MetadataReadPattern,
+    boundary: MetadataReclaimBoundary,
+) -> MetadataReadCounts {
+    const WARM_BLOCKS: usize = 1152;
+    const BATCH_BLOCKS: usize = 32;
+    let (filesystem, _inode, device, _) =
+        crate::file::read_tests::read_fixture_with_blocks(PAGE_SIZE_4K, 512, 2304);
+    let mount = Ext4Mount::new(filesystem);
+    let reference = match boundary {
+        MetadataReclaimBoundary::EachAccess => None,
+        MetadataReclaimBoundary::EndOfTrace => Some(mount.read()),
+    };
+    let read_batch = |hot: core::ops::Range<usize>, cold: core::ops::Range<usize>| {
+        let access;
+        let state = match reference.as_ref() {
+            Some(state) => state,
+            None => {
+                access = mount.read();
+                &access
+            }
+        };
+        let before = device.destinations.lock().len();
+        for block in hot {
+            let bytes = state
+                .read_metadata_block(crate::FilesystemBlock::new(block as u64))
+                .unwrap();
+            assert_eq!(bytes.as_ref().len(), PAGE_SIZE_4K);
+        }
+        let hot_reloads = device.destinations.lock().len() - before;
+        for block in cold {
+            drop(
+                state
+                    .read_metadata_block(crate::FilesystemBlock::new(block as u64))
+                    .unwrap(),
+            );
+        }
+        MetadataReadCounts {
+            hot_reloads,
+            total_reloads: device.destinations.lock().len() - before,
+            resident_blocks: state.metadata_io.cached_block_count(),
+        }
+    };
+    read_batch(0..0, 0..WARM_BLOCKS);
+    // Warm the hot subset again after the first maintenance passes. Subsequent
+    // hot misses then measure eviction during the trace, not initial warmup.
+    let first_hot = match pattern {
+        MetadataReadPattern::Cyclic => 0,
+        MetadataReadPattern::HotAndCold { first_hot } => first_hot,
+    };
+    read_batch(first_hot..first_hot + BATCH_BLOCKS, 0..0);
+    let mut counts = MetadataReadCounts::default();
+    match pattern {
+        MetadataReadPattern::Cyclic => {
+            for _ in 0..4 {
+                for first in (0..WARM_BLOCKS).step_by(BATCH_BLOCKS) {
+                    let batch = read_batch(first..first + BATCH_BLOCKS, 0..0);
+                    counts.hot_reloads += batch.hot_reloads;
+                    counts.total_reloads += batch.total_reloads;
+                }
+            }
+        }
+        MetadataReadPattern::HotAndCold { first_hot } => {
+            for round in 0..32 {
+                let first = WARM_BLOCKS + round * BATCH_BLOCKS;
+                let batch = read_batch(
+                    first_hot..first_hot + BATCH_BLOCKS,
+                    first..first + BATCH_BLOCKS,
+                );
+                counts.hot_reloads += batch.hot_reloads;
+                counts.total_reloads += batch.total_reloads;
+            }
+        }
+    }
+    counts.resident_blocks = match reference.as_ref() {
+        Some(state) => state.metadata_io.cached_block_count(),
+        None => mount.read().metadata_io.cached_block_count(),
+    };
+    counts
+}
+
+#[def_test]
+fn metadata_cache_cyclic_reads_measure_capacity_misses_after_warmup() {
+    let reference = metadata_read_trace(
+        MetadataReadPattern::Cyclic,
+        MetadataReclaimBoundary::EndOfTrace,
+    );
+    let mounted = metadata_read_trace(
+        MetadataReadPattern::Cyclic,
+        MetadataReclaimBoundary::EachAccess,
+    );
+    klogger::warn!("metadata cyclic reads: reference={reference:?}, mounted={mounted:?}");
+    assert_eq!(reference.total_reloads, 0);
+    assert!(mounted.total_reloads > 0);
+}
+
+#[def_test]
+fn metadata_cache_retains_reused_hot_blocks_during_cold_stream() {
+    // Heat must not depend on whether a physical key happens to precede or
+    // follow the reclaim cursor when the workload starts.
+    for first_hot in [0, 128, 768] {
+        let pattern = MetadataReadPattern::HotAndCold { first_hot };
+        let reference = metadata_read_trace(pattern, MetadataReclaimBoundary::EndOfTrace);
+        let mounted = metadata_read_trace(pattern, MetadataReclaimBoundary::EachAccess);
+        klogger::warn!(
+            "metadata hot/cold reads at {first_hot}: reference={reference:?}, mounted={mounted:?}"
+        );
+        assert_eq!(reference.hot_reloads, 0);
+        assert_eq!(reference.total_reloads, 1024);
+        assert_eq!(mounted.hot_reloads, 0);
+        assert_eq!(mounted.total_reloads, reference.total_reloads);
+        assert!(mounted.resident_blocks <= 1024);
+    }
 }

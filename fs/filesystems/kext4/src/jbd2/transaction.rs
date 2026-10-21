@@ -18,7 +18,10 @@ use core::fmt;
 use ksync::{Mutex, MutexGuard};
 use ktask::WaitQueue;
 
-use super::{JournalPersistedCommit, TransactionId};
+use super::{
+    JournalPersistedCommit, JournalSuperblock, TransactionId,
+    commit::{journal_checkpoint_target_blocks, journal_checkpoint_target_reached},
+};
 use crate::{Ext4Error, Ext4Result, FilesystemBlock};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -388,6 +391,15 @@ impl fmt::Debug for JournalTransactions {
     }
 }
 
+/// Selected FIFO prefix and the persisted boundary that remains live.
+///
+/// The mount mutation lock must exclude append/checkpoint until this selection
+/// has been written and retired. Merely selecting a prefix frees no log space.
+pub(crate) struct JournalCheckpointBatch {
+    pub(crate) transactions: Vec<(Arc<RuntimeTransaction>, JournalPersistedCommit)>,
+    pub(crate) next_oldest: Option<JournalPersistedCommit>,
+}
+
 impl JournalTransactions {
     /// Creates an unbounded transaction engine for isolated tests.
     #[cfg(unittest)]
@@ -569,6 +581,8 @@ impl JournalTransactions {
     ///
     /// Persistence is performed separately while the same object remains in
     /// this phase. The transition refuses to run while callers hold handles.
+    /// Current running and committing transactions are resolved without
+    /// scanning the checkpoint FIFO; only retries for pending ids search it.
     pub(crate) fn force_commit(
         &self,
         transaction: TransactionId,
@@ -583,22 +597,16 @@ impl JournalTransactions {
         {
             return Ok(commit.clone());
         }
-        if let Some(checkpoint) = inner
-            .checkpoint_transactions
-            .iter()
-            .find(|checkpoint| checkpoint.id() == transaction)
-        {
-            return Ok(checkpoint.clone());
-        }
-        if inner.committing.is_some() {
-            return Err(Ext4Error::JournalBusy);
-        }
-
         if inner
             .running
             .as_ref()
             .is_some_and(|running| running.id() == transaction)
         {
+            // The running slot already identifies this transaction. Searching
+            // older checkpoints first would charge each commit for the backlog.
+            if inner.committing.is_some() {
+                return Err(Ext4Error::JournalBusy);
+            }
             let Some(running) = inner.running.as_ref() else {
                 return Err(Ext4Error::InvalidJournalTransaction);
             };
@@ -613,6 +621,18 @@ impl JournalTransactions {
             return Ok(commit);
         }
 
+        // A retry may refer to an older pending transaction even while another
+        // one is committing, so preserve that lookup before reporting busy.
+        if let Some(checkpoint) = inner
+            .checkpoint_transactions
+            .iter()
+            .find(|checkpoint| checkpoint.id() == transaction)
+        {
+            return Ok(checkpoint.clone());
+        }
+        if inner.committing.is_some() {
+            return Err(Ext4Error::JournalBusy);
+        }
         Err(Ext4Error::InvalidJournalTransaction)
     }
 
@@ -639,6 +659,58 @@ impl JournalTransactions {
             .collect()
     }
 
+    /// Selects enough FIFO work to admit this append and retain a transaction budget.
+    ///
+    /// Only the selected prefix, its successor and the newest evidence are read;
+    /// the unselected suffix is neither snapshotted nor scanned. No I/O runs under
+    /// the transaction lock. The mount mutation lock serializes selection through
+    /// retirement, just as for [`Self::checkpoint_batch`].
+    pub(crate) fn checkpoint_batch_for_append(
+        &self,
+        superblock: &JournalSuperblock,
+        commit: &Arc<RuntimeTransaction>,
+    ) -> Ext4Result<JournalCheckpointBatch> {
+        let inner = lock(&self.inner);
+        check_not_aborted(&inner)?;
+        if !inner
+            .committing
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, commit))
+        {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        }
+        let target =
+            journal_checkpoint_target_blocks(superblock, commit, self.max_reserved_credits)?;
+        let newest = inner
+            .checkpoint_transactions
+            .back()
+            .ok_or(Ext4Error::InvalidJournalTransaction)?
+            .persisted_commit()?
+            .ok_or(Ext4Error::InvalidJournalTransaction)?;
+        let mut pending = inner.checkpoint_transactions.iter();
+        let mut transactions = Vec::new();
+        while let Some(checkpoint) = pending.next() {
+            let persisted = checkpoint
+                .persisted_commit()?
+                .ok_or(Ext4Error::InvalidJournalTransaction)?;
+            transactions.push((checkpoint.clone(), persisted));
+            if journal_checkpoint_target_reached(superblock, &persisted, &newest, target)? {
+                let next_oldest = pending
+                    .next()
+                    .map(|next| {
+                        next.persisted_commit()?
+                            .ok_or(Ext4Error::InvalidJournalTransaction)
+                    })
+                    .transpose()?;
+                return Ok(JournalCheckpointBatch {
+                    transactions,
+                    next_oldest,
+                });
+            }
+        }
+        Err(Ext4Error::InvalidJournalTransaction)
+    }
+
     /// Confirms that this exact transaction object is owned by this journal's
     /// committing phase.
     pub(crate) fn validate_committing(&self, commit: &Arc<RuntimeTransaction>) -> Ext4Result<()> {
@@ -656,6 +728,9 @@ impl JournalTransactions {
     }
 
     /// Moves the committing transaction into the checkpoint queue.
+    ///
+    /// The current owner is checked directly; pending retries retain their
+    /// object-identity check without imposing a FIFO scan on every enqueue.
     pub(crate) fn start_checkpoint(
         &self,
         commit: &Arc<RuntimeTransaction>,
@@ -663,21 +738,25 @@ impl JournalTransactions {
     ) -> Ext4Result<()> {
         let mut inner = lock(&self.inner);
         check_not_aborted(&inner)?;
-        if inner
-            .checkpoint_transactions
-            .iter()
-            .any(|checkpoint| Arc::ptr_eq(checkpoint, commit))
+        if !inner
+            .committing
+            .as_ref()
+            .is_some_and(|committing| Arc::ptr_eq(committing, commit))
         {
-            return Ok(());
+            return if inner
+                .checkpoint_transactions
+                .iter()
+                .any(|checkpoint| Arc::ptr_eq(checkpoint, commit))
+            {
+                Ok(())
+            } else {
+                Err(Ext4Error::InvalidJournalTransaction)
+            };
         }
         let committing = inner
             .committing
             .take()
             .ok_or(Ext4Error::InvalidJournalTransaction)?;
-        if !Arc::ptr_eq(&committing, commit) {
-            inner.committing = Some(committing);
-            return Err(Ext4Error::InvalidJournalTransaction);
-        }
         if let Err(error) = committing.start_checkpoint(Some(persisted)) {
             inner.committing = Some(committing);
             return Err(error);

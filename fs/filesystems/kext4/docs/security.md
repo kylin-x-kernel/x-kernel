@@ -192,7 +192,7 @@ hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
 
 ## 线程安全
 
-运行态 KVFS `SuperBlock` 把无状态 `Ext4SuperOperations` 与唯一 `RwLock<Ext4SbInfo>`
+运行态 KVFS `SuperBlock` 把无状态 `Ext4SuperOperations` 与唯一 `Ext4Mount`（内部 `RwLock<Ext4SbInfo>`）
 分别作为 `s_op`/`s_fs_info` 保存；`s_op` 是所有挂载共享的真正静态表，private object 由
 superblock 独占且只能借用恢复，不存在承载 mount identity 的 operation wrapper 或可逃逸的
 typed owner。所有 inode mapping 也共享静态 `Ext4AddressSpaceOperations`，callback 只从
@@ -280,9 +280,35 @@ Checkpoint 批处理必须保持 FIFO frozen image 写回顺序：选中连续�
 写入成功并 flush 之后，才允许一次持久化日志尾部更新；在尾部 flush 及 recovery 状态处理成功前，不移除
 任何批内事务或回收日志空间。写回中途失败或任一道 flush 失败都保留整批 pending work
 并 abort，禁止在当前 mount 重试已消费的缓存快照；重新挂载依赖保留的日志恢复。
-空间不足时，只回收足够容纳待提交事务且仍保留一个空日志块的最短前缀；剩余事务及其
-policy 不移除。tail 指向 `next_oldest`，journal 必须保持 active，ext4 recovery feature
-不得清除，也不能失效仍有 frozen checkpoint image 的缓存。显式同步仍排空全部队列。
+空间不足时，按待提交事务的实际日志块数加下一笔 transaction credit 上限的最坏编码开销
+选择前缀，目标封顶为 ring 容量减一，始终保留一个空块。`usable_log_capacity()` 是
+预留规则的单一来源，append 准入、过大事务拒绝与目标封顶共用，避免全排空后仍无法
+满足目标的语义漂移。可选预算不能阻塞可容纳的当前
+append；计算使用与日志写入相同的 descriptor/revoke 格式和 checked 算术。完整的下一笔
+预算覆盖共用 credit 池的任意 metadata/revoke 混合，证明见设计文档；ring 容量封顶可能
+削减可选预算，不能据此承诺下一笔免于再次回收。剩余事务及其 policy 不移除。tail 指向 `next_oldest`，journal 必须保持 active，ext4 recovery feature
+不得清除，也不能失效仍有 frozen checkpoint image 的缓存。前缀退休先按涉及的 block key 定向回收
+clean、无 pin 且无后续 ownership 的 entry；后缀或 committing transaction 的缓存不能释放。
+一般缓存清理不以 checkpoint 批次计数触发。`MetadataBlockCache` 从驻留 block payload
+是否超过 4 MiB 软保留额度计算需求；`Ext4Mount` 的读写 guard 在访问结束、仍持有 mount
+保护时最多推进 64 个条目的增量扫描。只读访问无需日志压力即可推进回收。
+每轮固定结束 key，新增高地址不能推迟回绕；dirty/pin/ownership 和 frozen image 不可淘汰，
+预算限制检查数而非成功淘汰数。命中在已有索引锁内设置一位复用标记，首次插入不置位；
+扫描清位并给近期复用条目一次保留机会，仍消耗检查预算，不因未淘汰而额外扫描。
+该位不授予淘汰权限，也不替代 pin/ownership/frozen image 校验；checkpoint 定向回收
+及显式全回收忽略访问位，避免热度阻止明确清理。持续复用可能使软额度长期超出。
+无需求时仅 Relaxed 读取缓存自己的 `AtomicBool` 提示，
+不获取 cache mutex；提示在每次索引增删/失效的同一 cache 临界区内从实际长度更新，
+避免旧扫描覆盖新插入的需求。它不发布 buffer 数据或授予淘汰权限，并发旧值只允许
+推迟维护或触发一次多余复核。真正的需求复核、游标和资格检查在同一 cache mutex 下进行；
+不持有该锁执行设备 I/O。普通缓存 read/insert 不淘汰；allocator 的预取和临界区重读
+始终处于同一 mount 写访问内，guard 的清理在 allocator 锁释放后执行，读访问的清理也
+不能与 allocator mutation 交错。显式全回收和整个缓存失效重置游标，syncfs 仍排空并全局回收。
+没有周期全扫或 checkpoint 次数状态。软保留额度不包括索引/frozen image 开销，不能保证
+硬内存上界：pin/事务持有、单次访问的大量插入或新增速度超过扫描速度都可能造成超额；
+没有后续访问也没有自动进度。尚无通用 shrinker、容量准入或内存压力反馈。
+空间目标限制回收完成条件，但 mount 写锁内的 I/O 仍可能较长，
+该策略不保证设备故障下的延迟上界。
 生产 checkpoint entry 必须先取得 persisted evidence 再在事务锁内入队；缺少证据属于
 内部不变量破坏，不能按仍在提交的 `JournalBusy` 状态跳过。写回前须确认每笔事务的
 policy 记录存在。`PreserveDuringRecovery` 追加后在 mount 写锁下同步排空，若批内存在

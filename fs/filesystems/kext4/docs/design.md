@@ -314,16 +314,86 @@ transaction。新 handle 加入前按 journal 格式开销采用约三分之一�
 容量。不再以固定 operation 数或“半个 journal”触发普通提交。home-block checkpoint
 仍留在 FIFO queue；`syncfs` 和 KVFS unmount writeback 会先提交当前 running transaction，
 再 drain 全部 pending checkpoint；普通 mount 在 dentry eviction 后再次执行同一同步路径，
-以覆盖 final inode eviction 产生的新 metadata。checkpoint worker 在 mount 写锁下快照当前
-FIFO 中已提交事务：显式同步选取全部队列；journal 空间不足时，按待提交事务的 descriptor、
-metadata、revoke 和 commit 块开销选取足够释放空间的最短连续前缀，仍保留一个空日志块。
-选中事务按顺序写回 frozen metadata（同一块的较新版本最后写入），
-统一执行一次 home-block flush，再一次更新并 flush journal tail。只有这两道持久化屏障
-及末尾 recovery 状态处理成功后，才逐个释放事务及其日志空间；写回、flush 或尾部更新
-失败会保留整批 pending work 并 abort journal。批大小由当前占用的日志空间自然限制，
-不跨越未提交的 running/committing transaction；revoke 仍通过原有缓存规则抑制旧版本写回。
-journal 空间不足时提交者同步处理选中的前缀后重试 append，后续事务继续留在 FIFO。
-当前仍由调用者同步驱动，没有 background worker 和基于时间的 age trigger。
+以覆盖 final inode eviction 产生的新 metadata。正常提交直接检查 running/committing 槽位，
+只有针对旧 pending transaction 的重试才扫描 FIFO，避免每次提交都承担 backlog 长度的开销。
+
+checkpoint worker 在 mount 写锁下执行两类工作：显式同步快照全部队列并排空；append
+返回 `JournalBusy` 时，选取达到空间目标的最短连续前缀。令 `A` 为当前 frozen transaction
+实际需要的 descriptor、metadata、revoke 和 commit 块数，`B` 为 mounted transaction credit
+上限对应的最坏日志开销，`C` 为可用 ring 总块数，则回收目标为 `min(C - 1, A + B)` 个可写
+日志块；物理 free space 必须严格大于该目标，继续保留一个空块。每个 credit 最多拥有一个
+metadata block 或 revoke record；若 descriptor 容纳 `D` 个 tag，credit 上限为 `L`，则
+`B = L + ceil(L / D) + 1`。若 metadata 块数为 `m`、revoke 记录数为 `r`，revoke 每块
+容量为 `R`，则 credit 计费保证 `m + r <= L`，格式容量校验保证 `D >= 1`、`R >= 1`。
+因此实际编码开销满足：
+
+```text
+m + ceil(m / D) + ceil(r / R) + 1
+    <= m + r + ceil(m / D) + 1
+    <= L + ceil(L / D) + 1 = B
+```
+
+这个上界不要求 `R` 与 `D` 具有大小关系。混合记录的 descriptor/revoke 控制块数可能比
+全 metadata 的 descriptor 数多，但把一个 metadata credit 换成 revoke 至少省去一个
+完整 metadata 数据块，足以支付最多一个 revoke 日志块；末尾 `+1` 是 commit record。
+因此预算覆盖任意合法混合，无须额外增加 revoke 份额。小 ring 可通过 `C - 1` 上限削减
+下一笔的可选预算，但不能削减当前 append 的必需空间；截断后不保证下一笔免于再次回收。
+`usable_log_capacity()` 统一定义 ring 容量减去一个预留空块，append 准入、单笔事务
+过大检查和 checkpoint 目标封顶均使用该值，确保全排空后目标始终可达。
+
+这是空间不足后的回收批次目标，不是 handle 准入时的日志空间预留协议。
+`begin` / `reserve_more` 当前检查事务 credits，未发生 `JournalBusy` 的 append 不建立
+下一笔预留；commit 仍可能在 metadata 已修改后推动同步 checkpoint。将空间保证纳入
+事务准入需要同时覆盖 handle 扩展、running/committing 额度及释放生命周期，独立于本策略。
+
+压力选择只读取选中前缀、首笔后缀和队尾凭据，不先复制整个队列。选中事务按顺序写回
+frozen metadata（同一块的较新版本最后写入），统一执行一次 home-block flush，再一次更新
+并 flush journal tail。只有这两道持久化屏障及适用的 recovery 状态处理成功后，才逐个释放
+事务及其日志空间；写回、flush 或尾部更新失败会保留选中和未选中的全部 pending work 并
+abort journal。保留后缀时先按退休事务涉及的 block key 定向回收 clean、无 pin、无新 owner 的
+metadata cache entry。checkpoint 只负责释放退休事务的占用和定向回收，不用批次计数
+驱动一般缓存清理。显式 `sync_filesystem` 在 drain 和最终 flush 后保留全缓存回收，
+checkpoint worker 自身只定向处理退休事务，不因选中了全部 FIFO 而扫描无关 cache。
+恢复标志落盘要求的缓存失效继续遵循原有一致性协议。
+
+普通缓存的需求由 `MetadataBlockCache` 自身计算：当前驻留 block payload 超过 4 MiB
+软保留额度时，需要推进回收；不维护 checkpoint 批次或预算镜像。
+缓存另有一个 `has_reclaim_demand: AtomicBool` 提示，用于让没有回收需求的 mount
+访问跳过 cache mutex。所有索引插入、删除和失效在已有 cache mutex 内根据实际长度
+更新提示；不在普通 cache 命中或 mount 访问上递增计数。提示只使用 Relaxed 读写，
+不发布 buffer 内容、不替代索引或淘汰资格的锁保护；观察到并发变化前的提示可能推迟
+当前维护或触发多余的加锁复核，不影响缓存一致性。
+`Ext4Mount` 是 KVFS superblock 的唯一挂载私有对象，内部仍用 `RwLock<Ext4SbInfo>`
+保护 core；读写访问 guard 在结束时、释放 mount 保护之前，向 cache 提供最多检查 64
+条目的扫描预算。只读 mount 访问同样提供入口，不需要先发生日志压力或 syncfs。
+
+cache mutex 统一保护索引、需求复核、游标和淘汰资格；预算按检查条目计费，dirty、pin、
+后续 ownership 和 frozen image 都保留。游标每轮固定结束 block key，避免持续新增高地址
+推迟回绕。索引条目另带一个由同一 mutex 保护的 `was_referenced` 位：首次插入不算复用，
+后续命中在已有索引临界区内置位，不增加锁或原子读改写。增量扫描遇到置位条目时清位，
+本次保留并继续推进游标，仍计入 64 项检查预算；之后没有命中的条目才按原有资格淘汰。
+这是一位 second-chance 策略，不维护精确 LRU 链表，也不在单次调用内绕回重扫来凑淘汰数。
+热点混合冷访问及超容量循环访问的请求计数见
+[元数据缓存回收验证](metadata-cache-reclaim-validation.md)。
+checkpoint 定向回收和显式全量回收不受访问位延迟，仍检查 pin/ownership/frozen image。
+一次访问只做有界扫描，不周期性全扫；剩余需求由后续 mount 访问继续推进。
+普通 read/insert 自身不淘汰。allocator mutation 持有 mount 写 guard，回收在它的 allocator
+锁及预取/权威重读窗口结束后执行；读 guard 的回收仍排斥 allocator mutation。回收不做
+设备 I/O，因此不把新的冷读插入 allocator 临界区。显式全回收和失效重置扫描游标。
+
+4 MiB 仅为 resident block payload 的保留策略，不统计 frozen image 和索引开销，不是
+硬内存上限或实测最优值；64 仅限制单次访问的检查工作量，不保证成功淘汰数。全部条目
+被 pin/事务持有、单次访问大量新增条目或新增速度持续超过扫描速度时，仍可超过额度；
+被持续复用的条目也可能反复获得 second chance，额度不是强制驱逐热点的目标；
+没有后续访问时也不主动运行回收。本实现没有通用 shrinker、容量准入或后台线程，
+但不再用日志 checkpoint 节奏代替普通 cache 的回收需求。
+批大小由空间目标和 FIFO 顺序决定，不跨越未提交的 running/committing transaction；
+revoke 仍通过原有缓存规则抑制旧版本写回。提交者完成前缀回收后重试 append，后续事务继续留在 FIFO。
+
+这在“仅够本次 append”的频繁屏障和“全部排空”的长时间同步等待之间保留下一笔事务的
+空间预算，没有新增固定比例水位、后台 worker 或 age trigger。大事务或很小的 ring 仍可能
+需要排空；mount 写锁仍覆盖设备 I/O，不提供单次提交延迟上界。吞吐和尾延迟是否改善须与
+最短前缀及全量排空基线分别复测，预算本身不构成性能收益证明。
 
 只有批次排空 FIFO 时，才按批末事务策略处理 recovery 状态；保留后缀时用 `next_oldest`
 把日志尾部推进到剩余首笔事务，保持 journal active 和 ext4 recovery evidence，不执行缓存
@@ -678,7 +748,7 @@ pending extent，只有确认查询范围内没有后续映射时才添加 `LAST
 
 ## 并发模型
 
-运行态仍需联合修改 superblock/group metadata 的 mutation 当前通过 kext4 挂载级 `RwLock`
+运行态仍需联合修改 superblock/group metadata 的 mutation 当前通过 `Ext4Mount` 内的挂载级 `RwLock`
 write guard 串行化；只读调用以及 delalloc reservation 可共享 read guard，后者再使用独立
 reservation mutex。KVFS inode cache mutex 只保护 `New/Live/Freeing` identity state；每个 cache
 slot 使用自己的等待队列，等待发生在释放 cache mutex 之后，因此一个 inode 的状态变化不会
