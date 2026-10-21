@@ -50,7 +50,7 @@ fn tmpfs_page_quota_returns_enospc_and_truncate_releases() {
     let fs = shmem::new_tmpfs_with_type_and_page_limit(
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
-        Some(1),
+        1,
     );
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
@@ -77,9 +77,9 @@ fn tmpfs_page_quota_returns_enospc_and_truncate_releases() {
 }
 
 #[def_test]
-fn tmpfs_statfs_reports_zero_for_linux_unlimited_quota() {
+fn tmpfs_unlimited_page_quota_preserves_default_inode_capacity() {
     let fs =
-        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), None);
+        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), 0);
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
     let file = kvfs::Filename::new("unlimited")
@@ -97,6 +97,9 @@ fn tmpfs_statfs_reports_zero_for_linux_unlimited_quota() {
     assert_eq!(stat.blocks, 0);
     assert_eq!(stat.blocks_free, 0);
     assert_eq!(stat.blocks_available, 0);
+    let inode_limit = (global_allocator().total_pages() / 2).min(quota::MAX_INODES) as u64;
+    assert_eq!(stat.file_count, inode_limit);
+    assert_eq!(stat.free_file_count, inode_limit.saturating_sub(2));
     assert_eq!(file.write(b"page"), Ok(4));
 }
 
@@ -105,7 +108,7 @@ fn tmpfs_buffered_read_hole_does_not_consume_page_quota() {
     let fs = shmem::new_tmpfs_with_type_and_page_limit(
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
-        Some(1),
+        1,
     );
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
@@ -145,7 +148,7 @@ fn tmpfs_batched_read_of_holes_preserves_remaining_quota() {
     let fs = shmem::new_tmpfs_with_type_and_page_limit(
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
-        Some(2),
+        2,
     );
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
@@ -178,7 +181,7 @@ fn tmpfs_statfs_reports_page_quota() {
     let fs = shmem::new_tmpfs_with_type_and_page_limit(
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
-        Some(2),
+        2,
     );
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
@@ -207,7 +210,7 @@ fn tmpfs_page_limit_can_be_reconfigured() {
     let fs = shmem::new_tmpfs_with_type_and_page_limit(
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
-        Some(1),
+        1,
     );
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
@@ -244,7 +247,7 @@ fn tmpfs_page_limit_rejects_remount_below_current_use() {
     let fs = shmem::new_tmpfs_with_type_and_page_limit(
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
-        Some(2),
+        2,
     );
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
@@ -287,7 +290,7 @@ fn tmpfs_page_limit_rejects_remount_below_current_use() {
 #[def_test]
 fn tmpfs_page_limit_rejects_retroactive_limit_after_unlimited() {
     let fs =
-        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), None);
+        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), 0);
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
         .open_with_flags_at(
@@ -448,7 +451,7 @@ fn create_copy_test_file(root: &kvfs::Path, name: &str) -> Arc<VfsFile> {
 #[def_test]
 fn tmpfs_sparse_copy_reuses_destination_pages_without_charging_the_source() {
     for (page_limit, pages) in [(1, 1), (66, 65)] {
-        let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), Some(page_limit));
+        let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), page_limit);
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
         let input = create_copy_test_file(&root, "source");
@@ -481,7 +484,7 @@ fn tmpfs_sparse_copy_reuses_destination_pages_without_charging_the_source() {
 fn tmpfs_batched_mixed_read_preserves_eof_and_capacity() {
     let page = memaddr::PAGE_SIZE_4K;
     let pages = 2 * pagecache::FolioBatch::CAPACITY + 3;
-    let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), Some(pages));
+    let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), pages);
     let mount = Mount::new_root(&fs);
     let file = create_copy_test_file(&mount.root_path(), "mixed");
     for index in (0..pages).step_by(2) {

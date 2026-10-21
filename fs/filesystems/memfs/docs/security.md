@@ -3,9 +3,9 @@
 ## 测试审计范围
 
 审计范围包含生产源码及 `ut-tests/lib.rs`、`ut-tests/shmem.rs`、
-`ut-tests/quota.rs` 的 guest 用例和 fixture。测试仍为原父模块的私有子模块，
+`ut-tests/quota.rs`、`ut-tests/inode_quota.rs` 的 guest 用例和 fixture。测试仍为原父模块的私有子模块，
 仅在 `cfg(unittest)` 下编译；提取 quota 测试不改变容量计数、失败回滚、
-生产可见性或现有 lint 例外。三组测试没有新增 unsafe 或 host 注册。
+生产可见性或现有 lint 例外。测试没有新增 unsafe 或 host 注册。
 
 ## 信任模型
 
@@ -23,8 +23,8 @@
 - inode-owned `kvfs::AddressSpace` 暴露的 MM shared object identity
 - create/mkdir/mknod/symlink callback 的 mode 与 `&Cred`
 - Superblocks created by the `tmpfs` nodev factory.
-- tmpfs mount data, including `size` / `nr_blocks`, root metadata options, and
-  remount size changes.
+- tmpfs mount data, including `size` / `nr_blocks` / `nr_inodes`, root metadata
+  options, and remount capacity changes.
 
 ## unsafe 代码清单
 
@@ -52,9 +52,12 @@
 - `size=0` / `nr_blocks=0` 是显式 unlimited。`statfs()` 对 unlimited 报 0 个
   block 是 Linux 兼容行为，不代表容量为零或写入必须失败；
 - mount-data parser 只接受本文件系统明确支持的选项并校验取值；`mode`、`uid`、
-  `gid` 用于构造 root metadata；`nr_inodes=0` 表示 unlimited，非零值因
-  尚无有限 inode 计账而返回 Unsupported，不能成功接受无效上限；`noswap` 因无
-  swap 后端而作为 no-op 接受；
+  `gid` 用于构造 root metadata；`nr_inodes=0` 表示 unlimited，非零上限不得
+  超过 `usize::MAX / 1024`，数值及单位换算检查溢出；`noswap` 因无 swap 后端
+  而作为 no-op 接受；
+- inode 与额外硬链接在发布前收费，最后一个名字删除后仍有引用时保留 inode
+  额度；失败发布撤销目录项并归还额度；
+- 页和 inode 限额在同一 stats 写锁下全部校验后再更新，失败时两项都不改变；
 - quota charge/release 必须由 mapping ownership 驱动：folio 退出 cache 时释放，
   memfs 不得维护第二套 page accounting。
 
@@ -71,7 +74,11 @@
   fixed during inode construction and retained once by each mapping.
 - Admission/removal run under the cache index mutex and may take the quota limit
   lock; they never enter mappings or lock folios. Remount/statfs never acquire
-  cache locks. One limit snapshot supplies both statfs total and free pages.
+  cache locks. One stats snapshot supplies both page and inode capacities.
+- Link removal orders locks as metadata → stats. Final inode destruction releases
+  the slab lock before returning its allocation charge; admission releases stats
+  before taking slab. The number allocator holds no inode reference, so final
+  reclamation follows owned references without a reference-count snapshot.
 - Every winning identity is charged once, and removal returns capacity even if
   an external folio reference survives. No page or entry carries a quota Arc.
 - Sparse-hole handling belongs to memfs's read operation. Cache access retries
@@ -145,9 +152,10 @@
   anonymous-inode 类型。
 - mounted tmpfs quota 不提供 swap-out；无 swap 时已 resident 的 InMemory 数据仍
   不能被通用 clean-page reclaim 丢弃。
-- anonymous shmem/memfd instance 目前不套用 mounted tmpfs 的 size 默认值。
+- anonymous shmem/memfd instance 不套用 mounted tmpfs 的 page/inode 默认限额。
 - resident-folio quota 不覆盖 inode/dentry 元数据和 symlink target String（包括长目标），
-  也不严格限制未发布候选页或已脱离 mapping 的外部物理引用。
+  也不严格限制未发布候选页或已脱离 mapping 的外部物理引用。inode-space
+  配额限制节点及额外链接数量，不代表实际堆字节数；当前不支持 xattr。
 - `memfs` regular-file 数据路径依赖 KFS `AddressSpace` 及其私有 page-cache storage；
   `MemoryNode` 自身不直接保存普通文件数据页。
 
@@ -166,8 +174,8 @@
 - quota 是否按实际 folio 计数，truncate/final eviction 是否释放容量。
 - `statfs` 是否报告 quota 总量和剩余量。
 
-Mounted tmpfs accepts `nr_inodes=0` as unlimited; nonzero inode limits remain
-unsupported. A file-backed fault that exhausts resident capacity becomes
+Finite inode limits reject excess creation and additional hard links with
+`ENOSPC`; `nr_inodes=0` selects unlimited. A file-backed fault that exhausts resident capacity becomes
 `BusError` and delivers `SIGBUS`; ordinary buffered writes still return `ENOSPC`.
 
 Ordinary reads and copy_file_range use the same filesystem-owned sparse reader.

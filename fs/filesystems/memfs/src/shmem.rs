@@ -19,7 +19,10 @@ use linux_raw_sys::general::{
     O_RDWR,
 };
 
-use crate::{MemoryFs, MemoryNode, TMPFS_MAGIC, TMPFS_TYPE, quota::PageQuota};
+use crate::{
+    MemoryFs, MemoryNode, TMPFS_MAGIC, TMPFS_TYPE,
+    quota::{MAX_INODES, TmpfsAccounting},
+};
 
 bitflags::bitflags! {
     /// Memfd seal bits stored on a shmem inode.
@@ -38,31 +41,46 @@ bitflags::bitflags! {
     }
 }
 
-/// Creates a test-only tmpfs superblock with the Linux-style default size.
+/// Creates a test-only tmpfs superblock with the default size.
 ///
 /// Production mounts construct their superblock from parsed mount context.
-/// The default is one half of the allocatable physical memory. Like Linux,
-/// this is a per-superblock quota rather than a reservation.
+/// The default is one half of the allocatable physical memory, with zero
+/// selecting unlimited. This is a per-superblock quota, not a reservation.
 #[cfg(unittest)]
 pub(crate) fn new_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
     let page_limit = default_tmpfs_page_limit(global_allocator().total_pages());
-    new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, superblock_flags, Some(page_limit))
+    new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, superblock_flags, page_limit)
 }
 
 pub(crate) fn new_anonymous_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, superblock_flags, None)
+    new_tmpfs_with_type_and_mount_options(
+        &TMPFS_TYPE,
+        superblock_flags,
+        TmpfsMountOptions {
+            page_limit: 0,
+            inode_limit: 0,
+            root_mode: default_tmpfs_root_mode(),
+            root_uid: 0,
+            root_gid: 0,
+        },
+    )
 }
 
+/// Creates a test tmpfs with the requested page limit and the default inode limit.
+///
+/// Zero disables only the page limit; inode capacity is selected independently.
+#[cfg(unittest)]
 pub(crate) fn new_tmpfs_with_type_and_page_limit(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
-    page_limit: Option<usize>,
+    page_limit: usize,
 ) -> Arc<SuperBlock> {
     new_tmpfs_with_type_and_mount_options(
         file_system_type,
         superblock_flags,
         TmpfsMountOptions {
             page_limit,
+            inode_limit: default_tmpfs_page_limit(global_allocator().total_pages()).min(MAX_INODES),
             root_mode: default_tmpfs_root_mode(),
             root_uid: 0,
             root_gid: 0,
@@ -76,18 +94,21 @@ pub(crate) fn new_tmpfs_with_type_and_mount_options(
     superblock_flags: SuperBlockFlags,
     mount_options: TmpfsMountOptions,
 ) -> Arc<SuperBlock> {
-    MemoryFs::new_with_name_superblock_flags_root_metadata_and_page_quota(
+    MemoryFs::new_with_name_superblock_flags_root_metadata_and_accounting(
         file_system_type,
         TMPFS_MAGIC,
         superblock_flags,
         mount_options.root_mode,
         mount_options.root_uid,
         mount_options.root_gid,
-        Some(Arc::new(PageQuota::new(mount_options.page_limit))),
+        Some(Arc::new(TmpfsAccounting::new(
+            mount_options.page_limit,
+            mount_options.inode_limit,
+        ))),
     )
 }
 
-/// Returns the default Linux tmpfs page limit for a machine.
+/// Returns half the allocatable pages; zero selects unlimited capacity.
 fn default_tmpfs_page_limit(total_pages: usize) -> usize {
     total_pages / 2
 }
@@ -96,17 +117,11 @@ fn default_tmpfs_root_mode() -> NodePermission {
     NodePermission::from_bits_truncate(0o1777)
 }
 
-/// A page limit explicitly supplied in a tmpfs mount transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RequestedPageLimit {
-    Unlimited,
-    Pages(usize),
-}
-
 /// Validated tmpfs parameters used to construct one superblock.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TmpfsMountOptions {
-    page_limit: Option<usize>,
+    page_limit: usize,
+    inode_limit: usize,
     root_mode: NodePermission,
     root_uid: u32,
     root_gid: u32,
@@ -116,50 +131,51 @@ pub(crate) struct TmpfsMountOptions {
 ///
 /// `None` in `requested_page_limit` means the transaction did not request a new
 /// size. A new mount then uses `default_page_limit`; a remount leaves the
-/// current limit unchanged.
+/// current limit unchanged. Zero selects unlimited in either dimension.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct TmpfsContextOptions {
     default_page_limit: usize,
-    requested_page_limit: Option<RequestedPageLimit>,
+    requested_page_limit: Option<usize>,
+    requested_inode_limit: Option<usize>,
     root_mode: NodePermission,
     root_uid: u32,
     root_gid: u32,
 }
 
 impl TmpfsContextOptions {
-    /// Returns the limit to install for a new mount.
-    pub(super) fn mount_page_limit(&self) -> Option<usize> {
-        match self.requested_page_limit {
-            Some(RequestedPageLimit::Pages(pages)) => Some(pages),
-            Some(RequestedPageLimit::Unlimited) => None,
-            None => Some(self.default_page_limit),
-        }
+    /// Returns a requested inode limit; zero explicitly selects unlimited.
+    pub(super) fn reconfigure_inode_limit(&self) -> Option<usize> {
+        self.requested_inode_limit
+    }
+
+    /// Returns the limit for a new mount, with zero selecting unlimited.
+    pub(super) fn mount_page_limit(&self) -> usize {
+        self.requested_page_limit.unwrap_or(self.default_page_limit)
     }
 
     /// Returns the parameters used to construct a new tmpfs superblock.
     pub(super) fn mount_options(&self) -> TmpfsMountOptions {
         TmpfsMountOptions {
             page_limit: self.mount_page_limit(),
+            inode_limit: self
+                .requested_inode_limit
+                .unwrap_or(self.default_page_limit.min(MAX_INODES)),
             root_mode: self.root_mode,
             root_uid: self.root_uid,
             root_gid: self.root_gid,
         }
     }
 
-    /// Returns `Some(new_limit)` only when a remount requested a size change.
-    pub(super) fn reconfigure_page_limit(&self) -> Option<Option<usize>> {
-        match self.requested_page_limit {
-            Some(RequestedPageLimit::Pages(pages)) => Some(Some(pages)),
-            Some(RequestedPageLimit::Unlimited) => Some(None),
-            None => None,
-        }
+    /// Returns a requested page limit; zero explicitly selects unlimited.
+    pub(super) fn reconfigure_page_limit(&self) -> Option<usize> {
+        self.requested_page_limit
     }
 }
 
 /// Parses tmpfs mount options used by this implementation.
 ///
-/// `mode`, `uid`, and `gid` select the root inode's metadata. `nr_inodes` is
-/// accepts zero (unlimited); finite inode limits return `Unsupported`.
+/// `mode`, `uid`, and `gid` select the root inode's metadata. `nr_inodes`
+/// bounds inode space, with zero selecting unlimited.
 pub(super) fn parse_tmpfs_context_options(
     data: Option<&[u8]>,
     total_pages: usize,
@@ -167,6 +183,7 @@ pub(super) fn parse_tmpfs_context_options(
     let mut options = TmpfsContextOptions {
         default_page_limit: default_tmpfs_page_limit(total_pages),
         requested_page_limit: None,
+        requested_inode_limit: None,
         root_mode: default_tmpfs_root_mode(),
         root_uid: 0,
         root_gid: 0,
@@ -193,9 +210,7 @@ pub(super) fn parse_tmpfs_context_options(
         } else if let Some(value) = option.strip_prefix(b"gid=") {
             options.root_gid = parse_id(value)?;
         } else if let Some(value) = option.strip_prefix(b"nr_inodes=") {
-            if parse_inode_limit(value)? != 0 {
-                return Err(VfsError::Unsupported);
-            }
+            options.requested_inode_limit = Some(parse_inode_limit(value)?);
         } else if option == b"noswap" {
             // X-Kernel tmpfs has no swap backend, so Linux's `noswap` policy is
             // already in effect. Accept the flag without adding a second policy bit.
@@ -206,51 +221,56 @@ pub(super) fn parse_tmpfs_context_options(
     Ok(options)
 }
 
-fn parse_size_page_limit(value: &[u8], total_pages: usize) -> VfsResult<RequestedPageLimit> {
-    let (number, suffix) = split_number_and_suffix(value)?;
-    let number = parse_decimal_u64(number)?;
-    let multiplier = if suffix == b"%" {
-        1
-    } else {
-        parse_suffix_multiplier(suffix)?
-    };
-    if number == 0 {
-        return Ok(RequestedPageLimit::Unlimited);
-    }
-
-    if suffix == b"%" {
+fn parse_size_page_limit(value: &[u8], total_pages: usize) -> VfsResult<usize> {
+    let pages = if let Some(percent) = value.strip_suffix(b"%") {
+        let percent = parse_memory_quantity(percent)?;
         let total_pages = u64::try_from(total_pages).map_err(|_| VfsError::InvalidInput)?;
-        let pages = total_pages
-            .checked_mul(number)
+        total_pages
+            .checked_mul(percent)
             .map(|pages| pages.div_ceil(100))
-            .ok_or(VfsError::InvalidInput)?;
-        return requested_pages(pages);
-    }
-
-    let bytes = number
-        .checked_mul(multiplier)
-        .ok_or(VfsError::InvalidInput)?;
-    let pages = bytes.div_ceil(memaddr::PAGE_SIZE_4K as u64);
-    requested_pages(pages)
+            .ok_or(VfsError::InvalidInput)?
+    } else {
+        parse_memory_quantity(value)?.div_ceil(memaddr::PAGE_SIZE_4K as u64)
+    };
+    usize::try_from(pages).map_err(|_| VfsError::InvalidInput)
 }
 
-fn parse_block_page_limit(value: &[u8]) -> VfsResult<RequestedPageLimit> {
-    let (number, suffix) = split_number_and_suffix(value)?;
-    let number = parse_decimal_u64(number)?;
-    let multiplier = parse_suffix_multiplier(suffix)?;
-    if number == 0 {
-        return Ok(RequestedPageLimit::Unlimited);
+fn parse_block_page_limit(value: &[u8]) -> VfsResult<usize> {
+    let pages = parse_memory_quantity(value)?;
+    if pages > isize::MAX as u64 {
+        return Err(VfsError::InvalidInput);
     }
-
-    let pages = number
-        .checked_mul(multiplier)
-        .ok_or(VfsError::InvalidInput)?;
-    requested_pages(pages)
+    usize::try_from(pages).map_err(|_| VfsError::InvalidInput)
 }
 
-fn parse_inode_limit(value: &[u8]) -> VfsResult<u64> {
-    let (number, suffix) = split_number_and_suffix(value)?;
-    let number = parse_decimal_u64(number)?;
+fn parse_inode_limit(value: &[u8]) -> VfsResult<usize> {
+    let count = parse_memory_quantity(value)?;
+    let count = usize::try_from(count).map_err(|_| VfsError::InvalidInput)?;
+    if count > MAX_INODES {
+        return Err(VfsError::InvalidInput);
+    }
+    Ok(count)
+}
+
+/// Parses a capacity value before the option-specific unit and range checks.
+fn parse_memory_quantity(value: &[u8]) -> VfsResult<u64> {
+    // Detect the numeric base before consuming one binary size suffix.
+    let (digits, radix) = if let Some(digits) = value.strip_prefix(b"0x") {
+        (digits, 16)
+    } else if let Some(digits) = value.strip_prefix(b"0X") {
+        (digits, 16)
+    } else if value.starts_with(b"0") {
+        (value, 8)
+    } else {
+        (value, 10)
+    };
+    let split_at = digits
+        .iter()
+        .position(|byte| !char::from(*byte).is_digit(radix))
+        .unwrap_or(digits.len());
+    let (number, suffix) = digits.split_at(split_at);
+    let number = core::str::from_utf8(number).map_err(|_| VfsError::InvalidInput)?;
+    let number = u64::from_str_radix(number, radix).map_err(|_| VfsError::InvalidInput)?;
     let multiplier = parse_suffix_multiplier(suffix)?;
     number.checked_mul(multiplier).ok_or(VfsError::InvalidInput)
 }
@@ -277,20 +297,10 @@ fn parse_suffix_multiplier(suffix: &[u8]) -> VfsResult<u64> {
         b"m" | b"M" => Ok(1024 * 1024),
         b"g" | b"G" => Ok(1024 * 1024 * 1024),
         b"t" | b"T" => Ok(1024_u64 * 1024 * 1024 * 1024),
+        b"p" | b"P" => Ok(1_u64 << 50),
+        b"e" | b"E" => Ok(1_u64 << 60),
         _ => Err(VfsError::InvalidInput),
     }
-}
-
-fn split_number_and_suffix(value: &[u8]) -> VfsResult<(&[u8], &[u8])> {
-    let split_at = value
-        .iter()
-        .position(|byte| !byte.is_ascii_digit())
-        .unwrap_or(value.len());
-    let number = &value[..split_at];
-    if number.is_empty() {
-        return Err(VfsError::InvalidInput);
-    }
-    Ok((number, &value[split_at..]))
 }
 
 fn parse_decimal_u64(value: &[u8]) -> VfsResult<u64> {
@@ -314,11 +324,6 @@ fn parse_octal_u32(value: &[u8]) -> VfsResult<u32> {
             .ok_or(VfsError::InvalidInput)?;
     }
     Ok(number)
-}
-
-fn requested_pages(pages: u64) -> VfsResult<RequestedPageLimit> {
-    let pages = usize::try_from(pages).map_err(|_| VfsError::InvalidInput)?;
-    Ok(RequestedPageLimit::Pages(pages))
 }
 
 /// Kind of shmem object represented by a tmpfs-backed inode.

@@ -30,39 +30,75 @@ fn memfd_files_express_file_copy_support() {
 
 #[def_test]
 fn tmpfs_context_defaults_to_half_of_total_pages() {
-    let options = parse_tmpfs_context_options(None, 256).unwrap();
+    for (total_pages, limit) in [(2, 1), (3, 1), (256, 128)] {
+        let options = parse_tmpfs_context_options(None, total_pages).unwrap();
+        assert_eq!(options.mount_page_limit(), limit);
+        assert_eq!(options.reconfigure_page_limit(), None);
+        assert_eq!(options.mount_options().inode_limit, limit);
+        assert_eq!(options.reconfigure_inode_limit(), None);
+    }
+}
 
-    assert_eq!(options.mount_page_limit(), Some(128));
-    assert_eq!(options.reconfigure_page_limit(), None);
+#[def_test]
+fn tmpfs_zero_default_page_limit_allows_writes() {
+    for total_pages in [0, 1] {
+        let options = parse_tmpfs_context_options(None, total_pages).unwrap();
+        assert_eq!(options.mount_page_limit(), 0);
+        assert_eq!(options.reconfigure_page_limit(), None);
+        assert_eq!(options.mount_options().inode_limit, 0);
+        assert_eq!(options.reconfigure_inode_limit(), None);
+
+        let fs = new_tmpfs_with_type_and_mount_options(
+            &TMPFS_TYPE,
+            SuperBlockFlags::empty(),
+            options.mount_options(),
+        );
+        let root = Mount::new_root(&fs).root_path();
+        let file = kvfs::Filename::new("zero-default")
+            .open_with_flags_at(
+                &root,
+                &root,
+                O_RDWR | O_CREAT | O_EXCL,
+                NodePermission::from_bits_truncate(0o600),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap();
+        assert_eq!(file.write(b"page"), Ok(4));
+
+        let explicit = parse_tmpfs_context_options(Some(b"nr_blocks=1"), total_pages).unwrap();
+        assert_eq!(explicit.mount_page_limit(), 1);
+        assert_eq!(explicit.reconfigure_page_limit(), Some(1));
+    }
 }
 
 #[def_test]
 fn tmpfs_context_parses_size_and_block_limits() {
     let options = parse_tmpfs_context_options(Some(b"size=8192\0"), 256).unwrap();
-    assert_eq!(options.mount_page_limit(), Some(2));
-    assert_eq!(options.reconfigure_page_limit(), Some(Some(2)));
+    assert_eq!(options.mount_page_limit(), 2);
+    assert_eq!(options.reconfigure_page_limit(), Some(2));
 
     let options = parse_tmpfs_context_options(Some(b"size=1m\0"), 256).unwrap();
-    assert_eq!(options.mount_page_limit(), Some(256));
+    assert_eq!(options.mount_page_limit(), 256);
 
     let options = parse_tmpfs_context_options(Some(b"size=50%\0"), 256).unwrap();
-    assert_eq!(options.mount_page_limit(), Some(128));
+    assert_eq!(options.mount_page_limit(), 128);
 
     let options = parse_tmpfs_context_options(Some(b"nr_blocks=3\0"), 256).unwrap();
-    assert_eq!(options.mount_page_limit(), Some(3));
+    assert_eq!(options.mount_page_limit(), 3);
 
     let options = parse_tmpfs_context_options(Some(b"nr_blocks=1k\0"), 256).unwrap();
-    assert_eq!(options.mount_page_limit(), Some(1024));
+    assert_eq!(options.mount_page_limit(), 1024);
 }
 
 #[def_test]
 fn tmpfs_percentage_size_rounds_up_partial_pages() {
     let half = parse_tmpfs_context_options(Some(b"size=50%\0"), 257).unwrap();
-    assert_eq!(half.mount_page_limit(), Some(129));
+    assert_eq!(half.mount_page_limit(), 129);
     let small = parse_tmpfs_context_options(Some(b"size=1%\0"), 128).unwrap();
-    assert_eq!(small.mount_page_limit(), Some(2));
+    assert_eq!(small.mount_page_limit(), 2);
     let default = parse_tmpfs_context_options(None, 257).unwrap();
-    assert_eq!(default.mount_page_limit(), Some(128));
+    assert_eq!(default.mount_page_limit(), 128);
 }
 
 #[def_test]
@@ -74,50 +110,139 @@ fn tmpfs_context_accepts_explicit_unlimited_size() {
         &b"nr_blocks=0\0"[..],
     ] {
         let options = parse_tmpfs_context_options(Some(data), 256).unwrap();
-        assert_eq!(options.mount_page_limit(), None);
-        assert_eq!(options.reconfigure_page_limit(), Some(None));
+        assert_eq!(options.mount_page_limit(), 0);
+        assert_eq!(options.reconfigure_page_limit(), Some(0));
+        assert_eq!(options.mount_options().inode_limit, 128);
+        assert_eq!(options.reconfigure_inode_limit(), None);
     }
 }
 
 #[def_test]
 fn tmpfs_context_parses_linux_compatibility_options() {
-    let options = parse_tmpfs_context_options(
-        Some(b"size=4096,mode=0700,uid=1000,gid=100,noswap\0"),
-        256,
-    )
-    .unwrap();
+    let options =
+        parse_tmpfs_context_options(Some(b"size=4096,mode=0700,uid=1000,gid=100,noswap\0"), 256)
+            .unwrap();
 
-    assert_eq!(options.mount_page_limit(), Some(1));
+    assert_eq!(options.mount_page_limit(), 1);
     assert_eq!(options.root_mode.bits(), 0o700);
     assert_eq!(options.root_uid, 1000);
     assert_eq!(options.root_gid, 100);
 }
 
 #[def_test]
-fn tmpfs_rejects_unimplemented_inode_quotas() {
-    for data in [&b"nr_inodes=1\0"[..], &b"nr_inodes=1k\0"[..]] {
-        assert_eq!(
-            parse_tmpfs_context_options(Some(data), 256).map(|_| ()),
-            Err(VfsError::Unsupported)
-        );
+fn tmpfs_capacity_options_share_numeric_syntax() {
+    for (value, count) in [
+        ("1", 1),
+        ("1k", 1024),
+        ("800k", 819200),
+        ("800K", 819200),
+        ("0x10", 16),
+        ("010", 8),
+        ("010000", 4096),
+        ("010k", 8192),
+        ("0X10K", 16384),
+        ("0x1001", 4097),
+        ("0x1e", 30),
+        ("0x10k", 16384),
+        ("1P", 1_usize << 50),
+        ("0e", 0),
+        ("0x0", 0),
+    ] {
+        for (option, pages) in [
+            ("size", count.div_ceil(memaddr::PAGE_SIZE_4K)),
+            ("nr_blocks", count),
+        ] {
+            let data = alloc::format!("{option}={value}");
+            let options = parse_tmpfs_context_options(Some(data.as_bytes()), 256).unwrap();
+            assert_eq!(options.mount_page_limit(), pages);
+            assert_eq!(options.reconfigure_page_limit(), Some(pages));
+        }
+        let data = alloc::format!("nr_inodes={value}");
+        let options = parse_tmpfs_context_options(Some(data.as_bytes()), 256).unwrap();
+        assert_eq!(options.mount_options().inode_limit, count);
+        assert_eq!(options.reconfigure_inode_limit(), Some(count));
     }
+}
+
+#[def_test]
+fn tmpfs_percentages_use_capacity_numeric_syntax() {
+    for (value, pages) in [("010%", 8), ("0x32%", 50), ("01k%", 1024), ("0x0%", 0)] {
+        let data = alloc::format!("size={value}");
+        let options = parse_tmpfs_context_options(Some(data.as_bytes()), 100).unwrap();
+        assert_eq!(options.mount_page_limit(), pages);
+    }
+}
+
+#[def_test]
+fn tmpfs_block_limit_is_bounded_by_signed_page_count() {
+    let data = alloc::format!("nr_blocks={}", isize::MAX);
+    let options = parse_tmpfs_context_options(Some(data.as_bytes()), 256).unwrap();
+    assert_eq!(options.mount_page_limit(), isize::MAX as usize);
+    let data = alloc::format!("nr_blocks={}", isize::MAX as u64 + 1);
+    assert_eq!(
+        parse_tmpfs_context_options(Some(data.as_bytes()), 256).unwrap_err(),
+        VfsError::InvalidInput
+    );
+}
+
+#[def_test]
+fn tmpfs_inode_space_limit_is_bounded_before_multiplication() {
+    let data = alloc::format!("nr_inodes={MAX_INODES}");
+    assert_eq!(
+        parse_tmpfs_context_options(Some(data.as_bytes()), 256)
+            .unwrap()
+            .mount_options()
+            .inode_limit,
+        MAX_INODES,
+    );
+    let data = alloc::format!("nr_inodes={}", MAX_INODES + 1);
+    assert_eq!(
+        parse_tmpfs_context_options(Some(data.as_bytes()), 256).unwrap_err(),
+        VfsError::InvalidInput
+    );
 }
 
 #[def_test]
 fn tmpfs_accepts_unlimited_inode_requests() {
     let options = parse_tmpfs_context_options(Some(b"nr_inodes=0\0"), 256).unwrap();
-    assert_eq!(options.mount_page_limit(), Some(128));
+    assert_eq!(options.mount_page_limit(), 128);
     assert_eq!(options.reconfigure_page_limit(), None);
+    assert_eq!(options.mount_options().inode_limit, 0);
+    assert_eq!(options.reconfigure_inode_limit(), Some(0));
 }
 
 #[def_test]
 fn tmpfs_context_rejects_unknown_or_malformed_options() {
+    for value in [
+        "",
+        "-1",
+        "+1",
+        "08",
+        "0x",
+        "0xg",
+        "1x",
+        "1kb",
+        "1kk",
+        "0kgarbage",
+        "18446744073709551616",
+        "18446744073709551615k",
+    ] {
+        for option in ["size", "nr_blocks", "nr_inodes"] {
+            let data = alloc::format!("{option}={value}");
+            assert_eq!(
+                parse_tmpfs_context_options(Some(data.as_bytes()), 256).unwrap_err(),
+                VfsError::InvalidInput
+            );
+        }
+    }
     for data in [
         &b"size=one\0"[..],
-        &b"size=0x\0"[..],
-        &b"nr_blocks=1x\0"[..],
-        &b"nr_blocks=0x\0"[..],
+        &b"size=08%\0"[..],
+        &b"size=1%%\0"[..],
+        &b"size=18446744073709551615%\0"[..],
+        &b"nr_blocks=1%\0"[..],
         &b"nr_inodes=1%\0"[..],
+        &b"nr_inodes=1e\0"[..],
         &b"mode=0800\0"[..],
         &b"mode=\0"[..],
         &b"uid=-1\0"[..],
@@ -136,7 +261,8 @@ fn tmpfs_mount_options_apply_root_metadata() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         TmpfsMountOptions {
-            page_limit: Some(2),
+            page_limit: 2,
+            inode_limit: 2,
             root_mode: NodePermission::from_bits_truncate(0o700),
             root_uid: 1000,
             root_gid: 100,

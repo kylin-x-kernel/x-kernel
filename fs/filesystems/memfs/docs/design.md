@@ -4,9 +4,9 @@
 
 guest 单元测试位于 crate 根目录 `ut-tests/`，通过 `unittest::path_mod_test!`
 挂载在原父模块下，保留私有 `tests` 模块名、父模块访问及 `cfg(unittest)`。
-`lib.rs` 包含 16 例，`shmem.rs` 包含 20 例，`quota.rs` 包含 2 例，共 38 例。
+测试文件为 `lib.rs`、`shmem.rs`、`quota.rs` 和 `inode_quota.rs`。
 没有额外架构或 feature 门控，也没有 serial/user 标记或 host 测试。
-四种内核目标在链接 memfs 后均选择这 38 例；`fs/boot` 无条件依赖 memfs，
+四种内核目标在链接 memfs 后均选择这些用例；`fs/boot` 无条件依赖 memfs，
 不需要新增文件系统 feature 开关。验证使用配置好的内核 `UNITTEST=y` 流程。
 
 ## 定位
@@ -45,8 +45,10 @@ owner，而不是由每个 dentry 或 open file 单独拥有内容对象。
 
 ```text
 MemoryFs
-  -> Inode
-  -> Option<PageQuota> (mounted tmpfs; shared by all inodes)
+  -> inode_numbers: Slab<()>
+  -> Option<Arc<TmpfsAccounting>> (tmpfs; shared by all inodes)
+
+InodeRef / MemoryNode -> Arc<Inode> -> Arc<MemoryFs>
 
 VFS-wide identity table: (SuperBlock, ino)
   -> VfsInode
@@ -65,7 +67,7 @@ page-cache storage、mapped views 与 MM shared object identity 的统一宿主�
 `MemoryFs` 也不保存 inode-number 到 `VfsInode` 的第二张表。构造时先分配
 `SuperBlock`，再由 root initializer 通过 `SuperBlock::get_or_init_inode()` 进入 VFS-wide table
 建立 root；普通 lookup/create/link 由当前目录 inode 的 superblock 进入同一个 table。`MemoryFs`
-自己的 slab 只拥有 memfs backing inode 数据，不承担 VFS resident identity 生命周期。
+自己的 slab 只分配 inode 编号；目录项和 VFS 操作对象直接持有 backing inode。
 
 `TMPFS_TYPE` describes only the canonical name and nodev superblock factory.
 Boot and KVFS own filesystem-type registration and per-mount policy, so that
@@ -112,28 +114,34 @@ policy there.
 
 Without an explicit size, the mount limit is one half of `kalloc`'s allocatable
 physical pages, matching Linux's default tmpfs policy. `size=<bytes>` accepts
-`k`/`m`/`g`/`t` suffixes and `%` of total allocatable memory. Explicit byte and percentage sizes round up to a page, so `size=50%` of
+`k`/`m`/`g`/`t`/`p`/`e` suffixes and `%` of total allocatable memory. Explicit byte and percentage sizes round up to a page, so `size=50%` of
 257 allocatable pages allows 129 pages; the unspecified default still uses
-integer half (128 pages). `nr_blocks` uses
+integer half (128 pages), with zero selecting unlimited. `nr_blocks` uses
 page units and accepts the same size suffixes. `size=0` and `nr_blocks=0`
 explicitly select unlimited. `mode`, `uid`, and `gid` select the root inode's
 metadata at initial mount; remount leaves those fields unchanged, as Linux does.
-`nr_inodes=0` is accepted as unlimited; nonzero inode limits return `Unsupported`
-because finite inode accounting is not implemented. `noswap` is accepted as a no-op because this tmpfs implementation
+`size`, `nr_blocks`, and `nr_inodes` share decimal, octal and hexadecimal
+number parsing with binary size suffixes. `nr_inodes` limits inode space;
+zero selects unlimited, and finite limits are bounded by
+`usize::MAX / 1024`. The default is `min(total_pages / 2, usize::MAX / 1024)`.
+The root and each additional hard link consume one unit; directory `.` and `..`
+links do not. Removing the last name preserves the inode charge until its final
+reference is released. `statfs` reports total and free inode units. `noswap` is accepted as a no-op because this tmpfs implementation
 has no swap backend. The page limit is a quota on actually resident folios, not a
 reservation and not a file logical-size sum.
 
 For a finite limit, `statfs()` reports the current maximum and available quota
 pages. For an unlimited limit, it reports zero block fields like Linux
 `shmem_statfs()`; zero means "no fixed capacity", not "the quota is exhausted".
-Reconfigure applies an explicitly requested new limit but does not evict
-existing pages. Like Linux, a finite limit may be lowered only to the current
+Reconfigure validates explicitly requested page and inode limits together
+before changing either one, without evicting existing data. A finite limit may be lowered only to the current
 usage, and an unlimited instance cannot be retroactively limited; it may still
 become unlimited again. A requested finite limit below current usage returns
 `EINVAL` and preserves the old limit, matching Linux `shmem_reconfigure()`;
 `ENOSPC` is reserved for materialization beyond an installed limit.
-Anonymous shmem/memfd instances remain intentionally
-unbounded by a mount-size option.
+Anonymous shmem/memfd instances remain unlimited in both dimensions.
+Both limits use zero for unlimited throughout parsing and accounting;
+`Option` in a remount request only distinguishes an omitted limit from an explicit value.
 
 ### 读取普通文件
 
@@ -193,8 +201,13 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 - The generic cache serializes admission with winning identity publication and
   removal. Its callbacks take the quota limit lock after the cache index mutex;
   remount/statfs hold only the quota lock, never a mapping lock.
-- `statfs_pages()` samples the limit once under its read lock, so a concurrent
-  remount cannot mix total pages from one limit with free pages from another.
+- `TmpfsAccounting` protects both limits and remaining inode space with
+  `RwLock<TmpfsStats>`. Inode admission/release and remount take the write lock;
+  statfs samples both capacities under the read lock. No per-inode charge object
+  or additional usage counter is stored.
+- Namespace link removal takes metadata → stats locks. Final inode destruction
+  releases its number under the slab lock, then returns its allocation charge.
+  Admission releases stats before acquiring slab; stats never acquires inode locks.
 
 ## 设计决策
 
@@ -236,14 +249,17 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 - resident cache-entry removal releases its page-quota charge; `truncate(0)` and final
   inode eviction therefore make capacity available again.
 - 目录删除逻辑由 `InodeRef` 和 nlink 维护。
+- `InodeRef` 持有 backing inode；`Inode::drop` 在最后一个引用释放时归还编号与
+  分配额度，临时引用与 VFS 操作对象遵循同一生命周期。
 
 `quota.rs` owns the mount limit, usage and remount/statfs policy. Each mapping
 stores one lifecycle provider reference; entries are plain shared folio handles.
 Admission runs only for winning identities. Removal and final mapping destruction
 return capacity immediately, even if read batches still retain invalidated folios.
 
-Mounted tmpfs accepts `nr_inodes=0` as unlimited; nonzero inode limits remain
-unsupported. A file-backed fault that exhausts resident capacity becomes
+Inode-space exhaustion rejects creation or an additional hard link with
+`ENOSPC` before publication; publication failures undo the directory entry and
+return its charge through the existing release path. A file-backed fault that exhausts resident capacity becomes
 `BusError` and delivers `SIGBUS`; ordinary buffered writes still return `ENOSPC`.
 
 ### Shared sparse reader and native copy
