@@ -14,8 +14,8 @@ checks:
 - **Why**: Consistent capitalization makes identifiers readable without competing acronym conventions.
 - **How to check**:
   1. Run the backend with the configured platform and review each diagnostic.
-  2. Clippy flags acronyms; default non_camel_case_types remains in the auxiliary/default table. Check mechanically verifiable ABI names before accepting exceptions.
-- **Exceptions**: Types or variants that mirror Linux or hardware ABI spellings. Use the syntax in [README.md](README.md#suppressing-a-check).
+  2. Clippy flags acronyms; default non_camel_case_types remains in the auxiliary/default table. Check mechanically verifiable ABI names, or a published spelling matched by an external consumer, before accepting exceptions.
+- **Exceptions**: Types or variants that mirror Linux or hardware ABI spellings, or that keep a published name matched by an external consumer. Name the ABI or the consumer and the exact spelling. Use the syntax in [README.md](README.md#suppressing-a-check).
 - **Counter-example**:
 
 ```rust,ignore

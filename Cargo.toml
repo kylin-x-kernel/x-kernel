@@ -232,7 +232,7 @@ kplat-riscv64 = { path = "platforms/kplat-riscv64" }
 kplat-x86_64 = { path = "platforms/kplat-x86_64" }
 
 # Internal: tee
-tee_crypto = { version = "=0.1.4", default-features = false }
+tee_crypto = { version = "=0.1.5", default-features = false }
 tee_kernel = { path = "tee/tee_kernel" }
 tee_raw_sys = { path = "tee/tee_raw_sys" }
 tee_task_iface = { path = "tee/tee_task_iface" }

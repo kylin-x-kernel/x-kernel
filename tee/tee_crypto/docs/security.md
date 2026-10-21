@@ -68,6 +68,12 @@ wrong ciphertext algorithm, and wrong digest algorithm use specific
 `Direction` enum. This avoids boolean polarity mistakes at call sites and
 inside mode dispatch.
 
+X25519 shared-secret derivation multiplies by the RFC 7748 clamped integer
+and does not reduce that integer modulo the prime-order subgroup order.
+Reducing it would drop the multiple-of-8 property that sends low-order peer
+public keys to the all-zero u-coordinate. An all-zero result returns
+`VerificationFailed`.
+
 ## Big Numbers
 
 `TeeBigInt` models signed GP TEE arithmetic values. Modular operations reject

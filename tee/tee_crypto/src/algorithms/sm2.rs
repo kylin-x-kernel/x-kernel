@@ -7,22 +7,29 @@
 //! Supports:
 //! - SM2 DSA: digital signature (sign/verify with SM3)
 //! - SM2 PKE: public key encryption/decryption (encrypt/decrypt with SM3)
-//! - SM2 KEP: key exchange protocol (ECDH + SM3 KDF)
+//! - SM2 KEP: key exchange protocol (GB/T 32918.3 / GM/T 0003.3)
 
-use elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
+use alloc::vec::Vec;
+
+use elliptic_curve::{
+    Group,
+    bigint::U256,
+    point::AffineCoordinates,
+    sec1::{FromSec1Point, ToSec1Point},
+    subtle::CtOption,
+};
 use signature::hazmat::{PrehashSigner, PrehashVerifier};
+use sm2::{AffinePoint, ProjectivePoint, Scalar};
 use sm3::{Digest, Sm3};
 
 use crate::{
     asymmetric::{
-        Decryptor, Encryptor, KeyAgreement, Keypair, PublicKeyComponents, Signer, Sm2PublicPoint,
-        Verifier,
+        Decryptor, Encryptor, Keypair, PublicKeyComponents, Signer, Sm2PublicPoint, Verifier,
     },
     bytes::PlaintextBytes,
     error::{CryptoError, Result},
     material::{
-        CiphertextAlgorithm, CiphertextBytes, SharedSecretAlgorithm, SharedSecretBytes,
-        SignatureAlgorithm, SignatureBytes, SignatureEncoding,
+        CiphertextAlgorithm, CiphertextBytes, SignatureAlgorithm, SignatureBytes, SignatureEncoding,
     },
     rng::{CryptoRng, RngAdapter},
 };
@@ -195,12 +202,83 @@ impl Decryptor for Sm2PkeKeypair {
     }
 }
 
-/// SM2 Key Exchange Protocol keypair.
-///
-/// Implements SM2 key exchange using ECDH shared secret + SM3 KDF,
-/// following GM/T 0003.3-2012.
+/// Whether to compute the SM2 KEP confirmation tag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfirmationMode {
+    /// Skip confirmation tag computation.
+    Skip,
+    /// Compute both `conf_out` and `conf_peer`.
+    Compute,
+}
+
+/// SM2 KEP peer public material passed into [`sm2_kep_derive`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sm2KepPeerKeys {
+    pub static_x: [u8; 32],
+    pub static_y: [u8; 32],
+    pub ephemeral_x: [u8; 32],
+    pub ephemeral_y: [u8; 32],
+}
+
+/// SM2 KEP derive parameters (aligned with OP-TEE `struct sm2_kep_parms`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sm2KepDeriveParams<'a> {
+    /// `true` when the local party is the protocol initiator (GP `TEE_ATTR_SM2_KEP_USER` = 0).
+    pub is_initiator: bool,
+    pub initiator_id: &'a [u8],
+    pub responder_id: &'a [u8],
+    pub peer: Sm2KepPeerKeys,
+    /// Optional confirmation from the peer.
+    ///
+    /// The initiator expects `Hash(0x02 || y || inner)` (the responder's
+    /// `conf_out`). The responder expects `Hash(0x03 || y || inner)` (the
+    /// initiator's `conf_out`). `inner` is
+    /// `Hash(x || ZA || ZB || x1 || y1 || x2 || y2)`, matching GB/T 32918.3
+    /// and OP-TEE `sm2_kep_compute_S`.
+    pub conf_in: Option<&'a [u8]>,
+    /// Whether to compute the local confirmation tag (`conf_out` / `conf_peer`).
+    pub confirmation: ConfirmationMode,
+}
+
+/// Output of [`sm2_kep_derive`]: derived key material and optional confirmation tags.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Sm2KepDeriveOutput {
+    pub key: Vec<u8>,
+    /// Local confirmation value written to `TEE_ATTR_SM2_KEP_CONFIRMATION_OUT`.
+    ///
+    /// OP-TEE semantics: initiator uses tag `0x03`, responder uses tag `0x02`.
+    pub conf_out: Option<[u8; 32]>,
+    /// Same bytes as [`Self::conf_out`].
+    ///
+    /// The peer supplies this value as its `conf_in`. Checking it locally fails,
+    /// because each side expects the opposite tag.
+    pub conf_peer: Option<[u8; 32]>,
+}
+
+/// `w` parameter from GB/T 32918.3 section 6.1 (`ceil(log2(n)/2) - 1`).
+const SM2_KEP_W: u32 = 127;
+
+/// SM2 Key Exchange Protocol keypair (static or ephemeral).
 pub struct Sm2KepKeypair {
     secret_key: sm2::SecretKey,
+}
+
+impl Sm2KepKeypair {
+    /// Build a keypair from a 32-byte private scalar (big-endian).
+    pub fn from_secret_bytes(secret: &[u8; 32]) -> Result<Self> {
+        let secret_key = sm2::SecretKey::from_slice(secret).map_err(|_| CryptoError::InvalidKey)?;
+        Ok(Self { secret_key })
+    }
+
+    /// Access raw 32-byte private scalar.
+    pub fn secret_key_bytes(&self) -> [u8; 32] {
+        self.secret_key.to_bytes().into()
+    }
+
+    /// Static/ephemeral public key affine coordinates (big-endian, 32 bytes each).
+    pub fn public_key_bytes(&self) -> Result<([u8; 32], [u8; 32])> {
+        public_key_bytes_from_secret(&self.secret_key)
+    }
 }
 
 impl Keypair for Sm2KepKeypair {
@@ -212,12 +290,7 @@ impl Keypair for Sm2KepKeypair {
     }
 
     fn to_public_components(&self) -> Result<PublicKeyComponents> {
-        let public_key = self.secret_key.public_key();
-        let point = public_key.as_affine().to_sec1_point(false);
-        let (x, y) = match point.coordinates() {
-            elliptic_curve::sec1::Coordinates::Uncompressed { x, y } => (x, y),
-            _ => return Err(CryptoError::InternalError),
-        };
+        let (x, y) = self.public_key_bytes()?;
         Ok(PublicKeyComponents::Sm2(Sm2PublicPoint::from_be_bytes(
             x.to_vec(),
             y.to_vec(),
@@ -225,47 +298,253 @@ impl Keypair for Sm2KepKeypair {
     }
 }
 
-impl KeyAgreement for Sm2KepKeypair {
-    fn shared_secret(&self, peer_public: &PublicKeyComponents) -> Result<SharedSecretBytes> {
-        let point = match peer_public {
-            PublicKeyComponents::Sm2(point) => point,
-            _ => return Err(CryptoError::InvalidInput),
-        };
-
-        // Parse peer's public key
-        let x_bytes: &sm2::FieldBytes = point
-            .x()
-            .try_into()
-            .map_err(|_| CryptoError::InvalidLength)?;
-        let y_bytes: &sm2::FieldBytes = point
-            .y()
-            .try_into()
-            .map_err(|_| CryptoError::InvalidLength)?;
-        let point = sm2::Sec1Point::from_affine_coordinates(x_bytes, y_bytes, false);
-        let peer_affine = sm2::AffinePoint::from_sec1_point(&point)
-            .into_option()
-            .ok_or(CryptoError::InvalidKey)?;
-        let peer_pk =
-            sm2::PublicKey::from_affine(peer_affine).map_err(|_| CryptoError::InvalidKey)?;
-
-        // ECDH: compute raw shared secret
-        let shared = elliptic_curve::ecdh::diffie_hellman(
-            self.secret_key.to_nonzero_scalar(),
-            peer_pk.as_affine(),
-        );
-
-        // SM3 KDF: derive session key from raw shared secret
-        let raw = shared.raw_secret_bytes();
-        use digest::Digest;
-        let mut hasher = sm3::Sm3::new();
-        hasher.update(raw);
-        let derived = hasher.finalize();
-
-        Ok(SharedSecretBytes::new(
-            derived.to_vec(),
-            SharedSecretAlgorithm::Sm2Kep,
-        ))
+fn public_key_bytes_from_secret(secret_key: &sm2::SecretKey) -> Result<([u8; 32], [u8; 32])> {
+    let point = secret_key.public_key().as_affine().to_sec1_point(false);
+    match point.coordinates() {
+        elliptic_curve::sec1::Coordinates::Uncompressed { x, y } => {
+            let mut x_bytes = [0u8; 32];
+            let mut y_bytes = [0u8; 32];
+            x_bytes.copy_from_slice(x.as_slice());
+            y_bytes.copy_from_slice(y.as_slice());
+            Ok((x_bytes, y_bytes))
+        }
+        _ => Err(CryptoError::InternalError),
     }
+}
+
+fn affine_from_xy(x: &[u8], y: &[u8]) -> Result<AffinePoint> {
+    let x_bytes: &sm2::FieldBytes = x.try_into().map_err(|_| CryptoError::InvalidLength)?;
+    let y_bytes: &sm2::FieldBytes = y.try_into().map_err(|_| CryptoError::InvalidLength)?;
+    let point = sm2::Sec1Point::from_affine_coordinates(x_bytes, y_bytes, false);
+    AffinePoint::from_sec1_point(&point)
+        .into_option()
+        .ok_or(CryptoError::InvalidKey)
+}
+
+fn scalar_from_secret_key(secret_key: &sm2::SecretKey) -> Result<Scalar> {
+    let bytes = secret_key.to_bytes();
+    Option::from(Scalar::from_bytes(&bytes)).ok_or(CryptoError::InvalidKey)
+}
+
+/// Z = SM3(ENTL || ID || a || b || Gx || Gy || Px || Py).
+fn sm2_compute_user_z(user_id: &[u8], pub_x: &[u8; 32], pub_y: &[u8; 32]) -> Result<[u8; 32]> {
+    let entla: u16 = (user_id.len() * 8)
+        .try_into()
+        .map_err(|_| CryptoError::InvalidInput)?;
+    let mut hasher = Sm3::new();
+    hasher.update(entla.to_be_bytes());
+    hasher.update(user_id);
+    hasher.update(SM2_EQUATION_A);
+    hasher.update(SM2_EQUATION_B);
+    hasher.update(SM2_GENERATOR_X);
+    hasher.update(SM2_GENERATOR_Y);
+    hasher.update(pub_x);
+    hasher.update(pub_y);
+    Ok(hasher.finalize().into())
+}
+
+/// GB/T 32918.3 KDF(Z, klen) with SM3 (`klen` in bytes).
+fn sm2_kdf(z: &[u8], klen_bytes: usize) -> Result<Vec<u8>> {
+    if klen_bytes == 0 {
+        return Err(CryptoError::InvalidLength);
+    }
+    let klen_bits = klen_bytes
+        .checked_mul(8)
+        .ok_or(CryptoError::InvalidLength)?;
+    let hash_bits = 256usize;
+    let rounds = klen_bits.div_ceil(hash_bits);
+    let mut out = Vec::with_capacity(klen_bytes);
+    let mut ct: u32 = 1;
+    for i in 0..rounds {
+        let mut hasher = Sm3::new();
+        hasher.update(z);
+        hasher.update(ct.to_be_bytes());
+        let ha = hasher.finalize();
+        ct = ct.checked_add(1).ok_or(CryptoError::InvalidLength)?;
+
+        if i + 1 == rounds && klen_bits % hash_bits != 0 {
+            let take_bits = klen_bits % hash_bits;
+            let take_bytes = take_bits.div_ceil(8);
+            out.extend_from_slice(&ha[..take_bytes]);
+        } else {
+            out.extend_from_slice(&ha);
+        }
+    }
+    out.truncate(klen_bytes);
+    Ok(out)
+}
+
+fn sm2_kep_x_bar(x: &[u8; 32]) -> Result<Scalar> {
+    let x_int = U256::from_be_slice(x);
+    let mask = (U256::ONE << SM2_KEP_W) - U256::ONE;
+    let x_bar_int = (U256::ONE << SM2_KEP_W) | (x_int & mask);
+    Option::from(Scalar::from_uint(&x_bar_int)).ok_or(CryptoError::InvalidKey)
+}
+
+fn sm2_kep_shared_point(
+    t: &Scalar,
+    peer_static: &AffinePoint,
+    peer_ephemeral: &AffinePoint,
+    peer_ephemeral_x_bar: &Scalar,
+) -> Result<AffinePoint> {
+    let peer_eph = ProjectivePoint::from(*peer_ephemeral);
+    let scaled_eph = peer_eph * peer_ephemeral_x_bar;
+    let peer_stat = ProjectivePoint::from(*peer_static);
+    let combined = peer_stat + scaled_eph;
+    let shared = combined * t;
+    let shared = CtOption::new(shared.to_affine(), !shared.is_identity())
+        .into_option()
+        .ok_or(CryptoError::InvalidKey)?;
+    Ok(shared)
+}
+
+fn affine_xy(point: &AffinePoint) -> ([u8; 32], [u8; 32]) {
+    let mut x_bytes = [0u8; 32];
+    let mut y_bytes = [0u8; 32];
+    x_bytes.copy_from_slice(point.x().as_slice());
+    y_bytes.copy_from_slice(point.y().as_slice());
+    (x_bytes, y_bytes)
+}
+
+fn sm2_kep_inner_hash(
+    shared_x: &[u8; 32],
+    za: &[u8; 32],
+    zb: &[u8; 32],
+    initiator_ephemeral_x: &[u8; 32],
+    initiator_ephemeral_y: &[u8; 32],
+    responder_ephemeral_x: &[u8; 32],
+    responder_ephemeral_y: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sm3::new();
+    hasher.update(shared_x);
+    hasher.update(za);
+    hasher.update(zb);
+    hasher.update(initiator_ephemeral_x);
+    hasher.update(initiator_ephemeral_y);
+    hasher.update(responder_ephemeral_x);
+    hasher.update(responder_ephemeral_y);
+    hasher.finalize().into()
+}
+
+fn sm2_kep_confirmation(tag: u8, shared_y: &[u8; 32], inner: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sm3::new();
+    hasher.update([tag]);
+    hasher.update(shared_y);
+    hasher.update(inner);
+    hasher.finalize().into()
+}
+
+/// Derive an SM2 KEP session key (GB/T 32918.3 section 6.1).
+///
+/// `my_static` is the local long-term keypair; `my_ephemeral` is the local ephemeral keypair.
+/// `key_len` is the desired derived key size in bytes.
+pub fn sm2_kep_derive(
+    my_static: &Sm2KepKeypair,
+    my_ephemeral: &Sm2KepKeypair,
+    params: &Sm2KepDeriveParams<'_>,
+    key_len: usize,
+) -> Result<Sm2KepDeriveOutput> {
+    if params.initiator_id.is_empty() || params.responder_id.is_empty() {
+        return Err(CryptoError::InvalidInput);
+    }
+
+    let (my_stat_x, my_stat_y) = my_static.public_key_bytes()?;
+    let (my_eph_x, my_eph_y) = my_ephemeral.public_key_bytes()?;
+
+    let (init_stat_x, init_stat_y, resp_stat_x, resp_stat_y) = if params.is_initiator {
+        (
+            my_stat_x,
+            my_stat_y,
+            params.peer.static_x,
+            params.peer.static_y,
+        )
+    } else {
+        (
+            params.peer.static_x,
+            params.peer.static_y,
+            my_stat_x,
+            my_stat_y,
+        )
+    };
+
+    let (init_eph_x, init_eph_y, resp_eph_x, resp_eph_y) = if params.is_initiator {
+        (
+            my_eph_x,
+            my_eph_y,
+            params.peer.ephemeral_x,
+            params.peer.ephemeral_y,
+        )
+    } else {
+        (
+            params.peer.ephemeral_x,
+            params.peer.ephemeral_y,
+            my_eph_x,
+            my_eph_y,
+        )
+    };
+
+    let za = sm2_compute_user_z(params.initiator_id, &init_stat_x, &init_stat_y)?;
+    let zb = sm2_compute_user_z(params.responder_id, &resp_stat_x, &resp_stat_y)?;
+
+    let d = scalar_from_secret_key(&my_static.secret_key)?;
+    let r = scalar_from_secret_key(&my_ephemeral.secret_key)?;
+    let x_self_bar = sm2_kep_x_bar(&my_eph_x)?;
+    let t = d + (x_self_bar * r);
+
+    let peer_static = affine_from_xy(&params.peer.static_x, &params.peer.static_y)?;
+    let peer_ephemeral = affine_from_xy(&params.peer.ephemeral_x, &params.peer.ephemeral_y)?;
+    let peer_ephemeral_x_bar = sm2_kep_x_bar(&params.peer.ephemeral_x)?;
+
+    let shared = sm2_kep_shared_point(&t, &peer_static, &peer_ephemeral, &peer_ephemeral_x_bar)?;
+    let (shared_x, shared_y) = affine_xy(&shared);
+
+    let kdf_input = {
+        let mut buf = Vec::with_capacity(128);
+        buf.extend_from_slice(&shared_x);
+        buf.extend_from_slice(&shared_y);
+        buf.extend_from_slice(&za);
+        buf.extend_from_slice(&zb);
+        buf
+    };
+    let key = sm2_kdf(&kdf_input, key_len)?;
+
+    let inner = sm2_kep_inner_hash(
+        &shared_x,
+        &za,
+        &zb,
+        &init_eph_x,
+        &init_eph_y,
+        &resp_eph_x,
+        &resp_eph_y,
+    );
+
+    // OP-TEE sm2-kep.c: conf_in expects tag 0x02 for initiator, 0x03 for responder;
+    // conf_out uses the opposite tag (value sent to the peer).
+    let conf_out_tag = if params.is_initiator { 0x03 } else { 0x02 };
+    let conf_in_tag = if params.is_initiator { 0x02 } else { 0x03 };
+
+    let conf_out = if params.confirmation == ConfirmationMode::Compute {
+        Some(sm2_kep_confirmation(conf_out_tag, &shared_y, &inner))
+    } else {
+        None
+    };
+    let conf_peer = conf_out;
+
+    if let Some(peer_conf) = params.conf_in {
+        if peer_conf.len() != 32 {
+            return Err(CryptoError::InvalidLength);
+        }
+        let expected = sm2_kep_confirmation(conf_in_tag, &shared_y, &inner);
+        if peer_conf != expected {
+            return Err(CryptoError::VerificationFailed);
+        }
+    }
+
+    Ok(Sm2KepDeriveOutput {
+        key,
+        conf_out,
+        conf_peer,
+    })
 }
 
 /// SM2 PKE encrypt using raw public key (x, y) bytes.

@@ -5,12 +5,65 @@
 mod common;
 
 use tee_crypto::{
-    asymmetric::{
-        Decryptor, Encryptor, KeyAgreement, Keypair, PublicKeyComponents, Signer, Verifier,
-    },
+    asymmetric::{Decryptor, Encryptor, Keypair, PublicKeyComponents, Signer, Verifier},
     hash::{DigestBytes, HashAlgorithm},
     sm2::*,
 };
+
+fn sm2_kep_peer_keys(static_kp: &Sm2KepKeypair, ephemeral_kp: &Sm2KepKeypair) -> Sm2KepPeerKeys {
+    let (static_x, static_y) = static_kp.public_key_bytes().expect("static pub");
+    let (ephemeral_x, ephemeral_y) = ephemeral_kp.public_key_bytes().expect("ephemeral pub");
+    Sm2KepPeerKeys {
+        static_x,
+        static_y,
+        ephemeral_x,
+        ephemeral_y,
+    }
+}
+
+fn sm2_kep_exchange_keys(
+    alice_static: &Sm2KepKeypair,
+    alice_ephemeral: &Sm2KepKeypair,
+    bob_static: &Sm2KepKeypair,
+    bob_ephemeral: &Sm2KepKeypair,
+    initiator_id: &[u8],
+    responder_id: &[u8],
+    key_len: usize,
+    confirmation: ConfirmationMode,
+) -> (Sm2KepDeriveOutput, Sm2KepDeriveOutput) {
+    let alice_out = sm2_kep_derive(
+        alice_static,
+        alice_ephemeral,
+        &Sm2KepDeriveParams {
+            is_initiator: true,
+            initiator_id,
+            responder_id,
+            peer: sm2_kep_peer_keys(bob_static, bob_ephemeral),
+            conf_in: None,
+            confirmation,
+        },
+        key_len,
+    )
+    .expect("alice derive");
+
+    let bob_conf_in = alice_out.conf_out.as_ref().map(|v| v.as_slice());
+    let bob_out = sm2_kep_derive(
+        bob_static,
+        bob_ephemeral,
+        &Sm2KepDeriveParams {
+            is_initiator: false,
+            initiator_id,
+            responder_id,
+            peer: sm2_kep_peer_keys(alice_static, alice_ephemeral),
+            conf_in: bob_conf_in,
+            confirmation,
+        },
+        key_len,
+    )
+    .expect("bob derive");
+
+    (alice_out, bob_out)
+}
 
 #[test]
 fn test_sm2_dsa_keygen_sign_verify_roundtrip() {
@@ -158,35 +211,120 @@ fn test_sm2_kep_public_key_components() {
 }
 
 #[test]
-fn test_sm2_kep_shared_secret_symmetry() {
+fn test_sm2_kep_derive_symmetry() {
     let mut rng = common::seeded_rng(100);
-    let alice = Sm2KepKeypair::generate(&mut rng, 0).expect("alice keygen");
-    let bob = Sm2KepKeypair::generate(&mut rng, 0).expect("bob keygen");
+    let alice_static = Sm2KepKeypair::generate(&mut rng, 0).expect("alice static");
+    let alice_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("alice eph");
+    let bob_static = Sm2KepKeypair::generate(&mut rng, 0).expect("bob static");
+    let bob_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("bob eph");
 
-    let alice_pub = alice.to_public_components().expect("alice pub");
-    let bob_pub = bob.to_public_components().expect("bob pub");
+    let initiator_id = b"initiator";
+    let responder_id = b"responder";
+    let (alice_out, bob_out) = sm2_kep_exchange_keys(
+        &alice_static,
+        &alice_ephemeral,
+        &bob_static,
+        &bob_ephemeral,
+        initiator_id,
+        responder_id,
+        32,
+        ConfirmationMode::Skip,
+    );
 
-    let secret_a = alice.shared_secret(&bob_pub).expect("alice shared");
-    let secret_b = bob.shared_secret(&alice_pub).expect("bob shared");
-
-    assert_eq!(secret_a, secret_b);
-    assert!(!secret_a.expose_secret().is_empty());
+    assert_eq!(alice_out.key, bob_out.key);
+    assert_eq!(alice_out.key.len(), 32);
 }
 
 #[test]
-fn test_sm2_kep_different_peers_differ() {
+fn test_sm2_kep_derive_different_peers_differ() {
     let mut rng = common::seeded_rng(101);
-    let alice = Sm2KepKeypair::generate(&mut rng, 0).expect("alice");
-    let bob = Sm2KepKeypair::generate(&mut rng, 0).expect("bob");
-    let carol = Sm2KepKeypair::generate(&mut rng, 0).expect("carol");
+    let alice_static = Sm2KepKeypair::generate(&mut rng, 0).expect("alice static");
+    let alice_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("alice eph");
+    let bob_static = Sm2KepKeypair::generate(&mut rng, 0).expect("bob static");
+    let bob_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("bob eph");
+    let carol_static = Sm2KepKeypair::generate(&mut rng, 0).expect("carol static");
+    let carol_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("carol eph");
 
-    let bob_pub = bob.to_public_components().expect("bob pub");
-    let carol_pub = carol.to_public_components().expect("carol pub");
+    let initiator_id = b"A";
+    let responder_id = b"B";
 
-    let secret_ab = alice.shared_secret(&bob_pub).expect("ab shared");
-    let secret_ac = alice.shared_secret(&carol_pub).expect("ac shared");
+    let (ab, _) = sm2_kep_exchange_keys(
+        &alice_static,
+        &alice_ephemeral,
+        &bob_static,
+        &bob_ephemeral,
+        initiator_id,
+        responder_id,
+        32,
+        ConfirmationMode::Skip,
+    );
 
-    assert_ne!(secret_ab, secret_ac);
+    let (ac, _) = sm2_kep_exchange_keys(
+        &alice_static,
+        &alice_ephemeral,
+        &carol_static,
+        &carol_ephemeral,
+        initiator_id,
+        responder_id,
+        32,
+        ConfirmationMode::Skip,
+    );
+
+    assert_ne!(ab.key, ac.key);
+}
+
+#[test]
+fn test_sm2_kep_derive_with_confirmation() {
+    let mut rng = common::seeded_rng(102);
+    let alice_static = Sm2KepKeypair::generate(&mut rng, 0).expect("alice static");
+    let alice_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("alice eph");
+    let bob_static = Sm2KepKeypair::generate(&mut rng, 0).expect("bob static");
+    let bob_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("bob eph");
+
+    let (alice_out, bob_out) = sm2_kep_exchange_keys(
+        &alice_static,
+        &alice_ephemeral,
+        &bob_static,
+        &bob_ephemeral,
+        b"Alice",
+        b"Bob",
+        16,
+        ConfirmationMode::Compute,
+    );
+
+    assert_eq!(alice_out.key, bob_out.key);
+    assert_eq!(alice_out.conf_out, alice_out.conf_peer);
+    assert_eq!(bob_out.conf_out, bob_out.conf_peer);
+    assert_ne!(alice_out.conf_out, bob_out.conf_out);
+}
+
+#[test]
+fn test_sm2_kep_derive_rejects_bad_confirmation() {
+    let mut rng = common::seeded_rng(103);
+    let alice_static = Sm2KepKeypair::generate(&mut rng, 0).expect("alice static");
+    let alice_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("alice eph");
+    let bob_static = Sm2KepKeypair::generate(&mut rng, 0).expect("bob static");
+    let bob_ephemeral = Sm2KepKeypair::generate(&mut rng, 0).expect("bob eph");
+
+    let mut bad_conf = [0u8; 32];
+    bad_conf.fill(0xAA);
+
+    let err = sm2_kep_derive(
+        &bob_static,
+        &bob_ephemeral,
+        &Sm2KepDeriveParams {
+            is_initiator: false,
+            initiator_id: b"A",
+            responder_id: b"B",
+            peer: sm2_kep_peer_keys(&alice_static, &alice_ephemeral),
+            conf_in: Some(&bad_conf),
+            confirmation: ConfirmationMode::Skip,
+        },
+        32,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, tee_crypto::CryptoError::VerificationFailed);
 }
 
 #[test]

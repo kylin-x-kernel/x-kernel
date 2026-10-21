@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! tee_crypto PKIX facade: inlined [`pkix_path`] + SM2 / GmSSL extensions.
+//! tee_crypto PKIX facade: inlined `pkix_path` + SM2 / GmSSL extensions.
 
 use spki::{AlgorithmIdentifierRef, SubjectPublicKeyInfoRef};
 

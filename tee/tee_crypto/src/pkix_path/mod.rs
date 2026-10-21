@@ -76,8 +76,8 @@ use x509_cert::Certificate;
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 mod serde_der;
 
-/// Re-exported for use with [`TrustAnchor::name_constraints`].
-pub use x509_cert::ext::pkix::constraints::name::NameConstraints;
+/// Crate-visible alias for `TrustAnchor::name_constraints`.
+pub(crate) use x509_cert::ext::pkix::constraints::name::NameConstraints;
 
 /// Private shorthand for the `GeneralSubtrees` type used throughout NC processing.
 type GeneralSubtrees = x509_cert::ext::pkix::constraints::name::GeneralSubtrees;
@@ -101,7 +101,7 @@ type GeneralSubtrees = x509_cert::ext::pkix::constraints::name::GeneralSubtrees;
 /// not itself carry a textual message — its `Display` is derived from
 /// `der::ErrorKind` — round-trip is **lossy**: a deserialized `DerError`
 /// preserves the original `Display` output verbatim but its
-/// [`std::error::Error::source`] is `None` because the original
+/// `std::error::Error::source` is `None` because the original
 /// `der::Error` value cannot be reconstructed from a free-form string.
 /// This trade is acceptable for diagnostic error types; the success type
 /// (`ValidatedPath`) round-trips losslessly because all its fields are
@@ -114,14 +114,20 @@ pub struct DerError {
     ///
     /// Populated by [`DerError::new`] from a real `der::Error`. `None`
     /// only when the `DerError` was reconstructed from serialized form;
-    /// in that case [`std::error::Error::source`] returns `None` and the
+    /// in that case `std::error::Error::source` returns `None` and the
     /// Display message is taken from the preserved [`Self::message`].
     ///
     /// Under `no_std` builds the `std::error::Error::source` impl is
     /// not available, so this field is only read for its `Debug`
-    /// representation; `#[allow(dead_code)]` silences the lint in
-    /// that configuration.
-    #[cfg_attr(not(feature = "std"), allow(dead_code))]
+    /// representation. `Error::source` reads it when `std` is enabled.
+    #[cfg_attr(
+        not(feature = "std"),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: read by DerError::source when the std \
+                      feature is enabled"
+        )
+    )]
     inner: Option<der::Error>,
     /// Cached Display rendering of `inner`, preserved across serde
     /// round-trips so that the diagnostic message survives even when
@@ -157,7 +163,7 @@ impl DerError {
     /// Construct a `DerError` from a real `der::Error`.
     ///
     /// The original `der::Error` is preserved internally so
-    /// [`std::error::Error::source`] returns it; the rendered
+    /// `std::error::Error::source` returns it; the rendered
     /// `Display` message is cached so the diagnostic survives serde
     /// round-trips. See the type-level rustdoc for the round-trip
     /// fidelity contract.
@@ -278,6 +284,10 @@ pub enum Error {
     /// Path length exceeds [`ValidationPolicy::max_path_len`].
     PathTooLong,
     /// An intermediate certificate is missing `BasicConstraints` `cA=TRUE`.
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "CG-032-camel-case-types: published Error variant matched by tasign as NotCA"
+    )]
     NotCA {
         /// Zero-based index into the `chain` slice of the failing certificate.
         index: usize,
@@ -868,7 +878,11 @@ fn evaluate_dn_attr_rule(subject: &x509_cert::name::Name, rule: &DnAttrRule) -> 
 // 1:1 mapping to the spec text and force callers through a pattern-match
 // adapter for each field. The current shape is the most direct expression
 // of the spec inputs.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CG-024-lint-exceptions: struct_excessive_bools: bool fields are the RFC 5280 §6.1.1 \
+              named policy inputs"
+)]
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -3192,6 +3206,16 @@ fn verify_cert_signature<V: SignatureVerifier>(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy: split chain_walk into §6.1.2 init, \
+              per-cert §6.1.3/§6.1.4, and §6.1.5 wrap-up"
+)]
+#[expect(
+    clippy::excessive_nesting,
+    reason = "CG-029-shallow-control-flow: TODO(cg): legacy: extract policy-tree update, policy \
+              mapping, and name-constraint intersection from chain_walk"
+)]
 fn chain_walk<V: SignatureVerifier>(
     chain: &[Certificate],
     anchor: &TrustAnchor,

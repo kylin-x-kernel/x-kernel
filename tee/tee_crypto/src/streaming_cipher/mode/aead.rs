@@ -155,7 +155,11 @@ where
 }
 
 /// Build (GHash, J0, tag_mask) from key and nonce for any GCM variant.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::type_complexity,
+    reason = "CG-024-lint-exceptions: type_complexity: one GCM setup returns the GHASH key, J0, \
+              and tag mask"
+)]
 fn gcm_auth_primitives<C>(
     ctx: &StreamingCipherCtx,
 ) -> Result<(GHash, cipher::Array<u8, U16>, cipher::Array<u8, U16>)>

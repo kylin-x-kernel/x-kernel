@@ -11,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-use ecdsa::hazmat::{bits2field, sign_prehashed_rfc6979, verify_prehashed};
+use ecdsa::hazmat::{sign_prehashed_rfc6979, verify_prehashed};
 use elliptic_curve::{Generate, NonZeroScalar, sec1::FromSec1Point};
 
 pub use crate::asymmetric::EccCurve;
@@ -238,7 +238,7 @@ fn validate_digest(digest: &DigestBytes, hash_algo: EccHashAlgo) -> Result<()> {
         return Err(CryptoError::InvalidDigestAlgorithm);
     }
     // OP-TEE/xtest passes a caller-supplied prehash (regression_4006 uses SHA1 for
-    // all ECDSA curves). bits2field() truncates to the curve order — do not require
+    // all ECDSA curves). ecdsa hazmat APIs truncate/reduce the digest internally — do not require
     // digest.len() == hash output size (unlike standalone tee_crypto self-tests).
     if digest.as_bytes().is_empty() {
         return Err(CryptoError::InvalidLength);
@@ -434,9 +434,7 @@ fn ecc_sign_p192(
     _rng: &mut dyn CryptoRng,
 ) -> Result<SignatureBytes> {
     let d = nonzero_scalar_from_slice::<p192::NistP192>(secret_key)?;
-    let z = bits2field::<p192::NistP192>(hash).map_err(|_| CryptoError::InvalidInput)?;
-    let (sig, _) = sign_prehashed_rfc6979::<p192::NistP192, sha1::Sha1>(&d, &z, &[])
-        .map_err(|_| CryptoError::InternalError)?;
+    let (sig, _) = sign_prehashed_rfc6979::<p192::NistP192, sha1::Sha1>(&d, hash, &[]);
     Ok(SignatureBytes::new(
         sig.to_bytes().as_slice().to_vec(),
         SignatureAlgorithm::Ecdsa(EccCurve::P192),
@@ -446,9 +444,8 @@ fn ecc_sign_p192(
 
 fn ecc_verify_p192(public_x: &[u8], public_y: &[u8], hash: &[u8], signature: &[u8]) -> Result<()> {
     let pk = public_from_xy::<p192::NistP192>(public_x, public_y)?;
-    let z = bits2field::<p192::NistP192>(hash).map_err(|_| CryptoError::InvalidInput)?;
     let sig = parse_p192_signature(signature)?;
-    verify_prehashed::<p192::NistP192>(&pk.as_affine().into(), &z, &sig)
+    verify_prehashed::<p192::NistP192>(&pk.as_affine().into(), hash, &sig)
         .map_err(|_| CryptoError::VerificationFailed)
 }
 
@@ -473,9 +470,7 @@ fn ecc_sign_p224(
     let d = NonZeroScalar::<p224::NistP224>::from_repr(sk.to_bytes())
         .into_option()
         .ok_or(CryptoError::InvalidKey)?;
-    let z = bits2field::<p224::NistP224>(hash).map_err(|_| CryptoError::InvalidInput)?;
-    let (sig, _) = sign_prehashed_rfc6979::<p224::NistP224, sha2::Sha224>(&d, &z, &[])
-        .map_err(|_| CryptoError::InternalError)?;
+    let (sig, _) = sign_prehashed_rfc6979::<p224::NistP224, sha2::Sha224>(&d, hash, &[]);
     Ok(SignatureBytes::new(
         sig.to_bytes().as_slice().to_vec(),
         SignatureAlgorithm::Ecdsa(EccCurve::P224),
@@ -485,9 +480,8 @@ fn ecc_sign_p224(
 
 fn ecc_verify_p224(public_x: &[u8], public_y: &[u8], hash: &[u8], signature: &[u8]) -> Result<()> {
     let pk = public_from_xy::<p224::NistP224>(public_x, public_y)?;
-    let z = bits2field::<p224::NistP224>(hash).map_err(|_| CryptoError::InvalidInput)?;
     let sig = parse_p224_signature(signature)?;
-    verify_prehashed::<p224::NistP224>(&pk.as_affine().into(), &z, &sig)
+    verify_prehashed::<p224::NistP224>(&pk.as_affine().into(), hash, &sig)
         .map_err(|_| CryptoError::VerificationFailed)
 }
 
@@ -512,9 +506,7 @@ fn ecc_sign_p256(
     let d = NonZeroScalar::<p256::NistP256>::from_repr(sk.to_bytes())
         .into_option()
         .ok_or(CryptoError::InvalidKey)?;
-    let z = bits2field::<p256::NistP256>(hash).map_err(|_| CryptoError::InvalidInput)?;
-    let (sig, _) = sign_prehashed_rfc6979::<p256::NistP256, sha2::Sha256>(&d, &z, &[])
-        .map_err(|_| CryptoError::InternalError)?;
+    let (sig, _) = sign_prehashed_rfc6979::<p256::NistP256, sha2::Sha256>(&d, hash, &[]);
     Ok(SignatureBytes::new(
         sig.to_bytes().as_slice().to_vec(),
         SignatureAlgorithm::Ecdsa(EccCurve::P256),
@@ -524,9 +516,8 @@ fn ecc_sign_p256(
 
 fn ecc_verify_p256(public_x: &[u8], public_y: &[u8], hash: &[u8], signature: &[u8]) -> Result<()> {
     let pk = public_from_xy::<p256::NistP256>(public_x, public_y)?;
-    let z = bits2field::<p256::NistP256>(hash).map_err(|_| CryptoError::InvalidInput)?;
     let sig = parse_p256_signature(signature)?;
-    verify_prehashed::<p256::NistP256>(&pk.as_affine().into(), &z, &sig)
+    verify_prehashed::<p256::NistP256>(&pk.as_affine().into(), hash, &sig)
         .map_err(|_| CryptoError::VerificationFailed)
 }
 
@@ -551,9 +542,7 @@ fn ecc_sign_p384(
     let d = NonZeroScalar::<p384::NistP384>::from_repr(sk.to_bytes())
         .into_option()
         .ok_or(CryptoError::InvalidKey)?;
-    let z = bits2field::<p384::NistP384>(hash).map_err(|_| CryptoError::InvalidInput)?;
-    let (sig, _) = sign_prehashed_rfc6979::<p384::NistP384, sha2::Sha384>(&d, &z, &[])
-        .map_err(|_| CryptoError::InternalError)?;
+    let (sig, _) = sign_prehashed_rfc6979::<p384::NistP384, sha2::Sha384>(&d, hash, &[]);
     Ok(SignatureBytes::new(
         sig.to_bytes().as_slice().to_vec(),
         SignatureAlgorithm::Ecdsa(EccCurve::P384),
@@ -563,9 +552,8 @@ fn ecc_sign_p384(
 
 fn ecc_verify_p384(public_x: &[u8], public_y: &[u8], hash: &[u8], signature: &[u8]) -> Result<()> {
     let pk = public_from_xy::<p384::NistP384>(public_x, public_y)?;
-    let z = bits2field::<p384::NistP384>(hash).map_err(|_| CryptoError::InvalidInput)?;
     let sig = parse_p384_signature(signature)?;
-    verify_prehashed::<p384::NistP384>(&pk.as_affine().into(), &z, &sig)
+    verify_prehashed::<p384::NistP384>(&pk.as_affine().into(), hash, &sig)
         .map_err(|_| CryptoError::VerificationFailed)
 }
 
@@ -590,9 +578,7 @@ fn ecc_sign_p521(
     let d = NonZeroScalar::<p521::NistP521>::from_repr(sk.to_bytes())
         .into_option()
         .ok_or(CryptoError::InvalidKey)?;
-    let z = bits2field::<p521::NistP521>(hash).map_err(|_| CryptoError::InvalidInput)?;
-    let (sig, _) = sign_prehashed_rfc6979::<p521::NistP521, sha2::Sha512>(&d, &z, &[])
-        .map_err(|_| CryptoError::InternalError)?;
+    let (sig, _) = sign_prehashed_rfc6979::<p521::NistP521, sha2::Sha512>(&d, hash, &[]);
     Ok(SignatureBytes::new(
         sig.to_bytes().as_slice().to_vec(),
         SignatureAlgorithm::Ecdsa(EccCurve::P521),
@@ -602,9 +588,8 @@ fn ecc_sign_p521(
 
 fn ecc_verify_p521(public_x: &[u8], public_y: &[u8], hash: &[u8], signature: &[u8]) -> Result<()> {
     let pk = public_from_xy::<p521::NistP521>(public_x, public_y)?;
-    let z = bits2field::<p521::NistP521>(hash).map_err(|_| CryptoError::InvalidInput)?;
     let sig = parse_p521_signature(signature)?;
-    verify_prehashed::<p521::NistP521>(&pk.as_affine().into(), &z, &sig)
+    verify_prehashed::<p521::NistP521>(&pk.as_affine().into(), hash, &sig)
         .map_err(|_| CryptoError::VerificationFailed)
 }
 

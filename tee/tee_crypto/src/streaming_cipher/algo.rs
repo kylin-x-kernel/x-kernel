@@ -108,6 +108,11 @@ impl AlgorithmSpec {
 }
 
 impl StreamingCipherAlgo {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: linear match table, one independent AlgorithmSpec per \
+                  cipher"
+    )]
     pub const fn spec(self) -> AlgorithmSpec {
         use AlgorithmFamily::*;
         use AlgorithmMode::*;

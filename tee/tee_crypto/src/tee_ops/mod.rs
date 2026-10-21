@@ -7,3 +7,5 @@
 pub mod ecc;
 pub mod ed25519;
 pub mod rsa;
+pub mod x25519;
+pub mod x448;

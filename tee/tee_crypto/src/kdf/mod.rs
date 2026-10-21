@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Password-based key derivation functions (PBKDF2).
+//! Key derivation functions (PBKDF2, Concat KDF). HKDF lives in [`crate::hkdf`].
 
-pub use crate::algorithms::kdf::pbkdf2_hmac_sm3;
+pub use crate::algorithms::kdf::{
+    concat_kdf, concat_kdf_digest, pbkdf2_hmac_sha1, pbkdf2_hmac_sm3,
+};

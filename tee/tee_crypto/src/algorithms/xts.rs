@@ -28,7 +28,11 @@ pub trait XtsCipher {
 
 /// Multiply a 16-byte value by x in GF(2^128) using the reduction polynomial
 /// x^128 + x^7 + x^2 + x + 1 (0x87 in the constant lookup).
-#[allow(clippy::needless_range_loop)]
+#[expect(
+    clippy::needless_range_loop,
+    reason = "CG-024-lint-exceptions: needless_range_loop: each output byte is the previous carry \
+              shifted into this index"
+)]
 fn gf128_mul(x: &mut [u8; 16]) {
     let mut feedback: u8 = 0;
     for i in 0..16 {
