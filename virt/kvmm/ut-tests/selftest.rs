@@ -24,7 +24,7 @@ impl VcpuHook<CurrentArch> for HostCurrentObserver {
         // This runs on the vCPU task before IRQs are restored, so a later
         // scheduler switch cannot hide a broken guest-exit restoration.
         if let Some(task) = &self.task {
-            assert_eq!(khal::context::current_task_ptr(), Arc::as_ptr(task).cast());
+            assert_eq!(khal::context::current_task_ptr(), ktask::KtaskRef::as_ptr(task).cast());
             self.exits.fetch_add(1, Ordering::Relaxed);
         }
     }

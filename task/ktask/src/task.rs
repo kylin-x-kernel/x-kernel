@@ -159,9 +159,8 @@ impl UserRuntimeSlot {
         // SAFETY: this type does not establish synchronization on its own. Its
         // soundness relies on the surrounding invariant that a `UserRuntimeSlot`
         // is populated by `ready()` before the owning `TaskInner` is shared, and
-        // that sharing happens via `Arc<TaskInner>` publication — the `Arc`
-        // atomic ref-count store provides the happens-before edge that lets
-        // readers on other threads observe the value written here. Once
+        // that the owning KtaskRef is published through synchronized scheduler
+        // queues or subsystem registries before other tasks can access it. Once
         // published the runtime is never replaced, so the returned shared
         // reference remains valid for the task's lifetime.
         unsafe { (&*self.value.get()).as_deref() }
@@ -310,6 +309,8 @@ pub struct TaskInner {
     /// Per-task watchdog recording (lock-free/NMI-safe).
     #[cfg(feature = "snapshot")]
     record_lock: PerTaskRecording,
+    #[cfg(feature = "snapshot")]
+    pub(crate) diagnostic_registration: crate::task_registry::Registration,
 }
 
 impl From<u8> for TaskState {
@@ -735,6 +736,8 @@ impl TaskInner {
             ctx: TaskContextCell::new(),
             #[cfg(feature = "snapshot")]
             record_lock: PerTaskRecording::new(),
+            #[cfg(feature = "snapshot")]
+            diagnostic_registration: crate::task_registry::Registration::new(),
         }
     }
 
@@ -770,12 +773,35 @@ impl TaskInner {
     }
 
     pub(crate) fn into_arc(self) -> KtaskRef {
-        Arc::new(KTask::new(self))
+        Self::prepare_owner(KTask::new(self))
     }
 
     /// Wrap as the per-CPU Idle class task. Fair tasks use [`Self::into_arc`].
     pub(crate) fn into_arc_kernel(self, class: ksched::KernelClass) -> KtaskRef {
-        Arc::new(KTask::new_kernel(self, class))
+        Self::prepare_owner(KTask::new_kernel(self, class))
+    }
+
+    fn prepare_owner(task: KTask) -> KtaskRef {
+        assert!(
+            !kirq::context::is_in_nmi()
+                && !kirq::context::is_in_hardirq()
+                && !kirq::context::is_serving_softirq(),
+            "task preparation requires boot/task context"
+        );
+        // SAFETY: runtime installs the provider after allocator, per-CPU and
+        // trap setup, before constructing any Task. These preparation paths
+        // already allocate stacks and permit IRQ-safe allocator locking; the
+        // check above excludes hardirq, serving softirq and NMI callers.
+        match unsafe { kfinalize::service::new_integration(task) } {
+            Ok(owner) => owner,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: kruntime permanently installs the \
+                          integration provider before any Task creation; that provider only \
+                          prepares carriers and has no recoverable failure after initialization"
+            )]
+            Err((error, _task)) => panic!("task finalization preparation failed: {error:?}"),
+        }
     }
 
     /// Returns the current state of the task.
@@ -1214,9 +1240,9 @@ impl CurrentTask {
         let ptr: *const super::KTask = khal::context::current_task_ptr().cast();
         if !ptr.is_null() {
             // SAFETY: the architecture current-task pointer is installed from
-            // `Arc::into_raw` in `init_current`/`prepare_switch` and stays valid
+            // `KtaskRef::into_raw` in `init_current`/`prepare_switch` and stays valid
             // while it is the current task pointer for this CPU.
-            Some(Self(unsafe { ManuallyDrop::new(KtaskRef::from_raw(ptr)) }))
+            Some(Self(unsafe { KtaskRef::borrow_raw(ptr) }))
         } else {
             None
         }
@@ -1238,7 +1264,7 @@ impl CurrentTask {
 
     /// Returns `true` if the current task is the same as `other`.
     pub fn ptr_eq(&self, other: &KtaskRef) -> bool {
-        Arc::ptr_eq(&self.0, other)
+        KtaskRef::ptr_eq(&self.0, other)
     }
 
     /// # Safety
@@ -1248,8 +1274,8 @@ impl CurrentTask {
     /// until publication completes; `init_task` must be this CPU's initial task.
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
-        let ptr = Arc::into_raw(init_task);
-        // SAFETY: `ptr` originates from `Arc::into_raw` and becomes the owning
+        let ptr = KtaskRef::into_raw(init_task);
+        // SAFETY: `ptr` originates from `KtaskRef::into_raw` and becomes the owning
         // architecture current-task pointer for this CPU.
         unsafe {
             khal::context::set_current_task_ptr(ptr.cast());
@@ -1269,9 +1295,11 @@ impl CurrentTask {
     /// For same-task republication, the replacement owner may retain the stack.
     #[must_use = "transfer both owners to the switch and its cleanup"]
     pub(crate) unsafe fn prepare_switch(self, next: KtaskRef) -> (KtaskRef, *const ()) {
-        let Self(arc) = self;
-        let prev = ManuallyDrop::into_inner(arc);
-        let ptr = Arc::into_raw(next);
+        let previous = KtaskRef::as_ptr(&self.0);
+        // SAFETY: the caller transfers this CPU's single raw current owner
+        // exactly once. The borrowed self view does not consume that count.
+        let prev = unsafe { KtaskRef::from_raw(previous) };
+        let ptr = KtaskRef::into_raw(next);
         (prev, ptr.cast())
     }
 }

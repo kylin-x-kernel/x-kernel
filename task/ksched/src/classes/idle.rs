@@ -7,32 +7,35 @@
 //! Idle never joins a ready tree. `pick_next` always returns the pinned idle
 //! task so the arbitrator never yields `None`.
 
-use alloc::sync::Arc;
-
 use crate::{
     class::{ClassOps, EnqueueKind, LeaveReason},
     clock::RqClock,
     entity::{RqLocked, SchedTask},
+    owner::SharedOwner,
     policy::{SchedAttr, SchedClass, SchedError},
 };
 
 /// One idle task per RQ. `has_runnable` is always true so pick can fall back.
-pub(crate) struct IdleClass<T> {
-    idle: Arc<SchedTask<T>>,
+pub(crate) struct IdleClass<T, Owner: SharedOwner<SchedTask<T>>> {
+    idle: Owner,
+    marker: core::marker::PhantomData<T>,
 }
 
-impl<T> IdleClass<T> {
-    pub(crate) fn new(idle: Arc<SchedTask<T>>) -> Self {
-        Self { idle }
+impl<T, Owner: SharedOwner<SchedTask<T>>> IdleClass<T, Owner> {
+    pub(crate) fn new(idle: Owner) -> Self {
+        Self {
+            idle,
+            marker: core::marker::PhantomData,
+        }
     }
 
     #[cfg(unittest)]
-    pub(crate) fn idle(&self) -> &Arc<SchedTask<T>> {
+    pub(crate) fn idle(&self) -> &Owner {
         &self.idle
     }
 }
 
-impl<T> ClassOps<T> for IdleClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for IdleClass<T, Owner> {
     fn class(&self) -> SchedClass {
         SchedClass::Idle
     }
@@ -55,7 +58,7 @@ impl<T> ClassOps<T> for IdleClass<T> {
     )]
     fn enqueue(
         &mut self,
-        _task: Arc<SchedTask<T>>,
+        _task: Owner,
         _kind: EnqueueKind,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
@@ -66,11 +69,11 @@ impl<T> ClassOps<T> for IdleClass<T> {
 
     fn dequeue(
         &mut self,
-        _task: &SchedTask<T>,
+        _task: &Owner,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         _tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         None
     }
 
@@ -80,11 +83,11 @@ impl<T> ClassOps<T> for IdleClass<T> {
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         _tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         None
     }
 
-    fn pick_next(&mut self, _clk: &RqClock, _tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn pick_next(&mut self, _clk: &RqClock, _tok: RqLocked) -> Option<Owner> {
         Some(self.idle.clone())
     }
 
@@ -92,7 +95,7 @@ impl<T> ClassOps<T> for IdleClass<T> {
 
     fn put_prev(
         &mut self,
-        _prev: Arc<SchedTask<T>>,
+        _prev: Owner,
         _reason: LeaveReason,
         _clk: &RqClock,
         _tok: RqLocked,
@@ -128,7 +131,7 @@ impl<T> ClassOps<T> for IdleClass<T> {
 
     fn attr_changed(
         &mut self,
-        _task: &Arc<SchedTask<T>>,
+        _task: &Owner,
         _old: SchedAttr,
         _is_curr: bool,
         _clk: &RqClock,

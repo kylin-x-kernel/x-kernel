@@ -24,7 +24,7 @@ unsafe extern "C" fn guest_changes_tp() -> ! {
 #[unittest::def_test(serial)]
 fn guest_roundtrips_keep_host_current_and_guest_tp_separate() {
     let owner = ktask::current().clone();
-    let expected = alloc::sync::Arc::as_ptr(&owner).cast::<()>();
+    let expected = ktask::KtaskRef::as_ptr(&owner).cast::<()>();
     let mut vcpu = RiscvVcpu {
         pc: kaddr_layout::v2p(guest_changes_tp as *const () as usize) as u64,
         ..Default::default()

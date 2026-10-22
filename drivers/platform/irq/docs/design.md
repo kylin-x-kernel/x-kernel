@@ -74,8 +74,55 @@ kirq (policy) ──IntrManagerIf──> irq-driver
 - `dispatch_irq` runs in IRQ context with interrupts enabled; the GICv3
   NMI path (`dispatch_nmi`) runs with interrupts disabled and no NMI
   window, relying on PMR protection.
-- Backend registers are accessed under `SpinNoIrq` locks inside the
-  backends; no allocator and no sleeping anywhere in the crate.
+- Controller configuration uses backend `SpinNoIrq` locks; claim/completion
+  and the prepared GICv3 irq_work notifier use register operations directly.
+- `prepare_local_irq_work` runs once per CPU during runtime interrupt-service
+  initialization, after allocator and local GIC initialization, with migration
+  excluded. It may allocate and take locks, but does not sleep. It must not be
+  called from NMI, IRQ handlers, or early platform initialization.
+
+## Local irq_work Notification
+
+GICv3 reserves ordinary Group 1 SGI15 for irq_work. Preparation rejects an
+out-of-range SGI, a conflict with `IPI_IRQ`, or MPIDR Aff0 >= 16 (the sender
+does not implement the optional range selector). A global `LazyInit<bool>`
+serializes one `register_disabled` call; the permanent handler invokes
+`kirq::irq_work::handle_irq`. Registration and enablement share a descriptor
+marked `IrqFlags::PER_CPU`, identifying the SGI's CPU-local hardware state.
+Registration failure is retained and yields
+`None`, without replacing an existing handler. No GIC lock is held while
+entering the generic IRQ registration/control plane.
+
+Each CPU disables its SGI, clears the hardware NMI attribute when supported,
+sets edge configuration and ordinary priority `IRQ_THRESHOLD`, then enables
+through `kirq::try_enable(desc, true)` so generic descriptor state and hardware
+agree. This boolean API explicitly forces platform enable on every CPU even
+when the global descriptor is already enabled; `PER_CPU` is metadata, not the
+mechanism that bypasses enabled-state deduplication. Do not replace this call
+with `try_enable_irq`, which does not force platform enable.
+Runtime publishes generic irq_work readiness only after receiving the notifier.
+GICv3 preparation failures log the rejected SGI/affinity, handler registration,
+ordinary-IRQ classification or enablement step before returning `None`. These
+startup diagnostics do not run on the NMI-safe notifier path.
+GICv2, RISC-V and x86 return `None`; they do not fall back to the locking IPI path.
+
+The notifier reads immutable local MPIDR affinity and encodes the SGI1R
+target directly. It needs no CPU map, per-CPU allocation, or new dependency.
+`DSB ST` completes preceding Normal-memory work publication before the public
+`arm-gic-driver` `ICC_SGI1R_EL1` primitive writes the notification, and `ISB`
+orders issuance before return. Its path contains no locks, allocations, logging,
+or lazy initialization, including when interrupted execution holds the GIC lock.
+The driver's free `send_sgi` helper is deliberately excluded because it logs.
+
+Under `cfg(unittest)`, `gic::with_irq_work_gic_lock_for_test` runs a bounded
+callback while holding the actual GICv3 lock. Runtime tests can submit work or
+trigger an NMI there, then check ordinary-IRQ draining after the callback and
+lock release. The callback must not wait for ordinary IRQ delivery while masked;
+GICv2 returns `false` without calling it.
+
+The handler and SGI reservation last for the kernel lifetime. Other users must
+not unregister, disable, reprioritize, or reuse SGI15. CPU hot-unplug and GIC
+reinitialization after readiness are not supported by this lifetime contract.
 
 ## Concurrency Model
 

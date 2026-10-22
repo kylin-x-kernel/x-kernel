@@ -5,5 +5,7 @@
 //! Live boot service probes; no registry or softirq action replacement.
 
 mod allocation;
+pub(crate) mod deferred;
 mod delayed;
+mod irq_work;
 mod visibility;

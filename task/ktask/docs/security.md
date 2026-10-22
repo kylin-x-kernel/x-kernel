@@ -2,6 +2,31 @@
 
 ## Scope and trust model
 
+Task storage uses DeferredArc rather than immediate Arc destruction. The
+architecture current pointer owns one raw count; CurrentTask is only a borrowed
+view. Switch preparation consumes the real count once, not the borrowed view,
+and PREV_TASK covers the old stack through incoming-stack cleanup. Intrusive
+queues must preserve the original payload pointer provenance for raw recovery.
+Weak expiration ends acquisition, not destructor completion. Runtime destructors
+execute in a sleepable normal worker and must not wait for another destruction
+serialized behind them on the shared finalizer. NMI retirement is allowed only
+after local irq_work initialization. Creation remains boot/task-only with
+allocator and local context facilities initialized. BH-disabled task preparation
+is permitted under allocation-safe locks; this does not permit sleeping there.
+
+No GC task or exit queue retains an additional exit reference.
+The diagnostic module owns a task's registration token and inline weak slot.
+Retirement closes admission before reclaiming that Weak; a counted reader
+protects its storage through upgrade. The retiring writer or final reader owns
+removal, never both. A token is atomically consumed before a slot can be reused,
+so its later Drop cannot retire a replacement. Registration precedes runnable
+publication and must not overlap retirement. Tokens point only to permanent
+slots, independent of task migration. NMI readers never wait on interrupted
+writers and hold no registry borrow during callbacks; final Weak release still
+requires initialized local irq_work. No generic NMI reclamation framework is
+introduced. Exited-task diagnostic discovery ends before releasing PREV_TASK;
+previously acquired strong owners remain valid.
+
 `ktask` retains each task's `krcu_core::TaskReader` and supplies safe scheduler,
 idle and preemption-cleanup boundaries. System reader nodes, watching storage,
 cleanup notifications and service policy belong to
@@ -15,7 +40,7 @@ nesting. Sleep assertions and prepared waits share this gate; voluntary yielding
 also rejects readers. Involuntary preemption remains allowed. Callers still
 own dependency-cycle and execution-provider readiness checks.
 
-Scheduler enrollment uses retained Arc-owned outgoing task storage with IRQs
+Scheduler enrollment uses retained DeferredArc-owned outgoing task storage with IRQs
 and preemption excluded, before same-task return or switching. The provider
 cleans zero-depth membership before observation and enrolls active readers
 before reporting. It cannot wake, allocate or schedule under the runqueue lock.
@@ -52,7 +77,8 @@ On the incoming stack, `finish_task_switch` removes an exited task's abandoned
 participation before releasing its owner or on-CPU marker. Old current is
 unpublished, the task cannot resume, and IRQs/migration remain excluded.
 The PREV_TASK lock is released before taking the original reader-node lock;
-diagnostics follow unlinking. GC performs its ordinary final-ownership check.
+abandoned-scope diagnostics follow unlinking. Registration retirement precedes
+this RCU cleanup; neither operation waits for the final strong release.
 Cleanup neither detaches immutable runtime fields still borrowed by shared
 owners nor unwinds abandoned Rust stack values. No raw task pointer is sent
 to a deferred callback. This boundary does not establish general IRQ/NMI
@@ -187,7 +213,6 @@ kruntime timer irq / irq manager / kspin guards
 │    scheduler lock                                 │
 │  - run_queue/rq.rs: leave / pick / switch / kick  │
 │  - run_queue/migrate.rs: affinity                 │
-│  - run_queue/gc.rs: delayed exit reclaim          │
 │  - future / wait_queue: block / wake bridge       │
 │  - timers: tick callbacks                         │
 │  - snapshot / task_registry (optional)            │
@@ -258,11 +283,11 @@ The corresponding per-CPU invariants are:
 4. The atomic operations on `last_accounted_ns` only provide interior
    mutability; every read/write still requires the scheduler lock, and
    `Ordering::Relaxed` is not itself a cross-field synchronization protocol.
-5. Runtime mutation of `EXITED_TASKS` and `PREV_TASK` goes through their
-   per-CPU `SpinNoIrq` locks; `NoPreempt` only fixes the CPU while resolving
+5. Runtime mutation of `PREV_TASK` goes through its
+   per-CPU `SpinNoIrq` lock; `NoPreempt` only fixes the CPU while resolving
    the slot and does not replace the inner lock's object exclusivity. No
-   blocking is allowed under the lock, and GC drops the lock before running a
-   potentially slow task drop.
+   blocking is allowed under the lock. Incoming-stack cleanup takes the owner
+   and unlocks before cleanup and final ownership release.
 
 The check consumes new requests in a loop and keeps an extra preempt-disable
 count while releasing its own guard. After release it pairs the temporary
@@ -279,7 +304,7 @@ reentry flag or shared lock was added.
 |---|---|
 | `RunQueueRegistry::try_get` | Restores a `Once<usize>` address to `&'static mut RunQueue` |
 | `current_run_queue_ptr` / `current_run_queue_mut` | Current-CPU `RUN_QUEUE` `NonNull` / `&'static mut` |
-| `current_exited_tasks_mut` / `current_wait_for_exit` / `current_idle_task` / `current_prev_task_mut` | Same-CPU GC / idle / `PREV_TASK` slots |
+| `with_idle_task` / `PREV_TASK` access | Same-CPU idle / outgoing switch-owner slots |
 | `init` / `init_secondary` | `CurrentTask::init_current` at bring-up |
 
 `RUN_QUEUES` is no longer a `MaybeUninit` array: each slot is `Once<usize>`
@@ -346,7 +371,7 @@ Invariants:
    before interrupted replacement resumes; this is not a remote raw-pointer
    ownership-acquisition protocol.
 3. The stack is freed only after the task is no longer running and has no
-   remaining refs (gc task + `Arc::try_unwrap`).
+   remaining refs; DeferredArc then destroys it on a normal worker.
 
 `api.rs::init_scheduler_with_cpu_num` registers the permanent kernel root once,
 while boot still uses it and before any task is constructed.
@@ -389,13 +414,17 @@ Invariants:
 ### `timers.rs` / `task_registry.rs` / `snapshot`
 
 - `timers` binds owned core storage and publishes the timer IRQ heartbeat hook.
-- `task_registry` stores weak-ref slots with `Box::into_raw` / `from_raw`.
+- `task_registry` stores inline weak refs behind atomic reader admission.
 - `snapshot` holds trap-frame snapshots in `UnsafeCell` and `unsafe impl Sync`.
 
 Invariants:
 
-1. A `task_registry` slot holds 0 or a valid `Box<WeakKtaskRef>` pointer.
-2. The CAS winner is responsible for release.
+1. A diagnostic slot publishes initialized Weak with Release; counted Acquire
+   admission is required before borrowing it. EMPTY and publishing/retired
+   states cannot admit readers.
+2. Retirement closes admission; only zero readers permit moving Weak out.
+   The value is moved before publishing EMPTY, so slot reuse cannot overwrite
+   a borrowed Weak. Actual Weak Drop may occur on the final reader's CPU.
 3. Snapshot reads/writes obey session serialization (`begin` / `finish`).
 4. Owned timer storage is retained through callback cleanup. The core owns
    membership and routing; `ktask` preserves owner notification and IRQ context.
@@ -426,9 +455,10 @@ Invariants:
    not account/refresh the dest RQ. An immediate schedule request consumes
    the oneshot slot instead of looping a 10 µs timer. `smp` without `ipi`
    is a compile-time reject.
-5. **Exit reclaim isolation.** Exited tasks first enter `EXITED_TASKS` and
-   are reclaimed later by the per-CPU `gc_task`, so the switch path does not
-   drop them.
+5. **Exit reclaim isolation.** CPU current ownership survives scheduler-owner
+   release and transfers into `PREV_TASK` until incoming-stack cleanup.
+   DeferredArc submits final destruction to a normal worker; the switch path
+   never destroys the Task payload inline.
 6. **Idle special case.** Idle does not enter the ordinary scheduler-entity
    path and does not participate in `update_current`, so algorithm metadata
    is not polluted.
@@ -445,9 +475,9 @@ Invariants:
 |---|---|---|---|---|
 | T-01 | Per-CPU `&'static mut` alias causes UB | High | Concurrent mutable borrows on the same CPU | Guard plus IRQ/preempt exclusion; access is concentrated behind wrappers. Residual: a new path that bypasses those wrappers. |
 | T-02 | Switch and wake race: double enqueue, lost wake, or IRQ-off deadlock | High | Remote CPU still switching while this CPU unblocks immediately | SeqCst Dekker handoff (flags store/swap × `on_cpu` store/load plus a non-weakened `SeqCst` fence) and unique claim in `clear_prev_task_on_cpu`. Do not wait for remote `on_cpu`. |
-| T-03 | Exited task freed too early (UAF) | High | Joiner or switch path still holds a ref | Per-task exit `Completion` wakes joiners; `EXITED_TASKS` + `gc_task` + `Arc::try_unwrap` delay reclaim. |
+| T-03 | Exited task freed too early (UAF) | High | Joiner or switch path still holds a ref | Per-task exit `Completion` wakes joiners; PREV_TASK protects the outgoing stack; DeferredArc delays final destruction. |
 | T-04 | `need_resched` reenters scheduling at the wrong time | Medium | Direct preempt switch inside a critical section or while an exception/IRQ trapframe guard is held | Only set pending; check at the `enable_preempt` safe point; delay the real switch while in active exception context. |
-| T-05 | `task_registry` pointer-slot corruption | High | Illegal write or double free | CAS protocol, 0/ptr two-state constraint, weak-ref upgrade check. |
+| T-05 | Diagnostic slot reuse races a reader or stale token | High | Early retirement/replacement | Counted immutable borrows, closed admission before removal, one-shot registration token, worker/NMI-safe Weak release. |
 | T-06 | Snapshot race reads the wrong trap frame | Medium | Concurrent snapshot sessions | `begin`/`finish` session serialization and per-CPU slot isolation. |
 | T-07 | Affinity migrate race drops a task | Medium | Concurrent mutation during migrate | `migrate_current` is under the run-queue critical section. `enforce_affinity_placement` holds the RQ lock for `remove_task` of a queued ready task, is mask-only when the task does not occupy a CPU, and waits for remote preempt to finish a running task. |
 | T-07a | `setaffinity` succeeds but the task stays on a forbidden CPU | High | Non-current path only writes the mask | Success requires the task not occupy a forbidden CPU (running/queued must move; unpublished is mask-only); otherwise `false`/`EBUSY`. `preempt_resched`/`yield` force affinity migrate. |
@@ -476,7 +506,7 @@ Invariants:
 | F-02 | Empty `cpumask` | Caller set an illegal affinity | Task has no runnable CPU | API failure or panic | 2 | `set_task_affinity` returns false on empty. |
 | F-02a | Remote running affinity cannot move | No preempt/IPI, or a late safe point | Caller sees failure | Caller may retry; the mask may already be updated | 3 | `enforce_affinity_placement` returns false → syscall `EBUSY`. |
 | F-03 | A NoPreempt critical section is held too long | An overly heavy path | Preempt latency grows | Jitter / worse realtime | 3 | Keep critical sections short; avoid heavy work under the guard. |
-| F-04 | GC reclaim lags | External holders keep `Arc`s | `EXITED_TASKS` piles up | Memory growth | 2 | Retry `Arc::try_unwrap`; join semantics release refs. |
+| F-04 | Final reclamation lags | External strong owners persist or the shared finalizer stalls | Task payloads remain allocated | Memory growth | 2 | Release independent owners; avoid ownership cycles and destructors waiting for later finalizers. |
 | F-05 | Remote resched request is lost or consumed late | IPI send failure, or no safe point before EL1 IRQ return | Woken task is delayed | Throughput / latency jitter | 3 | SMP requires IPI. Send pending only (do not account/refresh dest RQ in the IPI). Arm backup hrtick on a failed probe. Record send failure. Suspend the exception mark after IRQ completion for a tail check. |
 | F-06 | Algorithm `update_current` / `next_preemption_ns` misbehaves | Scheduler implementation bug | Distorted preempt policy | Starvation / jitter | 2 | `ksched` unittests plus trace-hook diagnostics. |
 | F-07 | Soft-timer deadline truncates to an already-due hardware time | Deadline exceeds the hardware nanosecond range | Timer fires immediately and repeatedly | IRQ storm; task and network paths stall | 1 | Typed deadline through the HAL; backend uses checked conversion and clamps out-of-range values to the farthest representable deadline. |
@@ -492,8 +522,8 @@ Failure policy:
   constraints, CPU ids).
 - **Deferred recovery.** Preemption uses pending plus a safe-point switch so
   scheduling resumes from a consistent state.
-- **Reclaim tolerance.** GC requeues on `Arc::try_unwrap` failure instead of
-  freeing too early.
+- **Reclaim tolerance.** DeferredArc waits for the final strong owner and transfers
+  destruction to a normal worker without a separate exit queue.
 - **Diagnostics.** `snapshot` / `watchdog` share a task registry for lock-wait
   and backtrace checks. Mutex-wait elapsed rejects a future sample produced
   by a concurrent update. `watchdog_hardlockup` checks hard lockups in NMI

@@ -12,6 +12,37 @@
 
 ## 背景
 
+### 引用所有权与析构策略
+
+`Scheduler<T, Owner = Arc<SchedTask<T>>>` 默认保持原来的标准 Arc。
+Task 迁移可显式选择 `DeferredArc<SchedTask<T>>`，当前生产 ktask 尚未
+切换。`SharedOwner` 是稳定地址、Clone 和 raw 所有权转交的 unsafe 契约，
+不包含构造、工作队列或调度策略。owner.rs 为 Arc 和 DeferredArc 提供
+实现；ksched 依赖 kfinalize 的所有权类型，不依赖 kworkng 或 ktask。
+
+Fair 双树及缓存、Deadline 两棵树、RT 链表、Idle 和 current 均保存同一
+Owner 类型，没有混用额外 Arc 外壳，也没有运行时 enum/虚调用分流。
+OwnerPointerOps 将库的 raw 转交委托给 SharedOwner；实体字段投影仍
+使用原有 offset_of，不能通过 &SchedTask 生成拥有型指针。树内克隆
+仍由库的 clone_pointer 执行。原文中持有 Arc 的数量和释放位置对选择
+DeferredArc 的实例同样成立，只是末引用的实际析构策略不同。
+
+每个调度器只使用一种 owner，类型检查阻止跨不同 owner 的直接入队；
+外层调用者负责决定何时构造 DeferredArc 及释放上下文是否满足要求。
+构造、provider 安装和 worker 运行不发生在调度算法内。
+
+`dequeue` 接收 `&Owner`，不再只接收 `&SchedTask<T>`。RT 的 O(1)
+摘除由 Owner::as_ptr 提供完整分配 provenance；从 &SchedTask 生成的
+窄指针不能恢复 DeferredArc 头部。该问题由真实 RT 队列 Miri 复现，
+修正后仍保持 O(1) 摘除，不增加指针字段或额外引用。Fair/Deadline
+仍按键找回库保存的节点；队列所有权计数不变。
+
+64 位宿主布局测量（usize 测试 payload）：默认 Scheduler 为 1872 B，
+Deferred owner 实例为 1952 B，增加 80 B，来自已有五处 owner 存储变宽；
+SchedTask<usize> 仍为 296 B，OwnerPointerOps 不增加运行时字段或分配。
+这些不是 TaskInner 的实测成本，也不包含各任务的 DeferredArc 元数据，
+不能推广为跨平台 ABI 或性能保证。未进行正式吞吐/延迟测量。
+
 运行任务离开当前 RQ 的原因不止 yield：还包括 preempt、block、migrate、exit。
 若这些路径各自清理调度状态，公平调度器的 lag / `curr` 记账会漂移，并可能把
 运行任务的强引用困在算法内部。本 crate 用统一状态转换收口该契约。
@@ -25,6 +56,7 @@ task/ksched/
 │   ├── config.rs       # Fair request、RR 时间片、RT 带宽、DL 预算与准入余量
 │   ├── policy.rs       # SchedClass 秩、用户策略、RtPrio、DlParams
 │   ├── entity.rs       # SchedTask、FairEntity、RtEntity、DeadlineEntity、RQ 令牌
+│   ├── owner.rs        # SharedOwner 与 intrusive PointerOps 适配
 │   ├── ready_list.rs   # RT 用的 intrusive FIFO 与 O(1) 摘除
 │   ├── class.rs        # ClassOps
 │   ├── classes/        # deadline.rs（CBS+EDF）、rt.rs、fair.rs（EEVDF）、idle.rs
@@ -282,6 +314,9 @@ EEVDF steal 逐节点检查时，以游标 get_ptr 构造 ManuallyDrop<Arc<_>>
 或另一个优先级的链表地址不同，核对失败就返回 `None`，不会按指针去摘。不能
 只凭 `is_linked` 判断属于本队列。队列对象在运行队列公布之后不再移动，否则
 地址对不上。`Drop` 逐个 `pop_front`，清归属并释放链表持有的 `Arc`。
+
+RT steal 的筛选只借用游标中的任务内容，不创建临时 Arc 或克隆引用。
+命中时由链表 remove 转交已有 owner；未命中时引用份数保持不变。
 
 节流是每 RQ 的：`account` 累加 runner 的墙钟，达到 runtime 后 `has_runnable`
 为假，`pick_next` 跳过本队列的 RT。标志只在 `advance` 里清掉。

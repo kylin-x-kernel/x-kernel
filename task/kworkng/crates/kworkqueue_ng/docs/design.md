@@ -22,12 +22,21 @@ ready demand, and release publishes a fresh notification when it becomes eligibl
 service::prepare_retiring_work supplies the owning facade with a one-shot no-op
 Work and a paired opaque context/terminal function. Ordinary constructors set
 Work.retirement to None. Execution copies the optional action before clearing
-the running slot. Once that transition releases Work protection, a new
+the running slot. Shared callback and occurrence-resource cleanup return while
+running is still occupied. A separate raw terminal entry then projects only
+the state lock, using the retained running partition rather than a pending
+successor's owner. No shared Work or whole-lock helper call spans the idle
+publication. Once that transition releases Work protection, a new
 cancel_sync may observe idle and allow the external owner to free Work without
 subscribing to the detached completion. All subsequent execution bookkeeping
 uses detached state, not Work. It completes independent accounting/observers,
 then calls the action without any further Work access. The action can destroy
 enclosing storage.
+Partition finish preserves partition-before-state locking and returns allowance
+before releasing waiting successors. After the old state guard unlocks, old
+execution never accesses Work again; a successor may access the same address
+only through its own independently retained pending publication. Unpartitioned
+test execution uses the same raw terminal rule, not a shared-reference shortcut.
 This provider capability is unsafe: the integrator retains publication/storage,
 submits once, excludes cancellation/reuse and certifies the callback context.
 Cancellation does not invoke the hook. The hook is outside Work completion scope;

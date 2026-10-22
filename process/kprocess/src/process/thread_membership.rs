@@ -2,11 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use kerrno::{KError, KResult};
@@ -128,7 +124,7 @@ impl ThreadMemberSlot {
     }
 
     pub(super) fn publish(&self, task: &KtaskRef) {
-        *self.state.lock() = ThreadMemberState::Published(Arc::downgrade(task));
+        *self.state.lock() = ThreadMemberState::Published(KtaskRef::downgrade(task));
     }
 
     pub(crate) fn retire(&self) {
@@ -142,7 +138,7 @@ impl ThreadMemberSlot {
             ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader => return,
         };
         // Do not retire a replacement task that reused this numeric TID.
-        if !Weak::ptr_eq(published, &Arc::downgrade(task)) {
+        if !WeakKtaskRef::ptr_eq(published, &KtaskRef::downgrade(task)) {
             return;
         }
         *state = if is_leader {

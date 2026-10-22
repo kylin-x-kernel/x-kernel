@@ -2157,7 +2157,7 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
 
     let by_tid = scheduler::task_by_tid(sibling_tid).expect("published sibling tid");
     assert!(
-        Arc::ptr_eq(&by_tid, &sibling_task),
+        ktask::KtaskRef::ptr_eq(&by_tid, &sibling_task),
         "tid lookup must return the sibling task, not the leader"
     );
     assert_eq!(by_tid.as_thread().tid(), sibling_tid);
@@ -2174,7 +2174,7 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
     let by_tgid = scheduler::target_task(process.pid() as i32).expect("live tgid");
     assert_eq!(by_tgid.as_thread().pid(), process.pid());
     assert!(
-        Arc::ptr_eq(&by_tgid, &leader_task) || Arc::ptr_eq(&by_tgid, &sibling_task),
+        ktask::KtaskRef::ptr_eq(&by_tgid, &leader_task) || ktask::KtaskRef::ptr_eq(&by_tgid, &sibling_task),
         "tgid lookup must stay inside the process thread group"
     );
 
@@ -2322,7 +2322,7 @@ fn test_publish_user_task_exposes_handle_before_activation() {
         .task(process.pid())
         .expect("published task should resolve through the task registry");
     assert!(
-        Arc::ptr_eq(published.task(), &published_task),
+        ktask::KtaskRef::ptr_eq(published.task(), &published_task),
         "published handle must reference the same task object that lookup returns"
     );
     let published_process = publication
@@ -2512,7 +2512,7 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
     assert!(
         publication
             .task(1_170)
-            .is_ok_and(|task| Arc::ptr_eq(&task, &second)),
+            .is_ok_and(|task| ktask::KtaskRef::ptr_eq(&task, &second)),
         "republished tid must resolve to the newer task"
     );
 
@@ -2524,7 +2524,7 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
         .task(1_170)
         .expect("reused tid must keep resolving to the live task");
     assert!(
-        Arc::ptr_eq(&resolved, &second),
+        ktask::KtaskRef::ptr_eq(&resolved, &second),
         "retiring an older task must not disturb a republished live TID slot"
     );
 
@@ -2567,7 +2567,7 @@ fn test_exec_leader_takeover_moves_number_onto_survivor() {
     assert!(
         process_publication()
             .task(pid)
-            .is_ok_and(|task| Arc::ptr_eq(&task, &survivor)),
+            .is_ok_and(|task| ktask::KtaskRef::ptr_eq(&task, &survivor)),
         "the group number must resolve to the surviving thread"
     );
     assert!(

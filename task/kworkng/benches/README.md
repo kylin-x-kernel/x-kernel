@@ -7,6 +7,32 @@ the `bench` feature, not through the host test harness.
 Any future host benchmark must declare an explicit `[[bench]]` Cargo target.
 Production configurations leave `KFEAT_WORKQUEUE_BENCH` disabled.
 
+Before the queue benchmarks, `deferred cost:` records compare ordinary Arc and
+DeferredArc in ABBA order, using 256 equal non-sleeping payloads and 4096
+clone/drop and successful upgrade/drop operations. Preparation, final-owner
+release and observed full payload completion are reported separately. Vector
+capacity and the shared completion counter are allocated before timing. Logging
+is outside the samples. Completion polling sleeps 1 ms and therefore rounds
+completion upward; elapsed time also includes scheduling interference. There is
+no performance pass threshold. Completion means all payload destructors and
+their shared field references ended, not a public queue drain or observation of
+the final carrier deallocation. These records do not compare a previous deferred
+implementation, measure BH policy, or promise hardware latency. The baseline is
+legal only because this particular payload may be dropped synchronously.
+
+The subsequent `deferred interference:` ABBA diagnostic compares 65 queued
+non-sleeping destructors with and without a sleeping head destructor. The head
+waits on a coordinator-controlled gate; 32 ordinary WorkHandle round trips target
+the CPU actually executing that head. In the blocked case the tail must remain
+untouched while the ordinary work progresses; the coordinator then opens the
+gate and waits for payload completion. Preparation and printing are outside the
+probe interval. Five-second bounds detect a stuck fixture, not a latency SLA.
+This requires spare normal workers (the default is four per pool); it does not
+claim progress with a single worker or under full pool saturation.
+The gate deliberately extends head occupancy until the probes finish, so total
+release time is a diagnostic, not natural production destructor latency.
+Record all samples and CPU labels; the coordinator is not affinity-pinned.
+
 Prepare a platform configuration with `make defconfig`, enable
 `KFEAT_WORKQUEUE_BENCH=y`, and set
 `WORKQUEUE_SOAK_SECONDS=1800`. Run `make olddefconfig`, `make build`, then

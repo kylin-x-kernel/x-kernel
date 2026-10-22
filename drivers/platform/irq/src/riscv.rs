@@ -152,6 +152,10 @@ macro_rules! with_cause {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn prepare_local_irq_work() -> Option<fn()> {
+        None
+    }
+
     fn configure(_desc: kirq::IrqDesc) {}
 
     fn enable(irq: usize, enabled: bool) {

@@ -131,7 +131,17 @@ does not install production services or justify a remote wake/IRQ-allocation cla
 | Immutable QueuePartition source binding and detach receipt | Retained through repeated shutdown; prepare registrations before closure, detach after work drain and wait outside management locks |
 
 Execution no longer carries a temporary Queue/source borrow. Its private raw
-constructor relies on unsafe publication to preserve Work through consumption;
+terminal boundary also ends all shared Work cleanup calls before publishing idle.
+Partition finish accepts only the original raw state-lock projection and retains
+its independent partition owner. The lock acquisition call returns before the
+guard clears running; after unlocking, old execution uses only detached slot,
+accounting and notification owners. A late cancel_sync may observe idle and
+destroy storage before these notifications without overlapping a whole-Work or
+whole-lock shared function parameter. Successor access requires its own pending
+publication and must not reuse the old execution's access permission.
+
+Execution's private raw constructor relies on unsafe publication to preserve Work
+through consumption;
 only test-local typed claims retain a BorrowedExecution lifetime. The explicit
 Send/Sync implementations belong to the Retirement pair described above; execution
 does not add its own implementations. kspin, kpoll, intrusive-collections, kworkerpool_ng,

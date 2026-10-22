@@ -223,6 +223,7 @@
 //! callback dependency cycles. These features do not change storage ownership.
 
 #![no_std]
+#![feature(allocator_api)]
 
 extern crate alloc;
 
@@ -247,7 +248,10 @@ pub use work_handle::WorkHandle;
 mod delayed_work_handle;
 pub use delayed_work_handle::DelayedWorkHandle;
 
+mod finalize;
 mod services;
+#[cfg(feature = "system")]
+unittest::path_mod_test!(finalize_unittest, "../ut-tests/finalize.rs");
 
 #[cfg(all(feature = "bench", not(unittest)))]
 #[path = "../benches/kernel.rs"]
@@ -258,10 +262,15 @@ pub mod benchmarks;
 /// Call [`runtime::init`] once after all boot CPUs have task/timer/softirq providers and
 /// before exposing work-producing drivers. The caller must reserve Tasklet/High
 /// actions for these services; initialization rejects already occupied actions.
+/// Before workers exist, audited primary startup may use
+/// [`runtime::init_finalization_preparation`] after allocator/per-CPU/IRQ-lock setup.
 pub mod runtime {
     pub use kworkerpool_ng::{BottomHalfPrepareError, NormalRuntimeError};
 
-    pub use crate::services::{InitError, init};
+    pub use crate::{
+        finalize::init_preparation as init_finalization_preparation,
+        services::{InitError, init},
+    };
 }
 
 pub use kworkqueue_ng::{

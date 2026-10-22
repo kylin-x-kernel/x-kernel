@@ -16,17 +16,15 @@
 //! prefix. Links are stored on the entity, so enqueue does not allocate an
 //! index node.
 
-use alloc::sync::Arc;
 use core::ptr::NonNull;
 
-use intrusive_collections::{
-    Adapter, DefaultLinkOps, DefaultPointerOps, KeyAdapter, RBTree, RBTreeAtomicLink,
-};
+use intrusive_collections::{Adapter, DefaultLinkOps, KeyAdapter, RBTree, RBTreeAtomicLink};
 
 use crate::{
     class::{ClassOps, EnqueueKind, LeaveReason},
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
+    owner::{OwnerPointerOps, SharedOwner},
     policy::{NICE_0_WEIGHT, SchedAttr, SchedClass, SchedError},
 };
 
@@ -69,15 +67,15 @@ fn is_eligible(vruntime: i64, avg_vruntime: i64) -> bool {
 /// `intrusive_adapter!` cannot name `SchedTask`'s const-free generic, so the
 /// two field projections share one adapter. `DEADLINE` selects the deadline
 /// tree; otherwise the adapter indexes by vruntime.
-struct FairAdapter<T, const DEADLINE: bool> {
+struct FairAdapter<T, Owner: SharedOwner<SchedTask<T>>, const DEADLINE: bool> {
     link_ops: <RBTreeAtomicLink as DefaultLinkOps>::Ops,
-    pointer_ops: DefaultPointerOps<Arc<SchedTask<T>>>,
+    pointer_ops: OwnerPointerOps<SchedTask<T>, Owner>,
 }
 
-impl<T, const D: bool> FairAdapter<T, D> {
+impl<T, Owner: SharedOwner<SchedTask<T>>, const D: bool> FairAdapter<T, Owner, D> {
     const NEW: Self = Self {
         link_ops: <RBTreeAtomicLink as DefaultLinkOps>::NEW,
-        pointer_ops: DefaultPointerOps::new(),
+        pointer_ops: OwnerPointerOps::new(),
     };
     const OFFSET: usize = if D {
         core::mem::offset_of!(SchedTask<T>, fair.deadline_link)
@@ -88,11 +86,13 @@ impl<T, const D: bool> FairAdapter<T, D> {
 
 // SAFETY: each adapter projects one actual `RBTreeAtomicLink` field of
 // `SchedTask<T>`. `get_link` / `get_value` invert the same field offset
-// inside the live `Arc` allocation and do not change ownership.
-// `DefaultPointerOps` holds each tree's independent `Arc`.
-unsafe impl<T, const D: bool> Adapter for FairAdapter<T, D> {
+// inside the live entity allocation and do not change ownership.
+// `OwnerPointerOps` holds each tree's independent owner.
+unsafe impl<T, Owner: SharedOwner<SchedTask<T>>, const D: bool> Adapter
+    for FairAdapter<T, Owner, D>
+{
     type LinkOps = <RBTreeAtomicLink as DefaultLinkOps>::Ops;
-    type PointerOps = DefaultPointerOps<Arc<SchedTask<T>>>;
+    type PointerOps = OwnerPointerOps<SchedTask<T>, Owner>;
 
     /// # Safety
     ///
@@ -131,7 +131,9 @@ unsafe impl<T, const D: bool> Adapter for FairAdapter<T, D> {
     }
 }
 
-impl<'a, T, const D: bool> KeyAdapter<'a> for FairAdapter<T, D> {
+impl<'a, T, Owner: SharedOwner<SchedTask<T>>, const D: bool> KeyAdapter<'a>
+    for FairAdapter<T, Owner, D>
+{
     type Key = DeadlineKey;
 
     fn get_key(&self, task: &'a SchedTask<T>) -> Self::Key {
@@ -162,12 +164,12 @@ impl<'a, T, const D: bool> KeyAdapter<'a> for FairAdapter<T, D> {
 /// both trees; pick and preemption take it as `curr` when **V** must
 /// include it. Putting the runner back before a preemption probe lets the
 /// two swap on deadline repeatedly.
-pub(crate) struct FairClass<T> {
-    ready: RBTree<FairAdapter<T, true>>,
-    vruntime_tree: RBTree<FairAdapter<T, false>>,
+pub(crate) struct FairClass<T, Owner: SharedOwner<SchedTask<T>>> {
+    ready: RBTree<FairAdapter<T, Owner, true>>,
+    vruntime_tree: RBTree<FairAdapter<T, Owner, false>>,
     /// Cached minima: `RBTree::front` itself is O(log N).
-    first_deadline: Option<Arc<SchedTask<T>>>,
-    first_vruntime: Option<Arc<SchedTask<T>>>,
+    first_deadline: Option<Owner>,
+    first_vruntime: Option<Owner>,
     queued: usize,
     /// Placement floor. Includes the off-tree runner so an ahead waiter
     /// cannot freeze this above the real average.
@@ -177,7 +179,7 @@ pub(crate) struct FairClass<T> {
     sum_wv: i128,
     total_weight: i64,
     /// Preferred successor at the next pick, if still eligible.
-    next_buddy: Option<Arc<SchedTask<T>>>,
+    next_buddy: Option<Owner>,
     /// The waker is about to sleep. An eligible buddy may take the CPU even
     /// with a later deadline. Cleared when that buddy is picked, or when the
     /// tree is empty; a failed preemption probe must not clear it.
@@ -187,7 +189,7 @@ pub(crate) struct FairClass<T> {
     request_ns: u64,
 }
 
-impl<T> FairClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     pub(crate) const fn new() -> Self {
         Self {
             ready: RBTree::new(FairAdapter::NEW),
@@ -320,12 +322,7 @@ impl<T> FairClass<T> {
             .is_some_and(|found| core::ptr::eq(found, task))
     }
 
-    fn enqueue_tree(
-        &mut self,
-        task: Arc<SchedTask<T>>,
-        curr: Option<&SchedTask<T>>,
-        tok: RqLocked,
-    ) {
+    fn enqueue_tree(&mut self, task: Owner, curr: Option<&SchedTask<T>>, tok: RqLocked) {
         let vruntime = task.fair().vruntime.get(tok);
         let id = self.alloc_enqueue_id();
         task.fair().tree_id.set(id, tok);
@@ -360,7 +357,7 @@ impl<T> FairClass<T> {
         }
     }
 
-    fn dequeue_entity(&mut self, key: DeadlineKey, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn dequeue_entity(&mut self, key: DeadlineKey, tok: RqLocked) -> Option<Owner> {
         self.dequeue_entity_with_weight(key, None, tok)
     }
 
@@ -369,13 +366,13 @@ impl<T> FairClass<T> {
         key: DeadlineKey,
         queued_weight: Option<i64>,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         let mut cursor = self.ready.find_mut(&key);
         let task = cursor.remove()?;
         if self
             .first_deadline
             .as_ref()
-            .is_some_and(|first| Arc::ptr_eq(first, &task))
+            .is_some_and(|first| Owner::ptr_eq(first, &task))
         {
             self.first_deadline = cursor.as_cursor().clone_pointer();
         }
@@ -386,7 +383,7 @@ impl<T> FairClass<T> {
         assert!(
             cursor
                 .get()
-                .is_some_and(|found| core::ptr::eq(found, Arc::as_ptr(&task))),
+                .is_some_and(|found| core::ptr::eq(found, Owner::as_ptr(&task))),
             "EEVDF vruntime tree out of sync with ready for task {id}"
         );
         #[expect(
@@ -398,7 +395,7 @@ impl<T> FairClass<T> {
         if self
             .first_vruntime
             .as_ref()
-            .is_some_and(|first| Arc::ptr_eq(first, &task))
+            .is_some_and(|first| Owner::ptr_eq(first, &task))
         {
             self.first_vruntime = cursor.as_cursor().clone_pointer();
         }
@@ -434,7 +431,7 @@ impl<T> FairClass<T> {
         if self
             .next_buddy
             .as_ref()
-            .is_some_and(|buddy| core::ptr::eq(buddy.as_ref(), task))
+            .is_some_and(|buddy| core::ptr::eq(&**buddy, task))
         {
             self.clear_buddy();
         }
@@ -453,7 +450,7 @@ impl<T> FairClass<T> {
             || (a_deadline == b_deadline && a.fair().tree_id.get(tok) < b.fair().tree_id.get(tok))
     }
 
-    fn set_next_buddy(&mut self, wakee: Arc<SchedTask<T>>, tok: RqLocked) {
+    fn set_next_buddy(&mut self, wakee: Owner, tok: RqLocked) {
         if let Some(existing) = self.next_buddy.as_ref()
             && Self::entity_before(existing, &wakee, tok)
         {
@@ -464,7 +461,7 @@ impl<T> FairClass<T> {
 
     /// Prefer the nominated wakee if it is eligible. `has_sync_wake` is a
     /// preemption hint only; async wakes still nominate and must win pick.
-    fn pick_buddy(&mut self, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn pick_buddy(&mut self, tok: RqLocked) -> Option<Owner> {
         let avg = self.avg_vruntime(None, tok);
         if !self.is_buddy_eligible(avg, tok) {
             return None;
@@ -524,7 +521,7 @@ impl<T> FairClass<T> {
         task: &SchedTask<T>,
         curr: Option<&SchedTask<T>>,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         if !self.contains(task, tok) {
             return None;
         }
@@ -545,7 +542,7 @@ impl<T> FairClass<T> {
 
     fn enqueue_wake(
         &mut self,
-        task: Arc<SchedTask<T>>,
+        task: Owner,
         curr: Option<&SchedTask<T>>,
         sync: bool,
         tok: RqLocked,
@@ -559,7 +556,7 @@ impl<T> FairClass<T> {
         }
     }
 
-    fn requeue_prev(&mut self, prev: Arc<SchedTask<T>>, tok: RqLocked) {
+    fn requeue_prev(&mut self, prev: Owner, tok: RqLocked) {
         // `prev` is inserted first, so `curr = None` still sees it in the tree
         // and an ahead waiter cannot raise `min_vruntime` past it.
         self.enqueue_tree(prev, None, tok);
@@ -608,7 +605,7 @@ impl<T> FairClass<T> {
     }
 }
 
-impl<T> ClassOps<T> for FairClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Owner> {
     fn class(&self) -> SchedClass {
         SchedClass::Fair
     }
@@ -625,7 +622,7 @@ impl<T> ClassOps<T> for FairClass<T> {
 
     fn enqueue(
         &mut self,
-        task: Arc<SchedTask<T>>,
+        task: Owner,
         kind: EnqueueKind,
         curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
@@ -649,11 +646,11 @@ impl<T> ClassOps<T> for FairClass<T> {
 
     fn dequeue(
         &mut self,
-        task: &SchedTask<T>,
+        task: &Owner,
         curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         self.dequeue_with_lag(task, curr, tok)
     }
 
@@ -663,7 +660,7 @@ impl<T> ClassOps<T> for FairClass<T> {
         curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         let mut cursor = self.ready.front();
         let task = loop {
             match cursor.get() {
@@ -675,7 +672,7 @@ impl<T> ClassOps<T> for FairClass<T> {
         self.dequeue_with_lag(&task, curr, tok)
     }
 
-    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Owner> {
         if self.ready.is_empty() {
             self.clear_buddy();
             return None;
@@ -721,7 +718,7 @@ impl<T> ClassOps<T> for FairClass<T> {
 
     fn put_prev(
         &mut self,
-        prev: Arc<SchedTask<T>>,
+        prev: Owner,
         reason: LeaveReason,
         _clk: &RqClock,
         tok: RqLocked,
@@ -824,7 +821,7 @@ impl<T> ClassOps<T> for FairClass<T> {
 
     fn attr_changed(
         &mut self,
-        task: &Arc<SchedTask<T>>,
+        task: &Owner,
         old: SchedAttr,
         is_curr: bool,
         _clk: &RqClock,
@@ -874,7 +871,7 @@ impl<T> ClassOps<T> for FairClass<T> {
 }
 
 #[cfg(unittest)]
-impl<T> FairClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     pub(crate) fn min_vruntime_for_test(&self) -> i64 {
         self.min_vruntime
     }
@@ -884,7 +881,7 @@ impl<T> FairClass<T> {
         unsafe { self.avg_vruntime(curr, RqLocked::assume()) }
     }
 
-    pub(crate) fn inject_ready_for_test(&mut self, task: Arc<SchedTask<T>>) {
+    pub(crate) fn inject_ready_for_test(&mut self, task: Owner) {
         // SAFETY: kernel unittests run on one thread and own this class.
         let tok = unsafe { RqLocked::assume() };
         self.enqueue_tree(task, None, tok);
@@ -903,8 +900,8 @@ impl<T> FairClass<T> {
                 .get()
                 .is_some_and(|other| core::ptr::eq(task, other))
         });
-        let same_first = |tree_front: Option<&SchedTask<T>>, cached: Option<&Arc<SchedTask<T>>>| {
-            tree_front.map(core::ptr::from_ref) == cached.map(Arc::as_ptr)
+        let same_first = |tree_front: Option<&SchedTask<T>>, cached: Option<&Owner>| {
+            tree_front.map(core::ptr::from_ref) == cached.map(Owner::as_ptr)
         };
         same_members
             && self.ready.iter().count() == self.vruntime_tree.iter().count()

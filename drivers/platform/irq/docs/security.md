@@ -71,6 +71,8 @@ anywhere in this crate.
   rejected (`remember_config` assert).
 - `GIC` (`LazyInit<SpinNoIrq<Gic>>`) and `TRAP_OP`: the GICv3 backend
   handle and its trap operations, installed once.
+- `IRQ_WORK_HANDLER_REGISTERED`: one-time registration outcome for reserved
+  SGI15. Its handler is never removed; the notifier does not read this state.
 - `PLIC` (`LazyInit<SpinNoIrq<Plic>>`): the PLIC handle; access before
   init panics with a named `expect`.
 
@@ -83,6 +85,8 @@ anywhere in this crate.
 | T-03 | Interrupt storm from a misconfigured trigger mode | Medium — CPU starvation | Wrong edge/level programming | `configure` only accepts the four known `IrqTrigger` variants and ignores `Unknown`, leaving the line at its reset behavior. |
 | T-04 | Double initialization with different configuration | Medium — inconsistent controller state | Platform init calling `init` twice with diverging regions | `remember_config` asserts config equality; GIC/PLIC handles are idempotent on re-init. |
 | T-05 | Spurious PLIC claim | Low — wasted IRQ cycle | Level noise on a PLIC line | Claim returns `None`/skip sentinel for timer and IPI events; completion only for genuine device lines. |
+| T-06 | NMI irq_work submission re-enters controller or logging locks | High — CPU deadlock | NMI interrupts a GIC/logging critical section | Prepared notifier uses only immutable MPIDR affinity, integer encoding, DSB, the public SGI1R write primitive and ISB; no generic IPI helper, CPU map, lazy state or logging. |
+| T-07 | irq_work SGI reaches the wrong CPU or runs as NMI | Medium — work stranded or drained in forbidden context | Unrepresentable Aff0, SGI/IPI conflict, wrong priority or NMI attribute | Preparation validates SGI < 16, distinct IPI_IRQ and Aff0 < 16; encodes all affinity levels with RS=0/IRM=0; sets ordinary priority and clears supported hardware NMI attributes before enabling. |
 
 ## Failure Modes
 
@@ -92,9 +96,19 @@ anywhere in this crate.
 | F-02 | GIC region MMIO mapping fails | Panic with the region name | Boot fails | 2 | Bring-up ordering bug surfaced loudly. |
 | F-03 | PLIC accessed before `init` | Named-`expect` panic | Offending caller aborts | 2 | Initialization-order bug surfaced loudly. |
 | F-04 | GIC config re-supplied with different values | `remember_config` assert panic | Platform init aborts | 2 | Inconsistent platform description surfaced loudly. |
+| F-05 | Local irq_work preparation unsupported or fails | Returns `None`, no notifier published | Generic irq_work remains unavailable on this CPU | 3 | Reject invalid affinity/SGI, retain global registration failure, and propagate NMI-attribute or generic-enable failure. GICv3 logs the failed preparation step; runtime publishes ready only on success and rejects available NMI without a ready local handoff. |
 
 ## Known Limitations
 
+- Local irq_work is provided only on GICv3 with Aff0 < 16; no optional SGI
+  range-selector support is assumed. MPIDR and the initialized GIC interface
+  must remain stable. Callers must exclude migration across notification.
+- SGI15 is reserved for the kernel lifetime. External disabling, unregistering,
+  reprioritization, CPU hot-unplug or controller reset would invalidate readiness;
+  there is no revocation protocol. Normal IRQ masking delays delivery by design.
+- Preparation is allocator-ready startup work and may acquire locks. Only the
+  returned notifier has the NMI-safe contract. Its register primitives contain
+  the backend's audited assembly; this path introduces no new handwritten unsafe.
 - The x86 path delegates register access to `x86-apic` and supports only
   IO-APIC trigger/polarity translation; MSIs are composed by the
   `x86-apic` backend, not here.
@@ -108,5 +122,10 @@ anywhere in this crate.
   access.
 - New MMIO windows go through `memspace::iomap_device`, never manual
   address math.
-- New `IntrManagerIf` methods keep the no-sleeping, no-allocation
-  constraint (IRQ-context callers).
+- IRQ/NMI-context `IntrManagerIf` operations remain allocation-free and do not
+  sleep. `prepare_local_irq_work` is an explicit normal-startup exception for
+  allocation and locks; it runs only after the allocator and GIC are ready.
+- Keep irq_work notification independent of `GIC`, `LazyInit`, CPU maps and
+  logging, and keep SGI15 out of the NMI priority/attribute classes.
+- Keep the SGI descriptor marked `PER_CPU` and use the force-enable path on
+  every CPU; a globally enabled descriptor does not imply local SGI enablement.

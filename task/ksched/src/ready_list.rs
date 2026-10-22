@@ -8,16 +8,14 @@
 //! checks that address before `cursor_mut_from_ptr`, so a task queued on
 //! another CPU or another priority is left alone. `is_linked` is not enough.
 
-use alloc::sync::Arc;
 use core::{
-    mem::ManuallyDrop,
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use intrusive_collections::{
-    Adapter, DefaultLinkOps, DefaultPointerOps, LinkedList, LinkedListAtomicLink,
-};
+use intrusive_collections::{Adapter, DefaultLinkOps, LinkedList, LinkedListAtomicLink};
+
+use crate::owner::{OwnerPointerOps, SharedOwner};
 
 pub(crate) struct ReadyLinks {
     link: LinkedListAtomicLink,
@@ -49,26 +47,26 @@ pub(crate) unsafe trait ReadyItem: Sized {
     fn ready_links(&self) -> &ReadyLinks;
 }
 
-struct ReadyAdapter<T: ReadyItem> {
+struct ReadyAdapter<T: ReadyItem, Owner: SharedOwner<T>> {
     link_ops: <LinkedListAtomicLink as DefaultLinkOps>::Ops,
-    pointer_ops: DefaultPointerOps<Arc<T>>,
+    pointer_ops: OwnerPointerOps<T, Owner>,
 }
 
-impl<T: ReadyItem> ReadyAdapter<T> {
+impl<T: ReadyItem, Owner: SharedOwner<T>> ReadyAdapter<T, Owner> {
     const NEW: Self = Self {
         link_ops: <LinkedListAtomicLink as DefaultLinkOps>::NEW,
-        pointer_ops: DefaultPointerOps::new(),
+        pointer_ops: OwnerPointerOps::new(),
     };
     const OFFSET: usize = T::OFFSET + core::mem::offset_of!(ReadyLinks, link);
 }
 
 // SAFETY: `ReadyItem::OFFSET` names the private `ReadyLinks` field.
 // `get_link` and `get_value` invert that same field offset inside the live
-// `Arc` allocation. `DefaultPointerOps` owns each list's `Arc`; the adapter
+// entity allocation. `OwnerPointerOps` owns each list's reference; the adapter
 // does not change the strong count.
-unsafe impl<T: ReadyItem> Adapter for ReadyAdapter<T> {
+unsafe impl<T: ReadyItem, Owner: SharedOwner<T>> Adapter for ReadyAdapter<T, Owner> {
     type LinkOps = <LinkedListAtomicLink as DefaultLinkOps>::Ops;
-    type PointerOps = DefaultPointerOps<Arc<T>>;
+    type PointerOps = OwnerPointerOps<T, Owner>;
 
     /// # Safety
     ///
@@ -106,11 +104,11 @@ unsafe impl<T: ReadyItem> Adapter for ReadyAdapter<T> {
     }
 }
 
-pub(crate) struct ReadyList<T: ReadyItem> {
-    list: LinkedList<ReadyAdapter<T>>,
+pub(crate) struct ReadyList<T: ReadyItem, Owner: SharedOwner<T>> {
+    list: LinkedList<ReadyAdapter<T, Owner>>,
 }
 
-impl<T: ReadyItem> ReadyList<T> {
+impl<T: ReadyItem, Owner: SharedOwner<T>> ReadyList<T, Owner> {
     pub(crate) const fn new() -> Self {
         Self {
             list: LinkedList::new(ReadyAdapter::NEW),
@@ -127,7 +125,7 @@ impl<T: ReadyItem> ReadyList<T> {
     ///
     /// Returns false when `task` is already on a list. Its owner stays with
     /// that list.
-    fn push(&mut self, task: Arc<T>, front: bool) -> bool {
+    fn push(&mut self, task: Owner, front: bool) -> bool {
         if task.ready_links().link.is_linked() {
             return false;
         }
@@ -142,15 +140,15 @@ impl<T: ReadyItem> ReadyList<T> {
         true
     }
 
-    pub(crate) fn push_back(&mut self, task: Arc<T>) -> bool {
+    pub(crate) fn push_back(&mut self, task: Owner) -> bool {
         self.push(task, false)
     }
 
-    pub(crate) fn push_front(&mut self, task: Arc<T>) -> bool {
+    pub(crate) fn push_front(&mut self, task: Owner) -> bool {
         self.push(task, true)
     }
 
-    pub(crate) fn pop_front(&mut self) -> Option<Arc<T>> {
+    pub(crate) fn pop_front(&mut self) -> Option<Owner> {
         let task = self.list.pop_front()?;
         task.ready_links().owner.store(0, Ordering::Relaxed);
         Some(task)
@@ -160,7 +158,7 @@ impl<T: ReadyItem> ReadyList<T> {
         self.list.is_empty()
     }
 
-    pub(crate) fn remove(&mut self, task: &T) -> Option<Arc<T>> {
+    pub(crate) fn remove(&mut self, task: &Owner) -> Option<Owner> {
         if task.ready_links().owner.load(Ordering::Relaxed) != self.identity() {
             return None;
         }
@@ -168,27 +166,16 @@ impl<T: ReadyItem> ReadyList<T> {
         // SAFETY: `cursor_mut_from_ptr` requires `task` to be linked in this
         // list. `owner` is this list's address, stored only when the link was
         // free, and cleared before the link is released.
-        // Exclusive `&mut self` is the only mutator of this list. The list's
-        // `Arc` keeps the allocation alive for the cursor.
-        unsafe {
-            self.list
-                .cursor_mut_from_ptr(core::ptr::from_ref(task))
-                .remove()
-        }
+        // Exclusive `&mut self` is the only mutator of this list. The owner's
+        // original pointer preserves allocation provenance for raw recovery;
+        // a narrowed &T pointer is insufficient for an owner with a prefix.
+        unsafe { self.list.cursor_mut_from_ptr(Owner::as_ptr(task)).remove() }
     }
 
-    pub(crate) fn steal(&mut self, mut want: impl FnMut(&Arc<T>) -> bool) -> Option<Arc<T>> {
+    pub(crate) fn steal(&mut self, mut want: impl FnMut(&T) -> bool) -> Option<Owner> {
         let mut cursor = self.list.front_mut();
-        while let Some(pointer) = cursor.as_cursor().get_ptr() {
-            // SAFETY: `get_ptr` is the data pointer of the `Arc` this list
-            // inserted through `DefaultPointerOps::into_raw`. The exclusive
-            // cursor keeps that `Arc` alive for the predicate.
-            // `ManuallyDrop` borrows the strong count: it does not release it
-            // on return or panic. The view is not used after `cursor.remove`
-            // transfers the list's `Arc`. The predicate receives `&Arc` and
-            // cannot consume the borrowed count.
-            let task = ManuallyDrop::new(unsafe { Arc::from_raw(pointer.as_ptr()) });
-            if want(&task) {
+        while let Some(task) = cursor.get() {
+            if want(task) {
                 task.ready_links().owner.store(0, Ordering::Relaxed);
                 return cursor.remove();
             }
@@ -198,7 +185,7 @@ impl<T: ReadyItem> ReadyList<T> {
     }
 }
 
-impl<T: ReadyItem> Drop for ReadyList<T> {
+impl<T: ReadyItem, Owner: SharedOwner<T>> Drop for ReadyList<T, Owner> {
     fn drop(&mut self) {
         // Surviving external Arcs must be reusable after the queue is dropped.
         while self.pop_front().is_some() {}

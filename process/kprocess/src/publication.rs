@@ -128,7 +128,7 @@ impl PublicationSlot<WeakKtaskRef> {
         let mut inner = self.inner.lock();
         match &*inner {
             PublicationSlotInner::Published(weak) => match weak.upgrade() {
-                Some(published) if Arc::ptr_eq(&published, task) => {
+                Some(published) if KtaskRef::ptr_eq(&published, task) => {
                     *inner = PublicationSlotInner::Retired;
                     true
                 }
@@ -190,7 +190,7 @@ impl ThreadPublicationBinding {
         task: &KtaskRef,
     ) {
         proc.publish_thread_task_locked(domain, &self.member_slot, task);
-        self.task_slot.publish(Arc::downgrade(task));
+        self.task_slot.publish(KtaskRef::downgrade(task));
     }
 
     fn retire(&self) {
@@ -589,7 +589,7 @@ impl ProcessPublication {
         // membership reads) can resolve a task without a numeric key.
         self.identities
             .write()
-            .insert(task.as_thread().identity_token(), Arc::downgrade(task));
+            .insert(task.as_thread().identity_token(), KtaskRef::downgrade(task));
         Ok(PublicationRollback {
             process: proc.clone(),
             thread_binding,
@@ -638,7 +638,7 @@ impl ProcessPublication {
     /// deletes the map entry when still cleanable.
     ///
     /// Mirrors [`Self::unpublish_process_if_matches`]: retire is gated by
-    /// `Arc::ptr_eq` against the published task, so a reused TID that already
+    /// `KtaskRef::ptr_eq` against the published task, so a reused TID that already
     /// publishes a different live task is not flipped to `Retired`. Structural
     /// removal still requires the directory to point at the same slot object
     /// in a cleanable state.
@@ -672,7 +672,10 @@ impl ProcessPublication {
         &self,
         token: kidentity::TaskIdentityToken,
     ) -> Option<KtaskRef> {
-        self.identities.read().get(&token).and_then(Weak::upgrade)
+        self.identities
+            .read()
+            .get(&token)
+            .and_then(WeakKtaskRef::upgrade)
     }
 
     /// Moves `task`'s number directory entry from `from` to `to`.
@@ -704,7 +707,7 @@ impl ProcessPublication {
             to_slot.retire();
         }
         to_slot.reserve_vacant_task_slot();
-        to_slot.publish(Arc::downgrade(task));
+        to_slot.publish(KtaskRef::downgrade(task));
         Self::remove_slot_if_retired(&mut tables.task_table, from, &from_slot);
         true
     }

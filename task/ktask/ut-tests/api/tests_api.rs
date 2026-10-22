@@ -190,6 +190,16 @@ fn sleep_context_gate_rejects_bh_disabled_context() {
     assert!(!can_sleep_current_context_for_tests());
 }
 
+#[def_test(serial)]
+fn task_preparation_accepts_bh_disabled_task_context() {
+    let _bh = local_bh_disable();
+    let task = crate::TaskInner::new_internal(|| {}, "bh-preparation".into(), 16384);
+    let owner = super::prepare_task(task);
+    assert_eq!(owner.state(), crate::TaskState::Ready);
+    assert!(!can_sleep_current_context_for_tests());
+    drop(owner);
+}
+
 #[def_test]
 fn sleep_context_gate_accepts_plain_task_context() {
     assert!(can_sleep_current_context_for_tests());

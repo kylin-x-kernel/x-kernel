@@ -192,7 +192,7 @@ fn manager_retires_excess_and_reaps_before_capacity_reuse() {
     let task_lifetimes: alloc::vec::Vec<_> = manager
         .tasks
         .iter()
-        .map(|task| Arc::downgrade(task.as_ref().unwrap()))
+        .map(|task| ktask::KtaskRef::downgrade(task.as_ref().unwrap()))
         .collect();
     let refused_occupied_stop = !manager.stop_if_idle();
     probe.hold.store(false, Ordering::Release);
@@ -208,7 +208,7 @@ fn manager_retires_excess_and_reaps_before_capacity_reuse() {
     });
     let owned_after_reap = manager.tasks.iter().filter(|task| task.is_some()).count();
     // A cleared manager slot alone does not prove scheduler ownership ended.
-    // Observe actual strong-owner release through the normal task GC path.
+    // Observe actual strong-owner release after scheduler switch cleanup.
     until(|| {
         task_lifetimes
             .iter()

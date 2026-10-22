@@ -125,6 +125,10 @@ impl kirq::IntrManagerIf {
         todo!()
     }
 
+    fn prepare_local_irq_work() -> Option<fn()> {
+        None
+    }
+
     #[expect(
         clippy::todo,
         reason = "CG-023-unfinished-implementations: TODO(cg): LoongArch controller-local \

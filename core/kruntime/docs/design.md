@@ -1,5 +1,76 @@
 # kruntime — 设计文档
 
+## Local irq_work Startup And Probes
+
+Primary interrupt initialization and each secondary's IRQ-service setup install
+the local irq_work provider before enabling NMI users. This is independent of
+kworkng readiness and creates no threads. Unsupported platforms remain unready
+with a CPU-local warning. If the configured runtime exposes an available NMI
+mechanism, missing local irq_work is a fatal startup error before NMI consumers
+are enabled, rather than a later last-reference failure. GICv3 preparation logs
+the failed SGI reservation, registration, classification or enablement step.
+Tests submit 193 self-freeing nodes per CPU under an IRQ mask, verify no inline
+execution, then hand a callback to a retained normal Work and actually sleep.
+
+The `entry/unittest` feature enables `kruntime/irq-work-test`; its optional
+AArch64 irq-driver and device-tree direct dependencies are disabled in ordinary
+runtime builds. The NMI-enabled, watchdog-disabled live fixture owns each CPU's
+otherwise unused periodic PMU source. Before arming it, the fixture masks the local PMU line
+using its DT-resolved IRQ number: hardware NMI attributes cannot be changed on
+an enabled line. It re-enables delivery after successful configuration.
+It publishes 129 preallocated nodes from a real NMI while
+holding the GIC lock, checks zero ordinary callback execution before unlock,
+then waits for ordinary IRQ and worker completion. It quiesces its source after
+the probe, masking its local PMU line first so hardware NMI cannot interrupt
+counter shutdown between disabling the counter and its overflow IRQ. Source
+configuration/callback storage remains installed but inactive
+for the guest lifetime under the existing one-way quiesce contract. It never
+replaces a watchdog-owned source. Watchdog-enabled builds exercise the ordinary
+probe without taking over their NMI facility.
+When the configured NMI mechanism falls back to `None` on the actual hardware,
+the live probe reports a skip instead of treating this supported fallback as a
+test failure; available NMI still requires local irq_work readiness.
+
+The same owned-source probe now drops prepared DeferredArc references in NMI:
+last strong without Weak, last strong followed by last Weak, and a last Weak
+whose payload already completed on a worker. It verifies immediate upgrade
+failure, zero source allocations and sleepable destruction after IRQ unlock.
+
+## Deferred finalization integration probes
+
+Production rust_main installs preparation once after primary allocator/per-CPU/
+trap setup and before scheduler initialization, without creating tasks or waiting
+for workers. Successful workqueue initialization binds execution later.
+
+In unittest builds, rust_main prepares and retires 193 BootPayload objects
+immediately after allocator initialization, with per-CPU/trap support ready but
+before scheduler/current Task and worker setup. Weak upgrade already fails and
+the destruction counter remains zero. The later registered test waits for all
+sleepable worker destructors and one child prepared/retired by the first
+destructor, checking that normal preparation is ready before backlog execution.
+Additional probes run under the primary startup NoPreempt guard and on each AP
+before current Task setup and under its startup NoPreempt guard: 194 + 2 per AP.
+Production boot creates no probe objects. The unsafe construction entry belongs
+to kfinalize::service; provider installation belongs to kworkng::runtime.
+
+The unittest-only workqueue `deferred` module prepares DeferredArc owners in task
+context and releases their last references from a task, a real timer hard IRQ,
+and a normal-priority BH callback. Source checks distinguish hard IRQ from an
+IRQ-masked task. A caller-CPU allocator snapshot covers strong/weak release under
+one IRQ/preemption guard. The payload verifies sleepable normal-worker context
+and actually sleeps. A BH callback is a submission source, not a finalizer.
+The probe does not claim NMI support, global allocation freedom or latency bounds.
+
+Shared finalizer Work may retain unfinished ownership on another CPU. Submission
+therefore marks its IRQ-guarded source CPU and checks that destruction does not
+run inline on that CPU; a remote executor may legitimately finish before return.
+A zero global destruction count during submission is not a valid assertion.
+
+Boot-owned worker services remain initialized for the whole integration run;
+the probes install no service hooks and wait for payload field references to
+disappear. Timing comparisons belong to the opt-in kworkng release benchmark,
+not this coverage-instrumented integration test suite.
+
 ## RCU Carrier Startup
 
 After the all-CPU service rendezvous, `late_init_main` calls
@@ -195,7 +266,7 @@ init (PID 1, 全新 spawn 的用户任务):
 
 ### PID 1 启动约定
 
-`ktask::init_scheduler()` 创建的 boot/current task 与 idle/gc task 都是 scheduler 内部身份（`Internal`/`Idle`），不调用 `kidentity::allocate_root_pid_handle()`。late-init 线程也是 `Internal`，且 late init 期间 spawn 的所有后台 worker（`ktask::spawn` 走 `new_pidless_kthread`）同样是 PID-less 的 `Internal`。因此 `SystemInitEntry::enter()` 创建 init 时，root namespace 的第一笔普通 PID 分配必须得到 PID 1。
+`ktask::init_scheduler()` 创建的 boot/current task 与 idle task 都是 scheduler 内部身份（`Internal`/`Idle`），不调用 `kidentity::allocate_root_pid_handle()`。late-init 线程也是 `Internal`，且 late init 期间 spawn 的所有后台 worker（`ktask::spawn` 走 `new_pidless_kthread`）同样是 PID-less 的 `Internal`。因此 `SystemInitEntry::enter()` 创建 init 时，root namespace 的第一笔普通 PID 分配必须得到 PID 1。
 
 这个顺序把 root namespace 的早期 PID 语义固定为：
 

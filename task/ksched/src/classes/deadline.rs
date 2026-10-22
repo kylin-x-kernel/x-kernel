@@ -13,18 +13,16 @@
 //! Admission is per run queue: the sum of every resident task's
 //! `runtime/period` must stay within `1 - margin` of one CPU.
 
-use alloc::sync::Arc;
 use core::ptr::NonNull;
 
-use intrusive_collections::{
-    Adapter, DefaultLinkOps, DefaultPointerOps, KeyAdapter, RBTree, RBTreeAtomicLink,
-};
+use intrusive_collections::{Adapter, DefaultLinkOps, KeyAdapter, RBTree, RBTreeAtomicLink};
 
 use crate::{
     class::{ClassOps, EnqueueKind, LeaveReason},
     clock::RqClock,
     config::DL_BW_MARGIN_PPM,
     entity::{QueueSeat, RqLocked, SchedTask},
+    owner::{OwnerPointerOps, SharedOwner},
     policy::{DlParams, SchedAttr, SchedClass, SchedError},
 };
 
@@ -35,15 +33,15 @@ type DlKey = (u64, u64);
 ///
 /// `READY` selects `deadline.ready_link`; otherwise `deadline.throttled_link`.
 /// One const-generic adapter serves both trees, mirroring `FairAdapter`.
-struct DlAdapter<T, const READY: bool> {
+struct DlAdapter<T, Owner: SharedOwner<SchedTask<T>>, const READY: bool> {
     link_ops: <RBTreeAtomicLink as DefaultLinkOps>::Ops,
-    pointer_ops: DefaultPointerOps<Arc<SchedTask<T>>>,
+    pointer_ops: OwnerPointerOps<SchedTask<T>, Owner>,
 }
 
-impl<T, const R: bool> DlAdapter<T, R> {
+impl<T, Owner: SharedOwner<SchedTask<T>>, const R: bool> DlAdapter<T, Owner, R> {
     const NEW: Self = Self {
         link_ops: <RBTreeAtomicLink as DefaultLinkOps>::NEW,
-        pointer_ops: DefaultPointerOps::new(),
+        pointer_ops: OwnerPointerOps::new(),
     };
     const OFFSET: usize = if R {
         core::mem::offset_of!(SchedTask<T>, deadline.ready_link)
@@ -54,11 +52,11 @@ impl<T, const R: bool> DlAdapter<T, R> {
 
 // SAFETY: each instantiation projects one actual `RBTreeAtomicLink` field of
 // `SchedTask<T>`. `get_link` / `get_value` invert the same field offset inside
-// the live `Arc` allocation and do not change ownership. `DefaultPointerOps`
+// the live entity allocation and do not change ownership. `OwnerPointerOps`
 // holds each tree's independent `Arc`.
-unsafe impl<T, const R: bool> Adapter for DlAdapter<T, R> {
+unsafe impl<T, Owner: SharedOwner<SchedTask<T>>, const R: bool> Adapter for DlAdapter<T, Owner, R> {
     type LinkOps = <RBTreeAtomicLink as DefaultLinkOps>::Ops;
-    type PointerOps = DefaultPointerOps<Arc<SchedTask<T>>>;
+    type PointerOps = OwnerPointerOps<SchedTask<T>, Owner>;
 
     /// # Safety
     ///
@@ -102,7 +100,9 @@ unsafe impl<T, const R: bool> Adapter for DlAdapter<T, R> {
     }
 }
 
-impl<'a, T, const R: bool> KeyAdapter<'a> for DlAdapter<T, R> {
+impl<'a, T, Owner: SharedOwner<SchedTask<T>>, const R: bool> KeyAdapter<'a>
+    for DlAdapter<T, Owner, R>
+{
     type Key = DlKey;
 
     fn get_key(&self, task: &'a SchedTask<T>) -> Self::Key {
@@ -135,9 +135,9 @@ struct DeadlineRunner {
 }
 
 /// Per-CPU CBS/EDF queue with per-run-queue bandwidth admission.
-pub(crate) struct DeadlineClass<T> {
-    ready: RBTree<DlAdapter<T, true>>,
-    throttled: RBTree<DlAdapter<T, false>>,
+pub(crate) struct DeadlineClass<T, Owner: SharedOwner<SchedTask<T>>> {
+    ready: RBTree<DlAdapter<T, Owner, true>>,
+    throttled: RBTree<DlAdapter<T, Owner, false>>,
     /// Next tie-breaker handed out; mirrors `FairClass`'s counter.
     next_enqueue_id: u64,
     /// Runner while it belongs to this class, so admission still counts the
@@ -145,11 +145,11 @@ pub(crate) struct DeadlineClass<T> {
     running: Option<DeadlineRunner>,
 }
 
-impl<T> DeadlineClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> DeadlineClass<T, Owner> {
     pub(crate) fn new() -> Self {
         Self {
-            ready: RBTree::new(DlAdapter::<T, true>::NEW),
-            throttled: RBTree::new(DlAdapter::<T, false>::NEW),
+            ready: RBTree::new(DlAdapter::<T, Owner, true>::NEW),
+            throttled: RBTree::new(DlAdapter::<T, Owner, false>::NEW),
             next_enqueue_id: 0,
             running: None,
         }
@@ -163,7 +163,7 @@ impl<T> DeadlineClass<T> {
     }
 
     /// Links `task` as ready under a fresh tie-breaker.
-    fn insert_ready(&mut self, task: Arc<SchedTask<T>>, tok: RqLocked) {
+    fn insert_ready(&mut self, task: Owner, tok: RqLocked) {
         let id = self.alloc_enqueue_id();
         task.deadline().tree_id.set(id, tok);
         task.set_seat(QueueSeat::Deadline, tok);
@@ -171,7 +171,7 @@ impl<T> DeadlineClass<T> {
     }
 
     /// Links `task` as throttled under a fresh tie-breaker.
-    fn insert_throttled(&mut self, task: Arc<SchedTask<T>>, tok: RqLocked) {
+    fn insert_throttled(&mut self, task: Owner, tok: RqLocked) {
         let id = self.alloc_enqueue_id();
         task.deadline().tree_id.set(id, tok);
         task.set_seat(QueueSeat::Deadline, tok);
@@ -209,7 +209,7 @@ impl<T> DeadlineClass<T> {
     }
 
     /// Sum of the bandwidth reserved by every task linked in `tree`.
-    fn tree_load_ppm<const R: bool>(tree: &RBTree<DlAdapter<T, R>>, tok: RqLocked) -> u64 {
+    fn tree_load_ppm<const R: bool>(tree: &RBTree<DlAdapter<T, Owner, R>>, tok: RqLocked) -> u64 {
         let mut cursor = tree.front();
         let mut total = 0u64;
         while let Some(task) = cursor.get() {
@@ -254,7 +254,7 @@ impl<T> DeadlineClass<T> {
     }
 }
 
-impl<T> ClassOps<T> for DeadlineClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for DeadlineClass<T, Owner> {
     fn class(&self) -> SchedClass {
         SchedClass::Deadline
     }
@@ -299,7 +299,7 @@ impl<T> ClassOps<T> for DeadlineClass<T> {
 
     fn enqueue(
         &mut self,
-        task: Arc<SchedTask<T>>,
+        task: Owner,
         kind: EnqueueKind,
         _curr: Option<&SchedTask<T>>,
         clk: &RqClock,
@@ -326,11 +326,11 @@ impl<T> ClassOps<T> for DeadlineClass<T> {
 
     fn dequeue(
         &mut self,
-        task: &SchedTask<T>,
+        task: &Owner,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         if task.seat(tok) != QueueSeat::Deadline {
             return None;
         }
@@ -362,14 +362,14 @@ impl<T> ClassOps<T> for DeadlineClass<T> {
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         _tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         // Deadline tasks are pinned to their home run queue: bandwidth is
         // admitted and enforced per run queue, so stealing would move a task
         // outside the reservation that admitted it.
         None
     }
 
-    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Owner> {
         // The runner leaves the ready tree: `Scheduler::curr` owns it until
         // `put_prev` decides where it goes next, mirroring `FairClass`. Leaving
         // it linked would keep it counted by `nr_queued` (which feeds
@@ -399,7 +399,7 @@ impl<T> ClassOps<T> for DeadlineClass<T> {
 
     fn put_prev(
         &mut self,
-        prev: Arc<SchedTask<T>>,
+        prev: Owner,
         reason: LeaveReason,
         _clk: &RqClock,
         tok: RqLocked,
@@ -512,7 +512,7 @@ impl<T> ClassOps<T> for DeadlineClass<T> {
 
     fn attr_changed(
         &mut self,
-        task: &Arc<SchedTask<T>>,
+        task: &Owner,
         _old: SchedAttr,
         is_curr: bool,
         _clk: &RqClock,

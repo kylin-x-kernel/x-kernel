@@ -4,6 +4,10 @@
 
 //! GICv3 backend.
 
+extern crate alloc;
+
+use alloc::sync::Arc;
+
 use arm_gic_driver::v3::*;
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kirq::TargetCpu;
@@ -12,6 +16,92 @@ use lazyinit::LazyInit;
 
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
+
+const IRQ_WORK_SGI: u32 = 15;
+static IRQ_WORK_HANDLER_REGISTERED: LazyInit<bool> = LazyInit::new();
+
+/// Prepares SGI15 in allocator-ready, non-migrating startup context.
+///
+/// Registration is global and permanent; configuration and enablement are
+/// local. Aff0 >= 16 is unsupported because this sender uses RS=0. MPIDR
+/// affinity is immutable after CPU bring-up, so the notification can read it
+/// directly without consulting a CPU map or allocating per-CPU storage.
+pub(super) fn prepare_local_irq_work() -> Option<fn()> {
+    let affinity = Affinity::current();
+    if IRQ_WORK_SGI >= 16 || IRQ_WORK_SGI as usize == kbuild_config::IPI_IRQ || affinity.aff0 >= 16
+    {
+        warn!(
+            "irq_work SGI15 preparation rejected: IPI_IRQ={}, Aff0={}",
+            kbuild_config::IPI_IRQ,
+            affinity.aff0
+        );
+        return None;
+    }
+
+    let desc = super::edge_irq_desc(IRQ_WORK_SGI as usize).with_flags(kirq::IrqFlags::PER_CPU);
+    IRQ_WORK_HANDLER_REGISTERED.call_once(|| {
+        kirq::register_disabled(
+            desc,
+            Arc::new(|_| {
+                kirq::irq_work::handle_irq();
+                kirq::IrqEvent::HANDLED
+            }),
+        )
+    });
+    if IRQ_WORK_HANDLER_REGISTERED.get() != Some(&true) {
+        warn!("irq_work SGI15 handler registration failed");
+        return None;
+    }
+
+    let gic = GIC.lock();
+    #[cfg(feature = "nmi-hardware")]
+    let mut gic = gic;
+    let intid = IntId::sgi(IRQ_WORK_SGI);
+    let cpu = gic.cpu_interface();
+    cpu.set_irq_enable(intid, false);
+    #[cfg(feature = "nmi-hardware")]
+    if gic.supports_nmi_attributes()
+        && gic
+            .set_nmi_attribute(intid, NmiAttribute::Maskable)
+            .is_err()
+    {
+        warn!("irq_work SGI15 could not be configured as an ordinary IRQ");
+        return None;
+    }
+    cpu.set_cfg(intid, Trigger::Edge);
+    cpu.set_priority(intid, karch::pmr::IRQ_THRESHOLD);
+    drop(gic);
+    if let Err(error) = kirq::try_enable(desc, true) {
+        warn!("irq_work SGI15 enable failed: {error:?}");
+        return None;
+    }
+    Some(notify_local_irq_work)
+}
+
+/// Issues the reserved ordinary SGI on the prepared current CPU, even in NMI.
+///
+/// Preparation validated Aff0 and the SGI number. Only register reads, integer
+/// encoding and register writes occur here; the generic caller keeps this
+/// execution on the prepared CPU. DSB publishes queued work before the SGI,
+/// and ISB ensures issuance before returning. Do not use `send_sgi`: its trace
+/// logging can re-enter locks held by the interrupted execution.
+fn notify_local_irq_work() {
+    let affinity = Affinity::current();
+    let target = (u64::from(affinity.aff3) << 48)
+        | (u64::from(affinity.aff2) << 32)
+        | (u64::from(IRQ_WORK_SGI) << 24)
+        | (u64::from(affinity.aff1) << 16)
+        | (1u64 << affinity.aff0);
+    aarch64_cpu::asm::barrier::dsb(aarch64_cpu::asm::barrier::ST);
+    ICC_SGI1R_EL1.set(target);
+    aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
+}
+
+#[cfg(unittest)]
+pub(super) fn with_irq_work_gic_lock_for_test(action: impl FnOnce()) {
+    let _guard = GIC.lock();
+    action();
+}
 
 pub(super) fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {

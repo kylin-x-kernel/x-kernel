@@ -29,13 +29,10 @@ pub(crate) fn dump_println(force: bool, args: fmt::Arguments<'_>) {
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub(crate) fn current_task_for_cpu(cpu_id: LogicalCpuId) -> Option<crate::KtaskRef> {
     let mut running = None;
-    crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
+    crate::task_registry::for_each_tracked_task(cpu_id, |task| {
         if running.is_some() {
             return;
         }
-        let Some(task) = weaktask.upgrade() else {
-            return;
-        };
         if task.inner().is_running() && task.inner().cpu_id() == cpu_id {
             running = Some(task);
         }
@@ -46,10 +43,8 @@ pub(crate) fn current_task_for_cpu(cpu_id: LogicalCpuId) -> Option<crate::KtaskR
 /// Dump backtraces for all non-running tasks on the given CPU.
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
-    crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
-        if let Some(task) = weaktask.upgrade()
-            && !task.inner().is_running()
-        {
+    crate::task_registry::for_each_tracked_task(cpu_id, |task| {
+        if !task.inner().is_running() {
             let ctx = task.inner().ctx();
             let bt = backtrace::Backtrace::capture_trap(
                 ctx.r29 as usize, // fp
@@ -66,9 +61,8 @@ pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn dump_cpu_task_backtrace(cpu_id: LogicalCpuId, force: bool) {
-    crate::task_registry::for_each_tracked_task(cpu_id, |weaktask| {
-        if let Some(task) = weaktask.upgrade()
-            && has_stable_saved_task_context(&task)
+    crate::task_registry::for_each_tracked_task(cpu_id, |task| {
+        if has_stable_saved_task_context(&task)
             && let Some((rbp, rip)) = task.inner().ctx().backtrace_frame()
         {
             let bt = backtrace::Backtrace::capture_trap(rbp, rip, 0);

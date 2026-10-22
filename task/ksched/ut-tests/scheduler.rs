@@ -24,6 +24,103 @@ use crate::{
 const UNIT_NS: u64 = 4096;
 const SLICE_NS: u64 = DEFAULT_SLICE_NS;
 
+type DeferredTask = kfinalize::DeferredArc<SchedTask<usize>>;
+type DeferredScheduler = Scheduler<usize, DeferredTask>;
+
+fn deferred_task(value: usize, is_idle: bool) -> DeferredTask {
+    let task = if is_idle {
+        SchedTask::new_kernel(value, KernelClass::Idle)
+    } else {
+        SchedTask::new(value)
+    };
+    DeferredTask::new(task).ok().expect("finalizer must be ready in the test task")
+}
+
+#[def_test]
+fn deferred_queues_preserve_owners_across_steal_and_reuse() {
+    for attr in [SchedAttr::DEFAULT, rt_attr(SchedPolicy::Fifo, 1)] {
+        let mut source = DeferredScheduler::new(deferred_task(0, true), 0);
+        let mut destination = DeferredScheduler::new(deferred_task(0, true), 0);
+        let task = deferred_task(41, false);
+        let weak = DeferredTask::downgrade(&task);
+        source.set_attr(&task, attr, 0).unwrap();
+        let _ = source.enqueue(task.clone(), EnqueueKind::New, 0);
+        let before = DeferredTask::strong_count(&task);
+        assert!(source.steal(&mut |_| false, 0).is_none());
+        assert_eq!(DeferredTask::strong_count(&task), before);
+        let stolen = source.steal(&mut |_| true, 0).unwrap();
+        assert!(DeferredTask::ptr_eq(&task, &stolen));
+        assert_eq!(source.nr_queued(), 0);
+        assert_eq!(DeferredTask::strong_count(&task), 2);
+        let _ = destination.enqueue(stolen, EnqueueKind::MigrateIn, 0);
+        assert!(source.dequeue(&task, 0).is_none());
+        let removed = destination.dequeue(&task, 0).unwrap();
+        assert!(DeferredTask::ptr_eq(&task, &removed));
+        drop(removed);
+        assert_eq!(DeferredTask::strong_count(&task), 1);
+        let _ = source.enqueue(task.clone(), EnqueueKind::MigrateIn, 0);
+        drop(source);
+        drop(destination);
+        assert_eq!(DeferredTask::strong_count(&task), 1);
+        drop(task);
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+#[def_test]
+fn deferred_deadline_retains_owners_while_throttled() {
+    for replenish in [false, true] {
+        let mut scheduler = DeferredScheduler::new(deferred_task(0, true), 0);
+        let task = deferred_task(17, false);
+        let weak = DeferredTask::downgrade(&task);
+        scheduler.set_attr(&task, dl_attr(), 0).unwrap();
+        let _ = scheduler.enqueue(task.clone(), EnqueueKind::New, 0);
+        assert!(scheduler.steal(&mut |_| true, 0).is_none());
+        drop(scheduler.pick_next(0));
+        let _ = scheduler.update(DL_RUNTIME_NS, UpdateKind::Account);
+        scheduler.preempt_current(DL_RUNTIME_NS);
+        assert_eq!(scheduler.nr_queued(), 0);
+        if replenish {
+            let _ = scheduler.update(DL_PERIOD_NS, UpdateKind::Account);
+            assert_eq!(scheduler.nr_queued(), 1);
+        }
+        drop(scheduler);
+        assert_eq!(DeferredTask::strong_count(&task), 1);
+        drop(task);
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+#[def_test]
+fn deferred_current_transfers_owner_on_exit() {
+    let mut scheduler = DeferredScheduler::new(deferred_task(0, true), 0);
+    let task = deferred_task(7, false);
+    let weak = DeferredTask::downgrade(&task);
+    scheduler.install_current(task.clone(), 0);
+    assert!(DeferredTask::ptr_eq(scheduler.current().unwrap(), &task));
+    drop(task);
+    let exited = scheduler.exit_current(10);
+    assert_eq!(*exited.inner(), 7);
+    assert!(scheduler.current().is_none());
+    assert_eq!(DeferredTask::strong_count(&exited), 1);
+    drop(exited);
+    assert!(weak.upgrade().is_none());
+}
+
+#[def_test]
+fn deferred_ready_tasks_keep_weak_live_until_queue_drop() {
+    for attr in [SchedAttr::DEFAULT, rt_attr(SchedPolicy::Fifo, 1), dl_attr()] {
+        let mut scheduler = DeferredScheduler::new(deferred_task(0, true), 0);
+        let task = deferred_task(9, false);
+        let weak = DeferredTask::downgrade(&task);
+        scheduler.set_attr(&task, attr, 0).unwrap();
+        let _ = scheduler.enqueue(task, EnqueueKind::New, 0);
+        assert!(weak.upgrade().is_some());
+        drop(scheduler);
+        assert!(weak.upgrade().is_none());
+    }
+}
+
 fn idle() -> Arc<SchedTask<usize>> {
     Arc::new(SchedTask::new_kernel(0usize, KernelClass::Idle))
 }
@@ -667,6 +764,54 @@ fn rt_migrate_does_not_requeue() {
     s.migrate_current(0);
     assert!(s.curr_is_none());
     assert_eq!(s.nr_queued(), 0);
+}
+
+#[def_test]
+fn rt_steal_preserves_owners_and_reuses_middle_node() {
+    let mut source = sched();
+    let mut destination = sched();
+    let tasks = [task(1), task(2), task(3)];
+    for queued in &tasks {
+        source
+            .set_attr(queued, rt_attr(SchedPolicy::Fifo, 1), 0)
+            .unwrap();
+        enqueue_new(&mut source, queued.clone());
+    }
+    let mut visited = 0;
+    let mut has_expected_counts = true;
+    assert!(
+        source
+            .steal(
+                &mut |_| {
+                    visited += 1;
+                    has_expected_counts &=
+                        tasks.iter().all(|queued| Arc::strong_count(queued) == 2);
+                    false
+                },
+                0
+            )
+            .is_none()
+    );
+    assert_eq!(visited, 3);
+    assert!(has_expected_counts);
+    assert!(destination.dequeue(&tasks[1], 0).is_none());
+    let stolen = source.steal(&mut |queued| *queued.inner() == 2, 0).unwrap();
+    assert!(Arc::ptr_eq(&stolen, &tasks[1]));
+    assert_eq!(Arc::strong_count(&tasks[1]), 2);
+    let _ = destination.enqueue(stolen, EnqueueKind::MigrateIn, 0);
+    assert!(source.dequeue(&tasks[1], 0).is_none());
+    assert_eq!(source.nr_queued(), 2);
+    assert_eq!(destination.nr_queued(), 1);
+    drop(destination);
+    assert_eq!(Arc::strong_count(&tasks[1]), 1);
+    enqueue_new(&mut source, tasks[1].clone());
+    for expected in [1, 3, 2] {
+        let stolen = source.steal(&mut |_| true, 0).unwrap();
+        assert_eq!(*stolen.inner(), expected);
+        drop(stolen);
+    }
+    assert_eq!(source.nr_queued(), 0);
+    assert!(tasks.iter().all(|queued| Arc::strong_count(queued) == 1));
 }
 
 #[def_test]

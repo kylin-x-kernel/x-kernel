@@ -33,7 +33,7 @@ pub(crate) fn clear_owner_for_current_task() {
         let mut guard = owner.lock();
         if guard
             .as_ref()
-            .is_some_and(|task| Arc::ptr_eq(task, &current))
+            .is_some_and(|task| ktask::KtaskRef::ptr_eq(task, &current))
         {
             *guard = None;
         }

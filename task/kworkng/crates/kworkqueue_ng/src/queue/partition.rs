@@ -463,14 +463,23 @@ impl QueuePartition {
 
     /// Clears running and returns allowance together after unlocked payload cleanup.
     ///
+    /// # Safety
+    /// `state` is the original state-lock projection of this partition's unique
+    /// running occurrence, with resources already released. No enclosing Work
+    /// or state-lock shared call may remain active. Storage is retained until
+    /// the state guard unlocks; after that this call must not access it again.
+    /// Any successor is retained independently by its pending publication.
+    ///
     /// # Panics
     /// Panics if internal execution ownership or cleanup ordering was violated.
-    pub(crate) fn finish<T, H>(
+    pub(crate) unsafe fn finish<T>(
         self: &Arc<Self>,
-        work: &Work<T, H>,
+        state: *const SpinNoIrq<WorkState<T>>,
     ) -> (WorkSlot<Option<T>>, Option<Arc<Waker>>) {
         let mut partition = self.state.lock();
-        let mut state = work.state.lock();
+        // SAFETY: the unique running claim keeps the projected lock live through
+        // acquisition. Its shared lock() call returns before running is cleared.
+        let mut state = unsafe { &*state }.lock();
         assert!(state.running_on(self), "running belongs to this partition");
         let finished = state
             .finish_after_cleanup()

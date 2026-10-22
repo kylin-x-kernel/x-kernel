@@ -93,8 +93,9 @@ coverage of reader lifetime and scheduler boundaries.
 For permanent task exit, `finish_task_switch` clears residual participation
 on the incoming stack, after publishing incoming current but before releasing
 the outgoing owner or on-CPU marker. It diagnoses abandoned scopes after unlinking.
-GC still waits for independent owners through `Arc::try_unwrap` and destroys
-tasks in task context; it neither repairs RCU lists nor retains readers forever.
+The scheduler releases its exit owner before switching; the CPU current owner
+survives in PREV_TASK until incoming-stack cleanup. DeferredArc submits the
+actual last release to a normal worker, without an exit queue or GC task.
 
 Owned timer preparation uses `ktimer_core::Timer::new_on` with a snapshot of the
 current logical CPU after platform per-CPU initialization. The platform accessor
@@ -142,14 +143,13 @@ task/ktask/
 │   ├── task.rs                # TaskInner / CurrentTask / state / context
 │   ├── irq_wait.rs            # kirq::IrqSyncWaitIf provider
 │   ├── softirqd.rs            # ksoftirqd/N daemon
-│   ├── run_queue/             # per-CPU RQ: ownership, placement, switch, GC
+│   ├── run_queue/             # per-CPU RQ: ownership, placement, switch
 │   │   ├── mod.rs             # RunQueue type, per-CPU slots, registry, init
 │   │   ├── rq.rs              # leave / pick / switch / kick
 │   │   ├── placement.rs       # spawn / wake CPU choice (no remote sched lock)
 │   │   ├── ownership.rs       # cpu_id and nr_running / nr_home
 │   │   ├── idle_pull.rs       # steal a Ready !on_cpu waiter onto an idle CPU
 │   │   ├── migrate.rs         # affinity: migrate_current / migrate_entry
-│   │   ├── gc.rs              # delayed exit reclaim
 │   │   ├── stats.rs           # sched_stat counters and /proc text
 │   │   └── tests.rs           # run-queue unittests
 │   ├── future/
@@ -175,7 +175,7 @@ task/ktask/
 `placement.rs` because it reads each CPU's `nr_running` / `nr_home`; `ksched`
 holds one RQ lock and never sees remote load. `rq.rs` owns local leave / pick /
 switch. `idle_pull.rs` steals across CPUs. `migrate.rs` only moves a task after
-an affinity change. `gc.rs` only consumes `EXITED_TASKS`.
+an affinity change.
 
 `kworkerpool_ng` uses `ktask` for pinned task creation, prepared waits and
 owned timers. `kworkqueue_ng` retains work lifecycle and wait predicates;
@@ -195,7 +195,6 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 │   idle_pull.rs  steal a Ready !on_cpu waiter onto an idle CPU   │
 │   rq.rs         leave / pick / switch_to / kick                 │
 │   migrate.rs    affinity: migrate_current / migrate_entry       │
-│   gc.rs         delayed EXITED_TASKS reclaim                    │
 │   stats.rs      optional sched_stat                             │
 └─────────────────────────────────────────────────────────────────┘
         │                         │
@@ -218,7 +217,6 @@ kruntime::init_scheduler()/init_scheduler_secondary()
 | `ownership.rs` | `cpu_id` and `nr_running` / `nr_home` accounting |
 | `idle_pull.rs` | Steal a Ready `!on_cpu` waiter from a busier CPU onto an about-to-idle CPU |
 | `migrate.rs` | Affinity enforcement after `set_cpumask`: current `migrate_current`, ready `migrate_entry` |
-| `gc.rs` | Delayed per-CPU `try_unwrap` of exited tasks |
 | `stats.rs` | Optional `sched_stat` counters |
 | `Scheduler` (`ksched`) | `add_task` / `pick_next` / `update_current` / `next_preemption_ns` / `enqueue_task` / `leave_current` / `steal_ready_task`. A running task always leaves through `leave_current`. Block/Migrate record vlag; wake/migrate-in use `enqueue_task` PLACE_LAG; idle-pull uses `steal_ready_task` then PLACE_LAG. EEVDF `curr` is a numeric snapshot only. Slice/request are in ns. |
 | `future::block_on` | Maps `Future` pending onto task block/wake |
@@ -326,8 +324,6 @@ entries:
 - `migrate.rs` `enforce_affinity_placement` runs in task context after
   `set_cpumask`. A remote running task only gets a resched IPI; the caller
   does not `switch_to` on the remote CPU.
-- `gc.rs` `poll_gc` runs only in the per-CPU gc task and may block on
-  `WAIT_FOR_EXIT`.
 - IRQ / IPI paths may call `request_remote_resched` / `kick_running_task`,
   but must not `account` / `refresh` the dest RQ from an IPI callback.
 
@@ -358,7 +354,7 @@ not reentrant under a held RQ guard.
 
 `ktask` splits the user-visible lifetime into two stages:
 
-- `prepare_task()` turns `TaskInner` into an `Arc` without placing the task
+- `prepare_task()` turns `TaskInner` into a `DeferredArc` without placing the task
   on a run queue.
 - `activate_task()` publishes the prepared task onto a run queue so it
   becomes runnable.
@@ -372,7 +368,7 @@ must keep that order.
 `init_scheduler()` captures the active permanent kernel page-table root before
 constructing the boot CPU's run queue. All tasks created through
 `TaskInner::new_common()` start with `TaskContext::new_kernel(kernel_root)`,
-including idle, gc, migration, PID-less, and Linux-visible kernel threads. `ktask` uses the same constructor on every
+including idle, migration, PID-less, and Linux-visible kernel threads. `ktask` uses the same constructor on every
 architecture; `kcpu` defines the register semantics. Shared-root architectures
 use the supplied permanent root, while split-root architectures keep their
 separate user-root default and the already active kernel root. No constructor
@@ -411,7 +407,7 @@ init_scheduler()
   → run_queue::init()
   → disable_local_irq() and leave IRQs masked
   → create the per-CPU idle task (pinned to this CPU)
-  → create the per-CPU run queue (including the gc task)
+  → create the per-CPU run queue
   → install current as the main task
 
 kruntime::init_interrupt()
@@ -428,7 +424,7 @@ init_scheduler_secondary()
   → run_queue::init_secondary()
   → disable_local_irq() and leave IRQs masked
   → install current as the idle task
-  → create this CPU's run queue (including the gc task)
+  → create this CPU's run queue
 
 rust_main_secondary()
   → ktask::init_softirqd_current_cpu()
@@ -596,10 +592,9 @@ Scheduler algorithm state is mutated through `SpinRaw<Scheduler>`, and load
 snapshots / the account epoch use atomic interior mutability, so neither local
 nor remote access forms a long-lived `&mut RunQueue`.
 
-The exited-task queue and `PREV_TASK` each use `SpinNoIrq` inside their
-per-CPU slot. Scheduling, GC, and the context-switch continuation only
-clear/push/pop/clone/replace within the short critical section and never
-return a long-lived mutable reference out of the slot. `PREV_TASK` holds an
+`PREV_TASK` uses `SpinNoIrq` inside its per-CPU slot. The switch path
+only replaces or takes the owner within the short critical section and never
+returns a long-lived mutable reference out of the slot. `PREV_TASK` holds an
 optional strong reference, taken by the incoming task after switching stacks.
 The reference is released or transferred to a wake enqueue outside the lock.
 Callers exclude migration while resolving the current-CPU slot; the inner
@@ -667,7 +662,7 @@ queue because a resumed task may have migrated. On SMP it also clears the old
 task's on-CPU marker and completes any deferred wake enqueue.
 Local NMI observations finish before the interrupted switch resumes and can
 therefore borrow either task across that publication boundary. Atomic pointer publication does
-not synchronize arbitrary mutable task fields or permit remote raw Arc upgrades.
+not synchronize arbitrary mutable task fields or permit remote raw owner upgrades.
 `kcpu` owns current-task storage and its architecture access rules, re-exported
 by `khal::context`. It accepts opaque pointers; `ktask` alone interprets them
 as tasks and manages their owning references. `CurrentTask::prepare_switch`
@@ -751,24 +746,74 @@ readiness precedence and Linux restart policy belong to their callers.
   `kirq::synchronize_irq()` / `free_irq()` can block the current task. IRQ
   descriptor lifetime and the `in_flight` predicate stay in `kirq`.
 
-### Exit reclaim (GC task)
+### Exit reclaim through DeferredArc
 
-Each CPU run queue is created with a `gc` task that loops on `poll_gc`:
+There is no per-CPU GC task, exit queue, or reference-count polling:
 
-- consume the `EXITED_TASKS` list
-- reclaim immediately on successful `Arc::try_unwrap`
-- otherwise push back and wait for external refs to drop
-- sleep/wake through the `WAIT_FOR_EXIT` waker
+1. Exit publishes the per-task completion and removes the scheduler owner.
+   That owner is dropped before the non-returning switch, not left on the
+   abandoned stack. The CPU current owner still retains the active stack.
+2. The switch transfers that current owner into `PREV_TASK`.
+3. Incoming-stack cleanup retires diagnostic registration, clears abandoned
+   RCU participation and releases the on-CPU marker before releasing the owner.
+4. Independent holders may outlive exit. The actual last strong release submits
+   destruction to the normal worker through DeferredArc.
 
-This is delayed reclaim so the exit/switch hot path does not do a slow drop.
-`WAIT_FOR_EXIT` keeps `PollSet` event semantics because the same CPU's GC
-task observes successive batches of exited tasks. It is not a per-task sticky
-exit completion.
+Join still observes exit, not destructor completion. Weak expiry likewise does
+not imply that the worker has finished destruction. Power-off does not promise
+a global finalizer drain.
+
+## Diagnostic registration lifetime
+
+With snapshot enabled, each task carries an 8-byte registration pointer on
+64-bit targets (aggregate Task layout may add alignment padding). Registration
+before runnable publication returns a permanent slot address, not a CPU inferred
+at exit. Task migration never moves that registration. The exited branch of
+finish_task_switch retires it directly; Registration::drop is an idempotent
+fallback. Exited tasks cease being discoverable even if external owners retain
+them. Readers that already obtained a Task owner may finish afterwards.
+
+Each of the existing 4096 slots per configured CPU now embeds DeferredWeak and
+one atomic admission state, rather than pointing to a separately allocated Box.
+An Acquire CAS admits a counted reader only to LIVE storage. Retirement closes
+admission; the retiring writer or last reader moves out Weak after the count
+reaches zero, then publishes EMPTY for reuse. No reader waits on a publishing or
+retiring writer, including one interrupted by NMI. Contended admission uses CAS
+retries, not a wait-free latency guarantee. Slot guards cover only Weak upgrade;
+formatting, stack walks and user callbacks run after releasing that guard.
+NMI final Weak release uses DeferredWeak's existing local irq_work requirement.
+
+Cost on 64-bit targets: 32 bytes/slot, 128 KiB/configured CPU versus the previous
+32 KiB static table plus 24 requested heap bytes per registered Weak box.
+Four configured CPUs add 384 KiB static storage while eliminating those boxes
+and their allocation/free operations. No diagnostic storage is added when
+snapshot is disabled. Registration remains a worst-case 4096-slot scan and now
+has a larger cache footprint; successful reads add a count CAS and decrement.
+Exit performs direct-slot retirement, never a table scan or reader wait. The
+default hardlockup NMI period is 10 seconds, so this is not a scheduling hot-path
+scan; no latency or throughput improvement is claimed without measurement.
 
 ## SMP semantics
 
-- Each CPU has one `RUN_QUEUE`, `IDLE_TASK`, `EXITED_TASKS`, and
-  `WAIT_FOR_EXIT`.
+Task owners are `DeferredArc<SchedTask<TaskInner>>`; task weak references use
+`DeferredWeak`. Run queues instantiate ksched's shared-owner parameter with this
+type. Current stores one owning raw payload pointer and CurrentTask borrows it
+without refcount traffic. Preparing a switch reconstructs that count exactly once
+and retains it in PREV_TASK until the outgoing stack is inactive. The incoming
+pointer independently owns its count. No scheduling policy changes.
+
+Final strong release expires Weak immediately and submits payload destruction;
+join and Weak expiration do not wait for that destruction. Unactivated tasks use
+the same path. The worker destroys TaskInner, its runtime and stack. Creation
+uses the installed preparation provider after allocator/per-CPU/trap setup,
+including boot before worker binding. Hardirq, serving softirq and NMI creation
+are rejected; BH-disabled task preparation remains supported when allocation is
+legal under the caller's locks, including scheduler affinity migration helpers.
+NMI release requires local irq_work readiness; it transfers the obligation to
+ordinary IRQ before worker submission, without inline Task destruction.
+
+
+- Each CPU has one `RUN_QUEUE`, `IDLE_TASK`, and `PREV_TASK`.
 - `task.cpu_id` is **run-queue ownership**, not an ad hoc helper:
   - runnable / running: CPU whose run queue currently owns the task
   - blocked: last owner CPU, used as wake-affinity preference by
@@ -776,7 +821,7 @@ exit completion.
 - All ownership updates go through `RunQueue` wrappers. Callers must not call
   `Scheduler::add_task` / `enqueue_task` / `leave_current` or scatter
   `set_cpu_id`:
-  - `publish_task`: first enqueue of a new task (`spawn` / per-CPU gc)
+  - `publish_task`: first enqueue of a new task (`spawn`)
   - `enqueue_task`: enqueue a non-current Ready task (unblock / affinity
     migrate-in / idle-pull)
   - `leave_current`: current running task leaves the execution slot (Yield /
@@ -1038,7 +1083,7 @@ multiplied by 25.
 
 ### Why `run_queue.rs` became a directory
 
-One file holding placement, switch, affinity, GC, and counters would tangle
+One file holding placement, switch, affinity, and counters would tangle
 SMP rules with local leave/pick once class placement (for example RT
 pin-home) is added. After the split, `placement.rs` only reads per-CPU load
 heuristics; `rq.rs` only leave/pick/switches on the already-chosen RQ;
@@ -1090,19 +1135,20 @@ Consequences:
 interface the other way breaks a potential cycle and keeps the crate
 boundary clear.
 
-### Why a GC task reclaims exited tasks
+### Why final destruction uses a normal worker
 
-An exiting task may still be held by a joiner or the switch path. Delayed
-reclaim avoids use-after-free and a slow drop on the hot path.
+An exiting task may still be held by a joiner or the switch path. Strong
+ownership prevents premature reclamation; DeferredArc moves potentially
+sleeping destruction out of the last releaser's execution context.
 
 ## Drop / resource release
 
 - `KRunQueueRef` / `CurrentRunQueueRef` call `G::release` in `Drop`,
   matching acquire. The preempt-check path temporarily raises the disable
   count so drop cannot recurse into scheduling.
-- Exited tasks first enter `EXITED_TASKS`. `gc.rs` `poll_gc` uses
-  `Arc::try_unwrap` to delay-drop `TaskInner` and its stack. `switch_to`
-  must not drop the task that just switched away.
+- DeferredArc owns final destruction of TaskInner and its stack, without an
+  exit-list owner or polling task. PREV_TASK must retain the task
+  that just switched away until execution reaches the incoming stack.
 
 ## Boundary with `kruntime`
 
@@ -1129,7 +1175,7 @@ trigger calls `dump_sched_stats()` for allocation-free base output.
 
 ## Redundancy and overload
 
-- **Redundancy**: each CPU has its own idle/gc and run queue, so there is no
+- **Redundancy**: each CPU has its own idle task and run queue, so there is no
   single global queue.
 - **Overload**: class algorithms (`ksched`) and the block model share the
   load. `ktask` places spawn / affinity migrate-in with `find_idlest_cpu`

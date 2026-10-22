@@ -129,3 +129,47 @@ CPU/category binding, atomic action publication, and no waiting/destruction whil
 holding the test fixture selector or admission gate. Live-service tests cover
 boot-installed providers, controlled races and lifecycle outcomes; neither test
 mode proves all concurrent schedules or worst-case latency under arbitrary load.
+
+## Finalization provider boundary
+
+Carrier's UnsafeCell has one pre-publication writer and one post-removal consumer.
+The permanent executor's pending lock synchronizes the handoff. Intrusive list
+ownership retains an Arc; the publishing Arc independently spans notification.
+The intrusive-collections adapter transfers one Arc owner into the list and
+returns it on removal. Embedded LinkedListAtomicLink storage is never used by
+another list and each Prepared is submitted at most once. All list mutations
+remain under the pending lock; the publishing Arc independently protects the
+carrier until notification returns.
+Payload destruction and carrier release occur outside the pending lock.
+
+One static executor owns Work. It remains pinned and live for kernel life,
+cannot be canceled/disabled, and retains the normal default queue. A running
+occurrence can have one queued successor; AlreadyQueued coalesces notification,
+not finalization ownership. Unexpected notification errors retain pending nodes
+and fail fatally. Panic recovery or resumed processing is not promised.
+
+Before binding, the permanent list retains every obligation without executing
+it. Queue publication precedes the binder's locked pending check; producers link
+before checking queue publication. This prevents a missed startup notification
+without a second queue or migration transaction. Failed service candidates never
+publish the finalizer's queue. Permanent boot failure can retain objects forever;
+it is not a promise of reclamation after failed boot.
+Provider installation is serialized primary startup. The unsafe
+kfinalize::service::new_integration entry permits concurrent audited boot/task
+preparation after each CPU's allocation/per-CPU/IRQ-lock prerequisites hold.
+Caller-held locks must permit allocation and metadata release. This grants no
+hardirq, softirq or NMI construction permission.
+
+Consumer callbacks process bounded node batches. No finalization runs inline in
+submit, no enqueue allocates a node, and no callback changes execution category.
+No BH finalization provider is installed. Normal destructors must not
+wait for same-executor finalization: sharing Work introduces serial head-of-line
+blocking in addition to existing shared worker-pool dependencies.
+
+The public identity remains separate, so private queue ownership cannot extend
+Weak upgrade. Metadata frees on the publishing CPU outside NMI; DeferredArc NMI
+release instead uses a preprepared, separate ordinary-IRQ node. This does not
+make arbitrary Work/WorkHandle submission NMI-safe. No RCU grace-period handling,
+guaranteed latency or global deadlock
+detection. Previously recorded host fault/Miri evidence for the per-object Work
+backend must not be attributed to this revised backend.

@@ -11,6 +11,7 @@ use alloc::{
 use core::{
     num::NonZeroUsize,
     pin::{Pin, pin},
+    ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
     task::Waker,
 };
@@ -20,6 +21,88 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::super::{Work, observers::CompletionObserver};
 use crate::queue::partition::QueuePartition;
+
+fn release_in_terminal_gap<H: Fn() + Send + Sync>(callback: H, is_partitioned: bool) {
+    let partition = Arc::new(QueuePartition::new(
+        kcpu_id_map::LogicalCpuId::new(0),
+        NonZeroUsize::new(1).unwrap(),
+    ));
+    let work = Box::into_raw(Box::new(Work::with_callback(callback)));
+    let (receipt, token) = CompletionObserver::prepare();
+    let (queue_receipt, queue_token) = CompletionObserver::prepare();
+    {
+        // SAFETY: the raw Box uniquely retains this stable allocation until the
+        // explicit destruction below, after terminal publication and all borrows.
+        let borrowed = unsafe { &*work };
+        if is_partitioned {
+            // SAFETY: the Box remains live through admission and the unique
+            // execution's shared cleanup; no other producer can submit it.
+            core::assert!(unsafe { partition.accept(borrowed, (), 0) }.is_ok());
+            core::assert!(partition.observe_batch(0, queue_token).is_ok());
+        } else {
+            core::assert!(borrowed.accept(()).is_ok());
+        }
+        core::assert_eq!(borrowed.capture(&mut vec![token]), Ok(1));
+    }
+    let claimed = if is_partitioned {
+        let super::Execution { work, .. } = partition.claim_next().unwrap();
+        work
+    } else {
+        // SAFETY: the unpartitioned fixture's sole Box owner keeps this state
+        // initialized; claim establishes the same unique running responsibility.
+        core::assert!(unsafe { &*work }.state.lock().claim());
+        NonNull::new(work).unwrap().cast()
+    };
+    let (running_partition, retirement) = {
+        // SAFETY: this fixture consumed the sole execution claim and retains
+        // storage until its shared callback and cleanup have returned.
+        let borrowed = unsafe { &*work };
+        (borrowed.callback)();
+        borrowed.prepare_completion()
+    };
+    core::assert!(retirement.is_none());
+    // SAFETY: callback and shared cleanup returned with running still occupied;
+    // claimed preserves the original Work type and running partition ownership.
+    let finished = unsafe { Work::<(), H>::finish_execution(claimed, running_partition) };
+    core::assert!(!receipt.is_completed());
+    {
+        // SAFETY: the raw Box is still retained. This new caller arrives after
+        // idle publication, with no earlier shared Work call on the stack.
+        let borrowed = unsafe { &*work };
+        let (_, late_token) = CompletionObserver::prepare();
+        core::assert_eq!(borrowed.capture(&mut vec![late_token]), Ok(0));
+        core::assert!(!borrowed.cancel_sync().unwrap());
+    }
+    // SAFETY: cancellation observed no pending/running work, every shared call
+    // returned, and there is no producer or retirement hook retaining this Box.
+    drop(unsafe { Box::from_raw(work) });
+    Work::<(), H>::complete_execution(finished);
+    core::assert!(receipt.is_completed());
+    if is_partitioned {
+        core::assert!(queue_receipt.is_completed());
+        let (_, empty_token) = CompletionObserver::prepare();
+        core::assert!(partition.observe_batch(0, empty_token).is_err());
+    }
+}
+
+/// A late cancellation may destroy Work before old completion notifications.
+///
+/// # Panics
+/// Panics on early notification, stale running state or duplicate destruction.
+#[def_test]
+fn late_cancel_releases_work_before_old_notifications() {
+    for is_partitioned in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let capture = CallbackCapture {
+            calls: calls.clone(),
+            drops: drops.clone(),
+        };
+        release_in_terminal_gap(move || capture.call(), is_partitioned);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+}
 
 struct Resource {
     on_drop: Option<Box<dyn FnOnce() + Send>>,

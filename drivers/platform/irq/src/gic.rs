@@ -302,6 +302,22 @@ pub fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
     }
 }
 
+/// Runs a bounded, non-blocking test action while the real GICv3 lock is held.
+///
+/// Requires initialized GIC and local irq_work readiness. The action may submit
+/// irq_work or arrange an NMI, but must not wait for the ordinary IRQ to drain
+/// while this lock masks it. Returns `false` without running the action on GICv2.
+#[cfg(unittest)]
+pub fn with_irq_work_gic_lock_for_test(action: impl FnOnce()) -> bool {
+    match active_version() {
+        GicVersion::V2 => false,
+        GicVersion::V3 => {
+            gicv3::with_irq_work_gic_lock_for_test(action);
+            true
+        }
+    }
+}
+
 pub fn set_prio(irq: usize, priority: u8) {
     // NMI classification relies on the invariant that only NMI sources live
     // below IRQ_THRESHOLD: excp routes IRQs taken with PMR <= NMI_ONLY to the
@@ -345,6 +361,13 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn prepare_local_irq_work() -> Option<fn()> {
+        match active_version() {
+            GicVersion::V2 => None,
+            GicVersion::V3 => gicv3::prepare_local_irq_work(),
+        }
+    }
+
     fn configure(desc: kirq::IrqDesc) {
         match desc.trigger {
             kirq::IrqTrigger::EdgeRising | kirq::IrqTrigger::EdgeFalling => {

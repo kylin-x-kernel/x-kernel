@@ -186,7 +186,7 @@ vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
 pmu = ["kruntime/pmu", "kplat-aarch64?/pmu"]
 
 # NMI
-nmi = ["khal/nmi", "kplat-aarch64?/nmi"]
+nmi = ["khal/nmi", "kruntime/nmi", "kplat-aarch64?/nmi"]
 nmi_pmu = ["khal/nmi_pmu", "kplat-aarch64?/nmi-pmu"]
 nmi_mode_pseudo = ["khal/nmi_pseudo", "kplat-aarch64?/nmi-pseudo"]
 nmi_mode_hardware = ["khal/nmi_hardware", "kplat-aarch64?/nmi-hardware"]

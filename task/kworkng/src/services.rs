@@ -303,6 +303,9 @@ pub fn init(
     budget: NonZeroUsize,
 ) -> Result<(), InitError> {
     let result = Services::prepare(limit, idle_for, budget).and_then(install);
+    if result.is_ok() {
+        crate::finalize::install();
+    }
     if let Err(error) = result {
         log::warn!("[kworkng] service initialization failed: {error:?}");
     }

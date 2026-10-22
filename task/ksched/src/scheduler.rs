@@ -21,16 +21,17 @@ use crate::{
     classes::{DeadlineClass, FairClass, IdleClass, RtClass},
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
+    owner::SharedOwner,
     policy::{SchedAttr, SchedClass, SchedError},
 };
 
 /// Rank that is defined but has no queue yet.
-struct UnwiredClass<T> {
+struct UnwiredClass<T, Owner: SharedOwner<SchedTask<T>>> {
     class: SchedClass,
-    _task: PhantomData<T>,
+    _task: PhantomData<(T, Owner)>,
 }
 
-impl<T> UnwiredClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> UnwiredClass<T, Owner> {
     const fn new(class: SchedClass) -> Self {
         Self {
             class,
@@ -39,7 +40,7 @@ impl<T> UnwiredClass<T> {
     }
 }
 
-impl<T> ClassOps<T> for UnwiredClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for UnwiredClass<T, Owner> {
     fn class(&self) -> SchedClass {
         self.class
     }
@@ -62,7 +63,7 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
     )]
     fn enqueue(
         &mut self,
-        _task: Arc<SchedTask<T>>,
+        _task: Owner,
         _kind: EnqueueKind,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
@@ -73,11 +74,11 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
     fn dequeue(
         &mut self,
-        _task: &SchedTask<T>,
+        _task: &Owner,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         _tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         None
     }
 
@@ -87,11 +88,11 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         _tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         None
     }
 
-    fn pick_next(&mut self, _clk: &RqClock, _tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn pick_next(&mut self, _clk: &RqClock, _tok: RqLocked) -> Option<Owner> {
         None
     }
 
@@ -99,7 +100,7 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
     fn put_prev(
         &mut self,
-        _prev: Arc<SchedTask<T>>,
+        _prev: Owner,
         _reason: LeaveReason,
         _clk: &RqClock,
         _tok: RqLocked,
@@ -135,7 +136,7 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
     fn attr_changed(
         &mut self,
-        _task: &Arc<SchedTask<T>>,
+        _task: &Owner,
         _old: SchedAttr,
         _is_curr: bool,
         _clk: &RqClock,
@@ -173,16 +174,16 @@ impl<T> ClassOps<T> for UnwiredClass<T> {
 
 /// Stop, Deadline, RT, Fair, then Idle. `curr` and `clock` stay outside so a
 /// queue can be borrowed mutably beside the runner.
-pub(crate) struct ClassSet<T> {
-    stop: UnwiredClass<T>,
-    deadline: DeadlineClass<T>,
-    rt: RtClass<T>,
-    fair: FairClass<T>,
-    idle: IdleClass<T>,
+pub(crate) struct ClassSet<T, Owner: SharedOwner<SchedTask<T>>> {
+    stop: UnwiredClass<T, Owner>,
+    deadline: DeadlineClass<T, Owner>,
+    rt: RtClass<T, Owner>,
+    fair: FairClass<T, Owner>,
+    idle: IdleClass<T, Owner>,
 }
 
-impl<T> ClassSet<T> {
-    fn get(&self, c: SchedClass) -> &dyn ClassOps<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> ClassSet<T, Owner> {
+    fn get(&self, c: SchedClass) -> &dyn ClassOps<T, Owner> {
         match c {
             SchedClass::Stop => &self.stop,
             SchedClass::Deadline => &self.deadline,
@@ -192,7 +193,7 @@ impl<T> ClassSet<T> {
         }
     }
 
-    fn get_mut(&mut self, c: SchedClass) -> &mut dyn ClassOps<T> {
+    fn get_mut(&mut self, c: SchedClass) -> &mut dyn ClassOps<T, Owner> {
         match c {
             SchedClass::Stop => &mut self.stop,
             SchedClass::Deadline => &mut self.deadline,
@@ -202,11 +203,11 @@ impl<T> ClassSet<T> {
         }
     }
 
-    fn iter_by_rank(&self) -> [&dyn ClassOps<T>; 5] {
+    fn iter_by_rank(&self) -> [&dyn ClassOps<T, Owner>; 5] {
         [&self.stop, &self.deadline, &self.rt, &self.fair, &self.idle]
     }
 
-    fn iter_by_rank_mut(&mut self) -> [&mut dyn ClassOps<T>; 5] {
+    fn iter_by_rank_mut(&mut self) -> [&mut dyn ClassOps<T, Owner>; 5] {
         [
             &mut self.stop,
             &mut self.deadline,
@@ -218,17 +219,17 @@ impl<T> ClassSet<T> {
 }
 
 /// Per-CPU class arbitrator.
-pub struct Scheduler<T> {
+pub struct Scheduler<T, Owner: SharedOwner<SchedTask<T>> = Arc<SchedTask<T>>> {
     clock: RqClock,
-    curr: Option<Arc<SchedTask<T>>>,
-    classes: ClassSet<T>,
+    curr: Option<Owner>,
+    classes: ClassSet<T, Owner>,
 }
 
-impl<T> Scheduler<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// Build an empty scheduler whose Idle fallback is `idle`.
     ///
     /// Fair requests use [`crate::DEFAULT_SLICE_NS`].
-    pub fn new(idle: Arc<SchedTask<T>>, now_ns: u64) -> Self {
+    pub fn new(idle: Owner, now_ns: u64) -> Self {
         Self {
             clock: RqClock::new(now_ns),
             curr: None,
@@ -253,7 +254,7 @@ impl<T> Scheduler<T> {
 
     /// Runner if it belongs to `class`. Takes the field so callers can still
     /// mutably borrow `classes`.
-    fn curr_for(curr: &Option<Arc<SchedTask<T>>>, class: SchedClass) -> Option<&SchedTask<T>> {
+    fn curr_for(curr: &Option<Owner>, class: SchedClass) -> Option<&SchedTask<T>> {
         curr.as_deref().filter(|task| task.sched_class() == class)
     }
 
@@ -338,7 +339,7 @@ impl<T> Scheduler<T> {
         next
     }
 
-    fn leave(&mut self, now_ns: u64, reason: LeaveReason, tok: RqLocked) -> Arc<SchedTask<T>> {
+    fn leave(&mut self, now_ns: u64, reason: LeaveReason, tok: RqLocked) -> Owner {
         let _ = self.charge(now_ns, tok);
         #[expect(
             clippy::expect_used,
@@ -386,7 +387,7 @@ impl<T> Scheduler<T> {
     /// ```
     ///
     /// Boot `main` and AP idle call this before the first `pick_next`.
-    pub fn install_current(&mut self, task: Arc<SchedTask<T>>, now_ns: u64) {
+    pub fn install_current(&mut self, task: Owner, now_ns: u64) {
         let tok = Self::token();
         assert!(self.curr.is_none(), "install_current on a live runner");
         let _ = self.clock.advance(now_ns);
@@ -398,7 +399,7 @@ impl<T> Scheduler<T> {
     }
 
     /// Current runner, if any.
-    pub fn current(&self) -> Option<&Arc<SchedTask<T>>> {
+    pub fn current(&self) -> Option<&Owner> {
         self.curr.as_ref()
     }
 
@@ -466,7 +467,7 @@ impl<T> Scheduler<T> {
     }
 
     /// Charge, enqueue, then probe wakeup preemption.
-    pub fn enqueue(&mut self, task: Arc<SchedTask<T>>, kind: EnqueueKind, now_ns: u64) -> Decision {
+    pub fn enqueue(&mut self, task: Owner, kind: EnqueueKind, now_ns: u64) -> Decision {
         let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         let class = task.sched_class();
@@ -483,7 +484,9 @@ impl<T> Scheduler<T> {
     }
 
     /// Take a queued (non-current) task off this RQ.
-    pub fn dequeue(&mut self, task: &SchedTask<T>, now_ns: u64) -> Option<Arc<SchedTask<T>>> {
+    /// The owning handle preserves the original allocation provenance needed
+    /// by intrusive removal; a borrowed task value alone is insufficient.
+    pub fn dequeue(&mut self, task: &Owner, now_ns: u64) -> Option<Owner> {
         let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         if task.seat(tok) == QueueSeat::Detached {
@@ -500,7 +503,7 @@ impl<T> Scheduler<T> {
         &mut self,
         want: &mut dyn FnMut(&SchedTask<T>) -> bool,
         now_ns: u64,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         let tok = Self::token();
         let _ = self.charge(now_ns, tok);
         let clock = self.clock;
@@ -517,7 +520,7 @@ impl<T> Scheduler<T> {
     /// # Panics
     ///
     /// A previous runner is still recorded in `curr`.
-    pub fn pick_next(&mut self, now_ns: u64) -> Arc<SchedTask<T>> {
+    pub fn pick_next(&mut self, now_ns: u64) -> Owner {
         let tok = Self::token();
         assert!(
             self.curr.is_none(),
@@ -561,7 +564,7 @@ impl<T> Scheduler<T> {
     }
 
     /// The runner is exiting. Returns the `Arc` for the exited list.
-    pub fn exit_current(&mut self, now_ns: u64) -> Arc<SchedTask<T>> {
+    pub fn exit_current(&mut self, now_ns: u64) -> Owner {
         let tok = Self::token();
         self.leave(now_ns, LeaveReason::Exit, tok)
     }
@@ -581,7 +584,7 @@ impl<T> Scheduler<T> {
     /// the old class tree does not hold it.
     pub fn set_attr(
         &mut self,
-        task: &Arc<SchedTask<T>>,
+        task: &Owner,
         attr: SchedAttr,
         now_ns: u64,
     ) -> Result<Decision, SchedError> {
@@ -596,7 +599,7 @@ impl<T> Scheduler<T> {
         let is_curr = self
             .curr
             .as_ref()
-            .is_some_and(|curr| Arc::ptr_eq(curr, task));
+            .is_some_and(|curr| Owner::ptr_eq(curr, task));
         let new_class = attr.class();
         let clock = self.clock;
         self.classes.get(new_class).can_admit(task, attr, tok)?;
@@ -655,16 +658,16 @@ impl<T> Scheduler<T> {
 }
 
 #[cfg(unittest)]
-impl<T> Scheduler<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     pub(crate) fn curr_is_none(&self) -> bool {
         self.curr.is_none()
     }
 
-    pub(crate) fn fair_mut(&mut self) -> &mut FairClass<T> {
+    pub(crate) fn fair_mut(&mut self) -> &mut FairClass<T, Owner> {
         &mut self.classes.fair
     }
 
-    pub(crate) fn idle_task(&self) -> &Arc<SchedTask<T>> {
+    pub(crate) fn idle_task(&self) -> &Owner {
         self.classes.idle.idle()
     }
 }

@@ -205,6 +205,22 @@ pub trait IntrManagerIf {
     /// before the target acknowledges it.
     fn notify_cpu(id: usize, target: TargetCpu);
 
+    /// Prepares a permanent local ordinary-IRQ notification for irq_work.
+    ///
+    /// Called once per CPU in non-migrating normal startup context, after the
+    /// allocator and local interrupt controller are ready. Preparation may
+    /// allocate and acquire locks, but must not sleep. The provider installs
+    /// the global handler once and configures/enables delivery on this CPU.
+    /// The handler must call [`crate::irq_work::handle_irq`].
+    ///
+    /// Returns `None` when unsupported or preparation fails. On success the
+    /// function remains valid for the kernel lifetime on this prepared CPU:
+    /// it must be NMI-safe, reentrant, allocation-free, lock-free and log-free,
+    /// with no lazy initialization. It orders preceding memory writes before
+    /// notifying this CPU through an ordinary IRQ, never an NMI. Callers must
+    /// prevent migration and publish irq_work readiness only after this returns.
+    fn prepare_local_irq_work() -> Option<fn()>;
+
     /// Sets a controller-local interrupt priority.
     ///
     /// Backends that do not expose priority levels may implement this as a

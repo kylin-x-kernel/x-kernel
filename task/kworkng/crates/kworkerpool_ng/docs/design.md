@@ -128,8 +128,8 @@ When no deadline is needed, synchronous cancellation runs only if that obligatio
 exists, then clears it. Timer expiry does not clear the flag; final timer Drop
 still drains delivery unconditionally. Repeated no-deadline passes avoid timer
 owner-lock acquisition.
-Published task exit permits slot reuse, not a claim that scheduler GC has already
-released the task stack.
+Published task exit permits slot reuse, not a claim that the DeferredArc
+finalizer has already released the task stack.
 
 ## BH Execution
 

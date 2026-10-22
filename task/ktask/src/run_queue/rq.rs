@@ -7,7 +7,6 @@
 #[cfg(unittest)]
 unittest::path_mod_test!(tests_rcu_switch, "../../ut-tests/tests/rcu_switch.rs");
 
-use alloc::sync::Arc;
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicU8, AtomicUsize};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -25,10 +24,7 @@ use super::migrate::spawn_affinity_migration_task;
 use super::stats::record_remote_resched;
 #[cfg(feature = "sched_stat")]
 use super::stats::{sched_stat_cpu, sched_stat_inc};
-use super::{
-    CurrentRunQueueRef, KRunQueueRef, PREV_TASK, RunQueue, WakeEnqueue, current_wait_for_exit, gc,
-    with_exited_tasks,
-};
+use super::{CurrentRunQueueRef, KRunQueueRef, PREV_TASK, RunQueue, WakeEnqueue};
 use crate::{
     KtaskRef, Scheduler, TaskInner,
     api::{current, program_sched_deadline, program_sched_deadline_for, rearm_local_timer},
@@ -417,26 +413,17 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         assert!(curr.is_running(), "task is not running: {:?}", curr.state());
         assert!(!curr.is_idle());
         if curr.is_init() {
-            // SAFETY: `exit_current` runs under
-            // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
-            // preemption are disabled while touching the current CPU's percpu
-            // exited-task list.
-            with_exited_tasks(|tasks| tasks.clear());
             khal::power::power_off();
         } else {
             curr.notify_exit(exit_code);
             #[cfg(feature = "smp")]
             self.inner.discharge_home(curr);
 
-            // SAFETY: `exit_current` runs under
-            // `current_run_queue::<NoPreemptIrqSave>()`, so IRQs and
-            // preemption are disabled while touching this CPU's exited list
-            // and waking GC. The Arc returned by `exit_current` is the one
-            // that goes on `EXITED_TASKS` (`refactor_ksched`); do not also
-            // clone `curr` onto that list.
             let (exited, pull_if_empty) = self.inner.leave_and_publish(|s| s.exit_current(now_ns));
-            with_exited_tasks(|tasks| tasks.push_back(exited));
-            current_wait_for_exit().wake();
+            // The owning CPU current pointer still retains this active stack.
+            // Release the scheduler owner before the non-returning switch;
+            // PREV_TASK transfers the current owner to incoming-stack cleanup.
+            drop(exited);
 
             self.inner.resched(pull_if_empty, TaskState::Exited);
         }
@@ -469,7 +456,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///
     /// # Panics
     ///
-    /// Panics if `Arc::strong_count(current) <= 2` (missing caller-owned ref).
+    /// Panics if `KtaskRef::strong_count(current) <= 2` (missing caller-owned ref).
     /// This is a hard scheduler invariant: there is no recovery path. New
     /// wait-queue / timer callers must clone current before entry — see the
     /// `blocked_resched_survives_with_caller_owned_ref` unittest for a
@@ -488,7 +475,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         assert!(curr.can_preempt(2));
         assert!(!curr.rcu_reader.is_reading(), "blocking in RCU read scope");
         // CurrentTask slot + Scheduler.curr + caller clone (e.g. block_on).
-        let strong = Arc::strong_count(curr);
+        let strong = KtaskRef::strong_count(curr);
         assert!(
             strong > 2,
             "blocked_resched: strong_count={strong} (need > 2); into_raw current slot and \
@@ -526,13 +513,10 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
 impl RunQueue {
     /// Create a new run queue for the specified CPU.
-    /// The run queue is initialized with a per-CPU gc task in its scheduler.
     pub(super) fn new(cpu_id: LogicalCpuId, idle: KtaskRef) -> Self {
-        let gc_task = gc::spawn_gc_task(cpu_id);
-
         let now_ns = khal::time::monotonic_time_nanos();
         let scheduler = Scheduler::new(idle, now_ns);
-        let rq = Self {
+        Self {
             cpu_id,
             scheduler: SpinRaw::new(scheduler),
             last_accounted_ns: AtomicU64::new(now_ns),
@@ -542,11 +526,7 @@ impl RunQueue {
             nr_home: AtomicUsize::new(0),
             #[cfg(feature = "smp")]
             rt_preempt_rank: AtomicU8::new(0),
-        };
-        // Publish through the ownership-aware entry so secondary-CPU gc tasks
-        // do not keep the default `cpu_id == 0`.
-        rq.publish_task(gc_task, EnqueueKind::New, now_ns);
-        rq
+        }
     }
 
     /// Run `f` under this CPU's scheduler lock and publish `nr_running`.
@@ -858,7 +838,7 @@ impl RunQueue {
         };
 
         // SAFETY: IRQs/preemption are excluded and prev_task is this CPU's
-        // Arc-owned current task. Post-switch cleanup unlinks exited readers
+        // KtaskRef-owned current task. Post-switch cleanup unlinks exited readers
         // before releasing the outgoing owner.
         let observation = unsafe {
             krcu_core::SchedulerObservation::new(&prev_task.rcu_reader, self.cpu_id.as_usize())
@@ -921,10 +901,10 @@ impl RunQueue {
             unsafe { (*next_ctx_ptr).set_page_table_root(root) };
         }
 
-        // The scheduler/GC also retains the outgoing task. Switch cleanup
-        // releases its current reference only after leaving its stack.
-        assert!(Arc::strong_count(&prev_task) > 1);
-        assert!(Arc::strong_count(&next_task) >= 1);
+        // Current may be the outgoing task's only owner after exit. PREV_TASK
+        // retains that same count until cleanup on the incoming stack.
+        assert!(KtaskRef::strong_count(&prev_task) >= 1);
+        assert!(KtaskRef::strong_count(&next_task) >= 1);
 
         let suspended_exception = khal::context::suspend_active_exception_context();
         // SAFETY: IRQs and migration are disabled, prev_task is current, and
@@ -982,9 +962,11 @@ pub(crate) unsafe fn finish_task_switch() {
         .take()
         .expect("context switch must supply the outgoing task owner");
     if prev_task.state() == TaskState::Exited {
+        #[cfg(feature = "snapshot")]
+        prev_task.diagnostic_registration.retire();
         // SAFETY: this task cannot resume, its stack is inactive and current
         // already names the incoming task. IRQs/migration remain excluded;
-        // PREV_TASK's transferred Arc retains its storage through unlinking.
+        // PREV_TASK's transferred KtaskRef retains its storage through unlinking.
         // The inactive outgoing task cannot be observed by incoming IRQ/NMI scopes.
         let outcome = unsafe { prev_task.rcu_reader.finish_task_exit() };
         if outcome.needs_progress {

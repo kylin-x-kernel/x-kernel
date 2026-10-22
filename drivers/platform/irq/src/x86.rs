@@ -89,6 +89,10 @@ fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn prepare_local_irq_work() -> Option<fn()> {
+        None
+    }
+
     fn configure(desc: kirq::IrqDesc) {
         configure(desc);
     }

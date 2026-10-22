@@ -120,7 +120,12 @@ fn exit_thread_snapshot_stays_on_old_binding_until_task_drop() {
     drop(runtime);
     assert!(old_weak.upgrade().is_some());
     assert!(ktask::is_sleepable_context());
+    let retired_task = ktask::KtaskRef::downgrade(&task);
     drop(task);
+    assert!(retired_task.upgrade().is_none());
+    while old_weak.strong_count() != 0 {
+        ktask::yield_now();
+    }
     assert!(old_weak.upgrade().is_none());
 }
 

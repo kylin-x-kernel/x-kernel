@@ -187,3 +187,82 @@ implementation selection. Live tests leave the permanent Once and both BH
 actions installed, covering all CPU/categories, safe ownership, deferred release
 and delayed work. `kruntime` additionally probes real hard IRQ publication,
 caller-CPU allocation counters, timer cancellation races and payload visibility.
+
+## Normal finalization provider
+
+The permanent executor can be prepared before worker services. Successful
+runtime initialization binds its normal default queue through a Once. It owns
+one borrowed Work and an IRQ-safe intrusive pending list from
+`intrusive-collections`. Its Arc-owning adapter uses the Carrier's embedded
+`LinkedListAtomicLink`; enqueue/dequeue allocates no separate list node.
+Per-object Carrier also contains a prepared NMI irq_work node, a static executor
+reference and the one-shot Finalization slot. No per-object Work, thread or queue
+is allocated. The pending lock still serializes all list operations; atomic links
+do not make the queue lock-free or permit NMI to access it directly.
+
+Submission writes the token, transfers a cloned Arc into the list, releases its
+lock, then notifies the shared Work if bound. Every bound enqueue notifies: no additional
+scheduled-bit protocol is needed. AlreadyQueued means an unclaimed occurrence
+already exists, not a dropped node; other rejection is fatal while the permanent
+list retains the obligation. Work accepts a successor while running and never
+executes two occurrences of that same Work concurrently. Implicit routing retains
+unfinished CPU ownership rather than requesting a conflicting CPU.
+
+Each callback removes and destroys at most 64 nodes, taking the list lock only
+around removal. Destructors, node frees and notifications run outside it.
+Remaining backlog schedules another occurrence. If an enqueue races an empty
+observation or the final backlog check, its own notification supplies the next
+occurrence; if it sees AlreadyQueued that occurrence observes the published node.
+The batch bound limits node count, not duration or a single destructor's runtime.
+
+Payload destruction runs only on normal workers, including when submission
+originates in hardirq or softirq. A sleeping Normal destructor serializes this
+entire Normal finalizer: it MUST NOT wait for another finalization on the same
+executor (including indirect dependencies). It can enqueue more nodes without
+waiting. Shared worker-pool dependency restrictions still apply.
+
+Payload Box and standard Arc/Weak counting semantics remain unchanged. The publishing Arc
+protects the lightweight node while a consumer may finish early; list ownership
+keeps it live independently of the public identity. Only the private consumer
+takes the token. No user cancellation, flush or executor teardown is exposed.
+
+NMI DeferredArc retirement is the narrow exception to the public work-submission
+NMI prohibition. Each carrier has a first-field one-shot IrqWork. Before taking
+any ordinary lock, submit detects NMI and transfers its Arc::into_raw owner to
+local ordinary IRQ; the callback restores it and runs the existing publish path.
+Identity storage has a separate prefix containing IrqWork and the global layout.
+Its original allocation token survives separately in the Arc allocator copies;
+ordinary release frees directly, while NMI release queues the prefix for ordinary
+IRQ free. Neither IRQ callback executes payload destruction. Unready/unsupported
+NMI routing is fatal after relinquishing the raw token, not inline fallback.
+No new worker or queue was added; the existing shared-finalizer dependencies remain.
+
+Unittest seams check completion before publisher return and enqueue after the
+consumer observed empty but before callback return. Seams are absent in production.
+The former explicit remote CPU override is removed: shared unfinished Work owns
+its CPU, so the publication test no longer claims forced remote completion.
+The 193-node normal backlog spans the finalizer's 64-node batch; existing real IRQ,
+Weak, and busy-pool regressions remain applicable, subject to shared routing.
+
+### Early startup handoff
+
+The unsafe runtime::init_finalization_preparation installs the provider during
+serialized primary startup after allocator/per-CPU/IRQ-lock setup. The hidden
+kfinalize::service::new_integration entry prepares fresh carriers concurrently on
+independently initialized CPUs, including audited startup NoPreempt paths. It
+requires neither current Task nor installed workers and never creates tasks or
+waits for execution. Consumers need no kworkng dependency.
+Ordinary DeferredArc::new keeps its ready-provider/sleepable-task checks.
+
+The same permanent list is the startup inbox and the running backlog; there is
+no detached batch or second list to migrate. Before binding, notify returns
+without touching the token. After successful service publication, install first
+publishes the normal preparation entry, then the queue, and then checks pending
+under its lock, notifying outside it. Preparation must precede any notification:
+an early destructor may immediately prepare another DeferredArc.
+A producer that observes no queue has already linked its node, so the binder's
+subsequent lock check sees that node. A later producer sees the bound queue and
+notifies itself. Duplicate notifications coalesce; ownership never moves during
+binding. If initialization fails, services::init does not bind, and obligations
+remain in permanent storage for a later successful attempt. Startup/rollback
+must never wait for that physical reclamation.

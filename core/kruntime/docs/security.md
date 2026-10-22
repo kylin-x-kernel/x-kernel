@@ -1,5 +1,27 @@
 # kruntime — 安全与可靠性分析
 
+## irq_work Initialization And Live Validation
+
+Runtime initializes irq_work in allocator-ready, CPU-local startup before NMI
+consumers. A failed/unsupported preparation does not publish readiness; callers
+must handle NotReady rather than synchronously executing the callback in NMI.
+Runtime startup rejects an available NMI mechanism without local irq_work on
+each CPU, before enabling NMI consumers. Platforms without an available NMI
+mechanism may continue without irq_work and emit a warning. GICv3 preparation
+failures additionally report the failed operation. Direct NMI clients must still
+obey the local readiness contract; diagnostic task owners remain owning references.
+The test-only real-NMI probe is excluded when watchdog owns the periodic source.
+Its nodes and Work captures are prepared before NMI publication and retained
+until callback completion plus Work flush. It quiesces the test-owned source;
+that source cannot be rearmed in the same boot. A host timeout must bound failed
+hardware delivery or a genuine lockup; no test timeout proves latency bounds.
+
+Deferred reference probes retain their containing Box outside NMI until the
+source's release/acquire completion handoff. NMI takes only the prepared fields;
+it never frees the containing fixture allocation. Payload and metadata retirement
+are separate, including late Weak after payload completion. This validates only
+DeferredArc, not Task's outer standard Arc or arbitrary diagnostic accesses.
+
 ## RCU Carrier Preparation
 
 The unsafe `krcu::init_service` call follows the all-CPU service rendezvous,
@@ -14,6 +36,13 @@ the GP task are ready. Runtime owns the startup ordering, not the RCU arrays,
 cleanup policy or service state, which belong to `krcu`.
 
 ## Workqueue Publication Boundary
+
+Production startup installs preparation after primary per-CPU, trap and allocator
+initialization, before consumers. Unittest new_integration probes cover primary
+and AP startup, outside allocator locks, without waiting for reclamation before
+worker binding. Each CPU must establish its own allocation/IRQ-lock prerequisites;
+global provider readiness alone is insufficient. Hardirq/softirq/NMI construction
+is not permitted, even after provider installation.
 
 The default-off `workqueue-bench` feature exposes a boot test path, not an
 untrusted runtime request. It intentionally suppresses userspace and powers off
@@ -39,6 +68,14 @@ IRQ allocation probes exist only in unittest builds. Their test-owned timers
 are drained before work storage; producers stop before final synchronous work
 cancellation. Allocation counters cover successful heap bytes on the guarded
 caller CPU, not remote execution, allocation attempts or NMI.
+
+The deferred-owner probe releases its slot lock before handing off payloads.
+Timer delivery and pinned BH Work are drained before their captures are destroyed,
+even on an expired bounded completion wait. Last-reference tests also release
+their Weak control blocks inside the measured interval; only metadata may be
+freed there. Payload Drop and its storage always run on the normal executor.
+The BH callback only submits already prepared owners; it never performs the
+payload's sleepable destructor or waits for its completion.
 
 ## 信任模型
 

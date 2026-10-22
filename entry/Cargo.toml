@@ -9,6 +9,7 @@ homepage.workspace = true
 
 [features]
 unittest = [
+    "kruntime/irq-work-test",
     "dep:kworkerpool_ng",
     "dep:kworkqueue_ng",
     "dep:kworkng",

@@ -112,7 +112,7 @@ fn rcu_preempted_reader_remains_enrolled_until_outer_exit() {
         drop(task);
         crate::exit(i32::from(!passed || observer_status != 0));
     });
-    let retired = Arc::downgrade(&worker);
+    let retired = crate::KtaskRef::downgrade(&worker);
     assert_eq!(worker.join(), 0);
     drop(worker);
     while retired.strong_count() != 0 {

@@ -19,6 +19,7 @@ extern crate alloc;
 mod backend;
 mod bottom_half;
 mod domain;
+pub mod irq_work;
 mod model;
 mod runtime;
 

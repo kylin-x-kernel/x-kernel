@@ -8,21 +8,20 @@
 //! the highest occupied level in O(1). Same priority is list order. RR adds
 //! a leftover quantum. Period advancement uses the absolute [`RqClock`].
 
-use alloc::sync::Arc;
-
 use crate::{
     DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS,
     class::{ClassOps, EnqueueKind, LeaveReason},
     clock::RqClock,
     config::{MAX_RT_PRIORITY, MIN_RT_PRIORITY, RT_PRIO_LEVELS},
     entity::{QueueSeat, RqLocked, SchedTask},
+    owner::SharedOwner,
     policy::{SchedAttr, SchedClass, SchedError, SchedPolicy},
     ready_list::ReadyList,
 };
 
 /// Per-CPU RT ready queue shared by FIFO and RR.
-pub(crate) struct RtClass<T> {
-    queues: [ReadyList<SchedTask<T>>; RT_PRIO_LEVELS],
+pub(crate) struct RtClass<T, Owner: SharedOwner<SchedTask<T>>> {
+    queues: [ReadyList<SchedTask<T>, Owner>; RT_PRIO_LEVELS],
     occupied: u128,
     queued: usize,
     used_ns: u64,
@@ -33,7 +32,7 @@ pub(crate) struct RtClass<T> {
     rt_period_ns: u64,
 }
 
-impl<T> RtClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> RtClass<T, Owner> {
     pub(crate) const fn new() -> Self {
         Self {
             queues: [const { ReadyList::new() }; RT_PRIO_LEVELS],
@@ -103,7 +102,7 @@ impl<T> RtClass<T> {
         (MIN_RT_PRIORITY..=MAX_RT_PRIORITY).contains(&priority) && self.is_occupied(priority)
     }
 
-    fn enqueue_ready(&mut self, task: Arc<SchedTask<T>>, front: bool, tok: RqLocked) {
+    fn enqueue_ready(&mut self, task: Owner, front: bool, tok: RqLocked) {
         let priority = task.rt_priority(tok).get();
         task.set_seat(QueueSeat::Rt, tok);
         let linked = if front {
@@ -118,20 +117,15 @@ impl<T> RtClass<T> {
         self.mark_occupied(priority);
     }
 
-    fn enqueue_tail(&mut self, task: Arc<SchedTask<T>>, tok: RqLocked) {
+    fn enqueue_tail(&mut self, task: Owner, tok: RqLocked) {
         self.enqueue_ready(task, false, tok);
     }
 
-    fn enqueue_head(&mut self, task: Arc<SchedTask<T>>, tok: RqLocked) {
+    fn enqueue_head(&mut self, task: Owner, tok: RqLocked) {
         self.enqueue_ready(task, true, tok);
     }
 
-    fn dequeue_addr(
-        &mut self,
-        priority: u8,
-        task: &SchedTask<T>,
-        tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    fn dequeue_addr(&mut self, priority: u8, task: &Owner, tok: RqLocked) -> Option<Owner> {
         if !(MIN_RT_PRIORITY..=MAX_RT_PRIORITY).contains(&priority) || !self.is_occupied(priority) {
             return None;
         }
@@ -148,7 +142,7 @@ impl<T> RtClass<T> {
     }
 }
 
-impl<T> ClassOps<T> for RtClass<T> {
+impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for RtClass<T, Owner> {
     fn class(&self) -> SchedClass {
         SchedClass::Rt
     }
@@ -179,7 +173,7 @@ impl<T> ClassOps<T> for RtClass<T> {
 
     fn enqueue(
         &mut self,
-        task: Arc<SchedTask<T>>,
+        task: Owner,
         kind: EnqueueKind,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
@@ -193,11 +187,11 @@ impl<T> ClassOps<T> for RtClass<T> {
 
     fn dequeue(
         &mut self,
-        task: &SchedTask<T>,
+        task: &Owner,
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         if task.seat(tok) != QueueSeat::Rt {
             return None;
         }
@@ -210,7 +204,7 @@ impl<T> ClassOps<T> for RtClass<T> {
         _curr: Option<&SchedTask<T>>,
         _clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>> {
+    ) -> Option<Owner> {
         // Throttle blocks `pick_next` on this RQ only. Bandwidth is per RQ,
         // so idle-pull may move a waiter onto a CPU that still has runtime.
         // The destination charges its own `used_ns` after the task runs there.
@@ -231,7 +225,7 @@ impl<T> ClassOps<T> for RtClass<T> {
         None
     }
 
-    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Arc<SchedTask<T>>> {
+    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Owner> {
         if self.is_throttled() {
             return None;
         }
@@ -250,7 +244,7 @@ impl<T> ClassOps<T> for RtClass<T> {
 
     fn put_prev(
         &mut self,
-        prev: Arc<SchedTask<T>>,
+        prev: Owner,
         reason: LeaveReason,
         _clk: &RqClock,
         tok: RqLocked,
@@ -366,7 +360,7 @@ impl<T> ClassOps<T> for RtClass<T> {
 
     fn attr_changed(
         &mut self,
-        task: &Arc<SchedTask<T>>,
+        task: &Owner,
         old: SchedAttr,
         is_curr: bool,
         _clk: &RqClock,
@@ -383,7 +377,7 @@ impl<T> ClassOps<T> for RtClass<T> {
             return;
         }
         if old.rt_priority.get() != new_prio
-            && let Some(removed) = self.dequeue_addr(old.rt_priority.get(), task.as_ref(), tok)
+            && let Some(removed) = self.dequeue_addr(old.rt_priority.get(), task, tok)
         {
             // A lowered priority goes to the head of its new level so tasks
             // already waiting there do not run ahead of it.

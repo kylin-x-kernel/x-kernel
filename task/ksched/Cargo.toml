@@ -14,6 +14,7 @@ default = []
 
 [dependencies]
 intrusive-collections.workspace = true
+kfinalize.workspace = true
 kbuild_config = { workspace = true }
 unittest = { workspace = true }
 

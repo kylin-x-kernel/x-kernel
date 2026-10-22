@@ -6,12 +6,118 @@
 //! Joining every worker bounds fixture lifetime; the guest harness supplies
 //! the hang bound, with no wall-clock latency assertion in these cases.
 
-use alloc::{format, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{WaitQueue, api as ktask};
+
+struct DeferredRuntimeProbe(Arc<AtomicBool>);
+
+impl crate::UserTaskRuntime for DeferredRuntimeProbe {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+impl Drop for DeferredRuntimeProbe {
+    fn drop(&mut self) {
+        core::assert!(crate::is_sleepable_context());
+        crate::yield_now();
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[def_test]
+fn task_last_owner_under_irq_guard_defers_sleepable_runtime_drop() {
+    let destroyed = Arc::new(AtomicBool::new(false));
+    let task = crate::prepare_task(crate::TaskInner::new_user(
+        || {},
+        "deferred-runtime-drop".into(),
+        kidentity::allocate_root_pid_handle().expect("test task identity"),
+        Box::new(DeferredRuntimeProbe(destroyed.clone())),
+    ));
+    let weak = crate::KtaskRef::downgrade(&task);
+    let retained = task.clone();
+    drop(task);
+    assert!(weak.upgrade().is_some());
+    assert!(!destroyed.load(Ordering::Acquire));
+    {
+        let _guard = kspin::IrqSave::new();
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+        drop(weak);
+    }
+    while !destroyed.load(Ordering::Acquire) {
+        crate::yield_now();
+    }
+}
+
+#[def_test]
+fn task_exit_without_external_owner_reclaims_after_stack_switch() {
+    let destroyed = Arc::new(AtomicBool::new(false));
+    let can_exit = Arc::new(AtomicBool::new(false));
+    let worker_exit = can_exit.clone();
+    let task = crate::prepare_task(crate::TaskInner::new_user(
+        move || {
+            while !worker_exit.load(Ordering::Acquire) {
+                crate::yield_now();
+            }
+        },
+        "exit-without-owner".into(),
+        kidentity::allocate_root_pid_handle().expect("test task identity"),
+        Box::new(DeferredRuntimeProbe(destroyed.clone())),
+    ));
+    let weak = crate::KtaskRef::downgrade(&task);
+    crate::activate_task(&task);
+    drop(task);
+    assert!(!destroyed.load(Ordering::Acquire));
+    can_exit.store(true, Ordering::Release);
+    while !destroyed.load(Ordering::Acquire) {
+        crate::yield_now();
+    }
+    assert!(weak.upgrade().is_none());
+}
+
+#[def_test]
+fn exited_task_last_external_owner_can_release_under_irq_guard() {
+    let destroyed = Arc::new(AtomicBool::new(false));
+    let task = crate::prepare_task(crate::TaskInner::new_user(
+        || {},
+        "retained-exited-task".into(),
+        kidentity::allocate_root_pid_handle().expect("test task identity"),
+        Box::new(DeferredRuntimeProbe(destroyed.clone())),
+    ));
+    let weak = crate::KtaskRef::downgrade(&task);
+    crate::activate_task(&task);
+    assert_eq!(task.join(), 0);
+    while crate::KtaskRef::strong_count(&task) != 1 {
+        crate::yield_now();
+    }
+    let other_destroyed = Arc::new(AtomicBool::new(false));
+    let other = crate::prepare_task(crate::TaskInner::new_user(
+        || {},
+        "independent-exited-task".into(),
+        kidentity::allocate_root_pid_handle().expect("test task identity"),
+        Box::new(DeferredRuntimeProbe(other_destroyed.clone())),
+    ));
+    crate::activate_task(&other);
+    assert_eq!(other.join(), 0);
+    drop(other);
+    while !other_destroyed.load(Ordering::Acquire) {
+        crate::yield_now();
+    }
+    assert!(!destroyed.load(Ordering::Acquire));
+    {
+        let _guard = kspin::IrqSave::new();
+        drop(task);
+        assert!(weak.upgrade().is_none());
+    }
+    while !destroyed.load(Ordering::Acquire) {
+        crate::yield_now();
+    }
+}
 
 #[def_test]
 fn test_spawn_yield_completes() {

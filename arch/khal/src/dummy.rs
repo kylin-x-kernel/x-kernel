@@ -57,7 +57,6 @@ impl crate::time::ClockSourceIf {
     fn frequency() -> ktime_types::Frequency {
         ktime_types::Frequency::ZERO
     }
-
 }
 
 #[kiface::provide]
@@ -97,6 +96,10 @@ impl SysCtrl {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn prepare_local_irq_work() -> Option<fn()> {
+        None
+    }
+
     fn configure(_desc: kirq::IrqDesc) {}
 
     fn enable(_irq: usize, _enabled: bool) {}

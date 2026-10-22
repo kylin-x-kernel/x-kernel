@@ -43,7 +43,7 @@ impl crate::UserTaskRuntime for FirstEntryProbe {
         // the actual handoff, not a task that might have exited much earlier.
         let previous = super::PREV_TASK.shared_current().lock();
         let matches = previous.as_ref().is_some_and(|task| {
-            self.outgoing.ptr_eq(&Arc::downgrade(task))
+            self.outgoing.ptr_eq(&crate::KtaskRef::downgrade(task))
                 && task.state() == crate::TaskState::Exited
                 && task.rcu_reader.is_reading()
                 && task.rcu_reader.is_enrolled()
@@ -146,16 +146,15 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
                 crate::activate_task(&abandoned);
                 let exit_code = abandoned.join();
 
-                // This task enters the same CPU's FIFO exit queue after abandoned.
-                // Its reclamation proves GC has visited the earlier entry without
-                // needing a timing threshold or a production-path test hook.
+                // Running a later task on this CPU crosses abandoned's switch
+                // cleanup without assuming join waits for that cleanup.
                 let sentinel = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
                     || {},
-                    "rcu-gc-sentinel".into(),
+                    "rcu-switch-sentinel".into(),
                     kbuild_config::TASK_STACK_SIZE,
                 ));
                 sentinel.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
-                let reclaimed = Arc::downgrade(&sentinel);
+                let reclaimed = crate::KtaskRef::downgrade(&sentinel);
                 crate::activate_task(&sentinel);
                 let sentinel_status = sentinel.join();
                 drop(sentinel);
@@ -165,15 +164,15 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
 
                 let is_clean =
                     !abandoned.rcu_reader.is_reading() && !abandoned.rcu_reader.is_enrolled();
-                let retained = Arc::downgrade(&abandoned);
+                let retained = crate::KtaskRef::downgrade(&abandoned);
                 drop(abandoned);
                 // join only publishes exit; Weak expiration proves that neither
-                // the switch owner nor GC permanently retains the exited task.
+                // the scheduler nor switch owner retains the exited task.
                 while retained.strong_count() != 0 {
                     crate::yield_now();
                 }
-                // GC may be preempted after try_unwrap clears the strong
-                // count but before it destroys the task's runtime field.
+                // Weak expiry precedes asynchronous runtime destruction; wait
+                // for the worker's explicit completion, not the strong count.
                 while !runtime_dropped.load(Ordering::Acquire) {
                     crate::yield_now();
                 }
@@ -202,7 +201,7 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
     let abandoned = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
         move || {
             let task = crate::current();
-            let outgoing = Arc::downgrade(&task);
+            let outgoing = crate::KtaskRef::downgrade(&task);
             let outgoing_probe = outgoing.clone();
             let receiver = crate::prepare_task(crate::TaskInner::new_user(
                 move || {
@@ -221,7 +220,7 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
                 }),
             ));
             receiver.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
-            // FIFO outranks the ordinary supervisor/GC tasks. Keep scheduling
+            // FIFO outranks the ordinary supervisor tasks. Keep scheduling
             // excluded from publication through exit so the receiver's first
             // switch-in must consume this task's terminal handoff.
             let _guard = kspin::NoPreemptIrqSave::new();

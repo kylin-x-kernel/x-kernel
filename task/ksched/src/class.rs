@@ -4,11 +4,10 @@
 
 //! Per-class operations. The class arbitrator iterates [`ClassOps`] by rank.
 
-use alloc::sync::Arc;
-
 use crate::{
     clock::RqClock,
     entity::{RqLocked, SchedTask},
+    owner::SharedOwner,
     policy::{SchedAttr, SchedClass, SchedError},
 };
 
@@ -67,7 +66,7 @@ pub enum UpdateKind {
 /// Methods that take `curr: Option<&SchedTask<T>>` receive `Some` only when
 /// the runner belongs to this class. Methods that take `curr: &SchedTask<T>`
 /// are only invoked in that case.
-pub(crate) trait ClassOps<T> {
+pub(crate) trait ClassOps<T, Owner: SharedOwner<SchedTask<T>>> {
     /// Rank this implementation occupies in the arbitrator.
     fn class(&self) -> SchedClass;
 
@@ -86,7 +85,7 @@ pub(crate) trait ClassOps<T> {
     /// Place `task` onto this class's ready structure.
     fn enqueue(
         &mut self,
-        task: Arc<SchedTask<T>>,
+        task: Owner,
         kind: EnqueueKind,
         curr: Option<&SchedTask<T>>,
         clk: &RqClock,
@@ -96,11 +95,11 @@ pub(crate) trait ClassOps<T> {
     /// Remove a non-current waiter. `None` if `task` is not queued here.
     fn dequeue(
         &mut self,
-        task: &SchedTask<T>,
+        task: &Owner,
         curr: Option<&SchedTask<T>>,
         clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>>;
+    ) -> Option<Owner>;
 
     /// Idle-pull candidate. Idle returns `None`.
     fn steal(
@@ -109,13 +108,13 @@ pub(crate) trait ClassOps<T> {
         curr: Option<&SchedTask<T>>,
         clk: &RqClock,
         tok: RqLocked,
-    ) -> Option<Arc<SchedTask<T>>>;
+    ) -> Option<Owner>;
 
     /// Take the next runner from this class, or `None` to try the next rank.
     ///
     /// Idle always returns its pinned task. The arbitrator never sees `None`
     /// after the Idle class.
-    fn pick_next(&mut self, clk: &RqClock, tok: RqLocked) -> Option<Arc<SchedTask<T>>>;
+    fn pick_next(&mut self, clk: &RqClock, tok: RqLocked) -> Option<Owner>;
 
     /// Boot / class-switch hook for a task that is already the runner.
     ///
@@ -123,13 +122,7 @@ pub(crate) trait ClassOps<T> {
     fn set_curr(&mut self, task: &SchedTask<T>, clk: &RqClock, tok: RqLocked);
 
     /// The runner is leaving. Requeue on yield/preempt; drop on block/migrate/exit.
-    fn put_prev(
-        &mut self,
-        prev: Arc<SchedTask<T>>,
-        reason: LeaveReason,
-        clk: &RqClock,
-        tok: RqLocked,
-    ) -> bool;
+    fn put_prev(&mut self, prev: Owner, reason: LeaveReason, clk: &RqClock, tok: RqLocked) -> bool;
 
     /// Charge `elapsed_ns` to the runner.
     ///
@@ -157,7 +150,7 @@ pub(crate) trait ClassOps<T> {
     /// Replay queued keys after `set_attr` stayed in this class.
     fn attr_changed(
         &mut self,
-        task: &Arc<SchedTask<T>>,
+        task: &Owner,
         old: SchedAttr,
         is_curr: bool,
         clk: &RqClock,

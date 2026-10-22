@@ -1,0 +1,20 @@
+[package]
+name = "deferred-fault-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+system = []
+scheduler-probe = ["dep:ksched"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }
+
+[dependencies]
+kfinalize = { path = "../../../../util/kfinalize" }
+ksched = { path = "../../../../task/ksched", optional = true }
+klazy = { path = "../../../../util/klazy" }
+intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }

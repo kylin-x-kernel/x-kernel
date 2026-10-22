@@ -9,7 +9,8 @@ use core::{ptr::NonNull, task::Waker};
 
 use kworkerpool_ng::AcquiredExecution;
 
-use super::{Work, state::WorkSlot};
+use super::{Retirement, Work, state::WorkSlot};
+use crate::queue::partition::QueuePartition;
 
 /// Internal authority to run and retire the occurrence already claimed from Work.
 ///
@@ -149,7 +150,7 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
     /// # Safety
     /// work must identify this concrete type's unique, live claimed occurrence.
     unsafe fn run_claimed(work: NonNull<()>) {
-        let (finished, retirement) = {
+        let (partition, retirement) = {
             // SAFETY: only Execution::from_ptr installs this function, paired with
             // the same concrete Work type and its stable, uniquely claimed storage.
             let work = unsafe { work.cast::<Self>().as_ref() };
@@ -163,11 +164,11 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
             }
             #[cfg(not(feature = "self-wait-check"))]
             (work.callback)();
-            // Clearing running permits a new cancel_sync to return immediately.
-            // It must not leave a subsequent read from externally owned Work.
-            let retirement = work.retirement;
-            (work.finish_execution(), retirement)
+            work.prepare_completion()
         };
+        // SAFETY: shared callback/cleanup calls have returned with running still
+        // occupied. This unique claim retains the original raw Work provenance.
+        let finished = unsafe { Self::finish_execution(work, partition) };
         Self::complete_execution(finished);
         if let Some(retirement) = retirement {
             retirement.run();
@@ -178,41 +179,60 @@ impl<T: Send, H: Fn() + Send + Sync> Work<T, H> {
     /// # Safety
     /// work must identify this concrete type's unique, live claimed occurrence.
     unsafe fn finish_claimed(work: NonNull<()>) {
-        let (finished, retirement) = {
+        let (partition, retirement) = {
             // SAFETY: same unique live execution as the enclosing test entry.
             let work = unsafe { work.cast::<Self>().as_ref() };
-            // Keep the same pre-retirement snapshot as the production path.
-            let retirement = work.retirement;
-            (work.finish_execution(), retirement)
+            work.prepare_completion()
         };
+        // SAFETY: the test execution owns the unique running claim and its
+        // shared cleanup has returned before publishing the terminal state.
+        let finished = unsafe { Self::finish_execution(work, partition) };
         Self::complete_execution(finished);
         if let Some(retirement) = retirement {
             retirement.run();
         }
     }
 
-    // This consumes the running claim's storage protection. Callers must copy
-    // every field they still need before entering, and never access Work after.
-    fn finish_execution(&self) -> (WorkSlot<Option<T>>, Option<Arc<Waker>>) {
+    /// Releases occurrence resources without publishing idle. Running retains
+    /// storage until this shared call and every enclosing Work borrow have ended.
+    fn prepare_completion(&self) -> (Option<Arc<QueuePartition>>, Option<Retirement>) {
         let resources = self
             .state
             .lock()
             .take_running_resources()
             .expect("claimed execution owns running resources");
         drop(resources);
-        {
-            let partition = self.state.lock().running_partition();
-            if let Some(partition) = partition {
-                partition.finish(self)
-            } else {
-                (
-                    self.state
-                        .lock()
-                        .finish_after_cleanup()
-                        .expect("execution cleanup finished before retirement"),
-                    None,
-                )
-            }
+        (self.state.lock().running_partition(), self.retirement)
+    }
+
+    /// Publishes the unique execution's terminal state without borrowing Work.
+    ///
+    /// # Safety
+    /// `work` retains the original provenance for this concrete Work and its
+    /// unique running claim. Shared callback/cleanup calls must have returned,
+    /// leaving running occupied with resources released. `partition` must be
+    /// that running occurrence's retained partition. No enclosing Work or state
+    /// lock borrow may survive this call; unlocking may permit storage release.
+    unsafe fn finish_execution(
+        work: NonNull<()>,
+        partition: Option<Arc<QueuePartition>>,
+    ) -> (WorkSlot<Option<T>>, Option<Arc<Waker>>) {
+        // SAFETY: the unique running claim retains this initialized Work. Raw
+        // projection preserves provenance without borrowing the enclosing Work.
+        let state = unsafe { &raw const (*work.cast::<Self>().as_ptr()).state };
+        if let Some(partition) = partition {
+            // SAFETY: prepare_completion retained the original running partition;
+            // its resources are gone and no shared Work call remains active.
+            unsafe { partition.finish(state) }
+        } else {
+            // SAFETY: running keeps the state lock live through acquisition. The
+            // lock method returns before clearing running; only its guard remains.
+            let mut guard = unsafe { &*state }.lock();
+            let finished = guard
+                .finish_after_cleanup()
+                .expect("execution cleanup finished before retirement");
+            drop(guard);
+            (finished, None)
         }
     }
 

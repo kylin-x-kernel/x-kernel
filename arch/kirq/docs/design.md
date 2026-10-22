@@ -1,5 +1,39 @@
 # kirq — 设计文档
 
+## One-shot Local irq_work
+
+`irq_work` is a permanent per-CPU bridge from NMI to ordinary hardirq, not a
+worker thread or a sleepable execution provider. Runtime calls `init_current_cpu`
+after scheduler/controller/allocator setup and before exposing NMI consumers.
+The platform prepares a dedicated ordinary IRQ and returns a permanent, local,
+NMI-safe notification function. Unsupported providers return None; queue returns
+NotReady without consuming the caller's node. No teardown or CPU hotplug exists.
+
+`IrqWork` is a stable-address, one-shot raw callback node. Its unsafe queue
+contract transfers responsibility and requires storage to survive until unlink
+and callback handoff. A claimed node cannot be reused, even after completion.
+There is no cancel/flush API and no strong-reference or allocator policy here.
+
+NMI producers use the lock-free context query before touching ordinary guards.
+Normal producers pin execution and mask IRQs. A release-CAS pushes a node onto
+the local atomic stack; every successful producer sends a notification. Hardware
+may coalesce signals because the queue retains each responsibility. No FIFO or
+wait-free guarantee is provided. NMI never runs the consumer inline.
+
+The ordinary IRQ consumer acquire-detaches batches and preserves unfinished
+nodes in a CPU-local backlog. It executes at most 64 callbacks per invocation,
+then re-notifies for leftovers. Producers never modify the detached backlog.
+The consumer copies next and callback before calling; it never touches that node
+again, allowing callbacks to free or forward their allocation. A callback may
+be interrupted by a producer NMI; new incoming nodes remain discoverable at the
+budget boundary. Callbacks must preserve IRQ-off context and cannot sleep.
+
+AArch64 GICv3 uses reserved ordinary SGI15 with direct system-register writes,
+not the existing locked/logging sender. Other current backends explicitly lack
+the capability. See irq-driver docs for affinity and readiness constraints.
+Higher layers may bridge to kworkng from the callback, but this does not make
+standard Arc/Weak metadata frees or DeferredArc automatically NMI-safe.
+
 ## Interrupt Watching And NMI Context
 
 The static `krcu_core::RcuContextIf::current_cpu_watching` contract borrows
@@ -100,9 +134,10 @@ guest 测试和两个公共 fixture 模块位于 crate 根部 `ut-tests/`，通�
 | `rcu_irq_entry.rs` | 2 | 无，其中 1 例为 serial |
 | `rcu_context.rs` | 1 | 无 |
 | `unhandled_unittest.rs` | 4 | 无 |
+| `irq_work.rs` | 6 | 无，均为 serial |
 
-共 12 个 guest 模块（含 2 个零用例 fixture）、97 例；x86_64 为 96 例。
-76 例保留 serial，无 user 用例。所有 guest 模块均要求 `cfg(unittest)`。
+共 13 个 guest 模块（含 2 个零用例 fixture）、103 例；x86_64 为 102 例。
+82 例保留 serial，无 user 用例。所有 guest 模块均要求 `cfg(unittest)`。
 `context::test_support::with_nmi_context` 保留主线的安全契约；新增 NMI 分类
 用例在持有普通上下文锁时验证查询绕过该锁。`tests_rcu_entry` 的独立挂载保留
 专用 NMI 和嵌套 IRQ/NMI 的 RCU watching 平衡检查。

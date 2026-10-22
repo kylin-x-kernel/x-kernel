@@ -263,7 +263,7 @@ fn test_status_nonzero_target_credentials_are_not_reader_credentials() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
     let reader = ktask::current();
-    assert!(!alloc::sync::Arc::ptr_eq(target.task(), &reader));
+    assert!(!ktask::KtaskRef::ptr_eq(target.task(), &reader));
     assert!(!alloc::sync::Arc::ptr_eq(
         target.task().as_thread().process(),
         reader.as_thread().process()
@@ -400,7 +400,7 @@ fn test_status_partial_reads_keep_one_record_and_rewind_refreshes_credentials() 
 fn test_status_collected_target_keeps_esrch_without_reader_fallback() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
-    let weak = alloc::sync::Arc::downgrade(target.task());
+    let weak = ktask::KtaskRef::downgrade(target.task());
     let root = status_test_root();
     let pid = target.task().as_thread().process().pid();
     let file = open_status(&root, alloc::format!("/{pid}/status")).unwrap();
@@ -421,7 +421,7 @@ fn test_status_retained_target_preserves_credentials_after_abort() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
     let retained = target.task().clone();
-    let weak = alloc::sync::Arc::downgrade(&retained);
+    let weak = ktask::KtaskRef::downgrade(&retained);
     target.abort();
     let status = super::task_status(&retained);
     assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));

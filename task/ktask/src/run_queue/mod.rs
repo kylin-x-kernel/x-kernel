@@ -10,7 +10,6 @@
 //! - `ownership`: `cpu_id` and `nr_running` / `nr_home` snapshots
 //! - `idle_pull`: steal a Ready `!on_cpu` waiter onto an about-to-idle CPU
 //! - `migrate`: affinity enforcement after `set_cpumask`
-//! - `gc`: delayed `Arc::try_unwrap` of exited tasks
 //! - `stats`: optional `sched_stat` counters
 //!
 //! Callers still enter through `current_run_queue`, `select_run_queue`,
@@ -19,7 +18,6 @@
 //! Placement reads remote `nr_running` / `nr_home` / `rt_preempt_rank` without
 //! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
-mod gc;
 #[cfg(feature = "smp")]
 mod idle_pull;
 #[cfg(feature = "smp")]
@@ -33,7 +31,6 @@ mod stats;
 #[cfg(unittest)]
 unittest::path_mod_test!(tests, "../../ut-tests/run_queue/tests.rs");
 
-use alloc::collections::VecDeque;
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicU8, AtomicUsize};
 use core::{ptr::NonNull, sync::atomic::AtomicU64};
@@ -41,7 +38,6 @@ use core::{ptr::NonNull, sync::atomic::AtomicU64};
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use khal::percpu::this_cpu_id;
 use klazy::Once;
-use kpoll::PollSet;
 use kspin::{BaseGuard, SpinRaw};
 use lazyinit::LazyInit;
 #[cfg(feature = "smp")]
@@ -62,9 +58,9 @@ use crate::{
 };
 
 // Scheduler payloads use allocation-free template markers (lazy-uninitialized,
-// empty deque, None), so `StaticSlotValue`'s container blanket impls
+// None), so `StaticSlotValue`'s container blanket impls
 // carry the template-copy proof; drops happen only through owner-code
-// removal (switch cleanup takes `PREV_TASK`, GC pops drop deque entries),
+// removal (switch cleanup takes `PREV_TASK`),
 // never through storage teardown.
 // Macro-generated wrapper modules do not inherit the invocation site's
 // lexical scope, so payload types are anchored absolutely.
@@ -72,15 +68,6 @@ use crate::{
 kcpu_slot::cpu_slot_cell_with_template! {
     static RUN_QUEUE: lazyinit::LazyInit<crate::run_queue::RunQueue> =
         unsafe { lazyinit::LazyInit::new() };
-}
-// SAFETY: both the lock and deque are empty and own no allocation.
-kcpu_slot::cpu_slot_cell_with_template! {
-    static EXITED_TASKS: kspin::SpinNoIrq<alloc::collections::vec_deque::VecDeque<crate::KtaskRef>> =
-        unsafe { kspin::SpinNoIrq::new(alloc::collections::vec_deque::VecDeque::new()) };
-}
-// SAFETY: `LazyInit::new()` is an uninitialized marker with no owned payload.
-kcpu_slot::cpu_slot_cell_with_template! {
-    static WAIT_FOR_EXIT: lazyinit::LazyInit<kpoll::PollSet> = unsafe { lazyinit::LazyInit::new() };
 }
 // SAFETY: `LazyInit::new()` is an uninitialized marker with no owned payload.
 kcpu_slot::cpu_slot_cell_with_template! {
@@ -151,14 +138,6 @@ pub(crate) fn current_run_queue_ref() -> &'static RunQueue {
         .expect("run queue must be initialized before use")
 }
 
-#[inline(always)]
-fn current_wait_for_exit() -> &'static PollSet {
-    WAIT_FOR_EXIT
-        .shared_current()
-        .get()
-        .expect("wait-for-exit must be initialized before GC/exit paths")
-}
-
 #[inline]
 fn with_run_queue<R>(f: impl FnOnce(&mut LazyInit<RunQueue>) -> R) -> R {
     // Bring-up runs on the owning CPU with IRQs off; the guard pins it while
@@ -175,20 +154,6 @@ fn with_idle_task<R>(f: impl FnOnce(&mut LazyInit<KtaskRef>) -> R) -> R {
     let guard = kspin::NoPreemptIrqSave::new();
     // SAFETY: as `with_run_queue`.
     f(unsafe { IDLE_TASK.get_mut_unchecked(&guard) })
-}
-
-#[inline]
-fn with_wait_for_exit<R>(f: impl FnOnce(&mut LazyInit<PollSet>) -> R) -> R {
-    // As `with_run_queue`; the GC/exit paths run on the owning CPU.
-    let guard = kspin::NoPreemptIrqSave::new();
-    // SAFETY: as `with_run_queue`.
-    f(unsafe { WAIT_FOR_EXIT.get_mut_unchecked(&guard) })
-}
-
-#[inline]
-fn with_exited_tasks<R>(f: impl FnOnce(&mut VecDeque<KtaskRef>) -> R) -> R {
-    // `SpinNoIrq` is `Sync`; object exclusivity comes from its lock.
-    f(&mut EXITED_TASKS.shared_current().lock())
 }
 
 /// Returns a guard over the current CPU's run queue.

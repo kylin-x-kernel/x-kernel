@@ -33,7 +33,7 @@ struct KWaker {
 impl KWaker {
     fn new(task: &KtaskRef) -> Arc<Self> {
         Arc::new(KWaker {
-            task: Arc::downgrade(task),
+            task: KtaskRef::downgrade(task),
             woke: SpinNoIrq::new(false),
         })
     }

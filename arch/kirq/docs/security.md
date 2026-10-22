@@ -1,5 +1,41 @@
 # kirq — 安全与可靠性分析
 
+## irq_work Ownership And NMI Boundary
+
+The trusted platform must return a permanent notification function that never
+locks, allocates, logs, lazily initializes or invokes callbacks inline. It must
+notify only the prepared current CPU at ordinary IRQ priority. Configuration
+and CPU-slot prerequisites are established before NMI consumers are exposed.
+Ready is release-published after provider setup; NMI readers acquire readiness
+without ordinary IRQ context locks. Failure leaves the node caller-owned.
+
+Unsafe queue callers own the node's stability, initialization and callback
+contract. A successful claim serializes producers; the next pointer is private
+until release publication. The acquire-detaching local consumer alone reads
+links afterward. Duplicate callers need independent external lifetime protection:
+AlreadyQueued is not a lifetime lease, and a freed pointer cannot be retried.
+Neither producer nor dispatcher may access storage after its ownership handoff.
+
+The static CPU template contains only null pointers, false atomics and None;
+its StaticSlotValue implementation introduces no shared owned allocations.
+UnsafeCell notification storage is immutable after initialization; backlog is
+accessed only by the IRQ-off, non-reentrant local consumer. NMI writers modify
+only the atomic incoming list. Callbacks are trusted not to enable IRQs, sleep,
+unwind, or wait for work whose execution requires this CPU. A callback failure
+is fatal kernel behavior, not a recoverable queue transaction.
+
+Do not run draining from NMI exit after merely clearing software depth: the
+interrupted execution may still hold an ordinary lock. The pending ordinary
+IRQ waits for restoration of the original mask. Long IRQ-off sections, stopped
+CPUs, permanent boot failure and hot-unplug have no reclamation-time guarantee.
+Budget 64 bounds callback count, not callback cost or total interrupt utilization.
+Malicious or unbounded callbacks can still monopolize the CPU; this is an
+internal kernel capability, not an interface for untrusted code.
+
+Tests separate deterministic CAS/ownership/budget interleavings from live
+platform delivery. Passing a mock is not evidence of hardware NMI safety; live
+tests must include NMI publication while the actual GIC lock is held.
+
 ## Interrupt Watching Boundary
 
 `krcu_core::RcuContextIf` is a static contract implemented by `krcu`, including
@@ -502,7 +538,7 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
 - 新增 context check 是否把 BH-disabled 视为 non-sleepable，而不是普通 task context。
 - 新增 diagnostics 是否保留计数、避免分配，并且不会在 hot path 里无限刷 warning。
 - 新增 MSI backend 是否只暴露 virq/message，且不让驱动读取 APIC id 或裸 CPU vector。
-- 新增 deferred execution 功能是否只通过 `bottom_half/deferred.rs` 的 hardirq-exit handoff
-  进入，而不是修改平台后端。
+- 新增 softirq deferred execution 功能是否通过 `bottom_half/deferred.rs` 的
+  hardirq-exit handoff 进入；独立 irq_work 则必须由普通 IRQ 分发，不能在 NMI exit 消费。
 - deferred executor 是否在 completion 之后、lifecycle exit 之前运行。
 - deferred executor 是否仍保持单 owner 且不引入 `ktask`/`kprocess` 依赖。

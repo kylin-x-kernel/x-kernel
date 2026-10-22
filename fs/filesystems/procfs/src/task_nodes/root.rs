@@ -685,7 +685,11 @@ impl SimpleDirOps for ThreadFdDir {
                     err
                 }
             })?;
-        proc_fd_link_child(lookup, name, ProcFdLink::new(fs, Arc::downgrade(&task), fd))
+        proc_fd_link_child(
+            lookup,
+            name,
+            ProcFdLink::new(fs, KtaskRef::downgrade(&task), fd),
+        )
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -706,7 +710,7 @@ fn make_thread_dir(
 ) -> Dentry {
     let thread_dir = ThreadDir {
         fs: fs.clone(),
-        task: Arc::downgrade(task),
+        task: KtaskRef::downgrade(task),
     };
 
     #[cfg(feature = "tee")]
@@ -714,7 +718,7 @@ fn make_thread_dir(
         let mut ext = DirMapping::new();
         ext.add_child("ta_info", {
             let fs = fs.clone();
-            let task = Arc::downgrade(task);
+            let task = KtaskRef::downgrade(task);
             move |lookup, name| {
                 Ok(tee::make_ta_info_dir(
                     lookup,
@@ -840,7 +844,7 @@ impl NsProcFile {
     ) -> VfsResult<Dentry> {
         let inode = task_namespace_inode(kind, task)?;
         let node = Arc::new(Self {
-            task: Arc::downgrade(task),
+            task: KtaskRef::downgrade(task),
             kind,
             inode,
         });
@@ -1139,7 +1143,7 @@ impl SimpleDirOps for ThreadDir {
                     SimpleDir::new_maker(
                         fs.clone(),
                         Arc::new(ThreadNsDir {
-                            task: Arc::downgrade(&task),
+                            task: KtaskRef::downgrade(&task),
                         }),
                     ),
                 ))
@@ -1205,7 +1209,7 @@ impl SimpleDirOps for ThreadDir {
                         fs.clone(),
                         Arc::new(ThreadFdDir {
                             fs: fs.clone(),
-                            task: Arc::downgrade(&task),
+                            task: KtaskRef::downgrade(&task),
                         }),
                     ),
                 ))

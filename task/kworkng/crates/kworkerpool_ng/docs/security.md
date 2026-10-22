@@ -88,7 +88,7 @@ Payloads are opaque trusted kernel data; this crate does not parse or log user
 content. Hostile callbacks and producer teardown misuse are outside the safe
 service-progress contract. CPU hotplug, forced cancellation, panic unwind recovery,
 reclaim-rescuer guarantees and wall-clock bounds are not supported.
-Published task exit is not evidence of final scheduler-GC stack release.
+Published task exit is not evidence of final DeferredArc worker stack release.
 
 Audit source ownership, every state/list transition, closure/count conservation,
 dispatch-before-worker lock order, unlocked wake/destruction, startup rollback

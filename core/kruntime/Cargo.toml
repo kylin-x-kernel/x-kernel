@@ -9,8 +9,13 @@ repository.workspace = true
 documentation.workspace = true
 description = "Runtime library of X-kernel"
 
+[package.metadata.cargo-shear]
+# Used by cfg(unittest) probes in ut-tests/tests_workqueue/{deferred,irq_work}.rs.
+ignored = ["kfinalize", "irq_driver", "of"]
+
 [features]
 default = []
+irq-work-test = ["dep:irq_driver", "dep:of"]
 workqueue-bench = ["kworkng/bench"]
 rcu-torture = ["krcu/torture"]
 rcu-bench = ["krcu/bench"]
@@ -41,6 +46,7 @@ rootfs-secondary-block = ["fs", "fs_boot/rootfs-secondary-block"]
 watchdog = ["dep:watchdog"]
 watchdog_hardlockup = ["watchdog/nmi"]
 pmu = ["khal/pmu"]
+nmi = ["khal/nmi"]
 
 [dependencies]
 kspin.workspace = true
@@ -66,6 +72,7 @@ klogger.workspace = true
 memspace = { workspace = true }
 knet = { workspace = true, optional = true }
 kworkng = { workspace = true, features = ["system"] }
+kfinalize.workspace = true
 ktask = { workspace = true }
 krcu.workspace = true
 timer_driver = { workspace = true }
@@ -82,3 +89,7 @@ kcpu_id_map = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+irq_driver = { workspace = true, optional = true }
+of = { workspace = true, optional = true }

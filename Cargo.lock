@@ -2483,6 +2483,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kfinalize"
+version = "0.3.0-dev"
+dependencies = [
+ "klazy",
+ "unittest",
+]
+
+[[package]]
 name = "kfutex"
 version = "0.3.0-dev"
 dependencies = [
@@ -2947,6 +2955,7 @@ dependencies = [
  "fs_boot",
  "heapless",
  "inputdev",
+ "irq-driver",
  "kaddr_layout",
  "kalloc",
  "karch",
@@ -2957,6 +2966,7 @@ dependencies = [
  "kdriver",
  "kernel-boot",
  "kerrno",
+ "kfinalize",
  "khal",
  "kiface",
  "kipi",
@@ -2972,6 +2982,7 @@ dependencies = [
  "kworkng",
  "memaddr",
  "memspace",
+ "of",
  "timer-driver",
  "unittest",
  "watchdog",
@@ -2983,6 +2994,7 @@ version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
  "kbuild_config",
+ "kfinalize",
  "unittest",
 ]
 
@@ -3110,6 +3122,7 @@ dependencies = [
  "kcpu_id_map",
  "kcpu_slot",
  "kerrno",
+ "kfinalize",
  "khal",
  "kidentity",
  "kiface",
@@ -3372,8 +3385,10 @@ dependencies = [
 name = "kworkng"
 version = "0.3.0-dev"
 dependencies = [
+ "intrusive-collections",
  "kbuild_config",
  "kcpu_id_map",
+ "kfinalize",
  "khal",
  "kiface",
  "kirq",

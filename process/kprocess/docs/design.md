@@ -346,8 +346,11 @@ rollover remains supported; no frozen ASID scalar is stored. Other architectures
 retain their saved-root switch path. Old residency bits remain conservative.
 The snapshot has no active MM user and cannot delay last-user mapping clear.
 It survives runtime binding changes, process reap and remaining exit work until
-Thread destruction. TaskGC drops the task outside its queue lock after its final
-switch; extra task owners can delay that destruction. User cleanup must precede
+Thread destruction. Task ownership uses DeferredArc: after the final switch
+and final strong release, a normal sleepable worker destroys the task and its
+Thread runtime. Weak expiration and handle Drop do not wait for snapshot/MM
+storage release; explicit process cleanup and publication rollback still run at
+their existing boundaries. Extra task owners delay retirement. User cleanup must precede
 `finish_thread_exit`; the POSIX continuation owns skipping subsequent user signal
 delivery and user return.
 

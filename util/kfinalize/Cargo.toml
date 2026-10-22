@@ -1,0 +1,18 @@
+[package]
+name = "kfinalize"
+version.workspace = true
+edition.workspace = true
+publish = false
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "Shared ownership with prepared worker-context destruction"
+
+[dependencies]
+klazy.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

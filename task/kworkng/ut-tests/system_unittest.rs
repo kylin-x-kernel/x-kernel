@@ -14,6 +14,80 @@ use unittest::def_test;
 
 use crate::{DefaultQueue, DelayedWork, Work};
 
+struct TerminalOwner {
+    work: Work,
+    completions: alloc::sync::Arc<AtomicUsize>,
+    drops: alloc::sync::Arc<AtomicUsize>,
+    is_sleepable: bool,
+}
+
+impl Drop for TerminalOwner {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// # Safety
+/// `context` owns the single raw Arc transferred to this one-shot terminal.
+/// No Work access follows invocation; the publisher retains its own Arc.
+unsafe fn release_terminal_owner(context: *const ()) {
+    // SAFETY: the only submission transfers one raw strong reference from this
+    // concrete allocation, and the provider invokes this terminal exactly once.
+    let owner = unsafe { alloc::sync::Arc::from_raw(context.cast::<TerminalOwner>()) };
+    assert_eq!(ktask::is_sleepable_context(), owner.is_sleepable);
+    owner.completions.fetch_add(1, Ordering::Release);
+}
+
+/// One-shot terminals release their execution owner on both live provider kinds.
+///
+/// # Panics
+/// Panics on admission failure, wrong terminal context or missing/duplicate release.
+#[def_test(serial)]
+fn boot_services_retire_owned_storage_in_matching_context() {
+    use alloc::sync::Arc;
+    use core::pin::Pin;
+
+    for queue in [DefaultQueue::Normal, DefaultQueue::BottomHalf] {
+        let completions = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new_cyclic(|weak: &alloc::sync::Weak<TerminalOwner>| TerminalOwner {
+            // SAFETY: the stable Arc address is bound before publication. One
+            // raw Arc is transferred to the sole terminal, which is valid on
+            // both normal and BH providers; neither captures nor cleanup block.
+            work: unsafe {
+                kworkqueue_ng::service::prepare_retiring_work(
+                    weak.as_ptr().cast(),
+                    release_terminal_owner,
+                )
+            },
+            completions: completions.clone(),
+            drops: drops.clone(),
+            is_sleepable: matches!(queue, DefaultQueue::Normal),
+        });
+        let context = Arc::into_raw(owner.clone());
+        // SAFETY: this publisher's Arc pins the Work through submission even
+        // if the terminal already consumes the independently transferred Arc.
+        let work = unsafe { Pin::new_unchecked(&owner.work) };
+        // SAFETY: private one-shot publication retains an execution Arc through
+        // terminal invocation. On rejection it has not been consumed.
+        let result = unsafe { queue.queue_work(work, None) };
+        if result.is_err() {
+            // SAFETY: rejected admission leaves the transferred strong owner
+            // unconsumed and no callback or terminal may run for this attempt.
+            drop(unsafe { Arc::from_raw(context) });
+        }
+        assert!(result.is_ok());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        drop(owner);
+        let limit = khal::time::monotonic_time() + TimeSpan::from_secs(2);
+        while drops.load(Ordering::Acquire) == 0 && khal::time::monotonic_time() < limit {
+            ktask::sleep(TimeSpan::from_millis(1));
+        }
+        assert_eq!(completions.load(Ordering::Acquire), 1);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
+}
+
 /// Safe static entry points reuse storage across CPUs and reject closed queues.
 /// Storage intentionally remains allocated for the guest's lifetime, as required
 /// by these APIs; producers stop and drain before this test returns.

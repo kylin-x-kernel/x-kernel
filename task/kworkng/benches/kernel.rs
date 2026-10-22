@@ -13,6 +13,9 @@ use ktime_types::TimeSpan;
 
 use crate::{DefaultQueue, DelayedWorkHandle, Work, WorkHandle};
 
+#[path = "deferred.rs"]
+mod deferred;
+
 const QUEUES: [DefaultQueue; 3] = [
     DefaultQueue::Normal,
     DefaultQueue::BottomHalf,
@@ -135,6 +138,7 @@ fn stress(target: LogicalCpuId, deadline_ns: u64, progress: Arc<AtomicUsize>) {
 /// An external timeout must diagnose hangs; elapsed times are measurements,
 /// not pass thresholds.
 pub fn run(seconds: usize) {
+    deferred::run();
     assert!(seconds <= 86400);
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));

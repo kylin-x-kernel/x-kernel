@@ -9,6 +9,7 @@ mod classes;
 mod clock;
 mod config;
 mod entity;
+mod owner;
 mod policy;
 mod ready_list;
 mod scheduler;
@@ -22,5 +23,6 @@ pub use config::{
     DEFAULT_RR_SLICE_NS, DEFAULT_RT_PERIOD_NS, DEFAULT_RT_RUNTIME_NS, DEFAULT_SLICE_NS,
 };
 pub use entity::{KernelClass, SchedTask};
+pub use owner::SharedOwner;
 pub use policy::{DlParams, Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use scheduler::Scheduler;

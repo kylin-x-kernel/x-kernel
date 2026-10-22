@@ -27,6 +27,26 @@ Stop（未接线） -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
 
 ## 外部边界 / 攻击面
 
+新增 `SharedOwner<T>` 是 unsafe 实现边界：实现必须保持同一值的稳定
+地址，Clone 创建独立 owner，raw 往返既不释放也不增加计数，有效指针的
+恢复不能 panic。调用方仍须保证 owner 的释放适合 RQ 锁和执行上下文。
+默认 Arc 的行为不变；DeferredArc 的末引用交接遵循 kfinalize 契约。
+
+Ready/Fair/Deadline 的 OwnerPointerOps 只转交这份责任，不从借用引用
+恢复控制块。侵入式库可能用临时 ManuallyDrop owner 克隆节点引用，
+临时视图不消费队列保留的 count，真实 owner 覆盖其全部使用。适配器
+必须保留 into_raw 的完整指针 provenance，字段投影逆运算才可恢复
+DeferredArc 的 payload 头部。缓存、双索引和 current 的每份 owner 都
+独立计数；非空队列析构逐个摘除，不 fast_clear，也不现场析构 Deferred
+payload。真实三类队列的宿主/Miri 和 guest 测试覆盖该边界。
+
+RT 按任务摘除必须使用 &Owner 的原始指针，不能用 &SchedTask 派生
+指针跨越 payload 头部；Miri 曾在该路径报告越出借用权限。修正为
+Owner::as_ptr 后，RT 与核心 raw 案例通过 strict-provenance Miri。
+Fair/Deadline 所用 intrusive-collections 0.10.2 存在 parent/color
+整数指针编码，仅使用默认 provenance 模式验证并保留警告，不能称为
+严格 provenance 通过；不关闭 alias/leak 检查。
+
 `ksched` 不直接接触用户内存、设备或固件输入。攻击面主要是：
 
 - 错误的调度 API 使用顺序（漏 `leave_current`、重复入队）；
@@ -68,10 +88,10 @@ owner 不是链表同步锁；Relaxed 足够用于身份检查，同一队列的
 其他队列只能写其自身地址或零，不能伪造本队列地址。跨队列取得链接依赖库的
 原子链接操作。所有链接和身份字段均不公开，不添加手写 Send/Sync。
 
-steal 的临时 Arc 视图是额外的原始所有权指针审计点：指针来自游标 get_ptr，
-没有经 &T 缩窄后再向前恢复 Arc 头部。列表仍拥有原来的强引用，ManuallyDrop
-阻止正常或 panic 路径释放它；谓词仅得到 &Arc，可 clone 但不能消费借来的 Arc。
-视图不逃逸，不在游标摘除后访问；真实所有权仍只经库的 remove 返回一次。
+ReadyList::steal 通过游标 get 借用任务，谓词只接收 &T，不恢复临时 Arc，
+也不增加或减少强引用。游标借用保护谓词访问；命中后先清除归属标记，
+结束任务借用，再由 remove 转出列表原有的拥有型引用。拒绝或谓词 panic
+不会转移列表所有权。
 
 EEVDF 新增私有 EntityAdapter 的两个原始指针投影：get_link 将活实体指针加上
 本适配器选定字段的 offset_of，get_value 对该适配器先前产出的链接指针做逆运算。

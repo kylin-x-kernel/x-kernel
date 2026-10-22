@@ -6,7 +6,6 @@
 
 #[unittest::mod_test]
 mod tests_switch_handoff {
-    use alloc::sync::Arc;
 
     use unittest::{assert_eq, def_test};
 
@@ -53,11 +52,11 @@ mod tests_switch_handoff {
                 crate::yield_now();
             }
         });
-        let retired = Arc::downgrade(&worker);
+        let retired = crate::KtaskRef::downgrade(&worker);
         assert_eq!(worker.join(), 0);
         drop(worker);
 
-        // GC runs asynchronously; a leaked switch owner prevents reclamation
+        // A leaked switch owner prevents retirement
         // even though the outgoing task will never resume its continuation.
         while retired.strong_count() != 0 {
             crate::yield_now();
@@ -68,7 +67,6 @@ mod tests_switch_handoff {
 
 #[unittest::mod_test]
 mod tests_blocked_resched {
-    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use kspin::{NoPreemptIrqSave, SpinNoIrq};
@@ -93,7 +91,7 @@ mod tests_blocked_resched {
         let waiter = spawn(move || {
             // CurrentTask slot + Scheduler.curr + this clone (`strong_count > 2`).
             let keep_alive = current().clone();
-            if Arc::strong_count(&keep_alive) > 2 {
+            if crate::KtaskRef::strong_count(&keep_alive) > 2 {
                 STRONG_OK.store(1, Ordering::Release);
             }
 

@@ -444,6 +444,11 @@ pub fn rust_main(arg: usize) -> ! {
     kernel_boot::bootln!("kruntime memory regions ready");
     init_allocator();
     kernel_boot::bootln!("kruntime allocator ready");
+    // SAFETY: primary per-CPU, trap and allocator setup is complete. No Task
+    // or AP preparation is exposed yet; this only publishes permanent carriers.
+    unsafe { kworkng::runtime::init_finalization_preparation() };
+    #[cfg(unittest)]
+    tests_workqueue::deferred::prepare_boot_probe();
     register_boot_console_runtime_region(boot_info);
     memspace::init_memory_management();
     kernel_boot::bootln!("memory space map ready");
@@ -498,6 +503,8 @@ pub fn rust_main(arg: usize) -> ! {
     // Prepare IRQ services and the late-init task before any newly activated
     // task can preempt this bootstrap frame at a nested guard release.
     let startup_guard = kspin::NoPreempt::new();
+    #[cfg(unittest)]
+    tests_workqueue::deferred::prepare_local_boot_probe();
     info!("Initialize interrupt handlers...");
     init_interrupt();
 
@@ -698,7 +705,26 @@ fn finish_allocator_init() {
     );
 }
 
+fn init_local_irq_work() {
+    if kirq::irq_work::init_current_cpu() {
+        return;
+    }
+    #[cfg(any(feature = "nmi", feature = "watchdog_hardlockup"))]
+    assert_eq!(
+        khal::nmi::mode(),
+        khal::nmi::NmiMode::None,
+        "CPU {}: NMI-capable runtime requires local irq_work before enabling NMI consumers",
+        khal::percpu::this_cpu_id().as_usize()
+    );
+    warn!(
+        "CPU {}: local irq_work unavailable; NMI reclamation is unsupported (see platform \
+         preparation diagnostics)",
+        khal::percpu::this_cpu_id().as_usize()
+    );
+}
+
 fn init_interrupt() {
+    init_local_irq_work();
     if !kirq::softirq::init() {
         warn!("softirq hardirq-exit runner was already installed");
     }

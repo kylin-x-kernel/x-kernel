@@ -4,10 +4,7 @@
 
 //! Task APIs for multi-task configuration.
 
-use alloc::{
-    string::String,
-    sync::{Arc, Weak},
-};
+use alloc::string::String;
 use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 
 use kcpu_slot::cpu_slot_cell;
@@ -20,11 +17,11 @@ pub use crate::{
     wait_queue::WaitQueue,
 };
 
-/// The reference type of a task.
-pub type KtaskRef = Arc<KTask>;
+/// Shared task ownership; the final release submits destruction to a sleepable worker.
+pub type KtaskRef = kfinalize::DeferredArc<KTask>;
 
 /// The weak reference type of a task.
-pub type WeakKtaskRef = Weak<KTask>;
+pub type WeakKtaskRef = kfinalize::DeferredWeak<KTask>;
 
 /// The wrapper type for [`KCpuMask`](kcpu_id_map::KCpuMask) with SMP configuration.
 pub use kcpu_id_map::KCpuMask;
@@ -37,7 +34,7 @@ pub(crate) static KERNEL_PAGE_TABLE_ROOT: lazyinit::LazyInit<karch::HwPageTableR
     lazyinit::LazyInit::new();
 
 pub(crate) type KTask = ksched::SchedTask<TaskInner>;
-pub(crate) type Scheduler = ksched::Scheduler<TaskInner>;
+pub(crate) type Scheduler = ksched::Scheduler<TaskInner, KtaskRef>;
 
 #[kiface::provide]
 impl kspin::KernelGuardIf {
@@ -496,6 +493,15 @@ pub fn spawn_task(task: TaskInner) -> KtaskRef {
 /// any scheduler run queue yet. Callers that need additional publication steps
 /// before the task may run should use this entry point together with
 /// [`activate_task`].
+///
+/// Requires initialized boot/task context with allocation permitted, never
+/// hardirq, serving softirq or NMI context. BH-disabled task context is allowed.
+/// Worker execution may still be unbound during scheduler startup; the installed
+/// provider retains retirement.
+///
+/// # Panics
+/// Panics in hardirq, serving softirq or NMI context, or if finalization
+/// preparation is unavailable.
 pub fn prepare_task(task: TaskInner) -> KtaskRef {
     task.into_arc()
 }
@@ -903,24 +909,21 @@ unittest::path_mod_test!(tests_api, "../ut-tests/api/tests_api.rs");
 #[cfg(feature = "watchdog")]
 pub fn check_mutex_deadlock() -> bool {
     let mut ok = true;
-    crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |weaktask| {
+    crate::task_registry::for_each_tracked_task(khal::percpu::this_cpu_id(), |task| {
         if !ok {
             return;
         }
-        if let Some(task) = weaktask.upgrade() {
-            let Some((_lock, since)) = task.inner().waiting_snapshot() else {
-                return;
-            };
+        let Some((_lock, since)) = task.inner().waiting_snapshot() else {
+            return;
+        };
 
-            let now = khal::time::now_ticks();
-            let Some(blocked_ticks) = now.as_raw().checked_sub(since.as_raw()) else {
-                return;
-            };
-            let blocked = khal::time::TimerTicks::from_raw(blocked_ticks);
-            if khal::time::ticks_to_span(blocked) > ktime_types::TimeSpan::from_secs(20) {
-                // suspect stall (20s)
-                ok = false;
-            }
+        let now = khal::time::now_ticks();
+        let Some(blocked_ticks) = now.as_raw().checked_sub(since.as_raw()) else {
+            return;
+        };
+        let blocked = khal::time::TimerTicks::from_raw(blocked_ticks);
+        if khal::time::ticks_to_span(blocked) > ktime_types::TimeSpan::from_secs(20) {
+            ok = false;
         }
     });
     ok

@@ -2,6 +2,13 @@
 
 ## Scope and trust model
 
+Task publication slots retain `WeakKtaskRef` (DeferredWeak), not a destructor
+completion token. Final strong release prevents resurrection immediately while
+the normal worker may still retain the Thread runtime and its exit MM snapshot.
+Visibility retirement and process-exit cleanup remain synchronous at their
+explicit boundaries; neither is delegated to payload Drop. Task pointer identity
+checks use KtaskRef/WeakKtaskRef, while Process and slot identities still use Arc.
+
 This analysis covers the entire crate, including `process/`, `process_runtime/`,
 `thread/`, public facade files and tests. Syscall decoders are outside scope and
 own ABI validation and operation-specific authorization. Trusted kernel callers

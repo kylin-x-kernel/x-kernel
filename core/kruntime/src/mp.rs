@@ -132,6 +132,8 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
 
     khal::final_init_secondary(logical_cpu_id);
 
+    #[cfg(unittest)]
+    super::tests_workqueue::deferred::prepare_local_boot_probe();
     ktask::init_scheduler_secondary();
 
     // Boot runs on idle: switching it out can postpone all remaining setup
@@ -139,6 +141,8 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     // Keep startup non-preemptible until every per-CPU service is prepared;
     // this region must not explicitly yield or wait for a runnable task.
     let startup_guard = kspin::NoPreempt::new();
+    #[cfg(unittest)]
+    super::tests_workqueue::deferred::prepare_local_boot_probe();
 
     // Publish that this CPU's run queue is registered so the primary's
     // `start_secondary_cpus` can stop waiting and enter driver initialization
@@ -158,6 +162,7 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     kipi::enable_fixed_notifications();
 
     ktask::init_softirqd_current_cpu();
+    super::init_local_irq_work();
     karch::enable_local_irq();
 
     #[cfg(feature = "watchdog")]
