@@ -20,15 +20,28 @@ mod tests {
 
     const VERSION: c_ulong = 0xc040_6400;
     const GET_UNIQUE: c_ulong = 0xc010_6401;
+    const GET_MAGIC: c_ulong = 0x8004_6402;
     const SET_VERSION: c_ulong = 0xc010_6407;
+    const AUTH_MAGIC: c_ulong = 0x4004_6411;
     const SET_MASTER: c_ulong = 0x641e;
     const DROP_MASTER: c_ulong = 0x641f;
     const EACCES: i32 = 13;
     const EBUSY: i32 = 16;
+    const EINVAL: i32 = 22;
     const SENTINEL: u8 = 0xa5;
 
     unsafe extern "C" {
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        fn mmap(
+            address: *mut c_void,
+            length: usize,
+            protection: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
+        fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int;
+        fn munmap(address: *mut c_void, length: usize) -> c_int;
     }
 
     #[repr(C)]
@@ -131,6 +144,60 @@ mod tests {
         ioctl_arg(file, SET_VERSION, &mut request)
     }
 
+    fn get_magic(file: &File) -> u32 {
+        let mut auth = 0_u32;
+        ioctl_arg(file, GET_MAGIC, &mut auth).expect("GET_MAGIC");
+        assert_ne!(auth, 0, "GET_MAGIC must allocate a nonzero token");
+        auth
+    }
+
+    fn auth_magic(file: &File, magic: u32) -> io::Result<()> {
+        let mut auth = magic;
+        ioctl_arg(file, AUTH_MAGIC, &mut auth)
+    }
+
+    fn auth_magic_from_read_only_memory(file: &File, magic: u32) -> io::Result<()> {
+        const PAGE_SIZE: usize = 4096;
+        const PROT_READ: c_int = 1;
+        const PROT_WRITE: c_int = 2;
+        const MAP_PRIVATE: c_int = 2;
+        const MAP_ANONYMOUS: c_int = 0x20;
+        // SAFETY: mmap creates a fresh writable anonymous page owned by this
+        // test; the returned mapping is checked before it is accessed.
+        let mapping = unsafe {
+            mmap(
+                ptr::null_mut(),
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapping as isize == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: mapping names a live writable page of at least PAGE_SIZE
+        // bytes and is aligned for a u32 value.
+        unsafe { ptr::write(mapping.cast::<u32>(), magic) };
+        // SAFETY: the mapping remains live and PAGE_SIZE is its exact length.
+        if unsafe { mprotect(mapping, PAGE_SIZE, PROT_READ) } != 0 {
+            let error = io::Error::last_os_error();
+            // SAFETY: this is the same live mapping returned by mmap.
+            let _ = unsafe { munmap(mapping, PAGE_SIZE) };
+            return Err(error);
+        }
+        // SAFETY: the ioctl consumes one initialized u32 from the live,
+        // read-only mapping; the command is input-only.
+        let result = unsafe { ioctl(file.as_raw_fd(), AUTH_MAGIC, mapping) };
+        let ioctl_error = (result < 0).then(io::Error::last_os_error);
+        // SAFETY: this is the same live mapping returned by mmap.
+        if unsafe { munmap(mapping, PAGE_SIZE) } != 0 && ioctl_error.is_none() {
+            return Err(io::Error::last_os_error());
+        }
+        ioctl_error.map_or(Ok(()), Err)
+    }
+
     fn unique_length(file: &File) -> usize {
         let mut unique = Unique {
             len: 0,
@@ -215,6 +282,42 @@ mod tests {
                 .raw_os_error(),
             Some(EBUSY)
         );
+        let client_magic = get_magic(&client);
+        assert_eq!(get_magic(&client), client_magic, "GET_MAGIC must be stable per fd");
+        let owner_magic = get_magic(&owner);
+        assert_ne!(client_magic, owner_magic, "open DRM files need distinct tokens");
+        let expired = open_card();
+        let expired_magic = get_magic(&expired);
+        drop(expired);
+        assert_eq!(
+            auth_magic(&owner, expired_magic)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(EINVAL),
+            "closing a file must expire its magic token"
+        );
+        assert_eq!(
+            auth_magic(&client, client_magic).unwrap_err().raw_os_error(),
+            Some(EACCES),
+            "only the active master may authenticate clients"
+        );
+        auth_magic_from_read_only_memory(&owner, client_magic)
+            .expect("AUTH_MAGIC must read an input-only buffer");
+        assert_eq!(
+            auth_magic(&owner, client_magic).unwrap_err().raw_os_error(),
+            Some(EINVAL),
+            "a DRM magic token is single-use"
+        );
+        let renewed_magic = get_magic(&client);
+        assert_ne!(renewed_magic, client_magic, "consumed tokens must be renewed");
+        auth_magic(&owner, renewed_magic).expect("owner consumes a renewed client token");
+        assert_eq!(
+            auth_magic(&owner, u32::MAX).unwrap_err().raw_os_error(),
+            Some(EINVAL),
+            "unknown DRM magic must be rejected"
+        );
+        let peer = open_card();
+        let peer_magic = get_magic(&peer);
         assert_eq!(
             unique_length(&owner),
             0,
@@ -289,7 +392,20 @@ mod tests {
             set_version(&owner, 1, 4).unwrap_err().raw_os_error(),
             Some(EACCES)
         );
+        let mut dropped_master_magic = 0_u32;
+        assert_eq!(
+            ioctl_arg(&client, GET_MAGIC, &mut dropped_master_magic)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(EACCES),
+            "releasing the master invalidates client magic tokens"
+        );
         master_ioctl(&owner, SET_MASTER).expect("former owner reacquires its master");
+        let refreshed_client_magic = get_magic(&client);
+        assert_ne!(
+            refreshed_client_magic, client_magic,
+            "reacquiring a master must not reuse an invalidated token"
+        );
         assert_eq!(
             read_identity(&owner),
             identity,
@@ -312,6 +428,12 @@ mod tests {
         );
         master_ioctl(&client, SET_MASTER).expect("last owner close releases active ownership");
         assert_eq!(
+            auth_magic(&client, peer_magic).unwrap_err().raw_os_error(),
+            Some(EINVAL),
+            "a new master must not consume tokens from the previous master"
+        );
+        drop(peer);
+        assert_eq!(
             unique_length(&client),
             0,
             "client becoming owner inherited old identity"
@@ -325,5 +447,28 @@ mod tests {
             "fresh owner inherited closed identity"
         );
         set_version(&fresh, 1, 4).expect("final owner close allows a fresh owner");
+        drop(fresh);
+
+        let abandoned_owner = open_card();
+        master_ioctl(&abandoned_owner, SET_MASTER).expect("device must have no external owner");
+        let stale_client = open_card();
+        let stale_magic = get_magic(&stale_client);
+        drop(abandoned_owner);
+        let replacement_owner = open_card();
+        let mut stale_again = 0_u32;
+        assert_eq!(
+            ioctl_arg(&stale_client, GET_MAGIC, &mut stale_again)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(EACCES),
+            "a file bound to a replaced master cannot retain or issue magic tokens"
+        );
+        assert_eq!(
+            auth_magic(&replacement_owner, stale_magic)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(EINVAL),
+            "a replacement master cannot consume a stale master's token"
+        );
     }
 }

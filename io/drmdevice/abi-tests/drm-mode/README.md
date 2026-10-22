@@ -14,7 +14,8 @@
 - `MODE_CURSOR` 在真实 CRTC 上接受 MOVE 与 BO（含 `handle=0` 的隐藏请求），
   未知 CRTC 返回 `EINVAL`。
 - `SET_CLIENT_CAP` 按 Linux 的 `_IOW` 编码：未知能力返回 `EOPNOTSUPP`，布尔值
-  越界返回 `EINVAL`，并在同一个打开文件上可授予、可撤销。
+  越界返回 `EINVAL`，并在同一个打开文件上可授予、可撤销；授予请求放在
+  `mmap` 后经 `mprotect(PROT_READ)` 设为只读的页上，验证不会回写参数而误报 `EFAULT`。
 - `DIRTYFB` 对未知帧缓冲返回 `ENOENT`，对已登记帧缓冲成功。
 - 关闭并重新打开设备后上述接口仍可用（X server 重启会重建描述符）。
 

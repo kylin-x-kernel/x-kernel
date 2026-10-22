@@ -42,10 +42,31 @@ trait DrmIoctl: Sized {
     where
         Self: UserRead + UserWrite,
     {
+        const { assert!(Self::CMD >> 30 == (IOC_READ | IOC_WRITE)) };
         let mut ptr: Self = arg.read_vm().map_err(|_| kvfs::VfsError::BadAddress)?;
         let result = Self::handle(dev, file, &mut ptr);
         arg.write_vm(ptr).map_err(|_| kvfs::VfsError::BadAddress)?;
         result
+    }
+
+    fn handle_raw_output(dev: &DrmCard, file: &Arc<DrmFile>, arg: UserPtr<Self>) -> VfsResult<usize>
+    where
+        Self: Default + UserWrite,
+    {
+        const { assert!(Self::CMD >> 30 == IOC_READ) };
+        let mut value = Self::default();
+        let result = Self::handle(dev, file, &mut value);
+        arg.write_vm(value).map_err(|_| VfsError::BadAddress)?;
+        result
+    }
+
+    fn handle_raw_input(dev: &DrmCard, file: &Arc<DrmFile>, arg: UserPtr<Self>) -> VfsResult<usize>
+    where
+        Self: UserRead,
+    {
+        const { assert!(Self::CMD >> 30 == IOC_WRITE) };
+        let mut value: Self = arg.read_vm().map_err(|_| VfsError::BadAddress)?;
+        Self::handle(dev, file, &mut value)
     }
 }
 
@@ -221,18 +242,73 @@ impl DrmIoctl for DrmSetClientCap {
 }
 
 impl DrmIoctl for DrmAuth {
-    const CMD: u32 = iowr::<DrmAuth>(DRM_TYPE, 0x02);
+    const CMD: u32 = ior::<DrmAuth>(DRM_TYPE, 0x02);
 
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, auth: &mut Self) -> VfsResult<usize> {
-        auth.magic = 1;
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, auth: &mut Self) -> VfsResult<usize> {
+        let masters = dev.masters.lock();
+        let binding = file.binding.lock();
+        let mut file_magic = file.magic.lock();
+        if !masters
+            .active
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&binding.master, &active.master))
+        {
+            if let Some(magic) = file_magic.take() {
+                let mut registry = binding.master.magic_registry.lock();
+                if registry
+                    .files
+                    .get(&magic)
+                    .is_some_and(|owner| Weak::ptr_eq(owner, &Arc::downgrade(file)))
+                {
+                    registry.files.remove(&magic);
+                }
+            }
+            return Err(VfsError::PermissionDenied);
+        }
+        let mut registry = binding.master.magic_registry.lock();
+        if let Some(magic) = *file_magic {
+            if registry
+                .files
+                .get(&magic)
+                .is_some_and(|owner| Weak::ptr_eq(owner, &Arc::downgrade(file)))
+            {
+                auth.magic = magic;
+                return Ok(0);
+            }
+            *file_magic = None;
+        }
+
+        let magic = registry.allocate(file).ok_or(VfsError::NoMemory)?;
+        *file_magic = Some(magic);
+        auth.magic = magic;
         Ok(0)
     }
 }
 
 impl DrmIoctl for DrmAuthMagic {
-    const CMD: u32 = iowr::<DrmAuth>(DRM_TYPE, 0x03);
+    const CMD: u32 = iow::<DrmAuth>(DRM_TYPE, 0x11);
 
-    fn handle(_dev: &DrmCard, _file: &Arc<DrmFile>, _auth: &mut Self) -> VfsResult<usize> {
+    fn handle(dev: &DrmCard, file: &Arc<DrmFile>, auth: &mut Self) -> VfsResult<usize> {
+        // Keep active-master ownership stable through token consumption. The
+        // target Arc is declared outside the lock scope so its final drop
+        // cannot re-enter DrmFile::drop while the master-state lock is held.
+        let _target;
+        {
+            let masters = dev.masters.lock();
+            let active = masters
+                .active
+                .as_ref()
+                .filter(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(file)))
+                .ok_or(VfsError::PermissionDenied)?;
+            _target = active
+                .master
+                .magic_registry
+                .lock()
+                .files
+                .remove(&auth.0.magic)
+                .and_then(|target| target.upgrade())
+                .ok_or(VfsError::InvalidInput)?;
+        }
         Ok(0)
     }
 }
@@ -388,9 +464,46 @@ struct ModesetState {
     plane_crtc_h: u64,
 }
 
-#[derive(Default)]
 struct DrmMaster {
     unique: Mutex<Option<String>>,
+    magic_registry: Mutex<DrmMagicRegistry>,
+}
+
+impl Default for DrmMaster {
+    fn default() -> Self {
+        Self {
+            unique: Mutex::new(None),
+            magic_registry: Mutex::new(DrmMagicRegistry::default()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DrmMagicRegistry {
+    next_magic: u32,
+    files: BTreeMap<u32, Weak<DrmFile>>,
+}
+
+impl DrmMagicRegistry {
+    fn allocate(&mut self, file: &Arc<DrmFile>) -> Option<u32> {
+        let first = self.next_magic.max(1);
+        let mut magic = first;
+        loop {
+            if let alloc::collections::btree_map::Entry::Vacant(entry) = self.files.entry(magic) {
+                entry.insert(Arc::downgrade(file));
+                self.next_magic = magic.wrapping_add(1).max(1);
+                return Some(magic);
+            }
+            magic = magic.wrapping_add(1).max(1);
+            if magic == first {
+                return None;
+            }
+        }
+    }
+}
+
+fn invalidate_magic_tokens(master: &DrmMaster) {
+    master.magic_registry.lock().files.clear();
 }
 
 struct MasterBinding {
@@ -425,18 +538,27 @@ struct DrmFile {
     /// setter, not because anything here acts on them: plane enumeration is the
     /// same with or without `DRM_CLIENT_CAP_UNIVERSAL_PLANES`.
     client_caps: AtomicU64,
+    magic: Mutex<Option<u32>>,
 }
 
 impl Drop for DrmFile {
     fn drop(&mut self) {
         // Also rolls back ownership if the file builder is never published.
         let mut masters = self.masters.lock();
-        if masters
+        let released_master = masters
             .active
             .as_ref()
             .is_some_and(|active| core::ptr::eq(active.owner.as_ptr(), self))
-        {
-            masters.active = None;
+            .then_some(())
+            .and_then(|()| masters.active.take().map(|active| active.master));
+        if let Some(master) = &released_master {
+            invalidate_magic_tokens(master);
+        }
+        drop(masters);
+
+        let binding = self.binding.lock();
+        if let Some(magic) = *self.magic.lock() {
+            binding.master.magic_registry.lock().files.remove(&magic);
         }
     }
 }
@@ -647,7 +769,10 @@ impl DeviceFileOps for DrmCard {
             .as_ref()
             .is_some_and(|active| active.owner.strong_count() == 0)
         {
-            masters.active = None;
+            let Some(released_master) = masters.active.take().map(|active| active.master) else {
+                return Err(VfsError::InvalidInput);
+            };
+            invalidate_magic_tokens(&released_master);
         }
         let is_master = masters.active.is_none();
         let master = match &masters.active {
@@ -661,6 +786,7 @@ impl DeviceFileOps for DrmCard {
                 is_master,
             }),
             client_caps: AtomicU64::new(0),
+            magic: Mutex::new(None),
         });
         if is_master {
             masters.active = Some(ActiveMaster {
@@ -669,6 +795,7 @@ impl DeviceFileOps for DrmCard {
             });
         }
         file.set_private_data(state);
+        drop(masters);
         Ok(())
     }
 
@@ -677,13 +804,16 @@ impl DeviceFileOps for DrmCard {
             .private_data_get::<DrmFile>()
             .ok_or(VfsError::InvalidInput)?;
         let mut masters = self.masters.lock();
-        if masters
+        let released_master = masters
             .active
             .as_ref()
             .is_some_and(|active| Weak::ptr_eq(&active.owner, &Arc::downgrade(&state)))
-        {
-            masters.active = None;
+            .then_some(())
+            .and_then(|()| masters.active.take().map(|active| active.master));
+        if let Some(master) = &released_master {
+            invalidate_magic_tokens(master);
         }
+        drop(masters);
         Ok(())
     }
 
@@ -738,6 +868,10 @@ impl DeviceFileOps for DrmCard {
                 }
                 let mut binding = state.binding.lock();
                 if !binding.is_master {
+                    let mut file_magic = state.magic.lock();
+                    if let Some(magic) = file_magic.take() {
+                        binding.master.magic_registry.lock().files.remove(&magic);
+                    }
                     binding.master = Arc::new(DrmMaster::default());
                     binding.is_master = true;
                 }
@@ -756,7 +890,12 @@ impl DeviceFileOps for DrmCard {
                 {
                     return Err(VfsError::InvalidInput);
                 }
-                masters.active = None;
+                let Some(released_master) = masters.active.take().map(|active| active.master)
+                else {
+                    return Err(VfsError::InvalidInput);
+                };
+                invalidate_magic_tokens(&released_master);
+                drop(masters);
                 Ok(0)
             }
             <DrmVersion as DrmIoctl>::CMD => {
@@ -777,15 +916,15 @@ impl DeviceFileOps for DrmCard {
             }
             <DrmSetClientCap as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmSetClientCap>::from(arg);
-                <DrmSetClientCap as DrmIoctl>::handle_raw(self, &state, user_ptr)
+                <DrmSetClientCap as DrmIoctl>::handle_raw_input(self, &state, user_ptr)
             }
             <DrmAuth as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmAuth>::from(arg);
-                <DrmAuth as DrmIoctl>::handle_raw(self, &state, user_ptr)
+                <DrmAuth as DrmIoctl>::handle_raw_output(self, &state, user_ptr)
             }
             <DrmAuthMagic as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmAuthMagic>::from(arg);
-                <DrmAuthMagic as DrmIoctl>::handle_raw(self, &state, user_ptr)
+                <DrmAuthMagic as DrmIoctl>::handle_raw_input(self, &state, user_ptr)
             }
             <DrmModeDirtyFb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeDirtyFb>::from(arg);
@@ -841,7 +980,7 @@ impl DeviceFileOps for DrmCard {
             }
             <DrmGemClose as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmGemClose>::from(arg);
-                <DrmGemClose as DrmIoctl>::handle_raw(self, &state, user_ptr)
+                <DrmGemClose as DrmIoctl>::handle_raw_input(self, &state, user_ptr)
             }
             <DrmModeCloseFb as DrmIoctl>::CMD => {
                 let user_ptr = UserPtr::<DrmModeCloseFb>::from(arg);

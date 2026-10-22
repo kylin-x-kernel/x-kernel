@@ -13,6 +13,8 @@
 - `GEM_CLOSE`：**先校验 `pad`**——真实 handle 配非零 `pad` 返回 `EINVAL`、清掉 `pad` 后同一 handle 能正常关闭
   （顺序反过来实现也无法通过）；未知 handle → `EINVAL`（Linux
   `drm_gem_handle_delete()` 的返回值）；已创建的 dumb buffer → 返回 0；重复关闭 → `EINVAL`。
+- `GEM_CLOSE` 请求放在 `mmap` 后经 `mprotect(PROT_READ)` 设为只读的页上时
+  仍返回 0，且重复请求返回 `EINVAL`，避免已释放 handle 却因回写只读页而误报 `EFAULT`。
 - `MODE_CLOSEFB`：非零 `pad` → `EINVAL`；未知 fb → `ENOENT`；
   fb 仍绑在 legacy CRTC 上 → `EBUSY`；解绑后 → 0；再次关闭 → `ENOENT`。
 - `DESTROY_DUMB` 对未知 handle 仍返回 0（legacy 语义不变），用例顺带确认两条路径没有互相改坏。

@@ -31,6 +31,12 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
   offsets.
 - Retained backing pages outlive user mappings that reference them.
 - The vblank event queue remains bounded by `MAX_EVENTS`.
+- DRM magic tokens are scoped to one master, consumed once, and removed when
+  their file closes or changes master.
+- AUTH_MAGIC requires the active master and reads its argument without copying
+  data back to user memory.
+- User-copy helpers enforce the matching ioctl direction bits
+  at compile time, preventing a mismatched dispatcher arm from being built.
 
 ## Thread safety
 
@@ -47,6 +53,7 @@ handle's availability state and does not mutate another card's local tables.
 | T-03 | Mapped buffer freed too early | High — use-after-free and kernel memory corruption | Remove framebuffer while mmap survives | `retained_pages` keeps backing pages alive. |
 | T-04 | Open fd targets a newly registered display | High — operations affect the wrong display and corrupt visible device state | Hot-unplug followed by card-index reuse | Each `DrmCard` owns one concrete class handle and returns `ENODEV` after removal. |
 | T-05 | Event queue exhausts memory | Medium — unbounded kernel-memory growth and service denial | Repeated event-producing ioctls | Queue length is capped at `MAX_EVENTS`. |
+| T-06 | Reuse or cross-master use of a DRM magic token | Medium — unauthorized client authentication | Forged, replayed, or stale AUTH_MAGIC request | Tokens live in one master registry, require its active owner, are single-use, and are removed on file close or master change. |
 
 ## Failure modes and effects
 
@@ -99,7 +106,12 @@ Interface negotiation may establish an identity before a later driver-version
 error, following Linux's operation order. Identity presence is represented by
 the master-owned optional string, not an independent activation flag.
 
-Master ownership here is an identity lifecycle, not a complete access-control
-implementation: existing authentication and KMS privilege limitations remain.
+The legacy GET_MAGIC/AUTH_MAGIC handshake is implemented with
+master-scoped, single-use tokens. GET_MAGIC rejects a file bound to an inactive
+or replaced master; tokens are cleared when a master stops being active. The
+handshake does not update an authorization state consumed by the ioctl
+dispatcher; tokens are compatibility identifiers, not cryptographic
+credentials. The dispatcher does not yet enforce per-ioctl DRM_AUTH flags, and
+complete KMS authorization remains outside this change.
 The synthetic identity is not a validated hardware bus ID and does not provide
 real PCI bus-id matching.

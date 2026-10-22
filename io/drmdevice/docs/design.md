@@ -149,6 +149,11 @@ release active ownership without clearing identities held by older files.
 Private-state destruction also rolls back ownership for an unpublished open.
 The ioctl dispatcher resolves `DrmFile` once and passes its shared reference to
 the typed handlers.
+All raw helpers assert their command direction at
+compile time, so selecting a helper inconsistent with the ioctl encoding fails
+the build. Input-only commands, including SET_CLIENT_CAP and GEM_CLOSE, never
+write their request structures back. Bidirectional commands retain the
+read-and-write helper.
 
 `SET_VERSION` requires the calling file to be the current active owner, including
 for query-only requests. Other files receive `EACCES` without changing the shared
@@ -160,5 +165,19 @@ query-only and 1.0 requests do not. As in Linux, interface processing precedes
 driver-version validation. Responses report the highest supported interface and
 driver versions, including for lower-version requests and validation errors.
 The established string remains the synthetic driver label; real PCI bus-id
-matching, authentication, leases, and complete KMS master authorization are not
-implemented by this change.
+matching, leases, and complete KMS master authorization are not implemented by
+this change.
+
+## Legacy DRM authentication
+
+DRM_IOCTL_GET_MAGIC allocates one nonzero token per open file description in
+its bound master's registry and returns it through an output-only user buffer.
+Repeated requests return the same token while it remains registered. The
+active master may consume a client's token once with input-only
+DRM_IOCTL_AUTH_MAGIC; a later GET_MAGIC allocates a fresh token. Unknown,
+expired, and reused tokens fail. Tokens are removed when their file closes,
+moves to a new master, or its master stops being active. GET_MAGIC rejects
+files whose bound master is no longer active. Authentication is master-scoped
+and is serialized with master ownership changes. This implements the legacy
+token handshake; it does not add per-ioctl DRM_AUTH permission checks or
+complete KMS authorization.

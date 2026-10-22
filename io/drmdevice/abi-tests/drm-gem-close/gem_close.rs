@@ -17,7 +17,7 @@ compile_error!("DRM GEM_CLOSE regressions require a 64-bit Linux userspace targe
 #[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
 mod tests {
     use std::{
-        ffi::{c_int, c_ulong},
+        ffi::{c_int, c_ulong, c_void},
         fs::{File, OpenOptions},
         io,
         mem::size_of,
@@ -49,6 +49,16 @@ mod tests {
 
     unsafe extern "C" {
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        fn mmap(
+            address: *mut c_void,
+            length: usize,
+            protection: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
+        fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int;
+        fn munmap(address: *mut c_void, length: usize) -> c_int;
     }
 
     #[repr(C)]
@@ -214,6 +224,48 @@ mod tests {
         ioctl_arg(file, GEM_CLOSE, &mut request)
     }
 
+    fn gem_close_from_read_only_memory(file: &File, handle: u32) -> io::Result<()> {
+        const PAGE_SIZE: usize = 4096;
+        const PROT_READ: c_int = 1;
+        const PROT_WRITE: c_int = 2;
+        const MAP_PRIVATE: c_int = 2;
+        const MAP_ANONYMOUS: c_int = 0x20;
+        // SAFETY: mmap creates a fresh writable anonymous page; its result is
+        // checked before any access, and no other test shares this mapping.
+        let mapping = unsafe {
+            mmap(
+                ptr::null_mut(),
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapping as isize == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the fresh mapping is writable, page-aligned, and larger than
+        // the 8-byte GemClose request. No references alias its storage.
+        unsafe { ptr::write(mapping.cast::<GemClose>(), GemClose { handle, pad: 0 }) };
+        // SAFETY: mapping is live and PAGE_SIZE is the length passed to mmap.
+        if unsafe { mprotect(mapping, PAGE_SIZE, PROT_READ) } != 0 {
+            let error = io::Error::last_os_error();
+            // SAFETY: this is the same live mapping returned by mmap.
+            let _ = unsafe { munmap(mapping, PAGE_SIZE) };
+            return Err(error);
+        }
+        // SAFETY: GEM_CLOSE consumes the initialized repr(C) request from
+        // this live read-only mapping, which remains allocated during ioctl.
+        let result = unsafe { ioctl(file.as_raw_fd(), GEM_CLOSE, mapping) };
+        let ioctl_error = (result < 0).then(io::Error::last_os_error);
+        // SAFETY: this is the same live mapping returned by mmap.
+        if unsafe { munmap(mapping, PAGE_SIZE) } != 0 && ioctl_error.is_none() {
+            return Err(io::Error::last_os_error());
+        }
+        ioctl_error.map_or(Ok(()), Err)
+    }
+
     fn close_fb(file: &File, fb_id: u32, pad: u32) -> io::Result<()> {
         let mut request = CloseFb { fb_id, pad };
         ioctl_arg(file, CLOSEFB, &mut request)
@@ -272,7 +324,15 @@ mod tests {
             gem_close(&file, pad_dumb.handle, 1).unwrap_err().raw_os_error(),
             Some(EINVAL)
         );
-        gem_close(&file, pad_dumb.handle, 0).expect("live handle closes with pad cleared");
+        gem_close_from_read_only_memory(&file, pad_dumb.handle)
+            .expect("live handle closes from a read-only request with pad cleared");
+        assert_eq!(
+            gem_close_from_read_only_memory(&file, pad_dumb.handle)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(EINVAL),
+            "the read-only request closes the handle exactly once"
+        );
 
         let dumb = create_dumb(&file, 64);
         let fb_id = addfb2(&file, &dumb);

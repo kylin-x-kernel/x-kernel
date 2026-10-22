@@ -35,7 +35,7 @@ compile_error!("DRM mode ABI regressions require a 64-bit Linux userspace target
 #[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
 mod tests {
     use std::{
-        ffi::{c_int, c_ulong},
+        ffi::{c_int, c_ulong, c_void},
         fs::{File, OpenOptions},
         io,
         mem::size_of,
@@ -188,6 +188,48 @@ mod tests {
         }
     }
 
+    fn set_client_cap_from_read_only_memory(file: &File, request: SetClientCap) -> io::Result<()> {
+        const PAGE_SIZE: usize = 4096;
+        const PROT_READ: c_int = 1;
+        const PROT_WRITE: c_int = 2;
+        const MAP_PRIVATE: c_int = 2;
+        const MAP_ANONYMOUS: c_int = 0x20;
+        // SAFETY: mmap creates a fresh writable anonymous page; its result is
+        // checked before any access, and no other test shares this mapping.
+        let mapping = unsafe {
+            mmap(
+                ptr::null_mut(),
+                PAGE_SIZE,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if mapping as isize == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the fresh mapping is writable, page-aligned, and larger than
+        // the 16-byte SetClientCap request. No references alias its storage.
+        unsafe { ptr::write(mapping.cast::<SetClientCap>(), request) };
+        // SAFETY: mapping is live and PAGE_SIZE is the length passed to mmap.
+        if unsafe { mprotect(mapping, PAGE_SIZE, PROT_READ) } != 0 {
+            let error = io::Error::last_os_error();
+            // SAFETY: this is the same live mapping returned by mmap.
+            let _ = unsafe { munmap(mapping, PAGE_SIZE) };
+            return Err(error);
+        }
+        // SAFETY: SET_CLIENT_CAP consumes the initialized repr(C) request from
+        // this live read-only mapping, which remains allocated during ioctl.
+        let result = unsafe { ioctl(file.as_raw_fd(), SET_CLIENT_CAP, mapping) };
+        let ioctl_error = (result < 0).then(io::Error::last_os_error);
+        // SAFETY: this is the same live mapping returned by mmap.
+        if unsafe { munmap(mapping, PAGE_SIZE) } != 0 && ioctl_error.is_none() {
+            return Err(io::Error::last_os_error());
+        }
+        ioctl_error.map_or(Ok(()), Err)
+    }
+
     fn errno(result: io::Result<()>) -> i32 {
         result
             .expect_err("ioctl was expected to fail")
@@ -240,12 +282,12 @@ mod tests {
                 EINVAL,
                 "capability {capability} accepted a boolean value other than 0 or 1"
             );
-            let mut valid = SetClientCap {
+            let valid = SetClientCap {
                 capability,
                 value: 1,
             };
-            ioctl_arg(&card, SET_CLIENT_CAP, &mut valid).unwrap_or_else(|error| {
-                panic!("capability {capability} must be grantable: {error}")
+            set_client_cap_from_read_only_memory(&card, valid).unwrap_or_else(|error| {
+                panic!("capability {capability} must be grantable from a read-only request: {error}")
             });
             let mut revoked = SetClientCap {
                 capability,
@@ -559,5 +601,15 @@ mod tests {
 
     unsafe extern "C" {
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        fn mmap(
+            address: *mut c_void,
+            length: usize,
+            protection: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
+        fn mprotect(address: *mut c_void, length: usize, protection: c_int) -> c_int;
+        fn munmap(address: *mut c_void, length: usize) -> c_int;
     }
 }

@@ -11,6 +11,10 @@
 - owner 查询及接口 1.0 不建立身份，接口 1.4 建立身份。
 - owner 请求接口 1.2 时回填最高支持版本 1.4。
 - 第二个独立打开的文件 SET_MASTER 返回 EBUSY。
+- GET_MAGIC 返回稳定且互异的非零令牌；关闭文件或释放 master 使令牌失效。
+- 绑定已释放 master 的文件不能继续签发或复用旧令牌。
+- AUTH_MAGIC 只允许当前 owner 消费令牌，且输入 buffer 可为只读页。
+- AUTH_MAGIC 令牌单次消费；未知令牌和跨 master 令牌均返回 EINVAL。
 - DROP_MASTER 后身份保留，原 owner 重新获取时复用原身份。
 - dup 描述符维持所有权，最后一个 owner 描述符关闭后其他文件可以获取所有权。
 - client 成为 owner 时身份为空，最后关闭后新打开的文件成为 owner。
