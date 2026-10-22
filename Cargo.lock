@@ -5289,6 +5289,7 @@ dependencies = [
  "uuid 0.8.2",
  "xdice",
  "zerocopy",
+ "zeroize",
 ]
 
 [[package]]

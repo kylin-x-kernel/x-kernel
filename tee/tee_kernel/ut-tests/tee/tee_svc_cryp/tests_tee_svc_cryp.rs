@@ -150,6 +150,16 @@ fn test_op_attr_secret_value_from_binary_rejects_bad_inputs() {
     assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
 }
 
+/// 属性个数超过上限时直接返回参数错误，避免按该计数分配内核缓冲。
+#[unittest::def_test]
+fn test_obj_syscalls_reject_oversized_attr_count() {
+    let too_many = (TEE_CRYP_MAX_USER_ATTRS + 1) as c_ulong;
+    let result = syscall_cryp_obj_populate(0, core::ptr::null_mut(), too_many);
+    assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    let result = syscall_obj_generate_key(0, 256, core::ptr::null(), c_ulong::MAX);
+    assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+}
+
 #[unittest::def_test]
 fn test_op_u32_from_binary_helper() {
     let data: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
@@ -266,6 +276,32 @@ fn test_tee_obj_set_type() {
     assert_eq!(obj.info.dataPosition, 0);
     assert_eq!(obj.attr.len(), 1);
     assert!(matches!(obj.attr[0], TeeCryptObj::EccPublicKey(_)));
+
+    let mut obj = TeeObj::default();
+    let result = tee_obj_set_type(&mut obj, TEE_TYPE_X25519_PUBLIC_KEY, 256);
+    assert!(result.is_ok());
+    assert_eq!(obj.info.objectType, TEE_TYPE_X25519_PUBLIC_KEY);
+    assert!(matches!(obj.attr[0], TeeCryptObj::X25519PublicKey(_)));
+}
+
+#[unittest::def_test]
+fn test_x25519_public_key_copies_from_keypair() {
+    let mut src = TeeObj::default();
+    assert!(tee_obj_set_type(&mut src, TEE_TYPE_X25519_KEYPAIR, 256).is_ok());
+    let mut dst = TeeObj::default();
+    assert!(tee_obj_set_type(&mut dst, TEE_TYPE_X25519_PUBLIC_KEY, 256).is_ok());
+
+    let pub_bytes = [0x11u8; 32];
+    assert!(matches!(src.attr[0], TeeCryptObj::X25519Keypair(_)));
+    if let TeeCryptObj::X25519Keypair(kp) = &mut src.attr[0] {
+        kp.pub_key = pub_bytes;
+    }
+
+    assert!(tee_obj_attr_copy_from(&mut dst, &mut src).is_ok());
+    assert!(matches!(dst.attr[0], TeeCryptObj::X25519PublicKey(_)));
+    if let TeeCryptObj::X25519PublicKey(key) = &dst.attr[0] {
+        assert_eq!(key.pub_key, pub_bytes);
+    }
 }
 
 #[unittest::def_test]

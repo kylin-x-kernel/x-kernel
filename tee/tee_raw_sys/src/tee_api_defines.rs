@@ -356,14 +356,29 @@ pub const TEE_ATTR_ECC_CURVE: u32 = 0xF0000441;
 pub const TEE_ATTR_EDDSA_CTX: u32 = 0xD0000643;
 pub const TEE_ATTR_ED25519_PUBLIC_VALUE: u32 = 0xD0000743;
 pub const TEE_ATTR_ED25519_PRIVATE_VALUE: u32 = 0xC0000843;
+pub const TEE_ATTR_X25519_PUBLIC_VALUE: u32 = 0xD0000944;
+pub const TEE_ATTR_X25519_PRIVATE_VALUE: u32 = 0xC0000A44;
+pub const TEE_ATTR_X448_PUBLIC_VALUE: u32 = 0xD0000A45;
+pub const TEE_ATTR_X448_PRIVATE_VALUE: u32 = 0xC0000A46;
 pub const TEE_ATTR_EDDSA_PREHASH: u32 = 0xF0000004;
 pub const TEE_ATTR_SM2_ID_INITIATOR: u32 = 0xD0000446;
 pub const TEE_ATTR_SM2_ID_RESPONDER: u32 = 0xD0000546;
 pub const TEE_ATTR_SM2_KEP_USER: u32 = 0xF0000646;
 pub const TEE_ATTR_SM2_KEP_CONFIRMATION_IN: u32 = 0xD0000746;
 pub const TEE_ATTR_SM2_KEP_CONFIRMATION_OUT: u32 = 0xD0000846;
+// OP-TEE tee_api_defines.h defines the four constants below with overlapping
+// numeric values (0xD0000946 / 0xD0000A46). This is upstream history, not a
+// local mistake: SM2 KEP once used the wrong ephemeral-key IDs, and those
+// values were kept as aliases alongside TEE_ATTR_HKDF_SALT/INFO.
+// Attribute meaning is determined by the derive algorithm (TEE_ALG_SM2_KEP vs
+// TEE_ALG_HKDF_*), not by the ID alone — do not merge their parsers.
+// GP-spec HKDF salt/info are 0xD00002C0 / 0xD00003C0 and are also supported.
 pub const TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_X: u32 = 0xD0000946;
 pub const TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_Y: u32 = 0xD0000A46;
+pub const TEE_ATTR_HKDF_SALT: u32 = 0xD0000946;
+pub const TEE_ATTR_HKDF_INFO: u32 = 0xD0000A46;
+pub const TEE_ATTR_HKDF_HASH_ALGORITHM: u32 = 0xF0000B46;
+pub const TEE_ATTR_KDF_KEY_SIZE: u32 = 0xF0000C46;
 pub const TEE_ATTR_FLAG_PUBLIC: u32 = 1 << 28;
 pub const TEE_ATTR_FLAG_VALUE: u32 = 1 << 29;
 // Deprecated, but kept for backwards compatibility

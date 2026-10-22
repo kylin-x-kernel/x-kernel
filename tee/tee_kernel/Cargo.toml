@@ -49,6 +49,7 @@ posix-types.workspace = true
 kprocess = { workspace = true, features = ["tee"] }
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
+zeroize.workspace = true
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 tee_raw_sys = { workspace = true }

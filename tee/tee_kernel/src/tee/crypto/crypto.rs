@@ -9,6 +9,8 @@ use ksync::Mutex;
 use tee_crypto::{
     asymmetric::EccCurve,
     hash::{Digest, DigestBytes, HashAlgorithm, Sha1, Sha224, Sha256, Sha384, Sha512, Sm3},
+    hkdf::hkdf,
+    kdf::{concat_kdf, pbkdf2_hmac_sha1},
     mac::{
         Aes128Cmac, Aes192Cmac, Aes256Cmac, Des3Cmac, HmacMd5, HmacSha1, HmacSha224, HmacSha256,
         HmacSha384, HmacSha512, HmacSm3, Mac, Sm4Cmac,
@@ -17,6 +19,7 @@ use tee_crypto::{
         CiphertextAlgorithm, CiphertextBytes, SignatureAlgorithm, SignatureBytes, SignatureEncoding,
     },
     md5::Md5,
+    sm2::{ConfirmationMode, Sm2KepDeriveParams, Sm2KepKeypair, Sm2KepPeerKeys, sm2_kep_derive},
     streaming_cipher::{Direction, PaddingMode, StreamingCipherAlgo, StreamingCipherCtx},
     tee_ops::{
         ecc::{self as ecc_ops, EccHashAlgo},
@@ -25,6 +28,8 @@ use tee_crypto::{
             ED25519_SIGNATURE_SIZE_BYTES, Ed25519Variant,
         },
         rsa::{self as rsa_ops, RsaEncPadding, RsaHashAlgo, RsaSignPadding},
+        x448::{self as x448_ops, X448_KEY_SIZE_BYTES},
+        x25519::{self as x25519_ops, X25519_KEY_SIZE_BYTES},
     },
 };
 use tee_raw_sys::*;
@@ -39,12 +44,28 @@ use crate::tee::{
             Sm2KepKeyPair, Sm2PkeKeyPair,
         },
     },
+    libutee::utee_defines::{tee_alg_get_class, tee_alg_get_main_alg},
     rng_software::TeeSoftwareRng,
-    tee_api_defines_extensions::TEE_ALG_SM4_XTS,
-    tee_obj::{TeeObjIdType, tee_obj_get},
-    tee_svc_cryp::{CryptoAttrRef, KernelAttribute, TeeCryptObj, TeeCryptoOps},
+    tee_api_defines_extensions::{
+        __OPTEE_TEE_ATTR_HKDF_INFO, __OPTEE_TEE_ATTR_HKDF_SALT, TEE_ALG_CONCAT_KDF_SHA1_DERIVE_KEY,
+        TEE_ALG_CONCAT_KDF_SHA224_DERIVE_KEY, TEE_ALG_CONCAT_KDF_SHA256_DERIVE_KEY,
+        TEE_ALG_CONCAT_KDF_SHA384_DERIVE_KEY, TEE_ALG_CONCAT_KDF_SHA512_DERIVE_KEY,
+        TEE_ALG_HKDF_MD5_DERIVE_KEY, TEE_ALG_HKDF_SHA1_DERIVE_KEY, TEE_ALG_HKDF_SHA224_DERIVE_KEY,
+        TEE_ALG_HKDF_SHA256_DERIVE_KEY, TEE_ALG_HKDF_SHA384_DERIVE_KEY,
+        TEE_ALG_HKDF_SHA512_DERIVE_KEY, TEE_ALG_PBKDF2_HMAC_SHA1_DERIVE_KEY, TEE_ALG_SM4_XTS,
+        TEE_ALG_X448, TEE_ATTR_CONCAT_KDF_DKM_LENGTH, TEE_ATTR_CONCAT_KDF_OTHER_INFO,
+        TEE_ATTR_HKDF_OKM_LENGTH, TEE_ATTR_PBKDF2_DKM_LENGTH, TEE_ATTR_PBKDF2_ITERATION_COUNT,
+        TEE_ATTR_PBKDF2_SALT,
+    },
+    tee_obj::{TeeObj, TeeObjIdType, tee_obj_get},
+    tee_svc_cryp::{
+        CryptoAttrRef, KernelAttribute, TEE_CRYP_OBJ_SECRET_VALUE_ATTRS, TeeCrypObjSecretWrapper,
+        TeeCrypObjTypeProps, TeeCryptObj, TeeCryptoOps, set_attribute, tee_svc_find_type_props,
+        write_user_memref_out,
+    },
     tee_svc_cryp2::{
         CipherPaddingMode, CmacContext, CrypCtx, CrypState, HashContext, HmacContext, TeeCrypState,
+        tee_cryp_state_get, translate_compat_algo,
     },
 };
 
@@ -77,7 +98,7 @@ fn bn_to_bytes(bn: &BigNum) -> Vec<u8> {
     bn.to_bytes().unwrap_or_default()
 }
 
-fn ecc_curve_field_byte_len(curve: EccCurve) -> usize {
+pub(crate) fn ecc_curve_field_byte_len(curve: EccCurve) -> usize {
     match curve {
         EccCurve::P192 => 24,
         EccCurve::P224 => 28,
@@ -89,7 +110,7 @@ fn ecc_curve_field_byte_len(curve: EccCurve) -> usize {
 }
 
 /// Big-endian field element bytes fixed to the curve's coordinate/scalar width.
-fn bn_to_ecc_field_bytes(bn: &BigNum, field_len: usize) -> Vec<u8> {
+pub(crate) fn bn_to_ecc_field_bytes(bn: &BigNum, field_len: usize) -> Vec<u8> {
     let bytes = bn_to_bytes(bn);
     if bytes.len() >= field_len {
         bytes[bytes.len() - field_len..].to_vec()
@@ -240,7 +261,7 @@ fn algo_to_enc_padding(algo: u32) -> RsaEncPadding {
 }
 
 /// Helper: map TEE curve constant to EccCurve.
-fn tee_curve_to_ecc_curve(curve: u32) -> TeeResult<EccCurve> {
+pub(crate) fn tee_curve_to_ecc_curve(curve: u32) -> TeeResult<EccCurve> {
     match curve {
         TEE_ECC_CURVE_NIST_P192 => Ok(EccCurve::P192),
         TEE_ECC_CURVE_NIST_P224 => Ok(EccCurve::P224),
@@ -1656,6 +1677,119 @@ impl TeeCryptoOps for Ed25519PublicKey {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct X25519Keypair {
+    pub priv_key: [u8; X25519_KEY_SIZE_BYTES],
+    pub pub_key: [u8; X25519_KEY_SIZE_BYTES],
+    pub curve: u32,
+}
+
+impl TeeCryptoOps for X25519Keypair {
+    fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        if key_type != TEE_TYPE_X25519_KEYPAIR || key_size_bits != 256 {
+            return Err(TEE_ERROR_NOT_SUPPORTED);
+        }
+        Ok(Self {
+            curve: TEE_ECC_CURVE_25519,
+            ..Default::default()
+        })
+    }
+
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
+        match attr_id as u32 {
+            TEE_ATTR_X25519_PRIVATE_VALUE => Ok(CryptoAttrRef::Key32(&mut self.priv_key)),
+            TEE_ATTR_X25519_PUBLIC_VALUE => Ok(CryptoAttrRef::Key32(&mut self.pub_key)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct X25519PublicKey {
+    pub pub_key: [u8; X25519_KEY_SIZE_BYTES],
+    pub curve: u32,
+}
+
+impl TeeCryptoOps for X25519PublicKey {
+    fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        if key_type != TEE_TYPE_X25519_PUBLIC_KEY || key_size_bits != 256 {
+            return Err(TEE_ERROR_NOT_SUPPORTED);
+        }
+        Ok(Self {
+            curve: TEE_ECC_CURVE_25519,
+            ..Default::default()
+        })
+    }
+
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
+        match attr_id as u32 {
+            TEE_ATTR_X25519_PUBLIC_VALUE => Ok(CryptoAttrRef::Key32(&mut self.pub_key)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct X448PublicKey {
+    pub pub_key: [u8; X448_KEY_SIZE_BYTES],
+}
+
+impl Default for X448PublicKey {
+    fn default() -> Self {
+        Self {
+            pub_key: [0u8; X448_KEY_SIZE_BYTES],
+        }
+    }
+}
+
+impl TeeCryptoOps for X448PublicKey {
+    fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        if key_type != TEE_TYPE_X448_PUBLIC_KEY || key_size_bits != 448 {
+            return Err(TEE_ERROR_NOT_SUPPORTED);
+        }
+        Ok(Self::default())
+    }
+
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
+        match attr_id as u32 {
+            TEE_ATTR_X448_PUBLIC_VALUE => Ok(CryptoAttrRef::Key56(&mut self.pub_key)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct X448Keypair {
+    pub priv_key: [u8; X448_KEY_SIZE_BYTES],
+    pub pub_key: [u8; X448_KEY_SIZE_BYTES],
+}
+
+impl Default for X448Keypair {
+    fn default() -> Self {
+        Self {
+            priv_key: [0u8; X448_KEY_SIZE_BYTES],
+            pub_key: [0u8; X448_KEY_SIZE_BYTES],
+        }
+    }
+}
+
+impl TeeCryptoOps for X448Keypair {
+    fn new(key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
+        if key_type != TEE_TYPE_X448_KEYPAIR || key_size_bits != 448 {
+            return Err(TEE_ERROR_NOT_SUPPORTED);
+        }
+        Ok(Self::default())
+    }
+
+    fn get_attr_by_id(&mut self, attr_id: TeeObjIdType) -> TeeResult<CryptoAttrRef<'_>> {
+        match attr_id as u32 {
+            TEE_ATTR_X448_PRIVATE_VALUE => Ok(CryptoAttrRef::Key56(&mut self.priv_key)),
+            TEE_ATTR_X448_PUBLIC_VALUE => Ok(CryptoAttrRef::Key56(&mut self.pub_key)),
+            _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
+        }
+    }
+}
+
 pub(crate) struct Ed25519OperationParams {
     pub variant: Ed25519Variant,
 }
@@ -1723,6 +1857,37 @@ pub(crate) fn crypto_acipher_gen_ed25519_key(
     Ok(())
 }
 
+pub(crate) fn crypto_acipher_gen_x25519_key(
+    key: &mut X25519Keypair,
+    key_size_bits: usize,
+) -> TeeResult {
+    if key_size_bits != 256 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let mut rng = TeeSoftwareRng::new();
+    let (private_key, public_key) =
+        x25519_ops::x25519_generate_keypair(&mut rng).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    key.priv_key = private_key;
+    key.pub_key = public_key;
+    key.curve = TEE_ECC_CURVE_25519;
+    Ok(())
+}
+
+pub(crate) fn crypto_acipher_gen_x448_key(
+    key: &mut X448Keypair,
+    key_size_bits: usize,
+) -> TeeResult {
+    if key_size_bits != 448 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let mut rng = TeeSoftwareRng::new();
+    let (private_key, public_key) =
+        x448_ops::x448_generate_keypair(&mut rng).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    key.priv_key = private_key;
+    key.pub_key = public_key;
+    Ok(())
+}
+
 pub(crate) fn crypto_acipher_ed25519_sign(
     cs: Arc<Mutex<TeeCrypState>>,
     message: &[u8],
@@ -1775,4 +1940,661 @@ pub(crate) fn crypto_acipher_ed25519_verify(
     let op_params = parse_ed25519_operation_params(params)?;
     ed25519_ops::ed25519_verify_variant(pub_key, message, signature, &op_params.variant)
         .map_err(map_ed25519_verify_err)
+}
+
+fn tee_alg_get_digest_hash(algo: u32) -> u32 {
+    (algo >> 12) & 0xFF
+}
+
+fn uses_secret_value_type(type_props: &TeeCrypObjTypeProps) -> bool {
+    type_props.type_attrs.as_ptr() == TEE_CRYP_OBJ_SECRET_VALUE_ATTRS.as_ptr()
+        && type_props.type_attrs.len() == TEE_CRYP_OBJ_SECRET_VALUE_ATTRS.len()
+}
+
+fn obj_as_secret(o: &TeeObj) -> TeeResult<&TeeCrypObjSecretWrapper> {
+    match &o.attr[0] {
+        TeeCryptObj::ObjSecret(secret) => Ok(secret),
+        _ => Err(TEE_ERROR_BAD_STATE),
+    }
+}
+
+fn obj_as_secret_mut(o: &mut TeeObj) -> TeeResult<&mut TeeCrypObjSecretWrapper> {
+    match &mut o.attr[0] {
+        TeeCryptObj::ObjSecret(secret) => Ok(secret),
+        _ => Err(TEE_ERROR_BAD_STATE),
+    }
+}
+
+fn finalize_derived_secret(
+    so: &mut TeeObj,
+    type_props: &TeeCrypObjTypeProps,
+    key_material: &[u8],
+) -> TeeResult {
+    let secret = obj_as_secret_mut(so)?;
+    if key_material.len() > secret.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    secret.data_mut()[..key_material.len()].copy_from_slice(key_material);
+    if key_material.len() < secret.data().len() {
+        secret.data_mut()[key_material.len()..].fill(0);
+    }
+    secret.secret_mut().key_size = key_material.len() as u32;
+    so.info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
+    set_attribute(so, type_props, TEE_ATTR_SECRET_VALUE);
+    Ok(())
+}
+
+struct HkdfParams<'a> {
+    salt: &'a [u8],
+    info: &'a [u8],
+    okm_len: usize,
+    hash_id: u32,
+}
+
+fn get_hkdf_params(algo: u32, attrs: &[KernelAttribute]) -> TeeResult<HkdfParams<'_>> {
+    let mut salt: Option<&[u8]> = None;
+    let mut info: Option<&[u8]> = None;
+    let mut okm_len: Option<usize> = None;
+    let mut hash_id = if algo == TEE_ALG_HKDF {
+        TEE_MAIN_ALGO_SHA256
+    } else {
+        tee_alg_get_digest_hash(algo)
+    };
+
+    for attr in attrs {
+        match attr.id() {
+            __OPTEE_TEE_ATTR_HKDF_SALT | TEE_ATTR_HKDF_SALT if salt.is_none() => {
+                salt = Some(attr.memref_data()?);
+            }
+            __OPTEE_TEE_ATTR_HKDF_INFO | TEE_ATTR_HKDF_INFO if info.is_none() => {
+                info = Some(attr.memref_data()?);
+            }
+            TEE_ATTR_HKDF_OKM_LENGTH | TEE_ATTR_KDF_KEY_SIZE if okm_len.is_none() => {
+                let (len, _) = attr.value()?;
+                okm_len = Some(len as usize);
+            }
+            TEE_ATTR_HKDF_HASH_ALGORITHM if algo == TEE_ALG_HKDF => {
+                let (id, _) = attr.value()?;
+                hash_id = id;
+            }
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    }
+
+    let okm_len = okm_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    Ok(HkdfParams {
+        salt: salt.unwrap_or(&[]),
+        info: info.unwrap_or(&[]),
+        okm_len,
+        hash_id,
+    })
+}
+
+fn hkdf_derive(
+    hash_id: u32,
+    ikm: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    okm_len: usize,
+) -> TeeResult<Vec<u8>> {
+    let okm = match hash_id {
+        TEE_MAIN_ALGO_MD5 | TEE_ALG_HKDF_MD5_DERIVE_KEY => {
+            hkdf::<HmacMd5>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        TEE_MAIN_ALGO_SHA1 | TEE_ALG_HKDF_SHA1_DERIVE_KEY => {
+            hkdf::<HmacSha1>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        TEE_MAIN_ALGO_SHA224 | TEE_ALG_HKDF_SHA224_DERIVE_KEY => {
+            hkdf::<HmacSha224>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        TEE_MAIN_ALGO_SHA256 | TEE_ALG_HKDF_SHA256_DERIVE_KEY => {
+            hkdf::<HmacSha256>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        TEE_MAIN_ALGO_SHA384 | TEE_ALG_HKDF_SHA384_DERIVE_KEY => {
+            hkdf::<HmacSha384>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        TEE_MAIN_ALGO_SHA512 | TEE_ALG_HKDF_SHA512_DERIVE_KEY => {
+            hkdf::<HmacSha512>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        TEE_MAIN_ALGO_SM3 => {
+            hkdf::<HmacSm3>(salt, ikm, info, okm_len).map_err(|_| TEE_ERROR_GENERIC)?
+        }
+        _ => return Err(TEE_ERROR_NOT_SUPPORTED),
+    };
+    Ok(okm)
+}
+
+fn derive_hkdf(
+    ko: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    algo: u32,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    let params = get_hkdf_params(algo, attrs)?;
+    let ikm = obj_as_secret(ko)?.key();
+    if ikm.is_empty() {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+    if params.okm_len > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let okm = hkdf_derive(
+        params.hash_id,
+        ikm,
+        params.salt,
+        params.info,
+        params.okm_len,
+    )?;
+    finalize_derived_secret(so, so_props, &okm)
+}
+
+struct ConcatKdfParams<'a> {
+    other_info: &'a [u8],
+    dkm_len: usize,
+}
+
+fn digest_hash_to_hash_algorithm(hash_id: u32) -> TeeResult<HashAlgorithm> {
+    match hash_id {
+        TEE_MAIN_ALGO_SHA1 | TEE_ALG_CONCAT_KDF_SHA1_DERIVE_KEY => Ok(HashAlgorithm::Sha1),
+        TEE_MAIN_ALGO_SHA224 | TEE_ALG_CONCAT_KDF_SHA224_DERIVE_KEY => Ok(HashAlgorithm::Sha224),
+        TEE_MAIN_ALGO_SHA256 | TEE_ALG_CONCAT_KDF_SHA256_DERIVE_KEY => Ok(HashAlgorithm::Sha256),
+        TEE_MAIN_ALGO_SHA384 | TEE_ALG_CONCAT_KDF_SHA384_DERIVE_KEY => Ok(HashAlgorithm::Sha384),
+        TEE_MAIN_ALGO_SHA512 | TEE_ALG_CONCAT_KDF_SHA512_DERIVE_KEY => Ok(HashAlgorithm::Sha512),
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+fn get_concat_kdf_params(attrs: &[KernelAttribute]) -> TeeResult<ConcatKdfParams<'_>> {
+    let mut other_info: Option<&[u8]> = None;
+    let mut dkm_len: Option<usize> = None;
+
+    for attr in attrs {
+        match attr.id() {
+            TEE_ATTR_CONCAT_KDF_OTHER_INFO if other_info.is_none() => {
+                other_info = Some(attr.memref_data()?);
+            }
+            TEE_ATTR_CONCAT_KDF_DKM_LENGTH if dkm_len.is_none() => {
+                let (len, _) = attr.value()?;
+                dkm_len = Some(len as usize);
+            }
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    }
+
+    let dkm_len = dkm_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    Ok(ConcatKdfParams {
+        other_info: other_info.unwrap_or(&[]),
+        dkm_len,
+    })
+}
+
+fn derive_concat_kdf(
+    ko: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    algo: u32,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    let params = get_concat_kdf_params(attrs)?;
+    let shared_secret = obj_as_secret(ko)?.key();
+    if shared_secret.is_empty() {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+    if params.dkm_len > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let hash_algo = digest_hash_to_hash_algorithm(tee_alg_get_digest_hash(algo))?;
+    let dkm = concat_kdf(hash_algo, shared_secret, params.other_info, params.dkm_len)
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    finalize_derived_secret(so, so_props, &dkm)
+}
+
+struct Pbkdf2Params<'a> {
+    salt: &'a [u8],
+    dkm_len: usize,
+    iteration_count: usize,
+}
+
+fn get_pbkdf2_params(attrs: &[KernelAttribute]) -> TeeResult<Pbkdf2Params<'_>> {
+    let mut salt: Option<&[u8]> = None;
+    let mut dkm_len: Option<usize> = None;
+    let mut iteration_count: Option<usize> = None;
+
+    for attr in attrs {
+        match attr.id() {
+            TEE_ATTR_PBKDF2_SALT if salt.is_none() => {
+                salt = Some(attr.memref_data()?);
+            }
+            TEE_ATTR_PBKDF2_DKM_LENGTH if dkm_len.is_none() => {
+                let (len, _) = attr.value()?;
+                dkm_len = Some(len as usize);
+            }
+            TEE_ATTR_PBKDF2_ITERATION_COUNT if iteration_count.is_none() => {
+                let (count, _) = attr.value()?;
+                iteration_count = Some(count as usize);
+            }
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    }
+
+    let dkm_len = dkm_len.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    let iteration_count = iteration_count.ok_or(TEE_ERROR_BAD_PARAMETERS)?;
+    Ok(Pbkdf2Params {
+        salt: salt.unwrap_or(&[]),
+        dkm_len,
+        iteration_count,
+    })
+}
+
+fn pbkdf2_derive(
+    hash_id: u32,
+    password: &[u8],
+    salt: &[u8],
+    iteration_count: usize,
+    dkm_len: usize,
+) -> TeeResult<Vec<u8>> {
+    match hash_id {
+        TEE_MAIN_ALGO_SHA1 | TEE_ALG_PBKDF2_HMAC_SHA1_DERIVE_KEY => {
+            pbkdf2_hmac_sha1(password, salt, iteration_count, dkm_len)
+                .map_err(|_| TEE_ERROR_GENERIC)
+        }
+        _ => Err(TEE_ERROR_NOT_SUPPORTED),
+    }
+}
+
+fn derive_pbkdf2(
+    ko: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    algo: u32,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    let params = get_pbkdf2_params(attrs)?;
+    let password = obj_as_secret(ko)?.key();
+    if password.is_empty() {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+    if params.dkm_len > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let dkm = pbkdf2_derive(
+        tee_alg_get_digest_hash(algo),
+        password,
+        params.salt,
+        params.iteration_count,
+        params.dkm_len,
+    )?;
+    finalize_derived_secret(so, so_props, &dkm)
+}
+
+fn pad_ecc_field_bytes(bytes: &[u8], field_len: usize) -> Vec<u8> {
+    if bytes.len() >= field_len {
+        bytes[bytes.len() - field_len..].to_vec()
+    } else {
+        let mut out = Vec::with_capacity(field_len);
+        out.resize(field_len - bytes.len(), 0);
+        out.extend_from_slice(bytes);
+        out
+    }
+}
+
+fn derive_ecdh(
+    ko: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    if attrs.len() != 2 {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    if attrs[0].id() != TEE_ATTR_ECC_PUBLIC_VALUE_X || attrs[1].id() != TEE_ATTR_ECC_PUBLIC_VALUE_Y
+    {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let peer_x = attrs[0].memref_data()?;
+    let peer_y = attrs[1].memref_data()?;
+
+    let ecc_kp = match &ko.attr[0] {
+        TeeCryptObj::EccKeypair(kp) => kp,
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    };
+    let curve = tee_curve_to_ecc_curve(ecc_kp.curve)?;
+    let field_len = ecc_curve_field_byte_len(curve);
+    let local_secret = bn_to_ecc_field_bytes(&ecc_kp.d, field_len);
+    let peer_x = pad_ecc_field_bytes(peer_x, field_len);
+    let peer_y = pad_ecc_field_bytes(peer_y, field_len);
+    let shared = ecc_ops::ecc_shared_secret(curve, &local_secret, &peer_x, &peer_y)
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    let shared_bytes = shared.expose_secret();
+    if shared_bytes.len() > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    finalize_derived_secret(so, so_props, shared_bytes)
+}
+
+fn derive_sm2_kep(
+    ko: &TeeObj,
+    ko2: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    let params = get_sm2_kep_params(attrs)?;
+    let static_kp = obj_as_sm2_kep_keypair(ko)?;
+    let eph_kp = obj_as_sm2_kep_keypair(ko2)?;
+    let my_static = sm2_kep_from_ecc_keypair(static_kp)?;
+    let my_ephemeral = sm2_kep_from_ecc_keypair(eph_kp)?;
+
+    let key_len = (so.info.maxObjectSize / 8) as usize;
+    if key_len == 0 || key_len > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let compute_conf_out = params.conf_out.is_some();
+    if let Some((_, len)) = params.conf_out
+        && len < 32
+    {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let derive_params = Sm2KepDeriveParams {
+        is_initiator: params.is_initiator,
+        initiator_id: params.initiator_id,
+        responder_id: params.responder_id,
+        peer: Sm2KepPeerKeys {
+            static_x: params.peer_static_x,
+            static_y: params.peer_static_y,
+            ephemeral_x: params.peer_ephemeral_x,
+            ephemeral_y: params.peer_ephemeral_y,
+        },
+        conf_in: params.conf_in,
+        confirmation: if compute_conf_out {
+            ConfirmationMode::Compute
+        } else {
+            ConfirmationMode::Skip
+        },
+    };
+
+    let out = sm2_kep_derive(&my_static, &my_ephemeral, &derive_params, key_len)
+        .map_err(map_sm2_kep_err)?;
+
+    finalize_derived_secret(so, so_props, &out.key)?;
+
+    if let Some((user_addr, buf_len)) = params.conf_out {
+        let conf = out.conf_out.as_ref().ok_or(TEE_ERROR_GENERIC)?;
+        write_user_memref_out(user_addr, buf_len, conf)?;
+    }
+
+    Ok(())
+}
+
+struct Sm2KepParams<'a> {
+    is_initiator: bool,
+    initiator_id: &'a [u8],
+    responder_id: &'a [u8],
+    peer_static_x: [u8; 32],
+    peer_static_y: [u8; 32],
+    peer_ephemeral_x: [u8; 32],
+    peer_ephemeral_y: [u8; 32],
+    conf_in: Option<&'a [u8]>,
+    conf_out: Option<(usize, usize)>,
+}
+
+fn get_sm2_kep_params(attrs: &[KernelAttribute]) -> TeeResult<Sm2KepParams<'_>> {
+    let mut is_initiator: Option<bool> = None;
+    let mut peer_static_x: Option<[u8; 32]> = None;
+    let mut peer_static_y: Option<[u8; 32]> = None;
+    let mut peer_ephemeral_x: Option<[u8; 32]> = None;
+    let mut peer_ephemeral_y: Option<[u8; 32]> = None;
+    let mut initiator_id: Option<&[u8]> = None;
+    let mut responder_id: Option<&[u8]> = None;
+    let mut conf_in: Option<&[u8]> = None;
+    let mut conf_out: Option<(usize, usize)> = None;
+
+    for attr in attrs {
+        match attr {
+            KernelAttribute::Value { id, a, .. } if *id == TEE_ATTR_SM2_KEP_USER => {
+                if is_initiator.is_some() {
+                    return Err(TEE_ERROR_BAD_PARAMETERS);
+                }
+                is_initiator = Some(*a == 0);
+            }
+            KernelAttribute::MemrefOut {
+                id: TEE_ATTR_SM2_KEP_CONFIRMATION_OUT,
+                user_addr,
+                len,
+            } if conf_out.is_none() => {
+                conf_out = Some((*user_addr, *len));
+            }
+            KernelAttribute::Memref { id, data } => match *id {
+                TEE_ATTR_ECC_PUBLIC_VALUE_X if peer_static_x.is_none() => {
+                    peer_static_x = Some(memref_to_field32(data)?);
+                }
+                TEE_ATTR_ECC_PUBLIC_VALUE_Y if peer_static_y.is_none() => {
+                    peer_static_y = Some(memref_to_field32(data)?);
+                }
+                TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_X if peer_ephemeral_x.is_none() => {
+                    peer_ephemeral_x = Some(memref_to_field32(data)?);
+                }
+                TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_Y if peer_ephemeral_y.is_none() => {
+                    peer_ephemeral_y = Some(memref_to_field32(data)?);
+                }
+                TEE_ATTR_SM2_ID_INITIATOR if initiator_id.is_none() => {
+                    initiator_id = Some(data);
+                }
+                TEE_ATTR_SM2_ID_RESPONDER if responder_id.is_none() => {
+                    responder_id = Some(data);
+                }
+                TEE_ATTR_SM2_KEP_CONFIRMATION_IN if conf_in.is_none() => {
+                    conf_in = Some(data);
+                }
+                _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+            },
+            _ => return Err(TEE_ERROR_BAD_PARAMETERS),
+        }
+    }
+
+    Ok(Sm2KepParams {
+        is_initiator: is_initiator.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        initiator_id: initiator_id.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        responder_id: responder_id.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        peer_static_x: peer_static_x.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        peer_static_y: peer_static_y.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        peer_ephemeral_x: peer_ephemeral_x.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        peer_ephemeral_y: peer_ephemeral_y.ok_or(TEE_ERROR_BAD_PARAMETERS)?,
+        conf_in,
+        conf_out,
+    })
+}
+
+fn obj_as_sm2_kep_keypair(o: &TeeObj) -> TeeResult<&EccKeypair> {
+    match &o.attr[0] {
+        TeeCryptObj::EccKeypair(kp) if kp.curve == TEE_ECC_CURVE_SM2 => Ok(kp),
+        _ => Err(TEE_ERROR_BAD_STATE),
+    }
+}
+
+fn sm2_kep_from_ecc_keypair(kp: &EccKeypair) -> TeeResult<Sm2KepKeypair> {
+    let secret = bn_to_ecc_field_bytes(&kp.d, 32);
+    let secret: [u8; 32] = secret.try_into().map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+    Sm2KepKeypair::from_secret_bytes(&secret).map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+}
+
+fn memref_to_field32(data: &[u8]) -> TeeResult<[u8; 32]> {
+    let padded = pad_ecc_field_bytes(data, 32);
+    padded.try_into().map_err(|_| TEE_ERROR_BAD_PARAMETERS)
+}
+
+fn map_sm2_kep_err(err: tee_crypto::CryptoError) -> u32 {
+    match err {
+        tee_crypto::CryptoError::VerificationFailed => TEE_ERROR_BAD_STATE,
+        tee_crypto::CryptoError::InvalidInput
+        | tee_crypto::CryptoError::InvalidLength
+        | tee_crypto::CryptoError::InvalidKey => TEE_ERROR_BAD_PARAMETERS,
+        _ => TEE_ERROR_GENERIC,
+    }
+}
+
+fn derive_dh(
+    _ko: &TeeObj,
+    _so: &mut TeeObj,
+    _so_props: &TeeCrypObjTypeProps,
+    _attrs: &[KernelAttribute],
+) -> TeeResult {
+    Err(TEE_ERROR_NOT_SUPPORTED)
+}
+
+fn derive_key_by_algo(
+    algo: u32,
+    ko: &TeeObj,
+    ko2: Option<&TeeObj>,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    let algo = translate_compat_algo(algo);
+    match algo {
+        TEE_ALG_DH_DERIVE_SHARED_SECRET => derive_dh(ko, so, so_props, attrs),
+        TEE_ALG_ECDH_DERIVE_SHARED_SECRET => derive_ecdh(ko, so, so_props, attrs),
+        TEE_ALG_SM2_KEP => derive_sm2_kep(ko, ko2.ok_or(TEE_ERROR_BAD_STATE)?, so, so_props, attrs),
+        TEE_ALG_X25519 => derive_x25519(ko, so, so_props, attrs),
+        TEE_ALG_X448 => derive_x448(ko, so, so_props, attrs),
+        _ => match tee_alg_get_main_alg(algo) {
+            TEE_MAIN_ALGO_HKDF => derive_hkdf(ko, so, so_props, algo, attrs),
+            TEE_MAIN_ALGO_CONCAT_KDF => derive_concat_kdf(ko, so, so_props, algo, attrs),
+            TEE_MAIN_ALGO_PBKDF2 => derive_pbkdf2(ko, so, so_props, algo, attrs),
+            _ => Err(TEE_ERROR_NOT_SUPPORTED),
+        },
+    }
+}
+
+fn derive_x25519(
+    ko: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    if attrs.len() != 1 || attrs[0].id() != TEE_ATTR_X25519_PUBLIC_VALUE {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let peer_public = attrs[0].memref_data()?;
+    if peer_public.len() != X25519_KEY_SIZE_BYTES {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let peer_public: &[u8; X25519_KEY_SIZE_BYTES] = peer_public
+        .try_into()
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+
+    let x25519_kp = match &ko.attr[0] {
+        TeeCryptObj::X25519Keypair(kp) => kp,
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    };
+    if X25519_KEY_SIZE_BYTES > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let shared = x25519_ops::x25519_shared_secret(&x25519_kp.priv_key, peer_public).map_err(
+        |err| match err {
+            tee_crypto::CryptoError::VerificationFailed => TEE_ERROR_SECURITY,
+            _ => TEE_ERROR_BAD_PARAMETERS,
+        },
+    )?;
+    finalize_derived_secret(so, so_props, &shared)
+}
+
+fn derive_x448(
+    ko: &TeeObj,
+    so: &mut TeeObj,
+    so_props: &TeeCrypObjTypeProps,
+    attrs: &[KernelAttribute],
+) -> TeeResult {
+    if attrs.len() != 1 || attrs[0].id() != TEE_ATTR_X448_PUBLIC_VALUE {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let peer_public = attrs[0].memref_data()?;
+    if peer_public.len() != X448_KEY_SIZE_BYTES {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+    let peer_public: &[u8; X448_KEY_SIZE_BYTES] = peer_public
+        .try_into()
+        .map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+
+    let x448_kp = match &ko.attr[0] {
+        TeeCryptObj::X448Keypair(kp) => kp,
+        _ => return Err(TEE_ERROR_BAD_STATE),
+    };
+    if X448_KEY_SIZE_BYTES > obj_as_secret(so)?.secret().alloc_size as usize {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let shared =
+        x448_ops::x448_shared_secret(&x448_kp.priv_key, peer_public).map_err(|err| match err {
+            tee_crypto::CryptoError::VerificationFailed => TEE_ERROR_SECURITY,
+            _ => TEE_ERROR_BAD_PARAMETERS,
+        })?;
+    finalize_derived_secret(so, so_props, &shared)
+}
+
+pub(crate) fn tee_cryp_derive_key(
+    state: u32,
+    attrs: &[KernelAttribute],
+    derived_key: TeeObjIdType,
+) -> TeeResult {
+    let cs = tee_cryp_state_get(state)?;
+    let cs_guard = cs.lock();
+
+    if cs_guard.mode != TEE_OperationMode::TEE_MODE_DERIVE {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+    if tee_alg_get_class(cs_guard.algo) != TEE_OPERATION_KEY_DERIVATION {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+    let key1 = cs_guard.key1.ok_or(TEE_ERROR_BAD_STATE)?;
+    let key2 = cs_guard.key2;
+    let algo = cs_guard.algo;
+    drop(cs_guard);
+
+    let ko = tee_obj_get(key1 as TeeObjIdType)?;
+    let so = tee_obj_get(derived_key)?;
+    let ko2 = if translate_compat_algo(algo) == TEE_ALG_SM2_KEP {
+        Some(tee_obj_get(
+            key2.ok_or(TEE_ERROR_BAD_STATE)? as TeeObjIdType
+        )?)
+    } else {
+        None
+    };
+
+    // ksync::Mutex 在同一任务再次获取自己已持有的锁时会断言 panic。派生目标要在
+    // 运算密钥保持加锁时写入，所以它必须是另一把锁。
+    if Arc::ptr_eq(&ko, &so)
+        || ko2
+            .as_ref()
+            .is_some_and(|obj| Arc::ptr_eq(obj, &ko) || Arc::ptr_eq(obj, &so))
+    {
+        return Err(TEE_ERROR_BAD_PARAMETERS);
+    }
+
+    let ko_guard = ko.lock();
+    let ko2_guard = ko2.as_ref().map(|obj| obj.lock());
+    let mut so_guard = so.lock();
+
+    if so_guard.info.handleFlags & TEE_HANDLE_FLAG_INITIALIZED != 0 {
+        return Err(TEE_ERROR_BAD_STATE);
+    }
+
+    let so_props =
+        tee_svc_find_type_props(so_guard.info.objectType).ok_or(TEE_ERROR_NOT_SUPPORTED)?;
+    if !uses_secret_value_type(so_props) {
+        return Err(TEE_ERROR_NOT_SUPPORTED);
+    }
+
+    derive_key_by_algo(
+        algo,
+        &ko_guard,
+        ko2_guard.as_deref(),
+        &mut so_guard,
+        so_props,
+        attrs,
+    )
 }

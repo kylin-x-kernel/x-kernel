@@ -19,7 +19,10 @@ use super::{
         TEE_CHAIN_MODE_XTS, tee_alg_get_chain_mode, tee_alg_get_class, tee_alg_get_main_alg,
     },
     tee_obj::{TeeObj, TeeObjIdType, tee_obj_close, tee_obj_get},
-    tee_svc_cryp::{TeeCryptObj, copy_in_attrs, tee_obj_attr_clear},
+    tee_svc_cryp::{
+        KernelAttribute, TeeCryptObj, check_user_attr_count, copy_in_attrs, load_user_attrs,
+        tee_obj_attr_clear,
+    },
     user_ta::user_ta_ctx,
     vm::vm_check_access_rights,
 };
@@ -35,12 +38,11 @@ use crate::tee::{
         crypto_acipher_sm2_pke_encrypt, crypto_authenc_dec_final, crypto_authenc_enc_final,
         crypto_authenc_init, crypto_authenc_update_aad, crypto_cipher_final, crypto_cipher_init,
         crypto_cipher_max_output_len, crypto_cipher_update, crypto_ecc_init, crypto_rsa_init,
-        crypto_xts_cipher_final,
+        crypto_xts_cipher_final, tee_cryp_derive_key,
     },
     memtag::{memtag_strip_tag, memtag_strip_tag_const},
     rng_software::crypto_rng_read,
     tee_session::{with_tee_session_ctx, with_tee_session_ctx_mut},
-    tee_svc_cryp::KernelAttribute,
     utee_defines::{
         TEE_AES_BLOCK_SIZE, TEE_DES_BLOCK_SIZE, TEE_MD5_HASH_SIZE, TEE_SHA1_HASH_SIZE,
         TEE_SHA224_HASH_SIZE, TEE_SHA256_HASH_SIZE, TEE_SHA384_HASH_SIZE, TEE_SHA512_HASH_SIZE,
@@ -335,7 +337,7 @@ fn tee_alg_get_digest_size(algo: u32, size: &mut usize) -> TeeResult {
     Ok(())
 }
 
-fn translate_compat_algo(algo: u32) -> u32 {
+pub(crate) fn translate_compat_algo(algo: u32) -> u32 {
     match algo {
         TEE_ALG_ECDSA_P192 => TEE_ALG_ECDSA_SHA1,
         TEE_ALG_ECDSA_P224 => TEE_ALG_ECDSA_SHA224,
@@ -452,7 +454,7 @@ fn tee_svc_cryp_check_key_type(o: &TeeObj, algo: u32, mode: TEE_OperationMode) -
         }
         TEE_MAIN_ALGO_SM2_KEP => {
             req_key_type = TEE_TYPE_SM2_KEP_KEYPAIR;
-            req_key_type2 = TEE_TYPE_SM2_KEP_PUBLIC_KEY;
+            req_key_type2 = TEE_TYPE_SM2_KEP_KEYPAIR;
         }
         TEE_MAIN_ALGO_HKDF => {
             req_key_type = TEE_TYPE_HKDF_IKM;
@@ -1431,6 +1433,19 @@ pub(super) fn syscall_authenc_dec_final(
     }
 }
 
+/// GP: `syscall_cryp_derive_key` (Linux sysno 532).
+pub(super) fn syscall_cryp_derive_key(
+    state: usize,
+    usr_params: usize,
+    param_count: usize,
+    derived_key: usize,
+) -> TeeResult {
+    let usr_attrs = load_user_attrs(usr_params as *const utee_attribute, param_count)?;
+    let attrs = copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs)?;
+
+    tee_cryp_derive_key(state as u32, &attrs, derived_key as TeeObjIdType)
+}
+
 #[cfg(unittest)]
 pub(super) fn tee_cryp_asymm_operate(
     id: u32,
@@ -1546,13 +1561,12 @@ pub(super) fn syscall_asymm_operate(
     arg6: usize,
 ) -> TeeResult {
     let num_params = arg2;
+    check_user_attr_count(num_params)?;
 
     let params_attrs = if num_params == 0 {
         None
     } else {
-        let usr_attrs = UserConstPtr::<utee_attribute>::from(arg1)
-            .load_vm_vec(num_params)
-            .map_err(map_user_mem_error)?;
+        let usr_attrs = load_user_attrs(arg1 as *const utee_attribute, num_params)?;
         let usr_attrs_slice = usr_attrs.as_slice();
         Some(copy_in_attrs(&mut user_ta_ctx::default(), usr_attrs_slice)?)
     };
@@ -1692,6 +1706,7 @@ pub(super) fn syscall_asymm_verify(
     arg5: usize,
     arg6: usize,
 ) -> TeeResult {
+    check_user_attr_count(arg2)?;
     let cs = tee_cryp_state_get(arg0 as _)?;
     if cs.lock().mode != TEE_OperationMode::TEE_MODE_VERIFY {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -1700,9 +1715,7 @@ pub(super) fn syscall_asymm_verify(
     let params_attrs = if arg2 == 0 {
         None
     } else {
-        let usr_attrs = UserConstPtr::<utee_attribute>::from(arg1)
-            .load_vm_vec(arg2)
-            .map_err(map_user_mem_error)?;
+        let usr_attrs = load_user_attrs(arg1 as *const utee_attribute, arg2)?;
         Some(copy_in_attrs(&mut user_ta_ctx::default(), &usr_attrs)?)
     };
 

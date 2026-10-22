@@ -12,14 +12,22 @@ use crate::{
     tee::{
         crypto::{
             bignum::BigNum,
-            crypto::{EccPublicKey, RsaKeypair},
+            crypto::{EccPublicKey, RsaKeypair, bn_to_ecc_field_bytes},
         },
         libutee::tee_api_objects::TEE_USAGE_DEFAULT,
+        tee_api_defines_extensions::{
+            __OPTEE_TEE_ATTR_HKDF_INFO, __OPTEE_TEE_ATTR_HKDF_SALT,
+            TEE_ALG_CONCAT_KDF_SHA256_DERIVE_KEY, TEE_ALG_HKDF_SHA256_DERIVE_KEY,
+            TEE_ALG_PBKDF2_HMAC_SHA1_DERIVE_KEY, TEE_ALG_X448, TEE_ATTR_CONCAT_KDF_DKM_LENGTH,
+            TEE_ATTR_CONCAT_KDF_OTHER_INFO, TEE_ATTR_HKDF_IKM, TEE_ATTR_HKDF_OKM_LENGTH,
+            TEE_ATTR_PBKDF2_DKM_LENGTH, TEE_ATTR_PBKDF2_ITERATION_COUNT, TEE_ATTR_PBKDF2_SALT,
+        },
         tee_obj::{TeeObjIdType, tee_obj_add},
         tee_svc_cryp::{
-            TeeCrypObjSecretWrapper, TeeCryptoOps, syscall_cryp_obj_alloc,
-            syscall_cryp_obj_copy, syscall_cryp_obj_populate, syscall_obj_generate_key,
-            tee_init_ref_attribute, tee_obj_set_type,
+            TEE_CRYP_MAX_USER_ATTRS, TeeCrypObjSecretWrapper, TeeCryptoOps,
+            syscall_cryp_obj_alloc, syscall_cryp_obj_copy, syscall_cryp_obj_populate,
+            syscall_cryp_obj_reset, syscall_obj_generate_key, tee_init_ref_attribute,
+            tee_obj_set_type,
         },
     },
 };
@@ -165,6 +173,1371 @@ fn test_translate_compat_algo_maps_legacy_values() {
         TEE_ALG_ECDH_DERIVE_SHARED_SECRET
     );
     assert_eq!(translate_compat_algo(TEE_ALG_SM3), TEE_ALG_SM3);
+}
+
+fn set_obj_secret(obj: &mut TeeObj, data: &[u8]) -> TeeResult {
+    if let TeeCryptObj::ObjSecret(w) = &mut obj.attr[0] {
+        if data.len() > w.secret().alloc_size as usize {
+            return Err(TEE_ERROR_BAD_PARAMETERS);
+        }
+        w.data_mut()[..data.len()].copy_from_slice(data);
+        w.secret_mut().key_size = data.len() as u32;
+        obj.info.handleFlags |= TEE_HANDLE_FLAG_INITIALIZED;
+        Ok(())
+    } else {
+        Err(TEE_ERROR_BAD_STATE)
+    }
+}
+
+fn write_user_bytes<const N: usize>(dst: &mut crate::TestUserArray<u8, N>, src: &[u8]) {
+    let mut buf = [0u8; N];
+    buf.copy_from_slice(src);
+    dst.write(buf);
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_hkdf_sha256() {
+    use tee_crypto::{hkdf::hkdf, mac::HmacSha256};
+
+    let ikm = [
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+    ];
+    let salt = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+    ];
+    let info = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
+    let okm_len = 42usize;
+    let expected = hkdf::<HmacSha256>(&salt, &ikm, &info, okm_len).expect("hkdf");
+
+    let ikm_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_HKDF_IKM as _, 256, ikm_obj_id.as_user_ptr(),).is_ok()
+    );
+    let ikm_obj_id = ikm_obj_id.read();
+    {
+        let ikm_obj = tee_obj_get(ikm_obj_id as TeeObjIdType).unwrap();
+        let mut g = ikm_obj.lock();
+        set_obj_secret(&mut g, &ikm).unwrap();
+    }
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 512, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_HKDF_SHA256_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(ikm_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_salt = crate::user_vec![0u8; 13];
+    write_user_bytes(&mut usr_salt, &salt);
+    let mut usr_info = crate::user_vec![0u8; 10];
+    write_user_bytes(&mut usr_info, &info);
+
+    let mut usr_attrs_data = [utee_attribute::default(); 3];
+    tee_init_ref_attribute(&mut usr_attrs_data[0], __OPTEE_TEE_ATTR_HKDF_SALT, usr_salt.as_user_ptr(), 13);
+    tee_init_ref_attribute(&mut usr_attrs_data[1], __OPTEE_TEE_ATTR_HKDF_INFO, usr_info.as_user_ptr(), 10);
+    usr_attrs_data[2].attribute_id = TEE_ATTR_HKDF_OKM_LENGTH;
+    usr_attrs_data[2].a = okm_len as u64;
+    usr_attrs_data[2].b = 0;
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 3];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_hkdf failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.as_slice());
+}
+
+/// 派生目标与运算密钥是同一对象时返回参数错误，避免再次锁同一把 Mutex。
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_rejects_aliased_object() {
+    let ikm_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_HKDF_IKM as _, 256, ikm_obj_id.as_user_ptr(),).is_ok()
+    );
+    let ikm_obj_id = ikm_obj_id.read();
+    {
+        let ikm_obj = tee_obj_get(ikm_obj_id as TeeObjIdType).unwrap();
+        let mut g = ikm_obj.lock();
+        set_obj_secret(&mut g, &[0x0b; 22]).unwrap();
+    }
+    let mut state = 0u32;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_HKDF_SHA256_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(ikm_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+    let res = syscall_cryp_derive_key(state as _, 0, 0, ikm_obj_id as _);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+    let key1_id = TestUserValue::<u32>::from_value(0).unwrap();
+    let key2_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_SM2_KEP_KEYPAIR as _, 256, key1_id.as_user_ptr(),).is_ok()
+    );
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_SM2_KEP_KEYPAIR as _, 256, key2_id.as_user_ptr(),).is_ok()
+    );
+    let key1_id = key1_id.read();
+    let key2_id = key2_id.read();
+    let mut state = 0u32;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_SM2_KEP,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(key1_id),
+            Some(key2_id),
+            &mut state,
+        )
+        .is_ok()
+    );
+    let res = syscall_cryp_derive_key(state as _, 0, 0, key2_id as _);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    let res = syscall_cryp_derive_key(state as _, 0, 0, key1_id as _);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+}
+
+/// 属性个数超过上限时直接返回参数错误，避免按该计数分配内核缓冲。
+#[unittest::def_test(user)]
+fn test_cryp_syscalls_reject_oversized_attr_count() {
+    let too_many = TEE_CRYP_MAX_USER_ATTRS + 1;
+    let res = syscall_cryp_derive_key(0, 0, too_many, 0);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    let res = syscall_cryp_derive_key(0, 0, usize::MAX, 0);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+
+    let res = syscall_asymm_operate(0, 0, too_many, 0, 0, 0, 0);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    let res = syscall_asymm_verify(0, 0, usize::MAX, 0, 0, 0, 0);
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+}
+
+/// TA 标准路径：外部 IKM populate → 操作内部 key reset+copy → derive（对齐 TEE_SetOperationKey）。
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_hkdf_sha256_via_set_operation_key() {
+    use tee_crypto::{hkdf::hkdf, mac::HmacSha256};
+
+    let ikm = [0x0bu8; 22];
+    let salt = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+    ];
+    let info = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
+    let okm_len = 42usize;
+    let expected = hkdf::<HmacSha256>(&salt, &ikm, &info, okm_len).expect("hkdf");
+
+    let ext_ikm_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_HKDF_IKM as _, 256, ext_ikm_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let ext_ikm_obj_id = ext_ikm_obj_id.read();
+
+    let mut usr_ikm = crate::user_vec![0u8; 22];
+    write_user_bytes(&mut usr_ikm, &ikm);
+    let mut usr_attrs_data = [utee_attribute::default(); 1];
+    tee_init_ref_attribute(&mut usr_attrs_data[0], TEE_ATTR_HKDF_IKM, usr_ikm.as_user_ptr(), 22);
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 1];
+    usr_attrs.write(usr_attrs_data);
+    assert!(
+        syscall_cryp_obj_populate(
+            ext_ikm_obj_id as _,
+            usr_attrs.as_user_ptr(),
+            usr_attrs.len() as _,
+        )
+        .is_ok()
+    );
+
+    let int_ikm_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_HKDF_IKM as _, 256, int_ikm_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let int_ikm_obj_id = int_ikm_obj_id.read();
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_GENERIC_SECRET as _,
+            (okm_len * 8) as _,
+            out_obj_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_HKDF_SHA256_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(int_ikm_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    assert!(syscall_cryp_obj_reset(int_ikm_obj_id as _).is_ok());
+    assert!(syscall_cryp_obj_copy(int_ikm_obj_id as _, ext_ikm_obj_id as _).is_ok());
+
+    {
+        let int_obj = tee_obj_get(int_ikm_obj_id as TeeObjIdType).unwrap();
+        let g = int_obj.lock();
+        let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+            panic!("expected HKDF IKM secret");
+        };
+        assert_eq!(secret.key(), &ikm);
+    }
+
+    let mut usr_salt = crate::user_vec![0u8; 13];
+    write_user_bytes(&mut usr_salt, &salt);
+    let mut usr_info = crate::user_vec![0u8; 10];
+    write_user_bytes(&mut usr_info, &info);
+
+    let mut derive_attrs_data = [utee_attribute::default(); 3];
+    tee_init_ref_attribute(
+        &mut derive_attrs_data[0],
+        __OPTEE_TEE_ATTR_HKDF_SALT,
+        usr_salt.as_user_ptr(),
+        13,
+    );
+    tee_init_ref_attribute(
+        &mut derive_attrs_data[1],
+        __OPTEE_TEE_ATTR_HKDF_INFO,
+        usr_info.as_user_ptr(),
+        10,
+    );
+    derive_attrs_data[2].attribute_id = TEE_ATTR_HKDF_OKM_LENGTH;
+    derive_attrs_data[2].a = okm_len as u64;
+    derive_attrs_data[2].b = 0;
+
+    let mut derive_attrs = crate::user_vec![utee_attribute::default(); 3];
+    derive_attrs.write(derive_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        derive_attrs.as_user_ptr() as _,
+        derive_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_hkdf via copy failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.as_slice());
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_concat_kdf_sha256() {
+    use tee_crypto::{hash::HashAlgorithm, kdf::concat_kdf};
+
+    let z = [
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+        0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+    ];
+    let other_info = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
+    let dkm_len = 42usize;
+    let expected =
+        concat_kdf(HashAlgorithm::Sha256, &z, &other_info, dkm_len).expect("concat kdf");
+
+    let z_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_CONCAT_KDF_Z as _, 256, z_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let z_obj_id = z_obj_id.read();
+    {
+        let z_obj = tee_obj_get(z_obj_id as TeeObjIdType).unwrap();
+        let mut g = z_obj.lock();
+        set_obj_secret(&mut g, &z).unwrap();
+    }
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 512, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_CONCAT_KDF_SHA256_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(z_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_info = crate::user_vec![0u8; 10];
+    write_user_bytes(&mut usr_info, &other_info);
+
+    let mut usr_attrs_data = [utee_attribute::default(); 2];
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[0],
+        TEE_ATTR_CONCAT_KDF_OTHER_INFO,
+        usr_info.as_user_ptr(),
+        10,
+    );
+    usr_attrs_data[1].attribute_id = TEE_ATTR_CONCAT_KDF_DKM_LENGTH;
+    usr_attrs_data[1].a = dkm_len as u64;
+    usr_attrs_data[1].b = 0;
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_concat_kdf failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.as_slice());
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_pbkdf2_sha1() {
+    use tee_crypto::kdf::pbkdf2_hmac_sha1;
+
+    let password = b"password";
+    let salt = b"salt";
+    let iterations = 4096usize;
+    let dkm_len = 20usize;
+    let expected = pbkdf2_hmac_sha1(password, salt, iterations, dkm_len).expect("pbkdf2");
+
+    let pwd_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_PBKDF2_PASSWORD as _, 256, pwd_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let pwd_obj_id = pwd_obj_id.read();
+    {
+        let pwd_obj = tee_obj_get(pwd_obj_id as TeeObjIdType).unwrap();
+        let mut g = pwd_obj.lock();
+        set_obj_secret(&mut g, password).unwrap();
+    }
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 512, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_PBKDF2_HMAC_SHA1_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(pwd_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_salt = crate::user_vec![0u8; 4];
+    write_user_bytes(&mut usr_salt, salt);
+
+    let mut usr_attrs_data = [utee_attribute::default(); 3];
+    tee_init_ref_attribute(&mut usr_attrs_data[0], TEE_ATTR_PBKDF2_SALT, usr_salt.as_user_ptr(), 4);
+    usr_attrs_data[1].attribute_id = TEE_ATTR_PBKDF2_ITERATION_COUNT;
+    usr_attrs_data[1].a = iterations as u64;
+    usr_attrs_data[1].b = 0;
+    usr_attrs_data[2].attribute_id = TEE_ATTR_PBKDF2_DKM_LENGTH;
+    usr_attrs_data[2].a = dkm_len as u64;
+    usr_attrs_data[2].b = 0;
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 3];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_pbkdf2 failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.as_slice());
+}
+
+/// 未写入的 PBKDF2 口令和 Concat KDF Z 与空 HKDF IKM 一样返回 BAD_STATE。
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_rejects_empty_source() {
+    let z_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_CONCAT_KDF_Z as _, 256, z_obj_id.as_user_ptr(),).is_ok()
+    );
+    let z_obj_id = z_obj_id.read();
+    let concat_out_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_GENERIC_SECRET as _,
+            256,
+            concat_out_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let concat_out_id = concat_out_id.read();
+    let mut state = 0u32;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_CONCAT_KDF_SHA256_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(z_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+    let mut concat_attrs_data = [utee_attribute::default(); 1];
+    concat_attrs_data[0].attribute_id = TEE_ATTR_CONCAT_KDF_DKM_LENGTH;
+    concat_attrs_data[0].a = 16;
+    let mut concat_attrs = crate::user_vec![utee_attribute::default(); 1];
+    concat_attrs.write(concat_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        concat_attrs.as_user_ptr() as _,
+        concat_attrs.len(),
+        concat_out_id as _,
+    );
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_STATE));
+    let out = tee_obj_get(concat_out_id as TeeObjIdType).unwrap();
+    assert_eq!(
+        out.lock().info.handleFlags & TEE_HANDLE_FLAG_INITIALIZED,
+        0
+    );
+
+    let pwd_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_PBKDF2_PASSWORD as _, 256, pwd_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let pwd_obj_id = pwd_obj_id.read();
+    let pbkdf2_out_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_GENERIC_SECRET as _,
+            256,
+            pbkdf2_out_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let pbkdf2_out_id = pbkdf2_out_id.read();
+    let mut state = 0u32;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_PBKDF2_HMAC_SHA1_DERIVE_KEY,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(pwd_obj_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+    let mut pbkdf2_attrs_data = [utee_attribute::default(); 2];
+    pbkdf2_attrs_data[0].attribute_id = TEE_ATTR_PBKDF2_ITERATION_COUNT;
+    pbkdf2_attrs_data[0].a = 1;
+    pbkdf2_attrs_data[1].attribute_id = TEE_ATTR_PBKDF2_DKM_LENGTH;
+    pbkdf2_attrs_data[1].a = 16;
+    let mut pbkdf2_attrs = crate::user_vec![utee_attribute::default(); 2];
+    pbkdf2_attrs.write(pbkdf2_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        pbkdf2_attrs.as_user_ptr() as _,
+        pbkdf2_attrs.len(),
+        pbkdf2_out_id as _,
+    );
+    assert_eq!(res.err(), Some(TEE_ERROR_BAD_STATE));
+    let out = tee_obj_get(pbkdf2_out_id as TeeObjIdType).unwrap();
+    assert_eq!(
+        out.lock().info.handleFlags & TEE_HANDLE_FLAG_INITIALIZED,
+        0
+    );
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_x25519() {
+    use tee_crypto::x25519::{X25519_KEY_SIZE_BYTES, x25519_shared_secret};
+
+    let kp_a_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_X25519_KEYPAIR as _, 256, kp_a_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let kp_a_id = kp_a_id.read();
+    assert!(syscall_obj_generate_key(kp_a_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let kp_b_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_X25519_KEYPAIR as _, 256, kp_b_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let kp_b_id = kp_b_id.read();
+    assert!(syscall_obj_generate_key(kp_b_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let (alice_priv, bob_pub) = {
+        let obj_a = tee_obj_get(kp_a_id as TeeObjIdType).unwrap();
+        let g_a = obj_a.lock();
+        let TeeCryptObj::X25519Keypair(alice) = &g_a.attr[0] else {
+            panic!("expected alice keypair");
+        };
+        let alice_priv = alice.priv_key;
+
+        let obj_b = tee_obj_get(kp_b_id as TeeObjIdType).unwrap();
+        let g_b = obj_b.lock();
+        let TeeCryptObj::X25519Keypair(bob) = &g_b.attr[0] else {
+            panic!("expected bob keypair");
+        };
+        let bob_pub = bob.pub_key;
+        (alice_priv, bob_pub)
+    };
+    let expected = x25519_shared_secret(&alice_priv, &bob_pub).expect("reference shared");
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 256, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_X25519,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(kp_a_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_pub = crate::user_vec![0u8; X25519_KEY_SIZE_BYTES];
+    write_user_bytes(&mut usr_pub, &bob_pub);
+    let mut usr_attrs_data = [utee_attribute::default(); 1];
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[0],
+        TEE_ATTR_X25519_PUBLIC_VALUE,
+        usr_pub.as_user_ptr(),
+        X25519_KEY_SIZE_BYTES as u32,
+    );
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 1];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_x25519 failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.as_slice());
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_x448() {
+    use tee_crypto::x448::{X448_KEY_SIZE_BYTES, x448_shared_secret};
+
+    let kp_a_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_X448_KEYPAIR as _, 448, kp_a_id.as_user_ptr(),).is_ok()
+    );
+    let kp_a_id = kp_a_id.read();
+    assert!(syscall_obj_generate_key(kp_a_id as _, 448, core::ptr::null(), 0).is_ok());
+
+    let kp_b_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_X448_KEYPAIR as _, 448, kp_b_id.as_user_ptr(),).is_ok()
+    );
+    let kp_b_id = kp_b_id.read();
+    assert!(syscall_obj_generate_key(kp_b_id as _, 448, core::ptr::null(), 0).is_ok());
+
+    let (alice_priv, bob_pub) = {
+        let obj_a = tee_obj_get(kp_a_id as TeeObjIdType).unwrap();
+        let g_a = obj_a.lock();
+        let TeeCryptObj::X448Keypair(alice) = &g_a.attr[0] else {
+            panic!("expected alice keypair");
+        };
+        let alice_priv = alice.priv_key;
+
+        let obj_b = tee_obj_get(kp_b_id as TeeObjIdType).unwrap();
+        let g_b = obj_b.lock();
+        let TeeCryptObj::X448Keypair(bob) = &g_b.attr[0] else {
+            panic!("expected bob keypair");
+        };
+        let bob_pub = bob.pub_key;
+        (alice_priv, bob_pub)
+    };
+    let expected = x448_shared_secret(&alice_priv, &bob_pub).expect("reference shared");
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 448, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_X448,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(kp_a_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_pub = crate::user_vec![0u8; X448_KEY_SIZE_BYTES];
+    write_user_bytes(&mut usr_pub, &bob_pub);
+    let mut usr_attrs_data = [utee_attribute::default(); 1];
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[0],
+        TEE_ATTR_X448_PUBLIC_VALUE,
+        usr_pub.as_user_ptr(),
+        X448_KEY_SIZE_BYTES as u32,
+    );
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 1];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_x448 failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.as_slice());
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_sm2_kep() {
+    use tee_crypto::sm2::{
+        ConfirmationMode, Sm2KepDeriveParams, Sm2KepPeerKeys, sm2_kep_derive,
+    };
+
+    let alice_static_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_KEP_KEYPAIR as _,
+            256,
+            alice_static_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let alice_static_id = alice_static_id.read();
+    assert!(syscall_obj_generate_key(alice_static_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let alice_eph_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_KEP_KEYPAIR as _,
+            256,
+            alice_eph_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let alice_eph_id = alice_eph_id.read();
+    assert!(syscall_obj_generate_key(alice_eph_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let bob_static_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_KEP_KEYPAIR as _,
+            256,
+            bob_static_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let bob_static_id = bob_static_id.read();
+    assert!(syscall_obj_generate_key(bob_static_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let bob_eph_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_SM2_KEP_KEYPAIR as _, 256, bob_eph_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let bob_eph_id = bob_eph_id.read();
+    assert!(syscall_obj_generate_key(bob_eph_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let (bob_static_x, bob_static_y) = {
+        let obj = tee_obj_get(bob_static_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+            panic!("expected bob static keypair");
+        };
+        (
+            bn_to_ecc_field_bytes(&kp.x, 32),
+            bn_to_ecc_field_bytes(&kp.y, 32),
+        )
+    };
+    let (bob_eph_x, bob_eph_y) = {
+        let obj = tee_obj_get(bob_eph_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+            panic!("expected bob ephemeral keypair");
+        };
+        (
+            bn_to_ecc_field_bytes(&kp.x, 32),
+            bn_to_ecc_field_bytes(&kp.y, 32),
+        )
+    };
+
+    let (alice_static, alice_ephemeral) = {
+        let obj_a = tee_obj_get(alice_static_id as TeeObjIdType).unwrap();
+        let g_a = obj_a.lock();
+        let TeeCryptObj::EccKeypair(kp_a) = &g_a.attr[0] else {
+            panic!("expected alice static");
+        };
+        let sk_a: [u8; 32] = bn_to_ecc_field_bytes(&kp_a.d, 32)
+            .try_into()
+            .expect("alice static secret");
+
+        let obj_e = tee_obj_get(alice_eph_id as TeeObjIdType).unwrap();
+        let g_e = obj_e.lock();
+        let TeeCryptObj::EccKeypair(kp_e) = &g_e.attr[0] else {
+            panic!("expected alice ephemeral");
+        };
+        let sk_e: [u8; 32] = bn_to_ecc_field_bytes(&kp_e.d, 32)
+            .try_into()
+            .expect("alice eph secret");
+
+        (
+            tee_crypto::sm2::Sm2KepKeypair::from_secret_bytes(&sk_a).expect("static"),
+            tee_crypto::sm2::Sm2KepKeypair::from_secret_bytes(&sk_e).expect("eph"),
+        )
+    };
+
+    let mut bob_static_x_arr = [0u8; 32];
+    let mut bob_static_y_arr = [0u8; 32];
+    let mut bob_eph_x_arr = [0u8; 32];
+    let mut bob_eph_y_arr = [0u8; 32];
+    bob_static_x_arr.copy_from_slice(&bob_static_x);
+    bob_static_y_arr.copy_from_slice(&bob_static_y);
+    bob_eph_x_arr.copy_from_slice(&bob_eph_x);
+    bob_eph_y_arr.copy_from_slice(&bob_eph_y);
+
+    let initiator_id = b"Alice";
+    let responder_id = b"Bob";
+    let expected = sm2_kep_derive(
+        &alice_static,
+        &alice_ephemeral,
+        &Sm2KepDeriveParams {
+            is_initiator: true,
+            initiator_id,
+            responder_id,
+            peer: Sm2KepPeerKeys {
+                static_x: bob_static_x_arr,
+                static_y: bob_static_y_arr,
+                ephemeral_x: bob_eph_x_arr,
+                ephemeral_y: bob_eph_y_arr,
+            },
+            conf_in: None,
+            confirmation: ConfirmationMode::Skip,
+        },
+        32,
+    )
+    .expect("reference sm2 kep");
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 256, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_SM2_KEP,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(alice_static_id),
+            Some(alice_eph_id),
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_bob_x = crate::user_vec![0u8; 32];
+    let mut usr_bob_y = crate::user_vec![0u8; 32];
+    let mut usr_bob_ex = crate::user_vec![0u8; 32];
+    let mut usr_bob_ey = crate::user_vec![0u8; 32];
+    let mut usr_init_id = crate::user_vec![0u8; 5];
+    let mut usr_resp_id = crate::user_vec![0u8; 3];
+    write_user_bytes(&mut usr_bob_x, &bob_static_x);
+    write_user_bytes(&mut usr_bob_y, &bob_static_y);
+    write_user_bytes(&mut usr_bob_ex, &bob_eph_x);
+    write_user_bytes(&mut usr_bob_ey, &bob_eph_y);
+    write_user_bytes(&mut usr_init_id, initiator_id);
+    write_user_bytes(&mut usr_resp_id, responder_id);
+
+    let mut usr_attrs_data = [utee_attribute::default(); 7];
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[0],
+        TEE_ATTR_ECC_PUBLIC_VALUE_X,
+        usr_bob_x.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[1],
+        TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+        usr_bob_y.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[2],
+        TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_X,
+        usr_bob_ex.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[3],
+        TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_Y,
+        usr_bob_ey.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[4],
+        TEE_ATTR_SM2_ID_INITIATOR,
+        usr_init_id.as_user_ptr(),
+        5,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_data[5],
+        TEE_ATTR_SM2_ID_RESPONDER,
+        usr_resp_id.as_user_ptr(),
+        3,
+    );
+    usr_attrs_data[6].attribute_id = TEE_ATTR_SM2_KEP_USER;
+    usr_attrs_data[6].a = 0;
+    usr_attrs_data[6].b = 0;
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 7];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_sm2_kep failed: {res:#010X?}");
+
+    let out_obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+    let g = out_obj.lock();
+    let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+        panic!("expected generic secret");
+    };
+    assert_eq!(secret.key(), expected.key.as_slice());
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_sm2_kep_with_confirmation() {
+    use tee_crypto::sm2::{
+        ConfirmationMode, Sm2KepDeriveParams, Sm2KepPeerKeys, sm2_kep_derive,
+    };
+
+    let alice_static_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_KEP_KEYPAIR as _,
+            256,
+            alice_static_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let alice_static_id = alice_static_id.read();
+    assert!(syscall_obj_generate_key(alice_static_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let alice_eph_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_KEP_KEYPAIR as _,
+            256,
+            alice_eph_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let alice_eph_id = alice_eph_id.read();
+    assert!(syscall_obj_generate_key(alice_eph_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let bob_static_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(
+            TEE_TYPE_SM2_KEP_KEYPAIR as _,
+            256,
+            bob_static_id.as_user_ptr(),
+        )
+        .is_ok()
+    );
+    let bob_static_id = bob_static_id.read();
+    assert!(syscall_obj_generate_key(bob_static_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let bob_eph_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_SM2_KEP_KEYPAIR as _, 256, bob_eph_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let bob_eph_id = bob_eph_id.read();
+    assert!(syscall_obj_generate_key(bob_eph_id as _, 256, core::ptr::null(), 0).is_ok());
+
+    let ecc_xy = |obj_id: u32| -> (Vec<u8>, Vec<u8>) {
+        let obj = tee_obj_get(obj_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+            panic!("expected ecc keypair");
+        };
+        (
+            bn_to_ecc_field_bytes(&kp.x, 32),
+            bn_to_ecc_field_bytes(&kp.y, 32),
+        )
+    };
+
+    let (bob_static_x, bob_static_y) = ecc_xy(bob_static_id);
+    let (bob_eph_x, bob_eph_y) = ecc_xy(bob_eph_id);
+    let (alice_static_x, alice_static_y) = ecc_xy(alice_static_id);
+    let (alice_eph_x, alice_eph_y) = ecc_xy(alice_eph_id);
+
+    let (alice_static, alice_ephemeral, bob_static, bob_ephemeral) = {
+        let sk = |obj_id: u32| -> [u8; 32] {
+            let obj = tee_obj_get(obj_id as TeeObjIdType).unwrap();
+            let g = obj.lock();
+            let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+                panic!("expected ecc keypair");
+            };
+            bn_to_ecc_field_bytes(&kp.d, 32).try_into().expect("secret")
+        };
+        (
+            tee_crypto::sm2::Sm2KepKeypair::from_secret_bytes(&sk(alice_static_id))
+                .expect("alice static"),
+            tee_crypto::sm2::Sm2KepKeypair::from_secret_bytes(&sk(alice_eph_id))
+                .expect("alice eph"),
+            tee_crypto::sm2::Sm2KepKeypair::from_secret_bytes(&sk(bob_static_id))
+                .expect("bob static"),
+            tee_crypto::sm2::Sm2KepKeypair::from_secret_bytes(&sk(bob_eph_id))
+                .expect("bob eph"),
+        )
+    };
+
+    let peer_bob = |static_x: &[u8], static_y: &[u8], eph_x: &[u8], eph_y: &[u8]| {
+        let mut sx = [0u8; 32];
+        let mut sy = [0u8; 32];
+        let mut ex = [0u8; 32];
+        let mut ey = [0u8; 32];
+        sx.copy_from_slice(static_x);
+        sy.copy_from_slice(static_y);
+        ex.copy_from_slice(eph_x);
+        ey.copy_from_slice(eph_y);
+        Sm2KepPeerKeys {
+            static_x: sx,
+            static_y: sy,
+            ephemeral_x: ex,
+            ephemeral_y: ey,
+        }
+    };
+
+    let initiator_id = b"Alice";
+    let responder_id = b"Bob";
+    let alice_ref = sm2_kep_derive(
+        &alice_static,
+        &alice_ephemeral,
+        &Sm2KepDeriveParams {
+            is_initiator: true,
+            initiator_id,
+            responder_id,
+            peer: peer_bob(&bob_static_x, &bob_static_y, &bob_eph_x, &bob_eph_y),
+            conf_in: None,
+            confirmation: ConfirmationMode::Compute,
+        },
+        32,
+    )
+    .expect("alice reference");
+
+    let usr_conf_a = crate::user_vec![0u8; 32];
+    let usr_conf_b = crate::user_vec![0u8; 32];
+    let out_a_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 256, out_a_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_a_id = out_a_id.read();
+
+    let mut state_a: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_SM2_KEP,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(alice_static_id),
+            Some(alice_eph_id),
+            &mut state_a,
+        )
+        .is_ok()
+    );
+
+    let mut usr_bob_x = crate::user_vec![0u8; 32];
+    let mut usr_bob_y = crate::user_vec![0u8; 32];
+    let mut usr_bob_ex = crate::user_vec![0u8; 32];
+    let mut usr_bob_ey = crate::user_vec![0u8; 32];
+    let mut usr_init_id = crate::user_vec![0u8; 5];
+    let mut usr_resp_id = crate::user_vec![0u8; 3];
+    write_user_bytes(&mut usr_bob_x, &bob_static_x);
+    write_user_bytes(&mut usr_bob_y, &bob_static_y);
+    write_user_bytes(&mut usr_bob_ex, &bob_eph_x);
+    write_user_bytes(&mut usr_bob_ey, &bob_eph_y);
+    write_user_bytes(&mut usr_init_id, initiator_id);
+    write_user_bytes(&mut usr_resp_id, responder_id);
+
+    let mut usr_attrs_a_data = [utee_attribute::default(); 8];
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[0],
+        TEE_ATTR_ECC_PUBLIC_VALUE_X,
+        usr_bob_x.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[1],
+        TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+        usr_bob_y.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[2],
+        TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_X,
+        usr_bob_ex.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[3],
+        TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_Y,
+        usr_bob_ey.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[4],
+        TEE_ATTR_SM2_ID_INITIATOR,
+        usr_init_id.as_user_ptr(),
+        5,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[5],
+        TEE_ATTR_SM2_ID_RESPONDER,
+        usr_resp_id.as_user_ptr(),
+        3,
+    );
+    usr_attrs_a_data[6].attribute_id = TEE_ATTR_SM2_KEP_USER;
+    usr_attrs_a_data[6].a = 0;
+    usr_attrs_a_data[6].b = 0;
+    tee_init_ref_attribute(
+        &mut usr_attrs_a_data[7],
+        TEE_ATTR_SM2_KEP_CONFIRMATION_OUT,
+        usr_conf_a.as_user_ptr(),
+        32,
+    );
+
+    let mut usr_attrs_a = crate::user_vec![utee_attribute::default(); 8];
+    usr_attrs_a.write(usr_attrs_a_data);
+    assert!(
+        syscall_cryp_derive_key(
+            state_a as _,
+            usr_attrs_a.as_user_ptr() as _,
+            usr_attrs_a.len(),
+            out_a_id as _,
+        )
+        .is_ok()
+    );
+    let conf_a = usr_conf_a.read();
+    assert_eq!(conf_a, alice_ref.conf_out.unwrap());
+
+    let bob_ref = sm2_kep_derive(
+        &bob_static,
+        &bob_ephemeral,
+        &Sm2KepDeriveParams {
+            is_initiator: false,
+            initiator_id,
+            responder_id,
+            peer: peer_bob(&alice_static_x, &alice_static_y, &alice_eph_x, &alice_eph_y),
+            conf_in: Some(conf_a.as_slice()),
+            confirmation: ConfirmationMode::Compute,
+        },
+        32,
+    )
+    .expect("bob reference");
+
+    let out_b_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 256, out_b_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_b_id = out_b_id.read();
+
+    let mut state_b: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            TEE_ALG_SM2_KEP,
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(bob_static_id),
+            Some(bob_eph_id),
+            &mut state_b,
+        )
+        .is_ok()
+    );
+
+    let mut usr_alice_x = crate::user_vec![0u8; 32];
+    let mut usr_alice_y = crate::user_vec![0u8; 32];
+    let mut usr_alice_ex = crate::user_vec![0u8; 32];
+    let mut usr_alice_ey = crate::user_vec![0u8; 32];
+    write_user_bytes(&mut usr_alice_x, &alice_static_x);
+    write_user_bytes(&mut usr_alice_y, &alice_static_y);
+    write_user_bytes(&mut usr_alice_ex, &alice_eph_x);
+    write_user_bytes(&mut usr_alice_ey, &alice_eph_y);
+
+    let mut usr_attrs_b_data = [utee_attribute::default(); 9];
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[0],
+        TEE_ATTR_ECC_PUBLIC_VALUE_X,
+        usr_alice_x.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[1],
+        TEE_ATTR_ECC_PUBLIC_VALUE_Y,
+        usr_alice_y.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[2],
+        TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_X,
+        usr_alice_ex.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[3],
+        TEE_ATTR_ECC_EPHEMERAL_PUBLIC_VALUE_Y,
+        usr_alice_ey.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[4],
+        TEE_ATTR_SM2_ID_INITIATOR,
+        usr_init_id.as_user_ptr(),
+        5,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[5],
+        TEE_ATTR_SM2_ID_RESPONDER,
+        usr_resp_id.as_user_ptr(),
+        3,
+    );
+    usr_attrs_b_data[6].attribute_id = TEE_ATTR_SM2_KEP_USER;
+    usr_attrs_b_data[6].a = 1;
+    usr_attrs_b_data[6].b = 0;
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[7],
+        TEE_ATTR_SM2_KEP_CONFIRMATION_IN,
+        usr_conf_a.as_user_ptr(),
+        32,
+    );
+    tee_init_ref_attribute(
+        &mut usr_attrs_b_data[8],
+        TEE_ATTR_SM2_KEP_CONFIRMATION_OUT,
+        usr_conf_b.as_user_ptr(),
+        32,
+    );
+
+    let mut usr_attrs_b = crate::user_vec![utee_attribute::default(); 9];
+    usr_attrs_b.write(usr_attrs_b_data);
+    assert!(
+        syscall_cryp_derive_key(
+            state_b as _,
+            usr_attrs_b.as_user_ptr() as _,
+            usr_attrs_b.len(),
+            out_b_id as _,
+        )
+        .is_ok()
+    );
+
+    assert_eq!(usr_conf_b.read(), bob_ref.conf_out.unwrap());
+    assert_eq!(alice_ref.key, bob_ref.key);
+
+    let out_a = tee_obj_get(out_a_id as TeeObjIdType).unwrap();
+    let out_b = tee_obj_get(out_b_id as TeeObjIdType).unwrap();
+    let ga = out_a.lock();
+    let gb = out_b.lock();
+    let TeeCryptObj::ObjSecret(secret_a) = &ga.attr[0] else {
+        panic!("expected secret");
+    };
+    let TeeCryptObj::ObjSecret(secret_b) = &gb.attr[0] else {
+        panic!("expected secret");
+    };
+    assert_eq!(secret_a.key(), secret_b.key());
+    assert_eq!(secret_a.key(), alice_ref.key.as_slice());
+}
+
+#[unittest::def_test(user)]
+fn test_syscall_cryp_derive_key_ecdh_p256() {
+    use tee_crypto::tee_ops::ecc::{self, EccCurve};
+
+    let mut curve_attr_data = [utee_attribute::default(); 1];
+    curve_attr_data[0].attribute_id = TEE_ATTR_ECC_CURVE;
+    curve_attr_data[0].a = TEE_ECC_CURVE_NIST_P256 as u64;
+
+    let kp_a_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_ECDH_KEYPAIR as _, 256, kp_a_id.as_user_ptr(),).is_ok()
+    );
+    let kp_a_id = kp_a_id.read();
+    let mut curve_attr = crate::user_vec![utee_attribute::default(); 1];
+    curve_attr.write(curve_attr_data);
+    assert!(syscall_obj_generate_key(kp_a_id as _, 256, curve_attr.as_user_ptr(), 1).is_ok());
+
+    let kp_b_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_ECDH_KEYPAIR as _, 256, kp_b_id.as_user_ptr(),).is_ok()
+    );
+    let kp_b_id = kp_b_id.read();
+    assert!(syscall_obj_generate_key(kp_b_id as _, 256, curve_attr.as_user_ptr(), 1).is_ok());
+
+    let (usr_x, usr_y) = {
+        let obj = tee_obj_get(kp_b_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+            panic!("expected keypair");
+        };
+        let x = bn_to_ecc_field_bytes(&kp.x, 32);
+        let y = bn_to_ecc_field_bytes(&kp.y, 32);
+        let mut usr_x = crate::user_vec![0u8; 32];
+        let mut usr_y = crate::user_vec![0u8; 32];
+        write_user_bytes(&mut usr_x, &x);
+        write_user_bytes(&mut usr_y, &y);
+        (usr_x, usr_y)
+    };
+
+    let out_obj_id = TestUserValue::<u32>::from_value(0).unwrap();
+    assert!(
+        syscall_cryp_obj_alloc(TEE_TYPE_GENERIC_SECRET as _, 512, out_obj_id.as_user_ptr(),)
+            .is_ok()
+    );
+    let out_obj_id = out_obj_id.read();
+
+    let mut state: u32 = 0;
+    assert!(
+        tee_cryp_state_alloc(
+            translate_compat_algo(TEE_ALG_ECDH_P256),
+            TEE_OperationMode::TEE_MODE_DERIVE,
+            Some(kp_a_id),
+            None,
+            &mut state,
+        )
+        .is_ok()
+    );
+
+    let mut usr_attrs_data = [utee_attribute::default(); 2];
+    tee_init_ref_attribute(&mut usr_attrs_data[0], TEE_ATTR_ECC_PUBLIC_VALUE_X, usr_x.as_user_ptr(), 32);
+    tee_init_ref_attribute(&mut usr_attrs_data[1], TEE_ATTR_ECC_PUBLIC_VALUE_Y, usr_y.as_user_ptr(), 32);
+
+    let mut usr_attrs = crate::user_vec![utee_attribute::default(); 2];
+    usr_attrs.write(usr_attrs_data);
+    let res = syscall_cryp_derive_key(
+        state as _,
+        usr_attrs.as_user_ptr() as _,
+        usr_attrs.len(),
+        out_obj_id as _,
+    );
+    assert!(res.is_ok(), "derive_ecdh failed: {res:#010X?}");
+
+    let derived = {
+        let obj = tee_obj_get(out_obj_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::ObjSecret(secret) = &g.attr[0] else {
+            panic!("expected secret");
+        };
+        secret.key().to_vec()
+    };
+
+    let (local_a, peer_x_a, peer_y_a) = {
+        let obj = tee_obj_get(kp_a_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+            panic!("expected keypair");
+        };
+        (
+            bn_to_ecc_field_bytes(&kp.d, 32),
+            bn_to_ecc_field_bytes(&kp.x, 32),
+            bn_to_ecc_field_bytes(&kp.y, 32),
+        )
+    };
+    let local_b = {
+        let obj = tee_obj_get(kp_b_id as TeeObjIdType).unwrap();
+        let g = obj.lock();
+        let TeeCryptObj::EccKeypair(kp) = &g.attr[0] else {
+            panic!("expected keypair");
+        };
+        bn_to_ecc_field_bytes(&kp.d, 32)
+    };
+
+    let expected =
+        ecc::ecc_shared_secret(EccCurve::P256, &local_b, &peer_x_a, &peer_y_a).unwrap();
+    assert_eq!(derived.as_slice(), expected.expose_secret());
+
+    let peer_x = usr_x.read();
+    let peer_y = usr_y.read();
+    let reverse = ecc::ecc_shared_secret(EccCurve::P256, &local_a, &peer_x, &peer_y).unwrap();
+    assert_eq!(derived.as_slice(), reverse.expose_secret());
 }
 
 #[unittest::def_test(user)]

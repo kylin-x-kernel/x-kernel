@@ -2,11 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Shared 32-byte Curve25519 key material helpers (Ed25519 today, X25519 later).
+//! Shared 32-byte Curve25519 key material helpers (Ed25519 / X25519).
 
-use core::{mem::size_of, ptr::write_volatile};
+use core::mem::size_of;
 
 use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OVERFLOW};
+use zeroize::Zeroize;
 
 use super::{TeeResult, libutee::utee_defines::tee_u32_to_big_endian};
 
@@ -17,15 +18,15 @@ pub(super) const KEY_SIZE_BYTES_25519: usize = 32;
 pub(super) const ATTR_OPS_INDEX_25519: u32 = 3;
 
 fn secure_zero(bytes: &mut [u8]) {
-    for byte in bytes.iter_mut() {
-        // SAFETY: `byte` is a valid mutable reference; volatile stores inhibit
-        // the compiler from eliding the wipe.
-        unsafe {
-            write_volatile(byte, 0);
-        }
-    }
+    // Volatile stores inside `Zeroize` keep the wipe from being deleted as a dead store.
+    bytes.zeroize();
 }
 
+/// Serialize a u32 into `data`, advancing `*offs` by 4.
+///
+/// When `data` is empty or too short, skips the write but still advances `*offs`
+/// so callers can probe the required size (see `tee_obj_attr_to_binary` with
+/// `data = &mut []`). Overflow checks happen at the top level, not here.
 fn u32_to_binary(v: u32, data: &mut [u8], offs: &mut usize) -> TeeResult {
     let next_offs = offs
         .checked_add(size_of::<u32>())
