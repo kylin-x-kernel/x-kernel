@@ -112,7 +112,16 @@ impl ThreadSignalManager {
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
         loop {
-            let signal = self.pending.lock().dequeue_signal(mask);
+            let signal = {
+                let mut pending = self.pending.lock();
+                let signal = pending.dequeue_signal(mask);
+                if signal.is_none() {
+                    // Serialize the no-deliverable-signal observation and hint clear with enqueue.
+                    // Clearing after unlocking can overwrite a sender's true hint.
+                    self.possibly_has_signal.store(false, Ordering::Release);
+                }
+                signal
+            };
             if let Some(sig) = signal {
                 if notify_signal_dequeued(&sig) == SignalDequeueAction::Deliver {
                     return Some(sig);
@@ -122,7 +131,6 @@ impl ThreadSignalManager {
             break;
         }
 
-        self.possibly_has_signal.store(false, Ordering::Release);
         self.proc.dequeue_signal(mask)
     }
 

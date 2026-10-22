@@ -211,7 +211,10 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
   doc comments deliberately do not claim Linux's global `sighand->siglock`
   equivalence for every field.
 - `has_pending`/`possibly_has_signal` are Release/Acquire hints only; the
-  authoritative check happens under the queue locks.
+  authoritative check happens under the queue locks. Thread dequeue clears
+  `possibly_has_signal` while still holding the pending-queue lock when no
+  matching signal is found. Clearing it after unlocking can overwrite a
+  concurrent sender's notification and strand an unblocked pending signal.
 - Dead thread entries are pruned opportunistically during target scans.
 - `SignalInfo` is `Send + Sync` through an explicit `unsafe impl` because
   the payload is treated as opaque ABI bits (see `security.md`).
