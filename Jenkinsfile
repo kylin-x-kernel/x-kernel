@@ -25,6 +25,11 @@ pipeline {
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
         string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
         booleanParam(name: 'ENABLE_DOC_CHECK', defaultValue: false, description: 'Run Rust documentation generation check')
+        booleanParam(
+            name: 'ENABLE_COVERAGE',
+            defaultValue: false,
+            description: 'Instrument unit tests and archive coverage HTML/info (enable for release/acceptance gates)'
+        )
     }
 
     environment {
@@ -147,6 +152,12 @@ def ciMatrixArchitectures() { return runtimeTestArchitectures() }
 def teeTestArchitectures() { return ['x86_64', 'aarch64'] }
 def teeTestBinaries() { return ['storage_test', 'cryp_test'] }
 def docCheckEnabled() { return params.ENABLE_DOC_CHECK?.toString()?.toBoolean() ?: false }
+def coverageEnabled() { return params.ENABLE_COVERAGE?.toString()?.toBoolean() ?: false }
+
+/** Propagate into xconfig/xkmake: 0 skips instrument-coverage and host report generation. */
+def coverageEnableEnv() {
+    return "XKERNEL_ENABLE_COVERAGE=${coverageEnabled() ? '1' : '0'}"
+}
 
 // Fixed native hosts (same as daily-test); ops adds labels on these nodes in Jenkins.
 def nativeGuestAgentLabels() {
@@ -336,21 +347,38 @@ def withArchCiAgent(String arch, Closure body) {
 }
 
 def stashArchCiOutputs(String arch) {
-    stash name: ciArchOutputStashName(arch),
-        includes: '.ci/stage-logs/**,' +
-            '.ci/work/runtime-*/test-harness/logs/**,' +
-            '.ci/work/**/unittest-output.log,.ci/work/**/tee-test-output.log,' +
-            '.ci/work/**/artifacts/**,' +
-            "artifacts/coverage/${arch}/coverage.txt," +
-            "artifacts/coverage/${arch}/coverage.info," +
+    def includes = [
+        '.ci/stage-logs/**',
+        '.ci/work/runtime-*/test-harness/logs/**',
+        '.ci/work/**/unittest-output.log',
+        '.ci/work/**/tee-test-output.log',
+        '.ci/work/**/artifacts/**',
+    ]
+    if (coverageEnabled()) {
+        includes.addAll([
+            "artifacts/coverage/${arch}/coverage.txt",
+            "artifacts/coverage/${arch}/coverage.info",
             "artifacts/coverage/${arch}/coverage.xml",
+        ])
+    }
+    stash name: ciArchOutputStashName(arch),
+        includes: includes.join(','),
         useDefaultExcludes: false,
         allowEmpty: true
 }
 
 def archiveLegHeavyArtifacts(String archLabel) {
-    archiveArtifacts artifacts: "artifacts/coverage/${archLabel}/**,artifacts/docs/${archLabel}/**",
-        allowEmptyArchive: true
+    def patterns = []
+    if (coverageEnabled()) {
+        patterns << "artifacts/coverage/${archLabel}/**"
+    }
+    if (docCheckEnabled()) {
+        patterns << "artifacts/docs/${archLabel}/**"
+    }
+    if (!patterns) {
+        return
+    }
+    archiveArtifacts artifacts: patterns.join(','), allowEmptyArchive: true
 }
 
 def restoreStashedArchCiOutputs() {
@@ -538,15 +566,37 @@ def ciFailureDetail(String stageName) {
 }
 
 def archiveArtifactPatterns() {
-    def patterns = [
-        'ci-summary.md',
-        '.ci/stage-logs/**/*.log',
-        'artifacts/**/*',
-        '.ci/work/**/artifacts/**/*',
-        '.ci/work/**/logs/**/*',
-        '.ci/work/**/unittest-output.log',
-        '.ci/work/**/tee-test-output.log',
-    ]
+    // Success with no meta issues: keep only the PR/summary comment.
+    // Failed stages, timeout/abort, or Gitee post-meta issues keep diagnostic
+    // logs. Do not call unstable() before this — giteeTestShouldPass still
+    // needs SUCCESS at archive time. Coverage/docs only when toggles are on.
+    def patterns = ['ci-summary.md']
+    def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
+    def buildUnsuccessful = !(currentBuild.currentResult in [null, 'SUCCESS'])
+    def hasMetaIssues = !ciMetaIssues.isEmpty()
+    def needsDiagnostics = failedStages || buildUnsuccessful || hasMetaIssues
+    if (needsDiagnostics) {
+        if (failedStages) {
+            failedStages.each { name ->
+                patterns << ".ci/stage-logs/${sanitizeStageFileName(name)}.log"
+            }
+        } else {
+            // Timeout/abort/incomplete/meta-only: no status=='failed' stages.
+            patterns << '.ci/stage-logs/**/*.log'
+        }
+        patterns.addAll([
+            '.ci/work/**/artifacts/**/*',
+            '.ci/work/**/logs/**/*',
+            '.ci/work/**/unittest-output.log',
+            '.ci/work/**/tee-test-output.log',
+        ])
+    }
+    if (coverageEnabled()) {
+        patterns << 'artifacts/coverage/**/*'
+    }
+    if (docCheckEnabled()) {
+        patterns << 'artifacts/docs/**/*'
+    }
     return patterns
 }
 
@@ -940,7 +990,7 @@ def runUnittestBuildArtifact(String arch) {
     def unittestTargetDir = targetDirForUnittest(arch)
 
     withCleanSourceWorkspace("build-artifact-${arch}-unittest") {
-        withEnv(["TARGET_DIR=${unittestTargetDir}"]) {
+        withEnv(["TARGET_DIR=${unittestTargetDir}", coverageEnableEnv()]) {
             sh label: "Build unittest artifact ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
@@ -991,11 +1041,20 @@ def runUnitTestStage(String arch) {
     def unittestTargetDir = targetDirForUnittest(arch)
 
     withCleanSourceWorkspace("unittest-${arch}") {
-        withEnv(["TARGET_DIR=${unittestTargetDir}", "STAGE_LOG=${stageLog}", "SKIP_KERNEL_BUILD=1"]) {
+        withEnv([
+            "TARGET_DIR=${unittestTargetDir}",
+            "STAGE_LOG=${stageLog}",
+            "SKIP_KERNEL_BUILD=1",
+            coverageEnableEnv(),
+        ]) {
             restoreKernelArtifact(artifactNameForUnittest(arch))
             runUnitTests(arch)
-            generateCoverageHtml(arch, unittestTargetDir)
-            copyCoverageToWorkspace(arch, unittestTargetDir)
+            if (coverageEnabled()) {
+                generateCoverageHtml(arch, unittestTargetDir)
+                copyCoverageToWorkspace(arch, unittestTargetDir)
+            } else {
+                echo "ENABLE_COVERAGE=false: skipping coverage HTML/artifact collection for ${arch}"
+            }
         }
     }
 }

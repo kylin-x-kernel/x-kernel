@@ -31,6 +31,21 @@ impl BuildOpts {
     }
 }
 
+/// Shared parser for `XKERNEL_ENABLE_COVERAGE`.
+///
+/// Used by xconfig (whether to add `-C instrument-coverage`) and xkmake
+/// (whether to generate host coverage reports). Default is on when unset so
+/// local `make UNITTEST=y` keeps coverage; set `0`/`n`/`false`/`off` to skip.
+pub fn coverage_enabled_from_env() -> bool {
+    match std::env::var("XKERNEL_ENABLE_COVERAGE") {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "0" | "n" | "no" | "false" | "off")
+        }
+        Err(_) => true,
+    }
+}
+
 /// Generate `.cargo/.xconfig.toml` from .config and build options.
 ///
 /// Unlike `gen-const`, this should run before every build because it depends
@@ -412,10 +427,14 @@ fn generate_cargo_config(config: &HashMap<String, String>, opts: &BuildOpts) -> 
     target_rustflags.push("strip=none".into());
 
     if opts.unittest {
-        target_rustflags.push("-C".into());
-        target_rustflags.push("instrument-coverage".into());
-        target_rustflags.push("-Z".into());
-        target_rustflags.push("no-profiler-runtime".into());
+        // Coverage instrumentation is optional: CI day-to-day jobs set
+        // XKERNEL_ENABLE_COVERAGE=0 to skip the cost; unset/1 keeps local default.
+        if coverage_enabled_from_env() {
+            target_rustflags.push("-C".into());
+            target_rustflags.push("instrument-coverage".into());
+            target_rustflags.push("-Z".into());
+            target_rustflags.push("no-profiler-runtime".into());
+        }
         // One codegen unit per crate so that any live reference to a crate
         // pulls its whole compilation unit — including `#[def_test]` descriptors
         // in `.unittest` — into the link, where the linker-script `KEEP` retains

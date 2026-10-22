@@ -11,4 +11,5 @@ mod log;
 pub mod ui;
 pub mod validate;
 
+pub use cli::coverage_enabled_from_env;
 pub use error::{KconfigError, Result};

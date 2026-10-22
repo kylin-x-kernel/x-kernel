@@ -58,7 +58,7 @@ const X86_ROOT_ARTIFACTS: &[RootArtifactKind] = &[
     RootArtifactKind::Linuxboot,
     RootArtifactKind::Uefi,
 ];
-const BUNDLE_FORMAT_VERSION: u32 = 6;
+const BUNDLE_FORMAT_VERSION: u32 = 7;
 
 impl RootArtifactKind {
     fn source(self, context: &BuildContext) -> &std::path::Path {
@@ -90,6 +90,11 @@ struct BundleManifest {
     guest_ip: String,
     gateway: String,
     unittest: bool,
+    /// Whether this unittest image was built with `-C instrument-coverage`.
+    /// Recorded at build time so `justrun` / host coverage follow the image,
+    /// not a possibly different `XKERNEL_ENABLE_COVERAGE` at run time.
+    #[serde(default = "default_legacy_coverage_enabled")]
+    coverage_enabled: bool,
     unittest_crate: Option<String>,
     build_info: BuildInfo,
     build_id: String,
@@ -98,6 +103,51 @@ struct BundleManifest {
     kernel_image: BundleArtifact,
     linuxboot_image: Option<BundleArtifact>,
     uefi_image: Option<BundleArtifact>,
+}
+
+fn default_legacy_coverage_enabled() -> bool {
+    // Pre-v7 manifests omit the field; keep the historical env fallback.
+    xconfig::coverage_enabled_from_env()
+}
+
+/// Whether the existing unittest bundle was instrumented for coverage.
+///
+/// Prefer the build-time `coverage-enabled` flag in `bundle.toml` so host-side
+/// validation matches the guest image even when `XKERNEL_ENABLE_COVERAGE` differs
+/// between `make build` and `make justrun`.
+pub(crate) fn unittest_coverage_enabled(bundle: &Bundle) -> Result<bool> {
+    if !bundle.context.unittest {
+        return Ok(false);
+    }
+    let manifest_path = bundle.context.bundle_dir.join("bundle.toml");
+    // `--no-build` / existing_bundle only requires kernel.elf. Trust
+    // coverage-enabled only when the manifest is present and parses; otherwise
+    // fall back to env (same as can_reuse_bundle treating a bad manifest as
+    // unusable). NotFound is the common partial-bundle case and stays quiet;
+    // other I/O or TOML errors warn so permission/path problems are visible.
+    let content = match fs::read_to_string(&manifest_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(xconfig::coverage_enabled_from_env());
+        }
+        Err(error) => {
+            eprintln!(
+                "[xkmake] failed to read {}: {error}; falling back to XKERNEL_ENABLE_COVERAGE",
+                manifest_path.display()
+            );
+            return Ok(xconfig::coverage_enabled_from_env());
+        }
+    };
+    match toml::from_str::<BundleManifest>(&content) {
+        Ok(manifest) => Ok(manifest.coverage_enabled),
+        Err(error) => {
+            eprintln!(
+                "[xkmake] ignoring unreadable {}: {error}; falling back to XKERNEL_ENABLE_COVERAGE",
+                manifest_path.display()
+            );
+            Ok(xconfig::coverage_enabled_from_env())
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -524,6 +574,7 @@ fn bundle_manifest(
         guest_ip: context.guest_ip.to_string(),
         gateway: context.gateway.to_string(),
         unittest: context.unittest,
+        coverage_enabled: context.unittest && xconfig::coverage_enabled_from_env(),
         unittest_crate: context.unittest_crate.clone(),
         build_info: build_info.clone(),
         build_id,
@@ -555,11 +606,13 @@ fn can_reuse_bundle(
     let Ok(manifest) = toml::from_str::<BundleManifest>(&content) else {
         return Ok(false);
     };
+    let expected_coverage = context.unittest && xconfig::coverage_enabled_from_env();
     let metadata_matches = manifest.format_version == BUNDLE_FORMAT_VERSION
         && manifest.package == context.package_name
         && manifest.guest_ip == context.guest_ip.to_string()
         && manifest.gateway == context.gateway.to_string()
         && manifest.unittest == context.unittest
+        && manifest.coverage_enabled == expected_coverage
         && manifest.unittest_crate == context.unittest_crate
         && build_info.matches(&manifest.build_info)
         && manifest.kernel_elf.path == "kernel.elf"
