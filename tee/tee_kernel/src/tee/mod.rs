@@ -170,7 +170,7 @@ pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
         Sysno::tee_scn_mask_cancellation => sys_tee_scn_mask_cancellation(uctx.arg0() as _),
         Sysno::tee_scn_wait => sys_tee_scn_wait(uctx.arg0() as _),
         Sysno::tee_scn_get_time => sys_tee_scn_get_time(uctx.arg0() as _, uctx.arg1() as _),
-        Sysno::tee_scn_set_ta_time => sys_tee_scn_set_ta_time(uctx.arg1() as _),
+        Sysno::tee_scn_set_ta_time => sys_tee_scn_set_ta_time(uctx.arg0() as _),
 
         Sysno::tee_scn_cryp_state_alloc => syscall_cryp_state_alloc(
             uctx.arg0(),
