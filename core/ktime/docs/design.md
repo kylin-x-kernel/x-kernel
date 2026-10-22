@@ -124,3 +124,28 @@ MONOTONIC 与相对 REALTIME 不订阅时钟变化。ITIMER_REAL 沿用 MONOTONI
 
 通知和观察者回归分别放在 `ut-tests/change.rs`、`ut-tests/observer.rs`，
 由对应生产模块通过 `unittest::path_mod_test!` 挂载，保留私有接口测试边界。
+
+## 暂停与恢复结算事务
+
+`src/suspend.rs` 提供 `begin_suspend_accounting`、`resume_suspend_accounting` 和
+`cancel_suspend_accounting`。同一 TIMEKEEPER 锁保护时钟、事务状态与提交。开始时
+保存一致 ClockReading，并分配本次启动内不复用的私有标识；同一时刻只允许一轮事务。
+恢复验证凭证及单调基准，在副本上调用不含事务策略的共享注入算术，成功后一次提交
+时钟偏移和事务结束；旧式注入入口独立检查活动事务，不再靠先清状态绕过策略。
+失败保持原状态，可重试或取消；零注入结束事务但不发通知。非零提交解锁后复用
+REALTIME/BOOTTIME 通知及观察者；取消不改时钟，不发送通知。
+
+这是 Linux timekeeping_suspend/resume 职责中结算部分的适配，不是完整 PM 实现。
+期间读时钟与定时器仍运行，墙钟设置保留；恢复在当前关联上增加睡眠时长。
+调用方先恢复连续且不包含待补偿睡眠的 MONOTONIC，再提交确认的睡眠时长。
+本层不推断 RTC 差值，不冻结时钟，不恢复 clocksource/clockevent，不停止设备或 CPU，
+也不提供宿主协议。旧 inject_sleeptime 非零调用在事务期间被拒绝；零调用仍是无操作。
+凭证只保证同一轮提交一次，不能识别调用方在后续新事务或旧注入 API 中重复报告同一睡眠。
+
+凭证拥有绑定到签发 Timekeeper 的内部回收守卫，Drop 自动取消仍属于本凭证的事务，
+不补偿时间、不通知、不恢复硬件；已完成或已取消的旧凭证析构不会清除新事务。
+错误路径的普通提前返回也能释放结算所有权。Drop 短暂取得时间写锁，不得在持有
+该锁或 NMI 中执行；PM owner 仍负责硬件及任务的回滚，不得 mem::forget 凭证。
+主动绕过析构不保证恢复所有权。标识耗尽时失败，不回绕。没有生产 PM 调用者，
+也不以单元测试证明
+真实硬件暂停、多核恢复顺序或跨宿主时钟可信性。

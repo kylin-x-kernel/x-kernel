@@ -15,6 +15,8 @@
 //! - realtime advances 1:1 with monotonic time between explicit updates;
 //! - boottime is monotonic plus cumulative injected sleep time;
 //! - [`inject_sleeptime`] advances realtime and boottime without changing monotonic;
+//! - [`begin_suspend_accounting`] and [`resume_suspend_accounting`] provide a
+//!   single-use accounting transaction, without suspending clocks or hardware;
 //! - before any persistent clock is sampled, realtime falls back to the Unix
 //!   epoch plus elapsed monotonic time and injected sleep intervals;
 //! - [`set_realtime_checked`] re-bases the correlation so a caller-supplied
@@ -35,11 +37,16 @@ use kspin::SpinRwNoIrq;
 
 mod change;
 mod observer;
+mod suspend;
 pub use change::{ClockChangeListener, ClockDomain, clock_change_listener};
 use ktime_types::{BoottimeInstant, MonotonicInstant, NANOS_PER_SEC, SystemTime, TimeSpan};
 pub use observer::{
     ClockChangeId, ClockObserver, ClockObserverRegistration, ClockReading, ClockUpdate,
     register_clock_observer,
+};
+pub use suspend::{
+    SuspendAccountingError, SuspendToken, begin_suspend_accounting, cancel_suspend_accounting,
+    resume_suspend_accounting,
 };
 
 /// Largest settable wall-clock second value, mirroring Linux `KTIME_SEC_MAX`
@@ -85,12 +92,14 @@ impl ClockCorrelation {
 struct Timekeeper {
     correlation: ClockCorrelation,
     sleep_time: TimeSpan,
+    suspend: suspend::SuspendState,
 }
 
 impl Timekeeper {
     const INITIAL: Self = Self {
         correlation: ClockCorrelation::FALLBACK,
         sleep_time: TimeSpan::ZERO,
+        suspend: suspend::SuspendState::INITIAL,
     };
 
     fn snapshot(self, monotonic: MonotonicInstant) -> ClockSnapshot {
@@ -121,6 +130,21 @@ impl Timekeeper {
     }
 
     fn inject_sleeptime(
+        &mut self,
+        delta: TimeSpan,
+        monotonic: MonotonicInstant,
+    ) -> Result<(), SleepTimeError> {
+        if delta.is_zero() {
+            return Ok(());
+        }
+        if self.suspend.is_active() {
+            return Err(SleepTimeError::AccountingInProgress);
+        }
+        self.apply_sleeptime(delta, monotonic)
+    }
+
+    // Arithmetic shared by untracked injection and validated transaction commit.
+    fn apply_sleeptime(
         &mut self,
         delta: TimeSpan,
         monotonic: MonotonicInstant,
@@ -277,6 +301,8 @@ pub fn boottime() -> BoottimeInstant {
 /// The reason a confirmed sleep interval could not be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SleepTimeError {
+    /// A nonzero untracked injection would bypass an active suspend transaction.
+    AccountingInProgress,
     /// Cumulative sleep time or a clock value would exceed its supported range.
     OutOfRange,
     /// The monotonic sample precedes the recorded realtime correlation base.
@@ -305,7 +331,9 @@ pub enum SleepTimeError {
 /// time cannot represent the update, or realtime would reach the upper bound
 /// enforced by [`set_realtime_checked`]. Returns
 /// [`SleepTimeError::InvalidMonotonicBaseline`] if the monotonic sample precedes
-/// the recorded correlation base. Either error leaves state unchanged.
+/// the recorded correlation base. Returns [`SleepTimeError::AccountingInProgress`]
+/// for a nonzero injection while a suspend accounting transaction is active.
+/// Every error leaves state unchanged.
 pub fn inject_sleeptime(delta: TimeSpan) -> Result<(), SleepTimeError> {
     if delta.is_zero() {
         return Ok(());
