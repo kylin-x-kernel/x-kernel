@@ -111,12 +111,14 @@ pub fn init_network() {
     )]
     let lo_ip = Ipv4Cidr::new(Ipv4Address::new(127, 0, 0, 1), 8).unwrap();
     router
-        .add_ipv4_addr(Ipv4AddrEntry {
-            dev: lo_dev,
-            addr: lo_ip,
-            scope: ROUTE_SCOPE_HOST,
-            broadcast: None,
-        })
+        .add_ipv4_addr(
+            lo_dev,
+            Ipv4AddrEntry {
+                addr: lo_ip,
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            },
+        )
         .expect("loopback IPv4 address must fit the interface");
 
     if let Some(handle) = net_devs.pop() {
@@ -133,12 +135,14 @@ pub fn init_network() {
             .expect("Ethernet interface ID must be available");
 
         router
-            .add_ipv4_addr(Ipv4AddrEntry {
-                dev: eth0_dev,
-                addr: eth0_ip,
-                scope: ROUTE_SCOPE_UNIVERSE,
-                broadcast: None,
-            })
+            .add_ipv4_addr(
+                eth0_dev,
+                Ipv4AddrEntry {
+                    addr: eth0_ip,
+                    scope: ROUTE_SCOPE_UNIVERSE,
+                    broadcast: None,
+                },
+            )
             .expect("Ethernet IPv4 address must fit the interface");
         #[expect(
             clippy::unwrap_used,

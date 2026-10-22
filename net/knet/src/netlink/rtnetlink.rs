@@ -285,10 +285,10 @@ fn dump_addrs(request: &NlMsgHeader, payload: &[u8]) -> Vec<NetlinkPacket> {
     SERVICE
         .ipv4_addr_snapshots()
         .into_iter()
-        .filter(|snapshot| ifindex == 0 || snapshot.entry.dev.ifindex() as u32 == ifindex)
+        .filter(|snapshot| ifindex == 0 || snapshot.dev.ifindex() as u32 == ifindex)
         .map(|snapshot| NetlinkPacket {
             from: NetlinkAddr { pid: 0, groups: 0 },
-            data: build_addr_message(request, snapshot.entry, &snapshot.label),
+            data: build_addr_message(request, snapshot.dev, snapshot.entry, &snapshot.label),
         })
         .collect()
 }
@@ -390,7 +390,7 @@ pub(super) fn apply_link_update(request: LinkUpdateRequest) -> Result<(), LinuxE
 }
 
 pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxError> {
-    let entry = ipv4_addr_entry_from_request(request)?;
+    let (dev, entry) = ipv4_addr_entry_from_request(request)?;
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
@@ -400,16 +400,16 @@ pub(super) fn add_addr(request: AddrRequest, flags: u16) -> Result<(), LinuxErro
     } else {
         ExistingIpv4AddrAction::Reject
     };
-    SERVICE.add_ipv4_addr(entry, existing_action)
+    SERVICE.add_ipv4_addr(dev, entry, existing_action)
 }
 
 pub(super) fn del_addr(request: AddrRequest) -> Result<(), LinuxError> {
-    let entry = ipv4_addr_entry_from_request(request)?;
+    let (dev, entry) = ipv4_addr_entry_from_request(request)?;
     if !SERVICE.is_inited() {
         return Err(LinuxError::ENODEV);
     }
     let _network_config_guard = control::network_config_lock();
-    SERVICE.remove_ipv4_addr(entry)?;
+    SERVICE.remove_ipv4_addr(dev, entry.addr)?;
     Ok(())
 }
 
@@ -508,7 +508,9 @@ fn neighbor_update_from_request(request: NeighRequest) -> Result<NeighborUpdate,
     })
 }
 
-fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, LinuxError> {
+fn ipv4_addr_entry_from_request(
+    request: AddrRequest,
+) -> Result<(NetDeviceId, Ipv4AddrEntry), LinuxError> {
     let IpAddress::Ipv4(address) = request.address else {
         return Err(LinuxError::EAFNOSUPPORT);
     };
@@ -517,13 +519,15 @@ fn ipv4_addr_entry_from_request(request: AddrRequest) -> Result<Ipv4AddrEntry, L
     }
     let ifindex = i32::try_from(request.index).map_err(|_| LinuxError::ENODEV)?;
     let dev = NetDeviceId::new(ifindex).ok_or(LinuxError::ENODEV)?;
-    Ok(Ipv4AddrEntry {
+    Ok((
         dev,
-        addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len)
-            .ok_or(LinuxError::EINVAL)?,
-        scope: request.scope,
-        broadcast: None,
-    })
+        Ipv4AddrEntry {
+            addr: crate::ip::Ipv4Cidr::new(address.into(), request.prefix_len)
+                .ok_or(LinuxError::EINVAL)?,
+            scope: request.scope,
+            broadcast: None,
+        },
+    ))
 }
 
 fn same_route_key(route: Rule, request: &RouteRequest) -> bool {
@@ -838,14 +842,19 @@ fn build_link_message(request: &NlMsgHeader, link: LinkSnapshot, flags: u16) -> 
     build_nlmsg(RTM_NEWLINK, request.seq, flags, payload)
 }
 
-fn build_addr_message(request: &NlMsgHeader, addr: Ipv4AddrEntry, label: &str) -> Vec<u8> {
+fn build_addr_message(
+    request: &NlMsgHeader,
+    dev: NetDeviceId,
+    addr: Ipv4AddrEntry,
+    label: &str,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     IfAddrMsg {
         family: wire_route::FAMILY_IPV4,
         prefix_len: addr.addr.prefix_len(),
         flags: 0,
         scope: addr.scope,
-        index: addr.dev.ifindex() as u32,
+        index: dev.ifindex() as u32,
     }
     .write(&mut payload);
 

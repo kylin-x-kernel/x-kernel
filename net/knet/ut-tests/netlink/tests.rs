@@ -32,8 +32,7 @@ use crate::{
         LINK_FLAG_LOWER_UP, LINK_FLAG_MULTICAST, LINK_FLAG_RUNNING, LINK_FLAG_UP, LinkKind,
         LinkSendSnapshot, LinkSnapshot, NeighborUpdate, NetDevice, NetDeviceId, RxPoll,
     },
-    network::router::Rule,
-    network::interface_address::Ipv4AddrEntry,
+    network::{interface_address::Ipv4AddrEntry, router::Rule},
     router::Router,
     service::Service,
     socket::{
@@ -200,12 +199,14 @@ fn init_test_state() {
         ))
         .unwrap();
     router
-        .add_ipv4_addr(Ipv4AddrEntry {
-            dev: NetDeviceId::LOOPBACK,
-            addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
-            scope: wire_route::SCOPE_HOST,
-            broadcast: None,
-        })
+        .add_ipv4_addr(
+            NetDeviceId::LOOPBACK,
+            Ipv4AddrEntry {
+                addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(127, 0, 0, 1), 8),
+                scope: wire_route::SCOPE_HOST,
+                broadcast: None,
+            },
+        )
         .unwrap();
     router.table.add_rule(Rule::new(
         valid_ipv4_cidr(crate::ip::Ipv4Address::UNSPECIFIED, 0).into(),
@@ -216,12 +217,14 @@ fn init_test_state() {
         crate::ip::Ipv4Address::new(192, 168, 1, 2).into(),
     ));
     router
-        .add_ipv4_addr(Ipv4AddrEntry {
-            dev: NetDeviceId::new(2).unwrap(),
-            addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
-            scope: wire_route::SCOPE_UNIVERSE,
-            broadcast: None,
-        })
+        .add_ipv4_addr(
+            NetDeviceId::new(2).unwrap(),
+            Ipv4AddrEntry {
+                addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(192, 168, 1, 2), 24),
+                scope: wire_route::SCOPE_UNIVERSE,
+                broadcast: None,
+            },
+        )
         .unwrap();
     if SERVICE.is_inited() {
         SERVICE.replace_router_for_tests(router);
@@ -791,10 +794,9 @@ fn test_add_replace_and_delete_address() {
         SERVICE
             .ipv4_addr_entries()
             .iter()
-            .any(
-                |entry| entry.addr.address() == crate::ip::Ipv4Address::new(192, 168, 1, 99)
-                    && entry.dev == NetDeviceId::new(2).unwrap()
-            )
+            .any(|(dev, entry)| entry.addr.address()
+                == crate::ip::Ipv4Address::new(192, 168, 1, 99)
+                && *dev == NetDeviceId::new(2).unwrap())
     );
 
     let replaced = AddrRequest {
@@ -807,7 +809,7 @@ fn test_add_replace_and_delete_address() {
             .ipv4_addr_entries()
             .iter()
             .any(
-                |entry| entry.addr.address() == crate::ip::Ipv4Address::new(192, 168, 1, 99)
+                |(_, entry)| entry.addr.address() == crate::ip::Ipv4Address::new(192, 168, 1, 99)
                     && entry.scope == wire_route::SCOPE_UNIVERSE
             )
     );
@@ -817,10 +819,9 @@ fn test_add_replace_and_delete_address() {
         !SERVICE
             .ipv4_addr_entries()
             .iter()
-            .any(
-                |entry| entry.addr.address() == crate::ip::Ipv4Address::new(192, 168, 1, 99)
-                    && entry.dev == NetDeviceId::new(2).unwrap()
-            )
+            .any(|(dev, entry)| entry.addr.address()
+                == crate::ip::Ipv4Address::new(192, 168, 1, 99)
+                && *dev == NetDeviceId::new(2).unwrap())
     );
 }
 
@@ -880,7 +881,10 @@ fn test_add_and_delete_route() {
         prefsrc: Some(IpAddress::Ipv4(Ipv4Address::new(192, 168, 1, 2))),
     };
 
-    assert_eq!(add_route(req, NLM_F_CREATE | NLM_F_EXCL), Err(LinuxError::EEXIST));
+    assert_eq!(
+        add_route(req, NLM_F_CREATE | NLM_F_EXCL),
+        Err(LinuxError::EEXIST)
+    );
     // SIOCADDRT allows a configured route alongside the connected route.
     crate::control::add_ipv4_route(
         Some(core::net::Ipv4Addr::new(192, 168, 1, 0)),
@@ -890,15 +894,10 @@ fn test_add_and_delete_route() {
     )
     .unwrap();
     add_route(req, NLM_F_REPLACE).unwrap();
-    assert!(
-        SERVICE
-            .route_snapshot()
-            .iter()
-            .any(|route| {
-                route.filter.prefix_len() == req.dst_len
-                    && route.via == Some(crate::ip::Ipv4Address::new(192, 168, 1, 3).into())
-            })
-    );
+    assert!(SERVICE.route_snapshot().iter().any(|route| {
+        route.filter.prefix_len() == req.dst_len
+            && route.via == Some(crate::ip::Ipv4Address::new(192, 168, 1, 3).into())
+    }));
 
     del_route(req).unwrap();
     assert!(
@@ -1058,7 +1057,7 @@ fn test_newaddr_accepts_legacy_ipv4_address_flags() {
         SERVICE
             .ipv4_addr_entries()
             .iter()
-            .any(|entry| entry.addr.address() == address.into())
+            .any(|(_, entry)| entry.addr.address() == address.into())
     );
 }
 
@@ -1341,12 +1340,14 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
         ),
     ] {
         router
-            .add_ipv4_addr(Ipv4AddrEntry {
-                dev: NetDeviceId::new(dev + 1).unwrap(),
-                addr: valid_ipv4_cidr(addr, 24),
-                scope,
-                broadcast: None,
-            })
+            .add_ipv4_addr(
+                NetDeviceId::new(dev + 1).unwrap(),
+                Ipv4AddrEntry {
+                    addr: valid_ipv4_cidr(addr, 24),
+                    scope,
+                    broadcast: None,
+                },
+            )
             .unwrap();
     }
     if SERVICE.is_inited() {
@@ -1370,7 +1371,7 @@ fn test_interface_ipv4_addr_survives_middle_device_removal() {
 }
 
 #[def_test]
-fn test_removed_interface_id_is_not_reused() {
+fn test_device_removal_releases_address_capacity_and_preserves_surviving_ids() {
     let ethernet = |name: &str, model_id: u64| {
         TestDevice::new(LinkSnapshot {
             ifindex: 0,
@@ -1388,18 +1389,38 @@ fn test_removed_interface_id_is_not_reused() {
     let eth0 = router.add_device(Box::new(ethernet("eth0", 2))).unwrap();
     let eth1 = router.add_device(Box::new(ethernet("eth1", 3))).unwrap();
     let address = crate::ip::Ipv4Address::new(10, 0, 0, 2);
-    router
-        .add_ipv4_addr(Ipv4AddrEntry {
-            dev: eth1,
-            addr: valid_ipv4_cidr(address, 24),
-            scope: wire_route::SCOPE_UNIVERSE,
-            broadcast: None,
-        })
-        .unwrap();
+    let entry = Ipv4AddrEntry {
+        addr: valid_ipv4_cidr(address, 24),
+        scope: wire_route::SCOPE_UNIVERSE,
+        broadcast: None,
+    };
+    router.add_ipv4_addr(eth1, entry).unwrap();
+    // Fill the shared capacity using another device's independent address set.
+    for index in 1..smoltcp::config::IFACE_MAX_ADDR_COUNT {
+        router
+            .add_ipv4_addr(
+                eth0,
+                Ipv4AddrEntry {
+                    addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(192, 0, 2, index as u8), 32),
+                    ..entry
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(router.add_ipv4_addr(eth1, entry), Ok(()));
+    let extra = Ipv4AddrEntry {
+        addr: valid_ipv4_cidr(crate::ip::Ipv4Address::new(198, 51, 100, 1), 24),
+        ..entry
+    };
+    assert_eq!(router.add_ipv4_addr(eth1, extra), Err(LinuxError::ENOBUFS));
+    assert_eq!(router.ipv4_addr_entries(eth1), &[entry]);
 
     router
         .remove_device_by_model_id(kdevice::DeviceId::new(2))
         .unwrap();
+    assert_eq!(router.local_ipv4_addrs(), vec![entry.addr]);
+    assert!(router.devices.ipv4(eth0).is_none());
+    assert_eq!(router.add_ipv4_addr(eth0, extra), Err(LinuxError::ENODEV));
     let destination = crate::ip::IpAddress::Ipv4(crate::ip::Ipv4Address::new(10, 0, 0, 3));
     assert_eq!(
         router.output_route_source(&destination, eth1.ifindex()),
@@ -1413,6 +1434,20 @@ fn test_removed_interface_id_is_not_reused() {
     let eth2 = router.add_device(Box::new(ethernet("eth2", 4))).unwrap();
     assert_eq!(eth2.ifindex(), 4);
     assert!(!router.devices.has_device(eth0.ifindex()));
+    assert!(router.ipv4_addr_entries(eth2).is_empty());
+    assert_eq!(router.add_ipv4_addr(eth2, entry), Ok(()));
+    assert_eq!(router.ipv4_addr_entries(eth1), &[entry]);
+    router
+        .remove_device_by_model_id(kdevice::DeviceId::new(3))
+        .unwrap();
+    assert!(router.has_ipv4_address(address));
+    assert_eq!(router.ipv4_addr_entries(eth2), &[entry]);
+    router
+        .remove_device_by_model_id(kdevice::DeviceId::new(4))
+        .unwrap();
+    assert!(!router.has_ipv4_address(address));
+    assert!(router.local_ipv4_addrs().is_empty());
+    assert!(router.table.snapshot().is_empty());
 }
 
 #[def_test(serial)]
@@ -1495,11 +1530,11 @@ fn test_route_socket_processes_same_class_mutation_batch() {
     assert!(queue.pop_front().is_none());
     drop(queue);
 
-    assert!(SERVICE.ipv4_addr_entries().iter().any(|entry| {
-        entry.addr.address() == first_addr.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    assert!(SERVICE.ipv4_addr_entries().iter().any(|(dev, entry)| {
+        entry.addr.address() == first_addr.into() && *dev == NetDeviceId::new(2).unwrap()
     }));
-    assert!(SERVICE.ipv4_addr_entries().iter().any(|entry| {
-        entry.addr.address() == second_addr.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    assert!(SERVICE.ipv4_addr_entries().iter().any(|(dev, entry)| {
+        entry.addr.address() == second_addr.into() && *dev == NetDeviceId::new(2).unwrap()
     }));
 }
 
@@ -1556,8 +1591,8 @@ fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
         Err(LinuxError::EOPNOTSUPP.into())
     );
     assert!(socket.inner.rx_queue.lock().is_empty());
-    assert!(!SERVICE.ipv4_addr_entries().iter().any(|entry| {
-        entry.addr.address() == address.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    assert!(!SERVICE.ipv4_addr_entries().iter().any(|(dev, entry)| {
+        entry.addr.address() == address.into() && *dev == NetDeviceId::new(2).unwrap()
     }));
 }
 
@@ -1586,8 +1621,8 @@ fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
         Ok(request.len())
     );
     assert!(socket.inner.rx_queue.lock().is_empty());
-    assert!(!SERVICE.ipv4_addr_entries().iter().any(|entry| {
-        entry.addr.address() == address.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    assert!(!SERVICE.ipv4_addr_entries().iter().any(|(dev, entry)| {
+        entry.addr.address() == address.into() && *dev == NetDeviceId::new(2).unwrap()
     }));
 }
 
@@ -1660,7 +1695,7 @@ fn test_mutation_queue_reservation_failure_preserves_network_state() {
         ),
         Err(LinuxError::ENOBUFS.into())
     );
-    assert!(!SERVICE.ipv4_addr_entries().iter().any(|entry| {
-        entry.addr.address() == address.into() && entry.dev == NetDeviceId::new(2).unwrap()
+    assert!(!SERVICE.ipv4_addr_entries().iter().any(|(dev, entry)| {
+        entry.addr.address() == address.into() && *dev == NetDeviceId::new(2).unwrap()
     }));
 }

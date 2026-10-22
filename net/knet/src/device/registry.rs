@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Registered interfaces, link configuration, and aggregate protocol-stack MTU.
+//! Registered interfaces, their protocol configuration, and aggregate stack MTU.
 
 use alloc::{boxed::Box, vec::Vec};
 
@@ -12,18 +12,21 @@ use kerrno::LinuxError;
 use crate::{
     consts::STANDARD_MTU,
     device::{LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice, NetDeviceId},
+    network::interface_address::{Ipv4AddrEntry, Ipv4AddressSet},
 };
 
 struct DeviceEntry {
     id: NetDeviceId,
     device: Box<dyn NetDevice>,
+    ipv4: Ipv4AddressSet,
 }
 
-/// Owns registered devices and validates collection-wide link configuration.
+/// Owns devices and their IPv4 configuration, validating link configuration.
 ///
 /// Maintains `slots[&entries[index].id] == index` and refreshes the aggregate
 /// MTU on registration, removal, and successful MTU updates. Callers serialize
-/// registry access with the enclosing Router mutex.
+/// registry access with the enclosing Router mutex. Removing a device also drops
+/// its address set; Router reconciles routes and pending packets in that critical section.
 pub(crate) struct DeviceRegistry {
     entries: Vec<DeviceEntry>,
     slots: HashMap<NetDeviceId, usize>,
@@ -161,7 +164,11 @@ impl DeviceRegistry {
             id
         };
         let slot = self.entries.len();
-        self.entries.push(DeviceEntry { id, device });
+        self.entries.push(DeviceEntry {
+            id,
+            device,
+            ipv4: Ipv4AddressSet::default(),
+        });
         self.slots.insert(id, slot);
         self.recompute_effective_mtu();
         Ok(id)
@@ -206,6 +213,40 @@ impl DeviceRegistry {
     pub(crate) fn get_mut_by_slot(&mut self, slot: usize) -> Option<&mut (dyn NetDevice + '_)> {
         let entry = self.entries.get_mut(slot)?;
         Some(entry.device.as_mut())
+    }
+
+    /// Refreshes the device projections after an address or device mutation.
+    pub(crate) fn sync_ipv4_addrs(&mut self) {
+        let local_addrs: Vec<_> = self
+            .iter_ipv4_addrs()
+            .map(|(_, entry)| entry.addr)
+            .collect();
+        for entry in &mut self.entries {
+            let assigned_addrs: Vec<_> =
+                entry.ipv4.as_slice().iter().map(|addr| addr.addr).collect();
+            entry.device.set_ipv4_addrs(&assigned_addrs, &local_addrs);
+        }
+    }
+
+    pub(crate) fn ipv4(&self, id: NetDeviceId) -> Option<&Ipv4AddressSet> {
+        Some(&self.entries[self.slot(id)?].ipv4)
+    }
+
+    pub(crate) fn ipv4_mut(&mut self, id: NetDeviceId) -> Option<&mut Ipv4AddressSet> {
+        let slot = self.slot(id)?;
+        Some(&mut self.entries[slot].ipv4)
+    }
+
+    /// Iterates by device registration order, then by device-local address order.
+    /// Cross-device address insertion order is not retained.
+    pub(crate) fn iter_ipv4_addrs(&self) -> impl Iterator<Item = (NetDeviceId, &Ipv4AddrEntry)> {
+        self.entries.iter().flat_map(|device| {
+            device
+                .ipv4
+                .as_slice()
+                .iter()
+                .map(move |entry| (device.id, entry))
+        })
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &dyn NetDevice> {

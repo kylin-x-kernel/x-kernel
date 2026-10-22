@@ -162,12 +162,14 @@ fn poll_round_dispatches_tx_when_due_ipv4_expiration_lock_is_contended() {
     let mut router = Router::new();
     let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     router
-        .add_ipv4_addr(Ipv4AddrEntry {
-            dev: loopback,
-            addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
-            scope: ROUTE_SCOPE_HOST,
-            broadcast: None,
-        })
+        .add_ipv4_addr(
+            loopback,
+            Ipv4AddrEntry {
+                addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            },
+        )
         .unwrap();
     let packet =
         ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
@@ -193,12 +195,14 @@ fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
     let mut router = Router::new();
     let loopback = router.add_device(Box::new(LoopbackDevice::new())).unwrap();
     router
-        .add_ipv4_addr(Ipv4AddrEntry {
-            dev: loopback,
-            addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
-            scope: ROUTE_SCOPE_HOST,
-            broadcast: None,
-        })
+        .add_ipv4_addr(
+            loopback,
+            Ipv4AddrEntry {
+                addr: Ipv4Cidr::new(loopback_addr, 8).unwrap(),
+                scope: ROUTE_SCOPE_HOST,
+                broadcast: None,
+            },
+        )
         .unwrap();
     let packet =
         ipv4::build_ipv4_packet(loopback_addr, loopback_addr, ipv4::PROTOCOL_ICMP, 64, &[])
@@ -215,11 +219,8 @@ fn tx_dispatch_exposes_loopback_rx_in_the_same_round() {
         round_started_at,
     );
     let mut packets = Vec::new();
-    let rx_progress = router.drain_rx_budgeted_into(
-        round_started_at,
-        TEST_POLL_BUDGET.rx_packets,
-        &mut packets,
-    );
+    let rx_progress =
+        router.drain_rx_budgeted_into(round_started_at, TEST_POLL_BUDGET.rx_packets, &mut packets);
 
     assert_eq!(tx_progress.packet_count, 1);
     assert!(tx_progress.capacity_poll.is_some());

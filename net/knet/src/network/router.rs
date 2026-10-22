@@ -18,7 +18,6 @@ pub(crate) use crate::netlink::{
 use crate::{
     device::{DeviceRegistry, LinkKind, NetDeviceId},
     ip::{IpAddress, IpCidr, Ipv4Cidr},
-    network::interface_address::Ipv4AddrEntry,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,9 +283,8 @@ impl RouteTable {
         &mut self,
         rule: Rule,
         devices: &DeviceRegistry,
-        addrs: &[Ipv4AddrEntry],
     ) -> Result<(), LinuxError> {
-        Self::validate_configured_route(rule, devices, addrs)?;
+        Self::validate_configured_route(rule, devices)?;
         self.add_rule(rule);
         Ok(())
     }
@@ -298,19 +296,14 @@ impl RouteTable {
         existing: Rule,
         replacement: Rule,
         devices: &DeviceRegistry,
-        addrs: &[Ipv4AddrEntry],
     ) -> Result<(), LinuxError> {
-        Self::validate_configured_route(replacement, devices, addrs)?;
+        Self::validate_configured_route(replacement, devices)?;
         self.remove_exact_rule(existing);
         self.add_rule(replacement);
         Ok(())
     }
 
-    fn validate_configured_route(
-        rule: Rule,
-        devices: &DeviceRegistry,
-        addrs: &[Ipv4AddrEntry],
-    ) -> Result<(), LinuxError> {
+    fn validate_configured_route(rule: Rule, devices: &DeviceRegistry) -> Result<(), LinuxError> {
         if !rule.is_configured() {
             return Err(LinuxError::EINVAL);
         }
@@ -320,11 +313,9 @@ impl RouteTable {
         if !matches!(rule.filter, IpCidr::Ipv4(_)) {
             return Err(LinuxError::EAFNOSUPPORT);
         }
-        if devices.slot(rule.dev).is_none() {
-            return Err(LinuxError::ENODEV);
-        }
+        let addrs = devices.ipv4(rule.dev).ok_or(LinuxError::ENODEV)?;
         if let Some(prefsrc) = rule.preferred_source()
-            && !matches!(prefsrc, IpAddress::Ipv4(address) if addrs.iter().any(|entry| entry.addr.address() == address))
+            && !matches!(prefsrc, IpAddress::Ipv4(address) if devices.iter_ipv4_addrs().any(|(_, entry)| entry.addr.address() == address))
         {
             return Err(LinuxError::EINVAL);
         }
@@ -334,14 +325,16 @@ impl RouteTable {
             };
             if !gateway.is_unicast()
                 || addrs
+                    .as_slice()
                     .iter()
-                    .any(|entry| entry.dev == rule.dev && entry.addr.is_directed_broadcast(gateway))
+                    .any(|entry| entry.addr.is_directed_broadcast(gateway))
             {
                 return Err(LinuxError::EINVAL);
             }
             if !addrs
+                .as_slice()
                 .iter()
-                .any(|entry| entry.dev == rule.dev && entry.addr.contains_addr(&gateway.into()))
+                .any(|entry| entry.addr.contains_addr(&gateway.into()))
             {
                 return Err(LinuxError::ENETUNREACH);
             }
@@ -353,21 +346,16 @@ impl RouteTable {
     ///
     /// Every address must refer to a registered device. Callers retain the
     /// enclosing Router lock across address mutation and route refresh. The
-    /// slice preserves address order within each device to select the first
+    /// registry preserves address order within each device to select the first
     /// supporting source for shared routes. New identities receive new orders.
     /// Existing route identities retain their order even if their source changes.
-    pub(crate) fn sync_ipv4_address_routes(
-        &mut self,
-        devices: &DeviceRegistry,
-        addrs: &[Ipv4AddrEntry],
-    ) {
+    pub(crate) fn sync_ipv4_address_routes(&mut self, devices: &DeviceRegistry) {
         let loopback_dev = devices
             .iter()
             .position(|device| device.link_kind() == LinkKind::Loopback)
             .map(|slot| devices.id_at(slot));
         let mut desired = Vec::new();
-        for entry in addrs {
-            let dev = entry.dev;
+        for (dev, entry) in devices.iter_ipv4_addrs() {
             if let Some(loopback_dev) = loopback_dev {
                 Self::push_address_route(
                     &mut desired,

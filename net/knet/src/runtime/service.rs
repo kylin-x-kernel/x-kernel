@@ -793,8 +793,16 @@ impl Service {
     #[cfg(unittest)]
     pub(crate) fn ipv4_addr_entries(
         &self,
-    ) -> Vec<crate::network::interface_address::Ipv4AddrEntry> {
-        self.router.lock().ipv4_addr_entries().to_vec()
+    ) -> Vec<(
+        NetDeviceId,
+        crate::network::interface_address::Ipv4AddrEntry,
+    )> {
+        self.router
+            .lock()
+            .ipv4_addr_snapshots()
+            .into_iter()
+            .map(|snapshot| (snapshot.dev, snapshot.entry))
+            .collect()
     }
 
     pub(crate) fn interface_ipv4_addr(
@@ -806,21 +814,19 @@ impl Service {
 
     pub(crate) fn add_ipv4_addr(
         &self,
+        dev: NetDeviceId,
         entry: crate::network::interface_address::Ipv4AddrEntry,
         existing_action: ExistingIpv4AddrAction,
     ) -> Result<(), LinuxError> {
         let mut router = self.router.lock();
-        let is_existing = router
-            .ipv4_addr_entries()
-            .iter()
-            .any(|existing| existing.dev == entry.dev && existing.addr == entry.addr);
+        let is_existing = router.has_ipv4_addr_entry(dev, entry.addr);
         if is_existing {
             return match existing_action {
                 ExistingIpv4AddrAction::Keep => Ok(()),
                 ExistingIpv4AddrAction::Reject => Err(LinuxError::EEXIST),
             };
         }
-        router.add_ipv4_addr(entry)?;
+        router.add_ipv4_addr(dev, entry)?;
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(())
@@ -828,13 +834,14 @@ impl Service {
 
     pub(crate) fn remove_ipv4_addr(
         &self,
-        entry: crate::network::interface_address::Ipv4AddrEntry,
+        dev: NetDeviceId,
+        addr: crate::ip::Ipv4Cidr,
     ) -> Result<bool, LinuxError> {
         let mut router = self.router.lock();
-        if !router.remove_ipv4_addr(entry) {
+        if !router.remove_ipv4_addr(dev, addr) {
             return Err(LinuxError::EADDRNOTAVAIL);
         }
-        let is_last_owner = !router.has_ipv4_address(entry.addr.address());
+        let is_last_owner = !router.has_ipv4_address(addr.address());
         let local_ipv4_addrs = router.local_ipv4_addrs();
         self.replace_local_ipv4_views(&local_ipv4_addrs);
         Ok(is_last_owner)

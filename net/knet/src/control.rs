@@ -276,7 +276,7 @@ fn ipv4_entries_for_device(dev: NetDeviceId) -> Vec<Ipv4AddrEntry> {
     SERVICE
         .ipv4_addr_snapshots()
         .into_iter()
-        .filter(|snapshot| snapshot.entry.dev == dev)
+        .filter(|snapshot| snapshot.dev == dev)
         .map(|snapshot| snapshot.entry)
         .collect()
 }
