@@ -789,3 +789,343 @@ fn block_read_failure_prevents_read_modify_write() {
     assert_eq!(fixture.backend.writes.load(Relaxed), 0);
     assert!(fixture.backend.storage.lock().iter().all(|&b| b == 0x35));
 }
+
+struct TestBlkdevInode {
+    rdev: DeviceId,
+}
+
+impl InodeOperations for TestBlkdevInode {
+    fn getattr(
+        &self,
+        _idmap: &MountIdmap,
+        _path: Option<&crate::Path>,
+        _request_mask: GetattrRequestMask,
+        _query_flags: GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        Ok(Metadata {
+            device: 0,
+            inode: 8,
+            nlink: 1,
+            mode: Umode::new(
+                NodeType::BlockDevice,
+                NodePermission::from_bits_truncate(0o666),
+            ),
+            uid: 0,
+            gid: 0,
+            size: 0,
+            block_size: 0,
+            blocks: 0,
+            rdev: self.rdev,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            ctime: SystemTime::UNIX_EPOCH,
+        })
+    }
+
+    fn setattr(
+        &self,
+        _idmap: &MountIdmap,
+        _dentry: &crate::Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        Ok(update)
+    }
+}
+
+const SEEK_SET: i32 = 0;
+const SEEK_END: i32 = 2;
+
+fn open_block_device_file(rdev: DeviceId) -> VfsResult<(Arc<VfsFile>, crate::Path)> {
+    open_block_device_file_with(rdev, crate::OpenFlags::READ_WRITE)
+}
+
+fn open_block_device_file_with(
+    rdev: DeviceId,
+    flags: crate::OpenFlags,
+) -> VfsResult<(Arc<VfsFile>, crate::Path)> {
+    let init = VfsInodeInit::new(
+        crate::get_next_ino(),
+        0,
+        Umode::new(
+            NodeType::BlockDevice,
+            NodePermission::from_bits_truncate(0o666),
+        ),
+    )
+    .with_owner_links_and_rdev(0, 0, 1, rdev);
+    let inode = VfsInode::new_special(
+        Arc::new(TestBlkdevInode { rdev }),
+        NodeFlags::empty(),
+        init,
+    );
+    let mount = crate::Mount::new_root(&crate::nullfs::new_superblock());
+    let dentry = crate::Dentry::new_file_from_inode(inode, None, String::from("blockdev"));
+    let path = crate::Path::new(mount, dentry);
+    let stat_path = path.clone();
+    let file = VfsFileBuilder::allocate(flags, kcred::initial_cred())?.vfs_open(path)?;
+    Ok((file, stat_path))
+}
+
+#[def_test(serial)]
+fn block_device_file_reports_live_capacity() {
+    const BLOCK_SIZE: usize = 512;
+    const BLOCKS: usize = 4;
+    let backend = Arc::new(MemoryBlockDevice {
+        storage: Arc::new(Mutex::new(vec![0u8; BLOCK_SIZE * BLOCKS])),
+        block_size: BLOCK_SIZE,
+        flushes: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        reads: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        writes: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        fail_io: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        fail_after_write_bytes: core::sync::atomic::AtomicUsize::new(usize::MAX),
+    });
+    let disk = block::Gendisk::alloc(
+        String::from("kvfs-size-test"),
+        245,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .expect("valid size test disk");
+    let device = block::add_disk(disk).expect("publish size test disk");
+
+    let rdev = device.disk().device_number();
+    let (file, stat_path) = open_block_device_file(rdev).expect("open block device");
+
+    // Regression for the fallocate-clamp regression: the opened file must
+    // expose the device capacity (the `blkdev_llseek` view), not the special
+    // node's zero size.
+    assert_eq!(file.size(), (BLOCK_SIZE * BLOCKS) as u64);
+    // The node metadata stays zero-sized on purpose: Linux device nodes also
+    // stat as zero while `SEEK_END` reports the capacity through the opened
+    // file. getattr must NOT report the capacity.
+    assert_eq!(file.inode().size(), 0);
+    assert_eq!(stat_path.getattr().unwrap().size, 0);
+
+    // SEEK_END is the capacity view (`blkdev_llseek` reads bd_inode).
+    assert_eq!(file.llseek(0, SEEK_END).unwrap(), (BLOCK_SIZE * BLOCKS) as u64);
+    // Seeks are bounded by the capacity (`fixed_size_llseek` in
+    // `blkdev_llseek`): at-end allowed, past-end EINVAL.
+    assert_eq!(file.llseek((BLOCK_SIZE * BLOCKS) as i64, SEEK_SET).unwrap(), (BLOCK_SIZE * BLOCKS) as u64);
+    assert_eq!(
+        LinuxError::from(
+            file.llseek((BLOCK_SIZE * BLOCKS + 1) as i64, SEEK_SET)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+
+    // Live view: capacity changes after open (loop attach/detach style) are
+    // visible without reopening; the file holds no snapshot.
+    device
+        .set_capacity(((BLOCK_SIZE * 8) / 512) as u64)
+        .expect("resize test device");
+    // Keep the fixture self-consistent: the backend storage grows with the
+    // announced capacity (pattern-filled, like the initial fill).
+    backend.storage.lock().resize(BLOCK_SIZE * 8, 0x35);
+    assert_eq!(file.size(), (BLOCK_SIZE * 8) as u64);
+    assert_eq!(stat_path.getattr().unwrap().size, 0);
+    // The seek bound follows the live capacity.
+    assert_eq!(
+        file.llseek((BLOCK_SIZE * 8) as i64, SEEK_SET).unwrap(),
+        (BLOCK_SIZE * 8) as u64
+    );
+    assert_eq!(
+        LinuxError::from(
+            file.llseek((BLOCK_SIZE * 8 + 1) as i64, SEEK_SET)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+
+    // Append writes keep the caller's position on block devices
+    // (`blkdev_write_iter` writes at ki_pos): with O_APPEND and f_pos 0, the
+    // data lands at the device start, not at the capacity end.
+    let append = crate::OpenFlags::READ_WRITE | crate::OpenFlags::APPEND;
+    let (append_file, _append_stat) =
+        open_block_device_file_with(rdev, append).expect("open append test device");
+    let payload: Vec<u8> = (0..64u8).collect();
+    let mut pos = 0u64;
+    let written = append_file.write_from(&payload, &mut pos).expect("append write");
+    assert_eq!(written, payload.len());
+    {
+        let storage = backend.storage.lock();
+        assert_eq!(&storage[..payload.len()], &payload[..]);
+        // The capacity-end tail stays pattern-filled: the append did NOT
+        // relocate to the capacity end.
+        let tail = BLOCK_SIZE * 8;
+        assert!(storage[tail - payload.len()..tail].iter().all(|&b| b == 0x35));
+    }
+
+    block::del_gendisk(device.disk().device_number()).expect("remove size test disk");
+}
+
+#[def_test(serial)]
+fn block_device_fallocate_validates_mode_capacity_and_alignment() {
+    const BLOCK_SIZE: usize = 512;
+    const BLOCKS: usize = 8;
+    use FallocateFlags as F;
+
+    let capacity = (BLOCK_SIZE * BLOCKS) as u64;
+
+    let backend = Arc::new(MemoryBlockDevice {
+        storage: Arc::new(Mutex::new(vec![0x35u8; BLOCK_SIZE * BLOCKS])),
+        block_size: BLOCK_SIZE,
+        flushes: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        reads: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        writes: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        fail_io: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        fail_after_write_bytes: core::sync::atomic::AtomicUsize::new(usize::MAX),
+    });
+    let disk = block::Gendisk::alloc(
+        String::from("kvfs-fallocate-test"),
+        246,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .expect("valid fallocate test disk");
+    let device = block::add_disk(disk).expect("publish fallocate test disk");
+    let rdev = device.disk().device_number();
+    let (file, _stat_path) = open_block_device_file(rdev).expect("open fallocate test device");
+
+    // Aligned ZERO_RANGE zeroes exactly the range and nothing else.
+    file.fallocate(F::ZERO_RANGE, 512, 1024)
+        .expect("aligned zero range");
+    {
+        let storage = backend.storage.lock();
+        assert!(storage[..512].iter().all(|&b| b == 0x35));
+        assert!(storage[512..1536].iter().all(|&b| b == 0));
+        assert!(storage[1536..].iter().all(|&b| b == 0x35));
+    }
+
+    // Unaligned ranges are rejected before any media write (Linux
+    // blkdev_fallocate requires logical-block alignment).
+    let before = backend.storage.lock().clone();
+    assert_eq!(
+        LinuxError::from(file.fallocate(F::ZERO_RANGE, 1, 1).unwrap_err()),
+        LinuxError::EINVAL
+    );
+    // A KEEP_SIZE clamp only tolerates the capacity's partial trailing
+    // block: an unaligned start is EINVAL regardless of KEEP_SIZE, and an
+    // unaligned length without an actual clamp is EINVAL, never a silent
+    // floor.
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::ZERO_RANGE | F::KEEP_SIZE, 1, capacity)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::ZERO_RANGE | F::KEEP_SIZE, 0, 513)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+    // Order matches blkdev_fallocate: alignment first — an unaligned punch
+    // answers EINVAL — then the capability gate, where an aligned punch on
+    // a backend without deallocation offload answers EOPNOTSUPP.
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::PUNCH_HOLE | F::KEEP_SIZE, 512, 511)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::PUNCH_HOLE | F::KEEP_SIZE, 512, 512)
+                .unwrap_err()
+        ),
+        LinuxError::EOPNOTSUPP
+    );
+    assert_eq!(*backend.storage.lock(), before);
+
+    // Ranges beyond the capacity need KEEP_SIZE (which clamps), else EINVAL.
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::ZERO_RANGE, capacity - 512, 4096)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+    file.fallocate(F::ZERO_RANGE | F::KEEP_SIZE, capacity - 512, 4096)
+    .expect("clamped keep-size range");
+    {
+        let storage = backend.storage.lock();
+        assert!(storage[capacity as usize - 512..].iter().all(|&b| b == 0));
+    }
+
+    // Punch hole carries deallocation semantics (Linux passes
+    // BLKDEV_ZERO_NOFALLBACK there): a plain read/write backend provides no
+    // deallocation operation, so it must fail with EOPNOTSUPP and leave the
+    // medium untouched instead of succeeding through a software zero-fill.
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::PUNCH_HOLE | F::KEEP_SIZE, 1536, 512)
+                .unwrap_err()
+        ),
+        LinuxError::EOPNOTSUPP
+    );
+    assert!(backend.storage.lock()[1536..2048].iter().all(|&b| b == 0x35));
+
+    // Unsupported modes fail without writing: pure allocate and any
+    // unlisted flag combination are EOPNOTSUPP like blkdev_fallocate.
+    assert_eq!(
+        LinuxError::from(file.fallocate(F::empty(), 512, 512).unwrap_err()),
+        LinuxError::EOPNOTSUPP
+    );
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::COLLAPSE_RANGE, 512, 512)
+                .unwrap_err()
+        ),
+        LinuxError::EOPNOTSUPP
+    );
+    {
+        // Zeroed: [512,1536) by the aligned call and [3584,4096) by the
+        // clamped keep-size call; the failed punch hole left [1536,2048)
+        // pattern-filled.
+        let storage = backend.storage.lock();
+        assert!(storage[..512].iter().all(|&b| b == 0x35));
+        assert!(storage[512..1536].iter().all(|&b| b == 0));
+        assert!(storage[1536..3584].iter().all(|&b| b == 0x35));
+        assert!(storage[3584..].iter().all(|&b| b == 0));
+    }
+
+    // A capacity that is not a multiple of the logical block size is the
+    // only shape that reaches the KEEP_SIZE floor branch: the clamp leaves
+    // a partial trailing block, which is floored to the aligned prefix
+    // instead of failing the whole request.
+    let fixture = BlockIoFixture::new(4096);
+    fixture
+        .device
+        .set_capacity(9)
+        .expect("resize to non-multiple capacity");
+    let capacity = 9 * 512u64;
+    let (file, _stat) = open_block_device_file(
+        fixture.device.disk().device_number(),
+    )
+    .expect("open non-multiple test device");
+    file.fallocate(F::ZERO_RANGE | F::KEEP_SIZE, 0, capacity + 1)
+        .expect("floor to aligned prefix");
+    {
+        let storage = fixture.backend.storage.lock();
+        assert!(storage[..4096].iter().all(|&b| b == 0));
+        assert!(storage[4096..capacity as usize].iter().all(|&b| b == 0x35));
+    }
+    // When flooring leaves no full block, the request cannot be honored.
+    assert_eq!(
+        LinuxError::from(
+            file.fallocate(F::ZERO_RANGE | F::KEEP_SIZE, 4096, 1024)
+                .unwrap_err()
+        ),
+        LinuxError::EINVAL
+    );
+    assert!(fixture.backend.storage.lock()[4096..capacity as usize]
+        .iter()
+        .all(|&b| b == 0x35));
+
+    block::del_gendisk(device.disk().device_number()).expect("remove fallocate test disk");
+}

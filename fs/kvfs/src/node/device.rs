@@ -4,7 +4,7 @@
 
 //! Device file operations trait and memory mapping callback.
 
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use block::{BlockDevice, BlockOpenMode, DriverError};
@@ -15,8 +15,8 @@ use memaddr::PhysAddrRange;
 use osvm::VirtPtr;
 
 use crate::{
-    DeviceId, FMode, FileOperations, Mutex, NodeFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode,
-    VfsResult,
+    DeviceId, FMode, FallocateFlags, FileOperations, Mutex, NodeFlags, VfsError, VfsFile,
+    VfsFileBuilder, VfsInode, VfsResult,
 };
 
 mod registration;
@@ -304,6 +304,16 @@ impl FileOperations for DefaultBlkdevFileOperations {
         DeviceFileOps::ioctl(device.as_ref(), file, cred, cmd, arg)
     }
 
+    fn fallocate(
+        &self,
+        file: &VfsFile,
+        flags: FallocateFlags,
+        offset: u64,
+        len: u64,
+    ) -> VfsResult<()> {
+        block_device_fallocate(file_block_device(file)?.as_ref(), flags, offset, len)
+    }
+
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         file_block_device(file)?.mmap(file, mapper)
     }
@@ -455,6 +465,91 @@ fn write_block_device(device: &BlockDevice, buf: &[u8], offset: u64) -> VfsResul
     }
 
     Ok(length)
+}
+
+/// Mirrors Linux `blkdev_fallocate` (block/fops.c): only the zeroing modes
+/// are supported, and the mode mask, capacity and logical-block alignment are
+/// all validated before any media write. Generic file emulation must not run
+/// against raw devices — an unaligned range is `EINVAL`, never a silent
+/// partial-block write.
+fn block_device_fallocate(
+    device: &BlockDevice,
+    flags: FallocateFlags,
+    start: u64,
+    mut len: u64,
+) -> VfsResult<()> {
+    use FallocateFlags as F;
+
+    const ZERO_CHUNK_BYTES: usize = 64 * 1024;
+    let supported = F::KEEP_SIZE | F::PUNCH_HOLE | F::ZERO_RANGE;
+    if !supported.contains(flags) {
+        return Err(VfsError::from(LinuxError::EOPNOTSUPP));
+    }
+    let capacity = device.size();
+    if start >= capacity {
+        return Err(VfsError::from(LinuxError::EINVAL));
+    }
+    let requested_end = start
+        .checked_add(len)
+        .ok_or_else(|| VfsError::from(LinuxError::EFBIG))?;
+    let mut clamped = false;
+    if requested_end > capacity {
+        if !flags.contains(F::KEEP_SIZE) {
+            return Err(VfsError::from(LinuxError::EINVAL));
+        }
+        len = capacity - start;
+        clamped = true;
+    }
+    let block_size = device.block_size() as u64;
+    if block_size == 0 {
+        return Err(VfsError::from(LinuxError::ENXIO));
+    }
+    if (start | len) & (block_size - 1) != 0 {
+        // Unaligned requests are EINVAL. The single exception is a KEEP_SIZE
+        // clamp against a capacity that is not a logical-block multiple:
+        // zero-to-end keeps the aligned prefix of the clamped remainder,
+        // provided the start itself is aligned and at least one full block
+        // remains after flooring. Everything else — an unaligned start, or
+        // an unaligned length that was never clamped — stays EINVAL instead
+        // of silently rewriting partial blocks.
+        if !clamped || start & (block_size - 1) != 0 {
+            return Err(VfsError::from(LinuxError::EINVAL));
+        }
+        len -= len & (block_size - 1);
+        if len == 0 {
+            return Err(VfsError::from(LinuxError::EINVAL));
+        }
+    }
+    // Only the zeroing modes reach the media (Linux switch in
+    // blkdev_fallocate). ZERO_RANGE maps to BLKDEV_ZERO_NOUNMAP: a plain
+    // write-zeroes fallback is allowed, which is what the loop below does.
+    //
+    // PUNCH_HOLE maps to BLKDEV_ZERO_NOFALLBACK: Linux succeeds when the
+    // device provides write-zeroes/discard offload and fails with EOPNOTSUPP
+    // only otherwise. The `BlockDeviceOperations` contract currently defines
+    // neither operation, so this kernel deliberately narrows punch hole to
+    // EOPNOTSUPP for every backend — reported as a missing capability, not
+    // as Linux semantics — rather than silently rewriting the medium with
+    // software zeros.
+    let is_zero_range = flags == F::ZERO_RANGE || flags == F::ZERO_RANGE | F::KEEP_SIZE;
+    if !is_zero_range {
+        return Err(VfsError::from(LinuxError::EOPNOTSUPP));
+    }
+
+    let zeros = vec![0u8; ZERO_CHUNK_BYTES];
+    let end = start + len;
+    let mut pos = start;
+    while pos < end {
+        let chunk = (end - pos).min(zeros.len() as u64) as usize;
+        // Honor short writes: a concurrent capacity change (loop detach)
+        // must surface as an error instead of reporting a full zeroing.
+        let written = write_block_device(device, &zeros[..chunk], pos)?;
+        if written == 0 {
+            return Err(KError::Io);
+        }
+        pos += written as u64;
+    }
+    Ok(())
 }
 
 impl DeviceFileOps for BlockDevice {

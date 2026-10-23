@@ -22,8 +22,8 @@ use log::warn;
 use pagecache::{FolioGuard, PageIndex};
 
 use crate::{
-    AddressSpace, DirContext, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard, NodeFlags,
-    NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
+    AddressSpace, DirContext, FallocateFlags, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard,
+    NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
 };
 
 /// A captured, event-filtered wait source independent of current file readiness.
@@ -201,7 +201,10 @@ pub trait FileOperations: Send + Sync + 'static {
         let base = match whence {
             SEEK_SET => 0,
             SEEK_CUR => *position as i64,
-            SEEK_END => file.inode().size() as i64,
+            // The capacity view: `blkdev_llseek` reads `bd_inode`'s size
+            // (block/fops.c:533), unlike record locks which read the node
+            // inode (locks.c:465) — the two SEEK_END bases differ by design.
+            SEEK_END => file.size() as i64,
             _ => return Err(VfsError::InvalidInput),
         };
         let new_offset = base.checked_add(offset).ok_or(VfsError::InvalidInput)?;
@@ -209,6 +212,12 @@ pub trait FileOperations: Send + Sync + 'static {
             return Err(VfsError::InvalidInput);
         }
         let new_offset = new_offset as u64;
+        // Block devices bound seeks to the capacity (`blkdev_llseek` uses
+        // `fixed_size_llseek`, EINVAL past the end); regular files may seek
+        // past EOF.
+        if file.inode().node_type() == NodeType::BlockDevice && new_offset > file.size() {
+            return Err(VfsError::from(LinuxError::EINVAL));
+        }
         *position = new_offset;
         Ok(new_offset)
     }
@@ -344,8 +353,17 @@ pub trait FileOperations: Send + Sync + 'static {
     }
 
     /// Applies filesystem-specific space allocation or range-shift operations.
-    fn fallocate(&self, _file: &VfsFile, _mode: u32, _offset: u64, _len: u64) -> VfsResult<()> {
-        Err(VfsError::Unsupported)
+    fn fallocate(
+        &self,
+        _file: &VfsFile,
+        _flags: FallocateFlags,
+        _offset: u64,
+        _len: u64,
+    ) -> VfsResult<()> {
+        // Linux answers EOPNOTSUPP when a file's operation table has no
+        // fallocate handler (fs/open.c:323); the same errno replaces the
+        // generic `Unsupported` (ENOSYS) here.
+        Err(VfsError::from(LinuxError::EOPNOTSUPP))
     }
 
     /// Polls an open file description.
@@ -820,9 +838,21 @@ impl VfsFile {
             .copy_chunk_from(input, input_pos, self, output_pos, len)
     }
 
-    /// Returns this file's inode size.
+    /// Returns this file's size.
+    ///
+    /// Block devices report their live capacity here, mirroring Linux's
+    /// `bd_inode` size that backs `blkdev_llseek`'s `SEEK_END`; the special
+    /// node's own metadata stays zero-sized. The node size (via getattr) and
+    /// the capacity (via this query) are intentionally separate views, and
+    /// the capacity tracks changes after open, e.g. loop attach/detach.
     pub fn size(&self) -> u64 {
-        self.inode().size()
+        let inode = self.inode();
+        if inode.node_type() == NodeType::BlockDevice
+            && let Some(device) = block::lookup_block_device(inode.rdev())
+        {
+            return device.size();
+        }
+        inode.size()
     }
 
     /// Borrows this file's inode address space (`f_mapping`).
@@ -1012,8 +1042,13 @@ impl VfsFile {
             self.verify_write_area(0, iter.count())?;
             let mut iocb = Kiocb::new(self, 0);
             self.operations().write_iter(&mut iocb, iter)
-        } else if self.flags().contains(OpenFlags::APPEND) {
-            let end = self.inode().size();
+        } else if self.flags().contains(OpenFlags::APPEND)
+            && self.inode().node_type() != NodeType::BlockDevice
+        {
+            // Block devices keep the caller's position for appends: Linux
+            // `blkdev_write_iter` writes at `ki_pos` and never repositions to
+            // the capacity end like regular-file append handling does.
+            let end = self.size();
             self.verify_write_area(end, iter.count())?;
             let mut iocb = Kiocb::new(self, end);
             let written = self.operations().write_iter(&mut iocb, iter)?;
@@ -1210,8 +1245,8 @@ impl VfsFile {
     }
 
     /// Applies filesystem-specific space allocation or range-shift operations.
-    pub fn fallocate(&self, mode: u32, offset: u64, len: u64) -> VfsResult<()> {
-        self.operations().fallocate(self, mode, offset, len)
+    pub fn fallocate(&self, flags: FallocateFlags, offset: u64, len: u64) -> VfsResult<()> {
+        self.operations().fallocate(self, flags, offset, len)
     }
 
     /// Polls this open file.

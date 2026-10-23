@@ -217,6 +217,8 @@ fn lock_request(file: &VfsFile, owner: FileLockOwner, lock: &k_flock64) -> KResu
     let base = match lock.l_whence as u32 {
         SEEK_SET => 0,
         SEEK_CUR => file.position(),
+        // Record locks read the node inode's size (locks.c:465 uses
+        // `file_inode`), not the block capacity behind `blkdev_llseek`.
         SEEK_END => file.inode().size(),
         _ => return Err(KError::InvalidInput),
     };

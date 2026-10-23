@@ -19,8 +19,8 @@ use iov_iter::{IovSink, IovSource, iov_iter_dest, iov_iter_source};
 use kerrno::{KError, KResult, LinuxError};
 use kio::prelude::*;
 use kvfs::{
-    FMode, Filename, LookupFlags, LookupIntent, OpenFlags, TransferPosition, VfsFile,
-    pipe::PipeObject,
+    FMode, FallocateFlags, Filename, LookupFlags, LookupIntent, NodeType, OpenFlags,
+    TransferPosition, VfsFile, pipe::PipeObject,
 };
 use linux_raw_sys::general::__kernel_off_t;
 use linux_sysno::Sysno;
@@ -225,6 +225,8 @@ fn finish_restartable_io(result: KResult<usize>) -> KResult<usize> {
     }
 }
 
+unittest::path_mod_test!(fallocate_mode_tests, "../ut-tests/fallocate_mode_tests.rs");
+
 unittest::path_mod_test!(restart_tests, "../ut-tests/io_restart_tests.rs");
 
 unittest::path_mod_test!(
@@ -279,7 +281,46 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     Ok(0)
 }
 
-/// Preallocates disk space for a file.
+/// Decodes `fallocate` request flags and validates their legality, mirroring
+/// `vfs_fallocate`'s checks. The errno split follows the reference exactly
+/// (fs/open.c): punch-related violations are EOPNOTSUPP (lines 257-264),
+/// while the exclusive-only range-shifting rules are EINVAL (lines 266-279).
+fn parse_fallocate(mode: u32) -> KResult<FallocateFlags> {
+    // Unknown bits are EOPNOTSUPP in vfs_fallocate (line 253); bitflags'
+    // `from_bits` reports them by returning `None`.
+    let Some(flags) = FallocateFlags::from_bits(mode) else {
+        return Err(KError::OperationNotSupported);
+    };
+    // PUNCH_HOLE and ZERO_RANGE are mutually exclusive (lines 257-259), and
+    // PUNCH_HOLE requires KEEP_SIZE (lines 262-264); both are EOPNOTSUPP.
+    if flags.contains(FallocateFlags::PUNCH_HOLE | FallocateFlags::ZERO_RANGE) {
+        return Err(KError::OperationNotSupported);
+    }
+    if flags.contains(FallocateFlags::PUNCH_HOLE) && !flags.contains(FallocateFlags::KEEP_SIZE) {
+        return Err(KError::OperationNotSupported);
+    }
+    // Range-shifting modes must be used exclusively (COLLAPSE lines
+    // 266-269, INSERT lines 271-274) and UNSHARE only accepts KEEP_SIZE
+    // (lines 276-279); violations are EINVAL.
+    let exclusive = |solo: FallocateFlags| {
+        let rest = flags - solo;
+        !rest.is_empty()
+    };
+    if flags.contains(FallocateFlags::COLLAPSE_RANGE) && exclusive(FallocateFlags::COLLAPSE_RANGE) {
+        return Err(KError::InvalidInput);
+    }
+    if flags.contains(FallocateFlags::INSERT_RANGE) && exclusive(FallocateFlags::INSERT_RANGE) {
+        return Err(KError::InvalidInput);
+    }
+    if flags.contains(FallocateFlags::UNSHARE_RANGE) {
+        let rest = flags - FallocateFlags::UNSHARE_RANGE;
+        if !rest.is_empty() && rest != FallocateFlags::KEEP_SIZE {
+            return Err(KError::InvalidInput);
+        }
+    }
+    Ok(flags)
+}
+
 pub fn sys_fallocate(
     fd: c_int,
     mode: u32,
@@ -287,136 +328,117 @@ pub fn sys_fallocate(
     len: __kernel_off_t,
 ) -> KResult<isize> {
     debug!("sys_fallocate <= fd: {fd}, mode: {mode}, offset: {offset}, len: {len}");
-    // Allocate/deallocate disk space for a file.
-    // Supported modes:
-    // - preallocate (mode 0, optionally KEEP_SIZE)
-    // - PUNCH_HOLE (requires KEEP_SIZE)
-    // - ZERO_RANGE (with/without KEEP_SIZE)
-    // - COLLAPSE_RANGE (byte-range remove)
-    // - INSERT_RANGE (byte-range insert zeroes)
-    // - UNSHARE_RANGE (no-op on non-reflink backend)
-    const FALLOC_FL_KEEP_SIZE: u32 = 0x01;
-    const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
-    const FALLOC_FL_COLLAPSE_RANGE: u32 = 0x08;
-    const FALLOC_FL_ZERO_RANGE: u32 = 0x10;
-    const FALLOC_FL_INSERT_RANGE: u32 = 0x20;
-    const FALLOC_FL_UNSHARE_RANGE: u32 = 0x40;
-
-    if offset < 0 || len < 0 {
+    // Order mirrors the Linux call chain exactly: ksys_fallocate resolves the
+    // descriptor first (EBADF), then vfs_fallocate checks the range
+    // (EINVAL), mode legality (EOPNOTSUPP/EINVAL), write permission
+    // (FMODE_WRITE, EBADF), node-type dispatch (ESPIPE/EISDIR/ENODEV), and
+    // finally the file's size bound (EFBIG) — before any backend runs.
+    let f = kprocess::current_files().get_file(fd)?;
+    if offset < 0 || len <= 0 {
         return Err(KError::InvalidInput);
     }
-    if len == 0 {
-        return Ok(0);
-    }
-
-    let keep_size = (mode & FALLOC_FL_KEEP_SIZE) != 0;
-    let base_mode = mode & !FALLOC_FL_KEEP_SIZE;
-
-    let f = kprocess::current_files().get_file(fd)?;
+    let flags = parse_fallocate(mode)?;
+    let keep_size = flags.contains(FallocateFlags::KEEP_SIZE);
+    let base_mode = flags - FallocateFlags::KEEP_SIZE;
     f.verify_mode(FMode::WRITE)?;
+
+    // Node-type dispatch mirrors vfs_fallocate (fs/open.c): FIFOs are not
+    // seekable, directories are their own error, and only regular files and
+    // block devices have range semantics at all.
+    match f.inode().node_type() {
+        NodeType::Fifo => return Err(KError::from(LinuxError::ESPIPE)),
+        NodeType::Directory => return Err(KError::from(LinuxError::EISDIR)),
+        NodeType::RegularFile | NodeType::BlockDevice => {}
+        _ => return Err(KError::from(LinuxError::ENODEV)),
+    }
 
     let start = offset as u64;
     let len_u = len as u64;
-    let end = start.checked_add(len_u).ok_or(KError::InvalidInput)?;
+
+    // Block devices validate mode/capacity/alignment in their own fallocate
+    // (overflow past u64 is EFBIG there, capacity violations are EINVAL or
+    // KEEP_SIZE-clamped). On Linux a block device's inode lives in the block
+    // pseudo-superblock, so the hosting filesystem's size limit does not
+    // apply; keep the hosting `max_file_size()` bound for regular files
+    // only.
+    if f.inode().node_type() == NodeType::BlockDevice {
+        return f.fallocate(flags, start, len_u).map(|_| 0);
+    }
+    // Overflow past the regular file's maximum is EFBIG (fs/open.c:321),
+    // not EINVAL.
+    let end = start
+        .checked_add(len_u)
+        .ok_or_else(|| KError::from(LinuxError::EFBIG))?;
+    if end > f.max_file_size() {
+        return Err(KError::from(LinuxError::EFBIG));
+    }
     let old_size = f.size();
 
-    match base_mode {
+    if base_mode == FallocateFlags::empty() {
         // Standard preallocation behavior in our current implementation.
-        0 => {
-            if !keep_size {
-                let target_size = old_size.max(end);
-                if target_size > old_size {
-                    // Some backends may delay i_size visibility on set_len-only growth.
-                    // Force EOF advancement with a single-byte write at target_size - 1.
-                    let z = [0u8; 1];
-                    let mut pos = target_size - 1;
-                    let written = f.write_from(&z[..], &mut pos)?;
-                    if written != 1 {
-                        return Err(KError::WriteZero);
-                    }
+        if !keep_size {
+            let target_size = old_size.max(end);
+            if target_size > old_size {
+                // Some backends may delay i_size visibility on set_len-only growth.
+                // Force EOF advancement with a single-byte write at target_size - 1.
+                let z = [0u8; 1];
+                let mut pos = target_size - 1;
+                let written = f.write_from(&z[..], &mut pos)?;
+                if written != 1 {
+                    return Err(KError::WriteZero);
                 }
             }
         }
+    } else if base_mode == FallocateFlags::PUNCH_HOLE {
         // Emulate punch hole by zeroing existing file range.
-        FALLOC_FL_PUNCH_HOLE => {
-            // PUNCH_HOLE requires KEEP_SIZE.
-            if !keep_size {
-                return Err(KError::InvalidInput);
-            }
-            let target_end = end.min(old_size);
-            if target_end <= start {
-                return Ok(0);
-            }
-
+        let target_end = end.min(old_size);
+        if target_end > start {
             write_zeros_range(&f, start, target_end)?;
         }
-        // Emulate zero-range by writing zeros to the range.
-        FALLOC_FL_ZERO_RANGE => {
-            // KEEP_SIZE: only affect visible bytes in current file size.
-            // Avoid temporary i_size growth, which can perturb extent metadata
-            // on backends with incomplete hole/truncate handling.
-            let target_end = if keep_size { end.min(old_size) } else { end };
-            if target_end <= start {
-                return Ok(0);
-            }
-
+    } else if base_mode == FallocateFlags::ZERO_RANGE {
+        // Emulate zero-range by writing zeros to the range. KEEP_SIZE only
+        // affects visible bytes in current file size; avoid temporary i_size
+        // growth, which can perturb extent metadata on backends with
+        // incomplete hole/truncate handling.
+        let target_end = if keep_size { end.min(old_size) } else { end };
+        if target_end > start {
             if !keep_size && target_end > old_size {
                 f.truncate(target_end)?;
             }
-
             write_zeros_range(&f, start, target_end)?;
         }
-        // On non-reflink filesystems, emulate unshare by preallocating range semantics.
-        FALLOC_FL_UNSHARE_RANGE => {
-            if !keep_size {
-                let target_size = old_size.max(end);
-                if target_size > old_size {
-                    let z = [0u8; 1];
-                    let mut pos = target_size - 1;
-                    let written = f.write_from(&z[..], &mut pos)?;
-                    if written != 1 {
-                        return Err(KError::WriteZero);
-                    }
+    } else if base_mode == FallocateFlags::UNSHARE_RANGE {
+        // On non-reflink filesystems, emulate unshare by preallocating range
+        // semantics.
+        if !keep_size {
+            let target_size = old_size.max(end);
+            if target_size > old_size {
+                let z = [0u8; 1];
+                let mut pos = target_size - 1;
+                let written = f.write_from(&z[..], &mut pos)?;
+                if written != 1 {
+                    return Err(KError::WriteZero);
                 }
             }
         }
-        // Remove [start, end) and shift following bytes left.
-        FALLOC_FL_COLLAPSE_RANGE => {
-            // COLLAPSE_RANGE does not allow KEEP_SIZE.
-            if keep_size {
-                return Err(KError::InvalidInput);
-            }
-            if end > old_size {
-                return Err(KError::InvalidInput);
-            }
-            if start >= old_size {
-                return Err(KError::InvalidInput);
-            }
-
-            let removed = end - start;
-            if removed == 0 {
-                return Ok(0);
-            }
-            f.fallocate(base_mode, start, len_u)?;
+    } else if base_mode == FallocateFlags::COLLAPSE_RANGE
+        || base_mode == FallocateFlags::INSERT_RANGE
+    {
+        // Range-shifting modes: reject out-of-range requests with EINVAL
+        // before forwarding, and answer a missing backend implementation
+        // with EOPNOTSUPP (Linux: `!f_op->fallocate`), never ENOSYS.
+        if base_mode == FallocateFlags::COLLAPSE_RANGE && (end > old_size || start >= old_size) {
+            return Err(KError::InvalidInput);
         }
-        // Insert zero-filled [start, start+len) and shift tail right.
-        FALLOC_FL_INSERT_RANGE => {
-            // INSERT_RANGE does not allow KEEP_SIZE.
-            if keep_size {
-                return Err(KError::InvalidInput);
-            }
-            if start > old_size {
-                return Err(KError::InvalidInput);
-            }
-
-            let insert_len = len_u;
-            if insert_len == 0 {
-                return Ok(0);
-            }
-            f.fallocate(base_mode, start, len_u)?;
+        if base_mode == FallocateFlags::INSERT_RANGE && start > old_size {
+            return Err(KError::InvalidInput);
         }
-        // Other mode combinations are not supported.
-        _ => return Err(KError::Unsupported),
+        f.fallocate(base_mode, start, len_u)?;
+    } else {
+        // Other flag combinations are not supported by the emulation;
+        // fallocate mode errors are EOPNOTSUPP on Linux (fs-op default),
+        // never ENOSYS.
+        return Err(KError::OperationNotSupported);
     }
 
     Ok(0)

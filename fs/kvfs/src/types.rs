@@ -236,3 +236,24 @@ impl SetattrTime {
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/types.rs");
+
+bitflags::bitflags! {
+    /// `fallocate(2)` mode flags (`FALLOC_FL_*` in the Linux UAPI).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FallocateFlags: u32 {
+        /// Keep the file size unchanged when the range extends it.
+        const KEEP_SIZE = 0x01;
+        /// De-allocate the range; requires [`FallocateFlags::KEEP_SIZE`].
+        const PUNCH_HOLE = 0x02;
+        /// Remove the range and shift the tail left; must be used alone.
+        const COLLAPSE_RANGE = 0x08;
+        /// Convert the range to zeros.
+        const ZERO_RANGE = 0x10;
+        /// Insert zero-filled space and shift the tail right; must be used
+        /// alone.
+        const INSERT_RANGE = 0x20;
+        /// Break shared storage for the range; only [`FallocateFlags::KEEP_SIZE`]
+        /// may accompany it.
+        const UNSHARE_RANGE = 0x40;
+    }
+}

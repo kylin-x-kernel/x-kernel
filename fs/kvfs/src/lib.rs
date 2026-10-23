@@ -95,7 +95,8 @@ pub use super_block::{
 pub use transfer::{TransferPosition, copy_file_range, transfer_files};
 pub(crate) use type_map::TypeMap;
 pub use types::{
-    DeviceId, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType, SetattrTime, Umode,
+    DeviceId, FallocateFlags, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType,
+    SetattrTime, Umode,
 };
 pub use xattr::{XATTR_NAME_MAX, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags};
 

@@ -59,6 +59,27 @@ poll 和 open/release；文件系统节点不再复制这层适配。
 VFS 在 open 成功后按最终操作表计算能力，末引用释放时调用最终后端 release。
 注册表查找锁不跨后端回调；设备号的注册与注销仍由调用方拥有。
 
+## 块设备文件尺寸与范围操作
+
+块设备有两类刻意分离的尺寸视图，与 Linux 一致：设备节点的
+`getattr`/`fstat` 元数据保持零尺寸（Linux 设备节点同样如此），而
+`VfsFile::size()`——`lseek(SEEK_END)` 的基准——实时读取
+`BlockDevice::size()`，对应 Linux 的 `bd_inode`。容量随 loop
+attach/detach 等操作即时变化，不缓存快照；记录锁的 `SEEK_END` 基准是节点
+尺寸，append 写保持在调用者位置（`blkdev_write_iter` 不做重定位）。
+
+`fallocate` 的模式合法性（未知 flag、`PUNCH_HOLE` 与 `ZERO_RANGE` 互斥、
+`PUNCH_HOLE` 必须带 `KEEP_SIZE`、COLLAPSE/INSERT/UNSHARE 的排他性）由
+公共入口按 `vfs_fallocate` 统一校验；块设备随后由
+`DefaultBlkdevFileOperations` 按设备语义执行，不走普通文件的逐字节模拟：
+容量（越界且无 KEEP_SIZE 则 `EINVAL`）与逻辑块对齐（`EINVAL`）先于任何
+介质写入校验，通过后仅 `ZERO_RANGE`（± `KEEP_SIZE`）对齐地整段写零。
+`PUNCH_HOLE` 携带释放语义：Linux 以 `BLKDEV_ZERO_NOFALLBACK` 调用，设备
+具备 write-zeroes/discard 卸载时成功、否则 `EOPNOTSUPP`。块设备契约
+`BlockDeviceOperations` 目前尚未定义这两类能力位，本内核有意收窄为对所有
+后端返回 `EOPNOTSUPP`（按能力缺失上报，而非软件写零冒充释放）。没有这一步，依赖文件尺寸的上层语义（如
+`ext2fs_zero_blocks2` 的清零请求）会把整个设备视为空而静默跳过实际工作。
+
 字符设备统一按同一 major 内的非空 minor 范围注册，单设备使用长度 1。
 注册表用按 `(major, first_minor)` 排序的 BTreeMap 查找覆盖范围；重复、包含
 或部分重叠均返回错误，不隐式替换已有驱动。注销必须匹配完整起点和长度。
