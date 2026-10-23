@@ -154,8 +154,7 @@ impl block::BlockDeviceOperations for TestBlockDevice {
     fn block_size(&self) -> usize {
         512
     }
-}
-impl TestBlockDevice {
+
     fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> block::DriverResult {
         Ok(())
     }
@@ -166,22 +165,6 @@ impl TestBlockDevice {
 
     fn flush(&self) -> block::DriverResult {
         Ok(())
-    }
-}
-
-impl block::BioOperations for TestBlockDevice {
-    fn submit_bio(&self, mut bio: block::Bio) {
-        let block_id = bio.sector() / (block::BlockDeviceOperations::block_size(self) as u64 / 512);
-        let result = match bio.operation() {
-            block::BioOperation::Read => {
-                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
-            }
-            block::BioOperation::Write => {
-                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
-            }
-            block::BioOperation::Flush => self.flush(),
-        };
-        bio.end_io(result);
     }
 }
 

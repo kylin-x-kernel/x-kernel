@@ -39,11 +39,12 @@ format validation belongs to the filesystem consuming the device.
 - One `dev_t` maps to exactly one `BlockDevice` in the resident registry.
 - A canonical `BlockDevice` has at most one exclusive holder at a time;
   the claim token owns release.
-- Each I/O has a logically aligned starting sector and total byte length;
-  memory-segment boundaries need not be aligned. Its complete sector extent
-  lies within current capacity.
-- Buffer start addresses may be arbitrary. Device alignment, DMA mapping and
-  cache-maintenance requirements belong to the backend and its provider.
+- Every I/O buffer length is a multiple of the logical block size, and the
+  complete sector extent lies within current capacity.
+- Buffer start addresses may be arbitrary. Device address, contiguous-memory,
+  DMA mapping and cache-maintenance requirements belong to the backend and its
+  provider, including when a caller bypasses the canonical view with a direct
+  operations trait object.
 - Block/sector conversions and offset/length multiplication and addition use
   checked arithmetic.
 - The operations object, `Gendisk`, and `BlockDevice` are all `Send + Sync`.
@@ -54,34 +55,15 @@ format validation belongs to the filesystem consuming the device.
   effective read-only state is the union of inherent and administrative state.
 - Every `BlockDevice` write checks effective read-only state before entering
   the backend.
-- `Gendisk` does not implement the driver operations trait. Consumers retain canonical `BlockDevice` references; only driver implementations
-  implement the operations traits.
+- `Gendisk` does not implement the driver operations trait. The transitional
+  synchronous trait implementation on `BlockDevice` delegates to canonical
+  methods and cannot bypass capacity, bounds, or read-only checks.
 
 ## Unsafe
 
-`BioVec` in `src/bio.rs` retains stable storage through the unsafe `BioMemory`
-contract. Its private borrowed variants erase a slice lifetime only inside
-`BlockDevice::read_block`/`write_block`. Those entry points reject unwinding
-builds before publication, wait non-interruptibly, and dispose of vectors before
-returning. Preparation failures occur before device access. Shared write sources
-never produce mutable slices; read submission rejects shared-only storage.
-
-`BioWait` is neither Send nor Sync. Its shared result state outlives an abandoned
-waiting handle until bio completion returns the memory. Host context validation
-precedes submission; infallible waiting-resource allocation may be deferred.
-Result publication and notification enrollment share one lock, with notification
-outside it. Completion before enrollment is observed by the result recheck;
-completion afterwards uses the enrolled permanent signal. No stack pointers or
-additional lifetime erasure are used for this handshake.
-
-`BioVecRef` borrows a vector without exposing its ownership. Safe backends
-cannot move that owner out or complete the Bio while a memory view is live.
-Device DMA uses raw pointers outside Rust borrows; transport implementations
-must retire those pointers before completion under their existing unsafe DMA
-contracts. `BioMemory`
-implementations must retain storage and exclusive access, not merely a reference
-count to concurrently accessible bytes. Concrete DMA/cache boundaries remain
-with their backend and provider.
+`drivers/contracts/block/src/lib.rs` contains no unsafe blocks. The MMIO/DMA
+safety boundaries of concrete hardware backends belong to each backend's own
+documentation.
 
 `word_io` uses `device_res::CpuBuffer` for initialized ordinary CPU storage.
 Its unsafe `CpuMemoryOp` implementation contract supplies unique storage of the
@@ -142,11 +124,10 @@ to the target must span synchronous stop before device resources are destroyed.
 The completion-wait contract requires provider signals to own only notification
 state, never requests or DMA data. Callers notify outside device/registry locks.
 A `BlockWaiter` is used only by the task that prepared it, in sleepable context.
-Context validation can fail before submission. Waiter preparation and task
-enrollment are lazy and infallible; after submission the terminal wait
-must remain non-interruptible and return no recoverable wait error. An abandoned
-waiting handle cannot revoke the driver ownership of the bio or its buffers.
-The contract itself implements neither queues nor DMA lifecycle
+A failed admission wait cancels the pending node at the transaction layer and
+passes on the admission opportunity. The terminal wait has no recoverable-error
+exit, preventing a request still involved in DMA from being freed early because
+of a wait error. The contract itself implements neither queues nor DMA lifecycle
 and does not verify device completion; drivers must publish the real result
 before raising terminal notification.
 
@@ -203,19 +184,3 @@ cache would not satisfy the contract.
 There is no partition scan today; only whole-disk part0 is published. Hot removal
 does not actively freeze already-mounted filesystems; further I/O through
 existing references relies on the backend returning device errors.
-
-## Bio Submission Boundary
-
-The core validates total length, overall logical-block alignment, view capacity
-and write permission before dispatch, then applies the view's sector offset once.
-Memory-segment boundaries need not be sector-aligned. Flush accepts no vectors
-and no data address. Validation failures use the same terminal callback path.
-
-Bio owns the device and data allocations through completion; Request owns its
-Bio. Drivers may retain requests after submission returns and must retire every
-DMA reference before consuming completion. Dropping a caller's BioWait cannot
-free driver-owned memory. Waiting-resource, range-validation and I/O errors
-return original owners independently of status; reads may be partially modified.
-Request cursor advancement never removes or replaces these owners. Completion callbacks must not sleep and run outside
-device locks. Public asynchronous construction requires owned storage; only the private
-synchronous adapter lends borrowed ranges until terminal completion.

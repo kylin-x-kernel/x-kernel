@@ -58,7 +58,7 @@ pub(crate) fn journal_allocator_test_filesystem(
     write_allocator_bitmap(&mut image, 3 * TEST_BLOCK_SIZE, &[0xff, 0x03, 0, 0], true);
 
     let block_device = Arc::new(TestDevice::new(image));
-    let device: Arc<block::BlockDevice> = crate::io::test_block_device(block_device.clone());
+    let device: Arc<dyn BlockDeviceOperations> = block_device.clone();
     let filesystem_device = Arc::new(
         FilesystemDevice::open(
             device,
@@ -323,8 +323,7 @@ impl BlockDeviceOperations for TestDevice {
     fn block_size(&self) -> usize {
         TEST_BLOCK_SIZE
     }
-}
-impl TestDevice {
+
     fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
         let start = usize::try_from(block_id)
             .ok()
@@ -369,22 +368,6 @@ impl TestDevice {
             return Err(DriverError::Io);
         }
         Ok(())
-    }
-}
-
-impl block::BioOperations for TestDevice {
-    fn submit_bio(&self, mut bio: block::Bio) {
-        let block_id = bio.sector() / (self.block_size() as u64 / 512);
-        let result = match bio.operation() {
-            block::BioOperation::Read => {
-                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
-            }
-            block::BioOperation::Write => {
-                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
-            }
-            block::BioOperation::Flush => self.flush(),
-        };
-        bio.end_io(result);
     }
 }
 
@@ -450,13 +433,12 @@ pub(crate) fn recovery_test_filesystem_with_free_blocks(
         crate::jbd2::enable_superblock_revoke(&mut journal).unwrap();
         image[16 * TEST_BLOCK_SIZE..16 * TEST_BLOCK_SIZE + journal.len()].copy_from_slice(&journal);
     }
-    (
-        open_test_filesystem(crate::io::test_block_device(device.clone())).unwrap(),
-        device,
-    )
+    (open_test_filesystem(device.clone()).unwrap(), device)
 }
 
-pub(crate) fn open_test_filesystem(device: Arc<block::BlockDevice>) -> Ext4Result<Ext4SbInfo> {
+pub(crate) fn open_test_filesystem(
+    device: Arc<dyn BlockDeviceOperations>,
+) -> Ext4Result<Ext4SbInfo> {
     let mut filesystem = Ext4SbInfo::prepare_mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)?;
     filesystem.persist_directory_hash_policy()?;
     Ok(filesystem)
@@ -608,7 +590,7 @@ fn allocator_multigroup_test_filesystem_inner(
     }
 
     let block_device = Arc::new(TestDevice::new(image));
-    let device: Arc<block::BlockDevice> = crate::io::test_block_device(block_device.clone());
+    let device: Arc<dyn BlockDeviceOperations> = block_device.clone();
     let filesystem_device =
         Arc::new(FilesystemDevice::open(device, TEST_BLOCK_SIZE, u64::from(block_count)).unwrap());
     let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
@@ -795,7 +777,7 @@ pub(crate) fn allocator_test_filesystem_with_options(
     image[TEST_BLOCK_SIZE..TEST_BLOCK_SIZE + descriptor.len()].copy_from_slice(&descriptor);
 
     let block_device = Arc::new(TestDevice::new(image));
-    let device: Arc<block::BlockDevice> = crate::io::test_block_device(block_device.clone());
+    let device: Arc<dyn BlockDeviceOperations> = block_device.clone();
     let filesystem_device =
         Arc::new(FilesystemDevice::open(device, TEST_BLOCK_SIZE, TEST_BLOCK_COUNT as u64).unwrap());
     let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
@@ -1185,7 +1167,7 @@ pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDev
         put_u32(sb, 0x5c, compat);
         put_u32(sb, 0x280, inode.number().get());
     }
-    let filesystem = Ext4SbInfo::mount(crate::io::test_block_device(device.clone())).unwrap();
+    let filesystem = Ext4SbInfo::mount(device.clone()).unwrap();
     (filesystem, device)
 }
 

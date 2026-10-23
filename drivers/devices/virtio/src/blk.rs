@@ -6,7 +6,10 @@
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use block::{BlockDeviceOperations, completion::BlockSignals};
+use block::{
+    BlockDeviceOperations,
+    completion::{BlockSignals, PrepareBlockWait},
+};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
@@ -27,11 +30,32 @@ pub use requests::requests_unittest::{
 
 struct BlockState<H: Hal, T: Transport> {
     device: Option<InnerDev<H, T>>,
-    requests: BlockRequests,
-    is_irq_driven: bool,
+    requests: Option<BlockRequests>,
     is_accepting: bool,
-    active_requests: usize,
+    active_calls: usize,
     drain_notification: Option<Arc<dyn BlockSignals>>,
+}
+
+// Covers wait preparation as well as pending/submitted requests. The borrowed
+// device remains alive until the call retires, even if public lookup is removed.
+struct BlockCall<'a, H: Hal, T: Transport>(&'a VirtIoBlkDev<H, T>);
+
+impl<H: Hal, T: Transport> Drop for BlockCall<'_, H, T> {
+    fn drop(&mut self) {
+        let notification = {
+            let mut state = self.0.state.lock();
+            assert!(state.active_calls > 0);
+            state.active_calls -= 1;
+            if state.active_calls == 0 && !state.is_accepting {
+                state.drain_notification.take()
+            } else {
+                None
+            }
+        };
+        if let Some(notification) = notification {
+            notification.notify_completion();
+        }
+    }
 }
 
 /// Number of minor bits reserved for partitions of one virtio disk.
@@ -67,8 +91,8 @@ fn vd_name(index: u32) -> String {
 /// The VirtIO block device driver.
 ///
 /// Wraps `VirtIOBlk` from `virtio-drivers` and implements the
-/// [`BlockDeviceOperations`] control contract and [`block::BlkMqOperations`]
-/// owned-request contract for a virtual block device.
+/// [`BlockDeviceOperations`] trait, providing sector-level read/write access to a
+/// virtual block device.
 ///
 /// # Type Parameters
 ///
@@ -79,13 +103,13 @@ fn vd_name(index: u32) -> String {
 ///
 /// ```ignore
 /// let (kind, transport) = virtio::probe_pci_device::<HalImpl, _>(...).unwrap();
-/// let blk = Arc::new(VirtIoBlkDev::<HalImpl, _>::try_new(transport)?);
-/// let disk = block::Gendisk::alloc_mq("vda".into(), 253, 0, 1, blk)?;
+/// let mut blk = VirtIoBlkDev::<HalImpl, _>::try_new(transport)?;
 /// let mut buf = [0u8; 512];
-/// disk.part0().read_block(0, &mut buf)?;
+/// blk.read_block(0, &mut buf)?;
 /// ```
 pub struct VirtIoBlkDev<H: Hal, T: Transport> {
     state: SpinNoIrq<BlockState<H, T>>,
+    prepare_wait: Option<PrepareBlockWait>,
     num_blocks: u64,
     is_read_only: bool,
     name: String,
@@ -96,8 +120,8 @@ pub struct VirtIoBlkDev<H: Hal, T: Transport> {
 // its own `SpinNoIrq` lock. The inner VirtIOBlk is not auto Send due to
 // PhantomData, but it is safe to transfer across threads behind that lock.
 // It also protects the intrusive request links, token pointers and request
-// state in IRQ mode. Each pointer indexes a device-owned boxed node; terminal
-// publication removes all external node references before the completion callback runs.
+// state in IRQ mode. Each pointer indexes a call-owned pinned node; terminal
+// publication removes all external node references before that call returns.
 // Legacy polling still masks interrupts to avoid shared-level IRQ livelock.
 // IRQ mode holds this lock only for submission/ack/reclamation, never waiting.
 unsafe impl<H: Hal, T: Transport> Send for VirtIoBlkDev<H, T> {}
@@ -113,10 +137,9 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     ///
     /// Returns `DriverError` if the device fails to initialize (e.g. feature
     /// negotiation failure, queue allocation failure, DMA error).
-    /// Returns Unsupported if one data segment cannot hold a sector.
     pub fn try_new(transport: T) -> DriverResult<Self> {
         let device = Self::init_device(transport)?;
-        Ok(Self::from_device(device, false))
+        Ok(Self::from_device(device, None))
     }
 
     /// Prepares interrupt-driven request handling without publishing the disk.
@@ -127,32 +150,31 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// this device until all admitted calls and completion callbacks retire.
     ///
     /// # Errors
-    /// Returns initialization errors from the transport, or Unsupported if one
-    /// data segment cannot hold a sector or the build uses unwinding: submitted
-    /// request nodes cannot unwind through DMA.
-    pub fn try_new_irq(transport: T) -> DriverResult<Self> {
+    /// Returns initialization errors from the transport, or Unsupported when
+    /// built with unwinding: submitted stack nodes cannot unwind through DMA.
+    pub fn try_new_irq(transport: T, prepare_wait: PrepareBlockWait) -> DriverResult<Self> {
         if cfg!(panic = "unwind") {
             return Err(DriverError::Unsupported);
         }
         let mut device = Self::init_device(transport)?;
         device.disable_interrupts();
-        Ok(Self::from_device(device, true))
+        Ok(Self::from_device(device, Some(prepare_wait)))
     }
 
-    fn from_device(device: InnerDev<H, T>, is_irq_driven: bool) -> Self {
+    fn from_device(device: InnerDev<H, T>, prepare_wait: Option<PrepareBlockWait>) -> Self {
         let num_blocks = device.capacity();
         let is_read_only = device.readonly();
         let index = VD_INDEX.fetch_add(1, Ordering::Relaxed);
-        let requests = BlockRequests::new(device.virt_queue_size());
+        let requests = prepare_wait.map(|_| BlockRequests::new(device.virt_queue_size()));
         Self {
             state: SpinNoIrq::new(BlockState {
                 device: Some(device),
                 requests,
-                is_irq_driven,
                 is_accepting: true,
-                active_requests: 0,
+                active_calls: 0,
                 drain_notification: None,
             }),
+            prepare_wait,
             num_blocks,
             is_read_only,
             name: alloc::format!("vd{}", vd_name(index)),
@@ -183,7 +205,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         }
     }
 
-    /// Rejects new I/O and signals when every previously admitted request retires.
+    /// Rejects new I/O and signals when every previously admitted call retires.
     ///
     /// The host serializes close, supplies a fresh closing-task notification,
     /// then withdraws disk lookup and waits without device/registry locks. Keep
@@ -201,7 +223,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
                 "concurrent block close"
             );
             state.is_accepting = false;
-            if state.active_requests == 0 {
+            if state.active_calls == 0 {
                 true
             } else {
                 state.drain_notification = Some(notification.clone());
@@ -220,17 +242,31 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// Repeated calls after close are harmless. Cached geometry remains available.
     ///
     /// # Panics
-    /// Panics if admission is still open, requests remain active, or request
+    /// Panics if admission is still open, calls remain active, or request
     /// reclamation has not finished.
     pub fn finish_close(&self) {
         let device = {
             let mut state = self.state.lock();
-            assert!(!state.is_accepting && state.active_requests == 0);
-            assert!(state.requests.is_drained());
+            assert!(!state.is_accepting && state.active_calls == 0);
+            if let Some(requests) = &state.requests {
+                assert!(requests.is_drained());
+            }
             state.device.take()
         };
         // Transport reset and coherent queue deallocation require task context.
         drop(device);
+    }
+
+    fn admit_call(&self) -> DriverResult<BlockCall<'_, H, T>> {
+        let mut state = self.state.lock();
+        if !state.is_accepting {
+            return Err(DriverError::Io);
+        }
+        state.active_calls = state
+            .active_calls
+            .checked_add(1)
+            .expect("block call count overflow");
+        Ok(BlockCall(self))
     }
 
     /// Returns the discovery-order disk index retained for driver cleanup and
@@ -240,13 +276,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     }
 
     fn init_device(transport: T) -> DriverResult<InnerDev<H, T>> {
-        let device = InnerDev::new(transport).map_err(as_driver_error)?;
-        // The adapter's fragmented-sector fallback submits one sector in one
-        // data segment. This is an adapter limit, not a Virtio protocol rule.
-        if device.max_segment_size() < SECTOR_SIZE {
-            return Err(DriverError::Unsupported);
-        }
-        Ok(device)
+        InnerDev::new(transport).map_err(as_driver_error)
     }
 }
 
@@ -273,6 +303,51 @@ impl<H: Hal, T: Transport> BlockDeviceOperations for VirtIoBlkDev<H, T> {
 
     fn is_inherently_read_only(&self) -> bool {
         self.is_read_only
+    }
+
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        let _call = self.admit_call()?;
+        if let Some(prepare) = self.prepare_wait {
+            return self.read_request(block_id, buf, prepare);
+        }
+        self.state
+            .lock()
+            .device
+            .as_mut()
+            .expect("admitted block transport")
+            .read_blocks(block_id as usize, buf)
+            .map_err(as_driver_error)
+    }
+
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        let _call = self.admit_call()?;
+        if let Some(prepare) = self.prepare_wait {
+            return self.write_request(block_id, buf, prepare);
+        }
+        let mut state = self.state.lock();
+        if self.is_read_only {
+            return Err(DriverError::ReadOnly);
+        }
+        state
+            .device
+            .as_mut()
+            .expect("admitted block transport")
+            .write_blocks(block_id as usize, buf)
+            .map_err(as_driver_error)
+    }
+
+    fn flush(&self) -> DriverResult {
+        let _call = self.admit_call()?;
+        if let Some(prepare) = self.prepare_wait {
+            return self.flush_request(prepare);
+        }
+        self.state
+            .lock()
+            .device
+            .as_mut()
+            .expect("admitted block transport")
+            .flush()
+            .map_err(as_driver_error)
     }
 }
 

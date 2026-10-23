@@ -243,9 +243,6 @@ waiters. Clients never read the VirtIO queue or register IRQ-line waiters.
 
 Loop advances the owning `Gendisk::diskseq` after successful SET_FD/CLR_FD
 under the existing media-change locks; failed changes retain the sequence.
-Loop accepts the common block Request, snapshots its backing file, and performs
-I/O in the submitting task outside the media lock. Completion follows the final
-backing-file operation. No per-device work list or background worker is created.
 
 ## Firmware snapshot publication
 

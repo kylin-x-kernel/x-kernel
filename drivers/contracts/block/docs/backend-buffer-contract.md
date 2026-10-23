@@ -25,7 +25,7 @@ and FIFO write uses `from_le_bytes` on an eight-byte slice. MMIO word accesses
 are accesses to controller registers, not casts of the caller buffer. Loop's
 and sdmmc's length/offset checks must not be confused with address checks.
 
-The VirtIO review follows `kvirtiodrivers` 0.13.5, its descriptor `set_buf`,
+The VirtIO review follows `kvirtiodrivers` 0.13.4, its descriptor `set_buf`,
 the X-Kernel HAL glue, and `device-res-xkernel`'s DMA provider. The host
 streaming provider allocates from its DMA bounce pool, tracks the active
 mapping and performs direction-dependent copy-back on unmap. Its device bus

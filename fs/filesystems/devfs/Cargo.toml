@@ -24,7 +24,6 @@ vmm = ["dep:kvmm-api"]
 
 [dependencies]
 block.workspace = true
-iov_iter.workspace = true
 kalloc.workspace = true
 kcred.workspace = true
 kexec.workspace = true

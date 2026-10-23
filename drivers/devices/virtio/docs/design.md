@@ -146,15 +146,19 @@ Uninitialized ──probe──> Probed ──try_new──> Ready ──ops─�
 
 ### Block Request State
 
-The host uses `try_new_irq`; `try_new` remains explicit early-boot polling,
-never a fallback after failed IRQ setup. Both use the same owned request queue.
-IRQ construction disables queue interrupts until activation is ready.
+The host uses `try_new_irq`; `try_new` remains an explicit legacy polling
+constructor, not a setup-error fallback. IRQ construction takes PrepareBlockWait, disables
+queue interrupts initially and allocates per-device request bookkeeping.
+This is explicit construction, never fallback after IRQ setup failure.
 
-Pending FIFO and submitted-token ownership retain a boxed `VirtioRequest` with
-one common `block::Request`, protocol header/response and queue links. There is
-no driver-local waiter or second result state machine. Request owns the transfer
-cursor; the private node owns only protocol/transport resources. Terminal callbacks
-run after descriptor and DMA retirement, outside the device lock.
+IRQ mode uses Prepared -> Pending -> Submitted(token) -> Done(result).
+No-op flush and pre-submit errors go directly from Pending to Done.
+Completing is the critical section between descriptor reclamation and Done;
+Retired is the synchronous frame's exit, not another published enum value.
+The caller pins Request on its stack; it owns protocol fields, direct caller
+buffer identity, links and a signals Arc. BlockRequests owns a non-owning
+RawList FIFO, a descriptor-sized token index, and preallocated notification
+scratch. Software backlog follows calling concurrency, not a 16-call cap.
 
 ### GPU 设备 scanout resource 状态
 
@@ -288,28 +292,42 @@ Idle ──request──> Waiting ──设备响应──> ResponseReady ──
 
 ### Block Reads, Writes And Flushes
 
-`BlkMqOperations::queue_rq` accepts the common Request, prepares its protocol
-node and enqueues it. QueueFull retains the node in FIFO order; completion reclaims
-a finite used batch and refills from pending requests without caller intervention.
-A successful transfer prefix advances Request's cursor. Only the final prefix or
-an error completes the common request. No-op flush completes without a token.
+The unchanged BlockDeviceOperations methods route by the constructor-selected
+wait provider. Legacy instances call the dependency's polling operations.
 
-The library's scatter submission/completion APIs preserve byte ranges through
-virtqueue descriptors. Segment count and size are negotiated; requests exceeding
-a chain's limits continue from the common cursor. An otherwise indescribable
-fragmented sector uses a preallocated 512-byte bounce, never a request-sized copy.
-The adapter rejects a per-segment limit below 512 bytes with Unsupported during
-initialization because that fallback requires one segment. The library's SG API
-only requires sector alignment of the combined request length.
-Descriptor arrays are temporary stack views, not another owner/request registry.
-The HAL still performs device-specific DMA mapping, including its existing bounce
-pool; indirect descriptor allocation remains a transport cost.
+For IRQ instances:
+1. Reject read-only writes and invalid size/range, then prepare task-local wait
+   resources before exposing a request to the device.
+2. Pin the request, enqueue it under the device SpinNoIrq, and let only the FIFO
+   head call read_blocks_nb, write_blocks_nb or flush_nb.
+3. QueueFull leaves the node pending. Sleep outside the lock using admission
+   notifications; pre-submit wait errors unlink in O(1) and notify the new head.
+4. A successful submission installs the token under that same lock before any
+   completion can inspect it. A no-op flush has no token and returns immediately.
+   Both success and failure hand admission to the next head.
+5. Terminal waiting only checks Done under the device lock and uses the prepared
+   terminal source. There is no device polling and no fallible post-submit wait.
+6. The host's serialized BlockCompletionOperations pass harvests a finite used
+   batch without submitting new work. It reclaims the exact original buffers,
+   clears token/operation pointers, retains independent signals, then publishes
+   Done. All notifications run after the device lock is released.
 
-Unknown/out-of-range tokens and unproven descriptor reclamation are fatal invariant
-violations. IO_ERR/UNSUPPORTED after pop become ordinary driver errors. NotReady
-is ambiguous and fails closed. The IRQ constructor rejects panic-unwind builds.
-The host supplies non-sleeping DMA/completion capabilities and serializes completion
-passes; caller-side waits use the common block adapter only.
+Used-token absence/range failures and descriptor-pop failures are fatal invariant
+violations. IO_ERR/UNSUPPORTED after successful pop become ordinary driver errors.
+NotReady is ambiguous in the dependency and fails closed. The IRQ constructor
+rejects panic-unwind builds, preventing unwinding of stack nodes through live DMA.
+
+The only new persistent allocations are the descriptor-sized token index and
+Q notification scratch, both allocated at construction. Requests are stack
+pinned and no new data buffer/copy is introduced. Existing host wait metadata,
+HAL bounce mapping and negotiated indirect-table allocations remain. The scratch
+is taken and restored by the serialized per-device callback, never grown.
+Under the device lock each occupied token contributes at most one notification;
+the pending FIFO head's admission signal is kept separately. Thus Q entries
+suffice even with indirect descriptors. At Q=16 on a 64-bit target the token
+index uses 128 bytes and notification elements use 256 bytes, excluding container
+headers and allocator overhead. The logical sector size is the protocol's fixed
+512 bytes, not per-device mutable state.
 
 ### GPU 设备 scanout resource
 
@@ -459,8 +477,8 @@ host IRQ 核心或工作队列。
 
 ## 并发模型
 
-- **blk**: submissions and completions use one device SpinNoIrq for queue/state;
-  all caller waits and terminal callbacks occur outside it. IRQ acknowledgement uses
+- **blk**: shared synchronous callers use one device SpinNoIrq for queue/state;
+  all task waits and notifications occur outside it. IRQ acknowledgement uses
   the same lock; the host serializes per-device completion passes.
 - **gpu / socket / virtio_9p**：所有操作通过 `&mut self` 独占访问，
   调用者负责串行化，模块内部无锁。
@@ -513,17 +531,18 @@ For IRQ block instances, host activation keeps the device alive through admitted
 I/O drain, device IRQ suppression, native Irq release and reclaimer stop.
 BlockState represents Live by is_accepting with Some(transport), Closing by
 !is_accepting with Some(transport), and Closed by !is_accepting with None.
-Active-request accounting spans admission through the terminal callback, including
-requests awaiting descriptors. Closing rejects new submissions with Io while the
-completion path continues to drain accepted requests. begin_close receives a fresh closing-task signal; finish_close requires
-drained requests and stopped callbacks, takes InnerDev under the lock and
+BlockCall counts every synchronous call from entry, including wait preparation;
+its Drop decrements the count and notifies the closing task outside the lock.
+Closing rejects new calls with Io but leaves existing FIFO submission rights
+intact. begin_close receives a fresh closing-task signal; finish_close requires
+drained calls/requests and stopped callbacks, takes InnerDev under the lock and
 drops it outside the lock in task context. Retained Gendisk references own only
 inert state; cached geometry/read-only queries never require a live transport.
 No concrete driver imports ktask/kirq.
 
-Request tests live in `ut-tests/blk_requests_unittest.rs` and remain a child of
-the requests module. They cover queue refill, retained memory, scatter addresses,
-transfer limits, errors and close drain using real dependency descriptors.
+Request tests live in blk/tests/requests.rs and remain a child of the requests
+module through #[path]. The blk directory holds runtime request code; requests
+does not need a separate directory solely to contain tests.
 
 ## IRQ-driven RNG adapter
 

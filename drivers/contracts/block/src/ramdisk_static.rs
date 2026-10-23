@@ -93,36 +93,45 @@ impl BlockDeviceOperations for RamDisk {
     fn block_size(&self) -> usize {
         BLOCK_SIZE
     }
+
+    /// Reads a single block from the RAM disk into the provided buffer.
+    fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
+        if !buffer.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(DriverError::InvalidInput);
+        }
+
+        let offset = block_id as usize * BLOCK_SIZE;
+        if offset + buffer.len() > self.len {
+            return Err(DriverError::Io);
+        }
+
+        self.with_data(|data| {
+            buffer.copy_from_slice(&data[offset..offset + buffer.len()]);
+        });
+        Ok(())
+    }
+
+    /// Writes a single block to the RAM disk from the provided buffer.
+    fn write_block(&self, block_id: u64, buffer: &[u8]) -> DriverResult {
+        if !buffer.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(DriverError::InvalidInput);
+        }
+
+        let offset = block_id as usize * BLOCK_SIZE;
+        if offset + buffer.len() > self.len {
+            return Err(DriverError::Io);
+        }
+
+        self.with_data(|data| {
+            data[offset..offset + buffer.len()].copy_from_slice(buffer);
+        });
+        Ok(())
+    }
+
+    /// No operation needed for flushing RAM disk.
+    fn flush(&self) -> DriverResult {
+        Ok(())
+    }
 }
 
 unittest::path_mod_test!(pub mod tests_ramdisk_static, "../ut-tests/ramdisk_static.rs");
-
-impl crate::BioOperations for RamDisk {
-    fn submit_bio(&self, mut bio: crate::Bio) {
-        let transfer = |data: &mut [u8]| -> DriverResult {
-            let mut offset = usize::try_from(bio.sector())
-                .ok()
-                .and_then(|sector| sector.checked_mul(512))
-                .ok_or(DriverError::InvalidInput)?;
-            let len: usize = bio.vectors_mut().map(|vector| vector.bytes().len()).sum();
-            if offset.checked_add(len).is_none_or(|end| end > data.len()) {
-                return Err(DriverError::Io);
-            }
-            let operation = bio.operation();
-            for mut vector in bio.vectors_mut() {
-                let end = offset + vector.bytes().len();
-                match operation {
-                    crate::BioOperation::Read => {
-                        vector.bytes_mut()?.copy_from_slice(&data[offset..end])
-                    }
-                    crate::BioOperation::Write => data[offset..end].copy_from_slice(vector.bytes()),
-                    crate::BioOperation::Flush => unreachable!(),
-                }
-                offset = end;
-            }
-            Ok(())
-        };
-        let result = self.with_data(transfer);
-        bio.end_io(result);
-    }
-}

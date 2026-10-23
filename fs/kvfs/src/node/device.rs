@@ -280,7 +280,7 @@ impl FileOperations for DefaultBlkdevFileOperations {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
         let device = block::lookup_block_device(inode.rdev())
             .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
-        BlockDevice::open(&device, block_open_mode(file.mode()))
+        device.open(block_open_mode(file.mode()))
     }
 
     fn supports_read(&self) -> bool {
@@ -301,7 +301,7 @@ impl FileOperations for DefaultBlkdevFileOperations {
 
     fn ioctl(&self, file: &VfsFile, cred: &kcred::Cred, cmd: u32, arg: usize) -> VfsResult<usize> {
         let device = file_block_device(file)?;
-        DeviceFileOps::ioctl(&device, file, cred, cmd, arg)
+        DeviceFileOps::ioctl(device.as_ref(), file, cred, cmd, arg)
     }
 
     fn fallocate(
@@ -311,7 +311,7 @@ impl FileOperations for DefaultBlkdevFileOperations {
         offset: u64,
         len: u64,
     ) -> VfsResult<()> {
-        block_device_fallocate(&file_block_device(file)?, flags, offset, len)
+        block_device_fallocate(file_block_device(file)?.as_ref(), flags, offset, len)
     }
 
     fn mmap(&self, file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
@@ -320,7 +320,7 @@ impl FileOperations for DefaultBlkdevFileOperations {
 
     fn release(&self, inode: &VfsInode, _file: &VfsFile) -> VfsResult<()> {
         if let Some(device) = block::lookup_block_device(inode.rdev()) {
-            BlockDevice::release(&device);
+            device.release();
         }
         Ok(())
     }
@@ -359,7 +359,7 @@ fn map_block_error(error: DriverError) -> VfsError {
     }
 }
 
-fn read_block_device(device: &Arc<BlockDevice>, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
+fn read_block_device(device: &BlockDevice, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -409,7 +409,7 @@ fn read_block_device(device: &Arc<BlockDevice>, buf: &mut [u8], offset: u64) -> 
     Ok(length)
 }
 
-fn write_block_device(device: &Arc<BlockDevice>, buf: &[u8], offset: u64) -> VfsResult<usize> {
+fn write_block_device(device: &BlockDevice, buf: &[u8], offset: u64) -> VfsResult<usize> {
     if buf.is_empty() {
         return Ok(0);
     }
@@ -473,7 +473,7 @@ fn write_block_device(device: &Arc<BlockDevice>, buf: &[u8], offset: u64) -> Vfs
 /// against raw devices — an unaligned range is `EINVAL`, never a silent
 /// partial-block write.
 fn block_device_fallocate(
-    device: &Arc<BlockDevice>,
+    device: &BlockDevice,
     flags: FallocateFlags,
     start: u64,
     mut len: u64,
@@ -552,7 +552,7 @@ fn block_device_fallocate(
     Ok(())
 }
 
-impl DeviceFileOps for Arc<BlockDevice> {
+impl DeviceFileOps for BlockDevice {
     fn supports_read(&self) -> bool {
         true
     }

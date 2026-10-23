@@ -101,9 +101,7 @@ impl<H: AhciHal> BlockDeviceOperations for AhciDriver<H> {
     fn num_blocks(&self) -> u64 {
         self.num_blocks
     }
-}
 
-impl<H: AhciHal> AhciDriver<H> {
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         crate::word_io::read_blocks_with_provider(
             self.buffer_provider,
@@ -142,22 +140,6 @@ impl<H: AhciHal> AhciDriver<H> {
 
     fn flush(&self) -> DriverResult {
         Ok(())
-    }
-}
-
-impl<H: AhciHal> crate::BlkMqOperations for AhciDriver<H> {
-    fn queue_rq(&self, mut request: crate::Request) {
-        let block_id = request.sector() / (self.block_size() as u64 / 512);
-        let result = match request.operation() {
-            crate::BioOperation::Read => {
-                request.read_contiguous(|bytes| self.read_block(block_id, bytes))
-            }
-            crate::BioOperation::Write => {
-                request.write_contiguous(|bytes| self.write_block(block_id, bytes))
-            }
-            crate::BioOperation::Flush => self.flush(),
-        };
-        request.complete(result);
     }
 }
 

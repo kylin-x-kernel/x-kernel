@@ -39,8 +39,7 @@ impl BlockDeviceOperations for ReadOnlyDevice {
     fn block_size(&self) -> usize {
         512
     }
-}
-impl ReadOnlyDevice {
+
     fn read_block(&self, block: u64, output: &mut [u8]) -> DriverResult {
         let start = usize::try_from(block)
             .ok()
@@ -59,22 +58,6 @@ impl ReadOnlyDevice {
 
     fn flush(&self) -> DriverResult {
         Ok(())
-    }
-}
-
-impl block::BioOperations for ReadOnlyDevice {
-    fn submit_bio(&self, mut bio: block::Bio) {
-        let block_id = bio.sector() / (self.block_size() as u64 / 512);
-        let result = match bio.operation() {
-            block::BioOperation::Read => {
-                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
-            }
-            block::BioOperation::Write => {
-                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
-            }
-            block::BioOperation::Flush => self.flush(),
-        };
-        bio.end_io(result);
     }
 }
 
@@ -149,7 +132,7 @@ fn legacy_mapping_reads_all_indirection_boundaries_and_rejects_bad_pointers() {
         // The filesystem supports extents; this particular inode uses legacy
         // pointers. Do not bypass the mount rejection of non-extent filesystems.
         let filesystem = Ext4SbInfo::prepare_mount_with_statfs_mode(
-            crate::io::test_block_device(Arc::new(ReadOnlyDevice(bytes.clone()))),
+            Arc::new(ReadOnlyDevice(bytes.clone())),
             Ext4StatFsMode::Bsd,
         )
         .unwrap();
@@ -181,7 +164,7 @@ fn legacy_mapping_reads_all_indirection_boundaries_and_rejects_bad_pointers() {
             let mut corrupt = bytes.clone();
             put_u32(&mut corrupt, 14 * block_size, invalid);
             let filesystem = Ext4SbInfo::prepare_mount_with_statfs_mode(
-                crate::io::test_block_device(Arc::new(ReadOnlyDevice(corrupt))),
+                Arc::new(ReadOnlyDevice(corrupt)),
                 Ext4StatFsMode::Bsd,
             )
             .unwrap();

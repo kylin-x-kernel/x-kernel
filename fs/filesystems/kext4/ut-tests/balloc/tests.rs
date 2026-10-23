@@ -63,7 +63,7 @@ fn allocation_goals_in_second_group_round_trip_accounting() {
         .unwrap();
     assert_eq!(filesystem.free_blocks_count(), free_blocks);
     assert_eq!(filesystem.free_inodes_count(), free_inodes);
-    let reopened = Ext4SbInfo::open(crate::io::test_block_device(device), false).unwrap();
+    let reopened = Ext4SbInfo::open(device, false).unwrap();
     assert_eq!(reopened.free_blocks_count(), free_blocks);
     assert_eq!(reopened.free_inodes_count(), free_inodes);
     assert!(!reopened.is_inode_allocated(inode.inode()).unwrap());

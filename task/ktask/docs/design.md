@@ -686,7 +686,7 @@ for existing callers. Both check task interruption before polling the operation
 and release their owned registrations on completion or cancellation; file-specific
 readiness precedence and Linux restart policy belong to their callers.
 
-- `future::PreparedTaskWait` checks sleepable context before wake registration and
+- `future::PreparedTaskWait` checks sleepable context before publication and
   allocates a `KWaker` Arc. It keeps one strong task ref for
   `blocked_resched`. The handle is not `Send`/`Sync`; `park()` checks current
   task identity. Cross-context delivery uses a Waker that holds only a task

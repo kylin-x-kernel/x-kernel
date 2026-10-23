@@ -29,8 +29,6 @@ ipi = ["dep:kipi"]
 char = ["kdriver/char", "dep:ktty"]
 display = ["kdriver/display", "dep:fbdevice"]
 input = ["kdriver/input", "dep:inputdev"]
-# Filesystem consumers such as devfs loop need the block host services even
-# when no physical block driver is selected.
 fs = ["kdriver/block", "dep:fs_boot"]
 # 9P runtime glue only. The transport driver is selected at the top level via
 # `kfeat/driver_virtio_9p` (or any future 9P transport driver feature).

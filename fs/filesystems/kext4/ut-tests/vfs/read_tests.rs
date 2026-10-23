@@ -142,14 +142,9 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
             Ext4SyncIntent::DataOnly,
         )
         .unwrap();
-    let device = ReadDevice::new(crate::io::test_block_device(storage));
+    let device = ReadDevice::new(storage);
     filesystem.device = Arc::new(
-        FilesystemDevice::open(
-            crate::io::test_block_device(device.clone()),
-            PAGE_SIZE_4K,
-            device.num_blocks(),
-        )
-        .unwrap(),
+        FilesystemDevice::open(device.clone(), PAGE_SIZE_4K, device.num_blocks()).unwrap(),
     );
     let (_super_block, file) = cached_file(
         filesystem,

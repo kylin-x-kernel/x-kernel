@@ -66,7 +66,10 @@ pub(super) fn activate<T: Transport + 'static>(
     irq: Option<usize>,
 ) -> DriverResult<()> {
     let irq = irq.ok_or(DriverError::InvalidInput)?;
-    let device = Arc::new(VirtIoBlkDev::<VirtIoHalImpl, T>::try_new_irq(transport)?);
+    let device = Arc::new(VirtIoBlkDev::<VirtIoHalImpl, T>::try_new_irq(
+        transport,
+        block_completion::prepare_block_wait,
+    )?);
     // PCI/MMIO discovery already mapped this virtual IRQ. A plain resource
     // reuses that mapping; Unknown does not replace its trigger/polarity.
     activate_device(
@@ -101,12 +104,12 @@ fn activate_device<H: VirtIoHal + 'static, T: Transport + 'static>(
         )
         .map_err(crate::resource::map_res_err)?,
     );
-    let disk = Gendisk::alloc_mq(
+    let disk = Gendisk::alloc(
         device.name().into(),
         virtio::VIRTIO_BLK_MAJOR,
         device.index() << virtio::VIRTIO_BLK_PART_BITS,
         1 << virtio::VIRTIO_BLK_PART_BITS,
-        device.clone(),
+        Box::new(device.clone()),
     )?;
     activation.disk = Some(disk.clone());
     device.enable_interrupts();

@@ -79,41 +79,41 @@ impl BlockDeviceOperations for RamDisk {
     fn block_size(&self) -> usize {
         BLOCK_SIZE
     }
+
+    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        if !buf.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(DriverError::InvalidInput);
+        }
+        let offset = block_id as usize * BLOCK_SIZE;
+        if offset + buf.len() > self.len {
+            return Err(DriverError::Io);
+        }
+        let storage = self.storage.lock();
+        buf.copy_from_slice(&storage[offset..offset + buf.len()]);
+        Ok(())
+    }
+
+    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+        if !buf.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(DriverError::InvalidInput);
+        }
+        let offset = block_id as usize * BLOCK_SIZE;
+        if offset + buf.len() > self.len {
+            return Err(DriverError::Io);
+        }
+        let mut storage = self.storage.lock();
+        storage[offset..offset + buf.len()].copy_from_slice(buf);
+        Ok(())
+    }
+
+    fn flush(&self) -> DriverResult {
+        Ok(())
+    }
 }
 
 /// Aligns a given size upwards to the nearest multiple of `BLOCK_SIZE`.
 const fn align_up(val: usize) -> usize {
     (val + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1)
-}
-
-impl crate::BioOperations for RamDisk {
-    fn submit_bio(&self, mut bio: crate::Bio) {
-        let mut transfer = |data: &mut [u8]| -> DriverResult {
-            let mut offset = usize::try_from(bio.sector())
-                .ok()
-                .and_then(|sector| sector.checked_mul(512))
-                .ok_or(DriverError::InvalidInput)?;
-            let len: usize = bio.vectors_mut().map(|vector| vector.bytes().len()).sum();
-            if offset.checked_add(len).is_none_or(|end| end > data.len()) {
-                return Err(DriverError::Io);
-            }
-            let operation = bio.operation();
-            for mut vector in bio.vectors_mut() {
-                let end = offset + vector.bytes().len();
-                match operation {
-                    crate::BioOperation::Read => {
-                        vector.bytes_mut()?.copy_from_slice(&data[offset..end])
-                    }
-                    crate::BioOperation::Write => data[offset..end].copy_from_slice(vector.bytes()),
-                    crate::BioOperation::Flush => unreachable!(),
-                }
-                offset = end;
-            }
-            Ok(())
-        };
-        let result = transfer(&mut self.storage.lock());
-        bio.end_io(result);
-    }
 }
 
 unittest::path_mod_test!(tests_ramdisk, "../ut-tests/ramdisk.rs");

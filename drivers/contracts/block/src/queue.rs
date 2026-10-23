@@ -4,11 +4,7 @@
 
 //! Block request-queue geometry and topology.
 
-use alloc::sync::Arc;
-
 use driver_base::{DriverError, DriverResult};
-
-use crate::Bio;
 
 /// Shift from bytes to Linux block sectors.
 pub const SECTOR_SHIFT: u32 = 9;
@@ -93,144 +89,22 @@ impl QueueLimits {
     }
 }
 
-/// A block request queue with exactly one data dispatch contract.
+/// A block request queue and its device limits.
+///
+/// Request dispatch state is added with the block multi-queue path. Keeping
+/// limits on this object now gives every consumer one canonical geometry source.
 pub struct RequestQueue {
     limits: QueueLimits,
-    dispatch: Dispatch,
-}
-
-pub(crate) enum Dispatch {
-    Bio(Arc<dyn crate::BioOperations>),
-    Request(Arc<dyn BlkMqOperations>),
 }
 
 impl RequestQueue {
-    pub(crate) fn new(limits: QueueLimits, dispatch: Dispatch) -> Self {
-        Self { limits, dispatch }
-    }
-
-    pub(crate) fn submit(&self, bio: Bio) {
-        match &self.dispatch {
-            Dispatch::Bio(operations) => operations.submit_bio(bio),
-            Dispatch::Request(operations) => {
-                let request = Request {
-                    bio,
-                    vector_index: 0,
-                    vector_offset: 0,
-                };
-                operations.queue_rq(request);
-            }
-        }
+    /// Creates a request queue with validated device limits.
+    pub const fn new(limits: QueueLimits) -> Self {
+        Self { limits }
     }
 
     /// Returns the queue's hardware geometry and I/O topology.
     pub const fn limits(&self) -> &QueueLimits {
         &self.limits
-    }
-}
-
-/// Driver dispatch for request-based disks, corresponding to Linux blk_mq_ops.
-pub trait BlkMqOperations: Send + Sync {
-    /// Takes ownership in sleepable task context, independently of completion.
-    /// The device queue retains it until DMA reclamation and calls [`Request::complete`],
-    /// including on failure.
-    ///
-    /// Ownership prevents duplicate completion, but cannot require completion.
-    /// Dropping the request does not publish a result or cancel device access;
-    /// omitting `complete` leaves synchronous callers blocked indefinitely.
-    fn queue_rq(&self, request: Request);
-}
-
-/// One owned, in-flight bio. Hardware admission and descriptors stay with the driver.
-#[must_use]
-pub struct Request {
-    bio: Bio,
-    vector_index: usize,
-    vector_offset: usize,
-}
-
-impl Request {
-    /// Returns the operation being executed.
-    pub fn operation(&self) -> crate::BioOperation {
-        self.bio.operation()
-    }
-
-    /// Returns the whole-disk sector at the current transfer cursor.
-    pub fn sector(&self) -> u64 {
-        self.bio.sector()
-    }
-
-    /// Returns the memory extents while hardware does not own their bytes.
-    pub fn vectors_mut(&mut self) -> impl ExactSizeIterator<Item = crate::BioVecRef<'_>> {
-        self.bio
-            .vectors_from_mut(self.vector_index, self.vector_offset)
-    }
-
-    /// Advances a retired, sector-aligned transfer prefix without releasing any
-    /// memory owners. The terminal callback still receives every original extent.
-    /// Call only after hardware relinquishes the submitted prefix.
-    ///
-    /// # Errors
-    /// Returns InvalidInput without moving the cursor for a non-sector-aligned
-    /// count or one exceeding the remaining request.
-    pub fn advance(&mut self, bytes: usize) -> DriverResult {
-        if !bytes.is_multiple_of(SECTOR_SIZE as usize) {
-            return Err(DriverError::InvalidInput);
-        }
-        let (mut index, mut offset, mut left) = (self.vector_index, self.vector_offset, bytes);
-        while let Some(len) = self.bio.vector_len(index) {
-            let count = (len - offset).min(left);
-            offset += count;
-            left -= count;
-            if offset != len {
-                break;
-            }
-            index += 1;
-            offset = 0;
-        }
-        if left != 0 {
-            return Err(DriverError::InvalidInput);
-        }
-        let sector = self
-            .bio
-            .sector()
-            .checked_add((bytes / SECTOR_SIZE as usize) as u64)
-            .ok_or(DriverError::InvalidInput)?;
-        self.vector_index = index;
-        self.vector_offset = offset;
-        self.bio.remap(sector);
-        Ok(())
-    }
-
-    /// Whether the transfer cursor reached the end of all data extents.
-    /// Flush requests have no data and require their own device completion.
-    pub fn is_data_complete(&self) -> bool {
-        self.bio.vector_len(self.vector_index).is_none()
-    }
-
-    /// Runs a contiguous-only read backend, staging scatter extents if needed.
-    ///
-    /// # Errors
-    /// Propagates invalid memory/operation, length overflow and backend errors.
-    pub fn read_contiguous(
-        &mut self,
-        read: impl FnOnce(&mut [u8]) -> DriverResult,
-    ) -> DriverResult {
-        self.bio
-            .read_contiguous_at(self.vector_index, self.vector_offset, read)
-    }
-
-    /// Runs a contiguous-only write backend without copying a single extent.
-    ///
-    /// # Errors
-    /// Propagates invalid operation, length overflow and backend errors.
-    pub fn write_contiguous(&mut self, write: impl FnOnce(&[u8]) -> DriverResult) -> DriverResult {
-        self.bio
-            .write_contiguous_at(self.vector_index, self.vector_offset, write)
-    }
-
-    /// Completes the request after all device references have been retired.
-    pub fn complete(self, status: DriverResult) {
-        self.bio.end_io(status);
     }
 }
