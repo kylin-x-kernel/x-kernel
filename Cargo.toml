@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "arch/kcpu_slot",
+    "util/kxarray",
     # kernel entry
     "entry",
     # boot and loader
@@ -102,6 +103,7 @@ x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 klazy = { path = "util/klazy" }
+kxarray = { path = "util/kxarray" }
 kfinalize = { path = "util/kfinalize" }
 ktime_types = { path = "util/ktime_types" }
 ktime = { path = "core/ktime" }

@@ -55,6 +55,10 @@
 //!       watchdog boot initialization; periodic inspection requires system integration.
 #![no_std]
 
+// Link container-owned tests without a runtime dependency on the container.
+#[cfg(unittest)]
+extern crate kxarray as _;
+
 #[cfg(feature = "kwork_stall_check")]
 extern crate kworkng as _;
 

@@ -23,6 +23,7 @@ smp = [
     "khal/smp",
     "kruntime/smp",
     "krcu/smp",
+    "kxarray/smp",
     "memspace/smp",
     "fs_boot?/smp",
     "ktracing?/smp",
@@ -237,6 +238,7 @@ kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
 krcu.workspace = true
+kxarray.workspace = true
 fs_boot = { workspace = true, optional = true }
 timer_driver = { workspace = true, optional = true }
 kext4 = { workspace = true, optional = true }

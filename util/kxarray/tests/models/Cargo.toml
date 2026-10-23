@@ -1,0 +1,14 @@
+[package]
+name = "xarray-publication-models"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+loom = "=0.7.2"
+
+[[test]]
+name = "publication"
+path = "publication.rs"

@@ -2482,6 +2482,7 @@ dependencies = [
  "ktask",
  "ktracing",
  "kworkng",
+ "kxarray",
  "linux_sysno",
  "memspace",
  "procfs",
@@ -3423,6 +3424,25 @@ dependencies = [
  "ktask",
  "ktime_types",
  "kworkerpool_ng",
+ "unittest",
+]
+
+[[package]]
+name = "kxarray"
+version = "0.3.0-dev"
+dependencies = [
+ "kalloc",
+ "karch",
+ "kbuild_config",
+ "kcpu_id_map",
+ "kerrno",
+ "khal",
+ "kirq",
+ "krcu",
+ "krcu-core",
+ "kspin",
+ "ktask",
+ "ktime_types",
  "unittest",
 ]
 
