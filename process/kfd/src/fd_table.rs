@@ -7,22 +7,21 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::ffi::c_int;
 
-use flatten_objects::FlattenObjects;
 use kerrno::{KError, KResult};
 use ksync::RwLock;
 use kvfs::VfsFile;
 
-use crate::{FdSnapshot, FileDescriptor};
+use crate::{FdSnapshot, FileDescriptor, fd_slots::FileSlots};
 
 /// Process-local file descriptor table.
 pub struct FdTable {
-    entries: FlattenObjects<FileDescriptor, { krlimit::FILE_LIMIT }>,
+    slots: FileSlots<FileDescriptor>,
 }
 
 impl Default for FdTable {
     fn default() -> Self {
         Self {
-            entries: FlattenObjects::new(),
+            slots: FileSlots::new(),
         }
     }
 }
@@ -49,27 +48,27 @@ impl FdTable {
 
     /// Returns the number of occupied descriptors.
     pub fn count(&self) -> usize {
-        self.entries.count()
+        self.slots.count()
     }
 
     /// Returns an iterator over allocated descriptor numbers.
     pub fn ids(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
-        self.entries.ids()
+        self.slots.ids()
     }
 
     /// Returns the descriptor entry at the given index.
     pub fn get(&self, fd: usize) -> Option<&FileDescriptor> {
-        self.entries.get(fd)
+        self.slots.get(fd)
     }
 
     /// Returns a mutable descriptor entry at the given index.
     pub(crate) fn get_mut(&mut self, fd: usize) -> Option<&mut FileDescriptor> {
-        self.entries.get_mut(fd)
+        self.slots.get_mut(fd)
     }
 
     /// Inserts a descriptor entry at the first available slot.
     pub(crate) fn add(&mut self, descriptor: FileDescriptor) -> Result<usize, FileDescriptor> {
-        self.entries.add(descriptor)
+        self.slots.add(descriptor)
     }
 
     /// Inserts a descriptor entry at a fixed slot.
@@ -78,17 +77,17 @@ impl FdTable {
         fd: usize,
         descriptor: FileDescriptor,
     ) -> Result<usize, FileDescriptor> {
-        self.entries.add_at(fd, descriptor)
+        self.slots.add_at(fd, descriptor)
     }
 
     /// Removes the descriptor entry at the given index.
     pub(crate) fn remove(&mut self, fd: usize) -> Option<FileDescriptor> {
-        self.entries.remove(fd)
+        self.slots.remove(fd)
     }
 
     /// Clones the table contents from another descriptor table.
     pub(crate) fn clone_from(&mut self, other: &Self) {
-        self.entries.clone_from(&other.entries);
+        self.slots.clone_from(&other.slots);
     }
 
     /// Returns the open file stored in the given descriptor.
@@ -162,18 +161,28 @@ impl FdTable {
 
     /// Shared allocation for ordinary insertion and minimum-based duplication.
     /// Command-specific validation happens before this policy-neutral search.
+    ///
+    /// The search starts at the free-descriptor bound and skips fully occupied
+    /// bitmap words instead of testing every occupied id, so its cost depends on
+    /// the number of dense words, not on the width of the requested range.
     fn allocate_descriptor(
         &mut self,
         minimum: usize,
         max_nofile: u64,
         descriptor: FileDescriptor,
     ) -> KResult<c_int> {
-        // Search is bounded by the fixed table capacity, even for RLIM_INFINITY.
+        // The search is bounded by the fixed table capacity, even for RLIM_INFINITY.
         let end = max_nofile.min(krlimit::FILE_LIMIT as u64) as usize;
-        self.entries
-            .add_in_range(minimum, end, descriptor)
+        self.slots
+            .alloc(minimum, end, descriptor)
             .map(|fd| fd as c_int)
             .map_err(|_| KError::TooManyOpenFiles)
+    }
+
+    /// Returns the free-descriptor bound for invariant checks in unit tests.
+    #[cfg(unittest)]
+    pub(crate) fn test_next_free(&self) -> usize {
+        self.slots.next_free()
     }
 
     /// Inserts an open file without applying a resource-limit policy.

@@ -1567,13 +1567,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
-name = "flatten_objects"
-version = "0.2.4"
-dependencies = [
- "bitmaps",
-]
-
-[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2405,7 +2398,6 @@ name = "kfd"
 version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
- "flatten_objects",
  "kcred",
  "kerrno",
  "kpoll",

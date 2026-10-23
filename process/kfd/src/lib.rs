@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+mod fd_slots;
 mod fd_table;
 mod fd_table_owner;
 mod file_descriptor;

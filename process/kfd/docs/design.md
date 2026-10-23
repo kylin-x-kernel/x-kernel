@@ -12,15 +12,18 @@ There is no local `FileLike` trait or file-like downcast layer.
 ## Scope and architecture
 
 - `src/lib.rs`: public re-exports and the kernel test module mount.
-- `src/fd_table.rs`: `FdTable`, fixed-capacity slot operations and final cleanup.
+- `src/fd_table.rs`: `FdTable`, descriptor-table operations and final cleanup.
+- `src/fd_slots.rs`: `FileSlots`, the bitmap-backed slot storage and allocator.
 - `src/file_descriptor.rs`: `FileDescriptor` and `FdSnapshot` ownership.
 - `src/fd_table_owner.rs`: binding ownership and last-binding teardown.
 - `src/stat.rs`: `Kstat` and metadata/ABI conversions.
+- `tests/fd-slots-host/`: standalone HOST/Miri fixture that compiles
+  `src/fd_slots.rs` and pins the slot publish-order invariants.
 
 ```text
 kresources -> Arc<FdTableOwner> -> Arc<RwLock<FdTable>>
                          |
-       FlattenObjects<FileDescriptor, krlimit::FILE_LIMIT>
+            FileSlots<FileDescriptor>  (values + occupancy bitmap + bound)
                          |
           FileDescriptor { Arc<VfsFile>, cloexec }
                          |
@@ -49,11 +52,27 @@ insert in the lowest unassigned slot in
 `[minimum, min(soft_limit, FILE_LIMIT))`. Ordinary insertion supplies zero;
 `F_DUPFD` supplies its requested minimum. Physical capacity is
 `krlimit::FILE_LIMIT` (1024), which also bounds the search for an infinite limit.
-The allocator delegates range selection to `FlattenObjects::add_in_range`, which
-reuses the container's single bitmap and skips fully occupied words. It does
-not check every occupied descriptor while holding the table write lock. The
-local dependency preserves upstream 0.2.4 ownership and slot operations; its
-provenance and sole API extension are in `third_party/flatten_objects/XKERNEL-PATCH.md`.
+
+`FileSlots` owns the value array, the occupancy bitmap, and the free-descriptor
+lower bound together, so the bound is maintained next to the bits it describes.
+It is an in-tree implementation whose layout follows the upstream
+`flatten_objects` crate it replaces; the local fork and its provenance record
+were removed with this change, and no upstream source lines are retained.
+The bound `next_free` means every id below it is occupied. The allocator starts
+at `max(minimum, next_free)`, because a free descriptor below the bound cannot
+exist, masks the bits below the start in the first bitmap word, and then skips
+fully occupied words until it finds a free bit; its cost depends on the number
+of dense words rather than on the width of the requested range. The bound is
+raised only when a search proved that everything below the new occupant is
+occupied: ordinary insertion always qualifies, and a range search qualifies only
+when it began at the bound. It is lowered to the freed id by every release path.
+Keeping it an under-estimate is therefore the only correctness requirement - an
+over-estimate would skip lower holes and break the lowest-free-descriptor rule -
+so `add_at` for a fixed target slot moves it only when that slot was the bound
+itself, and `clone_from` copies the source bound because the occupancy is
+identical. Descriptor ids and slot emptiness come from the same bitmap: a slot
+holds a value exactly while its bit is set, which is what allows `get` and
+`remove` to rely on initialization without a separate state tag.
 `duplicate_from` checks the source first and rejects a negative minimum or one
 at/above the soft limit before entering the shared allocator. These
 command-specific errors remain separate from ordinary insertion. Existing high descriptors after a limit

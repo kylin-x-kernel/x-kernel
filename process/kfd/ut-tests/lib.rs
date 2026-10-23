@@ -2,7 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{
+    sync::Arc,
+    vec,
+    vec::Vec,
+};
 use core::{
     ffi::c_int,
     sync::atomic::{AtomicUsize, Ordering},
@@ -421,4 +425,386 @@ fn test_fd_table_drop_continues_after_flush_error() {
 
     assert_eq!(failed_flushes.load(Ordering::Relaxed), 1);
     assert_eq!(successful_flushes.load(Ordering::Relaxed), 1);
+}
+
+/// Deterministic xorshift64* generator, so every differential run replays exactly.
+struct OpRng(u64);
+
+impl OpRng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    /// Returns a value below `bound`; callers never pass zero.
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound as u64) as usize
+    }
+}
+
+/// Reference model of occupancy and close-on-exec state.
+///
+/// Allocation is answered by brute force over the same permitted range, so a
+/// mismatch localizes a defect in the bound, the search, or the command checks.
+struct FdModel {
+    occupied: Vec<bool>,
+    cloexec: Vec<bool>,
+}
+
+impl FdModel {
+    fn new() -> Self {
+        Self {
+            occupied: vec![false; krlimit::FILE_LIMIT],
+            cloexec: vec![false; krlimit::FILE_LIMIT],
+        }
+    }
+
+    fn lowest_free(&self, minimum: usize, max_nofile: u64) -> Option<usize> {
+        let end = max_nofile.min(krlimit::FILE_LIMIT as u64) as usize;
+        (minimum..end).find(|&fd| !self.occupied[fd])
+    }
+
+    fn assigned_ids(&self) -> Vec<usize> {
+        (0..krlimit::FILE_LIMIT)
+            .filter(|&fd| self.occupied[fd])
+            .collect()
+    }
+
+    fn release(&mut self, fd: usize) {
+        self.occupied[fd] = false;
+        self.cloexec[fd] = false;
+    }
+}
+
+/// The bound may only claim occupied slots: an over-estimate would skip holes.
+fn assert_bound_is_valid(table: &FdTable) {
+    let bound = table.test_next_free();
+    assert!(bound <= krlimit::FILE_LIMIT, "bound {bound} exceeds capacity");
+    for fd in 0..bound {
+        assert!(table.get(fd).is_some(), "bound {bound} skips free fd {fd}");
+    }
+}
+
+fn assert_matches_model(table: &FdTable, model: &FdModel, seed: u64, step: usize) {
+    let actual: Vec<usize> = table.ids().collect();
+    let expected = model.assigned_ids();
+    assert_eq!(actual, expected, "occupancy seed={seed:#x} step={step}");
+    assert_eq!(table.count(), expected.len(), "count seed={seed:#x} step={step}");
+}
+
+fn assert_cloexec_matches_model(table: &FdTable, model: &FdModel, seed: u64, step: usize) {
+    for fd in 0..krlimit::FILE_LIMIT {
+        if model.occupied[fd] {
+            assert_eq!(
+                table.cloexec(fd as c_int).ok(),
+                Some(model.cloexec[fd]),
+                "cloexec at {fd} seed={seed:#x} step={step}"
+            );
+        }
+    }
+}
+
+#[def_test]
+fn fd_ids_iterate_both_directions_across_bitmap_words() {
+    let file = snapshot_test_file();
+    let mut table = FdTable::default();
+    let source = table.add_file(u64::MAX, file.clone(), false).unwrap();
+    assert_eq!(source, 0);
+    // Occupy the ids around every bitmap word edge plus the last physical slot.
+    for fd in [1usize, 62, 63, 64, 65, 127, 128, 1022, 1023] {
+        assert_eq!(
+            table
+                .duplicate_to(source, fd as c_int, false)
+                .map(|(fd, _)| fd),
+            Ok(fd as c_int)
+        );
+    }
+
+    let expected = [0usize, 1, 62, 63, 64, 65, 127, 128, 1022, 1023];
+    assert_eq!(table.count(), expected.len());
+    assert_eq!(table.ids().collect::<Vec<_>>(), expected);
+    assert_eq!(
+        table.ids().rev().collect::<Vec<_>>(),
+        expected.iter().rev().copied().collect::<Vec<_>>()
+    );
+
+    // Consuming from both ends must not repeat, skip, or reorder an id.
+    let mut ids = table.ids();
+    let mut order = Vec::new();
+    while let Some(front) = ids.next() {
+        order.push(front);
+        let Some(back) = ids.next_back() else {
+            break;
+        };
+        order.push(back);
+    }
+    assert_eq!(order, [0, 1023, 1, 1022, 62, 128, 63, 127, 64, 65]);
+}
+
+#[def_test]
+fn test_next_free_bound_tracks_lowest_hole_and_range_searches() {
+    let file = snapshot_test_file();
+    let mut table = FdTable::default();
+    for expected in 0..4 {
+        assert_eq!(table.add_file(16, file.clone(), false), Ok(expected));
+    }
+    assert_eq!(table.test_next_free(), 4);
+
+    // A released low slot lowers the bound and is allocated again first.
+    table.file_close_fd_locked(2).unwrap();
+    assert_eq!(table.test_next_free(), 2);
+    assert_bound_is_valid(&table);
+    assert_eq!(table.add_file(16, file.clone(), false), Ok(2));
+    assert_eq!(table.test_next_free(), 3);
+
+    // A fixed target above the bound must not absorb the holes below it.
+    table.file_close_fd_locked(0).unwrap();
+    assert_eq!(table.test_next_free(), 0);
+    assert_eq!(table.duplicate_to(2, 8, false).map(|(fd, _)| fd), Ok(8));
+    assert_eq!(table.test_next_free(), 0);
+    assert_eq!(table.add_file(16, file.clone(), false), Ok(0));
+
+    // A fixed target that is the bound itself moves the bound past it.
+    assert_eq!(table.test_next_free(), 1);
+    assert_eq!(table.duplicate_to(2, 1, false).map(|(fd, _)| fd), Ok(1));
+    assert_eq!(table.test_next_free(), 2);
+
+    // A range search above the bound must not claim the holes below it either.
+    let mut table = FdTable::default();
+    assert_eq!(table.add_file(16, file.clone(), false), Ok(0));
+    assert_eq!(table.add_file(16, file.clone(), false), Ok(1));
+    table.file_close_fd_locked(0).unwrap();
+    assert_eq!(table.duplicate_from(1, 700, 16, false), Err(kerrno::KError::InvalidInput));
+    assert_eq!(table.duplicate_from(1, 700, u64::MAX, false), Ok(700));
+    assert_eq!(table.test_next_free(), 0);
+    assert_bound_is_valid(&table);
+    assert_eq!(table.add_file(16, file.clone(), false), Ok(0));
+}
+
+#[def_test]
+fn test_copied_table_inherits_the_free_descriptor_bound() {
+    let file = snapshot_test_file();
+    let shared = FdTable::new_shared();
+    {
+        let mut table = shared.write();
+        for expected in 0..3 {
+            assert_eq!(table.add_file(16, file.clone(), false), Ok(expected));
+        }
+        table.file_close_fd_locked(0).unwrap();
+        assert_eq!(table.test_next_free(), 0);
+    }
+
+    let copied_shared = FdTable::clone_shared_from(&shared);
+    {
+        let copied = copied_shared.read();
+        // An under-estimate would stay correct but slow; an over-estimate would
+        // return 3 instead of the freed slot 0.
+        assert_eq!(copied.test_next_free(), 0);
+        assert_bound_is_valid(&copied);
+    }
+
+    let mut copied = copied_shared.write();
+    assert_eq!(copied.add_file(16, file.clone(), false), Ok(0));
+    assert_eq!(copied.add_file(16, file.clone(), false), Ok(3));
+    assert_bound_is_valid(&copied);
+}
+
+#[def_test]
+fn fd_table_matches_reference_model_under_random_operations() {
+    const FILE_LIMIT: usize = krlimit::FILE_LIMIT;
+
+    for seed in [1u64, 0x5eed, 0xdead_beef] {
+        let mut rng = OpRng(seed);
+        let mut table = FdTable::default();
+        let mut model = FdModel::new();
+        let file = snapshot_test_file();
+
+        for step in 0..2000 {
+            // Mix finite and infinite soft limits so bounded and unbounded
+            // searches are both exercised.
+            let soft = match rng.below(6) {
+                0 => FILE_LIMIT as u64,
+                1 => u64::MAX,
+                _ => rng.below(FILE_LIMIT + 1) as u64,
+            };
+            let random_fd = |rng: &mut OpRng| match rng.below(8) {
+                0 => -1,
+                _ => rng.below(FILE_LIMIT) as c_int,
+            };
+
+            match rng.below(13) {
+                0..=3 => {
+                    // open(): lowest free descriptor below the soft limit.
+                    let cloexec = rng.next() & 1 == 1;
+                    let expected = match model.lowest_free(0, soft) {
+                        Some(fd) => {
+                            model.occupied[fd] = true;
+                            model.cloexec[fd] = cloexec;
+                            Some(fd as c_int)
+                        }
+                        None => None,
+                    };
+                    assert_eq!(
+                        table.add_file(soft, file.clone(), cloexec).ok(),
+                        expected,
+                        "open seed={seed:#x} step={step}"
+                    );
+                }
+                4..=5 => {
+                    // F_DUPFD: lowest free descriptor at or above the minimum.
+                    let old_fd = random_fd(&mut rng);
+                    let minimum = match rng.below(8) {
+                        0 => FILE_LIMIT as c_int + 1,
+                        _ => rng.below(FILE_LIMIT + 1) as c_int,
+                    };
+                    let cloexec = rng.next() & 1 == 1;
+                    let expected = if old_fd < 0 || !model.occupied[old_fd as usize] {
+                        Err(kerrno::KError::BadFileDescriptor)
+                    } else if minimum as u64 >= soft {
+                        Err(kerrno::KError::InvalidInput)
+                    } else {
+                        match model.lowest_free(minimum as usize, soft) {
+                            Some(fd) => {
+                                model.occupied[fd] = true;
+                                model.cloexec[fd] = cloexec;
+                                Ok(fd as c_int)
+                            }
+                            None => Err(kerrno::KError::TooManyOpenFiles),
+                        }
+                    };
+                    assert_eq!(
+                        table.duplicate_from(old_fd, minimum, soft, cloexec),
+                        expected,
+                        "dup_min seed={seed:#x} step={step}"
+                    );
+                }
+                6 => {
+                    // insert_file() ignores the soft limit but not capacity.
+                    let cloexec = rng.next() & 1 == 1;
+                    let expected = match model.lowest_free(0, FILE_LIMIT as u64) {
+                        Some(fd) => {
+                            model.occupied[fd] = true;
+                            model.cloexec[fd] = cloexec;
+                            Some(fd)
+                        }
+                        None => None,
+                    };
+                    assert_eq!(
+                        table.insert_file(file.clone(), cloexec).ok(),
+                        expected,
+                        "insert seed={seed:#x} step={step}"
+                    );
+                }
+                7..=8 => {
+                    // dup2/dup3: fixed target, replaced entry reported back.
+                    let old_fd = random_fd(&mut rng);
+                    let new_fd = match rng.below(8) {
+                        0 => FILE_LIMIT as c_int,
+                        1 => -1,
+                        _ => rng.below(FILE_LIMIT) as c_int,
+                    };
+                    let cloexec = rng.next() & 1 == 1;
+                    let expected = if new_fd < 0
+                        || new_fd as usize >= FILE_LIMIT
+                        || old_fd < 0
+                        || !model.occupied[old_fd as usize]
+                    {
+                        Err(kerrno::KError::BadFileDescriptor)
+                    } else if old_fd == new_fd {
+                        Ok((new_fd, None))
+                    } else {
+                        let replaced = if model.occupied[new_fd as usize] {
+                            Some(model.cloexec[new_fd as usize])
+                        } else {
+                            None
+                        };
+                        model.occupied[new_fd as usize] = true;
+                        model.cloexec[new_fd as usize] = cloexec;
+                        Ok((new_fd, replaced))
+                    };
+                    let actual = table
+                        .duplicate_to(old_fd, new_fd, cloexec)
+                        .map(|(fd, replaced)| (fd, replaced.map(|entry| entry.cloexec())));
+                    assert_eq!(actual, expected, "dup2 seed={seed:#x} step={step}");
+                }
+                9 => {
+                    let fd = random_fd(&mut rng);
+                    let expected = if fd < 0 || !model.occupied[fd as usize] {
+                        Err(kerrno::KError::BadFileDescriptor)
+                    } else {
+                        let cloexec = model.cloexec[fd as usize];
+                        model.release(fd as usize);
+                        Ok(cloexec)
+                    };
+                    assert_eq!(
+                        table.file_close_fd_locked(fd).map(|entry| entry.cloexec()),
+                        expected,
+                        "close seed={seed:#x} step={step}"
+                    );
+                }
+                10 => {
+                    let first = rng.below(FILE_LIMIT) as c_int;
+                    let last = rng.below(FILE_LIMIT) as c_int;
+                    let expected = (first..=last)
+                        .filter(|&fd| model.occupied[fd as usize])
+                        .count();
+                    assert_eq!(
+                        table.remove_range(first, last).len(),
+                        expected,
+                        "remove_range seed={seed:#x} step={step}"
+                    );
+                    for fd in first..=last {
+                        model.release(fd as usize);
+                    }
+                }
+                11 => {
+                    let fd = random_fd(&mut rng);
+                    let value = rng.next() & 1 == 1;
+                    let expected = if fd < 0 || !model.occupied[fd as usize] {
+                        Err(kerrno::KError::BadFileDescriptor)
+                    } else {
+                        model.cloexec[fd as usize] = value;
+                        Ok(())
+                    };
+                    assert_eq!(
+                        table.set_cloexec(fd, value),
+                        expected,
+                        "set_cloexec seed={seed:#x} step={step}"
+                    );
+                }
+                _ => {
+                    let expected = (0..FILE_LIMIT)
+                        .filter(|&fd| model.occupied[fd] && model.cloexec[fd])
+                        .count();
+                    assert_eq!(
+                        table.remove_cloexec_files().len(),
+                        expected,
+                        "remove_cloexec seed={seed:#x} step={step}"
+                    );
+                    for fd in 0..FILE_LIMIT {
+                        if model.cloexec[fd] {
+                            model.release(fd);
+                        }
+                    }
+                }
+            }
+
+            assert_bound_is_valid(&table);
+            assert_matches_model(&table, &model, seed, step);
+            if step % 128 == 0 {
+                assert_cloexec_matches_model(&table, &model, seed, step);
+                let reversed: Vec<usize> = table.ids().rev().collect();
+                let expected = model.assigned_ids();
+                assert_eq!(
+                    reversed,
+                    expected.iter().rev().copied().collect::<Vec<_>>(),
+                    "reverse ids seed={seed:#x} step={step}"
+                );
+            }
+        }
+    }
 }
