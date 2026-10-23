@@ -24,6 +24,12 @@ struct Descriptor {
     next: u16,
 }
 
+/// Returns a chained descriptor index only when it is inside the negotiated queue depth.
+fn checked_next_descriptor_index(next: u16, queue_size: usize) -> Option<usize> {
+    let index = usize::from(next);
+    (index < queue_size).then_some(index)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum GpuCommand {
     Transfer { rect: Rect, offset: u64, resource_id: u32 },
@@ -70,8 +76,11 @@ impl GpuQueue {
         core::assert!(head.len >= 24, "GPU command header must be complete");
         let request = head.address as *const u8;
         core::assert!(head.flags & 1 != 0, "GPU request descriptor must chain to the response");
-        let response_descriptor = descriptors.wrapping_add(usize::from(head.next));
-        // SAFETY: the queue retains the request descriptor buffer through completion.
+        let response_index = checked_next_descriptor_index(head.next, queue.size)
+            .expect("GPU response descriptor index is out of bounds");
+        let response_descriptor = descriptors.wrapping_add(response_index);
+        // SAFETY: the queue retains the descriptor table through completion, and
+        // checked_next_descriptor_index confirmed the response index is in bounds.
         let response_desc = unsafe { response_descriptor.read_volatile() };
         core::assert!(response_desc.flags & 2 != 0, "GPU response descriptor must be device-writable");
         let response = response_desc.address as *mut u8;
@@ -222,6 +231,14 @@ fn new_gpu() -> (super::VirtIoGpu2d<MockHal, GpuTestTransport>, Arc<SpinNoIrq<Gp
     let mut gpu = super::VirtIoGpu2d::new(transport).unwrap();
     core::assert_eq!(gpu.resolution().unwrap(), (1024, 768));
     (gpu, queue)
+}
+
+#[def_test]
+fn gpu_response_descriptor_index_rejects_out_of_bounds_next() {
+    assert_eq!(checked_next_descriptor_index(7, 8), Some(7));
+    assert_eq!(checked_next_descriptor_index(8, 8), None);
+    assert_eq!(checked_next_descriptor_index(u16::MAX, 8), None);
+    assert_eq!(checked_next_descriptor_index(0, 0), None);
 }
 
 #[def_test]
