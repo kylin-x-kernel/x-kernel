@@ -335,12 +335,18 @@ pub(super) fn extend_boot_linear_ram_from_dtb(dtb_paddr: usize) {
 }
 
 #[unsafe(link_section = ".idmap.text")]
+/// Initializes this CPU's boot translation regime and EL0 cache access.
+///
+/// With VMM disabled, both boot entry paths permit `CTR_EL0` reads and
+/// user-address cache maintenance needed by userspace cache-flush routines.
+///
 /// # Safety
 ///
 /// The boot page tables rooted at `BOOT_PT_L0_TTBR0` and `BOOT_PT_L0_TTBR1`
 /// must already be fully initialized for the current boot image, and the
 /// caller must ensure enabling the MMU will keep the current execution path
-/// and required data mapped.
+/// and required data mapped. This must run in the owning CPU's early boot
+/// context at the configured exception level, before userspace runs on it.
 pub(super) unsafe fn init_mmu() {
     let ttbr0_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR0);
     let ttbr1_root_pa = phys_addr_of!(BOOT_PT_L0_TTBR1);
@@ -368,6 +374,17 @@ pub(super) unsafe fn init_mmu() {
     karch::flush_tlb(None);
 
     SCTLR_EL1.modify(SCTLR_EL1::M::Enable + SCTLR_EL1::C::Cacheable + SCTLR_EL1::I::Cacheable);
+    // libc/JIT cache flushes read CTR_EL0 and maintain user-address caches;
+    // vectorized memset/memcpy additionally probe DC ZVA for line zeroing.
+    // Establish that ABI on each EL1 CPU instead of inheriting reset values.
+    // The cfg is a build-time premise: vmm builds stay at EL2/VHE via
+    // el::init_el2_vhe, where the same-named controls alias into SCTLR_EL2.
+    // If a vmm build ever falls back to EL1 (CurrentEL < 2), this grant is
+    // compiled out and EL0 keeps the reset policy — a pre-existing gap left
+    // to a future runtime regime check.
+    #[cfg(not(feature = "vmm"))]
+    SCTLR_EL1
+        .modify(SCTLR_EL1::UCT::DontTrap + SCTLR_EL1::UCI::DontTrap + SCTLR_EL1::DZE::DontTrap);
     SCTLR_EL1.set(SCTLR_EL1.get() | (1 << 23));
     barrier::isb(barrier::SY);
     super::serial::activate_boot_map();
