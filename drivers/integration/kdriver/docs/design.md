@@ -90,34 +90,30 @@ drivers/integration/kdriver/
 
 ## Architecture
 
-When `block` is enabled, `block_completion::prepare_block_wait` implements
-the block waiting contract, injected as a `PrepareBlockWait` function
-pointer. `HostSignals` owns two private `kpoll::Completion`s: admission
-uses consumable tokens, terminal uses a permanent `complete_all` and is
-never re-initialized. `HostBlockWaiter` verifies task context through
-`PreparedTaskWait` before creating sources and registering the terminal.
-A separate terminal-registration guard is held across the admission wait
-and spurious wakeups; on Drop it first revokes the registration, then
-releases the signals and task references. The prepare function directly
-returns the boxed waiter; `waiter.signals()` clones its existing
-notification-state `Arc`; the terminal holds a single
-`PollRegistration` rather than a multi-registration container, and
-admission also holds a single local guard per round.
-
-Admission parks after each check/register/recheck round; terminal only
-try_waits or parks. Both wait sources share one prepared waker, so an
-admission registration round cannot clear the terminal registration.
-Admission releases that round's guard after each return/park; a
-notification arriving before the next round's registration is retained as
-a token. This provider is injected into the virtio-blk IRQ probe.
+When `block` is enabled, `HostBlockWaitProvider` implements the block host
+contract: allocation-free context validation before submission and waiter
+preparation only for an incomplete bio. `init_drivers` installs it before
+discovery. `kruntime/fs` explicitly enables `kdriver/block`, so filesystem
+consumers including devfs loop get this service without a physical block driver.
+`HostSignals` owns one permanent
+`kpoll::Completion`. `HostBlockWaiter` validates and retains the preparing task.
+It creates a `PreparedTaskWait` and registers the terminal source only if the
+completion is still pending when waited on. The check/register/recheck sequence
+retains early signals; one registration spans all spurious wakes until the wait
+returns. Signals clone the existing completion state. Only terminal waiting
+remains; virtio completion refills its own pending
+queue and needs no admission waiter. IRQ construction therefore takes no wait
+provider. The host still prepares a waiter for explicit device-close drain.
 ktask/kpoll dependencies are enabled only by the block feature and are not
 propagated to concrete drivers; existing filesystems keep using the same
 generic block interface.
 
-Each `prepare_block_wait` allocates five metadata heap objects: the boxed
-waiter, the HostSignals `Arc`, two PollSet inner `Arc`s, and a KWaker
-`Arc`. One private registration fits kpoll's inline storage with no extra
-growth; no data buffers or data copies are added. The existing EEVDF wake
+Each `prepare_block_wait` allocates three metadata heap objects: the boxed
+waiter, the HostSignals `Arc`, and its PollSet inner `Arc`. An already completed
+bio skips all three; its only shared metadata allocation is the block-owned
+result state. A blocking wait creates one
+KWaker; its sole private registration fits kpoll's inline storage and cannot
+exhaust registration IDs. No data buffers or data copies are added. The existing EEVDF wake
 path may allocate, so this layer adding no wake bookkeeping allocations
 must not be described as the whole wakeup chain being allocation-free.
 
@@ -194,8 +190,9 @@ only into the next batch. Enqueue and raise stay pinned across daemon wake.
 Concurrent stop callers serialize on stop_lock through the terminal wait:
 the single stop_notification cannot be overwritten. IRQ and softirq never take
 this mutex, so it adds no lock acquisition to the I/O hot path. Stop takes a
-fresh task-bound waiter prepared before teardown; no new terminal registration
-can fail after disabling processing. A later closer finds Idle and returns.
+fresh task-bound completion prepared before teardown; its sole lazy terminal
+registration cannot fail after disabling processing. A later closer finds Idle
+and returns.
 The lock order is stop_lock -> PENDING_DEVICES, never the reverse.
 
 Arc Drop does not stop processing. Activation must explicitly finish admitted
@@ -260,6 +257,8 @@ tests/block_requests.rs injects the real wait provider into that fake, blocks 24
 callers across two CPUs, then acknowledges simulated IRQs and drives this
 reclaimer through Block softirq. It does not publish a production IRQ disk.
 Production PCI/MMIO block activation uses try_new_irq and the real host provider.
+Driver initialization also installs that provider for block-core BioWait; disk
+publication uses alloc_mq and the common Request data entry point.
 Missing/failed IRQ leaves no published disk. One BlockActivation owns the strong
 device, optional native Irq, reclaimer and optional Gendisk throughout setup and
 close. A task-only map stores an owned FnOnce close action to erase heterogeneous

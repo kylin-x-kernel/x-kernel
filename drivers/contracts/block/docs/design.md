@@ -13,7 +13,9 @@
 | `struct block_device_operations` | `BlockDeviceOperations` | Driver/backend algorithm, open-mode callback |
 | `struct queue_limits` | `QueueLimits` | Logical/physical block size, alignment, minimum/optimal I/O size |
 | `struct backing_dev_info` | `BackingDevInfo` | Disk-owned shared readahead budget; file history stays in KVFS |
-| `struct request_queue` | `RequestQueue` | Canonical queue limits; request dispatch is added in a later phase |
+| `struct request_queue` | `RequestQueue` | Canonical queue limits and one selected data dispatch contract |
+| `struct bio` / `bio_vec` | `Bio` / `BioVec` | Sector operation, owned memory extents and terminal callback |
+| `struct request` / `blk_mq_ops` | `Request` / `BlkMqOperations` | One-bio dispatch and driver completion |
 | `struct gendisk` | `Gendisk` | Disk identity, queue, `part0`, state, operations |
 | `struct block_device` | `BlockDevice` | `dev_t`, queue, sector range, capacity |
 | `bd_holder` / exclusive `bdev_open` | `BlockDeviceClaim` | Exclusive holder lifetime |
@@ -22,16 +24,12 @@
 | `set_capacity` | `BlockDevice::set_capacity` | Mutable media capacity publication |
 | `set_disk_ro` / `get_disk_ro` | `BlockDevice::set_disk_read_only` / `is_read_only` | Canonical disk state |
 
-`BlockDeviceOperations` does not inherit the generic `Device`, because disk
-identity belongs to `Gendisk`. The backend expresses I/O and the open, release,
-and ioctl callbacks corresponding to Linux block-device operations. `Gendisk`
-holds that algorithm object and the `RequestQueue`, but does not implement the
-operations trait. Backend calls go through canonical `BlockDevice` methods so
-capacity, bounds, and read-only policy cannot be bypassed. Until the kext4 Bio
-migration in PR5, the legacy synchronous operations implementation on
-`BlockDevice` only derives a block count and delegates to those methods; it
-stores no second copy of state. Disk identity, queue, state, and operations
-belong directly to `Gendisk`, without a separate disk-state object.
+`BlockDeviceOperations` provides geometry and control callbacks; disk identity
+belongs to `Gendisk`. `Gendisk::alloc` requires `BioOperations`, while `alloc_mq`
+requires `BlkMqOperations`. Neither has a default synchronous data fallback.
+Consumers, including kext4, retain canonical `BlockDevice` references. Only its
+submission path validates capacity, read-only policy and partition remapping.
+
 `BlockOpenMode` corresponds to Linux `blk_mode_t` and carries the KVFS opened-file
 mode into open/ioctl. Concrete drivers such as loop do not define separate open
 semantics.
@@ -117,29 +115,21 @@ needs no knowledge of VFS or filesystem types.
 
 ## I/O Boundary
 
-`BlockCompletionOperations` expresses device completion reclamation. Each call
-must be finite, non-sleeping, and must not submit new requests. The host guarantees
-serial callback execution within one registration; activation keeps a strong
-reference to the target until synchronous stop completes. Each target is
-registered at most once. The host owns queuing and stopping, without exposing
-kernel APIs for these operations to drivers.
+`BlockCompletionOperations` expresses finite, non-sleeping reclamation. The host
+serializes callbacks and retains the target until stop completes. Virtio reclaims
+completed descriptors and submits pending requests without waking a caller for admission.
+Terminal bio callbacks run after releasing the device lock and must not sleep.
 
-The `completion` module defines the OS-neutral `PrepareBlockWait`, `BlockWaiter`,
-and `BlockSignals`. They do not change `BlockDeviceOperations` or directly
-introduce kernel scheduler dependencies. The host injects an ordinary preparation
-function returning a task-bound waiter. `waiter.signals()` exports an Arc to the
-same notification state. Drivers use these contracts to wait for admission hints
-and final completion. An admission hint does not grant submission rights;
-queue/FIFO predicates and request results remain owned by the concrete transaction
-implementation. Terminal notification must be published only after the device
-has released the data buffers.
-
-A waiter is not shared across tasks. Signals can be called from IRQ context and
-retain no request, data, or device pointers. Waiting-resource preparation and
-admission registration may return errors, but the terminal wait after submission
-does not register again or return wait errors. The VirtIO implementation lives in
-`virtio::blk`; `kdriver` supplies waiting and IRQ/softirq integration. Other drivers
-can adopt these contracts without filesystem changes.
+`BioWait` is a caller-side adapter over the existing `BlockWaiter`/`BlockSignals`
+contracts. `kdriver` installs its provider at driver initialization. The adapter
+owns the terminal result and returned allocations, and enrolls host notification
+only while the result is absent. A registered waiter uses the host's permanent
+`kpoll::Completion`. Prepare all handles, submit all bios, then wait as needed.
+Status and original memory owners are returned
+independently, including preparation, validation and device errors. Dropping a
+handle does not cancel device ownership.
+Submission may complete inline or block inside a backend; this interface alone
+does not make device execution asynchronous.
 
 `QueueLimits` is the block core's sole source of device geometry. Backends
 currently report only logical block size, so physical block size and minimum I/O
@@ -148,10 +138,11 @@ and alignment offset are zero. Logical block size must be at least 512 bytes,
 a power of two, and representable as `u32`. It is also bounded by the Linux
 `BLK_MAX_BLOCK_SIZE` limit corresponding to the current 4-KiB page size.
 
-Before delegating to the backend, `BlockDevice` checks that the buffer length is
-a multiple of the logical block size, converts the legacy backend block ID to a
-sector extent, checks that the entire extent fits within `num_sectors`, and
-converts the sector offset including `start_sector` back to a backend block ID.
+Before delegating to the backend, `BlockDevice` checks the total byte length
+and starting-sector alignment, checks that the entire extent fits within
+`num_sectors`, and remaps the starting sector by `start_sector` exactly once.
+The synchronous methods convert logical block IDs to sectors
+before creating a bio; memory extents do not define device block boundaries.
 All multiplications and additions use checked arithmetic. `Gendisk::alloc`
 converts the initial backend block count to sectors; `set_capacity` accepts a
 sector count, as Linux does. Both paths require `num_sectors * 512` to fit in
@@ -176,11 +167,11 @@ backend `flush`.
 
 ## Synchronous Buffer Address Contract
 
-`BlockDeviceOperations::read_block` and `write_block` accept a buffer beginning
-at any byte address. Whole-block lengths, range checks and read-only policy
-remain in force. The same contract applies when callers hold a backend trait
-object directly, through `Arc`, or through the canonical `BlockDevice`; putting
-a bounce buffer only around the canonical view would not cover direct calls.
+`BlockDevice::read_block` and `write_block` accept a buffer beginning at any
+byte address. They lend that range to the common Bio submission path and wait
+non-interruptibly for completion; they do not allocate a data copy. Writes lend
+shared storage, so `BioVec::bytes_mut` rejects mutable access to that source.
+Whole-block lengths, range checks and read-only policy remain in force.
 Buffer address alignment is distinct from request/block alignment.
 
 Each backend and its existing DMA provider owns hardware address alignment,
@@ -298,7 +289,8 @@ baseline 80574592, and the repository driver-boundary rules. PR 727 supplied
 problem context only; its implementation is not a design or code input.
 
 Scope: ordinary reads, writes and flushes through filesystem/block interfaces;
-virtio-blk is the first converted driver. The synchronous API remains unchanged.
+virtio-blk retains the common Request through its device-owned queue and
+completes it after DMA retirement; synchronous callers adapt through BlockDevice.
 Automatic polling fallback, conversion of every driver, forced DMA cancellation,
 and unrelated scheduler/preemption repairs are not included. IRQ setup failure
 fails activation without publishing a disk (accepted integration policy).
@@ -415,23 +407,46 @@ the duration of outstanding I/O instead of waiting for a completion event.
 
 ## Completion Integration
 
-The synchronous caller owns its buffers until return. Concrete drivers own
-hardware submission, request identity and buffer retirement; host providers own
-waiting and deferred execution. `block` defines the shared contracts without
-owning hardware tokens or scheduler objects. Filesystem callers use
-`BlockDevice`/`Gendisk`, never a VirtIO-specific wait or interrupt API.
+A `Bio` owns its target `Arc<BlockDevice>`, memory extents and terminal callback.
+A request queue transfers that ownership to `Request`; completion consumes it.
+`BioWait` validates task context before submission and owns one shared result
+state with the bio. Its built-in completion needs no boxed callback. If the
+result is already available, waiting returns it without preparing host wait
+resources. Otherwise it prepares a waiter, rechecks the result, and installs
+notification under the result lock. Completion publishes the result under that
+same lock and notifies outside it. This closes the completion/enrollment race
+without another request registry or a separate synchronous device path.
+Virtio retains that same Request through pending admission, descriptor submission,
+DMA retirement and final completion; its private node supplies protocol storage
+and queue links. Request owns the transfer cursor and preserves original extents
+for the terminal callback. IRQ completion refills the queue; explicit early-boot
+polling uses that same request lifecycle. Loop snapshots its backing file and
+passes borrowed extents through one VFS iterator operation in the submitting task,
+outside media locks. RAM disks complete direct bios inline; legacy contiguous-only
+backends also use the common completion protocol.
 
-- [VirtIO transactions and resource lifetime](../../../devices/virtio/docs/design.md)
-- [Host waiting, IRQ dispatch and removal](../../../integration/kdriver/docs/design.md)
+Alignment applies to the starting sector and total byte length. Extent boundaries
+need not be sector-aligned. Virtio builds scatter descriptors directly and splits
+transfer prefixes only at negotiated descriptor-count/segment-size limits. If
+those limits cannot describe one fragmented sector, it stages only that sector.
+The existing DMA provider remains responsible for device address/cache constraints.
 
-## Staged Migration And Test Boundaries
-
-PR1 consolidates disk lifetime, sector capacity, and queue geometry without
-establishing another request-submission path. The existing virtio request-wait,
-IRQ completion reclamation, and shutdown-drain contracts on main remain in
-force. Subsequent Bio/Request migration should reuse and consolidate these
-completion mechanisms instead of retaining parallel request-ownership and
-completion states.
+`BioVec` holds ordinary `Box<[u8]>` storage directly; special `BioMemory` owners
+use type erasure and a checked byte range. Invalid ranges return the original owner.
+The memory contract requires stable initialized storage and exclusive access
+responsibility, allowing an allocation or another storage owner's access token.
+The block layer has no folio or filesystem dependency. Synchronous adapters
+privately lend caller storage through the same path; borrowed vectors never
+escape through a public waiting handle. Their mandatory wait is supported only
+with abort-on-panic, so unwinding cannot bypass memory retirement.
+`BioVecRef` exposes borrowed byte access without exposing mutable ownership of
+a vector. A live view borrows the Bio, so safe code cannot extract its storage
+and complete early. DMA retirement remains the transport's unsafe obligation.
+A driver that only accepts contiguous data opts into `Bio::read_contiguous`
+or `write_contiguous` (also forwarded by Request): one extent passes directly, scatter uses staging. Device
+address/cache requirements remain with the backend and provider. There is no
+parallel public driver read/write/flush interface. Folio completion transfer,
+merging, FUA and flush sequencing flags remain outside this change.
 
 Constructing an unpublished disk lets tests avoid registering a global device;
 it does not make an entire filesystem crate independently runnable in a host

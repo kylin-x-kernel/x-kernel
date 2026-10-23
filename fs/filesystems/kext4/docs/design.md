@@ -88,7 +88,7 @@ fs/filesystems/kext4
            ^
            `-- borrow Ext4Inode private state composed in the VFS inode
     v
-block::BlockDeviceOperations
+block::BlockDevice
 ```
 
 核心修改路径通过 `JournalHandle` 进入事务，先经 buffer 层取得元数据创建/写入访问权，
@@ -103,9 +103,9 @@ Running、Committing、Checkpoint 和 Finished phase；FIFO 队列只保存该�
 `Ext4SbInfo::read_inode_bytes` 按映射 run 读取文件。只有 initialized 映射、文件偏移位于
 filesystem block 边界且本段长度为整块倍数时，才把调用者已有的目标切片交给
 `FilesystemDevice::read_blocks`；省去该段临时零初始化 `Vec` 的分配和一次回拷。
-目标切片可以从任意字节地址开始；`BlockDeviceOperations` 在 trait 本身约定接受任意起点，
+目标切片可以从任意字节地址开始；`BlockDevice` 的同步读写将该范围直接交给 Bio，
 由后端与既有 DMA 能力层解决设备地址对齐、连续性、映射及缓存维护要求。
-该契约也覆盖直接 trait 对象和 Arc 调用，不依赖 canonical BlockDevice 外层再包一层中转。
+同步调用在设备访问结束后才返回，通用层不复制完整块缓冲区。
 ext4 不保存设备对齐常量或驱动清单，也不为设备地址要求额外创建回退缓冲。
 `FilesystemDevice` 负责 filesystem/device block 换算和长度、范围校验。
 部分块仍需 staging 来提取文件范围，与设备地址要求无关；驱动的 DMA/bounce buffer 所有权
@@ -857,7 +857,7 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
   用户指针与输出容量留在 POSIX/KVFS 边界，`vfs` 模块只负责把 mapping 语义转换为 extent。
 - `Ext4SbInfo` 保留类似 Linux `ext4_sb_info` 的 mount 总状态；只有具有独立事务状态机和
   生命周期不变量的 journal 聚合为 `MountedJournal`，不为代码分组机械创建 service。
-- KExt4 只通过通用 `BlockDeviceOperations` 表达块读写和 flush；异步 request、完成通知和 VirtIO
+- KExt4 持有真实 `BlockDevice`，通过公共同步适配提交块读写和 flush；request、完成通知和 VirtIO
   中断队列属于 block/driver 层。KExt4 可合并请求并在通用接口可用后接入，但不建立私有驱动
   旁路。当前 transaction restart 仍需同步 `flush` 建立 ordered-data durability 边界；只有通用
   block 层提供 request completion/FUA 或等价 dependency 后，才能把多个 transaction 的数据与

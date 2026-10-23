@@ -303,7 +303,7 @@ fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
         ));
         filesystem.device = Arc::new(
             FilesystemDevice::open(
-                device.clone(),
+                crate::io::test_block_device(device.clone()),
                 TEST_BLOCK_SIZE,
                 (initial.len() / TEST_BLOCK_SIZE) as u64,
             )

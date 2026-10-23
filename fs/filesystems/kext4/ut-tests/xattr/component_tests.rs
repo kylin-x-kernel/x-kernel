@@ -96,7 +96,8 @@ fn inline_and_external_xattr_persist_noop_and_opaque_acl_accounting() {
 
     use crate::{Ext4Timestamp, superblock::test_fixtures::*};
     let device = Arc::new(TestDevice::new(synchronous_xattr_image()));
-    let mut filesystem = open_test_filesystem(device.clone()).unwrap();
+    let mut filesystem =
+        open_test_filesystem(crate::io::test_block_device(device.clone())).unwrap();
     let inode = xattr_file(&filesystem);
     let original_blocks = inode.blocks();
     filesystem
@@ -122,7 +123,8 @@ fn inline_and_external_xattr_persist_noop_and_opaque_acl_accounting() {
     assert_eq!(inode.ctime(), ctime);
     assert_eq!(device.bytes(), committed);
     drop(filesystem);
-    let mut filesystem = open_test_filesystem(device.clone()).unwrap();
+    let mut filesystem =
+        open_test_filesystem(crate::io::test_block_device(device.clone())).unwrap();
     let inode = xattr_file(&filesystem);
     assert_eq!(
         filesystem
@@ -165,7 +167,8 @@ fn inline_and_external_xattr_persist_noop_and_opaque_acl_accounting() {
         .unwrap();
     filesystem.sync_filesystem().unwrap();
     drop(filesystem);
-    let mut filesystem = open_test_filesystem(device.clone()).unwrap();
+    let mut filesystem =
+        open_test_filesystem(crate::io::test_block_device(device.clone())).unwrap();
     let inode = xattr_file(&filesystem);
     assert!(
         filesystem
@@ -215,7 +218,7 @@ fn inline_and_external_xattr_persist_noop_and_opaque_acl_accounting() {
         .unwrap();
     filesystem.sync_filesystem().unwrap();
     drop(filesystem);
-    let filesystem = open_test_filesystem(device).unwrap();
+    let filesystem = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
     let inode = xattr_file(&filesystem);
     assert_eq!(inode.blocks(), original_blocks);
     assert!(filesystem.read_xattrs(&inode).unwrap().is_empty());
@@ -235,7 +238,8 @@ fn external_xattr_write_and_flush_failures_preserve_old_state_and_allow_retry() 
         Arc::new(BufferedFaultDevice::fail_write_at(original.clone(), 1)),
         Arc::new(BufferedFaultDevice::fail_flush_at(original.clone(), 1)),
     ] {
-        let mut filesystem = open_test_filesystem(device.clone()).unwrap();
+        let mut filesystem =
+            open_test_filesystem(crate::io::test_block_device(device.clone())).unwrap();
         let inode = xattr_file(&filesystem);
         assert!(matches!(
             filesystem.set_xattr(
@@ -249,7 +253,7 @@ fn external_xattr_write_and_flush_failures_preserve_old_state_and_allow_retry() 
         ));
         drop(filesystem);
         let retry = Arc::new(TestDevice::new(device.committed_bytes()));
-        let mut filesystem = open_test_filesystem(retry).unwrap();
+        let mut filesystem = open_test_filesystem(crate::io::test_block_device(retry)).unwrap();
         let inode = xattr_file(&filesystem);
         assert!(
             filesystem

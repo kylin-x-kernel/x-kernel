@@ -6,7 +6,6 @@
 
 use alloc::{collections::BTreeMap, sync::Arc, vec};
 
-use block::BlockDeviceOperations;
 use ksync::Mutex;
 
 use crate::{
@@ -833,7 +832,7 @@ fn mutation_error_requires_abort(error: Ext4Error) -> bool {
 }
 
 impl Ext4Recovery {
-    pub(super) fn open(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
+    pub(super) fn open(device: Arc<block::BlockDevice>) -> Ext4Result<Self> {
         Ok(Self {
             filesystem: Ext4SbInfo::open(device, true)?,
         })

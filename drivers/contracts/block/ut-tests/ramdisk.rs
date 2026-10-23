@@ -16,6 +16,9 @@ fn test_ramdisk_basic_operations() {
     assert_eq!(disk.name(), "ramdisk");
     assert_eq!(disk.block_size(), 512);
     assert_eq!(disk.num_blocks(), 2);
+    let disk = crate::Gendisk::alloc("ram-test".into(), 250, 0, 1, Box::new(disk))
+        .unwrap()
+        .part0();
 
     // Test basic read/write operations
     let test_data = vec![0xAA; 512];
@@ -46,23 +49,27 @@ fn test_ramdisk_basic_operations() {
 fn test_ramdisk_num_blocks_matches_capacity() {
     let disk = RamDisk::from(&[0x5Au8; 700][..]);
     assert_eq!(disk.num_blocks(), 2);
+    let disk = test_device(disk);
     assert!(disk.write_block(1, &[0xA5; 512]).is_ok());
-    assert_eq!(disk.num_blocks(), 2);
+    assert_eq!(disk.num_sectors(), 2);
 }
 
 #[def_test]
 fn test_ramdisk_boundary_conditions() {
-    let disk = RamDisk::new(1536); // 3 blocks
+    let disk = test_device(RamDisk::new(1536)); // 3 blocks
 
     // Test reading beyond disk boundary
     let mut buf = vec![0; 512];
-    assert_eq!(disk.read_block(3, &mut buf), Err(DriverError::Io));
-    assert_eq!(disk.read_block(100, &mut buf), Err(DriverError::Io));
+    assert_eq!(disk.read_block(3, &mut buf), Err(DriverError::InvalidInput));
+    assert_eq!(
+        disk.read_block(100, &mut buf),
+        Err(DriverError::InvalidInput)
+    );
 
     // Test writing beyond disk boundary
     let data = vec![0xFF; 512];
-    assert_eq!(disk.write_block(3, &data), Err(DriverError::Io));
-    assert_eq!(disk.write_block(100, &data), Err(DriverError::Io));
+    assert_eq!(disk.write_block(3, &data), Err(DriverError::InvalidInput));
+    assert_eq!(disk.write_block(100, &data), Err(DriverError::InvalidInput));
 
     // Test invalid buffer sizes (not multiple of block size)
     let mut invalid_buf = vec![0; 510]; // Not aligned to block size
@@ -89,8 +96,14 @@ fn test_ramdisk_boundary_conditions() {
     assert!(disk.write_block(1, &multi_buf).is_ok());
 
     // This should fail (blocks 2-3, but only block 2 exists)
-    assert_eq!(disk.read_block(2, &mut multi_buf), Err(DriverError::Io));
-    assert_eq!(disk.write_block(2, &multi_buf), Err(DriverError::Io));
+    assert_eq!(
+        disk.read_block(2, &mut multi_buf),
+        Err(DriverError::InvalidInput)
+    );
+    assert_eq!(
+        disk.write_block(2, &multi_buf),
+        Err(DriverError::InvalidInput)
+    );
 
     // Test edge case: exactly at boundary
     let edge_data = vec![0xCC; 512];
@@ -106,7 +119,13 @@ fn test_ramdisk_boundary_conditions() {
     assert_eq!(disk_from_slice.num_blocks(), 4);
 
     let mut verify_buf = vec![0; 512];
-    let disk_from_slice_mut = &mut RamDisk::from(source_data.as_slice());
-    assert!(disk_from_slice_mut.read_block(0, &mut verify_buf).is_ok());
+    let disk_from_slice = test_device(disk_from_slice);
+    assert!(disk_from_slice.read_block(0, &mut verify_buf).is_ok());
     assert_eq!(verify_buf, vec![0x12; 512]);
+}
+
+fn test_device(disk: RamDisk) -> alloc::sync::Arc<crate::BlockDevice> {
+    crate::Gendisk::alloc("ram-test".into(), 250, 0, 1, Box::new(disk))
+        .unwrap()
+        .part0()
 }

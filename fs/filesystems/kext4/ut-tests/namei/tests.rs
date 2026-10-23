@@ -183,7 +183,7 @@ fn fragmented_linear_directory_mutation(external_leaf: bool, rename: bool) {
     );
     filesystem.sync_filesystem().unwrap();
     drop(filesystem);
-    let reopened = open_test_filesystem(device).unwrap();
+    let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
     let target = reopened.internal_iget(target.number()).unwrap();
     assert_eq!(
         reopened.lookup(&target, &name).unwrap().unwrap().inode(),
@@ -257,7 +257,7 @@ fn rename_into_full_linear_directory_reserves_growth_credits() {
     );
     filesystem.sync_filesystem().unwrap();
     drop(filesystem);
-    let reopened = open_test_filesystem(device).unwrap();
+    let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
     let target = reopened.internal_iget(target.number()).unwrap();
     assert_eq!(
         reopened
@@ -309,7 +309,7 @@ fn regular_create_fits_parent_growth_journal_budget() {
         );
         filesystem.sync_filesystem().unwrap();
         drop(filesystem);
-        let reopened = open_test_filesystem(device).unwrap();
+        let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
         let target = reopened.internal_iget(target.number()).unwrap();
         assert_eq!(
             reopened.lookup(&target, &name).unwrap().unwrap().inode(),

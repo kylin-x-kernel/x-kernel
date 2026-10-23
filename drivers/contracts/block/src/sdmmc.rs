@@ -59,7 +59,9 @@ impl BlockDeviceOperations for SdMmcDriver {
     fn block_size(&self) -> usize {
         SdMmc::BLOCK_SIZE
     }
+}
 
+impl SdMmcDriver {
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         let (blocks, remainder) = buf.as_chunks_mut::<{ SdMmc::BLOCK_SIZE }>();
 
@@ -92,6 +94,22 @@ impl BlockDeviceOperations for SdMmcDriver {
 
     fn flush(&self) -> DriverResult {
         Ok(())
+    }
+}
+
+impl crate::BlkMqOperations for SdMmcDriver {
+    fn queue_rq(&self, mut request: crate::Request) {
+        let block_id = request.sector() / (self.block_size() as u64 / 512);
+        let result = match request.operation() {
+            crate::BioOperation::Read => {
+                request.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            crate::BioOperation::Write => {
+                request.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            crate::BioOperation::Flush => self.flush(),
+        };
+        request.complete(result);
     }
 }
 

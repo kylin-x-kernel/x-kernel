@@ -77,7 +77,7 @@ impl Wake for KWaker {
     }
 }
 
-/// Task-bound parking resources prepared before publishing an operation.
+/// Task-bound parking resources prepared before registering a wake source.
 ///
 /// This handle is neither Send nor Sync. Only the preparing task may park;
 /// the independently owned [`Waker`] may be notified from IRQ context. Wakeups

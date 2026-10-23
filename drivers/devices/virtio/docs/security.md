@@ -69,17 +69,20 @@ IRQ 元数据不会关闭硬件中断；屏蔽共享线路又会阻断其他设�
 ## IRQ Block Request Safety
 
 The IRQ constructor rejects panic-unwind builds before creating a device.
-A request lives in a pinned synchronous frame; all returns either precede
-submission or observe Done after descriptor/mapping retirement. No public
-nonblocking request handle exposes that stack lifetime.
+A boxed protocol node retains the common Request and all its memory owners. It
+is converted to raw ownership before publishing DMA pointers; the token table
+retains the unique allocation until descriptor reclamation. Box reconstruction
+occurs only after the library retires the original descriptor chain. CPU access
+to protocol/data bytes is excluded while hardware owns them. Pending requests
+remain owned even if the caller drops its wait handle.
 
-Request's protocol header/response, operation and state use separate UnsafeCell
-fields. A shared Request reference never creates a mutable borrow of the whole
-node. The device SpinNoIrq protects RawList links, token pointers and CPU state
-access. HAL/device ownership excludes CPU protocol access from submission to
-peek_used plus complete_*. The same original buffers are used for reclamation.
-The token index is bounded by virt_queue_size; pending callers have no extra
-software-capacity limit. Driver metadata adds no data-buffer copy.
+Scatter descriptors reference original extents. Transfer splitting advances the
+common Request only after successful retirement; original owners survive to the
+terminal callback on either success or error. A sector bounce is used only when
+device segment limits cannot represent that sector's fragments. Read destinations
+are exclusive; borrowed synchronous write sources remain immutable.
+Both constructors reject per-segment limits below 512 bytes before publishing the
+device, preserving the adapter's single-segment sector-bounce invariant.
 
 Unknown/out-of-range tokens and unproven descriptor reclamation panic before
 normal request retirement. The pinned dependency's IoError and Unsupported
@@ -87,21 +90,19 @@ completion outcomes follow pop_used; NotReady can come from either pop or status
 and is deliberately fatal. Fatal-error paths have been source-reviewed, not
 injected into the shared QEMU test process. No device reset/retry is invented.
 
-Callbacks retain only independently owned signals after publishing Done. Before
-notification, every token/buffer reference is cleared. The host must serialize
-the entire completion pass, including notifications and scratch restoration.
-Concurrent/reentrant passes fail the scratch-ownership assertion rather than
-sharing mutable scratch. Wait preparation is task-only and all waits occur
-outside the device lock. Activation/transport lifetime remains a host obligation.
+Callbacks receive status and original owners only after all DMA references have
+retired. They run outside the device lock and must not sleep. The host serializes
+completion passes, keeps IRQ/reclamation active through drain, and supplies DMA
+routines valid in completion context. Waiting resources are prepared by the block
+caller's adapter, not by the transport.
 
 Tests use an identity-mapped fake HAL and real dependency descriptors; production
 uses the existing host bounce pool. Passing fake tests does not prove physical
 device DMA coherency, which remains a hardware-validation obligation.
 
-Close accounts calls before wait preparation, not only published descriptors.
-The caller guard decrements admission only after request state and DMA retirement.
-begin_close rejects new calls while keeping previously admitted calls alive;
-its drain signal is retained until the last call retires. Host close serializes
+Close counts accepted requests through terminal callbacks, including the pending
+FIFO. begin_close rejects new submissions while keeping accepted requests alive;
+its drain signal is retained until the last callback returns. Host close serializes
 ownership, waits for drain, suppresses/acknowledges device IRQs, synchronizes its
 native action and stops the reclaimer before finish_close takes the transport.
 Transport destruction and coherent queue deallocation occur outside SpinNoIrq in

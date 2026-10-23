@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, sync::Arc};
+use alloc::{format, sync::Arc};
 
 use driver_base::{Device, DeviceKind};
 use kdevice::{BusTypeId, DeviceDriver, DeviceMatcher, DeviceObject};
@@ -42,7 +42,7 @@ impl DeviceDriver for SdmmcDriver {
         let dev = unsafe { block::sdmmc::SdMmcDriver::new(vaddr) };
         let (index, first_minor) = super::allocate_mmc_disk()?;
         let name = format!("{}{}", dev.name(), index);
-        let disk = block::Gendisk::alloc(name, 179, first_minor, 8, Box::new(dev))?;
+        let disk = block::Gendisk::alloc_mq(name, 179, first_minor, 8, Arc::new(dev))?;
         kclass::publish_block(device, disk).map(drop)
     }
 }

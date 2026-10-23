@@ -7,7 +7,7 @@ use unittest::def_test;
 use super::*;
 extern crate alloc;
 use alloc::{
-    alloc::{Layout, alloc},
+    alloc::{Layout, alloc_zeroed},
     vec,
 };
 
@@ -15,19 +15,16 @@ use alloc::{
 fn create_aligned_buffer(size: usize) -> &'static mut [u8] {
     assert!(size > 0, "test buffer allocation must be nonempty");
     let layout = Layout::from_size_align(size, 512).unwrap();
-    // SAFETY: the assertion above guarantees a nonzero allocation size;
-    // `Layout::from_size_align` validates alignment and size bounds. The
-    // returned pointer is only used after the null check below.
-    let ptr = unsafe { alloc(layout) };
+    // SAFETY: `layout` is constructed from validated size/alignment values,
+    // and the returned pointer is only used after the null check below.
+    let ptr = unsafe { alloc_zeroed(layout) };
     if ptr.is_null() {
         panic!("Failed to allocate memory");
     }
 
-    // SAFETY: the checked non-null allocation owns `size` writable bytes
-    // and has not been aliased; zeroing this range initializes every byte.
-    unsafe { ptr.write_bytes(0, size) };
-    // SAFETY: the initialized allocation is aligned, exclusively owned and
-    // intentionally leaked. The slice spans exactly its `size` bytes.
+    // SAFETY: `alloc_zeroed` initialized all `size` bytes, the null check
+    // succeeded, and this newly allocated buffer has no other references.
+    // The allocation is leaked to provide the test's static lifetime.
     unsafe { core::slice::from_raw_parts_mut(ptr, size) }
 }
 
@@ -41,6 +38,15 @@ fn test_ramdisk_static_basic_operations() {
     assert_eq!(disk.name(), "ramdisk");
     assert_eq!(disk.block_size(), 512);
     assert_eq!(disk.num_blocks(), 4);
+    let disk = crate::Gendisk::alloc(
+        "static-ram-test".into(),
+        250,
+        0,
+        1,
+        alloc::boxed::Box::new(disk),
+    )
+    .unwrap()
+    .part0();
 
     // Test basic read/write operations
     let test_pattern = vec![0xAB; 512];
@@ -78,7 +84,15 @@ fn test_ramdisk_static_basic_operations() {
 #[def_test]
 fn test_ramdisk_static_boundary_and_errors() {
     let buffer = create_aligned_buffer(1024); // 2 blocks
-    let disk = RamDisk::new(buffer);
+    let disk = crate::Gendisk::alloc(
+        "static-ram-boundary".into(),
+        250,
+        0,
+        1,
+        alloc::boxed::Box::new(RamDisk::new(buffer)),
+    )
+    .unwrap()
+    .part0();
 
     // Test reading/writing beyond boundaries
     let mut test_buf = vec![0; 512];
@@ -91,10 +105,22 @@ fn test_ramdisk_static_boundary_and_errors() {
     assert!(disk.write_block(1, &test_data).is_ok());
 
     // Invalid operations - beyond disk boundary
-    assert_eq!(disk.read_block(2, &mut test_buf), Err(DriverError::Io));
-    assert_eq!(disk.read_block(100, &mut test_buf), Err(DriverError::Io));
-    assert_eq!(disk.write_block(2, &test_data), Err(DriverError::Io));
-    assert_eq!(disk.write_block(100, &test_data), Err(DriverError::Io));
+    assert_eq!(
+        disk.read_block(2, &mut test_buf),
+        Err(DriverError::InvalidInput)
+    );
+    assert_eq!(
+        disk.read_block(100, &mut test_buf),
+        Err(DriverError::InvalidInput)
+    );
+    assert_eq!(
+        disk.write_block(2, &test_data),
+        Err(DriverError::InvalidInput)
+    );
+    assert_eq!(
+        disk.write_block(100, &test_data),
+        Err(DriverError::InvalidInput)
+    );
 
     // Test buffer size validation - must be multiple of block size
     let mut invalid_buf = vec![0; 511]; // One byte short
@@ -120,12 +146,21 @@ fn test_ramdisk_static_boundary_and_errors() {
 
     // Invalid multi-block operation - extends beyond disk
     let mut oversized_buf = vec![0; 1536]; // 3 blocks, but disk only has 2
-    assert_eq!(disk.read_block(0, &mut oversized_buf), Err(DriverError::Io));
+    assert_eq!(
+        disk.read_block(0, &mut oversized_buf),
+        Err(DriverError::InvalidInput)
+    );
 
     let oversized_data = vec![0xDD; 1536];
-    assert_eq!(disk.write_block(0, &oversized_data), Err(DriverError::Io));
+    assert_eq!(
+        disk.write_block(0, &oversized_data),
+        Err(DriverError::InvalidInput)
+    );
 
     // Test edge case: read/write starting from block 1 with 2-block buffer
     let mut edge_buf = vec![0; 1024]; // 2 blocks
-    assert_eq!(disk.read_block(1, &mut edge_buf), Err(DriverError::Io)); // Would read blocks 1-2, but block 2 doesn't exist
+    assert_eq!(
+        disk.read_block(1, &mut edge_buf),
+        Err(DriverError::InvalidInput)
+    ); // Would read blocks 1-2, but block 2 doesn't exist
 }

@@ -2,8 +2,13 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::vec::Vec;
+use core::{
+    ptr::NonNull,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
+use block::completion::BlockSignals;
 use unittest::{assert, assert_eq, def_test};
 use virtio_drivers::{
     BufferDirection, PhysAddr,
@@ -153,11 +158,11 @@ impl Hardware {
             // no driver mutation overlaps this hardware-locked completion.
             let descriptor = unsafe { descriptor_ptr.read_volatile() };
             let address = descriptor.address as *mut u8;
-            if descriptor.len >= SECTOR_SIZE as u32 {
+            if step != 0 && descriptor.flags & 1 != 0 {
                 self.data_addresses.push(address as usize);
             }
             if descriptor.flags & 2 != 0 {
-                if descriptor.len == 1 {
+                if descriptor.flags & 1 == 0 {
                     // SAFETY: The writable descriptor grants this fake device
                     // one live response byte, mapped identically by TrackedHal.
                     unsafe { address.write_volatile(status) };
@@ -294,33 +299,26 @@ impl Transport for QueueTransport {
 }
 
 type Disk = VirtIoBlkDev<TrackedHal, QueueTransport>;
-fn unavailable_wait() -> DriverResult<Box<dyn BlockWaiter>> {
-    Err(DriverError::NoMemory)
-}
 fn disk(features: u64, is_immediate: bool) -> (Arc<Disk>, Arc<SpinNoIrq<Hardware>>) {
-    block_test_disk(features, is_immediate, unavailable_wait)
+    block_test_disk(features, is_immediate)
 }
 
 /// Creates a queue-aware fake disk using the caller's real host wait provider.
-pub fn block_test_disk(
-    features: u64,
-    is_immediate: bool,
-    prepare: PrepareBlockWait,
-) -> (Arc<Disk>, Arc<SpinNoIrq<Hardware>>) {
+pub fn block_test_disk(features: u64, is_immediate: bool) -> (Arc<Disk>, Arc<SpinNoIrq<Hardware>>) {
     let mut base = MockTransport::new();
     base.features = features;
     base.config_space.borrow_mut()[..8].copy_from_slice(&1024u64.to_le_bytes());
+    base.config_space.borrow_mut()[8..12].copy_from_slice(&1024u32.to_le_bytes());
+    base.config_space.borrow_mut()[12..16]
+        .copy_from_slice(&(MAX_DATA_SEGMENTS as u32).to_le_bytes());
     let hardware = Arc::new(SpinNoIrq::new(Hardware {
         is_immediate,
         ..Default::default()
     }));
-    let disk = Disk::try_new_irq(
-        QueueTransport {
-            base,
-            hardware: hardware.clone(),
-        },
-        prepare,
-    )
+    let disk = Disk::try_new_irq(QueueTransport {
+        base,
+        hardware: hardware.clone(),
+    })
     .unwrap();
     disk.enable_interrupts();
     (Arc::new(disk), hardware)
@@ -328,303 +326,279 @@ pub fn block_test_disk(
 
 #[derive(Default)]
 struct Signals {
-    admission: AtomicUsize,
     completion: AtomicUsize,
 }
-impl BlockSignals for Signals {
-    fn notify_admission(&self) {
-        self.admission.fetch_add(1, Ordering::Relaxed);
-    }
 
+#[def_test(serial)]
+fn polling_requests_reclaim_split_transfers_without_interrupts() {
+    let mut base = MockTransport::new();
+    base.features = (1 << 1) | (1 << 2); // SIZE_MAX and SEG_MAX.
+    base.config_space.borrow_mut()[..8].copy_from_slice(&1024u64.to_le_bytes());
+    base.config_space.borrow_mut()[8..12].copy_from_slice(&1024u32.to_le_bytes());
+    base.config_space.borrow_mut()[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let hardware = Arc::new(SpinNoIrq::new(Hardware {
+        is_immediate: true,
+        ..Default::default()
+    }));
+    let disk = Arc::new(
+        Disk::try_new(QueueTransport {
+            base,
+            hardware: hardware.clone(),
+        })
+        .unwrap(),
+    );
+    assert!(!disk.state.lock().is_irq_driven);
+    assert_eq!(
+        disk.state.lock().device.as_ref().unwrap().max_segments(),
+        MAX_DATA_SEGMENTS
+    );
+    let device = view(&disk);
+    for operation in [BioOperation::Read, BioOperation::Write] {
+        let before = hardware.lock().completed;
+        let result = Arc::new(SpinNoIrq::new(None));
+        let completed = result.clone();
+        device.submit_bio(block::Bio::new(
+            device.clone(),
+            7,
+            operation,
+            vec![block::BioVec::new(vec![0x3c; 16 * 1024].into_boxed_slice())],
+            move |status, vectors| *completed.lock() = Some((status, vectors)),
+        ));
+        // notify drives the fake device; only the polling path can reclaim its
+        // used descriptors and submit the suffix. No IRQ executor runs here.
+        let (status, vectors) = result.lock().take().expect("polling completes inline");
+        assert_eq!(status, Ok(()));
+        let expected = if operation == BioOperation::Read { 0xa5 } else { 0x3c };
+        assert!(vectors[0].bytes().iter().all(|byte| *byte == expected));
+        assert_eq!(hardware.lock().completed - before, 2);
+        assert!(disk.state.lock().requests.is_drained());
+        assert_eq!(disk.state.lock().active_requests, 0);
+        assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+    }
+    let drained = Arc::new(Signals::default());
+    disk.begin_close(drained.clone());
+    assert_eq!(drained.completion.load(Ordering::Relaxed), 1);
+    disk.finish_close();
+    assert!(!hardware.lock().is_queue_live());
+}
+impl BlockSignals for Signals {
     fn notify_completion(&self) {
         self.completion.fetch_add(1, Ordering::Relaxed);
     }
 }
-struct Waiter<F: FnMut()> {
-    signals: Arc<Signals>,
-    complete: F,
-    waits: usize,
-}
-impl<F: FnMut()> BlockWaiter for Waiter<F> {
-    fn signals(&self) -> Arc<dyn BlockSignals> {
-        self.signals.clone()
-    }
 
-    fn wait_admission(&mut self) -> DriverResult {
-        Err(DriverError::NoMemory)
-    }
-
-    fn wait_completion(&mut self) {
-        self.waits += 1;
-        (self.complete)();
-        core::assert_ne!(self.signals.completion.load(Ordering::Relaxed), 0);
-    }
+fn view(disk: &Arc<Disk>) -> Arc<block::BlockDevice> {
+    block::Gendisk::alloc_mq(
+        alloc::string::String::from("virtio-test"),
+        0,
+        0,
+        1,
+        disk.clone(),
+    )
+    .unwrap()
+    .part0()
 }
 
 #[def_test(serial)]
 fn request_read_write_flush_complete_without_driver_copy() {
     for features in [1 << 9, (1 << 9) | (1 << 28)] {
-        for kind in 0..3 {
+        for operation in [BioOperation::Read, BioOperation::Write, BioOperation::Flush] {
             for status in [0, 1, 2] {
                 let (disk, hardware) = disk(features, false);
-                let mut buffer = [0u8; SECTOR_SIZE];
-                let pointer = NonNull::from(&mut buffer[..]);
-                let operation = match kind {
-                    0 => Operation::Read(3, pointer),
-                    1 => Operation::Write(3, pointer),
-                    _ => Operation::Flush,
+                let device = view(&disk);
+                let buffer = vec![0u8; SECTOR_SIZE].into_boxed_slice();
+                let address = buffer.as_ptr() as usize;
+                let vectors = if operation == BioOperation::Flush {
+                    Vec::new()
+                } else {
+                    vec![block::BioVec::new(buffer)]
                 };
-                let signals = Arc::new(Signals::default());
-                let mut waiter = Waiter {
-                    signals: signals.clone(),
-                    waits: 0,
-                    complete: || {
-                        let token = hardware.lock().submitted[0];
-                        hardware.lock().complete(token, status);
-                        core::assert!(disk.handle(0).handled());
-                        disk.process_completed_requests();
-                        core::assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+                let result = Arc::new(SpinNoIrq::new(None));
+                let completed = result.clone();
+                device.submit_bio(block::Bio::new(
+                    device.clone(),
+                    if operation == BioOperation::Flush {
+                        0
+                    } else {
+                        3
                     },
-                };
-                let result = disk.run_request(operation, &mut waiter);
+                    operation,
+                    vectors,
+                    move |status, vectors| {
+                        *completed.lock() = Some((status, vectors));
+                    },
+                ));
+                assert!(result.lock().is_none());
+                assert!(MAPPINGS.load(Ordering::Relaxed) > 0);
+                let token = hardware.lock().submitted[0];
+                hardware.lock().complete(token, status);
+                assert!(disk.handle(0).handled());
+                disk.process_completed_requests();
+                assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+                let (actual, vectors) = result.lock().take().unwrap();
                 assert_eq!(
-                    result,
+                    actual,
                     match status {
                         0 => Ok(()),
                         1 => Err(DriverError::Io),
                         _ => Err(DriverError::Unsupported),
                     }
                 );
-                assert_eq!(signals.completion.load(Ordering::Relaxed), 1);
-                assert_eq!(waiter.waits, 1);
-                if kind != 2 {
-                    assert_eq!(hardware.lock().data_addresses[0], buffer.as_ptr() as usize);
+                if operation != BioOperation::Flush {
+                    assert_eq!(hardware.lock().data_addresses[0], address);
+                    assert_eq!(vectors[0].bytes().as_ptr() as usize, address);
                 }
-                if kind == 0 {
-                    assert!(buffer.iter().all(|byte| *byte == 0xa5));
+                if operation == BioOperation::Read {
+                    assert!(vectors[0].bytes().iter().all(|byte| *byte == 0xa5));
                 }
-                assert!(!disk.handle(0).handled());
                 disk.process_completed_requests();
-                assert_eq!(signals.completion.load(Ordering::Relaxed), 1);
+                assert!(result.lock().is_none());
             }
         }
     }
+}
+
+#[def_test(serial)]
+fn submit_batch_then_wait_preserves_fifo_and_owned_scatter_memory() {
+    let (disk, hardware) = disk(0, false);
+    let device = view(&disk);
+    let mut waits = Vec::new();
+    for _ in 0..24 {
+        // Memory boundaries need not even align to 512-byte sectors.
+        let vectors = vec![
+            block::BioVec::new(vec![0; 17].into_boxed_slice()),
+            block::BioVec::new(vec![0; 495].into_boxed_slice()),
+        ];
+        let (bio, wait) =
+            block::completion::BioWait::prepare(device.clone(), 0, BioOperation::Read, vectors)
+                .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+        device.submit_bio(bio);
+        waits.push(wait);
+    }
+    // All submissions returned without a caller waiting or hardware completing.
+    assert_eq!(hardware.lock().submitted_count(), 5);
+    assert_eq!(disk.state.lock().active_requests, 24);
+    let drain = Arc::new(Signals::default());
+    disk.begin_close(drain.clone());
+    assert_eq!(drain.completion.load(Ordering::Relaxed), 0);
+    // Dropping a waiting handle must not free pending or DMA-owned data.
+    drop(waits.pop());
+    while hardware.lock().completed < 24 {
+        hardware.lock().complete_pending();
+        disk.process_completed_requests();
+    }
+    for wait in waits {
+        let (status, vectors) = wait.wait();
+        status.unwrap();
+        assert_eq!(vectors[0].bytes().len(), 17);
+        assert_eq!(vectors[1].bytes().len(), 495);
+        assert!(
+            vectors
+                .iter()
+                .all(|v| v.bytes().iter().all(|byte| *byte == 0xa5))
+        );
+    }
+    assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+    assert_eq!(drain.completion.load(Ordering::Relaxed), 1);
+    disk.disable_interrupts();
+    disk.finish_close();
+    assert!(!hardware.lock().is_queue_live());
+    assert_eq!(device.read_block(0, &mut [0; 512]), Err(DriverError::Io));
+    disk.finish_close();
 }
 
 #[def_test(serial)]
 fn request_immediate_completion_and_noop_flush() {
     let (disk, hardware) = disk(0, true);
-    let mut buffer = [0u8; SECTOR_SIZE];
-    let signals = Arc::new(Signals::default());
-    let mut waiter = Waiter {
-        signals: signals.clone(),
-        waits: 0,
-        complete: || {
-            core::assert!(disk.handle(0).handled());
-            disk.process_completed_requests();
-        },
-    };
-    assert_eq!(
-        disk.run_request(
-            Operation::Read(0, NonNull::from(&mut buffer[..])),
-            &mut waiter
-        ),
-        Ok(())
-    );
-    assert_eq!(signals.completion.load(Ordering::Relaxed), 1);
-    let mut waiter = Waiter {
-        signals: Arc::new(Signals::default()),
-        waits: 0,
-        complete: || panic!("no-op flush waited"),
-    };
-    assert_eq!(disk.run_request(Operation::Flush, &mut waiter), Ok(()));
-    assert_eq!(waiter.waits, 0);
-    assert_eq!(hardware.lock().submitted.len(), 1);
+    let device = view(&disk);
+    let (bio, wait) = block::completion::BioWait::prepare(
+        device.clone(),
+        0,
+        BioOperation::Read,
+        vec![block::BioVec::new(vec![0; 512].into_boxed_slice())],
+    )
+    .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+    device.submit_bio(bio);
+    disk.process_completed_requests();
+    assert!(wait.wait().0.is_ok());
+    assert_eq!(device.flush(), Ok(()));
+    assert_eq!(hardware.lock().submitted_count(), 1);
     assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
 }
 
 #[def_test(serial)]
-fn request_fifo_exceeds_descriptors_and_cancels_head_and_middle() {
-    let (disk, hardware) = disk(0, false);
-    let mut buffers: Vec<_> = (0..24).map(|_| alloc::vec![0u8; SECTOR_SIZE]).collect();
-    let signals: Vec<_> = (0..24).map(|_| Arc::new(Signals::default())).collect();
-    let requests: Vec<_> = buffers
-        .iter_mut()
-        .zip(&signals)
-        .map(|(buffer, signals)| {
-            Box::pin(Request::new(
-                Operation::Read(0, NonNull::from(buffer.as_mut_slice())),
-                signals.clone(),
-            ))
-        })
-        .collect();
-    {
-        let mut state = disk.state.lock();
-        let BlockState {
-            device,
-            requests: queue,
-            ..
-        } = &mut *state;
-        let queue = queue.as_mut().unwrap();
-        for request in &requests {
-            // SAFETY: these pinned test nodes and their buffers outlive all
-            // queue references; this test retires every node before dropping them.
-            unsafe {
-                queue.enqueue(request);
-            }
-        }
-        for (index, request) in requests.iter().enumerate() {
-            assert_eq!(
-                queue.try_submit(device.as_mut().unwrap(), request),
-                index < 5
-            );
-        }
-        assert_eq!(queue.pending.iter().count(), 19);
-        queue.cancel_pending(&requests[5], DriverError::NoMemory);
-        queue.cancel_pending(&requests[12], DriverError::NoMemory);
-        assert!(core::ptr::eq(
-            queue.pending.iter().next().unwrap(),
-            &*requests[6]
-        ));
-    }
-    // The synchronous error path must also unlink itself without disturbing the FIFO.
-    let mut waiter = Waiter {
-        signals: Arc::new(Signals::default()),
-        waits: 0,
-        complete: || panic!("cancelled request waited"),
-    };
-    assert_eq!(
-        disk.run_request(Operation::Flush, &mut waiter),
-        Err(DriverError::NoMemory)
-    );
-    let mut completed_count = 0;
-    loop {
-        let tokens = hardware.lock().submitted[completed_count..].to_vec();
-        if tokens.is_empty() {
-            break;
-        }
-        completed_count += tokens.len();
-        for token in tokens.into_iter().rev() {
-            hardware.lock().complete(token, 0);
-        }
-        disk.process_completed_requests();
-        let mut state = disk.state.lock();
-        let BlockState {
-            device,
-            requests: queue,
-            ..
-        } = &mut *state;
-        let queue = queue.as_mut().unwrap();
-        for request in &requests {
-            // SAFETY: the device lock protects the state of these pinned nodes.
-            if unsafe { *request.state.get() } == RequestState::Pending {
-                queue.try_submit(device.as_mut().unwrap(), request);
-            }
-        }
-    }
-    assert_eq!(completed_count, 22);
-    assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
-    for (index, signals) in signals.iter().enumerate() {
-        assert_eq!(
-            signals.completion.load(Ordering::Relaxed),
-            usize::from(index != 5 && index != 12)
-        );
-    }
-    assert!(signals[6].admission.load(Ordering::Relaxed) > 0);
-    let state = disk.state.lock();
-    assert!(state.requests.as_ref().unwrap().pending.is_empty());
-    assert!(
-        state
-            .requests
-            .as_ref()
-            .unwrap()
-            .in_flight
-            .iter()
-            .all(Option::is_none)
-    );
-}
-
-#[def_test(serial)]
-fn request_validation_and_wait_preparation_precede_submission() {
+fn request_validation_precedes_submission() {
     let (disk, hardware) = disk(1 << 5, false);
+    let device = view(&disk);
+    assert_eq!(device.write_block(0, &[0; 512]), Err(DriverError::ReadOnly));
     assert_eq!(
-        disk.write_block(0, &[0; SECTOR_SIZE]),
-        Err(DriverError::ReadOnly)
-    );
-    assert_eq!(
-        disk.read_block(0, &mut [0; 3]),
+        device.read_block(0, &mut [0; 3]),
         Err(DriverError::InvalidInput)
     );
     assert_eq!(
-        disk.read_block(1024, &mut [0; SECTOR_SIZE]),
+        device.read_block(1024, &mut [0; 512]),
         Err(DriverError::InvalidInput)
-    );
-    assert_eq!(
-        disk.read_block(0, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::NoMemory)
     );
     assert!(hardware.lock().submitted.is_empty());
     assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
 }
 
-#[def_test]
-fn request_metadata_layout_is_reported() {
-    let requests = BlockRequests::new(16);
-    unittest::ktest_println!(
-        "blk IRQ metadata: request={}B align={} token-index={}B notification-scratch={}B",
-        core::mem::size_of::<Request>(),
-        core::mem::align_of::<Request>(),
-        core::mem::size_of_val(&*requests.in_flight),
-        requests.notifications.as_ref().unwrap().capacity()
-            * core::mem::size_of::<Arc<dyn BlockSignals>>(),
-    );
-    assert_eq!(requests.in_flight.len(), 16);
-    assert_eq!(
-        requests.notifications.as_ref().unwrap().capacity(),
-        requests.in_flight.len()
-    );
-}
-
 #[def_test(serial)]
-fn close_counts_preparation_and_keeps_retained_device_inert() {
-    let (disk, hardware) = disk(0, false);
-    // Admission precedes wait preparation. Closing must also wait for a call
-    // that has not constructed a Request or published a descriptor yet.
-    let call = disk.admit_call().unwrap();
-    let signal = Arc::new(Signals::default());
-    disk.begin_close(signal.clone());
-    assert_eq!(signal.completion.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        disk.read_block(0, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::Io)
-    );
-    assert!(hardware.lock().is_queue_live());
-    drop(call);
-    assert_eq!(signal.completion.load(Ordering::Relaxed), 1);
-    disk.disable_interrupts();
-    disk.finish_close();
-    assert!(!hardware.lock().is_queue_live());
-    assert_eq!(disk.num_blocks(), 1024);
-    assert_eq!(disk.block_size(), SECTOR_SIZE);
-    assert!(!disk.is_inherently_read_only());
-    assert_eq!(disk.write_block(0, &[0; SECTOR_SIZE]), Err(DriverError::Io));
-    assert_eq!(disk.flush(), Err(DriverError::Io));
-    assert!(!disk.handle(0).handled());
-    disk.process_completed_requests();
-    disk.finish_close();
-}
-
-#[def_test(serial)]
-fn preparation_error_retires_admission_before_close() {
-    let (disk, hardware) = disk(0, false);
-    assert_eq!(
-        disk.read_block(0, &mut [0; SECTOR_SIZE]),
-        Err(DriverError::NoMemory)
-    );
-    let signal = Arc::new(Signals::default());
-    disk.begin_close(signal.clone());
-    assert_eq!(signal.completion.load(Ordering::Relaxed), 1);
-    disk.disable_interrupts();
-    disk.finish_close();
-    assert!(!hardware.lock().is_queue_live());
+fn scatter_transfers_preserve_addresses_and_split_only_at_device_limits() {
+    for features in [(1 << 1) | (1 << 2), (1 << 1) | (1 << 2) | (1 << 28)] {
+        for operation in [BioOperation::Read, BioOperation::Write] {
+            let (disk, hardware) = disk(features, false);
+            let device = view(&disk);
+            // Two sub-sector segments go directly to hardware. The final large
+            // extent exceeds both size_max and one chain's descriptor budget.
+            let vectors: Vec<_> = [17, 495, 16 * 1024]
+                .into_iter()
+                .map(|len| block::BioVec::new(vec![0; len].into_boxed_slice()))
+                .collect();
+            let addresses: Vec<_> = vectors
+                .iter()
+                .map(|v| v.bytes().as_ptr() as usize)
+                .collect();
+            let (bio, wait) =
+                block::completion::BioWait::prepare(device.clone(), 7, operation, vectors)
+                    .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+            device.submit_bio(bio);
+            assert_eq!(hardware.lock().submitted_count(), 1);
+            hardware.lock().complete_pending();
+            disk.process_completed_requests();
+            // The common request has not completed; its remaining extent was
+            // submitted by completion processing, without waking the caller.
+            assert_eq!(disk.state.lock().active_requests, 1);
+            assert_eq!(hardware.lock().submitted_count(), 2);
+            hardware.lock().complete_pending();
+            disk.process_completed_requests();
+            let (status, vectors) = wait.wait();
+            status.unwrap();
+            assert_eq!(disk.state.lock().active_requests, 0);
+            assert_eq!(MAPPINGS.load(Ordering::Relaxed), 0);
+            let expected: Vec<_> = addresses[..2]
+                .iter()
+                .copied()
+                .chain((0..16).map(|i| addresses[2] + i * 1024))
+                .collect();
+            assert_eq!(hardware.lock().data_addresses, expected);
+            assert_eq!(
+                vectors
+                    .iter()
+                    .map(|v| v.bytes().as_ptr() as usize)
+                    .collect::<Vec<_>>(),
+                addresses
+            );
+            let value = if operation == BioOperation::Read {
+                0xa5
+            } else {
+                0
+            };
+            assert!(
+                vectors
+                    .iter()
+                    .all(|v| v.bytes().iter().all(|byte| *byte == value))
+            );
+        }
+    }
 }

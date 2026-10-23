@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub(crate) struct ReadDevice {
-    inner: Arc<dyn BlockDeviceOperations>,
+    inner: Arc<block::BlockDevice>,
     // The public trait call and the restricted transfer may use different
     // addresses. Record both without changing the existing raw-I/O assertions.
     caller_destinations: Mutex<Vec<usize>>,
@@ -27,7 +27,7 @@ pub(crate) struct ReadDevice {
 }
 
 impl ReadDevice {
-    pub(crate) fn new(inner: Arc<dyn BlockDeviceOperations>) -> Arc<Self> {
+    pub(crate) fn new(inner: Arc<block::BlockDevice>) -> Arc<Self> {
         Arc::new(Self {
             inner,
             caller_destinations: Mutex::new(Vec::new()),
@@ -54,13 +54,15 @@ impl Device for ReadDevice {
 
 impl BlockDeviceOperations for ReadDevice {
     fn num_blocks(&self) -> u64 {
-        self.inner.num_blocks()
+        self.inner.size() / self.inner.block_size() as u64
     }
 
     fn block_size(&self) -> usize {
         self.inner.block_size()
     }
+}
 
+impl ReadDevice {
     fn read_block(&self, block: u64, output: &mut [u8]) -> DriverResult {
         self.caller_destinations
             .lock()
@@ -118,7 +120,9 @@ impl BlockDeviceOperations for ReadStorage {
     fn block_size(&self) -> usize {
         self.block_size
     }
+}
 
+impl ReadStorage {
     fn read_block(&self, block: u64, output: &mut [u8]) -> DriverResult {
         let start = usize::try_from(block)
             .ok()
@@ -226,11 +230,11 @@ pub(crate) fn read_fixture_with_blocks(
     image[23 * block_size..25 * block_size].fill(0xee); // Unwritten data must not escape.
     image[25 * block_size..26 * block_size].fill(0x7a); // Real partial EOF block.
 
-    let device = ReadDevice::new(Arc::new(ReadStorage {
+    let device = ReadDevice::new(crate::io::test_block_device(Arc::new(ReadStorage {
         bytes: Mutex::new(image),
         block_size: device_block_size,
-    }));
-    let filesystem = Ext4SbInfo::open(device.clone(), false).unwrap();
+    })));
+    let filesystem = Ext4SbInfo::open(crate::io::test_block_device(device.clone()), false).unwrap();
     let inode = filesystem.load_inode_private(InodeNumber::new(12)).unwrap();
     device.destinations.lock().clear();
     (filesystem, inode, device, expected)
@@ -378,4 +382,36 @@ fn aligned_file_read_reports_io_failure_and_retry_reinitializes_output() {
     assert_eq!(&output[start..start + 4096], &expected[..4096]);
     assert!(output[..start].iter().all(|&byte| byte == 0xa5));
     assert!(output[start + 4096..].iter().all(|&byte| byte == 0xa5));
+}
+
+impl block::BioOperations for ReadDevice {
+    fn submit_bio(&self, mut bio: block::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            block::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            block::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            block::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
+}
+
+impl block::BioOperations for ReadStorage {
+    fn submit_bio(&self, mut bio: block::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            block::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            block::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            block::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
 }

@@ -22,6 +22,15 @@ fn test_virtio_blk_init_failure_handling() {
     } else {
         assert!(dev.is_err());
     }
+
+    let mut transport = MockTransport::new();
+    transport.features = 1 << 1; // SIZE_MAX.
+    transport.config_space.borrow_mut()[8..12]
+        .copy_from_slice(&((SECTOR_SIZE - 1) as u32).to_le_bytes());
+    assert!(matches!(
+        VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport),
+        Err(DriverError::Unsupported)
+    ));
 }
 
 #[def_test]
@@ -51,7 +60,17 @@ fn test_read_only_feature_is_reported_and_rejects_writes() {
 
     assert!(dev.is_inherently_read_only());
     assert_eq!(
-        dev.write_block(0, &[0; SECTOR_SIZE]).unwrap_err(),
+        block::Gendisk::alloc_mq(
+            alloc::string::String::from("ro-test"),
+            0,
+            0,
+            1,
+            Arc::new(dev)
+        )
+        .unwrap()
+        .part0()
+        .write_block(0, &[0; SECTOR_SIZE])
+        .unwrap_err(),
         DriverError::ReadOnly
     );
 }

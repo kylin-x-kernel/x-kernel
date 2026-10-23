@@ -338,7 +338,6 @@ impl Ext4SuperOperations {
             .block_device()
             .expect("get_tree_bdev must set s_bdev before fill_super")
             .clone();
-        let device: Arc<dyn block::BlockDeviceOperations> = device;
         let statfs_mode = options.mount_statfs_mode();
         let is_read_only = super_block.flags().contains(SuperBlockFlags::RDONLY);
         let mount_fn = |device| Ext4SbInfo::prepare_mount_with_statfs_mode(device, statfs_mode);

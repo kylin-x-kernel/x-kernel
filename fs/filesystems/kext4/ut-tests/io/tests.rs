@@ -46,7 +46,8 @@ impl BlockDeviceOperations for MemoryBlockDevice {
     fn block_size(&self) -> usize {
         DEVICE_BLOCK_SIZE
     }
-
+}
+impl MemoryBlockDevice {
     fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
         let start = usize::try_from(block_id)
             .map_err(|_| DriverError::InvalidInput)?
@@ -87,10 +88,28 @@ impl BlockDeviceOperations for MemoryBlockDevice {
     }
 }
 
+impl block::BioOperations for MemoryBlockDevice {
+    fn submit_bio(&self, mut bio: block::Bio) {
+        let block_id =
+            bio.sector() / (block::BlockDeviceOperations::block_size(self) as u64 / 512);
+        let result = match bio.operation() {
+            block::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            block::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            block::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
+}
+
 #[def_test]
 fn writes_filesystem_blocks_through_device_block_mapping() {
     let device = Arc::new(MemoryBlockDevice::new(8));
-    let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
+    let filesystem =
+        FilesystemDevice::open(crate::io::test_block_device(device.clone()), 1024, 4).unwrap();
     let input = vec![0x5a; 1024];
 
     filesystem
@@ -105,7 +124,8 @@ fn writes_filesystem_blocks_through_device_block_mapping() {
 #[def_test]
 fn rejects_partial_contiguous_filesystem_block_write() {
     let device = Arc::new(MemoryBlockDevice::new(8));
-    let filesystem = FilesystemDevice::open(device, 1024, 4).unwrap();
+    let filesystem =
+        FilesystemDevice::open(crate::io::test_block_device(device), 1024, 4).unwrap();
 
     assert_eq!(
         filesystem.write_contiguous_blocks(FilesystemBlock::new(1), 1, &[0; 512]),
@@ -119,7 +139,8 @@ fn rejects_partial_contiguous_filesystem_block_write() {
 #[def_test]
 fn replay_writer_writes_one_block_and_flushes() {
     let device = Arc::new(MemoryBlockDevice::new(8));
-    let filesystem = FilesystemDevice::open(device.clone(), 1024, 4).unwrap();
+    let filesystem =
+        FilesystemDevice::open(crate::io::test_block_device(device.clone()), 1024, 4).unwrap();
     let input = vec![0xa5; 1024];
 
     filesystem

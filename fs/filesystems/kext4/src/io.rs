@@ -4,6 +4,7 @@
 
 use alloc::{sync::Arc, vec};
 
+#[cfg(unittest)]
 use block::BlockDeviceOperations;
 
 use crate::{
@@ -13,16 +14,14 @@ use crate::{
 
 /// Adapts device blocks to the ext4 filesystem block address space.
 pub(crate) struct FilesystemDevice {
-    device: Arc<dyn BlockDeviceOperations>,
-    device_block_size: usize,
+    device: Arc<block::BlockDevice>,
     filesystem_block_size: usize,
-    blocks_per_filesystem_block: u64,
     filesystem_blocks: u64,
 }
 
 impl FilesystemDevice {
     pub(crate) fn open(
-        device: Arc<dyn BlockDeviceOperations>,
+        device: Arc<block::BlockDevice>,
         filesystem_block_size: usize,
         filesystem_blocks: u64,
     ) -> Ext4Result<Self> {
@@ -39,21 +38,19 @@ impl FilesystemDevice {
         let required_device_blocks = filesystem_blocks
             .checked_mul(blocks_per_filesystem_block)
             .ok_or(Ext4Error::Overflow)?;
-        if required_device_blocks > device.num_blocks() {
+        if required_device_blocks > (device.size() / device.block_size() as u64) {
             return Err(Ext4Error::OutOfBounds);
         }
 
         Ok(Self {
             device,
-            device_block_size,
             filesystem_block_size,
-            blocks_per_filesystem_block,
             filesystem_blocks,
         })
     }
 
     pub(crate) fn read_bytes(
-        device: &dyn BlockDeviceOperations,
+        device: &Arc<block::BlockDevice>,
         byte_offset: u64,
         output: &mut [u8],
     ) -> Ext4Result<()> {
@@ -70,10 +67,7 @@ impl FilesystemDevice {
         let end = byte_offset
             .checked_add(output_len)
             .ok_or(Ext4Error::Overflow)?;
-        let capacity = device
-            .num_blocks()
-            .checked_mul(block_size)
-            .ok_or(Ext4Error::Overflow)?;
+        let capacity = device.size();
         if end > capacity {
             return Err(Ext4Error::OutOfBounds);
         }
@@ -133,7 +127,7 @@ impl FilesystemDevice {
 
         let device_block = start
             .get()
-            .checked_mul(self.blocks_per_filesystem_block)
+            .checked_mul((self.filesystem_block_size / self.device.block_size()) as u64)
             .ok_or(Ext4Error::Overflow)?;
         self.device.read_block(device_block, output)?;
         Ok(())
@@ -167,10 +161,10 @@ impl FilesystemDevice {
 
         let device_block = start
             .get()
-            .checked_mul(self.blocks_per_filesystem_block)
+            .checked_mul((self.filesystem_block_size / self.device.block_size()) as u64)
             .ok_or(Ext4Error::Overflow)?;
         let device_block_count = u64::from(block_count)
-            .checked_mul(self.blocks_per_filesystem_block)
+            .checked_mul((self.filesystem_block_size / self.device.block_size()) as u64)
             .ok_or(Ext4Error::Overflow)?;
         self.write_contiguous_device_blocks(device_block, device_block_count, input)?;
         Ok(())
@@ -189,7 +183,7 @@ impl FilesystemDevice {
     ) -> Ext4Result<()> {
         let expected = usize::try_from(block_count)
             .map_err(|_| Ext4Error::Overflow)?
-            .checked_mul(self.device_block_size)
+            .checked_mul(self.device.block_size())
             .ok_or(Ext4Error::Overflow)?;
         if input.len() != expected {
             return Err(Ext4Error::InvalidBufferLength {
@@ -198,7 +192,7 @@ impl FilesystemDevice {
             });
         }
         let end = start.checked_add(block_count).ok_or(Ext4Error::Overflow)?;
-        if end > self.device.num_blocks() {
+        if end > (self.device.size() / self.device.block_size() as u64) {
             return Err(Ext4Error::OutOfBounds);
         }
 
@@ -216,6 +210,21 @@ impl JournalReplayBlockWriter for FilesystemDevice {
     fn flush_replay(&self) -> Ext4Result<()> {
         self.flush()
     }
+}
+
+#[cfg(unittest)]
+pub(crate) fn test_block_device<T: block::BioOperations + 'static>(
+    device: Arc<T>,
+) -> Arc<block::BlockDevice> {
+    block::Gendisk::alloc(
+        alloc::string::String::from("ext4-test"),
+        0,
+        0,
+        1,
+        alloc::boxed::Box::new(device),
+    )
+    .unwrap()
+    .part0()
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/io/tests.rs");

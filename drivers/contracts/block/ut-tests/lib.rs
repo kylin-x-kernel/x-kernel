@@ -48,7 +48,8 @@ impl BlockDeviceOperations for MemoryDisk {
     fn block_size(&self) -> usize {
         self.block_size
     }
-
+}
+impl MemoryDisk {
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         let block_id = usize::try_from(block_id).map_err(|_| DriverError::InvalidInput)?;
         let start = block_id
@@ -84,6 +85,22 @@ impl BlockDeviceOperations for MemoryDisk {
     }
 }
 
+impl crate::BioOperations for MemoryDisk {
+    fn submit_bio(&self, mut bio: crate::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            crate::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            crate::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            crate::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
+}
+
 impl BlockDeviceOperations for GeometryDisk {
     fn num_blocks(&self) -> u64 {
         self.blocks
@@ -92,7 +109,8 @@ impl BlockDeviceOperations for GeometryDisk {
     fn block_size(&self) -> usize {
         self.block_size
     }
-
+}
+impl GeometryDisk {
     fn read_block(&self, _block_id: u64, _buf: &mut [u8]) -> DriverResult {
         Err(DriverError::Unsupported)
     }
@@ -103,6 +121,22 @@ impl BlockDeviceOperations for GeometryDisk {
 
     fn flush(&self) -> DriverResult {
         Ok(())
+    }
+}
+
+impl crate::BioOperations for GeometryDisk {
+    fn submit_bio(&self, mut bio: crate::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            crate::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            crate::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            crate::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
     }
 }
 
@@ -118,7 +152,8 @@ impl BlockDeviceOperations for InherentlyReadOnlyDisk {
     fn is_inherently_read_only(&self) -> bool {
         true
     }
-
+}
+impl InherentlyReadOnlyDisk {
     fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
         self.0.read_block(block_id, buf)
     }
@@ -129,6 +164,127 @@ impl BlockDeviceOperations for InherentlyReadOnlyDisk {
 
     fn flush(&self) -> DriverResult {
         self.0.flush()
+    }
+}
+
+impl crate::BioOperations for InherentlyReadOnlyDisk {
+    fn submit_bio(&self, mut bio: crate::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            crate::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            crate::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            crate::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
+}
+
+#[def_test]
+fn bio_validates_whole_transfer_and_remaps_once() {
+    let backend = Arc::new(MemoryDisk::with_block_size(4, 4096));
+    let disk = Gendisk::alloc(
+        String::from("bio-test"),
+        250,
+        0,
+        8,
+        Box::new(backend.clone()),
+    )
+    .unwrap();
+    let whole = disk.part0();
+    let partition = Arc::new(BlockDevice {
+        disk: whole.disk.clone(),
+        queue: whole.queue.clone(),
+        device_number: DeviceNumber::new(250, 1),
+        start_sector: 8,
+        num_sectors: AtomicU64::new(8),
+        exclusive_holder: Mutex::new(false),
+    });
+    let vectors = || {
+        vec![
+            BioVec::new(vec![0x12; 2048].into_boxed_slice()),
+            BioVec::new(vec![0x34; 2048].into_boxed_slice()),
+        ]
+    };
+    let invalid = vec![
+        BioVec::new(vec![0x12; 2048].into_boxed_slice()),
+        BioVec::new(vec![0x34; 2047].into_boxed_slice()),
+    ];
+    assert_eq!(
+        partition
+            .submit_bio_wait(0, BioOperation::Write, invalid)
+            .0
+            .err(),
+        Some(DriverError::InvalidInput)
+    );
+    assert!(backend.storage.lock().iter().all(|byte| *byte == 0));
+    partition
+        .submit_bio_wait(0, BioOperation::Write, vectors())
+        .0
+        .unwrap();
+    let mut result = [0; 4096];
+    whole.read_block(1, &mut result).unwrap();
+    assert!(result[..2048].iter().all(|byte| *byte == 0x12));
+    assert!(result[2048..].iter().all(|byte| *byte == 0x34));
+    assert_eq!(
+        partition
+            .submit_bio_wait(1, BioOperation::Read, vectors())
+            .0
+            .err(),
+        Some(DriverError::InvalidInput)
+    );
+    assert_eq!(
+        partition
+            .submit_bio_wait(8, BioOperation::Read, vectors())
+            .0
+            .err(),
+        Some(DriverError::InvalidInput)
+    );
+    partition.set_disk_read_only(true).unwrap();
+    assert_eq!(
+        partition
+            .submit_bio_wait(0, BioOperation::Write, vectors())
+            .0
+            .err(),
+        Some(DriverError::ReadOnly)
+    );
+    partition.flush().unwrap();
+}
+
+#[def_test]
+fn invalid_flush_returns_memory_without_reaching_backend() {
+    let backend = Arc::new(ProbeDisk {
+        pending: Mutex::new(None),
+        observed: Mutex::new(Vec::new()),
+        is_deferred: false,
+    });
+    let device = Gendisk::alloc(
+        "invalid-flush".into(),
+        250,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    for (sector, vectors) in [
+        (0, vec![BioVec::new(vec![0x5a; 512].into_boxed_slice())]),
+        (1, Vec::new()),
+    ] {
+        let address = vectors.first().map(|v| v.bytes().as_ptr());
+        let (bio, waiter) =
+            completion::BioWait::prepare(device.clone(), sector, BioOperation::Flush, vectors)
+                .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+        device.submit_bio(bio);
+        let (status, returned) = waiter.wait();
+        assert_eq!(status, Err(DriverError::InvalidInput));
+        assert_eq!(returned.first().map(|v| v.bytes().as_ptr()), address);
+        assert!(returned.iter().all(|v| v.bytes().iter().all(|b| *b == 0x5a)));
+        assert!(backend.observed.lock().is_empty());
+        assert!(backend.pending.lock().is_none());
     }
 }
 
@@ -462,7 +618,7 @@ fn four_kib_logical_io_uses_sector_capacity() {
         .expect("sector capacity need not fill a logical block");
     assert_eq!(disk.part0().size(), 9 * u64::from(SECTOR_SIZE));
     assert_eq!(
-        BlockDeviceOperations::read_block(disk.part0().as_ref(), 1, &mut read).unwrap_err(),
+        disk.part0().read_block(1, &mut read).unwrap_err(),
         DriverError::InvalidInput
     );
 }
@@ -548,7 +704,7 @@ fn read_only_state_is_owned_by_the_block_core() {
         DriverError::ReadOnly
     );
     assert_eq!(
-        BlockDeviceOperations::write_block(device.as_ref(), 0, &[0; BLOCK_SIZE]).unwrap_err(),
+        device.write_block(0, &[0; BLOCK_SIZE]).unwrap_err(),
         DriverError::ReadOnly
     );
     device
@@ -620,4 +776,203 @@ fn exclusive_claim_follows_token_lifetime() {
         .expect("drop makes device claimable");
 
     del_gendisk(disk.device_number()).expect("remove claim test disk");
+}
+
+struct ProbeDisk {
+    pending: Mutex<Option<Bio>>,
+    observed: Mutex<Vec<(BioOperation, usize, bool)>>,
+    is_deferred: bool,
+}
+
+impl BlockDeviceOperations for ProbeDisk {
+    fn num_blocks(&self) -> u64 {
+        8
+    }
+
+    fn block_size(&self) -> usize {
+        BLOCK_SIZE
+    }
+}
+
+impl BioOperations for ProbeDisk {
+    fn submit_bio(&self, mut bio: Bio) {
+        let operation = bio.operation();
+        let mut vector = bio.vectors_mut().next().unwrap();
+        self.observed.lock().push((
+            operation,
+            vector.bytes().as_ptr() as usize,
+            vector.bytes_mut().is_ok(),
+        ));
+        if operation == BioOperation::Read {
+            vector.bytes_mut().unwrap().fill(0x5a);
+        }
+        if self.is_deferred {
+            *self.pending.lock() = Some(bio);
+        } else {
+            bio.end_io(Ok(()));
+        }
+    }
+}
+
+#[def_test]
+fn synchronous_bio_preserves_borrowed_addresses_and_write_access() {
+    let backend = Arc::new(ProbeDisk {
+        pending: Mutex::new(None),
+        observed: Mutex::new(Vec::new()),
+        is_deferred: false,
+    });
+    let device = Gendisk::alloc("bio-borrow".into(), 241, 0, 1, Box::new(backend.clone()))
+        .unwrap()
+        .part0();
+    let source = [0x3c; BLOCK_SIZE];
+    let mut target = [0; BLOCK_SIZE];
+    device.write_block(0, &source).unwrap();
+    device.read_block(0, &mut target).unwrap();
+    assert_eq!(
+        &*backend.observed.lock(),
+        &[
+            (BioOperation::Write, source.as_ptr() as usize, false),
+            (BioOperation::Read, target.as_ptr() as usize, true),
+        ]
+    );
+    assert_eq!(target, [0x5a; BLOCK_SIZE]);
+    assert_eq!(source, [0x3c; BLOCK_SIZE]);
+}
+
+struct TrackedMemory {
+    buffer: Box<[u8]>,
+    drops: Arc<core::sync::atomic::AtomicUsize>,
+}
+
+// SAFETY: the boxed bytes have stable address and exclusive ownership. Neither
+// the drop counter nor other observers expose the allocation; Drop only counts
+// destruction and releases the box, both valid in completion context.
+unsafe impl BioMemory for TrackedMemory {
+    fn bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer
+    }
+}
+impl Drop for TrackedMemory {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn bio_range_retains_storage_after_wait_handle_is_dropped() {
+    let backend = Arc::new(ProbeDisk {
+        pending: Mutex::new(None),
+        observed: Mutex::new(Vec::new()),
+        is_deferred: true,
+    });
+    let device = Gendisk::alloc(
+        "bio-owned-range".into(),
+        241,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    for status in [Ok(()), Err(DriverError::Io)] {
+        let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let memory = TrackedMemory {
+            buffer: vec![0; 1024].into_boxed_slice(),
+            drops: drops.clone(),
+        };
+        let address = memory.bytes()[17..].as_ptr() as usize;
+        let vector = BioVec::from_memory(memory, 17..529)
+            .unwrap_or_else(|(error, _)| panic!("range: {error:?}"));
+        let (bio, waiter) =
+            completion::BioWait::prepare(device.clone(), 0, BioOperation::Read, vec![vector])
+                .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+        device.submit_bio(bio);
+        drop(waiter);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        let pending = backend.pending.lock().take().unwrap();
+        assert_eq!(backend.observed.lock().last().unwrap().1, address);
+        pending.end_io(status);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+    assert!(BioVec::from_memory(vec![0; 512].into_boxed_slice(), 1..513).is_err());
+    assert!(BioVec::from_memory(vec![0; 512].into_boxed_slice(), 7..7).is_err());
+}
+
+#[def_test]
+fn bio_wait_returns_memory_on_device_validation_and_preparation_errors() {
+    let backend = Arc::new(ProbeDisk {
+        pending: Mutex::new(None),
+        observed: Mutex::new(Vec::new()),
+        is_deferred: true,
+    });
+    let device = Gendisk::alloc(
+        "bio-error-owner".into(),
+        241,
+        0,
+        1,
+        Box::new(backend.clone()),
+    )
+    .unwrap()
+    .part0();
+    for failure in 0..3 {
+        let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let memory = TrackedMemory {
+            buffer: vec![0x37; 512].into_boxed_slice(),
+            drops: drops.clone(),
+        };
+        let address = memory.bytes().as_ptr() as usize;
+        let vector = BioVec::from_memory(memory, 0..512)
+            .unwrap_or_else(|(error, _)| panic!("range: {error:?}"));
+        let (status, vectors) = if failure == 2 {
+            // The host rejects waiting-resource preparation with IRQs disabled.
+            let lock = kspin::SpinNoIrq::new(());
+            let _guard = lock.lock();
+            match completion::BioWait::prepare(device.clone(), 0, BioOperation::Read, vec![vector])
+            {
+                Err((error, vectors)) => (Err(error), vectors),
+                Ok(_) => panic!("wait preparation must reject a nonsleepable context"),
+            }
+        } else {
+            let (bio, wait) = completion::BioWait::prepare(
+                device.clone(),
+                if failure == 0 { 0 } else { u64::MAX },
+                BioOperation::Read,
+                vec![vector],
+            )
+            .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+            device.submit_bio(bio);
+            if failure == 0 {
+                backend
+                    .pending
+                    .lock()
+                    .take()
+                    .unwrap()
+                    .end_io(Err(DriverError::Io));
+            }
+            wait.wait()
+        };
+        assert_eq!(
+            status,
+            Err(if failure == 0 {
+                DriverError::Io
+            } else {
+                DriverError::InvalidInput
+            })
+        );
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].bytes().as_ptr() as usize, address);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(
+            vectors[0]
+                .bytes()
+                .iter()
+                .all(|byte| *byte == if failure == 0 { 0x5a } else { 0x37 })
+        );
+        drop(vectors);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
 }

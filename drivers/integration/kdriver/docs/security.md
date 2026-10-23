@@ -64,15 +64,18 @@ device-res-xkernel / kirq / khal / kdma / memspace / driver crates
 ## External Boundaries and Attack Surface
 
 The block wait provider is a safe-code host adapter, not a DMA owner. It
-validates sleepable task context before source construction. A private terminal
-registration stays alive until completion or waiter drop; only the permanent
-terminal source can detach it for notification. Admission uses separate guards.
+validates sleepable task context before source construction and checks task
+identity when waiting. An already-completed request needs no task registration.
+Otherwise check/register/recheck preserves completion racing with enrollment;
+the private terminal registration stays alive until completion. Its single entry
+fits PollSet inline storage and cannot exhaust registration IDs, so enrollment
+introduces no recoverable failure after submission. There is no admission wait.
 No terminal wait failure can release a submitted caller's buffers, and spurious
 wakes only repeat the completion predicate. Signals retain no request/device
 pointer and may outlive the waiter. Notifications run outside device/registry
 locks; kpoll invokes KWaker after releasing its source lock. Infallible Arc/Box
-allocation retains kernel OOM policy. Request submission, admission cancellation
-and DMA retirement are enforced by the virtio request transaction layer.
+allocation retains kernel OOM policy. Pending requests and DMA retirement are
+owned by the device queue independently of the caller-side waiter.
 
 `kdriver` is a core kernel crate that processes hardware description data.
 Its attack surface primarily consists of untrusted physical addresses, IRQ numbers,
@@ -168,9 +171,11 @@ No user-controlled pointers or device DMA state enter this executor.
 
 State mutation is centralized in private `update_state`, except the atomic
 batch-pop/Running transition under the same lock. The closure cannot return a
-borrow into the protected state. Preparation is now an injected function, not
-a factory object; task binding, notification lifetime and allocation policy
-remain unchanged.
+borrow into the protected state. The host provider validates bio callers before
+submission without allocation. A pending bio prepares its task-bound waiter
+when waited on; the block layer serializes notification enrollment with result
+publication. Device-close drain/stop still prepare their waiters before exposing
+notification handles. Signals never retain a task, device or data pointer.
 
 ### 1. device-res-xkernel — DMA Allocation
 
