@@ -1,5 +1,15 @@
 # kvfs - 安全与可靠性分析
 
+## File-lock context allocation failure
+
+The inode's first advisory-lock context allocation can return `NoMemory`.
+`Once::try_call_once` publishes only a fully initialized `KBox`; on error the
+cell stays uninitialized and no lock request reaches `apply`. Later attempts
+may retry. Both record-lock and BSD-lock entry points propagate the error.
+`KBox::new_nowait` prevents this spinning initialization path from opting into future
+sleeping reclaim. This change does not make subsequent lock-record, waiter,
+or other VFS allocations fallible.
+
 ## Test Fixture Scope
 
 The audit scope includes guest fixtures under `ut-tests/` and the host-only

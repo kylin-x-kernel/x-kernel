@@ -1,5 +1,19 @@
 # kvfs - 设计文档
 
+## Fallible file-lock context
+
+Inodes own advisory-lock contexts through `Once<KBox<FileLockContext>>`.
+Initialization uses `KBox::new_nowait` because Once waiters spin, even
+though the lock operation itself runs in task context. Failed initialization
+returns `NoMemory` through both `FileOperations::lock` and `flock`, publishes
+no context, and permits a later retry. The constructor returns `KResult`, so
+VFS forwards its error directly. A ready context is reused without
+allocation. Queries and unlocking an inode without a context remain allocation
+free. Lock-record allocations are unchanged by this migration.
+
+The inode guest regression injects a local initialization failure and verifies
+absence, successful retry, and reuse without invoking another allocator.
+
 ## Test Layout
 
 Guest tests live in crate-root `ut-tests/`; `unittest::path_mod_test!`

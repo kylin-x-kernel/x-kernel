@@ -160,6 +160,7 @@ bpffs = { path = "fs/filesystems/bpffs" }
 memfs = { path = "fs/filesystems/memfs" }
 kaddr_layout = { path = "mm/kaddr_layout" }
 kalloc = { path = "mm/kalloc" }
+kalloc-types = { path = "mm/kalloc-types" }
 fat = { path = "fs/filesystems/fat" }
 fs_block = { path = "fs/block" }
 fs_boot = { path = "fs/boot" }

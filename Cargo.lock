@@ -2092,6 +2092,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kalloc-types"
+version = "0.3.0-dev"
+dependencies = [
+ "bitflags 2.13.2",
+ "kalloc",
+ "kerrno",
+ "unittest",
+]
+
+[[package]]
 name = "karch"
 version = "0.3.0-dev"
 dependencies = [
@@ -3277,6 +3287,7 @@ dependencies = [
  "inherit-methods-macro",
  "intrusive-collections",
  "iov_iter",
+ "kalloc-types",
  "kcred",
  "kdevice",
  "kerrno",

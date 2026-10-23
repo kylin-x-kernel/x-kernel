@@ -517,3 +517,22 @@ fn metadata_only_inode_operations_accepts_owner_changes() {
         Some(NodePermission::from_bits_truncate(0o600).bits())
     );
 }
+
+#[def_test]
+fn file_lock_context_allocation_failure_is_retryable() {
+    let inode = VfsInode::new_dir(
+        Arc::new(EmptyInodeOperations),
+        VfsInodeInit::new(
+            1,
+            0,
+            Umode::new(NodeType::Directory, NodePermission::empty()),
+        ),
+    );
+    let result = inode.init_file_locks(|| Err(VfsError::NoMemory));
+    assert_eq!(result.err(), Some(VfsError::NoMemory));
+    assert!(inode.existing_file_locks().is_none());
+    let context = inode.file_locks().unwrap();
+    let reused = inode.init_file_locks(|| Err(VfsError::NoMemory)).unwrap();
+    assert!(core::ptr::eq(context, reused));
+    assert!(core::ptr::eq(context, inode.existing_file_locks().unwrap()));
+}

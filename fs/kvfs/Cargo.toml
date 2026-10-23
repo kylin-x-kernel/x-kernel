@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kalloc-types.workspace = true
 block.workspace = true
 kcred = { workspace = true }
 kdevice = { workspace = true }

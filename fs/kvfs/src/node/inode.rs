@@ -18,6 +18,7 @@ use core::{
 
 use bitflags::bitflags;
 use hashbrown::HashMap;
+use kalloc_types::KBox;
 use kcred::Cred;
 use kerrno::LinuxError;
 use klazy::{Lazy, Once};
@@ -1198,7 +1199,7 @@ pub struct VfsInode {
     private_data: Arc<dyn Any + Send + Sync>,
     mapping: Arc<AddressSpace>,
     special_state: InodeSpecialState,
-    file_locks: klazy::Once<alloc::boxed::Box<crate::locks::FileLockContext>>,
+    file_locks: klazy::Once<KBox<crate::locks::FileLockContext>>,
 }
 
 /// Weak reference to a VFS inode identity.
@@ -1357,9 +1358,23 @@ struct InodeParts {
 }
 
 impl VfsInode {
-    pub(crate) fn file_locks(&self) -> &crate::locks::FileLockContext {
+    /// Returns or initializes the advisory-lock context for task-context callers.
+    ///
+    /// Initialization uses NOWAIT because competing Once callers spin. The
+    /// initializer constructs only empty lock lists and a mutex; it must not
+    /// acquire the context's mutex, sleep, or change to the default KBox policy.
+    /// Returns `NoMemory` without publishing a context, allowing a later retry.
+    pub(crate) fn file_locks(&self) -> VfsResult<&crate::locks::FileLockContext> {
+        self.init_file_locks(|| KBox::new_nowait(crate::locks::FileLockContext::new()))
+    }
+
+    fn init_file_locks(
+        &self,
+        allocate: impl FnOnce() -> VfsResult<KBox<crate::locks::FileLockContext>>,
+    ) -> VfsResult<&crate::locks::FileLockContext> {
         self.file_locks
-            .call_once(|| alloc::boxed::Box::new(crate::locks::FileLockContext::new()))
+            .try_call_once(allocate)
+            .map(|context| &**context)
     }
 
     pub(crate) fn existing_file_locks(&self) -> Option<&crate::locks::FileLockContext> {

@@ -312,23 +312,26 @@ pub trait FileOperations: Send + Sync + 'static {
 
     /// Applies a record lock, optionally waiting interruptibly for conflicts.
     /// Callers must release descriptor-table locks before entering this method.
+    /// Returns `NoMemory` if the inode's lock context cannot be allocated;
+    /// that failure installs no lock and a later call may retry.
     fn lock(&self, file: &VfsFile, request: &crate::FileLock, is_blocking: bool) -> VfsResult<()> {
         if request.kind() == crate::FileLockType::Unlock
             && file.inode().existing_file_locks().is_none()
         {
             return Ok(());
         }
-        file.inode().file_locks().apply(request, is_blocking)
+        file.inode().file_locks()?.apply(request, is_blocking)
     }
 
     /// Applies a BSD lock in the inode's separate whole-file lock domain.
+    /// Returns `NoMemory` if the inode's lock context cannot be allocated.
     fn flock(&self, file: &VfsFile, request: &crate::FileLock, is_blocking: bool) -> VfsResult<()> {
         if request.kind() == crate::FileLockType::Unlock
             && file.inode().existing_file_locks().is_none()
         {
             return Ok(());
         }
-        file.inode().file_locks().apply(request, is_blocking)
+        file.inode().file_locks()?.apply(request, is_blocking)
     }
 
     /// Flushes an open file description.
