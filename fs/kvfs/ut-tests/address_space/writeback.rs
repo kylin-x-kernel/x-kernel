@@ -4,11 +4,11 @@
 
 //! Partial writeback completion and retry tests.
 
+use pagecache::FolioGuard;
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::Folio;
 use unittest::def_test;
 
 use super::{
@@ -30,7 +30,7 @@ struct PrefixRetryWritebackOps {
 }
 
 impl AddressSpaceOperations for PrefixRetryWritebackOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         folio.data().fill(0);
         Ok(())
     }

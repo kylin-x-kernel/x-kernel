@@ -183,9 +183,10 @@ model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内�
   filemap 或文件系统。entries 与派生 dirty marks 由同一 mutex 维护，Folio 的引用
   继续独立保活页数据；该调整不改变 invalidate lock 或 mapping identity 校验。
   Filesystem-owned `CacheResidency` is installed once during inode construction.
-  Callbacks run under the mapping index mutex; they must not reenter a mapping,
-  lock folios, perform I/O, or invert the index-to-provider lock order.
-  Cache entry removal reports removal even while physical references survive.
+  Admission runs under folio and mapping index mutexes; final physical-page
+  release returns capacity outside both locks. Callbacks must not reenter a
+  mapping, lock folios, perform I/O, or invert the folio-to-index-to-provider
+  lock order. Detachment alone never releases a live allocation's charge.
 - `SuperBlock` 的 operation table 与 filesystem-private state 分离，对应 Linux `s_op` 与
   `s_fs_info`。构造 API 只接受静态共享 operation table；filesystem callback 必须通过绑定到
   `&SuperBlock` 的 typed borrow 恢复 private state，不得取得可逃逸的 private owner、在
@@ -542,18 +543,38 @@ this cost in access and resource policy.
 并发 pread 可改变同一打开描述的历史，但不能绕过初始化、身份复核或截断保护。
 独立打开不共享策略状态，dup/fork 的同一打开描述引用共享状态。
 
+## Pinned file-page mappings
+
+- `with_pinned_file_page` holds the invalidate read lock through EOF validation
+  and publication, and rejects page starts at/beyond EOF or overflowing indices
+  before materialization or admission. A callback error keeps an initialized
+  in-range cache page charged for reuse. Its callback must not wait for this mapping's exclusive
+  invalidation lock.
+- Read-only publication consumes `PinnedFolio` and returns a must-use
+  `MappedFolio` token. The mapping owner retains that token until its PTE is
+  removed and the corresponding TLB invalidation completes. A deferred
+  invalidation submission and cache detachment do not establish completion.
+- The stable `Folio` owns its page identity, allocation and content mutex.
+  Filesystem callbacks receive only restricted `FolioGuard` access; replacing
+  an index cannot replace a published owner or its lock.
+- Copies deliberately remain available after detachment and are serialized
+  with writers of the original object. They initialize all destination bytes,
+  but are neither current-EOF validation nor an immutable snapshot.
+- Pins and mapping tokens retain the allocation and its single capacity charge
+  through ordinary shared ownership, without a separate pin statistics system.
 
 ## Cache residency lifecycle
 
 The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. The cache stores only ordinary folio handles;
-no entry or folio owns a quota field or a per-page provider reference. Under the
-index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
-including readahead cancellation, truncate and final mapping destruction, calls
-`remove_folios(count)` independently of external physical-page references.
+when constructing an inode mapping. Only a winning new identity calls
+`try_add_folio()` under folio and index mutexes. Its stable folio retains one
+capacity charge until the physical allocation is freed. Cache detachment and
+mapping destruction leave charges intact while pins, tokens or batches remain.
+The last reference frees the allocation and returns capacity outside both locks;
+its charge also keeps the accounting provider alive until this release.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
-index -> quota limit; remount and statfs never acquire a cache index lock.
+folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
 
 
@@ -565,8 +586,8 @@ propagated.
 
 Filesystem sparse reads must not consume remaining quota by prefetching absent
 pages. Truncate invalidates retained read-batch entries before removing cache
-identity and returning the charge; references keep storage alive but cannot
-serve stale bytes or defer quota reuse.
+identity; references cannot serve stale bytes, and keep their physical page
+charged until its final release.
 
 Filesystem-driven resident traversal uses one invalidate read guard per bounded
 31-page snapshot. Page callbacks may only consume data, cannot reenter the

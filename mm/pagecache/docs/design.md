@@ -43,7 +43,7 @@ VfsInode
   -> kvfs::AddressSpace { host, a_ops, object_id, mapped_views }
        -> i_pages: pagecache::MappingPages (直接持有)
             -> Mutex<MappingPagesState>
-                 -> BTreeMap<PageIndex, Arc<Mutex<Folio>>> entries
+                 -> BTreeMap<PageIndex, Arc<Folio>> entries
                  -> optional Arc<dyn CacheResidency> (one per mapping)
                  -> BTreeSet<PageIndex> dirty_marks (派生索引)
                  -> BTreeSet<PageIndex> writeback_marks (派生索引)
@@ -101,6 +101,10 @@ growth 和 shrink 在索引锁下取得候选引用，释放索引锁后锁页�
 `visible_len`，据此裁剪最后一个 folio 的有效字节。成功后清 dirty；失败时恢复
 仍属于当前 mapping 的 folio 为 dirty，并结束 under-writeback 状态。
 
+`with_folio_or_create` 和 `pin_folio_or_create` 共享同一查找、锁外分配、
+插入竞争、resident identity 复核、初始化及 dirty 对账流程；两者只在
+持锁后的访问结果不同。读取闭包在可能重试的查找/等待阶段完成之前不会消费。
+
 writeback 从独立的 dirty folio index 枚举目标范围，不扫描全部 resident folio。
 dirty tag 只产生候选 `(index, Arc<Folio>)`。真正开始写回前，writeback 在
 folio lock → MappingPages state lock 的同一临界区内重新确认：
@@ -126,6 +130,9 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 
 ## 并发模型
 
+- Folio 与 pin/token 共享同一稳定 `Arc<Folio>`，页的所有权、identity 和数据锁不分离；
+- 回调只得到 `FolioGuard`，不能替换或移出已发布 owner；缓存替换更新索引引用；
+- `copy_to_uninit` 在原页自己的锁内完整复制初始化页；摘除不禁止复制，EOF 由调用方校验；
 - 一个 mutex 保护 resident folio tree 和 dirty index；
 - 每个 folio 的 mutex 保护数据和 dirty/writeback 状态；
 - 同时核对 resident tree、dirty index 与 folio 状态时，锁顺序固定为
@@ -197,24 +204,57 @@ Folio 的预读标记表示后续窗口的触发点，由 KVFS 在新预留页�
 批次读取在 folio 锁内复核初始化与失效状态后，可消费预读标记；callback 不改变数据、
 dirty 或驻留状态，也不等待其他 folio。预读 I/O 在 callback 返回、释放页锁后执行。
 
+## Stable page objects and long-lived pins
+
+Each resident entry stores `Arc<Folio>`. The object owns its allocation, immutable
+index and a mutex protecting content and mutable
+state. Callbacks receive only `FolioGuard`, which has no mutable projection to
+`Folio`; safe callbacks cannot move out or replace the published page. Replacement
+updates the cache index reference. Existing pins retain exactly the old object,
+including its original synchronization, without retaining the replacement.
+
+`PinnedFolio` owns one reference to this same object. `map_readonly(self, ...)`
+consumes the access pin and returns a `#[must_use] MappedFolio` ownership token.
+The mapping owner stores that token until the PTE is removed and its TLB
+invalidation completes. Publication remains unsafe because its owner must
+validate EOF and exclude invalidation through the enclosing VFS guard.
+`MappedFolio::map_readonly(&self, ...)` publishes another PTE of the retained
+object, for fork or reconstruction, and returns its own ownership token.
+
+`copy_to_uninit` accepts exactly one page through an array reference, encoding
+the destination length and full initialization guarantee without a runtime
+assertion. It locks the same object even after cache detachment or replacement.
+It deliberately permits copying the retained page; detachment is not revocation
+or an immutable snapshot. File extent must be validated separately, and partial
+truncate can change a retained tail under the same lock. No identity-mismatch
+fallback or second allocation owner is necessary.
+
+Pins and mapping tokens use ordinary shared ownership without a second pin
+counter or registry. The physical address is derived from the stable allocation.
+
 ## Residency admission and initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
 reservation, synchronous initialization and truncate.
 The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. The cache stores only ordinary folio handles;
-no entry or folio owns a quota field or a per-page provider reference. Under the
-index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
-including readahead cancellation, truncate and final mapping destruction, calls
-`remove_folios(count)` independently of external physical-page references.
+when constructing an inode mapping. Only a winning new identity calls
+`try_add_folio()` under its folio and index mutexes. That successful admission
+attaches one provider-owned capacity charge to the stable folio. Detaching the
+cache identity does not return it: pins, mapping tokens and read batches keep
+the physical allocation and its charge alive together. Cloning never charges
+again. After the last reference drops, Folio frees the physical allocation and
+returns its charge with neither the folio nor mapping index mutex held. The
+charge retains the provider even when the inode mapping has already gone away.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
-index -> quota limit; remount and statfs never acquire a cache index lock.
+folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
 
 The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
-Unconsumed readahead reservations release their charges before unlocking.
+Unconsumed readahead reservations detach while locked and release their charges
+when the batch drops its final references after unlocking. Failed reads retain
+their non-uptodate reservation and charge until retry or removal.
 
 `visit_resident_folios` snapshots only one bounded page range. Missing identities
 are reported as None from that snapshot and never reserved or initialized. This

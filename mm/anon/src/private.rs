@@ -229,12 +229,33 @@ impl PreparedAnonPrivatePage {
         pages.insert(self.object_start, handle.clone());
         Ok(handle)
     }
+
+    /// Publishes one owned anonymous page after an atomic runtime update.
+    ///
+    /// The object slot remains locked and absent while `commit` runs. The
+    /// callback must either install the matching PTE successfully or return an
+    /// error without changing the PTE. On error the caller still owns `pa`.
+    pub fn commit_after<E>(
+        self,
+        pa: PhysAddr,
+        size: PageSize,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<AnonPrivatePageHandle, AnonPrivatePageCommitError<E>> {
+        let mut pages = self.object.pages.lock();
+        if pages.contains_key(&self.object_start) {
+            return Err(AnonPrivatePageCommitError::Changed);
+        }
+        let handle = AnonPrivatePageHandle::new(pa, size);
+        commit().map_err(AnonPrivatePageCommitError::Commit)?;
+        pages.insert(self.object_start, handle.clone());
+        Ok(handle)
+    }
 }
 
 /// Error returned while committing a private page slot replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnonPrivatePageCommitError<E> {
-    /// The object slot no longer matches the page observed by the caller.
+    /// The object slot no longer has the expected absent or matching-page state.
     Changed,
     /// The caller-provided runtime commit step failed.
     Commit(E),

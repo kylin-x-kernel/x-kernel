@@ -58,9 +58,7 @@ sys_brk(raw addr)
 ```text
 sys_mremap(move)
   -> MmSpace::resolve_mremap_source()
-  -> MmSpace::map_relocated_snapshot()
-  -> MmSpace::move_pages()
-  -> MmSpace::drop_mapping_metadata()
+  -> MmSpace::relocate_mapping()
 ```
 
 The syscall layer must not retire the old source range with ordinary
@@ -195,10 +193,12 @@ cache、filemap runtime 或 VMA 内部状态。
 backing semantics.
 
 - source validation goes through `MmSpace::resolve_mremap_source()`;
-- destination install goes through `MmSpace::map_relocated_snapshot()`;
-- present PTE transfer goes through `MmSpace::move_pages()`;
-- old-source retirement after successful move goes through
-  `MmSpace::drop_mapping_metadata()`, not ordinary `MmSpace::unmap()`.
+- destination install, PTE transfer and source retirement share the
+  `MmSpace::relocate_mapping()` transaction;
+- destination PTE preparation failure rolls back the destination and leaves
+  source PTEs and backing unchanged;
+- successful source retirement drops metadata without ordinary
+  `MmSpace::unmap()`, which would destroy moved private backing.
 
 This preserves the ownership split between:
 

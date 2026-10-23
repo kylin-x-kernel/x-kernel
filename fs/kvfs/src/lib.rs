@@ -103,3 +103,5 @@ pub type VfsError = kerrno::KError;
 pub type VfsResult<T> = Result<T, VfsError>;
 
 use ksync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+/// Read-only page-cache reference retained until mapping teardown completes.
+pub use pagecache::{MappedFolio, PinnedFolio};

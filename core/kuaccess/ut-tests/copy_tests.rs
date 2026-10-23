@@ -95,12 +95,22 @@ impl VmRuntimeOps for SleepableBacking {
 
     fn relocate_for_mremap(
         &self,
+        source_range: VirtAddrRange,
         start: VirtAddr,
+        new_len: usize,
         id: u64,
         space: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
-        VmRuntimeOps::relocate_for_mremap(&self.pages, start, id, space, invalidate)
+        VmRuntimeOps::relocate_for_mremap(
+            &self.pages,
+            source_range,
+            start,
+            new_len,
+            id,
+            space,
+            invalidate,
+        )
     }
 
     fn clone_for_fork(

@@ -143,7 +143,9 @@ impl VmRuntimeOps for LinearBackend {
 
     fn relocate_for_mremap(
         &self,
+        _source_range: VirtAddrRange,
         _new_start: VirtAddr,
+        _new_len: usize,
         _new_mm_id: u64,
         _aspace: &Arc<Mutex<MmSpace>>,
         _invalidate: Option<InvalidateHandle>,

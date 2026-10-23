@@ -4,7 +4,7 @@
 
 //! Filesystem callbacks and default address-space operations.
 
-use pagecache::Folio;
+use pagecache::FolioGuard;
 
 use super::{AddressSpace, ReadaheadControl, WritebackControl};
 use crate::{NodeFlags, NodeType, VfsError, VfsResult};
@@ -94,7 +94,7 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Runs with the folio locked and the cache index lock released. Do not
     /// reenter the mapping or acquire inode data or invalidate exclusive locks:
     /// callers may already hold them or the invalidate shared lock.
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         Err(VfsError::NoSuchDevice)
     }
 
@@ -111,7 +111,7 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     }
 
     /// Marks a folio dirty.
-    fn dirty_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<bool> {
+    fn dirty_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<bool> {
         let was_dirty = folio.is_dirty();
         folio.mark_dirty();
         Ok(!was_dirty)
@@ -128,7 +128,7 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// The default consumes all reservations through `read_folio`, marking
     /// successful pages uptodate and continuing after errors. It returns the
     /// first error after attempting the entire run.
-    fn readahead(&self, control: &mut ReadaheadControl<'_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
         control.read_folios(|mapping, folio| self.read_folio(mapping, folio))
     }
 
@@ -156,7 +156,7 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     fn invalidate_folio(
         &self,
         _mapping: &AddressSpace,
-        _folio: &mut Folio,
+        _folio: &mut FolioGuard<'_>,
         _offset: usize,
         _len: usize,
     ) -> VfsResult<()> {
@@ -164,7 +164,7 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     }
 
     /// Releases a clean folio if the filesystem has no private attachment left.
-    fn release_folio(&self, _mapping: &AddressSpace, _folio: &Folio) -> VfsResult<bool> {
+    fn release_folio(&self, _mapping: &AddressSpace, _folio: &FolioGuard<'_>) -> VfsResult<bool> {
         Ok(true)
     }
 }
@@ -194,7 +194,7 @@ static IN_MEMORY_ADDRESS_SPACE_OPERATIONS: InMemoryAddressSpaceOperations =
     InMemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         let page = folio.data();
         page.fill(0);
         Ok(())
@@ -220,7 +220,7 @@ struct EmptyAddressSpaceOperations;
 static EMPTY_ADDRESS_SPACE_OPERATIONS: EmptyAddressSpaceOperations = EmptyAddressSpaceOperations;
 
 impl AddressSpaceOperations for EmptyAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
 

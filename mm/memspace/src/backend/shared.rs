@@ -75,6 +75,7 @@ impl Drop for SharedPages {
 #[derive(Clone)]
 pub struct SharedBackend {
     start: VirtAddr,
+    page_start: usize,
     pages: Arc<SharedPages>,
     object: Arc<AnonSharedObject>,
     object_view: Option<AnonSharedViewGuard>,
@@ -83,6 +84,7 @@ impl SharedBackend {
     pub fn new(start: VirtAddr, pages: Arc<SharedPages>, object: Arc<AnonSharedObject>) -> Self {
         Self {
             start,
+            page_start: 0,
             object,
             pages,
             object_view: None,
@@ -93,6 +95,7 @@ impl SharedBackend {
         let pages = Arc::new(SharedPages::new(size, pgsize)?);
         Ok(Self {
             start,
+            page_start: 0,
             object: AnonSharedObject::new(),
             pages,
             object_view: None,
@@ -109,9 +112,10 @@ impl SharedBackend {
     }
 
     /// Create a relocated shared backend at a new start address with the same pages.
-    pub fn relocated(&self, new_start: VirtAddr) -> Self {
+    pub fn relocated(&self, source_range: VirtAddrRange, new_start: VirtAddr) -> Self {
         Self {
             start: new_start,
+            page_start: self.page_index_for(source_range.start),
             pages: self.pages.clone(),
             object: self.object.clone(),
             object_view: None,
@@ -129,6 +133,7 @@ impl SharedBackend {
         let object_start = vma.page_offset() * memaddr::PAGE_SIZE_4K as u64;
         Self {
             start: self.start,
+            page_start: self.page_start,
             pages: self.pages.clone(),
             object: self.object.clone(),
             object_view: Some(self.object.register_view(MappingViewSpec {
@@ -154,15 +159,20 @@ impl SharedBackend {
     ) -> KResult<Self> {
         Ok(Self {
             start: self.start,
+            page_start: self.page_start,
             pages: self.pages.clone(),
             object: self.object.clone(),
             object_view: None,
         })
     }
 
-    fn pages_starting_from(&self, start: VirtAddr) -> &[PhysAddr] {
+    fn page_index_for(&self, start: VirtAddr) -> usize {
         debug_assert!(start.is_aligned(self.pages.size));
-        let start_index = divide_page(start - self.start, self.pages.size);
+        self.page_start + divide_page(start - self.start, self.pages.size)
+    }
+
+    fn pages_starting_from(&self, start: VirtAddr) -> &[PhysAddr] {
+        let start_index = self.page_index_for(start);
         &self.pages[start_index..]
     }
 
@@ -300,12 +310,14 @@ impl VmRuntimeOps for SharedBackend {
 
     fn relocate_for_mremap(
         &self,
+        source_range: VirtAddrRange,
         new_start: VirtAddr,
+        _new_len: usize,
         _new_mm_id: u64,
         _aspace: &Arc<Mutex<MmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
-        Ok(Arc::new(self.relocated(new_start)))
+        Ok(Arc::new(self.relocated(source_range, new_start)))
     }
 
     fn clone_for_fork(

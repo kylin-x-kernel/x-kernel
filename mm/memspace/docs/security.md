@@ -66,6 +66,13 @@
   TLB guard 仍覆盖该过程，不释放中间页表。
 - `mremap` move-style source retirement must not call ordinary runtime
   `unmap()` on the moved source range.
+- `relocate_mapping()` prepares every destination PTE before removing source
+  PTEs. On failure, it finalizes rollback TLB invalidation before dropping only
+  destination metadata and runtime references; rollback cannot detach the
+  anonymous slots still owned by the source.
+- Mapping-policy registrations use a separate metadata-only retirement hook;
+  rollback does not call runtime `unmap()` and therefore cannot release source
+  anonymous slots or alter source PTE ownership.
 - `resolve_futex_backing()` 对 shared VMA 必须返回 object-relative offset；
   不能把 VMA-relative address 当作跨进程 key。
 - `MmUserHandle` 是唯一能保留用户映射生命周期的 capability；`MmPin` 和普通
@@ -173,3 +180,9 @@
 - [ ] Unsupported Linux semantics 是否显式返回错误而不是静默降级。
 - [ ] 新增地址空间 observer 是否只持有 `MmPin` 或普通 `Arc`，不误用
   `MmUserHandle` 延长用户映射生命周期。
+
+## 失效完成通知顺序
+
+运行时完成回调必须位于 PTE 删除和 TLB finish 之后，且由同一 MM 独占锁
+串行；只能释放通知区间的运行时引用，不能额外清除其他映射。失效失败
+不得触发回调，故仍可能可见的 PTE 始终有 backing 引用保护。

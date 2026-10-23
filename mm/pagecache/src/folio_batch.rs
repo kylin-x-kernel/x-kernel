@@ -6,16 +6,14 @@
 
 use alloc::sync::Arc;
 
-use ksync::Mutex;
-
-use crate::Folio;
+use crate::{Folio, FolioGuard};
 
 /// A bounded, ascending collection of mapping folio references.
 ///
 /// References keep allocations alive without guaranteeing residency. Clearing
 /// releases references only; callers must first finish any started writeback.
 pub struct FolioBatch {
-    entries: [Option<Arc<Mutex<Folio>>>; Self::CAPACITY],
+    entries: [Option<Arc<Folio>>; Self::CAPACITY],
     len: usize,
 }
 
@@ -47,7 +45,11 @@ impl FolioBatch {
     /// modify data, dirty state or residency, or wait for another folio. Absent,
     /// non-uptodate or invalidated entries return `None` without calling `read`;
     /// callers must resolve them again.
-    pub fn with_read_folio<R>(&self, slot: usize, read: impl FnOnce(&mut Folio) -> R) -> Option<R> {
+    pub fn with_read_folio<R>(
+        &self,
+        slot: usize,
+        read: impl FnOnce(&mut FolioGuard<'_>) -> R,
+    ) -> Option<R> {
         let folio = self.entries.get(slot)?.as_ref()?;
         let mut locked = folio.lock();
         if locked.is_invalidated() || !locked.is_uptodate() {
@@ -61,12 +63,12 @@ impl FolioBatch {
     }
 
     /// Appends a reference in traversal order, with space available.
-    pub(crate) fn push(&mut self, folio: Arc<Mutex<Folio>>) {
+    pub(crate) fn push(&mut self, folio: Arc<Folio>) {
         self.entries[self.len] = Some(folio);
         self.len += 1;
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<Mutex<Folio>>> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<Folio>> {
         self.entries[..self.len].iter().flatten()
     }
 

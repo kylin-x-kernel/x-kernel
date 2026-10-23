@@ -193,6 +193,56 @@ fn vma_set_protect_preserves_file_metadata_offsets() {
 }
 
 #[def_test]
+fn vma_set_protect_middle_derives_anon_offset_from_page_offset() {
+    let start = vaddr(0x1000);
+    let mut set = VmAreaSet::new();
+    set.insert(VmArea::new(
+        start,
+        PAGE_SIZE_4K * 3,
+        MappingFlags::READ | MappingFlags::WRITE,
+        MappingFlags::READ | MappingFlags::WRITE,
+        VmBackingInfo::new(
+            VmBackingKind::AnonymousPrivate {
+                object: VmObjectId::Anon(AnonObjectId::from_raw(9)),
+            },
+            PageSize::Size4K,
+        ),
+        7,
+        None,
+    ));
+
+    set.protect(start + PAGE_SIZE_4K, PAGE_SIZE_4K, MappingFlags::READ);
+
+    let middle = set.find(start + PAGE_SIZE_4K).expect("middle VMA exists");
+    assert_eq!(middle.private_anon_offset_for(middle.start()), Some(8 * PAGE_SIZE_4K as u64));
+}
+
+#[def_test]
+fn vma_set_unmap_head_derives_anon_offset_from_page_offset() {
+    let start = vaddr(0x1000);
+    let mut set = VmAreaSet::new();
+    set.insert(VmArea::new(
+        start,
+        PAGE_SIZE_4K * 3,
+        MappingFlags::READ | MappingFlags::WRITE,
+        MappingFlags::READ | MappingFlags::WRITE,
+        VmBackingInfo::new(
+            VmBackingKind::AnonymousPrivate {
+                object: VmObjectId::Anon(AnonObjectId::from_raw(10)),
+            },
+            PageSize::Size4K,
+        ),
+        5,
+        None,
+    ));
+
+    set.unmap(start, PAGE_SIZE_4K);
+
+    let remaining = set.find(start + PAGE_SIZE_4K).expect("remaining VMA exists");
+    assert_eq!(remaining.private_anon_offset_for(remaining.start()), Some(6 * PAGE_SIZE_4K as u64));
+}
+
+#[def_test]
 fn vma_set_merge_adjacent_uses_caller_predicate() {
     let mut set = VmAreaSet::new();
     set.insert(test_area(0x1000, PAGE_SIZE_4K, 40));

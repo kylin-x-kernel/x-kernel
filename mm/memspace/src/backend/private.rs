@@ -32,6 +32,7 @@ use crate::{
 #[derive(Clone)]
 pub struct PrivateBackend {
     start: VirtAddr,
+    object_start: u64,
     size: PageSize,
     object: Arc<AnonPrivateObject>,
     object_view: Option<AnonPrivateViewGuard>,
@@ -41,15 +42,19 @@ impl PrivateBackend {
     pub fn new(start: VirtAddr, pgsize: PageSize) -> Self {
         Self {
             start,
+            object_start: 0,
             size: pgsize,
             object: AnonPrivateObject::new_root(),
             object_view: None,
         }
     }
 
-    pub fn relocated(&self, new_start: VirtAddr) -> Self {
+    pub fn relocated(&self, source_range: VirtAddrRange, new_start: VirtAddr) -> Self {
         Self {
             start: new_start,
+            object_start: self
+                .object_offset_for(source_range.start)
+                .expect("mremap source belongs to private runtime"),
             size: self.size,
             object: self.object.clone(),
             object_view: None,
@@ -67,8 +72,11 @@ impl PrivateBackend {
         vma: &VmArea,
     ) -> Self {
         let object_start = vma.page_offset() * memaddr::PAGE_SIZE_4K as u64;
+        // Fork cloning keeps the parent's runtime origin while copying PTEs.
+        // Once attached to a child VMA, rebase both coordinates to that VMA.
         Self {
-            start: self.start,
+            start: vma.start(),
+            object_start,
             size: self.size,
             object: self.object.clone(),
             object_view: Some(self.object.register_view(MappingViewSpec {
@@ -84,9 +92,12 @@ impl PrivateBackend {
     }
 
     fn object_offset_for(&self, addr: VirtAddr) -> KResult<u64> {
-        addr.as_usize()
-            .checked_sub(self.start.as_usize())
-            .map(|it| it as u64)
+        self.object_start
+            .checked_add(
+                addr.as_usize()
+                    .checked_sub(self.start.as_usize())
+                    .ok_or(KError::BadAddress)? as u64,
+            )
             .ok_or(KError::BadAddress)
     }
 
@@ -131,6 +142,7 @@ impl PrivateBackend {
             range.size(),
             PrivateForkMaterialize {
                 runtime_start: self.start,
+                object_base: self.object_start,
                 cow_flags,
                 page_size: self.size,
             },
@@ -139,6 +151,9 @@ impl PrivateBackend {
         )?;
         Ok(Self {
             start: self.start,
+            // Keep the parent's coordinate pair until register_object_view()
+            // rebases the child backend to its cloned VMA.
+            object_start: self.object_start,
             size: self.size,
             object: child,
             object_view: None,
@@ -310,12 +325,14 @@ impl VmRuntimeOps for PrivateBackend {
 
     fn relocate_for_mremap(
         &self,
+        source_range: VirtAddrRange,
         new_start: VirtAddr,
+        _new_len: usize,
         _new_mm_id: u64,
         _aspace: &Arc<Mutex<MmSpace>>,
         _invalidate: Option<InvalidateHandle>,
     ) -> KResult<Arc<dyn VmRuntimeOps>> {
-        Ok(Arc::new(self.relocated(new_start)))
+        Ok(Arc::new(self.relocated(source_range, new_start)))
     }
 
     fn clone_for_fork(
@@ -548,6 +565,7 @@ pub fn discard_private_object_range(
 
 pub struct PrivateForkMaterialize {
     pub runtime_start: VirtAddr,
+    pub object_base: u64,
     pub cow_flags: MappingFlags,
     pub page_size: PageSize,
 }
@@ -599,7 +617,11 @@ pub fn clone_private_object_pages_for_fork(
     let prepared = object.prepare_fork_child_pages(object_start, object_len, child)?;
     let mut mapped = Vec::new();
     for shared in prepared.pages() {
-        let vaddr = ctx.runtime_start + shared.object_start() as usize;
+        let vaddr = ctx.runtime_start
+            + shared
+                .object_start()
+                .checked_sub(ctx.object_base)
+                .expect("fork page precedes runtime object range") as usize;
         match old_pgtbl.query(vaddr) {
             Ok((_paddr, parent_flags, mapped_size)) => {
                 assert_eq!(mapped_size, ctx.page_size);

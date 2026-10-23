@@ -19,7 +19,7 @@ mod readahead;
 mod truncate;
 mod writeback;
 
-pub use folio::Folio;
+pub use folio::{Folio, FolioGuard, MappedFolio, PinnedFolio};
 pub use folio_batch::FolioBatch;
 pub use mapping_pages::{CacheResidency, MappingPages};
 pub use writeback::WritebackRangeResult;

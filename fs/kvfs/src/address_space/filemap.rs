@@ -9,7 +9,7 @@ use core::ops::ControlFlow;
 use iov_iter::{IovIterDest, IovIterSource};
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex};
+use pagecache::{FolioGuard, PageIndex, PinnedFolio};
 
 use super::{AddressSpace, WriteBeginRequest, WriteEndRequest};
 use crate::{Kiocb, Mutex, VfsError, VfsResult, file_ra::FileRaState};
@@ -23,9 +23,42 @@ fn write_prefix_or_error(written: usize, error: VfsError) -> VfsResult<usize> {
 }
 
 impl AddressSpace {
+    /// Pins an initialized cache page while excluding truncate invalidation.
+    ///
+    /// The callback runs while the address-space invalidation read lock is
+    /// held. Pages starting at or beyond EOF are rejected before allocation or
+    /// admission. The callback must validate its exact byte range and publish the read-only
+    /// PTE together with its file-mapping reference before returning. Truncate
+    /// submits mapping invalidation before detaching the cache entry, but that
+    /// submission may be deferred while an MM is busy. The mapping owner must
+    /// retain the pin until PTE removal and TLB invalidation actually complete.
+    /// Callback failure keeps a successfully initialized in-range page resident
+    /// and charged, so another access can reuse it.
+    pub fn with_pinned_file_page<R>(
+        &self,
+        index: PageIndex,
+        f: impl FnOnce(PinnedFolio) -> VfsResult<R>,
+    ) -> VfsResult<R> {
+        let _invalidate_guard = self.invalidate_lock.read();
+        let offset = index
+            .checked_mul(PAGE_SIZE_4K as u64)
+            .ok_or(VfsError::BadAddress)?;
+        if offset >= self.visible_len()? {
+            return Err(VfsError::BadAddress);
+        }
+        let pin = self
+            .i_pages
+            .pin_folio_or_create(index, |folio| self.ops.read_folio(self, folio))?;
+        f(pin)
+    }
+
     /// Runs `f` with the initialized resident folio at `index`, if present.
     /// Missing or non-uptodate folios are reported as `None`.
-    pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
+    pub fn with_folio<R>(
+        &self,
+        index: PageIndex,
+        f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> R,
+    ) -> R {
         self.i_pages.with_folio(index, f)
     }
 
@@ -46,7 +79,7 @@ impl AddressSpace {
         &self,
         start: PageIndex,
         count: usize,
-        visit: impl FnMut(PageIndex, Option<&mut Folio>) -> KResult<ControlFlow<()>>,
+        visit: impl FnMut(PageIndex, Option<&mut FolioGuard<'_>>) -> KResult<ControlFlow<()>>,
     ) -> KResult<usize> {
         let _invalidate = self.invalidate_lock.read();
         self.i_pages.visit_resident_folios(
@@ -61,7 +94,7 @@ impl AddressSpace {
     pub fn with_folio_or_create<R>(
         &self,
         index: PageIndex,
-        f: impl FnOnce(&mut Folio) -> KResult<R>,
+        f: impl FnOnce(&mut FolioGuard<'_>) -> KResult<R>,
     ) -> KResult<R> {
         self.i_pages
             .with_folio_or_create(index, |folio| self.ops.read_folio(self, folio), f)
@@ -81,7 +114,7 @@ impl AddressSpace {
         &self,
         index: PageIndex,
         prepare: impl FnOnce(u64, usize) -> VfsResult<()>,
-        f: impl FnOnce(&mut Folio) -> VfsResult<R>,
+        f: impl FnOnce(&mut FolioGuard<'_>) -> VfsResult<R>,
     ) -> VfsResult<R> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let pos = index
@@ -101,7 +134,7 @@ impl AddressSpace {
         })
     }
 
-    fn dirty_folio(&self, folio: &mut Folio) -> VfsResult<bool> {
+    fn dirty_folio(&self, folio: &mut FolioGuard<'_>) -> VfsResult<bool> {
         self.ops.dirty_folio(self, folio)
     }
 
@@ -146,7 +179,7 @@ impl AddressSpace {
                 let page_remaining = PAGE_SIZE_4K - (offset % PAGE_SIZE_4K as u64) as usize;
                 // Sample EOF after locking the folio, so a completed shrink cannot
                 // expose stale bytes through an earlier file-size snapshot.
-                let mut copy = |folio: &mut Folio| {
+                let mut copy = |folio: &mut FolioGuard<'_>| {
                     let page_off = (offset % PAGE_SIZE_4K as u64) as usize;
                     let step = inode
                         .size()
@@ -215,7 +248,7 @@ impl AddressSpace {
 
     fn readahead_after_copy(
         &self,
-        folio: &mut Folio,
+        folio: &mut FolioGuard<'_>,
         offset: u64,
         count: usize,
         ra: &Mutex<FileRaState>,
@@ -426,5 +459,14 @@ impl AddressSpace {
         }
 
         Ok(written)
+    }
+
+    /// Runs a mapping operation while excluding truncate and cache invalidation.
+    ///
+    /// The callback may publish page-table entries and their backing references;
+    /// both must be complete before this guard is released.
+    pub fn with_invalidate_read<R>(&self, f: impl FnOnce() -> KResult<R>) -> KResult<R> {
+        let _invalidate_guard = self.invalidate_lock.read();
+        f()
     }
 }

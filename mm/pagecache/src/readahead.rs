@@ -8,9 +8,8 @@ use alloc::sync::Arc;
 use core::ops::Range;
 
 use kerrno::KResult;
-use ksync::{Mutex, MutexGuard};
 
-use crate::{Folio, FolioBatch, MappingPages, PageIndex};
+use crate::{Folio, FolioBatch, FolioGuard, MappingPages, PageIndex};
 
 impl MappingPages {
     /// Installs and locks an absent prefix of `range` for synchronous readahead.
@@ -29,7 +28,7 @@ impl MappingPages {
     pub fn readahead_folios(
         &self,
         range: Range<PageIndex>,
-        read: impl FnOnce(&mut dyn ExactSizeIterator<Item = &mut Folio>),
+        read: impl FnOnce(&mut dyn ExactSizeIterator<Item = &mut FolioGuard<'_>>),
     ) -> KResult<usize> {
         let mut batch = FolioBatch::new();
         for index in range {
@@ -49,14 +48,14 @@ impl MappingPages {
                 }
                 Err(_) => break,
             };
-            batch.push(Arc::new(Mutex::new(folio)));
+            batch.push(Arc::new(folio));
         }
         let count = batch.len();
         if count == 0 {
             return Ok(0);
         }
         // These folios are private until publication, so locking cannot wait.
-        let mut locked: [Option<MutexGuard<'_, Folio>>; FolioBatch::CAPACITY] =
+        let mut locked: [Option<FolioGuard<'_>>; FolioBatch::CAPACITY] =
             core::array::from_fn(|_| None);
         for (slot, folio) in locked.iter_mut().zip(batch.iter()) {
             *slot = Some(folio.lock());
@@ -65,12 +64,12 @@ impl MappingPages {
         let mut count = 0;
         let mut charge_error = None;
         // Every batch folio has a guard in the matching leading slot.
-        for (folio, guard) in batch.iter().zip(locked.iter().flatten()) {
+        for (folio, guard) in batch.iter().zip(locked.iter_mut().flatten()) {
             let index = guard.index();
             if state.entries.contains_key(&index) {
                 break;
             }
-            if let Err(error) = state.insert_folio(index, folio.clone()) {
+            if let Err(error) = state.insert_folio(index, folio.clone(), guard) {
                 charge_error = Some(error);
                 break;
             }
@@ -89,7 +88,7 @@ impl MappingPages {
             )]
             let mut folios = locked[..count]
                 .iter_mut()
-                .map(|guard| guard.as_deref_mut().unwrap());
+                .map(|guard| guard.as_mut().unwrap());
             read(&mut folios);
             count - folios.len()
         };
@@ -98,9 +97,9 @@ impl MappingPages {
         let mut state = self.state.lock();
         let guards = locked.iter_mut().flatten();
         for (candidate, guard) in batch.iter().zip(guards).take(count).skip(consumed) {
-            let folio: &mut Folio = guard;
+            let folio: &mut FolioGuard<'_> = guard;
             if state.is_current(folio.index(), candidate) {
-                Self::discard_folio(&mut state, folio);
+                Self::discard_folio(&mut state, candidate, folio);
             }
         }
         drop(state);

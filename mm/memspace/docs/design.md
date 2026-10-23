@@ -133,6 +133,9 @@ lazy private runtime 的 `map()` 本身不修改页表，不能依赖 page-table
 
 - `VmAreaSet::unmap()` 支持 exact removal、front/back trim 和 middle split。
 - `VmAreaSet::protect()` 支持 partial range split，只更新 current permission。
+- Protection changes use each runtime's actual PTE flags. Empty PTE flags
+  follow the zap/TLB/runtime-notification contract even when the VMA request
+  itself is nonempty; a later error cannot retain tokens for cleared prefixes.
 - `VmAreaSet::merge_adjacent_where()` 只合并语义等价且 runtime kind 一致的相邻 VMA。
 - file-backed `FileMappingInfo.offset` 和 `page_offset` 在 split/trim 时同步更新。
 
@@ -142,9 +145,10 @@ lazy private runtime 的 `map()` 本身不修改页表，不能依赖 page-table
 
 ```text
 source snapshot
-  -> map_relocated_snapshot()
-  -> move_pages()
-  -> drop_mapping_metadata()
+  -> relocate_mapping()
+       -> prepare destination VMA/runtime and all destination PTEs
+       -> remove source PTEs and finalize TLBs
+       -> retire source metadata
 ```
 
 The three ownership layers are explicit:
@@ -156,6 +160,19 @@ The three ownership layers are explicit:
   `kvfs::AddressSpace`.
 
 Relocation may change the first two layers without destroying the third.
+The address-space lock covers the complete transaction. PTE preparation
+failure removes only the newly installed destination PTEs and finalizes TLBs
+before dropping the destination metadata/runtime. All source PTEs and backing
+references remain intact. In particular, rollback must not call ordinary
+runtime `unmap`, because the destination shares the source anonymous object.
+Source-retirement runtimes are resolved before publication so the commit path
+has no fallible metadata lookup. Shrinking callers trim a discarded tail first.
+Runtime registrations that are external to page-table ownership use the
+metadata-only `on_mapping_retired()` callback on rollback and commit; it never
+detaches anonymous slots or replaces the PTE/TLB cleanup contract.
+Anonymous shared relocation supports the existing fixed page-array extent;
+growth is rejected before destination publication rather than exposing a VMA
+that extends beyond the backing page array.
 
 ### Page fault
 
@@ -314,3 +331,22 @@ dirty tracking.
 File-backed page faults classify backend capacity exhaustion (`StorageFull`)
 as `BusError`, alongside backend data and I/O failures. User runtime therefore
 delivers `SIGBUS`; this conversion does not change write syscall errno mapping.
+
+## 映射引用的失效完成通知
+
+`VmRuntimeOps::on_invalidate_complete(range)` 是通用运行时寿命边界：对象
+失效请求经过 backing identity/offset 匹配，或调用 invalidate_present 后，
+memspace 在一个页表 guard 中批量 zap PTE 并完成一次 TLB finalization，再按
+已成功处理的页逐页通知运行时；失败时未处理部分保留引用和请求供重试。通知不删除
+VMA，不承担文件 pin 或匿名帧的具体所有权。
+
+`PROT_NONE` protection also removes present PTEs. After the page-table guard
+finishes TLB invalidation, `MmSpace` invokes the same completion hook so backing
+runtimes can release references that only kept those translations valid.
+
+Private anonymous offsets have one source: anonymous VMAs derive bytes from
+`page_offset`, while file-private runtimes derive them from their retained
+anonymous origin and the virtual displacement. Object invalidation asks that
+runtime for the same coordinate used by faults, fork and relocation; splitting,
+prefix unmapping and protection do not maintain a second VMA offset field.
+

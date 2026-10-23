@@ -19,7 +19,7 @@ use kvfs::{
     WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
     XattrSetFlags, default_evict_inode, inode_init_owner,
 };
-use pagecache::Folio;
+use pagecache::FolioGuard;
 
 use crate::{
     BlockMapping, BlockMappingFlags, DirectoryFileType, Ext4DeviceId, Ext4DirEntryRef, Ext4DirPos,
@@ -1434,7 +1434,7 @@ fn read_backing_at(mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsRe
 }
 
 impl AddressSpaceOperations for Ext4AddressSpaceOperations {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         let offset = folio
             .index()
             .checked_mul(PAGE_SIZE_4K as u64)
@@ -1513,7 +1513,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         Ok(())
     }
 
-    fn readahead(&self, control: &mut ReadaheadControl<'_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
         if control.count() == 0 {
             return Ok(());
         }

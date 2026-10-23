@@ -55,7 +55,7 @@ fn write_cached(cache: &MappingPages, offset: u64, src: &[u8]) -> KResult<()> {
 
 // One scoped observer is installed by the truncate concurrency test. Other
 // tests can write back concurrently: notifications match the retained Arc.
-type FolioWaitSignal = (Arc<Mutex<Folio>>, Arc<AtomicBool>, Arc<WaitQueue>);
+type FolioWaitSignal = (Arc<Folio>, Arc<AtomicBool>, Arc<WaitQueue>);
 static_lock! {
     static WRITEBACK_WAIT_SIGNAL: Mutex<Option<FolioWaitSignal>> = Mutex::new(None);
 }
@@ -63,7 +63,7 @@ static_lock! {
 struct WritebackWaitObservation;
 
 impl WritebackWaitObservation {
-    fn new(folio: Arc<Mutex<Folio>>, entered: Arc<AtomicBool>, events: Arc<WaitQueue>) -> Self {
+    fn new(folio: Arc<Folio>, entered: Arc<AtomicBool>, events: Arc<WaitQueue>) -> Self {
         let mut signal = WRITEBACK_WAIT_SIGNAL.lock();
         assert!(
             signal.is_none(),
@@ -80,7 +80,7 @@ impl Drop for WritebackWaitObservation {
     }
 }
 
-pub(super) fn observe_writeback_wait(folio: &Arc<Mutex<Folio>>) {
+pub(super) fn observe_writeback_wait(folio: &Arc<Folio>) {
     let signal = WRITEBACK_WAIT_SIGNAL.lock();
     if let Some((observed, entered, events)) = signal.as_ref()
         && Arc::ptr_eq(observed, folio)
@@ -101,7 +101,7 @@ static_lock! {
     static READ_WAIT_SIGNAL: Mutex<Option<FolioWaitSignal>> = Mutex::new(None);
 }
 
-pub(super) fn observe_read_wait(folio: &Arc<Mutex<Folio>>) {
+pub(super) fn observe_read_wait(folio: &Arc<Folio>) {
     let signal = READ_WAIT_SIGNAL.lock();
     if let Some((observed, entered, events)) = signal.as_ref()
         && Arc::ptr_eq(observed, folio)

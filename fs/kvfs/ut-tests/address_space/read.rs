@@ -4,13 +4,13 @@
 
 //! Buffered read boundaries, synchronous readahead and publication.
 
+use pagecache::FolioGuard;
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::ops::ControlFlow;
 
 use iov_iter::{IovIterDest, IovSink, iov_iter_dest, iov_iter_kvec_dest};
 use kerrno::{KError, KResult};
 use memaddr::PAGE_SIZE_4K;
-use pagecache::Folio;
 use unittest::def_test;
 
 use super::{AddressSpace, TruncateOps};
@@ -33,8 +33,59 @@ fn read_inode(ops: &'static dyn AddressSpaceOperations, size: usize) -> Arc<VfsI
 struct ReadOps;
 static READ_OPS: ReadOps = ReadOps;
 
+#[def_test]
+fn pinned_file_pages_reject_eof_before_materialization_or_quota_admission() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use pagecache::CacheResidency;
+
+    struct OnePageQuota(AtomicUsize);
+
+    impl CacheResidency for OnePageQuota {
+        fn try_add_folio(&self) -> KResult<()> {
+            self.0
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .map(|_| ())
+                .map_err(|_| KError::StorageFull)
+        }
+
+        fn remove_folio(&self) {
+            assert_eq!(self.0.swap(0, Ordering::AcqRel), 1);
+        }
+    }
+
+    let inode = read_inode(&READ_OPS, 0);
+    let quota = Arc::new(OnePageQuota(AtomicUsize::new(0)));
+    let mapping = AddressSpace::with_residency(Arc::downgrade(&inode), &READ_OPS, Some(quota.clone()));
+    for index in [0, 1, u64::MAX] {
+        assert_eq!(
+            mapping.with_pinned_file_page(index, |_| panic!("EOF must reject before callback")),
+            Err::<(), _>(crate::VfsError::BadAddress)
+        );
+        assert_eq!(mapping.nrpages(), 0);
+        assert_eq!(quota.0.load(Ordering::Acquire), 0);
+    }
+    inode.truncate_setsize(1).unwrap();
+    mapping.with_pinned_file_page(0, |_| Ok(())).unwrap();
+    assert_eq!(mapping.nrpages(), 1);
+    assert_eq!(quota.0.load(Ordering::Acquire), 1);
+    assert_eq!(
+        mapping.with_pinned_file_page(1, |_| panic!("partial last page excludes the next page")),
+        Err::<(), _>(crate::VfsError::BadAddress)
+    );
+    assert_eq!(quota.0.load(Ordering::Acquire), 1);
+    assert_eq!(
+        mapping.with_pinned_file_page(0, |_| Err::<(), _>(crate::VfsError::PermissionDenied)),
+        Err(crate::VfsError::PermissionDenied)
+    );
+    assert_eq!(mapping.nrpages(), 1);
+    assert_eq!(quota.0.load(Ordering::Acquire), 1);
+    drop(mapping);
+    assert_eq!(quota.0.load(Ordering::Acquire), 0);
+}
+
 impl AddressSpaceOperations for ReadOps {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         let index = folio.index();
         folio.data().fill((index % 251) as u8);
         let len = mapping
@@ -76,7 +127,7 @@ struct FailingSparseReadOps;
 static FAILING_SPARSE_READ_OPS: FailingSparseReadOps = FailingSparseReadOps;
 
 impl AddressSpaceOperations for FailingSparseReadOps {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         assert!(mapping.invalidate_lock.try_write().is_none());
         // Failed initialization must neither expose partial bytes nor turn
         // the resident reservation into an absent sparse-file hole.
@@ -239,7 +290,7 @@ static READAHEAD_OPS: ReadaheadOps = ReadaheadOps;
 
 impl AddressSpaceOperations for ReadaheadOps {
     // Rereading a completed readahead page is the regression this mock reports.
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         // Initialize the isolated miss or retry the consumed, incomplete EOF page.
         assert!(mapping.invalidate_lock.try_write().is_none());
         let byte = match folio.index() {
@@ -257,7 +308,7 @@ impl AddressSpaceOperations for ReadaheadOps {
     }
 
     // An unexpected readahead request is the regression this mock reports.
-    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
         assert!(control.mapping().invalidate_lock.try_write().is_none());
         match control.index() {
             0 => {
@@ -361,7 +412,7 @@ struct GatedReadOps;
 static GATED_READ_OPS: GatedReadOps = GatedReadOps;
 
 impl AddressSpaceOperations for GatedReadOps {
-    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
         use core::sync::atomic::Ordering;
         // The gated mapping belongs to a live test inode.
         let inode = control.mapping().inode().unwrap();
@@ -427,7 +478,7 @@ struct GrowingReadOps;
 static GROWING_READ_OPS: GrowingReadOps = GrowingReadOps;
 
 impl AddressSpaceOperations for GrowingReadOps {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         // Model an old-EOF read finishing while a write publishes a larger
         // size. The filesystem has initialized both the data and zero tail.
         folio.data().fill(0);
@@ -452,7 +503,7 @@ struct FailingFallbackOps;
 static FAILING_FALLBACK_OPS: FailingFallbackOps = FailingFallbackOps;
 
 impl AddressSpaceOperations for FailingFallbackOps {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         assert!(mapping.invalidate_lock.try_write().is_none());
         // Looking up the index must remain possible during backend I/O.
         assert_eq!(mapping.nrpages(), 3);
@@ -535,11 +586,11 @@ static CONFLICTED_READAHEAD_OPS: ReadaheadConflict = ReadaheadConflict;
 
 impl AddressSpaceOperations for ReadaheadConflict {
     // A demand read of the remaining run is the regression this mock reports.
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         panic!("the remaining run must be initialized by batch readahead");
     }
 
-    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
         assert_eq!(control.index(), 5);
         assert_eq!(control.count(), 3);
         while control.count() != 0 {
@@ -589,7 +640,7 @@ struct WindowReadOps;
 static WINDOW_READ_OPS: WindowReadOps = WindowReadOps;
 
 impl AddressSpaceOperations for WindowReadOps {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         assert!(mapping.invalidate_lock.try_write().is_none());
         assert_eq!(
             folio.index(),
@@ -600,7 +651,7 @@ impl AddressSpaceOperations for WindowReadOps {
         Ok(())
     }
 
-    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut crate::ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
         assert!(
             control.count() > 1,
             "single reservations must use read_folio"

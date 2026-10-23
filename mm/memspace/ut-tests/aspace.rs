@@ -136,6 +136,40 @@ fn futex_backing_preserves_shared_object_offset_after_vma_trim() {
 }
 
 #[def_test]
+fn private_fork_after_vma_split_keeps_child_cow_object_offset() {
+    let start = VirtAddr::from_usize(0x60_0000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut parent = MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8)
+        .expect("allocate parent address space");
+    parent
+        .map(
+            start,
+            PAGE_SIZE_4K * 3,
+            flags,
+            false,
+            VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+        )
+        .expect("map private range");
+    let second_page = start + PAGE_SIZE_4K;
+    assert!(parent
+        .handle_page_fault(second_page, PageFaultFlags::WRITE)
+        .is_resolved());
+    parent
+        .protect(
+            start,
+            PAGE_SIZE_4K,
+            MappingFlags::USER | MappingFlags::READ,
+        )
+        .expect("split first VMA page");
+
+    let child = parent.try_clone().expect("fork split private mapping");
+    assert!(child
+        .lock()
+        .handle_page_fault(second_page, PageFaultFlags::WRITE)
+        .is_resolved());
+}
+
+#[def_test]
 fn futex_backing_rejects_unaligned_or_unmapped_addresses() {
     let aspace = new_test_aspace();
     assert!(matches!(
@@ -451,12 +485,8 @@ fn relocated_private_mapping_keeps_object_contents_after_source_metadata_drop() 
     let source = mm
         .resolve_mremap_source(start, len)
         .expect("resolve relocation source");
-    mm.map_relocated_snapshot(&source, target, len, flags, &aspace)
-        .expect("install relocated snapshot");
-    mm.move_pages(start, target, len, khal::paging::PageSize::Size4K)
-        .expect("move present pages");
-    mm.drop_mapping_metadata(start, len)
-        .expect("retire old metadata");
+    mm.relocate_mapping(&source, target, len, flags, &aspace)
+        .expect("relocate private snapshot");
 
     assert!(!mm.can_access_range(start, PAGE_SIZE_4K, flags));
 
@@ -469,6 +499,70 @@ fn relocated_private_mapping_keeps_object_contents_after_source_metadata_drop() 
     mm.read(target, &mut buf)
         .expect("read relocated contents after refault");
     assert_eq!(&buf, b"abc");
+}
+
+#[def_test]
+fn relocated_shared_mapping_preserves_frames_and_refaults_at_destination() {
+    let start = VirtAddr::from_usize(0x4000);
+    let target = VirtAddr::from_usize(0x10000);
+    let len = PAGE_SIZE_4K * 2;
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let aspace = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 32)
+            .expect("allocate shared relocation address space"),
+    ));
+    let mut mm = aspace.lock();
+    map_shared(&mut mm, start.as_usize(), len, flags);
+    mm.write(start, &[0x48]).expect("seed first shared page");
+    mm.write(start + PAGE_SIZE_4K, &[0x79]).expect("seed second shared page");
+    let frames = [
+        mm.page_table().query(start).unwrap().0,
+        mm.page_table().query(start + PAGE_SIZE_4K).unwrap().0,
+    ];
+    let source = mm.resolve_mremap_source(start, len).expect("shared source snapshot");
+    mm.relocate_mapping(&source, target, len, flags, &aspace)
+        .expect("relocate eagerly populated shared runtime");
+    assert!(mm.find_vma(start).is_none());
+    for (page, frame) in frames.iter().enumerate() {
+        assert!(mm.page_table().query(start + page * PAGE_SIZE_4K).is_err());
+        assert_eq!(mm.page_table().query(target + page * PAGE_SIZE_4K).unwrap().0, *frame);
+    }
+    mm.invalidate_present(target, len).expect("drop destination shared PTEs");
+    mm.populate_area(target, len, flags).expect("refault relocated shared pages");
+    for (page, expected) in [0x48, 0x79].into_iter().enumerate() {
+        let mut byte = [0];
+        mm.read(target + page * PAGE_SIZE_4K, &mut byte).expect("read relocated shared payload");
+        assert_eq!(byte, [expected]);
+        assert_eq!(mm.page_table().query(target + page * PAGE_SIZE_4K).unwrap().0, frames[page]);
+    }
+    mm.unmap(target, len).expect("cleanup relocated shared mapping");
+}
+
+#[def_test]
+fn shared_relocation_rejects_growth_before_destination_publication() {
+    let start = VirtAddr::from_usize(0x4000);
+    let target = VirtAddr::from_usize(0x10000);
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let aspace = Arc::new(Mutex::new(
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 32)
+            .expect("allocate rejected shared-growth address space"),
+    ));
+    let mut mm = aspace.lock();
+    map_shared(&mut mm, start.as_usize(), PAGE_SIZE_4K, flags);
+    mm.write(start, &[0x53]).expect("seed shared source");
+    let frame = mm.page_table().query(start).unwrap().0;
+    let source = mm.resolve_mremap_source(start, PAGE_SIZE_4K).expect("shared source snapshot");
+    assert_eq!(
+        mm.relocate_mapping(&source, target, PAGE_SIZE_4K * 3, flags, &aspace),
+        Err(KError::InvalidInput),
+        "fixed shared backing cannot supply a larger runtime range",
+    );
+    assert!(mm.find_vma(target).is_none());
+    assert_eq!(mm.page_table().query(start).unwrap().0, frame);
+    let mut byte = [0];
+    mm.read(start, &mut byte).expect("rejected growth must preserve source");
+    assert_eq!(byte, [0x53]);
+    mm.unmap(start, PAGE_SIZE_4K).expect("cleanup rejected shared growth");
 }
 
 #[def_test]

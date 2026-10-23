@@ -221,9 +221,7 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
             let mut state = cache.state.lock();
             state.entries.insert(
                 0,
-                Arc::new(ksync::Mutex::new(
-                    replacement,
-                )),
+                Arc::new(replacement),
             );
             state.dirty_marks.insert(0);
             state.writeback_marks.remove(&0);

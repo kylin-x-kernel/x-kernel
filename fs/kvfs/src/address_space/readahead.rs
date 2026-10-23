@@ -5,7 +5,7 @@
 //! Readahead requests, window selection and filesystem dispatch.
 
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{Folio, PageIndex};
+use pagecache::{FolioGuard, PageIndex};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
@@ -16,13 +16,13 @@ use crate::{VfsError, VfsResult};
 /// invalidate lock for reading. Completion cannot outlive that callback.
 /// A consumed folio that fails initialization remains non-uptodate for demand
 /// retry. Unconsumed reservations are released when the callback returns.
-pub struct ReadaheadControl<'a, 'folio> {
+pub struct ReadaheadControl<'a, 'folio, 'page> {
     address_space: &'a AddressSpace,
     index: PageIndex,
-    folios: &'a mut dyn ExactSizeIterator<Item = &'folio mut Folio>,
+    folios: &'a mut dyn ExactSizeIterator<Item = &'folio mut FolioGuard<'page>>,
 }
 
-impl ReadaheadControl<'_, '_> {
+impl ReadaheadControl<'_, '_, '_> {
     /// Returns the address space whose backing storage should be read.
     pub fn mapping(&self) -> &AddressSpace {
         self.address_space
@@ -41,7 +41,7 @@ impl ReadaheadControl<'_, '_> {
     // Keep the default fallback on the same locked reservations as batch I/O.
     pub(super) fn read_folios(
         &mut self,
-        mut read: impl FnMut(&AddressSpace, &mut Folio) -> VfsResult<()>,
+        mut read: impl FnMut(&AddressSpace, &mut FolioGuard<'_>) -> VfsResult<()>,
     ) -> VfsResult<()> {
         let mut result = Ok(());
         for folio in &mut *self.folios {
@@ -90,11 +90,11 @@ impl AddressSpace {
             #[cfg(unittest)]
             super::tests::observe_readahead_run(self, &run);
             match self.i_pages.readahead_folios(run.clone(), |folios| {
-                // `inspect` receives &&mut Folio and cannot mutate the marker.
+                // `inspect` receives &&mut FolioGuard<'_> and cannot mutate the marker.
                 #[expect(
                     clippy::manual_inspect,
                     reason = "CG-024-lint-exceptions: manual_inspect: inspect only lends &&mut \
-                              Folio; setting the marker requires mutable access"
+                              FolioGuard; setting the marker requires mutable access"
                 )]
                 let mut marked = folios.map(|folio| {
                     if Some(folio.index()) == marker {

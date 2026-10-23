@@ -127,7 +127,8 @@ zero selects unlimited, and finite limits are bounded by
 The root and each additional hard link consume one unit; directory `.` and `..`
 links do not. Removing the last name preserves the inode charge until its final
 reference is released. `statfs` reports total and free inode units. `noswap` is accepted as a no-op because this tmpfs implementation
-has no swap backend. The page limit is a quota on actually resident folios, not a
+has no swap backend. The page limit charges physical folios, including detached
+pages retained by pins, mapping tokens or read batches, not a
 reservation and not a file logical-size sum.
 
 For a finite limit, `statfs()` reports the current maximum and available quota
@@ -198,9 +199,9 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 - `MemoryNode::cache_residency()` gives each newly constructed mapping one
   reference to the filesystem quota; lookup never traverses weak inode or
   superblock references on a resident access.
-- The generic cache serializes admission with winning identity publication and
-  removal. Its callbacks take the quota limit lock after the cache index mutex;
-  remount/statfs hold only the quota lock, never a mapping lock.
+- The generic cache serializes admission with winning identity publication,
+  taking folio -> index -> quota limit locks. Final physical deallocation returns
+  the charge outside folio/index locks. Remount/statfs never acquire cache locks.
 - `TmpfsAccounting` protects both limits and remaining inode space with
   `RwLock<TmpfsStats>`. Inode admission/release and remount take the write lock;
   statfs samples both capacities under the read lock. No per-inode charge object
@@ -236,8 +237,9 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 
 6. tmpfs size is enforced at folio materialization rather than file length.
    原因：sparse holes do not consume pages, while a small file can dirty one
-   full page. Charging actual folios also makes truncate/unlink release quota
-   without a second accounting pass. A buffered-read hole is served from the
+   full page. Charging physical folios makes truncate/unlink return quota after
+   the last retained reference releases that allocation, without a second
+   accounting pass. A buffered-read hole is served from the
    zero page, so it cannot consume the last quota page or turn `read(2)` into
    `ENOSPC`. Mmap read faults deliberately materialize and charge a folio, as
    Linux does for `shmem_fault()`; only the buffered-read path follows
@@ -246,16 +248,18 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
 ## Drop / 资源释放
 
 - inode 释放时，`AddressSpace` 在最后一个引用释放时销毁，其直接持有的 `MappingPages` 随字段释放。
-- resident cache-entry removal releases its page-quota charge; `truncate(0)` and final
-  inode eviction therefore make capacity available again.
+- Physical folio destruction returns its page-quota charge. `truncate(0)` and
+  final inode eviction detach entries; retained pins, tokens and batches keep
+  capacity charged until they release the physical pages.
 - 目录删除逻辑由 `InodeRef` 和 nlink 维护。
 - `InodeRef` 持有 backing inode；`Inode::drop` 在最后一个引用释放时归还编号与
   分配额度，临时引用与 VFS 操作对象遵循同一生命周期。
 
 `quota.rs` owns the mount limit, usage and remount/statfs policy. Each mapping
-stores one lifecycle provider reference; entries are plain shared folio handles.
-Admission runs only for winning identities. Removal and final mapping destruction
-return capacity immediately, even if read batches still retain invalidated folios.
+stores one lifecycle provider reference. Admission runs only for winning
+identities, whose stable folios retain one charge and provider reference each.
+Clones never multiply charges. Removal and mapping destruction cannot return
+capacity before the physical page is freed by its final retained reference.
 
 Inode-space exhaustion rejects creation or an additional hard link with
 `ENOSPC` before publication; publication failures undo the directory entry and

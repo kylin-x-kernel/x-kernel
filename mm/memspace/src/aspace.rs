@@ -203,6 +203,7 @@ impl InvalidateHandle {
 /// handle remains encapsulated inside `memspace`.
 pub struct MremapSource {
     vma: VmArea,
+    range: VirtAddrRange,
 }
 
 impl MremapSource {
@@ -306,7 +307,7 @@ impl MmSpace {
             (VmBackingKind::FilePrivate { anon_object, .. }, object @ VmObjectId::Anon(_))
                 if anon_object == object =>
             {
-                Some(addr.as_usize().saturating_sub(vma.start().as_usize()) as u64)
+                vma.private_anon_offset_for(addr)
             }
             _ => None,
         }
@@ -331,29 +332,38 @@ impl MmSpace {
         Self::request_offset_for(vma, request.object(), overlap.start) == Some(expected_offset)
     }
 
-    fn zap_present_ranges(&mut self, ranges: Vec<(VirtAddrRange, PageSize)>) -> KResult<()> {
-        let mut modify = self.pgtbl.modify();
-        let mut result = Ok(());
-        'outer: for (range, page_size) in ranges {
-            let iter = match pages_in(range, page_size) {
-                Ok(iter) => iter,
-                Err(err) => {
-                    result = Err(err);
-                    break;
-                }
-            };
-            for vaddr in iter {
+    fn zap_present_range(
+        &mut self,
+        range: VirtAddrRange,
+        page_size: PageSize,
+        runtime: Option<&VmRuntimeRef>,
+    ) -> KResult<()> {
+        let mut cleared_pages = 0;
+        let mut first_error = None;
+        {
+            let mut modify = self.pgtbl.modify();
+            for vaddr in pages_in(range, page_size)? {
                 match modify.unmap(vaddr) {
-                    Ok(_) | Err(PagingError::NotMapped) => {}
+                    Ok(_) | Err(PagingError::NotMapped) => cleared_pages += 1,
                     Err(err) => {
-                        result = Err(map_paging_err(err));
-                        break 'outer;
+                        first_error = Some(map_paging_err(err));
+                        break;
                     }
                 }
             }
+            modify.finish();
         }
-        modify.finish();
-        result
+
+        if let Some(runtime) = runtime {
+            for vaddr in pages_in(range, page_size)?.take(cleared_pages) {
+                runtime.on_invalidate_complete(VirtAddrRange::from_start_size(
+                    vaddr,
+                    page_size as usize,
+                ));
+            }
+        }
+
+        first_error.map_or(Ok(()), Err)
     }
 
     fn apply_invalidate_request(&mut self, request: &ObjectInvalidateRequest) -> KResult<()> {
@@ -378,11 +388,14 @@ impl MmSpace {
                 if overlap.is_empty() || !self.overlap_matches_invalidate(&vma, overlap, request) {
                     return None;
                 }
-                Some((overlap, vma.backing().page_size()))
+                Some((overlap, vma.backing().page_size(), vma.runtime().cloned()))
             })
             .collect::<Vec<_>>();
 
-        self.zap_present_ranges(overlaps)
+        for (range, page_size, runtime) in overlaps {
+            self.zap_present_range(range, page_size, runtime.as_ref())?;
+        }
+        Ok(())
     }
 
     fn drain_pending_invalidations(&mut self) {
@@ -479,12 +492,9 @@ impl MmSpace {
             }
             modify.finish();
         }
-        self.vmas.unmap(start, size);
-        Ok(())
-    }
-
-    fn remove_mapping_metadata(&mut self, start: VirtAddr, size: usize) -> KResult {
-        self.validate_region(start, size)?;
+        for (overlap, runtime) in &operations {
+            runtime.on_invalidate_complete(*overlap);
+        }
         self.vmas.unmap(start, size);
         Ok(())
     }
@@ -522,18 +532,29 @@ impl MmSpace {
                 let protect_range =
                     VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
                 let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
-                Ok((protect_range, runtime))
+                Ok((protect_range, runtime, vma.backing().page_size()))
             })
             .collect::<KResult<Vec<_>>>()?;
-        {
-            let mut modify = self.pgtbl.modify();
-            for (protect_range, runtime) in &operations {
-                let pte_flags = runtime.on_protect(*protect_range, flags, &mut modify)?;
-                modify
-                    .protect_region(protect_range.start, protect_range.size(), pte_flags)
-                    .map_err(crate::backend::map_paging_err)?;
+        for (protect_range, runtime, page_size) in &operations {
+            let pte_flags = {
+                let mut modify = self.pgtbl.modify();
+                let result = runtime.on_protect(*protect_range, flags, &mut modify);
+                modify.finish();
+                result?
+            };
+            if pte_flags.is_empty() {
+                // A runtime may remove WRITE for COW, turning a nonempty VMA
+                // request into an empty PTE permission set. Use the normal zap
+                // contract: finish TLBs, then retire each cleared page's token,
+                // including a cleared prefix if a later operation fails.
+                self.zap_present_range(*protect_range, *page_size, Some(runtime))?;
+            } else {
+                let mut modify = self.pgtbl.modify();
+                let result =
+                    modify.protect_region(protect_range.start, protect_range.size(), pte_flags);
+                modify.finish();
+                result.map_err(crate::backend::map_paging_err)?;
             }
-            modify.finish();
         }
         self.vmas.protect(start, size, flags);
         Ok(())
@@ -557,6 +578,9 @@ impl MmSpace {
                     .expect("backend clear must succeed");
             }
             modify.finish();
+        }
+        for (range, runtime) in &operations {
+            runtime.on_invalidate_complete(*range);
         }
         self.vmas.clear();
     }
@@ -908,6 +932,7 @@ impl MmSpace {
     fn relocated_mapping_from_snapshot(
         &self,
         vma: &VmArea,
+        source_range: VirtAddrRange,
         new_start: VirtAddr,
         new_size: usize,
         new_flags: MappingFlags,
@@ -917,7 +942,14 @@ impl MmSpace {
         let invalidate = Some(self.invalidate_handle(aspace));
         Ok((
             vma.relocated(new_start, new_size, new_flags),
-            runtime.relocate_for_mremap(new_start, self.mm_id(), aspace, invalidate)?,
+            runtime.relocate_for_mremap(
+                source_range,
+                new_start,
+                new_size,
+                self.mm_id(),
+                aspace,
+                invalidate,
+            )?,
         ))
     }
 
@@ -937,7 +969,10 @@ impl MmSpace {
         if !vma.backing().page_size().is_aligned(addr.as_usize()) {
             return Err(KError::InvalidInput);
         }
-        Ok(MremapSource { vma })
+        Ok(MremapSource {
+            vma,
+            range: VirtAddrRange::from_start_size(addr, old_size),
+        })
     }
 
     /// Finds a destination range suitable for relocating a mapping.
@@ -1099,12 +1134,16 @@ impl MmSpace {
         Ok(())
     }
 
-    /// Installs a relocated copy of an existing mapping snapshot.
+    /// Relocates the retained part of an existing mapping snapshot.
     ///
-    /// This keeps `mremap`-style relocation on the `MmSpace -> VmArea`
-    /// construction path instead of open-coding `relocated VMA + relocated
-    /// backend` assembly in upper layers.
-    pub fn map_relocated_snapshot(
+    /// All destination PTEs are prepared before any source PTE is removed.
+    /// On preparation failure, newly installed destination PTEs are removed and
+    /// TLB invalidation completes before the destination VMA/runtime is dropped.
+    /// Source PTEs and backing ownership remain unchanged. On success, only the
+    /// source metadata is retired; its backing has moved to the destination.
+    ///
+    /// The caller must trim a discarded source tail before a shrinking move.
+    pub fn relocate_mapping(
         &mut self,
         snapshot: &MremapSource,
         new_start: VirtAddr,
@@ -1113,14 +1152,66 @@ impl MmSpace {
         owner: &Arc<Mutex<MmSpace>>,
     ) -> KResult {
         self.drain_pending_invalidations();
-        let (vma, runtime) = self.relocated_mapping_from_snapshot(
+        self.validate_region(new_start, new_size)?;
+        let move_size = snapshot.range.size().min(new_size);
+        let source_range = VirtAddrRange::from_start_size(snapshot.range.start, move_size);
+        self.validate_region(source_range.start, source_range.size())?;
+        // Resolve every fallible source-metadata operation before publishing
+        // the destination. Retirement cannot fail after PTE transfer commits.
+        let retirement = self
+            .covering_vmas_in_range(source_range)?
+            .iter()
+            .map(|vma| {
+                let overlap = VirtAddrRange::new(
+                    source_range.start.max(vma.start()),
+                    source_range.end.min(vma.end()),
+                );
+                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+                Ok((overlap, runtime))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        let (mut vma, runtime) = self.relocated_mapping_from_snapshot(
             &snapshot.vma,
+            snapshot.range,
             new_start,
             new_size,
             new_flags,
             owner,
         )?;
-        self.install_runtime_mapping(vma, runtime)
+        if self.vmas.overlaps(vma.range()) {
+            return Err(KError::AlreadyExists);
+        }
+        // Anonymous shared runtimes already own their stable page array. Their
+        // normal map() eagerly installs PTEs; relocation must leave publication
+        // to move_pages instead. File runtimes still run map() for permission,
+        // seal and shared-range registration before metadata is published.
+        if !matches!(&runtime, VmRuntimeRef::AnonShared(_)) {
+            runtime.map(vma.range(), vma.flags(), &mut self.pgtbl.modify())?;
+        }
+        let target_range = vma.range();
+        let target_runtime =
+            runtime.register_object_views(self.mm_id, self.deferred_invalidate_handle(), &vma);
+        vma.set_runtime(target_runtime.clone());
+        self.vmas.insert(vma);
+        if let Err(err) = self.move_pages(
+            source_range.start,
+            new_start,
+            move_size,
+            snapshot.page_size(),
+        ) {
+            // move_pages has removed only its newly installed destination PTEs
+            // and finalized TLBs. Ordinary unmap would also detach anonymous
+            // slots still owned by the source runtime, so drop only metadata.
+            target_runtime.on_mapping_retired(target_range);
+            self.vmas.unmap(new_start, new_size);
+            return Err(err);
+        }
+        for (range, runtime) in retirement {
+            runtime.on_invalidate_complete(range);
+            runtime.on_mapping_retired(range);
+        }
+        self.vmas.unmap(source_range.start, source_range.size());
+        Ok(())
     }
 
     /// Populates the area with physical frames, returning false if the area
@@ -1163,13 +1254,6 @@ impl MmSpace {
         self.remove_mapping_range(start, size)
     }
 
-    /// Removes VMA metadata for a range whose PTEs and backing ownership have
-    /// already been transferred elsewhere.
-    pub fn drop_mapping_metadata(&mut self, start: VirtAddr, size: usize) -> KResult {
-        self.drain_pending_invalidations();
-        self.remove_mapping_metadata(start, size)
-    }
-
     /// Drops present PTEs in the specified range while keeping VMA metadata.
     ///
     /// The backing object zaps affected PTEs but the VMA remains so subsequent
@@ -1180,12 +1264,10 @@ impl MmSpace {
             .snapshot_vmas_in_range(start, size)?
             .into_iter()
             .collect::<Vec<_>>();
-        let operations = overlaps
-            .iter()
-            .map(|(vma, overlap)| Ok((*overlap, vma.backing().page_size())))
-            .collect::<KResult<Vec<_>>>()?;
-
-        self.zap_present_ranges(operations)
+        for (vma, range) in overlaps {
+            self.zap_present_range(range, vma.backing().page_size(), vma.runtime())?;
+        }
+        Ok(())
     }
 
     /// To process data in this area with the given function.
@@ -1363,9 +1445,11 @@ impl MmSpace {
 
     /// Move page table entries from src to dst within the same address space.
     ///
-    /// For each mapped page in `[src, src+size)`, queries the PTE, maps it at
-    /// the corresponding dst address, and unmaps from src. Unmapped (lazy)
-    /// pages are skipped and will be demand-paged at the new location.
+    /// Prepares every destination PTE while keeping all source PTEs intact.
+    /// A preparation failure removes only this call's destination PTEs and
+    /// completes TLB invalidation. Once preparation succeeds, source removal
+    /// cannot allocate or fail: the exclusive page-table guard still holds the
+    /// entries just queried. Unmapped (lazy) pages are skipped.
     pub fn move_pages(
         &mut self,
         src: VirtAddr,
@@ -1373,20 +1457,45 @@ impl MmSpace {
         size: usize,
         page_size: PageSize,
     ) -> KResult {
+        self.validate_region(src, size)?;
+        self.validate_region(dst, size)?;
         let range = VirtAddrRange::from_start_size(src, size);
+        if src < dst + size && dst < range.end {
+            return Err(KError::InvalidInput);
+        }
+        let pages = crate::backend::pages_in(range, page_size)?;
         let mut modify = self.pgtbl.modify();
-        for vaddr in crate::backend::pages_in(range, page_size)? {
-            let dst_vaddr = dst + (vaddr - src);
-            if let Ok((paddr, flags, _)) = modify.query(vaddr) {
+        let mut prepared = Vec::new();
+        let result = (|| {
+            for vaddr in pages {
+                let (paddr, flags, source_page_size) = match modify.query(vaddr) {
+                    Ok(entry) => entry,
+                    Err(PagingError::NotMapped) => continue,
+                    Err(err) => return Err(map_paging_err(err)),
+                };
+                if source_page_size != page_size {
+                    return Err(KError::InvalidInput);
+                }
                 modify
-                    .map(dst_vaddr, paddr, page_size, flags)
-                    .map_err(|_| KError::NoMemory)?;
-                // Safe: we just confirmed the mapping exists via query(), and we
-                // hold exclusive access to the page table through the modify guard.
-                modify
-                    .unmap(vaddr)
-                    .expect("unmap must succeed after successful query");
+                    .map(dst + (vaddr - src), paddr, page_size, flags)
+                    .map_err(map_paging_err)?;
+                prepared.push(vaddr);
             }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            for vaddr in prepared {
+                modify
+                    .unmap(dst + (vaddr - src))
+                    .expect("prepared destination PTE remains under exclusive page-table access");
+            }
+            modify.finish();
+            return Err(err);
+        }
+        for vaddr in prepared {
+            modify
+                .unmap(vaddr)
+                .expect("source PTE remains under exclusive page-table access");
         }
         modify.finish();
         Ok(())

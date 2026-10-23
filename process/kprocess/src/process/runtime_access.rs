@@ -110,14 +110,14 @@ impl LiveAddressSpaceMappingGuard<'_> {
         self.guard.invalidate_handle(self.owner)
     }
 
-    /// Installs a relocated mapping snapshot using this live owner.
+    /// Relocates a mapping snapshot transactionally using this live owner.
     ///
     /// # Errors
     ///
     /// Forwards the validation/allocation errors of
-    /// `memspace::MmSpace::map_relocated_snapshot` for the supplied mapping snapshot,
+    /// `memspace::MmSpace::relocate_mapping` for the supplied mapping snapshot,
     /// address, byte size and permissions.
-    pub fn map_relocated_snapshot(
+    pub fn relocate_mapping(
         &mut self,
         snapshot: &MremapSource,
         new_start: VirtAddr,
@@ -125,7 +125,7 @@ impl LiveAddressSpaceMappingGuard<'_> {
         new_flags: MappingFlags,
     ) -> KResult {
         self.guard
-            .map_relocated_snapshot(snapshot, new_start, new_size, new_flags, self.owner)
+            .relocate_mapping(snapshot, new_start, new_size, new_flags, self.owner)
     }
 }
 

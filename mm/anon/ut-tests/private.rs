@@ -194,3 +194,39 @@ fn anon_private_fork_prepare_rolls_back_without_commit() {
     assert!(handle.is_exclusive());
     assert!(child.page_at(0x1000).is_none());
 }
+
+#[def_test]
+fn anon_private_first_cow_commit_failure_keeps_slot_absent() {
+    use khal::{mem::PhysAddr, paging::PageSize};
+    let object = AnonPrivateObject::new_root();
+    let prepared = object
+        .prepare_first_touch_page(0)
+        .expect("prepare absent slot");
+    let result = prepared.commit_after(PhysAddr::from_usize(0x7000), PageSize::Size4K, || {
+        Err::<(), _>(17)
+    });
+    assert!(matches!(
+        result,
+        Err(AnonPrivatePageCommitError::Commit(17))
+    ));
+    assert!(object.page_at(0).is_none());
+    let prepared = object.prepare_first_touch_page(0).expect("prepare again");
+    object
+        .install_page(0, PhysAddr::from_usize(0x8000), PageSize::Size4K)
+        .expect("competing page");
+    let mut did_run = false;
+    let result = prepared.commit_after(PhysAddr::from_usize(0x9000), PageSize::Size4K, || {
+        did_run = true;
+        Ok::<(), ()>(())
+    });
+    assert!(matches!(result, Err(AnonPrivatePageCommitError::Changed)));
+    assert!(!did_run);
+    assert_eq!(
+        object
+            .page_at(0)
+            .expect("competing slot retained")
+            .phys_addr(),
+        PhysAddr::from_usize(0x8000)
+    );
+    object.detach_range(0, 4096).finalize_release();
+}

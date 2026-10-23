@@ -8,11 +8,10 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
 
 use kerrno::{KError, KResult};
-use ksync::{Mutex, MutexGuard};
 use ktask::WaitQueue;
 use memaddr::PAGE_SIZE_4K;
 
-use crate::{Folio, FolioBatch, MappingPages, PageIndex};
+use crate::{Folio, FolioBatch, FolioGuard, MappingPages, PageIndex};
 
 /// Result of one contiguous filesystem writeback submission.
 ///
@@ -26,12 +25,12 @@ pub type WritebackRangeResult = Result<usize, (usize, KError)>;
 // than matching a folio/bit key; each waiter rechecks its own folio's state.
 static WRITEBACK_WAITERS: [WaitQueue; 256] = [const { WaitQueue::new() }; 256];
 
-fn writeback_waiters(folio: &Arc<Mutex<Folio>>) -> &'static WaitQueue {
+fn writeback_waiters(folio: &Arc<Folio>) -> &'static WaitQueue {
     let address = Arc::as_ptr(folio) as usize;
     &WRITEBACK_WAITERS[((address >> 3) ^ (address >> 11)) % WRITEBACK_WAITERS.len()]
 }
 
-pub(super) fn wait_on_writeback(folio: &Arc<Mutex<Folio>>) {
+pub(super) fn wait_on_writeback(folio: &Arc<Folio>) {
     writeback_waiters(folio).wait_until(|| {
         let is_complete = !folio.lock().is_under_writeback();
         #[cfg(unittest)]
@@ -121,7 +120,7 @@ impl MappingPages {
         *next_index = end_index;
     }
 
-    fn finish_writeback(&self, folio: &Arc<Mutex<Folio>>, is_complete: bool) {
+    fn finish_writeback(&self, folio: &Arc<Folio>, is_complete: bool) {
         let mut locked = folio.lock();
         let mut state = self.state.lock();
         let index = locked.index();
@@ -149,9 +148,9 @@ impl MappingPages {
     fn start_writeback_for_candidate<'a>(
         &self,
         index: PageIndex,
-        candidate: &'a Arc<Mutex<Folio>>,
+        candidate: &'a Arc<Folio>,
         pages_skipped: &mut usize,
-    ) -> Option<MutexGuard<'a, Folio>> {
+    ) -> Option<FolioGuard<'a>> {
         let mut folio = candidate.lock();
         let mut state = self.state.lock();
         if !state.is_current(index, candidate) {

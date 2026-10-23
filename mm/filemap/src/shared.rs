@@ -364,6 +364,11 @@ impl VmRuntimeOps for FileSharedRuntime {
         self.unmap_impl(range, pgtbl)
     }
 
+    fn on_mapping_retired(&self, range: VirtAddrRange) {
+        self.0.unregister_shared_range(range);
+        self.0.unregister_writable_shared_range(range);
+    }
+
     fn on_protect(
         &self,
         range: VirtAddrRange,
@@ -393,7 +398,9 @@ impl VmRuntimeOps for FileSharedRuntime {
 
     fn relocate_for_mremap(
         &self,
+        _source_range: VirtAddrRange,
         new_start: VirtAddr,
+        _new_len: usize,
         new_mm_id: u64,
         aspace: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,

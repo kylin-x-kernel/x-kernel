@@ -8,11 +8,119 @@ use alloc::sync::Arc;
 use core::ops::ControlFlow;
 
 use kerrno::{KError, KResult};
-use ksync::Mutex;
 
-use crate::{Folio, FolioBatch, MappingPages, PageIndex};
+use crate::{Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, PinnedFolio};
 
 impl MappingPages {
+    fn get_or_create_folio(&self, index: PageIndex) -> KResult<Arc<Folio>> {
+        loop {
+            let mut state = self.state.lock();
+            if let Some(folio) = state.entries.get(&index) {
+                return Ok(folio.clone());
+            }
+
+            drop(state);
+            #[cfg(unittest)]
+            crate::pagecache_unittest::observe_allocation(self);
+            let folio = match Folio::new_zeroed(index) {
+                Ok(folio) => Arc::new(folio),
+                Err(error) => {
+                    // A competing publication wins even when our speculative
+                    // physical allocation failed.
+                    if let Some(folio) = self.state.lock().entries.get(&index) {
+                        return Ok(folio.clone());
+                    }
+                    return Err(error);
+                }
+            };
+            // This private object cannot block. Preserve folio -> index order
+            // when attaching its allocation-lifetime capacity charge.
+            let mut locked = folio.lock();
+            state = self.state.lock();
+            if state.entries.contains_key(&index) {
+                // Another allocator may have published this index while the
+                // index lock was dropped; reuse that identity without another
+                // capacity charge.
+                drop(state);
+                drop(locked);
+                // Dropping a losing allocation can enter the page allocator,
+                // so keep it outside the mapping index critical section.
+                drop(folio);
+                continue;
+            }
+
+            if let Err(error) = state.insert_folio(index, folio.clone(), &mut locked) {
+                drop(state);
+                drop(locked);
+                drop(folio);
+                return Err(error);
+            }
+            drop(state);
+            drop(locked);
+            return Ok(folio);
+        }
+    }
+
+    fn with_initialized_folio<R>(
+        &self,
+        index: PageIndex,
+        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        f: impl FnOnce(&Arc<Folio>, &mut FolioGuard<'_>) -> KResult<R>,
+    ) -> KResult<R> {
+        // This helper's lock order is folio -> mapping state. After waiting for
+        // the folio, recheck the index because truncate may have detached it.
+        let mut folio = self.get_or_create_folio(index)?;
+        loop {
+            let Some(mut locked) = folio.try_lock() else {
+                #[cfg(unittest)]
+                crate::pagecache_unittest::observe_read_wait(&folio);
+                drop(folio.lock());
+                folio = self.get_or_create_folio(index)?;
+                continue;
+            };
+
+            let state = self.state.lock();
+            if !state.is_current(index, &folio) {
+                drop(state);
+                drop(locked);
+                folio = self.get_or_create_folio(index)?;
+                continue;
+            }
+            drop(state);
+
+            let was_dirty = locked.is_dirty();
+            if !locked.is_uptodate() {
+                read(&mut locked)?;
+                locked.mark_uptodate();
+                if was_dirty != locked.is_dirty() {
+                    self.reconcile_dirty_folio(&folio, &locked);
+                }
+            }
+            let was_dirty = locked.is_dirty();
+            let result = f(&folio, &mut locked);
+            if was_dirty != locked.is_dirty() {
+                self.reconcile_dirty_folio(&folio, &locked);
+            }
+            return result;
+        }
+    }
+
+    /// Initializes and pins one resident folio without exposing cache mutation.
+    ///
+    /// `read` runs without the mapping index lock and is called only when the
+    /// folio is not up to date. The owner must exclude invalidation and validate
+    /// EOF around this operation. The returned reference keeps the allocation
+    /// alive if the cache entry is later evicted.
+    pub fn pin_folio_or_create(
+        &self,
+        index: PageIndex,
+        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+    ) -> KResult<PinnedFolio> {
+        self.with_initialized_folio(index, read, |folio, _locked| {
+            Ok(PinnedFolio::new(folio.clone()))
+        })
+    }
+
     /// Collects up to `count` contiguous resident folios starting at `start`.
     ///
     /// Stops at the first hole or [`FolioBatch::CAPACITY`] without loading pages.
@@ -56,7 +164,11 @@ impl MappingPages {
     /// non-uptodate folio is reported as `None`; partial read data is not exposed.
     /// Dirty-state changes made by `f` are reflected in the cache's writeback
     /// index before this method returns.
-    pub fn with_folio<R>(&self, index: PageIndex, f: impl FnOnce(Option<&mut Folio>) -> R) -> R {
+    pub fn with_folio<R>(
+        &self,
+        index: PageIndex,
+        f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> R,
+    ) -> R {
         loop {
             let state = self.state.lock();
             let Some(folio) = state.entries.get(&index).cloned() else {
@@ -104,8 +216,8 @@ impl MappingPages {
         &self,
         start: PageIndex,
         count: usize,
-        read: impl Fn(&mut Folio) -> KResult<()>,
-        mut visit: impl FnMut(PageIndex, Option<&mut Folio>) -> KResult<ControlFlow<()>>,
+        read: impl Fn(&mut FolioGuard<'_>) -> KResult<()>,
+        mut visit: impl FnMut(PageIndex, Option<&mut FolioGuard<'_>>) -> KResult<ControlFlow<()>>,
     ) -> KResult<usize> {
         let count = count.min(FolioBatch::CAPACITY);
         if count == 0 {
@@ -150,8 +262,8 @@ impl MappingPages {
     fn with_resident_folio<R>(
         &self,
         index: PageIndex,
-        read: impl FnOnce(&mut Folio) -> KResult<()>,
-        f: impl FnOnce(Option<&mut Folio>) -> KResult<R>,
+        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> KResult<R>,
     ) -> KResult<R> {
         loop {
             let state = self.state.lock();
@@ -189,58 +301,10 @@ impl MappingPages {
     pub fn with_folio_or_create<R>(
         &self,
         index: PageIndex,
-        read: impl FnOnce(&mut Folio) -> KResult<()>,
-        f: impl FnOnce(&mut Folio) -> KResult<R>,
+        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        f: impl FnOnce(&mut FolioGuard<'_>) -> KResult<R>,
     ) -> KResult<R> {
-        loop {
-            let mut state = self.state.lock();
-            let folio = if let Some(folio) = state.entries.get(&index) {
-                folio.clone()
-            } else {
-                drop(state);
-                #[cfg(unittest)]
-                crate::pagecache_unittest::observe_allocation(self);
-                let allocated = Folio::new_zeroed(index).map(|folio| Arc::new(Mutex::new(folio)));
-                state = self.state.lock();
-                if state.entries.contains_key(&index) {
-                    // Another allocator published while the index lock was
-                    // released. Even allocation failure must reuse its entry.
-                    drop(state);
-                    drop(allocated);
-                    continue;
-                }
-                let folio = allocated?;
-                if let Err(error) = state.insert_folio(index, folio.clone()) {
-                    // Releasing unused physical storage may enter the
-                    // allocator; keep it outside the cache index mutex.
-                    drop(state);
-                    drop(folio);
-                    return Err(error);
-                }
-                folio
-            };
-            let Some(mut locked) = folio.try_lock() else {
-                drop(state);
-                // Wait without the index lock, then look up residency again:
-                // truncation may have detached this folio while we waited.
-                #[cfg(unittest)]
-                crate::pagecache_unittest::observe_read_wait(&folio);
-                drop(folio.lock());
-                continue;
-            };
-            drop(state);
-            if !locked.is_uptodate() {
-                read(&mut locked)?;
-                locked.mark_uptodate();
-            }
-            let was_dirty = locked.is_dirty();
-            let result = f(&mut locked);
-            let needs_dirty_reconciliation = was_dirty != locked.is_dirty();
-            if needs_dirty_reconciliation {
-                self.reconcile_dirty_folio(&folio, &locked);
-            }
-            return result;
-        }
+        self.with_initialized_folio(index, read, |_folio, locked| f(locked))
     }
 
     /// Publishes a fully initialized folio if its index is still absent.
@@ -250,20 +314,25 @@ impl MappingPages {
     /// unchanged so the caller retains ownership of its data and dirty state.
     /// Dirty state is indexed in the same critical section as publication.
     #[cfg(unittest)]
-    pub fn filemap_add_folio(&self, mut folio: Folio) -> Result<(), Folio> {
+    pub fn filemap_add_folio(&self, folio: Folio) -> Result<(), Folio> {
         let index = folio.index();
+        // Preserve folio -> index lock order even for privately owned pages.
+        let mut locked = folio.lock();
         let mut state = self.state.lock();
         if state.entries.contains_key(&index) {
+            drop(locked);
             return Err(folio);
         }
-        if state.admit_folio().is_err() {
+        if state.admit_folio(&mut locked).is_err() {
+            drop(locked);
             return Err(folio);
         }
-        folio.mark_uptodate();
-        if folio.is_dirty() {
+        locked.mark_uptodate();
+        if locked.is_dirty() {
             state.dirty_marks.insert(index);
         }
-        state.entries.insert(index, Arc::new(Mutex::new(folio)));
+        drop(locked);
+        state.entries.insert(index, Arc::new(folio));
         Ok(())
     }
 }

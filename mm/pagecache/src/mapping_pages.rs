@@ -12,25 +12,26 @@ use alloc::{
 use kerrno::KResult;
 use ksync::Mutex;
 
-use crate::{Folio, PageIndex};
+use crate::{Folio, FolioGuard, PageIndex};
 
-/// Filesystem-owned admission and removal accounting for one mapping.
+/// Filesystem-owned capacity accounting for cache-owned physical pages.
 ///
-/// Callbacks run under the mapping's sleepable index mutex, in task context.
+/// Admission runs under the mapping's sleepable index and folio mutexes.
+/// Release runs after physical deallocation, with neither mutex held. Both
+/// callbacks require sleepable task context; a release may outlive the mapping.
 /// They must not reenter a mapping, lock folios, perform I/O, or acquire locks
-/// whose holders wait for this mapping. Each resident folio contains one page.
-/// The mapping retains one provider, shared by all its entries.
+/// whose holders wait for this mapping. Each folio contains one page. A charge
+/// belongs to the stable folio and survives cache detachment and all clones.
 pub trait CacheResidency: Send + Sync {
-    /// Admits one new cache identity, or fails without changing its accounting.
+    /// Admits one new page before publication, or fails without changing accounting.
     fn try_add_folio(&self) -> KResult<()>;
 
-    /// Releases `count` cache identities after removal or final destruction.
-    /// Physical folio references may outlive their cache identities.
-    fn remove_folios(&self, count: usize);
+    /// Releases one charge after its physical allocation is freed.
+    fn remove_folio(&self);
 }
 
 pub(super) struct MappingPagesState {
-    pub(super) entries: BTreeMap<PageIndex, Arc<Mutex<Folio>>>,
+    pub(super) entries: BTreeMap<PageIndex, Arc<Folio>>,
     residency: Option<Arc<dyn CacheResidency>>,
     // Rust's `BTreeMap` has no per-entry marks, so this derived index carries
     // the enumeration role of Linux `PAGECACHE_TAG_DIRTY`. `Folio::dirty`
@@ -41,40 +42,36 @@ pub(super) struct MappingPagesState {
 }
 
 impl MappingPagesState {
-    pub(super) fn admit_folio(&self) -> KResult<()> {
-        self.residency
-            .as_ref()
-            .map_or(Ok(()), |residency| residency.try_add_folio())
+    pub(super) fn admit_folio(&self, folio: &mut FolioGuard<'_>) -> KResult<()> {
+        self.residency.as_ref().map_or(Ok(()), |residency| {
+            folio.charge_residency(residency.clone())
+        })
     }
 
     pub(super) fn insert_folio(
         &mut self,
         index: PageIndex,
-        folio: Arc<Mutex<Folio>>,
+        folio: Arc<Folio>,
+        locked: &mut FolioGuard<'_>,
     ) -> KResult<()> {
         debug_assert!(!self.entries.contains_key(&index));
-        self.admit_folio()?;
+        self.admit_folio(locked)?;
         self.entries.insert(index, folio);
         Ok(())
     }
 
-    pub(super) fn remove_folio(&mut self, index: PageIndex) {
-        if self.entries.remove(&index).is_some()
-            && let Some(residency) = &self.residency
-        {
-            residency.remove_folios(1);
-        }
+    pub(super) fn remove_folio(&mut self, index: PageIndex, retained: &Arc<Folio>) {
+        debug_assert!(self.is_current(index, retained));
+        // The caller retains this exact object past the index critical section,
+        // so removing the tree reference cannot deallocate or call the provider.
+        self.entries.remove(&index);
     }
 
-    pub(super) fn take_folios(&mut self) -> BTreeMap<PageIndex, Arc<Mutex<Folio>>> {
-        let entries = core::mem::take(&mut self.entries);
-        if let Some(residency) = &self.residency {
-            residency.remove_folios(entries.len());
-        }
-        entries
+    pub(super) fn take_folios(&mut self) -> BTreeMap<PageIndex, Arc<Folio>> {
+        core::mem::take(&mut self.entries)
     }
 
-    pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Mutex<Folio>>) -> bool {
+    pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Folio>) -> bool {
         self.entries
             .get(&index)
             .is_some_and(|current| Arc::ptr_eq(current, candidate))
@@ -119,7 +116,7 @@ impl MappingPages {
         self.state.lock().entries.len() as u64
     }
 
-    pub(super) fn reconcile_dirty_folio(&self, candidate: &Arc<Mutex<Folio>>, folio: &Folio) {
+    pub(super) fn reconcile_dirty_folio(&self, candidate: &Arc<Folio>, folio: &FolioGuard<'_>) {
         let mut state = self.state.lock();
         let index = folio.index();
         if !state.is_current(index, candidate) {

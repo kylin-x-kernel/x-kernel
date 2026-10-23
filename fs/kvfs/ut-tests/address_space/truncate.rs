@@ -4,6 +4,7 @@
 
 //! Size publication, view invalidation and final teardown tests.
 
+use pagecache::FolioGuard;
 use alloc::{
     sync::{Arc, Weak},
     vec,
@@ -12,7 +13,6 @@ use alloc::{
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::Folio;
 use unittest::def_test;
 use vmobj::{
     MappingViewKind, MappingViewNotifier, MappingViewSpec, ObjectInvalidateWork, ObjectViewHit,
@@ -54,7 +54,7 @@ struct PanicWritebackOps;
 static PANIC_WRITEBACK_OPERATIONS: PanicWritebackOps = PanicWritebackOps;
 
 impl AddressSpaceOperations for PanicWritebackOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         folio.data().fill(0);
         Ok(())
     }

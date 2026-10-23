@@ -8,9 +8,9 @@ homepage.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-shear]
-# cfg(unittest) helpers in ut-tests/test_support.rs use kcred::initial_cred;
+# cfg(unittest) helpers use kcred::initial_cred and Linux memfd seal constants;
 # cargo-shear ignores ut-tests sources, but guest UT needs a regular dependency.
-ignored = ["kcred"]
+ignored = ["kcred", "linux-raw-sys"]
 
 [dependencies]
 anon = { workspace = true }
@@ -21,9 +21,11 @@ kvfs = { workspace = true }
 khal = { workspace = true }
 ksync = { workspace = true }
 log = { workspace = true }
+linux-raw-sys = { workspace = true }
 memfs = { workspace = true }
 memaddr = { workspace = true }
 memspace = { workspace = true }
+page_table = { workspace = true }
 unittest = { workspace = true }
 vmobj = { workspace = true }
 

@@ -265,7 +265,7 @@ fn failed_writeback_does_not_redirty_detached_folio() {
             // Model a detached in-flight reference directly: truncate now
             // waits for this callback to finish before removing the folio.
             let mut state = cache_during_io.state.lock();
-            state.remove_folio(0);
+            state.remove_folio(0, &detached);
             state.dirty_marks.remove(&0);
             state.writeback_marks.remove(&0);
             drop(state);
@@ -663,7 +663,8 @@ fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
 
 #[def_test]
 fn readahead_marker_survives_writeback() {
-    let mut folio = Folio::new_zeroed(0).unwrap();
+    let owner = Folio::new_zeroed(0).unwrap();
+    let mut folio = owner.lock();
     folio.mark_readahead();
     folio.start_writeback();
     assert!(!folio.take_readahead());

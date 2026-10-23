@@ -134,3 +134,80 @@ fn shared_file_source_adapter_and_private_runtime_agree_on_file_object() {
 
     assert_eq!(adapter.object(), file_object);
 }
+
+fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
+    use alloc::sync::Arc;
+
+    use khal::trap::PageFaultFlags;
+    use linux_raw_sys::general::F_SEAL_WRITE;
+    use memfs::shmem;
+    use memspace::{MmSpace, VmArea, backend::{alloc_frame, dealloc_frame}};
+
+    let location = shmem::create_memfd_file("shared-relocation-seals", true, kcred::initial_cred())
+        .expect("create sealable relocation file")
+        .into_path();
+    let file = crate::test_support::open_test_file(location, 2);
+    let len = PAGE_SIZE_4K * 2;
+    file.write_from(&vec![0x63; len], &mut 0).expect("seed shared relocation file");
+    let mm = Arc::new(Mutex::new(MmSpace::new_user_empty().expect("new shared relocation mm")));
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let start = VirtAddr::from_usize(0x700_000);
+    let target = start + 0x80_000;
+    let mm_id = mm.lock().mm_id();
+    let invalidate = mm.lock().invalidate_handle(&mm);
+    let runtime = super::new_shared_runtime(super::FileSharedRuntimeSpec {
+        start,
+        len,
+        file: file.clone(),
+        offset: 0,
+        mm_id,
+        invalidate,
+    });
+    let vma = VmArea::new(start, len, flags, flags, runtime.backing_info(), 0,
+        Some(memspace::FileMappingInfo {
+            offset: 0,
+            inode: file.inode().inode(),
+            path: None,
+        }));
+    let mut guard = mm.lock();
+    guard.map_runtime_vma(vma, false, runtime).expect("install shared source");
+    for page in 0..2 {
+        assert!(guard.handle_page_fault(start + page * PAGE_SIZE_4K, PageFaultFlags::READ).is_resolved());
+    }
+    assert_eq!(shmem::add_seals_for_location(file.path(), F_SEAL_WRITE),
+        Err(kvfs::VfsError::ResourceBusy), "active source must block write sealing");
+    let source = guard.resolve_mremap_source(start, len).expect("shared source snapshot");
+    if fail_preparation {
+        let collision = alloc_frame(true, PageSize::Size4K).expect("destination collision frame");
+        guard.page_table_mut().modify()
+            .map(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
+            .expect("force second destination PTE preparation failure");
+        assert!(guard.relocate_mapping(&source, target, len, flags, &mm).is_err());
+        assert!(guard.find_vma(target).is_none());
+        assert!(guard.page_table().query(target).is_err());
+        assert_eq!(guard.page_table().query(target + PAGE_SIZE_4K).unwrap().0, collision);
+        let mut pgtbl = guard.page_table_mut().modify();
+        pgtbl.unmap(target + PAGE_SIZE_4K).expect("remove test collision");
+        pgtbl.finish();
+        drop(pgtbl);
+        dealloc_frame(collision, PageSize::Size4K);
+        guard.unmap(start, len).expect("unmap original source after failed move");
+    } else {
+        guard.relocate_mapping(&source, target, len, flags, &mm)
+            .expect("relocate shared file successfully");
+        assert!(guard.find_vma(start).is_none());
+        guard.unmap(target, len).expect("unmap destination after successful move");
+    }
+    assert_eq!(shmem::add_seals_for_location(file.path(), F_SEAL_WRITE), Ok(()),
+        "retired source and failed destination must not leak writable registrations");
+}
+
+#[def_test]
+fn failed_shared_relocation_releases_destination_seal_registrations() {
+    shared_relocation_releases_seal_registrations(true);
+}
+
+#[def_test]
+fn successful_shared_relocation_releases_source_seal_registrations() {
+    shared_relocation_releases_seal_registrations(false);
+}

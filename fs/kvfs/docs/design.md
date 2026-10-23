@@ -735,7 +735,7 @@ libfs helper。
 
 `AddressSpace` 自己持有 object-id、mapped views、静态共享的 `AddressSpaceOperations` 和
 `i_pages: MappingPages`。该字段直接组合缓存容器，不单独分配 `Arc`，对应 Linux
-`address_space::i_pages`；Folio 自身仍用 `Arc<Mutex<Folio>>` 保持引用和页锁生命周期。
+`address_space::i_pages`；Folio 使用 `Arc<Folio>` 同时保持物理页、稳定 identity 和内部页锁生命周期。
 `read_folio` 从 Folio 自身获取稳定 index；AddressSpace 构造不再传入仅控制诊断的 mapping kind。
 `MappingPages` 不保存 length、object-id 或 views。`AddressSpace` 持有 cache-invalidate
 lock，用于把 readahead 插入、writeback、page_mkwrite 与 truncate 串行到同一个
@@ -1053,20 +1053,43 @@ zero. Tests cover differently sized generations, EOF, backward seeks and
 invalid offsets. Snapshot operations do not advertise `CAN_WRITE`: write-mode
 writes fail with `InvalidInput`; read-only writes fail with `BadFileDescriptor`.
 
+## Pinned file pages for private mappings
+
+`AddressSpace::with_pinned_file_page()` initializes a stable page object while
+holding the invalidation read lock. The callback validates EOF and consumes the
+pin through `map_readonly`, storing its must-use `MappedFolio` token alongside
+the PTE. Before materialization, the provider rejects page offsets at/beyond EOF
+and overflowing indices under the same lock, without allocation or quota charge.
+The callback still validates its exact byte range; its failure retains a valid
+initialized page and its charge for ordinary cache reuse. Truncate submits
+invalidation before detaching cache entries, but a busy
+MM may queue that submission. Only completed PTE removal and TLB invalidation
+permit releasing mapping tokens; cache removal alone does not.
+
+`PinnedFolio` and `MappedFolio` retain the same `Arc<Folio>` that owns its page
+and content mutex. All filesystem callbacks receive a restricted `FolioGuard`;
+cache replacement changes an index reference, not a published object's identity.
+The original page remains copyable under its original lock after detachment,
+without retaining its replacement. Copies do not by themselves prove current EOF
+or freeze bytes against truncate. Pins and tokens share the stable page and its
+physical-allocation quota charge without an additional statistics subsystem.
+
 ## tmpfs quota integration with resident initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
 reservation, synchronous initialization and truncate. The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. The cache stores only ordinary folio handles;
-no entry or folio owns a quota field or a per-page provider reference. Under the
-index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
-including readahead cancellation, truncate and final mapping destruction, calls
-`remove_folios(count)` independently of external physical-page references.
+when constructing an inode mapping. Only a winning new identity calls
+`try_add_folio()` under folio and index mutexes. Its single capacity charge stays
+with the stable folio after cache detachment, while any pin, mapping token or
+batch retains the allocation. Clones do not charge again. Final release frees
+the physical page before returning capacity, outside both mutexes; the charge
+keeps its provider alive independently of mapping destruction.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
-index -> quota limit; remount and statfs never acquire a cache index lock.
+folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
 
 The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
-Unconsumed readahead reservations release their charges before unlocking.
+Unconsumed readahead reservations detach while locked and return capacity only
+after their final allocation reference is dropped outside the locks.

@@ -17,7 +17,10 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 所有页内存 unsafe 操作集中在私有 `src/folio.rs`，字段不向其他模块开放。
 
 1. `Folio::new_zeroed(index)`：对页分配器返回的独占可写页清零。
-2. `Folio::data()`：在持有 `&mut Folio` 时构造独占的页大小 mutable slice。
+2. `Folio::data()`：仅允许未发布页的独占 owner 借用；已发布页只由
+   `FolioGuard::data()` 在稳定页对象自身的 mutex 下访问。
+3. `PinnedFolio::copy_to_uninit()`：锁住 pin 持有的同一稳定页对象后复制完整初始化页。
+   缓存摘除或替换不改变其分配或锁，允许继续复制原页；目标范围由独占切片限定。
 
 ## 内存安全不变量
 
@@ -29,6 +32,8 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
   整个 dirty range 或被截断的页数增长；
 - 一个 page index 最多关联一个 cached folio；发布前校验 tree key 与 folio immutable index 一致；
 - folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
+- pinned-folio copy-to-uninit 在稳定页对象自身的锁内读取完整初始化页；
+  成功时完整写入 MaybeUninit 目标后才返回；
 - 移除先在 folio lock 下永久标记失效，再删除索引；普通和批次访问在同一锁下校验，
   失效候选不执行 callback，普通路径重新查询，成功 callback 不重放；
 - 批次读取 callback 只读取数据及更新预读标记，不修改 dirty 或驻留状态；
@@ -114,17 +119,42 @@ callback，该 callback 不得重入同一个 `MappingPages`；batch writeback �
 预读标记的设置与消费要求独占 folio 访问；标记只影响性能策略，不能替代 uptodate
 或 resident 身份检查。缓存历史查询返回瞬时提示，不延长驻留期或授权发布。
 
+## Stable folio lifetime
+
+- `Arc<Folio>` unifies physical ownership, immutable identity and the mutex that
+  protects every safe content access. Public callbacks receive only a
+  `FolioGuard`; its fields are private and it cannot yield or replace the owner.
+- Pins refer only to this object. A replaced index cannot redirect their lock
+  or accidentally retain the replacement page. The physical address is derived
+  from this object's stable allocation.
+- `PinnedFolio::map_readonly` consumes the pin and returns a must-use
+  `MappedFolio` token. The unsafe publication contract requires EOF validation
+  under the invalidate guard and retention of the returned token through PTE
+  removal and completed TLB invalidation. Clone tokens share the same object.
+- WRITE, DEVICE, UNCACHED and SHARED attributes are rejected before publication.
+  Existing raw physical-address consumers are migrated in follow-up consumers;
+  this provider change does not authorize writable user aliases.
+- Copying takes a fixed single-page array, so an incorrect length cannot reach a
+  kernel panic. A retained detached page remains copyable, serialized with that object's
+  writers, and initializes the full output. It neither proves current EOF nor
+  promises an immutable snapshot. Buffered resident traversal instead rejects
+  invalidated entries because it promises current cache data.
+- Ordinary shared ownership retains pages without a separate pin counter or registry.
+
 ## Cache residency lifecycle
 
 The filesystem owns capacity policy and supplies one `CacheResidency` provider
-when constructing an inode mapping. The cache stores only ordinary folio handles;
-no entry or folio owns a quota field or a per-page provider reference. Under the
-index mutex, only a winning new identity calls `try_add_folio()`. Every removal,
-including readahead cancellation, truncate and final mapping destruction, calls
-`remove_folios(count)` independently of external physical-page references.
+when constructing an inode mapping. Only a winning publication calls
+`try_add_folio()` under folio and index mutexes; its charge is attached to the
+stable folio. Detachment, truncate and mapping destruction cannot release quota
+while pins, tokens or batches retain that physical page. The last reference
+frees the allocation before returning its single charge, with neither mutex
+held. Failed admissions and losing allocations own no charge; failed reads keep
+the resident reservation charged. A charge retains its provider past mapping
+destruction, so delayed release cannot use a destroyed accounting object.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
-index -> quota limit; remount and statfs never acquire a cache index lock.
+folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
 
 

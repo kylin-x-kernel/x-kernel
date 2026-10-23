@@ -76,7 +76,7 @@
 | `MADV_DONTNEED` 误伤 file source object | 当前只接 pure private anon 和 file-private anon result object |
 | `msync` 把 private COW 页写回原文件 | `MmSpace::msync_range()` 只让 shared file runtime 执行 writeback |
 | `MS_INVALIDATE` 被假实现成成功 | 当前返回 `OperationNotSupported` |
-| `mremap` move 后旧源 teardown 销毁目标仍需的 private backing | move 分支只做 `map_relocated_snapshot` + `move_pages` + `drop_mapping_metadata` |
+| `mremap` move 失败留下半完成源映射，或旧源 teardown 销毁目标仍需的 private backing | 各 move 分支统一使用 `relocate_mapping` 事务；准备失败保留源状态并撤销目标，成功仅退休源 metadata |
 
 ## 故障模式与影响分析（FMEA）
 

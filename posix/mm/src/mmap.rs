@@ -604,11 +604,6 @@ bitflags::bitflags! {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CG-028-focused-functions: TODO(cg): legacy mremap; split argument checks, in-place \
-              resize and move paths"
-)]
 pub fn sys_mremap(
     addr: usize,
     old_size: usize,
@@ -676,13 +671,7 @@ pub fn sys_mremap(
                 .aspace_mut()
                 .unmap(VirtAddr::from(new_addr), new_size)?;
             let target_addr = VirtAddr::from(new_addr);
-            mapping.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags)?;
-            mapping
-                .aspace_mut()
-                .move_pages(addr, target_addr, move_size, page_size)?;
-            mapping
-                .aspace_mut()
-                .drop_mapping_metadata(addr, move_size)?;
+            mapping.relocate_mapping(&source, target_addr, new_size, mapping_flags)?;
             if mremap_flags.keeps_source_mapping() {
                 let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
                 mapping.aspace_mut().map_with_max_flags(
@@ -703,13 +692,9 @@ pub fn sys_mremap(
                 .aspace_mut()
                 .find_relocation_target(addr, new_size, page_size)?;
 
-            mapping.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags)?;
-            mapping
-                .aspace_mut()
-                .move_pages(addr, target_addr, old_size, page_size)?;
-            // Old mapping: retire the moved source role, then install a fresh
-            // anonymous mapping at the original address.
-            mapping.aspace_mut().drop_mapping_metadata(addr, old_size)?;
+            mapping.relocate_mapping(&source, target_addr, new_size, mapping_flags)?;
+            // The old mapping's role was retired after the PTE transfer; install
+            // fresh anonymous backing at the original address.
             let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
             mapping.aspace_mut().map_with_max_flags(
                 addr,
@@ -756,12 +741,7 @@ pub fn sys_mremap(
             .aspace_mut()
             .find_relocation_target(addr, new_size, page_size)?;
 
-        let move_size = old_size.min(new_size);
-        mapping.map_relocated_snapshot(&source, target_addr, new_size, mapping_flags)?;
-        mapping
-            .aspace_mut()
-            .move_pages(addr, target_addr, move_size, page_size)?;
-        mapping.aspace_mut().drop_mapping_metadata(addr, old_size)?;
+        mapping.relocate_mapping(&source, target_addr, new_size, mapping_flags)?;
 
         Ok(target_addr.as_usize() as _)
     })

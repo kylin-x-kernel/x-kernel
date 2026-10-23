@@ -19,7 +19,7 @@ use kerrno::{KResult, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError, WeakPollSet};
 use linux_raw_sys::general::O_ACCMODE;
 use log::warn;
-use pagecache::{Folio, PageIndex};
+use pagecache::{FolioGuard, PageIndex};
 
 use crate::{
     AddressSpace, DirContext, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard, NodeFlags,
@@ -840,7 +840,7 @@ impl VfsFile {
     pub fn page_mkwrite<R>(
         &self,
         index: PageIndex,
-        update_mapping: impl FnOnce(&mut Folio) -> VfsResult<R>,
+        update_mapping: impl FnOnce(&mut FolioGuard<'_>) -> VfsResult<R>,
     ) -> VfsResult<R> {
         self.mapping().page_mkwrite(
             index,

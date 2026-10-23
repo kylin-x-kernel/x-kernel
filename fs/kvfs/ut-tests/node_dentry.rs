@@ -2,12 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use pagecache::FolioGuard;
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ktime_types::SystemTime;
 use memaddr::PAGE_SIZE_4K;
-use pagecache::Folio;
 use unittest::{assert, def_test};
 
 use super::{Dentry, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive};
@@ -156,7 +156,7 @@ struct MockAddressSpaceOperations;
 static MOCK_ADDRESS_SPACE_OPERATIONS: MockAddressSpaceOperations = MockAddressSpaceOperations;
 
 impl AddressSpaceOperations for MockAddressSpaceOperations {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut Folio) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
         let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
         let data = inode.private::<MockFileOps>()?.data.lock();
         let start = folio

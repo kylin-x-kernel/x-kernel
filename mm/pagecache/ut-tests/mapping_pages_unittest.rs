@@ -99,7 +99,7 @@ fn publication_preserves_resident_data_and_missing_run_boundaries() {
     assert_eq!(rejected.paddr(), incoming_addr);
     assert!(rejected.is_dirty());
     core::assert_eq!(&rejected.data()[..5], b"stale");
-    rejected.clear_dirty();
+    rejected.lock().clear_dirty();
     cache.with_folio(1, |folio| {
         let folio = folio.unwrap();
         core::assert_eq!(&folio.data()[..6], b"winner");

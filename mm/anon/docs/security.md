@@ -42,3 +42,9 @@ Invariants:
 - runtime code must not infer anonymous object identity or private page
   ownership from ad hoc runtime-local frame tables when an explicit
   `Anon*Object` is available.
+
+## 首次 COW 发布边界
+
+`commit_after` 的运行时回调必须在返回错误时保持原 PTE 不变。对象槽为空
+的复核、PTE compare/replace 与 owned 匿名页发布由同一对象锁覆盖；失败
+不接管目标帧。文件缓存 pin 不可作为匿名槽参与排他性判断或匿名帧回收。

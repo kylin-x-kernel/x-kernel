@@ -108,6 +108,7 @@ fn private_backend_madvise_then_fork_then_write_fault_refaults_clean_child_page(
             PAGE_SIZE_4K,
             PrivateForkMaterialize {
                 runtime_start: start,
+                object_base: 0,
                 cow_flags: flags - MappingFlags::WRITE,
                 page_size: PageSize::Size4K,
             },
@@ -123,6 +124,7 @@ fn private_backend_madvise_then_fork_then_write_fault_refaults_clean_child_page(
 
     let child = PrivateBackend {
         start,
+        object_start: 0,
         size: PageSize::Size4K,
         object: child_object,
         object_view: None,
@@ -253,6 +255,7 @@ fn private_fork_rolls_back_parent_write_protect_when_child_map_fails() {
                 PAGE_SIZE_4K,
                 PrivateForkMaterialize {
                     runtime_start: start,
+                    object_base: 0,
                     cow_flags: flags - MappingFlags::WRITE,
                     page_size: PageSize::Size4K,
                 },
@@ -312,6 +315,7 @@ fn private_cow_write_fault_replaces_parent_and_preserves_child_page() {
             PAGE_SIZE_4K,
             PrivateForkMaterialize {
                 runtime_start: start,
+                object_base: 0,
                 cow_flags: flags - MappingFlags::WRITE,
                 page_size: PageSize::Size4K,
             },
@@ -388,6 +392,7 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
             PAGE_SIZE_4K,
             PrivateForkMaterialize {
                 runtime_start: start,
+                object_base: 0,
                 cow_flags: flags - MappingFlags::WRITE,
                 page_size: PageSize::Size4K,
             },
@@ -455,6 +460,7 @@ fn private_cow_unmapped_write_fault_reports_retry_when_child_map_conflicts() {
             PAGE_SIZE_4K,
             PrivateForkMaterialize {
                 runtime_start: start,
+                object_base: 0,
                 cow_flags: flags - MappingFlags::WRITE,
                 page_size: PageSize::Size4K,
             },

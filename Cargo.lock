@@ -1540,10 +1540,12 @@ dependencies = [
  "khal",
  "ksync",
  "kvfs",
+ "linux-raw-sys",
  "log",
  "memaddr",
  "memfs",
  "memspace",
+ "page_table",
  "unittest",
  "vmobj",
 ]

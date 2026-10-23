@@ -44,7 +44,8 @@
 - 新 inode 的 UID/GID 必须来自 `inode_init_owner()`；setgid 父目录的 GID 与 mode
   传播必须在 inode 发布前完成。
 - filesystem type factory 不得把 per-mount policy 写入共享 superblock flags；
-- mounted tmpfs quota 只按实际 resident folio 计数，不得把文件逻辑长度或 sparse
+- mounted tmpfs quota 按已准入物理 folio 计数，包括摘除后被 pin、mapping token
+  或 read batch 保留的页；不得把文件逻辑长度或 sparse
   hole 当作已用页；buffered read 的 hole 直接零填充、不 materialize、不 charge；
   mmap 读缺页仍走 folio materialization 并 charge quota；
 - quota 不预留物理内存；remount 不得降到当前用量以下，也不得把 unlimited 实例
@@ -58,7 +59,8 @@
 - inode 与额外硬链接在发布前收费，最后一个名字删除后仍有引用时保留 inode
   额度；失败发布撤销目录项并归还额度；
 - 页和 inode 限额在同一 stats 写锁下全部校验后再更新，失败时两项都不改变；
-- quota charge/release 必须由 mapping ownership 驱动：folio 退出 cache 时释放，
+- quota charge/release 必须由物理 folio 生命周期驱动：成功发布时 charge，
+  最后保留引用释放物理页后退额；退出 cache 不能提前释放，
   memfs 不得维护第二套 page accounting。
 
 ## Thread Safety
@@ -72,15 +74,17 @@
   `MappingPages` storage。
 - Mount capacity policy lives in memfs `quota.rs`. Its lifecycle provider is
   fixed during inode construction and retained once by each mapping.
-- Admission/removal run under the cache index mutex and may take the quota limit
-  lock; they never enter mappings or lock folios. Remount/statfs never acquire
+- Admission takes folio -> cache index -> quota limit locks; final physical
+  release returns capacity outside cache locks. Callbacks never enter mappings
+  or lock folios. Remount/statfs never acquire
   cache locks. One stats snapshot supplies both page and inode capacities.
 - Link removal orders locks as metadata → stats. Final inode destruction releases
   the slab lock before returning its allocation charge; admission releases stats
   before taking slab. The number allocator holds no inode reference, so final
   reclamation follows owned references without a reference-count snapshot.
-- Every winning identity is charged once, and removal returns capacity even if
-  an external folio reference survives. No page or entry carries a quota Arc.
+- Every winning identity is charged once. The stable folio retains its charge
+  and provider reference until physical deallocation; clones neither charge
+  again nor allow cache removal to return capacity early.
 - Sparse-hole handling belongs to memfs's read operation. Cache access retries
   retained initialization errors and excludes truncate through EOF/data copying.
 
@@ -115,8 +119,8 @@
      page quota；quota 满时 materialization 返回 `StorageFull`。
 
 8. quota 计数与实际 folio 生命周期分离。
-   - 防护：quota charge/release 由 page-cache mapping ownership 驱动；truncate、
-     final eviction 和插入失败使用同一路径，并有回归测试。
+   - 防护：quota charge/release 由物理 folio 生命周期驱动；truncate、final eviction
+     后残留 pin/token/batch 仍保持 charge，最后释放才退额，并有回归测试。
 
 9. memfd 因模式过窄被 exec 拒绝（runc/crun self-reexec）。
    - 防护：`create_memfd_file()` 创建 `0o777` 文件；exec 的 `MAY_EXEC` 因此通过。
@@ -153,8 +157,8 @@
 - mounted tmpfs quota 不提供 swap-out；无 swap 时已 resident 的 InMemory 数据仍
   不能被通用 clean-page reclaim 丢弃。
 - anonymous shmem/memfd instance 不套用 mounted tmpfs 的 page/inode 默认限额。
-- resident-folio quota 不覆盖 inode/dentry 元数据和 symlink target String（包括长目标），
-  也不严格限制未发布候选页或已脱离 mapping 的外部物理引用。inode-space
+- physical-folio quota 不覆盖 inode/dentry 元数据和 symlink target String（包括长目标），
+  也不严格限制未发布候选页；已脱离 mapping 的外部物理引用仍计入原配额。inode-space
   配额限制节点及额外链接数量，不代表实际堆字节数；当前不支持 xattr。
 - `memfs` regular-file 数据路径依赖 KFS `AddressSpace` 及其私有 page-cache storage；
   `MemoryNode` 自身不直接保存普通文件数据页。
@@ -171,7 +175,7 @@
 - filesystem type factory 是否只创建 superblock，而不决定 per-mount flags。
 - tmpfs 默认值是否为 allocatable physical pages 的一半，且未预留物理内存。
 - `size`/`nr_blocks` 解析是否拒绝未知或 malformed 选项，`0` 是否表达 unlimited。
-- quota 是否按实际 folio 计数，truncate/final eviction 是否释放容量。
+- quota 是否按物理 folio 计数，truncate/final eviction 是否等待最后引用才归还容量。
 - `statfs` 是否报告 quota 总量和剩余量。
 
 Finite inode limits reject excess creation and additional hard links with

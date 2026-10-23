@@ -36,6 +36,13 @@ use crate::{
 /// anonymous/private objects rather than inside the VMA.
 pub trait VmRuntimeOps: Send + Sync {
     fn backing_info(&self) -> VmBackingInfo;
+    /// Resolves a private file mapping's anonymous byte coordinate.
+    ///
+    /// Split VMAs share the runtime origin; relocation supplies a new runtime
+    /// with its retained anonymous origin instead of duplicating it in the VMA.
+    fn private_anon_offset_for(&self, _addr: VirtAddr) -> Option<u64> {
+        None
+    }
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult;
     fn unmap(&self, range: VirtAddrRange, pgtbl: &mut PageTableMut) -> KResult;
     fn on_protect(
@@ -44,6 +51,16 @@ pub trait VmRuntimeOps: Send + Sync {
         flags: MappingFlags,
         pgtbl: &mut PageTableMut,
     ) -> KResult<MappingFlags>;
+    /// Releases runtime references after the range's PTEs and TLB entries are gone.
+    ///
+    /// Called with MM serialization held. Implementations must release only
+    /// references belonging to this range and must not re-enter this MM or
+    /// invalidate more PTEs.
+    fn on_invalidate_complete(&self, _range: VirtAddrRange) {}
+    /// Rolls back or retires mapping-level registrations without touching PTEs
+    /// or anonymous backing slots. This is distinct from unmap and is used by
+    /// transactional mremap when a runtime registered external policy state.
+    fn on_mapping_retired(&self, _range: VirtAddrRange) {}
     fn madvise_dontneed(
         &self,
         _vma: &VmArea,
@@ -68,7 +85,9 @@ pub trait VmRuntimeOps: Send + Sync {
     ) -> FaultCompletionResult;
     fn relocate_for_mremap(
         &self,
+        source_range: VirtAddrRange,
         new_start: VirtAddr,
+        new_len: usize,
         new_mm_id: u64,
         aspace: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,
@@ -255,6 +274,17 @@ impl VmRuntimeRef {
         }
     }
 
+    pub(crate) fn on_invalidate_complete(&self, range: VirtAddrRange) {
+        match self {
+            Self::Linear(inner) => VmRuntimeOps::on_invalidate_complete(inner, range),
+            Self::AnonShared(inner) => VmRuntimeOps::on_invalidate_complete(inner, range),
+            Self::AnonPrivate(inner) => VmRuntimeOps::on_invalidate_complete(inner, range),
+            Self::FileShared(inner) | Self::FilePrivate(inner) => {
+                inner.on_invalidate_complete(range)
+            }
+        }
+    }
+
     pub(crate) fn register_object_views(
         &self,
         mm_id: u64,
@@ -294,6 +324,15 @@ impl VmRuntimeRef {
             Self::AnonPrivate(inner) => VmRuntimeOps::unmap(inner, range, pgtbl),
             Self::FileShared(inner) => inner.unmap(range, pgtbl),
             Self::FilePrivate(inner) => inner.unmap(range, pgtbl),
+        }
+    }
+
+    pub(crate) fn on_mapping_retired(&self, range: VirtAddrRange) {
+        match self {
+            Self::Linear(inner) => VmRuntimeOps::on_mapping_retired(inner, range),
+            Self::AnonShared(inner) => VmRuntimeOps::on_mapping_retired(inner, range),
+            Self::AnonPrivate(inner) => VmRuntimeOps::on_mapping_retired(inner, range),
+            Self::FileShared(inner) | Self::FilePrivate(inner) => inner.on_mapping_retired(range),
         }
     }
 
@@ -359,20 +398,43 @@ impl VmRuntimeRef {
 
     pub(crate) fn relocate_for_mremap(
         &self,
+        source_range: VirtAddrRange,
         new_start: VirtAddr,
+        new_len: usize,
         new_mm_id: u64,
         aspace: &Arc<Mutex<MmSpace>>,
         invalidate: Option<InvalidateHandle>,
     ) -> KResult<Self> {
         match self {
             Self::Linear(_) => Err(kerrno::KError::OperationNotSupported),
-            Self::AnonShared(inner) => Ok(Self::AnonShared(inner.relocated(new_start))),
-            Self::AnonPrivate(inner) => Ok(Self::AnonPrivate(inner.relocated(new_start))),
+            Self::AnonShared(inner) => {
+                if new_len > source_range.size() {
+                    return Err(kerrno::KError::InvalidInput);
+                }
+                Ok(Self::AnonShared(inner.relocated(source_range, new_start)))
+            }
+            Self::AnonPrivate(inner) => {
+                Ok(Self::AnonPrivate(inner.relocated(source_range, new_start)))
+            }
             Self::FileShared(inner) => inner
-                .relocate_for_mremap(new_start, new_mm_id, aspace, invalidate)
+                .relocate_for_mremap(
+                    source_range,
+                    new_start,
+                    new_len,
+                    new_mm_id,
+                    aspace,
+                    invalidate,
+                )
                 .map(Self::new_file_shared),
             Self::FilePrivate(inner) => inner
-                .relocate_for_mremap(new_start, new_mm_id, aspace, invalidate)
+                .relocate_for_mremap(
+                    source_range,
+                    new_start,
+                    new_len,
+                    new_mm_id,
+                    aspace,
+                    invalidate,
+                )
                 .map(Self::new_file_private),
         }
     }
@@ -687,6 +749,22 @@ impl VmArea {
         self.page_offset
     }
 
+    pub(crate) fn private_anon_offset_for(&self, addr: VirtAddr) -> Option<u64> {
+        match self.backing.kind() {
+            VmBackingKind::FilePrivate { .. } => match self.runtime.as_ref()? {
+                VmRuntimeRef::FilePrivate(runtime) => runtime.private_anon_offset_for(addr),
+                _ => None,
+            },
+            VmBackingKind::AnonymousPrivate { .. } => {
+                let relative = addr.as_usize().checked_sub(self.start().as_usize())? as u64;
+                self.page_offset
+                    .checked_mul(PAGE_SIZE_4K as u64)?
+                    .checked_add(relative)
+            }
+            _ => None,
+        }
+    }
+
     /// Returns file-backed metadata for proc-style introspection, if present.
     pub fn file_mapping(&self) -> Option<&FileMappingInfo> {
         self.file.as_ref()
@@ -764,6 +842,13 @@ impl VmArea {
             && self.inheritance == next.inheritance
             && self.backing == next.backing
             && self.next_page_offset() == Some(next.page_offset)
+            && (!matches!(self.backing.kind(), VmBackingKind::FilePrivate { .. })
+                || self
+                    .private_anon_offset_for(self.start())
+                    .and_then(|offset| offset.checked_add(self.size() as u64))
+                    .is_some_and(|offset| {
+                        next.private_anon_offset_for(next.start()) == Some(offset)
+                    }))
             && self.file_mapping_contiguous_with(next)
             && self.has_same_known_runtime_kind(next)
     }

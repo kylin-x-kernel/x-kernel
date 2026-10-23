@@ -4,11 +4,13 @@
 
 //! Cached folio resize and final teardown.
 
+use alloc::sync::Arc;
+
 use kerrno::KResult;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{
-    Folio, FolioBatch, MappingPages, PageIndex, mapping_pages::MappingPagesState,
+    Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, mapping_pages::MappingPagesState,
     writeback::wait_on_writeback,
 };
 
@@ -80,7 +82,7 @@ impl MappingPages {
                     continue;
                 };
                 if !folio.is_under_writeback() && state.is_current(folio.index(), candidate) {
-                    Self::discard_folio(&mut state, &mut folio);
+                    Self::discard_folio(&mut state, candidate, &mut folio);
                 }
             }
         }
@@ -110,17 +112,21 @@ impl MappingPages {
                     if folio.is_under_writeback() {
                         continue;
                     }
-                    Self::discard_folio(&mut state, &mut folio);
+                    Self::discard_folio(&mut state, candidate, &mut folio);
                     break;
                 }
             }
         }
     }
 
-    pub(super) fn discard_folio(state: &mut MappingPagesState, folio: &mut Folio) {
+    pub(super) fn discard_folio(
+        state: &mut MappingPagesState,
+        retained: &Arc<Folio>,
+        folio: &mut FolioGuard<'_>,
+    ) {
         let index = folio.index();
         folio.invalidate();
-        state.remove_folio(index);
+        state.remove_folio(index, retained);
         state.dirty_marks.remove(&index);
         state.writeback_marks.remove(&index);
     }
