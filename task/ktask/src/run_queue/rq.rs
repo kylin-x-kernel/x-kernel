@@ -145,8 +145,12 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         #[cfg(feature = "sched_stat")]
         sched_stat_inc(&sched_stat_cpu(self.inner.cpu_id).add_task);
         let now_ns = khal::time::monotonic_time_nanos();
-        let decision = self.inner.publish_task(task, EnqueueKind::New, now_ns);
-        self.inner.kick(decision);
+        if let Some(decision) = self
+            .inner
+            .publish_or_migrate(task, EnqueueKind::New, now_ns)
+        {
+            self.inner.kick(decision);
+        }
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -685,7 +689,18 @@ impl RunQueue {
     /// Spawn, wake, idle-pull, and affinity migrate-in all go through here so
     /// `cpu_id` / `nr_home` move with the enqueue. Callers must not
     /// `Scheduler::enqueue` a published task without this.
-    pub(super) fn publish_task(&self, task: KtaskRef, kind: EnqueueKind, now_ns: u64) -> Decision {
+    ///
+    /// `Err` returns the task unqueued when this CPU is outside its cpumask.
+    /// `cpu_id` and `nr_home` stay with the previous owner: this queue does
+    /// not take over a task it rejects. `set_task_affinity` is mask-only for
+    /// a task on no run queue, so the CPU picked by `select_run_queue` may
+    /// already be forbidden here.
+    pub(super) fn publish_task(
+        &self,
+        task: KtaskRef,
+        kind: EnqueueKind,
+        now_ns: u64,
+    ) -> Result<Decision, KtaskRef> {
         let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         self.with_sched_rank(|s| {
             // Entity lock after the RQ lock. `cpu_id` changes here, still
@@ -693,31 +708,68 @@ impl RunQueue {
             // the old id retries instead of editing the task on the wrong RQ.
             // The guard ends before `task` moves into `enqueue`.
             {
-                let _entity = task.lock_sched_entity();
+                let entity = task.lock_sched_entity();
+                // `set_task_affinity` stores the mask before it takes this
+                // lock. Reject before ownership so `task_rq_lock` still
+                // follows the previous owner.
                 #[cfg(feature = "smp")]
-                {
+                let is_cpu_allowed = task.cpumask().get(self.cpu_id.as_usize());
+                #[cfg(feature = "smp")]
+                if is_cpu_allowed {
                     self.attach_owner(&task);
                     self.charge_home(&task);
                 }
+                drop(entity);
+                #[cfg(feature = "smp")]
+                if !is_cpu_allowed {
+                    return Err(task);
+                }
             }
-            s.enqueue(task, kind, now_ns)
+            Ok(s.enqueue(task, kind, now_ns))
         })
+    }
+
+    /// [`Self::publish_task`], moving a forbidden task to an allowed CPU.
+    ///
+    /// `None` means `migrate_entry` already published and kicked elsewhere;
+    /// the caller must not kick this run queue. That publish uses the same
+    /// `kind`: a wake still throttles a spent Deadline budget, and a first
+    /// publish still places the entity.
+    fn publish_or_migrate(
+        &self,
+        task: KtaskRef,
+        kind: EnqueueKind,
+        now_ns: u64,
+    ) -> Option<Decision> {
+        match self.publish_task(task, kind, now_ns) {
+            Ok(decision) => Some(decision),
+            #[cfg(feature = "smp")]
+            Err(rejected) => {
+                super::migrate::migrate_entry(rejected, kind);
+                None
+            }
+            #[cfg(not(feature = "smp"))]
+            Err(_) => unreachable!("UP publish never rejects a placement"),
+        }
     }
 
     /// Enqueue a non-current ready task onto this run queue (migrate-in).
     ///
     /// Running tasks leave through yield / preempt / block / migrate / exit.
+    /// `Err` is the same rejection as [`Self::publish_task`].
     #[cfg(feature = "smp")]
-    pub(super) fn enqueue_task(&self, task: KtaskRef) -> Decision {
+    pub(super) fn enqueue_task(&self, task: KtaskRef) -> Result<Decision, KtaskRef> {
         let now_ns = khal::time::monotonic_time_nanos();
         self.publish_task(task, EnqueueKind::MigrateIn, now_ns)
     }
 
     /// Enqueue a ready task, optionally arming WF_SYNC in the same lock as
     /// NEXT_BUDDY nomination (Linux `ttwu` / `check_preempt_wakeup`).
-    fn enqueue_ready_task(&self, task: KtaskRef, is_wake_sync: bool) -> Decision {
+    ///
+    /// `None` as in [`Self::publish_or_migrate`].
+    fn enqueue_ready_task(&self, task: KtaskRef, is_wake_sync: bool) -> Option<Decision> {
         let now_ns = khal::time::monotonic_time_nanos();
-        self.publish_task(task, EnqueueKind::Wake { sync: is_wake_sync }, now_ns)
+        self.publish_or_migrate(task, EnqueueKind::Wake { sync: is_wake_sync }, now_ns)
     }
 
     /// Attach a local helper task and switch to it without enqueueing.
@@ -747,8 +799,9 @@ impl RunQueue {
     /// Used for non-current tasks (unblock). Running tasks use `leave_current`.
     /// `is_wake_sync` arms EEVDF WF_SYNC in the same scheduler lock as enqueue.
     ///
-    /// Returns whether the transition was rejected, enqueued immediately, or
-    /// handed to the CPU completing the task's switch-out.
+    /// Returns whether the transition was rejected, enqueued, or handed to the
+    /// CPU completing the task's switch-out. `Enqueued` with no decision means
+    /// the task was migrated to another CPU and this queue must not be kicked.
     pub(super) fn put_task_with_state(
         &self,
         task: KtaskRef,
@@ -781,7 +834,7 @@ impl RunQueue {
                 let _ = task.take_wake_cpu();
             }
             let decision = self.enqueue_ready_task(task, is_wake_sync);
-            (WakeEnqueue::Enqueued, Some(decision))
+            (WakeEnqueue::Enqueued, decision)
         } else {
             (WakeEnqueue::Rejected, None)
         }
@@ -1036,8 +1089,9 @@ fn clear_prev_task_on_cpu(current_rq: &RunQueue, prev_task: KtaskRef) {
     } else {
         get_run_queue(target_cpu.as_usize())
     };
-    let decision = target_rq.enqueue_ready_task(prev_task, is_wake_sync);
-    if resched {
+    if let Some(decision) = target_rq.enqueue_ready_task(prev_task, is_wake_sync)
+        && resched
+    {
         target_rq.kick(decision);
     }
 }
@@ -1074,19 +1128,14 @@ fn apply_fair_nice(
     sched.set_attr(task, attr, now_ns).ok()
 }
 
-/// Dequeue a `Ready` task from the run queue that currently owns it.
+/// Run `f` under the scheduler lock of the run queue that owns `task`.
 ///
 /// `cpu_id` is rechecked after the scheduler lock and the entity lock. A
-/// concurrent idle-pull that moves the task makes this retry on the new
-/// owner instead of dequeuing under the previous run queue.
+/// concurrent idle-pull that moves the task retries on the new owner.
 #[cfg(feature = "smp")]
-pub(super) fn dequeue_ready_on_owner(task: &KtaskRef) -> Option<KtaskRef> {
-    let now_ns = khal::time::monotonic_time_nanos();
+pub(super) fn with_owner_sched<R>(task: &KtaskRef, f: impl FnOnce(&mut Scheduler) -> R) -> R {
     let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
-    if !task.is_ready() {
-        return None;
-    }
-    locked.scheduler().dequeue(task, now_ns)
+    f(locked.scheduler())
 }
 
 /// Run-queue lock for `task`, retried if `cpu_id` moves.

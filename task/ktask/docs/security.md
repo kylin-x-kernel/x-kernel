@@ -484,7 +484,8 @@ Invariants:
 | T-05 | Diagnostic slot reuse races a reader or stale token | High | Early retirement/replacement | Counted immutable borrows, closed admission before removal, one-shot registration token, worker/NMI-safe Weak release. |
 | T-06 | Snapshot race reads the wrong trap frame | Medium | Concurrent snapshot sessions | `begin`/`finish` session serialization and per-CPU slot isolation. |
 | T-07 | Affinity migrate race drops a task | Medium | Concurrent mutation during migrate | `migrate_current` is under the run-queue critical section. `enforce_affinity_placement` holds the RQ lock for `remove_task` of a queued ready task, is mask-only when the task does not occupy a CPU, and waits for remote preempt to finish a running task. |
-| T-07a | `setaffinity` succeeds but the task stays on a forbidden CPU | High | Non-current path only writes the mask | Success requires the task not occupy a forbidden CPU (running/queued must move; unpublished is mask-only); otherwise `false`/`EBUSY`. `preempt_resched`/`yield` force affinity migrate. |
+| T-07f | Affinity migrate publishes a still-`on_cpu` task | High | Yield/preempt requeue as `Ready` before `switch_to`; a remote `setaffinity` dequeues and enqueues on another CPU, which resumes the stack the old CPU is still saving | `dequeue_ready_task_waiting_off_cpu` dequeues only when `!on_cpu` under the source RQ lock; otherwise it releases the lock and spins until the old CPU clears `on_cpu`. A detached seat (`dequeue` returns `None` while already off-CPU) returns immediately, so a prepared task stays mask-only. Idle is never queued and is excluded from the wait. |
+| T-07a | `setaffinity` succeeds but the task stays on a forbidden CPU | High | Non-current path only writes the mask, or a deferred wake enqueues on the CPU chosen before the mask change | Success requires the task not occupy a forbidden CPU (running/queued must move; unpublished is mask-only); otherwise `false`/`EBUSY`. `preempt_resched`/`yield` force affinity migrate. `publish_task` rejects a forbidden CPU under the scheduler and entity locks before `attach_owner` and `enqueue`, so `cpu_id` and `nr_home` stay with the previous owner. The caller reselects through `migrate_entry` with the same `EnqueueKind`. Residual: a caller already IRQ-off retries inside that section, so a moving mask can delay timers and IPIs until a publish succeeds. Residual: `enforce_affinity_placement` samples `cpu_id` before the owner lock, so an in-flight publish that already observed the old mask can enqueue on a CPU the new mask forbids and `setaffinity` still returns success. |
 | T-07b | A running-task leave path skips deactivate and leaves scheduler residue | High | A new leave path bypasses the unified API | All leaves go through `leave_current`. EEVDF `curr` is non-owning. `pick_next` asserts. |
 | T-07c | `blocked_resched` without an extra strong ref frees the task at switch | High | Caller did not clone current | rustdoc `# Panics`; `#[track_caller]` plus `strong_count > 2`; `block_on` clones first; unittest `blocked_resched_survives_with_caller_owned_ref`. |
 | T-07d | Prepared wait blocks the wrong task or an atomic context | High | Handle moved across a coroutine, or `park` after taking a lock | Handle is `!Send`/`!Sync`. Prepare checks context before allocation; `park` asserts task identity and context. Callers still own lock constraints that cannot be checked dynamically. |
@@ -500,7 +501,7 @@ Invariants:
 | T-11 | An already-due schedule slot is rearmed repeatedly in a non-preemptible region | High | An immediate request is rewritten as a periodic 10 µs hrtick | A due slot only sets pending and is cleared immediately. Owned timer deadlines stay independent. |
 | T-12 | Idle-pull steals a still-`on_cpu` task | High | Remote steal after yield/preempt requeue and before `switch_to` finishes | Steal only Ready && `!on_cpu`. `can_idle_pull_task` rejects `on_cpu`. |
 | T-12a | Steal changes `cpu_id` and moves prev away | Medium | Wake follows the new CPU after idle-pull migrate-in | Fair wake uses `select_idle_sibling` (home if prev is idle, otherwise seek idle). RT wake uses `find_lowest_rt_cpu`. |
-| T-12b | Idle-pull mid-state is missed by `setaffinity` | High | Ready on no RQ after steal and before dest enqueue | That window is mask-only, same as unpublished. Dest rechecks cpumask after enqueue and `migrate_entry`s if dest is not allowed. |
+| T-12b | Idle-pull mid-state is missed by `setaffinity` | High | Ready on no RQ after steal and before dest enqueue | That window is mask-only, same as unpublished. Dest `enqueue_task` rejects a forbidden CPU before enqueue and `migrate_entry` publishes the steal as `MigrateIn`. |
 
 ## Failure modes and handling
 
@@ -622,17 +623,24 @@ timer routing. Test source existence is not execution proof.
   `docs/design.md`. Do not substitute one-VM hammering or a guest stress
   unittest.
 - Do not move a ready task to another RQ while `on_cpu` is still true
-  (idle-pull must reject it).
+  (idle-pull must reject it; affinity migrate must wait for it to clear).
 - Idle-pull locks only src and goes through `steal_ready_task` /
   `enqueue_task` PLACE_LAG.
-- Idle-pull rechecks cpumask after dest enqueue and `migrate_entry`s if dest
-  is not allowed. The undo dequeue also rechecks `cpu_id` under the dest
-  scheduler lock, so a task already moved to another CPU is left there.
-- Affinity dequeue of a ready task uses `dequeue_ready_on_owner`, which
-  retries when `cpu_id` moves between the lookup and the scheduler lock.
+- Idle-pull's dest publish rejects a forbidden CPU before `attach_owner`
+  and enqueue, leaving `cpu_id` / `nr_home` with the previous owner.
+  `migrate_entry` then publishes that steal as `MigrateIn`.
+- Affinity dequeue of a ready task uses `dequeue_ready_task_waiting_off_cpu`
+  (via `with_owner_sched`). Under the source RQ lock it dequeues only when
+  `!on_cpu`; otherwise it drops the lock and spins until `finish_task_switch`
+  clears `on_cpu`, then retries. A miss while already off-CPU is a detached
+  seat and returns without retrying.
 - `setaffinity` of a Ready task that does not occupy a CPU (unpublished /
   idle-pull gap) is mask-only and succeeds; it does not spin or return
   `false`.
+- Residual: `enforce_affinity_placement` samples `cpu_id` before the owner
+  lock. An in-flight `publish_task` that already observed the old mask can
+  enqueue on a CPU the new mask forbids, and that `setaffinity` still
+  returns success.
 - `nr_running` is charged only on publish/enqueue and discharged on
   block/migrate/exit.
 - `nr_home` is kept across block and discharged only on exit or a home

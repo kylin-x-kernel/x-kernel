@@ -890,9 +890,9 @@ ordinary IRQ before worker submission, without inline Task destruction.
   **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
   source `steal_ready_task` (internal `remove_task`, PLACE_LAG) then local
   `enqueue_task`. Lock only src, then dest enqueue, so dest-then-src cannot
-  deadlock against a remote wake. Recheck cpumask after enqueue: affinity
-  may have excluded dest between steal and enqueue; if dest is not allowed,
-  `migrate_entry` immediately so this CPU does not pick a forbidden task.
+  deadlock against a remote wake. `enqueue_task` reads cpumask under the
+  dest lock and, when dest is not allowed, `migrate_entry` publishes the
+  steal as `MigrateIn` on a CPU the mask allows.
   Stealing an still-`on_cpu` task (yield/preempt requeue before `switch_to`
   finishes) ran the same stack on two CPUs; `on_cpu` must be rejected.
   Steal changes `cpu_id`. Under SIS that is expected musical chairs: the
@@ -970,17 +970,42 @@ ordinary IRQ before worker submission, without inline Task destruction.
   Migration happens only while the task **occupies** a CPU: current
   immediately `migrate_current`; ready already on a forbidden RQ is
   `remove_task` then `migrate_entry` (dest enqueue then `kick(Decision)`,
-  same as `add_task`); a remote running task under `preempt`+`ipi` gets
+  same as `add_task`). Yield/preempt requeue the runner as `Ready` before
+  `switch_to` (it must be in the tree for this `pick_next`), so a queued
+  task can still be `on_cpu`. The dequeue checks `!on_cpu` under the source
+  RQ lock (a queued task cannot be picked there) and otherwise drops the lock
+  and spins until the old CPU's `finish_task_switch` clears `on_cpu`. A miss
+  while already off-CPU is a detached seat and returns without retrying;
+  publishing a still-`on_cpu` task would resume one stack on two CPUs. A remote running
+  task under `preempt`+`ipi` gets
   a reschedule IPI, and `preempt_resched` / `yield_current` force-migrate
   when the mask no longer contains this CPU. The caller spins until the
   task leaves the forbidden CPU; failure returns `false` (syscall `EBUSY`).
   A prepared-but-not-activated task, Blocked/Exited, and the idle-pull
   steal-to-enqueue gap (Ready, on no queue) do not occupy a CPU, so the
-  path is mask-only. The next enqueue (`activate_task` / wake / dest
-  `commit_idle_pull`) chooses a CPU from the new mask. Dest still rechecks
-  cpumask after enqueue and `migrate_entry`s immediately if dest is
-  forbidden. First pin uses `set_cpumask` then `activate_task` (ksoftirqd /
-  watchdog); do not send an unpublished task through the migrate path.
+  path is mask-only. Every publish (`activate_task`, wake, deferred wake,
+  idle-pull, `migrate_entry`) reads the cpumask after taking the scheduler
+  and entity locks and before `attach_owner` / `enqueue`. A forbidden CPU
+  returns the task unqueued and does not take ownership: `cpu_id` and
+  `nr_home` stay with the previous owner. The caller runs `migrate_entry`,
+  which selects again outside that lock and publishes with the same
+  `EnqueueKind`. A caller that is
+  already IRQ-off keeps retrying inside that section; a mask that keeps
+  moving can delay timers and IPIs until a publish succeeds. Publishing
+  only after IRQs are enabled is left for later.
+  A rejected wake still
+  throttles a Deadline task whose budget is spent, and a rejected first
+  publish still replenishes and does Fair first placement. Affinity dequeue,
+  current-task migration, and idle-pull pass `MigrateIn`. Residual: the
+  publisher reads the mask under the destination entity lock, while
+  `enforce_affinity_placement` samples `state` and `cpu_id` before the owner
+  lock. Those observations can pass each other. The publisher still sees the
+  old mask and enqueues, and `setaffinity` sees the previous `cpu_id` inside
+  the new mask and returns success. The task can then run on a CPU the stored
+  mask forbids until it leaves that run queue or a later `setaffinity`
+  observes the updated `cpu_id`. First pin uses `set_cpumask` then
+  `activate_task` (ksoftirqd / watchdog); do not send an unpublished task
+  through the migrate path.
 - When re-enqueueing a `Blocked` task, the SMP waker first publishes the
   dest RQ and wake flags. If `task.on_cpu()` is still true, the outgoing
   CPU claims the flags atomically after clearing `on_cpu` and finishes

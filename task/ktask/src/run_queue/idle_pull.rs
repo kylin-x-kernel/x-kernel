@@ -7,6 +7,7 @@
 use core::sync::atomic::Ordering;
 
 use kcpu_id_map::LogicalCpuId;
+use ksched::EnqueueKind;
 
 use super::{
     KCpuMask, RUN_QUEUES, RunQueue, get_run_queue,
@@ -20,8 +21,7 @@ impl RunQueue {
     ///
     /// Locks only the source scheduler (then this RQ's enqueue lock). Never
     /// dest-then-src: that deadlocks against remote wake. Never steals
-    /// `on_cpu` tasks (yield/preempt are already in the ready tree). After
-    /// enqueue, drop the waiter if its cpumask no longer contains this CPU.
+    /// `on_cpu` tasks (yield/preempt are already in the ready tree).
     pub(super) fn idle_pull(&self) -> bool {
         let dest = self.cpu_id.as_usize();
         let nr_cpus = kcpu_id_map::nr_cpus();
@@ -48,31 +48,19 @@ impl RunQueue {
         }
     }
 
-    /// Enqueue a stolen waiter, then drop it if affinity no longer allows dest.
+    /// Enqueue a stolen waiter, or send it elsewhere if affinity forbids dest.
     ///
     /// Steal to enqueue is not atomic: the task is Ready, on no RQ, with
     /// `cpu_id` still at src. `set_task_affinity` in that window is mask-only;
-    /// recheck after `enqueue_task` so this CPU does not pick a task the new
-    /// mask forbids.
+    /// `enqueue_task` rejects it under the dest lock.
     fn commit_idle_pull(&self, stolen: KtaskRef) -> bool {
-        let dest = self.cpu_id.as_usize();
-        let _ = self.enqueue_task(stolen.clone());
-        if stolen.cpumask().get(dest) {
-            return true;
-        }
-        let now_ns = khal::time::monotonic_time_nanos();
-        let Some(removed) = self.with_sched_rank(|s| {
-            // Enqueue dropped this lock. Another pull may already have moved
-            // the task; its entity is then owned by that run queue.
-            if stolen.cpu_id() != self.cpu_id {
-                return None;
+        match self.enqueue_task(stolen) {
+            Ok(_) => true,
+            Err(rejected) => {
+                migrate_entry(rejected, EnqueueKind::MigrateIn);
+                false
             }
-            s.dequeue(&stolen, now_ns)
-        }) else {
-            return false;
-        };
-        migrate_entry(removed);
-        false
+        }
     }
 
     /// Dequeue a stealable waiter from this (source) RQ. Caller must not hold

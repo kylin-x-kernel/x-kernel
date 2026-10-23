@@ -219,6 +219,8 @@ enum WakeEnqueue {
     Rejected,
     #[cfg(feature = "smp")]
     Deferred,
+    /// Left `Blocked` and published, on this run queue or (with no decision)
+    /// migrated to a CPU the mask allows.
     Enqueued,
 }
 

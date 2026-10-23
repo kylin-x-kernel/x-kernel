@@ -510,7 +510,8 @@ pub fn prepare_task(task: TaskInner) -> KtaskRef {
 ///
 /// Callers must finish any required visibility or registry publication before
 /// calling this function, because the task may start executing immediately
-/// after it is enqueued.
+/// after it is enqueued. A cpumask stored before publish is honored even if
+/// it no longer contains the CPU selected here.
 pub fn activate_task(task: &KtaskRef) {
     select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
 }

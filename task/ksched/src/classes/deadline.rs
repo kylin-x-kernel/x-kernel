@@ -309,8 +309,20 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for DeadlineClass<T
             // A first placement starts a fresh request.
             EnqueueKind::New => self.replenish(&task, clk.now_ns(), tok),
             // `Scheduler::set_attr` already opened the request through
-            // `switched_to`, and a migrate-in is placed by its destination.
-            EnqueueKind::ClassChange | EnqueueKind::MigrateIn => {}
+            // `switched_to`.
+            EnqueueKind::ClassChange => {}
+            // A migrate keeps the request that was open on the source and does
+            // not replenish it. A spent budget stays throttled, same as `Wake`.
+            // Same-policy `attr_changed` clears `is_throttled` and `is_active`
+            // without unlinking or refilling, so those flags cannot decide this.
+            EnqueueKind::MigrateIn => {
+                let entity = task.deadline();
+                if entity.budget_left_ns.get(tok) == 0 {
+                    entity.is_throttled.set(true, tok);
+                    self.insert_throttled(task, tok);
+                    return;
+                }
+            }
             // Waking resumes the current request while budget remains;
             // otherwise the task stays throttled until its period starts.
             EnqueueKind::Wake { .. } => {
@@ -334,22 +346,18 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for DeadlineClass<T
         if task.seat(tok) != QueueSeat::Deadline {
             return None;
         }
-        if task.deadline().is_throttled.get(tok) {
-            let key = (
-                task.deadline().period_start_ns.get(tok),
-                task.deadline().tree_id.get(tok),
-            );
-            let removed = self.throttled.find_mut(&key).remove();
-            if removed.is_some() {
-                task.set_seat(QueueSeat::Detached, tok);
-            }
-            return removed;
+        // The flag is not the link. Same-policy `attr_changed` clears
+        // `is_throttled` without unlinking. A `Deadline` seat is looked up in
+        // both trees by that tree's own key.
+        let entity = task.deadline();
+        let tree_id = entity.tree_id.get(tok);
+        let throttled_key = (entity.period_start_ns.get(tok), tree_id);
+        if let Some(removed) = self.throttled.find_mut(&throttled_key).remove() {
+            task.set_seat(QueueSeat::Detached, tok);
+            return Some(removed);
         }
-        let key = (
-            task.deadline().deadline_ns.get(tok),
-            task.deadline().tree_id.get(tok),
-        );
-        let removed = self.ready.find_mut(&key).remove();
+        let ready_key = (entity.deadline_ns.get(tok), tree_id);
+        let removed = self.ready.find_mut(&ready_key).remove();
         if removed.is_some() {
             task.set_seat(QueueSeat::Detached, tok);
         }
@@ -518,9 +526,9 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for DeadlineClass<T
         _clk: &RqClock,
         tok: RqLocked,
     ) {
-        // A new triple moves the request's keys, so the residency is rebuilt
-        // under the fresh parameters. `Scheduler::set_attr` performs the
-        // matching dequeue and re-enqueue.
+        // Same-policy `set_attr` keeps the task linked. Clearing these flags
+        // does not move it between trees; `dequeue` finds a `Deadline` seat
+        // in either one.
         let entity = task.deadline();
         entity.is_active.set(false, tok);
         entity.is_throttled.set(false, tok);

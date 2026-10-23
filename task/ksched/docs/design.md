@@ -131,9 +131,10 @@ Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
 
 - 两棵树的键都是 `(instant_ns, tree_id)`：`tree_id` 由类在每次入队时分配，
   仅用于同刻 tie-break，保证 FIFO 而不引入 id 反查表。
-- `enqueue` 的语义按 `EnqueueKind` 区分：`New` 开新请求；`ClassChange` /
-  `MigrateIn` 由 `switched_to` 或目的 RQ 负责，不重复补预算；`Wake` 在预算
-  仍有剩余时续用当前请求，否则保持节流直到周期开始。
+- `enqueue` 的语义按 `EnqueueKind` 区分：`New` 开新请求；`ClassChange`
+  由 `switched_to` 负责，不重复补预算；`MigrateIn` 和 `Wake` 在
+  `budget_left_ns == 0` 时留在节流树，否则续用当前请求。同类 `attr_changed`
+  会清掉 `is_throttled` / `is_active` 但不补预算，所以迁入不看这两个标志。
 - **准入是每 RQ 的**：`can_admit` 累加**就绪树 + 节流树 + runner**各自的
   `runtime/period`。runner 被 `pick_next` 摘出两棵树，所以 class 用私有字段
   `running`（记 `tree_id` 与预留 ppm）自己记住它：在 `pick_next` / `set_curr`
@@ -244,7 +245,9 @@ RT 优先级”。`ktask` 在会改变这个字节的操作（记账/`charge`、
      节流项；那会把选人路径从"取最小键"退化为 O(树中节流项数)，也会让
      `class_timer_ns` 的最早事件不再等于树的 `front()`。
   代价是每个实体多一个链接（`ready_link` / `throttled_link`），构造时静态
-  初始化，运行期不分配。
+  初始化，运行期不分配。出队不拿 `is_throttled` 选树：同类 `attr_changed`
+  只清标志、不摘链，标志和链接会反向分叉。`QueueSeat::Deadline` 时按各自的键
+  在节流树和就绪树各查一次。
 - `SchedAttr` 保持扁平 `Copy` 结构，各档字段并存、由 `policy` 决定谁有意
   义，`validate()` 是唯一闸门；新增一档只需加字段与分支，不改变既有字段布局。
   非本类参数用哨兵值（`RtPrio::NONE` / `Option::None`）表示。

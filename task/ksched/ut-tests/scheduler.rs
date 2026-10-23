@@ -1253,6 +1253,47 @@ fn dl_timer_reports_budget_and_period_events() {
 }
 
 #[def_test]
+fn dl_migrate_in_keeps_a_spent_budget_out_of_ready() {
+    let mut s = sched();
+    let t = dl_task(1);
+    s.install_current(t.clone(), 0);
+    // Same shape as a wake that finds no budget left, then an affinity
+    // migrate of that throttled task (`dequeue` + `EnqueueKind::MigrateIn`).
+    s.block_current(DL_RUNTIME_NS);
+    let _ = s.enqueue(t.clone(), EnqueueKind::Wake { sync: false }, DL_RUNTIME_NS);
+    assert!(t.dl_is_throttled_for_test());
+    assert_eq!(s.nr_queued(), 0);
+    let removed = s.dequeue(&t, DL_RUNTIME_NS);
+    assert!(removed.is_some());
+    s.enqueue(removed.unwrap(), EnqueueKind::MigrateIn, DL_RUNTIME_NS);
+    assert!(t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), 0);
+    assert_eq!(s.nr_queued(), 0);
+}
+
+#[def_test]
+fn dl_migrate_in_after_same_policy_attr_change_stays_throttled() {
+    let mut s = sched();
+    let t = dl_task(1);
+    s.install_current(t.clone(), 0);
+    s.block_current(DL_RUNTIME_NS);
+    let _ = s.enqueue(t.clone(), EnqueueKind::Wake { sync: false }, DL_RUNTIME_NS);
+    assert!(t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), 0);
+    // Same-policy `set_attr` clears both flags and leaves the throttled link
+    // and the zero budget in place.
+    assert!(s.set_attr(&t, dl_attr(), DL_RUNTIME_NS).is_ok());
+    assert!(!t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), 0);
+    let removed = s.dequeue(&t, DL_RUNTIME_NS);
+    assert!(removed.is_some());
+    s.enqueue(removed.unwrap(), EnqueueKind::MigrateIn, DL_RUNTIME_NS);
+    assert!(t.dl_is_throttled_for_test());
+    assert_eq!(t.dl_budget_for_test(), 0);
+    assert_eq!(s.nr_queued(), 0);
+}
+
+#[def_test]
 fn dl_class_event_survives_an_idle_runner() {
     let mut s = sched();
     let t = dl_task(1);
@@ -1279,6 +1320,24 @@ fn dl_class_event_survives_an_idle_runner() {
     // again, so the idle CPU has something to pick.
     let _ = s.update(DL_PERIOD_NS, UpdateKind::Account);
     assert!(!t.dl_is_throttled_for_test());
+    assert_eq!(s.nr_queued(), 1);
+}
+
+#[def_test]
+fn dl_dequeue_finds_a_throttled_task_after_attr_clears_the_flag() {
+    let mut s = sched();
+    let t = dl_task(1);
+    s.install_current(t.clone(), 0);
+    s.block_current(DL_RUNTIME_NS);
+    let _ = s.enqueue(t.clone(), EnqueueKind::Wake { sync: false }, DL_RUNTIME_NS);
+    assert!(t.dl_is_throttled_for_test());
+    // Same policy: `attr_changed` clears the flag and leaves the throttled link.
+    assert!(s.set_attr(&t, dl_attr(), DL_RUNTIME_NS).is_ok());
+    assert!(!t.dl_is_throttled_for_test());
+    // A later class change dequeues. Missing the throttled tree panics in
+    // `set_attr` and would also make affinity treat the task as unqueued.
+    assert!(s.set_attr(&t, nice_attr(0), DL_RUNTIME_NS).is_ok());
+    assert_eq!(s.attr(&t).policy, SchedPolicy::Normal);
     assert_eq!(s.nr_queued(), 1);
 }
 

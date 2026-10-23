@@ -128,9 +128,11 @@ mod tests_blocked_resched {
 
 #[cfg(all(feature = "smp", unittest))]
 mod tests_wake_affinity {
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use kcpu_id_map::LogicalCpuId;
+    use khal::percpu::this_cpu_id;
     use kirq::softirq::{
         SoftirqRunResult, SoftirqVec, raise_softirq,
         test_support::{ScopedSoftirqAction, begin_softirq_test},
@@ -142,6 +144,7 @@ mod tests_wake_affinity {
     use super::super::stats::sched_stat_cpu;
     use super::super::{
         WakeEnqueue, current_run_queue,
+        migrate::can_dequeue_ready_task,
         placement::{
             WakePlacement, can_idle_pull_task, find_idle_pull_src, find_idlest_cpu,
             find_lowest_rt_cpu, select_idle_cpu, select_wake_run_queue, sync_handoff_target,
@@ -171,6 +174,29 @@ mod tests_wake_affinity {
             assert!(task.cpumask().get(1));
             assert!(!task.cpumask().get(0));
             assert_eq!(task.state(), TaskState::Ready);
+        }
+    }
+
+    /// Idle stays `Ready` + `on_cpu` for its whole run and is never queued.
+    /// Affinity must return without waiting; nothing else will clear `on_cpu`.
+    #[def_test]
+    fn set_task_affinity_on_on_cpu_idle_is_mask_only() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let task = TaskInner::new_idle(|| {}, "aff-idle".into(), 4096).into_arc();
+            task.set_state(TaskState::Ready);
+            task.set_on_cpu(true);
+            assert!(task.is_idle());
+            assert_eq!(task.cpu_id().as_usize(), 0);
+
+            let mut only1 = KCpuMask::new();
+            only1.set(1, true);
+            assert!(crate::set_task_affinity(&task, only1));
+            assert!(task.cpumask().get(1));
+            assert!(!task.cpumask().get(0));
+            assert_eq!(task.cpu_id().as_usize(), 0);
+            assert_eq!(task.state(), TaskState::Ready);
+            assert!(task.on_cpu());
+            task.set_on_cpu(false);
         }
     }
 
@@ -607,6 +633,26 @@ mod tests_wake_affinity {
     }
 
     #[def_test]
+    fn can_dequeue_ready_task_rejects_on_cpu_and_idle() {
+        let task = test_task_on(0);
+        task.set_state(TaskState::Ready);
+        assert!(can_dequeue_ready_task(task.as_ref()));
+        task.set_on_cpu(true);
+        assert!(!can_dequeue_ready_task(task.as_ref()));
+        task.set_on_cpu(false);
+        assert!(can_dequeue_ready_task(task.as_ref()));
+        task.set_state(TaskState::Running);
+        assert!(!can_dequeue_ready_task(task.as_ref()));
+
+        let idle = TaskInner::new_idle(|| {}, "aff-idle-pred".into(), 4096).into_arc();
+        idle.set_state(TaskState::Ready);
+        assert!(!can_dequeue_ready_task(idle.as_ref()));
+        idle.set_on_cpu(true);
+        assert!(!can_dequeue_ready_task(idle.as_ref()));
+        idle.set_on_cpu(false);
+    }
+
+    #[def_test]
     fn can_idle_pull_task_rejects_disallowed_cpu() -> unittest::TestResult {
         if kcpu_id_map::nr_cpus() < 2 {
             return unittest::TestResult::Ignored;
@@ -618,6 +664,79 @@ mod tests_wake_affinity {
         assert!(!can_idle_pull_task(task.as_ref(), 0));
         assert!(can_idle_pull_task(task.as_ref(), 1));
         unittest::TestResult::Ok
+    }
+
+    /// Rejecting a publish must not name this CPU as the owner. `task_rq_lock`
+    /// follows `cpu_id`, and the task is still unqueued.
+    #[def_test]
+    fn publish_reject_keeps_previous_owner() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let here = this_cpu_id().as_usize();
+            let other = usize::from(here == 0);
+            let task = test_task_on(other);
+            let mut only_other = KCpuMask::new();
+            only_other.set(other, true);
+            task.set_cpumask(only_other);
+            let rq = current_run_queue::<NoPreemptIrqSave>();
+            let nr_home = rq.inner.nr_home.load(Ordering::Relaxed);
+            let now_ns = khal::time::monotonic_time_nanos();
+            let rejected = rq
+                .inner
+                .publish_task(task.clone(), ksched::EnqueueKind::New, now_ns);
+            assert!(rejected.is_err());
+            assert_eq!(task.cpu_id().as_usize(), other);
+            assert_eq!(rq.inner.nr_home.load(Ordering::Relaxed), nr_home);
+        }
+    }
+
+    /// A remote affinity move of a running task must not enter its body on the
+    /// destination while the source CPU is still inside that body.
+    #[def_test]
+    fn remote_affinity_does_not_run_the_task_on_two_cpus() {
+        if kcpu_id_map::nr_cpus() >= 2 {
+            let depth = Arc::new(AtomicUsize::new(0));
+            let started = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(AtomicBool::new(false));
+            let overlapped = Arc::new(AtomicBool::new(false));
+            let landed = Arc::new(AtomicUsize::new(usize::MAX));
+            let worker = crate::spawn({
+                let depth = depth.clone();
+                let started = started.clone();
+                let stop = stop.clone();
+                let overlapped = overlapped.clone();
+                let landed = landed.clone();
+                move || {
+                    let mut only0 = KCpuMask::new();
+                    only0.set(0, true);
+                    if !crate::set_current_affinity(only0) {
+                        return;
+                    }
+                    started.store(true, Ordering::Release);
+                    while !stop.load(Ordering::Acquire) {
+                        let prev = depth.fetch_add(1, Ordering::AcqRel);
+                        if prev != 0 {
+                            overlapped.store(true, Ordering::Release);
+                        }
+                        for _ in 0..32 {
+                            core::hint::spin_loop();
+                        }
+                        depth.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    landed.store(this_cpu_id().as_usize(), Ordering::Release);
+                }
+            });
+            while !started.load(Ordering::Acquire) {
+                crate::yield_now();
+            }
+            let mut only1 = KCpuMask::new();
+            only1.set(1, true);
+            assert!(crate::set_task_affinity(&worker, only1));
+            stop.store(true, Ordering::Release);
+            let _ = worker.join();
+            assert!(!overlapped.load(Ordering::Acquire));
+            assert_eq!(depth.load(Ordering::Acquire), 0);
+            assert_eq!(landed.load(Ordering::Acquire), 1);
+        }
     }
 }
 
