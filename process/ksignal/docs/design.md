@@ -23,6 +23,7 @@ process/ksignal/src/
 ├── types.rs             Signo, SignalSet, SignalInfo, ChildExitInfo, SignalStack
 ├── action.rs            SignalAction, SignalActionFlags, dispositions, OS actions
 ├── pending.rs           PendingSignals (standard + real-time queues)
+├── siglock.rs           SigLock: signal-state ownership, transactions, projections
 ├── trampoline.rs        map_signal_trampoline
 ├── api/
 │   ├── mod.rs           re-exports
@@ -41,29 +42,32 @@ process/ksignal/src/
                        |
 posix/process runtime (check_signals -> process teardown)
                        |
-        ProcessSignalManager           ThreadSignalManager
-        ├─ pending: PendingSignals     ├─ pending: PendingSignals
-        ├─ handlers: Option<Arc<      ├─ blocked / saved_sigmask
-        │           SignalHandlers>>   ├─ stack: SignalStack
-        ├─ children: Vec<(tid, Weak)>  └─ possibly_has_signal
-        └─ has_pending: AtomicBool              |
+        ProcessSignalManager              ThreadSignalManager
+        ├─ siglock: SigLock ────────┐     ├─ slot: SlotId (generation-checked)
+        │    ├─ shared: PendingSignals    ├─ stack: SignalStack
+        │    └─ slots: per-thread    <----┴─ hint: Arc<AtomicBool>
+        │         pending / blocked /
+        │         saved_sigmask / hint
+        ├─ handlers: Option<Arc<SignalHandlers>>
+        └─ fatal_signal: AtomicU64
                   \                            /
-                   `Weak` registry, process fallback dequeue
+                   transaction: select + queue or take + republish
                                 |
               handle_signal -> SignalFrame on user stack
                                 |
               arch::UContext / MContext + signal trampoline page
 ```
 
-`ProcessSignalManager` holds process-shared actions and a process-directed
-pending queue; each `ThreadSignalManager` registers itself with the process
-manager through a `Weak` reference at creation. Thread dequeue first drains
-the thread queue, then falls back to the process queue. `SignalActions` is
+`ProcessSignalManager` holds process-shared actions and the `SigLock` that
+owns every pending queue and blocked mask; each `ThreadSignalManager` holds a
+generation-checked slot handle into it rather than a registered `Weak`
+reference. One dequeue takes the thread queue first, then the process queue,
+from the same transaction. `SignalActions` is
 shared by `Arc` so `sigaction` updates are immediately visible to every
 thread. Its shared reference stays inside the signal managers: constructors
 take an owned `SignalActions` value, and `fork_shared` / `fork_private` create
 new process managers with shared configuration or an independent snapshot.
-Both create empty pending queues and separate thread lists. Callers query or
+Both create empty pending queues and separate slot tables. Callers query or
 replace actions through manager methods, not by retaining the underlying lock
 or cloning its reference.
 
@@ -138,14 +142,15 @@ selectable.
 an ignored disposition drops the signal only when no live thread currently
 blocks it — a blocked signal stays pending because userspace may install a
 handler before unblocking. Target-thread selection picks the first live
-non-blocking thread while pruning dead `Weak` entries. The thread-level
-`send_signal` follows the same ignore/blocked policy.
+non-blocking thread that has not left the group, in the same transaction that
+queues the signal. The thread-level `send_signal` follows the same
+ignore/blocked policy.
 
-`check_signals` uses two fast-path atomics (`possibly_has_signal`,
-process `has_pending`) to avoid locks on the common no-signal return. The
-slow path dequeues against `!blocked`, consults dequeue observers (used by
-`kprocess` timer delivery to drop stale POSIX timer signals), then dispatches
-through `handle_signal`.
+`check_signals` reads the calling thread's projection to avoid locking on the
+common no-signal return. The slow
+path dequeues against the thread's own blocked mask, consults dequeue observers
+(used by `kprocess` timer delivery to drop stale POSIX timer signals), then
+dispatches through `handle_signal`.
 
 Handler dispatch builds a `SignalFrame { ucontext, siginfo, saved }` on the
 user stack (alternate stack when `SA_ONSTACK` and configured), rewrites
@@ -198,26 +203,90 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
 
 ## Concurrency
 
-- Lock order is `ProcessSignalManager.handlers` -> `SignalHandlers.actions` ->
-  children/blocked during delivery classification. Fork/exec use the same
-  ownership-before-content order; they do not lock another process's ownership.
-- Pending queues and each thread's saved mask/stack have separate locks.
-  Send retains the ownership lock through pending publication, excluding
-  ownership release. Actions/children/blocked locks are released before pending
-  insertion; notification happens after all signal locks are released.
-  Dequeue observers, user-memory access and wakes run outside configuration locks.
-- `send_signal` reads actions and scans children inside one actions-lock
-  generation to keep the disposition decision and target scan coherent; the
-  doc comments deliberately do not claim Linux's global `sighand->siglock`
-  equivalence for every field.
-- `has_pending`/`possibly_has_signal` are Release/Acquire hints only; the
-  authoritative check happens under the queue locks. Thread dequeue clears
-  `possibly_has_signal` while still holding the pending-queue lock when no
-  matching signal is found. Clearing it after unlocking can overwrite a
-  concurrent sender's notification and strand an unblocked pending signal.
-- Dead thread entries are pruned opportunistically during target scans.
+- Lock order is `ProcessSignalManager.handlers` -> `SignalHandlers.actions`
+  and -> `SigLock`. Fork/exec use the same ownership-before-content order; they
+  do not lock another process's ownership. `SigLock` is never taken before
+  `handlers`.
+- `SigLock` owns the whole deliverability predicate: the process-directed
+  queue plus each member thread's private queue, blocked set and saved sigmask.
+  Deliverability is `pending ∩ ¬blocked`, so observing its factors from
+  different critical sections is the bug class this layout removes. Target
+  selection and queueing of a process-directed signal are one transaction, so a
+  selected thread cannot change its mask in between.
+- The fast-path projection is per thread and counts both queues under that
+  thread's own blocked mask, the same predicate Linux keeps in `TIF_SIGPENDING`
+  (`recalc_sigpending_tsk`). It may over-report (one extra slow-path pass) and
+  may never under-report. It is written only by `SigLock::republish`, inside the
+  transaction that changed the state, and derived from that state; `republish`
+  writes only real transitions. Callers cannot publish an availability answer,
+  so a receiver can no longer overwrite a sender's notification with a stale
+  observation taken before unlocking. A signal every thread blocks therefore
+  keeps the fast path quiet instead of forcing a slow-path pass per user
+  return.
+- `SigTxn` is the only mutation handle; `SigView` is the read-only capability
+  used by query paths. `SigLock::transact` and `SigLock::inspect` construct them,
+  they borrow the guarded state for the critical section, and they cannot
+  outlive it. Verbs take their inputs from the guarded state — `take` derives
+  the delivery mask from the thread's blocked set — instead of from a caller
+  snapshot.
+- Transactions record the slots and queues they touched in an allocation-free
+  dirty set: `republish` recomputes only those, so mask changes, enqueues and
+  dequeues stay O(1) inside the lock, and read-only queries recompute nothing.
+  A process-directed change marks all slots, because the answer differs per
+  thread; that cost is paid once per process-directed signal, as in
+  `complete_signal`, not per syscall return. The dirty set is inline (256 slots)
+  and degrades to a full recompute above it rather than allocating in interrupt
+  context. Set bits are walked directly, and a transaction that touched nothing
+  skips the recompute entirely.
+- Dequeue observers, user-memory frame writes, arrival wakes and
+  `task.interrupt()` run outside `SigLock`. A signal consumed by an observer
+  costs one further transaction instead of a critical section held across a
+  callback. Wakes stay outside the `handlers` guard because the arrival source
+  is `Arc`-shared with CLONE_SIGHAND peers and cannot move into `SigLock`.
+- Slot handles carry a generation, so `exit()`, `Drop` and `rebind_after_exec`
+  cannot address a slot that was released and reused. Because `Drop` releases
+  the slot, the last manager reference must not be dropped while `SigLock` is
+  held (`SigLock` is a non-reentrant `SpinNoIrq`); no path does that, and
+  transactions never touch a manager reference. `exit()` only clears the
+  slot's target flag: the thread's own pending and blocked state stays
+  observable while it unwinds, and `Drop` releases the slot.
+- `fatal_signal` remains a packed `AtomicU64` read by the exec/de_thread
+  sweep. It is not part of the deliverability predicate, but it is published
+  inside the same transaction as the queue so the sweep cannot absorb a fatal
+  signal that was already queued.
 - `SignalInfo` is `Send + Sync` through an explicit `unsafe impl` because
   the payload is treated as opaque ABI bits (see `security.md`).
+
+## Signal state ownership
+
+`SigLock` (`src/siglock.rs`) is the only critical section that answers signal
+deliverability. `ThreadSignalManager` keeps only a slot handle, its alternate
+stack and a projection cell; the pending queue, blocked mask and saved sigmask
+it used to own per field live in the shared state, so a mask change and an
+enqueue are serialized without a second lock. `handlers` and the action table
+stay outside it: dispositions are `Arc`-shared with CLONE_SIGHAND peers and are
+not part of the deliverability predicate, so they keep their own locks and the
+ownership-before-content order.
+
+Slots hold their payload out of line (`Box<ThreadSlot>`): `PendingSignals` is
+about 1.3 KiB, so an inlined table would keep a thread-count peak resident for
+the process lifetime. `retire` clears the slot and pops trailing empty slots,
+so the table shrinks back after a thread-count peak. Registration allocates the
+boxed slot and its projection cell *before* taking the lock and only links the
+prepared slot inside the transaction, so no `Box`/`Arc` allocation or slab
+refill runs in the critical section other threads' sends and slow-path dequeues
+spin on. The table is pre-sized at construction (before the manager is shared,
+so nothing spins on the lock yet); a process that exceeds that capacity pays an
+amortized doubling of 8-byte entries, never of the slot payload.
+
+The one deliberate exception is the signal payload: `put_thread`/`put_shared`
+reach `PendingSignals::put_signal`, which boxes a standard signal only after the
+queue accepts it, so a send may allocate inside the lock. That matches Linux,
+where `__send_signal_locked` asserts it already holds `sighand->siglock`, skips
+allocation for a coalesced signal or `SIGKILL`, and otherwise calls
+`__sigqueue_alloc` with `GFP_ATOMIC`. Moving that allocation to the caller was
+considered and rejected: it would allocate on the coalescing path that Linux
+specifically avoids, and would break the `SIGKILL` case that never allocates.
 
 ## Design decisions
 

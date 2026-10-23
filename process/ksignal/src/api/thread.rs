@@ -17,8 +17,8 @@ use osvm::VirtMutPtr;
 
 use super::ProcessSignalManager;
 use crate::{
-    DefaultSignalAction, PendingSignals, SignalAction, SignalActionFlags, SignalDisposition,
-    SignalInfo, SignalOsAction, SignalSet, SignalStack, Signo,
+    DefaultSignalAction, Dequeued, SignalAction, SignalActionFlags, SignalDisposition, SignalInfo,
+    SignalOsAction, SignalSet, SignalStack, Signo, SlotId,
     api::{SignalDequeueAction, notify_signal_dequeued},
     arch::{self, UContext},
 };
@@ -39,59 +39,51 @@ const _: () = assert!(
 
 /// Thread-level signal manager.
 ///
-/// Owns the per-thread pending queue, blocked set, saved sigmask, and
-/// alternate stack. Handler-frame construction happens here on the
-/// user-return path; queueing decisions consult the owning
-/// [`ProcessSignalManager`] for shared actions.
+/// Owns this thread's handle into the process signal state and the alternate
+/// signal stack. Pending signals, the blocked mask and the saved sigmask live
+/// in the owning process's `SigLock`, because deliverability is
+/// `pending ∩ ¬blocked` and must be decided under a single lock. Handler-frame
+/// construction happens here on the user-return path, outside that lock, from
+/// the snapshot a dequeue produced.
 pub struct ThreadSignalManager {
     /// The process-level signal manager
     proc: Arc<ProcessSignalManager>,
 
-    /// The pending signals
-    pending: SpinNoIrq<PendingSignals>,
-    /// The set of signals currently blocked from delivery.
-    blocked: SpinNoIrq<SignalSet>,
-    /// Previous blocked mask to restore when the next caught signal frame is
-    /// installed, matching Linux `saved_sigmask` semantics.
-    saved_sigmask: SpinNoIrq<Option<SignalSet>>,
+    /// This thread's slot in the process signal state. Retiring or rebinding
+    /// the slot is generation-checked, so a retained manager reference can
+    /// never address a successor thread's state.
+    slot: SlotId,
     /// The stack used by signal handlers
     stack: SpinNoIrq<SignalStack>,
 
-    possibly_has_signal: AtomicBool,
+    /// Projection of this thread's deliverability. Read lock-free on the
+    /// user-return fast path; written only when the owning lock republishes
+    /// state, never by this manager.
+    hint: Arc<AtomicBool>,
 }
 
 impl ThreadSignalManager {
     /// Create a new thread signal manager attached to a process.
     pub fn new(tid: u32, proc: Arc<ProcessSignalManager>) -> Arc<Self> {
-        let this = Arc::new(Self {
-            proc: proc.clone(),
-
-            pending: SpinNoIrq::new(PendingSignals::default()),
-            blocked: SpinNoIrq::new(SignalSet::default()),
-            saved_sigmask: SpinNoIrq::new(None),
+        let (slot, hint) = proc.siglock().register(tid);
+        Arc::new(Self {
+            proc,
+            slot,
             stack: SpinNoIrq::new(SignalStack::default()),
-
-            possibly_has_signal: AtomicBool::new(false),
-        });
-        proc.children.lock().push((tid, Arc::downgrade(&this)));
-        this
+            hint,
+        })
     }
 
     /// Rebinds this thread's delivery target after an `exec` identity takeover.
     ///
-    /// Routing selects threads by number, so the registry entry follows the
-    /// moved number; other registered managers retain their own identities and
-    /// lifecycle. The lookup compares object identity, so a reused TID cannot
-    /// rebind a successor's entry.
+    /// Routing selects threads by number, so the slot follows the moved
+    /// number; other slots retain their own identities and lifecycle. The slot
+    /// handle is generation-checked, so a reused TID cannot rebind a
+    /// successor's slot.
     pub fn rebind_after_exec(self: &Arc<Self>, tid: u32) {
-        let this = Arc::downgrade(self);
-        let mut children = self.proc.children.lock();
-        if let Some((number, _)) = children
-            .iter_mut()
-            .find(|(_, child)| alloc::sync::Weak::ptr_eq(child, &this))
-        {
-            *number = tid;
-        }
+        self.proc
+            .siglock()
+            .transact(|txn| txn.set_tid(self.slot, tid));
     }
 
     /// Removes this thread from process-directed signal selection at exit.
@@ -101,37 +93,36 @@ impl ThreadSignalManager {
     /// removal is idempotent and identity-compared, so a reused TID cannot
     /// remove a successor.
     pub fn exit(self: &Arc<Self>) {
-        let this = Arc::downgrade(self);
         self.proc
-            .children
-            .lock()
-            .retain(|(_, child)| !alloc::sync::Weak::ptr_eq(child, &this));
+            .siglock()
+            .transact(|txn| txn.leave_group(self.slot));
     }
 
-    /// Dequeues a signal from the thread's pending signals.
+    /// Dequeues the next signal matching an explicit mask.
+    ///
+    /// The mask is supplied by the caller (`signalfd`, `sigtimedwait`) rather
+    /// than derived from this thread, so this is the only dequeue entry point
+    /// that takes one. The availability projection is recomputed from the
+    /// post-dequeue state inside the same transaction.
     #[must_use]
     pub fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
         loop {
-            let signal = {
-                let mut pending = self.pending.lock();
-                let signal = pending.dequeue_signal(mask);
-                if signal.is_none() {
-                    // Serialize the no-deliverable-signal observation and hint clear with enqueue.
-                    // Clearing after unlocking can overwrite a sender's true hint.
-                    self.possibly_has_signal.store(false, Ordering::Release);
-                }
-                signal
-            };
-            if let Some(sig) = signal {
-                if notify_signal_dequeued(&sig) == SignalDequeueAction::Deliver {
-                    return Some(sig);
-                }
-                continue;
+            let dequeued = self
+                .proc
+                .siglock()
+                .transact(|txn| txn.take_masked(self.slot, mask))?;
+            if notify_signal_dequeued(&dequeued.sig) == SignalDequeueAction::Deliver {
+                return Some(dequeued.sig);
             }
-            break;
         }
+    }
 
-        self.proc.dequeue_signal(mask)
+    /// Lock-free fast-path read: a signal may be deliverable to this thread,
+    /// counting both queues under this thread's own blocked mask.
+    ///
+    /// A projection, not the state: it may over-report and never under-reports.
+    fn may_have_signal(&self) -> bool {
+        self.hint.load(Ordering::Acquire)
     }
 
     /// Returns the owning process signal manager.
@@ -241,7 +232,9 @@ impl ThreadSignalManager {
                         .set_signal_action(signo, SignalAction::default())
                         .ok()?;
                 }
-                *self.blocked.lock() |= add_blocked;
+                self.proc
+                    .siglock()
+                    .transact(|txn| txn.add_blocked(self.slot, add_blocked));
                 Some(SignalOsAction::Handler)
             }
         }
@@ -253,29 +246,41 @@ impl ThreadSignalManager {
         uctx: &mut UserContext,
         restore_blocked: Option<SignalSet>,
     ) -> Option<(SignalInfo, SignalOsAction)> {
-        let blocked = self.blocked.lock();
-        let mask = !*blocked;
-        let current_blocked = *blocked;
-        drop(blocked);
-
         loop {
-            let sig = self.dequeue_signal(&mask)?;
+            let dequeued = self.take_signal()?;
             let restore_blocked = restore_blocked
                 .or_else(|| self.take_saved_sigmask())
-                .unwrap_or(current_blocked);
-            let action = self.proc.signal_action(sig.signo()).ok()?;
+                .unwrap_or(dequeued.current_blocked);
+            let action = self.proc.signal_action(dequeued.sig.signo()).ok()?;
 
-            if let Some(os_action) = self.handle_signal(uctx, restore_blocked, &sig, &action) {
-                break Some((sig, os_action));
+            if let Some(os_action) =
+                self.handle_signal(uctx, restore_blocked, &dequeued.sig, &action)
+            {
+                break Some((dequeued.sig, os_action));
+            }
+        }
+    }
+
+    /// Dequeues the next deliverable signal, discarding any that a dequeue
+    /// observer consumes.
+    ///
+    /// The observer runs outside the signal lock (it may take other locks or
+    /// block), so a consumed signal costs one more transaction rather than a
+    /// critical section held across a callback.
+    fn take_signal(&self) -> Option<Dequeued> {
+        loop {
+            let dequeued = self.proc.siglock().transact(|txn| txn.take(self.slot))?;
+            if notify_signal_dequeued(&dequeued.sig) == SignalDequeueAction::Deliver {
+                return Some(dequeued);
             }
         }
     }
 
     /// Checks pending signals and dispatches at most one.
     ///
-    /// Uses the `possibly_has_signal`/process `has_pending` fast-path flags
-    /// before taking any lock; on the slow path it dequeues the first
-    /// unblocked signal, consults dequeue observers, and installs its frame.
+    /// Uses the thread and process availability projections before taking any
+    /// lock; on the slow path it dequeues the first unblocked signal, consults
+    /// dequeue observers, and installs its frame.
     ///
     /// # Returns
     ///
@@ -286,10 +291,8 @@ impl ThreadSignalManager {
         uctx: &mut UserContext,
         restore_blocked: Option<SignalSet>,
     ) -> Option<(SignalInfo, SignalOsAction)> {
-        // Fast path
-        if !self.possibly_has_signal.load(Ordering::Acquire)
-            && !self.proc.has_pending.load(Ordering::Acquire)
-        {
+        // Fast path: projections may over-report, never under-report.
+        if !self.may_have_signal() {
             return None;
         }
         self.check_signals_slow(uctx, restore_blocked)
@@ -303,8 +306,12 @@ impl ThreadSignalManager {
     /// before `rt_sigreturn` causes the kernel-side access to fault through
     /// the normal kernel fault path.
     ///
-    /// Restoring also re-arms the pending check so a signal queued while the
-    /// handler ran is noticed before returning to user mode.
+    /// Restoring replaces the blocked mask inside a transaction, which
+    /// republishes the availability projection from the restored mask, so a
+    /// signal queued while the handler ran is noticed before returning to
+    /// user mode. The restored mask comes from the user-writable frame, so it
+    /// passes through the same write entry that drops the unblockable signals
+    /// (Linux `do_sigreturn` -> `set_current_blocked`).
     pub fn restore(&self, uctx: &mut UserContext) {
         let frame_ptr = uctx.sp() as *const SignalFrame;
         // SAFETY: pointer is valid
@@ -313,8 +320,9 @@ impl ThreadSignalManager {
         uctx.restore_user_restorable(frame.saved);
         frame.ucontext.mcontext.restore(uctx);
 
-        *self.blocked.lock() = frame.ucontext.sigmask;
-        self.possibly_has_signal.store(true, Ordering::Release);
+        self.proc
+            .siglock()
+            .transact(|txn| txn.set_blocked(self.slot, frame.ucontext.sigmask));
     }
 
     /// Sends a signal to the thread.
@@ -336,32 +344,40 @@ impl ThreadSignalManager {
         let Some(handlers) = owner.as_ref() else {
             return false;
         };
-        let (ignored, is_blocked, fatal) = {
+        let (ignored, fatal) = {
             let actions = handlers.actions.lock();
-            let is_blocked = self.signal_blocked(signo);
             (
                 super::process::signal_ignored_by(&actions, signo),
-                is_blocked,
                 super::process::signal_is_fatal(&actions, signo),
             )
         };
 
-        if ignored && !is_blocked {
-            return false;
-        }
+        // The blocked check, the fatal-signal note and the enqueue are one
+        // transaction: a mask change can no longer land between the
+        // "deliverable" answer and the queue it justifies, and the arrival
+        // projection is published from the queue that was just extended.
+        let (is_blocked, accepted) = self.proc.siglock().transact(|txn| {
+            let is_blocked = txn.view().blocked_has(self.slot, signo);
+            if ignored && !is_blocked {
+                return (is_blocked, false);
+            }
+            // A fatal signal delivered to this thread terminates the whole
+            // process when it is not blocked; a blocked one stays pending (and
+            // survives `execve`) without marking the process as dying. Record
+            // it before the queue so a concurrent `exec` sibling sweep cannot
+            // absorb it.
+            if fatal && !is_blocked {
+                self.proc.note_fatal_signal(signo);
+            }
+            txn.put_thread(self.slot, sig);
+            (is_blocked, true)
+        });
 
-        // A fatal signal delivered to this thread terminates the whole process
-        // when it is not blocked; a blocked one stays pending (and survives
-        // `execve`) without marking the process as dying. Record it so a
-        // concurrent `exec` sibling sweep cannot absorb it.
-        if fatal && !is_blocked {
-            self.proc.note_fatal_signal(signo);
-        }
-        if self.pending.lock().put_signal(sig) {
-            self.possibly_has_signal.store(true, Ordering::Release);
-        }
         let source = handlers.pending_changed.clone();
         drop(owner);
+        if !accepted {
+            return false;
+        }
         source.wake();
         !is_blocked
     }
@@ -379,13 +395,9 @@ impl ThreadSignalManager {
             return false;
         };
         let source = handlers.pending_changed.clone();
-        if self
-            .pending
-            .lock()
-            .put_signal(SignalInfo::new_kernel(Signo::SIGKILL))
-        {
-            self.possibly_has_signal.store(true, Ordering::Release);
-        }
+        self.proc
+            .siglock()
+            .transact(|txn| txn.put_thread(self.slot, SignalInfo::new_kernel(Signo::SIGKILL)));
         drop(owner);
         source.wake();
         true
@@ -428,27 +440,20 @@ impl ThreadSignalManager {
 
     /// Returns the current blocked signal set.
     pub fn blocked(&self) -> SignalSet {
-        *self.blocked.lock()
+        self.proc.siglock().inspect(|view| view.blocked(self.slot))
     }
 
     /// Replaces the blocked set, returning the previous one.
     ///
-    /// `SIGKILL` and `SIGSTOP` are always cleared from `set` because they
-    /// cannot be blocked. Re-arms the pending check so a signal that became
+    /// `SIGKILL` and `SIGSTOP` are always cleared because they cannot be
+    /// blocked; the write entry enforces that for every caller, including the
+    /// `rt_sigreturn` path. The availability projection is recomputed from the
+    /// new mask before the lock is released, so a signal that became
     /// deliverable by this change is handled before the next user return.
-    pub fn set_blocked(&self, mut set: SignalSet) -> SignalSet {
-        set.remove(Signo::SIGKILL);
-        set.remove(Signo::SIGSTOP);
-        self.possibly_has_signal.store(true, Ordering::Release);
-        let mut guard = self.blocked.lock();
-        let old = *guard;
-        *guard = set;
-        old
-    }
-
-    /// Checks whether the signal is currently blocked.
-    pub fn signal_blocked(&self, signo: Signo) -> bool {
-        self.blocked.lock().has(signo)
+    pub fn set_blocked(&self, set: SignalSet) -> SignalSet {
+        self.proc
+            .siglock()
+            .transact(|txn| txn.set_blocked(self.slot, set))
     }
 
     /// Temporarily replaces the blocked signal set for the duration of `f`,
@@ -471,12 +476,16 @@ impl ThreadSignalManager {
     /// Saves a blocked-mask snapshot to restore when the next caught signal
     /// frame is built. Used by `rt_sigsuspend`.
     pub fn set_saved_sigmask(&self, sigmask: SignalSet) {
-        *self.saved_sigmask.lock() = Some(sigmask);
+        self.proc
+            .siglock()
+            .transact(|txn| txn.set_saved_sigmask(self.slot, sigmask));
     }
 
     /// Takes and clears the saved blocked-mask snapshot, if any.
     pub fn take_saved_sigmask(&self) -> Option<SignalSet> {
-        self.saved_sigmask.lock().take()
+        self.proc
+            .siglock()
+            .transact(|txn| txn.take_saved_sigmask(self.slot))
     }
 
     /// Returns the signal handler stack configuration.
@@ -491,7 +500,27 @@ impl ThreadSignalManager {
 
     /// Returns pending signals for this thread and its process.
     pub fn pending(&self) -> SignalSet {
-        self.pending.lock().set | self.proc.pending()
+        self.proc
+            .siglock()
+            .inspect(|view| view.pending(self.slot) | view.shared_pending())
+    }
+}
+
+impl Drop for ThreadSignalManager {
+    /// Releases this thread's slot so it can be reused.
+    ///
+    /// [`Self::exit`] retires the slot at thread exit; this covers managers
+    /// retired without it. The handle is generation-checked, so a second
+    /// retirement after the slot was reused is a no-op.
+    ///
+    /// This acquires the process `SigLock`, which is a non-reentrant
+    /// `SpinNoIrq`, so the last `Arc<ThreadSignalManager>` must not be dropped
+    /// while that lock is held: the drop would wait on a lock its own CPU
+    /// already owns. No path does that today — transactions only touch slot
+    /// state and never a manager reference — and this is stated here so a
+    /// future one cannot assume otherwise.
+    fn drop(&mut self) {
+        self.proc.siglock().transact(|txn| txn.retire(self.slot));
     }
 }
 

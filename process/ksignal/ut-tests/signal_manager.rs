@@ -823,6 +823,139 @@ fn test_signal_action_default() {
     assert!(action.mask.is_empty());
 }
 
+/// Drives the availability projection through every transition the fast path
+/// depends on, for both queues.
+///
+/// This is the regression guard for `F-04` (a projection that under-reports
+/// strands a deliverable signal until an unrelated event re-arms the check), so
+/// it asserts the projection cell itself rather than delivery behaviour.
+#[def_test]
+fn test_availability_projection_tracks_both_queues() {
+    fn block(lock: &crate::SigLock, slot: crate::SlotId, signo: Signo) {
+        let mut set = SignalSet::default();
+        set.add(signo);
+        lock.transact(|txn| txn.set_blocked(slot, set));
+    }
+    fn unblock(lock: &crate::SigLock, slot: crate::SlotId) {
+        lock.transact(|txn| txn.set_blocked(slot, SignalSet::default()));
+    }
+
+    let lock = crate::SigLock::new();
+    let (slot, hint) = lock.register(11);
+    assert!(!hint.load(Ordering::Acquire));
+
+    // Thread-private queue: enqueue, mask, unmask, dequeue.
+    lock.transact(|txn| txn.put_thread(slot, SignalInfo::new_kernel(Signo::SIGTERM)));
+    assert!(hint.load(Ordering::Acquire));
+    block(&lock, slot, Signo::SIGTERM);
+    assert!(!hint.load(Ordering::Acquire));
+    unblock(&lock, slot);
+    assert!(hint.load(Ordering::Acquire));
+    let taken = lock.transact(|txn| txn.take(slot)).map(|d| d.sig.signo());
+    assert_eq!(taken, Some(Signo::SIGTERM));
+    assert!(!hint.load(Ordering::Acquire));
+
+    // Process-directed queue: the same transitions, but the answer depends on
+    // this thread's mask, so the queueing side must publish every slot.
+    lock.transact(|txn| txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1)));
+    assert!(hint.load(Ordering::Acquire));
+    block(&lock, slot, Signo::SIGUSR1);
+    assert!(!hint.load(Ordering::Acquire));
+    unblock(&lock, slot);
+    assert!(hint.load(Ordering::Acquire));
+    let taken = lock.transact(|txn| txn.take(slot)).map(|d| d.sig.signo());
+    assert_eq!(taken, Some(Signo::SIGUSR1));
+    assert!(!hint.load(Ordering::Acquire));
+}
+
+/// The identity mechanism that replaced the `Weak` registry: `leave_group`
+/// takes the thread out of delivery-target selection.
+#[def_test]
+fn test_leave_group_removes_delivery_target() {
+    let lock = crate::SigLock::new();
+    let (first, _) = lock.register(21);
+    let (second, _) = lock.register(22);
+
+    let (target, blocked) = lock.inspect(|view| view.find_target(Signo::SIGUSR1));
+    assert_eq!(target, Some(21));
+    assert!(!blocked);
+
+    // A target that blocks the signal is skipped but still reported, so the
+    // "ignored signals stay pending while someone blocks them" policy holds.
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGUSR1);
+    lock.transact(|txn| txn.set_blocked(first, set));
+    let (target, blocked) = lock.inspect(|view| view.find_target(Signo::SIGUSR1));
+    assert_eq!(target, Some(22));
+    assert!(blocked);
+
+    // Leaving the group removes the thread from selection entirely, including
+    // from the blocked report.
+    lock.transact(|txn| txn.leave_group(second));
+    let (target, blocked) = lock.inspect(|view| view.find_target(Signo::SIGUSR1));
+    assert_eq!(target, None);
+    assert!(blocked);
+
+    lock.transact(|txn| txn.leave_group(first));
+    let (target, blocked) = lock.inspect(|view| view.find_target(Signo::SIGUSR1));
+    assert_eq!(target, None);
+    assert!(!blocked);
+}
+
+/// A retired slot handle must never reach the successor that reuses its index.
+#[def_test]
+fn test_retired_slot_handle_cannot_address_reused_slot() {
+    let lock = crate::SigLock::new();
+    let (stale, _) = lock.register(31);
+    lock.transact(|txn| txn.retire(stale));
+
+    // The freed index is reused, with a new generation.
+    let (successor, hint) = lock.register(32);
+    assert!(!hint.load(Ordering::Acquire));
+
+    let mut set = SignalSet::default();
+    set.add(Signo::SIGTERM);
+    lock.transact(|txn| txn.set_blocked(stale, set));
+    assert!(lock.inspect(|view| view.blocked(successor)).is_empty());
+
+    assert!(!lock.transact(|txn| txn.put_thread(stale, SignalInfo::new_kernel(Signo::SIGTERM))));
+    assert!(lock.inspect(|view| view.pending(successor)).is_empty());
+    assert!(lock.transact(|txn| txn.take(stale)).is_none());
+    assert!(!hint.load(Ordering::Acquire));
+
+    // The successor's own handle still works.
+    assert!(lock.transact(|txn| txn.put_thread(successor, SignalInfo::new_kernel(Signo::SIGTERM))));
+    assert!(lock.inspect(|view| view.pending(successor)).has(Signo::SIGTERM));
+    assert!(hint.load(Ordering::Acquire));
+}
+
+#[def_test]
+fn test_blocked_write_entry_drops_unblockable_signals() {
+    let lock = crate::SigLock::new();
+    let (slot, _hint) = lock.register(7);
+
+    let mut named = SignalSet::default();
+    named.add(Signo::SIGTERM);
+    named.add(Signo::SIGKILL);
+    named.add(Signo::SIGSTOP);
+
+    let (after_set, after_add) = lock.transact(|txn| {
+        txn.set_blocked(slot, named);
+        let after_set = txn.view().blocked(slot);
+        txn.add_blocked(slot, named);
+        (after_set, txn.view().blocked(slot))
+    });
+
+    // Both writers are the same entry, so a handler mask cannot reintroduce
+    // an unblockable signal either.
+    assert!(after_set.has(Signo::SIGTERM));
+    assert!(!after_set.has(Signo::SIGKILL));
+    assert!(!after_set.has(Signo::SIGSTOP));
+    assert!(after_add.has(Signo::SIGTERM));
+    assert!(!after_add.has(Signo::SIGKILL));
+    assert!(!after_add.has(Signo::SIGSTOP));
+}
+
 #[def_test]
 fn test_thread_signal_manager_blocked_and_stack_helpers() {
     let thread = new_thread_manager();
@@ -834,9 +967,9 @@ fn test_thread_signal_manager_blocked_and_stack_helpers() {
 
     let old = thread.set_blocked(set);
     assert!(old.is_empty());
-    assert!(thread.signal_blocked(Signo::SIGTERM));
-    assert!(!thread.signal_blocked(Signo::SIGKILL));
-    assert!(!thread.signal_blocked(Signo::SIGSTOP));
+    assert!(thread.blocked().has(Signo::SIGTERM));
+    assert!(!thread.blocked().has(Signo::SIGKILL));
+    assert!(!thread.blocked().has(Signo::SIGSTOP));
 
     let stack = SignalStack {
         sp: 0x4000,

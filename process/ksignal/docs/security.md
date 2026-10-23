@@ -59,9 +59,9 @@ treats payload fields as raw bits and never dereferences pointer-like values
 | ID | Failure mode | Cause | Local effect | System effect | Sev | Response |
 |---|---|---|---|---|---|---|
 | F-01 | Frame write fails | unmapped user stack | dispatch returns `CoreDump` | process exits | 3 | documented fatal path |
-| F-02 | Dead thread entry kept in `children` | thread exit without prune | stale tid selected | wake/interrupt to dead tid is filtered by callers; entries pruned on next scan | 4 | opportunistic `retain` pruning |
+| F-02 | Retired slot reused while a handle is retained | thread exit without releasing the slot, then reuse | stale handle addresses a successor thread's state | signals routed to the wrong thread | 3 | generation-checked handles; `exit()` only clears the target flag, `Drop` releases the slot |
 | F-03 | Pending bit set without queue entry | bookkeeping divergence under concurrent put/dequeue of same signal | dequeue returns `None` while bit set (fast-path flag stays true) | extra slow-path iterations, no lost signal | 4 | bit and queue mutated under the same `SpinNoIrq` per manager |
-| F-04 | `has_pending` false negative | ordering bug between store and queue | signal delayed until next set | latency only | 4 | Release store after successful put; Acquire loads on check |
+| F-04 | Availability projection under-reports | a caller publishes "nothing pending" from an observation taken under another lock | deliverable signal stays queued until an unrelated event re-arms the check | thread hangs waiting for a handler that never runs | 2 | projection written only by `SigLock::republish`, inside the transaction that changed state, derived from that state, and only for slots the transaction marked dirty; no caller-side clears exist |
 
 ## Thread safety
 
@@ -79,23 +79,29 @@ An expired captured source never rebinds after exec. Inactive manager capture
 returns `NoSuchProcess`, mapped to `InvalidState` by thread registration; normal
 expiry after capture is a successful registration with no waiter installed.
 
-Managers use per-field `SpinNoIrq` cells; `SignalActions` is `Arc`-shared
-and locked per access. Its shared reference is internal to signal managers;
-external callers receive action values, not an independently retainable lock.
+`SigLock` guards the whole deliverability predicate in one `SpinNoIrq`:
+the process-directed queue and each thread's private queue, blocked set and
+saved sigmask. The lock-free fast path reads only a per-thread projection, which
+may over-report but never under-report and is written solely by the lock's own
+commit step; query paths use a read-only capability that recomputes nothing. `SignalActions` is `Arc`-shared and locked per access. Its shared
+reference is internal to signal managers; external callers receive action
+values, not an independently retainable lock.
 Fork copies the whole action snapshot under its lock and releases the lock
 before allocating the independent child state. An outer process ownership lock
 serializes table selection with fork and exec. The lock order is ownership,
-represented by `ProcessSignalManager.handlers`, then `SignalHandlers.actions`,
-children, blocked; no path takes another process's ownership lock.
+represented by `ProcessSignalManager.handlers`, then `SignalHandlers.actions`
+and `SigLock`; no path takes another process's ownership lock and no path takes
+`SigLock` before `handlers`.
 Only shared fork adds a table owner, so a sole-owner count under the ownership
 lock permits in-place reset. Exec allocation and old-table destruction happen
 outside signal locks. Pending publication holds the ownership lock after
 classification locks are released, so release and acceptance are serialized.
-No waker runs under the ownership lock. `SignalSet` is a plain `Copy` bitmap
+No waker runs under the ownership lock or under `SigLock`. `SignalSet` is a plain `Copy` bitmap
 shared by value.
 `SignalInfo` `Send`/`Sync` rely on the opaque-bits invariant above. The
-global observer table is lock-serialized. `find_target_thread` mutates the
-children list (prune) during sends from any thread.
+global observer table is lock-serialized. Slot registration, retirement and
+target selection all run inside `SigLock`, so a handle cannot be observed as
+reusable while a send is selecting targets.
 
 ## Failure handling
 
@@ -123,7 +129,11 @@ metadata, not user file content. No other user data is processed or logged.
   the user-writable frame, `restore` clears unsupported `MXCSR` bits against a
   cached trusted feature mask before `FXRSTOR`.
 - `restore` trusts a mapped frame at `sp`; a corrupted frame produces a user
-  fault after return rather than a kernel-side checked error.
+  fault after return rather than a kernel-side checked error. The restored
+  mask is user-controlled, so it goes through the same blocked-mask write entry
+  as `rt_sigprocmask`, which drops `SIGKILL`/`SIGSTOP` (Linux `do_sigreturn` ->
+  `set_current_blocked`). A frame that names them cannot make the process
+  unkillable.
 
 ## Audit checklist
 
@@ -131,7 +141,10 @@ metadata, not user file content. No other user data is processed or logged.
   the `SignalInfo` can be observed.
 - Every new user-memory access in the dispatch path must use checked `osvm`
   access; never raw deref on the write side.
-- Keep `SIGKILL`/`SIGSTOP` unblockable in `set_blocked`.
+- `SigTxn::set_blocked`/`add_blocked` are the only blocked-mask writers and
+  always drop `SIGKILL`/`SIGSTOP`; new writers must go through them instead of
+  re-deriving the rule.
 - Dequeue observers must stay cheap and non-sleeping.
-- Fast-path atomics must be updated with the queue-lock discipline described
-  in design.md (store after successful enqueue under lock).
+- The availability projection is written only by `SigLock::republish`, inside
+  the transaction that changed state. Never publish an availability answer from
+  a caller, and never clear it after releasing the lock.

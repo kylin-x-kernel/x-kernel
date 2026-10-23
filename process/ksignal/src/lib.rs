@@ -41,6 +41,9 @@ pub use action::*;
 mod pending;
 pub use pending::*;
 
+mod siglock;
+pub(crate) use siglock::{Dequeued, SigLock, SlotId};
+
 mod types;
 pub use types::*;
 

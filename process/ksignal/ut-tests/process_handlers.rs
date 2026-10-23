@@ -3,16 +3,18 @@
 // See LICENSES for license details.
 
 use super::*;
+use crate::api::ThreadSignalManager;
 
 #[cfg(unittest)]
 #[unittest::def_test]
 fn test_captured_notification_survives_exec_without_owning_handlers() {
     let manager = ProcessSignalManager::new(SignalActions::default(), 0);
+    manager.siglock().transact(|txn| {
+        txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1));
+    });
     let source = {
         let owner = manager.handlers.lock();
-        let handlers = owner.as_ref().unwrap();
-        manager.put_pending_signal(SignalInfo::new_kernel(Signo::SIGUSR1));
-        handlers.pending_changed.clone()
+        owner.as_ref().unwrap().pending_changed.clone()
     };
     let before = Arc::as_ptr(manager.handlers.lock().as_ref().unwrap());
     manager.reset_actions_for_exec().unwrap();

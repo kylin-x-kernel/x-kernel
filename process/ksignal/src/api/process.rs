@@ -3,23 +3,19 @@
 // See LICENSES for license details.
 
 //! Process-level signal state and delivery.
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::sync::Arc;
 use core::{
     array,
     ops::{Index, IndexMut},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
 
 use crate::{
-    DefaultSignalAction, MAX_SIGNALS, PendingSignals, SigchldChildExitSignalInfo, SignalAction,
+    DefaultSignalAction, MAX_SIGNALS, SigLock, SigchldChildExitSignalInfo, SignalAction,
     SignalActionFlags, SignalDisposition, SignalInfo, SignalSet, Signo,
-    api::{SignalDequeueAction, ThreadSignalManager, notify_signal_dequeued},
 };
 
 /// Container for signal actions across all supported signals.
@@ -86,8 +82,12 @@ impl SignalHandlers {
 /// This manager coordinates signal delivery between the process and its threads,
 /// maintains signal actions, and handles process-wide pending signals.
 pub struct ProcessSignalManager {
-    /// Process-level pending signals queue
-    pending: SpinNoIrq<PendingSignals>,
+    /// The only critical section that answers signal deliverability: this
+    /// process's directed queue together with every member thread's private
+    /// queue, blocked set and saved sigmask. Holding them under one lock is
+    /// what makes `pending ∩ ¬blocked` observable atomically; splitting them
+    /// lets a sender and a receiver each see a consistent-but-stale half.
+    siglock: SigLock,
 
     /// This process's current configuration; locks before SignalHandlers.actions.
     /// Serializes fork/exec ownership changes without adding query owners.
@@ -95,12 +95,6 @@ pub struct ProcessSignalManager {
 
     /// Default signal handler restore function
     pub(crate) default_restorer: usize,
-
-    /// Thread signal managers for signal distribution
-    pub(crate) children: SpinNoIrq<Vec<(u32, Weak<ThreadSignalManager>)>>,
-
-    /// Fast path indicator for pending signals
-    pub(crate) has_pending: AtomicBool,
 
     /// Packs the fatal-signal counter (high 32 bits) and the signal number of
     /// the last accepted fatal signal (low 32 bits) into one word.
@@ -154,13 +148,16 @@ impl ProcessSignalManager {
 
     fn with_handlers(handlers: Arc<SignalHandlers>, default_restorer: usize) -> Self {
         Self {
-            pending: SpinNoIrq::new(PendingSignals::default()),
+            siglock: SigLock::new(),
             handlers: SpinNoIrq::new(Some(handlers)),
             default_restorer,
-            children: SpinNoIrq::new(Vec::new()),
-            has_pending: AtomicBool::new(false),
             fatal_signal: AtomicU64::new(0),
         }
+    }
+
+    /// Borrows the signal-state lock shared with this process's threads.
+    pub(crate) fn siglock(&self) -> &SigLock {
+        &self.siglock
     }
 
     /// Creates a new process manager sharing this process's action configuration.
@@ -270,32 +267,6 @@ impl ProcessSignalManager {
         Ok(())
     }
 
-    /// Dequeues the next pending signal that matches the given mask.
-    ///
-    /// # Arguments
-    /// * `mask` - Signal mask to filter available signals
-    ///
-    /// # Returns
-    /// The next available signal info, if any
-    pub(crate) fn dequeue_signal(&self, mask: &SignalSet) -> Option<SignalInfo> {
-        loop {
-            let signal = {
-                let mut pending_guard = self.pending.lock();
-                let signal = pending_guard.dequeue_signal(mask);
-                if pending_guard.set.is_empty() {
-                    self.has_pending.store(false, Ordering::Release);
-                }
-                signal
-            };
-
-            let sig = signal?;
-
-            if notify_signal_dequeued(&sig) == SignalDequeueAction::Deliver {
-                return Some(sig);
-            }
-        }
-    }
-
     /// Checks if a signal is ignored by the process.
     /// Returns `NoSuchProcess` after configuration ownership is released.
     pub fn signal_ignored(&self, signo: Signo) -> KResult<bool> {
@@ -370,33 +341,40 @@ impl ProcessSignalManager {
         let signo = sig.signo();
         let owner = self.handlers.lock();
         let handlers = owner.as_ref()?;
-        let (ignored, fatal, target_tid, has_blocked_thread) = {
+        let (ignored, fatal) = {
             let actions = handlers.actions.lock();
-
-            // Keep the disposition snapshot and target-thread scan in one
-            // generation decision. This follows Linux's prepare_signal() /
-            // complete_signal() structure without claiming the same global
-            // sighand->siglock consistency for every signal-related field.
-            let (target_tid, has_blocked_thread) = self.find_target_thread(signo);
             (
                 signal_ignored_by(&actions, signo),
                 signal_is_fatal(&actions, signo),
-                target_tid,
-                has_blocked_thread,
             )
         };
+
+        // Target selection and queueing are one transaction, so a target
+        // cannot change its blocked set between selection and queueing, and
+        // the arrival projection is derived from the queue that was just
+        // extended rather than published separately.
+        let (target_tid, has_blocked_thread) = self.siglock.transact(|txn| {
+            let (target_tid, has_blocked_thread) = txn.view().find_target(signo);
+            if ignored && !has_blocked_thread {
+                return (target_tid, has_blocked_thread);
+            }
+            // A fatal group signal terminates the whole process when some
+            // thread can actually take it; record it before the queue so a
+            // concurrent `exec` sibling sweep cannot absorb it. A signal every
+            // thread blocks stays pending (and survives `execve`) without
+            // marking the process as dying. The epoch is a plain atomic store,
+            // so it is safe to publish it inside the critical section where
+            // the ordering matters.
+            if fatal && target_tid.is_some() {
+                self.note_fatal_signal(signo);
+            }
+            txn.put_shared(sig);
+            (target_tid, has_blocked_thread)
+        });
 
         if ignored && !has_blocked_thread {
             return None;
         }
-        // A fatal group signal terminates the whole process when some thread can
-        // actually take it; record it before the queue so a concurrent `exec`
-        // sibling sweep cannot absorb it. A signal every thread blocks stays
-        // pending (and survives `execve`) without marking the process as dying.
-        if fatal && target_tid.is_some() {
-            self.note_fatal_signal(signo);
-        }
-        self.put_pending_signal(sig);
         let source = handlers.pending_changed.clone();
         drop(owner);
         source.wake();
@@ -470,8 +448,10 @@ impl ProcessSignalManager {
         let owner = self.handlers.lock();
         let handlers = owner.as_ref()?;
         if prepared.queue_signal {
-            self.put_pending_signal(prepared.sig.into_signal_info());
-            let (target_tid, _) = self.find_target_thread(Signo::SIGCHLD);
+            let (target_tid, _) = self.siglock.transact(|txn| {
+                txn.put_shared(prepared.sig.into_signal_info());
+                txn.view().find_target(Signo::SIGCHLD)
+            });
             let source = handlers.pending_changed.clone();
             drop(owner);
             source.wake();
@@ -497,12 +477,6 @@ impl ProcessSignalManager {
         };
         let target_tid = self.commit_child_exit_signal(prepared);
         Ok((outcome, target_tid))
-    }
-
-    fn put_pending_signal(&self, sig: SignalInfo) {
-        if self.pending.lock().put_signal(sig) {
-            self.has_pending.store(true, Ordering::Release);
-        }
     }
 }
 
@@ -552,30 +526,9 @@ impl ProcessSignalManager {
         ((raw >> 32) as u32, raw as u32)
     }
 
-    /// Finds a suitable thread and reports whether any live thread blocks it.
-    fn find_target_thread(&self, signo: Signo) -> (Option<u32>, bool) {
-        let mut target_tid = None;
-        let mut has_blocked_thread = false;
-
-        self.children.lock().retain(|(tid, thread_weak)| {
-            if let Some(thread) = thread_weak.upgrade() {
-                if thread.signal_blocked(signo) {
-                    has_blocked_thread = true;
-                } else if target_tid.is_none() {
-                    target_tid = Some(*tid);
-                }
-                true // Keep this thread reference
-            } else {
-                false // Remove dead thread reference
-            }
-        });
-
-        (target_tid, has_blocked_thread)
-    }
-
     /// Gets currently pending signals.
     pub fn pending(&self) -> SignalSet {
-        self.pending.lock().set
+        self.siglock.inspect(|view| view.shared_pending())
     }
 }
 

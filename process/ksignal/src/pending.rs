@@ -45,6 +45,13 @@ impl PendingSignals {
     /// # Arguments
     /// * `sig` - Signal information to add
     ///
+    /// The payload is boxed only once the queue accepts it (not for a
+    /// coalesced standard signal), which keeps this the only allocation on the
+    /// send path. That allocation happens under the owning signal lock, as in
+    /// Linux, where `__send_signal_locked` calls `__sigqueue_alloc` with
+    /// `GFP_ATOMIC` while already holding `sighand->siglock`, and skips it
+    /// entirely for a coalesced signal or `SIGKILL`.
+    ///
     /// # Returns
     /// `true` if the signal was successfully added, `false` if it was
     /// already pending (for standard signals only)
@@ -63,6 +70,16 @@ impl PendingSignals {
             self.info_std[signo as usize] = Some(Box::new(sig));
         }
         true
+    }
+
+    /// Returns whether any queued signal is deliverable under `blocked`.
+    ///
+    /// This is the authoritative deliverability predicate: it is evaluated
+    /// only by the owner of the queue, inside the same critical section that
+    /// mutates it, and its result is what the lock-free fast-path projection
+    /// is derived from.
+    pub(crate) fn has_deliverable(&self, blocked: SignalSet) -> bool {
+        !(self.set & !blocked).is_empty()
     }
 
     /// Dequeues the next pending signal contained in `mask`, if any.
