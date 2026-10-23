@@ -4,6 +4,8 @@
 
 use core::mem::size_of;
 
+#[cfg(target_arch = "x86_64")]
+use kerrno::KError;
 use khal::uspace::UserContext;
 use kprocess::UserThreadRuntimeAction;
 use ksignal::{SignalAction, SignalDisposition, SignalInfo, Signo};
@@ -76,4 +78,39 @@ fn dispatch_rt_tgsigqueueinfo_uses_four_arguments() {
 
     assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
     assert_eq!(uctx.retval(), 0);
+}
+
+// The legacy epoll entries exist only in the x86_64 syscall table; this pins
+// the number-to-handler mapping and the argument order of the wiring.
+#[cfg(target_arch = "x86_64")]
+#[def_test(user)]
+fn dispatch_legacy_epoll_wait_maps_number_and_arguments() {
+    let mut uctx = UserContext::new(0, 0x8000usize.into(), 0);
+    uctx.set_sysno(Sysno::epoll_wait.id() as usize);
+    uctx.set_arg0((-1i32) as usize); // invalid epfd must fail before anything else
+    uctx.set_arg1(0);
+    uctx.set_arg2(1);
+    uctx.set_arg3(0);
+
+    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(
+        uctx.retval(),
+        KError::BadFileDescriptor.into_syscall_return() as usize
+    );
+}
+
+// The other half of the legacy wiring: epoll_create(213) must reach the
+// size check instead of the ENOSYS fallback.
+#[cfg(target_arch = "x86_64")]
+#[def_test(user)]
+fn dispatch_legacy_epoll_create_maps_number_and_arguments() {
+    let mut uctx = UserContext::new(0, 0x8000usize.into(), 0);
+    uctx.set_sysno(Sysno::epoll_create.id() as usize);
+    uctx.set_arg0(0); // a non-positive size is rejected before any allocation
+
+    assert_eq!(handle_syscall(&mut uctx), UserThreadRuntimeAction::Continue);
+    assert_eq!(
+        uctx.retval(),
+        KError::InvalidInput.into_syscall_return() as usize
+    );
 }

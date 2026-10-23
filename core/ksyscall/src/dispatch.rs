@@ -401,6 +401,17 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
             uctx.arg4().into(),
             uctx.arg5() as _,
         ),
+        // x86_64 keeps the legacy epoll entries that newer architectures
+        // dropped; some programs call the legacy entries directly.
+        #[cfg(target_arch = "x86_64")]
+        Sysno::epoll_create => sys_epoll_create(uctx.arg0() as _),
+        #[cfg(target_arch = "x86_64")]
+        Sysno::epoll_wait => sys_epoll_wait(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
 
         // fs mount
         Sysno::mount => sys_mount(

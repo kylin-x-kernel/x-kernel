@@ -38,6 +38,16 @@ pub(crate) fn sys_epoll_create1(flags: u32) -> KResult<isize> {
         .map(|fd| fd as isize)
 }
 
+/// Creates an epoll instance (legacy `epoll_create`): `size` must be
+/// positive but is otherwise ignored, exactly like `epoll_create1(0)`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn sys_epoll_create(size: i32) -> KResult<isize> {
+    if size <= 0 {
+        return Err(KError::InvalidInput);
+    }
+    sys_epoll_create1(0)
+}
+
 /// Adds, modifies, or removes an epoll interest.
 pub(crate) fn sys_epoll_ctl(
     epfd: i32,
@@ -143,6 +153,18 @@ pub(crate) fn sys_epoll_pwait(
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
 
+/// Waits for epoll events with a millisecond timeout (legacy `epoll_wait`):
+/// identical to `epoll_pwait` without a signal mask.
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn sys_epoll_wait(
+    epfd: i32,
+    events: UserPtr<k_epoll_event>,
+    maxevents: i32,
+    timeout: i32,
+) -> KResult<isize> {
+    sys_epoll_pwait(epfd, events, maxevents, timeout, UserConstPtr::default(), 0)
+}
+
 /// Waits for epoll events with a high-precision timeout.
 pub(crate) fn sys_epoll_pwait2(
     epfd: i32,
@@ -169,4 +191,10 @@ unittest::path_mod_test!(
 unittest::path_mod_test!(
     tests_epoll_negative_timeout,
     "../../ut-tests/io_mpx/epoll/tests_epoll_negative_timeout.rs"
+);
+
+unittest::path_mod_test!(
+    #[cfg(target_arch = "x86_64")]
+    mod tests_epoll_legacy,
+    "../../ut-tests/io_mpx/epoll/tests_epoll_legacy.rs"
 );
