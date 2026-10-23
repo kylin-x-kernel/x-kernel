@@ -17,6 +17,7 @@ use alloc::{
 use core::{
     cell::UnsafeCell,
     future::poll_fn,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Poll, Waker},
 };
 
@@ -35,6 +36,10 @@ struct LockNode {
     bounds: UnsafeCell<(i64, i64)>,
     links: LinkedListLink,
     blocked: UnsafeCell<FileLockBlocked>,
+    /// Durable summary of `blocked.requests`, maintained by the same
+    /// BLOCKED_OWNERS-guarded paths that edit that list. Lets a zero-waiter
+    /// detach skip the global mutex without dereferencing the guarded cell.
+    waiter_count: AtomicUsize,
 }
 
 struct FileLockBlocked {
@@ -66,7 +71,22 @@ impl LockNode {
                 requests: LinkedList::new(LockAdapter::new()),
                 wait: None,
             }),
+            waiter_count: AtomicUsize::new(0),
         }
+    }
+
+    /// Records a waiter joining this node's request list.
+    ///
+    /// Every caller holds BLOCKED_OWNERS, the same mutex whose guard the list
+    /// edits require, so the count stays in lockstep with `requests`.
+    fn note_push(&self) {
+        self.waiter_count.fetch_add(1, Ordering::Release);
+    }
+
+    /// Records a waiter leaving this node's request list.
+    fn note_pop(&self) {
+        let previous = self.waiter_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
     }
 
     /// Copies the record without granting access to its shared storage.
@@ -109,6 +129,7 @@ impl LockNode {
 
     fn wake_blocked(&self, blocked: &mut MutexGuard<'_, BlockedOwners>, wake: &mut WakeQueue) {
         while let Some(waiter) = self.state(blocked).requests.pop_front() {
+            self.note_pop();
             waiter.state(blocked).blocker = None;
             remove_blocked_owner(blocked, &waiter);
             // The registration moves with its existing request node. A
@@ -118,12 +139,15 @@ impl LockNode {
                 wake.0.push_back(waiter);
             }
         }
+        debug_assert_eq!(self.waiter_count.load(Ordering::Relaxed), 0);
     }
 
     fn move_blocked(&self, target: &Arc<Self>, blocked: &mut MutexGuard<'_, BlockedOwners>) {
         while let Some(waiter) = self.state(blocked).requests.pop_front() {
+            self.note_pop();
             waiter.state(blocked).blocker = Some(Arc::downgrade(target));
             target.state(blocked).requests.push_back(waiter);
+            target.note_push();
         }
     }
 
@@ -162,11 +186,14 @@ impl OwnedLock {
     }
 
     pub(super) fn detach_blocked(&mut self, wake: &mut WakeQueue) {
-        // Weak parents prevent exclusive Arc access while descendants exist.
-        // This is an ownership check, not an unsynchronized shared-list read.
-        if let Some(node) = Arc::get_mut(&mut self.0)
-            && node.blocked.get_mut().requests.is_empty()
-        {
+        // The count summarizes `blocked.requests` and is maintained by the
+        // BLOCKED_OWNERS-guarded push/pop paths. A zero read means
+        // wake_blocked would find nothing, so the detach skips the global
+        // mutex even while shared handles (a transient Blocker clone) are
+        // alive. Detach runs under the owning inode's state mutex, which
+        // also serializes any blocking registration targeting this node, so
+        // the read cannot miss an in-flight push.
+        if self.0.waiter_count.load(Ordering::Acquire) == 0 {
             return;
         }
         self.0.wake_blocked(&mut BLOCKED_OWNERS.lock(), wake);
@@ -278,6 +305,7 @@ impl Waiter {
             .state(&mut blocked)
             .requests
             .push_back(self.0.clone());
+        blocker.note_push();
         // Indexing depends on the actual blocker, not detection eligibility.
         if blocker.owner.is_posix() {
             blocked
@@ -300,13 +328,16 @@ impl Waiter {
             let discarded = if let Some(parent) = parent {
                 // SAFETY: the blocker relation records membership in this
                 // exact list, and the global guard serializes all list edits.
-                let _ = unsafe {
+                let removed = unsafe {
                     parent
                         .state(&mut blocked)
                         .requests
                         .cursor_mut_from_ptr(Arc::as_ptr(&self.0))
                         .remove()
                 };
+                if removed.is_some() {
+                    parent.note_pop();
+                }
                 self.0.state(&mut blocked).wait.take()
             } else {
                 // A detached request may already belong to a notification

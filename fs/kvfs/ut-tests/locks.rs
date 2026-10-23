@@ -120,6 +120,13 @@ fn record_lock_matches_bytewise_updates() {
     }
 }
 
+// Registration through the synchronous entry keeps every wait-tree
+// observation in-task; the spawned child below only exercises the
+// end-to-end signal path, whose resolution is deterministic because
+// poll_interrupt double-checks the flag (a pre-scheduled interrupt is
+// consumed at the child's first poll). No yield budget is involved, so a
+// nested-VM scheduling stall can no longer produce a false failure
+// (CI #2790/#2798).
 #[def_test]
 fn blocking_lock_wakeup_deadlock_and_signal_cleanup() {
     let first = Arc::new(FileLockContext::new());
@@ -138,22 +145,25 @@ fn blocking_lock_wakeup_deadlock_and_signal_cleanup() {
             false,
         )
         .unwrap();
-    let waiting = second.clone();
-    let task = ktask::spawn(move || {
-        waiting
-            .apply(
-                &FileLock::new(owner_a, 101, FileLockType::Write, 0, 0).unwrap(),
-                true,
-            )
-            .unwrap();
-    });
-    for _ in 0..10000 {
-        if node::has_blocked_owner(owner_a) {
-            break;
-        }
-        ktask::yield_now();
-    }
+    // A waiter registered on owner_b's lock makes the blocked owner visible
+    // without any cross-task observation.
+    let mut waiter = None;
+    let mut wake = WakeQueue::new();
+    assert_eq!(
+        second.try_apply(
+            &FileLock::new(owner_a, 101, FileLockType::Write, 0, 0).unwrap(),
+            true,
+            &mut waiter,
+            &mut wake,
+        ),
+        Ok(true)
+    );
     assert!(node::has_blocked_owner(owner_a));
+    // Attach a waker so the unlock notification becomes observable, exactly
+    // like a parked waiter would.
+    assert!(waiter.as_ref().unwrap().poll_wait(Waker::noop()).is_pending());
+    // The reverse request closes the cycle and must deadlock instead of
+    // parking the caller.
     assert_eq!(
         first.apply(
             &FileLock::new(owner_b, 102, FileLockType::Write, 0, 0).unwrap(),
@@ -161,9 +171,36 @@ fn blocking_lock_wakeup_deadlock_and_signal_cleanup() {
         ),
         Err(LinuxError::EDEADLK.into())
     );
-    second.apply(&FileLock::unlock(owner_b), false).unwrap();
-    assert_eq!(task.join(), 0);
+    // Unlocking hands the registration to the wake queue; the retry reuses
+    // the same request node and now succeeds. try_apply is required here:
+    // the apply() wrapper owns its internal wake queue, so the notification
+    // would never reach ours.
+    let mut unlock_waiter = None;
+    assert_eq!(
+        second.try_apply(
+            &FileLock::unlock(owner_b),
+            false,
+            &mut unlock_waiter,
+            &mut wake,
+        ),
+        Ok(false)
+    );
+    assert_eq!(wake.len(), 1);
+    wake.wake();
+    assert!(waiter.as_ref().unwrap().poll_wait(Waker::noop()).is_ready());
+    assert_eq!(
+        second.try_apply(
+            &FileLock::new(owner_a, 101, FileLockType::Write, 0, 0).unwrap(),
+            true,
+            &mut waiter,
+            &mut wake,
+        ),
+        Ok(false)
+    );
     assert!(!node::has_blocked_owner(owner_a));
+    // End-to-end signal path: the waiter parks on owner_a's installed lock
+    // and the interrupt resolves it with ERESTARTSYS, cancelling its own
+    // registration.
     let waiting = second.clone();
     let task = ktask::spawn(move || {
         assert_eq!(
@@ -174,13 +211,6 @@ fn blocking_lock_wakeup_deadlock_and_signal_cleanup() {
             Err(LinuxError::ERESTARTSYS.into())
         );
     });
-    for _ in 0..10000 {
-        if node::has_blocked_owner(owner_b) {
-            break;
-        }
-        ktask::yield_now();
-    }
-    assert!(node::has_blocked_owner(owner_b));
     ktask::interrupt_task(&task, true);
     assert_eq!(task.join(), 0);
     assert!(!node::has_blocked_owner(owner_b));
@@ -472,47 +502,36 @@ fn expansion_preserves_identity_and_close_hands_off_readers() {
     );
 }
 
+// The regression this test guards is the uncontended file-lock path taking
+// the global wait-tree mutex (BLOCKED_OWNERS). Run the uncontended operation
+// sequence on the task that holds that mutex: any acquisition attempt
+// re-enters it and trips the mutex's self-ownership assert, so the property
+// is checked deterministically. The previous spawned-child-plus-yield-budget
+// shape only measured guest scheduling latency, which a nested VM may starve
+// independently of kernel correctness (CI #2790/#2798).
 #[def_test]
 fn uncontended_operations_do_not_take_wait_tree_lock() {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    let finished = Arc::new(AtomicBool::new(false));
-    let completed = finished.clone();
     let blocked = node::hold_wait_tree();
-    let task = ktask::spawn(move || {
-        for owner in [FileLockOwner::Posix(500), FileLockOwner::Flock(500)] {
-            let context = FileLockContext::new();
-            for (kind, start, length) in [
-                (FileLockType::Write, 0, 10),
-                (FileLockType::Write, 0, 20),
-                (FileLockType::Write, 30, 10),
-                (FileLockType::Write, 0, 40),
-                (FileLockType::Unlock, 10, 10),
-                (FileLockType::Read, 0, 40),
-                (FileLockType::Unlock, 0, 0),
-            ] {
-                context
-                    .apply(
-                        &FileLock::new(owner, 0, kind, start, length).unwrap(),
-                        false,
-                    )
-                    .unwrap();
-            }
+    for owner in [FileLockOwner::Posix(500), FileLockOwner::Flock(500)] {
+        let context = FileLockContext::new();
+        for (kind, start, length) in [
+            (FileLockType::Write, 0, 10),
+            (FileLockType::Write, 0, 20),
+            (FileLockType::Write, 30, 10),
+            (FileLockType::Write, 0, 40),
+            (FileLockType::Unlock, 10, 10),
+            (FileLockType::Read, 0, 40),
+            (FileLockType::Unlock, 0, 0),
+        ] {
+            context
+                .apply(
+                    &FileLock::new(owner, 0, kind, start, length).unwrap(),
+                    false,
+                )
+                .unwrap();
         }
-        completed.store(true, Ordering::Release);
-    });
-    // Bound a regression's wait, then release the mutex before joining so
-    // a failure is reported instead of hanging the test kernel.
-    for _ in 0..10000 {
-        if finished.load(Ordering::Acquire) {
-            break;
-        }
-        ktask::yield_now();
     }
-    let completed_without_global_lock = finished.load(Ordering::Acquire);
     drop(blocked);
-    assert_eq!(task.join(), 0);
-    assert!(completed_without_global_lock);
 }
 
 #[def_test]

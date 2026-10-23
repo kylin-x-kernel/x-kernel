@@ -535,18 +535,23 @@ macro_rules! assert_eq {
             return $crate::TestResult::Failed;
         }
     }};
-    ($left:expr, $right:expr, $($arg:tt)*) => {{
+    // Tolerate a trailing comma with no message (`assert_eq!(a, b,)`).
+    ($left:expr, $right:expr,) => {
+        $crate::assert_eq!($left, $right)
+    };
+    ($left:expr, $right:expr, $($arg:tt)+) => {{
         let left_val = &$left;
         let right_val = &$right;
         if left_val != right_val {
             $crate::ktest_println!(
-                "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?})",
+                "assert_eq! failed at {}:{}: {} ({:x?}) == {} ({:x?}): {}",
                 file!(),
                 line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
-                right_val
+                right_val,
+                format_args!($($arg)+)
             );
             return $crate::TestResult::Failed;
         }
@@ -571,18 +576,23 @@ macro_rules! assert_ne {
             return $crate::TestResult::Failed;
         }
     }};
-    ($left:expr, $right:expr, $($arg:tt)*) => {{
+    // Tolerate a trailing comma with no message (`assert_ne!(a, b,)`).
+    ($left:expr, $right:expr,) => {
+        $crate::assert_ne!($left, $right)
+    };
+    ($left:expr, $right:expr, $($arg:tt)+) => {{
         let left_val = &$left;
         let right_val = &$right;
         if left_val == right_val {
             $crate::ktest_println!(
-                "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?})",
+                "assert_ne! failed at {}:{}: {} ({:x?}) != {} ({:x?}): {}",
                 file!(),
                 line!(),
                 stringify!($left),
                 left_val,
                 stringify!($right),
-                right_val
+                right_val,
+                format_args!($($arg)+)
             );
             return $crate::TestResult::Failed;
         }
@@ -602,13 +612,18 @@ macro_rules! assert {
             return $crate::TestResult::Failed;
         }
     };
-    ($cond:expr, $($arg:tt)*) => {
+    // Tolerate a trailing comma with no message (`assert!(cond,)`).
+    ($cond:expr,) => {
+        $crate::assert!($cond)
+    };
+    ($cond:expr, $($arg:tt)+) => {
         if !$cond {
             $crate::ktest_println!(
-                "assert! failed at {}:{}: {}",
+                "assert! failed at {}:{}: {}: {}",
                 file!(),
                 line!(),
-                stringify!($cond)
+                stringify!($cond),
+                format_args!($($arg)+)
             );
             return $crate::TestResult::Failed;
         }
