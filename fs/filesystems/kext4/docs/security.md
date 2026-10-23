@@ -409,5 +409,20 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 - namespace mutation 是否传入既有 VFS victim/moved/replaced private state，而不是 core 按编号重载？
 - 新增 ext4-private transient 字段是否放在 VFS inode 组合持有的 `Ext4Inode`，而不是另建 wrapper
   snapshot、mount-wide inode-number map 或通用状态容器？
+- 目录插入需要分配新块时，link/rename 是否在发布 metadata 前预留 bitmap/group/superblock
+  增长额度，而不是依赖只存在于 create 路径的 child inode allocation 预算？普通文件
+  创建是否避免重复申请父目录增长额度，同时保留 mkdir/长 symlink 的独立 child 块预留？
 - 文档是否区分了 core support、live KVFS syscall exposure 和路线图能力？
 - statfs 模式是否只改变 `blocks`，并保持 free/available/reserved/delalloc accounting 共享？
+
+
+### Directory growth extent-credit boundary
+
+Namespace insertion admits both free space and journal credits from one preflight plan.
+`growth_credits` covers every planned directory/extent block's allocator headroom and
+create access, plus old external levels rewritten by each independent append.
+Checked arithmetic rejects overflow before metadata publication. In-place insertion
+adds no growth allowance; create does not double-reserve it. The existing transaction
+abort semantics remain intact. Regression fixtures cover inline-root and full external
+leaf splits for both link and rename, separate inode-table blocks, bounded transaction
+admission, and persistence after reopen.

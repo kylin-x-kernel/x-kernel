@@ -557,6 +557,21 @@ append、已有 HTree leaf split、线性目录转 HTree，以及转换后立即
 的单块 mapping，不能把它们视为一个连续的两块 extent。计划一旦进入 HTree 路径，即使事务
 开始时 inode 尚未设置 `EXT4_INDEX_FL`，credits 也包含 HTree 更新余量。
 
+目录插入计划同时保存 `required_blocks` 和 `growth_credits`。前者仍是目录数据块与
+extent 元数据块的空间上界；后者在相同预检结果上，为每个计划新块预留 4 个 credit
+（分配器入口要求 3 个余量，以及新块 create access），再按当前 extent depth 乘独立追加的
+目录块数，覆盖旧叶与索引沿路径的重写。新 extent 块的后续改写由同一 handle 的 metadata
+去重覆盖；转换后立即 split 的两次独立追加使用既有 independent-block 上界。所有换算均在
+metadata 发布前检查溢出，原地插入的增长预算为零。`dirent_insert` 使用计划中的预算，
+不再把所有增长路径都折算成固定 4；HTree 更新余量仍独立保留。
+
+普通文件与 inline child 创建只通过 `dirent_insert` 预留父目录增长额度，不重复申请；
+`mkdir` 与 block-mapped symlink 保留原数值的 `CHILD_BLOCK_ALLOCATION_METADATA`，服务
+child 自身数据块。新增回归用4个内联 extent及340个外部满叶 extent构造碎片化目录，
+分别执行 link/rename；目标与目录 inode 位于不同 inode-table block。准备阶段完成 sync，
+操作仅获得自身公式声明的事务额度，随后 lookup、sync、重开检查持久化。夹具保持合法
+1024-block journal，并通过测试专用 free-block 参数提供容量，不缩小日志来模拟预算。
+
 目录磁盘语义由既有对象分层承担：`RawDirectoryEntry` 统一完成 `rec_len` 编解码，并与 Linux
 `ext4_rec_len_from_disk()` 一致地把原始 `0` 和 `0xffff` 解释为整个目录块；64 KiB 整块写回使用
 `0xffff`。`HTreeRootInfo` 统一校验 root 固定字段与磁盘 hash version，`Ext4SbInfo::decode_htree_root()`

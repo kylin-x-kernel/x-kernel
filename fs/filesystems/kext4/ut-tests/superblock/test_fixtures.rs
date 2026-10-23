@@ -384,7 +384,14 @@ pub(crate) const TEST_FREE_INODES: u32 = 22;
 /// Minimal reopenable metadata for recovery tests: one group, root and journal.
 /// This is not an e2fsprogs interoperability image; unneeded inodes stay zero.
 pub(crate) fn recovery_test_filesystem() -> (Ext4SbInfo, Arc<TestDevice>) {
-    let (filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS - 1, 0x7f);
+    recovery_test_filesystem_with_free_blocks(TEST_FREE_BLOCKS - 1)
+}
+
+/// Same reopenable journal fixture, with room for fragmented extent trees.
+pub(crate) fn recovery_test_filesystem_with_free_blocks(
+    free_blocks: u32,
+) -> (Ext4SbInfo, Arc<TestDevice>) {
+    let (filesystem, device) = journal_allocator_test_filesystem(free_blocks, 0x7f);
     drop(filesystem);
     {
         let mut image = lock(&device.bytes);

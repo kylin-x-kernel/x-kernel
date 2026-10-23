@@ -51,12 +51,47 @@ impl DirectoryInsertPath {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DirectoryInsertPlan {
     required_blocks: u64,
+    growth_credits: u32,
     path: DirectoryInsertPath,
+}
+
+impl DirectoryInsertPlan {
+    fn growing(
+        directory: &Ext4Inode,
+        path: DirectoryInsertPath,
+        directory_blocks: BlockCount,
+        extent_blocks: u64,
+    ) -> Ext4Result<Self> {
+        let required_blocks = extent_blocks
+            .checked_add(u64::from(directory_blocks.get()))
+            .ok_or(Ext4Error::Overflow)?;
+        // Preflight has validated the path. Each old external level can be
+        // rewritten once per independently appended directory block. New
+        // levels are already covered by extent_blocks' conservative bound.
+        let depth = crate::disk::extent::ExtentHeader::decode(&directory.raw_i_block())?.depth();
+        let rewrites = u32::from(depth)
+            .checked_mul(directory_blocks.get())
+            .ok_or(Ext4Error::Overflow)?;
+        let growth_credits = u32::try_from(required_blocks)
+            .map_err(|_| Ext4Error::Overflow)?
+            .checked_mul(Ext4Credits::DIRECTORY_BLOCK_GROW)
+            .and_then(|credits| credits.checked_add(rewrites))
+            .ok_or(Ext4Error::Overflow)?;
+        Ok(Self {
+            required_blocks,
+            growth_credits,
+            path,
+        })
+    }
 }
 
 struct Ext4Credits;
 
 impl Ext4Credits {
+    // Retain the independent allowance for a new directory or long symlink's
+    // child data block; regular-file creation does not allocate a child block.
+    const CHILD_BLOCK_ALLOCATION_METADATA: u32 = 4;
+    // Per planned data/extent block: allocator precheck (3) plus create (1).
     const DIRECTORY_BLOCK_GROW: u32 = 4;
     const DIRECTORY_BLOCK_UPDATE: u32 = 1;
     const FILE_BLOCK_ALLOCATOR: u32 = 8;
@@ -73,11 +108,7 @@ impl Ext4Credits {
         directory: &Ext4Inode,
         insert: DirectoryInsertPlan,
     ) -> JournalCredits {
-        Self::credits(
-            Self::INODE_ALLOCATOR
-                + Self::dirent_insert(directory, insert)
-                + Self::DIRECTORY_BLOCK_GROW,
-        )
+        Self::credits(Self::INODE_ALLOCATOR + Self::dirent_insert(directory, insert))
     }
 
     fn mkdir(
@@ -89,7 +120,7 @@ impl Ext4Credits {
             Self::INODE_ALLOCATOR
                 + Self::DIRECTORY_BLOCK_UPDATE
                 + Self::dirent_insert(directory, insert)
-                + Self::DIRECTORY_BLOCK_GROW
+                + Self::CHILD_BLOCK_ALLOCATION_METADATA
                 + Self::FILE_BLOCK_ALLOCATOR
                 + Self::FILE_EXTENT_UPDATE
                 + Self::INODE_UPDATE,
@@ -105,7 +136,7 @@ impl Ext4Credits {
             Self::INODE_ALLOCATOR
                 + Self::DIRECTORY_BLOCK_UPDATE
                 + Self::dirent_insert(directory, insert)
-                + Self::DIRECTORY_BLOCK_GROW
+                + Self::CHILD_BLOCK_ALLOCATION_METADATA
                 + Self::INODE_UPDATE
                 + Self::SYMLINK_DATA_BLOCK,
         )
@@ -195,6 +226,9 @@ impl Ext4Credits {
     fn dirent_insert(directory: &Ext4Inode, insert: DirectoryInsertPlan) -> u32 {
         Self::DIRECTORY_BLOCK_UPDATE
             + Self::INODE_UPDATE
+            // Space and journal admission use the same preflight plan, including
+            // extent splits and rewrites, before any metadata is published.
+            + insert.growth_credits
             + if directory.has_indexed_directory() || insert.path.uses_htree() {
                 Self::HTREE_INDEX_EXTRA
             } else {
@@ -1480,6 +1514,7 @@ impl Ext4SbInfo {
             if find_linear_insert_slot(&leaf, block_size, name.len())?.is_some() {
                 return Ok(DirectoryInsertPlan {
                     required_blocks: 0,
+                    growth_credits: 0,
                     path: DirectoryInsertPath::InPlace,
                 });
             }
@@ -1519,10 +1554,12 @@ impl Ext4SbInfo {
                 LogicalBlock::new(logical),
                 BlockCount::new(1),
             )?;
-            return Ok(DirectoryInsertPlan {
-                required_blocks: extent_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?,
-                path: DirectoryInsertPath::IndexedLeafSplit,
-            });
+            return DirectoryInsertPlan::growing(
+                directory,
+                DirectoryInsertPath::IndexedLeafSplit,
+                BlockCount::new(1),
+                extent_blocks,
+            );
         }
 
         let block_count = directory_block_count_exact(directory.size(), block_size_u64)?;
@@ -1541,6 +1578,7 @@ impl Ext4SbInfo {
             if find_linear_insert_slot(&block, block_size, name.len())?.is_some() {
                 return Ok(DirectoryInsertPlan {
                     required_blocks: 0,
+                    growth_credits: 0,
                     path: DirectoryInsertPath::InPlace,
                 });
             }
@@ -1584,12 +1622,12 @@ impl Ext4SbInfo {
                 additional_directory_blocks,
             )?
         };
-        Ok(DirectoryInsertPlan {
-            required_blocks: extent_blocks
-                .checked_add(u64::from(additional_directory_blocks.get()))
-                .ok_or(Ext4Error::Overflow)?,
-            path: insert_path,
-        })
+        DirectoryInsertPlan::growing(
+            directory,
+            insert_path,
+            additional_directory_blocks,
+            extent_blocks,
+        )
     }
 
     fn replace_directory_entry(
