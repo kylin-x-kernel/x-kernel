@@ -30,6 +30,49 @@ fn host_borrow_preserves_current_reader_without_entering_a_scope() {
 }
 
 #[def_test]
+fn cleanup_without_notification_still_unlinks_finished_membership() {
+    let mut observed = None;
+    RcuExecutionIf::with_exception_snapshot(&mut |_| {
+        host::with_preempt_check_deferred(|| {
+            host::with_current_reader(|current| {
+                let reader = current.reader();
+                let cpu = RcuExecutionIf::current_cpu();
+                // SAFETY: retained current at a watched task boundary under
+                // IRQ/preemption exclusion; no node lock or active scope.
+                unsafe { crate::context::finish_reader_cleanup(reader) };
+                let initially_clean = !reader.is_enrolled()
+                    && !crate::context::needs_reader_cleanup(cpu);
+                let enroll_fn = |_: &krcu_core::ReadGuard<'_>| {
+                    // SAFETY: exclusively driven current under host exclusion;
+                    // its permanent node and retained storage outlive unlinking.
+                    unsafe { crate::context::reader_node(cpu).enroll(reader) };
+                };
+                // SAFETY: retained current, excluded nonblocking callback;
+                // explicit cleanup below removes the deferred membership.
+                unsafe { reader.with_read_deferred(enroll_fn) };
+                let pending_without_hint = !reader.is_reading()
+                    && reader.is_enrolled()
+                    && !crate::context::needs_reader_cleanup(cpu);
+                // SAFETY: the scope ended, with the same retained current and
+                // IRQ/preemption exclusion; membership alone requires cleanup.
+                unsafe { crate::context::finish_reader_cleanup(reader) };
+                let cleaned = !reader.is_enrolled()
+                    && !crate::context::needs_reader_cleanup(cpu);
+                // Restore the fixture even if the provider incorrectly skipped
+                // unlinking. This also preserves any resulting progress hint.
+                // SAFETY: same excluded retained current after scope exit.
+                let outcome = unsafe { reader.finish_deferred_cleanup() };
+                if outcome.needs_progress {
+                    krcu_core::RcuContextIf::request_completion_pass();
+                }
+                observed = Some((initially_clean, pending_without_hint, cleaned));
+            });
+        });
+    });
+    assert_eq!(observed, Some((true, true, true)));
+}
+
+#[def_test]
 fn cleanup_demand_survives_reentry_and_is_consumed_locally() {
     let mut observed = None;
     RcuExecutionIf::with_exception_snapshot(&mut |_| {

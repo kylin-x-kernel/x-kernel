@@ -218,9 +218,9 @@ Owning-container reads use this accounting through the host scope policy.
 The sleepability predicate and blocking scheduler boundary reject active readers,
 and `yield_now` rejects voluntary yielding. Involuntary preemption eligibility
 does not inspect this counter. `RcuContextIf::note_context_switch` enrolls an
-active reader
-before same-task selection returns or an actual stack switch occurs; the common
-path includes migration helpers. CPU nodes have kernel lifetime and retain no
+active reader before a permitted wake probe retains the runner, same-task
+selection returns or an actual stack switch occurs; the common path includes
+migration helpers. CPU nodes have kernel lifetime and retain no
 owning task reference. The task retains its original node across migration;
 outer scope exit unlinks it. After service construction the same hook also
 reports the CPU boundary, but only after enrollment. An active task remains a
@@ -231,6 +231,13 @@ Active nesting prevents that cleanup; a subsequent CPU report still requires
 the normal scheduler observation. Cleanup also runs for same-task selection,
 before the early return, and never wakes or invokes callbacks under scheduler
 locks. This follows Linux's context-switch deferred cleanup before `rcu_qs`.
+For an inactive reader with neither enrollment nor local cleanup demand,
+`finish_reader_cleanup` returns after read-only checks instead of issuing an
+atomic clear. Enrollment without a notification still requires unlinking, and
+a notification without enrollment still requires clearing. This shortcut ends
+only cleanup: scheduler observation continues, including when a new GP races
+with the cleanup checks. No RCU-demand query is added to the scheduler.
+
 The provider's `check_reader_cleanup` also drains finished membership without a
 reschedule request. It requires an initially preemptible, watched task outside exception,
 hardirq, softirq, BH-disabled and NMI contexts. An outer exclusion guard covers

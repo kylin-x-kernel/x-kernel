@@ -41,7 +41,11 @@ also rejects readers. Involuntary preemption remains allowed. Callers still
 own dependency-cycle and execution-provider readiness checks.
 
 Scheduler enrollment uses retained DeferredArc-owned outgoing task storage with IRQs
-and preemption excluded, before same-task return or switching. The provider
+and preemption excluded, before a permitted no-reschedule return, same-task
+return or switching. The no-reschedule report follows `can_preempt(1)` and
+affinity validation; it must not acknowledge a CPU while an outer preemption
+guard still protects implicit readers. Ordinary IRQ-off checkpoints remain
+excluded by the task checkpoint gate. The provider
 cleans zero-depth membership before observation and enrolls active readers
 before reporting. It cannot wake, allocate or schedule under the runqueue lock.
 A CPU report never substitutes for the original node's task-reader blocker.

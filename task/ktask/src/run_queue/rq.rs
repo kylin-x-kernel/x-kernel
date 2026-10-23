@@ -6,6 +6,8 @@
 
 #[cfg(unittest)]
 unittest::path_mod_test!(tests_rcu_switch, "../../ut-tests/tests/rcu_switch.rs");
+#[cfg(unittest)]
+unittest::path_mod_test!(tests_rcu_progress, "../../ut-tests/tests/rcu_progress.rs");
 
 #[cfg(feature = "smp")]
 use core::sync::atomic::{AtomicU8, AtomicUsize};
@@ -372,6 +374,22 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             };
             self.apply_runtime_account_side_effects(elapsed, is_idle, decision.resched);
             if !decision.resched {
+                // An RCU progress kick need not select another task. Consume
+                // its observation before clearing the request, enrolling any
+                // active reader just as the switch path does.
+                // SAFETY: can_preempt excludes outer preemption protection;
+                // the caller admitted a task/finished-IRQ-tail checkpoint.
+                // The RQ guard pins this retained current task and excludes
+                // IRQs/preemption in watched non-NMI context. The scheduler
+                // rank lock is released and no RCU lock is held. Task exit
+                // cleanup retains storage through removal of enrolled readers.
+                let observation = unsafe {
+                    krcu_core::SchedulerObservation::new(
+                        &self.current_task.rcu_reader,
+                        self.inner.cpu_id.as_usize(),
+                    )
+                };
+                krcu_core::RcuContextIf::note_context_switch(observation);
                 self.current_task.set_preempt_pending(false);
                 // Keep every class event even when the runner is idle: a
                 // class can have a pending event with nothing runnable, and

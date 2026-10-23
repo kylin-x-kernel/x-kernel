@@ -38,7 +38,10 @@ impl<'a> ReaderCleanup<'a> {
     }
 }
 
-/// An outgoing task retained through a scheduler observation on its CPU.
+/// A current task retained through a scheduler observation on its CPU.
+///
+/// The scheduler may retain the same runner; an actual task switch is not
+/// required. Active readers must still be enrolled before reporting the CPU.
 pub struct SchedulerObservation<'a> {
     reader: &'a TaskReader,
     cpu: usize,
@@ -46,13 +49,15 @@ pub struct SchedulerObservation<'a> {
 }
 
 impl<'a> SchedulerObservation<'a> {
-    /// Certifies one immediate outgoing-task observation.
+    /// Certifies one immediate current-task scheduler observation.
     ///
     /// # Safety
-    /// `reader` belongs to the retained outgoing current task on discovered
+    /// `reader` belongs to the retained current task on discovered
     /// CPU `cpu`. Keep IRQs/preemption excluded in watched non-NMI scheduler
     /// context, with no RCU lock or concurrent enrollment/scope execution, until
-    /// the observation returns. Retain task storage through terminal cleanup
+    /// the observation returns. The boundary must end preceding implicit
+    /// IRQ-off/no-preempt protection; exclusion acquired for the scheduler itself
+    /// does not prevent observation. Retain task storage through terminal cleanup
     /// after its last switch. Do not save this context for a later boundary.
     pub unsafe fn new(reader: &'a TaskReader, cpu: usize) -> Self {
         Self {
@@ -62,7 +67,7 @@ impl<'a> SchedulerObservation<'a> {
         }
     }
 
-    /// Borrows the outgoing reader retained by the scheduling caller.
+    /// Borrows the current reader retained by the scheduling caller.
     pub fn reader(&self) -> &'a TaskReader {
         self.reader
     }
@@ -108,7 +113,11 @@ pub trait RcuContextIf {
     /// without a safe deferred carrier, retain periodic progress instead.
     fn request_completion_pass();
 
-    /// Registers the outgoing reader before reporting a scheduler observation.
+    /// Registers the current reader before reporting a scheduler observation.
+    ///
+    /// This also covers permitted wake probes that keep running the same task;
+    /// it must not treat an active reader as finished merely because the CPU
+    /// has reached this boundary.
     ///
     /// The caller retains the context established by `SchedulerObservation::new`.
     /// This call must not wake, allocate or schedule, even before GP startup.

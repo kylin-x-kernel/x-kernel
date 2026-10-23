@@ -170,6 +170,13 @@ rejects unwatched/interrupt-like execution, and suppresses recursive guard-drop
 checking. `ktask` always enables `kspin/preempt`, independently of the scheduler
 preempt feature; the balanced count protocol depends on that dependency.
 
+The empty cleanup fast path checks both current-task enrollment and CPU-local
+demand under the caller's IRQ/preemption exclusion. Remote CPUs only inspect
+demand, and strictly nested NMI scopes change neither enrollment nor demand.
+Active nesting retains both; either finished membership or a retained demand
+prevents the empty shortcut. Skipping cleanup supplies no CPU observation and
+does not skip the subsequent scheduler observation or reader enrollment.
+
 Ordinary preemption checks retain pending requests while local IRQs are masked,
 even when the preemption count reaches zero. Otherwise an inner guard release
 could split an implicit IRQ-off RCU region and falsely report a scheduler

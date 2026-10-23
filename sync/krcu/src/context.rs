@@ -104,6 +104,14 @@ pub(crate) unsafe fn finish_reader_cleanup(reader: &TaskReader) {
     if reader.is_reading() {
         return;
     }
+    // A scheduler probe with neither membership nor demand needs no cleanup.
+    // Avoid a write to CPU-local state on that path. This only skips cleanup:
+    // the caller must still enroll readers and observe pending CPU obligations.
+    // IRQ/preemption exclusion keeps local enrollment and demand stable; NMI
+    // scopes cannot change either, and remote CPUs only inspect the demand.
+    if !reader.is_enrolled() && !needs_local_reader_cleanup() {
+        return;
+    }
     // Clear before inspection/removal, never after: a later notification must
     // survive. An active scope above keeps both its enrollment and demand.
     current_state()
@@ -232,7 +240,7 @@ pub unsafe fn exit_user_quiescent() {
     unsafe { watching.exit_quiescent() };
 }
 
-/// Called before the same-task decision and by the migration helper's path.
+/// Called at permitted no-reschedule, same-task and outgoing-switch boundaries.
 ///
 /// # Safety
 /// `reader` must belong to the current, Arc-owned task on `cpu`, with ordinary IRQs and

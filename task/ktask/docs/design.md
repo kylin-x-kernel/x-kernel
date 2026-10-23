@@ -56,8 +56,9 @@ and reader-node arrays, cleanup notifications, and the GP service belong to
 that owner without making `ktask` depend on the RCU service.
 
 Sleepability, blocking and voluntary yielding reject active reader nesting;
-involuntary preemption remains permitted. Before same-task selection returns
-or a real switch occurs, the scheduler calls `RcuContextIf::note_context_switch`
+involuntary preemption remains permitted. Before a permitted wake probe retains
+the runner, same-task selection returns, or a real switch occurs, the scheduler
+calls `RcuContextIf::note_context_switch`
 with a `SchedulerObservation` constructed unsafely for the retained outgoing
 reader and CPU under IRQ/preemption exclusion. The static call consumes that
 context immediately; the core defines its safety contract.
@@ -65,6 +66,14 @@ The provider drains finished membership, preserves active readers on their
 original node across migration, and reports only after enrollment. Before GP
 service construction it still maintains enrollment. No callback or wakeup runs
 inside this scheduler boundary.
+
+A reschedule request can carry RCU progress demand even when no peer should
+run. `preempt_resched` therefore observes the retained current task before
+clearing the request on its no-reschedule path, after `can_preempt(1)` and
+affinity checks and outside the scheduler rank lock. This observation must not
+move before the preemption check: an outer no-preempt region is implicit RCU
+protection. Ordinary IRQ-off checks still retain the request; only the completed
+IRQ tail may exempt its own IRQ mask. No forced task switch is needed.
 
 The preemption checkpoint makes one `RcuContextIf::check_reader_cleanup` call,
 even without a reschedule request. All RCU cleanup predicates, context checks

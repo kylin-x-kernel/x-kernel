@@ -439,6 +439,59 @@ fn scheduler_observation_keeps_a_migrating_reader_blocking() {
 }
 
 #[unittest::def_test]
+fn repeated_retained_runner_observations_preserve_retirement_blockers() {
+    let nodes = [ReaderNode::new()];
+    let reader = TaskReader::new();
+    // SAFETY: isolated stable node with one controller and no outstanding work.
+    let state = unsafe { CallbackState::new(&nodes, [true]) }.unwrap();
+    let mut driver = state.claim_driver().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let object = Box::into_raw(Box::new(Retirement {
+        node: CallbackNode::new(invoke_retirement),
+        calls: calls.clone(),
+    }));
+    // SAFETY: field projection preserves the uniquely owned allocation.
+    let node = unsafe { &raw mut (*object).node };
+    // SAFETY: this unpublished fixture allocation is retired exactly once and
+    // remains owned by the callback queue until invocation below.
+    assert!(unsafe { state.submit(0, node) });
+    let observed = reader.with_read(|_| {
+        driver.advance();
+        let _guard = kspin::NoPreemptIrqSave::new();
+        // SAFETY: the isolated retained-current model excludes concurrent scope
+        // mutation/enrollment and retains reader/node storage through unlinking.
+        let first = unsafe { state.note_context_switch(0, &reader) };
+        let nested = reader.with_read(|_| {
+            // SAFETY: the same retained fixture under the same exclusion. No
+            // task switch or scope exit occurred between these observations.
+            unsafe { state.note_context_switch(0, &reader) }
+        });
+        // SAFETY: inner exit leaves the outer scope active in this fixture.
+        let after_inner = unsafe { state.note_context_switch(0, &reader) };
+        driver.advance();
+        (
+            (first, nested, after_inner),
+            state.needs_cpu_observation(0),
+            nodes[0].reader_count(),
+            state.has_ready(0),
+        )
+    });
+    // Complete and reclaim even if a later assertion reports a regression.
+    {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        // SAFETY: stable fixture, after its outer scope unlinked the reader.
+        unsafe { state.report_ready(0) };
+    }
+    driver.advance();
+    // SAFETY: fixture borrows have ended; detached callbacks own their objects.
+    let invoked = unsafe { state.invoke_ready(0, 1) };
+    assert_eq!(observed, ((false, false, false), false, 1, false));
+    assert!(!reader.is_enrolled());
+    assert_eq!(invoked, 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[unittest::def_test]
 fn scheduler_boundary_before_period_does_not_satisfy_a_future_period() {
     let nodes = [ReaderNode::new()];
     let reader = TaskReader::new();
