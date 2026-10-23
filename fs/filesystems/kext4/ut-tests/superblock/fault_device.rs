@@ -86,7 +86,8 @@ impl BlockDeviceOperations for WriteThroughFaultDevice {
     fn block_size(&self) -> usize {
         DEVICE_BLOCK_SIZE
     }
-
+}
+impl WriteThroughFaultDevice {
     fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
         let start = block_start(block_id)?;
         let end = start
@@ -125,6 +126,22 @@ impl BlockDeviceOperations for WriteThroughFaultDevice {
     }
 }
 
+impl block::BioOperations for WriteThroughFaultDevice {
+    fn submit_bio(&self, mut bio: block::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            block::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            block::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            block::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
+}
+
 impl Device for BufferedFaultDevice {
     fn name(&self) -> &str {
         "kext4-faulty-buffered-test-image"
@@ -143,7 +160,8 @@ impl BlockDeviceOperations for BufferedFaultDevice {
     fn block_size(&self) -> usize {
         DEVICE_BLOCK_SIZE
     }
-
+}
+impl BufferedFaultDevice {
     fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
         let start = block_start(block_id)?;
         let end = start
@@ -211,6 +229,22 @@ impl BlockDeviceOperations for BufferedFaultDevice {
                 .copy_from_slice(&bytes);
         }
         Ok(())
+    }
+}
+
+impl block::BioOperations for BufferedFaultDevice {
+    fn submit_bio(&self, mut bio: block::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            block::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            block::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            block::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
     }
 }
 

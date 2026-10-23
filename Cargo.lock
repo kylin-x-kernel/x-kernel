@@ -1138,6 +1138,7 @@ dependencies = [
  "gimli 0.34.0",
  "inherit-methods-macro",
  "inputdev",
+ "iov_iter",
  "kalloc",
  "kclass",
  "kcred",
@@ -3307,9 +3308,9 @@ dependencies = [
 
 [[package]]
 name = "kvirtiodrivers"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "595ef5ddca8cc67ca73adf936e6374d2826a59d602559e948b5b5fb9e751eee1"
+checksum = "fcd1e8c5fc51d837bc32288d152ca226b3dff58edb5a820943c5c1811e965721"
 dependencies = [
  "bitflags 2.13.2",
  "enumn",

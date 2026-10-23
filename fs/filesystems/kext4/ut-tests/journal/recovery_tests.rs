@@ -81,12 +81,12 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
         assert!(!persisted.features().needs_recovery());
     }
 
-    let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let mount_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         open_test_filesystem(mount_device).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
     );
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
 
     {
@@ -98,7 +98,7 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
         assert!(!persisted.features().needs_recovery());
     }
 
-    let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovered_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let recovered = open_test_filesystem(recovered_device).expect("mount orphan-cleaned image");
     assert_eq!(recovered.orphan_head(), None);
     assert!(!journal_status(&recovered).has_nonzero_log_start());
@@ -150,7 +150,7 @@ fn clean_orphan_recovery_flush_failure_preserves_evidence_and_retries() {
     drop(filesystem);
 
     device.fail_flush_at(device.flush_count() + 1);
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
         Err(Ext4Error::Device(DriverError::Io))
@@ -165,16 +165,16 @@ fn clean_orphan_recovery_flush_failure_preserves_evidence_and_retries() {
         assert!(persisted.features().needs_recovery());
     }
 
-    let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let mount_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         open_test_filesystem(mount_device).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
     );
 
-    let retry_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let retry_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     Ext4SbInfo::recover(retry_device).expect("retry clean orphan recovery");
 
-    let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovered_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let recovered = open_test_filesystem(recovered_device).expect("mount retried recovery image");
     assert_eq!(recovered.orphan_head(), None);
     assert!(!recovered.needs_recovery());
@@ -204,8 +204,8 @@ fn symlink_data_block_recovers_after_journal_replay() {
     let timestamp = crate::Ext4Timestamp::new(144, 0);
     let target = b"/opt/package/lib/libreplay.so.1.0.0-symlink-journal-replay-target-block";
     {
-        let mut filesystem =
-            open_test_filesystem(device.clone()).expect("mount journaled namespace image");
+        let mut filesystem = open_test_filesystem(crate::io::test_block_device(device.clone()))
+            .expect("mount journaled namespace image");
         let root = filesystem
             .internal_iget(crate::InodeNumber::new(2))
             .expect("read root inode");
@@ -230,15 +230,16 @@ fn symlink_data_block_recovers_after_journal_replay() {
     }
 
     assert_eq!(
-        open_test_filesystem(device.clone()).map(|_| ()),
+        open_test_filesystem(crate::io::test_block_device(device.clone())).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
     );
-    let report = Ext4SbInfo::recover(device.clone())
+    let report = Ext4SbInfo::recover(crate::io::test_block_device(device.clone()))
         .expect("recover journaled symlink commit")
         .expect("expected replayed journal records");
     assert!(report.update_count() > 0);
 
-    let mut filesystem = open_test_filesystem(device.clone()).expect("mount after journal replay");
+    let mut filesystem = open_test_filesystem(crate::io::test_block_device(device.clone()))
+        .expect("mount after journal replay");
     let root = filesystem
         .internal_iget(crate::InodeNumber::new(2))
         .expect("read root inode");
@@ -301,18 +302,18 @@ fn recovers_persisted_allocator_journal_commit_before_checkpoint() {
         .expect("persist allocator metadata to the journal");
     drop(filesystem);
 
-    let dirty_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let dirty_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         open_test_filesystem(dirty_device).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
     );
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let report = Ext4SbInfo::recover(recovery_device)
         .expect("recover persisted allocator journal commit")
         .expect("journal recovery was required");
     assert_eq!(report.update_count(), expected_replay_updates);
 
-    let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovered_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let recovered =
         open_test_filesystem(recovered_device).expect("mount recovered allocator image");
     assert!(!recovered.needs_recovery());
@@ -339,7 +340,7 @@ fn invalid_orphan_head_recovery_failure_preserves_evidence_and_retries() {
     let device = Arc::new(TestDevice::new(bytes));
 
     device.fail_flush_at(device.flush_count() + 1);
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
         Err(Ext4Error::Device(DriverError::Io))
@@ -354,15 +355,15 @@ fn invalid_orphan_head_recovery_failure_preserves_evidence_and_retries() {
         assert!(persisted.features().needs_recovery());
     }
 
-    let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let mount_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         open_test_filesystem(mount_device).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
     );
 
-    let retry_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let retry_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     Ext4SbInfo::recover(retry_device).expect("retry invalid orphan head recovery");
-    let recovered_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovered_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let recovered =
         open_test_filesystem(recovered_device).expect("mount retried orphan recovery image");
     assert_eq!(recovered.orphan_head(), None);
@@ -386,13 +387,13 @@ fn recovery_rebases_transaction_sequence_before_regular_orphan_cleanup() {
         .expect("persist orphan transaction without checkpoint");
     drop(filesystem);
 
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let report = Ext4SbInfo::recover(recovery_device)
         .expect("replay and orphan cleanup")
         .expect("active journal report");
     assert!(report.update_count() > 0);
 
-    let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let mount_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     let recovered = open_test_filesystem(mount_device).expect("mount recovered image");
     assert_eq!(recovered.orphan_head(), None);
     assert_eq!(recovered.free_inodes_count(), free_inodes_before_allocation);
@@ -416,7 +417,7 @@ fn recover_keeps_recovery_feature_when_regular_orphan_cleanup_fails() {
         .expect("persist orphan head update to journal");
     drop(filesystem);
 
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
         Err(Ext4Error::Unsupported(UnsupportedKind::InodeKind))
@@ -443,12 +444,14 @@ fn recovery_selection_uses_ext4_flag_and_clears_empty_journal() {
     );
     let device = Arc::new(TestDevice::new(bytes));
     assert!(matches!(
-        open_test_filesystem(device.clone()),
+        open_test_filesystem(crate::io::test_block_device(device.clone())),
         Err(Ext4Error::NeedsRecovery)
     ));
-    let report = Ext4SbInfo::recover(device.clone()).unwrap().unwrap();
+    let report = Ext4SbInfo::recover(crate::io::test_block_device(device.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(report.update_count(), 0);
-    let recovered = open_test_filesystem(device.clone()).unwrap();
+    let recovered = open_test_filesystem(crate::io::test_block_device(device.clone())).unwrap();
     assert!(!recovered.needs_recovery());
     let status = journal_status(&recovered);
     assert_eq!(status.start_block(), None);
@@ -461,7 +464,10 @@ fn recovery_selection_uses_ext4_flag_and_clears_empty_journal() {
     let offset = journal_block.get() as usize * TEST_BLOCK_SIZE;
     let first = u32::from_be_bytes(bytes[offset + 0x14..offset + 0x18].try_into().unwrap());
     put_be_u32(&mut bytes, offset + 0x1c, first);
-    let mounted = open_test_filesystem(Arc::new(TestDevice::new(bytes))).unwrap();
+    let mounted = open_test_filesystem(crate::io::test_block_device(Arc::new(TestDevice::new(
+        bytes,
+    ))))
+    .unwrap();
     assert_eq!(journal_status(&mounted).start_block(), Some(first));
     assert!(!mounted.needs_recovery());
 }
@@ -512,7 +518,7 @@ fn partial_replay_write_failure_keeps_completed_block_and_recovery_evidence() {
     let bytes = pending_two_block_commit();
     let device = Arc::new(WriteThroughFaultDevice::fail_write_at(bytes, 2));
     assert!(matches!(
-        Ext4SbInfo::recover(device.clone()),
+        Ext4SbInfo::recover(crate::io::test_block_device(device.clone())),
         Err(Ext4Error::Device(DriverError::Io))
     ));
     let committed = device.committed_bytes();
@@ -528,10 +534,12 @@ fn partial_replay_write_failure_keeps_completed_block_and_recovery_evidence() {
             .all(|byte| *byte == 0)
     );
     let retry = Arc::new(TestDevice::new(committed));
-    let report = Ext4SbInfo::recover(retry.clone()).unwrap().unwrap();
+    let report = Ext4SbInfo::recover(crate::io::test_block_device(retry.clone()))
+        .unwrap()
+        .unwrap();
     assert_eq!(report.update_count(), 2);
     assert_eq!(report.revoke_hit_count(), 0);
-    let recovered = open_test_filesystem(retry.clone()).unwrap();
+    let recovered = open_test_filesystem(crate::io::test_block_device(retry.clone())).unwrap();
     assert_eq!(
         journal_status(&recovered).sequence(),
         report.next_sequence()
@@ -571,7 +579,7 @@ fn replay_barrier_failures_preserve_durable_blocks_and_recovery_evidence() {
         let device = Arc::new(BufferedFaultDevice::new(bytes.clone(), write, flush));
         assert!(
             matches!(
-                Ext4SbInfo::recover(device.clone()),
+                Ext4SbInfo::recover(crate::io::test_block_device(device.clone())),
                 Err(Ext4Error::Device(DriverError::Io))
             ),
             "{stage}"

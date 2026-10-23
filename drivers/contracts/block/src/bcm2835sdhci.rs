@@ -93,6 +93,15 @@ impl Device for SDHCIDriver {
 }
 
 impl BlockDeviceOperations for SDHCIDriver {
+    fn num_blocks(&self) -> u64 {
+        self.num_blocks
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+}
+impl SDHCIDriver {
     fn read_block(&self, block_id: u64, buffer: &mut [u8]) -> DriverResult {
         if self.block_size != BLOCK_SIZE {
             return Err(DriverError::Unsupported);
@@ -161,13 +170,21 @@ impl BlockDeviceOperations for SDHCIDriver {
     fn flush(&self) -> DriverResult {
         Ok(())
     }
+}
 
-    fn num_blocks(&self) -> u64 {
-        self.num_blocks
-    }
-
-    fn block_size(&self) -> usize {
-        self.block_size
+impl crate::BioOperations for SDHCIDriver {
+    fn submit_bio(&self, mut bio: crate::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            crate::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            crate::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            crate::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
     }
 }
 

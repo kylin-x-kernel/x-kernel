@@ -15,6 +15,7 @@
 extern crate alloc;
 
 mod backing_dev;
+mod bio;
 pub mod completion;
 mod ioctl;
 pub mod word_io;
@@ -32,6 +33,7 @@ use core::{
 };
 
 pub use backing_dev::BackingDevInfo;
+pub use bio::{Bio, BioMemory, BioOperation, BioOperations, BioVec, BioVecRef};
 use kdevice::DeviceNumber;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
@@ -66,7 +68,7 @@ mod queue;
 
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-pub use queue::{QueueLimits, RequestQueue, SECTOR_SHIFT, SECTOR_SIZE};
+pub use queue::{BlkMqOperations, QueueLimits, Request, RequestQueue, SECTOR_SHIFT, SECTOR_SIZE};
 
 bitflags::bitflags! {
     /// Access mode passed from an opened block-device file to the block driver.
@@ -86,7 +88,7 @@ const DISK_STATE_ADMIN_READ_ONLY: usize = 1 << 0;
 // Sequence allocation is independent of disk publication and I/O state.
 static DISK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// I/O operations that a block storage backend must implement.
+/// Disk geometry and control operations; data dispatch belongs to the queue.
 ///
 /// Device-number allocation and user-visible disk identity belong to
 /// [`Gendisk`], not to this operations table.
@@ -109,36 +111,6 @@ pub trait BlockDeviceOperations: Send + Sync {
     fn is_inherently_read_only(&self) -> bool {
         false
     }
-
-    /// Reads blocked data from the given block.
-    ///
-    /// The size of the buffer may exceed the block size, in which case multiple
-    /// contiguous blocks will be read.
-    ///
-    /// The buffer may start at any byte address. Its length must still be a
-    /// multiple of the logical block size and the complete range must fit the
-    /// device. The backend and its DMA provider own any address alignment,
-    /// contiguous-memory, DMA mapping and cache-maintenance requirements; a
-    /// restricted backend must adapt the buffer rather than reject its address.
-    /// This applies to direct trait calls as well as `Arc` and `BlockDevice`
-    /// forwarding. An error may leave the destination partially modified;
-    /// successful-prefix or failure-atomic semantics are not implied.
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult;
-
-    /// Writes blocked data to the given block.
-    ///
-    /// The size of the buffer may exceed the block size, in which case multiple
-    /// contiguous blocks will be written.
-    ///
-    /// The buffer may start at any byte address. Length and device-range
-    /// requirements remain in force. The backend and its DMA provider must
-    /// satisfy device alignment, contiguous-memory and cache-maintenance
-    /// requirements, including for direct trait, `Arc` and `BlockDevice` calls.
-    /// Errors propagate without promising that no media blocks were changed.
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult;
-
-    /// Flushes the device to write all pending data to the storage.
-    fn flush(&self) -> DriverResult;
 
     /// Opens a block-device view through this disk.
     fn open(&self, _device: &BlockDevice, _mode: BlockOpenMode) -> KResult<()> {
@@ -183,18 +155,6 @@ impl<T: BlockDeviceOperations + ?Sized> BlockDeviceOperations for Arc<T> {
         (**self).is_inherently_read_only()
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        (**self).read_block(block_id, buf)
-    }
-
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        (**self).write_block(block_id, buf)
-    }
-
-    fn flush(&self) -> DriverResult {
-        (**self).flush()
-    }
-
     fn open(&self, device: &BlockDevice, mode: BlockOpenMode) -> KResult<()> {
         (**self).open(device, mode)
     }
@@ -233,7 +193,7 @@ pub struct Gendisk {
     minors: u32,
     is_inherently_read_only: bool,
     state: AtomicUsize,
-    operations: Box<dyn BlockDeviceOperations + Send + Sync>,
+    operations: Arc<dyn BlockDeviceOperations>,
     queue: Arc<RequestQueue>,
     part0: Weak<BlockDevice>,
 }
@@ -282,7 +242,47 @@ impl Gendisk {
         major: u32,
         first_minor: u32,
         minors: u32,
-        operations: Box<dyn BlockDeviceOperations + Send + Sync>,
+        operations: Box<dyn BioOperations>,
+    ) -> DriverResult<GendiskRef> {
+        let operations: Arc<dyn BioOperations> = Arc::from(operations);
+        Self::alloc_with_queue(
+            name,
+            major,
+            first_minor,
+            minors,
+            operations.clone(),
+            queue::Dispatch::Bio(operations),
+        )
+    }
+
+    /// Creates a request-based disk sharing one backend between control and I/O.
+    ///
+    /// # Errors
+    /// Returns the same identity, geometry and capacity errors as `alloc`.
+    pub fn alloc_mq<T: BlockDeviceOperations + BlkMqOperations + 'static>(
+        name: String,
+        major: u32,
+        first_minor: u32,
+        minors: u32,
+        operations: Arc<T>,
+    ) -> DriverResult<GendiskRef> {
+        Self::alloc_with_queue(
+            name,
+            major,
+            first_minor,
+            minors,
+            operations.clone(),
+            queue::Dispatch::Request(operations),
+        )
+    }
+
+    fn alloc_with_queue(
+        name: String,
+        major: u32,
+        first_minor: u32,
+        minors: u32,
+        operations: Arc<dyn BlockDeviceOperations>,
+        dispatch: queue::Dispatch,
     ) -> DriverResult<GendiskRef> {
         let limits = QueueLimits::new(operations.block_size())?;
         let capacity_sectors = operations
@@ -297,7 +297,7 @@ impl Gendisk {
             return Err(DriverError::InvalidInput);
         }
         let is_inherently_read_only = operations.is_inherently_read_only();
-        let queue = Arc::new(RequestQueue::new(limits));
+        let queue = Arc::new(RequestQueue::new(limits, dispatch));
         let part0 = Arc::new_cyclic(move |part0| {
             let disk = Arc::new(Self {
                 name,
@@ -576,44 +576,95 @@ impl BlockDevice {
 
     /// Reads one or more contiguous logical blocks from this device view.
     ///
-    /// Accepts any buffer start address under the backend's
-    /// [`BlockDeviceOperations::read_block`] contract. This forwarding layer
-    /// validates length and range; it does not own a second bounce buffer.
+    /// Accepts any buffer start address and reads directly into the borrowed range.
+    /// The call cannot return until completion has retired all device access.
+    /// An error may leave the destination partially modified.
     ///
     /// # Errors
     ///
     /// Returns [`DriverError::InvalidInput`] for a non-block-sized or out-of-range
-    /// request. Backend failures are propagated unchanged.
-    pub fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        let backend_block = self.backend_block(block_id, buf.len())?;
-        self.disk.operations.read_block(backend_block, buf)
+    /// request. Backend failures are propagated unchanged. Unwinding builds return
+    /// Unsupported before lending memory.
+    pub fn read_block(self: &Arc<Self>, block_id: u64, buf: &mut [u8]) -> DriverResult {
+        let sector = block_id
+            .checked_mul(self.queue.limits().logical_block_sectors())
+            .ok_or(DriverError::InvalidInput)?;
+        if buf.is_empty() {
+            return if sector <= self.num_sectors() {
+                Ok(())
+            } else {
+                Err(DriverError::InvalidInput)
+            };
+        }
+        // No unwind may bypass the mandatory completion wait after publication.
+        if cfg!(panic = "unwind") {
+            return Err(DriverError::Unsupported);
+        }
+        // SAFETY: this private vector never escapes to a caller-owned handle.
+        // submit_bio_wait waits non-interruptibly and drops returned vectors
+        // before this exclusive buffer borrow can end, including on I/O error.
+        let vector = unsafe { BioVec::borrowed_read(buf) };
+        self.submit_bio_wait(sector, BioOperation::Read, alloc::vec![vector])
+            .0
     }
 
-    /// Writes one or more contiguous logical blocks to this device view.
+    /// Synchronous borrowed-buffer adapter over the owned submission contract.
     ///
-    /// Accepts any buffer start address under the backend's
-    /// [`BlockDeviceOperations::write_block`] contract.
+    /// Accepts any buffer start address and lends the shared source until completion.
+    /// Drivers cannot obtain mutable access to this source.
     ///
     /// # Errors
-    ///
-    /// Returns [`DriverError::ReadOnly`] when writes are prohibited and
-    /// [`DriverError::InvalidInput`] for a non-block-sized or out-of-range request.
-    /// Backend failures are propagated unchanged.
-    pub fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
+    /// Returns validation, wait preparation, or terminal device errors. Unwinding
+    /// builds return Unsupported before lending memory.
+    pub fn write_block(self: &Arc<Self>, block_id: u64, buf: &[u8]) -> DriverResult {
+        let sector = block_id
+            .checked_mul(self.queue.limits().logical_block_sectors())
+            .ok_or(DriverError::InvalidInput)?;
         if self.is_read_only() {
             return Err(DriverError::ReadOnly);
         }
-        let backend_block = self.backend_block(block_id, buf.len())?;
-        self.disk.operations.write_block(backend_block, buf)
+        if buf.is_empty() {
+            return if sector <= self.num_sectors() {
+                Ok(())
+            } else {
+                Err(DriverError::InvalidInput)
+            };
+        }
+        if cfg!(panic = "unwind") {
+            return Err(DriverError::Unsupported);
+        }
+        // SAFETY: the shared source borrow remains live until the mandatory
+        // terminal wait retires all device access and disposes of the vector.
+        let vector = unsafe { BioVec::borrowed_write(buf) };
+        self.submit_bio_wait(sector, BioOperation::Write, alloc::vec![vector])
+            .0
     }
 
-    /// Flushes pending writes through the driver operations table.
+    /// Waits for a flush through the same data submission contract.
     ///
     /// # Errors
+    /// Returns wait preparation or device errors.
+    pub fn flush(self: &Arc<Self>) -> DriverResult {
+        self.submit_bio_wait(0, BioOperation::Flush, Vec::new()).0
+    }
+
+    /// Submits owned memory and waits using the host's existing completion mechanism.
     ///
-    /// Propagates the backend flush error unchanged.
-    pub fn flush(&self) -> DriverResult {
-        self.disk.operations.flush()
+    /// Returns status and the original owners independently, including on wait
+    /// preparation, validation or device failure. Read data may be partial.
+    pub fn submit_bio_wait(
+        self: &Arc<Self>,
+        sector: u64,
+        operation: BioOperation,
+        vectors: Vec<BioVec>,
+    ) -> completion::BioResult {
+        let (bio, waiter) =
+            match completion::BioWait::prepare(self.clone(), sector, operation, vectors) {
+                Ok(prepared) => prepared,
+                Err((error, vectors)) => return (Err(error), vectors),
+            };
+        self.submit_bio(bio);
+        waiter.wait()
     }
 
     /// Opens this block-device view with the requested access mode.
@@ -649,32 +700,43 @@ impl BlockDevice {
             .ioctl(self, mode, cmd, arg, has_sys_admin)
     }
 
-    fn backend_block(&self, block_id: u64, len: usize) -> DriverResult<u64> {
-        let block_size = self.block_size();
-        if !len.is_multiple_of(block_size) {
-            return Err(DriverError::InvalidInput);
+    /// Transfers an owned bio to its driver after full validation and one remap.
+    /// Requires sleepable task context. Validation errors also complete the bio;
+    /// return does not imply completion.
+    pub fn submit_bio(&self, mut bio: Bio) {
+        let validate = || -> DriverResult<u64> {
+            if !core::ptr::eq(self, bio.device().as_ref()) {
+                return Err(DriverError::InvalidInput);
+            }
+            if bio.operation() == BioOperation::Write && self.is_read_only() {
+                return Err(DriverError::ReadOnly);
+            }
+            let sectors = bio.validate()?;
+            if bio.operation() == BioOperation::Flush {
+                return Ok(0);
+            }
+            let end = bio
+                .sector()
+                .checked_add(sectors)
+                .ok_or(DriverError::InvalidInput)?;
+            let sector = self
+                .start_sector
+                .checked_add(bio.sector())
+                .ok_or(DriverError::InvalidInput)?;
+            if end > self.num_sectors()
+                || !sector.is_multiple_of(self.queue.limits().logical_block_sectors())
+            {
+                return Err(DriverError::InvalidInput);
+            }
+            Ok(sector)
+        };
+        match validate() {
+            Ok(sector) => {
+                bio.remap(sector);
+                self.queue.submit(bio);
+            }
+            Err(error) => bio.end_io(Err(error)),
         }
-        let logical_block_sectors = self.queue.limits().logical_block_sectors();
-        let relative_sector = block_id
-            .checked_mul(logical_block_sectors)
-            .ok_or(DriverError::InvalidInput)?;
-        let len_sectors =
-            u64::try_from(len >> SECTOR_SHIFT).map_err(|_| DriverError::InvalidInput)?;
-        let end_sector = relative_sector
-            .checked_add(len_sectors)
-            .ok_or(DriverError::InvalidInput)?;
-        let capacity_sectors = self.num_sectors();
-        if relative_sector > capacity_sectors || end_sector > capacity_sectors {
-            return Err(DriverError::InvalidInput);
-        }
-        let backend_sector = self
-            .start_sector
-            .checked_add(relative_sector)
-            .ok_or(DriverError::InvalidInput)?;
-        if !backend_sector.is_multiple_of(logical_block_sectors) {
-            return Err(DriverError::InvalidInput);
-        }
-        Ok(backend_sector / logical_block_sectors)
     }
 }
 
@@ -689,58 +751,6 @@ impl Device for BlockDevice {
 
     fn irq(&self) -> Option<usize> {
         None
-    }
-}
-
-// kext4 still consumes the synchronous operations interface until its Bio
-// migration. This derived view delegates to the canonical `BlockDevice`
-// methods and owns no geometry or capacity state of its own.
-impl BlockDeviceOperations for BlockDevice {
-    fn num_blocks(&self) -> u64 {
-        self.num_sectors() / self.queue.limits().logical_block_sectors()
-    }
-
-    fn block_size(&self) -> usize {
-        BlockDevice::block_size(self)
-    }
-
-    fn is_inherently_read_only(&self) -> bool {
-        self.disk.is_inherently_read_only
-    }
-
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> DriverResult {
-        BlockDevice::read_block(self, block_id, buf)
-    }
-
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> DriverResult {
-        BlockDevice::write_block(self, block_id, buf)
-    }
-
-    fn flush(&self) -> DriverResult {
-        BlockDevice::flush(self)
-    }
-
-    fn open(&self, _device: &BlockDevice, mode: BlockOpenMode) -> KResult<()> {
-        BlockDevice::open(self, mode)
-    }
-
-    fn release(&self, _device: &BlockDevice) {
-        BlockDevice::release(self);
-    }
-
-    fn ioctl(
-        &self,
-        _device: &BlockDevice,
-        mode: BlockOpenMode,
-        cmd: u32,
-        arg: usize,
-        has_sys_admin: bool,
-    ) -> KResult<usize> {
-        self.driver_ioctl(mode, cmd, arg, has_sys_admin)
-    }
-
-    fn set_read_only(&self, _device: &BlockDevice, read_only: bool) -> KResult<()> {
-        self.set_disk_read_only(read_only)
     }
 }
 

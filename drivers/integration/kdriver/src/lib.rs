@@ -126,6 +126,8 @@ fn iomap_first_mmio(
 /// Must be called after platform `early_driver_init` has brought up timer,
 /// IRQ, and boot-console infrastructure.
 pub fn init_drivers() {
+    #[cfg(feature = "block")]
+    block::completion::init_wait_provider(&block_completion::HostBlockWaitProvider);
     info!("Initialize device drivers...");
 
     #[cfg(feature = "block")]

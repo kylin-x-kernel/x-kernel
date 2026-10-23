@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+use alloc::{format, sync::Arc, vec::Vec};
 use core::{
     mem::{MaybeUninit, size_of},
     slice,
@@ -205,47 +205,6 @@ impl block::BlockDeviceOperations for LoopDevice {
         512
     }
 
-    fn read_block(&self, block_id: u64, buf: &mut [u8]) -> block::DriverResult<()> {
-        let offset = block_id
-            .checked_mul(512)
-            .ok_or(block::DriverError::InvalidInput)?;
-        let file = self
-            .clone_file()
-            .map_err(|_| block::DriverError::BadState)?;
-        let mut position = offset;
-        let read = file
-            .read_from(buf, &mut position)
-            .map_err(|_| block::DriverError::Io)?;
-        if read != buf.len() {
-            return Err(block::DriverError::Io);
-        }
-        Ok(())
-    }
-
-    fn write_block(&self, block_id: u64, buf: &[u8]) -> block::DriverResult<()> {
-        let offset = block_id
-            .checked_mul(512)
-            .ok_or(block::DriverError::InvalidInput)?;
-        let file = self
-            .clone_file()
-            .map_err(|_| block::DriverError::BadState)?;
-        let mut position = offset;
-        let written = file
-            .write_from(buf, &mut position)
-            .map_err(|_| block::DriverError::Io)?;
-        if written != buf.len() {
-            return Err(block::DriverError::Io);
-        }
-        Ok(())
-    }
-
-    fn flush(&self) -> block::DriverResult<()> {
-        if let Some(file) = self.file.lock().as_ref() {
-            file.fsync(false).map_err(|_| block::DriverError::Io)?;
-        }
-        Ok(())
-    }
-
     fn ioctl(
         &self,
         device: &block::BlockDevice,
@@ -269,14 +228,9 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
                 reason = "CG-021-no-panic-on-reachable-failure: Loop devices use a fixed valid \
                           block size and initially zero capacity"
             )]
-            let disk = block::Gendisk::alloc(
-                format!("loop{number}"),
-                7,
-                number,
-                1,
-                Box::new(device.clone()),
-            )
-            .expect("valid loop gendisk");
+            let disk =
+                block::Gendisk::alloc_mq(format!("loop{number}"), 7, number, 1, device.clone())
+                    .expect("valid loop gendisk");
             #[expect(
                 clippy::expect_used,
                 reason = "CG-021-no-panic-on-reachable-failure: The once-initialized loop array \
@@ -290,6 +244,136 @@ static LOOP_DEVICES: Lazy<Vec<Arc<LoopDevice>>> = Lazy::new(|| {
 
 pub(crate) fn init_devices() {
     Lazy::force(&LOOP_DEVICES);
+}
+
+impl block::BlkMqOperations for LoopDevice {
+    fn queue_rq(&self, mut request: block::Request) {
+        let file = self.file.lock().clone();
+        let result = match file {
+            None if request.operation() == block::BioOperation::Flush => Ok(()),
+            None => Err(block::DriverError::BadState),
+            Some(file) => loop_transfer(&mut request, &file),
+        };
+        request.complete(result);
+    }
+}
+
+fn loop_transfer(request: &mut block::Request, file: &VfsFile) -> block::DriverResult {
+    let operation = request.operation();
+    if operation == block::BioOperation::Flush {
+        return file.fsync(false).map_err(|_| block::DriverError::Io);
+    }
+    let mut position = request
+        .sector()
+        .checked_mul(512)
+        .ok_or(block::DriverError::InvalidInput)?;
+    let mut buffers = RequestIter::new(request);
+    let expected = buffers.remaining;
+    let count = match operation {
+        block::BioOperation::Read => {
+            file.read_iter_from(&mut iov_iter::iov_iter_dest(&mut buffers), &mut position)
+        }
+        block::BioOperation::Write => {
+            file.write_iter_from(&mut iov_iter::iov_iter_source(&mut buffers), &mut position)
+        }
+        block::BioOperation::Flush => unreachable!(),
+    }
+    .map_err(|_| block::DriverError::Io)?;
+    if count == expected {
+        Ok(())
+    } else {
+        Err(block::DriverError::Io)
+    }
+}
+
+// Borrowed bvec cursor for a single backing-file operation. The request retains
+// every owner; only slice descriptors are collected, never a payload-sized copy.
+struct RequestIter<'a> {
+    vectors: Vec<block::BioVecRef<'a>>,
+    index: usize,
+    offset: usize,
+    remaining: usize,
+}
+
+impl<'a> RequestIter<'a> {
+    fn new(request: &'a mut block::Request) -> Self {
+        let vectors: Vec<_> = request.vectors_mut().collect();
+        let remaining = vectors.iter().map(|vector| vector.bytes().len()).sum();
+        Self {
+            vectors,
+            index: 0,
+            offset: 0,
+            remaining,
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        self.offset += count;
+        self.remaining -= count;
+        if self.offset == self.vectors[self.index].bytes().len() {
+            self.index += 1;
+            self.offset = 0;
+        }
+    }
+
+    fn rewind(&mut self, count: usize) -> KResult<()> {
+        let (mut index, mut offset, mut left) = (self.index, self.offset, count);
+        while left > offset {
+            left -= offset;
+            index = index.checked_sub(1).ok_or(KError::InvalidInput)?;
+            offset = self.vectors[index].bytes().len();
+        }
+        self.index = index;
+        self.offset = offset - left;
+        self.remaining += count;
+        Ok(())
+    }
+}
+
+impl iov_iter::IovSource for RequestIter<'_> {
+    fn count(&self) -> usize {
+        self.remaining
+    }
+
+    fn copy_from_iter(&mut self, dst: &mut [u8]) -> KResult<usize> {
+        let mut copied = 0;
+        while copied < dst.len() && self.remaining != 0 {
+            let bytes = &self.vectors[self.index].bytes()[self.offset..];
+            let count = bytes.len().min(dst.len() - copied);
+            dst[copied..copied + count].copy_from_slice(&bytes[..count]);
+            copied += count;
+            self.advance(count);
+        }
+        Ok(copied)
+    }
+
+    fn revert(&mut self, count: usize) -> KResult<()> {
+        self.rewind(count)
+    }
+}
+
+impl iov_iter::IovSink for RequestIter<'_> {
+    fn count(&self) -> usize {
+        self.remaining
+    }
+
+    fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
+        let mut copied = 0;
+        while copied < src.len() && self.remaining != 0 {
+            let bytes = &mut self.vectors[self.index]
+                .bytes_mut()
+                .map_err(|_| KError::InvalidInput)?[self.offset..];
+            let count = bytes.len().min(src.len() - copied);
+            bytes[..count].copy_from_slice(&src[copied..copied + count]);
+            copied += count;
+            self.advance(count);
+        }
+        Ok(copied)
+    }
+
+    fn revert(&mut self, count: usize) -> KResult<()> {
+        self.rewind(count)
+    }
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/loop.rs");

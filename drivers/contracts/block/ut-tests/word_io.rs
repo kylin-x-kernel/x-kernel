@@ -243,7 +243,9 @@ impl BlockDeviceOperations for RestrictedDevice {
     fn num_blocks(&self) -> u64 {
         8
     }
+}
 
+impl RestrictedDevice {
     fn read_block(&self, block: u64, bytes: &mut [u8]) -> DriverResult {
         read_blocks_with_provider(test_provider(), block, 512, 8, bytes, |block, bytes| {
             assert_eq!(bytes.as_ptr() as usize % 4, 0);
@@ -268,7 +270,7 @@ impl BlockDeviceOperations for RestrictedDevice {
 }
 
 #[def_test]
-fn word_io_direct_trait_arc_and_canonical_forwarding_accept_arbitrary_addresses() {
+fn word_io_backend_and_canonical_forwarding_accept_arbitrary_addresses() {
     let backend = Arc::new(RestrictedDevice(Mutex::new(vec![0; 4096])));
     let disk = Gendisk::alloc(
         String::from("word-contract"),
@@ -283,17 +285,20 @@ fn word_io_direct_trait_arc_and_canonical_forwarding_accept_arbitrary_addresses(
     let input = unaligned(&mut input, 512);
     let mut output = [0; 520];
     let output = unaligned(&mut output, 512);
-    let direct: &dyn BlockDeviceOperations = backend.as_ref();
-    for device in [
-        direct,
-        &backend as &dyn BlockDeviceOperations,
-        canonical.as_ref() as &dyn BlockDeviceOperations,
-    ] {
-        device.write_block(2, input).unwrap();
-        device.read_block(2, output).unwrap();
-        assert_eq!(output, input);
-        assert_eq!(device.read_block(8, output), Err(DriverError::InvalidInput));
-    }
+    backend.write_block(2, input).unwrap();
+    backend.read_block(2, output).unwrap();
+    assert_eq!(output, input);
+    assert_eq!(
+        backend.read_block(8, output),
+        Err(DriverError::InvalidInput)
+    );
+    canonical.write_block(2, input).unwrap();
+    canonical.read_block(2, output).unwrap();
+    assert_eq!(output, input);
+    assert_eq!(
+        canonical.read_block(8, output),
+        Err(DriverError::InvalidInput)
+    );
 }
 
 #[def_test]
@@ -373,4 +378,20 @@ fn word_io_public_provider_releases_owned_memory_on_success_and_io_errors() {
     );
     assert_eq!(owner.allocations.load(Ordering::Relaxed), 3);
     assert_eq!(owner.frees.load(Ordering::Relaxed), 3);
+}
+
+impl crate::BioOperations for RestrictedDevice {
+    fn submit_bio(&self, mut bio: crate::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            crate::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            crate::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            crate::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
 }

@@ -66,7 +66,8 @@ impl BlockDeviceOperations for TestDevice {
     fn block_size(&self) -> usize {
         TEST_BLOCK_SIZE
     }
-
+}
+impl TestDevice {
     fn read_block(&self, block_id: u64, output: &mut [u8]) -> DriverResult {
         self.read_count.fetch_add(1, Ordering::Relaxed);
         if self
@@ -117,16 +118,32 @@ impl BlockDeviceOperations for TestDevice {
     }
 }
 
+impl block::BioOperations for TestDevice {
+    fn submit_bio(&self, mut bio: block::Bio) {
+        let block_id = bio.sector() / (self.block_size() as u64 / 512);
+        let result = match bio.operation() {
+            block::BioOperation::Read => {
+                bio.read_contiguous(|bytes| self.read_block(block_id, bytes))
+            }
+            block::BioOperation::Write => {
+                bio.write_contiguous(|bytes| self.write_block(block_id, bytes))
+            }
+            block::BioOperation::Flush => self.flush(),
+        };
+        bio.end_io(result);
+    }
+}
+
 pub(super) fn cache_for(device: Arc<TestDevice>) -> MetadataBlockCache {
     let block_count = device.num_blocks();
-    let device: Arc<dyn BlockDeviceOperations> = device;
+    let device: Arc<block::BlockDevice> = crate::io::test_block_device(device);
     let filesystem_device = FilesystemDevice::open(device, TEST_BLOCK_SIZE, block_count).unwrap();
     MetadataBlockCache::new(Arc::new(filesystem_device))
 }
 
 fn metadata_io_for(device: Arc<TestDevice>) -> Ext4MetadataIo {
     let block_count = device.num_blocks();
-    let device: Arc<dyn BlockDeviceOperations> = device;
+    let device: Arc<block::BlockDevice> = crate::io::test_block_device(device);
     let filesystem_device = FilesystemDevice::open(device, TEST_BLOCK_SIZE, block_count).unwrap();
     Ext4MetadataIo::new(Arc::new(filesystem_device))
 }

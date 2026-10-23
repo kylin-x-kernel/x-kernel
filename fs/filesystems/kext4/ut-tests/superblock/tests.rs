@@ -7,7 +7,6 @@
 use alloc::{sync::Arc, vec};
 use core::num::NonZeroU32;
 
-use block::BlockDeviceOperations;
 use unittest::def_test;
 
 use super::*;
@@ -40,7 +39,8 @@ fn mount_rejects_non_extent_after_superblock_decode() {
         features::IncompatFeatures::BIT_64.bits(),
     );
     image[1024..1024 + superblock::SUPERBLOCK_SIZE].copy_from_slice(&superblock_bytes);
-    let device: Arc<dyn BlockDeviceOperations> = Arc::new(TestDevice::new(image));
+    let device: Arc<block::BlockDevice> =
+        crate::io::test_block_device(Arc::new(TestDevice::new(image)));
 
     assert!(matches!(
         Ext4SbInfo::mount(device),
@@ -148,7 +148,7 @@ fn mount_rejects_clean_legacy_orphan_head_without_recovery() {
     persist_test_orphan_head(&mut filesystem, Some(inode.number()), 764);
     drop(filesystem);
 
-    let mount_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let mount_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         Ext4SbInfo::mount(mount_device).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
@@ -162,7 +162,7 @@ fn recover_rejects_clean_legacy_orphan_without_a_journal() {
     persist_test_orphan_head(&mut filesystem, Some(inode.number()), 765);
     drop(filesystem);
 
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
         Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))
@@ -183,7 +183,7 @@ fn recover_rejects_orphan_file_without_backing_inode() {
     );
     drop(filesystem);
 
-    let recovery_device: Arc<dyn BlockDeviceOperations> = device.clone();
+    let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
     assert_eq!(
         Ext4SbInfo::recover(recovery_device),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile))
@@ -483,7 +483,8 @@ fn mount_validates_checksums_and_device_geometry() {
     );
     drop(filesystem);
     let valid = device.bytes();
-    let mounted = open_test_filesystem(device).expect("valid checksummed metadata mounts");
+    let mounted = open_test_filesystem(crate::io::test_block_device(device))
+        .expect("valid checksummed metadata mounts");
     assert_eq!(
         mounted.groups().len(),
         mounted.layout().group_count() as usize
@@ -493,14 +494,18 @@ fn mount_validates_checksums_and_device_geometry() {
         let mut corrupt = valid.clone();
         corrupt[offset] ^= 1;
         assert!(matches!(
-            open_test_filesystem(Arc::new(TestDevice::new(corrupt))),
+            open_test_filesystem(crate::io::test_block_device(Arc::new(TestDevice::new(
+                corrupt
+            )))),
             Err(Ext4Error::ChecksumMismatch { .. })
         ));
     }
     let mut short = valid;
     short.truncate(short.len() / 2);
     assert!(matches!(
-        open_test_filesystem(Arc::new(TestDevice::new(short))),
+        open_test_filesystem(crate::io::test_block_device(Arc::new(TestDevice::new(
+            short
+        )))),
         Err(Ext4Error::OutOfBounds)
     ));
 }

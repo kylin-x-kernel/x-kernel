@@ -194,3 +194,14 @@ open modes. Raw block mmap is rejected with ENODEV until a canonical block cache
 and media-change invalidation protocol are implemented together.
 Readahead controls belong to the generic block layer; the old loop-local value
 was disconnected from I/O and has been removed.
+
+## Loop request lifetime
+
+A request retains its memory, device and captured backing file until synchronous
+completion. Callbacks run outside media locks. Removing or replacing the backing
+file does not invalidate a previously captured file reference. Execution uses
+the submitting task and does not depend on shared worker-pool availability.
+
+Loop passes borrowed request extents to one VFS iterator operation without a
+payload-sized staging allocation. The iterator owns only cursor/borrow metadata;
+completion returns the original memory even when backing I/O fails or is short.

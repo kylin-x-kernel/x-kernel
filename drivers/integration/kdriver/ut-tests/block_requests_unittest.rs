@@ -7,7 +7,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use block::{BlockDeviceOperations, completion::BlockCompletionOperations};
+use block::{Gendisk, completion::BlockCompletionOperations};
 use device_res::IrqHandler;
 use kirq::context::test_support::ScopedHardIrqContext;
 use unittest::{assert_eq, def_test};
@@ -19,13 +19,16 @@ fn virtio_requests_sleep_across_cpus_and_reclaim_through_block_softirq() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;
     }
-    let (disk, hardware) = virtio::mock_virtio::block_test_disk(0, false, prepare_block_wait);
+    let (disk, hardware) = virtio::mock_virtio::block_test_disk(0, false);
     let operations: Arc<dyn BlockCompletionOperations> = disk.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&operations));
+    let block_device = Gendisk::alloc_mq("request-test".into(), 250, 0, 1, disk.clone())
+        .unwrap()
+        .part0();
     let returned = Arc::new(AtomicUsize::new(0));
     let mut tasks = Vec::new();
     for index in 0..24 {
-        let disk = disk.clone();
+        let disk = block_device.clone();
         let returned = returned.clone();
         let task = ktask::TaskInner::new_kthread(
             move || {
@@ -43,8 +46,8 @@ fn virtio_requests_sleep_across_cpus_and_reclaim_through_block_softirq() {
         task.set_cpumask(mask);
         tasks.push(ktask::spawn_task(task));
     }
-    // With no used entries, five callers await terminal completion and the
-    // other nineteen await FIFO admission. Neither group can busy-poll here.
+    // Every caller waits for terminal completion. Five requests are on the
+    // device, and nineteen remain driver-owned until descriptors are reclaimed.
     while !tasks
         .iter()
         .all(|task| task.state() == ktask::TaskState::Blocked)

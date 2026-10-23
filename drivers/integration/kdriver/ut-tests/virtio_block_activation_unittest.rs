@@ -7,7 +7,6 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use block::BlockDeviceOperations;
 use device_res::{IrqEvent, IrqHandlerToken, ResError, ResResult};
 use kdevice::{
     BusId, DeviceIdentity, DeviceLocation, DiscoveryOrigin, PlatformIdentity, ResourceSet,
@@ -40,12 +39,14 @@ impl IrqOp for TestProvider {
         ACTIONS.lock().insert((irq.number, token), handler);
         Ok(IrqHandlerToken::shared_action(token))
     }
+
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken) {
         let IrqHandlerToken::SharedAction(token) = token else {
             panic!("shared action expected")
         };
         core::assert!(ACTIONS.lock().remove(&(irq.number, token)).is_some());
     }
+
     fn set_irq_enabled(&self, _: IrqResource, _: bool) {
         panic!("block close must not mask the shared line");
     }
@@ -90,7 +91,7 @@ fn failed_irq_and_failed_publication_close_transport_without_disk() {
     ] {
         let parent = parent();
         let id = parent.id();
-        let (device, hardware) = block_test_disk(0, false, block_completion::prepare_block_wait);
+        let (device, hardware) = block_test_disk(0, false);
         let disk_number = kdevice::DeviceNumber::new(
             virtio::VIRTIO_BLK_MAJOR,
             device.index() << virtio::VIRTIO_BLK_PART_BITS,
@@ -105,7 +106,12 @@ fn failed_irq_and_failed_publication_close_transport_without_disk() {
         assert!(ACTIONS.lock().is_empty());
         assert!(!ACTIVATIONS.lock().contains_key(&id));
         assert!(block::lookup_block_device(disk_number).is_none());
-        assert_eq!(device.read_block(0, &mut [0; 512]), Err(DriverError::Io));
+        let closed_disk =
+            Gendisk::alloc_mq(device.name().into(), 250, 0, 1, device.clone()).unwrap();
+        assert_eq!(
+            closed_disk.part0().read_block(0, &mut [0; 512]),
+            Err(DriverError::Io)
+        );
         close_device(id);
     }
 }
@@ -115,7 +121,7 @@ fn close_drains_pending_and_submitted_calls_before_destroying_retained_disk() {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;
     }
-    let (device, hardware) = block_test_disk(0, false, block_completion::prepare_block_wait);
+    let (device, hardware) = block_test_disk(0, false);
     let operations: Arc<dyn BlockCompletionOperations> = device.clone();
     let reclaimer = BlockIoReclaimer::new(Arc::downgrade(&operations));
     let handler: Arc<dyn IrqHandler> = device.clone();
@@ -126,12 +132,12 @@ fn close_drains_pending_and_submitted_calls_before_destroying_retained_disk() {
         reclaimer.clone(),
     )
     .unwrap();
-    let disk = Gendisk::alloc(
+    let disk = Gendisk::alloc_mq(
         device.name().into(),
         virtio::VIRTIO_BLK_MAJOR,
         device.index() << virtio::VIRTIO_BLK_PART_BITS,
         16,
-        Box::new(device.clone()),
+        device.clone(),
     )
     .unwrap();
     let retained = block::add_disk(disk.clone()).unwrap();
@@ -209,7 +215,7 @@ fn close_drains_pending_and_submitted_calls_before_destroying_retained_disk() {
     let before = neighbor_calls.load(Ordering::Relaxed);
     dispatch();
     assert_eq!(neighbor_calls.load(Ordering::Relaxed), before + 1);
-    assert_eq!(retained.num_blocks(), 1024);
+    assert_eq!(retained.num_sectors(), 1024);
     assert_eq!(retained.block_size(), 512);
     assert_eq!(retained.flush(), Err(DriverError::Io));
     drop(neighbor);

@@ -5,6 +5,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::num::NonZeroU32;
 
+#[cfg(unittest)]
 use block::BlockDeviceOperations;
 use ksync::{Mutex, MutexGuard};
 use ktime_types::TimestampLimits;
@@ -545,7 +546,7 @@ impl Ext4SbInfo {
     /// it does not publish a filesystem whose legacy indirect block maps can
     /// only be read but not safely allocated, truncated, or freed.
     #[cfg(unittest)]
-    pub(crate) fn mount(device: Arc<dyn BlockDeviceOperations>) -> Ext4Result<Self> {
+    pub(crate) fn mount(device: Arc<block::BlockDevice>) -> Ext4Result<Self> {
         let mut filesystem = Self::prepare_mount_with_statfs_mode(device, Ext4StatFsMode::Bsd)?;
         filesystem.persist_directory_hash_policy()?;
         Ok(filesystem)
@@ -553,7 +554,7 @@ impl Ext4SbInfo {
 
     /// Prepares ext4 mount state without committing mount-success metadata.
     pub(crate) fn prepare_mount_with_statfs_mode(
-        device: Arc<dyn BlockDeviceOperations>,
+        device: Arc<block::BlockDevice>,
         statfs_mode: Ext4StatFsMode,
     ) -> Ext4Result<Self> {
         let mut filesystem = Self::open(device, false)?;
@@ -594,18 +595,15 @@ impl Ext4SbInfo {
     /// lacks extent-based block mapping, because recovery may need the same
     /// mutation and block-release support as a normal writable mount.
     pub(crate) fn recover(
-        device: Arc<dyn BlockDeviceOperations>,
+        device: Arc<block::BlockDevice>,
     ) -> Ext4Result<Option<Ext4RecoveryReport>> {
         Ext4Recovery::open(device)?.replay()
     }
 
-    pub(crate) fn open(
-        device: Arc<dyn BlockDeviceOperations>,
-        allow_recovery: bool,
-    ) -> Ext4Result<Self> {
+    pub(crate) fn open(device: Arc<block::BlockDevice>, allow_recovery: bool) -> Ext4Result<Self> {
         let mut superblock_bytes = [0; superblock::SUPERBLOCK_SIZE];
         FilesystemDevice::read_bytes(
-            device.as_ref(),
+            &device,
             superblock::SUPERBLOCK_OFFSET,
             &mut superblock_bytes,
         )?;
