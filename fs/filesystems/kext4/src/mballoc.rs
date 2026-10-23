@@ -15,6 +15,7 @@ use crate::{
     bitmap_allocator::{BlockAllocation, BlockRunAllocation},
     error::{CorruptKind, Ext4Error, Ext4Result},
     jbd2::JournalHandle,
+    prealloc_space::PREALLOC_DISCARD_SEARCH_LIMIT,
     superblock::{AllocatorState, Ext4SbInfo, is_ext4_bitmap_bit_set, lock},
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, LogicalBlock, PhysicalBlock},
 };
@@ -561,6 +562,18 @@ pub(crate) fn ensure_block_group_free_cache_inner(
 }
 
 impl Ext4SbInfo {
+    /// Allocates the run for one write request, scanning groups in mballoc
+    /// order and attaching no post-allocation state.
+    ///
+    /// - `request`: the write request; lengths in blocks.
+    /// - `handle`: journal handle carrying the winning group's updates.
+    ///
+    /// Returns: the allocated run paired with `request.logical_start`.
+    ///
+    /// Errors: `NoSpace` when no group served the request; other errors
+    /// propagate unchanged.
+    ///
+    /// Locking: caller must not hold the allocator mutex. May sleep.
     pub(crate) fn allocate_blocks_for_write(
         &self,
         request: Ext4AllocationRequest,
@@ -614,18 +627,31 @@ impl Ext4SbInfo {
         Ok(Some(allocation))
     }
 
-    /// Body of [`Self::allocate_blocks_for_write`] with a hook that runs
-    /// inside the successful allocation's allocator-lock section, so a caller
-    /// can attach state while no other allocator can run - the preallocation
-    /// entry samples and registers the surplus there (Linux births PAs under
-    /// the allocation's own group lock likewise).
+    /// Scans groups for a write allocation, running `after_allocated` inside the
+    /// same allocator-lock section as the successful allocation, so the caller
+    /// can attach state that no other allocator may observe half-built; the
+    /// preallocation entry registers its surplus there. Linux births a PA under
+    /// the allocation's group lock for the same reason.
     ///
-    /// - `request`: the write allocation request.
-    /// - `handle`: journal handle marking the run.
-    /// - `after_allocated`: the hook; receives the live guard and the
-    ///   allocation (its group and lengths are derivable from it). Runs at
-    ///   most once, only on success, and may take only the owner's prealloc
-    ///   map leaf lock under the guard.
+    /// - `request`: the write request; lengths in blocks, and
+    ///   `min_len < expected_len` only when its flags allow a partial run.
+    /// - `handle`: journal handle carrying the winning group's updates.
+    /// - `after_allocated`: runs at most once, only on success; under the guard
+    ///   it may take nothing but an owner's prealloc map leaf lock.
+    ///
+    /// Returns: the allocated run paired with `request.logical_start`, shorter
+    /// than `expected_len` only when a partial run is allowed.
+    ///
+    /// Errors: `NoSpace` when no group served the request after the discard
+    /// retries; other errors propagate unchanged.
+    ///
+    /// Worth noting: one corrupt group does not fail the write. The first
+    /// `Corrupt` is remembered and returned instead of `NoSpace` only when no
+    /// healthy group served; it does not block retries, which are gated on a
+    /// healthy group reporting `NoSpace`.
+    ///
+    /// Locking: caller must not hold the allocator mutex; the discard between
+    /// retry rounds takes it. Prefetch runs unlocked. May sleep.
     pub(crate) fn allocate_blocks_for_write_with(
         &self,
         request: Ext4AllocationRequest,
@@ -639,7 +665,14 @@ impl Ext4SbInfo {
             Some(goal) => self.block_allocation_start_group(Some(goal))?,
             None => request.locality_group(),
         };
+        // First bitmap corruption met while scanning, latched so it outlives the
+        // retry rounds and wins over the final NoSpace.
         let mut first_corruption = None;
+        // Set when any healthy group returns Err(NoSpace) from the bitmap
+        // scanner — prealloc spaces may be blocking it, so a retry behind
+        // a discard could help. Ok(None) (descriptor shortfall) does not
+        // set this, since discarding cannot change group capacities.
+        let mut healthy_nospace = false;
         let min_len = if request.flags.allows_partial() {
             request.min_len
         } else {
@@ -652,72 +685,99 @@ impl Ext4SbInfo {
         // section, so a stale snapshot is harmless.
         let mount_free_blocks = self.free_blocks_count().min(u64::from(u32::MAX)) as u32;
 
-        for group in self.group_scan_order(start)? {
-            let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
-            let range = self.block_group_range(group)?;
-            // Pure geometry first: skip impossible groups without any lock.
-            let expected_len = request
-                .expected_len
-                .get()
-                .min(range.block_count())
-                .min(mount_free_blocks);
-            if min_len.get() > range.block_count() || expected_len < min_len.get() {
-                continue;
-            }
-            // Cheap descriptor peek under a short lock, so the prefetch below
-            // (which may hit the device) runs only for groups worth trying.
-            // `min_len` is at least one block (validated at request
-            // construction), so an empty group is covered by the same skip.
-            let worth_a_try = {
-                let alloc = lock(&self.allocator);
-                match alloc.groups.get(group_index) {
-                    Some(descriptor) => {
-                        descriptor.has_uninit_block_bitmap()
-                            || descriptor.free_blocks_count() >= min_len.get()
-                    }
-                    None => return Err(Ext4Error::OutOfBounds),
-                }
-            };
-            if !worth_a_try {
-                continue;
-            }
-            // Warm the metadata cache outside the allocator lock: a
-            // cold-cache device read must not serialize every allocator
-            // behind the mutex. The attempt re-reads authoritatively inside.
-            self.prefetch_group_allocation_metadata(group)?;
-            // One lock section covers the attempt and the post-allocation
-            // hook, so the hook observes - and may extend - exactly the
-            // state the allocation published.
-            let attempt = {
-                let mut alloc = lock(&self.allocator);
-                self.attempt_group_allocation_locked(
-                    &mut alloc,
-                    GroupAttempt {
-                        goal: request.goal,
-                        group,
-                        min_len,
-                        expected_len,
-                    },
-                    handle,
-                    &mut after_allocated,
-                )
-            };
-            match attempt {
-                Ok(Some(allocation)) => {
-                    return Ok(Ext4AllocatedRun::new(
-                        request.logical_start,
-                        request.expected_len,
-                        allocation,
-                    ));
-                }
-                Ok(None) => continue,
-                Err(Ext4Error::NoSpace) => continue,
-                Err(error @ Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap)) => {
-                    first_corruption.get_or_insert(error);
+        // One common reason the scan comes up empty is that prealloc spaces
+        // hold the groups: the bitmap scanner skips their bits while the free
+        // aggregate still counts them. So retry behind a discard, at most
+        // `PREALLOC_DISCARD_SEARCH_LIMIT` searches; a discard that frees nothing
+        // ends the loop. Linux: the `repeat:` path of
+        // `ext4_mb_new_blocks` (fs/ext4/mballoc.c:6308-6339).
+        let mut searches = 0u32;
+        loop {
+            for group in self.group_scan_order(start)? {
+                let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
+                let range = self.block_group_range(group)?;
+                // Pure geometry first: skip impossible groups without any lock.
+                let expected_len = request
+                    .expected_len
+                    .get()
+                    .min(range.block_count())
+                    .min(mount_free_blocks);
+                if min_len.get() > range.block_count() || expected_len < min_len.get() {
                     continue;
                 }
-                Err(error) => return Err(error),
+                // Cheap descriptor peek under a short lock, so the prefetch
+                // below (which may hit the device) runs only for groups worth
+                // trying. `min_len` is at least one block (validated at
+                // request construction), so an empty group is covered by the
+                // same skip.
+                let worth_a_try = {
+                    let alloc = lock(&self.allocator);
+                    match alloc.groups.get(group_index) {
+                        Some(descriptor) => {
+                            descriptor.has_uninit_block_bitmap()
+                                || descriptor.free_blocks_count() >= min_len.get()
+                        }
+                        None => return Err(Ext4Error::OutOfBounds),
+                    }
+                };
+                if !worth_a_try {
+                    continue;
+                }
+                // Warm the metadata cache outside the allocator lock: a
+                // cold-cache device read must not serialize every allocator
+                // behind the mutex. The attempt re-reads authoritatively
+                // inside.
+                self.prefetch_group_allocation_metadata(group)?;
+                // One lock section covers the attempt and the post-allocation
+                // hook, so the hook observes - and may extend - exactly the
+                // state the allocation published.
+                let attempt = {
+                    let mut alloc = lock(&self.allocator);
+                    self.attempt_group_allocation_locked(
+                        &mut alloc,
+                        GroupAttempt {
+                            goal: request.goal,
+                            group,
+                            min_len,
+                            expected_len,
+                        },
+                        handle,
+                        &mut after_allocated,
+                    )
+                };
+                match attempt {
+                    Ok(Some(allocation)) => {
+                        return Ok(Ext4AllocatedRun::new(
+                            request.logical_start,
+                            request.expected_len,
+                            allocation,
+                        ));
+                    }
+                    Ok(None) => continue,
+                    Err(Ext4Error::NoSpace) => {
+                        healthy_nospace = true;
+                        continue;
+                    }
+                    // A healthy group may still serve, so keep scanning and
+                    // remember the first hit. kext4 has no persistent
+                    // `BBITMAP_CORRUPT` buddy flag, so each scan re-detects it.
+                    Err(error @ Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap)) => {
+                        first_corruption.get_or_insert(error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
+
+            searches += 1;
+            // Only retry when a healthy group reported NoSpace.
+            if healthy_nospace
+                && searches < PREALLOC_DISCARD_SEARCH_LIMIT
+                && self.discard_preallocs_for_space(u64::from(min_len.get())) > 0
+            {
+                continue;
+            }
+            break;
         }
 
         Err(first_corruption.unwrap_or(Ext4Error::NoSpace))

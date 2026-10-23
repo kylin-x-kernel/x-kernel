@@ -86,6 +86,26 @@ impl Ext4SbInfo {
         self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])
     }
 
+    /// Allocates a contiguous run inside `group`, journalling the bitmap, group
+    /// descriptor and superblock updates through `handle`.
+    ///
+    /// - `group`: group to allocate in; no other group is searched.
+    /// - `goal`: preferred first block, filesystem-wide; ignored when it lies
+    ///   outside `group`.
+    /// - `min_len`: smallest acceptable run, non-zero and at most `expected_len`.
+    /// - `expected_len`: requested run length, non-zero.
+    /// - `handle`: journal handle carrying the updates; needs
+    ///   [`BLOCK_ALLOCATOR_METADATA_CREDITS`] credits.
+    ///
+    /// Returns: the allocated run, between `min_len` and `expected_len` blocks.
+    /// Its blocks are marked allocated, so the caller owns them and must release
+    /// them if a later step fails.
+    ///
+    /// Errors: `NoSpace` when no run of `min_len` exists in the group; other
+    /// errors propagate unchanged.
+    ///
+    /// Locking: caller must not hold the allocator mutex. Prefetch runs unlocked.
+    /// May sleep.
     pub(crate) fn allocate_block_run_in_group(
         &self,
         group: BlockGroupNumber,

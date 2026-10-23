@@ -8,11 +8,12 @@ use block::{Device, DeviceKind, DriverError, DriverResult};
 
 use super::*;
 use crate::{
-    BlockCount, Ext4Inode, LogicalBlock, PhysicalBlock,
+    BlockCount, BlockGroupNumber, Ext4Inode, FilesystemBlock, LogicalBlock, PhysicalBlock,
     extent::ExtentMappingState,
     inode::InodeInitialization,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
+    prealloc_space::{GroupPreallocSpace, PreallocSpace},
 };
 
 pub(crate) fn journal_allocator_test_filesystem(
@@ -503,6 +504,26 @@ pub(crate) struct AllocatorGroupSpec {
 pub(crate) fn allocator_multigroup_test_filesystem(
     groups: &[AllocatorGroupSpec],
 ) -> (Ext4SbInfo, Arc<TestDevice>) {
+    allocator_multigroup_test_filesystem_inner(groups, false, &[])
+}
+
+/// Multi-group fixture with metadata checksums enabled. Each group index in
+/// `corrupt_block_bitmap_groups` gets a block bitmap checksum that does not
+/// match its bitmap, while the group descriptor itself keeps a valid
+/// checksum: bitmap reads fail with `InvalidBlockBitmap` and the scan can
+/// still reach the remaining healthy groups.
+pub(crate) fn allocator_multigroup_checksum_test_filesystem(
+    groups: &[AllocatorGroupSpec],
+    corrupt_block_bitmap_groups: &[u32],
+) -> (Ext4SbInfo, Arc<TestDevice>) {
+    allocator_multigroup_test_filesystem_inner(groups, true, corrupt_block_bitmap_groups)
+}
+
+fn allocator_multigroup_test_filesystem_inner(
+    groups: &[AllocatorGroupSpec],
+    has_metadata_checksum: bool,
+    corrupt_block_bitmap_groups: &[u32],
+) -> (Ext4SbInfo, Arc<TestDevice>) {
     let group_count = u32::try_from(groups.len()).unwrap();
     let block_count = group_count * TEST_BLOCK_COUNT as u32;
     let inodes_count = group_count * 32;
@@ -517,32 +538,48 @@ pub(crate) fn allocator_multigroup_test_filesystem(
         .try_fold(0u32, |sum, value| sum.checked_add(value))
         .unwrap();
     let mut image = vec![0; usize::try_from(block_count).unwrap() * TEST_BLOCK_SIZE];
-    let superblock_bytes =
+    let mut superblock_bytes =
         allocator_superblock_with_geometry(block_count, inodes_count, free_blocks, free_inodes);
+    if has_metadata_checksum {
+        enable_allocator_metadata_checksum(&mut superblock_bytes);
+    }
     image[1024..1024 + superblock::SUPERBLOCK_SIZE].copy_from_slice(&superblock_bytes);
+    let superblock = Ext4DiskSuperblock::decode(&superblock_bytes).unwrap();
 
     let mut descriptors = Vec::new();
     for (index, group) in groups.iter().copied().enumerate() {
-        let group = allocator_group_descriptor_for_group(u32::try_from(index).unwrap(), group);
-        descriptors.push(group);
-        let descriptor_start = TEST_BLOCK_SIZE + index * 64;
-        image[descriptor_start..descriptor_start + 64].copy_from_slice(&group);
-
+        let group_number = u32::try_from(index).unwrap();
         let group_first = index * TEST_BLOCK_COUNT;
         let block_bitmap_start = (group_first + 2) * TEST_BLOCK_SIZE;
         write_allocator_bitmap(
             &mut image,
             block_bitmap_start,
-            &groups[index].block_bitmap,
-            groups[index].flags & 0x0002 == 0,
+            &group.block_bitmap,
+            group.flags & 0x0002 == 0,
         );
         let inode_bitmap_start = (group_first + 3) * TEST_BLOCK_SIZE;
         write_allocator_bitmap(
             &mut image,
             inode_bitmap_start,
-            &groups[index].inode_bitmap,
-            groups[index].flags & 0x0001 == 0,
+            &group.inode_bitmap,
+            group.flags & 0x0001 == 0,
         );
+
+        let mut descriptor = allocator_group_descriptor_for_group(group_number, group);
+        if has_metadata_checksum {
+            update_allocator_descriptor_bitmap_checksums(
+                &mut descriptor,
+                group_number,
+                superblock.checksum_seed(),
+                &image[block_bitmap_start..block_bitmap_start + TEST_BLOCK_SIZE],
+                &image[inode_bitmap_start..inode_bitmap_start + TEST_BLOCK_SIZE],
+                corrupt_block_bitmap_groups.contains(&group_number),
+                false,
+            );
+        }
+        descriptors.push(descriptor);
+        let descriptor_start = TEST_BLOCK_SIZE + index * 64;
+        image[descriptor_start..descriptor_start + 64].copy_from_slice(&descriptor);
     }
 
     let block_device = Arc::new(TestDevice::new(image));
@@ -550,7 +587,6 @@ pub(crate) fn allocator_multigroup_test_filesystem(
     let filesystem_device =
         Arc::new(FilesystemDevice::open(device, TEST_BLOCK_SIZE, u64::from(block_count)).unwrap());
     let metadata_io = Ext4MetadataIo::new(filesystem_device.clone());
-    let superblock = Ext4DiskSuperblock::decode(&superblock_bytes).unwrap();
     let layout = FilesystemLayout::derive(&superblock).unwrap();
     let descriptors: Vec<BlockGroupDescriptor> = descriptors
         .iter()
@@ -1126,4 +1162,48 @@ pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDev
     }
     let filesystem = Ext4SbInfo::mount(device.clone()).unwrap();
     (filesystem, device)
+}
+
+// ---- shared prealloc-space test helpers ----
+
+/// Seeds one prealloc space into both index sides, keeping the conservative
+/// counter in step. Blocks at `phys_start..phys_start+phys_len` must be free
+/// on the bitmap (otherwise consume will fail the allocation).
+pub(crate) fn insert_prealloc_space(
+    filesystem: &Ext4SbInfo,
+    inode: &Arc<Ext4Inode>,
+    logical_start: u64,
+    phys_start: u64,
+    phys_len: u32,
+    group: u32,
+) {
+    let mut alloc = lock(&filesystem.allocator);
+    let space = PreallocSpace {
+        group: BlockGroupNumber::new(group),
+        logical_start: LogicalBlock::new(logical_start),
+        phys_start: FilesystemBlock::new(phys_start),
+        phys_len: BlockCount::new(phys_len),
+    };
+    inode.prealloc_map().update(|preallocs| {
+        preallocs.insert(space.logical_start, space);
+    });
+    alloc.preallocs_by_group.insert(
+        (space.group, space.phys_start),
+        GroupPreallocSpace {
+            logical_start: space.logical_start,
+            phys_len: space.phys_len,
+            owner: inode.clone(),
+        },
+    );
+    alloc.preallocated_blocks += u64::from(phys_len);
+}
+
+/// Returns how many prealloc spaces this inode holds.
+pub(crate) fn prealloc_count(inode: &Ext4Inode) -> usize {
+    inode.prealloc_map().update(|preallocs| preallocs.len())
+}
+
+/// Returns how many group-side twin entries exist.
+pub(crate) fn prealloc_twin_count(filesystem: &Ext4SbInfo) -> usize {
+    lock(&filesystem.allocator).preallocs_by_group.len()
 }

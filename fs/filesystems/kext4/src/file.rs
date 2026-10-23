@@ -769,7 +769,30 @@ impl Ext4SbInfo {
             inode,
             LogicalBlock::new(first),
             end.checked_sub(first).ok_or(Ext4Error::Overflow)?,
-        )
+        )?;
+        // Writeback completing may have cleared the last delalloc
+        // reservation that kept prealloc spaces alive past close. If
+        // no reservation remains, drop any spaces now — the close that
+        // deferred them has already returned and won't check again,
+        // and eviction won't fire while read-only handles still hold
+        // the inode.
+        //
+        // NB: this hook can also fire in write→fsync loops while the
+        // file is still open for write, discarding spaces the current
+        // writeback just produced.  That is harmless while birth is
+        // not wired (no spaces exist); once birth lands the gate
+        // should additionally require write_count == 0, which needs
+        // write_count threaded through from the VFS writepages path.
+        //
+        // `is_empty` is a per-inode leaf-lock hint that keeps the
+        // allocator mutex out of the common no-space case: the writeback
+        // path never took that mutex before, and an inode holding no
+        // spaces stays that way. A space born after the check is owed
+        // to close/eviction, not to this call.
+        if !inode.has_delalloc_reservations() && !inode.prealloc_map().is_empty() {
+            self.release_preallocs(inode);
+        }
+        Ok(())
     }
 
     /// Commits regular-file size and timestamps after ordered data writeback.

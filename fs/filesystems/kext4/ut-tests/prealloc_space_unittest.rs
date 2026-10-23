@@ -9,12 +9,15 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     BlockCount, BlockGroupNumber, FilesystemBlock, LogicalBlock, PhysicalBlock,
+    error::CorruptKind,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     mballoc::Ext4AllocationFlags,
     superblock::test_fixtures::{
-        AllocatorGroupSpec, TEST_FREE_BLOCKS,
-        allocator_multigroup_test_filesystem, allocator_test_filesystem,
-        allocate_checkpointed_regular_inode,
+        AllocatorGroupSpec, TEST_FREE_BLOCKS, TEST_FREE_INODES,
+        allocator_multigroup_checksum_test_filesystem, allocator_multigroup_test_filesystem,
+        allocator_test_filesystem, allocator_test_filesystem_with_options,
+        allocate_checkpointed_regular_inode, insert_prealloc_space, prealloc_count,
+        prealloc_twin_count,
     },
 };
 
@@ -280,49 +283,6 @@ fn insert_multiple_non_overlapping() {
 }
 
 // ---- helpers for prealloc lifecycle tests ----
-
-/// Directly insert a prealloc space into both the inode map and the group
-/// index, with their invariants in sync. Blocks at `phys_start..phys_start+len`
-/// must be free on the bitmap (otherwise consume will fail the allocation).
-fn insert_prealloc_space(
-    filesystem: &Ext4SbInfo,
-    inode: &Arc<Ext4Inode>,
-    logical_start: u64,
-    phys_start: u64,
-    phys_len: u32,
-    group: u32,
-) {
-    let mut alloc = lock(&filesystem.allocator);
-    let space = PreallocSpace {
-        group: BlockGroupNumber::new(group),
-        logical_start: LogicalBlock::new(logical_start),
-        phys_start: FilesystemBlock::new(phys_start),
-        phys_len: BlockCount::new(phys_len),
-    };
-    inode.prealloc_map().update(|preallocs| {
-        preallocs.insert(space.logical_start, space);
-    });
-    alloc.preallocs_by_group.insert(
-        (space.group, space.phys_start),
-        GroupPreallocSpace {
-            logical_start: space.logical_start,
-            phys_len: space.phys_len,
-            owner: inode.clone(),
-        },
-    );
-    alloc.preallocated_blocks += u64::from(phys_len);
-}
-
-/// Returns how many spaces this inode holds.
-fn prealloc_count(inode: &Ext4Inode) -> usize {
-    inode.prealloc_map().update(|preallocs| preallocs.len())
-}
-
-/// Returns how many group-side twins exist.
-fn prealloc_twin_count(filesystem: &Ext4SbInfo) -> usize {
-    let alloc = lock(&filesystem.allocator);
-    alloc.preallocs_by_group.len()
-}
 
 /// Returns preallocated_blocks counter.
 fn preallocated_blocks(filesystem: &Ext4SbInfo) -> u64 {
@@ -1050,4 +1010,224 @@ fn reserve_merged_books_only_the_new_length() {
     );
     assert_eq!(prealloc_twin_count(&filesystem), 1);
     assert_eq!(preallocated_blocks(&filesystem), 10);
+}
+
+// ---- ENOSPC retry valve ----
+//
+// A prealloc space covers physical blocks the bitmap still shows free, so a
+// scan can come up empty while the free aggregate is non-zero. The valve
+// drops whole groups of spaces and rescans; the tests below pin the retry,
+// the corrupt no-retry, and the "zero discard ends the loop" behaviours on
+// both allocation entry points.
+
+/// Builds a file-data request for `len` blocks at goal block 6 of group 0.
+fn group0_request(logical_start: u64, len: u32) -> Ext4AllocationRequest {
+    Ext4AllocationRequest::new(
+        LogicalBlock::new(logical_start),
+        Some(FilesystemBlock::new(6)),
+        BlockCount::new(len),
+        BlockCount::new(len),
+        Ext4AllocationFlags::EXACT,
+        BlockGroupNumber::new(0),
+    )
+    .unwrap()
+}
+
+/// Runs the mballoc scan entry with a no-op post-allocation hook.
+fn scan_without_birth(
+    filesystem: &Ext4SbInfo,
+    request: Ext4AllocationRequest,
+) -> Ext4Result<Ext4AllocatedRun> {
+    let journal = JournalTransactions::new(TransactionId::new(200));
+    let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+    let result = filesystem.allocate_blocks_for_write_with(request, &mut handle, |_, _| {});
+    drop(handle);
+    result
+}
+
+#[def_test]
+fn enospc_valve_discards_spaces_and_retries_scan() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    // One space covers the whole free region [6, 32): the first scan finds no
+    // allocatable bit, yet the free aggregate still counts every block.
+    insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
+    assert_eq!(filesystem.free_blocks_count(), u64::from(TEST_FREE_BLOCKS));
+
+    let run = scan_without_birth(&filesystem, group0_request(0, 4)).unwrap();
+
+    assert_eq!(run.physical_start(), PhysicalBlock::new(6));
+    assert_eq!(run.block_count(), BlockCount::new(4));
+    // The valve dropped the blocking space from both index sides.
+    assert_eq!(prealloc_count(&inode), 0);
+    assert_eq!(prealloc_twin_count(&filesystem), 0);
+    assert_eq!(preallocated_blocks(&filesystem), 0);
+}
+
+#[def_test]
+fn enospc_valve_without_spaces_passes_nospace_through() {
+    // No prealloc space exists, so the valve has nothing to discard: a
+    // request the group cannot satisfy must fail with NoSpace, not spin.
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    let free_before = filesystem.free_blocks_count();
+
+    // 27 blocks exceed the group's 26 free blocks; the group is skipped
+    // outright (expected_len clamps below min_len), leaving the scan empty.
+    let request = Ext4AllocationRequest::new(
+        LogicalBlock::new(0),
+        Some(FilesystemBlock::new(6)),
+        BlockCount::new(TEST_FREE_BLOCKS + 1),
+        BlockCount::new(TEST_FREE_BLOCKS + 1),
+        Ext4AllocationFlags::EXACT,
+        BlockGroupNumber::new(0),
+    )
+    .unwrap();
+    let result = scan_without_birth(&filesystem, request);
+
+    assert_eq!(result, Err(Ext4Error::NoSpace));
+    assert_eq!(filesystem.free_blocks_count(), free_before);
+    assert_eq!(prealloc_count(&inode), 0);
+}
+
+#[def_test]
+fn enospc_valve_skips_retry_when_failure_is_geometric() {
+    // The request exceeds the group's capacity, so geometry skips the
+    // group entirely. No healthy group was attempted, so the valve has
+    // nothing to retry — discard cannot change group sizes.
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
+
+    let request = Ext4AllocationRequest::new(
+        LogicalBlock::new(0),
+        Some(FilesystemBlock::new(6)),
+        BlockCount::new(TEST_FREE_BLOCKS + 4),
+        BlockCount::new(TEST_FREE_BLOCKS + 4),
+        Ext4AllocationFlags::EXACT,
+        BlockGroupNumber::new(0),
+    )
+    .unwrap();
+    let result = scan_without_birth(&filesystem, request);
+
+    assert_eq!(result, Err(Ext4Error::NoSpace));
+    // No retry happened: geometry cannot be fixed by discarding.
+    assert_eq!(prealloc_count(&inode), 1);
+    assert_eq!(prealloc_twin_count(&filesystem), 1);
+    assert_eq!(preallocated_blocks(&filesystem), u64::from(TEST_FREE_BLOCKS));
+}
+
+#[def_test]
+fn enospc_valve_does_not_retry_corrupt_bitmap() {
+    // A bitmap-checksum mismatch surfaces as InvalidBlockBitmap. Discard
+    // cannot repair corruption, so the valve must stay put: the original
+    // error is returned and the space is left intact.
+    let (mut filesystem, _device) = allocator_test_filesystem_with_options(
+        AllocatorGroupSpec {
+            free_blocks: TEST_FREE_BLOCKS,
+            free_inodes: TEST_FREE_INODES,
+            used_directories: 0,
+            flags: 0,
+            block_bitmap: [0b0011_1111, 0, 0, 0],
+            inode_bitmap: [0xff, 0x03, 0, 0],
+        },
+        true,
+        true,
+        false,
+    );
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
+
+    let result = scan_without_birth(&filesystem, group0_request(0, 4));
+
+    assert_eq!(result, Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap)));
+    // No discard happened: the corruption suppression held.
+    assert_eq!(prealloc_count(&inode), 1);
+    assert_eq!(prealloc_twin_count(&filesystem), 1);
+}
+
+#[def_test]
+fn enospc_valve_retries_healthy_group_despite_corrupt_sibling() {
+    // Distinguishes "corruption is only latched" from "corruption closes the
+    // retry gate". Group 0's bitmap checksum is bad; group 1's free bits are
+    // all held by a prealloc space. The scan reports Corrupt for group 0 and
+    // NoSpace for group 1, so the valve must discard group 1's space and serve
+    // the request from the healthy group on the rescan.
+    let (mut filesystem, _device) = allocator_multigroup_checksum_test_filesystem(
+        &[
+            AllocatorGroupSpec {
+                free_blocks: TEST_FREE_BLOCKS,
+                free_inodes: TEST_FREE_INODES,
+                used_directories: 0,
+                flags: 0,
+                block_bitmap: [0b0011_1111, 0, 0, 0],
+                inode_bitmap: [0xff, 0x03, 0, 0],
+            },
+            AllocatorGroupSpec {
+                free_blocks: TEST_FREE_BLOCKS,
+                free_inodes: TEST_FREE_INODES,
+                used_directories: 0,
+                flags: 0,
+                block_bitmap: [0b0011_1111, 0, 0, 0],
+                inode_bitmap: [0xff, 0x03, 0, 0],
+            },
+        ],
+        &[0],
+    );
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    // Group 1 spans blocks 32..64, so its first free block (bit 6) is 38.
+    insert_prealloc_space(&filesystem, &inode, 0, 38, TEST_FREE_BLOCKS, 1);
+
+    let run = scan_without_birth(&filesystem, group0_request(0, 4)).unwrap();
+
+    assert_eq!(run.group(), BlockGroupNumber::new(1));
+    assert_eq!(run.physical_start(), PhysicalBlock::new(38));
+    assert_eq!(run.block_count(), BlockCount::new(4));
+    // The valve dropped group 1's space; group 0 was never allocatable.
+    assert_eq!(prealloc_count(&inode), 0);
+    assert_eq!(prealloc_twin_count(&filesystem), 0);
+    assert_eq!(preallocated_blocks(&filesystem), 0);
+}
+
+#[def_test]
+fn group_allocation_fails_when_prealloc_spaces_block_the_group() {
+    // The single-group entry does not retry with a discard: the discard is
+    // group-unaware (it drops groups in ascending order), so it cannot
+    // guarantee reaching the target group. The mballoc scan entry handles
+    // the ENOSPC retry valve for multi-group scans.
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
+
+    let journal = JournalTransactions::new(TransactionId::new(200));
+    let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+    let result = filesystem.allocate_block_run_in_group(
+        BlockGroupNumber::new(0),
+        Some(FilesystemBlock::new(6)),
+        BlockCount::new(4),
+        BlockCount::new(4),
+        &mut handle,
+    );
+    drop(handle);
+
+    assert_eq!(result, Err(Ext4Error::NoSpace));
+    // No discard happened: the space is intact.
+    assert_eq!(prealloc_count(&inode), 1);
+    assert_eq!(prealloc_twin_count(&filesystem), 1);
+    assert_eq!(preallocated_blocks(&filesystem), u64::from(TEST_FREE_BLOCKS));
+}
+
+#[def_test]
+fn discard_preallocs_returns_zero_when_no_spaces_exist() {
+    // The valve's termination condition: when `discard` returns 0,
+    // nothing was freed, a retry cannot do better, and the loop must
+    // end. Exercising this through the full scan entry requires a
+    // fragmented bitmap so the scanner hits NoSpace with zero prealloc
+    // spaces (a feasible construction via AllocatorGroupSpec, deferred
+    // to a follow-up); this test covers the function directly.
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let _inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+
+    let freed = filesystem.discard_preallocs_for_space(100);
+    assert_eq!(freed, 0);
 }

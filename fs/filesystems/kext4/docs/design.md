@@ -51,6 +51,7 @@ fs/filesystems/kext4/
 ├── src/balloc.rs
 ├── src/ialloc.rs
 ├── src/mballoc.rs
+├── src/prealloc_space.rs
 ├── src/file.rs
 ├── src/truncate.rs
 ├── src/orphan.rs
@@ -74,6 +75,9 @@ fs/filesystems/kext4
     |-- HTree hash_unsigned mount policy
     |-- metadata buffer / checksum validation
     |-- group descriptors / allocator state
+    |     |-- per-group free-extent cache
+    |     |-- orphan 头与 RECOVER/ORPHAN_PRESENT 位
+    |     `-- speculative prealloc space 两侧索引（inode 逻辑图 + group 孪生表）
     |-- MountedJournal (类似 journal_t)
     |     |-- internal journal mapping / on-disk superblock
     |     |-- transaction state
@@ -187,10 +191,15 @@ bitmap 更新"的语义。多组扫描入口（`allocate_blocks_for_write()` /
 并发超预留窗口，也不依赖 bridge 挂载级写锁的外部串行化；临界区有界（仅读计数
 并做一次加法），与 Linux 直接原子累加 percpu 计数的近似记账相比保持精确语义。
 
-锁序固定为 bridge 挂载级锁 → allocator 锁 → delalloc 锁 → metadata-buffer /
-journal 内部锁，禁止反向等待。持 allocator 锁期间不得调用任何会重新取该锁的路径：
+锁序固定为 bridge 挂载级锁 → allocator 锁 → delalloc 锁 / prealloc map 叶锁 → metadata-buffer /
+journal 内部锁，禁止反向等待。delalloc 总量锁与 per-inode prealloc map 叶锁都是 allocator 锁之下的
+独立叶锁，彼此不嵌套：前者只保护 mount-wide 计数，后者只保护单个文件的逻辑区间表，`update` 闭包在
+allocator 临界区内取放该叶锁且不取得任何其他锁；group 侧 discard 需要锁 foreign owner 的 map 时按
+同一顺序取，故 prealloc 操作不与 inode-state 锁构成 ABBA。持 allocator 锁期间不得调用任何会重新取该锁的路径：
 不仅公开入口，取锁访问器（`groups()`/`free_blocks_count()`/`free_inodes_count()`/
-`needs_recovery()`/`has_orphan_present()`）同样在禁止之列——守卫内直接访问锁内字段；
+`needs_recovery()`/`has_orphan_present()`）同样在禁止之列——守卫内直接访问锁内字段；ENOSPC 重试阀
+（`discard_preallocs_for_space()`）同样在此禁止之列，它自带 allocator 锁，因此只能留在扫描循环的
+锁段之外；
 inode 定位等几何
 计算读冻结的 `group_geometry` 表（无锁），持锁的分配路径使用 `*_in_group` 无锁
 变体（该锁不可重入，ksync 对同任务重入直接 panic）。delalloc 锁是独立的
@@ -503,6 +512,39 @@ extent、external xattr 和 inode bitmap 工作提前计入 rename/unlink/rmdir 
 单事务 recovery/测试 eviction 路径按当前 extent tree 的实际 metadata targets 估算，运行态
 kext4 KVFS 层则继续使用有界的三阶段 eviction。
 
+### 写回 speculative prealloc space
+
+```text
+写回窗口分配 surplus      -> Registered（inode 逻辑图 + group 孪生表，同一 allocator 临界区发布）
+后续写命中已登记区间      -> Consumed（整段/前缀/后缀/内部消费，剩余拆为新的 Registered 条目）
+shrink truncate          -> Clipped（EOF 之后部分回收，前缀保持 Registered）
+最后一次 writable close  -> Dropped（仅当无 delalloc reservation）
+写回结算 reservation 清零 -> Dropped（close 已推迟、只有只读句柄持有时兜住）
+eviction                 -> Dropped（无条件，含 nlink 非零的 cache eviction）
+```
+
+一条 space 是"某文件的某段逻辑区间由这段物理 run 兑现"的许诺，只存在于内存：位图、group
+descriptor 与 inode 都不记录它，块在被消费前不进 `i_disksize` 也不写盘，因此崩溃或卸载后
+零磁盘残留。它同时登记在两个视图里，两侧只在同一个 allocator 临界区内一起变更——单侧
+失效条目既保护不了任何块，也没有可交易的许诺：inode 侧按逻辑起始块索引供消费查找，group 侧
+按 `(group, 起始物理块)` 索引供组扫描排除与 ENOSPC discard，且每个孪生条目持有 owner 的强引用。
+
+守恒不变量：`preallocated_blocks` 恒等于 group 侧各孪生段长度之和；每次变更后由
+`debug_assert_prealloc_conservation!` 校验。group 侧的强 owner 引用使 space 不可能早于
+inode 对象释放，所以 eviction 必须无条件 discard，否则孪生表会留悬空条目。
+
+free 口径不受 space 影响：`free_blocks_count()` 返回磁盘聚合值，未消费的 surplus 仍计为空闲
+（Linux statfs 同口径），因此"聚合非零但选不出块"是正常状态，由 ENOSPC 重试阀处理，而不是
+把 surplus 从 free 中扣除。
+
+与 Linux 的差别：`MB_GROUP_PA`（inode PA 未命中时的 locality-group 回退）在此没有对应物。
+kext4 没有 locality-group PA 生产者；写路径的长度归一化对小于 `EXT4_PREALLOC_MIN_WRITE_BLOCKS`
+（4 块）的请求不做放大，因此小写入不产生 surplus，也就不登记 space。
+
+**当前接线状态**：两侧索引、组扫描排除、ENOSPC 重试阀、shrink clip 以及 close/eviction 的
+生命周期 discard 已接入生产路径；space 的**产出（birth）与消费（consume）入口尚无生产调用者**，
+由写回 wiring 提交接入，在此之前生产路径不会登记任何 space，上述回收侧代码只由单元测试驱动。
+
 ## 算法流程
 
 Namei 修改先验证 parent/name，查找目标 dirent，检查 inode kind 和磁盘格式约束，然后在
@@ -642,7 +684,10 @@ corruption 或把未完成的有效 cleanup 伪装成成功。
 
 Truncate 和 unwritten preallocation discard 的 journal credits 按实际 extent 结构计算：inode
 root、重建后的 extent-tree blocks、需要 revoke 的旧 tree blocks，以及释放范围覆盖的不同 block
-group 中各一个 bitmap/descriptor target。数据块数量本身不会一对一增加 journal metadata block，
+group 中各一个 bitmap/descriptor target。此处的 "unwritten preallocation" 指磁盘 extent tree 中
+越过 `i_disksize` 的未写 extent（`discard_regular_inode_preallocations()`，对应 Linux
+`ext3_truncate_failed_write()` 一类清理），与上一节"写回 speculative prealloc space"所述的
+in-memory space 无关：后者不写盘、不需要 credits。数据块数量本身不会一对一增加 journal metadata block，
 因此不能用 `i_blocks` 或被释放 data block 数直接放大 reservation；否则大文件只回收一个很小的
 preallocation tail 也会被误判为超过空 journal 容量。唯一例外是目录与 block-mapped symlink
 的数据块：它们本身是 journaled metadata buffer，释放路径对每个被释放块各产生一个 revoke，
@@ -746,6 +791,20 @@ mapped extent 输出物理块范围，unwritten 添加 `UNWRITTEN`，delayed hol
 pending extent，只有确认查询范围内没有后续映射时才添加 `LAST`；输出容量满时立即停止且
 不误标 `LAST`。
 
+块分配入口分两层：`balloc` 的单组分配（`allocate_block_run_in_group()`）与 `mballoc` 的多组扫描
+（`allocate_blocks_for_write()`）。只有多组扫描接 ENOSPC 重试阀：组扫描可能因为 prealloc space
+占位而选不出块——位图扫描把这些位当作受保护位排除，而 free 聚合仍把它们计为空闲——此时先
+discard 若干 group 的 space 再重扫；单组入口不重试，因为 discard 按组号升序、无法保证触达请求的
+组，全局丢弃只会损失其他文件的局部性。重试上界由 `PREALLOC_DISCARD_SEARCH_LIMIT`（3 次搜索）固定：
+discard 只可能出现在第一次之后的每次搜索之前，且 discard 返回 0（无 space 可丢）时立即结束，
+因为重扫结果必然相同。discard 以整组为粒度、按组号升序累计到 `needed` 为止，因此可能超出请求量；
+`needed == 0` 表示清扫所有持有 space 的组。与 Linux 的 `freed > 0 || discard_pa_seq 前进` 双重门
+不同，这里只保留 `freed > 0`：单把 allocator 互斥锁已经串行化了选取与 discard，不存在其他 CPU
+在调用者背后释放 space 的情形。重试只在出现"健康组报告无空间"时发生：几何或描述符预检跳过的组
+不置位，因为丢弃改变不了组容量；扫描中遇到的 `InvalidBlockBitmap` 会被记住并优先于 `NoSpace`
+返回，但不会禁止健康组在回收后重试。阀自带 allocator 锁，因此必须在扫描的锁段
+之外调用，否则会重入死锁。
+
 ## 并发模型
 
 运行态仍需联合修改 superblock/group metadata 的 mutation 当前通过 `Ext4Mount` 内的挂载级 `RwLock`
@@ -788,6 +847,16 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
   旁路。当前 transaction restart 仍需同步 `flush` 建立 ordered-data durability 边界；只有通用
   block 层提供 request completion/FUA 或等价 dependency 后，才能把多个 transaction 的数据与
   commit 安全流水化，不能在 filesystem 层直接删除该 barrier。
+- speculative prealloc space 只做内存记账：不在位图、也不在 in-core free-extent cache 中预先
+  打标（Linux 会给 buddy 打标并要求与 PA 生命周期同步），两侧索引是唯一记录。代价是 space 对
+  free 聚合不可见，"聚合非零但选不出块"因此成为正常状态，由 ENOSPC 重试阀处理而非改记账口径。
+- 不实现 `MB_GROUP_PA`：kext4 没有 locality-group PA 生产者，且小于 `EXT4_PREALLOC_MIN_WRITE_BLOCKS`
+  的请求不被归一化放大、不产生 surplus，小写入因此不登记 space，不需要 inode PA 未命中时的
+  组级回退。
+- shrink truncate 按新 EOF 裁剪 space，保留其下的前缀（Linux 在这里丢弃整个文件的
+  preallocations）：kext4 的 space 带精确逻辑区间且有需要同步的 group 孪生条目，前缀仍然有效可用。
+- ENOSPC discard 以整组为粒度，不部分释放一个组的 space：保持"要么整段许诺还在、要么整段消失"
+  的简单不变量，避免为一个请求打散多个组的连续区间。
 - errseq、clean unmount/freeze 和完整 fault matrix 依赖最终的后台执行图，集中放在 N3；它们
   不阻塞 N2 主路径，但仍是替换旧后端前的强制门槛。
 
@@ -812,6 +881,16 @@ final eviction。KVFS 在 hook 前完成 `Live -> Freeing`，所以 cleanup 期�
 eviction token 或另一种 inode handle。完成后 KVFS 精确删除旧 cache entry 并唤醒同号 `iget`。
 nlink 非零的 cache eviction 不释放磁盘 inode；后续 `iget` 可从仍分配的磁盘 inode构造新的
 private component。
+
+speculative prealloc space 的回收挂在 file/inode 生命周期与写回结算上。最后一次 writable close 只在
+没有 delalloc reservation 时丢弃该文件的全部 space；有 reservation 时保留，由写回结算或 eviction
+兜底（对应 Linux `ext4_release_file()` 的 `i_reserved_data_blocks` 门）。写回结算在 reservation
+清零后补一次回收，覆盖"close 已返回、只剩只读句柄、eviction 不会发生"的场景。eviction 在检查 nlink
+之前丢弃全部 space，包括 nlink 非零的 cache eviction：group 侧孪生条目持有 owner 的强引用，漏丢
+即让条目活过其 owner 对象。无 space 的 inode 由 per-inode map 的叶子锁判空，在取 allocator 互斥锁
+之前早退，因此写回结算不会为一次空回收触碰全局 allocator 锁。各回收点都只更新内存索引并把块退回
+可分配池，不产生磁盘写入、不需要 journal credits；块在被消费前从未在位图中打标，因此不存在需要
+回退的磁盘状态。
 
 Recovery 不创建 resident inode 表。它在 mount/VFS identity 尚未发布时通过 orphan-aware decode
 取得临时 private state，复用正常 truncate 或 zero-link eviction。若 cleanup 失败，恢复证据

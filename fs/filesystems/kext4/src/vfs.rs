@@ -500,9 +500,19 @@ impl SuperBlockOperations for Ext4SuperOperations {
         let private = inode.private::<Ext4Inode>()?;
         let super_block = inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
-        ext4.read()
-            .release_all_delalloc(private)
-            .map_err(into_vfs_err)?;
+        let state = ext4.read();
+        // Drop the spaces on every eviction, link count included: unlink comes
+        // through here too, and only this call releases the group twin's strong
+        // owner reference. Must run before release_all_delalloc: the latter can
+        // fail, and a space must never outlive its owner. Linux:
+        // `ext4_discard_preallocations` at its eviction sites.
+        //
+        // Unconditional on purpose: this is the last guarantee that a twin
+        // cannot outlive its owner, and a "no inode-side entry" short-circuit
+        // would trust an invariant that drift only logs in release builds.
+        state.release_preallocs(private);
+        state.release_all_delalloc(private).map_err(into_vfs_err)?;
+        drop(state);
         if inode.link_count() != 0 {
             return Ok(());
         }
@@ -962,6 +972,9 @@ impl InodeOperations for Ext4Inode {
             state
                 .truncate_delalloc_range(self, LogicalBlock::new(first_unneeded))
                 .map_err(into_vfs_err)?;
+            // A space at or past the new EOF can never be written through
+            // again, so clip there; the prefix below it stays usable.
+            state.clip_preallocs_from_logical(self, first_unneeded);
         }
         if is_disk_shrink {
             state
@@ -1594,7 +1607,14 @@ impl FileOperations for Ext4Inode {
         }
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
-        ext4.write()
+        let mut state = ext4.write();
+        // Spaces survive the close while delalloc reservations still expect to
+        // allocate through them; eviction reclaims whatever remains. Linux:
+        // `ext4_release_file` gates the discard on `i_reserved_data_blocks`.
+        if !self.has_delalloc_reservations() {
+            state.release_preallocs(self);
+        }
+        state
             .discard_regular_inode_preallocations(self)
             .inspect_err(|error| {
                 error!(
@@ -1656,6 +1676,9 @@ impl Ext4DirSink for KvfsDirSink<'_, '_> {
         Ok(accepted)
     }
 }
+
+#[cfg(unittest)]
+unittest::path_mod_test!(hook_tests, "../ut-tests/vfs/hook_tests.rs");
 
 #[cfg(unittest)]
 unittest::path_mod_test!(read_tests, "../ut-tests/vfs/read_tests.rs");

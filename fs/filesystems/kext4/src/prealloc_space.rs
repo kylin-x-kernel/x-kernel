@@ -35,9 +35,9 @@
 //! stale one-sided entry would protect nothing and trade on a dead promise.
 //!
 //! Only per-inode spaces exist: Linux's locality-group PAs (`MB_GROUP_PA`,
-//! the fallback when inode PAs miss) have no counterpart here - the
-//! directory/locality producer is out of this layer's scope and remains a
-//! recorded gap for the wiring commit to confirm.
+//! the fallback when inode PAs miss) have no counterpart here. kext4 has no
+//! locality-group producer, and the writeback normalizer never inflates a
+//! request below four blocks, so small writes register no space at all.
 //!
 //! # Identity and lifecycle
 //!
@@ -50,27 +50,19 @@
 //! writable close and at eviction ([`Ext4SbInfo::release_preallocs`], the
 //! `ext4_discard_preallocations` sites).
 //!
-//! The free aggregate never sees spaces (Linux parity: statfs shows an
-//! unconsumed surplus as free; [`AllocatorState::raw_free_blocks_count`]).
+//! The free aggregate never sees spaces: [`Ext4SbInfo::free_blocks_count`] is
+//! the raw on-disk count, so an unconsumed surplus still reads as free
+//! (Linux statfs parity).
 //!
 //! # Locking
 //!
-//! Lock order: *ext4 rwlock -> allocator mutex -> prealloc map lock*. The
-//! map lock is a module-private leaf (never the inode-state lock, just as
-//! Linux's PA tree uses `i_prealloc_lock`, not `i_data_sem`), so prealloc
+//! Lock order: *ext4 rwlock -> allocator mutex -> prealloc map lock*. The map
+//! lock is a module-private leaf, never the inode-state lock, so prealloc
 //! operations cannot form an ABBA cycle with inode-state users; discard
-//! locks foreign owners' maps in the same order. `update` closures run
-//! under the allocator guard and must acquire no further lock. Holding the
-//! allocator mutex across consumption closes the TOCTOU window between
-//! selection and the bitmap mark (Linux gets the same exclusivity from the
-//! buddy marks).
-
-// The group-scan exclusion is wired: the allocator's locked core snapshots a
-// group's ranges and rejects those bits in the bitmap scanner. Each dormant
-// entry below carries its own dead-code lint exception naming the wiring
-// commit that adds its caller; drop each exception as its caller lands.
-// Entries already exercised by unit tests carry `allow` rather than `expect`,
-// which is unreliable under `--cfg unittest`.
+//! locks foreign owners' maps in the same order. `update` closures run under
+//! the allocator guard and must acquire no further lock. The allocator mutex
+//! stays held across consumption, which closes the window between selecting a
+//! space and marking its bitmap bits.
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
@@ -84,6 +76,14 @@ use crate::{
     superblock::{AllocatorState, Ext4SbInfo, lock},
     sync::{Mutex, mutex_lock},
 };
+
+/// Allocation searches the `mballoc` write scan may run before giving up with
+/// `NoSpace`. A discard may precede each search after the first, so it needs a
+/// value of at least 2 to do anything at all. The single-group `balloc` entry
+/// does not retry: its group-unaware discard cannot guarantee reaching the
+/// requested group. Linux: `++retries < 3` in `ext4_mb_new_blocks`
+/// (fs/ext4/mballoc.c:6337).
+pub(crate) const PREALLOC_DISCARD_SEARCH_LIMIT: u32 = 3;
 
 /// Debug-only conservation check: the counter must equal the sum of the
 /// group-index lengths. Every mutation ends with it.
@@ -191,13 +191,15 @@ pub(crate) type GroupPreallocKey = (BlockGroupNumber, FilesystemBlock);
 ///
 /// # Locking
 ///
-/// Leaf lock, acquired only by this module's prealloc operations (the
-/// `Ext4Inode::prealloc_map()` accessor exists for them), always with the
-/// allocator mutex already held: *allocator mutex -> prealloc map lock*.
-/// The guard never escapes [`Self::update`], and the closure must acquire no
-/// other lock. With no outgoing lock edge the map lock cannot take part in a
-/// cycle - the module's lock order rests on this, not on crate-wide caller
-/// discipline.
+/// Leaf lock, acquired by this module's prealloc operations (the
+/// `Ext4Inode::prealloc_map()` accessor exists for them) with the allocator
+/// mutex already held: *allocator mutex -> prealloc map lock*. The only
+/// exception is [`Self::is_empty`], a read-only hint that takes the leaf lock
+/// alone and releases it before returning, so it never holds this lock while
+/// acquiring another and adds no wait edge. The guard never escapes
+/// [`Self::update`], and the closure must acquire no other lock. With no
+/// outgoing lock edge the map lock cannot take part in a cycle - the module's
+/// lock order rests on this, not on crate-wide caller discipline.
 pub(crate) struct InodePreallocMap {
     map: Mutex<BTreeMap<LogicalBlock, PreallocSpace>>,
 }
@@ -219,6 +221,16 @@ impl InodePreallocMap {
     ) -> R {
         let mut map = mutex_lock(&self.map);
         f(&mut map)
+    }
+
+    /// Reports whether the map holds no spaces, taking only the leaf lock.
+    ///
+    /// A hot-path hint: an entry may appear right after it returns `true`, so
+    /// callers may only skip releases that a later close/eviction owes anyway.
+    /// Taking the leaf lock alone is safe because it is released before any
+    /// other lock is acquired, so it cannot close a wait cycle.
+    pub(crate) fn is_empty(&self) -> bool {
+        mutex_lock(&self.map).is_empty()
     }
 }
 
@@ -348,17 +360,6 @@ pub(crate) fn bit_in_ranges(ranges: &[(u32, u32)], bit: u32) -> bool {
 }
 
 impl AllocatorState {
-    /// Mount-wide free blocks exactly as the on-disk aggregate reports them,
-    /// prealloc spaces included (Linux parity: statfs shows an unconsumed
-    /// surplus as free).
-    #[expect(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: read in-lock by the ENOSPC retry wiring"
-    )]
-    pub(crate) const fn raw_free_blocks_count(&self) -> u64 {
-        self.free_blocks_count
-    }
-
     /// Stores a new group-side twin.
     ///
     /// - `space`: the entry to file; its window must be overlap-free and
@@ -439,7 +440,7 @@ impl AllocatorState {
     ///
     /// - `range`: the block group to clip all spaces against.
     ///
-    /// Returns `[start_bit, end_bit)` pairs clipped to the group, ascending,
+    /// Returns: `[start_bit, end_bit)` pairs clipped to the group, ascending,
     /// touching pairs merged - the sorted-zones shape system-zone callers
     /// use. The index iterates in physical order, so one walk collects and
     /// merges without a sort. Empty when no space touches the group.
@@ -517,7 +518,7 @@ impl Ext4SbInfo {
     ///   0 disables registration.
     /// - `handle`: journal handle of the write run.
     ///
-    /// Returns the allocation plus how many trailing blocks were registered,
+    /// Returns: the allocation plus how many trailing blocks were registered,
     /// so the caller only spends its budget on what landed. Registration is
     /// best-effort like Linux's PA creation: blocked, too short or logically
     /// overlapping surplus yields 0 and the write proceeds without it.
@@ -571,7 +572,7 @@ impl Ext4SbInfo {
     /// - `allocation`: the just-published run.
     /// - `budget`: caller's surplus cap in blocks.
     ///
-    /// Returns the registered length (0 = none).
+    /// Returns: the registered length (0 = none).
     ///
     /// Locking: caller holds the allocator mutex.
     fn register_prealloc_surplus_locked(
@@ -655,7 +656,7 @@ impl Ext4SbInfo {
     /// - `phys_start`: first physical block of the backing run.
     /// - `phys_len`: window length in blocks.
     ///
-    /// Returns the accepted length; 0 when rejected, with neither side
+    /// Returns: the accepted length; 0 when rejected, with neither side
     /// changed.
     ///
     /// Locking: caller holds the allocator mutex; the map leaf lock is taken
@@ -790,7 +791,7 @@ impl Ext4SbInfo {
     /// - `logical_len`: how many file blocks the run needs.
     /// - `handle`: journal handle of the consuming run.
     ///
-    /// Returns the marked physical range, or `None` when the request is
+    /// Returns: the marked physical range, or `None` when the request is
     /// empty, no space contains its first block, or the run could not be
     /// secured - on `None`/error nothing is consumed (the span is restored
     /// on both sides): a lost hint, never a lost block. At most one space is
@@ -1021,23 +1022,21 @@ impl Ext4SbInfo {
         debug_assert_prealloc_conservation!(alloc);
     }
 
-    /// Throws away every prealloc space of a file - at the last writable
-    /// close and again at eviction, so a space never outlives its owner
-    /// object. The blocks return to the free pool with no disk work (Linux's
-    /// discard must also hand the surplus back to the in-core buddy via
-    /// `ext4_mb_release_inode_pa`).
+    /// Drops every prealloc space of `inode`, handing its blocks back to the
+    /// free pool. In-memory only - these blocks were never marked. Called at the
+    /// last writable close and at eviction, so a space never outlives its owner.
     ///
-    /// - `inode`: the file whose spaces all die.
+    /// - `inode`: the file whose spaces die; may hold none.
     ///
-    /// Returns how many blocks were given back, for caller-side accounting.
+    /// Returns: blocks handed back to the pool, 0 when the file held none. The
+    /// allocator's surplus counter is updated here, so callers may ignore it.
     ///
-    /// Locking: takes the allocator mutex internally; the map leaf lock is
-    /// taken and released inside the same section.
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: the wiring commit hooks close/evict; expect \
-                  is unreliable under --cfg unittest (tests exercise this)"
-    )]
+    /// Locking: takes the allocator mutex, then `inode`'s map leaf lock; caller
+    /// must hold neither. Every production caller holds the mount-level ext4
+    /// lock (eviction under the read lock, close and writeback under the write
+    /// lock), so both acquisitions are uncontended; an inode holding no spaces
+    /// costs one mutex round-trip plus an empty-map walk, and the O(spaces)
+    /// conservation check is skipped when nothing was released. May sleep.
     pub(crate) fn release_preallocs(&self, inode: &Ext4Inode) -> u64 {
         let mut alloc = lock(&self.allocator);
         let released = inode.prealloc_map().update(|preallocs| {
@@ -1053,28 +1052,29 @@ impl Ext4SbInfo {
             released
         });
         alloc.preallocated_blocks -= released;
-        debug_assert_prealloc_conservation!(alloc);
+        if released > 0 {
+            debug_assert_prealloc_conservation!(alloc);
+        }
         released
     }
 
-    /// Cuts the file's spaces at `from_logical` after a shrink truncate:
-    /// blocks at or past the new EOF can never be written through them
-    /// again. Spaces fully below stay usable (finer than Linux, which drops
-    /// the whole file's preallocations). Dropped blocks return to the pool
-    /// as in [`release_preallocs`].
+    /// Cuts a file's prealloc spaces at the new EOF after a shrink truncate:
+    /// a space starting at or past `from_logical` dies, the one space
+    /// straddling it is shortened to the part below the EOF, and spaces wholly
+    /// below stay usable. Freed blocks return to the pool as in
+    /// [`Self::release_preallocs`] - no disk work. Linux discards the file's
+    /// whole set here; a kext4 space carries an exact logical range with a group
+    /// twin, so the prefix below the EOF stays usable.
     ///
-    /// - `inode`: the truncated file.
-    /// - `from_logical`: the new EOF in file blocks; from here on, spaces die.
+    /// - `inode`: the truncated file; may hold no spaces.
+    /// - `from_logical`: first block no longer in the file, in blocks; 0 drops
+    ///   every space.
     ///
-    /// Returns how many blocks were given back.
+    /// Returns: blocks handed back to the pool - dropped spaces plus a
+    /// straddler's trimmed tail - 0 when nothing lay at or past the EOF.
     ///
-    /// Locking: takes the allocator mutex internally; the map leaf lock is
-    /// taken and released inside the same section.
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: the wiring commit hooks the shrink path; \
-                  expect is unreliable under --cfg unittest (tests exercise this)"
-    )]
+    /// Locking: takes the allocator mutex, then `inode`'s map leaf lock; caller
+    /// must hold neither. May sleep.
     pub(crate) fn clip_preallocs_from_logical(&self, inode: &Ext4Inode, from_logical: u64) -> u64 {
         let mut alloc = lock(&self.allocator);
         let released = inode.prealloc_map().update(|preallocs| {
@@ -1122,37 +1122,34 @@ impl Ext4SbInfo {
             released
         });
         alloc.preallocated_blocks -= released;
-        debug_assert_prealloc_conservation!(alloc);
+        if released > 0 {
+            debug_assert_prealloc_conservation!(alloc);
+        }
         released
     }
 
-    /// Returns spaces to the allocatable pool when a search came up empty,
-    /// mirroring `ext4_mb_discard_preallocations`: whole groups are dropped
-    /// until at least `needed` blocks are back, so the caller can retry.
-    /// Intended as the ENOSPC retry valve of the allocation scan path once
-    /// the writeback wiring lands (no caller yet). The retry policy is
-    /// x-kernel's own; Linux additionally retries when its global
-    /// discard-seq advanced (concurrent reclamation), which has no
-    /// counterpart here. Unlike Linux (which rounds a zero request up to one
-    /// group's clusters), `needed == 0` sweeps every group holding spaces.
-    /// Spaces are advisory
-    /// (losing one only costs locality), and nothing is freed on disk since
-    /// the blocks were never marked. Each doomed twin carries its owner, so
-    /// the inode-side entry dies in the same lock section; a one-sided
-    /// discard would leave a stale logical entry trading on unprotected
-    /// blocks.
+    /// ENOSPC retry valve: hands prealloc spaces back to the pool after an
+    /// allocation search came up empty, so the caller can search again. Dooms
+    /// whole groups in ascending order until the plan covers `needed`, so the
+    /// result can overshoot. Used by the `mballoc` write scan, bounded by
+    /// [`PREALLOC_DISCARD_SEARCH_LIMIT`]; the single-group `balloc` entry does
+    /// not call it, since a group-unaware discard cannot guarantee reaching
+    /// its target group. Nothing is freed on disk - these blocks
+    /// were never marked - and a lost space costs only locality. Linux:
+    /// `ext4_mb_discard_preallocations`.
     ///
-    /// - `needed`: blocks to return; 0 = full sweep.
+    /// - `needed`: blocks to free, in blocks; 0 sweeps every group holding
+    ///   spaces.
     ///
-    /// Returns the number of blocks returned.
+    /// Returns: blocks handed back to the pool. 0 means nothing was discarded,
+    /// so a retry cannot do better - that is the caller's stop condition.
     ///
-    /// Locking: takes the allocator mutex internally; foreign owners' map
-    /// leaf locks are taken under it (leaf order, see [`InodePreallocMap`]).
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: the wiring commit hooks ENOSPC retry; expect \
-                  is unreliable under --cfg unittest (tests exercise this)"
-    )]
+    /// The retry gate is `freed > 0` only; Linux also retries when its
+    /// `discard_pa_seq` advances, which the single allocator mutex makes
+    /// unnecessary here.
+    ///
+    /// Locking: takes the allocator mutex, then foreign owners' map leaf locks;
+    /// caller must not hold the mutex. May sleep.
     pub(crate) fn discard_preallocs_for_space(&self, needed: u64) -> u64 {
         let mut alloc = lock(&self.allocator);
         // Plan on whole groups, ascending: sum each group's preallocated
