@@ -19,7 +19,7 @@ mod registry;
 pub(crate) use ethernet::*;
 pub(crate) use id::{NetDeviceId, RxDeviceSelection};
 pub(crate) use loopback::*;
-pub(crate) use registry::DeviceRegistry;
+pub(crate) use registry::{DeviceRegistry, Ipv4AddrChange};
 
 use crate::{
     buf::PacketBuf,

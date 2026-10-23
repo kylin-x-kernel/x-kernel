@@ -12,6 +12,7 @@ use kerrno::LinuxError;
 use crate::{
     consts::STANDARD_MTU,
     device::{LinkConfigUpdate, LinkKind, LinkSendSnapshot, LinkSnapshot, NetDevice, NetDeviceId},
+    ip::{Ipv4Address, Ipv4Cidr},
     network::interface_address::{Ipv4AddrEntry, Ipv4AddressSet},
 };
 
@@ -21,28 +22,45 @@ struct DeviceEntry {
     ipv4: Ipv4AddressSet,
 }
 
-/// Owns devices and their IPv4 configuration, validating link configuration.
+/// Outcome to reconcile with routes and pending TX under the enclosing Router lock.
+#[must_use = "reconcile the address change before releasing the Router lock"]
+pub(crate) enum Ipv4AddrChange {
+    Unchanged,
+    /// The old source, if any, may still be owned by another address entry.
+    Updated {
+        old_source: Option<Ipv4Address>,
+    },
+}
+
+/// Owns interfaces, their address configuration, and device address projections.
 ///
 /// Maintains `slots[&entries[index].id] == index` and refreshes the aggregate
 /// MTU on registration, removal, and successful MTU updates. Callers serialize
-/// registry access with the enclosing Router mutex. Removing a device also drops
-/// its address set; Router reconciles routes and pending packets in that critical section.
+/// interface access with the enclosing Router mutex. Removing a device also drops
+/// its address set; callers reconcile routes and pending packets in that critical section.
 pub(crate) struct DeviceRegistry {
     entries: Vec<DeviceEntry>,
     slots: HashMap<NetDeviceId, usize>,
     next_ifindex: Option<i32>,
     loopback_registered: bool,
     effective_mtu: usize,
+    max_ipv4_addresses: usize,
 }
 
 impl DeviceRegistry {
-    pub(crate) fn new() -> Self {
+    /// Creates a registry with a total IPv4 address limit across all devices.
+    ///
+    /// The caller must choose a limit no greater than the address capacity of
+    /// every protocol-stack view populated from this registry. The shared
+    /// smoltcp Interface uses `smoltcp::config::IFACE_MAX_ADDR_COUNT`.
+    pub(crate) fn new(max_ipv4_addresses: usize) -> Self {
         Self {
             entries: Vec::new(),
             slots: HashMap::new(),
             next_ifindex: Some(2),
             loopback_registered: false,
             effective_mtu: STANDARD_MTU,
+            max_ipv4_addresses,
         }
     }
 
@@ -171,10 +189,13 @@ impl DeviceRegistry {
         });
         self.slots.insert(id, slot);
         self.recompute_effective_mtu();
+        self.sync_ipv4_addrs();
         Ok(id)
     }
 
-    pub(crate) fn remove_slot(&mut self, slot: usize) -> Box<dyn NetDevice> {
+    /// Removes an interface and returns its former sources for route and TX cleanup.
+    #[must_use = "removed sources require reconciliation with dependent network state"]
+    pub(crate) fn remove_slot(&mut self, slot: usize) -> Vec<Ipv4Address> {
         let removed_entry = self.entries.remove(slot);
         self.slots.remove(&removed_entry.id);
         if removed_entry.id == NetDeviceId::LOOPBACK {
@@ -184,7 +205,13 @@ impl DeviceRegistry {
             self.slots.insert(entry.id, new_slot);
         }
         self.recompute_effective_mtu();
-        removed_entry.device
+        self.sync_ipv4_addrs();
+        removed_entry
+            .ipv4
+            .as_slice()
+            .iter()
+            .map(|entry| entry.addr.address())
+            .collect()
     }
 
     pub(crate) fn slot(&self, id: NetDeviceId) -> Option<usize> {
@@ -215,8 +242,67 @@ impl DeviceRegistry {
         Some(entry.device.as_mut())
     }
 
+    pub(crate) fn add_ipv4_addr(
+        &mut self,
+        dev: NetDeviceId,
+        entry: Ipv4AddrEntry,
+    ) -> Result<Ipv4AddrChange, LinuxError> {
+        let addrs = self.ipv4(dev).ok_or(LinuxError::ENODEV)?;
+        if !entry.addr.address().is_unicast() {
+            return Err(LinuxError::EINVAL);
+        }
+        if addrs.contains_entry(entry.addr) {
+            return Ok(Ipv4AddrChange::Unchanged);
+        }
+        if self.iter_ipv4_addrs().count() >= self.max_ipv4_addresses {
+            return Err(LinuxError::ENOBUFS);
+        }
+        self.ipv4_mut(dev)
+            .ok_or(LinuxError::ENODEV)?
+            .insert(entry)?;
+        Ok(self.sync_ipv4_change(None))
+    }
+
+    /// Replaces the specified CIDR, preserving order and rejecting duplicate identities.
+    pub(crate) fn replace_ipv4_addr(
+        &mut self,
+        dev: NetDeviceId,
+        addr: Ipv4Cidr,
+        entry: Ipv4AddrEntry,
+    ) -> Result<Ipv4AddrChange, LinuxError> {
+        let old = self
+            .ipv4_mut(dev)
+            .ok_or(LinuxError::ENODEV)?
+            .replace(addr, entry)?;
+        if old == entry {
+            return Ok(Ipv4AddrChange::Unchanged);
+        }
+        if old.addr != entry.addr {
+            self.sync_ipv4_addrs();
+        }
+        Ok(Ipv4AddrChange::Updated {
+            old_source: (old.addr.address() != entry.addr.address()).then_some(old.addr.address()),
+        })
+    }
+
+    pub(crate) fn remove_ipv4_addr(&mut self, dev: NetDeviceId, addr: Ipv4Cidr) -> Ipv4AddrChange {
+        if self
+            .ipv4_mut(dev)
+            .and_then(|addrs| addrs.remove(addr))
+            .is_none()
+        {
+            return Ipv4AddrChange::Unchanged;
+        }
+        self.sync_ipv4_change(Some(addr.address()))
+    }
+
+    fn sync_ipv4_change(&mut self, old_source: Option<Ipv4Address>) -> Ipv4AddrChange {
+        self.sync_ipv4_addrs();
+        Ipv4AddrChange::Updated { old_source }
+    }
+
     /// Refreshes the device projections after an address or device mutation.
-    pub(crate) fn sync_ipv4_addrs(&mut self) {
+    fn sync_ipv4_addrs(&mut self) {
         let local_addrs: Vec<_> = self
             .iter_ipv4_addrs()
             .map(|(_, entry)| entry.addr)
@@ -232,7 +318,7 @@ impl DeviceRegistry {
         Some(&self.entries[self.slot(id)?].ipv4)
     }
 
-    pub(crate) fn ipv4_mut(&mut self, id: NetDeviceId) -> Option<&mut Ipv4AddressSet> {
+    fn ipv4_mut(&mut self, id: NetDeviceId) -> Option<&mut Ipv4AddressSet> {
         let slot = self.slot(id)?;
         Some(&mut self.entries[slot].ipv4)
     }
@@ -268,3 +354,5 @@ impl DeviceRegistry {
             .map(|entry| (entry.id, entry.device.as_mut()))
     }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/device/registry/tests.rs");

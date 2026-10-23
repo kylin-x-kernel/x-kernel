@@ -41,8 +41,8 @@ pub(crate) struct Ipv4AddrSnapshot {
 /// Mutations identify entries by CIDR and preserve uniqueness and device-local order.
 /// Callers select which address to update and apply operation-specific collision
 /// policy. Rejected mutations leave the set intact.
-/// Router enforces the shared stack's capacity and synchronizes derived state
-/// under its mutex. Route precedence belongs to the route table.
+/// DeviceRegistry enforces the caller-supplied capacity and synchronizes device
+/// projections. The enclosing Router lock protects route reconciliation.
 #[derive(Default)]
 pub(crate) struct Ipv4AddressSet {
     addresses: Vec<Ipv4AddrEntry>,

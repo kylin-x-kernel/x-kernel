@@ -731,7 +731,7 @@ impl Service {
                         addr.address().into(),
                         addr.prefix_len(),
                     )))
-                    .expect("Router validates the smoltcp address capacity");
+                    .expect("DeviceRegistry enforces the shared smoltcp address capacity");
             }
         });
     }
