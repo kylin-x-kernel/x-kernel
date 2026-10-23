@@ -82,7 +82,7 @@ fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) {
     let drain_begin_ns = khal::time::monotonic_time_nanos();
     // SAFETY: all producers joined, no repost/downstream work, no held locks
     // or read scopes, watched sleepable task. Observations and code remain live.
-    let drained = unsafe { crate::drain_callbacks() };
+    let drained = unsafe { krcu::drain_callbacks() };
     let completed_ns = khal::time::monotonic_time_nanos();
     assert!(drained.is_ok());
     assert!(begin_ns <= drain_begin_ns && drain_begin_ns <= completed_ns);

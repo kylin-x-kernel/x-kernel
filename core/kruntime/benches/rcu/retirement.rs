@@ -29,7 +29,7 @@ impl RetirementProbe {
 
 fn check_negative_control() {
     let probe = RetirementProbe::new();
-    crate::with_read(|_| {
+    krcu::with_read(|_| {
         let slot = probe.published.load(Ordering::Acquire);
         assert!(!probe.read_is_retired(slot));
         // Deliberately simulate premature retirement, not a broken production
@@ -63,7 +63,7 @@ pub(super) fn run() {
         let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
             move || {
                 while !should_stop.load(Ordering::Relaxed) {
-                    crate::with_read(|_| {
+                    krcu::with_read(|_| {
                         let slot = probe.published.load(Ordering::Acquire);
                         let mut invalid = probe.read_is_retired(slot);
                         for _ in 0..64 {
@@ -97,7 +97,7 @@ pub(super) fn run() {
         // SAFETY: watched sleepable boot task, no held locks. All selections
         // use the real host read scope; swap withdraws the only selection route.
         // Both slots remain allocated through all waits and reader joins.
-        if unsafe { crate::synchronize_rcu() }.is_err() {
+        if unsafe { krcu::synchronize_rcu() }.is_err() {
             errors.fetch_add(1, Ordering::Relaxed);
             break;
         }

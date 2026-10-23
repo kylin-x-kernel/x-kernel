@@ -8,8 +8,10 @@ use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
-use krcu_core::{CallbackNode, CallbackState, ReaderNode};
+use krcu_core::{CallbackNode, CallbackState, CpuWatching, RcuContextIf, ReaderNode};
 use unittest::{assert, assert_eq, def_test};
+
+use super::rcu_support;
 
 // Separate CPUs let the updater observe without forcing the reader to schedule.
 const READER_CPU: usize = 1;
@@ -41,6 +43,7 @@ unsafe fn reclaim_value(node: *mut CallbackNode) {
 
 #[derive(Default)]
 struct Handshake {
+    watching: kspin::SpinNoPreempt<Option<&'static CpuWatching>>,
     has_entered: AtomicBool,
     can_exit: AtomicBool,
     has_exited: AtomicBool,
@@ -56,7 +59,9 @@ struct Observation {
     has_ready: bool,
 }
 
-fn verify_implicit_region<G>(enter_fn: impl FnOnce() -> G + Send + 'static) -> unittest::TestResult {
+fn verify_implicit_region<G>(
+    enter_fn: impl FnOnce() -> G + Send + 'static,
+) -> unittest::TestResult {
     if kcpu_id_map::nr_cpus() < 2 {
         return unittest::TestResult::Ignored;
     }
@@ -73,18 +78,20 @@ fn verify_implicit_region<G>(enter_fn: impl FnOnce() -> G + Send + 'static) -> u
     let updater_result = result.clone();
     let updater = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
-            let area = kcpu_slot::area(LogicalCpuId::new(READER_CPU)).unwrap();
-            let watching = super::cpu_watching(&area);
             let nodes = [const { ReaderNode::new() }; kbuild_config::NR_CPUS];
             // SAFETY: sole controller of these isolated nodes. Only READER_CPU reads
             // this fixture's publication; no production reader uses the nodes.
-            let state = unsafe { CallbackState::new(&nodes, core::array::from_fn(|cpu| cpu == READER_CPU)) }
-                .unwrap();
+            let state = unsafe {
+                CallbackState::new(&nodes, core::array::from_fn(|cpu| cpu == READER_CPU))
+            }
+            .unwrap();
             let mut driver = state.claim_driver().unwrap();
             while !updater_handshake.has_entered.load(Ordering::Acquire) {
                 ktask::yield_now();
             }
-            let is_updater_on_expected_cpu = khal::percpu::this_cpu_id() == LogicalCpuId::new(UPDATER_CPU);
+            let watching = updater_handshake.watching.lock().unwrap();
+            let is_updater_on_expected_cpu =
+                khal::percpu::this_cpu_id() == LogicalCpuId::new(UPDATER_CPU);
             let retired = updater_published.swap(core::ptr::null_mut(), Ordering::AcqRel);
             // SAFETY: the original allocation is retained, and only the value
             // field is borrowed. Projecting the disjoint node preserves provenance.
@@ -127,37 +134,53 @@ fn verify_implicit_region<G>(enter_fn: impl FnOnce() -> G + Send + 'static) -> u
                 drop(unsafe { Box::from_raw(retired) });
             }
             updater_handshake.can_resume.store(true, Ordering::Release);
-            *updater_result.lock() = Some((is_updater_on_expected_cpu, accepted, started, observed, invoked));
+            *updater_result.lock() = Some((
+                is_updater_on_expected_cpu,
+                accepted,
+                started,
+                observed,
+                invoked,
+            ));
         },
         "rcu-implicit-updater".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
-    updater.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(UPDATER_CPU)));
+    updater.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(
+        UPDATER_CPU,
+    )));
 
     let reader_handshake = handshake.clone();
     let reader_published = published.clone();
     let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
+            // Single-CPU affinity keeps this permanent observation tied to the
+            // reader CPU even after the tested guard ends. Publish before entry
+            // so no fixture lock changes the implicit region being exercised.
+            *reader_handshake.watching.lock() = Some(RcuContextIf::current_cpu_watching());
             let guard = enter_fn();
             let pointer = reader_published.load(Ordering::Acquire);
             // SAFETY: publication remains installed until has_entered; after
             // withdrawal the updater never invokes reclamation before has_exited.
             let old = unsafe { &(*pointer).number };
             let task = ktask::current();
-            let has_no_explicit_reader = !crate::test_support::reader(&task).is_reading() && !crate::test_support::reader(&task).is_enrolled();
+            let has_no_explicit_reader = !rcu_support::reader(&task).is_reading()
+                && !rcu_support::reader(&task).is_enrolled();
             reader_handshake.has_entered.store(true, Ordering::Release);
             // An IRQ-off reader cannot depend on a timer callback to escape a
             // broken fixture. The hardware clock still advances with IRQs masked.
             let deadline = khal::time::monotonic_time_nanos().saturating_add(5_000_000_000);
             while !reader_handshake.can_exit.load(Ordering::Acquire) {
                 if khal::time::monotonic_time_nanos() >= deadline {
-                    reader_handshake.has_timed_out.store(true, Ordering::Release);
+                    reader_handshake
+                        .has_timed_out
+                        .store(true, Ordering::Release);
                     break;
                 }
                 core::hint::spin_loop();
             }
             reader_handshake.has_valid_read.store(
-                *old == 17 && has_no_explicit_reader
+                *old == 17
+                    && has_no_explicit_reader
                     && khal::percpu::this_cpu_id() == LogicalCpuId::new(READER_CPU),
                 Ordering::Release,
             );
@@ -168,25 +191,28 @@ fn verify_implicit_region<G>(enter_fn: impl FnOnce() -> G + Send + 'static) -> u
             // SAFETY: retained scope-free current, IRQ/preemption excluded and
             // single-CPU affinity. This controlled boundary contains only
             // independent handshake atomics, no scheduling or RCU accesses.
-            unsafe { super::enter_user_quiescent() };
+            unsafe { krcu::enter_user_quiescent() };
             while !reader_handshake.can_resume.load(Ordering::Acquire) {
                 core::hint::spin_loop();
             }
             // SAFETY: matching same-CPU exit before any task work or guard release.
-            unsafe { super::exit_user_quiescent() };
+            unsafe { krcu::exit_user_quiescent() };
             drop(boundary);
         },
         "rcu-implicit-reader".into(),
         kbuild_config::TASK_STACK_SIZE,
     ));
-    reader.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(READER_CPU)));
+    reader.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(
+        READER_CPU,
+    )));
     // Publish the releaser first: the reader must never monopolize a CPU while
     // waiting for a task the test has not activated yet. The releaser can yield.
     ktask::activate_task(&updater);
     ktask::activate_task(&reader);
     let reader_status = reader.join();
     let updater_status = updater.join();
-    let (is_updater_on_expected_cpu, accepted, started, observed, invoked) = result.lock().take().unwrap();
+    let (is_updater_on_expected_cpu, accepted, started, observed, invoked) =
+        result.lock().take().unwrap();
     assert_eq!((reader_status, updater_status), (0, 0));
     assert!(!handshake.has_timed_out.load(Ordering::Acquire));
     assert!(handshake.has_valid_read.load(Ordering::Acquire));

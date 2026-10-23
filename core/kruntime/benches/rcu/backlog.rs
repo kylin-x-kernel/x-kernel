@@ -12,8 +12,7 @@ use core::{
 };
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
-
-use crate::{CallbackNode, PreparedCallback};
+use krcu::{CallbackNode, PreparedCallback};
 
 const TIMEOUT_NS: u64 = 5_000_000_000;
 
@@ -78,7 +77,7 @@ fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) {
     let reader_gate = gate.clone();
     let reader = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
         move || {
-            crate::with_read(|_| {
+            krcu::with_read(|_| {
                 let start_ns = khal::time::monotonic_time_nanos();
                 // Acquire on the producer side orders every submission after
                 // entry to this old read scope, before any covering GP begins.
@@ -118,7 +117,7 @@ fn run_round(reader_cpu: LogicalCpuId, count: usize, round: usize) {
     gate.can_exit.store(true, Ordering::Release);
     // SAFETY: no producers remain, no reposts, no held locks/read scope in this
     // watched sleepable task; finite reader is released and all code stays live.
-    let drained = unsafe { crate::drain_callbacks() };
+    let drained = unsafe { krcu::drain_callbacks() };
     let drained_ns = khal::time::monotonic_time_nanos();
     assert!(drained.is_ok());
     assert_eq!(reader.join(), 0);

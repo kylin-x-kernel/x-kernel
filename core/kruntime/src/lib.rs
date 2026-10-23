@@ -29,6 +29,16 @@
 
 extern crate alloc;
 
+mod rcu;
+
+#[cfg(all(feature = "rcu-torture", not(unittest)))]
+#[path = "../benches/rcu/torture.rs"]
+mod rcu_torture;
+
+#[cfg(all(feature = "rcu-bench", not(unittest)))]
+#[path = "../benches/rcu/latency.rs"]
+mod rcu_bench;
+
 /// Runs an explicitly configured release validation workload before userspace.
 ///
 /// Call once in sleepable boot context after runtime initialization. With
@@ -42,12 +52,12 @@ extern crate alloc;
 pub fn run_boot_benchmarks() {
     #[cfg(all(feature = "rcu-bench", not(unittest)))]
     {
-        krcu::benchmarks::run();
+        rcu_bench::run();
         khal::power::power_off();
     }
     #[cfg(all(feature = "rcu-torture", not(unittest)))]
     {
-        krcu::torture::run(kbuild_config::RCU_TORTURE_SECONDS);
+        rcu_torture::run(kbuild_config::RCU_TORTURE_SECONDS);
         khal::power::power_off();
     }
     #[cfg(all(feature = "workqueue-bench", not(unittest)))]

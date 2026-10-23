@@ -24,6 +24,46 @@ DeferredArc, not Task's outer standard Arc or arbitrary diagnostic accesses.
 
 ## RCU Carrier Preparation
 
+The softirq provider delegates to kirq's fixed-vector registration. Conflict
+cannot replace the old action, and installation neither raises pending work nor
+calls the action inline. Dispatch must retain the ordinary softirq context and
+CPU pinning. Local raising requires no scheduler/RCU lock because daemon wakeup
+may enter the scheduler; the RCU action rechecks its own queues without such locks.
+
+After accepting the prepared GP entry, task startup must preserve it through
+normal task activation. It cannot substitute a different entry, execute inline,
+duplicate driver ownership or return a recoverable failure that loses the
+claimed driver. Existing task/stack allocation retains fatal OOM behavior.
+The runtime does not infer readiness from successful activation.
+
+Arming the borrowed progress timer requires initialized scheduler/timer services
+and an IRQ-compatible expiry function. The runtime neither invokes expiry
+inline on arm nor manufactures a quiescent observation. Cancellation and Drop
+drain delivery before freeing timer storage; callers must not hold callback-needed
+locks or cancel from that callback. The borrowed timer cannot outlive the body.
+
+Task parking preparation may reject a non-sleepable caller, but only before
+invoking the RCU body. Afterward the adapter must retain the prepared wait for
+the full synchronous operation, including early wake hints and migration. It
+does not interpret completion, handle retired ownership or consume signals.
+
+Drain serialization requires sleepable task context and excludes recursive
+drain calls. The adapter invokes its body exactly once under the permanent
+mutex and releases it only after that body returns. Callers must not hold locks
+needed by callbacks or GP progress. Neither callbacks nor the service acquire
+this mutex; their marker accesses are synchronized by krcu independently.
+
+The current-reader adapter uses initialized current storage only and retains its
+borrow until the RCU body returns. Its CurrentReader certificate does not grant
+permission to enter a read scope or unlink a reader. In NMI it relies on the
+interrupt entry's retained current, and performs no locking or scheduling.
+
+The static RCU notification adapter cannot allocate, wait or run callbacks.
+IPI delivery does not wake tasks inline; the no-IPI local softirq path may wake
+its daemon and is not usable while scheduler locks are held. RCU retains the
+choice of safe calling paths and its no-IPI periodic fallback. A delivered
+notification is never proof of reader exit, CPU quiescence or GP completion.
+
 The unsafe `krcu::init_service` call follows the all-CPU service rendezvous,
 which supplies its scheduler, timer and notification prerequisites. The boot
 task sleeps until the GP task has prepared its own wait and timer. Failure stops
@@ -50,8 +90,10 @@ after the kworkng workload. Production deployment must leave this feature off;
 test automation must impose a host timeout for stalled waits or joins.
 The independent default-off `rcu-torture` boot path has the same deployment and
 timeout constraints. Kconfig excludes simultaneous selection of these runners.
-Its ownership assertions and resource cleanup belong to krcu; runtime only
-invokes it after initialization and powers off on successful return.
+Runtime owns the workload's assertions, worker lifetimes and observation
+storage; `krcu` supplies the public reclamation guarantees being tested.
+Runtime runs the workload after initialization and powers off on successful
+return. A timeout must fail externally, never force reclamation of live records.
 The default-off `rcu-bench` path has the same constraints and is mutually
 exclusive with the stress runners in Kconfig. Measurement PASS confirms the
 runner completed its checks, not that a performance threshold was achieved.

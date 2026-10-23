@@ -13,15 +13,12 @@ use core::{
 use kerrno::{KError, KResult};
 use krcu_core::CallbackNode;
 use kspin::SpinNoIrq;
-use ksync::Mutex;
-use ktask::future::PreparedTaskWait;
 
 use super::SERVICE;
+use crate::host::{RcuTaskIf, TaskWait, with_prepared_wait};
 
-/// Permanent marker storage is separate from the mutex's exclusively borrowed
-/// payload: callbacks access markers while the draining task holds that mutex.
+/// Permanent marker storage; the host supplies serialization but owns no marker.
 pub(super) struct CallbackDrain {
-    serialization: Mutex<()>,
     markers: [DrainMarker; kbuild_config::NR_CPUS],
 }
 
@@ -33,6 +30,22 @@ struct DrainMarker {
 
 const _: () = assert!(core::mem::offset_of!(DrainMarker, node) == 0);
 
+/// Samples marker installation for controlled kernel serialization fixtures.
+///
+/// The caller holds the host drain gate while observing blocked drain callers.
+/// This exposes no marker storage or mutation; it is not a completion predicate.
+#[cfg(unittest)]
+#[doc(hidden)]
+pub fn has_installed_drain_markers_for_tests() -> bool {
+    SERVICE.get().is_some_and(|service| {
+        service
+            .drain
+            .markers
+            .iter()
+            .any(|marker| marker.completion.lock().is_some())
+    })
+}
+
 struct DrainCompletion {
     remaining: AtomicUsize,
     waker: Waker,
@@ -41,7 +54,6 @@ struct DrainCompletion {
 impl CallbackDrain {
     pub(super) fn new() -> Self {
         Self {
-            serialization: Mutex::new(()),
             markers: core::array::from_fn(|_| DrainMarker {
                 node: CallbackNode::new(complete_marker),
                 completion: SpinNoIrq::new(None),
@@ -92,7 +104,10 @@ impl DrainCompletion {
 /// error does not authorize releasing them, and downstream work needs its own
 /// completion protocol even after this function succeeds.
 pub unsafe fn drain_callbacks() -> KResult<()> {
-    let mut wait = PreparedTaskWait::prepare()?;
+    with_prepared_wait(drain_with_wait)?
+}
+
+fn drain_with_wait(wait: &mut dyn TaskWait) -> KResult<()> {
     {
         let _guard = kspin::NoPreemptIrqSave::new();
         if !krcu_core::RcuContextIf::current_cpu_watching().is_watching() {
@@ -104,38 +119,39 @@ pub unsafe fn drain_callbacks() -> KResult<()> {
         .filter(|service| service.waker.get().is_some())
         .ok_or(KError::BadState)?;
     let completion = Arc::new(DrainCompletion::new(wait.waker()));
-    let _serial = service.drain.serialization.lock();
-    let mut has_markers = false;
-    for cpu in 0..kcpu_id_map::nr_cpus() {
-        let marker = &service.drain.markers[cpu];
-        completion.remaining.fetch_add(1, Ordering::Relaxed);
-        *marker.completion.lock() = Some(completion.clone());
-        let record = core::ptr::from_ref(marker);
-        // SAFETY: project from the whole permanent marker, preserving container
-        // provenance for the callback. Interior mutation belongs to its locks.
-        let node = unsafe { &raw const (*record).node }.cast_mut();
-        // SAFETY: the mutex serializes installations. The preceding drain ended
-        // all marker accesses before publishing completion, and the executor
-        // never touches a node after invocation. This marker owns no retired
-        // data and only completes after prior callbacks return. Queue locks
-        // serialize remote insertion with capture/execution; no host lock that
-        // forbids sleeping is held across progress notification or waiting.
-        if unsafe { service.callbacks.enqueue_drain_marker(cpu, node) } {
-            has_markers = true;
-        } else {
-            // Empty/nonparticipating queues do not take ownership. Roll back
-            // their count while the installation reference still prevents zero.
-            marker.completion.lock().take();
-            completion.finish_one();
+    RcuTaskIf::with_serialized_drain(&mut || {
+        let mut has_markers = false;
+        for cpu in 0..kcpu_id_map::nr_cpus() {
+            let marker = &service.drain.markers[cpu];
+            completion.remaining.fetch_add(1, Ordering::Relaxed);
+            *marker.completion.lock() = Some(completion.clone());
+            let record = core::ptr::from_ref(marker);
+            // SAFETY: project from the whole permanent marker, preserving container
+            // provenance for the callback. Interior mutation belongs to its locks.
+            let node = unsafe { &raw const (*record).node }.cast_mut();
+            // SAFETY: the mutex serializes installations. The preceding drain ended
+            // all marker accesses before publishing completion, and the executor
+            // never touches a node after invocation. This marker owns no retired
+            // data and only completes after prior callbacks return. Queue locks
+            // serialize remote insertion with capture/execution; no host lock that
+            // forbids sleeping is held across progress notification or waiting.
+            if unsafe { service.callbacks.enqueue_drain_marker(cpu, node) } {
+                has_markers = true;
+            } else {
+                // Empty/nonparticipating queues do not take ownership. Roll back
+                // their count while the installation reference still prevents zero.
+                marker.completion.lock().take();
+                completion.finish_one();
+            }
         }
-    }
-    if has_markers {
-        service.request_pass();
-    }
-    completion.finish_one();
-    while !completion.is_complete() {
-        wait.park();
-    }
+        if has_markers {
+            service.request_pass();
+        }
+        completion.finish_one();
+        while !completion.is_complete() {
+            wait.park();
+        }
+    });
     Ok(())
 }
 

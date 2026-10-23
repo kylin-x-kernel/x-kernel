@@ -31,7 +31,8 @@ Callers install the action and prepare destination services before requesting it
 ### Timer Reprogram Notifications
 
 The independent `timer-reprogram` feature exports `notify_timer_reprogram` and
-`TimerReprogramIpiIf`; `ktask/ipi` enables it and supplies the static endpoint.
+`TimerReprogramIpiIf`; `kfeat/ipi` selects it together with `ktask/ipi`, which
+supplies the static endpoint.
 Any fixed-notification feature compiles `notification.rs`; generic IPI users
 without these features require no fixed endpoint. The scheduler and timer
 features each require their own provider, including non-SMP configurations that

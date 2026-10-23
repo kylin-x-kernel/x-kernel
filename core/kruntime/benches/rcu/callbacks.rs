@@ -11,8 +11,7 @@ use core::{
 };
 
 use kcpu_id_map::KCpuMaskExt;
-
-use crate::{CallbackNode, PreparedCallback};
+use krcu::{CallbackNode, PreparedCallback};
 
 const PER_PRODUCER: usize = 32;
 
@@ -137,7 +136,7 @@ pub(super) fn run() {
     let statuses: Vec<_> = producers.iter().map(|task| task.join()).collect();
     // SAFETY: all producers joined, no reposts or downstream work, sleepable
     // watched task context and no locks. Ledger and callback code remain live.
-    let drained = unsafe { crate::drain_callbacks() };
+    let drained = unsafe { krcu::drain_callbacks() };
     let accepted = ledger.accepted.load(Ordering::Relaxed);
     let cancelled = ledger.cancelled.load(Ordering::Relaxed);
     let calls: usize = ledger

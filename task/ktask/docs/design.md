@@ -279,7 +279,8 @@ procfs 读取并换算成 `/proc/[pid]/stat` 的 `starttime` 字段（USER_HZ=10
 供 runc 等运行时把它与持久化的 `InitProcessStartTime` 比较来判断进程是否仍是
 自己创建的那个。任务生命周期全程不修改它。
 
-`ktask/ipi` enables `kipi/timer-reprogram` and supplies `TimerReprogramIpiIf`.
+`kfeat/ipi` enables both `ktask/ipi` and `kipi/timer-reprogram`;
+`ktask/ipi` supplies `TimerReprogramIpiIf`.
 The endpoint only re-reads current deadlines and programs hardware; it does not
 dispatch callbacks, account runtime or mark a reschedule request. Notifications
 must follow accepted registration after releasing timer locks and target the
@@ -729,7 +730,7 @@ readiness precedence and Linux restart policy belong to their callers.
   `ipi + preempt` are available, requests the same on a remote CPU.
 - After waking `interrupt_waker`, `TaskInner::interrupt()` calls
   `kick_running_task()` if the task is still `on_cpu`: local `need_resched`
-  under `preempt`, remote IPI always (`smp` already implies `ipi`). Signal
+  under `preempt`, remote IPI always (`kfeat/smp` also enables IPI). Signal
   delivery to a task running in user mode must take this path; a NOHZ lone
   runner has no periodic tick fallback.
 - `WaitQueue` wraps `event_listener` wait/notify and supports timeout and
@@ -1038,7 +1039,7 @@ dynamic schedule timer plus safe-point preemption model.
 | Feature | Role |
 |---|---|
 | `preempt` | Preemption logic and the `kspin` preempt interface |
-| `smp` | Multi-CPU run queues and migration; also enables `ipi` |
+| `smp` | Multi-CPU run queues and migration; `kfeat/smp` also selects `ipi` |
 | `snapshot` | Task snapshot and backtrace foundation |
 | `watchdog` | Watchdog diagnostics (depends on `snapshot`); `watchdog_hardlockup` also needs root Kconfig `KFEAT_NMI` (mechanism + PMU period source, AArch64 QEMU) |
 | `ipi` | Required for SMP remote wake / reschedule |

@@ -6,15 +6,17 @@
 //! before their observers are released. No global action or service is replaced.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::{sync::atomic::{AtomicBool, AtomicUsize, Ordering}, task::Waker};
+use core::{ptr::NonNull, sync::atomic::{AtomicBool, AtomicUsize, Ordering}, task::Waker};
 
+use kerrno::KError;
+use krcu::{CallbackNode, PreparedCallback};
 use ktask::future::PreparedTaskWait;
 use unittest::{assert, assert_eq, def_test};
 
-use super::*;
-use crate::{CallbackNode, PreparedCallback};
-
 struct Counts {
+    prepared_node_address: AtomicUsize,
+    invoked_node_address: AtomicUsize,
+    invoked_cpu: AtomicUsize,
     invoked: AtomicUsize,
     cancelled: AtomicUsize,
     dropped: AtomicUsize,
@@ -27,6 +29,9 @@ struct Counts {
 impl Counts {
     fn new() -> Arc<Self> {
         Arc::new(Self {
+            prepared_node_address: AtomicUsize::new(0),
+            invoked_node_address: AtomicUsize::new(0),
+            invoked_cpu: AtomicUsize::new(usize::MAX),
             invoked: AtomicUsize::new(0),
             cancelled: AtomicUsize::new(0),
             dropped: AtomicUsize::new(0),
@@ -82,6 +87,8 @@ unsafe fn complete_probe(node: *mut CallbackNode) {
     // SAFETY: accepted submission transferred this original Box to invocation.
     let mut object = unsafe { recover_probe(node) };
     let counts = object.counts.clone();
+    counts.invoked_node_address.store(node as usize, Ordering::Relaxed);
+    counts.invoked_cpu.store(khal::percpu::this_cpu_id().as_usize(), Ordering::Relaxed);
     let waker = object.waker.clone();
     let is_valid_context = kirq::context::interrupt_context_level()
         == kirq::context::InterruptContextLevel::Softirq
@@ -122,13 +129,19 @@ unsafe fn complete_probe(node: *mut CallbackNode) {
 }
 
 fn prepare_probe(counts: &Arc<Counts>, waker: Waker, reposts: usize) -> PreparedCallback {
-    adopt_probe(Box::new(Probe {
+    let object = Box::new(Probe {
         value: 7,
         reposts_left: reposts,
         node: CallbackNode::new(complete_probe),
         counts: counts.clone(),
         waker,
-    }))
+    });
+    // Address-only observation: never reconstruct or dereference this integer.
+    counts.prepared_node_address.store(
+        core::ptr::addr_of!(object.node) as usize,
+        Ordering::Relaxed,
+    );
+    adopt_probe(object)
 }
 
 fn adopt_probe(object: Box<Probe>) -> PreparedCallback {
@@ -144,6 +157,138 @@ fn adopt_probe(object: Box<Probe>) -> PreparedCallback {
 }
 
 #[def_test(serial)]
+fn rejected_preflight_preserves_publication_and_prepared_owner() {
+    let counts = Counts::new();
+    let wait = PreparedTaskWait::prepare().unwrap();
+    let prepared = prepare_probe(&counts, wait.waker(), 0);
+    let published = AtomicUsize::new(17);
+    let update_fn = || {
+        krcu::preflight_callback_submission()?;
+        published.store(23, Ordering::Release);
+        Ok::<(), KError>(())
+    };
+    assert_eq!(krcu::preflight_callback_submission(), Ok(()));
+    let irq_result = {
+        let _irq = kspin::IrqSave::new();
+        update_fn()
+    };
+    let preempt_result = {
+        let _guard = kspin::NoPreempt::new();
+        // NoPreempt is a no-op when task preemption support is disabled.
+        ktask::current_preemption_disabled().then(update_fn)
+    };
+    let bh_result = {
+        let _bh = kirq::context::local_bh_disable();
+        update_fn()
+    };
+    let read_result = krcu::with_read(|_| update_fn());
+    let irq = kspin::IrqSave::new();
+    // SAFETY: controlled nested entry retains current and the CPU; the
+    // operation must reject before taking locks or modifying publication.
+    let nmi_result = unsafe {
+        kirq::context::test_support::with_nmi_context(update_fn)
+    };
+    let frame = kcpu::ExceptionContext::default();
+    let exception = kcpu::ExceptionContextGuard::new(&frame);
+    drop(irq);
+    // Model an IRQ-enabled trap backend: sleepability alone must not hide the
+    // active-exception rejection. Mask again before restoring the CPU slot.
+    let was_sleepable_in_exception = ktask::is_sleepable_context();
+    let was_exception_active = khal::context::in_exception_context();
+    let exception_result = update_fn();
+    let irq = kspin::IrqSave::new();
+    drop(exception);
+    drop(irq);
+    assert!(was_sleepable_in_exception);
+    assert!(was_exception_active);
+    for result in [irq_result, bh_result, read_result, nmi_result, exception_result] {
+        assert_eq!(result, Err(KError::InvalidInput));
+    }
+    if let Some(result) = preempt_result {
+        assert_eq!(result, Err(KError::InvalidInput));
+    }
+    assert_eq!(published.load(Ordering::Acquire), 17);
+    assert_eq!(counts.invoked.load(Ordering::Acquire), 0);
+    assert_eq!(counts.cancelled.load(Ordering::Acquire), 0);
+    assert_eq!(counts.dropped.load(Ordering::Acquire), 0);
+    drop(prepared);
+    assert_eq!(counts.cancelled.load(Ordering::Acquire), 1);
+    assert_eq!(counts.dropped.load(Ordering::Acquire), 1);
+}
+
+#[def_test(serial)]
+#[cfg(feature = "smp")]
+fn preflight_survives_involuntary_migration_before_submission() {
+    use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
+
+    let has_preemption = {
+        let _guard = kspin::NoPreempt::new();
+        ktask::current_preemption_disabled()
+    };
+    if kcpu_id_map::nr_cpus() < 2 || !has_preemption {
+        return unittest::TestResult::Ignored;
+    }
+    let counts = Counts::new();
+    let wait = PreparedTaskWait::prepare().unwrap();
+    let prepared = prepare_probe(&counts, wait.waker(), 0);
+    let has_checked = Arc::new(AtomicBool::new(false));
+    let has_submitted = Arc::new(AtomicBool::new(false));
+    let checked = has_checked.clone();
+    let submitted = has_submitted.clone();
+    let destination = LogicalCpuId::new(1);
+    let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
+        move || {
+            if krcu::preflight_callback_submission().is_err() {
+                return;
+            }
+            checked.store(true, Ordering::Release);
+            let start_ns = khal::time::monotonic_time_nanos();
+            // No park/yield or explicit context transition may help this
+            // migration. Affinity must move the running task by preemption.
+            while khal::percpu::this_cpu_id() != destination {
+                if khal::time::monotonic_time_nanos().saturating_sub(start_ns)
+                    >= 5_000_000_000
+                {
+                    return;
+                }
+                core::hint::spin_loop();
+            }
+            // SAFETY: unpublished fixture, unique prepared owner and
+            // nonblocking cleanup; no callback-needed exclusion is held.
+            match unsafe { prepared.submit() } {
+                Ok(()) => submitted.store(true, Ordering::Release),
+                Err((_, prepared)) => drop(prepared),
+            }
+        },
+        "rcu-preflight-migration".into(),
+        kbuild_config::TASK_STACK_SIZE,
+    ));
+    worker.set_cpumask(ktask::KCpuMask::one_shot_logical(LogicalCpuId::new(0)));
+    ktask::activate_task(&worker);
+    while !has_checked.load(Ordering::Acquire) && worker.state() != ktask::TaskState::Exited {
+        ktask::yield_now();
+    }
+    let affinity_applied = ktask::set_task_affinity(
+        &worker,
+        ktask::KCpuMask::one_shot_logical(destination),
+    );
+    let status = worker.join();
+    // SAFETY: the only producer has joined; no callback-needed resource is
+    // held and the fixed boot service/participants remain available.
+    let drained = unsafe { krcu::drain_callbacks() };
+    assert_eq!(status, 0);
+    assert!(affinity_applied);
+    assert!(has_checked.load(Ordering::Acquire));
+    assert!(has_submitted.load(Ordering::Acquire));
+    assert_eq!(drained, Ok(()));
+    assert_eq!(counts.invoked_cpu.load(Ordering::Acquire), destination.as_usize());
+    assert!(!counts.has_invalid_context.load(Ordering::Acquire));
+    assert_eq!(counts.invoked.load(Ordering::Acquire), 7);
+    assert_eq!(counts.cancelled.load(Ordering::Acquire), 0);
+    assert_eq!(counts.dropped.load(Ordering::Acquire), 1);
+}
+
+#[def_test(serial)]
 fn public_callback_submission_and_drain_release_owner_once() {
     let counts = Counts::new();
     let wait = PreparedTaskWait::prepare().unwrap();
@@ -154,7 +299,7 @@ fn public_callback_submission_and_drain_release_owner_once() {
     assert!(submitted.is_ok());
     // SAFETY: no producer remains, callback code is permanent and counts/wait
     // storage remains live. This task holds no resource needed by the callback.
-    assert_eq!(unsafe { crate::drain_callbacks() }, Ok(()));
+    assert_eq!(unsafe { krcu::drain_callbacks() }, Ok(()));
     assert_eq!(counts.completed.load(Ordering::Acquire), 1);
     assert_eq!(counts.invoked.load(Ordering::Relaxed), 7);
     assert_eq!(counts.cancelled.load(Ordering::Relaxed), 0);
@@ -179,7 +324,7 @@ fn rejected_contexts_preserve_same_owner_until_watched_retry() {
     let counts = Counts::new();
     let mut wait = PreparedTaskWait::prepare().unwrap();
     let prepared = prepare_probe(&counts, wait.waker(), 0);
-    let original_node = prepared.node;
+    let original_node = counts.prepared_node_address.load(Ordering::Relaxed);
     let result = {
         let _guard = kspin::NoPreemptIrqSave::new();
         let submit_fn = || {
@@ -196,7 +341,7 @@ fn rejected_contexts_preserve_same_owner_until_watched_retry() {
         Ok(()) => panic!("NMI callback submission was accepted"),
     };
     assert_eq!(error, KError::InvalidInput);
-    assert_eq!(prepared.node, original_node);
+    assert_eq!(counts.invoked_node_address.load(Ordering::Relaxed), 0);
     assert_eq!(counts.cancelled.load(Ordering::Relaxed), 0);
     assert_eq!(counts.dropped.load(Ordering::Relaxed), 0);
     let result = {
@@ -217,7 +362,7 @@ fn rejected_contexts_preserve_same_owner_until_watched_retry() {
         Ok(()) => panic!("unwatched callback submission was accepted"),
     };
     assert_eq!(error, KError::InvalidInput);
-    assert_eq!(prepared.node, original_node);
+    assert_eq!(counts.invoked_node_address.load(Ordering::Relaxed), 0);
     assert_eq!(counts.invoked.load(Ordering::Relaxed), 0);
     assert_eq!(counts.cancelled.load(Ordering::Relaxed), 0);
     assert_eq!(counts.dropped.load(Ordering::Relaxed), 0);
@@ -228,6 +373,7 @@ fn rejected_contexts_preserve_same_owner_until_watched_retry() {
     while counts.completed.load(Ordering::Acquire) == 0 {
         wait.park();
     }
+    assert_eq!(counts.invoked_node_address.load(Ordering::Relaxed), original_node);
     assert_eq!(counts.invoked.load(Ordering::Relaxed), 7);
     assert_eq!(counts.cancelled.load(Ordering::Relaxed), 0);
     assert_eq!(counts.dropped.load(Ordering::Relaxed), 1);
@@ -332,10 +478,12 @@ fn timer_hardirq_submits_prepared_callback_to_live_service() {
 }
 
 #[def_test(serial)]
-fn coalesced_notifications_drain_prepared_callbacks_across_budgets() {
+fn coalesced_notifications_complete_every_prepared_callback() {
     let mut wait = PreparedTaskWait::prepare().unwrap();
-    let count = super::super::CALLBACK_BUDGET * 2 + 1;
-    let observers: alloc::vec::Vec<_> = (0..count).map(|_| Counts::new()).collect();
+    // Public burst-completion coverage; the service's internal tests separately
+    // size their batches from CALLBACK_BUDGET to check budget/re-raise behavior.
+    const CALLBACK_COUNT: usize = 65;
+    let observers: alloc::vec::Vec<_> = (0..CALLBACK_COUNT).map(|_| Counts::new()).collect();
     let prepared: alloc::vec::Vec<_> = observers
         .iter()
         .map(|counts| prepare_probe(counts, wait.waker(), 0))
@@ -373,7 +521,7 @@ fn coalesced_notifications_drain_prepared_callbacks_across_budgets() {
     }
     assert!(!has_completed_before_release);
     assert!(!has_submission_allocation);
-    assert_eq!(accepted, count);
+    assert_eq!(accepted, CALLBACK_COUNT);
     for counts in observers {
         assert_eq!(counts.invoked.load(Ordering::Relaxed), 7);
         assert_eq!(counts.cancelled.load(Ordering::Relaxed), 0);

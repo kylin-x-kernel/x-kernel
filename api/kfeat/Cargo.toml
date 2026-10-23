@@ -12,7 +12,7 @@ description = "Top-level feature selection for x-kernel"
 [package.metadata.cargo-shear]
 # kfeat owns top-level feature forwarding. These optional crates are selected
 # through feature edges rather than direct code references.
-ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "kspin", "ksync", "ktask", "ktracing", "memspace", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "krcu", "kspin", "ksync", "ktask", "ktracing", "memspace", "fs_boot", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
 
 [features]
 default = []
@@ -22,8 +22,11 @@ smp = [
     "ipi",
     "khal/smp",
     "kruntime/smp",
+    "krcu/smp",
+    "memspace/smp",
+    "fs_boot?/smp",
     "ktracing?/smp",
-    "ktask?/smp",
+    "ktask/smp",
     "kspin/smp",
     "kplat-aarch64?/smp",
     "kplat-loongarch64?/smp",
@@ -45,7 +48,7 @@ vmm = [
 
 
 # Interrupts
-ipi = ["dep:kipi", "kruntime/ipi", "ktask?/ipi"]
+ipi = ["kipi/reschedule", "kipi/timer-reprogram", "kruntime/ipi", "ktask/ipi", "krcu/ipi"]
 dma-trace = ["kdriver/dma-trace"]
 dev_log = ["devfs/dev-log"]
 dice = [
@@ -57,9 +60,10 @@ kvm_guest_mem_share = ["kplat-aarch64?/kvm-guest-mem-share"]
 kvm_mmio_guard = ["kplat-aarch64?/kvm-mmio-guard"]
 arm_timer_resume_fixup = [
     "kruntime/arm-timer-resume-fixup",
-    "ktask?/arm-timer-resume-fixup",
+    "ktask/arm-timer-resume-fixup",
+    "timer_driver/arm-timer-resume-fixup",
 ]
-rootfs_secondary_block = ["kruntime/rootfs-secondary-block"]
+rootfs_secondary_block = ["dep:fs_boot", "kruntime/rootfs-secondary-block"]
 pci_non_ecam = ["kdriver/pci-non-ecam"]
 
 # Platform wiring
@@ -82,10 +86,10 @@ sched_stat = ["ktask/sched_stat", "dep:procfs", "procfs/sched_stat"]
 #
 # `KFEAT_FS` is a Kconfig-only dependency gate. Cargo features link concrete
 # filesystem implementations while kruntime only owns the generic fs stage.
-fs_ext4 = ["dep:kext4", "kruntime/fs"]
-fs_fat = ["dep:fat", "kruntime/fs"]
-fs_9p = ["kruntime/fs9p"]
-fs_cgroup2 = ["kruntime/fs_cgroup2"]
+fs_ext4 = ["dep:kext4", "dep:fs_boot", "kruntime/fs"]
+fs_fat = ["dep:fat", "dep:fs_boot", "kruntime/fs"]
+fs_9p = ["dep:fs_boot", "kruntime/fs9p"]
+fs_cgroup2 = ["dep:fs_boot", "kruntime/fs_cgroup2"]
 fs_times = ["fs_ext4", "kext4/times"]
 
 # Networking
@@ -183,7 +187,7 @@ tipc = ["ksyscall/tipc", "kprocess/tipc", "linux_sysno/tipc"]
 vsock_tipc_bridge = ["knet/vsock_tipc_bridge", "kruntime/vsock_tipc_bridge"]
 
 # Pmu
-pmu = ["kruntime/pmu", "kplat-aarch64?/pmu"]
+pmu = ["kruntime/pmu", "khal/pmu", "kplat-aarch64?/pmu"]
 
 # NMI
 nmi = ["khal/nmi", "kruntime/nmi", "kplat-aarch64?/nmi"]
@@ -195,7 +199,7 @@ nmi_mode_hardware = ["khal/nmi_hardware", "kplat-aarch64?/nmi-hardware"]
 tracepoint = ["ktracing/tracepoint"]
 
 # eBPF
-ebpf = ["dep:kbpf", "ksyscall/ebpf", "kruntime/fs_ebpf"]
+ebpf = ["dep:kbpf", "dep:fs_boot", "ksyscall/ebpf", "kruntime/fs_ebpf"]
 
 [dependencies]
 kworkng = { workspace = true, optional = true }
@@ -232,6 +236,9 @@ inputdev = { workspace = true, optional = true }
 kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
+krcu.workspace = true
+fs_boot = { workspace = true, optional = true }
+timer_driver = { workspace = true, optional = true }
 kext4 = { workspace = true, optional = true }
 ksync = { workspace = true, optional = true }
 ktask = { workspace = true, optional = true }

@@ -10,13 +10,16 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
-use kirq::softirq::SoftirqVec;
 use klazy::Once;
 use krcu_core::{CallbackDriver, CallbackState};
-use ktask::{Expiration, TaskInner, Timer, TimerControl, future::PreparedTaskWait};
-use ktime_types::{MonotonicInstant, TimeSpan};
 
-use crate::context::READER_NODES;
+use crate::{
+    context::READER_NODES,
+    host::{
+        ProgressTimer, RcuExecutionIf, RcuNotifyIf, RcuSoftirqIf, RcuTaskIf, RcuTimerIf, TaskWait,
+        with_prepared_wait,
+    },
+};
 
 const PROGRESS_INTERVAL_NS: u64 = 10_000_000;
 // Bound one Rcu action's work, not queue capacity. The common softirq runner
@@ -36,8 +39,10 @@ mod synchronize;
 #[path = "owned.rs"]
 mod owned;
 
-pub use callback::PreparedCallback;
+pub use callback::{PreparedCallback, preflight_callback_submission};
 pub use drain::drain_callbacks;
+#[cfg(unittest)]
+pub use drain::has_installed_drain_markers_for_tests;
 pub use owned::Rcu;
 pub use synchronize::synchronize_rcu;
 
@@ -47,6 +52,54 @@ struct GracePeriodTask {
     has_started: kspin::SpinNoPreempt<bool>,
     waker: Once<Waker>,
     has_demand: AtomicBool,
+}
+
+/// Unique GP driver and startup notification transferred to the host task.
+///
+/// Only RCU startup constructs this entry after claiming control. The runtime
+/// moves it into the task's existing entry allocation, without inspecting its
+/// fields or adding a second allocation for type erasure. This is a host
+/// integration capability, not an independently constructible RCU service.
+#[must_use = "the claimed GP driver must be transferred to its task, not dropped"]
+pub struct PreparedGpTask {
+    service: &'static GracePeriodTask,
+    driver: CallbackDriver<'static, 'static, { kbuild_config::NR_CPUS }>,
+    startup_waker: Waker,
+}
+
+impl PreparedGpTask {
+    /// Runs the service once on its dedicated sleepable kernel task.
+    ///
+    /// Never call inline from the startup task. Parking is prepared here, bound
+    /// to the new current task, and readiness is published only after timer
+    /// preparation. The service is permanent and normally never returns.
+    pub fn run(self) {
+        let Self {
+            service,
+            mut driver,
+            startup_waker,
+        } = self;
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the dedicated GP task enters with no \
+                      exclusion guards or reader scope"
+        )]
+        with_prepared_wait(|wait| {
+            let mut startup_waker = Some(startup_waker);
+            RcuTimerIf::with_progress_timer(request_timed_pass, &mut |timer| {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: the static timer provider \
+                              invokes its body exactly once after preparing the inactive timer"
+                )]
+                let startup_waker = startup_waker
+                    .take()
+                    .expect("RCU timer provider invokes once");
+                service.run_with_timer(&mut driver, wait, startup_waker, timer);
+            });
+        })
+        .expect("RCU GP task starts in sleepable task context");
+    }
 }
 
 pub(super) fn callbacks() -> Option<&'static CallbackState<'static, { kbuild_config::NR_CPUS }>> {
@@ -80,44 +133,72 @@ pub(super) fn request_completion_pass() {
 /// services are initialized and its permanent CPU area is published.
 /// No other coordinator may control READER_NODES.
 pub unsafe fn init_service() -> KResult<()> {
-    let mut startup = PreparedTaskWait::prepare()?;
-    let service = SERVICE.call_once(|| {
-        let participants = core::array::from_fn(|cpu| cpu < kcpu_id_map::nr_cpus());
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: initialized CPU discovery includes \
-                      the running boot CPU"
-        )]
-        // SAFETY: the startup caller excludes another owner of these static
-        // nodes. Construction preserves already-enrolled task readers.
-        let callbacks = unsafe { CallbackState::new(&READER_NODES, participants) }
-            .expect("RCU startup requires a discovered boot CPU");
-        GracePeriodTask {
-            drain: drain::CallbackDrain::new(),
-            callbacks,
-            has_started: kspin::SpinNoPreempt::new(false),
-            waker: Once::new(),
-            has_demand: AtomicBool::new(false),
+    with_prepared_wait(|startup| {
+        let service = SERVICE.call_once(|| {
+            let participants = core::array::from_fn(|cpu| cpu < kcpu_id_map::nr_cpus());
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: initialized CPU discovery \
+                          includes the running boot CPU"
+            )]
+            // SAFETY: the startup caller excludes another owner of these static
+            // nodes. Construction preserves already-enrolled task readers.
+            let callbacks = unsafe { CallbackState::new(&READER_NODES, participants) }
+                .expect("RCU startup requires a discovered boot CPU");
+            GracePeriodTask {
+                drain: drain::CallbackDrain::new(),
+                callbacks,
+                has_started: kspin::SpinNoPreempt::new(false),
+                waker: Once::new(),
+                has_demand: AtomicBool::new(false),
+            }
+        });
+        let driver =
+            service.claim_driver_with_action(|| RcuSoftirqIf::install(process_callbacks))?;
+        RcuTaskIf::start_gp_task(PreparedGpTask {
+            service,
+            driver,
+            startup_waker: startup.waker(),
+        });
+        while service.waker.get().is_none() {
+            startup.park();
         }
-    });
-    let driver = service.claim_driver_with_action(|| {
-        kirq::softirq::open_softirq(SoftirqVec::Rcu, process_callbacks)
-    })?;
-    let startup_waker = startup.waker();
-    let task = ktask::prepare_task(TaskInner::new_pidless_kthread(
-        move || service.run(driver, startup_waker),
-        "rcu_gp".into(),
-        kbuild_config::TASK_STACK_SIZE,
-    ));
-    ktask::activate_task(&task);
-    while service.waker.get().is_none() {
-        startup.park();
-    }
-    service.request_pass();
-    Ok(())
+        service.request_pass();
+        Ok(())
+    })?
 }
 
 impl GracePeriodTask {
+    /// Checks task-only mutation admission without preparing parking resources.
+    fn preflight_callback_submission(&self) -> KResult<()> {
+        // NMI must reject before task/context queries can acquire ordinary locks.
+        // Sample sleepability before our temporary IRQ exclusion changes it.
+        if RcuExecutionIf::is_in_nmi() || !RcuTaskIf::is_sleepable_context() {
+            return Err(KError::InvalidInput);
+        }
+        let mut result = Err(KError::InvalidInput);
+        RcuExecutionIf::with_exception_snapshot(&mut |is_exception_active| {
+            if !is_exception_active {
+                result = self.check_callback_readiness();
+            }
+        });
+        result
+    }
+
+    /// Shared callback checks; callers exclude local IRQs and reject NMI first.
+    ///
+    /// IRQ exclusion pins the watching snapshot. This neither selects a queue
+    /// nor imposes task-only restrictions on ordinary callback submission.
+    fn check_callback_readiness(&self) -> KResult<()> {
+        if !krcu_core::RcuContextIf::current_cpu_watching().is_watching() {
+            return Err(KError::InvalidInput);
+        }
+        if self.waker.get().is_none() {
+            return Err(KError::BadState);
+        }
+        Ok(())
+    }
+
     /// Transfers a withdrawn node and requests progress without allocating.
     ///
     /// Rejection leaves the node untouched and caller-owned. NMI and unwatched
@@ -135,18 +216,13 @@ impl GracePeriodTask {
     /// notification without IPIs may wake the softirq daemon. On success do not
     /// access the transferred node without independent ownership.
     unsafe fn submit_callback(&self, node: *mut krcu_core::CallbackNode) -> KResult<()> {
-        if kirq::context::is_in_nmi() {
+        if RcuExecutionIf::is_in_nmi() {
             return Err(KError::InvalidInput);
         }
         {
             let _guard = kspin::NoPreemptIrqSave::new();
-            if !krcu_core::RcuContextIf::current_cpu_watching().is_watching() {
-                return Err(KError::InvalidInput);
-            }
-            if self.waker.get().is_none() {
-                return Err(KError::BadState);
-            }
-            let cpu = khal::percpu::this_cpu_id().as_usize();
+            self.check_callback_readiness()?;
+            let cpu = RcuExecutionIf::current_cpu().as_usize();
             // SAFETY: the caller retains unique stable storage and supplies a
             // withdrawn object with softirq-safe cleanup. The guard keeps CPU
             // selection and queue transfer in one watched, non-NMI interval.
@@ -177,7 +253,7 @@ impl GracePeriodTask {
             reason = "CG-021-no-panic-on-reachable-failure: fixed participants completed \
                       notification startup before the GP task was activated"
         )]
-        kipi::notify_reschedule(cpu_id).expect("RCU progress CPU completed boot services");
+        RcuNotifyIf::notify_reschedule(cpu_id).expect("RCU progress CPU completed boot services");
         true
     }
 
@@ -215,31 +291,22 @@ impl GracePeriodTask {
     /// or RCU lock because raising softirq may wake its daemon. Never NMI-safe.
     fn request_pass(&self) {
         self.has_demand.store(true, Ordering::Release);
-        #[cfg(feature = "ipi")]
         #[expect(
             clippy::expect_used,
             reason = "CG-021-no-panic-on-reachable-failure: service callers run on discovered \
                       CPUs after notification startup"
         )]
-        kipi::notify_rcu(khal::percpu::this_cpu_id())
+        RcuNotifyIf::notify_rcu(RcuExecutionIf::current_cpu())
             .expect("RCU notifier runs on an initialized present CPU");
-        #[cfg(not(feature = "ipi"))]
-        kirq::softirq::raise_softirq(SoftirqVec::Rcu);
     }
 
-    fn run(
-        &'static self,
-        mut driver: CallbackDriver<'static, 'static, { kbuild_config::NR_CPUS }>,
+    fn run_with_timer(
+        &self,
+        driver: &mut CallbackDriver<'static, 'static, { kbuild_config::NR_CPUS }>,
+        wait: &mut dyn TaskWait,
         startup_waker: Waker,
+        timer: &mut dyn ProgressTimer,
     ) -> ! {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the dedicated GP task enters with no \
-                      exclusion guards or reader scope"
-        )]
-        let mut wait =
-            PreparedTaskWait::prepare().expect("RCU GP task starts in sleepable task context");
-        let timer = Timer::new(move |_: TimerControl<'_>, _: Expiration| self.request_pass());
         // Publishing the waker acknowledges both prepared resources. The wait
         // itself remains bound to this task, never to the boot task.
         self.waker.call_once(|| wait.waker());
@@ -250,7 +317,7 @@ impl GracePeriodTask {
             // survive for the next iteration. The prepared waker retains races
             // between this exchange, processing and actual park.
             let has_demand = self.has_demand.swap(false, Ordering::AcqRel);
-            let now = khal::time::monotonic_time_nanos();
+            let now = RcuTimerIf::monotonic_time_nanos();
             let is_due = deadline.is_some_and(|deadline| now >= deadline);
             if has_demand || is_due {
                 for cpu in 0..kcpu_id_map::nr_cpus() {
@@ -289,24 +356,21 @@ impl GracePeriodTask {
                         self.request_cpu_progress(cpu);
                     }
                     if self.callbacks.has_ready(cpu) {
-                        #[cfg(feature = "ipi")]
                         #[expect(
                             clippy::expect_used,
                             reason = "CG-021-no-panic-on-reachable-failure: every discovered \
                                       callback CPU completed notification startup before service \
                                       activation"
                         )]
-                        kipi::notify_rcu(kcpu_id_map::LogicalCpuId::new(cpu))
+                        RcuNotifyIf::notify_rcu(kcpu_id_map::LogicalCpuId::new(cpu))
                             .expect("RCU callback CPU completed boot services");
-                        #[cfg(not(feature = "ipi"))]
-                        kirq::softirq::raise_softirq(SoftirqVec::Rcu);
                     }
                 }
                 if !is_active {
                     deadline = None;
                     timer.cancel_sync();
                 } else if let Some(next) =
-                    progress_rearm_deadline(now, deadline, khal::time::monotonic_time_nanos())
+                    progress_rearm_deadline(now, deadline, RcuTimerIf::monotonic_time_nanos())
                 {
                     #[expect(
                         clippy::expect_used,
@@ -316,17 +380,21 @@ impl GracePeriodTask {
                     // SAFETY: startup waited for every possible owner CPU's
                     // timer service. The handler only records demand and wakes,
                     // never waits, reenters timer dispatch or holds RCU locks.
-                    unsafe {
-                        timer.start(MonotonicInstant::from_span_since_origin(
-                            TimeSpan::from_nanos(next),
-                        ))
-                    }
-                    .expect("RCU progress deadline and timer owner are validated");
+                    unsafe { timer.arm(next) }
+                        .expect("RCU progress deadline and timer owner are validated");
                     deadline = Some(next);
                 }
             }
             wait.park();
         }
+    }
+}
+
+// The boot-owned service outlives its timer. Expiry only publishes demand;
+// it cannot report a quiescent state or complete a grace period.
+fn request_timed_pass() {
+    if let Some(service) = SERVICE.get() {
+        service.request_pass();
     }
 }
 
@@ -341,16 +409,31 @@ fn process_callbacks() {
         // during this action remains pending in the ordinary softirq machinery.
         waker.wake_by_ref();
     }
-    let cpu = khal::percpu::this_cpu_id().as_usize();
+    let cpu = RcuExecutionIf::current_cpu().as_usize();
     // SAFETY: the softirq carrier excludes migration and holds no RCU lock.
     // Admission is limited to internal owning adapters and synchronous-wait
     // markers, all retained through their nonblocking callbacks. Periods use
     // real scheduler/watching observations; raw admission remains private.
-    unsafe { service.callbacks.invoke_ready(cpu, CALLBACK_BUDGET) };
-    if service.callbacks.has_ready(cpu) {
-        // Wait only for eligible work, never spin on a GP blocked by readers.
-        // Existing softirq restart limits and ksoftirqd provide further service.
-        kirq::softirq::raise_softirq(SoftirqVec::Rcu);
+    unsafe { service.invoke_callback_batch(cpu, RcuSoftirqIf::raise_local) };
+}
+
+impl GracePeriodTask {
+    /// Executes one bounded batch and requests another pass only for ready work.
+    ///
+    /// # Safety
+    /// The caller is this CPU's sole executor, excludes migration, holds no
+    /// bookkeeping lock, and supplies the context required by every callback.
+    /// Submitted allocations and GP observations must satisfy CallbackState's
+    /// contracts. The notification must not invoke this executor recursively.
+    unsafe fn invoke_callback_batch(&self, cpu: usize, raise_local_fn: impl FnOnce()) {
+        // SAFETY: the caller retains queue ownership and the callback execution
+        // context; invoke_ready detaches eligible nodes before invoking them.
+        unsafe { self.callbacks.invoke_ready(cpu, CALLBACK_BUDGET) };
+        if self.callbacks.has_ready(cpu) {
+            // Wait only for eligible work, never spin on a GP blocked by readers.
+            // Existing softirq restart limits and ksoftirqd provide further service.
+            raise_local_fn();
+        }
     }
 }
 

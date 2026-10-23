@@ -4,6 +4,14 @@
 
 //! Top-level feature selection for [X-Kernel].
 //!
+//! System capabilities are assembled here: `ipi` selects the runtime, task,
+//! RCU and IPI-provider features together; `smp` includes that assembly and
+//! selects the participating subsystems' SMP support. Runtime's local feature
+//! switches are not substitutes for these system-level selections.
+//! PMU, NMI and ARM timer recovery likewise select their runtime and provider
+//! capabilities here. Subsystems retain features needed by their own internal
+//! implementation dependencies, such as shared-lock support.
+//!
 //! # Cargo Features
 //!
 //! - CPU

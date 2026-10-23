@@ -22,8 +22,7 @@ use core::{
 };
 
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
-
-use crate::{CallbackNode, PreparedCallback};
+use krcu::{CallbackNode, PreparedCallback};
 
 const SAMPLES: usize = 32;
 const ROUNDS: usize = 3;
@@ -107,7 +106,7 @@ fn measure_sync_wait() -> Vec<u64> {
         // SAFETY: this watched, sleepable boot worker holds no reader scope or
         // lock needed by readers/service. No protected object is being retired;
         // the permanent initialized service supplies the actual GP protocol.
-        let result = unsafe { crate::synchronize_rcu() };
+        let result = unsafe { krcu::synchronize_rcu() };
         let end = khal::time::monotonic_time_nanos();
         assert!(result.is_ok());
         assert!(end >= begin);
@@ -137,7 +136,7 @@ fn measure(cpu: LogicalCpuId) -> Vec<Sample> {
         // SAFETY: this sequential producer has stopped submitting, no reposts
         // or downstream work. Sleepable watched task holds no callback resource
         // locks; the observation remains owned until callback return is drained.
-        let drained = unsafe { crate::drain_callbacks() };
+        let drained = unsafe { krcu::drain_callbacks() };
         let completed = khal::time::monotonic_time_nanos();
         assert!(drained.is_ok());
         let entry = observation.entry_ns.load(Ordering::Acquire);
@@ -174,7 +173,7 @@ fn report(cpu: LogicalCpuId, round: usize, metric: &str, mut values: Vec<u64>) {
 /// # Panics
 /// Panics on rejected operations, failed joins, wrong callback context/CPU or
 /// inconsistent clock observations. There is no latency pass threshold.
-pub fn run() {
+pub(crate) fn run() {
     let mut cpus = Vec::new();
     kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
     assert!(!cpus.is_empty());

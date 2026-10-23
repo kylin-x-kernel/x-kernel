@@ -2,10 +2,13 @@
 
 ## Ownership Stress
 
-This runner follows kworkng's opt-in boot validation mechanism. It uses the real
+These runtime-owned runners follow kworkng's opt-in boot validation mechanism.
+They use only public `krcu` APIs; task setup, load and reporting belong here,
+not in the RCU service. The ownership runner uses the real
 RCU service and public APIs, not a host simulation or default unit test.
-Cargo benchmark auto-discovery is disabled. No latency benchmark is implemented
-here; stress counters are correctness observations, not performance results.
+Cargo benchmark auto-discovery is disabled. Stress counters are correctness
+observations, not performance results; latency measurements use the separate
+RCU_BENCH runner described below.
 
 Prepare a platform defconfig using `make defconfig`, enable
 `KFEAT_RCU_TORTURE=y`, set `RCU_TORTURE_SECONDS=5` for initial smoke or `1800`
@@ -76,16 +79,19 @@ duration, actual CPU count and QEMU/host setup. A short smoke run does not prove
 long-term stability or weak-memory correctness.
 
 The normal kernel clippy command enables `cfg(unittest)`, which excludes this
-runner. Also lint the release-only module after a normal torture-enabled
-`make build`. For the x86_64 QEMU/slab configuration:
+runner. Also lint the release-only modules after a normal runner-enabled
+`make build`. Obtain the configured Cargo command with:
 
 ```sh
-cargo clippy -p krcu --no-deps --target x86_64-unknown-none \
-    --features torture,kalloc/slab -- -D warnings
+cargo xkmake clippy --dry-run -v
 ```
 
+Run that command without its trailing `--cfg unittest`, adding
+`-p entry -p kruntime --no-deps` before `--`. Retain the complete configured
+feature list, target and target directory: selecting `kruntime` alone omits
+platform and driver features supplied through `entry`/`kfeat`.
 This supplements, rather than replaces, the configured Makefile build and
-kernel validation. Match the target and allocator feature to the configuration.
+kernel validation.
 
 ## Read Costs And Wait Latency
 
@@ -93,8 +99,8 @@ kernel validation. Match the target and allocator feature to the configuration.
 with RCU torture and workqueue benchmarks in Kconfig. Prepare a platform
 defconfig, select the feature, run `make olddefconfig`, `make build` and the same
 bounded `make justrun` command above. Do not enable UNITTEST, coverage, lock-stat
-or detailed tracing for measurements. For supplemental release-only clippy use
-`--features bench,kalloc/slab` instead of `torture,kalloc/slab`.
+or detailed tracing for measurements. Repeat the supplemental release-only
+Clippy procedure above using the benchmark-enabled configuration.
 
 One pinned task at a time runs on each present CPU. Each CPU has one warmup
 round (round 0) and three measured rounds of 32 sequential submit/drain samples.

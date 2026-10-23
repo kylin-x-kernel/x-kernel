@@ -1,5 +1,6 @@
 [package]
 name = "kruntime"
+autobenches = false
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,17 +12,19 @@ description = "Runtime library of X-kernel"
 
 [package.metadata.cargo-shear]
 # Used by cfg(unittest) probes in ut-tests/tests_workqueue/{deferred,irq_work}.rs.
-ignored = ["kfinalize", "irq_driver", "of"]
+# krcu-core supplies watching observations for RCU integration fixtures.
+ignored = ["kfinalize", "irq_driver", "of", "krcu-core"]
 
 [features]
 default = []
 irq-work-test = ["dep:irq_driver", "dep:of"]
 workqueue-bench = ["kworkng/bench"]
-rcu-torture = ["krcu/torture"]
-rcu-bench = ["krcu/bench"]
+rcu-torture = []
+rcu-bench = []
 
-smp = ["khal/smp", "ktask/smp", "krcu/smp", "memspace/smp", "fs_boot?/smp", "ipi"]
-ipi = ["dep:kipi", "ktask/ipi", "krcu/ipi"]
+# kfeat assembles matching SMP/IPI capabilities across subsystem crates.
+smp = []
+ipi = ["dep:kipi"]
 
 char = ["kdriver/char", "dep:ktty"]
 display = ["kdriver/display", "dep:fbdevice"]
@@ -41,14 +44,16 @@ vsock_tipc_bridge = []
 
 rtc = []
 # driver-dyn = ["kdriver/dyn"]
-arm-timer-resume-fixup = ["ktask/arm-timer-resume-fixup", "timer_driver/arm-timer-resume-fixup"]
+arm-timer-resume-fixup = []
 rootfs-secondary-block = ["fs", "fs_boot/rootfs-secondary-block"]
 watchdog = ["dep:watchdog"]
 watchdog_hardlockup = ["watchdog/nmi"]
-pmu = ["khal/pmu"]
-nmi = ["khal/nmi"]
+pmu = []
+nmi = []
 
 [dependencies]
+klazy.workspace = true
+ksync.workspace = true
 kspin.workspace = true
 kalloc.workspace = true
 ktty = { workspace = true, optional = true }
@@ -75,6 +80,7 @@ kworkng = { workspace = true, features = ["system"] }
 kfinalize.workspace = true
 ktask = { workspace = true }
 krcu.workspace = true
+krcu-core.workspace = true
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }
 entropy.workspace = true

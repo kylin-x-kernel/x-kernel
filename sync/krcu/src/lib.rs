@@ -52,6 +52,9 @@
 //! Synchronous waits and drains require sleepable task context outside read
 //! scopes. Callback submission rejects NMI; NMI read participation does not
 //! imply permission to submit, allocate, wait, or reclaim there.
+//! [`preflight_callback_submission`] checks task context and permanent service
+//! readiness before a destructive update; it transfers no ownership and does
+//! not replace the submission contract or certify reclamation.
 //!
 //! # Interrupt Handler Example
 //!
@@ -176,19 +179,28 @@
 extern crate alloc;
 
 mod context;
+#[doc(hidden)]
+pub mod host;
 mod read;
 mod service;
-unittest::path_mod_test!(test_support, "../ut-tests/support.rs");
 
 pub use context::{enter_user_quiescent, exit_user_quiescent};
 pub use krcu_core::CallbackNode;
 pub use read::{ReadScope, with_interrupt_read, with_read};
-pub use service::{PreparedCallback, Rcu, drain_callbacks, init_service, synchronize_rcu};
+#[cfg(unittest)]
+#[doc(hidden)]
+pub use service::has_installed_drain_markers_for_tests;
+pub use service::{
+    PreparedCallback, Rcu, drain_callbacks, init_service, preflight_callback_submission,
+    synchronize_rcu,
+};
 
-#[cfg(all(feature = "torture", not(unittest)))]
-#[path = "../benches/torture.rs"]
-pub mod torture;
-
-#[cfg(all(feature = "bench", not(unittest)))]
-#[path = "../benches/latency.rs"]
-pub mod benchmarks;
+/// Observes deferred-cleanup demand without consuming it or authorizing cleanup.
+///
+/// Kernel integration fixtures must pass a discovered CPU with published slots.
+/// This snapshot neither pins the caller nor reports a quiescent state.
+#[cfg(unittest)]
+#[doc(hidden)]
+pub fn reader_cleanup_requested_for_tests(cpu: kcpu_id_map::LogicalCpuId) -> bool {
+    context::needs_reader_cleanup(cpu)
+}

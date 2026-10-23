@@ -8,59 +8,47 @@
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::synchronize_rcu;
-
-#[def_test]
-fn public_scope_rejects_wait_and_protects_multiple_containers() {
-    let left = crate::Rcu::new(alloc::boxed::Box::new(11));
-    let right = crate::Rcu::new(alloc::boxed::Box::new(22));
-    let (sum, wait_result) = crate::with_read(|scope| {
-        let sum = *left.read(scope) + *right.read(scope);
-        // SAFETY: no data is retired; this checks rejection before any marker
-        // is submitted. InvalidInput must not be interpreted as GP completion.
-        let result = unsafe { crate::synchronize_rcu() };
-        (sum, result)
-    });
-    assert_eq!(sum, 33);
-    assert_eq!(wait_result, Err(KError::InvalidInput));
-    // SAFETY: the scope ended, no reader-needed lock or resource is held,
-    // and the boot service remains available. No data is retired by this test.
-    assert_eq!(unsafe { crate::synchronize_rcu() }, Ok(()));
-}
 
 #[def_test]
 fn masked_context_is_rejected_before_submission() {
+    let mut was_called = false;
     let result = {
         let _irq = kspin::IrqSave::new();
-        PreparedGracePeriodWait::prepare()
+        with_prepared_grace_period(|_| was_called = true)
     };
     assert!(matches!(result, Err(KError::InvalidInput)));
+    assert!(!was_called);
 }
 
 #[def_test]
 fn local_read_scope_is_rejected_before_submission() {
-    let current = ktask::current();
-    let was_rejected = crate::test_support::reader(&current).with_read(|_| {
-        matches!(PreparedGracePeriodWait::prepare(), Err(KError::InvalidInput))
+    let was_rejected = crate::host::with_current_reader(|current| {
+        current.reader().with_read(|_| {
+            matches!(
+                with_prepared_grace_period(|_| ()),
+                Err(KError::InvalidInput)
+            )
+        })
     });
     assert!(was_rejected);
 }
 
 #[def_test]
 fn wake_hint_does_not_complete_a_grace_period() {
-    let mut prepared = PreparedGracePeriodWait::prepare().unwrap();
-    prepared.wait.waker().wake();
-    // Consume a retained wake without a callback. The completion predicate,
-    // not a return from park, is the authority used by submit_and_wait.
-    prepared.wait.park();
-    assert!(!prepared.completion.completion.try_wait());
+    let is_complete = with_prepared_grace_period(|prepared| {
+        prepared.wait.waker().wake();
+        // Consume a retained wake without a callback. The completion predicate,
+        // not a return from park, is the authority used by submit_and_wait.
+        prepared.wait.park();
+        prepared.completion.completion.try_wait()
+    })
+    .unwrap();
+    assert!(!is_complete);
 }
 
 #[def_test]
 fn abandoned_preparation_unregisters_without_submitting_callback() {
-    let prepared = PreparedGracePeriodWait::prepare().unwrap();
-    let record = prepared.completion.clone();
-    drop(prepared);
+    let record = with_prepared_grace_period(|prepared| prepared.completion.clone()).unwrap();
     // No raw callback owner was transferred. Keeping only the local record
     // lets us check cancellation without observing the global service queue.
     assert_eq!(Arc::strong_count(&record), 1);
@@ -70,56 +58,41 @@ fn abandoned_preparation_unregisters_without_submitting_callback() {
 
 #[def_test]
 fn completion_before_park_retains_its_result() {
-    let prepared = PreparedGracePeriodWait::prepare().unwrap();
-    let record = Arc::into_raw(prepared.completion.clone());
-    // SAFETY: raw projection preserves the independently retained Arc owner.
-    let node = unsafe { &raw const (*record).node }.cast_mut();
-    // SAFETY: this local fixture has never been queued or published to readers;
-    // it directly grants the callback the sole raw Arc reference, without locks.
-    unsafe { complete_grace_period(node) };
-    assert!(prepared.completion.completion.try_wait());
-    assert!(!prepared.completion.completion.try_wait());
+    let (first, second, owners) = with_prepared_grace_period(|prepared| {
+        let record = Arc::into_raw(prepared.completion.clone());
+        // SAFETY: raw projection preserves the independently retained Arc owner.
+        let node = unsafe { &raw const (*record).node }.cast_mut();
+        // SAFETY: this fixture was never queued or published to readers; it
+        // grants the callback the sole raw Arc reference without locks held.
+        unsafe { complete_grace_period(node) };
+        (
+            prepared.completion.completion.try_wait(),
+            prepared.completion.completion.try_wait(),
+            Arc::strong_count(&prepared.completion),
+        )
+    })
+    .unwrap();
+    assert!(first);
+    assert!(!second);
     // The unsubmitted handle still retains its independent cancellation owner.
-    assert_eq!(Arc::strong_count(&prepared.completion), 2);
+    assert_eq!(owners, 2);
 }
 
 #[def_test]
 fn notifier_ownership_survives_waiter_destruction() {
-    let prepared = PreparedGracePeriodWait::prepare().unwrap();
-    let observer = Arc::downgrade(&prepared.completion);
-    let notifier = prepared.completion.clone();
-    notifier.completion.complete();
-    assert!(prepared.completion.completion.try_wait());
-    drop(prepared);
+    let (notifier, was_complete) = with_prepared_grace_period(|prepared| {
+        let notifier = prepared.completion.clone();
+        notifier.completion.complete();
+        let was_complete = prepared.completion.completion.try_wait();
+        (notifier, was_complete)
+    })
+    .unwrap();
+    let observer = Arc::downgrade(&notifier);
+    assert!(was_complete);
     // Model the waiter returning while complete_grace_period still owns its
     // Arc. The notifier may finish its remaining accesses independently.
     assert_eq!(Arc::strong_count(&notifier), 1);
     assert!(!notifier.completion.is_completed());
     drop(notifier);
     assert!(observer.upgrade().is_none());
-}
-
-#[def_test(serial)]
-fn synchronous_wait_uses_the_live_callback_service() {
-    for _ in 0..4 {
-        // SAFETY: no object is retired by this fixture and no read scope or
-        // lock is held. Boot established the permanent participating services.
-        assert_eq!(unsafe { synchronize_rcu() }, Ok(()));
-    }
-}
-
-#[def_test(serial)]
-fn pending_interrupt_does_not_cancel_synchronous_wait() {
-    let current = ktask::current();
-    let was_interrupted = current.is_interrupted();
-    current.interrupt();
-    // SAFETY: this task-only fixture retires no object and holds no read scope
-    // or lock. Boot retains the participating services throughout the wait.
-    let result = unsafe { synchronize_rcu() };
-    let is_still_interrupted = current.is_interrupted();
-    if !was_interrupted {
-        current.clear_interrupt();
-    }
-    assert_eq!(result, Ok(()));
-    assert!(is_still_interrupted);
 }

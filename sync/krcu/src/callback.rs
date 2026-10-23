@@ -6,10 +6,47 @@
 
 use core::{mem::ManuallyDrop, ptr::NonNull};
 
-use kerrno::KError;
+use kerrno::{KError, KResult};
 use krcu_core::CallbackNode;
 
 use super::SERVICE;
+
+/// Checks task context and service readiness before a destructive publication change.
+///
+/// This does not allocate, wait, submit a callback, reserve service state or pin
+/// the caller after return. Check before acquiring writer exclusion or changing
+/// publication. A successful check is a snapshot, not a transferable permit.
+///
+/// Under the permanent boot contract, the driver and waker are never revoked
+/// and migration stays within the fixed participating CPU set. The same task
+/// may be preempted or migrated before submitting through
+/// [`PreparedCallback::submit`]. Prepare all fallible resources before mutation,
+/// release writer exclusion before submission, and insert no arbitrary caller
+/// code or explicit execution-context/watching transition between commit and
+/// submit. Callers still own serialization, withdrawal and callback safety.
+///
+/// Submission retains its independent checks and original rejection contract,
+/// including support for watched hardirq/softirq callers that this task-only
+/// preflight rejects. An unexpected rejection after mutation is an invariant
+/// failure: retain the retired ownership and diagnose it, rather than canceling
+/// protected data or returning an error claiming publication was unchanged.
+/// Service teardown or CPU hotplug would require revisiting this protocol.
+///
+/// # Errors
+/// Returns `BadState` if the service is absent (checked first). With a service,
+/// invalid context is rejected before checking waker readiness: `InvalidInput`
+/// outside sleepable watched task context, including NMI, interrupt/BH or exception
+/// context, masked IRQs, disabled preemption, an active read scope, or absent/
+/// idle current task storage; `BadState` if the startup waker is not published.
+/// No consumer state is changed on either error.
+/// Before service startup, the absent-service result requires no current task;
+/// once a service exists, the boot contract requires initialized CPU context.
+pub fn preflight_callback_submission() -> KResult<()> {
+    SERVICE
+        .get()
+        .ok_or(KError::BadState)?
+        .preflight_callback_submission()
+}
 
 /// Owns the right to submit one node or release its unsubmitted resources.
 ///
@@ -112,5 +149,3 @@ impl Drop for PreparedCallback {
         unsafe { (self.cancel_fn)(self.node.as_ptr()) };
     }
 }
-
-unittest::path_mod_test!(tests, "../ut-tests/rcu_callback.rs");

@@ -2,13 +2,75 @@
 
 ## Trust Boundary And Assets
 
-The default-off `torture` feature compiles an explicit release validation runner,
+Softirq installation must leave the existing action unchanged on conflict and
+must not invoke it under the startup lock. RCU installs before claiming driver
+control. Dispatch excludes migration, supplies non-sleepable softirq context,
+and holds no carrier lock across callbacks. Local re-raise preserves the owning
+CPU and cannot inline-dispatch; it is a pending-work hint, not a GP observation.
+
+The task-start provider must execute PreparedGpTask exactly once on a new
+sleepable task, never inline or on the startup caller's stack. The non-cloneable
+entry privately owns the sole driver and startup waker; discarding it would
+strand claimed control. No recoverable failure is allowed after this transfer.
+RCU validates startup parking before claiming control, and publishes readiness
+only after the new task prepares its own parking and timer resources.
+
+The timer provider must use the same monotonic nanosecond clock for sampling
+and arming, retain callback storage through delivery, and drain on cancellation
+or body return. RCU publishes readiness only after timer preparation. Expiry
+requests a pass; neither expiry nor timer cancellation proves GP completion.
+
+Callback drain borrows runtime-prepared task parking and a runtime-owned
+sleepable serialization gate. The gate covers installation and the entire wait;
+only krcu's completion counter authorizes return and marker reuse. The runtime
+does not own markers or decide completion.
+
+The task-wait provider must reject invalid sleep contexts before invoking the
+RCU body and must never report setup failure after invoking it. Its borrowed
+parking state stays on the preparing task's stack, remembers early wake hints,
+and does not consume signals or allocate during park. RCU owns the registered
+completion and loops on that predicate; a host wake is not reclamation authority.
+Owning replacement enters its exchange body only after both host preparation
+and completion registration succeed, preserving the unused owner on rejection.
+
+The current-reader provider must retain initialized current task storage across
+its single synchronous body, including involuntary migration or nested NMI.
+Its unsafe CurrentReader construction certifies only identity and lifetime;
+the borrowed token cannot cross tasks or escape the body. RCU remains responsible
+for watched-context admission and every nesting/enrollment operation. The host
+must neither acquire locks nor change exclusion just to lend current storage.
+
+The task-control provider must not turn a reschedule request or deferred credit
+release into a checkpoint. Deferral preserves IRQ state, balances only its own
+credit and never runs RCU cleanup on return. RCU must arrange the subsequent
+checkpoint outside its bookkeeping locks. The ordinary checkpoint may reenter
+RCU's guarded cleanup and schedule only under the host's normal context rules.
+
+The execution-context provider must recognize NMI before taking any ordinary
+context lock or guard, and must not run scheduler/cleanup checks on return.
+BH exclusion alone must not satisfy the interrupt-handler predicate. These are
+snapshots, not permission to unlink: RCU retains its exclusion and watching
+checks across cleanup, and its read admission checks before entering a scope.
+The exception-snapshot provider must pin CPU selection through its synchronous
+body and restore the caller's IRQ mask afterward without scheduling. It reads
+only trapframe presence, never dereferences the frame. The body must not enable
+IRQs or block. RCU's admission assertions remain inside that excluded interval;
+the subsequent read body runs with the caller's original mask. A sampled CPU
+identity does not authorize later unpinned CPU-local queue access.
+
+The static `RcuNotifyIf` provider is trusted only to deliver notifications under
+the declared execution-context constraints. It cannot establish quiescence or
+permission to reclaim. RCU publishes demand before notification and retains its
+completion predicates. The no-IPI provider may wake a softirq daemon inline;
+scheduler-locked cleanup must continue using periodic progress in that mode.
+
+Runtime's default-off `rcu-torture` feature compiles an explicit release validation runner,
 excluded under `cfg(unittest)`. It is not a userspace service. The boot adapter
 selects it instead of userspace and powers off after successful completion.
 Every finite batch retains its resources until workers join; a timeout must
 fail externally, not force reclamation. Assertions and unfiltered output are
 intentional test behavior, absent from normal configurations.
-The separate default-off `bench` runner follows the same exclusion and lifetime
+Runtime's separate default-off `rcu-bench` runner follows the same exclusion and lifetime
 rules. It submits unpublished records, checks same-CPU callback timestamps and
 drains each record before releasing observation storage. Invalid measurements
 fail; timing never grants permission to free a record without completion.
@@ -21,6 +83,14 @@ complete all-CPU service preparation before `init_service`.
 The static `krcu_core::RcuContextIf` provider exists before service startup;
 its presence is not GP readiness or consumer admission. The algorithm contracts
 remain in [krcu-core](../crates/krcu-core/docs/security.md).
+
+The unittest-only cleanup-demand query reads a published CPU's permanent
+atomic flag. It neither consumes demand nor grants scope, cleanup or GP
+authority. The unittest-only marker query observes installation under marker
+locks while the fixture holds the host drain gate; it cannot change markers or
+certify completion. Runtime fixtures retain task storage and use the same excluded
+integration boundaries as production; private queue/marker ownership is not
+exported to those fixtures. This observation API is absent from normal builds.
 
 No user pointer, device buffer or MMIO register is interpreted here. External
 interrupt and timer delivery affects progress through existing providers;
@@ -75,7 +145,8 @@ before releasing the outgoing owner or on-CPU marker. IRQs and migration remain
 excluded, old current is unpublished and the exited task cannot resume. The
 PREV_TASK lock is released before the original reader-node lock is acquired;
 diagnostics run after unlinking. Normal outer exits remove their node first.
-GC retains its ordinary final-ownership check before destroying task storage.
+The task subsystem's deferred finalization destroys storage only after its
+independent owners have released it.
 Cleanup does not detach immutable runtime fields while shared task references
 may still borrow them, or unwind values on an abandoned Rust stack.
 No raw task pointer is sent to a deferred callback. IRQ/NMI read scope support
@@ -208,6 +279,36 @@ exclusive container owner and performs ordinary caller-context destruction;
 it cannot overlap a protected borrow or an in-progress replacement.
 
 ## Service Startup And Failure Handling
+
+The safe `preflight_callback_submission` query neither owns a callback nor
+authorizes reclamation. Absent service returns `BadState` without current-task
+access. With a service present, NMI rejects before any ordinary guard or task
+query; the host sleepability snapshot performs no allocation, checkpoint or
+pending-bit mutation. It rejects missing/idle current, interrupt/BH contexts,
+masked IRQs, tracked preemption exclusion and active reader scopes. RCU then
+checks exception presence, watching and startup waker publication under a short
+IRQ snapshot. All temporary exclusion is restored before returning.
+
+This query and raw submission share only watching/waker validation. Task-only
+rejection must never be added to ordinary submission: timer hardirq and softirq
+reposts remain supported. Existing ownership checks, rejection with the original
+handle and notification outside the enqueue guard are unchanged.
+
+A consumer must reject ordinary setup failures before destructive publication,
+prepare fallible resources first, serialize the change and release writer
+exclusion before submitting. A successful preflight survives ordinary task
+preemption/migration only under the permanent driver/waker and fixed discovered
+participant-set invariant. It cannot certify arbitrary context changes, caller
+callbacks, teardown, hotplug or callback/destructor safety. After commit, an
+unexpected submission rejection is an invariant failure, not an ordinary error
+claiming an unchanged mapping. Retain the retired owner and diagnose/fail fast;
+cancellation is not a GP and must not free data still borrowed by readers.
+No retry backlog, alternate queue or admission session is introduced.
+
+Isolated readiness tests do not establish real boot or migration correctness.
+Runtime context rejection and migration after successful preflight remain
+integration acceptance obligations and must be verified before relying on this
+protocol in a new destructive consumer.
 
 Private callback admission checks NMI before ordinary guards, then watching and
 readiness before touching the supplied node. Rejected submissions retain caller

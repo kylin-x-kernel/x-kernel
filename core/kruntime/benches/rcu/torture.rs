@@ -7,7 +7,7 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::Rcu;
+use krcu::Rcu;
 
 #[path = "retirement.rs"]
 mod retirement;
@@ -63,7 +63,7 @@ impl Drop for Payload {
 fn run_reader(value: &Rcu<Payload>, ledger: &Ledger, index: usize) {
     let mut iteration: usize = 0;
     while !ledger.should_stop.load(Ordering::Relaxed) {
-        crate::with_read(|scope| {
+        krcu::with_read(|scope| {
             let borrowed = value.read(scope);
             if borrowed.id != 0 {
                 ledger.updated_reads.fetch_add(1, Ordering::Relaxed);
@@ -74,7 +74,7 @@ fn run_reader(value: &Rcu<Payload>, ledger: &Ledger, index: usize) {
             for _ in 0..(1 + iteration.wrapping_add(index) % 64) {
                 core::hint::spin_loop();
             }
-            crate::with_read(|nested| {
+            krcu::with_read(|nested| {
                 is_intact &= value.read(nested).is_intact();
             });
             is_intact &= borrowed.is_intact();
@@ -212,7 +212,7 @@ fn run_batch() {
 /// # Panics
 /// Panics on invalid duration, failed joins, content/ownership errors or lack
 /// of observed reads. An external timeout must diagnose a stalled batch.
-pub fn run(seconds: usize) {
+pub(crate) fn run(seconds: usize) {
     assert!((1..=86400).contains(&seconds));
     retirement::run();
     let begin = khal::time::monotonic_time_nanos();

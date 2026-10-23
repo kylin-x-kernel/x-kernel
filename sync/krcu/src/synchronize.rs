@@ -13,9 +13,9 @@ use core::{
 use kerrno::{KError, KResult};
 use kpoll::{Completion, PollRegisterError, PollRegistration};
 use krcu_core::CallbackNode;
-use ktask::future::PreparedTaskWait;
 
 use super::{SERVICE, callback::PreparedCallback};
+use crate::host::{TaskWait, with_prepared_wait};
 
 #[repr(C)]
 struct GracePeriodCompletion {
@@ -27,16 +27,22 @@ struct GracePeriodCompletion {
 const _: () = assert!(core::mem::offset_of!(GracePeriodCompletion, node) == 0);
 
 /// Prepared before withdrawal so no recoverable setup failure can abandon it.
-pub(super) struct PreparedGracePeriodWait {
+pub(super) struct PreparedGracePeriodWait<'wait> {
     callback: PreparedCallback,
     completion: Arc<GracePeriodCompletion>,
-    wait: PreparedTaskWait,
+    wait: &'wait mut dyn TaskWait,
     _registration: PollRegistration,
 }
 
-impl PreparedGracePeriodWait {
-    pub(super) fn prepare() -> KResult<Self> {
-        let wait = PreparedTaskWait::prepare()?;
+/// Invokes the update only after task parking and RCU registration succeed.
+pub(super) fn with_prepared_grace_period<R>(
+    body_fn: impl FnOnce(PreparedGracePeriodWait<'_>) -> R,
+) -> KResult<R> {
+    with_prepared_wait(|wait| PreparedGracePeriodWait::prepare(wait).map(body_fn))?
+}
+
+impl<'wait> PreparedGracePeriodWait<'wait> {
+    fn prepare(wait: &'wait mut dyn TaskWait) -> KResult<Self> {
         SERVICE
             .get()
             .filter(|service| service.waker.get().is_some())
@@ -70,7 +76,7 @@ impl PreparedGracePeriodWait {
         })
     }
 
-    pub(super) fn submit_and_wait(mut self) {
+    pub(super) fn submit_and_wait(self) {
         // SAFETY: preparation verified the permanent boot service. Every
         // executing CPU belongs to its fixed participant set. This fresh node
         // has one queue owner; its raw Arc survives through the nonblocking
@@ -147,8 +153,7 @@ unsafe fn complete_grace_period(node: *mut CallbackNode) {
 /// service. An error does not authorize reclamation. The boot-owned service
 /// and participating CPUs must remain available throughout the wait.
 pub unsafe fn synchronize_rcu() -> KResult<()> {
-    PreparedGracePeriodWait::prepare()?.submit_and_wait();
-    Ok(())
+    with_prepared_grace_period(|wait| wait.submit_and_wait())
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/rcu_synchronize.rs");

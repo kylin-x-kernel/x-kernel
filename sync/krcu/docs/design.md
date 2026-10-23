@@ -12,6 +12,21 @@ rendezvous; POSIX brackets user transfer with this crate's callbacks.
 
 ## Source Scope And Integration
 
+- `src/host.rs`: static execution, task, timer and notification contracts,
+  supplied by kruntime.
+  RCU retains demand publication, CPU progress eligibility and callback budgets;
+  the provider only delivers existing IPI/softirq notifications.
+  Its current-reader adapter lends host-retained task storage through a
+  synchronous body. CurrentReader certifies identity/lifetime, not read admission.
+  The task-wait adapter lends prepared parking and a waker; it does not own
+  completion predicates or callback markers.
+  The timer adapter lends a stack-borrowed one-shot timer and its clock. RCU
+  chooses deadlines, cancellation and progress actions; expiry only sets demand.
+  Task startup transfers a PreparedGpTask containing the unique driver, service
+  reference and startup waker. The host moves it into the ordinary task entry;
+  it neither claims control nor publishes RCU readiness.
+  The softirq adapter installs the fixed action and raises local pending work.
+  RCU retains callback budgets, GP wake decisions and the ready-queue recheck.
 - `src/context.rs`: permanent reader nodes and CPU watching, cleanup flags,
   the static `RcuContextIf` provider and user-boundary callbacks.
 - `src/service.rs`: service state, sole GP driver/task, progress timer and
@@ -21,8 +36,77 @@ rendezvous; POSIX brackets user transfer with this crate's callbacks.
 - `src/callback.rs`: public one-shot ownership of prepared callback nodes.
 - `src/drain.rs`: private serialized callback drain and reusable completion
   markers behind the exported `drain_callbacks` operation.
-- `ut-tests/`: controlled host integration fixtures.
+- `ut-tests/`: private scope, state, startup, completion and marker fixtures.
+  Host-integrated tasks, interrupts and consumers are tested by kruntime.
 - `crates/krcu-core/`: reusable algorithms and the static integration contract.
+
+The consumer interface remains in krcu; there is no separate API crate.
+`RcuNotifyIf` is a host integration contract, not an alternative callback API.
+With IPI support notifications remain deferred and cannot wake tasks inline.
+Without it, only local RCU softirq notification is supported and may wake its
+daemon. Scheduler-locked cleanup still relies on periodic progress in that
+configuration. Neither notification certifies a quiescent state or consumes
+reader cleanup demand. This crate does not depend on ktask, kirq, khal, kipi
+or ksync. Runtime supplies their concrete capabilities; scheduler/IRQ hooks
+reach the RCU owner through the existing krcu-core integration contract.
+
+Task and interrupt read scopes, scheduler cleanup checks and final user-entry
+cleanup borrow current storage through `RcuTaskIf`.
+The runtime retains its concrete CurrentTask handle until RCU nesting and task
+exit cleanup finish. No allocation or owner-count increment is added. The
+adapter preserves IRQ/preemption state and does not decide watching or unlink
+eligibility. Task bodies remain preemptible; interrupt bodies remain strictly
+nested and skip task-exit cleanup. User entry releases the borrowed handle
+before turning watching off; cleanup retains the handle through guard release.
+`RcuExecutionIf` supplies interrupt-context facts through runtime integration.
+The broad interrupt-context predicate includes BH-disabled tasks; the handler
+predicate excludes those tasks and includes only executing IRQ/NMI/softirq
+handlers. Queries check NMI before ordinary context snapshots and do not run
+scheduler checks. RCU retains scope admission and cleanup eligibility.
+`RcuTaskIf::is_sleepable_context` supplies a nonallocating task-context query
+without preparing a wait or changing exclusion/pending state. Preflight rejects
+NMI before this query, and samples it before adding temporary IRQ exclusion.
+RCU separately owns exception and watching checks.
+`RcuTaskIf` also supplies the current preemption-count query, reschedule-request
+bit, ordinary scheduling checkpoint and scoped check deferral. Deferral removes
+only its own preemption credit, without changing IRQ state or running cleanup.
+RCU decides when to retain enrollment and when to request a later checkpoint;
+the host decides whether that checkpoint may schedule. `RcuExecutionIf` supplies
+CPU identity and exception snapshots. Read admission runs in its synchronous
+exception-snapshot body while the host retains ordinary IRQ exclusion; RCU
+checks NMI, exception presence, watching and interrupt state inside that body.
+The host restores IRQ state before the actual read scope, without a scheduling
+check or preemption-count update. Cleanup uses the independent protected
+exception query. CPU identity is not a pin: queue transfer/execution retains
+its existing exclusion, while a demand notification may target a sampled CPU.
+The `ipi` feature selects RCU's remote notification protocol, not a scheduler
+implementation. The `smp` feature also enables `kspin/smp` for its own shared
+state. `kfeat/ipi` selects matching RCU, runtime and task/IPI capabilities
+together; `kfeat/smp` includes that assembly. Enabling an RCU feature alone
+does not initialize or configure the host scheduler. An alternative host must
+provide the selected notification contract; krcu does not depend on kruntime.
+Tests of private completion ownership and registration stay with the RCU
+implementation. Public synchronous-wait integration and task/timer carrier
+prerequisites live in `core/kruntime/ut-tests/`; they use boot's permanent
+services without opening private RCU state to external callers.
+Public callback lifecycle tests also live in runtime: they observe cancellation,
+invocation, original node addresses, execution context and submission allocation
+counts through caller-owned probes. Core queue tests check execution budgets;
+runtime uses finite per-CPU bursts to exercise real softirq progress.
+Internal CPU-slot, synchronous-wait admission and user-boundary fixtures obtain
+current CPU/reader state through the same host contracts as production code.
+They inspect private RCU state without depending on concrete task storage;
+runtime integration tests separately verify the host's context classification.
+Public drain admission and downstream-task completion boundaries are tested in
+runtime through `PreparedCallback` and `drain_callbacks`. Private marker and
+counter fixtures remain here; drain does not join work started by a callback.
+Task-switch, migration, IRQ/BH/NMI cleanup and implicit-region integration
+fixtures live in runtime. They retain actual task storage and use existing
+scheduler integration tokens, not unrestricted access to private RCU state.
+The unittest-only `reader_cleanup_requested_for_tests` snapshot lets them
+observe demand without clearing it, supplying quiescence or authorizing cleanup.
+The marker-installation snapshot similarly observes only whether any drain
+marker is installed while a fixture holds the host's drain serialization gate.
 
 `krcu_core::RcuContextIf` is defined in the core's `src/integration.rs` and
 implemented here, not in the IRQ crate. Its production operations are
@@ -38,7 +122,8 @@ certifies the host's retained task and excluded, watched, non-NMI boundary.
 The static methods are safe; their provider delegates unsafe core operations
 under that context contract.
 The crate exports `Rcu` for scoped reads and task-context synchronous replacement.
-It also exports `CallbackNode`, `PreparedCallback`, `drain_callbacks`,
+It also exports `CallbackNode`, `PreparedCallback`, `preflight_callback_submission`,
+`drain_callbacks`,
 `with_read`, `with_interrupt_read`, `ReadScope` and the unsafe `synchronize_rcu` operation.
 Core reader accounting and manual enter/exit operations remain private.
 
@@ -215,8 +300,9 @@ the runqueue lock. For permanently exited tasks, `finish_task_switch`
 clears residual reader participation after publishing incoming current and
 leaving the outgoing stack, but before releasing its owning reference or on-CPU
 marker. It diagnoses abandoned scopes and uses krcu-core's ordinary unlink path.
-GC still uses `Arc::try_unwrap` to wait for independent owners and destroy tasks
-in task context; it does not repair RCU lists or permanently retain readers.
+The task subsystem retains storage through unlinking and releases its outgoing
+owner afterward. Final destruction uses its deferred finalization mechanism;
+that mechanism does not repair RCU lists or permanently retain readers.
 
 ## Service Startup
 
@@ -233,6 +319,20 @@ The published waker admits prepared synchronous waits and callback handles.
 The raw queue transfer boundary remains private to owning adapters and tests.
 
 ## Owning Consumer Policies And Evidence
+
+Synchronous waits borrow a `TaskWait` from the runtime's stack-local
+`PreparedTaskWait` adapter. The host validates sleepability and prepares its
+waker before invoking the RCU body. RCU then prepares its completion registration
+before giving the caller a `PreparedGracePeriodWait`. Owning replacement retains
+the new Box until this body is entered, so either preparation failure returns
+that same owner without changing publication. No fallible setup follows exchange.
+The adapter adds no allocation for type erasure, cannot return an error after
+invoking its body, and cannot grant completion merely by returning from park.
+Callback drain, the startup caller and the GP task borrow the same prepared
+parking contract. Startup prepares its wait before any control claim. The GP
+task prepares a different wait on its own stack, then prepares its timer and
+publishes readiness. The startup caller still checks RCU's waker publication
+after each wake; activation alone is not readiness.
 
 The synchronous-wait module supports owning replacement and the public unsafe
 `synchronize_rcu` operation. The latter does not withdraw or own user data;
@@ -299,6 +399,37 @@ not boot-service notification, public container admission or weak-memory proof.
 
 ## Progress And Callback Execution
 
+`preflight_callback_submission` checks ordinary task execution and permanent
+service readiness before a consumer changes publication destructively. It has
+no node argument and allocates no wait, transfers no ownership, requests no
+progress and retains no CPU pin or admission token. An absent service returns
+`BadState` before any current-task access. Once the service exists, NMI is
+rejected before ordinary context queries can lock. Host sleepability is checked
+before temporary IRQ exclusion; the exception-snapshot body then rejects
+exceptions and performs the same watching/waker checks as callback submission.
+Invalid context returns `InvalidInput`; an unpublished waker returns `BadState`
+after valid context. The shared check does not impose task-only restrictions on
+ordinary submission, which still supports watched hardirq and softirq callers.
+
+Consumers prepare all fallible resources before mutation, serialize and recheck
+their update, then release writer exclusion and use the existing
+`PreparedCallback::submit`. Ordinary preemption/migration may occur; no
+arbitrary caller code or explicit context/watching transition belongs between
+commit and submit. The preflight result is not a transferable reservation.
+Its use relies on startup completing CPU discovery/rendezvous before fixing the
+participant set, driver claim preceding waker publication, and neither being
+revoked. The actual submit still selects its current CPU under short exclusion
+and performs the core driver/participant checks. No queue or GP algorithm changes.
+Future teardown/hotplug requires revisiting this contract.
+
+The internal preflight fixture owns isolated inactive reader nodes and service
+state. It checks rejection before driver claim and before waker publication,
+then watched task success and the shared masked/unwatched checks. It does not
+replace live SERVICE or execute early boot. Runtime fixtures check rejection
+without consuming prepared ownership or changing publication. A separate
+preemptible SMP fixture verifies actual CPU migration after preflight, followed
+by submission and exactly-once softirq execution on the destination CPU.
+
 The private `submit_callback` boundary pairs queue transfer with retained
 progress notification. It rejects NMI before taking any ordinary guard, and
 checks watching and service readiness under local IRQ/preemption exclusion.
@@ -358,9 +489,12 @@ distinct responsibilities: retained callback queues account for work, while
 notification and scheduler wakeups only request execution.
 
 The live prepared-submission burst fixture excludes local IRQ execution while
-submitting more than two callback budgets to its current CPU, then waits for
-every retained completion. It checks that pending-bit coalescing and budget
-continuation lose or duplicate no callbacks. It does not require one interrupt
+submitting a fixed workload to its current CPU, then waits for every retained
+completion. It checks that batched delivery loses or duplicates no callbacks.
+The private service fixture sizes its workload from `CALLBACK_BUDGET` and uses
+the production batch executor to check exact per-pass counts and re-notification:
+unready work does not rearm, ready remainder does, and an empty queue does not.
+The live fixture does not require one interrupt
 per submission or inject synchronous reentry into the IPI controller. Selecting
 one QEMU CPU does not disable the platform's Cargo `ipi` feature; such a run
 must not be reported as validation of the no-IPI wake branch.
@@ -412,7 +546,7 @@ That second inspection cannot discharge an unobserved CPU. After promotion, the 
 each CPU with eligible callbacks; it never invokes callbacks itself. The current
 integration test submits unpublished owning objects and supplies real scheduler
 boundaries with per-CPU tasks. It checks target CPU, softirq context and completed
-counts across repeated workloads larger than the callback budget. This does not
+counts across repeated fixed workloads, independent of the private budget. This does not
 establish idle/no-tick progress or authorize ordinary protected-data consumers.
 An additional fixture submits on every CPU and parks until owning callback
 wakers report completion, without yielding helper tasks. Other interrupt sources
@@ -421,8 +555,11 @@ are not disabled by that fixture; it is not proof of a completely tick-free run.
 ## Callback Drain
 
 The public drain interface requires a sleepable watched task. A sleepable
-mutex serializes drain callers; permanent service storage contains one reusable
-marker per CPU, separate from the mutex payload. Each queue inserts its marker
+mutex supplied by the runtime serializes drain callers from marker installation
+through completion. The runtime owns only this gate and prepared task parking;
+krcu owns the completion predicate and marker protocol. Permanent service
+storage contains one reusable marker per CPU, separate from the mutex payload.
+Each queue inserts its marker
 at its logical tail, including work already detached for execution. Empty queues
 need no marker and the drain does not request a new GP of its own. The service's
 normal progress path delivers eligible markers to their owning CPU.
@@ -462,7 +599,8 @@ then release owner resources. Any downstream work requires its own drain.
 
 ## Ownership Stress And Measurement Boundaries
 
-The default-off release runner in `benches/torture.rs` exercises public scoped reads and concurrent synchronous
+The runtime-owned default-off release runner in
+`core/kruntime/benches/rcu/torture.rs` exercises public scoped reads and concurrent synchronous
 replacement. Like Linux rcutorture's initialization and object-circulation
 checks, it checks payload contents and keeps an independent per-object return
 and destruction ledger. Readers retain the container, not an extra owner of the
@@ -478,7 +616,7 @@ changing the GP implementation. These checks complement real-allocation
 accounting; neither replaces weak-memory modeling or exhaustive interleavings.
 It repeats fully verified batches for `RCU_TORTURE_SECONDS`, enabled explicitly
 with `KFEAT_RCU_TORTURE`. Default UT does not compile or execute this workload.
-See [runner instructions](../benches/README.md) for configuration and pass criteria.
+See [runner instructions](../../../core/kruntime/benches/rcu/README.md) for configuration and pass criteria.
 Each timed iteration also runs bounded per-CPU callback producers through
 `PreparedCallback`. Records own their intrusive nodes and release themselves
 in softirq; after producer joins, `drain_callbacks` must leave each ID invoked

@@ -31,8 +31,9 @@ or lifetime ownership. It relies on the interrupt backend's publish-before-notif
 contract and eventual target IRQ service. Long IRQ masking remains a latency risk.
 
 Scheduler and timer fixed-notification features require matching providers.
-`ktask/ipi` enables these two features and supplies both endpoints. Built-in BH
-notifications call kirq directly. The notification module is always compiled;
+`kfeat/ipi` enables these two features together with `ktask/ipi`, which supplies
+both endpoints. Built-in BH notifications call kirq directly.
+The notification module is always compiled;
 linking it does not enable delivery or satisfy service initialization contracts.
 No empty fallback drops requests for a feature-selected endpoint.
 

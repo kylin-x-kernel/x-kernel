@@ -57,7 +57,7 @@ fn start_reader(
                     }
                 };
                 let duration = if is_rcu_reader {
-                    crate::with_read(|_| busy_read_fn())
+                    krcu::with_read(|_| busy_read_fn())
                 } else {
                     busy_read_fn()
                 };
@@ -120,7 +120,7 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
                             let start = khal::time::monotonic_time_nanos();
                             // SAFETY: watched sleepable worker, no read scope or
                             // held locks. No object is retired by this benchmark.
-                            let result = unsafe { crate::synchronize_rcu() };
+                            let result = unsafe { krcu::synchronize_rcu() };
                             let end = khal::time::monotonic_time_nanos();
                             assert!(result.is_ok());
                             assert!(end >= start);

@@ -9,7 +9,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use kcpu_id_map::LogicalCpuId;
 use krcu_core::{CpuWatching, RcuContextIf, ReaderNode, TaskReader};
 
-use crate::service;
+use crate::{
+    host::{RcuExecutionIf, RcuTaskIf, with_current_reader, with_preempt_check_deferred},
+    service,
+};
 
 pub(crate) static READER_NODES: [ReaderNode; kbuild_config::NR_CPUS] =
     [const { ReaderNode::new() }; kbuild_config::NR_CPUS];
@@ -76,26 +79,19 @@ pub(crate) fn request_local_cleanup_for_tests() {
         .store(true, Ordering::Release);
 }
 
-pub(crate) fn current_reader(task: &ktask::CurrentTask) -> &TaskReader {
-    // SAFETY: CurrentTask retains the current slot's borrow on this execution
-    // stack. Our private callers only mutate it on this task or its strictly
-    // nested handlers, under each core operation's additional context contract.
-    unsafe { task.rcu_reader_for_integration() }
-}
-
-pub(crate) fn request_reader_cleanup(task: &ktask::CurrentTask) {
+pub(crate) fn request_reader_cleanup(current: &crate::host::CurrentReader<'_>) {
     let guard = kspin::NoPreemptIrqSave::new();
-    let reader = current_reader(task);
+    let reader = current.reader();
     if !reader.is_reading() && reader.is_enrolled() {
         current_state()
             .cleanup_requested
             .store(true, Ordering::Release);
-        ktask::request_current_reschedule();
+        RcuTaskIf::request_current_reschedule();
     }
     // Preserve the caller's deferred exit: our temporary pin must not itself
     // trigger cleanup while restoring IRQ/preemption state. No IPI/controller
     // lock is acquired here; the active GP's timed pass delivers the kick.
-    ktask::with_preempt_check_deferred(|| drop(guard));
+    with_preempt_check_deferred(|| drop(guard));
 }
 
 /// Consumes local cleanup demand without completing a CPU observation.
@@ -124,7 +120,7 @@ pub(crate) unsafe fn finish_reader_cleanup(reader: &TaskReader) {
 #[kiface::provide]
 impl RcuContextIf {
     fn request_completion_pass() {
-        if !kirq::context::is_in_nmi() {
+        if !RcuExecutionIf::is_in_nmi() {
             service::request_completion_pass();
         }
     }
@@ -156,30 +152,31 @@ impl RcuContextIf {
 }
 
 fn check_reader_cleanup() {
-    if kirq::context::is_in_nmi() {
+    if RcuExecutionIf::is_in_nmi() {
         return;
     }
-    let task = ktask::current();
-    let reader = current_reader(&task);
-    if (reader.is_enrolled() || needs_local_reader_cleanup())
-        && !reader.is_reading()
-        && !ktask::current_preemption_disabled()
-        && !khal::context::in_exception_context()
-    {
-        // Exclusion covers owner lookup and reader removal, not merely the
-        // context queries, which provide their own snapshot protection.
-        let guard = kspin::NoPreemptIrqSave::new();
-        if RcuContextIf::current_cpu_watching().is_watching()
-            && !kirq::context::is_in_interrupt_context()
+    with_current_reader(|current| {
+        let reader = current.reader();
+        if (reader.is_enrolled() || needs_local_reader_cleanup())
+            && !reader.is_reading()
+            && !RcuTaskIf::current_preemption_disabled()
+            && !RcuExecutionIf::is_in_exception_context()
         {
-            // SAFETY: retained current, watched task context, IRQ/preemption
-            // excluded and no reader-node lock held. Nesting is rechecked.
-            unsafe { finish_reader_cleanup(reader) };
+            // Exclusion covers owner lookup and reader removal, not merely the
+            // context queries, which provide their own snapshot protection.
+            let guard = kspin::NoPreemptIrqSave::new();
+            if RcuContextIf::current_cpu_watching().is_watching()
+                && !RcuExecutionIf::is_in_interrupt_context()
+            {
+                // SAFETY: host-retained current, watched task context, IRQ/preemption
+                // excluded and no reader-node lock held. Nesting is rechecked.
+                unsafe { finish_reader_cleanup(reader) };
+            }
+            // IRQ restoration may request work. The enclosing scheduler checkpoint
+            // will inspect it; suppress only recursive checks during this release.
+            with_preempt_check_deferred(|| drop(guard));
         }
-        // IRQ restoration may request work. The enclosing scheduler checkpoint
-        // will inspect it; suppress only recursive checks during this release.
-        ktask::with_preempt_check_deferred(|| drop(guard));
-    }
+    });
 }
 
 /// Ends watched kernel execution at the final userspace-entry boundary.
@@ -196,23 +193,22 @@ pub unsafe fn enter_user_quiescent() {
     // The architecture caller keeps IRQs masked through the final transfer,
     // not just cleanup. A local guard restoring IRQs here cannot replace that contract.
     debug_assert!(!karch::local_irq_enabled());
-    {
-        let task = ktask::current();
-        let reader = current_reader(&task);
+    with_current_reader(|current| {
+        let reader = current.reader();
         // Avoid a preemption-count RMW on the ordinary unenrolled return path.
         // Debug context queries also need protection against guard-drop checks.
         if cfg!(debug_assertions) || reader.is_enrolled() || needs_local_reader_cleanup() {
             // Do not let cleanup's guard release schedule in the architecture's
             // final user-entry callback. Its caller already masks ordinary IRQs.
-            ktask::with_preempt_check_deferred(|| {
+            with_preempt_check_deferred(|| {
                 debug_assert!(!reader.is_reading());
-                debug_assert!(!kirq::context::is_in_interrupt_context());
-                // SAFETY: retained current task, watched task context, IRQs masked
+                debug_assert!(!RcuExecutionIf::is_in_interrupt_context());
+                // SAFETY: host-retained current, watched task context, IRQs masked
                 // and preemption excluded; no node lock is held at this boundary.
                 unsafe { finish_reader_cleanup(reader) };
             });
         }
-    }
+    });
     let watching = RcuContextIf::current_cpu_watching();
     // SAFETY: IRQ exclusion and the nonscheduling transition pin CPU selection.
     // Its caller finished protected work and limits the unwatched window to
@@ -268,9 +264,5 @@ pub(crate) fn reader_node(cpu: LogicalCpuId) -> &'static ReaderNode {
     &READER_NODES[cpu.as_usize()]
 }
 
-unittest::path_mod_test!(tests_service_startup, "../ut-tests/rcu_service_startup.rs");
 unittest::path_mod_test!(tests_user_boundary, "../ut-tests/rcu_user_boundary.rs");
-unittest::path_mod_test!(tests_cleanup, "../ut-tests/rcu_cleanup.rs");
 unittest::path_mod_test!(tests_cpu_state, "../ut-tests/rcu_cpu_state.rs");
-#[cfg(feature = "smp")]
-unittest::path_mod_test!(tests_implicit, "../ut-tests/rcu_implicit.rs");

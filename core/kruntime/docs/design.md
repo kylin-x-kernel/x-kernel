@@ -1,5 +1,72 @@
 # kruntime — 设计文档
 
+## RCU Host Adapters
+
+The execution-context adapter reports the common IRQ core's context facts,
+including the distinction between BH exclusion and serving a handler. It
+preserves NMI-first queries and existing snapshot protection, without deciding
+RCU scope admission, watching or cleanup eligibility.
+It also supplies CPU identity and exception presence. The scoped exception
+snapshot holds the existing IRQ-only guard through RCU's admission assertions,
+then restores the caller's mask before read-side execution. It does not add
+preemption accounting or a scheduling checkpoint. The independent exception
+query retains the architecture's own snapshot protection.
+
+The softirq adapter binds RCU's action to the existing fixed Rcu vector and
+raises it on the current CPU. It adds no action table, queue or executor. kirq
+retains softirq exclusion, pending bits, restart/time limits and daemon fallback;
+krcu retains its callback budget and decision to re-raise for eligible work.
+RCU startup serializes registration with driver acquisition, preserving retry
+after registration conflict.
+
+Task startup consumes RCU's PreparedGpTask in the existing PID-less task entry
+allocation, using the normal stack size and scheduling path. No extra boxed
+closure or control registry is introduced. RCU owns the one-shot driver claim,
+entry body and startup acknowledgment; the runtime only prepares and activates
+the kernel task. Its temporary task reference may be dropped after activation:
+the scheduler retains the runnable task. Both the caller's startup wait and the
+GP task's own parking use the task-wait adapter, each bound to its own current.
+
+The timer adapter owns the concrete ktask Timer and lends a one-shot capability
+on its stack. It translates monotonic nanoseconds to the timer deadline type,
+preserves owner routing across migration and synchronously drains delivery on
+return. The expiry function has no captured allocation; RCU's permanent service
+receives it and publishes demand. Intervals, deadline retention after early
+wakes, assistance and GP completion remain krcu policy. Service readiness is
+published from inside the adapter body, after timer preparation.
+
+The same integration module lends current task reader storage to krcu through
+`RcuTaskIf`. Its stack-local CurrentTask borrow spans the synchronous body,
+without allocation or an owner-count update. It supplies no scope-admission or
+cleanup policy; those remain in krcu. IRQ/NMI use the same storage adapter without
+locks or changes to IRQ/preemption state.
+
+Task preemption controls delegate directly to ktask: querying its actual count,
+setting a request, running a normal checkpoint and deferring checks around one
+synchronous body. Runtime adds no scheduling policy or credit of its own. RCU
+owns cleanup decisions; ktask owns count balancing and switch eligibility.
+
+The task-wait adapter owns one concrete `PreparedTaskWait` on its stack and lends
+only waker cloning and park operations. It validates sleepability before calling
+the RCU body, and never returns a preparation error afterward. Its small wrapper
+introduces no allocation of its own. RCU keeps callback completion and retirement
+ownership; a wake hint merely allows RCU to check its predicate again.
+
+The drain adapter holds one permanent sleepable mutex across the supplied body,
+including its completion wait. Lazy initialization constructs the mutex on the
+first admitted drain call, before any marker is installed. The mutex payload
+contains no RCU state: markers, counters and completion checks belong to krcu.
+
+`src/rcu.rs` provides krcu's static notification contract through existing kipi
+delivery, or local Rcu softirq raising without IPI support. It owns no reader,
+grace-period, callback queue or completion state. RCU publishes work/demand and
+chooses which CPU needs notification; runtime supplies the transport only.
+`kfeat/ipi` enables both runtime's provider and the krcu contract. IPI delivery
+rejects invalid or absent CPUs with BadState; without IPI only the current CPU
+is accepted. Service initialization remains a caller prerequisite: notification
+success does not validate readiness, and IPI requests before notification
+enablement remain pending for boot drain.
+
 ## Local irq_work Startup And Probes
 
 Primary interrupt initialization and each secondary's IRQ-service setup install
@@ -103,12 +170,54 @@ The default configuration and unit-test entry do not execute this path.
 `KFEAT_RCU_TORTURE` uses the same post-initialization handoff for the RCU
 ownership stress runner, with a separately configured duration. Kconfig excludes
 simultaneous selection with the workqueue runner. Neither workload belongs to
-normal boot or default UT; RCU owns its assertions, reporting and cleanup, while
-kruntime only invokes the runner and powers off on successful return.
+normal boot or default UT. The runtime-owned runners in `benches/rcu/` create
+tasks, arrange load, collect timings and verify results using only public
+`krcu` APIs. They do not access RCU's internal state. Runtime powers off on
+successful return. See [runner instructions](../benches/rcu/README.md) for
+configuration and pass criteria.
 `KFEAT_RCU_BENCH` selects the independent callback/synchronous-wait runner through the
 same handoff. Kconfig excludes both stress runners while it is selected.
 
 ## 定位
+
+RCU integration tests in `ut-tests/rcu_service_startup.rs` and
+`ut-tests/rcu_synchronize.rs` verify task/timer carrier preparation and public
+wait semantics against boot's permanent services. They own their temporary
+tasks, timers and interruption state. Private RCU completion/registration
+fixtures remain in `krcu`; production APIs do not expose their private state.
+For a focused kernel regression run, select both crates with
+`UNITTEST_CRATE=krcu,kruntime` so internal and integration checks execute together.
+`kfeat` assembles `smp` and `ipi` across runtime, RCU and the corresponding
+task/notification providers. Runtime features select only its local paths.
+RCU does not enable task features on behalf of its host; its own SMP feature retains shared-lock
+support independently of that assembly.
+`ut-tests/rcu_callback.rs` owns callback integration fixtures for real task,
+timer hardirq and softirq paths, plus controlled NMI/unwatched rejection. It
+checks returned ownership through caller-side cancellation/invocation and
+records the callback's node address rather than inspecting private handle
+fields. Burst completion is a public progress check; exact budget boundaries
+remain core queue tests. No fixture may release an accepted probe before
+its completion publication.
+`ut-tests/rcu_context.rs` checks the host's exception/interrupt classification
+and IRQ/preemption state preservation across public read scopes. Its controlled
+context markers are not hardware interrupt delivery tests.
+`ut-tests/rcu_drain.rs` checks public wait-context rejection and the boundary
+between callback completion and downstream task completion. It submits through
+`PreparedCallback` and holds a task-only gate until drain returns, then joins
+the task. Concurrent drains wait behind the host gate even after callback
+destruction; repost tests close their producer gate and wait for in-flight
+submissions before draining. No producer lock spans public callback submission.
+Marker counters and reuse checks remain internal RCU tests.
+`rcu_read.rs`, `rcu_cleanup.rs`, `rcu_service.rs`, `rcu_owned.rs` and
+`rcu_implicit.rs` cover actual host boundaries, migrated readers, per-CPU
+callback execution and guarded ownership. The runtime-local `rcu_support`
+helper retains the distinction between current-task operations and remote
+atomic observations. Unittest-only RCU snapshots expose cleanup demand and
+whether drain markers are installed. They cannot clear demand, unlink a reader,
+mutate marker ownership or certify a GP. The marker check runs while the fixture
+holds the host drain gate and verifies that blocked drain callers install nothing.
+Isolated startup, deadline and completion policy tests remain in krcu and use
+its host contracts without depending on concrete task or IRQ implementations.
 
 Startup distinguishes a published run queue that accepts tasks from a CPU whose
 services are ready to execute them. After scheduler initialization, each AP holds
@@ -387,7 +496,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 
 | Feature | 作用 |
 |---------|------|
-| `smp` | 从核启动、`rust_main_secondary`、`memspace`/`ktask`/`khal` SMP |
+| `smp` | 从核启动、`rust_main_secondary`；跨模块 SMP 配置由 `kfeat/smp` 统一启用 |
 | `ipi` | 依赖 `kipi`；IPI 中断处理 |
 | `fs` / `fs9p` / `net` / `vsock` / `display` / `input` | 驱动与子系统初始化（经 `kdriver`）；具体 filesystem feature 只负责链接其自注册实现 |
 | `rtc` | 启动时打印墙钟时间 |

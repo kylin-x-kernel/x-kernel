@@ -26,7 +26,7 @@ fn measure_batch(mut operation_fn: impl FnMut() -> u64) -> u64 {
 }
 
 pub(super) fn measure() -> Vec<[u64; 3]> {
-    let value = crate::Rcu::new(Box::new(VALUE));
+    let value = krcu::Rcu::new(Box::new(VALUE));
     let mut samples = Vec::with_capacity(super::SAMPLES);
     for index in 0..super::SAMPLES {
         let mut elapsed_ns = [0; 3];
@@ -36,13 +36,13 @@ pub(super) fn measure() -> Vec<[u64; 3]> {
             elapsed_ns[metric] = match metric {
                 0 => measure_batch(|| black_box(VALUE)),
                 1 => measure_batch(|| {
-                    crate::with_read(|scope| {
+                    krcu::with_read(|scope| {
                         black_box(scope);
                         black_box(VALUE)
                     })
                 }),
                 _ => measure_batch(|| {
-                    crate::with_read(|scope| black_box(*black_box(&value).read(scope)))
+                    krcu::with_read(|scope| black_box(*black_box(&value).read(scope)))
                 }),
             };
         }

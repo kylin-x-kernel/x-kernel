@@ -12,7 +12,7 @@ use core::{
 
 use kerrno::KError;
 
-use super::synchronize::PreparedGracePeriodWait;
+use super::synchronize::with_prepared_grace_period;
 use crate::ReadScope;
 
 /// Owns the currently published allocation; replacements privately retain old ones.
@@ -104,20 +104,32 @@ impl<T> Rcu<T> {
     /// Other allocations follow the kernel's fatal OOM policy. After publication
     /// the wait cannot be interrupted; return proves old readers have finished,
     /// not that unrelated callbacks or their downstream work have finished.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: preparation either rejects before \
+                  invoking the body or invokes it exactly once without later failure"
+    )]
     pub fn replace_sync(&self, new_value: Box<T>) -> Result<Box<T>, (KError, Box<T>)> {
-        let wait = match PreparedGracePeriodWait::prepare() {
-            Ok(wait) => wait,
-            Err(error) => return Err((error, new_value)),
-        };
-        let old = self.value.swap(Box::into_raw(new_value), Ordering::AcqRel);
-        // Do not reconstruct a Box yet: old readers may still hold shared
-        // borrows. A nonreturning wait leaks this raw owner instead of freeing
-        // it early, including if unwinding is introduced in a host environment.
-        wait.submit_and_wait();
-        // SAFETY: the exchange gave this operation unique ownership, and its
-        // subsequent GP ended all protected borrows of this removed allocation.
-        // The container exposes no independent publication or raw ownership API.
-        Ok(unsafe { Box::from_raw(old) })
+        // Retain the unused owner outside the body until all preparation succeeds.
+        let mut new_value = Some(new_value);
+        with_prepared_grace_period(|wait| {
+            let new_value = new_value.take().expect("replacement body runs once");
+            let old = self.value.swap(Box::into_raw(new_value), Ordering::AcqRel);
+            // Do not reconstruct a Box yet: old readers may still hold shared
+            // borrows. A nonreturning wait leaks this raw owner instead of freeing
+            // it early, including if unwinding is introduced in a host environment.
+            wait.submit_and_wait();
+            // SAFETY: the exchange gave this operation unique ownership, and its
+            // subsequent GP ended all protected borrows of this removed allocation.
+            // No independent publication or raw ownership API is exposed.
+            unsafe { Box::from_raw(old) }
+        })
+        .map_err(|error| {
+            (
+                error,
+                new_value.expect("preparation failure preserves owner"),
+            )
+        })
     }
 }
 

@@ -76,7 +76,7 @@ fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
                         count
                     };
                     operations += if use_rcu {
-                        crate::with_read(|_| body_fn())
+                        krcu::with_read(|_| body_fn())
                     } else {
                         body_fn()
                     };
