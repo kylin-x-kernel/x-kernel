@@ -1170,6 +1170,50 @@ Consequences:
 interface the other way breaks a potential cycle and keeps the crate
 boundary clear.
 
+### Why lock owners are compared, not dereferenced
+
+`ksync::RwLock` spins on contention instead of sleeping right away. Linux
+`rwsem_spin_on_owner` keeps spinning while the writer's `owner->on_cpu` is
+set, reading it under RCU. Tasks here are finalized by a `DeferredArc`
+worker, not after an RCU grace period, so a spinner must not dereference the
+holder.
+
+`LockOwner` records the writer's `holder_key` and the CPU it acquired on.
+`holder_key` is `owner_key`, except that a user task whose identity token is
+unknown (`owner_key` 0) uses its `TaskInner` address, as kernel tasks already
+do; 0 stays reserved for "no holder". `switch_to` (and
+`CurrentTask::init_current` at bring-up) writes the incoming task's key to
+that CPU's `CPU_RUNNING_TASK` slot. A holder is `Running` while its CPU's slot
+holds its key. Only keys are compared, so a stale record misjudges whether
+spinning pays off. Re-entry detection compares the same key. A reused
+address can therefore panic a later task that does not hold the lock, which
+is the same address fallback as `RawMutex`'s `owner_key`. That panic also
+requires the write record to outlive the holder.
+
+Spinning stops on `needs_resched`, on a writer that is not running, or when a
+budget runs out. The running-writer budget is pause-only and is rebuilt after
+each wakeup. It still has to exist, because the fair tick sets
+`preempt_pending` only when another task is ready, so a spinner alone on its
+CPU would never see `needs_resched`. The budget for no recorded writer
+(readers hold the lock) reuses `RawMutex`'s count: three exponential pauses,
+then `yield_now`, once per acquire. Linux instead waits on readers for
+`(20 + readers) / 2` µs (capped at 25 µs), re-arms that time whenever readers
+take over, and marks the lock nonspinnable on timeout. The count is a simpler
+stand-in, and this lock keeps no nonspinnable state.
+
+The lock word is the only admission, as in `RawMutex`. `event-listener`
+wakes waiters in registration order, but a woken waiter still has to win the
+CAS, and a spinner or a new caller can take the lock first. Spinning widens
+that window, and nothing queues spinners. The lock does not promise
+starvation freedom; a handoff would need a named successor that every CAS
+honors, and the wait events only record whom to wake.
+
+Uniprocessor builds and non-sleepable contexts do not spin: the holder
+cannot run until the waiter blocks. A task that calls `lock_exclusive` or
+`lock_shared` while it holds the write lock panics on every build, instead of
+sleeping on an unlock only it can perform. Readers are not recorded, so
+re-acquiring while holding only read guards waits.
+
 ### Why final destruction uses a normal worker
 
 An exiting task may still be held by a joiner or the switch path. Strong

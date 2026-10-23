@@ -939,6 +939,10 @@ impl RunQueue {
         {
             next_task.set_on_cpu(true);
             next_task.set_on_cpu_mask_bit(this_cpu_id());
+            crate::lock_owner::note_cpu_running_task(
+                cpu_id,
+                crate::lock_owner::holder_key(&next_task),
+            );
         }
 
         if let Some(runtime) = next_task.user_runtime() {

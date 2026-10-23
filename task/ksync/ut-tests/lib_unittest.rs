@@ -265,6 +265,52 @@ fn test_rwlock_writer_blocks_readers() {
     }
 }
 
+#[cfg(target_os = "none")]
+#[def_test]
+fn test_rwlock_contended_writers_and_readers() {
+    const WRITER_COUNT: usize = 4;
+    const READER_COUNT: usize = 2;
+    const ITERATIONS: usize = 2000;
+
+    let lock = Arc::new(RwLock::new((0usize, 0usize)));
+    let torn_reads = Arc::new(AtomicUsize::new(0));
+    let mut tasks = Vec::new();
+
+    for _ in 0..WRITER_COUNT {
+        let lock = Arc::clone(&lock);
+        tasks.push(ktask::spawn(move || {
+            for i in 0..ITERATIONS {
+                let mut guard = lock.write();
+                guard.0 += 1;
+                guard.1 += 1;
+                drop(guard);
+                if i % 64 == 0 {
+                    ktask::yield_now();
+                }
+            }
+        }));
+    }
+    for _ in 0..READER_COUNT {
+        let lock = Arc::clone(&lock);
+        let torn_reads = Arc::clone(&torn_reads);
+        tasks.push(ktask::spawn(move || {
+            for _ in 0..ITERATIONS {
+                let guard = lock.read();
+                // Writers update both halves under one write guard.
+                if guard.0 != guard.1 {
+                    torn_reads.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+    for task in tasks {
+        task.join();
+    }
+
+    assert_eq!(torn_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(*lock.read(), (WRITER_COUNT * ITERATIONS, WRITER_COUNT * ITERATIONS));
+}
+
 // ============================================================================
 // Semaphore Tests
 // ============================================================================

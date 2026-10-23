@@ -1274,6 +1274,11 @@ impl CurrentTask {
     /// until publication completes; `init_task` must be this CPU's initial task.
     pub(crate) unsafe fn init_current(init_task: KtaskRef) {
         assert!(init_task.is_init());
+        #[cfg(feature = "smp")]
+        crate::lock_owner::note_cpu_running_task(
+            khal::percpu::this_cpu_id(),
+            crate::lock_owner::holder_key(&init_task),
+        );
         let ptr = KtaskRef::into_raw(init_task);
         // SAFETY: `ptr` originates from `KtaskRef::into_raw` and becomes the owning
         // architecture current-task pointer for this CPU.

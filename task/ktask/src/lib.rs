@@ -47,6 +47,7 @@ unittest::path_mod_test!(tests_timer_irq, "../ut-tests/tests_timer_irq.rs");
 #[macro_use]
 mod api;
 mod irq_wait;
+mod lock_owner;
 mod run_queue;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
@@ -62,6 +63,7 @@ pub mod future;
 
 pub use self::{
     api::{sleep, sleep_until, yield_now, *},
+    lock_owner::{LockOwner, LockOwnerState, can_optimistic_spin},
     softirqd::init_current_cpu as init_softirqd_current_cpu,
     timers::{CancelResult, Expiration, Timer, TimerControl, TimerHandler},
     tracing_hooks::register_sched_trace_hooks,

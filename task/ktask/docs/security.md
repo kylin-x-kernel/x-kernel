@@ -338,6 +338,12 @@ Entries concentrate in `current_run_queue*` / `get_run_queue`.
 
 `RunQueue::switch_to` switches through raw context pointers and
 maintains cross-CPU visibility with `on_cpu` / `PREV_TASK`.
+On SMP, in the same block as `set_on_cpu(true)`, it also stores the
+incoming task's `holder_key` in that CPU's `CPU_RUNNING_TASK` slot
+(`Ordering::Relaxed`) via `note_cpu_running_task`. Remote CPUs load the
+slot with `Ordering::Relaxed` in `is_running_on` so an optimistic spinner
+can decide whether to keep spinning. The key is not a pointer and is not a
+synchronization or handoff word: `on_cpu` / `PREV_TASK` remain that protocol.
 `finish_task_switch` is an `unsafe fn` and must run once on the incoming
 task's stack after switching, before the next `PREV_TASK` is written. It
 takes the outgoing strong reference out of that CPU's slot, then releases
@@ -353,6 +359,15 @@ Invariants:
    load (Dekker memory-model requirement; not a TCG-only workaround) so at
    least one side finishes enqueue. Do not IRQ-off-spin waiting for remote
    `on_cpu`.
+4. `CPU_RUNNING_TASK` is a relaxed hint beside the `on_cpu` / `PREV_TASK`
+   handoff, not part of it. SMP `switch_to` publishes the incoming task's
+   `holder_key` before the context switch. A same-task switch returns before
+   that store; the slot already names the task from `CurrentTask::init_current`
+   or the switch that made it current. Spinners compare the stored key with a
+   recorded lock holder. A missing per-CPU area is skipped and reads as not
+   running. A stale key only misjudges whether spinning pays off. The next
+   switch overwrites the slot; `finish_task_switch` does not clear it and
+   does not wait for readers.
 
 ### `task.rs`: `TaskContext` interior mutability and architecture current-task pointers
 

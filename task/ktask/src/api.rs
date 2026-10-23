@@ -115,6 +115,15 @@ pub fn request_current_reschedule() {
     current().set_preempt_pending(true);
 }
 
+/// Returns whether the current task has a pending reschedule request.
+///
+/// Matches Linux `need_resched`. Only reads the request; a later scheduling
+/// checkpoint consumes it. Requires an initialized current task.
+#[inline]
+pub fn needs_resched() -> bool {
+    current().is_preempt_pending()
+}
+
 /// Runs an operation with preemption disabled, deferring the exit-time check.
 ///
 /// Removes only this helper's preemption credit on return or unwind, without
