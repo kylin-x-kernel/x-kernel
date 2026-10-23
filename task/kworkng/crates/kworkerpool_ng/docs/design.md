@@ -53,7 +53,7 @@ finishes source inspection, and consumes any acquired execution through `run`.
 An execution must remain valid independently of the temporary source reference.
 
 The crate uses `intrusive-collections` for Arc-owned intrusive nodes, `kspin`
-for locking and CPU pinning, and `kpoll` for completion receipts. `ktask`
+for locking and CPU pinning, and `kcompletion` for completion receipts. `ktask`
 provides task creation, affinity, durable waits and prepared timers;
 `ktime_types` supplies monotonic time and `kbuild_config` supplies stack size.
 `kcpu_id_map` and `khal` supply boot CPU identity and time.
@@ -89,7 +89,7 @@ A Weak owner identity prevents foreign insertion and strong reference cycles.
 `SourceDetachment` counts outstanding inspections, including references being
 released outside the dispatch lock. Detachment completion requires closure and
 zero outstanding inspections. It does not wait for acquired executions or
-publisher-held references. Callers may observe/register the receipt but must not
+publisher-held references. Callers may observe/wait the receipt but must not
 complete or reset it. Queue shutdown must drain accepted work separately.
 
 ## Normal Worker Lifecycle
@@ -187,3 +187,10 @@ Local tests cover state conservation, coalescing, reference retirement, reentran
 destruction, capacity, real worker growth/parking/retirement, startup rollback,
 and BH preparation. Concrete workqueue semantics and system migration are
 separate integration responsibilities, not established by these service tests.
+
+Source detachment uses kcompletion::Completion with permanent complete_all state.
+The detachment control publishes completion under its lock and obtains an Arc-owning
+DeferredWake, then wakes tasks after unlocking. Callers use the allocation-free
+ktask::completion::CompletionWait adapter; there is no poll registration. Normal
+worker/manager demand parking still uses PreparedTaskWait because it waits on demand,
+not a completion receipt. Source controls and receipt Arcs still allocate at setup.

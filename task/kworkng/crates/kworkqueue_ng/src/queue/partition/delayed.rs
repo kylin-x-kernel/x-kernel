@@ -11,7 +11,7 @@ use crate::work::{delayed::ArmError, observers::PreparedObserver};
 
 impl QueuePartition {
     /// Captures current Work subjects and expedites timer placement atomically.
-    /// Receipts are prepared and registered before this transaction. False requests
+    /// Receipts are prepared before this transaction. False requests
     /// retry after a stale owner or insufficient receipt capacity, without effects.
     /// Running timer delivery also requests retry, with no receipts attached.
     /// Retry only after releasing management locks and allowing IRQ progress.

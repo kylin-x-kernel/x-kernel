@@ -4,24 +4,15 @@
 
 //! Source inspection quiescence, not Work completion or Queue shutdown.
 
-use alloc::{sync::Arc, task::Wake};
-use core::{
-    sync::atomic::{AtomicUsize, Ordering},
-    task::{Context, Waker},
-};
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kpoll::{Completion, PollRegistrations};
+use kcompletion::Completion;
 use kspin::SpinNoIrq;
+use ktask::completion::CompletionWait;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{SourceRemainder, dispatch::PartitionDispatch, source::PartitionDispatchState};
-
-fn register(done: &Completion, waker: &Waker) -> PollRegistrations {
-    let cx = Context::from_waker(waker);
-    let mut registrations = PollRegistrations::new();
-    done.register(&mut registrations.context(&cx)).unwrap();
-    registrations
-}
 
 #[def_test]
 fn only_detach_transition_owner_can_publish_completion() {
@@ -50,7 +41,7 @@ fn idle_detach_receipt_is_durable_and_late_notices_do_not_reopen_source() {
     assert!(dispatch.begin_inspection().is_none());
     drop(source);
     drop(dispatch);
-    let _late = register(&done, Waker::noop());
+    CompletionWait::prepare().unwrap().wait(&done);
     assert!(done.try_wait());
     assert!(done.try_wait());
 }
@@ -100,30 +91,22 @@ fn detach_waits_for_inspection_and_ignores_backlog_notices_and_drop_retry() {
     }
 }
 
-struct InspectWake {
-    dispatch: Arc<PartitionDispatch<usize>>,
-    calls: AtomicUsize,
-}
-
-impl Wake for InspectWake {
-    fn wake(self: Arc<Self>) {
-        core::assert!(self.dispatch.begin_inspection().is_none());
-        self.calls.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 #[def_test]
 fn detachment_wakes_after_unlock_exactly_once_in_both_finish_orders() {
     for finish_first in [true, false] {
         let dispatch = PartitionDispatch::new();
         let source = dispatch.create_source(0usize);
         let done = source.detachment_completion();
-        let wake = Arc::new(InspectWake {
-            dispatch: dispatch.clone(),
-            calls: AtomicUsize::new(0),
+        let waiter = ktask::spawn({
+            let (dispatch, done) = (dispatch.clone(), done.clone());
+            move || {
+                CompletionWait::prepare().unwrap().wait(&done);
+                core::assert!(dispatch.begin_inspection().is_none());
+            }
         });
-        let waker = Waker::from(wake.clone());
-        let _registered = register(&done, &waker);
+        while waiter.state() != ktask::TaskState::Blocked {
+            ktask::yield_now();
+        }
         dispatch.notify(&source);
         let turn = dispatch.begin_inspection().unwrap();
         if finish_first {
@@ -131,12 +114,12 @@ fn detachment_wakes_after_unlock_exactly_once_in_both_finish_orders() {
             dispatch.detach(&source);
         } else {
             dispatch.detach(&source);
-            assert_eq!(wake.calls.load(Ordering::Relaxed), 0);
+            assert_eq!(waiter.state(), ktask::TaskState::Blocked);
             turn.finish(SourceRemainder::Empty);
         }
         dispatch.detach(&source);
         assert!(done.is_completed());
-        assert_eq!(wake.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(waiter.join(), 0);
     }
 }
 

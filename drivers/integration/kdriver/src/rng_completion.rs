@@ -8,55 +8,33 @@ use alloc::sync::Arc;
 
 use driver_base::{DriverError, DriverResult};
 use hwrng::completion::RngCompletion;
-use kpoll::{PollRegisterError, PollSet};
-use ktask::future::PreparedTaskWait;
+use kcompletion::WaitQueue;
+use ktask::completion::CompletionWait;
 
 /// Creates a shared completion capability for injection into one RNG driver.
 ///
 /// Construct in task context. Allocation follows the kernel's Arc OOM policy.
-/// The capability owns wake registrations, not request state or DMA storage.
+/// The capability owns the queue; waiting stacks own scoped nodes. It owns
+/// neither request state nor DMA storage.
 pub fn new_rng_completion() -> Arc<dyn RngCompletion> {
     Arc::new(HostRngCompletion {
-        waiters: PollSet::new(),
+        waiters: WaitQueue::new(),
     })
 }
 
 struct HostRngCompletion {
-    waiters: PollSet,
+    waiters: WaitQueue,
 }
 
 impl RngCompletion for HostRngCompletion {
     fn wait_until(&self, ready: &mut dyn FnMut() -> bool) -> DriverResult {
-        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| DriverError::InvalidInput)?;
-        if ready() {
-            return Ok(());
-        }
-
-        let waker = task_wait.waker();
-
-        loop {
-            // Recheck after registration to avoid a missed wake.
-            // notify() removes this registration when it wakes the task.
-            // After park(), drop any remaining registration and retry.
-            let registration = self.waiters.register(&waker).map_err(registration_error)?;
-
-            if ready() {
-                return Ok(());
-            }
-            task_wait.park();
-            drop(registration);
-        }
+        let task_wait = CompletionWait::prepare().map_err(|_| DriverError::InvalidInput)?;
+        task_wait.wait_until(&self.waiters, ready);
+        Ok(())
     }
 
     fn notify(&self) {
-        self.waiters.wake();
-    }
-}
-
-fn registration_error(error: PollRegisterError) -> DriverError {
-    match error {
-        PollRegisterError::NoMemory | PollRegisterError::IdExhausted => DriverError::NoMemory,
-        PollRegisterError::InvalidState => DriverError::InvalidInput,
+        self.waiters.notify_all();
     }
 }
 

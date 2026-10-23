@@ -4,7 +4,7 @@
 
 //! Independent ordinary-Work disable ownership, not exclusive business-data access.
 
-use ktask::future::PreparedTaskWait;
+use ktask::completion::CompletionWait;
 
 use super::{
     Work,
@@ -31,7 +31,7 @@ impl<T, H> Work<T, H> {
     /// Requires sleepable context; this ordinary operation is not a delayed drain.
     ///
     /// # Errors
-    /// Returns context, identity-validation or registration errors before effects.
+    /// Returns context or self-wait errors before effects.
     ///
     /// # Panics
     /// Propagates fatal preparation, cleanup and disable-depth invariant failures.
@@ -43,7 +43,7 @@ impl<T, H> Work<T, H> {
 
     /// Holds one independent disable while canceling and draining the captured Work.
     ///
-    /// Prepares the task waker and all observers before capture. Capacity is
+    /// Validates the task context and prepares all observers before capture. Capacity is
     /// rechecked under Work protection, and capture plus disable share that guard.
     /// Cancellation and waiting run unlocked. The returned guard keeps admission
     /// disabled until its owner drops it. Optional self-wait diagnostics compare
@@ -51,18 +51,16 @@ impl<T, H> Work<T, H> {
     /// and destructor-originated self-waits remain invalid without guaranteed diagnosis.
     ///
     /// # Errors
-    /// Invalid sleepable context (even for idle Work), self-wait validation and
-    /// registration failures return before changing Work state.
+    /// Invalid sleepable context (even for idle Work) and self-wait failures return before changing Work state.
     ///
     /// # Panics
-    /// Propagates fatal allocation/destructor/Waker failure and disable-depth overflow.
+    /// Propagates fatal allocation/destructor failure and disable-depth overflow.
     pub fn disable_sync(&self) -> Result<(DisableGuard<'_, T, H>, bool), WaitError> {
-        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| WaitError::InvalidContext)?;
+        let task_wait = CompletionWait::prepare().map_err(|_| WaitError::InvalidContext)?;
         #[cfg(feature = "self-wait-check")]
         self.reject_callback_self_wait()?;
-        let waker = task_wait.waker();
         let (mut wait, guard) = loop {
-            let mut wait = CleanupWait::prepare(self.observer_count(), &waker)?;
+            let mut wait = CleanupWait::prepare(self.observer_count());
             let mut state = self.state.lock();
             if state.observer_count() > wait.prepared.len() {
                 drop(state);
@@ -75,9 +73,7 @@ impl<T, H> Work<T, H> {
         };
         wait.discard_unused();
         let revoked = self.cancel_pending();
-        while !wait.is_completed() {
-            task_wait.park();
-        }
+        wait.wait(&task_wait);
         Ok((guard, revoked))
     }
 
@@ -92,7 +88,7 @@ impl<T, H> Work<T, H> {
     ///
     /// # Panics
     /// Panics on disable-depth overflow; that failure has no state effect. Also
-    /// propagates resource-destructor or completion-Waker panics during revocation.
+    /// propagates resource-destructor or completion invariant panics during revocation.
     pub fn disable(&self) -> (DisableGuard<'_, T, H>, bool) {
         self.state.lock().begin_disable();
         let guard = DisableGuard { work: self };

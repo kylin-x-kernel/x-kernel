@@ -118,6 +118,7 @@ kuaccess = { path = "core/kuaccess" }
 # Internal: task scheduling and synchronization
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await-macro"] }
 kpoll = { path = "task/kpoll" }
+kcompletion = { path = "sync/kcompletion" }
 krcu = { path = "sync/krcu" }
 krcu-core = { path = "sync/krcu/crates/krcu-core" }
 kspin = { path = "task/kspin" }

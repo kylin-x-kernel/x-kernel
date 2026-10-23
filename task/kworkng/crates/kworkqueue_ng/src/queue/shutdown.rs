@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use ktask::future::PreparedTaskWait;
+use ktask::completion::CompletionWait;
 
 use super::{Queue, control::COLOR_COUNT};
 use crate::work::{
@@ -23,35 +23,30 @@ impl Queue {
     /// Optional diagnostics reject a callback waiting on its own Queue. Context validation
     /// applies even if already closed/empty. All preparation precedes closure;
     /// repeated/concurrent callers retain independent Work receipts and wait on
-    /// the same permanent source receipts with their own registrations.
+    /// the same permanent source receipts using task-owned completion waits.
     ///
     /// # Errors
-    /// Returns context, identity-validation or registration errors before closure.
+    /// Returns context or self-wait errors before closure.
     /// No recoverable failure or interruption is permitted after closure.
     ///
     /// # Panics
     /// Propagates fatal allocation and violated internal observer-count invariants.
     pub fn close_and_drain(&self) -> Result<(), WaitError> {
-        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| WaitError::InvalidContext)?;
+        let task_wait = CompletionWait::prepare().map_err(|_| WaitError::InvalidContext)?;
         #[cfg(feature = "self-wait-check")]
         self.reject_callback_self_wait()?;
-        let waker = task_wait.waker();
         let mut receipts = Vec::new();
         let mut prepared = Vec::new();
         let mut source_receipts = Vec::new();
         for partition in &self.partitions {
             if let Some(receipt) = partition.source_detachment_completion() {
-                let registration = receipt
-                    .register_owned(&waker)
-                    .map_err(WaitError::Registration)?;
-                source_receipts.push((receipt, registration));
+                source_receipts.push(receipt);
             }
         }
         for _ in &self.partitions {
             for _ in 0..COLOR_COUNT {
                 let (receipt, token) = CompletionObserver::prepare();
-                let registration = receipt.register(&waker).map_err(WaitError::Registration)?;
-                receipts.push((receipt, registration));
+                receipts.push(receipt);
                 prepared.push(token);
             }
         }
@@ -69,17 +64,14 @@ impl Queue {
             }
         }
         empty.complete();
-        while !receipts.iter().all(|(receipt, _)| receipt.is_completed()) {
-            task_wait.park();
+        for receipt in receipts {
+            receipt.wait(&task_wait);
         }
         for partition in &self.partitions {
             partition.detach_source();
         }
-        while !source_receipts
-            .iter()
-            .all(|(receipt, _)| receipt.is_completed())
-        {
-            task_wait.park();
+        for receipt in source_receipts {
+            task_wait.wait(&receipt);
         }
         Ok(())
     }

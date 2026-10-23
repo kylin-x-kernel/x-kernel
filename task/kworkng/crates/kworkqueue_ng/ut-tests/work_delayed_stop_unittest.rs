@@ -9,7 +9,6 @@ use alloc::{sync::Arc, task::Wake};
 use core::{
     pin::{Pin, pin},
     sync::atomic::{AtomicUsize, Ordering},
-    task::Waker,
 };
 
 use ktime_types::TimeSpan;
@@ -69,7 +68,16 @@ fn cancel_notification_rearm_preserves_new_physical_timer() {
         calls: AtomicUsize::new(0),
     });
     let (receipt, token) = CompletionObserver::prepare();
-    let registration = receipt.register(&Waker::from(wake.clone())).unwrap();
+    let waiter = ktask::spawn({
+        let (receipt, owner) = (receipt.clone(), wake.clone());
+        move || {
+            receipt.wait(&ktask::completion::CompletionWait::prepare().unwrap());
+            owner.wake();
+        }
+    });
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
     // SAFETY: test and wake retain pinned Work through completion and final drain.
     unsafe { work.as_ref().queue_after_on(&queue, 0.into(), later()) }.unwrap();
     work.work_for_test()
@@ -77,11 +85,11 @@ fn cancel_notification_rearm_preserves_new_physical_timer() {
         .unwrap();
     assert!(work.cancel_pending());
     assert!(receipt.is_completed());
+    assert_eq!(waiter.join(), 0);
     assert_eq!(wake.calls.load(Ordering::Relaxed), 1);
     assert!(work.work_for_test().state.lock().has_pending());
     assert_eq!(work.timer.try_cancel(), ktask::CancelResult::Removed);
     assert!(work.cancel_sync().unwrap());
-    drop(registration);
     drop(wake);
     assert_eq!(Arc::strong_count(&queue), 1);
 }

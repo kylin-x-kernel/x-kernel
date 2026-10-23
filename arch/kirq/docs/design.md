@@ -778,18 +778,24 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 5. 调用方不能持有 handler 可能获取的锁或阻止目标 CPU handler 退出的资源锁，否则
    可能形成 handler 等锁、teardown 等 handler 的死锁。
 
-`in_flight` 等待使用 descriptor-local `kpoll::Completion` 作为 wake source：
+`in_flight` 等待使用 descriptor-local `kcompletion::Completion` 作为 wake source：
 `begin_dispatch()` 在 `0 -> 1` 转换时 `reinit()`，`IrqDispatchGuard::drop()` 在
 `1 -> 0` 转换时于 `IRQ_STATE` 锁内把 completion 标记为完成，并在释放
 `IRQ_STATE` 后 wake waiter。这样上一代 dispatch 的 delayed wake 不能在下一代
 `begin_dispatch()` 之后重新把同一个 completion 置为 completed，同时避免在全局
-IRQ state 锁内运行 poll wakeup。`kirq` 通过 `IrqSyncWaitIf`
+IRQ state 锁内运行同步 wake callback。`kcompletion::DeferredWake` 持有 completion
+的 `Arc`，不持有可逃逸的栈上 waiter 指针。`kirq` 通过 `IrqSyncWaitIf`
 调用 scheduler 层提供的等待实现，因此不依赖 `ktask`/`ksync`。等待实现按
-`try_wait/register/try_wait` 协议消费 completion token。如果 `synchronize_irq()` 无法
-在当前 task context 注册 waiter，会通过 `IrqDescError::SyncWaitFailed` 暴露失败，不把
-失败折叠成静默轮询；`free_irq*()` 在 action 已摘除后若同步失败则 fail-stop，避免
-调用方继续释放设备资源。`Completion` 在该路径里只作为 wake source；真实完成条件必须始终是
-descriptor-local `in_flight == 0`，并按 check/register/recheck 协议验证。
+作用域内 pinned 栈上 waiter 协议消费 completion token，使用 ktask 的
+`CompletionWait` 与共享 park latch 握手，不分配 poll registration 或 Waker。
+`IrqSyncWaitIf::can_wait()` 在进入同步操作前验证完整 sleepable task context，
+失败返回 `IrqDescError::InvalidContext`。`free_irq*()` 在摘除 action 之前完成该检查，
+释放控制锁后调用 `wait_for_completion()`；公开 provider 对非法直接调用返回
+`InvalidContext`，不存在登记失败或内存不足分支。manager 内部已在副作用前验证
+上下文，所有临时 IRQ 锁在等待前恢复，期间不得遗留改变睡眠条件的状态；因此
+其错误分支是站点级断言，而不能在 action 摘除后把失败当作释放成功。
+`Completion` 只作为 wake source；
+真实完成条件始终是 descriptor-local `in_flight == 0`，并在等待返回后重新验证。
 `synchronize_irq()` 不 mask line，持续 IRQ 仍可能让等待条件反复变为非零；teardown
 路径应使用 `disable_irq()` 或 `free_irq()`。
 
@@ -979,7 +985,6 @@ lock-free snapshot 解析，避免每次中断都查询控制面的 mapping tabl
 - `unregister()` 移除 regular action，并在 descriptor 无 action 使用者时
   删除 `IRQ_STATE` 条目并禁用平台 IRQ。MSI descriptor 仍由 MSI resource owner
   最终通过 `free_msix()` 释放；不存在额外的通用 IRQ waiter entry。
-  如果 action 已经从 dispatch table 摘除，但 scheduler wait provider 无法等待
-  escaped handler snapshot 退出，`free_irq()` / `unregister()` 采用 fail-stop
-  语义 panic；这样避免调用方继续释放设备状态，而旧 handler 仍可能在其它 CPU 上运行。
+  scheduler wait provider 在 action 摘除前检查可睡眠上下文；通过后使用栈上
+  waiter 等待 escaped handler snapshot 退出，不存在摘除后的登记失败分支。
 - `unregister_nmi()` 同时清理 `NMI_TABLE`、fallback action 和 `PER_CPU` 标记。

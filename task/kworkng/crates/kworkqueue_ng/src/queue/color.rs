@@ -5,9 +5,8 @@
 //! Immutable receipt for one sealed color occurrence, not a reusable counter.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::task::Waker;
 
-use kpoll::{PollRegisterError, PollRegistration};
+use ktask::completion::CompletionWait;
 
 use crate::work::observers::{CompletionObserver, PreparedObserver};
 
@@ -18,11 +17,15 @@ pub(super) struct ColorCompletion {
 
 impl ColorCompletion {
     /// Prepares one fresh observation per partition before publishing a cutoff.
-    pub(super) fn prepare(partitions: usize) -> (Arc<Self>, Vec<PreparedObserver>) {
+    pub(super) fn prepare(
+        partitions: usize,
+        progress: &Arc<kcompletion::WaitQueue>,
+    ) -> (Arc<Self>, Vec<PreparedObserver>) {
         let mut locals = Vec::with_capacity(partitions);
         let mut tokens = Vec::with_capacity(partitions);
         for _ in 0..partitions {
-            let (receipt, token) = CompletionObserver::prepare();
+            let (receipt, token) =
+                CompletionObserver::prepare_with_progress(Some(progress.clone()));
             locals.push(receipt);
             tokens.push(token);
         }
@@ -33,19 +36,9 @@ impl ColorCompletion {
         self.locals.iter().all(|local| local.is_completed())
     }
 
-    /// Registration and rollback happen outside every management/control lock.
-    /// Each caller retains its own registrations until its wait ends.
-    pub(super) fn register_with(
-        &self,
-        waker: &Waker,
-        register: &mut impl FnMut(
-            &CompletionObserver,
-            &Waker,
-        ) -> Result<PollRegistration, PollRegisterError>,
-    ) -> Result<Vec<PollRegistration>, PollRegisterError> {
-        self.locals
-            .iter()
-            .map(|local| register(local, waker))
-            .collect()
+    pub(super) fn wait(&self, task_wait: &CompletionWait) {
+        for local in &self.locals {
+            local.wait(task_wait);
+        }
     }
 }

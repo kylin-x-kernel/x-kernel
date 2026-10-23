@@ -234,13 +234,8 @@ pub enum IrqDescError {
     TeardownInProgress { virq: Virq },
     /// The operation requires at least one registered IRQ action on the line.
     NoIrqAction { virq: Virq },
-    /// The operation cannot run from hardirq, softirq, or BH-disabled context.
+    /// The operation requires sleepable task context with IRQs enabled.
     InvalidContext { operation: &'static str },
-    /// The scheduler wait provider could not register or block for IRQ sync.
-    SyncWaitFailed {
-        operation: &'static str,
-        error: kpoll::PollRegisterError,
-    },
 }
 
 impl IrqDesc {

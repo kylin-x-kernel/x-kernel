@@ -52,6 +52,7 @@ pub struct Queue {
     next_cpu_index: AtomicUsize,
     // Serializes cutoff/setup, never admission, completion or shutdown.
     sealed_colors: Mutex<[Option<Arc<ColorCompletion>>; COLOR_COUNT]>,
+    color_progress: Arc<kcompletion::WaitQueue>,
 }
 
 impl Queue {
@@ -159,6 +160,7 @@ impl Queue {
             control: AtomicUsize::new(0),
             next_cpu_index: AtomicUsize::new(0),
             sealed_colors: Mutex::new(core::array::from_fn(|_| None)),
+            color_progress: Arc::new(kcompletion::WaitQueue::new()),
         })
     }
 

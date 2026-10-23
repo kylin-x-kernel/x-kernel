@@ -11,7 +11,7 @@ use kerrno::KResult;
 use klazy::Lazy;
 use krcu::host::{
     CurrentReader, PreparedGpTask, ProgressTimer, RcuExecutionIf, RcuNotifyIf, RcuSoftirqIf,
-    RcuTaskIf, RcuTimerIf, TaskWait,
+    RcuTaskIf, RcuTimerIf, ServiceWait, TaskWait,
 };
 use ksync::Mutex;
 use ktask::{Expiration, Timer, TimerControl, TimerHandler, future::PreparedTaskWait};
@@ -98,13 +98,23 @@ struct TaskParking {
     wait: PreparedTaskWait,
 }
 
-impl TaskWait for TaskParking {
+impl ServiceWait for TaskParking {
     fn waker(&self) -> Waker {
         self.wait.waker()
     }
 
     fn park(&mut self) {
         self.wait.park();
+    }
+}
+
+struct TaskCompletionWait {
+    wait: ktask::completion::CompletionWait,
+}
+
+impl TaskWait for TaskCompletionWait {
+    fn wait_for_completion(&self, completion: &kcompletion::Completion) {
+        self.wait.wait(completion);
     }
 }
 
@@ -153,6 +163,14 @@ impl RcuTaskIf {
     }
 
     fn with_prepared_wait(body_fn: &mut dyn FnMut(&mut dyn TaskWait)) -> KResult<()> {
+        let mut wait = TaskCompletionWait {
+            wait: ktask::completion::CompletionWait::prepare()?,
+        };
+        body_fn(&mut wait);
+        Ok(())
+    }
+
+    fn with_prepared_service_wait(body_fn: &mut dyn FnMut(&mut dyn ServiceWait)) -> KResult<()> {
         let mut parking = TaskParking {
             wait: PreparedTaskWait::prepare()?,
         };

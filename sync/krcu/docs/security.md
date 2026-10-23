@@ -20,18 +20,24 @@ and arming, retain callback storage through delivery, and drain on cancellation
 or body return. RCU publishes readiness only after timer preparation. Expiry
 requests a pass; neither expiry nor timer cancellation proves GP completion.
 
-Callback drain borrows runtime-prepared task parking and a runtime-owned
+Callback drain borrows runtime-prepared completion waiting and a runtime-owned
 sleepable serialization gate. The gate covers installation and the entire wait;
-only krcu's completion counter authorizes return and marker reuse. The runtime
+only krcu's final countdown transition publishes sticky completion authorizing
+return and marker reuse. The installation sentinel prevents early markers from
+finishing an incomplete installation. A SeqCst fence follows the wait. The runtime
 does not own markers or decide completion.
 
 The task-wait provider must reject invalid sleep contexts before invoking the
 RCU body and must never report setup failure after invoking it. Its borrowed
-parking state stays on the preparing task's stack, remembers early wake hints,
-and does not consume signals or allocate during park. RCU owns the registered
-completion and loops on that predicate; a host wake is not reclamation authority.
-Owning replacement enters its exchange body only after both host preparation
-and completion registration succeed, preserving the unused owner on rejection.
+completion wait stays on the preparing task's stack. Preparation and waiting
+do not allocate, and signals or spurious wakeups cannot end the wait. RCU owns
+the completion; the host must acquire it before returning. Owning replacement
+enters its exchange body only after host preparation and callback storage setup,
+preserving the unused owner on rejection. Callback and drain Arc allocations
+still follow fatal OOM policy. Each notifying callback retains an independent
+Arc through notification, even if the waiter returns and markers are reused.
+Startup and GP progress retain the separate ServiceWait park/Waker contract;
+their wake hints only prompt readiness checks and do not authorize reclamation.
 
 The current-reader provider must retain initialized current task storage across
 its single synchronous body, including involuntary migration or nested NMI.
@@ -247,8 +253,8 @@ owning replacement destroys retired payloads in its calling task, not softirq.
 
 The public unsafe `synchronize_rcu` and owning replacement share private wait
 machinery. Standalone callers exclude unsupported reader contexts, withdraw all
-publication routes and retain the old owner on preparation failure. Completion
-registration precedes callback admission; after admission the wait cannot return
+publication routes and retain the old owner on preparation failure. Task wait
+preparation and callback storage setup precede callback admission; afterward the wait cannot return
 an interrupt error or treat a wake as GP completion. Callback and waiter own
 independent Arc references to the completion record. Only its nonblocking
 completion and queue storage are released in softirq, never the retired object.

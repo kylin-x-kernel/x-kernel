@@ -95,27 +95,22 @@ contract: allocation-free context validation before submission and waiter
 preparation only for an incomplete bio. `init_drivers` installs it before
 discovery. `kruntime/fs` explicitly enables `kdriver/block`, so filesystem
 consumers including devfs loop get this service without a physical block driver.
-`HostSignals` owns one permanent
-`kpoll::Completion`. `HostBlockWaiter` validates and retains the preparing task.
-It creates a `PreparedTaskWait` and registers the terminal source only if the
-completion is still pending when waited on. The check/register/recheck sequence
-retains early signals; one registration spans all spurious wakes until the wait
-returns. Signals clone the existing completion state. Only terminal waiting
-remains; virtio completion refills its own pending
-queue and needs no admission waiter. IRQ construction therefore takes no wait
-provider. The host still prepares a waiter for explicit device-close drain.
-ktask/kpoll dependencies are enabled only by the block feature and are not
-propagated to concrete drivers; existing filesystems keep using the same
-generic block interface.
+HostSignals owns one permanent `kcompletion::Completion`.
+`HostBlockWaiter` uses `ktask::completion::CompletionWait` to retain and
+validate the preparing task. Scoped stack registration retains early signals
+and rechecks completion after spurious wakes, without heap allocation or a
+recoverable registration error. Only terminal waiting remains; virtio refills
+its own pending queue. Explicit device-close drain prepares its waiter before
+teardown. Concrete drivers depend only on the portable contract.
 
-Each `prepare_block_wait` allocates three metadata heap objects: the boxed
-waiter, the HostSignals `Arc`, and its PollSet inner `Arc`. An already completed
-bio skips all three; its only shared metadata allocation is the block-owned
-result state. A blocking wait creates one
-KWaker; its sole private registration fits kpoll's inline storage and cannot
-exhaust registration IDs. No data buffers or data copies are added. The existing EEVDF wake
-path may allocate, so this layer adding no wake bookkeeping allocations
-must not be described as the whole wakeup chain being allocation-free.
+Each `prepare_block_wait` allocates two metadata heap objects: the boxed waiter
+and HostSignals Arc. An already completed bio skips both. Main's BioWait still
+prepares these objects lazily after submission under the infallible OOM policy;
+this migration does not make the complete bio lifecycle allocation-free.
+After preparation, waiting and notification allocate no wait resources.
+The scheduler uses intrusive ready queues; default unfiltered scheduler tracing
+uses preallocated capture storage. Arbitrary tracing callbacks/filters are
+outside that guarantee.
 
 ```text
                         init_drivers()
@@ -701,7 +696,7 @@ result, and static discovery propagates it before registering another device.
 
 `rng_completion.rs` is the X-Kernel implementation of the driver-facing
 `RngCompletion` capability. `wait_until` prepares the current task to sleep,
-registers its device wake source with `PollSet`, checks the driver's readiness
+registers a scoped stack node with `kcompletion::WaitQueue`, checks the driver's readiness
 predicate, and parks if the request is still pending.
 `notify` wakes registered tasks so they can check readiness again. The
 provider owns wait registrations; the concrete driver owns its request and DMA

@@ -366,6 +366,10 @@ pub trait IrqOp: Sync {
     }
 
     /// Release an interrupt handler previously registered for `irq`.
+    ///
+    /// May block while synchronizing in-flight handlers. Call in sleepable
+    /// task context without locks or resources needed by the handler. A normal
+    /// return must not leave an in-flight handler using resources about to be freed.
     fn release_irq(&self, irq: IrqResource, token: IrqHandlerToken);
 
     /// Enable or disable delivery of `irq`.
@@ -399,7 +403,8 @@ pub trait IrqOp: Sync {
 /// RAII handle to a registered interrupt.
 ///
 /// Dropping the handle releases the handler through the provider that created
-/// it.
+/// it. Drop may block while synchronizing in-flight handlers and therefore
+/// requires sleepable task context without locks needed by the handler.
 pub struct Irq {
     provider: Option<&'static dyn IrqOp>,
     resource: IrqResource,

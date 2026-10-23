@@ -16,8 +16,8 @@ use krcu_core::{CallbackDriver, CallbackState};
 use crate::{
     context::READER_NODES,
     host::{
-        ProgressTimer, RcuExecutionIf, RcuNotifyIf, RcuSoftirqIf, RcuTaskIf, RcuTimerIf, TaskWait,
-        with_prepared_wait,
+        ProgressTimer, RcuExecutionIf, RcuNotifyIf, RcuSoftirqIf, RcuTaskIf, RcuTimerIf,
+        ServiceWait, with_prepared_service_wait,
     },
 };
 
@@ -84,7 +84,7 @@ impl PreparedGpTask {
             reason = "CG-021-no-panic-on-reachable-failure: the dedicated GP task enters with no \
                       exclusion guards or reader scope"
         )]
-        with_prepared_wait(|wait| {
+        with_prepared_service_wait(|wait| {
             let mut startup_waker = Some(startup_waker);
             RcuTimerIf::with_progress_timer(request_timed_pass, &mut |timer| {
                 #[expect(
@@ -133,7 +133,7 @@ pub(super) fn request_completion_pass() {
 /// services are initialized and its permanent CPU area is published.
 /// No other coordinator may control READER_NODES.
 pub unsafe fn init_service() -> KResult<()> {
-    with_prepared_wait(|startup| {
+    with_prepared_service_wait(|startup| {
         let service = SERVICE.call_once(|| {
             let participants = core::array::from_fn(|cpu| cpu < kcpu_id_map::nr_cpus());
             #[expect(
@@ -303,7 +303,7 @@ impl GracePeriodTask {
     fn run_with_timer(
         &self,
         driver: &mut CallbackDriver<'static, 'static, { kbuild_config::NR_CPUS }>,
-        wait: &mut dyn TaskWait,
+        wait: &mut dyn ServiceWait,
         startup_waker: Waker,
         timer: &mut dyn ProgressTimer,
     ) -> ! {

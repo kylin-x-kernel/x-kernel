@@ -1,5 +1,11 @@
 # procfs - Security and Reliability
 
+Tracing loss counters in `tracing/capture_stats` expose dropped records without
+logging from IRQ/scheduler callbacks. Reading does not reset counters or mutate
+trace configuration. Each open is coherent on its own, not with an independently
+opened `tracing/trace` snapshot; consumers must not infer losslessness from the
+trace header alone.
+
 Named character devices are read from KVFS's registration snapshot; procfs
 does not claim a fixed tty exists when registration failed. A snapshot can
 become stale during concurrent removal, as can hardware topology output; the

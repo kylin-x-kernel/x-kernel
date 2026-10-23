@@ -13,7 +13,6 @@ use core::{
     pin::{Pin, pin},
     ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
-    task::Waker,
 };
 
 use kspin::SpinNoIrq;
@@ -221,16 +220,25 @@ fn terminal_wake_can_run_successor() {
         runs: AtomicUsize::new(0),
     });
     let (old, token) = CompletionObserver::prepare();
-    let registration = old.register(&Waker::from(wake.clone())).unwrap();
+    let waiter = ktask::spawn({
+        let (old, wake) = (old.clone(), wake.clone());
+        move || {
+            old.wait(&ktask::completion::CompletionWait::prepare().unwrap());
+            wake.wake();
+        }
+    });
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
     assert!(work.accept(1).is_ok());
     assert_eq!(work.capture(&mut vec![token]), Ok(1));
     let execution = work.claim().unwrap();
     assert!(work.accept(2).is_ok());
     execution.run();
     assert!(old.is_completed());
+    assert_eq!(waiter.join(), 0);
     assert_eq!(wake.runs.load(Ordering::Relaxed), 1);
     assert_eq!(work.observer_count(), 0);
-    drop(registration);
 }
 
 /// Checks pending cancellation from a callback cannot complete the running receipt.
@@ -395,9 +403,16 @@ fn terminal_notification_can_release_work_storage() {
         } else {
             &work_receipt
         };
-        let registration = release_receipt
-            .register(&Waker::from(owner.clone()))
-            .unwrap();
+        let waiter = ktask::spawn({
+            let (receipt, owner) = (release_receipt.clone(), owner.clone());
+            move || {
+                receipt.wait(&ktask::completion::CompletionWait::prepare().unwrap());
+                owner.wake();
+            }
+        });
+        while waiter.state() != ktask::TaskState::Blocked {
+            ktask::yield_now();
+        }
         {
             let borrowed = owner.work.lock();
             let work = borrowed.as_ref().unwrap();
@@ -410,9 +425,9 @@ fn terminal_notification_can_release_work_storage() {
         partition.claim_next().unwrap().run();
         core::assert!(work_receipt.is_completed());
         core::assert!(queue_receipt.is_completed());
+        core::assert_eq!(waiter.join(), 0);
         core::assert!(owner.work.lock().is_none());
         core::assert_eq!(owner.releases.load(Ordering::Relaxed), 1);
         core::assert!(partition.claim_next().is_none());
-        drop(registration);
     }
 }

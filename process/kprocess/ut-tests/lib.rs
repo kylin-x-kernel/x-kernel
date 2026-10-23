@@ -13,7 +13,7 @@ use khal::{
     mem::{PAGE_SIZE_4K, VirtAddr},
     paging::MappingFlags,
 };
-use kpoll::{Completion, PollRegistrations};
+use kpoll::PollRegistrations;
 use ksignal::Signo;
 use ktask::{TaskInner, prepare_task};
 use ktime_types::TimeSpan;
@@ -165,15 +165,6 @@ fn register_poll_set(set: &kpoll::PollSet, waker: &Waker) -> PollRegistrations {
     let mut registrations = PollRegistrations::new();
     let cx = Context::from_waker(waker);
     registrations.context(&cx).register(set).unwrap();
-    registrations
-}
-
-fn register_completion(completion: &Completion, waker: &Waker) -> PollRegistrations {
-    let mut registrations = PollRegistrations::new();
-    let cx = Context::from_waker(waker);
-    completion
-        .register(&mut registrations.context(&cx))
-        .unwrap();
     registrations
 }
 
@@ -856,8 +847,12 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
         ksignal::api::SignalActions::default(),
         initial_cred(),
     );
-    let task =
-        TaskInner::new_user(|| {}, String::from("nsi-pid-parent"), parent_task_number, thread);
+    let task = TaskInner::new_user(
+        || {},
+        String::from("nsi-pid-parent"),
+        parent_task_number,
+        thread,
+    );
 
     let prepared = task
         .as_thread()
@@ -1530,6 +1525,65 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
 }
 
 #[def_test(serial)]
+fn test_pidfd_exit_poll_registration_races_and_cancellation() {
+    use kpoll::{IoEvents, Pollable};
+
+    let init = ensure_init();
+    let child = init.fork(582);
+    let pidfd = crate::pidfd::PidFd::new(&child);
+    assert!(!pidfd.poll().contains(IoEvents::IN));
+
+    let counter = new_wake_counter();
+    let waker = counter_waker(counter);
+    let context = Context::from_waker(&waker);
+    let mut registrations = PollRegistrations::new();
+    pidfd
+        .register(&mut registrations.context(&context), IoEvents::IN)
+        .unwrap();
+
+    let cancelled_counter = new_wake_counter();
+    let cancelled_waker = counter_waker(cancelled_counter);
+    let cancelled_context = Context::from_waker(&cancelled_waker);
+    let mut cancelled = PollRegistrations::new();
+    pidfd
+        .register(&mut cancelled.context(&cancelled_context), IoEvents::IN)
+        .unwrap();
+    drop(cancelled);
+
+    let unrelated_counter = new_wake_counter();
+    let unrelated_waker = counter_waker(unrelated_counter);
+    let unrelated_context = Context::from_waker(&unrelated_waker);
+    let mut unrelated = PollRegistrations::new();
+    pidfd
+        .register(&mut unrelated.context(&unrelated_context), IoEvents::OUT)
+        .unwrap();
+
+    process_exit::finalize_process_exit(&child);
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(cancelled_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(unrelated_counter.load(Ordering::SeqCst), 0);
+    assert!(pidfd.poll().contains(IoEvents::IN));
+
+    let late_counter = new_wake_counter();
+    let late_waker = counter_waker(late_counter);
+    let late_context = Context::from_waker(&late_waker);
+    let mut late = PollRegistrations::new();
+    pidfd
+        .register(&mut late.context(&late_context), IoEvents::IN)
+        .unwrap();
+    assert_eq!(late_counter.load(Ordering::SeqCst), 0);
+    assert!(pidfd.poll().contains(IoEvents::IN));
+
+    wait_reap::assert_reap_zombie_process(&child);
+    assert!(pidfd.poll().contains(IoEvents::IN));
+    assert!(
+        crate::pidfd::PidFd::new(&child)
+            .poll()
+            .contains(IoEvents::IN)
+    );
+}
+
+#[def_test(serial)]
 fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     let init = ensure_init();
     let child = init.fork(580);
@@ -1542,7 +1596,7 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
 
     let child_counter = new_wake_counter();
     let child_waker = counter_waker(child_counter);
-    let _child_registration = register_completion(child.exit_event(), &child_waker);
+    let _child_registration = register_poll_set(child.exit_event(), &child_waker);
 
     let accounting_observer = new_exit_accounting_observer(
         child.clone(),
@@ -1554,13 +1608,13 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
         register_poll_set(init.child_exit_event(), &accounting_parent_waker);
     let accounting_child_waker = accounting_waker(accounting_observer);
     let _accounting_child_registration =
-        register_completion(child.exit_event(), &accounting_child_waker);
+        register_poll_set(child.exit_event(), &accounting_child_waker);
 
     process_exit::finalize_process_exit(&child);
 
     assert!(
-        child.exit_event().is_completed(),
-        "process exit completion must stay completed for late observers"
+        child.is_exited(),
+        "process exit state must stay observable for late observers"
     );
     assert_eq!(
         child_counter.load(Ordering::SeqCst),
@@ -1839,7 +1893,7 @@ fn test_finalize_process_exit_is_idempotent_after_autoreap() {
 
     let child_counter = new_wake_counter();
     let child_waker = counter_waker(child_counter);
-    let _child_registration = register_completion(child.exit_event(), &child_waker);
+    let _child_registration = register_poll_set(child.exit_event(), &child_waker);
 
     process_exit::finalize_process_exit_with_publication(
         &child,
@@ -1847,8 +1901,8 @@ fn test_finalize_process_exit_is_idempotent_after_autoreap() {
     );
     assert!(child.is_exited());
     assert!(
-        child.exit_event().is_completed(),
-        "autoreap exit completion must stay completed for late observers"
+        child.is_exited(),
+        "autoreap exit state must stay observable for late observers"
     );
     assert!(
         !child.is_waitable_zombie(),
@@ -2174,7 +2228,8 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
     let by_tgid = scheduler::target_task(process.pid() as i32).expect("live tgid");
     assert_eq!(by_tgid.as_thread().pid(), process.pid());
     assert!(
-        ktask::KtaskRef::ptr_eq(&by_tgid, &leader_task) || ktask::KtaskRef::ptr_eq(&by_tgid, &sibling_task),
+        ktask::KtaskRef::ptr_eq(&by_tgid, &leader_task)
+            || ktask::KtaskRef::ptr_eq(&by_tgid, &sibling_task),
         "tgid lookup must stay inside the process thread group"
     );
 
@@ -2817,18 +2872,29 @@ fn test_tipc_handles_close_before_process_exit_publication() {
 fn task_files_unshare_preserves_siblings_and_clone_files_policy() {
     let (process, task) = build_prepared_test_user_task();
     let leader = task.as_thread();
-    let file = crate::PidFd::new_file(&process, kvfs::OpenFlags::READ_WRITE.bits(), initial_cred()).unwrap();
+    let file = crate::PidFd::new_file(&process, kvfs::OpenFlags::READ_WRITE.bits(), initial_cred())
+        .unwrap();
     let fd = leader.files().add_file(1024, file.clone(), false).unwrap();
     let sibling = leader.clone_thread_in_process().unwrap();
     sibling.files().unshare_fd_table().unwrap();
     sibling.files().close_file(fd).unwrap();
     assert!(Arc::ptr_eq(&leader.files().get_file(fd).unwrap(), &file));
-    assert_eq!(sibling.files().get_file(fd).err(), Some(kerrno::KError::BadFileDescriptor));
+    assert_eq!(
+        sibling.files().get_file(fd).err(),
+        Some(kerrno::KError::BadFileDescriptor)
+    );
 
-    let private = leader.prepare_thread_clone_with_files(false).unwrap().into_parts().0;
+    let private = leader
+        .prepare_thread_clone_with_files(false)
+        .unwrap()
+        .into_parts()
+        .0;
     let shared = leader.clone_thread_in_process().unwrap();
     shared.files().close_file(fd).unwrap();
-    assert_eq!(leader.files().get_file(fd).err(), Some(kerrno::KError::BadFileDescriptor));
+    assert_eq!(
+        leader.files().get_file(fd).err(),
+        Some(kerrno::KError::BadFileDescriptor)
+    );
     assert!(Arc::ptr_eq(&private.files().get_file(fd).unwrap(), &file));
     private.files().exit_files();
     process.discard_unpublished();

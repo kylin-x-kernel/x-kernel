@@ -116,6 +116,17 @@ and park. Final handle release queues its already prepared reclamation Work; it
 does not synchronously wait or invoke capture destructors in the caller's context.
 It may revoke pending work and does not promise callback execution.
 
+Only the completion primitive and task-wait machinery are allocation-free.
+Synchronous drain still allocates completion-observation receipts and containers.
+Per ordinary Work preparation attempt, N captured-slot candidates (0–2) require N
+receipt Arcs plus two Vec buffers for N > 0: zero, three or four allocations.
+Capture-growth retries may repeat them. Delayed cancellation uses the same Work
+drain before joining its timer. The final reclamation hook's Drain::drain can
+therefore allocate these wait resources even though enqueueing reclamation does
+not allocate. Allocator failure remains fatal under kernel allocator policy;
+allocation-free entire drain or final reclamation is explicitly not guaranteed.
+The core queue design documents the additional queue/delayed-flush allocation counts.
+
 ## Ownership And Closure
 
 All clones share `Owner::is_closed`. Submission holds that IRQ-safe gate until the

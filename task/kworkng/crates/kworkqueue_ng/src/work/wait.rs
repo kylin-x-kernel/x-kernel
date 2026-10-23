@@ -5,10 +5,8 @@
 //! Waiter-owned receipts prepared before capture; no Work or Queue back-reference.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::task::Waker;
 
-use kpoll::{PollRegisterError, PollRegistration};
-use ktask::future::PreparedTaskWait;
+use ktask::completion::CompletionWait;
 
 use super::{
     Work,
@@ -26,26 +24,23 @@ impl<T, H> Work<T, H> {
     /// diagnostics do not guarantee their detection.
     ///
     /// # Errors
-    /// Returns invalid context, optional direct self-wait or registration errors
+    /// Returns invalid context, optional direct self-wait errors
     /// before attaching observers. Idle Work still requires sleepable context.
     ///
     /// # Panics
     /// Propagates fatal allocation and completion invariant failures.
     pub fn flush(&self) -> Result<(), WaitError> {
-        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| WaitError::InvalidContext)?;
+        let task_wait = CompletionWait::prepare().map_err(|_| WaitError::InvalidContext)?;
         #[cfg(feature = "self-wait-check")]
         self.reject_callback_self_wait()?;
-        let waker = task_wait.waker();
         let mut wait = loop {
-            let mut wait = CleanupWait::prepare(self.observer_count(), &waker)?;
+            let mut wait = CleanupWait::prepare(self.observer_count());
             if self.capture(&mut wait.prepared).is_ok() {
                 break wait;
             }
         };
         wait.discard_unused();
-        while !wait.is_completed() {
-            task_wait.park();
-        }
+        wait.wait(&task_wait);
         Ok(())
     }
 
@@ -67,37 +62,32 @@ pub enum WaitError {
     /// The wait includes the caller's own active callback.
     #[cfg(feature = "self-wait-check")]
     SelfWait,
-    /// Completion notification registration failed before wait effects.
-    Registration(PollRegisterError),
 }
 
-/// Owns completion receipts and their registrations for exactly one captured wait.
+/// Owns completion receipts for exactly one captured wait.
 pub(super) struct CleanupWait {
-    entries: Vec<(Arc<CompletionObserver>, PollRegistration)>,
+    entries: Vec<Arc<CompletionObserver>>,
     pub(super) prepared: Vec<PreparedObserver>,
 }
 
 impl CleanupWait {
-    pub(super) fn prepare(count: usize, waker: &Waker) -> Result<Self, WaitError> {
-        Self::prepare_with(count, |observer| observer.register(waker))
-    }
-
-    /// A registration failure drops earlier registrations before any Work capture.
-    fn prepare_with(
-        count: usize,
-        mut register: impl FnMut(&CompletionObserver) -> Result<PollRegistration, PollRegisterError>,
-    ) -> Result<Self, WaitError> {
+    pub(super) fn prepare(count: usize) -> Self {
         let mut wait = Self {
             entries: Vec::with_capacity(count),
             prepared: Vec::with_capacity(count),
         };
         for _ in 0..count {
             let (observer, prepared) = CompletionObserver::prepare();
-            let registration = register(&observer).map_err(WaitError::Registration)?;
-            wait.entries.push((observer, registration));
+            wait.entries.push(observer);
             wait.prepared.push(prepared);
         }
-        Ok(wait)
+        wait
+    }
+
+    pub(super) fn wait(&self, task_wait: &CompletionWait) {
+        for receipt in &self.entries {
+            receipt.wait(task_wait);
+        }
     }
 
     /// Capture pops tokens from the end; discard the unused prefix after unlocking.
@@ -107,10 +97,9 @@ impl CleanupWait {
         self.prepared.clear();
     }
 
+    #[cfg(unittest)]
     pub(super) fn is_completed(&self) -> bool {
-        self.entries
-            .iter()
-            .all(|(receipt, _)| receipt.is_completed())
+        self.entries.iter().all(|receipt| receipt.is_completed())
     }
 }
 

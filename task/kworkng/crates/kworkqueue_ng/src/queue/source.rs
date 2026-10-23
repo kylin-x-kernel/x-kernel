@@ -32,7 +32,7 @@ pub struct QueuePartitionSource {
 }
 
 impl QueueSource {
-    pub(super) fn detachment_completion(&self) -> Arc<kpoll::Completion> {
+    pub(super) fn detachment_completion(&self) -> Arc<kcompletion::Completion> {
         self.source.detachment_completion()
     }
 

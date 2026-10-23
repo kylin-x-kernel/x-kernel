@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use kpoll::{Completion, PollSet};
+use kpoll::PollSet;
 use ksignal::Signo;
 use ktime_types::TimeSpan;
 
@@ -229,8 +229,11 @@ impl Process {
         self.lifecycle.notify_child_exit();
     }
 
-    /// Returns the process-exit event for this process.
-    pub fn exit_event(&self) -> &Arc<Completion> {
+    /// Returns the process-exit notification source for poll registration.
+    ///
+    /// Notifications are hints, not stored readiness. Check [`Self::is_exited`]
+    /// after registering and after every wake, including for late observers.
+    pub fn exit_event(&self) -> &Arc<PollSet> {
         self.lifecycle.exit_event()
     }
 

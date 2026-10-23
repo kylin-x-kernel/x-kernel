@@ -4,7 +4,7 @@
 
 //! Regular IRQ dispatch and action fanout.
 
-use kpoll::PollSet;
+use kcompletion::DeferredWake;
 
 use crate::{IrqEvent, platform::PendingIrq, state::IRQ_STATE};
 
@@ -116,7 +116,7 @@ impl Drop for IrqDispatchGuard {
     }
 }
 
-fn wake_in_flight_zero(wait_set: Option<PollSet>) {
+fn wake_in_flight_zero(wait_set: Option<DeferredWake>) {
     if let Some(wait_set) = wait_set {
         wait_set.wake();
     }

@@ -2,8 +2,6 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-
-
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -12,7 +10,7 @@ use core::{
 
 use unittest::{assert, assert_eq, def_test};
 
-use super::{Completion, PollEvent, PollRegistrations, PollSet, WeakPollSet};
+use super::{PollEvent, PollRegistrations, PollSet, WeakPollSet};
 
 #[def_test]
 fn test_weak_source_cancel_wake_and_expiry() {
@@ -322,25 +320,6 @@ fn test_source_drop_wakes_waiter() {
 }
 
 #[def_test]
-fn test_completion_initial_state_is_not_ready() {
-    let completion = Completion::new();
-
-    assert!(!completion.is_completed());
-    assert!(!completion.try_wait());
-}
-
-#[def_test]
-fn test_completion_complete_releases_one_token() {
-    let completion = Completion::new();
-
-    assert_eq!(completion.complete(), 0);
-    assert!(completion.is_completed());
-    assert!(completion.try_wait());
-    assert!(!completion.is_completed());
-    assert!(!completion.try_wait());
-}
-
-#[def_test]
 fn test_poll_event_broadcasts_generation_change_to_all_waiters() {
     let event = PollEvent::new();
     let observed_generation = event.generation();
@@ -369,194 +348,4 @@ fn test_poll_event_broadcasts_generation_change_to_all_waiters() {
 
     drop(first_registrations);
     drop(second_registrations);
-}
-
-#[def_test]
-fn test_completion_accumulates_tokens() {
-    let completion = Completion::new();
-
-    assert_eq!(completion.complete(), 0);
-    assert_eq!(completion.complete(), 0);
-
-    assert!(completion.try_wait());
-    assert!(completion.try_wait());
-    assert!(!completion.try_wait());
-}
-
-#[def_test]
-fn test_completion_complete_all_is_permanent_until_reinit() {
-    let completion = Completion::new();
-
-    assert_eq!(completion.complete_all(), 0);
-    assert!(completion.try_wait());
-    assert!(completion.try_wait());
-    assert!(completion.is_completed());
-
-    completion.reinit();
-    assert!(!completion.is_completed());
-    assert!(!completion.try_wait());
-}
-
-#[def_test]
-fn test_completion_complete_all_defer_wake_delays_waiter_wake() {
-    let completion = Completion::new();
-    let counter = new_counter();
-    let waker = make_waker(counter);
-    let registrations = register_completion_waiter(&completion, &waker);
-
-    let wake_set = completion.complete_all_defer_wake();
-    assert!(completion.is_completed());
-    assert_eq!(counter.load(Ordering::SeqCst), 0);
-
-    assert_eq!(wake_set.wake(), 1);
-    assert_eq!(counter.load(Ordering::SeqCst), 1);
-    drop(registrations);
-    assert!(completion.try_wait());
-}
-
-fn register_completion_waiter(completion: &Completion, waker: &Waker) -> PollRegistrations {
-    let mut registrations = PollRegistrations::new();
-    let context = Context::from_waker(waker);
-    completion
-        .register(&mut registrations.context(&context))
-        .unwrap();
-    registrations
-}
-
-#[def_test]
-fn test_completion_register_then_complete_wakes_waiter() {
-    let completion = Completion::new();
-    let counter = new_counter();
-    let waker = make_waker(counter);
-    let registrations = register_completion_waiter(&completion, &waker);
-
-    assert_eq!(completion.complete(), 1);
-    assert_eq!(counter.load(Ordering::SeqCst), 1);
-    drop(registrations);
-    assert!(completion.try_wait());
-}
-
-struct ReentrantCompletionWake {
-    completion: &'static Completion,
-    count: AtomicUsize,
-}
-
-/// # Safety
-///
-/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
-/// with this vtable. The state and its referenced polling object must remain
-/// live for every clone; callbacks share the state and never deallocate it.
-unsafe fn reentrant_completion_clone(data: *const ()) -> RawWaker {
-    RawWaker::new(data, &REENTRANT_COMPLETION_VTABLE)
-}
-
-/// # Safety
-///
-/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
-/// with this vtable. The state and its referenced polling object must remain
-/// live for every clone; callbacks share the state and never deallocate it.
-unsafe fn reentrant_completion_wake(data: *const ()) {
-    // SAFETY: the pointer is created from a leaked `ReentrantCompletionWake`.
-    let state = unsafe { &*(data as *const ReentrantCompletionWake) };
-    state.count.fetch_add(1, Ordering::SeqCst);
-    core::assert!(state.completion.try_wait());
-}
-
-/// # Safety
-///
-/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
-/// with this vtable. The state and its referenced polling object must remain
-/// live for every clone; callbacks share the state and never deallocate it.
-unsafe fn reentrant_completion_wake_by_ref(data: *const ()) {
-    // SAFETY: same invariant as `reentrant_completion_wake`.
-    unsafe { reentrant_completion_wake(data) };
-}
-
-/// # Safety
-///
-/// `data` must point to the initialized, leaked `ReentrantCompletionWake` used
-/// with this vtable. The state and its referenced polling object must remain
-/// live for every clone; callbacks share the state and never deallocate it.
-unsafe fn reentrant_completion_drop(_data: *const ()) {}
-
-static REENTRANT_COMPLETION_VTABLE: RawWakerVTable = RawWakerVTable::new(
-    reentrant_completion_clone,
-    reentrant_completion_wake,
-    reentrant_completion_wake_by_ref,
-    reentrant_completion_drop,
-);
-
-#[def_test]
-fn test_completion_wake_is_reentrant_after_unlock() {
-    let completion = Box::leak(Box::new(Completion::new()));
-    let state = Box::leak(Box::new(ReentrantCompletionWake {
-        completion,
-        count: AtomicUsize::new(0),
-    }));
-    let raw = RawWaker::new(state as *const _ as *const (), &REENTRANT_COMPLETION_VTABLE);
-    // SAFETY: the vtable operates on the leaked `ReentrantCompletionWake`.
-    let waker = unsafe { Waker::from_raw(raw) };
-    let _registrations = register_completion_waiter(completion, &waker);
-
-    assert_eq!(completion.complete(), 1);
-    assert_eq!(state.count.load(Ordering::SeqCst), 1);
-    assert!(!completion.try_wait());
-}
-
-#[def_test]
-fn test_completion_recheck_observes_complete_before_register() {
-    let completion = Completion::new();
-    let counter = new_counter();
-    let waker = make_waker(counter);
-
-    assert!(!completion.try_wait());
-    assert_eq!(completion.complete(), 0);
-
-    let _registrations = register_completion_waiter(&completion, &waker);
-    assert!(completion.try_wait());
-    assert_eq!(counter.load(Ordering::SeqCst), 0);
-}
-
-#[def_test]
-fn test_completion_owned_guard_drop_unregisters() {
-    let completion = Completion::new();
-    let registration = completion.register_owned(Waker::noop()).unwrap();
-    drop(registration);
-    assert_eq!(completion.complete(), 0);
-    assert!(completion.try_wait());
-}
-
-#[def_test]
-fn test_completion_owned_recheck_and_stale_guard() {
-    let completion = Completion::new();
-    assert!(!completion.try_wait());
-    assert_eq!(completion.complete(), 0);
-    let first = completion.register_owned(Waker::noop()).unwrap();
-    assert!(completion.try_wait());
-    assert_eq!(completion.complete(), 1);
-    let second = completion.register_owned(Waker::noop()).unwrap();
-    drop(first);
-    assert_eq!(completion.complete_all(), 1);
-    assert!(!second.cancel());
-    assert!(completion.try_wait());
-}
-
-#[def_test]
-fn test_completion_owned_guard_does_not_keep_source_alive() {
-    use alloc::{sync::Arc, task::Wake};
-
-    struct CountWake(AtomicUsize);
-    impl Wake for CountWake {
-        fn wake(self: Arc<Self>) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    let counter = Arc::new(CountWake(AtomicUsize::new(0)));
-    let waker = Waker::from(counter.clone());
-    let registration = {
-        let completion = Completion::new();
-        completion.register_owned(&waker).unwrap()
-    };
-    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-    assert!(!registration.cancel());
 }

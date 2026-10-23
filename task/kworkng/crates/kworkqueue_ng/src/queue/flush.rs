@@ -4,17 +4,10 @@
 
 //! Common acceptance cutoff with bounded color reuse and independent old receipts.
 
-use alloc::{sync::Arc, vec::Vec};
-use core::task::Waker;
-
-use kpoll::{PollRegisterError, PollRegistration};
-use ktask::future::PreparedTaskWait;
+use ktask::completion::CompletionWait;
 
 use super::{Queue, color::ColorCompletion, control::COLOR_COUNT};
-use crate::work::{
-    observers::{CompletionObserver, CompletionObservers},
-    wait::WaitError,
-};
+use crate::work::{observers::CompletionObservers, wait::WaitError};
 
 impl Queue {
     /// Waits for ordinary acceptance before one common cutoff, including cleanup.
@@ -25,56 +18,29 @@ impl Queue {
     /// draining; this is not cancellation, shutdown or proof of final idleness.
     ///
     /// # Errors
-    /// Context, optional self-wait and registration errors precede cutoff effects.
+    /// Context and optional self-wait errors precede cutoff effects.
     ///
     /// # Panics
     /// Propagates fatal allocation, notification and batch-accounting invariant failures.
     pub fn flush(&self) -> Result<(), WaitError> {
-        self.flush_with(CompletionObserver::register, |_| {})
+        self.flush_with(|| {}, |_| {})
     }
 
-    // Private deterministic test hooks: registration failure and a late old-color
-    // commit before partition barriers. No business hook is exposed by flush.
     fn flush_with(
         &self,
-        mut register: impl FnMut(
-            &CompletionObserver,
-            &Waker,
-        ) -> Result<PollRegistration, PollRegisterError>,
+        before_capture: impl FnOnce(),
         after_publish: impl FnOnce(usize),
     ) -> Result<(), WaitError> {
-        let mut task_wait = PreparedTaskWait::prepare().map_err(|_| WaitError::InvalidContext)?;
+        let task_wait = CompletionWait::prepare().map_err(|_| WaitError::InvalidContext)?;
         #[cfg(feature = "self-wait-check")]
         self.reject_callback_self_wait()?;
-        let waker = task_wait.waker();
-        let (own, mut tokens) = ColorCompletion::prepare(self.partitions.len());
-        let _own_registrations = own
-            .register_with(&waker, &mut register)
-            .map_err(WaitError::Registration)?;
-        let (observed, _registrations) = loop {
-            let observed = self.sealed_colors.lock().clone();
-            let mut registrations = Vec::new();
-            for receipt in observed.iter().flatten() {
-                registrations.extend(
-                    receipt
-                        .register_with(&waker, &mut register)
-                        .map_err(WaitError::Registration)?,
-                );
-            }
+        let (own, mut tokens) =
+            ColorCompletion::prepare(self.partitions.len(), &self.color_progress);
+        before_capture();
+        let observed = loop {
             let mut sealed = self.sealed_colors.lock();
-            if !sealed
-                .iter()
-                .zip(&observed)
-                .all(|(live, old)| match (live, old) {
-                    (None, None) => true,
-                    (Some(live), Some(old)) => Arc::ptr_eq(live, old),
-                    _ => false,
-                })
-            {
-                drop(sealed);
-                continue;
-            }
-            // Snapshot Arcs defer final receipt/registration destruction past unlock.
+            let observed = sealed.clone();
+            // Snapshot Arcs defer final receipt destruction past unlock.
             // A terminal local receipt has already left its in-flight observer chain.
             for (index, receipt) in observed.iter().enumerate() {
                 if receipt
@@ -89,10 +55,13 @@ impl Queue {
                 .map(|offset| (current + offset) % COLOR_COUNT)
                 .find(|&color| sealed[color].is_none());
             let Some(next) = next else {
-                // Every occupied receipt is registered. Completion publishes a
-                // durable predicate and wakes us even if no further submit occurs.
                 drop(sealed);
-                task_wait.park();
+                task_wait.wait_until(&self.color_progress, || {
+                    observed
+                        .iter()
+                        .flatten()
+                        .any(|receipt| receipt.is_completed())
+                });
                 continue;
             };
             assert!(sealed[current].is_none());
@@ -109,18 +78,14 @@ impl Queue {
                 }
             }
             // No later flusher can recycle a partially visited color. Empty
-            // completions and any Waker callbacks are delivered after setup unlock.
+            // completions and task wakeups are delivered after setup unlock.
             drop(sealed);
             empty.complete();
-            break (observed, registrations);
+            break observed;
         };
-        while !own.is_completed()
-            || !observed
-                .iter()
-                .flatten()
-                .all(|receipt| receipt.is_completed())
-        {
-            task_wait.park();
+        own.wait(&task_wait);
+        for receipt in observed.iter().flatten() {
+            receipt.wait(&task_wait);
         }
         Ok(())
     }

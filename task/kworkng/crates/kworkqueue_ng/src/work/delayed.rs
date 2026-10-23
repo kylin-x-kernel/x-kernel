@@ -291,7 +291,7 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
     /// Sleepable context only; do not block progress or wait from this callback.
     ///
     /// # Errors
-    /// Context, self-wait and registration errors precede all effects.
+    /// Context and self-wait errors precede all effects.
     ///
     /// # Panics
     /// Propagates fatal preparation, disable-depth and cleanup invariant failures.
@@ -307,7 +307,7 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
     /// Do not prevent timer/callback progress or invoke from the same business callback.
     ///
     /// # Errors
-    /// Context, optional self-wait and registration failures precede all effects.
+    /// Context and optional self-wait errors precede all effects.
     ///
     /// # Panics
     /// Propagates disable-depth overflow and fatal preparation/cleanup failures.
@@ -324,21 +324,21 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
     /// cancel_sync for teardown. Sleepable context only, with callback progress.
     ///
     /// # Errors
-    /// Context, self-wait, registration and transfer errors precede scope capture
+    /// Context, self-wait and transfer errors precede scope capture
     /// and leave the accepted arrangement unchanged by this call.
     ///
     /// # Panics
     /// Propagates broken timer, queue, accounting or notification invariants.
     pub fn flush(&self) -> Result<(), FlushError> {
-        let mut task_wait = ktask::future::PreparedTaskWait::prepare()
+        let task_wait = ktask::completion::CompletionWait::prepare()
             .map_err(|_| FlushError::Wait(WaitError::InvalidContext))?;
         #[cfg(feature = "self-wait-check")]
         self.work
             .reject_callback_self_wait()
             .map_err(FlushError::Wait)?;
         // Work has at most one pending and one running slot. Prepare once so
-        // physical-delivery retries neither allocate nor fail registration later.
-        let mut wait = CleanupWait::prepare(2, &task_wait.waker()).map_err(FlushError::Wait)?;
+        // physical-delivery retries do not allocate more receipts.
+        let mut wait = CleanupWait::prepare(2);
         loop {
             let owner = self.work.state.lock().owner_partition();
             let captured = if let Some(owner) = owner {
@@ -361,9 +361,7 @@ impl<H: Fn() + Send + Sync> DelayedWork<H> {
             ktask::yield_now();
         }
         wait.discard_unused();
-        while !wait.is_completed() {
-            task_wait.park();
-        }
+        wait.wait(&task_wait);
         Ok(())
     }
 

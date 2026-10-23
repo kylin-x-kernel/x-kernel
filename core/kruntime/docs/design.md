@@ -46,11 +46,15 @@ setting a request, running a normal checkpoint and deferring checks around one
 synchronous body. Runtime adds no scheduling policy or credit of its own. RCU
 owns cleanup decisions; ktask owns count balancing and switch eligibility.
 
-The task-wait adapter owns one concrete `PreparedTaskWait` on its stack and lends
-only waker cloning and park operations. It validates sleepability before calling
-the RCU body, and never returns a preparation error afterward. Its small wrapper
-introduces no allocation of its own. RCU keeps callback completion and retirement
-ownership; a wake hint merely allows RCU to check its predicate again.
+The synchronous task-wait adapter owns a `ktask::completion::CompletionWait`
+on its stack and lends infallible `wait_for_completion` operations. Preparation
+validates sleepability before calling the RCU body; preparation and waiting do
+not allocate or use poll registrations. RCU keeps callback completion and
+retirement ownership, including its existing callback/drain Arc allocations.
+The separate service-wait adapter retains `PreparedTaskWait` waker cloning and
+park operations for startup acknowledgment and GP progress. Wake hints merely
+allow those callers to check their predicates again. Neither adapter returns
+a preparation error after invoking its body.
 
 The drain adapter holds one permanent sleepable mutex across the supplied body,
 including its completion wait. Lazy initialization constructs the mutex on the
@@ -183,7 +187,7 @@ same handoff. Kconfig excludes both stress runners while it is selected.
 RCU integration tests in `ut-tests/rcu_service_startup.rs` and
 `ut-tests/rcu_synchronize.rs` verify task/timer carrier preparation and public
 wait semantics against boot's permanent services. They own their temporary
-tasks, timers and interruption state. Private RCU completion/registration
+tasks, timers and interruption state. Private RCU completion/ownership
 fixtures remain in `krcu`; production APIs do not expose their private state.
 For a focused kernel regression run, select both crates with
 `UNITTEST_CRATE=krcu,kruntime` so internal and integration checks execute together.

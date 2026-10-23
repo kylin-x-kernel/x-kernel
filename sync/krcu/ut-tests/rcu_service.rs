@@ -35,10 +35,12 @@ fn callback_batches_rearm_only_for_ready_budget_remainder() {
         [const { krcu_core::ReaderNode::new() }; kbuild_config::NR_CPUS];
     let completed = Arc::new(AtomicUsize::new(0));
     let probes: alloc::vec::Vec<_> = (0..2 * CALLBACK_BUDGET + 1)
-        .map(|_| Box::new(BudgetProbe {
-            node: CallbackNode::new(finish_budget_probe),
-            completed: completed.clone(),
-        }))
+        .map(|_| {
+            Box::new(BudgetProbe {
+                node: CallbackNode::new(finish_budget_probe),
+                completed: completed.clone(),
+            })
+        })
         .collect();
     let _guard = kspin::NoPreemptIrqSave::new();
     let cpu = RcuExecutionIf::current_cpu().as_usize();
@@ -156,7 +158,10 @@ fn callback_preflight_checks_isolated_readiness_without_claiming_control() {
     // SAFETY: this serial fixture alone coordinates its inactive static nodes.
     // No reader is enrolled and no callback is submitted.
     let callbacks = unsafe {
-        CallbackState::new(&NODES, core::array::from_fn(|cpu| cpu < kcpu_id_map::nr_cpus()))
+        CallbackState::new(
+            &NODES,
+            core::array::from_fn(|cpu| cpu < kcpu_id_map::nr_cpus()),
+        )
     }
     .unwrap();
     let service = GracePeriodTask {
@@ -396,7 +401,7 @@ fn callback_progress_does_not_require_yielding_test_workers() {
     let service = SERVICE.get().unwrap();
     let completed = Arc::new(AtomicUsize::new(0));
     let violations = Arc::new(AtomicUsize::new(0));
-    let accepted = crate::host::with_prepared_wait(|wait| {
+    let accepted = crate::host::with_prepared_service_wait(|wait| {
         let mut accepted = 0;
         for _ in 0..4 {
             for cpu in 0..kcpu_id_map::nr_cpus() {

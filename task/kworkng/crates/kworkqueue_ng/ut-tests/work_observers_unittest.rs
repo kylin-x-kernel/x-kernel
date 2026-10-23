@@ -2,23 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, task::Wake};
-use core::{
-    sync::atomic::{AtomicUsize, Ordering},
-    task::Waker,
-};
+use alloc::sync::Arc;
 
+use ktask::completion::CompletionWait;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{CompletionObserver, CompletionObservers};
-
-struct WakeCount(AtomicUsize);
-
-impl Wake for WakeCount {
-    fn wake(self: Arc<Self>) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-    }
-}
 
 /// Checks whole-chain ownership transfer and isolation from replacement work.
 ///
@@ -64,26 +53,25 @@ fn abandoned_receipt_is_reclaimed_at_completion() {
     observers.complete();
 }
 
-/// Checks no wake during attachment/transfer and permanent readiness after wake.
-///
-/// # Panics
-/// Panics if registration fails or notification occurs before terminal completion.
+/// Attachment and transfer do not release a sleeping task before completion.
 #[def_test]
 fn wake_is_deferred_until_detached_completion() {
-    let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
-    let waker = Waker::from(counter.clone());
     let (receipt, prepared) = CompletionObserver::prepare();
-    let registration = receipt.register(&waker).unwrap();
+    let waiter = ktask::spawn({
+        let receipt = receipt.clone();
+        move || receipt.wait(&CompletionWait::prepare().unwrap())
+    });
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
     let mut observers = CompletionObservers::new();
     observers.attach(prepared);
     let detached = observers.take();
-    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
     assert!(!receipt.is_completed());
+    assert_eq!(waiter.state(), ktask::TaskState::Blocked);
     detached.complete();
-    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    assert_eq!(waiter.join(), 0);
     assert!(receipt.is_completed());
-    assert!(receipt.is_completed());
-    drop(registration);
 }
 
 /// Checks canceled preparation and discarded chains never report success.
@@ -104,38 +92,37 @@ fn discarded_storage_does_not_report_completion() {
     assert_eq!(Arc::strong_count(&attached), 1);
 }
 
-/// Checks rechecking readiness covers completion before wake registration.
-///
-/// # Panics
-/// Panics if late registration fails or hides permanent completion.
+/// Permanent completion supports late and repeated sequential waits.
 #[def_test]
-fn completion_before_registration_remains_observable() {
-    let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
-    let waker = Waker::from(counter.clone());
+fn completion_before_wait_remains_observable() {
     let (receipt, prepared) = CompletionObserver::prepare();
     let mut observers = CompletionObservers::new();
     observers.attach(prepared);
     observers.complete();
-    let registration = receipt.register(&waker).unwrap();
+    let wait = CompletionWait::prepare().unwrap();
+    receipt.wait(&wait);
+    receipt.wait(&wait);
     assert!(receipt.is_completed());
-    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
-    drop(registration);
 }
 
-/// Checks canceled wake registration does not affect subject completion.
-///
-/// # Panics
-/// Panics if unregistering wakes the observer or prevents terminal readiness.
+/// Independent tasks observe the same permanent receipt.
 #[def_test]
-fn canceled_wake_registration_does_not_cancel_observation() {
-    let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
-    let waker = Waker::from(counter.clone());
+fn concurrent_waiters_share_terminal_observation() {
     let (receipt, prepared) = CompletionObserver::prepare();
-    let registration = receipt.register(&waker).unwrap();
+    let waiters: [_; 2] = core::array::from_fn(|_| {
+        let receipt = receipt.clone();
+        ktask::spawn(move || receipt.wait(&CompletionWait::prepare().unwrap()))
+    });
+    for waiter in &waiters {
+        while waiter.state() != ktask::TaskState::Blocked {
+            ktask::yield_now();
+        }
+    }
     let mut observers = CompletionObservers::new();
     observers.attach(prepared);
-    drop(registration);
     observers.complete();
+    for waiter in waiters {
+        assert_eq!(waiter.join(), 0);
+    }
     assert!(receipt.is_completed());
-    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
 }

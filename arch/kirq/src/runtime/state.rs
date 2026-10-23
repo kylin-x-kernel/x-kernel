@@ -10,7 +10,7 @@ use alloc::{
 };
 use core::array;
 
-use kpoll::{Completion, PollSet};
+use kcompletion::{Completion, DeferredWake};
 use kspin::{SpinNoIrq, static_lock};
 
 use super::unhandled::{UnhandledIrqReport, UnhandledIrqState};
@@ -358,7 +358,7 @@ impl IrqDescRuntimeState {
         self.in_flight = self.in_flight.saturating_add(1);
     }
 
-    fn finish_dispatch(&mut self) -> Option<PollSet> {
+    fn finish_dispatch(&mut self) -> Option<DeferredWake> {
         if self.in_flight == 0 {
             warn!("IRQ dispatch in-flight underflow");
             None
@@ -516,7 +516,7 @@ impl IrqStateDesc {
         self.runtime.begin_dispatch();
     }
 
-    pub(super) fn finish_dispatch(&mut self) -> Option<PollSet> {
+    pub(super) fn finish_dispatch(&mut self) -> Option<DeferredWake> {
         self.runtime.finish_dispatch()
     }
 

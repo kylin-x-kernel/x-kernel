@@ -13,8 +13,13 @@ Callers must release outer locks that waker callbacks could reenter first.
 ## 定位
 
 `kpoll` 是 x-kernel 中 I/O readiness 查询与 one-shot waiter 注册的核心原语。
-`poll`/`select`/`epoll`、阻塞 read/write、信号等待、IRQ 桥接和 TIPC 等子系统
+`poll`/`select`/`epoll`、阻塞 read/write、信号等待和 TIPC 等子系统
 都通过它把“条件未就绪”转换为可被唤醒的异步等待。
+
+Synchronous completion tokens and blocking waits belong to the independent
+`kcompletion` primitive and its task provider. `kpoll` exposes readiness sources
+only, with no completion compatibility API. Process exit uses `PollSet` plus
+`Process::is_exited()` as its persistent readiness predicate.
 
 ## 背景
 
@@ -38,9 +43,10 @@ task/kpoll/
 │   ├── lib.rs           # Pollable trait 与公共导出
 │   ├── events.rs        # IoEvents
 │   ├── source.rs        # PollSet / 槽表 / wake
-│   ├── completion.rs    # Completion token state + PollSet wake source
-│   ├── registration.rs  # PollRegistration / PollRegistrations / PollContext
-│   └── tests.rs
+│   ├── event.rs         # PollEvent generation-based broadcast source
+│   └── registration.rs  # PollRegistration / PollRegistrations / PollContext
+├── ut-tests/
+│   └── kpoll_unittest.rs # PollSet / PollEvent regression tests
 └── docs/
     ├── design.md
     └── security.md
@@ -48,7 +54,7 @@ task/kpoll/
 
 主要消费方：
 
-- `task/ktask`：`poll_io`、`interruptible`、task interrupt/join、GC wait；
+- `task/ktask`：`poll_io`、`interruptible`、task interrupt、GC wait；
 - `fs/kvfs`：`FileOperations::register_poll`；
 - `core/ksyscall`：poll/select、wait、signal；
 - `process/kfd_objects`：eventfd/epoll 等；`fs/kvfs`：pipe/FIFO；
@@ -78,7 +84,7 @@ Pollable::register(context, events)
 | `PollRegistrations` | 一次逻辑等待拥有的全部 guards |
 | `PollContext` | 当前 poll 轮次的短生命周期注册能力 |
 | `Pollable` | 就绪快照 + 通过 `PollContext` 注册 |
-| `Completion` | Linux-like completion token + poll waiter wake source |
+| `PollEvent` | generation-based broadcast wake source |
 
 ## 调用约束 / 执行上下文
 
@@ -89,7 +95,6 @@ Pollable::register(context, events)
   `Waker::clone` 在加锁前完成；cancel 摘取的 `Waker` 在解锁后 drop，避免自定义
   waker 回调在 `SpinNoIrq` 内重入。
 - **不得在持有可能与 scheduler/Waker 回调反向的外层锁时调用 `wake`**。
-  IRQ 同步完成通知也必须在释放 descriptor 状态锁后执行。
 - **注册可失败**：扩容失败返回 `PollRegisterError::NoMemory`；ID 耗尽返回
   `IdExhausted`；目标未就绪返回 `InvalidState`。上层映射为 `KError::NoMemory` /
   `ENOMEM` 或 `InvalidInput` / `EINVAL`。
@@ -98,9 +103,6 @@ Pollable::register(context, events)
 - **wake 是提示而非状态转移**：允许迟到 wake；正确性依赖 register 后 recheck。
 - **`PollSet::new` 内部 `Arc::new` 目前仍可能在 OOM 时走全局分配器 panic**；
   该限制不扩展到每次 register。
-- **`Completion` 不阻塞当前 task**：它只提供 token 状态和 poll waiter 注册。
-  blocking wait 必须由 `ktask`/future 层用 `try_wait -> register -> recheck`
-  协议实现，低层 `kirq` 可以持有并 signal completion 而不依赖 scheduler。
 
 ## 状态机
 
@@ -144,47 +146,14 @@ register()
 2. 持锁安装 owned waker；`next_id` 仅在 slot 安装成功后递增。
 3. cancel 持锁摘取 waker，解锁后再 drop。
 
-### `Completion`
+### `PollEvent`
 
-`Completion` 对齐 Linux `struct completion` 的 `done + waitqueue` 语义，但把
-waitqueue 换成 `PollSet`：
-
-1. 初始 `done == 0`，`try_wait()` 返回 `false`。
-2. `complete()` 增加一个 token 并 wake 当前注册 waiter。ordinary token 数最多
-   保持到 sticky sentinel 前一位，只有 `complete_all()` 会进入 sticky 完成态。
-   由于 `PollSet` 是
-   broadcast source，该 wake 当前会唤醒所有 waiter；只有一个 waiter 能消费这个
-   token，其他 waiter 必须 recheck 后继续等待。
-3. 多次 `complete()` 会累积 token。
-4. `complete_all()` 把 `done` 置为 sticky sentinel，所有当前和后续 `try_wait()`
-   都返回 `true`，直到调用 `reinit()`。
-5. `complete_all_defer_wake()` 只把 `done` 置为 sticky sentinel 并返回内部
-   `PollSet` clone，让调用方能先释放自己的外层锁，再执行 wake。
-6. `reinit()` 把 `done` 重新置为 `0`。和 Linux `reinit_completion()` 一样，
-   调用方必须保证旧 waiter 已经完成对前一代完成态的观察。
-
-`Completion::register(context)` 只注册 wake source，不检查或消费 token。正确调用
-协议必须是：
-
-```
-if completion.try_wait() {
-    return Ready;
-}
-completion.register(context)?;
-if completion.try_wait() {
-    return Ready;
-}
-return Pending;
-```
-
-这个二次检查封闭 complete-before-register 和 register-before-complete 的 lost wake
-窗口。
-
-`Completion::register_owned(&Waker)` 为只保留一个注册的 bridge 返回
-`PollRegistration`，直接委托 `PollSet::register`，不引入新的注册状态或分配层。
-调用方必须保持 guard 存活，并在注册后重查 token；注册不消费完成状态，也不会因
-已经完成而自动调用 waker。guard 的 Weak 回指、Drop 注销和迟到 wake 语义不变。
-普通多源 poll 流程继续使用 `register(context)` 和 `PollRegistrations`。
+`PollEvent` tracks a generation for broadcast state-change notifications.
+Waiters snapshot the generation, register through `PollContext`, then recheck
+`has_changed_since` before returning `Pending`. `notify_defer_wake` publishes
+the new generation and returns a `PollSet` clone for waking after outer locks
+are released; `notify` publishes and wakes immediately. Notifications prompt
+predicate rechecks and never supply consumable tokens or synchronous waits.
 
 ## 并发模型
 
@@ -205,15 +174,11 @@ return Pending;
 | wake 路径移出 slot table 后锁外唤醒 | IRQ 热路径单次加锁、锁内不分配、不调用 waker | 锁内构造临时 waker buffer；二次加锁 recycle capacity |
 | 普通 `Pollable` 使用 `PollContext` | 禁止把裸 Waker 无 owner 地永久塞进 fd | 无 RAII owner 的注册 API |
 | registration 持 `Weak` | 防引用环，允许 source 先销毁 | registration 持强引用 |
-| `Completion` 放在 `kpoll` | `kirq` 后续可持有 wait source，且不依赖 `ktask`/`ksync` | 放入 `ktask` 或 `ksync` 后形成 crate 依赖环 |
-| `Completion` 不提供 blocking wait | 保持 scheduler-agnostic；阻塞由 `ktask`/future 层组合 | 在低层 poll crate 调用 scheduler |
 
 ## Drop / 资源释放
 
 - `PollRegistration::Drop`：若 token 仍匹配 occupied slot，则摘链回收。
 - `PollRegistrations::Drop` / `clear`：逐个 drop guard。
 - `PollSetInner::Drop`：摘取全部 waiter 并锁外唤醒，避免析构后永久阻塞。
-- `Completion`：drop 时通过内部 `PollSet` drop 唤醒 waiter；调用方仍必须通过
-  readiness recheck 判断完成状态是否仍存在。
 - epoll interest Drop / DEL / ONESHOT：通过清空其 `PollRegistrations` 注销；MOD
   原地更新同一个 interest 的配置并重新安装 registration。

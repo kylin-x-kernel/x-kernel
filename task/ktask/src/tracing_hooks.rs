@@ -26,7 +26,10 @@ static_lock! {
 /// The switch callback receives outgoing/incoming trace IDs and the outgoing
 /// [`crate::TaskState`] discriminant captured by the leave decision, before a
 /// concurrent wake can change Blocked to Ready. Callbacks execute with IRQs disabled and
-/// must not block or recursively schedule.
+/// must not block or recursively schedule. Completion wake delivery may invoke
+/// wakeup callbacks while holding a completion lock: callbacks must not allocate,
+/// unwind, or reenter completion/predicate queues, directly or indirectly.
+/// Switch callbacks must also avoid allocation on synchronous wait paths.
 pub fn register_sched_trace_hooks(wakeup: WakeupFn, switch_fn: SwitchFn) {
     let mut g = HOOKS.lock();
     g.wakeup = Some(wakeup);

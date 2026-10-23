@@ -2,13 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{
-    sync::atomic::{AtomicUsize, Ordering},
-    task::{Context, RawWaker, RawWakerVTable, Waker},
-};
+use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use kpoll::PollRegistrations;
+use kcompletion::SyncWake;
 use unittest::def_test;
 
 use super::{
@@ -112,50 +109,14 @@ fn test_in_flight_handler(_irq: usize) -> IrqEvent {
     IrqEvent::HANDLED
 }
 
-/// # Safety
-///
-/// `data` must be the aligned pointer to a live static `AtomicUsize`
-/// installed by `make_waker`. It must remain valid for every cloned waker;
-/// these callbacks borrow the counter and never reclaim its allocation.
-unsafe fn clone_waker(data: *const ()) -> RawWaker {
-    RawWaker::new(data, &WAKER_VTABLE)
-}
+struct CountWake(AtomicUsize);
 
-/// # Safety
-///
-/// `data` must be the aligned pointer to a live static `AtomicUsize`
-/// installed by `make_waker`. It must remain valid for every cloned waker;
-/// these callbacks borrow the counter and never reclaim its allocation.
-unsafe fn wake_waker(data: *const ()) {
-    // SAFETY: `make_waker` installs a leaked, aligned `AtomicUsize` pointer.
-    let counter = unsafe { &*(data as *const AtomicUsize) };
-    counter.fetch_add(1, Ordering::SeqCst);
-}
-
-/// # Safety
-///
-/// `data` must be the aligned pointer to a live static `AtomicUsize`
-/// installed by `make_waker`. It must remain valid for every cloned waker;
-/// these callbacks borrow the counter and never reclaim its allocation.
-unsafe fn wake_waker_by_ref(data: *const ()) {
-    // SAFETY: same invariant as `wake_waker`.
-    unsafe { wake_waker(data) };
-}
-
-/// # Safety
-///
-/// `data` must be the aligned pointer to a live static `AtomicUsize`
-/// installed by `make_waker`. It must remain valid for every cloned waker;
-/// these callbacks borrow the counter and never reclaim its allocation.
-unsafe fn drop_waker(_data: *const ()) {}
-
-static WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(clone_waker, wake_waker, wake_waker_by_ref, drop_waker);
-
-fn make_waker(counter: &'static AtomicUsize) -> Waker {
-    let raw = RawWaker::new(counter as *const _ as *const (), &WAKER_VTABLE);
-    // SAFETY: all vtable operations preserve the leaked AtomicUsize pointer.
-    unsafe { Waker::from_raw(raw) }
+// SAFETY: notification only updates an atomic counter; it cannot allocate,
+// unwind, reenter a wait source, or retain any borrowed reference.
+unsafe impl SyncWake for CountWake {
+    fn notify(&self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn test_release_in_flight_on_wait(virq: usize, in_flight: usize) {
@@ -1272,14 +1233,8 @@ fn test_in_flight_completion_old_wake_does_not_complete_next_dispatch() {
 #[def_test(serial)]
 fn test_in_flight_completion_wakes_multiple_waiters() {
     let virq = 0x3141;
-    let first_counter = Box::leak(Box::new(AtomicUsize::new(0)));
-    let second_counter = Box::leak(Box::new(AtomicUsize::new(0)));
-    let first_waker = make_waker(first_counter);
-    let second_waker = make_waker(second_counter);
-    let first_cx = Context::from_waker(&first_waker);
-    let second_cx = Context::from_waker(&second_waker);
-    let mut first_registrations = PollRegistrations::new();
-    let mut second_registrations = PollRegistrations::new();
+    let first_wake = CountWake(AtomicUsize::new(0));
+    let second_wake = CountWake(AtomicUsize::new(0));
     let mut entry = IrqStateDesc::test_with_runtime(
         IrqDesc::from_virq(virq),
         Some(IrqAction::regular(Arc::new(test_handler))),
@@ -1287,23 +1242,25 @@ fn test_in_flight_completion_wakes_multiple_waiters() {
 
     entry.begin_dispatch();
     let wait_source = entry.in_flight_zero_completion();
-    wait_source
-        .register(&mut first_registrations.context(&first_cx))
-        .unwrap();
-    wait_source
-        .register(&mut second_registrations.context(&second_cx))
-        .unwrap();
+    let mut park_second = || {
+        let deferred = entry
+            .finish_dispatch()
+            .expect("last in-flight dispatch should produce completion wake");
+        assert_eq!(first_wake.0.load(Ordering::SeqCst), 0);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+        assert_eq!(deferred.wake(), 2);
+    };
+    let mut park_first = || {
+        // SAFETY: the nested test callback only finishes dispatch and asserts;
+        // it returns or unwinds normally and cannot bypass waiter destruction.
+        unsafe { wait_source.wait_with(&second_wake, &mut park_second) };
+    };
+    // SAFETY: both nested test callbacks return or unwind normally, so scoped
+    // cleanup runs before these borrowed counters or their stack can retire.
+    unsafe { wait_source.wait_with(&first_wake, &mut park_first) };
 
-    let wait_set = entry
-        .finish_dispatch()
-        .expect("last in-flight dispatch should produce completion wake");
-    assert_eq!(first_counter.load(Ordering::SeqCst), 0);
-    assert_eq!(second_counter.load(Ordering::SeqCst), 0);
-
-    wait_set.wake();
-
-    assert_eq!(first_counter.load(Ordering::SeqCst), 1);
-    assert_eq!(second_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(first_wake.0.load(Ordering::SeqCst), 1);
+    assert_eq!(second_wake.0.load(Ordering::SeqCst), 1);
 }
 
 #[def_test(serial)]
@@ -1376,6 +1333,32 @@ fn test_synchronize_irq_rejects_hardirq_context() {
             operation: "synchronize_irq"
         }
     ));
+}
+
+#[def_test(serial)]
+fn test_free_irq_rejects_masked_irqs_before_action_removal() {
+    let virq = 0x3150;
+    assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
+    let rejected = {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        super::try_free_irq(virq)
+    };
+    assert!(matches!(
+        rejected,
+        Err(IrqDescError::InvalidContext {
+            operation: "free_irq"
+        })
+    ));
+    {
+        let state = IRQ_STATE.lock();
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("action must remain installed");
+        assert_eq!(entry.action_count(), 1);
+        assert!(!entry.is_teardown_in_progress());
+    }
+    assert!(unregister(virq).is_some());
 }
 
 #[def_test(serial)]

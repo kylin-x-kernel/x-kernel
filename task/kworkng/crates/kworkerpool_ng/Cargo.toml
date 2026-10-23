@@ -13,7 +13,7 @@ description = "Execution service and retained source demand for prepared work"
 [dependencies]
 unittest.workspace = true
 intrusive-collections.workspace = true
-kpoll.workspace = true
+kcompletion.workspace = true
 kspin.workspace = true
 kcpu_id_map.workspace = true
 khal.workspace = true

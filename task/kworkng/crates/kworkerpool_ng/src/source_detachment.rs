@@ -10,7 +10,7 @@
 
 use alloc::sync::Arc;
 
-use kpoll::Completion;
+use kcompletion::Completion;
 use kspin::SpinNoIrq;
 
 struct SourceDetachState {

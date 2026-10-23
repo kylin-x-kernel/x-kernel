@@ -1,5 +1,10 @@
 # procfs - Design
 
+`/proc/tracing/capture_stats` is a read-only per-open text snapshot of ktracing's
+retained, overwritten, oversized and uninitialized record counters. Reopening
+refreshes it without initializing tracing. Formatting takes place outside the
+capture spinlock; the trace snapshot ABI and header remain unchanged.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 

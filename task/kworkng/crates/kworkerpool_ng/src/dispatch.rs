@@ -36,7 +36,7 @@ use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 
 use intrusive_collections::{LinkedList, intrusive_adapter, linked_list::AtomicLink};
-use kpoll::Completion;
+use kcompletion::Completion;
 use kspin::SpinNoIrq;
 
 unittest::path_mod_test!(dispatch_unittest, "../ut-tests/dispatch_unittest.rs");
@@ -73,8 +73,8 @@ intrusive_adapter!(SourceAdapter<S> = Arc<PartitionSource<S>>: PartitionSource<S
 });
 
 impl<S> PartitionSource<S> {
-    /// Obtain the independent one-shot receipt before any detach effect, so a
-    /// wait adapter can finish fallible registration first. Observe/register only:
+    /// Obtains the independent permanent receipt before any detach effect.
+    /// Observe/wait only:
     /// callers must never complete or reset this dispatcher-owned receipt.
     pub fn detachment_completion(&self) -> Arc<Completion> {
         self.detachment.completion()

@@ -26,8 +26,9 @@ a wait. There is no polling timeout.
 ## Failures and resource lifecycle
 
 Reads and host waits return the shared `DriverError`. `InvalidInput` identifies
-a context that cannot sleep, while `NoMemory` can mean wait registration
-failed. These errors alone do not establish device failure, and the error type
+a context that cannot sleep. Fallible wait preparation must finish before
+invoking the readiness predicate; subsequent registration must be infallible
+and allocation-free. These errors alone do not establish device failure, and the error type
 does not encode whether a failure came from the host or the device. Entropy
 consumers use `HwrngDevice::is_failed` before permanently disabling a source
 on a read error. This non-sleeping query reports a monotonic terminal device

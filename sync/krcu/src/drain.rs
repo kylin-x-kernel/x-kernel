@@ -5,11 +5,9 @@
 //! Serialized callback drains with reusable markers and independent wake storage.
 
 use alloc::sync::Arc;
-use core::{
-    sync::atomic::{AtomicUsize, Ordering},
-    task::Waker,
-};
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
+use kcompletion::Completion;
 use kerrno::{KError, KResult};
 use krcu_core::CallbackNode;
 use kspin::SpinNoIrq;
@@ -48,7 +46,7 @@ pub fn has_installed_drain_markers_for_tests() -> bool {
 
 struct DrainCompletion {
     remaining: AtomicUsize,
-    waker: Waker,
+    completion: Completion,
 }
 
 impl CallbackDrain {
@@ -63,25 +61,21 @@ impl CallbackDrain {
 }
 
 impl DrainCompletion {
-    fn new(waker: Waker) -> Self {
+    fn new() -> Self {
         Self {
             // Installation owns one reference even if earlier markers run
             // before the draining task reaches the next CPU's queue.
             remaining: AtomicUsize::new(1),
-            waker,
+            completion: Completion::new(),
         }
     }
 
     fn finish_one(&self) {
         // Every participant releases its preceding callback effects. The final
-        // RMW acquires the chain before notifying the acquire-loading waiter.
+        // RMW acquires the chain before publishing the completion to the waiter.
         if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.waker.wake_by_ref();
+            self.completion.complete_all();
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        self.remaining.load(Ordering::Acquire) == 0
     }
 }
 
@@ -95,7 +89,8 @@ impl DrainCompletion {
 /// # Errors
 /// Returns `InvalidInput` outside sleepable watched task context (including a
 /// read scope), or `BadState` before service readiness, before publishing any
-/// marker. Wait and completion allocations follow fatal kernel OOM policy.
+/// marker. Completion preparation and waiting do not allocate; the shared
+/// drain record's Arc allocation still follows fatal kernel OOM policy.
 ///
 /// # Safety
 /// Hold no resource required by a callback or the GP service. The permanent
@@ -118,7 +113,7 @@ fn drain_with_wait(wait: &mut dyn TaskWait) -> KResult<()> {
         .get()
         .filter(|service| service.waker.get().is_some())
         .ok_or(KError::BadState)?;
-    let completion = Arc::new(DrainCompletion::new(wait.waker()));
+    let completion = Arc::new(DrainCompletion::new());
     RcuTaskIf::with_serialized_drain(&mut || {
         let mut has_markers = false;
         for cpu in 0..kcpu_id_map::nr_cpus() {
@@ -148,9 +143,8 @@ fn drain_with_wait(wait: &mut dyn TaskWait) -> KResult<()> {
             service.request_pass();
         }
         completion.finish_one();
-        while !completion.is_complete() {
-            wait.park();
-        }
+        wait.wait_for_completion(&completion.completion);
+        fence(Ordering::SeqCst);
     });
     Ok(())
 }
@@ -168,7 +162,7 @@ unsafe fn complete_marker(node: *mut CallbackNode) {
         marker.completion.lock().take()
     };
     // No marker access or borrow survives this point. The waiter may return and
-    // reuse its node as soon as finish_one publishes zero. Only this independent
+    // reuse its node as soon as finish_one signals completion. Only this independent
     // Arc is used while wakeup unwinds, never the next drain's completion state.
     if let Some(completion) = completion {
         completion.finish_one();

@@ -9,7 +9,7 @@ direct user, device, network or file-data inputs. CPU IDs, limits, intervals,
 source adapters and executions come from trusted kernel callers.
 
 The crate trusts `kspin` locking/pinning, `intrusive-collections` list ownership,
-`kpoll` completion and `ktask` task waits, affinity, exit publication and timers.
+`kcompletion` completion and `ktask` task waits, affinity, exit publication and timers.
 It trusts the immutable boot CPU map, `khal` identity/time, and `kirq` context.
 BH notification depends on `kipi` and `kirq` retaining notifications without
 allocation, sleep or inline business callbacks. System integration must initialize
@@ -22,7 +22,7 @@ must preserve acquired execution lifetime independently of source inspection.
 | --- | --- |
 | `PartitionSource::state`, `links`, `owner` | Unique Weak dispatcher identity; its lock protects state and membership |
 | `PartitionDispatch::sources` | Arc-owned intrusive nodes under SpinNoIrq; source release outside locks |
-| `SourceDetachment::state`, `completion` | Protected outstanding-inspection count and detachment marker; completion is observe/register-only to callers |
+| `SourceDetachment::state`, `completion` | Protected outstanding-inspection count and detachment marker; completion is observe/wait-only to callers |
 | `NormalWorkers::pool`, `wakers`, `manager_waker`, `stop_requested` | Worker lock; demand/park decisions also hold dispatch lock |
 | `WorkerManager::tasks` | Exclusive manager mutation; release only after published task exit |
 | `NormalServices::runtimes` | Complete boot coverage, retained until explicit joined stop |
@@ -95,3 +95,9 @@ dispatch-before-worker lock order, unlocked wake/destruction, startup rollback
 and task/timer drain together. Tests cover both pure transitions and real task
 lifecycle; system readiness, concrete work lifetime and real IRQ no-allocation
 acceptance remain integration tests rather than claims of this standalone crate.
+
+Source-detachment publication uses an Arc-owning DeferredWake from kcompletion.
+Its receipt stays alive until the deferred task wake runs outside the control lock.
+Callers may only observe or wait on the permanent receipt, never complete or reinit
+it. CompletionWait validates task context without registration or waiter allocation;
+source and receipt allocation at setup remains necessary.

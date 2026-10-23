@@ -19,11 +19,11 @@ fn test_kirq_sync_wait_provider_blocks_until_completion() {
 
     let completion = Arc::new(Completion::new());
     let waiter_completion = completion.clone();
+    assert!(kirq::IrqSyncWaitIf::can_wait());
 
     crate::spawn(move || {
         WAITER_STARTED.store(1, Ordering::Release);
-        kirq::IrqSyncWaitIf::wait_for_completion(&waiter_completion)
-            .expect("completion wait should register from a ktask context");
+        kirq::IrqSyncWaitIf::wait_for_completion(&waiter_completion).unwrap();
         WAITER_FINISHED.store(1, Ordering::Release);
     });
 

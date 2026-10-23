@@ -82,6 +82,7 @@ kworkng = { workspace = true, features = ["system"] }
 kfinalize.workspace = true
 ktask = { workspace = true }
 krcu.workspace = true
+kcompletion.workspace = true
 krcu-core.workspace = true
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }

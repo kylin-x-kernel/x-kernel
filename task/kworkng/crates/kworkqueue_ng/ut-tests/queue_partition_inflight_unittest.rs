@@ -219,14 +219,23 @@ fn execution_retires_before_queue_notification() {
     let wake = Arc::new(RunSuccessor {
         work: Arc::downgrade(&work),
     });
-    let registration = receipt.register(&core::task::Waker::from(wake)).unwrap();
+    let waiter = ktask::spawn({
+        let receipt = receipt.clone();
+        move || {
+            receipt.wait(&ktask::completion::CompletionWait::prepare().unwrap());
+            alloc::task::Wake::wake(wake);
+        }
+    });
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
     let execution = work.claim().unwrap();
     // SAFETY: successor finishes in wake reentry before the outer owner is dropped.
     assert!(unsafe { control.accept(&work, Resource(None), 1) }.is_ok());
     execution.run_with(|| core::assert!(!receipt.is_completed()));
+    assert_eq!(waiter.join(), 0);
     assert!(receipt.is_completed());
     assert_eq!(work.observer_count(), 0);
     let (_, token) = CompletionObserver::prepare();
     assert!(control.observe_batch(1, token).is_err());
-    drop(registration);
 }

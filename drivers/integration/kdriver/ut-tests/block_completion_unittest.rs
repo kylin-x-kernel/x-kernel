@@ -55,24 +55,14 @@ fn block_wait_rejects_atomic_context_before_submission() {
 }
 
 #[def_test(serial)]
-fn block_terminal_wait_survives_spurious_wake() {
+fn block_terminal_wait_observes_cross_task_completion() {
     let mut waiter = HostBlockWaiter::prepare().unwrap();
     let signals = waiter.signals.clone();
-    let mut parks = 0;
-    let mut notified = 0;
-    waiter.wait_completion_before_park(|task| {
-        parks += 1;
-        if parks == 1 {
-            // A wake hint without a terminal result must return to the predicate.
-            // Latch it before park so the test needs no scheduler-state polling.
-            task.waker().wake_by_ref();
-        } else {
-            // The same completion registration must survive the spurious wake.
-            notified = signals.terminal.complete_all();
-        }
+    let producer = ktask::spawn(move || {
+        signals.terminal.complete_all();
     });
-    assert_eq!(parks, 2);
-    assert_eq!(notified, 1);
-    assert!(signals.terminal.try_wait());
-    assert_eq!(signals.terminal.complete_all(), 0);
+    waiter.wait_completion();
+    assert_eq!(producer.join(), 0);
+    assert!(waiter.signals.terminal.try_wait());
+    assert_eq!(waiter.signals.terminal.complete_all(), 0);
 }

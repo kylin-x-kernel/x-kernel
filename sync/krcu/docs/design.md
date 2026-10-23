@@ -328,15 +328,17 @@ The raw queue transfer boundary remains private to owning adapters and tests.
 ## Owning Consumer Policies And Evidence
 
 Synchronous waits borrow a `TaskWait` from the runtime's stack-local
-`PreparedTaskWait` adapter. The host validates sleepability and prepares its
-waker before invoking the RCU body. RCU then prepares its completion registration
-before giving the caller a `PreparedGracePeriodWait`. Owning replacement retains
+`ktask::completion::CompletionWait` adapter. The host validates sleepability
+before invoking the RCU body. RCU then prepares its callback record before
+giving the caller a `PreparedGracePeriodWait`. Owning replacement retains
 the new Box until this body is entered, so either preparation failure returns
 that same owner without changing publication. No fallible setup follows exchange.
-The adapter adds no allocation for type erasure, cannot return an error after
-invoking its body, and cannot grant completion merely by returning from park.
-Callback drain, the startup caller and the GP task borrow the same prepared
-parking contract. Startup prepares its wait before any control claim. The GP
+The adapter and completion primitive allocate nothing, and the adapter cannot
+return an error after invoking its body. Its `wait_for_completion` returns only
+after acquiring completion, never merely on a wake hint. Callback drain uses
+the same completion contract. The startup caller and GP task instead borrow
+`ServiceWait`, preserving their existing `PreparedTaskWait` park/Waker contract
+and allocation policy. Startup prepares its wait before any control claim. The GP
 task prepares a different wait on its own stack, then prepares its timer and
 publishes readiness. The startup caller still checks RCU's waker publication
 after each wake; activation alone is not readiness.
@@ -345,12 +347,14 @@ The synchronous-wait module supports owning replacement and the public unsafe
 `synchronize_rcu` operation. The latter does not withdraw or own user data;
 integrations retain responsibility for withdrawal, lifetime and error handling.
 Like Linux's callback/completion wait, it
-prepares the task waiter and registers completion before submitting a marker.
+prepares the task waiter and callback storage before submitting a marker.
 The marker embeds its queue node and completion in one Arc allocation. Queue
 execution owns a strong reference independently of the waiter, so a resumed
-waiter cannot destroy storage still used by the notifying callback. Registration
-failure precedes submission; afterward the loop accepts only a completion token,
-not a signal or arbitrary wake. An RCU-local SeqCst fence follows the successful
+waiter cannot destroy storage still used by the notifying callback. The Arc
+allocation retains fatal OOM behavior; replacing completion does not eliminate
+callback allocations. Completion uses scoped stack waiters without poll
+registrations or recoverable registration failures. After submission, the wait
+accepts only a completion token, not a signal or arbitrary wake. An RCU-local SeqCst fence follows the successful
 completion observation, including completion before parking or migration. The marker
 never owns a retired payload, and potentially sleeping destruction remains with
 the caller after successful return. This waits for a GP, not callback drainage.
@@ -571,13 +575,16 @@ at its logical tail, including work already detached for execution. Empty queues
 need no marker and the drain does not request a new GP of its own. The service's
 normal progress path delivers eligible markers to their owning CPU.
 
-One task-bound wait and one shared completion allocation are prepared before
-publication; markers only clone that allocation, not allocate per CPU. An
+One allocation-free task-bound wait and one Arc-owned drain record containing
+the countdown and completion are prepared before publication. The record still
+allocates under fatal OOM policy; markers only clone it, not allocate per CPU. An
 initial count holds installation open. Each queue's count is added before its
 marker can run and undone if insertion is unnecessary. Only after visiting every
 participating queue does the installer release its initial count. Acquire/release
-completion counting carries prior callback effects to the returning waiter;
-notifications are hints, not the completion predicate.
+completion counting carries prior callback effects to the final decrement,
+which publishes sticky `Completion::complete_all`. The task acquires completion
+and executes a SeqCst fence before returning; it no longer waits on a counter
+snapshot or raw Waker. The installation sentinel and permanent markers remain.
 
 The marker takes its completion owner out under a short spinlock and ceases all
 marker access before decrementing. Wakeup uses that independent Arc even if the

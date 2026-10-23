@@ -66,16 +66,15 @@ device-res-xkernel / kirq / khal / kdma / memspace / driver crates
 The block wait provider is a safe-code host adapter, not a DMA owner. It
 validates sleepable task context before source construction and checks task
 identity when waiting. An already-completed request needs no task registration.
-Otherwise check/register/recheck preserves completion racing with enrollment;
-the private terminal registration stays alive until completion. Its single entry
-fits PollSet inline storage and cannot exhaust registration IDs, so enrollment
-introduces no recoverable failure after submission. There is no admission wait.
-No terminal wait failure can release a submitted caller's buffers, and spurious
-wakes only repeat the completion predicate. Signals retain no request/device
-pointer and may outlive the waiter. Notifications run outside device/registry
-locks; kpoll invokes KWaker after releasing its source lock. Infallible Arc/Box
-allocation retains kernel OOM policy. Pending requests and DMA retirement are
-owned by the device queue independently of the caller-side waiter.
+Otherwise a scoped stack node is registered under the same IRQ-safe lock
+as the completion state. Registration cannot fail or allocate. Spurious wakes
+recheck the permanent terminal state. There is no admission wait.
+Signals retain no request/device pointer and may outlive the waiter.
+Notifications run outside device/registry locks; the constrained scheduler
+wake runs under the completion source lock, which also serializes node cleanup.
+Arc/Box preparation retains the infallible OOM policy, including BioWait's lazy
+post-submission preparation. Pending requests and DMA retirement remain owned
+by the device queue independently of the caller-side waiter.
 
 `kdriver` is a core kernel crate that processes hardware description data.
 Its attack surface primarily consists of untrusted physical addresses, IRQ numbers,
@@ -660,7 +659,7 @@ When modifying this module, verify:
 
 ## Hardware entropy completion provider
 
-`wait_until` requires a sleepable current task. `PreparedTaskWait::prepare`
+`wait_until` requires a sleepable current task. `CompletionWait::prepare`
 rejects invalid context before the driver's predicate can consume bytes.
 Task interruption does not cancel this internal read. The device notification
 registration is removed by RAII when the wait ends.
@@ -670,4 +669,5 @@ between that check and `park` remains a wake hint, preventing a lost completion;
 spurious wakes only trigger another check. The driver must call IRQ-safe
 `notify` after releasing its request lock, and its predicate must not sleep.
 The provider retains neither the predicate nor DMA storage. Invalid context and
-registration failures do not establish a device fault.
+preparation failures do not establish a device fault. Once the predicate is invoked,
+scoped registration and wakeup are allocation-free and cannot return registration errors.

@@ -10,8 +10,8 @@ use core::{
     sync::atomic::{Ordering, fence},
 };
 
+use kcompletion::Completion;
 use kerrno::{KError, KResult};
-use kpoll::{Completion, PollRegisterError, PollRegistration};
 use krcu_core::CallbackNode;
 
 use super::{SERVICE, callback::PreparedCallback};
@@ -31,10 +31,9 @@ pub(super) struct PreparedGracePeriodWait<'wait> {
     callback: PreparedCallback,
     completion: Arc<GracePeriodCompletion>,
     wait: &'wait mut dyn TaskWait,
-    _registration: PollRegistration,
 }
 
-/// Invokes the update only after task parking and RCU registration succeed.
+/// Invokes the update only after task waiting and callback storage are prepared.
 pub(super) fn with_prepared_grace_period<R>(
     body_fn: impl FnOnce(PreparedGracePeriodWait<'_>) -> R,
 ) -> KResult<R> {
@@ -51,13 +50,6 @@ impl<'wait> PreparedGracePeriodWait<'wait> {
             node: CallbackNode::new(complete_grace_period),
             completion: Completion::new(),
         });
-        let registration = completion
-            .completion
-            .register_owned(&wait.waker())
-            .map_err(|error| match error {
-                PollRegisterError::NoMemory | PollRegisterError::IdExhausted => KError::NoMemory,
-                PollRegisterError::InvalidState => KError::InvalidInput,
-            })?;
         let record = Arc::into_raw(completion.clone());
         // SAFETY: raw field projection preserves the original Arc provenance.
         let node = unsafe { &raw const (*record).node }.cast_mut();
@@ -72,7 +64,6 @@ impl<'wait> PreparedGracePeriodWait<'wait> {
             callback,
             completion,
             wait,
-            _registration: registration,
         })
     }
 
@@ -98,9 +89,7 @@ impl<'wait> PreparedGracePeriodWait<'wait> {
         // its old allocation, so this is not a recoverable setup error after
         // publication changed.
         assert!(is_accepted, "prepared RCU wait requires valid admission");
-        while !self.completion.completion.try_wait() {
-            self.wait.park();
-        }
+        self.wait.wait_for_completion(&self.completion.completion);
         // Carry the RCU completion ordering to subsequent caller accesses even
         // when completion preceded park or the waiter resumed on another CPU.
         fence(Ordering::SeqCst);
@@ -136,13 +125,14 @@ unsafe fn complete_grace_period(node: *mut CallbackNode) {
 /// All fallible preparation precedes submission. Once submitted, signals and
 /// spurious wakes cannot end the wait early. No retired object is destroyed by
 /// this operation; the caller retains responsibility for its ownership.
-/// Allocation uses the kernel allocator's fatal OOM policy, except fallible
-/// completion registration. This is not a callback barrier.
+/// Completion preparation and waiting do not allocate. The callback's Arc
+/// allocation still uses the kernel allocator's fatal OOM policy. This is not
+/// a callback barrier.
 ///
 /// # Errors
 /// Returns `InvalidInput` outside sleepable task context (including a local
-/// read scope), `BadState` before service readiness, or `NoMemory` if completion
-/// registration cannot be stored. No callback is submitted on error.
+/// read scope), or `BadState` before service readiness. No callback is submitted
+/// on error.
 ///
 /// # Safety
 /// Call from watched kernel task execution.

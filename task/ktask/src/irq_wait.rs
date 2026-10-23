@@ -4,44 +4,21 @@
 
 //! KIRQ synchronization wait provider.
 
-use core::{future::poll_fn, task::Poll};
-
-use kpoll::{Completion, PollRegistrations};
-
-use crate::future::block_on;
+use kcompletion::Completion;
 
 #[kiface::provide]
 impl kirq::IrqSyncWaitIf {
-    fn wait_for_completion(completion: &Completion) -> Result<(), kpoll::PollRegisterError> {
-        wait_for_completion(completion)
-    }
-}
-
-pub(crate) fn wait_for_completion(completion: &Completion) -> Result<(), kpoll::PollRegisterError> {
-    if completion.try_wait() {
-        return Ok(());
-    }
-    if crate::current_may_uninit().is_none() {
-        return Err(kpoll::PollRegisterError::InvalidState);
+    fn can_wait() -> bool {
+        crate::is_sleepable_context()
     }
 
-    let mut registrations = PollRegistrations::new();
-    block_on(poll_fn(|cx| {
-        if completion.try_wait() {
-            return Poll::Ready(Ok(()));
-        }
-
-        let mut context = registrations.context(cx);
-        if let Err(error) = completion.register(&mut context) {
-            return Poll::Ready(Err(error));
-        }
-        drop(context);
-
-        if completion.try_wait() {
-            return Poll::Ready(Ok(()));
-        }
-        Poll::Pending
-    }))
+    fn wait_for_completion(completion: &Completion) -> Result<(), kirq::IrqDescError> {
+        crate::completion::wait_for_completion(completion).map_err(|_| {
+            kirq::IrqDescError::InvalidContext {
+                operation: "wait_for_completion",
+            }
+        })
+    }
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/irq_wait/tests.rs");

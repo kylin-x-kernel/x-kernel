@@ -14,19 +14,21 @@ pub trait RngCompletion: Send + Sync {
     /// Sleep until `ready` returns true.
     ///
     /// Requires a schedulable task with IRQs enabled and no lock forbidding
-    /// sleep. Validate context before invoking `ready`. Task interruption does
+    /// sleep. Validate context and finish fallible wait preparation before
+    /// invoking `ready`. Task interruption does
     /// not end this wait; the driver must notify after publishing completion
     /// or a terminal error.
     ///
     /// `ready` runs synchronously on this task, is never retained, and must
     /// not sleep. It may briefly lock the device and consume data or record a
-    /// terminal error. Register before checking it, or check/register/recheck,
+    /// terminal error. Registration after the first check must be infallible
+    /// and allocation-free. Register before checking it, or check/register/recheck,
     /// so notification before parking cannot be lost. Recheck after spurious
     /// wakes; never poll, yield-loop or use a device-completion timer.
     ///
     /// # Errors
     /// Returns [`driver_base::DriverError::InvalidInput`] for a non-sleepable
-    /// context, or a shared driver error for registration failure. Neither
+    /// context, or a shared driver error for wait preparation failure. Neither
     /// error proves that the device failed. The registration is removed on
     /// return; an already detached late wake is allowed. A wait error does
     /// not cancel DMA started by an earlier check.

@@ -25,7 +25,7 @@ kspin.workspace = true
 kiface.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
-kpoll.workspace = true
+kcompletion.workspace = true
 unittest.workspace = true
 
 [lints]

@@ -25,15 +25,107 @@ use ktracepoint::{
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 
 const TRACE_RECORD_CAPACITY: usize = 4096;
-// Reserve before registering hooks; retention evicts in O(1), without moving
-// thousands of records on every scheduler event.
-static_lock! {
-    static TRACE_RAW_PIPE: SpinNoIrq<VecDeque<Vec<u8>>> = SpinNoIrq::new(VecDeque::new());
+const MAX_RECORD_BYTES: usize = 64;
+const TASK_NAME_BYTES: usize = 16;
+
+const _: () = assert!(mem::size_of::<ktracepoint::TraceEntry>() == 8);
+const _: () = assert!(MAX_RECORD_BYTES >= 8 + 4 * mem::size_of::<u64>());
+
+#[derive(Clone, Copy)]
+#[repr(C, align(8))]
+struct TraceRecord {
+    bytes: [u8; MAX_RECORD_BYTES],
+    length: usize,
+    pid: u32,
+    name: [u8; TASK_NAME_BYTES],
+}
+
+/// Capture counters; the snapshot text header continues to report retained entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TraceCaptureStats {
+    /// Records currently retained, in capture order.
+    pub retained_records: usize,
+    /// Oldest records evicted when the bounded ring was full.
+    pub overwritten_records: usize,
+    /// Records rejected because their bytes exceeded the fixed inline capacity.
+    pub oversized_records: usize,
+    /// Records rejected before initialization reserved the ring storage.
+    pub uninitialized_records: usize,
+}
+
+impl core::fmt::Display for TraceCaptureStats {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        writeln!(formatter, "retained_records: {}", self.retained_records)?;
+        writeln!(
+            formatter,
+            "overwritten_records: {}",
+            self.overwritten_records
+        )?;
+        writeln!(formatter, "oversized_records: {}", self.oversized_records)?;
+        writeln!(
+            formatter,
+            "uninitialized_records: {}",
+            self.uninitialized_records
+        )
+    }
+}
+
+struct TraceRing {
+    records: VecDeque<TraceRecord>,
+    overwritten_records: usize,
+    oversized_records: usize,
+    uninitialized_records: usize,
+}
+
+impl TraceRing {
+    const fn new() -> Self {
+        Self {
+            records: VecDeque::new(),
+            overwritten_records: 0,
+            oversized_records: 0,
+            uninitialized_records: 0,
+        }
+    }
+
+    fn reserve(&mut self) {
+        self.records.reserve_exact(TRACE_RECORD_CAPACITY);
+    }
+
+    fn push(&mut self, bytes: &[u8], pid: u32, name: [u8; TASK_NAME_BYTES]) {
+        if bytes.len() > MAX_RECORD_BYTES {
+            self.oversized_records = self.oversized_records.saturating_add(1);
+            return;
+        }
+        if self.records.capacity() < TRACE_RECORD_CAPACITY {
+            self.uninitialized_records = self.uninitialized_records.saturating_add(1);
+            return;
+        }
+        let mut record = TraceRecord {
+            bytes: [0; MAX_RECORD_BYTES],
+            length: bytes.len(),
+            pid,
+            name,
+        };
+        record.bytes[..bytes.len()].copy_from_slice(bytes);
+        if self.records.len() == TRACE_RECORD_CAPACITY {
+            self.records.pop_front();
+            self.overwritten_records = self.overwritten_records.saturating_add(1);
+        }
+        self.records.push_back(record);
+    }
+
+    fn stats(&self) -> TraceCaptureStats {
+        TraceCaptureStats {
+            retained_records: self.records.len(),
+            overwritten_records: self.overwritten_records,
+            oversized_records: self.oversized_records,
+            uninitialized_records: self.uninitialized_records,
+        }
+    }
 }
 
 static_lock! {
-    static TRACE_CMDLINE_CACHE: SpinNoIrq<TraceCmdLineCache> =
-        SpinNoIrq::new(TraceCmdLineCache::new(1024));
+    static TRACE_RAW_PIPE: SpinNoIrq<TraceRing> = SpinNoIrq::new(TraceRing::new());
 }
 
 static TRACE_MANAGER: Once<TracingEventsManager<TraceRawLock, Kops>> = Once::new();
@@ -127,7 +219,10 @@ ktracepoint::define_event_trace!(
 /// Initialize global tracepoint manager once.
 pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops> {
     TRACE_MANAGER.call_once(|| {
-        TRACE_RAW_PIPE.lock().reserve(TRACE_RECORD_CAPACITY);
+        let mut ring = TraceRing::new();
+        ring.reserve();
+        mem::swap(&mut TRACE_RAW_PIPE.lock().records, &mut ring.records);
+        drop(ring);
         static_keys::global_init();
         #[expect(
             clippy::expect_used,
@@ -145,23 +240,24 @@ pub fn trace_point_manager() -> &'static TracingEventsManager<TraceRawLock, Kops
 pub fn dump_trace_records() -> String {
     let manager = trace_point_manager();
     let map = manager.tracepoint_map();
-    let records: Vec<_> = TRACE_RAW_PIPE.lock().iter().cloned().collect();
+    let mut records = Vec::with_capacity(TRACE_RECORD_CAPACITY);
+    records.extend(TRACE_RAW_PIPE.lock().records.iter().copied());
     let mut out = trace_header(records.len());
-    // Consuming a Vec by iteration is linear. The third-party snapshot's pop()
-    // removes index zero and would otherwise make every read quadratic.
-    // Keep each command-cache formatting critical section to one record.
-    // The raw-ring snapshot above still clones all records under its own IRQ
-    // lock. Hoisting the command-cache lock would also mask interrupts while
-    // formatting up to 4096 records.
-    // Per-record acquisition deliberately trades lock overhead for IRQ latency.
-    // Names are best-effort: concurrent cache updates or eviction can change
-    // name resolution between records, including producing missing-name markers.
-    // The generated bytes freeze on open; name lookup has no shared dump epoch.
+    let mut cmdline = TraceCmdLineCache::new(1);
     for event in records {
-        let cmdline = TRACE_CMDLINE_CACHE.lock();
-        out.push_str(&TraceEntryParser::parse::<Kops, _>(&map, &cmdline, &event));
+        cmdline.insert(event.pid, String::from_utf8_lossy(&event.name).into_owned());
+        out.push_str(&TraceEntryParser::parse::<Kops, _>(
+            &map,
+            &cmdline,
+            &event.bytes[..event.length],
+        ));
     }
     out
+}
+
+/// Returns capture and loss counters without initializing tracing or allocating.
+pub fn trace_capture_stats() -> TraceCaptureStats {
+    TRACE_RAW_PIPE.lock().stats()
 }
 
 fn trace_header(record_count: usize) -> String {
@@ -257,17 +353,15 @@ impl KernelTraceOps for Kops {
     }
 
     fn trace_pipe_push_raw_record(buf: &[u8]) {
-        let mut records = TRACE_RAW_PIPE.lock();
-        if records.len() == TRACE_RECORD_CAPACITY {
-            records.pop_front();
-        }
-        records.push_back(buf.to_vec());
+        let task = current();
+        let mut name = [0; TASK_NAME_BYTES];
+        task.copy_name(&mut name);
+        TRACE_RAW_PIPE
+            .lock()
+            .push(buf, task.trace_id() as u32, name);
     }
 
-    fn trace_cmdline_push(pid: u32) {
-        let comm = current().name();
-        TRACE_CMDLINE_CACHE.lock().insert(pid, comm);
-    }
+    fn trace_cmdline_push(_pid: u32) {}
 
     fn write_kernel_text(ptr: *mut core::ffi::c_void, data: &[u8]) {
         let addr = ptr as usize;

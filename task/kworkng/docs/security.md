@@ -73,6 +73,14 @@ the gate and releases it before synchronous drain. Last Owner release cannot ove
 another safe handle method because that method retains an Owner borrow. The terminal
 hook invokes no business destructor until callbacks and physical timer tails finish.
 
+The hook's Drain::drain still allocates completion-observation resources: for each
+nonempty preparation attempt, one or two receipt Arcs and two Vec buffers (three
+or four allocations); idle preparation allocates none and growth races can retry.
+These are remaining wait-resource allocations, distinct from allocation-free
+CompletionWait preparation/parking and from the preallocated reclamation Work.
+Allocator exhaustion during final reclamation is not a recoverable drain error;
+this migration does not guarantee allocation-free teardown.
+
 The raw Arc transfer keeps Storage alive through the hook. The publisher independently
 retains Storage until queue_work returns. Reclamation may destroy W before publication
 returns, but never mutates or frees the separate borrowed reclaim node. The core ends

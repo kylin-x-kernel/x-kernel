@@ -1,0 +1,13 @@
+[package]
+name = "kcompletion-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+intrusive-collections = { version = "=0.10.2", default-features = false, features = ["alloc", "nightly"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(unittest)'] }

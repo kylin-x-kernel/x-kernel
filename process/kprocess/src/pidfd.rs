@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use anon_inodefs::AnonInodeFs;
 use kcred::Cred;
 use kerrno::{KError, KResult};
-use kpoll::{Completion, IoEvents, PollContext, PollRegisterError, Pollable};
+use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ktask::KtaskRef;
 use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsInode};
 
@@ -16,7 +16,7 @@ use crate::{AsThread, Pid, Process, Tid, lookup};
 /// Process capability file descriptor for monitoring process lifecycle changes.
 pub struct PidFd {
     process: Arc<Process>,
-    exit_event: Arc<Completion>,
+    exit_event: Arc<PollSet>,
 }
 
 impl PidFd {
@@ -133,7 +133,7 @@ impl Pollable for PidFd {
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
         if events.contains(IoEvents::IN) {
-            self.exit_event.register(context)?;
+            context.register(&self.exit_event)?;
         }
         Ok(())
     }

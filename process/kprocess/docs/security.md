@@ -29,6 +29,13 @@ visibility, runtime mm/fs/ns and per-thread files ownership, objective/subjectiv
 cgroup charge, signal recipients, timer generations and controlling-terminal
 identity. Possession of a `Process` reference is not by itself syscall authority.
 
+Pidfd exit notifications use a `PollSet`, not stored completion tokens. Exit
+state is published before waking observers; readiness comes from
+`Process::is_exited()`, including after reaping. Poll callers must register and
+recheck readiness before sleeping. Registration failure does not establish exit
+or permit reclamation. Pidfds retain the process and notification source through
+their existing Arc ownership.
+
 ## External boundaries and validation responsibilities
 
 | Boundary / entry | Inputs and direction | Local check / responsibility |

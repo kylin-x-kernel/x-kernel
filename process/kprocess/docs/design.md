@@ -77,7 +77,10 @@ retains init identity; orphan reparenting reserves an init relation slot.
 - `process_exit` and `wait_reap` are used by lifecycle/syscall owners to sequence
   last-thread cleanup, stable exit publication, child scanning and final identity
   removal. `PidFd` implements `Pollable` and anonymous-file operations against
-  stable identity and exit completion.
+  stable identity and process exit state. `Process::exit_event()` exposes a
+  `PollSet` notification source, while `Process::is_exited()` is the persistent
+  readiness predicate. Poll users register then recheck that predicate to cover
+  exit racing registration; late observers need no replayed notification.
 - `migrate_cgroup_process` adapts a PID and filesystem authorization callback to
   process-wide migration; `scheduler` coordinates published task memberships.
   `CurrentThread` credential preparation/commit replaces only the calling

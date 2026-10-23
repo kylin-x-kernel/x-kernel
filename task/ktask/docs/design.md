@@ -17,6 +17,19 @@ hardware FP-register coverage on soft-float targets.
 
 ## Purpose and ownership
 
+`TaskInner::try_join` returns `InvalidInput` if an unfinished task would require
+sleeping from an invalid context. It never substitutes a stale exit code for
+failed waiting; the caller must retain all resources the target might access.
+Already-exited targets return their published code even with IRQs disabled.
+The legacy `join -> i32` wrapper still fail-stops on misuse. Its local CG-021
+TODO is to migrate callers and teardown ownership to the fallible interface,
+not to claim public misuse is unreachable or silently continue cleanup.
+
+The IRQ wait provider similarly returns `InvalidContext` to invalid direct
+callers. Its immediate prepare-and-wait sequence does not change sleepability
+between checks. KIRQ's private post-removal wait asserts its separately proven
+prevalidation/context-restoration invariant rather than exposing a public panic.
+
 `is_sleepable_context` provides a nonblocking context query for execution-service
 startup and joined teardown. Sleep assertions and prepared waits reuse this
 query: it requires an initialized non-idle task, no interrupt-like context,
@@ -689,6 +702,46 @@ for the entire replacement, rather than taking a second guard around the store.
 
 ### Block / wake and WaitQueue / Future
 
+`completion::CompletionWait::prepare()` validates sleepable context and captures
+one strong current `KtaskRef` plus an IRQ-safe boolean latch without allocating.
+The outer handle is neither Send nor Sync; its private wake capability is Sync.
+`wait(&kcompletion::Completion)` consumes completion tokens, while
+`wait_until(&kcompletion::WaitQueue, ready)` uses a broadcast queue and checks
+the caller's predicate outside the queue lock after registration. Both use a
+private pinned stack registration owned by kcompletion for the synchronous call.
+The public `wait_for_completion` convenience validates context even for an
+already-completed source. After preparation, waits have no registration-error
+path; the preparing task must still remain in sleepable context on entry.
+
+Both synchronous waits and `KWaker` reuse private `park::park_task`: consume an early
+latch hint, acquire the run-queue context guard, then recheck the latch before
+`blocked_resched`. The strong task reference remains alive across the switch.
+The kcompletion host seam is unsafe because arbitrary callbacks could bypass
+stack registration destructors by exiting without unwinding. The safe ktask
+wrapper retains the borrowed handle's strong task reference: `TaskInner` owns
+`TaskStack`, freed only when that reference is released. A non-unwinding exit
+from a readiness predicate leaks the handle and retains its stack and waiter
+storage. Ordinary returns and unwinding run scoped waiter cleanup normally.
+Completion callbacks hold the completion lock, briefly set the latch, release
+the latch, and then enqueue the task. Parking never takes the completion lock.
+The run-queue context guard itself only excludes IRQs/preemption; scheduler
+locks are held by individual operations. In `exit_current`, runtime accounting
+releases its scheduler lock before `notify_exit`; the scheduler leave operation
+comes afterwards. Thus exit does not create scheduler-lock -> completion-lock
+ordering. During parking the latch can cover scheduler operations, but wake
+releases the latch before acquiring scheduler locks, preventing the reverse edge.
+
+EEVDF's ready/deadline and vruntime indexes, RT queues and deadline-class indexes
+use links embedded in task entities and do not allocate on enqueue. Park and
+switch diagnostics use numeric trace IDs. The synchronous wake contract also
+requires scheduler tracing callbacks to be allocation-free, non-unwinding and
+non-reentrant. The default unfiltered ktracing path now captures inline records
+and UTF-8 task-name prefixes in a fully preallocated ring; capture and eviction
+neither allocate nor free memory. Snapshot parsing/name-cache allocation runs in
+the reader. Upstream ktracepoint 0.5.5 still clones allocating filter ASTs when a
+filter is installed, and custom callbacks retain their own obligations; neither
+is covered by the default scheduler capture's allocation-free guarantee.
+
 `poll_io_with_cause` preserves the outer task-interruption cause separately from
 operation and I/O registration errors. `poll_io` flattens this same implementation
 for existing callers. Both check task interruption before polling the operation
@@ -747,11 +800,12 @@ readiness precedence and Linux restart policy belong to their callers.
   the listener so a notification between the first check and registration cannot
   postpone progress until the timeout. `ut-tests/wait_queue.rs` exercises this
   ordering as well as an already-satisfied predicate and a genuine timeout.
-- `TaskInner::join()` uses `kpoll::Completion` as the per-task exit wait
+- `TaskInner::join()` uses `kcompletion::Completion` as the per-task exit wait
   source. Exit publishes `exit_code`, then moves state to `Exited` and
   `complete_all()`. The joiner's real completion condition remains
-  `TaskState::Exited`; completion only avoids a lost wake and supports a late
-  joiner.
+  `TaskState::Exited`; completion avoids a lost wake and supports a late
+  joiner. A blocking join uses `CompletionWait`, without `block_on`, poll
+  registration or allocation retries. Already-exited tasks return immediately.
 - `ktask` provides `kirq::IrqSyncWaitIf` completion-backed blocking wait so
   `kirq::synchronize_irq()` / `free_irq()` can block the current task. IRQ
   descriptor lifetime and the `in_flight` predicate stay in `kirq`.

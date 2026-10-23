@@ -2160,6 +2160,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcompletion"
+version = "0.3.0-dev"
+dependencies = [
+ "intrusive-collections",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
 name = "kcpu"
 version = "0.3.0-dev"
 dependencies = [
@@ -2279,12 +2288,12 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kclass",
+ "kcompletion",
  "kcpu_id_map",
  "kdevice",
  "kdma",
  "khal",
  "kirq",
- "kpoll",
  "kspin",
  "ksync",
  "ktask",
@@ -2604,9 +2613,9 @@ dependencies = [
  "bitflags 2.13.2",
  "karch",
  "kbuild_config",
+ "kcompletion",
  "kcpu_slot",
  "kiface",
- "kpoll",
  "krcu-core",
  "kspin",
  "log",
@@ -2902,12 +2911,12 @@ version = "0.3.0-dev"
 dependencies = [
  "karch",
  "kbuild_config",
+ "kcompletion",
  "kcpu_id_map",
  "kcpu_slot",
  "kerrno",
  "kiface",
  "klazy",
- "kpoll",
  "krcu-core",
  "kspin",
  "unittest",
@@ -2961,6 +2970,7 @@ dependencies = [
  "kalloc",
  "karch",
  "kbuild_config",
+ "kcompletion",
  "kcpu",
  "kcpu_id_map",
  "kdma",
@@ -3123,6 +3133,7 @@ dependencies = [
  "futures-util",
  "karch",
  "kbuild_config",
+ "kcompletion",
  "kcpu_id_map",
  "kcpu_slot",
  "kerrno",
@@ -3216,10 +3227,12 @@ name = "ktracing"
 version = "0.3.0-dev"
 dependencies = [
  "karch",
+ "kcompletion",
  "khal",
  "klazy",
  "kspin",
  "ktask",
+ "ktime_types",
  "ktracepoint",
  "lock_api",
  "memaddr",
@@ -3375,11 +3388,11 @@ version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
  "kbuild_config",
+ "kcompletion",
  "kcpu_id_map",
  "khal",
  "kipi",
  "kirq",
- "kpoll",
  "kspin",
  "ktask",
  "ktime_types",
@@ -3414,11 +3427,11 @@ name = "kworkqueue_ng"
 version = "0.3.0-dev"
 dependencies = [
  "intrusive-collections",
+ "kcompletion",
  "kcpu_id_map",
  "kerrno",
  "khal",
  "kirq",
- "kpoll",
  "kspin",
  "ksync",
  "ktask",

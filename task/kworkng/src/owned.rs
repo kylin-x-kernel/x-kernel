@@ -130,8 +130,8 @@ impl<W: Drain> Owner<W> {
             #[expect(
                 clippy::expect_used,
                 reason = "CG-021-no-panic-on-reachable-failure: Reclamation runs on the normal \
-                          worker outside the reclaimed callback; fresh completion observers have \
-                          inline registration capacity"
+                          worker outside the reclaimed callback; completion waits need only valid \
+                          sleepable context"
             )]
             work.drain()
                 .expect("normal reclamation can drain owned work");

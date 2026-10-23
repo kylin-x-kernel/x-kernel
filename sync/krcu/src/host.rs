@@ -98,7 +98,7 @@ impl<'task> CurrentReader<'task> {
 /// a wake delivered before park and permit spurious returns. Neither method
 /// registers a wait or allocates; all fallible preparation precedes the borrow.
 /// The borrow is not Send/Sync and must not escape the synchronous adapter body.
-pub trait TaskWait {
+pub trait ServiceWait {
     /// Clones the prepared waker without allocating. It may outlive this borrow.
     fn waker(&self) -> Waker;
 
@@ -107,6 +107,18 @@ pub trait TaskWait {
     /// Requires sleepable context and no reader/service lock. Must not consume
     /// pending signals; the caller rechecks its completion predicate on return.
     fn park(&mut self);
+}
+
+/// Prepared completion waiting bound to the current sleepable task.
+///
+/// The host retains this object on the preparing task's stack. Preparation
+/// validates context before the body can change publication or install markers.
+pub trait TaskWait {
+    /// Waits infallibly and without allocation until completion is acquired.
+    ///
+    /// Requires the preparing task in sleepable context with no reader/service
+    /// lock held. Signals and spurious wakeups cannot end the wait early.
+    fn wait_for_completion(&self, completion: &kcompletion::Completion);
 }
 
 /// Borrowed one-shot timer; RCU owns the deadline and the meaning of expiry.
@@ -209,16 +221,15 @@ pub trait RcuTaskIf {
     /// owns all RCU admission, nesting and cleanup decisions.
     fn with_current_reader(body_fn: &mut dyn FnMut(CurrentReader<'_>));
 
-    /// Prepares parking resources, then lends them to the body exactly once.
+    /// Prepares completion waiting, then lends it to the body exactly once.
     ///
     /// On failure do not invoke the body; after invoking it return only Ok.
     /// Retain the concrete wait on this stack through the body, without an
-    /// additional allocation just to erase its type. The body may sleep on the
-    /// preparing task and owns all completion checks and wait registrations.
+    /// allocation. The body may wait on completions on the preparing task.
     ///
     /// # Errors
     /// Rejects contexts where the current task cannot sleep before invoking
-    /// the body. Existing host allocations retain their fatal OOM policy.
+    /// the body. Preparation and waiting do not allocate.
     ///
     /// The host's task-bound wait cannot escape the body:
     ///
@@ -229,6 +240,17 @@ pub trait RcuTaskIf {
     /// });
     /// ```
     fn with_prepared_wait(body_fn: &mut dyn FnMut(&mut dyn TaskWait)) -> KResult<()>;
+
+    /// Prepares service parking, then lends it to the body exactly once.
+    ///
+    /// Retains early wake hints and permits spurious returns. The body owns
+    /// its readiness predicate. No allocation or interruption error occurs
+    /// during park; preparation retains the host's fatal allocation policy.
+    /// On failure do not invoke the body; after invoking it return only Ok.
+    ///
+    /// # Errors
+    /// Rejects contexts where the current task cannot sleep before the body.
+    fn with_prepared_service_wait(body_fn: &mut dyn FnMut(&mut dyn ServiceWait)) -> KResult<()>;
 
     /// Holds the permanent kernel RCU drain mutex across one synchronous body.
     ///
@@ -258,7 +280,7 @@ pub(crate) fn with_preempt_check_deferred<R>(body_fn: impl FnOnce() -> R) -> R {
     result.expect("RCU preemption provider must invoke the body")
 }
 
-/// Lends prepared host parking while keeping the generic result on this stack.
+/// Lends prepared completion waiting while keeping the result on this stack.
 #[expect(
     clippy::expect_used,
     reason = "CG-021-no-panic-on-reachable-failure: the static task provider calls its body \
@@ -273,6 +295,27 @@ pub(crate) fn with_prepared_wait<R>(body_fn: impl FnOnce(&mut dyn TaskWait) -> R
         ));
     })?;
     Ok(result.expect("RCU wait provider must invoke the body"))
+}
+
+/// Lends service parking while keeping the generic result on this stack.
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: the static task provider calls its body \
+              exactly once after successful preparation and never fails afterward"
+)]
+pub(crate) fn with_prepared_service_wait<R>(
+    body_fn: impl FnOnce(&mut dyn ServiceWait) -> R,
+) -> KResult<R> {
+    let mut body_fn = Some(body_fn);
+    let mut result = None;
+    RcuTaskIf::with_prepared_service_wait(&mut |wait| {
+        result = Some(body_fn
+            .take()
+            .expect("RCU service wait provider invokes once")(
+            wait
+        ));
+    })?;
+    Ok(result.expect("RCU service wait provider must invoke the body"))
 }
 
 /// Keeps the generic return value on the caller's stack across the static adapter.

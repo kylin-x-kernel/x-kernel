@@ -450,7 +450,16 @@ fn service_kicks_run_after_partition_unlock() {
     unsafe { queue.submit(&next, Some(0.into()), || unreachable!()) }.unwrap();
     assert_eq!(probe.calls.load(Ordering::Relaxed), 5);
     let (withdrawn, token) = CompletionObserver::prepare();
-    let _registration = withdrawn.register(kick.as_ref()).unwrap();
+    let waiter = ktask::spawn({
+        let (withdrawn, kick) = (withdrawn.clone(), kick.clone());
+        move || {
+            withdrawn.wait(&ktask::completion::CompletionWait::prepare().unwrap());
+            kick.wake_by_ref();
+        }
+    });
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
     deferred
         .work_for_test()
         .capture(&mut alloc::vec![token])
@@ -460,6 +469,7 @@ fn service_kicks_run_after_partition_unlock() {
     );
     // SAFETY: retained pinned storage outlives withdrawal, refill and synchronized cancel.
     assert!(unsafe { deferred.as_ref().retime_pending_at(future) }.unwrap());
+    assert_eq!(waiter.join(), 0);
     assert!(withdrawn.is_completed());
     // Both the service refill and old Work observer reenter the partition unlocked.
     assert_eq!(probe.calls.load(Ordering::Relaxed), 7);

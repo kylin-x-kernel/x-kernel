@@ -42,10 +42,13 @@ inline on arm nor manufactures a quiescent observation. Cancellation and Drop
 drain delivery before freeing timer storage; callers must not hold callback-needed
 locks or cancel from that callback. The borrowed timer cannot outlive the body.
 
-Task parking preparation may reject a non-sleepable caller, but only before
+Task wait preparation may reject a non-sleepable caller, but only before
 invoking the RCU body. Afterward the adapter must retain the prepared wait for
-the full synchronous operation, including early wake hints and migration. It
-does not interpret completion, handle retired ownership or consume signals.
+the full synchronous operation, including early completion and migration.
+CompletionWait acquires RCU's completion infallibly without allocation or signal
+interruption. RCU retains retired ownership and callback/drain Arc allocations.
+Startup and GP service waits retain the distinct PreparedTaskWait park/Waker
+contract, whose hints cannot establish RCU completion.
 
 Drain serialization requires sleepable task context and excludes recursive
 drain calls. The adapter invokes its body exactly once under the permanent

@@ -36,10 +36,11 @@ fn local_read_scope_is_rejected_before_submission() {
 #[def_test]
 fn wake_hint_does_not_complete_a_grace_period() {
     let is_complete = with_prepared_grace_period(|prepared| {
-        prepared.wait.waker().wake();
-        // Consume a retained wake without a callback. The completion predicate,
-        // not a return from park, is the authority used by submit_and_wait.
-        prepared.wait.park();
+        crate::host::with_prepared_service_wait(|wait| {
+            wait.waker().wake();
+            wait.park();
+        })
+        .unwrap();
         prepared.completion.completion.try_wait()
     })
     .unwrap();
@@ -47,12 +48,12 @@ fn wake_hint_does_not_complete_a_grace_period() {
 }
 
 #[def_test]
-fn abandoned_preparation_unregisters_without_submitting_callback() {
+fn abandoned_preparation_releases_callback_owner_without_submission() {
     let record = with_prepared_grace_period(|prepared| prepared.completion.clone()).unwrap();
     // No raw callback owner was transferred. Keeping only the local record
     // lets us check cancellation without observing the global service queue.
     assert_eq!(Arc::strong_count(&record), 1);
-    assert_eq!(record.completion.complete(), 0);
+    record.completion.complete();
     assert!(record.completion.try_wait());
 }
 
@@ -92,7 +93,7 @@ fn notifier_ownership_survives_waiter_destruction() {
     // Model the waiter returning while complete_grace_period still owns its
     // Arc. The notifier may finish its remaining accesses independently.
     assert_eq!(Arc::strong_count(&notifier), 1);
-    assert!(!notifier.completion.is_completed());
+    assert!(!notifier.completion.try_wait());
     drop(notifier);
     assert!(observer.upgrade().is_none());
 }

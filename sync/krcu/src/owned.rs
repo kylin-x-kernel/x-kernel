@@ -99,9 +99,9 @@ impl<T> Rcu<T> {
     ///
     /// # Errors
     /// Returns `InvalidInput` outside sleepable task context, including inside
-    /// a read scope; `BadState` before RCU service readiness; or `NoMemory` on
-    /// fallible wait registration. The error includes the unused replacement.
-    /// Other allocations follow the kernel's fatal OOM policy. After publication
+    /// a read scope, or `BadState` before RCU service readiness. The error includes
+    /// the unused replacement. Completion preparation and waiting do not allocate;
+    /// callback storage still follows the kernel's fatal OOM policy. After publication
     /// the wait cannot be interrupted; return proves old readers have finished,
     /// not that unrelated callbacks or their downstream work have finished.
     #[expect(

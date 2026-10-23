@@ -179,7 +179,7 @@ impl<T, H> Work<T, H> {
 
     /// Attaches one prepared observer per current subject in one transaction.
     ///
-    /// Prepare storage and wake registrations outside the lock. On success,
+    /// Prepare receipt storage outside the lock. On success,
     /// exactly the returned number of tokens are consumed from the vector end.
     /// Extra tokens remain caller-owned. No resources or observers are destroyed.
     ///

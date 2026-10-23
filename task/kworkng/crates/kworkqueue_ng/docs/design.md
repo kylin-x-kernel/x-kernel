@@ -140,8 +140,8 @@ predecessor blocks its successor until resource cleanup has completed.
 
 kcpu_id_map validates CPU configuration. intrusive-collections supplies non-owning
 pending links and Arc-owned observers. kspin supplies IRQ-compatible protection;
-kpoll supplies terminal completion and registration. ktask::PreparedTaskWait supplies
-context validation and preallocated parking for synchronous operations. ktask::Timer
+kcompletion supplies permanent terminal completion. ktask::completion::CompletionWait
+validates sleepable task context without allocation and waits infallibly after validation. ktask::Timer
 owns prepared timer storage; ktime_types and kerrno supply its deadline/error types.
 ksync supplies
 the sleepable Queue flush setup mutex; submissions and completion never take it.
@@ -164,10 +164,32 @@ List access takes partition -> node-key locks; entry releases the key lock befor
 linking. No management lock spans callback execution. Sleeping, migration and
 nested callbacks preserve identity. Entry/exit is O(1) without allocation; only
 sleepable Queue preflight scans active callbacks. Off builds omit nodes and lists.
-OOM handling is deferred by
-the approved successful-preparation assumption.
+CompletionWait preparation and each individual completion wait allocate no waiter
+storage. Whole Work/Queue drains still allocate completion-observation receipts and
+their containers before capture or closure. These are wait-resource allocations,
+not callback payload allocations. OOM handling remains governed by the allocator;
+this migration does not make complete drain operations allocation-free. Permanent
+complete_all receipts can finish before their turn in a sequential wait without
+losing notification, and multiple callers need no preregistration.
 
-The internal ordinary Work::flush prepares observer registrations, captures the
+Remaining wait-resource allocations, counted from the current implementation:
+
+| Operation | Allocation sites remaining |
+| --- | --- |
+| Ordinary Work flush/disable_sync/cancel_sync | Each preparation attempt for N observed slots (0–2) creates N receipt Arcs and two Vec buffers when N > 0: zero allocations for N=0, three for N=1, four for N=2. Capture-growth retries discard that attempt and can repeat these allocations. |
+| DelayedWork flush | Always prepares two receipts and two Vec buffers: four allocations, even for idle Work. Physical-delivery retries reuse them. |
+| DelayedWork disable_sync/cancel_sync | Uses ordinary Work preparation above, then drains the timer; completion task waiting adds no allocation. |
+| Queue flush with P partitions | P receipt Arcs, one ColorCompletion Arc and two Vec buffers: P+3 allocations per call. Old receipt snapshots and progress-queue Arc clones do not allocate; full-ring retries reuse preparation. |
+| Queue close_and_drain with P partitions | 4P receipt Arcs plus two Vec buffers holding 4P entries each, and a third Vec for bound-source receipt Arcs. Vec growth can perform additional reallocations; source receipt clones do not allocate. Repeated shutdown still prepares these resources. |
+| Queue preparation | One additional Arc allocation for the full-ring progress WaitQueue, shared by color observers; no per-wait allocation in its predicate wait. |
+
+Counts exclude allocator metadata, callbacks/destructors and unrelated queue/timer
+construction. The final owned-handle reclamation hook calls cancel_sync through
+Drain::drain and therefore can allocate the ordinary Work wait resources above
+before destroying Work. Allocation failure during that hook remains a kernel
+allocator failure; allocation-free final reclamation is not an acceptance claim.
+
+The internal ordinary Work::flush prepares observer receipts, captures the
 current pending/running pair under one Work guard and parks without management
 locks. Capacity is rechecked before attachment; a growth race retries preparation
 without partial capture. It neither cancels nor disables. Later submissions do not
@@ -180,10 +202,10 @@ expedition is not implemented by this ordinary wait.
 Queue owns sealed_colors under a sleepable mutex. Four reusable color slots hold
 only independent ColorCompletion receipts, not another participation count. Each
 receipt owns one existing CompletionObserver per partition. A flush prepares its
-own tokens and wake registrations before effects, snapshots old receipt Arcs under
-the mutex, registers them unlocked, then revalidates their identities after locking.
-Only terminal colors may be reclaimed, and snapshot Arcs defer destruction until
-unlock. Registration failure cannot publish a cutoff.
+own tokens before effects and snapshots old receipt Arcs under the same mutex
+guard that publishes the cutoff. Only terminal colors may be reclaimed,
+and snapshot Arcs defer destruction until unlock. Context and optional self-wait
+errors precede capture; there is no registration API or registration error.
 
 With a free color, one atomic update publishes the next admission color while
 preserving closure. Setup visits each partition admission barrier and attaches one
@@ -193,9 +215,14 @@ detach observers before notification, so terminal receipts prove local accountin
 and observer membership ended. No second counter or local color receipt field is
 needed. Old waiters retain their original immutable receipts across slot reuse.
 
-If all colors are occupied, registered old receipts provide durable completion
-wakes and the caller parks without the mutex, before choosing its cutoff. Ordinary
-acceptance continues. Once captured, a flush waits for its own and earlier receipts,
+If all colors are occupied, CompletionWait::wait_until waits on an independent
+kcompletion::WaitQueue until any retained color is terminal, without the mutex.
+Each color observer publishes permanent completion before notifying that queue;
+registration-before-predicate checking prevents lost progress. The predicate queue
+retains no Work or Queue and is allocated once at Queue preparation. Its Arc may
+outlive Queue in old color receipts. Ordinary acceptance continues, and the caller
+retries color selection before choosing its cutoff. Once captured, a flush waits sequentially
+for its own and earlier permanent receipts,
 not later submissions. Shutdown takes no flush mutex and drains all colors without
 needing a free slot. This Queue operation is not exposed on shared defaults.
 
@@ -363,7 +390,7 @@ Tests using safe unpartitioned admission retain a test-only borrowed guard.
 The dispatcher ends source inspection before invoking the acquired execution.
 
 No worker/BH runtime is created here. close_and_drain prepares source-detachment
-receipts and registrations before closure, drains ordinary accounting, then detaches
+receipts and validates task context before closure, drains ordinary accounting, then detaches
 every bound source and waits for inspections/reference release. Concurrent callers
 share each source's permanent receipt; none may return merely because another caller
 unpublished it. Immutable bindings live outside PartitionState so detach/notification

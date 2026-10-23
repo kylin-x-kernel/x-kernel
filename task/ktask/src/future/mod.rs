@@ -17,7 +17,7 @@ use kerrno::{KError, KResult};
 use kpoll::{PollRegisterError, PollRegistrations};
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{KtaskRef, WeakKtaskRef, current, current_run_queue, select_wake_run_queue};
+use crate::{KtaskRef, WeakKtaskRef, current, park::park_task, select_wake_run_queue};
 
 mod poll;
 pub use poll::*;
@@ -40,24 +40,7 @@ impl KWaker {
 
     // The caller retains a strong task reference across this handshake.
     fn park(&self) {
-        {
-            let mut woke = self.woke.lock();
-            if *woke {
-                *woke = false;
-                return;
-            }
-        }
-
-        let mut rq = current_run_queue::<NoPreemptIrqSave>();
-        let mut woke = self.woke.lock();
-        if *woke {
-            *woke = false;
-            return;
-        }
-
-        // Publish Blocked before dropping the latch lock, so a concurrent
-        // wake either prevents parking or observes a task it can unblock.
-        rq.blocked_resched(woke);
+        park_task(&self.woke);
     }
 }
 

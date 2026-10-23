@@ -23,6 +23,7 @@ arm-timer-resume-fixup = []
 
 
 [dependencies]
+kcompletion.workspace = true
 kerrno.workspace = true
 kfinalize.workspace = true
 krcu-core.workspace = true

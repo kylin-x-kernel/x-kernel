@@ -376,7 +376,8 @@ fn install_with_actions(
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Rollback runs in the same sleepable task \
-                  after dropping the preemption guard, with fresh inline completion registrations"
+                  after dropping the preemption guard; task joins use allocation-free completion \
+                  waits"
     )]
     retired
         .normal

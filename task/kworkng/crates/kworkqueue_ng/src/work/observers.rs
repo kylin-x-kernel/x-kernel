@@ -4,21 +4,22 @@
 
 //! Prepared, single-use completion observations without subject back-pointers.
 //!
-//! Prepare and register wakeups outside management locks. Attach and take require
+//! Prepare receipts outside management locks. Attach and take require
 //! exclusive access under the subject's protection. After resource cleanup and
 //! final subject access, complete the detached chain outside management locks:
-//! completion may invoke arbitrary waiter wakeups and release observer storage.
+//! completion wakes waiting tasks and may release observer storage.
 
 use alloc::sync::Arc;
-use core::task::Waker;
 
 use intrusive_collections::{LinkedList, intrusive_adapter, linked_list::AtomicLink};
-use kpoll::{Completion, PollRegisterError, PollRegistration};
+use kcompletion::{Completion, WaitQueue};
+use ktask::completion::CompletionWait;
 
 /// A permanent completion receipt; it never retains Work, Queue or slot storage.
 pub(crate) struct CompletionObserver {
     link: AtomicLink,
     completion: Completion,
+    progress: Option<Arc<WaitQueue>>,
 }
 
 /// Unique right to attach a newly prepared observer to exactly one subject.
@@ -30,9 +31,17 @@ pub(crate) struct PreparedObserver(Arc<CompletionObserver>);
 impl CompletionObserver {
     /// Allocates a fresh receipt and its single-use attachment token.
     pub(crate) fn prepare() -> (Arc<Self>, PreparedObserver) {
+        Self::prepare_with_progress(None)
+    }
+
+    /// Optionally notifies an independent predicate queue after terminal completion.
+    pub(crate) fn prepare_with_progress(
+        progress: Option<Arc<WaitQueue>>,
+    ) -> (Arc<Self>, PreparedObserver) {
         let observer = Arc::new(Self {
             link: AtomicLink::new(),
             completion: Completion::new(),
+            progress,
         });
         let prepared = PreparedObserver(observer.clone());
         (observer, prepared)
@@ -43,15 +52,9 @@ impl CompletionObserver {
         self.completion.is_completed()
     }
 
-    /// Registers a wakeup before attachment; allocation is permitted here.
-    ///
-    /// Keep the registration while waiting and recheck completion after
-    /// registration to cover completion racing with waiter preparation.
-    ///
-    /// # Errors
-    /// Returns the poll provider's storage or identity-exhaustion error.
-    pub(crate) fn register(&self, waker: &Waker) -> Result<PollRegistration, PollRegisterError> {
-        self.completion.register_owned(waker)
+    /// Waits for permanent completion using a validated task context.
+    pub(crate) fn wait(&self, task_wait: &CompletionWait) {
+        task_wait.wait(&self.completion);
     }
 }
 
@@ -86,6 +89,9 @@ impl CompletionObservers {
     pub(crate) fn complete(mut self) {
         while let Some(observer) = self.0.pop_front() {
             observer.completion.complete_all();
+            if let Some(progress) = &observer.progress {
+                progress.notify_all();
+            }
         }
     }
 }

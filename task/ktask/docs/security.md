@@ -2,6 +2,13 @@
 
 ## Scope and trust model
 
+Failed `try_join` means the target may still execute and access resources; error
+handling must not release them as though exit had completed. The legacy `join`
+retains a narrowly annotated fail-stop until those callers can propagate errors
+without abandoning ownership. Direct IRQ wait-provider misuse returns an error,
+which is not a quiescence certificate. Internal KIRQ callers validate before
+mutating IRQ ownership and restore all temporary context guards before waiting.
+
 Task storage uses DeferredArc rather than immediate Arc destruction. The
 architecture current pointer owns one raw count; CurrentTask is only a borrowed
 view. Switch preparation consumes the real count once, not the borrowed view,
@@ -507,7 +514,9 @@ Invariants:
 | T-07e | Early or spurious wake loses a notification or completes early | High | Predicate check races `park`, or the scheduler wakes the task alone | Reuse `KWaker` dual latch checks and the RQ handshake; hold a strong task ref across switch; `park` only returns a wake hint; the caller rechecks the predicate and owns event registration. |
 | T-08 | A long or repeatedly rearmed callback stalls scheduling | High | Callback abuse or repeated already-due rearm | API requires short, non-blocking hardirq callbacks. Core dispatch bounds catch-up rounds for deadlines reached during delivery. Residual: it cannot interrupt a callback or bound one round that continually rearms at or before its fixed cutoff. |
 | T-09 | Remote wake is not scheduled promptly | Medium | Task is on a remote RQ but that CPU has not reached a preempt safe point | SMP requires IPI. Remote IPI only sets `need_resched`. A failed probe arms backup hrtick in dest `preempt_resched`. Residual: IPI send failure or a late safe point. |
-| T-09b | IRQ teardown wait blocks the current task in the wrong context | High | Hardirq/softirq/BH-disabled path indirectly calls the `IrqSyncWaitIf` provider | `kirq` context-gates before entering the provider. `ktask` only supplies the blocking mechanism and does not relax IRQ-sync API constraints. |
+| T-09b | IRQ teardown wait blocks the current task in the wrong context | High | Hardirq/softirq/BH-disabled path indirectly calls the `IrqSyncWaitIf` provider | `IrqSyncWaitIf::can_wait` checks sleepable task context before IRQ teardown mutates actions; rejection maps to `IrqDescError::InvalidContext`. `CompletionWait::prepare` independently rejects invalid current, IRQ, BH, preemption and RCU context, even for a signaled completion. Subsequent scoped registration cannot fail. |
+| T-09g | Completion notification accesses a retired stack waiter | High | Concurrent notification races synchronous wait return | kcompletion owns pinned scoped nodes and serializes callback delivery with unlinking; the private Sync wake capability borrows a locked latch and strong task ref without retaining either borrow. |
+| T-09h | Completion callback inverts scheduler locks | High | Exit publishes completion or a waiter parks concurrently | Exit accounting releases the scheduler lock before notify_exit; parking never acquires completion locks, and notify releases the latch before scheduler enqueue. The run-queue context guard is not a scheduler lock. |
 | T-09f | Softirq schedule query consumes the task request early | Medium | A batch-boundary query clears `need_resched` or schedules directly | `SoftirqDaemonIf::needs_resched()` only Acquire-reads. Real scheduling stays at a safe point. Returns false with no task. |
 | T-09c | Workerqueue wait bypasses `kworkqueue_ng` lifecycle predicates | High | A `ktask` wait helper blocks without letting `kworkqueue_ng` recheck work state | `ktask` only supplies yield/wait. Work state, cancel/flush predicates, and the deadlock gate stay in `kworkqueue_ng`. |
 | T-09d | Custom/dynamic workqueue wrongly creates a dedicated task | Medium | Queue-level API reintroduces host/stop/wake or stores a `WorkQueueHandle` | Normal worker/manager tasks belong to `kworkerpool_ng`. Logical queues share pool tasks; queue closure may wait through `ktask` but does not own or destroy those tasks. |
@@ -519,6 +528,21 @@ Invariants:
 | T-12b | Idle-pull mid-state is missed by `setaffinity` | High | Ready on no RQ after steal and before dest enqueue | That window is mask-only, same as unpublished. Dest `enqueue_task` rejects a forbidden CPU before enqueue and `migrate_entry` publishes the steal as `MigrateIn`. |
 
 ## Failure modes and handling
+
+The `SyncWake` contract extends through scheduler callbacks. Intrusive scheduler
+queues and numeric park/switch diagnostics avoid allocations; any installed
+tracing implementation must also avoid allocation, unwinding, and reentry into
+completion or predicate queues. Legacy allocating trace-record/name-cache hooks
+are a prerequisite to resolve before claiming the entire wake chain satisfies
+this contract.
+
+The unsafe kcompletion host seam also requires waiter stack storage to survive
+callbacks that bypass destructors. `CompletionWait` retains a strong current
+task reference in its borrowed handle; `TaskInner::kstack` is freed only when
+TaskInner is destroyed. A readiness predicate calling non-unwinding task exit
+leaks that reference and its stack, rather than freeing a linked node. This is
+a resource leak, not permission to cancel waits by exiting. Normal returns and
+unwinding unlink before releasing the handle.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1–4) | Controls |
 |---|---|---|---|---|---|---|

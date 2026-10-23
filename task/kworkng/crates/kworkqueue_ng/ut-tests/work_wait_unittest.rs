@@ -2,11 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, task::Wake};
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     assert, assert_eq,
     sync::atomic::{AtomicBool, Ordering},
-    task::Waker,
 };
 
 use unittest::def_test;
@@ -14,31 +13,31 @@ use unittest::def_test;
 use super::*;
 use crate::work::Work;
 
-struct Noop;
-impl Wake for Noop {
-    fn wake(self: Arc<Self>) {}
+/// Abandoned preparation releases every unattached receipt.
+#[def_test]
+fn abandoned_preparation_releases_receipts() {
+    let wait = CleanupWait::prepare(2);
+    let receipts: Vec<_> = wait.entries.iter().map(Arc::downgrade).collect();
+    drop(wait);
+    assert!(receipts.iter().all(|receipt| receipt.upgrade().is_none()));
 }
 
-/// A later registration failure releases every earlier receipt and waker registration.
+/// A later receipt may finish before the sequential waiter reaches it.
 #[def_test]
-fn preparation_failure_rolls_back_registrations() {
-    let owner = Arc::new(Noop);
-    let waker = Waker::from(owner.clone());
-    let before = Arc::strong_count(&owner);
-    let mut calls = 0;
-    let result = CleanupWait::prepare_with(2, |observer| {
-        calls += 1;
-        if calls == 2 {
-            Err(PollRegisterError::IdExhausted)
-        } else {
-            observer.register(&waker)
-        }
-    });
-    assert!(matches!(
-        result,
-        Err(WaitError::Registration(PollRegisterError::IdExhausted))
-    ));
-    assert_eq!(Arc::strong_count(&owner), before);
+fn sequential_wait_preserves_early_completion() {
+    let mut wait = CleanupWait::prepare(2);
+    let mut later = crate::work::observers::CompletionObservers::new();
+    later.attach(wait.prepared.pop().unwrap());
+    let mut first = crate::work::observers::CompletionObservers::new();
+    first.attach(wait.prepared.pop().unwrap());
+    let waiter = ktask::spawn(move || wait.wait(&CompletionWait::prepare().unwrap()));
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
+    later.complete();
+    assert_eq!(waiter.state(), ktask::TaskState::Blocked);
+    first.complete();
+    assert_eq!(waiter.join(), 0);
 }
 
 /// A shrinking capture must wait only for the consumed suffix of prepared observers.
@@ -46,7 +45,7 @@ fn preparation_failure_rolls_back_registrations() {
 fn unused_observers_do_not_extend_capture() {
     let work = Work::new();
     assert!(work.accept(()).is_ok());
-    let mut wait = CleanupWait::prepare(2, Waker::noop()).unwrap();
+    let mut wait = CleanupWait::prepare(2);
     assert_eq!(work.capture(&mut wait.prepared), Ok(1));
     wait.discard_unused();
     assert!(!wait.is_completed());

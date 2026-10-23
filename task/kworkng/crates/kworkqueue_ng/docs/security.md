@@ -126,9 +126,9 @@ does not install production services or justify a remote wake/IRQ-allocation cla
 | QueueInFlight counts and observer chains | Original partition/color obligation survives detached cleanup; terminal notification outside locks |
 | Queue.sealed_colors and control color bits | Sleepable serializer owns cutoff/setup/reuse; atomic update preserves closure; admission and retirement never take this mutex |
 | ColorCompletion locals | One-shot independent receipts; all locals must be terminal before reuse; no Queue/Work back-reference or duplicated count |
-| CleanupWait and queue drain receipts | Waiter-owned registrations prepared before effects; no Work/Queue back-reference |
+| CleanupWait and queue drain receipts | Waiter-owned receipts prepared before effects; allocation-free task wait validation; no Work/Queue back-reference |
 | queue/source.rs QueueSource | Partition-protected publication; weak Queue payload avoids cycles; only service kick leaves protection |
-| Immutable QueuePartition source binding and detach receipt | Retained through repeated shutdown; prepare registrations before closure, detach after work drain and wait outside management locks |
+| Immutable QueuePartition source binding and detach receipt | Retained through repeated shutdown; prepare receipts and validate context before closure, detach after work drain and wait outside management locks |
 
 Execution no longer carries a temporary Queue/source borrow. Its private raw
 terminal boundary also ends all shared Work cleanup calls before publishing idle.
@@ -144,7 +144,7 @@ Execution's private raw constructor relies on unsafe publication to preserve Wor
 through consumption;
 only test-local typed claims retain a BorrowedExecution lifetime. The explicit
 Send/Sync implementations belong to the Retirement pair described above; execution
-does not add its own implementations. kspin, kpoll, intrusive-collections, kworkerpool_ng,
+does not add its own implementations. kspin, kcompletion, intrusive-collections, kworkerpool_ng,
 ksync and ktask are trusted providers. Queue flush adds no unsafe operation.
 The inventory above and threat responses below cover this crate's unsafe boundaries;
 provider internals are covered by their own crate security documents.
@@ -169,11 +169,11 @@ provider internals are covered by their own crate security documents.
 | Registration retains Queue strongly | Permanent reference cycle | Weak Queue in adapter; kick must not capture Queue/Work/registration |
 | Shutdown detaches before accepted Work drains | Lost execution progress | Detach only after all ordinary color receipts complete |
 | Concurrent shutdown observes unpublication but an inspection remains | Premature teardown | Every caller waits on the same permanent source receipt, covering inspection reference release |
-| Invalid context or direct self-wait | Hang / invalid scheduling | PreparedTaskWait validates context; optional task comparison rejects Work flush/cancel/disable and own Queue flush/shutdown before effects; indirect dependencies remain excluded |
+| Invalid context or direct self-wait | Hang / invalid scheduling | CompletionWait validates context; optional task comparison rejects Work flush/cancel/disable and own Queue flush/shutdown before effects; indirect dependencies remain excluded |
 | Reuse before a late old-color commit | Early return / teardown | Final admission sample stays under the partition guard; setup crosses every guard and holds the flush serializer until all visits finish |
 | Numeric slot reuse redirects an old waiter | Wait includes unrelated work or ends early | Retain immutable receipt Arcs, compare snapshot identity before effects, never reset/retarget receipts |
-| All colors occupied | Admission starvation or deadlock | Wait on registered old receipts outside the serializer; shutdown is independent of that mutex and color space |
-| Registration/Waker reentry under flush mutex | Deadlock / partial capture | Prepare registrations unlocked, revalidate snapshot, deliver empty notifications after unlock; no recoverable failure after publication |
+| All colors occupied | Admission starvation or deadlock | Allocation-free predicate wait observes any terminal retained color outside the serializer; observers publish completion before notifying the independent progress queue; admission and shutdown remain independent |
+| Task wakeup or receipt release under flush mutex | Deadlock / partial capture | Prepare receipts unlocked, snapshot and publish under one guard, deliver empty notifications after unlock; no recoverable failure after publication |
 | Concurrent submission changes a Work flush scope | Early return or unbounded wait | Capture under one Work lock after observer-capacity recheck; receipts follow only captured occurrences through cleanup, not later successors |
 | Allocation exhaustion during preparation | Fatal OOM | Accepted/deferred to kernel-wide effort by user decision; no recovery claim |
 
@@ -205,8 +205,9 @@ borrowed captures, repeated cancel/reuse, validation failures and cancellation o
 running predecessor with a timer-side successor. They do not prove global
 system integration. Pending absolute retime tests
 cover ready/waiting withdrawal, observer boundaries, retained resources, timer-only
-adjustment, unchanged failure and claim-first behavior. A source/observer Waker
-reacquires partition protection to check that withdrawal notifications are unlocked.
+adjustment, unchanged failure and claim-first behavior. Source notification probes
+reacquire partition protection to check that withdrawal notifications are unlocked;
+observer waits now exercise the task-bound completion path rather than arbitrary Wakers.
 Private modify_after tests cover empty-slot acceptance, pending modification,
 claim-first successor admission, route-sampling competing admission, disabled/
 closed/conflicting-owner rejection and zero expedition with IRQs masked. Zero
@@ -241,7 +242,8 @@ a fatal invariant violation, not silent loss of accepted work. No unwind recover
 is provided. Delayed delivery adds no unsafe Send/Sync implementation or owning
 callback cycle; the separate Retirement contract is described above.
 
-Registration and context failures precede stop/closure/cutoff effects. Once effects occur,
+Context failures precede stop/closure/cutoff effects. Completion registration is
+allocation-free and infallible. Once effects occur,
 waits have no recoverable interruption or timeout. Callback/destructor panic recovery
 is not supplied. Tests cover cancellation, cleanup, independent disables, concurrent
 waiters, ownership, partition/color drain and pointer provenance at earlier checkpoints.
@@ -260,3 +262,15 @@ checks, but not context validation or cleanup accounting. Direct self-waits then
 remain invalid usage. Destructor-originated and indirect dependency deadlocks are
 not diagnosed. Callback panic/task exit is forbidden by the execution contract;
 this diagnostic does not provide panic recovery or a task-exit cleanup mechanism.
+
+Completion waits validate sleepable context before capture, disable or closure;
+optional self-wait checks also precede effects. The task adapter allocates no waiter
+storage and exposes no registration failures. Receipt Arc/Vec preparation remains
+wait-resource allocation: ordinary Work needs three allocations for one observed
+slot or four for two, per preparation attempt; idle preparation needs none.
+Final owned-handle reclamation calls this same drain, so allocator exhaustion can
+still fail reclamation. Whole drain allocation freedom is not claimed. Queue and
+delayed-flush allocation counts are listed in design.md.
+Sequential waits use permanent complete_all receipts, so earlier
+completion cannot be lost. Waits and terminal notifications run outside management
+locks; receipt ownership does not retain Work or Queue storage.

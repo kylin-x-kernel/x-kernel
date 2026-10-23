@@ -12,7 +12,6 @@ use core::{
     any::Any,
     cell::{Cell, UnsafeCell},
     fmt,
-    future::poll_fn,
     mem::ManuallyDrop,
     ops::Deref,
     ptr::NonNull,
@@ -20,16 +19,17 @@ use core::{
     task::Poll,
 };
 
+use kcompletion::Completion;
 #[cfg(feature = "smp")]
 use kcpu_id_map::KCpuMaskExt;
 use kcpu_id_map::LogicalCpuId;
 use kerrno::KResult;
 use khal::context::TaskContext;
-use kpoll::{Completion, PollRegistrations, PollSet};
+use kpoll::PollSet;
 use kspin::SpinNoIrq;
 use memaddr::{VirtAddr, align_up_4k};
 
-use crate::{KCpuMask, KTask, KtaskRef, future::block_on, yield_now};
+use crate::{KCpuMask, KTask, KtaskRef, completion::CompletionWait};
 
 enum PreemptCheckOrigin {
     Task,
@@ -465,6 +465,20 @@ impl TaskInner {
         self.name.lock().clone()
     }
 
+    /// Copies the longest UTF-8 prefix of the task name that fits in `buffer`.
+    ///
+    /// Returns the number of bytes written, leaving the remaining buffer intact.
+    /// Takes the task-name spinlock without allocating; valid with IRQs disabled.
+    pub fn copy_name(&self, buffer: &mut [u8]) -> usize {
+        let name = self.name.lock();
+        let mut length = name.len().min(buffer.len());
+        while !name.is_char_boundary(length) {
+            length -= 1;
+        }
+        buffer[..length].copy_from_slice(&name.as_bytes()[..length]);
+        length
+    }
+
     /// Set the name of the task.
     pub fn set_name(&self, name: &str) {
         *self.name.lock() = String::from(name);
@@ -478,28 +492,36 @@ impl TaskInner {
     /// Wait for the task to exit, and return the exit code.
     ///
     /// It will return immediately if the task has already exited (but not dropped).
+    /// Otherwise the caller must be in sleepable task context.
+    /// Use [`Self::try_join`] to handle an invalid context without panicking.
+    ///
+    /// # Panics
+    /// Panics if waiting is necessary but the caller cannot sleep.
     pub fn join(&self) -> i32 {
-        let mut registrations = PollRegistrations::new();
-        block_on(poll_fn(|cx| {
-            loop {
-                if self.state() == TaskState::Exited {
-                    return Poll::Ready(self.exit_code.load(Ordering::Acquire));
-                }
-                let mut context = registrations.context(cx);
-                if self.wait_for_exit.register(&mut context).is_err() {
-                    drop(context);
-                    // Under memory pressure, yield and retry rather than
-                    // busy-spinning on `wake_by_ref` without a registration.
-                    yield_now();
-                    continue;
-                }
-                drop(context);
-                if self.state() == TaskState::Exited {
-                    return Poll::Ready(self.exit_code.load(Ordering::Acquire));
-                }
-                return Poll::Pending;
-            }
-        }))
+        match self.try_join() {
+            Ok(code) => code,
+            #[expect(
+                clippy::panic,
+                reason = "CG-021-no-panic-on-reachable-failure: TODO(cg): migrate infallible join \
+                          callers to try_join with teardown ownership retained on error; \
+                          returning an exit code here would falsely report task termination"
+            )]
+            Err(error) => panic!("join requires sleepable task context: {error:?}"),
+        }
+    }
+
+    /// Waits for task exit, returning its exit code only after exit is observed.
+    ///
+    /// # Errors
+    /// Returns `KError::InvalidInput` when waiting is needed but the caller
+    /// cannot sleep. The task remains live; callers must retain resources it
+    /// may access. An already-exited task can be joined in any context.
+    pub fn try_join(&self) -> KResult<i32> {
+        if self.state() != TaskState::Exited {
+            let wait = CompletionWait::prepare()?;
+            wait.wait(&self.wait_for_exit);
+        }
+        Ok(self.exit_code.load(Ordering::Acquire))
     }
 
     /// Returns the runtime attached to this task, if any.

@@ -3,10 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{boxed::Box, sync::Arc, task::Wake, vec, vec::Vec};
-use core::{
-    sync::atomic::{AtomicUsize, Ordering},
-    task::Waker,
-};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use unittest::{assert, assert_eq, def_test};
 
@@ -149,7 +146,7 @@ impl Wake for WakeCheck {
 /// Checks completion wakeups can reenter after the final Work access and unlock.
 ///
 /// # Panics
-/// Panics if wake registration fails or the wake cannot observe an empty Work.
+/// Panics if the resumed task cannot observe an empty Work.
 #[def_test]
 fn completion_wakes_outside_work_protection() {
     let work = Arc::new(Work::new());
@@ -158,11 +155,20 @@ fn completion_wakes_outside_work_protection() {
         wakes: AtomicUsize::new(0),
     });
     let (receipt, token) = CompletionObserver::prepare();
-    let registration = receipt.register(&Waker::from(check.clone())).unwrap();
+    let waiter = ktask::spawn({
+        let (receipt, owner) = (receipt.clone(), check.clone());
+        move || {
+            receipt.wait(&ktask::completion::CompletionWait::prepare().unwrap());
+            owner.wake();
+        }
+    });
+    while waiter.state() != ktask::TaskState::Blocked {
+        ktask::yield_now();
+    }
     assert!(work.accept(1).is_ok());
     assert_eq!(work.capture(&mut vec![token]), Ok(1));
     assert!(work.cancel_pending());
     assert!(receipt.is_completed());
+    assert_eq!(waiter.join(), 0);
     assert_eq!(check.wakes.load(Ordering::Relaxed), 1);
-    drop(registration);
 }

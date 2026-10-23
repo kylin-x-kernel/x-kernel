@@ -129,7 +129,7 @@ impl QueuePartition {
     }
 
     /// Obtain the shared one-shot receipt before queue closure changes state.
-    pub(super) fn source_detachment_completion(&self) -> Option<Arc<kpoll::Completion>> {
+    pub(super) fn source_detachment_completion(&self) -> Option<Arc<kcompletion::Completion>> {
         self.source.as_ref().map(QueueSource::detachment_completion)
     }
 

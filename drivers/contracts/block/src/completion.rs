@@ -62,7 +62,7 @@ pub trait BlockWaiter {
     /// May establish the task wait lazily when completion is still pending,
     /// but must not return a wait error after device ownership has started.
     /// Spurious task wakes must not let this method return before completion.
-    /// Infallible wait allocation follows the host kernel's OOM policy.
+    /// After waiter preparation, scoped wait registration must not allocate.
     fn wait_completion(&mut self);
 }
 

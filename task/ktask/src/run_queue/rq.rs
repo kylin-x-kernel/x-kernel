@@ -519,7 +519,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // Note that the state may have been set as `Ready` in `unblock_task()`,
         // see `unblock_task()` for details.
 
-        debug!("task block: {}", curr.id_name());
+        debug!("task block: trace_id={}", curr.trace_id());
         self.inner.resched(pull_if_empty, TaskState::Blocked);
     }
 
@@ -886,9 +886,9 @@ impl RunQueue {
             self.cpu_id.as_usize()
         );
         trace!(
-            "context switch: {} -> {}",
-            prev_task.id_name(),
-            next_task.id_name()
+            "context switch: trace_id={} -> trace_id={}",
+            prev_task.trace_id(),
+            next_task.trace_id()
         );
 
         let now_ns = khal::time::monotonic_time_nanos();

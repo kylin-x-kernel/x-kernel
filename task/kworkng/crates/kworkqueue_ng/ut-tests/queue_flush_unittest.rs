@@ -73,41 +73,46 @@ fn independent_flushes_do_not_follow_new_acceptance() {
 /// Panics on a cutoff without a free color, lost wakeup or captured later work.
 #[def_test]
 fn full_ring_waits_for_completion_without_stopping_admission() {
-    let queue = queue();
-    let works: Vec<_> = (0..5)
-        .map(|_| Box::pin(Work::with_callback(|| {})))
-        .collect();
-    let mut flushes = Vec::new();
-    for work in &works[..3] {
-        // SAFETY: every pinned allocation survives cancellation and all joins.
-        unsafe { queue.submit(work, None, || 0.into()) }.unwrap();
-        flushes.push(start_flush(&queue));
+    for first_completed in [0, 2] {
+        let queue = queue();
+        let works: Vec<_> = (0..5)
+            .map(|_| Box::pin(Work::with_callback(|| {})))
+            .collect();
+        let mut flushes = Vec::new();
+        for work in &works[..3] {
+            // SAFETY: every pinned allocation survives cancellation and all joins.
+            unsafe { queue.submit(work, None, || 0.into()) }.unwrap();
+            flushes.push(start_flush(&queue));
+        }
+        let full_color = queue.current_color();
+        let overflow = ktask::spawn({
+            let queue = queue.clone();
+            move || queue.flush().unwrap()
+        });
+        wait_blocked(&overflow);
+        assert_eq!(queue.current_color(), full_color);
+        // SAFETY: this prepared Work is canceled before storage is released.
+        unsafe { queue.submit(&works[3], None, || 0.into()) }.unwrap();
+        assert!(works[first_completed].cancel_pending());
+        while queue.current_color() == full_color {
+            ktask::yield_now();
+        }
+        wait_blocked(&overflow);
+        // SAFETY: retained pinned storage outlives the final cancellation below.
+        unsafe { queue.submit(&works[4], None, || 0.into()) }.unwrap();
+        for (index, work) in works[..4].iter().enumerate() {
+            if index == first_completed {
+                continue;
+            }
+            assert!(work.cancel_pending());
+        }
+        for flush in flushes {
+            assert_eq!(flush.join(), 0);
+        }
+        assert_eq!(overflow.join(), 0);
+        assert_eq!(works[4].observer_count(), 1);
+        assert!(works[4].cancel_pending());
     }
-    let full_color = queue.current_color();
-    let overflow = ktask::spawn({
-        let queue = queue.clone();
-        move || queue.flush().unwrap()
-    });
-    wait_blocked(&overflow);
-    assert_eq!(queue.current_color(), full_color);
-    // SAFETY: this prepared Work is canceled before storage is released.
-    unsafe { queue.submit(&works[3], None, || 0.into()) }.unwrap();
-    assert!(works[0].cancel_pending());
-    while queue.current_color() == full_color {
-        ktask::yield_now();
-    }
-    wait_blocked(&overflow);
-    // SAFETY: retained pinned storage outlives the final cancellation below.
-    unsafe { queue.submit(&works[4], None, || 0.into()) }.unwrap();
-    for work in &works[1..4] {
-        assert!(work.cancel_pending());
-    }
-    for flush in flushes {
-        assert_eq!(flush.join(), 0);
-    }
-    assert_eq!(overflow.join(), 0);
-    assert_eq!(works[4].observer_count(), 1);
-    assert!(works[4].cancel_pending());
 }
 
 /// Shutdown drains independently of both full color space and the flush mutex.
@@ -203,12 +208,15 @@ fn flush_visits_all_partitions_after_common_cutoff() {
         let (queue, late, published) = (queue.clone(), late.clone(), published.clone());
         move || {
             queue
-                .flush_with(CompletionObserver::register, |old| {
-                    // Models a pre-cutoff sample committing before the last CPU barrier.
-                    // SAFETY: retained Arc is stable and stays live until cancellation/join.
-                    unsafe { queue.partitions[1].accept(&late, (), old) }.unwrap();
-                    published.store(true, Ordering::Release);
-                })
+                .flush_with(
+                    || {},
+                    |old| {
+                        // Models a pre-cutoff sample committing before the last CPU barrier.
+                        // SAFETY: retained Arc is stable and stays live until cancellation/join.
+                        unsafe { queue.partitions[1].accept(&late, (), old) }.unwrap();
+                        published.store(true, Ordering::Release);
+                    },
+                )
                 .unwrap()
         }
     });
@@ -278,15 +286,11 @@ fn remote_sample_before_cutoff_commits_after_publication() {
                 assert_eq!(khal::percpu::this_cpu_id().as_usize(), 0);
                 queue
                     .flush_with(
-                        |receipt, waker| {
-                            let registration = receipt.register(waker)?;
-                            // Preflight has released every partition lock. Registration
-                            // runs outside the flush serializer and admission locks.
+                        || {
                             begin.store(true, Ordering::Release);
                             while !sampled.load(Ordering::Acquire) {
                                 ktask::yield_now();
                             }
-                            Ok(registration)
                         },
                         |_| {},
                     )
@@ -313,22 +317,14 @@ fn remote_sample_before_cutoff_commits_after_publication() {
     queue.close_and_drain().unwrap();
 }
 
-/// Preparation failure and invalid context preserve the current acceptance color.
+/// Invalid context preserves the current acceptance color.
 ///
 /// # Panics
-/// Panics on preflight effects, missed rollback or accepted invalid context.
+/// Panics on preflight effects or accepted invalid context.
 #[def_test]
 fn flush_errors_precede_cutoff_and_idle_flush_preserves_closure() {
     let queue = queue();
     let current = queue.current_color();
-    assert_eq!(
-        queue.flush_with(
-            |_, _| Err(PollRegisterError::IdExhausted),
-            |_| unreachable!()
-        ),
-        Err(WaitError::Registration(PollRegisterError::IdExhausted))
-    );
-    assert_eq!(queue.current_color(), current);
     assert!(queue.sealed_colors.lock().iter().all(Option::is_none));
     {
         let _guard = kspin::NoPreemptIrqSave::new();
@@ -416,15 +412,12 @@ fn flush_includes_cleanup_detached_before_capture() {
     assert_eq!(flush.join(), 0);
 }
 
-/// Failure after registering the new receipt does not change an older batch.
-///
-/// # Panics
-/// Panics on cutoff publication after failure, premature receipt completion or leaks.
+/// Invalid context preserves both cutoff and an older live receipt.
 #[def_test]
-fn older_receipt_registration_failure_has_no_cutoff_effect() {
+fn older_receipt_survives_rejected_capture() {
     let queue = queue();
     let work = core::pin::pin!(Work::with_callback(|| {}));
-    // SAFETY: retained pinned Work is canceled before final flush join and release.
+    // SAFETY: pinned Work remains live through cancellation and the joined flush.
     unsafe { queue.submit(&work, None, || 0.into()) }.unwrap();
     let first_color = queue.current_color();
     let first = start_flush(&queue);
@@ -433,21 +426,10 @@ fn older_receipt_registration_failure_has_no_cutoff_effect() {
         .unwrap()
         .clone();
     let current = queue.current_color();
-    let mut calls = 0;
-    assert_eq!(
-        queue.flush_with(
-            |receipt, waker| {
-                calls += 1;
-                if calls == 2 {
-                    Err(PollRegisterError::IdExhausted)
-                } else {
-                    receipt.register(waker)
-                }
-            },
-            |_| unreachable!()
-        ),
-        Err(WaitError::Registration(PollRegisterError::IdExhausted))
-    );
+    {
+        let _guard = kspin::NoPreemptIrqSave::new();
+        assert_eq!(queue.flush(), Err(WaitError::InvalidContext));
+    }
     assert_eq!(queue.current_color(), current);
     assert!(Arc::ptr_eq(
         queue.sealed_colors.lock()[first_color].as_ref().unwrap(),
@@ -460,32 +442,16 @@ fn older_receipt_registration_failure_has_no_cutoff_effect() {
     assert_eq!(Arc::strong_count(&original), 1);
 }
 
-/// A competing capture during unlocked registration forces fresh identity validation.
-///
-/// # Panics
-/// Panics on stale-slot mutation, missed retry or duplicate cutoff publication.
+/// A competing capture before setup leaves each flush with exactly one cutoff.
 #[def_test]
-fn changed_snapshot_retries_before_publishing_cutoff() {
+fn competing_capture_preserves_cutoff_identity() {
     let queue = queue();
     queue.flush().unwrap();
     let before = queue.current_color();
-    let mut calls = 0;
     let mut publications = 0;
     queue
-        .flush_with(
-            |receipt, waker| {
-                calls += 1;
-                if calls == 2 {
-                    // Own receipt was registered first. While observing the older receipt,
-                    // another completed flush replaces the snapshot's color identity.
-                    queue.flush().unwrap();
-                }
-                receipt.register(waker)
-            },
-            |_| publications += 1,
-        )
+        .flush_with(|| queue.flush().unwrap(), |_| publications += 1)
         .unwrap();
-    assert!(calls >= 3);
     assert_eq!(publications, 1);
     assert_eq!(queue.current_color(), (before + 2) % COLOR_COUNT);
 }

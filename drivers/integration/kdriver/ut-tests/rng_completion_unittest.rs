@@ -11,7 +11,7 @@ use super::*;
 
 fn completion() -> Arc<HostRngCompletion> {
     Arc::new(HostRngCompletion {
-        waiters: PollSet::new(),
+        waiters: WaitQueue::new(),
     })
 }
 
@@ -46,11 +46,11 @@ fn early_notification_and_notification_before_park_are_not_lost() {
     let provider = completion();
     let mut wake_count = None;
     let result = provider.wait_until(&mut || {
-        wake_count = Some(provider.waiters.wake());
+        wake_count = Some(provider.waiters.notify_all());
         true
     });
     assert_eq!(result, Ok(()));
-    assert_eq!(wake_count, Some(0));
+    assert_eq!(wake_count, Some(1));
 
     let provider = completion();
     let mut checks = 0;
@@ -66,7 +66,7 @@ fn early_notification_and_notification_before_park_are_not_lost() {
     });
     assert_eq!(result, Ok(()));
     assert_eq!(checks, 2);
-    assert_eq!(provider.waiters.wake(), 0);
+    assert_eq!(provider.waiters.notify_all(), 0);
 }
 
 #[def_test(serial)]
@@ -117,7 +117,7 @@ fn blocked_reader_rechecks_spurious_wake_and_notification() {
     wait_for(|| task.state() == ktask::TaskState::Exited);
     assert_eq!(task.join(), 0);
     assert!(succeeded.load(Ordering::Acquire));
-    assert_eq!(provider.waiters.wake(), 0);
+    assert_eq!(provider.waiters.notify_all(), 0);
 }
 
 #[def_test(serial)]
@@ -156,7 +156,7 @@ fn task_interruption_does_not_cancel_rng_wait() {
     wait_for(|| task.state() == ktask::TaskState::Exited);
     assert_eq!(task.join(), 0);
     assert!(succeeded.load(Ordering::Acquire));
-    assert_eq!(provider.waiters.wake(), 0);
+    assert_eq!(provider.waiters.notify_all(), 0);
     provider.notify(); // Late device notification after task exit is harmless.
     assert_eq!(provider.wait_until(&mut || true), Ok(()));
 }
@@ -174,12 +174,44 @@ fn atomic_context_is_rejected_before_the_driver_predicate() {
     };
     assert_eq!(result, Err(DriverError::InvalidInput));
     assert_eq!(checks, 0);
-    assert_eq!(provider.waiters.wake(), 0);
-    for (error, expected) in [
-        (PollRegisterError::NoMemory, DriverError::NoMemory),
-        (PollRegisterError::IdExhausted, DriverError::NoMemory),
-        (PollRegisterError::InvalidState, DriverError::InvalidInput),
-    ] {
-        assert_eq!(registration_error(error), expected);
-    }
+    assert_eq!(provider.waiters.notify_all(), 0);
+}
+
+#[def_test(serial)]
+fn one_notification_rechecks_all_blocked_readers() {
+    let provider = completion();
+    let is_ready = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let spawn_reader = || {
+        let provider = provider.clone();
+        let is_ready = is_ready.clone();
+        let finished = finished.clone();
+        ktask::spawn(move || {
+            provider
+                .wait_until(&mut || is_ready.load(Ordering::Acquire))
+                .unwrap();
+            finished.fetch_add(1, Ordering::Release);
+        })
+    };
+    let first = spawn_reader();
+    let second = spawn_reader();
+    let _first_cleanup = FinishReaderOnDrop {
+        task: first.clone(),
+        provider: provider.clone(),
+        is_ready: is_ready.clone(),
+    };
+    let _second_cleanup = FinishReaderOnDrop {
+        task: second.clone(),
+        provider: provider.clone(),
+        is_ready: is_ready.clone(),
+    };
+    wait_for(|| {
+        first.state() == ktask::TaskState::Blocked && second.state() == ktask::TaskState::Blocked
+    });
+    is_ready.store(true, Ordering::Release);
+    provider.notify();
+    assert_eq!(first.join(), 0);
+    assert_eq!(second.join(), 0);
+    assert_eq!(finished.load(Ordering::Acquire), 2);
+    assert_eq!(provider.waiters.notify_all(), 0);
 }
