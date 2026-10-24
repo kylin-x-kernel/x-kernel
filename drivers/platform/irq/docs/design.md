@@ -148,6 +148,23 @@ The handler and SGI reservation last for the kernel lifetime. Other users must
 not unregister, disable, reprioritize, or reuse SGI15. CPU hot-unplug and GIC
 reinitialization after readiness are not supported by this lifetime contract.
 
+## x86 Fixed-Vector Dispatch
+
+The dedicated LAPIC spurious vector is consumed without EOI. The LAPIC error
+vector delegates ESR capture and one EOI to `x86-apic`. Neither produces a
+`PendingIrq` or enters generic Action dispatch; both retain the surrounding
+`kirq::handle_irq` exit bookkeeping. This follows Linux's dedicated spurious
+and error handlers, not its separate unused-vector fallback.
+
+All other vector classification is unchanged: timer/IPI and MSI-X acknowledge
+early, IO-APIC edge sources acknowledge early, and level sources carry a
+completion cookie for acknowledgement after their handlers finish.
+
+Tests inject the regular/error operations to verify classification without
+issuing a false physical EOI. A separate spurious test uses the real backend
+through `kirq::handle_irq` to check return-context balance. Register sequencing
+is tested in the vendored x2apic host suite.
+
 ## Concurrency Model
 
 - Backend state (`GIC`, `PLIC`) lives in `LazyInit<SpinNoIrq<..>>`;

@@ -317,6 +317,19 @@ pub fn end_of_interrupt() {
     });
 }
 
+/// Captures ESR and completes the current CPU's in-service APIC error vector.
+///
+/// The IRQ backend calls this only for `APIC_ERROR_VECTOR`, instead of generic
+/// Action dispatch. Do not issue another EOI for the same delivery.
+pub fn handle_error_interrupt() {
+    let flags = with_local_apic(|lapic| {
+        // SAFETY: IRQ dispatch owns this in-service error event; the helper
+        // pins the CPU and excludes local IRQ reentry into the installed APIC.
+        unsafe { lapic.acknowledge_error() }
+    });
+    debug!("Local APIC error: {flags:?}");
+}
+
 /// Converts an 8-bit APIC id into the destination-id encoding used by
 /// this platform: x2APIC uses the value directly, xAPIC shifts it into
 /// the destination field of the redirect/IPI formats.
@@ -340,6 +353,8 @@ fn cpu_has_x2apic() -> bool {
 /// Masks the legacy PIC, selects x2APIC or xAPIC from CPUID, programs the
 /// timer/error/spurious vectors, maps the xAPIC MMIO page when needed,
 /// and maps and initializes the IO-APIC at `io_apic_paddr`.
+/// The LAPIC timer stays stopped and masked until the timer driver activates it.
+/// LINT0/LINT1 stay masked; this platform has no LINT routing consumer.
 ///
 /// # Panics
 ///
@@ -379,12 +394,14 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
                   vectors are supplied, and the xAPIC path supplies the mapped base"
     )]
     let mut lapic = builder.build().unwrap();
-    // SAFETY: the LAPIC instance was built from either x2APIC CPU state or a
-    // freshly mapped xAPIC MMIO base, so enabling it is valid during boot init.
-    unsafe {
-        lapic.enable();
-    }
+    // SAFETY: Boot excludes IRQs and migration, this handle exclusively owns
+    // the current CPU's hardware-enabled LAPIC, and its xAPIC mapping (if any)
+    // is valid. No NMI handler accesses the handle during preparation.
+    unsafe { lapic.enable_masked() };
+    #[cfg(unittest)]
+    tests_preparation::verify_masked_preparation();
     install_local_apic(lapic);
+    enable_error_delivery();
 
     #[expect(
         clippy::panic,
@@ -432,14 +449,32 @@ pub fn init_primary(io_apic_paddr: PhysAddr) {
 
 /// Brings up the Local APIC on an application CPU (spurious/error/timer
 /// vectors only; the IO-APIC is owned by the boot CPU).
+/// Leaves the LAPIC timer stopped and timer/LINT sources masked, as on the BSP.
 pub fn init_secondary() {
     let mut lapic = build_local_apic();
-    // SAFETY: secondary CPUs build their own LAPIC handle from the APIC mode
-    // discovered during primary initialization, then enable the local APIC for
-    // the current CPU before publishing that per-CPU handle.
-    unsafe { lapic.enable() };
+    // SAFETY: AP bring-up excludes IRQs and migration and uses the supported
+    // APIC mode/mapping established by the BSP. This CPU exclusively owns its
+    // hardware-enabled LAPIC; no NMI handler accesses this unpublished handle.
+    unsafe { lapic.enable_masked() };
+    #[cfg(unittest)]
+    tests_preparation::verify_masked_preparation();
     install_local_apic(lapic);
+    enable_error_delivery();
 }
+
+fn enable_error_delivery() {
+    // The fixed error handler is statically installed in irq-driver, and the
+    // per-CPU handle is now published. This unmasks LVTERR, but BSP/AP startup
+    // keeps EFLAGS.IF clear until runtime enables local IRQs. The IDT alone
+    // does not allow delivery; timer/LINT retain independent activation policy.
+    with_local_apic(|lapic| {
+        // SAFETY: Masked preparation completed; this borrow pins/excludes
+        // local IRQs and the fixed error handler can now find its APIC handle.
+        unsafe { lapic.enable_error() };
+    });
+}
+
+unittest::path_mod_test!(tests_preparation, "../ut-tests/preparation.rs");
 
 /// Sends an IPI to the current CPU with the given interrupt id.
 pub fn send_ipi_self(interrupt_id: usize) {

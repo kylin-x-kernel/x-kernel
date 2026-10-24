@@ -16,6 +16,8 @@ members = [
     "tee/xdice",
 ]
 exclude = [
+    # Published third-party source retains its own manifest and lint policy.
+    "vendor/x2apic",
     # platform-specific boot code that is not intended to be built as part of the main workspace
     "boot/x86_64-linuxboot",
     # build config tools (std crates, not part of the no_std kernel workspace)
@@ -27,6 +29,10 @@ exclude = [
     # Standalone DRM userspace ABI regression workspace.
     "io/drmdevice/abi-tests/*",
 ]
+
+[patch.crates-io]
+# Masked LAPIC bring-up; provenance and patch policy: vendor/README.md.
+x2apic = { path = "vendor/x2apic" }
 
 [workspace.metadata.cargo-shear]
 # unittest is used only by cfg(unittest) tests under ut-tests; cargo-shear

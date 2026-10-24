@@ -40,6 +40,7 @@ sbi-rt = { version = "0.0.3", features = ["legacy"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_apic = { workspace = true }
+unittest.workspace = true
 
 [package.metadata.docs.rs]
 targets = ["aarch64-unknown-none", "riscv64gc-unknown-none-elf"]

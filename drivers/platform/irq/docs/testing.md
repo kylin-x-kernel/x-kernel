@@ -60,3 +60,29 @@ GICv2 private-state reset require early probes or hardware fault injection.
 Report such runs separately from persistent UT coverage, including removal of
 temporary probes. Static review must verify that local-attempt rejection
 precedes destructive MMIO and that EOI/PMR publication follows backend success.
+
+## x86 Fixed Vectors
+
+Prepare `platforms/kplat-x86_64/qemu_defconfig`, then run:
+
+```sh
+make check_x2apic
+make unittest ACCEL=n UNITTEST_CRATE=x86_apic,irq_driver,timer_driver,kruntime XKMAKE_ARGS='--no-net --no-vsock'
+make unittest ACCEL=y UNITTEST_CRATE=x86_apic,irq_driver,timer_driver,kruntime XKMAKE_ARGS='--no-net --no-vsock'
+```
+
+The second guest run requires KVM with x2APIC exposed; record the actual CPU
+capabilities rather than treating acceleration alone as evidence of x2APIC.
+The host suite checks masked preparation and ESR-write/read/EOI ordering,
+including the legacy maximum-LVT exception. It uses ordinary memory as a
+register fixture, not an emulation of hardware error latching.
+
+The IRQ-driver tests verify that dedicated spurious/error vectors bypass
+regular claims. Representative non-fixed vectors are forwarded unchanged to
+an injected regular dispatcher; this does not test that backend's domain
+classification or hardware EOI behavior. The spurious test invokes the common
+IRQ entry and checks balanced context and IRQ masking on return. It does not
+simulate physical delivery or use the entry's return value as classification
+evidence; the separate dispatcher test checks that regular dispatch is bypassed.
+Do not invoke the real error handler directly from a test: its EOI requires an
+in-service error interrupt. Physical APIC error injection is not covered here.

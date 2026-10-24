@@ -78,7 +78,48 @@ kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
   `irq-driver`'s `IntrManagerIf`) with a hardware IRQ number; this
   crate translates it to an IO-APIC redirection entry.
 
+## Fixed Local Vectors
+
+`irq-driver` distinguishes the dedicated spurious and error vectors from
+ordinary Action delivery. A dedicated spurious vector has no ISR entry and
+must not write EOI. For an in-service error vector, `handle_error_interrupt`
+uses the dependency's `acknowledge_error`: refresh ESR, read status, then EOI
+exactly once. The ESR write is guarded by maximum LVT index > 3, matching
+Linux `sysvec_error_interrupt` and its Pentium 3AP exception. Diagnostics use
+the captured status after releasing the local APIC borrow.
+
+These two vectors produce no generic claim. They still return through
+`kirq::handle_irq`'s common context/RCU/deferred-work exit. This does not change
+completion ordering for timer/IPI, MSI-X, or edge/level IO-APIC sources, nor add
+Linux's catch-all handling for arbitrary unused vectors.
+
 ## Resource Lifecycle
+
+Controller preparation does not start a clock event. The vendored
+`LocalApic::enable_masked()` owns one-shot/zero-count initialization; builders
+do not duplicate that policy. It first writes a valid masked LVTERR, since
+masking another LVT with vector zero can itself raise an APIC error (Linux
+`clear_local_APIC`). It then masks timer/LINT0/LINT1 before
+configuring vectors and software-enabling the controller. It never writes an
+unmasked value to those sources. LINT delivery/polarity settings are preserved,
+but neither pin is activated: X-Kernel has no LINT NMI consumer. In particular,
+Linux's default BSP LINT1 NMI policy is not copied without its handler support.
+Register programming belongs to the dependency; kernel source-activation
+policy stays here and in the timer driver. See `vendor/README.md` for provenance
+and the write-sequence regression test. The timer driver owns subsequent
+mode selection, unmasking and event programming. This follows the Linux
+`lapic_timer_shutdown` principle of stopping the count as well as masking the
+LVT; masking alone is not the preparation contract.
+
+After publishing the per-CPU handle, the fixed error handler is ready and
+`enable_error()` explicitly refreshes ESR, enables LVTERR, and refreshes ESR
+again, following Linux `lapic_setup_esr`. LVTERR is now unmasked, but BSP/AP
+startup keeps EFLAGS.IF clear until runtime enables local IRQs; installing the
+IDT does not enable delivery. This does not start the timer or unmask LINT.
+Error delivery no longer inherits firmware's
+LVTERR mask. Kernel unittest builds check actual preparation registers on each
+booting CPU before publication/activation, so a call-site regression to
+`enable()` fails even if vendor-only tests still pass.
 
 The MSI-X vector window (`MSIX_VECTOR_ALLOCATOR`) is created statically
 (`SpinNoIrq::new(MsixVectorAllocator::new())`) — no runtime init step.

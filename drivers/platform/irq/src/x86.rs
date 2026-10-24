@@ -55,6 +55,30 @@ fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
 }
 
 fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
+    dispatch_irq_with(
+        vector,
+        dispatch_regular_irq,
+        x86_apic::handle_error_interrupt,
+    )
+}
+
+fn dispatch_irq_with(
+    vector: usize,
+    dispatch_regular_fn: impl FnOnce(usize) -> Option<kirq::PendingIrq>,
+    handle_error_fn: impl FnOnce(),
+) -> Option<kirq::PendingIrq> {
+    match vector {
+        // The dedicated spurious vector has no ISR entry to acknowledge.
+        value if value == usize::from(x86_apic::APIC_SPURIOUS_VECTOR) => None,
+        value if value == usize::from(x86_apic::APIC_ERROR_VECTOR) => {
+            handle_error_fn();
+            None
+        }
+        _ => dispatch_regular_fn(vector),
+    }
+}
+
+fn dispatch_regular_irq(vector: usize) -> Option<kirq::PendingIrq> {
     if vector >= x86_apic::APIC_TIMER_VECTOR as usize {
         trace!("LAPIC IRQ {}", vector);
         x86_apic::end_of_interrupt();
@@ -86,6 +110,8 @@ fn dispatch_irq(vector: usize) -> Option<kirq::PendingIrq> {
     }
     None
 }
+
+unittest::path_mod_test!(mod tests, "../ut-tests/x86.rs");
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {

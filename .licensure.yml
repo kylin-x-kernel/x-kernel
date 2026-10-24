@@ -1,5 +1,6 @@
 change_in_place: true
-excludes: []
+# Preserve upstream licensing in the separately maintained dependency.
+excludes: ["(^|/)vendor/x2apic/"]
 
 licenses:
   - files: any

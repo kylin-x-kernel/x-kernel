@@ -33,6 +33,11 @@ network/file data path in this crate.
 
 ## Unsafe Code
 
+On x86, fixed LAPIC spurious/error vectors are consumed before ordinary
+claims are constructed. Spurious delivery must not acknowledge any ISR entry;
+error delivery captures controller status and acknowledges once in x86-apic.
+Neither path may fall through to generic completion or Action dispatch.
+
 GICv2 local preparation constructs only architected SGI/PPI IDs (0..32),
 clears their banked active state and requests disablement before CPU-interface
 setup. The caller must keep CPU IRQ delivery masked and run this once before

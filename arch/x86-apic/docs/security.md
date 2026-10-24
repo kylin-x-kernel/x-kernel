@@ -46,6 +46,23 @@ All unsafe blocks carry `SAFETY:` comments and fall into three groups:
 
 ## Protected Resources
 
+The APIC error-vector handler owns ESR capture and exactly one EOI. It must
+only be called for an in-service APIC error, not for the dedicated spurious
+vector: an EOI there could retire an unrelated ISR entry. The IRQ backend
+excludes both fixed vectors from ordinary claims, preventing a second generic
+completion. Captured error flags are diagnostic input, not a device IRQ number.
+
+LAPIC preparation uses the vendored `enable_masked()` interface: it masks the
+timer and LINT pins, installs a stopped one-shot timer, then software-enables
+the controller without unmasking these sources. LVTERR is masked with a valid
+vector before any timer/LINT mask write. After handle publication, error
+delivery is explicitly enabled with ESR refreshes before and after the LVTERR
+write; the fixed error handler is already available. It does not drain interrupts
+already pending from firmware, or reset other LVT sources. This avoids
+starting the dependency's default periodic event before timer-handler readiness.
+Boot callers keep ordinary IRQ delivery disabled throughout preparation;
+clock-event activation remains the timer driver's responsibility.
+
 - `IO_APIC` (`LazyInit<SpinNoIrq<IoApic>>`): the only IO-APIC handle;
   every redirection write goes through the lock.
 - `LOCAL_APIC_PTR` (per-CPU): the exclusive Local APIC handle slot.

@@ -380,6 +380,11 @@ check_test_layout:
 check_host_tests:
 	@$(XKMAKE) hygiene host-tests
 
+# x86-only dependency regression; CI runs this on its native x86_64 leg.
+.PHONY: check_x2apic
+check_x2apic:
+	@cargo test --manifest-path vendor/x2apic/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-x2apic-host --lib --locked
+
 fmt:
 	@cargo +nightly-2026-03-08 fmt --all
 
