@@ -99,7 +99,14 @@ fn do_epoll_wait(
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    posix_types::check_sigset_size(sigsetsize)?;
+    // Linux validates `sigsetsize` only when a sigmask pointer is supplied:
+    // `do_epoll_pwait` hands both arguments to `set_user_sigmask`, which returns
+    // early for a NULL mask (fs/eventpoll.c). Go's runtime calls sigmask-less
+    // `epoll_pwait` and leaves the size register uninitialized, so a residual
+    // value outside `{0, size_of::<k_sigset>()}` failed the wait with EINVAL.
+    if sigmask.check_non_null().is_some() {
+        posix_types::check_sigset_size(sigsetsize)?;
+    }
     debug!("sys_epoll_wait <= epfd: {epfd}, maxevents: {maxevents}, timeout: {timeout:?}");
 
     if maxevents <= 0 {
@@ -197,4 +204,9 @@ unittest::path_mod_test!(
     #[cfg(target_arch = "x86_64")]
     mod tests_epoll_legacy,
     "../../ut-tests/io_mpx/epoll/tests_epoll_legacy.rs"
+);
+
+unittest::path_mod_test!(
+    tests_epoll_sigmask,
+    "../../ut-tests/io_mpx/epoll/tests_epoll_sigmask.rs"
 );

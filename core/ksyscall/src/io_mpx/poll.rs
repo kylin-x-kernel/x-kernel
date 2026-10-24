@@ -122,7 +122,14 @@ pub(crate) fn sys_ppoll(
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    posix_types::check_sigset_size(sigsetsize)?;
+    // Linux validates `sigsetsize` only when a sigmask pointer is supplied: the
+    // `ppoll` syscall hands both arguments to `set_user_sigmask`, which returns
+    // early for a NULL mask (fs/select.c). A sigmask-less `ppoll` therefore
+    // never fails on this argument, which the Go runtime relies on: it issues
+    // the wait syscalls with a NULL mask and an uninitialized size register.
+    if !sigmask.is_null() {
+        posix_types::check_sigset_size(sigsetsize)?;
+    }
     let nfds = nfds.try_into().map_err(|_| KError::InvalidInput)?;
     let mut poll_fds = fds.load_vm_vec(nfds)?;
     let timeout = if timeout.is_null() {
@@ -146,4 +153,9 @@ pub(crate) fn sys_ppoll(
 unittest::path_mod_test!(
     tests_poll_results,
     "../../ut-tests/io_mpx/poll/tests_poll_results.rs"
+);
+
+unittest::path_mod_test!(
+    tests_ppoll_sigmask,
+    "../../ut-tests/io_mpx/poll/tests_ppoll_sigmask.rs"
 );

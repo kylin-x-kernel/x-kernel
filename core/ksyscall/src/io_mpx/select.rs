@@ -48,11 +48,14 @@ fn do_select(
         None
     } else {
         let sigmask = sigmask.read_vm()?;
-        posix_types::check_sigset_size(sigmask.sigsetsize())?;
         let set = sigmask.set();
         if set.is_null() {
+            // Linux `set_user_sigmask` returns early for a NULL mask and only
+            // then compares `sigsetsize`, so the size is meaningful only next
+            // to a real mask pointer (fs/select.c `do_pselect`).
             None
         } else {
+            posix_types::check_sigset_size(sigmask.sigsetsize())?;
             Some(set.read_vm()?)
         }
     };
@@ -195,3 +198,8 @@ pub(crate) fn sys_pselect6(
         sigmask,
     )
 }
+
+unittest::path_mod_test!(
+    tests_pselect6_sigmask,
+    "../../ut-tests/io_mpx/select/tests_pselect6_sigmask.rs"
+);
