@@ -391,8 +391,13 @@ impl MadviseRequest {
         length: usize,
         advice: i32,
     ) -> KResult<Option<Self>> {
-        if advice != MADV_DONTNEED as i32 {
-            return Err(KError::InvalidInput);
+        // Pure performance hints with no correctness semantics; honoring them
+        // as no-ops matches Linux, where failures only affect performance.
+        // bbolt (containerd's metadata store) requires MADV_RANDOM to load.
+        match advice as u32 {
+            MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => return Ok(None),
+            MADV_DONTNEED => {}
+            _ => return Err(KError::InvalidInput),
         }
         if addr & (memaddr::PAGE_SIZE_4K - 1) != 0 {
             return Err(KError::InvalidInput);
