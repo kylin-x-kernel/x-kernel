@@ -33,6 +33,17 @@ network/file data path in this crate.
 
 ## Unsafe Code
 
+GICv2 local preparation constructs only architected SGI/PPI IDs (0..32),
+clears their banked active state and requests disablement before CPU-interface
+setup. The caller must keep CPU IRQ delivery masked and run this once before
+local source activation. GICv2 SGI enable writes may be ignored; they are not
+a substitute for CPU masking. This path neither clears pending state nor
+changes shared SPI state, and must not be reused on a live CPU interface.
+The common local entry rejects IRQ-enabled calls and atomically claims a
+per-CPU attempt before hardware setup. A failed attempt remains claimed:
+there is no rollback/retry guarantee. This flag is separate from PMR readiness
+and also protects GICv2 and builds without pseudo-NMI support.
+
 Every unsafe site is in a backend wrapper with a `SAFETY:` comment; the
 common precondition is that hwirq/interrupt identifiers were validated
 by the caller (`kirq` dispatch or platform init):
@@ -83,7 +94,7 @@ anywhere in this crate.
 | T-01 | DTB describing a wrong GIC version or truncated regions | Medium — wrong MMIO windows mapped, later accesses fault | Malformed or hostile device tree | Version/region requirements checked per version before any mapping; missing regions yield `None` (no mapping, no access). |
 | T-02 | Out-of-range hwirq reaching a backend | Medium — out-of-window register access | `kirq` or platform init passing a bad source number | PLIC and GIC backends bounds-check hwirq before register access; `x86.rs` translates but never invents numbers. |
 | T-03 | Interrupt storm from a misconfigured trigger mode | Medium — CPU starvation | Wrong edge/level programming | `configure` only accepts the four known `IrqTrigger` variants and ignores `Unknown`, leaving the line at its reset behavior. |
-| T-04 | Double initialization with different configuration | Medium — inconsistent controller state | Platform init calling `init` twice with diverging regions | `remember_config` asserts config equality; GIC/PLIC handles are idempotent on re-init. |
+| T-04 | Reinitialization resets live controller state | Medium — inconsistent controller state | Repeated configuration or local CPU initialization after source activation | `remember_config` asserts config equality. Global handle reuse does not make local GIC initialization idempotent; platform bring-up initializes the primary interface through discovery and each AP interface separately, without repeating primary local setup. |
 | T-05 | Spurious PLIC claim | Low — wasted IRQ cycle | Level noise on a PLIC line | Claim returns `None`/skip sentinel for timer and IPI events; completion only for genuine device lines. |
 | T-06 | NMI irq_work submission re-enters controller or logging locks | High — CPU deadlock | NMI interrupts a GIC/logging critical section | Prepared notifier uses only immutable MPIDR affinity, integer encoding, DSB, the public SGI1R write primitive and ISB; no generic IPI helper, CPU map, lazy state or logging. |
 | T-07 | irq_work SGI reaches the wrong CPU or runs as NMI | Medium — work stranded or drained in forbidden context | Unrepresentable Aff0, SGI/IPI conflict, wrong priority or NMI attribute | Preparation validates SGI < 16, distinct IPI_IRQ and Aff0 < 16; encodes all affinity levels with RS=0/IRM=0; sets ordinary priority and clears supported hardware NMI attributes before enabling. |
@@ -92,13 +103,18 @@ anywhere in this crate.
 
 | ID | Failure mode | Local effect | System effect | Severity | Handling |
 |----|--------------|--------------|---------------|----------|----------|
-| F-01 | No interrupt controller in the device tree | `init_from_device_tree` returns `None` | Platform init aborts or falls back | 3 | Explicit `Option` at the boundary. |
+| F-01 | No usable interrupt controller in the device tree | `init_from_device_tree` returns `Err` | Mandatory platform bring-up stops | 3 | Discover configuration before hardware initialization; propagate failure to the platform. |
 | F-02 | GIC region MMIO mapping fails | Panic with the region name | Boot fails | 2 | Bring-up ordering bug surfaced loudly. |
 | F-03 | PLIC accessed before `init` | Named-`expect` panic | Offending caller aborts | 2 | Initialization-order bug surfaced loudly. |
 | F-04 | GIC config re-supplied with different values | `remember_config` assert panic | Platform init aborts | 2 | Inconsistent platform description surfaced loudly. |
 | F-05 | Local irq_work preparation unsupported or fails | Returns `None`, no notifier published | Generic irq_work remains unavailable on this CPU | 3 | Reject invalid affinity/SGI, retain global registration failure, and propagate NMI-attribute or generic-enable failure. GICv3 logs the failed preparation step; runtime publishes ready only on success and rejects available NMI without a ready local handoff. |
 
 ## Known Limitations
+
+- GICv3 local preparation failure returns before EOI-mode configuration and PMR
+  readiness publication. Partial hardware initialization is not undone; callers
+  must stop bring-up instead of enabling sources or retrying a live controller.
+  Controller-wide backend failures and MMIO mapping failures can still be fatal.
 
 - Local irq_work is provided only on GICv3 with Aff0 < 16; no optional SGI
   range-selector support is assumed. MPIDR and the initialized GIC interface

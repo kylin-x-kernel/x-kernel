@@ -51,14 +51,20 @@ impl BootHandler {
                 kernel_boot::bootln!("rtc init skipped (non-fatal): no pl031 RTC in device tree");
             }
         }
-        irq_driver::gic::init_from_device_tree();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory GIC preparation \
+                      failed; this boot hook has no error return and must not activate sources"
+        )]
+        irq_driver::gic::init_from_device_tree().expect("primary GIC initialization failed");
         console_driver::register_input_irq_handler();
         #[cfg(feature = "nmi")]
         khal::nmi::early_init();
     }
 
     fn final_init(_boot_info: &BootInfo) {
-        irq_driver::gic::init_current_cpu();
+        // Early GIC discovery already prepared the primary CPU interface.
+        // Reinitializing it would reset private IRQ state and priority masks.
         timer_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
@@ -66,7 +72,13 @@ impl BootHandler {
 
     #[cfg(feature = "smp")]
     fn final_init_ap(_cpu_id: kcpu_id_map::LogicalCpuId) {
-        irq_driver::gic::init_current_cpu();
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: AP GIC preparation \
+                      failed; this boot hook has no error return and must not activate local \
+                      sources"
+        )]
+        irq_driver::gic::init_current_cpu().expect("secondary GIC initialization failed");
         timer_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();

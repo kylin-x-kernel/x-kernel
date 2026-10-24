@@ -1,5 +1,19 @@
 # Architecture Primitives
 
+## AArch64 PMR Bring-up
+
+After successful GICv3 CPU-interface preparation, `pmr::initialize_masked`
+sets `NMI_ONLY` before publishing per-CPU readiness. DAIF.I remains set across
+this transition. Controller initialization guards have already been released,
+so they cannot restore a pre-transition token during this operation. Later
+IRQ helpers may clear DAIF.I while PMR still blocks ordinary IRQs; explicit
+IRQ enablement remains the runtime's responsibility.
+
+Linux arm64's `init_gic_priority_masking` and `local_daif_restore` likewise
+establish PMR state before relying on priority masking. X-Kernel uses its own
+mask values and readiness flag, not Linux's PSR-I-in-PMR encoding. This is a
+boot transition, not an idempotent runtime readiness query.
+
 ## Idle Wait
 
 `idle_wait` is the scheduler's IRQ-off wait primitive, distinct from the

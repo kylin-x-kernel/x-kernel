@@ -16,15 +16,21 @@
 //!
 //! # PMR‑mode DAIF.I invariant
 //!
-//! Once `pmr::is_ready()` returns `true` on a CPU, **`DAIF.I` must always
-//! remain 0 (Unmasked)**.  Normal IRQ masking is performed exclusively by
-//! PMR; `DAIF.I` is held open so pseudo‑NMIs (whose priority exceeds
+//! During normal kernel execution after CPU bring-up, **`DAIF.I` must
+//! remain 0 (Unmasked)** when `pmr::is_ready()` is true. Normal IRQ masking
+//! is performed by PMR; `DAIF.I` is held open so pseudo‑NMIs (whose priority exceeds
 //! `pmr::NMI_ONLY`) can preempt the current context.  Do **not** write
 //! `DAIF.I` directly via `asm!` or raw register access in PMR mode —
 //! [`disable_local_irq`] and [`enable_local_irq`] will silently overwrite
 //! the bit without restoring a caller‑set value.
 //!
-//! Deliberate exceptions are the terminal [`disable_local_exceptions`] path,
+//! Readiness means PMR can be accessed, not that interrupt delivery has been
+//! opened. During boot, `pmr::initialize_masked()` publishes readiness with
+//! DAIF.I still set and PMR blocking normal IRQs. The first explicit IRQ
+//! enable/disable helper establishes the normal DAIF.I invariant; source
+//! activation and IRQ enablement remain separate runtime operations.
+//!
+//! Other deliberate exceptions are the terminal [`disable_local_exceptions`] path,
 //! the final EL0 handoff in [`prepare_enter_user_irq`], and the bounded
 //! [`super::cpu::idle_wait`] sequence. Idle temporarily masks I/F at the CPU
 //! while opening PMR so pending interrupts can wake WFI, then restores PMR
@@ -367,14 +373,24 @@ pub mod pmr {
             .load(core::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Mark the current CPU's PMR interface as initialised.
+    /// Establishes a masked PMR before enabling PMR-based IRQ helpers.
     ///
-    /// Idempotent (writes `true` to a per‑CPU flag); safe to call multiple
-    /// times during boot and per‑CPU bringup.  After the first call,
-    /// [`is_ready`] returns `true` and the fast IRQ mask/unmask path
-    /// (PMR‑based instead of DAIF) is active on this CPU.
+    /// Call once during CPU bring-up after successful GICv3 interface setup,
+    /// with DAIF.I set and before activating local interrupt sources. Release
+    /// controller initialization guards before this transition. DAIF is left
+    /// unchanged; this does not enable pseudo-NMI delivery or normal IRQs.
+    /// Unlike a readiness flag setter, this programs the hardware mask and
+    /// must not be used as a runtime readiness check.
+    #[cfg(feature = "nmi-pseudo")]
     #[inline]
-    pub fn mark_ready() {
+    pub fn initialize_masked() {
+        use aarch64_cpu::registers::Readable;
+
+        debug_assert!(super::DAIF.is_set(super::DAIF::I));
+        debug_assert!(!is_ready());
+        // CPU-interface setup may have left PMR fully open. Install the
+        // effective mask before any helper can save a PMR-mode token.
+        write(NMI_ONLY);
         READY
             .current_shared()
             .store(true, core::sync::atomic::Ordering::Relaxed);

@@ -12,6 +12,7 @@ use lazyinit::LazyInit;
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 const GUEST_VTIMER_IRQ: usize = 27;
+const PRIVATE_IRQ_COUNT: u32 = 32;
 
 pub(super) fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
     if GIC.get().is_some() {
@@ -31,7 +32,21 @@ pub(super) fn init(gicd_base: memaddr::VirtAddr, gicc_base: memaddr::VirtAddr) {
 
 pub(super) fn init_current_cpu() {
     debug!("Initialize GICv2 CPU Interface...");
-    let mut cpu = GIC.lock().cpu_interface();
+    let gic = GIC.lock();
+    // These Distributor registers are banked: global initialization on the
+    // primary cannot reset an AP's private state. Match Linux gic_cpu_config
+    // before opening the CPU interface. GICv2 SGI enable bits can be RAO/WI;
+    // CPU IRQ masking, not a disabled SGI readback, protects this boot phase.
+    for irq in 0..PRIVATE_IRQ_COUNT {
+        // SAFETY: 0..32 is the architected SGI/PPI interrupt-ID range.
+        let intid = unsafe { IntId::raw(irq) };
+        gic.set_active(intid, false);
+        gic.set_irq_enable(intid, false);
+    }
+    let mut cpu = gic.cpu_interface();
+    drop(gic);
+    // The owned register handle also resets this CPU's SGI/PPI priorities
+    // to 0xa0. It neither borrows the GIC lock nor touches shared SPI state.
     cpu.init_current_cpu();
     cpu.set_eoi_mode_ns(true);
 }

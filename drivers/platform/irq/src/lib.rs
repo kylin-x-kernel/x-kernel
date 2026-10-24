@@ -20,9 +20,10 @@
 //! // Kernel code only: run once during platform bring-up.
 //! use irq_driver::gic;
 //!
-//! gic::init_from_device_tree(); // discovers GICv2/v3 from the DTB and
-//!                               // maps the GICD/GICC/GICR regions
-//! gic::init_current_cpu();      // enables this CPU's CPU interface
+//! gic::init_from_device_tree()?; // discovers/maps the GIC and initializes
+//!                               // the primary CPU interface
+//! // On each secondary CPU only:
+//! // gic::init_current_cpu()?;
 //!
 //! // Effect: interrupt dispatch is initialized — device interrupts
 //! // acknowledged here are now routed into kirq's generic handler, and

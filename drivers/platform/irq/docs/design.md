@@ -69,8 +69,32 @@ kirq (policy) ──IntrManagerIf──> irq-driver
 
 ## Execution Context
 
+Reproducible boot checks and their coverage limits are in [testing.md](testing.md).
+
 - `init` / `init_from_device_tree` run once during platform bring-up,
-  before device interrupts are enabled; `init_current_cpu` runs per CPU.
+  before device interrupts are enabled and include primary CPU-interface
+  initialization. Each AP calls `init_current_cpu` once before activating local
+  sources. The primary final-init hook must not repeat it: local initialization
+  resets priority/interface state and private IRQ enable/active bits.
+  A per-CPU attempt flag rejects repeated local setup before destructive MMIO,
+  including retries after failure. IRQ-enabled entry is rejected without
+  consuming the attempt. This is not CPU hotplug or reset support.
+  GICv2 banked SGI/PPI state is reset on each CPU before CPU-interface setup,
+  as in Linux `gic_cpu_config`; this does not clear pending notifications or
+  modify shared SPI state. SGI enable bits can be read-as-one/write-ignored,
+  so preparation relies on CPU IRQ masking rather than disabled SGI readback.
+  The existing CPU-interface driver resets all private priorities to `0xa0`;
+  that per-CPU operation runs after releasing the global GIC lock.
+- GIC initialization returns local CPU-interface errors to the platform caller.
+  GICv3 EOI-mode setup and PMR readiness publication occur only after successful
+  local initialization. Global hardware may already be configured on failure;
+  there is no rollback guarantee. Mandatory platform bring-up stops on error
+  before activating sources rather than logging and continuing.
+- In pseudo-NMI builds, successful GICv3 setup is followed by
+  `pmr::initialize_masked` after releasing the controller lock. It installs the
+  ordinary-IRQ blocking mask before publishing readiness and leaves DAIF.I
+  set. CPU-interface setup's permissive PMR must not become the saved state of
+  subsequent IRQ guards before runtime activation.
 - `dispatch_irq` runs in IRQ context with interrupts enabled; the GICv3
   NMI path (`dispatch_nmi`) runs with interrupts disabled and no NMI
   window, relying on PMR protection.

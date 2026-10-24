@@ -30,6 +30,8 @@ arm-gic-driver = { workspace = true }
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 aarch64-cpu.workspace = true
+kcpu_slot.workspace = true
+unittest.workspace = true
 
 [target.'cfg(target_arch = "riscv64")'.dependencies]
 riscv = "0.14"

@@ -1,5 +1,15 @@
 # Architecture Primitive Safety
 
+## AArch64 PMR Bring-up
+
+The caller of `pmr::initialize_masked` must have completed GICv3 system-register
+setup and keep DAIF.I set on this CPU. The operation writes a blocking PMR
+before publishing readiness, leaving DAIF unchanged. Publishing readiness
+alone could let later helpers save an open PMR token and restore ordinary IRQ
+delivery before runtime activation. Debug assertions check the boot-only
+preconditions; platform sequencing supplies them in release builds. GICv2
+must not call this operation, since it has no ICC_PMR_EL1 interface.
+
 ## Idle Wait Boundary
 
 On bare metal, the unsafe `idle_wait` contract requires IRQ/preemption exclusion, initialized

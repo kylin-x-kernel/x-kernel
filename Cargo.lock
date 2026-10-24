@@ -2008,6 +2008,7 @@ dependencies = [
  "karch",
  "kbuild_config",
  "kcpu_id_map",
+ "kcpu_slot",
  "kiface",
  "kirq",
  "kplat",
@@ -2020,6 +2021,7 @@ dependencies = [
  "riscv",
  "riscv_plic",
  "sbi-rt",
+ "unittest",
  "x86-apic",
 ]
 

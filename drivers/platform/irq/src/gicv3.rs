@@ -119,13 +119,12 @@ pub(super) fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     TRAP_OP.init_once(cpu.trap_operations());
 }
 
-pub(super) fn init_current_cpu() {
+pub(super) fn init_current_cpu() -> Result<(), &'static str> {
     debug!("Initialize GICv3 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
-    if let Err(err) = cpu.init_current_cpu() {
-        error!("GICv3 CPU initialization failed: {err}");
-    }
+    cpu.init_current_cpu()?;
     cpu.set_eoi_mode(true);
+    Ok(())
 }
 
 pub(super) fn set_trigger(interrupt_id: usize, edge: bool) {

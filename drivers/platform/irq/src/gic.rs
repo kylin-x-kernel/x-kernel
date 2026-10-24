@@ -4,7 +4,7 @@
 
 //! GIC interrupt controller integration for AArch64 platforms.
 
-use core::fmt;
+use core::{fmt, sync::atomic::Ordering};
 
 #[path = "gicv2.rs"]
 mod gicv2;
@@ -21,6 +21,13 @@ const GICC_NAME: &str = "gicc";
 const GICR_NAME: &str = "gicr";
 static GIC_INFO: LazyInit<GicConfig> = LazyInit::new();
 static ACTIVE_GIC: LazyInit<GicVersion> = LazyInit::new();
+
+kcpu_slot::cpu_slot! {
+    static LOCAL_INIT_STARTED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+}
+
+unittest::path_mod_test!(tests, "../ut-tests/gic.rs");
 
 pub const GIC_ROOT_DOMAIN: kirq::IrqDomainId = kirq::GIC_ROOT_DOMAIN;
 
@@ -199,7 +206,20 @@ pub fn active_version() -> GicVersion {
         .expect("GIC config not initialized")
 }
 
-pub fn init(config: GicConfig) {
+/// Initializes the controller and the primary CPU interface.
+///
+/// Call during boot with local CPU IRQ delivery masked and before activating
+/// interrupt sources. This includes the local setup described by
+/// [`init_current_cpu`]; it is not a runtime reinitialization operation.
+///
+/// # Errors
+/// Returns a local CPU initialization or boot-context error. Global controller
+/// setup may already have taken effect; an error does not roll it back.
+///
+/// # Panics
+/// Panics on conflicting configuration, invalid MMIO configuration or a fatal
+/// controller-wide initialization failure.
+pub fn init(config: GicConfig) -> Result<(), &'static str> {
     remember_config(config);
     if let Some(active) = ACTIVE_GIC.get() {
         assert_eq!(
@@ -215,31 +235,69 @@ pub fn init(config: GicConfig) {
         GicVersion::V3 => gicv3::init(config.map_gicd(), config.map_gicr()),
     }
 
-    init_current_cpu();
+    init_current_cpu()
 }
 
-pub fn init_from_device_tree() {
-    #[expect(
-        clippy::expect_used,
-        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: required GIC configuration \
-                  cannot be parsed; interrupt initialization has no error return or recovery"
-    )]
-    let config = config_from_device_tree().expect("failed to parse GIC from device tree");
-    init(config);
+/// Discovers the GIC and initializes it for the primary CPU.
+///
+/// Requires the same masked boot context as [`init`].
+///
+/// # Errors
+/// Returns an error if configuration is unavailable or local CPU setup fails.
+///
+/// # Panics
+/// Has the same controller-wide failure conditions as [`init`].
+pub fn init_from_device_tree() -> Result<(), &'static str> {
+    let config = config_from_device_tree().ok_or("failed to parse GIC from device tree")?;
+    init(config)
 }
 
-pub fn init_current_cpu() {
-    match active_version() {
+/// Initializes this CPU's GIC interface during bring-up.
+///
+/// Keep local CPU IRQ delivery masked throughout this call and do not migrate
+/// execution. In pseudo-NMI builds, DAIF.I must still be set on entry; this call
+/// establishes PMR masking but does not enable IRQ delivery.
+///
+/// [`init`] (including [`init_from_device_tree`]) already calls this for the
+/// primary CPU. Secondary CPUs call it once before activating local sources.
+/// This is not an idempotent readiness check: it resets interface priorities
+/// and private interrupt enable/active state. GICv2 SGI enable bits may be
+/// read-as-one/write-ignored; CPU IRQ masking protects the preparation phase.
+///
+/// # Errors
+/// Returns a GICv3 CPU-interface initialization error before setting EOI mode
+/// or publishing PMR readiness. Partial hardware setup is not rolled back;
+/// callers must not activate sources or continue CPU bring-up after failure.
+/// Also rejects IRQ-enabled entry or a repeated initialization attempt before
+/// touching local controller registers, including retries after failure.
+///
+/// # Panics
+/// Panics if global controller initialization has not run.
+pub fn init_current_cpu() -> Result<(), &'static str> {
+    let version = active_version();
+    if karch::local_irq_enabled() {
+        return Err("local GIC initialization requires IRQs masked");
+    }
+    // The boot caller excludes migration. Claim before any destructive MMIO;
+    // an unsuccessful attempt stays claimed because hardware is not rolled back.
+    if LOCAL_INIT_STARTED
+        .current_shared()
+        .swap(true, Ordering::Relaxed)
+    {
+        return Err("local GIC initialization already attempted");
+    }
+    match version {
         GicVersion::V2 => gicv2::init_current_cpu(),
         GicVersion::V3 => {
-            gicv3::init_current_cpu();
+            gicv3::init_current_cpu()?;
             // PMR (ICC_PMR_EL1) only exists on GICv3; on a degraded build
             // (GICv2) it must never be touched, so only mark the CPU
-            // interface PMR-ready here.
+            // interface PMR-ready here, after its initialization guard is gone.
             #[cfg(feature = "nmi-pseudo")]
-            karch::pmr::mark_ready();
+            karch::pmr::initialize_masked();
         }
     }
+    Ok(())
 }
 
 pub fn set_trigger(interrupt_id: usize, edge: bool) {
