@@ -2484,6 +2484,8 @@ dependencies = [
  "kplat-x86_64",
  "kprocess",
  "krcu",
+ "krcu-list",
+ "krcu-list-kernel-tests",
  "kruntime",
  "kspin",
  "ksync",
@@ -2929,6 +2931,33 @@ dependencies = [
  "intrusive-collections",
  "kiface",
  "kspin",
+ "unittest",
+]
+
+[[package]]
+name = "krcu-list"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "krcu",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
+name = "krcu-list-kernel-tests"
+version = "0.3.0-dev"
+dependencies = [
+ "karch",
+ "kbuild_config",
+ "kcpu_id_map",
+ "khal",
+ "kirq",
+ "krcu",
+ "krcu-list",
+ "kspin",
+ "ktask",
+ "ktime_types",
  "unittest",
 ]
 

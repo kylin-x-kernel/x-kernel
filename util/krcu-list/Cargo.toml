@@ -1,0 +1,22 @@
+[package]
+name = "krcu-list"
+description = "Forward RCU list with owned entries and deferred retirement"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+krcu.workspace = true
+kerrno.workspace = true
+kspin.workspace = true
+unittest.workspace = true
+
+[dev-dependencies]
+kspin = { workspace = true, features = ["smp"] }
+
+[lints]
+workspace = true

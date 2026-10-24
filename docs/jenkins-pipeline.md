@@ -155,7 +155,11 @@ lint 只检查当前配置实际编译的代码，因此两边分别覆盖对应
 每个检查在该 leg 的独立 workspace 中使用对应平台的 `qemu_defconfig` 执行
 `make defconfig`、`make dylint_test` 和 `make dylint`，并使用独立的
 `/xkernel-target/dylint-<platform>` 构建输出目录。
-aarch64 分支随后向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig`
+aarch64 分支在保留上述普通配置检查的同时，额外依次执行
+`make UNITTEST=y clippy` 和 `make UNITTEST=y dylint`，覆盖 Cargo `unittest`
+feature 选入的测试专用 optional 依赖。仅传 `--cfg unittest` 不会启用这些依赖；
+x86_64 分支没有这两次额外扫描，因此该测试依赖图的 lint 覆盖目前仅在 aarch64。
+aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STAT=y`，执行 `make olddefconfig`
 并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
 `static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都
 不打开该选项。检查结果与其他并行阶段一起进入 Gitee Check Run。

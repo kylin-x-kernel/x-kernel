@@ -1,0 +1,34 @@
+[package]
+name = "krcu-list-kernel-tests"
+description = "Kernel context integration tests for the RCU list"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+smp = []
+
+[package.metadata.cargo-shear]
+# These dependencies are used by cfg(unittest) path-mounted kernel tests.
+ignored = ["krcu-list", "krcu", "ktask", "kirq", "khal", "kspin", "karch", "kbuild_config", "kcpu_id_map", "ktime_types"]
+
+[target.'cfg(target_os = "none")'.dependencies]
+krcu-list.workspace = true
+krcu.workspace = true
+ktask.workspace = true
+kirq.workspace = true
+khal.workspace = true
+kspin.workspace = true
+karch.workspace = true
+kbuild_config.workspace = true
+kcpu_id_map.workspace = true
+ktime_types.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

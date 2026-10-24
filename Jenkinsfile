@@ -939,6 +939,12 @@ stdbuf -oL -eL make build
 def runDylintCheck(String stageName, String platform, String defconfigPath, boolean lockStat) {
     initStageLog(stageName)
     def dylintTargetDir = "/xkernel-target/dylint-${platform}"
+    // cfg(unittest) alone does not select optional test-only Cargo dependencies.
+    // Keep the normal graph scan and cover the unittest graph on AArch64 too.
+    def unittestScan = platform == 'kplat-aarch64' ? """
+make UNITTEST=y clippy
+make UNITTEST=y dylint
+""" : ''
     // Lock statistics switch static_lock! to its registering proc macro and
     // compile the stats lock paths; no other CI configuration enables them.
     def lockStatScan = lockStat ? """
@@ -957,7 +963,7 @@ cp ${defconfigPath} .config
 make defconfig
 make dylint_test
 make dylint
-${lockStatScan}"""
+${unittestScan}${lockStatScan}"""
         }
     }
 }

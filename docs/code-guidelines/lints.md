@@ -11,6 +11,10 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 - MUST 对应 `deny`，SHOULD 对应 `warn`；`make clippy` 带 `-D warnings`，两者都阻塞合入。
 - `make clippy` 带 `--cfg unittest` 检查选定平台的依赖图（本地库、proc-macro、host `build.rs`），
   不带 `--all-targets`。因此 `cfg(not(unittest))` 代码、未选中的测试/bench target 从不被 lint。
+- `--cfg unittest` 不会启用 Cargo 的 `unittest` feature，也不会选择测试专用 optional 依赖。
+  CI 的 AArch64 `qemu_defconfig` lint 阶段额外执行 `make UNITTEST=y clippy` 和
+  `make UNITTEST=y dylint`，覆盖该测试依赖图；普通配置检查仍保留。
+  本地修改测试专用 crate 时也应执行这两条命令，不能仅依赖普通 pre-commit 检查。
 - 根 workspace 的每个成员（含隐式 path 依赖成员）必须声明 `[lints] workspace = true`，
   `make check_lints` 检查，`make clippy` 前置执行；不继承即绕过全部等级，不设豁免。
 - `xtask` 是独立 workspace，不继承根 lint；单独运行

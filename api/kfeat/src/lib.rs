@@ -56,6 +56,10 @@
 #![no_std]
 
 // Link container-owned tests without a runtime dependency on the container.
+#[cfg(all(unittest, feature = "kernel-tests"))]
+extern crate krcu_list as _;
+#[cfg(all(unittest, feature = "kernel-tests"))]
+extern crate krcu_list_kernel_tests as _;
 #[cfg(unittest)]
 extern crate kxarray as _;
 

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "arch/kcpu_slot",
     "util/kxarray",
+    "util/krcu-list",
     # kernel entry
     "entry",
     # boot and loader
@@ -104,6 +105,8 @@ kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 klazy = { path = "util/klazy" }
 kxarray = { path = "util/kxarray" }
+krcu-list = { path = "util/krcu-list" }
+krcu-list-kernel-tests = { path = "util/krcu-list/crates/kernel-tests" }
 kfinalize = { path = "util/kfinalize" }
 ktime_types = { path = "util/ktime_types" }
 ktime = { path = "core/ktime" }
