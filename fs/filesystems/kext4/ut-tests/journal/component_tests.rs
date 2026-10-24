@@ -160,6 +160,60 @@ fn expected_error_after_metadata_access_aborts_without_rewinding_state() {
 }
 
 #[def_test]
+fn credit_exhaustion_before_metadata_access_does_not_poison_mount_journal() {
+    let (mut filesystem, _device) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    install_test_internal_journal(&mut filesystem, 257);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
+    let transaction = handle.id();
+
+    assert_eq!(
+        filesystem.allocate_block(None, &mut handle),
+        Err(Ext4Error::InsufficientJournalCredits)
+    );
+    assert!(!handle.has_updates());
+    assert_eq!(
+        filesystem.complete_metadata_mutation(
+            handle,
+            Err::<(), _>(Ext4Error::InsufficientJournalCredits)
+        ),
+        Err(Ext4Error::InsufficientJournalCredits)
+    );
+    assert_eq!(filesystem.groups()[0].free_blocks_count(), TEST_FREE_BLOCKS);
+    assert!(!journal.is_aborted());
+    assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
+
+    let retry = journal.begin(JournalCredits::new(2)).unwrap();
+    assert_eq!(retry.id(), transaction);
+    drop(retry);
+}
+
+#[def_test]
+fn credit_exhaustion_after_metadata_access_aborts_the_journal() {
+    let (mut filesystem, _device) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    install_test_internal_journal(&mut filesystem, 258);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+    filesystem.allocate_block(None, &mut handle).unwrap();
+    assert!(handle.has_updates());
+
+    assert_eq!(
+        filesystem.complete_metadata_mutation(
+            handle,
+            Err::<(), _>(Ext4Error::InsufficientJournalCredits)
+        ),
+        Err(Ext4Error::InvalidJournalTransaction)
+    );
+    assert!(journal.is_aborted());
+    assert!(matches!(
+        journal.begin(JournalCredits::new(1)),
+        Err(Ext4Error::JournalAborted)
+    ));
+}
+
+#[def_test]
 fn commit_failure_after_metadata_publication_aborts_mount_journal() {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     install_test_internal_journal(&mut filesystem, 254);

@@ -817,12 +817,19 @@ impl Ext4SbInfo {
     }
 }
 
+// `InsufficientJournalCredits` intentionally does NOT abort the journal. Linux
+// treats credit exhaustion as retryable: `jbd2_journal_extend` only refuses the
+// extension (fs/jbd2/transaction.c), callers then commit and restart the
+// transaction (`ext4_journal_restart`, fs/ext4/ext4_jbd2.h) or drop the optional
+// operation (`ext4_try_to_expand_extra_isize` returns `-ENOSPC`, fs/ext4/inode.c),
+// and `jbd2_journal_abort` is reserved for I/O and commit errors. This only covers
+// a handle that has not published metadata yet; `fail_metadata_mutation` still
+// aborts once the handle consumed credits.
 fn mutation_error_requires_abort(error: Ext4Error) -> bool {
     matches!(
         error,
         Ext4Error::Device(_)
             | Ext4Error::JournalAborted
-            | Ext4Error::InsufficientJournalCredits
             | Ext4Error::JournalBusy
             | Ext4Error::InvalidJournalTransaction
             | Ext4Error::ChecksumMismatch { .. }
