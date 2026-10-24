@@ -11,6 +11,14 @@ repository.workspace = true
 documentation.workspace = true
 description = "Prepared workqueue APIs and safe ownership wrappers"
 
+[package.metadata.cargo-shear]
+# Consumed only by the opt-in `bench` runner, which is a *library* module
+# (`src/lib.rs`: `#[cfg(all(feature = "bench", not(unittest)))]` plus
+# `#[path = "../benches/kernel.rs"] pub mod benchmarks;`) and prints through
+# `klogger::kprintln!`. Its sources live outside the lib target's `src/`
+# directory, so the package-level analysis does not see the use.
+ignored = ["klogger"]
+
 [features]
 # Select live-service integration tests instead of replaceable service fixtures.
 system = []

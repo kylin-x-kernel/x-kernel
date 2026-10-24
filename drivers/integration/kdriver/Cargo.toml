@@ -10,9 +10,17 @@ repository.workspace = true
 documentation.workspace = true
 
 [package.metadata.cargo-shear]
-# These optional driver contracts are selected through feature wiring and may be
-# consumed only by the corresponding concrete driver configuration.
-ignored = ["display", "input", "kalloc", "vsock"]
+# These optional driver contracts are selected through feature wiring and are
+# consumed only by the corresponding concrete driver configuration, or by the
+# `cfg(unittest)` regressions under `ut-tests/` that the workspace excludes
+# from cargo-shear (`ignored-paths` in the root manifest). `kcpu_id_map` is the
+# second shape: `--cfg unittest` builds call `kcpu_id_map::nr_cpus()` from the
+# block ut-tests mounted with `path_mod_test!`. `kdma` is a third shape: the
+# crate only forwards `dma-trace` to the DMA core's own feature, and cargo-shear
+# still reports it after the forwarding was made explicit with `dep:kdma`,
+# because a feature reference is not a use. (The DMA core stays in the graph
+# regardless: `device_res_xkernel` depends on it unconditionally.)
+ignored = ["display", "kalloc", "vsock", "kcpu_id_map", "kdma"]
 
 [features]
 pci-non-ecam = []
@@ -23,7 +31,7 @@ char = ["dep:char_driver", "kclass/char"]
 display = ["dep:display", "kclass/display"]
 input = ["dep:input", "kclass/input"]
 vsock = ["dep:vsock", "kclass/vsock"]
-dma-trace = ["kdma/dma-trace"]
+dma-trace = ["dep:kdma", "kdma/dma-trace"]
 
 # Concrete driver selection now gates directly on Cargo features; there is no
 # build.rs-generated cfg translation layer anymore.
@@ -76,7 +84,7 @@ default = []
 
 [dependencies]
 kalloc = { workspace = true, optional = true }
-kdma.workspace = true
+kdma = { workspace = true, optional = true }
 device_res = { workspace = true }
 device_res_xkernel = { workspace = true }
 driver_base = { workspace = true }

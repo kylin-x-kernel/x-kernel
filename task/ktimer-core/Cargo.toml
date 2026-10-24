@@ -9,6 +9,12 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
+[package.metadata.cargo-shear]
+# benches/host is a nested host-only workspace with its own manifest: its
+# sources belong to that workspace's targets (ownership.rs declares
+# `mod ownership_races`), which the outer package-level analysis cannot see.
+ignored-paths = ["benches/host/*.rs"]
+
 [features]
 default = []
 smp = ["kspin/smp"]
