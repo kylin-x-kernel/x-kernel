@@ -3,7 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::fmt;
+use core::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use ktime_types::TimestampLimits;
 
@@ -618,7 +621,6 @@ impl ExtentStatusTree {
 
 struct Ext4InodeState {
     metadata: Ext4InodeMetadata,
-    visible_size: u64,
     delayed_extents: BTreeMap<u64, u64>,
     reserved_data_blocks: u64,
     extent_status: ExtentStatusTree,
@@ -638,8 +640,15 @@ pub(crate) enum OrphanLocation {
 }
 
 impl Ext4InodeState {
-    // Called under the inode-state lock; no nested state accessor is allowed.
-    fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
+    // The caller samples visible_size while holding the inode-state lock,
+    // which excludes both size publication and mapping/proof changes.
+    fn has_initialized_overwrite(
+        &self,
+        start: u64,
+        count: u64,
+        block_size: u32,
+        visible_size: u64,
+    ) -> bool {
         let Some(end) = start.checked_add(count) else {
             return false;
         };
@@ -647,7 +656,7 @@ impl Ext4InodeState {
         // the slow path's mapping and accounting validation.
         self.reserved_data_blocks == 0
             && self.delayed_extents.is_empty()
-            && end <= self.visible_size.min(self.metadata.disk_size) / u64::from(block_size)
+            && end <= visible_size.min(self.metadata.disk_size) / u64::from(block_size)
             && self.extent_status.contains_written(start, end)
     }
 
@@ -665,14 +674,6 @@ impl Ext4InodeState {
     /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
     pub(crate) fn gid(&self) -> u32 {
         self.metadata.gid
-    }
-
-    /// Returns the VFS-visible inode size in bytes.
-    ///
-    /// No locking here: only valid while the caller already holds the inode-state
-    /// lock, e.g. inside [`Ext4Inode::with_state`] or [`Ext4Inode::update_state`].
-    pub(crate) fn size(&self) -> u64 {
-        self.visible_size
     }
 
     /// Returns the ext4 on-disk inode size in bytes.
@@ -739,6 +740,11 @@ pub struct Ext4InodeStat {
 /// independent reference count.
 pub struct Ext4Inode {
     number: InodeNumber,
+    // The sole generic i_size, shared with KVFS through InodeAttributeOperations.
+    // Readers need no mapping lock. Every store after construction must hold
+    // the state write lock: sizes(), stat(), and extent-proof checks rely on
+    // that exclusion to sample i_size with the corresponding mapping state.
+    visible_size: AtomicU64,
     state: RwLock<Ext4InodeState>,
     writeback_lock: Mutex<()>,
     /// Speculative prealloc spaces owned by this inode (Linux:
@@ -752,9 +758,9 @@ impl Ext4Inode {
         let visible_size = metadata.disk_size;
         Self {
             number,
+            visible_size: AtomicU64::new(visible_size),
             state: RwLock::new(Ext4InodeState {
                 metadata,
-                visible_size,
                 delayed_extents: BTreeMap::new(),
                 reserved_data_blocks: 0,
                 extent_status: ExtentStatusTree::default(),
@@ -780,7 +786,7 @@ impl Ext4Inode {
     /// The underlying `RwLock` is **not** reentrant. The closure `f` must not
     /// call any method on the same [`Ext4Inode`] that acquires the inode-state
     /// lock (e.g. [`with_state`](Self::with_state),
-    /// [`update_state`](Self::update_state), [`size`](Self::size),
+    /// [`update_state`](Self::update_state), [`sizes`](Self::sizes),
     /// [`disk_size`](Self::disk_size), [`set_size`](Self::set_size), etc.),
     /// otherwise the current thread will self-deadlock.
     ///
@@ -814,7 +820,7 @@ impl Ext4Inode {
     /// The underlying `RwLock` is **not** reentrant. The closure `f` must not
     /// call any method on the same [`Ext4Inode`] that acquires the inode-state
     /// lock (e.g. [`with_state`](Self::with_state),
-    /// [`update_state`](Self::update_state), [`size`](Self::size),
+    /// [`update_state`](Self::update_state), [`sizes`](Self::sizes),
     /// [`disk_size`](Self::disk_size), [`set_size`](Self::set_size), etc.),
     /// otherwise the current thread will self-deadlock.
     ///
@@ -873,7 +879,9 @@ impl Ext4Inode {
 
     #[cfg(unittest)]
     fn has_initialized_overwrite(&self, start: u64, count: u64, block_size: u32) -> bool {
-        self.with_state(|state| state.has_initialized_overwrite(start, count, block_size))
+        self.with_state(|state| {
+            state.has_initialized_overwrite(start, count, block_size, self.size())
+        })
     }
 
     pub(crate) fn orphan_location(&self) -> Option<OrphanLocation> {
@@ -938,22 +946,42 @@ impl Ext4Inode {
     }
 
     /// Returns the VFS-visible inode size in bytes.
+    ///
+    /// Like Linux `i_size_read`, this does not acquire the mapping-state lock.
+    /// Acquire makes changes preceding the observed size publication visible.
+    /// This scalar read does not stabilize the size or the backing mappings;
+    /// callers needing that exclusion must hold the VFS data/invalidate locks.
     pub fn size(&self) -> u64 {
-        self.with_state(|state| state.size())
+        self.visible_size.load(Ordering::Acquire)
     }
 
-    /// Returns the `(visible_size, disk_size)` pair under one state lock.
+    /// Samples `(visible_size, disk_size)` while excluding both size writers.
+    ///
+    /// The two sizes can legitimately differ during writeback or truncate;
+    /// this snapshot does not combine their separate publication phases.
     pub fn sizes(&self) -> (u64, u64) {
-        self.with_state(|state| (state.size(), state.disk_size()))
+        self.with_state(|state| (self.size(), state.disk_size()))
     }
 
     /// Updates the VFS-visible inode size without changing `i_disksize`.
+    ///
+    /// This is size publication, not a write or truncate transaction. For a
+    /// resident regular file, KVFS calls it at the `write_end_set_size` or
+    /// `truncate_setsize` ordering point with the inode data lock held; truncate
+    /// also holds the mapping invalidate lock. Cache preparation, PTE teardown,
+    /// and backing-block cleanup remain the responsibility of those paths.
+    /// Non-regular inode mutations additionally require mount exclusion.
+    ///
+    /// This method always takes the state write lock, including when mount
+    /// exclusion is held. That lock keeps shrink and extent-proof invalidation
+    /// atomic with respect to mapping-state readers. Release publishes earlier
+    /// changes to lockless size readers without providing cache/mapping exclusion.
     pub fn set_size(&self, size: u64) {
         self.update_state(|state| {
-            if size < state.visible_size {
+            if size < self.size() {
                 state.extent_status.clear();
             }
-            state.visible_size = size;
+            self.visible_size.store(size, Ordering::Release);
         });
     }
 
@@ -965,7 +993,7 @@ impl Ext4Inode {
                 mode: metadata.mode,
                 uid: metadata.uid,
                 gid: metadata.gid,
-                size: state.visible_size,
+                size: self.size(),
                 blocks: metadata.blocks,
                 rdev: device_id_from_metadata(metadata),
                 links_count: metadata.links_count,
@@ -1269,7 +1297,12 @@ impl Ext4Inode {
                 state.metadata.flags,
                 sb.superblock().features().has_huge_file(),
             )?;
-            if state.has_initialized_overwrite(start.get(), block_count, sb.layout().block_size()) {
+            if state.has_initialized_overwrite(
+                start.get(),
+                block_count,
+                sb.layout().block_size(),
+                self.size(),
+            ) {
                 return Ok(());
             }
             if state.reserved_data_blocks > sb.delalloc_reserved_blocks() {

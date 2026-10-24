@@ -265,6 +265,27 @@ i_disksize` 就顺带修改 `i_size`；后者只由 VFS `write_end_set_size()` �
 `truncate_setsize()` 在 PageCache 顺序点发布。目录、符号链接等由 ext4 算法直接改变长度的
 对象则在对应 metadata mutation 中显式发布其可见长度。
 
+`i_size` 是通用 inode 属性，`i_disksize`、extent root 和 extent-status proof 是 ext4
+私有映射状态；组合在同一对象中不表示它们的单值读取必须使用同一把锁。唯一的 `i_size`
+保存在 `Ext4Inode::visible_size: AtomicU64`，从 `Ext4InodeState` 移出而非复制；
+`InodeAttributeOperations` 直接访问这一字段，不创建额外属性对象或影子缓存。
+全部受支持架构均为 64 位，对应 Linux `include/linux/fs.h` 的 `i_size_read()`
+acquire load 与 `i_size_write()` release store：缓存命中读取 EOF 不取得 ext4
+inode-state 锁；看到一次尺寸发布的读者也能看到该发布之前的相关修改。这个单值读取
+不保证之后长度不变，也不固定块映射。
+
+尺寸发布继续持 inode-state 写锁，使 shrink 的 extent-proof 清除与新 EOF 对映射读者
+不可分割；`sizes()`、`stat()` 和 extent-status overwrite proof 在该锁内采样尺寸，
+排除尺寸和映射状态的并发发布。`sizes()` 只保证采样期间没有这两类写者，并不把
+`i_size`、`i_disksize` 的不同发布阶段合并成事务；两者在 writeback/truncate 期间可以不同。
+这把锁是当前 ext4 状态的同步实现，不能让通用 `i_size` 单值读取依赖它。
+
+上层 inode data 锁对应 Linux `i_rwsem` 的尺寸事务串行化；truncate 另持 mapping
+invalidation 排他锁。`write_end_set_size()` 在页内容准备完成后发布增长，
+`truncate_setsize()` 按发布尺寸、PTE unmap、PageCache resize、再次 unmap 的次序执行，
+随后才释放 backing blocks。Atomic 只提供单值发布与内存可见性，不提供这些事务或失效互斥，
+也不改变 regular-file backing metadata/writeback 只发布 `i_disksize` 的职责。
+
 ### 元数据事务
 
 ```text

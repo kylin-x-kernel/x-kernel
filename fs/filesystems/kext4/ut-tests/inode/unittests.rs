@@ -223,8 +223,7 @@ fn initialized_extended_inode_preserves_epoch_and_nanoseconds() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
-            .unwrap();
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false).unwrap();
     assert_eq!(metadata.atime, timestamp);
     assert_eq!(metadata.ctime, timestamp);
     assert_eq!(metadata.mtime, timestamp);
@@ -246,8 +245,7 @@ fn initialized_legacy_inode_clamps_post_2038_timestamp() {
     .unwrap();
 
     let metadata =
-        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false)
-            .unwrap();
+        Ext4InodeMetadata::from_raw(disk_inode::RawInode::decode(&bytes).unwrap(), false).unwrap();
     let maximum = Ext4Timestamp::new(i32::MAX as i64, 0);
     assert_eq!(metadata.atime, maximum);
     assert_eq!(metadata.ctime, maximum);
@@ -255,17 +253,36 @@ fn initialized_legacy_inode_clamps_post_2038_timestamp() {
 }
 
 #[def_test]
-fn with_state_exposes_consistent_size_pair_and_passes_result_through() {
+fn generic_size_publication_is_shared_with_ext4_without_changing_disk_size() {
+    let mut metadata = regular_inode_metadata();
+    metadata.disk_size = 2048;
+    let inode = test_inode(metadata);
+    let attributes: &dyn kvfs::InodeAttributeOperations = &inode;
+
+    attributes.set_size(4096);
+    assert_eq!(inode.size(), 4096);
+    assert_eq!(inode.sizes(), (4096, 2048));
+    assert_eq!(inode.stat().size, 4096);
+
+    inode.set_size(1024);
+    assert_eq!(attributes.size(), 1024);
+    assert_eq!(
+        attributes
+            .fill_metadata(u64::from(inode.number().get()), 4096)
+            .size,
+        1024
+    );
+    assert_eq!(inode.sizes(), (1024, 2048));
+}
+
+#[def_test]
+fn visible_size_read_does_not_acquire_inode_mapping_state() {
     let inode = test_inode(regular_inode_metadata());
-    inode.update_state(|state| {
-        state.visible_size = 4096;
-        state.metadata.disk_size = 2048;
-    });
+    inode.set_size(4096);
+    let _state = inode.state.write();
 
-    let (size, disk_size) = inode.with_state(|state| (state.size(), state.disk_size()));
-
-    assert_eq!(size, 4096);
-    assert_eq!(disk_size, 2048);
+    assert_eq!(inode.size(), 4096);
+    assert_eq!(kvfs::InodeAttributeOperations::size(&inode), 4096);
 }
 
 #[def_test]
@@ -276,16 +293,14 @@ fn inode_state_accessors_reflect_metadata_fields() {
     metadata.flags = disk_inode::EXT4_IMMUTABLE_FL | disk_inode::EXT4_APPEND_FL;
     let inode = test_inode(metadata);
 
-    inode.update_state(|state| {
-        state.visible_size = 100;
-        state.metadata.disk_size = 200;
-    });
+    inode.set_size(100);
+    inode.update_state(|state| state.metadata.disk_size = 200);
 
     let (uid, gid, size, disk_size, immutable, append_only) = inode.with_state(|state| {
         (
             state.uid(),
             state.gid(),
-            state.size(),
+            inode.size(),
             state.disk_size(),
             state.is_immutable(),
             state.is_append_only(),
@@ -303,14 +318,12 @@ fn inode_state_accessors_reflect_metadata_fields() {
 fn update_state_publishes_mutation_to_later_readers() {
     let inode = test_inode(regular_inode_metadata());
 
-    inode.update_state(|state| {
-        state.visible_size = 1234;
-        state.metadata.disk_size = 5678;
-    });
+    inode.set_size(1234);
+    inode.update_state(|state| state.metadata.disk_size = 5678);
     inode.update_state(|state| state.metadata.uid = 42);
 
     let (size, disk_size, uid) =
-        inode.with_state(|state| (state.size(), state.disk_size(), state.uid()));
+        inode.with_state(|state| (inode.size(), state.disk_size(), state.uid()));
     assert_eq!(size, 1234);
     assert_eq!(disk_size, 5678);
     assert_eq!(uid, 42);
@@ -323,7 +336,7 @@ fn update_state_publishes_mutation_to_later_readers() {
 #[cfg(target_os = "none")]
 mod concurrent {
     use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use ksync::Semaphore;
     use ktask::spawn;
@@ -409,7 +422,7 @@ mod concurrent {
             writers.push(spawn(move || {
                 gate.acquire();
                 inode.update_state(|state| {
-                    state.visible_size += 1;
+                    state.metadata.disk_size += 1;
                     let active = active_writers.fetch_add(1, Ordering::SeqCst) + 1;
                     max_active_writers.fetch_max(active, Ordering::SeqCst);
                     ktask::yield_now();
@@ -430,52 +443,53 @@ mod concurrent {
             "update_state must be write-exclusive"
         );
         assert_eq!(
-            inode.size(),
+            inode.disk_size(),
             WRITER_COUNT as u64,
             "serialized writers must not lose updates"
         );
     }
 
     #[def_test]
-    fn with_state_never_tears_paired_size_update() {
+    fn shrink_publication_and_extent_proof_invalidation_are_serialized() {
         const WRITER_COUNT: usize = 1;
         const READER_COUNT: usize = 3;
         const ITERATIONS: u64 = 10_000;
 
-        let inode = Arc::new(test_inode(regular_inode_metadata()));
+        const GROWN_SIZE: u64 = 4 * 4096;
+        const SHRUNK_SIZE: u64 = 4096;
+
+        let mut metadata = regular_inode_metadata();
+        metadata.disk_size = GROWN_SIZE;
+        let inode = Arc::new(test_inode(metadata));
         let gate = Arc::new(Semaphore::new(0));
-        let generation = Arc::new(AtomicU64::new(0));
-        let torn = Arc::new(AtomicBool::new(false));
+        let has_stale_proof = Arc::new(AtomicBool::new(false));
 
         let mut workers = Vec::new();
         for _ in 0..WRITER_COUNT {
             let inode = Arc::clone(&inode);
             let gate = Arc::clone(&gate);
-            let generation = Arc::clone(&generation);
             workers.push(spawn(move || {
                 gate.acquire();
                 for _ in 0..ITERATIONS {
-                    let generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
-                    // Truncate/writeback publish visible_size and disk_size
-                    // as one paired update; a reader inside with_state must
-                    // never observe a torn (size, disk_size) combination.
-                    inode.update_state(|state| {
-                        state.visible_size = generation;
-                        state.metadata.disk_size = generation;
-                    });
+                    inode.set_size(GROWN_SIZE);
+                    inode.cache_initialized_blocks(0, 4);
+                    inode.set_size(SHRUNK_SIZE);
                 }
             }));
         }
         for _ in 0..READER_COUNT {
             let inode = Arc::clone(&inode);
             let gate = Arc::clone(&gate);
-            let torn = Arc::clone(&torn);
+            let has_stale_proof = Arc::clone(&has_stale_proof);
             workers.push(spawn(move || {
                 gate.acquire();
                 for _ in 0..ITERATIONS {
                     inode.with_state(|state| {
-                        if state.size() != state.disk_size() {
-                            torn.store(true, Ordering::SeqCst);
+                        // A mapping-state reader must not combine the new
+                        // shorter EOF with proofs surviving from before shrink.
+                        if inode.size() == SHRUNK_SIZE && state.extent_status.contains_written(0, 4)
+                        {
+                            has_stale_proof.store(true, Ordering::SeqCst);
                         }
                     });
                 }
@@ -490,9 +504,10 @@ mod concurrent {
         }
 
         assert!(
-            !torn.load(Ordering::SeqCst),
-            "with_state must never expose a torn (size, disk_size) pair"
+            !has_stale_proof.load(Ordering::SeqCst),
+            "shrink must invalidate extent proofs before publishing the shorter EOF"
         );
-        assert_eq!(generation.load(Ordering::SeqCst), ITERATIONS);
+        assert_eq!(inode.sizes(), (SHRUNK_SIZE, GROWN_SIZE));
+        assert!(!inode.has_initialized_overwrite(0, 1, 4096));
     }
 }
