@@ -14,6 +14,7 @@
 //! taken modulo the line count, or remapped onto another legal IRQ.
 
 use khal::mem::{PhysAddr, VirtAddr};
+use kspin::{SpinNoIrq, static_lock};
 use lazyinit::LazyInit;
 
 const PIC_COUNT_PER_REG: usize = 32;
@@ -28,6 +29,12 @@ const PCH_PIC_SIZE: usize = 0x1000;
 const PCH_PIC_PADDR: usize = 0x1000_0000;
 
 static PCH_PIC_BASE: LazyInit<VirtAddr> = LazyInit::new();
+
+static_lock! {
+    // Different IRQ lines share MASK words. Control is valid in task/IRQ
+    // context; a per-line lock cannot serialize these register transactions.
+    static REGISTER_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+}
 
 fn mmio_base() -> usize {
     #[expect(
@@ -105,6 +112,7 @@ pub(super) fn init() {
 }
 
 fn init_impl<R: PchPicRegs>(regs: &mut R) {
+    let _guard = REGISTER_LOCK.lock();
     // Mask both banks before programming trigger/polarity, as in Linux's
     // pch_pic_reset. Activation must not inherit firmware's unmasked lines.
     for i in 0..PIC_REG_COUNT {
@@ -134,6 +142,7 @@ fn enable_irq_impl<R: PchPicRegs>(regs: &mut R, irq: usize) {
         warn!("pch-pic: reject out-of-range hwirq {irq} (valid 0..{PCH_PIC_IRQ_COUNT})");
         return;
     }
+    let _guard = REGISTER_LOCK.lock();
     let (offset, bit) = split_bit(irq);
     // Publish the vector before opening the source gate.
     regs.htvec_write(PCH_INT_HTVEC + irq, irq as u8);
@@ -147,6 +156,7 @@ fn disable_irq_impl<R: PchPicRegs>(regs: &mut R, irq: usize) {
         warn!("pch-pic: reject out-of-range hwirq {irq} (valid 0..{PCH_PIC_IRQ_COUNT})");
         return;
     }
+    let _guard = REGISTER_LOCK.lock();
     let (offset, bit) = split_bit(irq);
     let addr = PCH_PIC_MASK + offset;
     let val = regs.reg_read(addr);

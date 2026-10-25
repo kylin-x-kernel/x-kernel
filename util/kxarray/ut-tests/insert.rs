@@ -15,7 +15,8 @@ impl<P: EntryOwner> XArray<P> {
     /// The one-shot observer runs with the writer lock held and must neither
     /// allocate, wait nor mutate this array. The child may still be beneath an
     /// unpublished root. Available only in kernel unittest builds.
-    pub(crate) fn set_publication_hook_for_test(&self, hook_fn: fn(&Self, usize)) {
+    #[doc(hidden)]
+    pub fn set_publication_hook_for_test(&self, hook_fn: fn(&Self, usize)) {
         *self.publication_hook.lock() = Some(hook_fn);
     }
 
@@ -24,8 +25,8 @@ impl<P: EntryOwner> XArray<P> {
     /// The observer runs before reinspection, for either nodes or a retirement
     /// record. It must return with the caller's execution context restored.
     /// Available only in kernel unittest builds.
-    #[cfg(all(target_os = "none", feature = "smp"))]
-    pub(crate) fn set_preparation_hook_for_test(&self, hook_fn: fn(&Self, usize)) {
+    #[doc(hidden)]
+    pub fn set_preparation_hook_for_test(&self, hook_fn: fn(&Self, usize)) {
         *self.preparation_hook.lock() = Some(hook_fn);
     }
 
@@ -34,7 +35,8 @@ impl<P: EntryOwner> XArray<P> {
     /// The observer must not mutate this array, allocate or wait. This fixes
     /// writer exclusion for kernel interrupt fixtures without adding a hook
     /// to production mutation paths. Available only in kernel unittest builds.
-    pub(crate) fn with_writer_locked_for_test<R>(&self, observe_fn: impl FnOnce() -> R) -> R {
+    #[doc(hidden)]
+    pub fn with_writer_locked_for_test<R>(&self, observe_fn: impl FnOnce() -> R) -> R {
         let _guard = self.writers.lock();
         observe_fn()
     }

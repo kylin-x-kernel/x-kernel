@@ -18,7 +18,7 @@ ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", 
 default = []
 
 # Selected by the unittest entry, not ordinary kernel configurations.
-kernel-tests = ["dep:krcu-list", "dep:krcu-list-kernel-tests"]
+kernel-tests = ["dep:krcu-list", "dep:krcu-list-kernel-tests", "dep:kxarray", "dep:kxarray-kernel-tests"]
 
 # Multicore
 smp = [
@@ -26,7 +26,7 @@ smp = [
     "khal/smp",
     "kruntime/smp",
     "krcu/smp",
-    "kxarray/smp",
+    "kxarray-kernel-tests?/smp",
     "krcu-list-kernel-tests?/smp",
     "memspace/smp",
     "fs_boot?/smp",
@@ -242,7 +242,8 @@ kipi = { workspace = true, optional = true }
 knet = { workspace = true, optional = true }
 kruntime.workspace = true
 krcu.workspace = true
-kxarray.workspace = true
+kxarray = { workspace = true, optional = true }
+kxarray-kernel-tests = { workspace = true, optional = true }
 krcu-list = { workspace = true, optional = true }
 krcu-list-kernel-tests = { workspace = true, optional = true }
 fs_boot = { workspace = true, optional = true }

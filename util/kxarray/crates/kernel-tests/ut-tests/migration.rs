@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use unittest::{assert, assert_eq, def_test};
 
-use crate::XArray;
+use kxarray::XArray;
 
 #[derive(Default)]
 struct History {

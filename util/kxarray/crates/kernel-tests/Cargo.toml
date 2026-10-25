@@ -1,0 +1,39 @@
+[package]
+name = "kxarray-kernel-tests"
+description = "Kernel integration tests for XArray"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+publish = false
+
+[package.metadata.cargo-shear]
+# CG-024-lint-exceptions: cfg(unittest) modules in ut-tests/ are the consumers.
+ignored = ["kxarray", "krcu", "krcu-core", "ktask", "khal", "karch", "kirq", "kalloc", "kspin", "kcpu_id_map", "kbuild_config", "ktime_types"]
+
+[features]
+default = []
+smp = []
+
+[dependencies]
+unittest.workspace = true
+
+[target.'cfg(target_os = "none")'.dependencies]
+kxarray.workspace = true
+krcu.workspace = true
+krcu-core.workspace = true
+ktask.workspace = true
+khal.workspace = true
+karch.workspace = true
+kirq.workspace = true
+kalloc.workspace = true
+kspin.workspace = true
+kcpu_id_map.workspace = true
+kbuild_config.workspace = true
+ktime_types.workspace = true
+
+[lints]
+workspace = true

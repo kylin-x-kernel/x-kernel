@@ -546,13 +546,6 @@ unsafe fn destroy_tree<P: EntryOwner>(raw: *mut Node) {
 unittest::path_mod_test!(tests, "../ut-tests/insert.rs");
 unittest::path_mod_test!(tests_remove, "../ut-tests/remove.rs");
 
-#[cfg(target_os = "none")]
-unittest::path_mod_test!(tests_context, "../ut-tests/context.rs");
-#[cfg(all(target_os = "none", feature = "smp"))]
-unittest::path_mod_test!(tests_migration, "../ut-tests/migration.rs");
-#[cfg(target_os = "none")]
-unittest::path_mod_test!(tests_tasks, "../ut-tests/tasks.rs");
-
 #[cfg(test)]
 #[path = "../tests/host/storage.rs"]
 mod tests_storage;

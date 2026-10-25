@@ -67,6 +67,12 @@ no user-space input.
 - `PCH_PIC_BASE` (`LazyInit<VirtAddr>`): the 4 KiB PCH PIC aperture at
   the fixed platform address `0x1000_0000`; all PCH accesses are
   offset-checked against it.
+- Each interrupt controller owns its register lock, protecting initialization
+  and shared-word enable/disable RMW even when different IRQ lines are operated
+  independently. `SpinNoIrq` excludes local IRQ/preemption and serializes CPUs
+  in SMP builds. Locks do not nest across controllers or span kirq callbacks.
+  NMI control is unsupported. EIO ISR completion remains a single W1C write,
+  independent of the configuration lock; it must not become an ISR RMW.
 - `NANOS_PER_TICK` (`LazyInit<u64>`): the counter-frequency conversion,
   computed once in `early_init`.
 - The GED sleep-control mapping: one byte, mapped only in the
@@ -100,6 +106,9 @@ no user-space input.
   the GED register could express S3 but no wakeup path exists.
 - Only the QEMU virt-class EIOINTC + PCH PIC hierarchy is supported;
   other LoongArch interrupt topologies are out of scope.
+- Locking does not establish remote-node IOCSR addressing. The current
+  single-router/default-UP coverage does not validate AP control or multi-node
+  register targeting; those need explicit routing and CPU/node ownership.
 
 ## Audit Checklist
 
@@ -107,6 +116,8 @@ no user-space input.
   otherwise pending device interrupts cannot complete blocked I/O. Device
   registration still controls the downstream per-device masks.
 - Backend hwirq range gates remain ahead of any IOCSR/MMIO access.
+- Register-transaction locks cover the entire RMW, not separate reads/writes;
+  retain lock order from IRQ line state to the controller and never the reverse.
 - The RTC mapping size and address still come from `RTC_PADDR` /
   `LS7A_RTC_SIZE`, and the sample still flows through
   `rtc_driver::read` before `ktime`.

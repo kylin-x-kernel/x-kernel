@@ -3,10 +3,14 @@
 // See LICENSES for license details.
 
 //! Real timer IRQ and fixed-notification integration, without manual dispatch.
+//!
+//! Expiry/rearm probes run sequentially on every present CPU and wait for
+//! callback acknowledgement. Run these hardware integration cases with an
+//! external QEMU timeout; they impose no guest latency threshold.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use kcpu_id_map::LogicalCpuId;
+use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use ktime_types::{MonotonicInstant, TimeSpan};
 #[cfg(feature = "ipi")]
 use ktimer_core::Timer;
@@ -84,20 +88,73 @@ fn local_delivery(repeats: usize) -> bool {
     // SAFETY: this initialized CPU is pinned; only its real IRQ dispatches.
     // Storage is owned, the handler is bounded and refresh follows acceptance.
     let started = unsafe { timer.start(instant(now() + 2_000_000)) }.is_ok();
-    let delivered = wait_for(timer.handler(), repeats);
+    let delivered = started && wait_for_delivery(timer.handler());
     timer.cancel_sync();
     refresh_local();
     started && delivered && timer.handler().is_valid.load(Ordering::Acquire)
 }
 
-#[def_test(serial)]
-fn prepared_one_shot_runs_from_real_timer_irq() {
-    assert!(local_delivery(1));
+fn wait_for_delivery(probe: &Probe) -> bool {
+    // A reported callback/rearm failure is terminal. Missing delivery without
+    // a callback still relies on the external timeout, not a guest latency limit.
+    while probe.calls.load(Ordering::Acquire) < probe.repeats
+        && probe.is_valid.load(Ordering::Acquire)
+    {
+        core::hint::spin_loop();
+    }
+    probe.calls.load(Ordering::Acquire) == probe.repeats
+        && probe.is_valid.load(Ordering::Acquire)
+}
+
+#[def_test]
+fn failed_callback_ends_delivery_wait_before_all_expirations() {
+    let probe = Probe::new(khal::percpu::this_cpu_id(), 3);
+    probe.is_valid.store(false, Ordering::Relaxed);
+    probe.calls.store(1, Ordering::Release);
+    assert!(!wait_for_delivery(&probe));
 }
 
 #[def_test(serial)]
-fn prepared_explicit_rearm_runs_from_real_timer_irq() {
-    assert!(local_delivery(3));
+fn prepared_one_shot_runs_from_real_timer_irq_on_each_cpu() {
+    assert!(delivery_on_each_cpu(1));
+}
+
+#[def_test(serial)]
+fn prepared_explicit_rearm_runs_from_real_timer_irq_on_each_cpu() {
+    assert!(delivery_on_each_cpu(3));
+}
+
+fn delivery_on_each_cpu(repeats: usize) -> bool {
+    // Boot-established timer services remain live throughout the test. Each
+    // probe owns and cancels its timer before exiting; no handler is replaced.
+    // Present is not a generic online mask: this fixture relies on kruntime's
+    // init_cpu_services rendezvous before the unittest entry. SMP AP startup
+    // failure aborts boot; a partially started CPU set cannot reach this test.
+    let mut is_valid = true;
+    kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| {
+        unittest::ktest_println!(
+            "timer IRQ probe starting: cpu={}, expirations={repeats}",
+            cpu.as_usize()
+        );
+        let task = crate::prepare_task(crate::TaskInner::new_pidless_kthread(
+            move || {
+                let is_expected_cpu = khal::percpu::this_cpu_id() == cpu;
+                let is_valid = is_expected_cpu && local_delivery(repeats);
+                crate::exit(if is_valid { 0 } else { 1 });
+            },
+            "timer_irq_probe".into(),
+            kbuild_config::TASK_STACK_SIZE,
+        ));
+        task.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
+        crate::activate_task(&task);
+        let status = task.join();
+        is_valid &= status == 0;
+        unittest::ktest_println!(
+            "timer IRQ probe: cpu={}, expirations={repeats}, status={status}",
+            cpu.as_usize()
+        );
+    });
+    is_valid
 }
 
 #[def_test(serial)]

@@ -60,8 +60,10 @@
 extern crate krcu_list as _;
 #[cfg(all(unittest, feature = "kernel-tests"))]
 extern crate krcu_list_kernel_tests as _;
-#[cfg(unittest)]
+#[cfg(all(unittest, feature = "kernel-tests"))]
 extern crate kxarray as _;
+#[cfg(all(unittest, feature = "kernel-tests"))]
+extern crate kxarray_kernel_tests as _;
 
 #[cfg(feature = "kwork_stall_check")]
 extern crate kworkng as _;

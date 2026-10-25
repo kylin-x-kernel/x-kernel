@@ -9,33 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 documentation.workspace = true
 
-[package.metadata.cargo-shear]
-# CG-024-lint-exceptions: cargo-shear omits these cfg(unittest) consumers in
-# ut-tests/{tasks,context,migration}.rs; kernel UT compilation checks their use.
-ignored = ["krcu-core", "ktask", "khal", "karch", "kirq", "kalloc", "kcpu_id_map", "kbuild_config", "ktime_types"]
-
-[features]
-default = []
-smp = []
-
 [dependencies]
 krcu.workspace = true
 kerrno.workspace = true
 kspin.workspace = true
 unittest.workspace = true
-
-# The kernel unittest runner builds normal libraries, not Cargo test targets.
-# These dependencies support cfg(unittest) fixtures on kernel targets only.
-[target.'cfg(target_os = "none")'.dependencies]
-krcu-core.workspace = true
-ktask.workspace = true
-khal.workspace = true
-karch.workspace = true
-kirq.workspace = true
-kalloc.workspace = true
-kcpu_id_map.workspace = true
-kbuild_config.workspace = true
-ktime_types.workspace = true
 
 [dev-dependencies]
 # Host threads need real exclusion even without a kernel SMP configuration.

@@ -677,15 +677,19 @@ mod tests_wake_affinity {
             let mut only_other = KCpuMask::new();
             only_other.set(other, true);
             task.set_cpumask(only_other);
-            let rq = current_run_queue::<NoPreemptIrqSave>();
-            let nr_home = rq.inner.nr_home.load(Ordering::Relaxed);
+            // A local IRQ/preemption guard cannot exclude remote publishers
+            // from a live queue. Keep the ownership assertion on private state.
+            let idle = TaskInner::new_idle(|| {}, "publish-idle".into(), 4096).into_arc();
+            let rq = super::super::RunQueue::new(LogicalCpuId::new(here), idle);
+            let _guard = NoPreemptIrqSave::new();
+            let nr_home = rq.nr_home.load(Ordering::Relaxed);
             let now_ns = khal::time::monotonic_time_nanos();
-            let rejected = rq
-                .inner
-                .publish_task(task.clone(), ksched::EnqueueKind::New, now_ns);
+            let rejected = rq.publish_task(task.clone(), ksched::EnqueueKind::New, now_ns);
             assert!(rejected.is_err());
             assert_eq!(task.cpu_id().as_usize(), other);
-            assert_eq!(rq.inner.nr_home.load(Ordering::Relaxed), nr_home);
+            // publish_task still mutates this real queue: charging ownership
+            // before rejecting the cpumask would change this private counter.
+            assert_eq!(rq.nr_home.load(Ordering::Relaxed), nr_home);
         }
     }
 

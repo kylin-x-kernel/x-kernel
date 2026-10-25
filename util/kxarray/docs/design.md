@@ -72,14 +72,20 @@ borrowing the array. Node deallocation, like payload release, must not block.
 
 ## Test Ownership
 
-Kernel fixtures live in this crate's `ut-tests/`, including task concurrency,
-RCU reclamation, interrupt contexts and SMP migration. The normal boot sequence
-starts RCU before running registered tests; XArray adds no boot-stage fixture.
-`kfeat` links the crate so its tests are discovered and selects its SMP coverage.
-Runtime contains neither XArray assertions nor an XArray dependency.
+Basic kernel fixtures remain in `ut-tests/`. Task concurrency, interrupt access
+and migration fixtures belong to the separate `crates/kernel-tests/` crate. The normal
+boot sequence starts RCU before registered tests; XArray adds no boot fixture.
+The unittest entry selects both crates through `kfeat/kernel-tests`; its optional
+integration dependency receives SMP coverage through weak feature forwarding.
+Ordinary system configurations select neither crate merely for tests. Runtime
+contains neither XArray assertions nor an XArray dependency.
 
-The kernel runner compiles libraries with `cfg(unittest)`, not Cargo's test
-targets, so Cargo dev-dependencies cannot supply its task and IRQ fixtures.
-Those dependencies are declared only for kernel targets; ordinary kernel builds
-still resolve them, but compile no fixture bodies. Host storage tests remain
-independent of task and platform providers. No separate test crate is required.
+The kernel runner builds libraries with `cfg(unittest)`, so these dependencies
+cannot be supplied as Cargo dev-dependencies. Keeping them in the integration
+crate avoids container-to-consumer dependency cycles when kirq uses XArray.
+Concretely this prevents `kirq -> kxarray -> kirq`, also through `ktask`.
+This is a dependency-cycle exception, not the default kernel test layout;
+ordinary UT, host tests and doctests stay in the owning crate.
+The test crate resolves its kernel dependencies on kernel targets, but is not a
+default system dependency. The container exposes three observation helpers
+only under `cfg(unittest)`; they are not part of its production API.

@@ -1,5 +1,8 @@
 # IRQ Startup Phase Validation
 
+This records the Ticket05 phase split. Later series-level evidence and open
+gates are tracked separately in [integration validation](irq-startup-integration.md).
+
 ## Scope
 
 The platform boot hooks separate controller preparation from local source

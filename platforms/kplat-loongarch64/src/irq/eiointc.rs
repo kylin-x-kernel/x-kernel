@@ -11,6 +11,7 @@
 //! Rejection is reported via `warn!` and never silently truncated, taken
 //! modulo the vector count, or remapped onto another legal vector.
 
+use kspin::{SpinNoIrq, static_lock};
 use loongArch64::iocsr::{iocsr_read_d, iocsr_write_d, iocsr_write_w};
 
 const LOONGARCH_IOCSR_MISC_FUNC: usize = 0x420;
@@ -24,6 +25,12 @@ const EIOINTC_REG_ROUTE: usize = 0x1c00;
 const VEC_REG_COUNT: usize = 4;
 const VEC_COUNT_PER_REG: usize = 64;
 const VEC_COUNT: usize = VEC_REG_COUNT * VEC_COUNT_PER_REG;
+
+static_lock! {
+    // Serialize this platform's shared router configuration, not per-CPU ISR
+    // observation/W1C completion. The guard also pins local IOCSR transactions.
+    static REGISTER_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
+}
 
 /// Register access surface for the EIOINTC.
 ///
@@ -61,6 +68,7 @@ pub(super) fn init() {
 }
 
 fn init_impl<R: EiointcRegs>(regs: &mut R) {
+    let _guard = REGISTER_LOCK.lock();
     // Establish source masks before changing routes or enabling the router;
     // firmware's enable bits are not our activation contract.
     for i in 0..VEC_REG_COUNT {
@@ -106,6 +114,7 @@ fn enable_irq_impl<R: EiointcRegs>(regs: &mut R, irq: usize) {
         warn!("eiointc: reject out-of-range hwirq {irq} (valid 0..{VEC_COUNT})");
         return;
     }
+    let _guard = REGISTER_LOCK.lock();
     let (offset, bit) = split_bit(irq);
     for base in [EIOINTC_REG_ENABLE, EIOINTC_REG_BOUNCE] {
         let addr = base + offset;
@@ -119,6 +128,7 @@ fn disable_irq_impl<R: EiointcRegs>(regs: &mut R, irq: usize) {
         warn!("eiointc: reject out-of-range hwirq {irq} (valid 0..{VEC_COUNT})");
         return;
     }
+    let _guard = REGISTER_LOCK.lock();
     let (offset, bit) = split_bit(irq);
     let addr = EIOINTC_REG_ENABLE + offset;
     let val = regs.read_d(addr);
@@ -130,6 +140,8 @@ fn complete_irq_impl<R: EiointcRegs>(regs: &mut R, irq: usize) {
         warn!("eiointc: reject out-of-range hwirq {irq} (valid 0..{VEC_COUNT})");
         return;
     }
+    // ISR is W1C: acknowledge only this bit, without a control-register RMW
+    // or lock shared with enable/disable. Dispatch keeps its CPU context pinned.
     let (offset, bit) = split_bit(irq);
     regs.write_d(EIOINTC_REG_ISR + offset, bit);
 }

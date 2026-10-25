@@ -39,7 +39,8 @@
 
 Kernel unit fixtures cover full-width sparse growth, conflicts, alignment-one
 and zero-sized payloads, Arc retention and exact destruction counts. Kernel
-fixtures in `ut-tests/` exercise competing tasks after boot initializes RCU.
+integration fixtures in `crates/kernel-tests/ut-tests/` exercise competing tasks after
+boot initializes RCU. Their task/IRQ dependencies are not container dependencies.
 Host storage tests compare boundary keys
 against a reference map and exercise ownership under Miri; public API doctests
 reject scope escape and container destruction while borrowed. See

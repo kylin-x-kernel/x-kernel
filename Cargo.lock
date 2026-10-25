@@ -2494,6 +2494,7 @@ dependencies = [
  "ktracing",
  "kworkng",
  "kxarray",
+ "kxarray-kernel-tests",
  "linux_sysno",
  "memspace",
  "procfs",
@@ -3474,11 +3475,20 @@ dependencies = [
 name = "kxarray"
 version = "0.3.0-dev"
 dependencies = [
+ "kerrno",
+ "krcu",
+ "kspin",
+ "unittest",
+]
+
+[[package]]
+name = "kxarray-kernel-tests"
+version = "0.3.0-dev"
+dependencies = [
  "kalloc",
  "karch",
  "kbuild_config",
  "kcpu_id_map",
- "kerrno",
  "khal",
  "kirq",
  "krcu",
@@ -3486,6 +3496,7 @@ dependencies = [
  "kspin",
  "ktask",
  "ktime_types",
+ "kxarray",
  "unittest",
 ]
 

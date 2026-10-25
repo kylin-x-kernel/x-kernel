@@ -116,6 +116,7 @@ kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
 klazy = { path = "util/klazy" }
 kxarray = { path = "util/kxarray" }
+kxarray-kernel-tests = { path = "util/kxarray/crates/kernel-tests" }
 krcu-list = { path = "util/krcu-list" }
 krcu-list-kernel-tests = { path = "util/krcu-list/crates/kernel-tests" }
 kfinalize = { path = "util/kfinalize" }

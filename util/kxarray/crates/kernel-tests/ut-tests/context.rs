@@ -15,7 +15,7 @@ use krcu::{CallbackNode, PreparedCallback};
 use ktime_types::TimeSpan;
 use unittest::{assert, assert_eq, def_test};
 
-use crate::XArray;
+use kxarray::XArray;
 
 #[def_test(serial)]
 fn timer_hardirq_reads_replacement_absence_and_reinsertion() {

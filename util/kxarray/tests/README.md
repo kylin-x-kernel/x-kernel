@@ -33,12 +33,17 @@ or concurrent destructive updates without a real read scope.
 
 The public API doctests check both scope and container lifetime constraints,
 with a compile-success example for independently acquired Arc ownership.
-Kernel tests in `../ut-tests/` exercise real scoped reads, task-backed competition,
-interrupt access and migration. They run after boot initializes RCU; no XArray
-fixture runs in the startup path. Run them with `make unittest UNITTEST_CRATE=kxarray`.
-Kernel-only dependencies support these registered tests because this runner builds
-normal libraries with `cfg(unittest)`, not Cargo test targets. Test bodies are
-absent from ordinary builds; host storage tests do not compile kernel dependencies.
+Basic kernel tests remain in `../ut-tests/`. The [kernel integration crate](../crates/kernel-tests/README.md)
+owns task-backed competition, interrupt access and migration. Both run after boot
+initializes RCU, without XArray-specific startup fixtures. Run the complete set with:
+
+```sh
+timeout --kill-after=10 600 make unittest UNITTEST_CRATE=kxarray,kxarray_kernel_tests
+```
+
+Filters use Rust module names: `kxarray_kernel_tests` has underscores, unlike its
+Cargo package name `kxarray-kernel-tests`. Host storage tests do not depend on
+the integration crate or its task/platform providers.
 
 Retirement fixtures invoke the actual callback and cancellation functions on
 private records. They check that cancellation preserves a still-borrowed raw
@@ -59,7 +64,7 @@ Callback-before-submit-return safety is checked by auditing that successful
 ownership transfer is followed by no record access; these tests do not force
 that timing in the live service.
 
-`../ut-tests/context.rs` uses actual timer hardirq delivery to
+`../crates/kernel-tests/ut-tests/context.rs` uses actual timer hardirq delivery to
 read successive replacement, absence and reinsertion states while retaining a
 sibling entry. Each one-shot invocation acquire-loads a stage request published
 after mutation and verifies exactly that stage's value. The callback publishes
@@ -89,7 +94,7 @@ the deadlock detector, since a timeout on the same locked stack cannot recover.
 Allocation accounting does not detect unsuccessful allocation attempts; the
 read implementation is also inspected for absence of allocation calls.
 
-`../ut-tests/migration.rs` requires an SMP runtime with at least three CPUs. The
+`../crates/kernel-tests/ut-tests/migration.rs` requires an SMP runtime with at least three CPUs. The
 coordinator stays on CPU0 while a reader keeps its old-value borrow across an
 affinity-enforced CPU1-to-CPU2 migration. The reader confirms its destination
 from its resumed stack; a successful affinity API result alone is insufficient.
@@ -99,7 +104,7 @@ wait for the reader's own destination-CPU acknowledgement without guest-clock
 latency thresholds. Cleanup signals exit, joins the reader and restores
 coordinator affinity before reporting failed operations. Run these kernel tests
 with an external QEMU timeout (for example `timeout --kill-after=10 600 make
-unittest UNITTEST_CRATE=kxarray`); a stalled scheduler fails that run rather than
+unittest UNITTEST_CRATE=kxarray,kxarray_kernel_tests`); a stalled scheduler fails that run rather than
 being judged against an internal five-second performance requirement. Task join,
 affinity enforcement and callback draining retain their normal kernel-progress
 dependencies. This does not exercise writer migration between commit and submit.

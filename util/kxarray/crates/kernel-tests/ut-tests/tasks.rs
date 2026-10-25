@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use unittest::{assert, assert_eq, def_test};
 
-use crate::XArray;
+use kxarray::XArray;
 
 #[def_test]
 fn competing_insertions_keep_one_owner_and_return_every_loser() {

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
@@ -33,6 +33,7 @@ struct RecorderPchPic {
     htvec: [u8; PCH_PIC_IRQ_COUNT],
     accesses: [Access; 8],
     count: usize,
+    has_unprotected_access: bool,
 }
 
 impl RecorderPchPic {
@@ -42,10 +43,18 @@ impl RecorderPchPic {
             htvec: [0; PCH_PIC_IRQ_COUNT],
             accesses: [Access::None; 8],
             count: 0,
+            has_unprotected_access: false,
         }
     }
 
     fn record(&mut self, access: Access) {
+        self.has_unprotected_access |= karch::local_irq_enabled();
+        // A deterministic contender at every register access must be excluded
+        // by the same lock as production. UP has no spin flag to probe.
+        #[cfg(feature = "smp")]
+        {
+            self.has_unprotected_access |= REGISTER_LOCK.try_lock().is_some();
+        }
         if self.count < self.accesses.len() {
             self.accesses[self.count] = access;
         }
@@ -188,5 +197,28 @@ fn test_disable_rejects_out_of_range() {
         let mut rec = RecorderPchPic::new();
         disable_irq_impl(&mut rec, irq);
         assert_eq!(rec.access_count(), 0);
+    }
+}
+
+#[def_test]
+fn register_transactions_exclude_irq_and_preserve_other_lines() {
+    // Start unmasked so observing IRQ-off inside the backend has discrimination.
+    assert!(karch::local_irq_enabled());
+    let mut rec = RecorderPchPic::new();
+    init_impl(&mut rec);
+    assert!(karch::local_irq_enabled());
+    assert!(!rec.has_unprotected_access);
+    for bank in 0..PIC_REG_COUNT {
+        let first = bank * PIC_COUNT_PER_REG;
+        let last = first + PIC_COUNT_PER_REG - 1;
+        enable_irq_impl(&mut rec, first);
+        enable_irq_impl(&mut rec, last);
+        assert_eq!(rec.mask[bank], !(1u32 | (1 << 31)));
+        disable_irq_impl(&mut rec, first);
+        assert_eq!(rec.mask[bank], !(1u32 << 31));
+        disable_irq_impl(&mut rec, last);
+        assert_eq!(rec.mask[bank], u32::MAX);
+        assert!(!rec.has_unprotected_access);
+        assert!(karch::local_irq_enabled());
     }
 }

@@ -73,12 +73,19 @@ original parents in `src/irq.rs`, `src/irq/eiointc.rs`, and
 registration are unchanged. All tests inherit the crate's LoongArch64 gate
 and require `cfg(unittest)`.
 
-The EIOINTC and PCH PIC files contain seven and five cases respectively, using
-recording backends instead of live IOCSR/MMIO. The single boot parent-gate
+The EIOINTC and PCH PIC cases use recording backends instead of live
+IOCSR/MMIO. Register-transaction tests observe IRQ exclusion at every access,
+probe the same control lock with `try_lock` when SMP is selected, and check
+different-bit updates in each bank. A recorder-only completion test starts with
+IRQs enabled and checks that the W1C write observes them still enabled. An
+accidental control `SpinNoIrq` acquisition therefore fails an assertion even in
+UP, where the spinlock's CAS flag is absent. This detects acquisition spanning
+the write, not arbitrary locking elsewhere in the function; real IRQ dispatch
+still invokes completion in its own pinned context. The single boot parent-gate
 case reads live CPU-local ECFG and retains `#[cfg(not(feature = "smp"))]`:
 external vectors target CPU0, while an unpinned SMP test could run elsewhere.
-Thus non-SMP builds have 13 cases and SMP builds have 12. No case uses serial
-or user-mode flags.
+These fixtures do not establish physical multi-node routing or concurrent
+hardware behavior. No case uses user-mode flags.
 
 ## Architecture
 
@@ -135,9 +142,27 @@ separate allocation/routing/activation lifecycle, not a wider PCH range check.
 - Platform state uses `LazyInit` one-shot slots (clock conversion, PCH
   PIC mapping); pre-init access panics with named messages, since all
   call sites follow the boot order.
-- EIOINTC IOCSR and PCH PIC MMIO accesses are serialized by the
-  `kirq`-driven single-threaded interrupt path; the backends add
-  bounds checks but no locks of their own.
+- Each controller owns a `SpinNoIrq` register lock. Initialization and each
+  enable/disable transaction use that controller's lock, independently of
+  kirq's global control serialization. PCH enable holds it from HTVEC setup
+  through MASK read-modify-write; EIO enable holds it across both ENABLE and
+  BOUNCE updates. Different IRQ lines sharing a word cannot overwrite each
+  other's bits. Range rejection and logging precede acquisition.
+- Lock order is IRQ line/control state -> one controller's register lock.
+  PCH and EIO locks are never nested; neither calls back into kirq, waits or
+  dispatches while locked. Task and ordinary IRQ control are supported, not
+  NMI control. The guard excludes local IRQ/preemption for the full IOCSR
+  transaction. EIO ISR sampling and single-bit W1C completion do not take the
+  configuration lock; no read-modify-write is introduced for pending bits.
+- This retains the current QEMU single-router, CPU0 external-delivery model.
+  A lock does not retarget local IOCSR accesses to another node. Multi-node
+  routing, AP interrupt steering and affinity require their own target-aware
+  protocol; adding this lock does not claim that support.
+- Linux `drivers/irqchip/irq-loongson-pch-pic.c` serializes mask RMW under
+  `pic_lock`; `irq-loongson-eiointc.c` serializes mask/route/unmask under
+  `affinity_lock`. Its multi-node `csr_any_send` routing and no-op ordinary
+  mask callbacks differ from this platform's per-vector ENABLE/BOUNCE gates.
+  Reuse the controller ownership boundary, not Linux's full-word enable policy.
 - `power_off`/`halt` are terminal: no locks are held across the final
   register write or CPU park.
 
