@@ -14,10 +14,11 @@
 `xkernel-amd64-01` 与 `xkernel-arm64-01` 按节点名调度，同样必须满足身份、设备和 volume 契约。
 节点名与标签以 `Jenkinsfile` 里的 `nativeGuestAgentLabels()`、`floatingGuestAgentLabel()` 为准。
 
-## Vendored APIC 回归
+## Vendored APIC/UART 回归
 
 普通 x86_64 `Build Artifact` 阶段在 `make defconfig` 后、`make clippy`
-之前执行 `make check_x2apic`，运行工作区外 vendored x2apic 的宿主寄存器
+之前执行 `make check_x2apic check_uart`，运行工作区外 vendored x2apic、
+arm_pl011 和 uart_16550 的宿主寄存器
 回归测试。该步骤失败会阻止后续构建；只在原生 x86_64 节点执行，其他架构
 不运行此宿主二进制。它补充内核 unittest 的启动状态检查，不替代该检查。
 

@@ -35,7 +35,6 @@ pub mod runtime;
 pub mod serial;
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 use khal::mem::PhysAddr;
@@ -101,10 +100,18 @@ pub struct SerialMmioLayout {
     pub reg_width: SerialRegWidth,
 }
 
-static INPUT_IRQ_REGISTERED: AtomicBool = AtomicBool::new(false);
+struct InputIrqState {
+    has_attempted: bool,
+    // Retain the line and action removal key; this boot-lifetime registration
+    // has no teardown, and the token itself does not unregister on drop.
+    registration: Option<(usize, IrqActionToken)>,
+}
+
 static_lock! {
-    /// Keeps the console input interrupt registration identity for diagnostics.
-    static INPUT_IRQ: SpinNoIrq<Option<IrqActionToken>> = SpinNoIrq::new(None);
+    static INPUT_IRQ: SpinNoIrq<InputIrqState> = SpinNoIrq::new(InputIrqState {
+        has_attempted: false,
+        registration: None,
+    });
 }
 
 /// Fixed I/O-port base for the NS16550 ISA COM port used as stdout on x86.
@@ -139,7 +146,21 @@ impl khal::console::ConsoleIf {
     }
 
     fn interrupt_id() -> Option<usize> {
-        serial::stdout_irq().and_then(IrqDesc::logical_irq)
+        INPUT_IRQ
+            .lock()
+            .registration
+            .as_ref()
+            .map(|(virq, _)| *virq)
+    }
+
+    fn prepare_input() {
+        prepare_input_with(
+            &INPUT_IRQ,
+            serial::stdout_port().zip(serial::stdout_irq()),
+            SerialPort::prepare_irq_input,
+            kirq::try_map,
+            kirq::try_register_shared,
+        );
     }
 }
 
@@ -306,16 +327,6 @@ fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
     }
 }
 
-fn map_console_irq(desc: IrqDesc) -> Option<IrqDesc> {
-    match kirq::try_map(desc) {
-        Ok(virq) => Some(desc.with_virq(virq)),
-        Err(err) => {
-            log::warn!("failed to map console IRQ {desc:?}: {err:?}");
-            None
-        }
-    }
-}
-
 /// Bring up the stdout console from the device tree.
 ///
 /// Parses the `chosen` stdout node, builds the matching [`SerialPort`], and
@@ -326,8 +337,7 @@ fn map_console_irq(desc: IrqDesc) -> Option<IrqDesc> {
 pub fn init_stdout_from_device_tree() -> Option<()> {
     let desc = stdout_desc_from_device_tree()?;
     let port = build_stdout_port(&desc);
-    let irq = desc.irq.and_then(map_console_irq);
-    serial::register_early_stdout(Arc::new(port), irq);
+    serial::register_early_stdout(Arc::new(port), desc.irq);
     Some(())
 }
 
@@ -336,68 +346,57 @@ pub fn init_stdout_from_device_tree() -> Option<()> {
 pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
     // SAFETY: `port` is the platform-configured NS16550 I/O-port base.
     let uart = unsafe { SerialPort::new_ioport_ns16550(port, SerialRole::Stdout) };
-    let irq = irq.and_then(map_console_irq);
     serial::register_early_stdout(Arc::new(uart), irq);
 }
 
-/// Register the stdout console's input interrupt handler.
-///
-/// Must be called after the platform IRQ provider is up; platforms differ on
-/// whether that is `early_driver_init` or `prepare_interrupts`.
-pub fn register_input_irq_handler() {
-    let Some(desc) = serial::stdout_irq() else {
-        return;
-    };
-    let Some(virq) = desc.logical_irq() else {
-        return;
-    };
-    if INPUT_IRQ_REGISTERED.load(Ordering::Acquire) {
-        return;
-    }
-    #[expect(
-        clippy::expect_used,
-        reason = "CG-021-no-panic-on-reachable-failure: The resolved console IRQ belongs to the \
-                  stdout port installed before IRQ input initialization"
-    )]
-    let port = serial::stdout_port().expect("console IRQ requires a stdout port");
-    #[expect(
-        clippy::expect_used,
-        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the console input buffer \
-                  cannot be prepared; console IRQ initialization has no error return or recovery"
-    )]
-    port.prepare_irq_input()
-        .expect("failed to allocate console input buffer");
-    if INPUT_IRQ_REGISTERED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
+// Keep failure tests off the live console/IRQ registry. Hardware activation
+// and readiness publication remain in this shared production transaction.
+fn prepare_input_with(
+    input_irq: &SpinNoIrq<InputIrqState>,
+    console: Option<(Arc<SerialPort>, IrqDesc)>,
+    prepare_fn: impl FnOnce(&SerialPort) -> Result<(), alloc::collections::TryReserveError>,
+    map_fn: impl FnOnce(IrqDesc) -> Result<usize, kirq::IrqDescError>,
+    register_fn: impl FnOnce(usize, kirq::Handler) -> Result<Option<IrqActionToken>, kirq::IrqDescError>,
+) {
     {
+        let mut state = input_irq.lock();
+        if state.has_attempted {
+            return;
+        }
+        state.has_attempted = true;
+    }
+    let Some((port, desc)) = console else {
+        return;
+    };
+    if let Err(error) = prepare_fn(&port) {
+        log::warn!("console input stays polled: buffer preparation failed: {error:?}");
         return;
     }
-    match kirq::try_register_shared(virq, Arc::new(move |_| port.handle_input_irq())) {
-        Ok(Some(token)) => *INPUT_IRQ.lock() = Some(token),
-        #[expect(
-            clippy::panic,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: kirq cannot install a \
-                      shared action on the stdout input IRQ (unresolved line, teardown or a \
-                      non-shared action); console IRQ initialization has no error return or \
-                      recovery"
-        )]
-        Ok(None) => {
-            INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
-            panic!("failed to register console input IRQ handler: {desc:?}");
+    let virq = match map_fn(desc) {
+        Ok(virq) => virq,
+        Err(error) => {
+            log::warn!("console input stays polled: cannot map {desc:?}: {error:?}");
+            return;
         }
-        #[expect(
-            clippy::panic,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: kirq rejects the stdout \
-                      input IRQ registration; console IRQ initialization has no error return or \
-                      recovery"
-        )]
+    };
+    let irq_port = port.clone();
+    // A mapping may predate this attempt or serve another shared action.
+    // On rejection retain it and the input buffer, without unmasking this UART.
+    match register_fn(virq, Arc::new(move |_| irq_port.handle_input_irq())) {
+        Ok(Some(token)) => {
+            port.enable_receive_interrupt();
+            input_irq.lock().registration = Some((virq, token));
+        }
+        Ok(None) => {
+            log::warn!("console input stays polled: action rejected for {desc:?}");
+        }
         Err(err) => {
-            INPUT_IRQ_REGISTERED.store(false, Ordering::Release);
-            panic!("failed to register console input IRQ handler: {desc:?} ({err:?})");
+            log::warn!("console input stays polled: action failed for {desc:?}: {err:?}");
         }
     }
 }
+
+unittest::path_mod_test!(input_setup_tests, "../ut-tests/input_setup.rs");
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 unittest::path_mod_test!(irq_desc_unittest, "../ut-tests/irq_desc_unittest.rs");

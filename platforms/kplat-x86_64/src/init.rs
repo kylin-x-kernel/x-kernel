@@ -61,7 +61,6 @@ impl BootHandler {
 
     fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
         x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
-        console_driver::register_input_irq_handler();
         Ok(())
     }
 

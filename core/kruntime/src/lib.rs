@@ -308,6 +308,9 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     )
     .expect("system workqueue services must be ready before driver initialization");
 
+    // Device discovery can construct N_TTY, whose input mode is chosen once.
+    khal::console::prepare_input();
+
     #[cfg(feature = "fs")]
     fs_boot::init_device_discovery();
     kdriver::init_drivers();

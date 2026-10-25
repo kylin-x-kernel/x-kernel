@@ -21,6 +21,13 @@ pub trait ConsoleIf {
 
     fn read_data(buf: &mut [u8]) -> usize;
 
+    /// Attempt input IRQ setup once, in sleepable boot-task context after
+    /// runtime services start and before any TTY chooses its input mode.
+    /// The boot task serializes this call with consumer publication.
+    /// Failure preserves polled I/O; the provider reports its diagnostic.
+    fn prepare_input();
+
+    /// Return the installed input IRQ, not merely firmware IRQ metadata.
     fn interrupt_id() -> Option<usize>;
 }
 
@@ -40,6 +47,16 @@ pub fn write_data_atomic(buf: &[u8]) {
 #[inline]
 pub fn read_data(buf: &mut [u8]) -> usize {
     ConsoleIf::read_data(buf)
+}
+
+/// Prepare optional interrupt input before publishing console consumers.
+///
+/// Called by the boot task after worker/IRQ services start. Completion fixes
+/// the input mode for this boot; unavailable IRQ input falls back to polling.
+/// The caller must serialize setup with consumer publication; this is not a
+/// concurrent initialization barrier or a runtime retry interface.
+pub fn prepare_input() {
+    ConsoleIf::prepare_input()
 }
 
 #[inline]

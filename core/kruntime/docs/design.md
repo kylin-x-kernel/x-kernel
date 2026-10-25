@@ -22,10 +22,11 @@ architecture interrupt-initialization hook. A common phase interface does not
 require moving platform discovery or hardware implementation into the generic
 IRQ core. X-Kernel retains its own current-installation and AP rendezvous needs.
 
-The current early console/controller discovery path remains distinct from
-local source activation. Normal console input registration still needs its
-separate early-output/late-input transition; the phase split alone does not
-establish that contract. Validation and coverage limits are recorded in
+Early console/controller discovery remains distinct from local source activation.
+After GP and worker startup, the boot task invokes `khal::console::prepare_input`
+before device discovery can construct N_TTY. The console provider owns optional
+input setup and polled fallback; runtime only orders this phase. Validation and
+coverage limits for controller startup are recorded in
 [IRQ startup validation](irq-startup-validation.md).
 
 ## RCU Host Adapters
@@ -386,6 +387,8 @@ late-init thread (Internal, PID-less):
         -> INITED_CPUS += 1 (release AP service initialization)
         -> wait until is_init_ok() (all AP services prepared)
         -> [smp] mark_all_cpus_started (enable TLB shootdowns)
+    -> krcu::init_service, kworkng::runtime::init
+    -> khal::console::prepare_input (optional IRQ input, polled fallback)
     -> [fs] init_device_discovery
     -> init_drivers (cross-CPU services are now available)
     → [char] console handoff

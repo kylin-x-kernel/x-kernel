@@ -74,6 +74,19 @@ enum Backend {
 }
 
 impl Backend {
+    fn enable_receive_interrupt(&mut self) {
+        match self {
+            #[cfg(unittest)]
+            Backend::Test(port) => port.receive_enable_count += 1,
+            #[cfg(feature = "pl011")]
+            Backend::Pl011(uart) => uart.set_receive_interrupt(true),
+            #[cfg(feature = "ns16550-mmio")]
+            Backend::Ns16550Mmio(uart) => uart.enable_receive_interrupt(),
+            #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
+            Backend::Ns16550IoPort(uart) => uart.set_receive_interrupt(true),
+        }
+    }
+
     /// Send one byte, applying the per-backend line discipline. PL011 and the
     /// NS16550 MMIO backend translate `\n` to `\r\n`; the NS16550 ioport backend
     /// preserves its historical raw behavior.
@@ -169,6 +182,8 @@ impl SerialPort {
     ///
     /// `role` records whether this port is the kernel stdout console or an
     /// auxiliary char device; it is later read back through [`Self::role`].
+    /// RX/TX polling is available immediately; UART interrupts stay masked
+    /// until the console owner installs buffered input and its IRQ action.
     ///
     /// # Safety
     ///
@@ -183,7 +198,7 @@ impl SerialPort {
         role: SerialRole,
     ) -> Self {
         let mut uart = Pl011Uart::new(uart_base.as_mut_ptr());
-        uart.init();
+        uart.init_masked();
         Self::new(
             Backend::Pl011(uart),
             EmergencyTx::Pl011 {
@@ -199,6 +214,7 @@ impl SerialPort {
     /// `reg_shift` is the device-tree `reg-shift` value; each register is
     /// `1 << reg_shift` bytes apart (RK3588's DesignWare UART uses 2). The baud
     /// divisor is left untouched — firmware already programmed it.
+    /// UART interrupts remain masked; polled reads and writes remain available.
     ///
     /// `reg_width` is the device-tree `reg-io-width` value decoded as a typed
     /// MMIO access width. Rockchip DesignWare UARTs use 32-bit accesses.
@@ -237,7 +253,7 @@ impl SerialPort {
         )
     }
 
-    /// Build an NS16550 I/O-port port.
+    /// Build an NS16550 I/O-port port with UART interrupts masked.
     ///
     /// # Safety
     ///
@@ -246,7 +262,7 @@ impl SerialPort {
     pub unsafe fn new_ioport_ns16550(port: u16, role: SerialRole) -> Self {
         // SAFETY: caller guarantees `port` is a valid NS16550 I/O-port base.
         let mut uart = unsafe { SerialPort16550::new(port) };
-        uart.init();
+        uart.init_masked();
         Self::new(
             Backend::Ns16550IoPort(uart),
             EmergencyTx::Ns16550IoPort { base: port },
@@ -351,6 +367,12 @@ impl SerialPort {
             }
         }
         Ok(())
+    }
+
+    /// Unmask RX only after storage and the port's IRQ action are installed.
+    /// The console setup owner serializes this call; it does not flush input.
+    pub(crate) fn enable_receive_interrupt(&self) {
+        self.io.lock().backend.enable_receive_interrupt();
     }
 
     /// Collects a bounded hardware batch without allocating or waking tasks.
@@ -462,8 +484,9 @@ pub fn stdout_port() -> Option<Arc<SerialPort>> {
     STDOUT.get().map(|stdout| stdout.port.clone())
 }
 
-/// The interrupt descriptor of the stdout port, if registered.
-pub fn stdout_irq() -> Option<IrqDesc> {
+/// Firmware/platform interrupt metadata, not input IRQ readiness.
+/// Mapping and action installation happen later through `ConsoleIf::prepare_input`.
+pub(crate) fn stdout_irq() -> Option<IrqDesc> {
     STDOUT.get().and_then(|stdout| stdout.irq)
 }
 

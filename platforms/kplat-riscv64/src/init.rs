@@ -30,7 +30,6 @@ impl BootHandler {
         if let Some(fdt) = of::fdt() {
             kcpu::init_hwprobe_from_fdt(fdt);
         }
-        console_driver::register_input_irq_handler();
         #[cfg(feature = "rtc")]
         {
             #[expect(

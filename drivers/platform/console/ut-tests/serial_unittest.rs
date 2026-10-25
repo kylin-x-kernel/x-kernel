@@ -9,6 +9,65 @@ use super::*;
 
 #[cfg(feature = "pl011")]
 #[def_test]
+fn pl011_rx_stays_masked_until_explicit_activation() {
+    let mut registers = [0u32; 18];
+    registers[14] = 0x7ff;
+    registers[6] = 1 << 4;
+    let base = VirtAddr::from_usize(registers.as_mut_ptr() as usize);
+    // SAFETY: the aligned initialized PL011 window is private to this test
+    // and remains live until the port is dropped.
+    let port = unsafe {
+        SerialPort::new_mmio_pl011(
+            base, PhysAddr::from_usize(0), size_of_val(&registers), SerialRole::Stdout,
+        )
+    };
+    assert_eq!(registers[14], 0);
+    port.write_data(b"A");
+    assert_eq!(registers[0], u32::from(b'A'));
+    port.prepare_irq_input().unwrap();
+    assert_eq!(registers[14], 0);
+    let mut expected = registers;
+    expected[14] = 1 << 4;
+    // This private register fixture needs no actual IRQ registration. Check
+    // that the post-registration operation only changes the RX mask.
+    port.enable_receive_interrupt();
+    assert_eq!(registers, expected);
+    port.enable_receive_interrupt();
+    assert_eq!(registers, expected);
+}
+
+#[cfg(feature = "ns16550-mmio")]
+#[def_test]
+fn ns16550_rx_activation_preserves_fifo_and_line_configuration() {
+    for width in [SerialRegWidth::U8, SerialRegWidth::U16, SerialRegWidth::U32] {
+        let mut registers = [0u32; 8];
+        registers[1] = 0x0f;
+        registers[3] = 0x83;
+        registers[5] = 0x60;
+        let base = VirtAddr::from_usize(registers.as_mut_ptr() as usize);
+        // SAFETY: each register is naturally aligned at stride four for all
+        // tested widths. The private window outlives this port.
+        let port = unsafe {
+            SerialPort::new_mmio_ns16550(
+                base, PhysAddr::from_usize(0), size_of_val(&registers),
+                SerialRole::Auxiliary, 2, width,
+            )
+        };
+        assert_eq!(registers[1], 0);
+        assert_eq!(registers[3], 3);
+        port.write_data(b"A");
+        assert_eq!(registers[0], u32::from(b'A'));
+        port.prepare_irq_input().unwrap();
+        assert_eq!(registers[1], 0);
+        let mut expected = registers;
+        expected[1] = 1;
+        port.enable_receive_interrupt();
+        assert_eq!(registers, expected);
+    }
+}
+
+#[cfg(feature = "pl011")]
+#[def_test]
 fn input_irq_binding_initial_pass_duplicate_and_stop() {
     use alloc::{sync::Weak, task::Wake};
     use core::{

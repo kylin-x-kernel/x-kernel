@@ -31,6 +31,11 @@ TTY connection -> CharDevice::read -> SerialPort::read_data -> UART
 
 Port construction initializes the device and saves its virtual address or I/O-port
 base in `EmergencyTx`, outside the lock.
+All backends construct with UART interrupt notification masked, including
+auxiliary ports without an input action. Polling RX/TX remains usable. The
+PL011 and I/O-port 16550 adapters use vendored `init_masked` APIs rather than
+enabling RX transiently through the upstream `init` and masking it afterward.
+The local MMIO 16550 backend clears DLAB and masks IER before FIFO setup.
 For NS16550 MMIO, it also saves the register stride and access width decoded during
 the same construction path.
 The stdout instance is published through `LazyInit` after construction;
@@ -66,7 +71,29 @@ consumer calls `take_input_dropped_bytes()` and logs nonzero losses in task
 context, outside the UART lock. Reading the report clears only the count, not
 buffered data. Before attachment the count accumulates for the initial pass.
 
-The stdout IRQ registration path prepares storage before publishing its action.
+Early stdout publication retains only the physical IRQ descriptor; it does not
+map or register an IRQ. The runtime boot task calls `ConsoleIf::prepare_input`
+after GP and worker startup, before device discovery can construct N_TTY.
+This one-shot attempt prepares storage, maps the IRQ, and installs a shared action.
+Absent IRQ metadata or a failed preparation/map/registration keeps polled input
+and output available. An already created buffer or mapping is retained on failure:
+the mapping may belong to other users, and this path must not disable their line.
+There is no retry after the consumer has chosen its input mode.
+
+Input is not guaranteed lossless from firmware handoff through successful
+late-init RX activation. Before activation, IRQ collection cannot transfer
+bytes into the software ring; without polling, retention is limited to the
+hardware FIFO. Late activation preserves remaining FIFO bytes but cannot
+recover overflowed input. This is an early-output/late-input boundary, not a
+promise to buffer boot-time commands.
+
+Only successful registration enables RX under the port lock. The token and
+logical IRQ are then published together; `ConsoleIf::interrupt_id` reports only
+this completed setup, never mere firmware metadata or a mapped descriptor.
+This step does not reinitialize or flush the FIFO. Mapping
+and action registration do not hold the port lock; the controller line may be
+enabled during registration while the UART source is still masked. Emergency
+output does not participate in receive activation.
 The action acknowledges and collects a receive batch under the port lock, then
 wakes the bound input `Waker` after unlocking. An unrelated IRQ reports unhandled.
 Ports without prepared IRQ input retain direct hardware reads.
@@ -112,6 +139,9 @@ enumeration. The subsystem exposes no active/default console selection API.
 
 ## Lifetime and Validation
 
+Commands, results and coverage limits for the early-output/late-input transition
+are recorded in [Console Input Startup Validation](input-startup-validation.md).
+
 `EmergencyTx` does not own a second mapping and does not unmap the device.
 A static reference retains the stdout port.
 Auxiliary ports follow the device mapping's lifetime; the mapping may be removed
@@ -121,3 +151,11 @@ Regression tests cover routing empty output while both the normal print lock and
 serial lock are held, transmission through simulated registers while the port lock
 is held, return when hardware remains unready, preservation of configuration
 registers, and all three NS16550 access widths.
+
+Late input setup tests use private state and serial storage, substituting only
+the fallible storage preparation, IRQ mapping and action registration calls.
+They exercise the production ordering and RX activation, without modifying the
+live IRQ registry. Coverage includes absent metadata, capacity failure, mapping
+failure, rejected/failed registration, retained polled I/O, and no repeated work
+after either success or failure. The storage failure is a deterministic
+capacity-overflow result, not a test of allocator exhaustion recovery.

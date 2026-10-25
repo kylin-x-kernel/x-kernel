@@ -25,7 +25,6 @@ impl BootHandler {
         )]
         console_driver::init_stdout_from_device_tree()
             .expect("failed to parse console from device tree");
-        console_driver::register_input_irq_handler();
         #[cfg(feature = "rtc")]
         {
             // The LS7A RTC sits at the static `RTC_PADDR` aperture; map it and

@@ -11,6 +11,7 @@ use super::{Backend, EmergencyTx, PhysAddr, SerialIdent, SerialPort, SerialRole}
 const CAPACITY: usize = 256;
 
 pub(super) struct TestBackend {
+    pub(super) receive_enable_count: usize,
     input: [u8; CAPACITY],
     input_len: usize,
     input_offset: usize,
@@ -53,6 +54,7 @@ impl SerialPortFixture {
             "test serial input exceeds capacity"
         );
         let mut backend = TestBackend {
+            receive_enable_count: 0,
             input: [0; CAPACITY],
             input_len: input.len(),
             input_offset: 0,
@@ -76,6 +78,15 @@ impl SerialPortFixture {
     /// Clones this fixture's port; the clone retains all byte storage.
     pub fn port(&self) -> Arc<SerialPort> {
         self.port.clone()
+    }
+
+    /// Number of RX activation requests, initially zero.
+    pub fn receive_enable_count(&self) -> usize {
+        let io = self.port.io.lock();
+        let Backend::Test(backend) = &io.backend else {
+            unreachable!("fixture owns a test serial port");
+        };
+        backend.receive_enable_count
     }
 
     /// Returns all bytes written so far without clearing them.

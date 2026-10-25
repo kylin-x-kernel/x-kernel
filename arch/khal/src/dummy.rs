@@ -43,6 +43,8 @@ impl crate::console::ConsoleIf {
         unimplemented!()
     }
 
+    fn prepare_input() {}
+
     fn interrupt_id() -> Option<usize> {
         None
     }

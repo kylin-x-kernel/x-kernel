@@ -385,6 +385,11 @@ check_host_tests:
 check_x2apic:
 	@cargo test --manifest-path vendor/x2apic/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-x2apic-host --lib --locked
 
+.PHONY: check_uart
+check_uart:
+	@cargo test --manifest-path vendor/arm_pl011/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-uart-host --lib --locked
+	@cargo test --manifest-path vendor/uart_16550/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-uart-host --lib --locked
+
 fmt:
 	@cargo +nightly-2026-03-08 fmt --all
 

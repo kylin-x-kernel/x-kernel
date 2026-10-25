@@ -57,7 +57,6 @@ impl BootHandler {
                       failed; this boot hook has no error return and must not activate sources"
         )]
         irq_driver::gic::init_from_device_tree().expect("primary GIC initialization failed");
-        console_driver::register_input_irq_handler();
         #[cfg(feature = "nmi")]
         khal::nmi::early_init();
     }

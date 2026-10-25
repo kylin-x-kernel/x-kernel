@@ -973,9 +973,9 @@ def runBuildArtifact(String arch) {
     def stageName = "Build Artifact: ${platform}"
     initStageLog(stageName)
     def runtimeTargetDir = targetDirForArch(arch)
-    // Vendored x2apic is outside workspace host-test discovery. This stage
+    // Vendored dependencies are outside workspace host-test discovery. This stage
     // uses a native x86_64 agent, so its register-fixture tests can execute.
-    def vendorCheck = arch == 'x86_64' ? 'make check_x2apic' : ''
+    def vendorCheck = arch == 'x86_64' ? 'make check_x2apic check_uart' : ''
 
     withCleanSourceWorkspace("build-artifact-${arch}") {
         withEnv(["TARGET_DIR=${runtimeTargetDir}"]) {

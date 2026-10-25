@@ -141,11 +141,17 @@ impl Port {
         // SAFETY: The caller exclusively owns the live UART during init; LCR
         // is writable at the configured register width and only DLAB is cleared.
         unsafe { self.write_reg(Self::LCR, lcr & !Self::LCR_DLAB) };
+        // SAFETY: DLAB is now clear, so this addresses IER rather than divisor high.
+        unsafe { self.write_reg(Self::IER, 0) };
         // SAFETY: same MMIO register window invariant as above.
         unsafe { self.write_reg(Self::FCR, 0xC7) };
         // SAFETY: same MMIO register window invariant as above.
         unsafe { self.write_reg(Self::MCR, 0x0B) };
-        // SAFETY: same MMIO register window invariant as above.
+    }
+
+    pub(crate) fn enable_receive_interrupt(&mut self) {
+        // SAFETY: initialization cleared DLAB and this backend never changes
+        // it afterward. The SerialPort owner serializes access to the live map.
         unsafe { self.write_reg(Self::IER, 0x01) };
     }
 

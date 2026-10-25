@@ -64,6 +64,21 @@ unobservable hardware FIFO losses. No received contents are logged.
 The stdout IRQ path enables storage before action registration. Allocation
 failure prevents publishing an unprepared receiver. Early IRQs may collect bytes
 before the TTY input notification is attached; attachment sends an initial wake.
+UART source notification stays masked from construction until action registration
+succeeds. Failure to prepare storage or register an action cannot unmask RX.
+No lossless-input guarantee applies before successful late-init RX activation:
+without polling, bytes can overflow the hardware FIFO before IRQ collection
+starts. The software-loss count cannot diagnose or recover that loss.
+The late boot attempt reports failures without aborting boot, and does not
+publish IRQ-input readiness on failure. It never removes a potentially shared
+mapping or masks a shared controller line as rollback. Prepared storage and any
+published mapping remain boot-lifetime resources. The boot task completes this
+attempt before exposing consumers; concurrent callers must not treat an
+in-progress attempt as a completed setup.
+Auxiliary ports without actions remain polled. The 16550 initialization clears
+DLAB before masking IER so a firmware-selected divisor latch cannot redirect the
+mask write. Source activation changes only the interrupt mask, not FIFO contents
+or baud configuration, and executes under the same lock as ordinary UART I/O.
 
 Input notification uses a prepared Waker outside the port lock. The provider
 must guarantee IRQ-safe, non-sleeping, allocation-free wake behavior and avoid

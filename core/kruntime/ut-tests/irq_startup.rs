@@ -7,9 +7,12 @@ use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use unittest::{assert, assert_eq, def_test};
 
 // One-shot observations persist for this test boot; no runtime hooks are installed.
+// Both primary and AP activation call sites are boot-only. Repeated activation
+// or CPU hotplug requires a separate contract, not relaxed phase observations.
 static HANDLERS_READY: AtomicBool = AtomicBool::new(false);
 static PHASES: [AtomicU8; kbuild_config::NR_CPUS] = [const { AtomicU8::new(0) }; kbuild_config::NR_CPUS];
 static HAS_INVALID_ORDER: AtomicBool = AtomicBool::new(false);
+static HAS_EARLY_CONSOLE_INPUT: AtomicBool = AtomicBool::new(false);
 
 fn advance(expected: u8, next: u8) {
     let cpu = khal::percpu::this_cpu_id().as_usize();
@@ -31,6 +34,9 @@ pub(super) fn record_handlers_ready() {
 }
 
 pub(super) fn record_activation_entry() {
+    if khal::console::interrupt_id().is_some() {
+        HAS_EARLY_CONSOLE_INPUT.store(true, Ordering::Release);
+    }
     if !HANDLERS_READY.load(Ordering::Acquire) || ktask::current_may_uninit().is_none() {
         HAS_INVALID_ORDER.store(true, Ordering::Release);
     }
@@ -39,6 +45,11 @@ pub(super) fn record_activation_entry() {
 
 pub(super) fn record_activation_return() {
     advance(2, 3);
+}
+
+#[def_test]
+fn console_input_is_not_registered_during_local_source_activation() {
+    assert!(!HAS_EARLY_CONSOLE_INPUT.load(Ordering::Acquire));
 }
 
 #[def_test]
