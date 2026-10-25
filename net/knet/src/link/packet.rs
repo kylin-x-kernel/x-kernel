@@ -356,6 +356,19 @@ impl SocketOps for PacketSocket {
         }
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_PACKET as i32
+    }
+
+    /// `sk_alloc` hands out a socket whose `sk_protocol` is zero-initialised
+    /// (`net/core/sock.c` passes `__GFP_ZERO`; the slab path clears the object
+    /// apart from the one word it preserves for RCU, which is not this field)
+    /// and nothing in the packet family assigns it afterwards, so Linux reports
+    /// 0 here for every ethertype even though the socket remembers one.
+    fn socket_protocol(&self) -> i32 {
+        0
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut addr = local_addr.into_packet()?;
         validate_ifindex_or_any(addr.ifindex)?;

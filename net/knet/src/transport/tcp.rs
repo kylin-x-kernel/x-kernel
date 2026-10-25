@@ -429,6 +429,14 @@ impl SocketOps for TcpSocket {
         linux_raw_sys::net::SOCK_STREAM as i32
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_INET as i32
+    }
+
+    fn socket_protocol(&self) -> i32 {
+        linux_raw_sys::net::IPPROTO_TCP as i32
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut local_addr = local_addr.into_ip()?;
         self.state

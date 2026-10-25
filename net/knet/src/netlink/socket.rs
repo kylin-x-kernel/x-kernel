@@ -246,6 +246,15 @@ impl SocketOps for NetlinkSocket {
         self.inner.socket_type.as_raw()
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_NETLINK as i32
+    }
+
+    /// `netlink_create` records the requested protocol in `sk_protocol`.
+    fn socket_protocol(&self) -> i32 {
+        self.inner.protocol
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let addr = local_addr.into_netlink()?;
         if self.inner.protocol == NETLINK_ROUTE && addr.groups != 0 {

@@ -100,6 +100,16 @@ impl SocketOps for VsockSocket {
         linux_raw_sys::net::SOCK_STREAM as i32
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_VSOCK as i32
+    }
+
+    /// AF_VSOCK sockets are created without a protocol here, matching the 0
+    /// `vsock_create` records for that case.
+    fn socket_protocol(&self) -> i32 {
+        0
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_vsock()?;
         self.transport.bind(local_addr)

@@ -47,6 +47,9 @@ pub(crate) fn new_raw_socket(
 pub struct RawSocket {
     handle: SocketHandle,
     ip_version: IpVersion,
+    /// The IP protocol the socket was created for, reported by `SO_PROTOCOL`
+    /// the way Linux keeps it in `sk_protocol`.
+    ip_protocol: u8,
     local_addr: RwLock<Option<IpAddress>>,
     peer_addr: RwLock<Option<IpAddress>>,
     ttl: RwLock<Option<u8>>,
@@ -62,6 +65,7 @@ impl RawSocket {
         Self {
             handle,
             ip_version,
+            ip_protocol: ip_protocol.into(),
             local_addr: RwLock::new(None),
             peer_addr: RwLock::new(None),
             ttl: RwLock::new(None),
@@ -210,6 +214,17 @@ impl SocketOps for RawSocket {
     /// Returns the `SO_TYPE` reported for this socket.
     fn socket_type(&self) -> i32 {
         linux_raw_sys::net::SOCK_RAW as i32
+    }
+
+    fn socket_family(&self) -> i32 {
+        match self.ip_version {
+            IpVersion::Ipv4 => linux_raw_sys::net::AF_INET as i32,
+            IpVersion::Ipv6 => linux_raw_sys::net::AF_INET6 as i32,
+        }
+    }
+
+    fn socket_protocol(&self) -> i32 {
+        self.ip_protocol as i32
     }
 
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {

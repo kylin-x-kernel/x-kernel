@@ -21,7 +21,8 @@ use knet::{
     sock_from_file,
 };
 use linux_raw_sys::net::{
-    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_TYPE, SOL_SOCKET, socklen_t,
+    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_DOMAIN, SO_PROTOCOL, SO_TYPE,
+    SOL_SOCKET, socklen_t,
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
@@ -380,12 +381,20 @@ pub fn sys_getsockopt(
             put(optval, &mut optlen, &sys_val)?;
         };
     }
-    if level == SOL_SOCKET && optname == SO_TYPE {
-        // `SO_TYPE` is a property of the socket itself, not a stored option.
-        // Runtime supervisors (containerd-shim, ttrpc) validate inherited
-        // descriptors with it right after spawn. Linux copies it with the
-        // caller's length, so a short buffer truncates rather than failing.
-        put_truncated(optval, &mut optlen, socket.socket_type())?;
+    // `SO_TYPE`, `SO_DOMAIN` and `SO_PROTOCOL` describe the socket itself
+    // rather than a stored option: Linux reports `sk_type`, `sk_family` and
+    // `sk_protocol` back from `sk_getsockopt` (net/core/sock.c), and runtime
+    // supervisors (containerd-shim, ttrpc) use `SO_TYPE` to validate inherited
+    // descriptors right after spawn. All three copy with the caller's length,
+    // so a short buffer truncates rather than failing.
+    let identity = match (level, optname) {
+        (SOL_SOCKET, SO_TYPE) => Some(socket.socket_type()),
+        (SOL_SOCKET, SO_DOMAIN) => Some(socket.socket_family()),
+        (SOL_SOCKET, SO_PROTOCOL) => Some(socket.socket_protocol()),
+        _ => None,
+    };
+    if let Some(identity) = identity {
+        put_truncated(optval, &mut optlen, identity)?;
     } else if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         let mut name: Option<alloc::string::String> = None;
         socket.get_option(GetSocketOption::BindToDevice(&mut name))?;

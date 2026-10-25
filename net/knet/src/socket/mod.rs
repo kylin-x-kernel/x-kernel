@@ -14,8 +14,8 @@ unittest::path_mod_test!(test_options, "../../ut-tests/socket/test_options.rs");
 unittest::path_mod_test!(test_state, "../../ut-tests/socket/test_state.rs");
 #[cfg(unittest)]
 unittest::path_mod_test!(
-    test_socket_type,
-    "../../ut-tests/socket/test_socket_type.rs"
+    test_socket_identity,
+    "../../ut-tests/socket/test_socket_identity.rs"
 );
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -312,11 +312,30 @@ pub trait SocketOps: Configurable {
     /// Deliberately has no default: a socket whose type is not reported would
     /// silently answer with `SOCK_STREAM`, so every implementation states it.
     fn socket_type(&self) -> i32;
+
+    /// Returns the `SO_DOMAIN` value reported by `getsockopt(SOL_SOCKET,
+    /// SO_DOMAIN)`: the address family the socket was created with, which Linux
+    /// keeps in `sk_family`. Has no default for the same reason as
+    /// [`Self::socket_type`].
+    fn socket_family(&self) -> i32;
+
+    /// Returns the `SO_PROTOCOL` value reported by `getsockopt(SOL_SOCKET,
+    /// SO_PROTOCOL)`: the protocol Linux keeps in `sk_protocol`. Families that
+    /// never record one report 0, which is what Linux leaves there.
+    fn socket_protocol(&self) -> i32;
 }
 
 impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
     fn socket_type(&self) -> i32 {
         (**self).socket_type()
+    }
+
+    fn socket_family(&self) -> i32 {
+        (**self).socket_family()
+    }
+
+    fn socket_protocol(&self) -> i32 {
+        (**self).socket_protocol()
     }
 
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {

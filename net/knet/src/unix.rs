@@ -342,6 +342,15 @@ impl SocketOps for UnixDomainSocket {
         self.socket_type.as_raw()
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_UNIX as i32
+    }
+
+    /// `unix_create` never records a protocol, so Linux leaves `sk_protocol` 0.
+    fn socket_protocol(&self) -> i32 {
+        0
+    }
+
     fn bind(&self, local_endpoint: SocketAddrEx) -> KResult {
         let cred = kprocess::current_cred();
         let mode = NodePermission::from_bits_truncate(0o777 & !(kprocess::current_umask() as u16));

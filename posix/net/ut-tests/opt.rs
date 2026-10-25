@@ -7,7 +7,10 @@ use core::mem::size_of;
 use kerrno::KError;
 use ktime_types::{NANOS_PER_SEC, TimeSpan};
 use linux_raw_sys::general::timeval;
-use linux_raw_sys::net::{AF_UNIX, SO_TYPE, SOCK_DGRAM, SOL_SOCKET, socklen_t};
+use linux_raw_sys::net::{
+    AF_INET, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PROTOCOL, SO_TYPE, SOCK_DGRAM, SOCK_STREAM,
+    SOL_SOCKET, socklen_t,
+};
 use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
 use unittest_support::{TestUserBuffer, TestUserValue};
@@ -109,6 +112,12 @@ fn classic_filter_rejects_out_of_range_jumps() {
     );
 }
 
+/// Releases a descriptor a test created, so the case cleans up after itself
+/// instead of relying on the task being torn down.
+fn close_socket(fd: i32) {
+    kprocess::current_files().close_file(fd).unwrap();
+}
+
 /// Linux `sk_getsockopt` copies `min(optlen, sizeof(int))` bytes and reports the
 /// length it wrote, so a buffer shorter than the value truncates instead of
 /// failing and a zero length succeeds without touching the buffer.
@@ -183,4 +192,92 @@ fn so_type_reports_the_socket_type_and_truncates_short_buffers() {
         ),
         Err(KError::BadFileDescriptor)
     );
+
+    close_socket(fd);
+}
+
+/// `SO_DOMAIN` and `SO_PROTOCOL` describe the socket the way `SO_TYPE` does, so
+/// they report what the descriptor was created with and share its short-buffer
+/// handling.
+#[def_test(user)]
+fn so_domain_and_protocol_report_the_creation_family_and_protocol() {
+    let value = TestUserValue::<i32>::new().unwrap();
+    let mut optlen = TestUserValue::from_value(size_of::<i32>() as socklen_t).unwrap();
+    let optlen_ptr = UserPtr::from(optlen.as_user_ptr());
+
+    let stream = sys_socket(AF_INET, SOCK_STREAM, 0).unwrap() as i32;
+    assert_eq!(
+        sys_getsockopt(
+            stream,
+            SOL_SOCKET,
+            SO_DOMAIN,
+            UserPtr::from(value.as_user_ptr().cast::<u8>()),
+            optlen_ptr
+        ),
+        Ok(0)
+    );
+    assert_eq!(value.read(), AF_INET as i32);
+
+    optlen.write(size_of::<i32>() as socklen_t);
+    assert_eq!(
+        sys_getsockopt(
+            stream,
+            SOL_SOCKET,
+            SO_PROTOCOL,
+            UserPtr::from(value.as_user_ptr().cast::<u8>()),
+            optlen_ptr
+        ),
+        Ok(0)
+    );
+    assert_eq!(value.read(), IPPROTO_TCP as i32);
+
+    // AF_UNIX records no protocol, and `unix_create` leaves `sk_protocol` 0.
+    let dgram = sys_socket(AF_UNIX, SOCK_DGRAM, 0).unwrap() as i32;
+    optlen.write(size_of::<i32>() as socklen_t);
+    assert_eq!(
+        sys_getsockopt(
+            dgram,
+            SOL_SOCKET,
+            SO_DOMAIN,
+            UserPtr::from(value.as_user_ptr().cast::<u8>()),
+            optlen_ptr
+        ),
+        Ok(0)
+    );
+    assert_eq!(value.read(), AF_UNIX as i32);
+
+    optlen.write(size_of::<i32>() as socklen_t);
+    assert_eq!(
+        sys_getsockopt(
+            dgram,
+            SOL_SOCKET,
+            SO_PROTOCOL,
+            UserPtr::from(value.as_user_ptr().cast::<u8>()),
+            optlen_ptr
+        ),
+        Ok(0)
+    );
+    assert_eq!(value.read(), 0);
+
+    // A short buffer truncates and reports the length it wrote, like `SO_TYPE`.
+    let short = TestUserBuffer::new(size_of::<i32>()).unwrap();
+    optlen.write(1);
+    assert_eq!(
+        sys_getsockopt(
+            stream,
+            SOL_SOCKET,
+            SO_DOMAIN,
+            UserPtr::from(short.as_user_ptr::<u8>()),
+            optlen_ptr
+        ),
+        Ok(0)
+    );
+    assert_eq!(optlen.read(), 1);
+    assert_eq!(
+        short.read_bytes(1).unwrap(),
+        (AF_INET as i32).to_ne_bytes()[..1].to_vec()
+    );
+
+    close_socket(stream);
+    close_socket(dgram);
 }

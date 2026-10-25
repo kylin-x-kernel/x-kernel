@@ -384,6 +384,14 @@ impl SocketOps for UdpSocket {
         linux_raw_sys::net::SOCK_DGRAM as i32
     }
 
+    fn socket_family(&self) -> i32 {
+        linux_raw_sys::net::AF_INET as i32
+    }
+
+    fn socket_protocol(&self) -> i32 {
+        linux_raw_sys::net::IPPROTO_UDP as i32
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_ip()?;
         if !matches!(local_addr, SocketAddr::V4(_)) {
