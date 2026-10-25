@@ -24,6 +24,7 @@ impl<P: EntryOwner> XArray<P> {
     /// The observer runs before reinspection, for either nodes or a retirement
     /// record. It must return with the caller's execution context restored.
     /// Available only in kernel unittest builds.
+    #[cfg(all(target_os = "none", feature = "smp"))]
     pub(crate) fn set_preparation_hook_for_test(&self, hook_fn: fn(&Self, usize)) {
         *self.preparation_hook.lock() = Some(hook_fn);
     }

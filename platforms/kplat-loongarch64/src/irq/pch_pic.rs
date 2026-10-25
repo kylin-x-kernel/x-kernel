@@ -62,8 +62,9 @@ impl PchPicRegs for MmioPchPic {
     fn reg_read(&mut self, addr: usize) -> u32 {
         // SAFETY: `mmio_base()` is the kernel virtual address of the 4 KiB
         // PCH PIC aperture established by `init()` via `memspace::iomap_device`.
-        // Callers only pass offsets inside that aperture: `init()` uses the
-        // fixed EDGE/POL offsets, and enable/disable reach here only after
+        // Callers only pass offsets inside that aperture: `init_impl()` writes
+        // both banks at MASK 0x20/0x24, EDGE 0x60/0x64 and POL 0x3e0/0x3e4.
+        // Enable/disable reach here only after
         // `check_hwirq` proved `irq < PCH_PIC_IRQ_COUNT`, so the MASK offset
         // is in [0x20, 0x24] and the HTVEC offset in [0x200, 0x240). The
         // volatile read models device-memory semantics, not synchronization.
@@ -100,10 +101,18 @@ pub(super) fn init() {
     let base = memspace::iomap_device(PhysAddr::from_usize(PCH_PIC_PADDR), PCH_PIC_SIZE, "pch-pic")
         .unwrap_or_else(|err| panic!("failed to iomap pch-pic: {err:?}"));
     PCH_PIC_BASE.init_once(base);
-    let mut regs = MmioPchPic;
-    for _ in 0..PIC_REG_COUNT {
-        regs.reg_write(PCH_PIC_EDGE, 0);
-        regs.reg_write(PCH_PIC_POL, 0);
+    init_impl(&mut MmioPchPic);
+}
+
+fn init_impl<R: PchPicRegs>(regs: &mut R) {
+    // Mask both banks before programming trigger/polarity, as in Linux's
+    // pch_pic_reset. Activation must not inherit firmware's unmasked lines.
+    for i in 0..PIC_REG_COUNT {
+        regs.reg_write(PCH_PIC_MASK + i * 4, u32::MAX);
+    }
+    for i in 0..PIC_REG_COUNT {
+        regs.reg_write(PCH_PIC_EDGE + i * 4, 0);
+        regs.reg_write(PCH_PIC_POL + i * 4, 0);
     }
 }
 
@@ -126,11 +135,11 @@ fn enable_irq_impl<R: PchPicRegs>(regs: &mut R, irq: usize) {
         return;
     }
     let (offset, bit) = split_bit(irq);
+    // Publish the vector before opening the source gate.
+    regs.htvec_write(PCH_INT_HTVEC + irq, irq as u8);
     let addr = PCH_PIC_MASK + offset;
     let val = regs.reg_read(addr);
     regs.reg_write(addr, val & !bit);
-    let addr = PCH_INT_HTVEC + irq;
-    regs.htvec_write(addr, irq as u8);
 }
 
 fn disable_irq_impl<R: PchPicRegs>(regs: &mut R, irq: usize) {

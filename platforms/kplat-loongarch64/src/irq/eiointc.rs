@@ -57,7 +57,15 @@ impl EiointcRegs for IocsrEiointc {
 }
 
 pub(super) fn init() {
-    let mut regs = IocsrEiointc;
+    init_impl(&mut IocsrEiointc);
+}
+
+fn init_impl<R: EiointcRegs>(regs: &mut R) {
+    // Establish source masks before changing routes or enabling the router;
+    // firmware's enable bits are not our activation contract.
+    for i in 0..VEC_REG_COUNT {
+        regs.write_d(EIOINTC_REG_ENABLE + i * 8, 0);
+    }
     let misc = regs.read_d(LOONGARCH_IOCSR_MISC_FUNC);
     regs.write_d(LOONGARCH_IOCSR_MISC_FUNC, misc | IOCSR_MISC_FUNC_EXT_IOI_EN);
     let index = 0;

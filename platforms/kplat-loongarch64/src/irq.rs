@@ -19,6 +19,8 @@ mod pch_pic;
 unittest::path_mod_test!(tests, "../ut-tests/irq.rs");
 
 pub(crate) fn init() {
+    // Keep the parent closed while replacing firmware's routing/source state.
+    ecfg::set_lie(ecfg::read().lie() & !LineBasedInterrupt::HWI1);
     eiointc::init();
     pch_pic::init();
     // EIOINTC routes external vectors to CPU0 HWI1. Device masks remain

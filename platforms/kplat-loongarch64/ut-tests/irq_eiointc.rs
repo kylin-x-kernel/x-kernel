@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use unittest::{assert_eq, def_test};
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 
@@ -27,15 +27,15 @@ enum Access {
 /// In-memory recording backend: logs every access and returns zero for
 /// reads, so read-modify-write results are fully predictable. It never
 /// touches real IOCSR.
-struct RecorderEiointc {
-    accesses: [Access; 8],
+struct RecorderEiointc<const N: usize> {
+    accesses: [Access; N],
     count: usize,
 }
 
-impl RecorderEiointc {
+impl<const N: usize> RecorderEiointc<N> {
     const fn new() -> Self {
         Self {
-            accesses: [Access::None; 8],
+            accesses: [Access::None; N],
             count: 0,
         }
     }
@@ -56,7 +56,7 @@ impl RecorderEiointc {
     }
 }
 
-impl EiointcRegs for RecorderEiointc {
+impl<const N: usize> EiointcRegs for RecorderEiointc<N> {
     fn read_d(&mut self, addr: usize) -> u64 {
         self.record(Access::Read { addr });
         // The recorder does not model ENABLE/BOUNCE/ISR state; returning
@@ -74,9 +74,31 @@ impl EiointcRegs for RecorderEiointc {
 }
 
 #[def_test]
+fn preparation_masks_all_vectors_before_routing() {
+    // Preparation records 88 accesses; other operations need at most four.
+    // Only this fixture reserves the larger log, with overflow checked below.
+    let mut rec = RecorderEiointc::<128>::new();
+    init_impl(&mut rec);
+    assert!(rec.access_count() <= rec.accesses.len());
+    for i in 0..VEC_REG_COUNT {
+        assert_eq!(rec.access(i), Access::WriteD {
+            addr: EIOINTC_REG_ENABLE + i * 8, val: 0,
+        });
+    }
+    // No later routing write may reopen an enable bank.
+    for access in &rec.accesses[VEC_REG_COUNT..rec.access_count()] {
+        let addr = match access {
+            Access::WriteD { addr, .. } | Access::WriteW { addr, .. } => *addr,
+            _ => continue,
+        };
+        assert!(!(EIOINTC_REG_ENABLE..EIOINTC_REG_ENABLE + VEC_REG_COUNT * 8).contains(&addr));
+    }
+}
+
+#[def_test]
 fn test_enable_legal_boundaries() {
     for irq in [0usize, 63, 64, 255] {
-        let mut rec = RecorderEiointc::new();
+        let mut rec = RecorderEiointc::<8>::new();
         enable_irq_impl(&mut rec, irq);
 
         // ENABLE and BOUNCE, each as a read-modify-write.
@@ -116,7 +138,7 @@ fn test_enable_legal_boundaries() {
 #[def_test]
 fn test_enable_rejects_out_of_range() {
     for irq in [256usize, 3584, usize::MAX] {
-        let mut rec = RecorderEiointc::new();
+        let mut rec = RecorderEiointc::<8>::new();
         enable_irq_impl(&mut rec, irq);
         // No IOCSR access before rejection: the log stays empty.
         assert_eq!(rec.access_count(), 0);
@@ -126,7 +148,7 @@ fn test_enable_rejects_out_of_range() {
 #[def_test]
 fn test_disable_legal() {
     for irq in [0usize, 255] {
-        let mut rec = RecorderEiointc::new();
+        let mut rec = RecorderEiointc::<8>::new();
         disable_irq_impl(&mut rec, irq);
 
         // disable touches ENABLE only, as a read-modify-write.
@@ -152,7 +174,7 @@ fn test_disable_legal() {
 #[def_test]
 fn test_disable_rejects_out_of_range() {
     for irq in [256usize, usize::MAX] {
-        let mut rec = RecorderEiointc::new();
+        let mut rec = RecorderEiointc::<8>::new();
         disable_irq_impl(&mut rec, irq);
         assert_eq!(rec.access_count(), 0);
     }
@@ -161,7 +183,7 @@ fn test_disable_rejects_out_of_range() {
 #[def_test]
 fn test_complete_legal() {
     for irq in [0usize, 255] {
-        let mut rec = RecorderEiointc::new();
+        let mut rec = RecorderEiointc::<8>::new();
         complete_irq_impl(&mut rec, irq);
 
         // complete is a single ISR write.
@@ -182,7 +204,7 @@ fn test_complete_legal() {
 #[def_test]
 fn test_complete_rejects_out_of_range() {
     for irq in [256usize, usize::MAX] {
-        let mut rec = RecorderEiointc::new();
+        let mut rec = RecorderEiointc::<8>::new();
         complete_irq_impl(&mut rec, irq);
         assert_eq!(rec.access_count(), 0);
     }

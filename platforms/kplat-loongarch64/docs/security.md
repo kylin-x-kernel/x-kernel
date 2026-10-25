@@ -18,6 +18,13 @@ the move adds no unsafe code or production trust boundary.
 
 ## Trust Model
 
+Startup does not trust firmware's source masks: HWI1 is closed during
+controller preparation, all EIOINTC enable banks are cleared, and both PCH
+mask banks are set before the parent is reopened. Recording tests check the
+mask-before-configuration sequence and both PCH bank offsets. Device activation
+installs its HTVEC entry before unmasking. Pending state is retained; these
+operations do not prove a device has stopped producing interrupts.
+
 The device tree and the architectural registers are the two external
 inputs. The DTB is structurally validated by `rs_fdtree`/`of`; the
 values read from it (power-off register and byte, console node) are

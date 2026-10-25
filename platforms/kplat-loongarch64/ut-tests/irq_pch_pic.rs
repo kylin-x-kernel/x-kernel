@@ -87,39 +87,60 @@ impl PchPicRegs for RecorderPchPic {
 }
 
 #[def_test]
+fn preparation_masks_both_banks_before_configuring_them() {
+    let mut rec = RecorderPchPic::new();
+    init_impl(&mut rec);
+    assert_eq!(rec.mask, [u32::MAX; PIC_REG_COUNT]);
+    assert_eq!(rec.access_count(), 6);
+    for i in 0..PIC_REG_COUNT {
+        assert_eq!(rec.access(i), Access::Write {
+            addr: PCH_PIC_MASK + i * 4, val: u32::MAX,
+        });
+        assert_eq!(rec.access(2 + i * 2), Access::Write {
+            addr: PCH_PIC_EDGE + i * 4, val: 0,
+        });
+        assert_eq!(rec.access(3 + i * 2), Access::Write {
+            addr: PCH_PIC_POL + i * 4, val: 0,
+        });
+    }
+}
+
+#[def_test]
 fn test_enable_legal_boundaries() {
     for irq in [0usize, 31, 32, 63] {
         let mut rec = RecorderPchPic::new();
+        rec.mask = [u32::MAX; PIC_REG_COUNT];
         enable_irq_impl(&mut rec, irq);
 
-        // read-modify-write of the MASK register, then one HTVEC byte.
+        // The vector must be installed before the MASK read-modify-write.
         assert_eq!(rec.access_count(), 3);
 
         let expected_mask = PCH_PIC_MASK + (irq / PIC_COUNT_PER_REG) * 4;
         assert_eq!(
-            rec.access(0),
+            rec.access(1),
             Access::Read {
                 addr: expected_mask,
-                val: 0
+                val: u32::MAX
             }
         );
         assert_eq!(
-            rec.access(1),
+            rec.access(2),
             Access::Write {
                 addr: expected_mask,
-                val: 0
+                val: !(1 << (irq % PIC_COUNT_PER_REG))
             }
         );
 
         let expected_htvec = PCH_INT_HTVEC + irq;
         assert_eq!(
-            rec.access(2),
+            rec.access(0),
             Access::Htvec {
                 addr: expected_htvec,
                 val: irq as u8
             }
         );
         assert_eq!(rec.htvec[irq], irq as u8);
+        assert_eq!(rec.mask[1 - irq / PIC_COUNT_PER_REG], u32::MAX);
     }
 }
 

@@ -679,6 +679,7 @@ impl RunQueue {
     /// NOHZ may leave a lone task without timer IRQs for a long time. Wakes and
     /// new publishes must flush that elapsed time into EEVDF `curr` before
     /// computing system V / PLACE_LAG.
+    #[cfg(feature = "smp")]
     pub(super) fn flush_running_runtime(&self, now_ns: u64) {
         let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         let _ = self.with_sched_rank(|s| s.update(now_ns, UpdateKind::Account));

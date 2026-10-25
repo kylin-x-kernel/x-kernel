@@ -73,11 +73,11 @@ original parents in `src/irq.rs`, `src/irq/eiointc.rs`, and
 registration are unchanged. All tests inherit the crate's LoongArch64 gate
 and require `cfg(unittest)`.
 
-The EIOINTC and PCH PIC files contain six and four cases respectively, using
+The EIOINTC and PCH PIC files contain seven and five cases respectively, using
 recording backends instead of live IOCSR/MMIO. The single boot parent-gate
 case reads live CPU-local ECFG and retains `#[cfg(not(feature = "smp"))]`:
 external vectors target CPU0, while an unpinned SMP test could run elsewhere.
-Thus non-SMP builds have 11 cases and SMP builds have 10. No case uses serial
+Thus non-SMP builds have 13 cases and SMP builds have 12. No case uses serial
 or user-mode flags.
 
 ## Architecture
@@ -99,10 +99,25 @@ SysCtrl (kiface)
 
 ## Execution Context
 
-The EIOINTC routes external vectors to CPU0 HWI1. After initializing both
+The EIOINTC routes external vectors to CPU0 HWI1. Preparation first closes
+HWI1, clears all four EIOINTC enable banks before programming routing, and
+masks both PCH PIC banks before setting each bank's edge/polarity state.
+After initializing both
 controllers, `irq::init` enables that parent in CPU0's `ECFG.LIE`, preserving
 other enabled CPU lines. Individual device lines remain gated by EIOINTC and
 PCH PIC; enabling a device alone cannot open the CPU parent gate.
+PCH activation writes the HTVEC mapping before unmasking the source.
+
+Linux `drivers/irqchip/irq-loongson-pch-pic.c::pch_pic_reset` likewise writes
+every PCH mask bank explicitly. Linux's EIOINTC router initialization enables
+all vectors; this backend instead retains its existing per-device EIOINTC
+gate and starts those gates closed. No pending/active bits are cleared by
+this preparation: masking is not an acknowledgement or device-source drain.
+The supported external route is the 64-line PCH PIC with an identity HTVEC
+mapping. EIOINTC vectors 64..255 have no platform activation path, and generic
+MSI-X allocation returns `None` on LoongArch. Those unsupported vectors stay
+masked rather than inheriting firmware enables. Supporting them requires a
+separate allocation/routing/activation lifecycle, not a wider PCH range check.
 
 - `early_driver_init` runs on the boot hart before the driver model;
   the RTC path maps its MMIO aperture through `memspace` and must run
