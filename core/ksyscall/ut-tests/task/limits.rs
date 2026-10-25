@@ -246,7 +246,7 @@ fn concurrent_rlimit_exchanges_return_one_complete_transition_chain() {
     let start_queue = Arc::new(WaitQueue::new());
     let mut workers = Vec::with_capacity(WORKERS);
     resources
-        .set_rlimit(RLIMIT_CORE, Rlimit::new(0, original.max))
+        .update_rlimit_and_get_old(RLIMIT_CORE, Some(Rlimit::new(0, original.max)), true)
         .unwrap();
 
     for index in 0..WORKERS {
@@ -263,7 +263,7 @@ fn concurrent_rlimit_exchanges_return_one_complete_transition_chain() {
             ready_queue.notify_one(false);
             start_queue.wait_until(|| start.load(Ordering::Acquire));
             let result = resources
-                .update_rlimit_and_get_old(RLIMIT_CORE, Some(Rlimit::new(index as u64 + 1, hard)));
+                .update_rlimit_and_get_old(RLIMIT_CORE, Some(Rlimit::new(index as u64 + 1, hard)), false);
             if let Ok(old) = result {
                 returned[index].0.store(old.current, Ordering::Relaxed);
                 returned[index].1.store(old.max, Ordering::Relaxed);
@@ -279,10 +279,10 @@ fn concurrent_rlimit_exchanges_return_one_complete_transition_chain() {
         .into_iter()
         .map(|worker| worker.join())
         .collect::<Vec<_>>();
-    let final_limit = resources.update_rlimit_and_get_old(RLIMIT_CORE, None);
+    let final_limit = resources.update_rlimit_and_get_old(RLIMIT_CORE, None, false);
     // Reap every worker and restore the fixed-hard-limit state before assertions.
-    let restored = resources.set_rlimit(RLIMIT_CORE, original);
-    assert_eq!(restored, Ok(()));
+    let restored = resources.update_rlimit_and_get_old(RLIMIT_CORE, Some(original), true);
+    assert!(restored.is_ok());
     assert!(exit_codes.iter().all(|code| *code == 0));
     assert!(final_limit.is_ok());
     let final_limit = final_limit.unwrap();

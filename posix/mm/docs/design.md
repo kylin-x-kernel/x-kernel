@@ -41,7 +41,7 @@ sys_munmap(raw args)
   -> MmSpace::unmap()
 
 sys_madvise(raw args)
-  -> MadviseRequest::dontneed_from_raw()
+  -> MadviseRequest::from_raw()
   -> MmSpace::madvise_dontneed()
 
 sys_msync(raw args)
@@ -159,8 +159,12 @@ opened `VfsFile`。名字只作为调试标签，不进入全局路径命名空�
 
 ### madvise(MADV_DONTNEED)
 
-`MADV_DONTNEED` 要求起始地址页对齐，并拒绝 `addr + len` 溢出。结束地址
-向上扩到整页后交给 `MmSpace::madvise_dontneed()`。
+`madvise` 要求起始地址页对齐，并拒绝 `addr + len` 溢出（含按页向上取整后的
+溢出）。`MADV_DONTNEED` 的结束地址向上扩到整页后交给
+`MmSpace::madvise_dontneed()`；四个性能提示
+（`MADV_NORMAL`/`MADV_RANDOM`/`MADV_SEQUENTIAL`/`MADV_WILLNEED`）不产生
+per-VMA 动作，但与 `MADV_DONTNEED` 一样要求范围完全映射（Linux
+`madvise_walk_vmas` 的判定：有洞整次调用返回 `ENOMEM`）。
 
 当前支持的主线是 private anonymous world：
 
@@ -239,7 +243,10 @@ This preserves the ownership split between:
 - `memfd_create` 支持 `MFD_CLOEXEC` 和 `MFD_ALLOW_SEALING` 初始 seal
   policy；`F_ADD_SEALS` / `F_GET_SEALS` 由 `posix-fs` 处理，hugetlb 扩展未接入。
 - `memfd` 名字展示不保证完全等同 Linux `/proc/self/fd`。
-- `madvise` 支持 `MADV_DONTNEED`，其它 advice 返回 `InvalidInput`。
+- `madvise` 支持 `MADV_DONTNEED` 与四个性能提示
+  （`MADV_NORMAL`/`MADV_RANDOM`/`MADV_SEQUENTIAL`/`MADV_WILLNEED`，作为
+  no-op 但仍要求范围完全映射，未映射返回 `ENOMEM`）；未知 advice 才返回
+  `InvalidInput`。
 - `msync` 支持 shared file dirty folio writeback，但 `MS_INVALIDATE` 完整语义未实现。
 - file-backed writable `MAP_SHARED` 由 `filemap` runtime 通过 write-fault
   dirty tracking 支持；memfd/shmem seals 在 `filemap` 边界执行。

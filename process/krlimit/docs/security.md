@@ -27,7 +27,7 @@ access, such as the `kresources` limits lock.
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
 | T-01 | Kernel denial of service via resource index | Medium | An unchecked external index reaches `Index`/`IndexMut` | Array bounds checking panics instead of corrupting memory; callers must reject indices >= `RLIM_NLIMITS` before indexing. |
-| T-02 | Invalid resource policy | Medium | A trusted caller writes soft > hard or treats storage as enforcement | `kresources::set_rlimit` validates checked updates; direct construction remains intentionally unchecked. |
+| T-02 | Invalid resource policy | Medium | A trusted caller writes soft > hard or treats storage as enforcement | `kresources::update_rlimit_and_get_old` validates checked updates (soft > hard is `InvalidInput` regardless of the privilege flag); direct construction remains intentionally unchecked. |
 | T-03 | Unexpected resource consumption | Medium | An unlimited entry is assumed to provide admission control | Consuming subsystems must enforce relevant limits; this crate only supplies defaults. |
 
 ## Failure modes and effects (FMEA)

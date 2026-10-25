@@ -42,7 +42,7 @@ boundary. Failure returns no old value and leaves the stored pair intact.
 
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
-| T-01 | Unauthorized hard-limit increase | High | A caller supplies a larger maximum | `set_rlimit` returns `OperationNotPermitted`; direct public lock access remains trusted and capability-based increases are unsupported. |
+| T-01 | Unauthorized hard-limit increase | High | A caller supplies a larger maximum | `update_rlimit_and_get_old` returns `OperationNotPermitted` when the update would raise the hard limit and `may_raise_hard_limit` is false; the check runs against the current limit inside the update write guard. The syscall layer derives the flag from its `CAP_SYS_RESOURCE` decision (euid-0 proxy) before calling; there is no in-kernel setter that bypasses it. |
 | T-02 | Descriptor exhaustion | Medium | Repeated file insertion | `add_file` and `duplicate_file_from` pass the soft limit to the same lowest-free slot allocator in `FdTable`. Both bound the new FD number by that limit and capacity. Fixed-slot duplication only checks capacity, so syscall-level policy remains a caller obligation. |
 | T-03 | Access after task files teardown | Medium | A new accessor races `exit_files` | Owner locking and `NoSuchProcess` reject detached access; temporary table references preserve storage but do not delay descriptor cleanup; snapshots of individual files remain usable. |
 | T-04 | Reentrant filesystem deadlock | Medium | A close callback reacquires process resources | Removal precedes close and releases owner/table locks; callers of raw table APIs must preserve this ordering. |
@@ -69,7 +69,9 @@ owner and is idempotent at the owner level.
 
 This crate does not copy file contents or log them. Strong references can retain
 open-file credentials and paths beyond process detachment. Resource limits are
-not all enforced here; hard-limit increases lack a capability path. Batch flush
+not all enforced here; hard-limit increases carry a capability path only
+through the syscall layer's euid-0 proxy, which passes `may_raise_hard_limit`
+into the guarded update. Batch flush
 errors are intentionally discarded. Existing external references delay final
 file release.
 

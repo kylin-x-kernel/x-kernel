@@ -1003,6 +1003,37 @@ impl VmAreaSet {
             .is_some_and(|(_, area)| area.start() < range.end)
     }
 
+    /// Reports whether every byte of `range` is backed by a mapping, without
+    /// cloning the covered VMAs.
+    pub fn is_fully_covered(&self, range: VirtAddrRange) -> bool {
+        if range.is_empty() {
+            return true;
+        }
+        // The VMA containing `range.start` may begin before it; start the
+        // cursor from its end. When it begins exactly at `range.start`, the
+        // forward iteration meets it again and the max() below leaves the
+        // cursor unchanged, so no de-duplication is needed.
+        let mut cursor = range.start;
+        if let Some((_, area)) = self.areas.range(..=range.start).next_back()
+            && area.end() > range.start
+        {
+            cursor = area.end();
+        }
+        for (start, area) in self.areas.range(range.start..) {
+            if *start >= range.end {
+                break;
+            }
+            if *start > cursor {
+                return false;
+            }
+            cursor = cursor.max(area.end());
+            if cursor >= range.end {
+                return true;
+            }
+        }
+        cursor >= range.end
+    }
+
     /// Collects cloned VMAs overlapping `range` in ascending address order.
     pub fn collect_overlapping(&self, range: VirtAddrRange) -> Vec<VmArea> {
         let mut overlapped = Vec::new();

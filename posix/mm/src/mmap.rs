@@ -383,35 +383,47 @@ impl MprotectRequest {
 pub(crate) struct MadviseRequest {
     start: VirtAddr,
     length: usize,
+    /// `true` for `MADV_DONTNEED` (the request discards); `false` for the
+    /// pure performance hints, which only require a covered range.
+    is_discard: bool,
 }
 
 impl MadviseRequest {
-    pub(crate) fn dontneed_from_raw(
-        addr: usize,
-        length: usize,
-        advice: i32,
-    ) -> KResult<Option<Self>> {
-        // Pure performance hints with no correctness semantics; honoring them
-        // as no-ops matches Linux, where failures only affect performance.
-        // bbolt (containerd's metadata store) requires MADV_RANDOM to load.
-        match advice as u32 {
-            MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => return Ok(None),
-            MADV_DONTNEED => {}
-            _ => return Err(KError::InvalidInput),
-        }
+    /// Parses one `madvise(2)` request: `None` when the advice needs no
+    /// per-VMA action (an empty range), otherwise the validated range and
+    /// whether it discards.
+    pub(crate) fn from_raw(addr: usize, length: usize, advice: i32) -> KResult<Option<Self>> {
+        // Linux `do_madvise()` validates the range before acting on the advice,
+        // so an unaligned address or an overflowing range is rejected even for
+        // the pure performance hints below.
         if addr & (memaddr::PAGE_SIZE_4K - 1) != 0 {
             return Err(KError::InvalidInput);
         }
         let end = addr.checked_add(length).ok_or(KError::InvalidInput)?;
+
+        // Pure performance hints with no correctness semantics; honoring them
+        // as no-ops matches Linux, where failures only affect performance.
+        // bbolt (containerd's metadata store) requires MADV_RANDOM to load.
+        let is_discard = match advice as u32 {
+            MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => false,
+            MADV_DONTNEED => true,
+            _ => return Err(KError::InvalidInput),
+        };
         if length == 0 {
             return Ok(None);
         }
 
+        // Rounding the end up to a page boundary must not wrap: Linux rejects
+        // a range whose `start + len` overflows with `EINVAL`.
+        if end > usize::MAX - (memaddr::PAGE_SIZE_4K - 1) {
+            return Err(KError::InvalidInput);
+        }
         let start = VirtAddr::from(addr);
         let end = VirtAddr::from(align_up_4k(end));
         Ok(Some(Self {
             start,
             length: end.as_usize().saturating_sub(start.as_usize()),
+            is_discard,
         }))
     }
 }
@@ -755,13 +767,23 @@ pub fn sys_mremap(
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> KResult<isize> {
     debug!("sys_madvise <= addr: {addr:#x}, length: {length:x}, advice: {advice:#x}");
 
-    let Some(request) = MadviseRequest::dontneed_from_raw(addr, length, advice)? else {
+    let Some(request) = MadviseRequest::from_raw(addr, length, advice)? else {
         return Ok(0);
     };
 
     let process = current_user_process();
     let aspace_ref = process.address_space()?;
     let mut aspace = aspace_ref.lock();
+    if !request.is_discard {
+        // The performance hints have no per-VMA action, but Linux's VMA walk
+        // still fails the whole request with `ENOMEM` when the range covers
+        // unmapped addresses. That check is why a hint now takes the address
+        // space lock and walks the VMA tree, where it used to return without
+        // touching either: the cost is Linux's (`madvise_walk_vmas()` runs for
+        // these advices too), and the outcome for a holey range is the same.
+        aspace.require_fully_mapped(request.start, request.length)?;
+        return Ok(0);
+    }
     aspace.madvise_dontneed(request.start, request.length)?;
     Ok(0)
 }

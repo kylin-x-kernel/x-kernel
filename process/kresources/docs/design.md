@@ -63,10 +63,14 @@ Repeated exit is harmless. Fork and unsharing reject `None` with
   validation, comparison against the current hard cap, the old snapshot and
   replacement share one limits write guard. The returned old pair is exactly
   the one replaced.
-  `set_rlimit` is the ordinary typed setter for callers that do not need the old
-  pair; it delegates to that write transaction and discards the old value.
-  Every hard-limit increase remains rejected until capability checks are
-  implemented.
+  Callers that do not need the replaced pair use
+  `update_rlimit_and_get_old(resource, new_limit, may_raise_hard_limit)` and
+  discard the old value; the authorization origin is explicit in the
+  signature. Hard-limit increases are applied only when
+  `may_raise_hard_limit = true`; the syscall layer sets that flag from its
+  `CAP_SYS_RESOURCE` decision (euid-0 proxy) and the comparison runs inside
+  the same write guard against the current limit, so `OperationNotPermitted`
+  is returned there and not in this crate.
 - Insertion passes `RLIMIT_NOFILE.current` to `FdTable::add_file`. Fixed-slot
   duplication uses the table's capacity check, not that soft-limit policy.
   Minimum-based duplication passes a limit snapshot to `FdTable::duplicate_from`.

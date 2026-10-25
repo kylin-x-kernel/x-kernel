@@ -33,6 +33,28 @@ const MSGQUEUE_LIMIT_BYTES: u64 = 819_200;
 /// The maximum number of open files supported by the current fd table.
 pub const FILE_LIMIT: usize = 1024;
 
+/// The `sysctl_nr_open` value this kernel stands in for.
+///
+/// Linux `do_prlimit()` caps a `RLIMIT_NOFILE` hard limit at `sysctl_nr_open`
+/// with `EPERM`, before the capability check; this kernel has no sysctl, so
+/// the sysctl's default (`fs/file.c`, 1048576) stands in. Note this is not
+/// Linux's `NR_OPEN` from `uapi/linux/limits.h`, which is 1024 — that value
+/// is [`FILE_LIMIT`] here. The check is `>`, so a caller may set exactly this
+/// value (the docker init script's `ulimit -n 1048576` does).
+///
+/// This is a compatibility allowance, NOT a promise of descriptors: the fd
+/// table is a fixed [`FILE_LIMIT`]-slot table, so a process that raises
+/// `RLIMIT_NOFILE` past it still runs into that table's bounds —
+/// `open`/`F_DUPFD` answer `EMFILE` once no slot below [`FILE_LIMIT`] is
+/// free, and `dup2`/`dup3` answer `EBADF` for a `newfd` at or above it —
+/// while `getrlimit`/`sysconf(_SC_OPEN_MAX)` report the allowance rather than
+/// the allocatable count. Linux behaves differently because its fd table
+/// grows (`expand_files()`) and its `EBADF` threshold is `newfd >=
+/// rlimit(RLIMIT_NOFILE)`. Reproducing the growable table is what would make
+/// the two agree; until then, refusing the value would break the container
+/// init scripts that set it unconditionally.
+pub const SYSCTL_NR_OPEN_DEFAULT: u64 = 1_048_576;
+
 /// The limit for a specific resource.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rlimit {
@@ -83,8 +105,14 @@ impl Rlimits {
         let mut result = Self([Rlimit::INFINITY; RLIM_NLIMITS as usize]);
 
         // x-kernel currently maps a fixed-size user stack and uses a fixed-capacity
-        // fd table, so keep those hard caps at the kernel-supported maximum instead
-        // of Linux's larger growable defaults.
+        // fd table, so these DEFAULTS are the kernel-supported maximum instead
+        // of Linux's larger growable ones.
+        //
+        // A caller may still raise the file-count hard limit up to
+        // [`SYSCTL_NR_OPEN_DEFAULT`] (the ceiling Linux enforces with
+        // `sysctl_nr_open`), because container init scripts set `ulimit -n`
+        // unconditionally; that allowance does not grow the table, so it is a
+        // reported value, not a promise of allocatable descriptors.
         //
         // If stack growth or a resizable fd table is added, revisit these two
         // entries and align their hard limits with the defaults reported

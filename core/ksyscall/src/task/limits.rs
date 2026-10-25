@@ -27,9 +27,17 @@ pub(crate) fn sys_prlimit64(
     let resources = process.resources()?;
     // Return the pair replaced by this update, even when another thread updates
     // the same resource. A rejected update must not overwrite the output buffer.
+    // Linux `do_prlimit()`: raising the hard limit requires `CAP_SYS_RESOURCE`.
+    // The credential model has no capability sets yet, so root (euid 0) stands
+    // in for the capability check. The decision is evaluated inside the
+    // resource object's update critical section against the CURRENT limit, so
+    // a concurrent update between a caller-side snapshot and the commit cannot
+    // be bypassed.
+    let may_raise_hard_limit = kprocess::current_cred().has_sys_resource();
     let old = resources.update_rlimit_and_get_old(
         resource,
         new_limit.map(|value| Rlimit::new(value.rlim_cur, value.rlim_max)),
+        may_raise_hard_limit,
     )?;
     if let Some(old_limit) = old_limit.check_non_null() {
         old_limit.write_vm(rlimit64 {

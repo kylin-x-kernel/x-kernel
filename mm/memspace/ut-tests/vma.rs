@@ -380,3 +380,25 @@ fn vma_set_semantic_merge_rejects_unknown_runtime_kind() {
         alloc::vec![(0x1000, 0x2000, 40), (0x2000, 0x3000, 41)]
     );
 }
+
+/// `is_fully_covered` is the single hole verdict behind the madvise
+/// coverage check (Linux `madvise_walk_vmas` fails the whole request with
+/// ENOMEM when the range covers unmapped addresses).
+#[def_test]
+fn fully_covered_range_requires_an_unbroken_mapping() {
+    use memaddr::VirtAddrRange;
+
+    let mut areas = VmAreaSet::new();
+    areas.insert(test_area(0x1000, 0x2000, 0));
+    areas.insert(test_area(0x5000, 0x1000, 0));
+
+    // A hole between the two areas fails the whole range.
+    assert!(!areas.is_fully_covered(VirtAddrRange::from_start_size(vaddr(0x1000), 0x5000)));
+    // A range inside one area is covered.
+    assert!(areas.is_fully_covered(VirtAddrRange::from_start_size(vaddr(0x1800), 0x800)));
+    // A range starting exactly at an area start (the forward walk's first
+    // step) is covered.
+    assert!(areas.is_fully_covered(VirtAddrRange::from_start_size(vaddr(0x1000), 0x2000)));
+    // A range running past the last area is not covered.
+    assert!(!areas.is_fully_covered(VirtAddrRange::from_start_size(vaddr(0x5000), 0x2000)));
+}

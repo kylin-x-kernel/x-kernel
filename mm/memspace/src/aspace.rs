@@ -889,18 +889,13 @@ impl MmSpace {
         if !self.range.contains(range.start) || self.range.end < range.end {
             return Err(KError::NoMemory);
         }
-        let overlapped_vmas = self.vmas.collect_overlapping(range);
-        let mut cursor = range.start;
-        for vma in &overlapped_vmas {
-            if vma.start() > cursor {
-                return Err(KError::NoMemory);
-            }
-            cursor = vma.end();
-            if cursor >= range.end {
-                return Ok(overlapped_vmas);
-            }
+        // The hole verdict has a single implementation
+        // (`VmAreaSet::is_fully_covered`); the VMA list is collected only
+        // once the range is known to be covered.
+        if !self.vmas.is_fully_covered(range) {
+            return Err(KError::NoMemory);
         }
-        Err(KError::NoMemory)
+        Ok(self.vmas.collect_overlapping(range))
     }
 
     fn snapshot_vmas_in_range(
@@ -1353,6 +1348,33 @@ impl MmSpace {
             }
         }
         self.protect_mapping_range(start, size, flags)
+    }
+
+    /// Requires every byte of `[start, start + size)` to be backed by a
+    /// mapping.
+    ///
+    /// Linux `madvise_walk_vmas()` ignores holes while walking but fails the
+    /// whole request with `ENOMEM` when the range covers unmapped addresses —
+    /// including for the purely advisory behaviors. Callers that only inspect
+    /// coverage (no per-VMA action) use this check instead of the discard path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::NoMemory` when the range leaves this address space or
+    /// any part of it is unmapped, and `KError::InvalidInput` when it is not
+    /// 4 KiB aligned.
+    pub fn require_fully_mapped(&self, start: VirtAddr, size: usize) -> KResult {
+        self.validate_region(start, size)?;
+        // Coverage-only check: no per-VMA action follows, so walk the tree
+        // without cloning the covered VMAs (the madvise hint path runs on
+        // bulk memory advice).
+        if !self
+            .vmas
+            .is_fully_covered(VirtAddrRange::from_start_size(start, size))
+        {
+            return Err(KError::NoMemory);
+        }
+        Ok(())
     }
 
     /// Applies a `MADV_DONTNEED`-style discard hint through object-side

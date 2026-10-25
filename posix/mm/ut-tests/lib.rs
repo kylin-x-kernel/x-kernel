@@ -179,7 +179,7 @@ fn mprotect_request_rejects_single_grow_flag_as_unsupported() {
 
 #[def_test]
 fn madvise_request_rejects_unsupported_advice() {
-    assert!(MadviseRequest::dontneed_from_raw(0x1000, PAGE_SIZE_4K, 999).is_err());
+    assert!(MadviseRequest::from_raw(0x1000, PAGE_SIZE_4K, 999).is_err());
 }
 
 #[def_test]

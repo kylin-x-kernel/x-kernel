@@ -196,6 +196,15 @@ impl Cred {
         self.euid == 0
     }
 
+    /// Returns whether the caller holds `CAP_SYS_RESOURCE`.
+    ///
+    /// Effective-uid zero proxies the capability until capability sets are
+    /// modelled, matching [`Self::has_sys_admin`]. Raising a hard resource
+    /// limit (`prlimit64`, Linux `do_prlimit()`) is the current consumer.
+    pub fn has_sys_resource(&self) -> bool {
+        self.euid == 0
+    }
+
     /// Returns this credential's `CAP_SYS_TTY_CONFIG` authorization decision.
     ///
     /// Like `has_sys_admin`, this uses effective UID 0 until capability sets

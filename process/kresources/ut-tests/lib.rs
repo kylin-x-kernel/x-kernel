@@ -30,9 +30,10 @@ fn test_rlimit_accessors_update_selected_limit() {
     );
 
     resources
-        .set_rlimit(
+        .update_rlimit_and_get_old(
             linux_raw_sys::general::RLIMIT_NOFILE,
-            Rlimit::new(512, 1024),
+            Some(Rlimit::new(512, 1024)),
+            true,
         )
         .unwrap();
 
@@ -44,29 +45,63 @@ fn test_rlimit_accessors_update_selected_limit() {
     );
 }
 
+/// Linux `do_prlimit()` rejects a `RLIMIT_NOFILE` hard limit that exceeds
+/// `sysctl_nr_open` with `EPERM` before the capability check; the privileged
+/// caller cannot raise it past that ceiling either.
 #[def_test]
-fn test_set_rlimit_rejects_invalid_or_privileged_updates() {
+fn test_nofile_hard_limit_is_capped_at_the_system_ceiling() {
     let resources = ProcessResources::new(0x80000);
+    let resource = linux_raw_sys::general::RLIMIT_NOFILE;
+    let original = resources.rlimit(resource).unwrap();
 
+    for may_raise in [false, true] {
+        unittest::assert_eq!(
+            resources.update_rlimit_and_get_old(
+                resource,
+                Some(Rlimit::new(original.current, krlimit::SYSCTL_NR_OPEN_DEFAULT + 1)),
+                may_raise,
+            ),
+            Err(kerrno::KError::OperationNotPermitted)
+        );
+    }
+    // Exactly at the ceiling is allowed (the docker init script's
+    // `ulimit -n 1048576`).
+    unittest::assert!(
+        resources
+            .update_rlimit_and_get_old(
+                resource,
+                Some(Rlimit::new(original.current, krlimit::SYSCTL_NR_OPEN_DEFAULT)),
+                true,
+            )
+            .is_ok()
+    );
+    resources
+        .update_rlimit_and_get_old(resource, Some(original), true)
+        .unwrap();
+}
+
+#[def_test]
+fn test_update_rlimit_rejects_invalid_soft_and_accepts_a_hard_increase() {
+    let resources = ProcessResources::new(0x80000);
+    let resource = linux_raw_sys::general::RLIMIT_NOFILE;
+
+    // soft > hard is rejected without changing the pair, even with the
+    // privilege flag set.
     assert_eq!(
         resources
-            .set_rlimit(
-                linux_raw_sys::general::RLIMIT_NOFILE,
-                Rlimit::new(2048, 1024)
-            )
+            .update_rlimit_and_get_old(resource, Some(Rlimit::new(2048, 1024)), true)
             .unwrap_err(),
         kerrno::KError::InvalidInput
     );
+    assert_eq!(resources.rlimit(resource), Ok(Rlimit::new(1024, 1024)));
 
-    assert_eq!(
-        resources
-            .set_rlimit(
-                linux_raw_sys::general::RLIMIT_NOFILE,
-                Rlimit::new(1024, 2048)
-            )
-            .unwrap_err(),
-        kerrno::KError::OperationNotPermitted
-    );
+    // Raising the hard limit with `may_raise_hard_limit = true` — the
+    // syscall layer sets it from its `CAP_SYS_RESOURCE` decision
+    // (Linux `do_prlimit()`).
+    resources
+        .update_rlimit_and_get_old(resource, Some(Rlimit::new(1024, 2048)), true)
+        .unwrap();
+    assert_eq!(resources.rlimit(resource), Ok(Rlimit::new(1024, 2048)));
 }
 
 #[def_test]
@@ -117,34 +152,41 @@ fn test_rlimit_exchange_returns_replaced_pair_and_queries_without_mutation() {
     let replacement = Rlimit::new(512, original.max);
 
     unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, Some(replacement)),
+        resources.update_rlimit_and_get_old(resource, Some(replacement), false),
         Ok(original)
     );
     unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, None),
+        resources.update_rlimit_and_get_old(resource, None, false),
         Ok(replacement)
     );
     unittest::assert_eq!(resources.rlimit(resource), Ok(replacement));
     unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, Some(replacement)),
+        resources.update_rlimit_and_get_old(resource, Some(replacement), false),
         Ok(replacement)
     );
 
     let lowered = Rlimit::new(128, 256);
     unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, Some(lowered)),
+        resources.update_rlimit_and_get_old(resource, Some(lowered), false),
         Ok(replacement)
     );
+    // Lowering the hard limit needs no privilege; raising it again does
+    // (Linux `do_prlimit()`: `new_max > old_max` without `CAP_SYS_RESOURCE`).
     unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, Some(replacement)),
+        resources.update_rlimit_and_get_old(resource, Some(replacement), false),
         Err(kerrno::KError::OperationNotPermitted)
     );
     unittest::assert_eq!(resources.rlimit(resource), Ok(lowered));
+    unittest::assert_eq!(
+        resources.update_rlimit_and_get_old(resource, Some(replacement), true),
+        Ok(lowered)
+    );
+    unittest::assert_eq!(resources.rlimit(resource), Ok(replacement));
     // The files owner is per-task now; detaching it must not affect the limits.
     TaskFiles::new(FdTableOwner::new_shared()).exit_files();
     unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, None),
-        Ok(lowered)
+        resources.update_rlimit_and_get_old(resource, None, false),
+        Ok(replacement)
     );
 }
 
@@ -158,23 +200,22 @@ fn test_rlimit_exchange_rejects_invalid_updates_without_mutation() {
 
     for invalid_resource in [linux_raw_sys::general::RLIM_NLIMITS, u32::MAX] {
         unittest::assert_eq!(
-            resources.update_rlimit_and_get_old(invalid_resource, None),
+            resources.update_rlimit_and_get_old(invalid_resource, None, false),
             Err(kerrno::KError::InvalidInput)
         );
         unittest::assert_eq!(
-            resources.update_rlimit_and_get_old(invalid_resource, Some(original)),
+            resources.update_rlimit_and_get_old(invalid_resource, Some(original), false),
             Err(kerrno::KError::InvalidInput)
         );
     }
-    unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, Some(Rlimit::new(2048, 1024))),
-        Err(kerrno::KError::InvalidInput)
-    );
-    unittest::assert_eq!(resources.rlimit(resource), Ok(original));
-    unittest::assert_eq!(
-        resources.update_rlimit_and_get_old(resource, Some(Rlimit::new(1024, 2048))),
-        Err(kerrno::KError::OperationNotPermitted)
-    );
+    // `soft > hard` is `InvalidInput` regardless of `may_raise_hard_limit`,
+    // and an invalid update must not mutate the pair.
+    for may_raise in [false, true] {
+        unittest::assert_eq!(
+            resources.update_rlimit_and_get_old(resource, Some(Rlimit::new(2048, 1024)), may_raise),
+            Err(kerrno::KError::InvalidInput)
+        );
+    }
     unittest::assert_eq!(resources.rlimit(resource), Ok(original));
 }
 
