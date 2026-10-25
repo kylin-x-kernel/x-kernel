@@ -25,6 +25,7 @@ use super::{
     *,
 };
 use crate::{
+    netlink::NetlinkSocketType,
     KernelAncillaryData, RecvFlags, RecvOptions, SERVICE, SendOptions, SocketAddrEx,
     buf::PacketBuf,
     device::{
@@ -288,7 +289,7 @@ fn test_rtnetlink_operation_classifies_supported_mutations() {
 
 #[def_test]
 fn test_malformed_unsupported_protocol_request_does_not_queue_empty_response() {
-    let socket = NetlinkSocket::new(i32::MAX);
+    let socket = NetlinkSocket::new(i32::MAX, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 50, groups: 0 }))
         .unwrap();
@@ -1063,7 +1064,7 @@ fn test_newaddr_accepts_legacy_ipv4_address_flags() {
 
 #[def_test(serial)]
 fn test_publish_kobject_uevent_to_group_subscriber() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1080,7 +1081,7 @@ fn test_publish_kobject_uevent_to_group_subscriber() {
 
 #[def_test(serial)]
 fn test_publish_kobject_uevent_drops_when_rx_queue_limit_exceeded() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1099,7 +1100,7 @@ fn test_publish_kobject_uevent_drops_when_rx_queue_limit_exceeded() {
 
 #[def_test(serial)]
 fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1130,7 +1131,7 @@ fn test_publish_kobject_uevent_appends_monotonic_seqnum() {
 
 #[def_test(serial)]
 fn test_kobject_uevent_passcred_reports_kernel_credentials() {
-    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT);
+    let socket = NetlinkSocket::new(NETLINK_KOBJECT_UEVENT, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 0, groups: 1 }))
         .unwrap();
@@ -1166,7 +1167,7 @@ fn test_kobject_uevent_passcred_reports_kernel_credentials() {
 
 #[def_test(serial)]
 fn test_route_netlink_passcred_does_not_forge_kernel_credentials() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
@@ -1192,7 +1193,7 @@ fn test_route_netlink_passcred_does_not_forge_kernel_credentials() {
 
 #[def_test(serial)]
 fn test_recv_reports_datagram_length_and_truncation() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket.inner.rx_queue.lock().push_back(NetlinkPacket {
         from: NetlinkAddr { pid: 1, groups: 0 },
         data: vec![1, 2, 3, 4],
@@ -1231,7 +1232,7 @@ fn test_recv_reports_datagram_length_and_truncation() {
 #[def_test(serial)]
 fn test_route_dump_ignores_nonzero_short_trailer() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 42, groups: 0 }))
         .unwrap();
@@ -1256,7 +1257,7 @@ fn test_route_dump_ignores_nonzero_short_trailer() {
 #[def_test(serial)]
 fn test_route_dump_stops_at_invalid_trailing_header() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 42, groups: 0 }))
         .unwrap();
@@ -1453,7 +1454,7 @@ fn test_device_removal_releases_address_capacity_and_preserves_surviving_ids() {
 #[def_test(serial)]
 fn test_route_mutation_checks_each_send_credential() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 42, groups: 0 }))
         .unwrap();
@@ -1501,7 +1502,7 @@ fn test_route_mutation_checks_each_send_credential() {
 #[def_test(serial)]
 fn test_route_socket_processes_same_class_mutation_batch() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 43, groups: 0 }))
         .unwrap();
@@ -1541,7 +1542,7 @@ fn test_route_socket_processes_same_class_mutation_batch() {
 #[def_test(serial)]
 fn test_route_socket_processes_query_batch() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 47, groups: 0 }))
         .unwrap();
@@ -1570,7 +1571,7 @@ fn test_route_socket_processes_query_batch() {
 #[def_test(serial)]
 fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 48, groups: 0 }))
         .unwrap();
@@ -1599,7 +1600,7 @@ fn test_route_socket_rejects_mixed_query_and_mutation_batch() {
 #[def_test(serial)]
 fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 44, groups: 0 }))
         .unwrap();
@@ -1628,7 +1629,7 @@ fn test_malformed_nlmsg_len_does_not_mutate_network_state() {
 
 #[def_test(serial)]
 fn test_route_socket_rejects_non_kernel_destination() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 45, groups: 0 }))
         .unwrap();
@@ -1658,7 +1659,7 @@ fn test_route_socket_rejects_non_kernel_destination() {
 
 #[def_test]
 fn test_route_socket_rejects_unsupported_multicast_subscription() {
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     assert_eq!(
         socket.bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 49, groups: 1 })),
         Err(LinuxError::EOPNOTSUPP.into())
@@ -1672,7 +1673,7 @@ fn test_route_socket_rejects_unsupported_multicast_subscription() {
 #[def_test(serial)]
 fn test_mutation_queue_reservation_failure_preserves_network_state() {
     init_test_state();
-    let socket = NetlinkSocket::new(NETLINK_ROUTE);
+    let socket = NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw);
     socket
         .bind(SocketAddrEx::Netlink(NetlinkAddr { pid: 46, groups: 0 }))
         .unwrap();

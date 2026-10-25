@@ -25,7 +25,7 @@ mod socket;
 unittest::path_mod_test!(tests, "../../ut-tests/netlink/tests.rs");
 mod wire;
 
-pub use socket::{NetlinkSocket, publish_kobject_uevent};
+pub use socket::{NetlinkSocket, NetlinkSocketType, publish_kobject_uevent};
 pub(crate) use wire::route::{
     PROTOCOL_BOOT as RTPROT_BOOT, PROTOCOL_KERNEL as RTPROT_KERNEL, SCOPE_HOST as RT_SCOPE_HOST,
     SCOPE_LINK as RT_SCOPE_LINK, SCOPE_UNIVERSE as RT_SCOPE_UNIVERSE, TABLE_MAIN as RT_TABLE_MAIN,
@@ -121,6 +121,9 @@ impl NetlinkRxQueue {
 
 pub(super) struct NetlinkSocketInner {
     pub(super) protocol: i32,
+    /// The socket type the socket was created with, reported by `SO_TYPE` the
+    /// way Linux keeps it in `sk_type`.
+    pub(super) socket_type: NetlinkSocketType,
     pub(super) local_addr: RwLock<Option<NetlinkAddr>>,
     pub(super) send_lock: Mutex<()>,
     pub(super) rx_queue: Mutex<NetlinkRxQueue>,

@@ -23,16 +23,36 @@ use crate::{
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
+/// The socket type requested at creation, kept because `netlink_create` accepts
+/// both and Linux reports the stored `sk_type` back from `SO_TYPE`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NetlinkSocketType {
+    Raw,
+    Datagram,
+}
+
+impl NetlinkSocketType {
+    /// The `SOCK_*` value `SO_TYPE` reports for this type.
+    pub const fn as_raw(self) -> i32 {
+        match self {
+            Self::Raw => linux_raw_sys::net::SOCK_RAW as i32,
+            Self::Datagram => linux_raw_sys::net::SOCK_DGRAM as i32,
+        }
+    }
+}
+
 /// Minimal AF_NETLINK socket.
 pub struct NetlinkSocket {
     pub(super) inner: Arc<NetlinkSocketInner>,
 }
 
 impl NetlinkSocket {
-    pub fn new(protocol: i32) -> Self {
+    /// Creates an AF_NETLINK socket that reports `socket_type` from `SO_TYPE`.
+    pub fn new(protocol: i32, socket_type: NetlinkSocketType) -> Self {
         Self {
             inner: Arc::new(NetlinkSocketInner {
                 protocol,
+                socket_type,
                 local_addr: ksync::RwLock::new(None),
                 send_lock: ksync::Mutex::new(()),
                 rx_queue: ksync::Mutex::new(NetlinkRxQueue::default()),
@@ -221,6 +241,11 @@ impl Configurable for NetlinkSocket {
 }
 
 impl SocketOps for NetlinkSocket {
+    /// Returns the `SO_TYPE` reported for this socket.
+    fn socket_type(&self) -> i32 {
+        self.inner.socket_type.as_raw()
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let addr = local_addr.into_netlink()?;
         if self.inner.protocol == NETLINK_ROUTE && addr.groups != 0 {

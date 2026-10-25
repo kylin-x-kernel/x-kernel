@@ -16,11 +16,12 @@ use alloc::{vec, vec::Vec};
 
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
+    SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
     sock_from_file,
 };
 use linux_raw_sys::net::{
-    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SOL_SOCKET, socklen_t,
+    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_TYPE, SOL_SOCKET, socklen_t,
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
@@ -322,12 +323,6 @@ pub fn sys_getsockopt(
     optval: UserPtr<u8>,
     optlen_ptr: UserPtr<socklen_t>,
 ) -> KResult<isize> {
-    let mut optlen = optlen_ptr.read_vm()?;
-    debug!(
-        "sys_getsockopt <= fd: {}, level: {}, optname: {}, optlen: {}",
-        fd, level, optname, optlen,
-    );
-
     fn put<T>(dst: UserPtr<u8>, len: &mut socklen_t, value: &T) -> KResult<()> {
         if (*len as usize) < size_of::<T>() {
             return Err(KError::InvalidInput);
@@ -340,8 +335,37 @@ pub fn sys_getsockopt(
         .map_err(Into::into)
     }
 
+    /// Writes an `int` option the way Linux `sk_getsockopt` does: it copies
+    /// `min(optlen, size_of::<i32>())` bytes and reports back the length it
+    /// actually wrote, so a short buffer truncates instead of failing and a
+    /// zero length leaves the buffer untouched (and may be a null pointer).
+    fn put_truncated(dst: UserPtr<u8>, len: &mut socklen_t, value: i32) -> KResult<()> {
+        let bytes = value.to_ne_bytes();
+        let written = (*len as usize).min(bytes.len());
+        if written > 0 {
+            osvm::write_vm_bytes(dst.as_ptr() as *mut u8, &bytes[..written])?;
+        }
+        *len = written as socklen_t;
+        Ok(())
+    }
+
+    // Linux resolves the descriptor first: `__sys_getsockopt` reports `EBADF`
+    // or `ENOTSOCK` before the protocol layer runs, and the length is read and
+    // rejected inside `sk_getsockopt` only afterwards (net/core/sock.c). The
+    // order is observable, so a bad descriptor wins over an unreachable length
+    // pointer and over a negative length.
     let file = kprocess::current_files().get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    let mut optlen = optlen_ptr.read_vm()?;
+    debug!(
+        "sys_getsockopt <= fd: {}, level: {}, optname: {}, optlen: {}",
+        fd, level, optname, optlen,
+    );
+    // A `socklen_t` carries the same four bytes as the signed `int` Linux
+    // reads, so the sign bit is the test.
+    if (optlen as i32) < 0 {
+        return Err(KError::InvalidInput);
+    }
 
     macro_rules! dispatch {
         ($which:ident) => {
@@ -356,7 +380,13 @@ pub fn sys_getsockopt(
             put(optval, &mut optlen, &sys_val)?;
         };
     }
-    if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
+    if level == SOL_SOCKET && optname == SO_TYPE {
+        // `SO_TYPE` is a property of the socket itself, not a stored option.
+        // Runtime supervisors (containerd-shim, ttrpc) validate inherited
+        // descriptors with it right after spawn. Linux copies it with the
+        // caller's length, so a short buffer truncates rather than failing.
+        put_truncated(optval, &mut optlen, socket.socket_type())?;
+    } else if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         let mut name: Option<alloc::string::String> = None;
         socket.get_option(GetSocketOption::BindToDevice(&mut name))?;
         let buf = encode_bound_device_name(name.as_deref(), optlen as usize)?;

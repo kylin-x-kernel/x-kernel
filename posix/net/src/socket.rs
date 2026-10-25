@@ -17,13 +17,13 @@ use kerrno::{KError, KResult, LinuxError};
 use knet::vsock::{VsockSocket, VsockStreamTransport};
 use knet::{
     AcceptOptions, ConnectOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
-    netlink::NetlinkSocket,
+    netlink::{NetlinkSocket, NetlinkSocketType},
     packet::{PacketSocket, PacketSocketKind},
     raw::{IpProtocol, IpVersion, RawSocket},
     sock_alloc_file, sock_from_file,
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{DgramTransport, StreamTransport, UnixDomainSocket},
+    unix::{DgramTransport, StreamTransport, UnixDomainSocket, UnixSocketType},
 };
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
@@ -84,17 +84,28 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
         (AF_INET6, _) => return Err(KError::from(LinuxError::EAFNOSUPPORT)),
         (AF_UNIX, SOCK_STREAM) => {
             // Unix domain stream socket
-            knet::Socket::Unix(Box::new(UnixDomainSocket::new(StreamTransport::new(pid))))
+            knet::Socket::Unix(Box::new(UnixDomainSocket::new(
+                StreamTransport::new(pid),
+                UnixSocketType::Stream,
+            )))
         }
         (AF_UNIX, SOCK_DGRAM) => {
             // Unix domain datagram socket
-            knet::Socket::Unix(Box::new(UnixDomainSocket::new(DgramTransport::new(pid))))
+            knet::Socket::Unix(Box::new(UnixDomainSocket::new(
+                DgramTransport::new(pid),
+                UnixSocketType::Datagram,
+            )))
         }
         (AF_NETLINK, SOCK_RAW) | (AF_NETLINK, SOCK_DGRAM) => {
             if proto > i32::MAX as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32)))
+            let socket_type = if ty == SOCK_RAW {
+                NetlinkSocketType::Raw
+            } else {
+                NetlinkSocketType::Datagram
+            };
+            knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32, socket_type)))
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
             if !cred.is_privileged() {
@@ -242,11 +253,24 @@ pub fn sys_socketpair(
     let (sock1, sock2) = match ty {
         SOCK_STREAM => {
             let (sock1, sock2) = StreamTransport::new_pair(pid);
-            (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
+            (
+                UnixDomainSocket::new(sock1, UnixSocketType::Stream),
+                UnixDomainSocket::new(sock2, UnixSocketType::Stream),
+            )
         }
+        // Both use the datagram transport, but `SO_TYPE` reports the type the
+        // caller asked for, as Linux keeps it in `sk_type`.
         SOCK_DGRAM | SOCK_SEQPACKET => {
+            let socket_type = if ty == SOCK_SEQPACKET {
+                UnixSocketType::Seqpacket
+            } else {
+                UnixSocketType::Datagram
+            };
             let (sock1, sock2) = DgramTransport::new_pair(pid);
-            (UnixDomainSocket::new(sock1), UnixDomainSocket::new(sock2))
+            (
+                UnixDomainSocket::new(sock1, socket_type),
+                UnixDomainSocket::new(sock2, socket_type),
+            )
         }
         _ => {
             warn!("Unsupported socketpair type: {ty}");

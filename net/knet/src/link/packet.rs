@@ -343,6 +343,19 @@ impl Configurable for PacketSocket {
 }
 
 impl SocketOps for PacketSocket {
+    /// Returns the `SO_TYPE` reported for this socket.
+    ///
+    /// Linux keeps the type the socket was created with in `sk_type`
+    /// (`sock_getsockopt` reports it back), and `sys_socket` stores the requested
+    /// type in `kind`, so a datagram socket must report `SOCK_DGRAM` even though
+    /// the transport below is the same frame path.
+    fn socket_type(&self) -> i32 {
+        match self.inner.kind {
+            PacketSocketKind::Raw => linux_raw_sys::net::SOCK_RAW as i32,
+            PacketSocketKind::Datagram => linux_raw_sys::net::SOCK_DGRAM as i32,
+        }
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let mut addr = local_addr.into_packet()?;
         validate_ifindex_or_any(addr.ifindex)?;

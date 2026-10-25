@@ -255,15 +255,42 @@ fn lookup_or_create_bind_entry<R>(
     }
 }
 
+/// The socket type requested at creation.
+///
+/// Linux keeps it in `sk_type` and reports it back from `SO_TYPE`, so it cannot
+/// be derived from the transport: `SOCK_DGRAM` and `SOCK_SEQPACKET` pairs both
+/// use the datagram transport (`sk_getsockopt` in `net/core/sock.c` reports the
+/// stored type; `unix_create` keeps `SOCK_SEQPACKET` and rewrites only
+/// `SOCK_RAW` to `SOCK_DGRAM`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnixSocketType {
+    Stream,
+    Datagram,
+    Seqpacket,
+}
+
+impl UnixSocketType {
+    /// The `SOCK_*` value `SO_TYPE` reports for this type.
+    pub const fn as_raw(self) -> i32 {
+        match self {
+            Self::Stream => linux_raw_sys::net::SOCK_STREAM as i32,
+            Self::Datagram => linux_raw_sys::net::SOCK_DGRAM as i32,
+            Self::Seqpacket => linux_raw_sys::net::SOCK_SEQPACKET as i32,
+        }
+    }
+}
+
 pub struct UnixDomainSocket {
     transport: UnixTransport,
+    socket_type: UnixSocketType,
     local_endpoint: Mutex<UnixAddr>,
     peer_endpoint: Mutex<UnixAddr>,
 }
 impl UnixDomainSocket {
-    pub fn new(transport: impl Into<UnixTransport>) -> Self {
+    pub fn new(transport: impl Into<UnixTransport>, socket_type: UnixSocketType) -> Self {
         Self {
             transport: transport.into(),
+            socket_type,
             local_endpoint: Mutex::new(UnixAddr::Unbound),
             peer_endpoint: Mutex::new(UnixAddr::Unbound),
         }
@@ -308,6 +335,13 @@ impl Configurable for UnixDomainSocket {
     }
 }
 impl SocketOps for UnixDomainSocket {
+    /// Returns the type the socket was created with, the way Linux reports
+    /// `sk_type` back from `SO_TYPE`. Deriving it from the transport would
+    /// report `SOCK_DGRAM` for `SOCK_SEQPACKET` pairs.
+    fn socket_type(&self) -> i32 {
+        self.socket_type.as_raw()
+    }
+
     fn bind(&self, local_endpoint: SocketAddrEx) -> KResult {
         let cred = kprocess::current_cred();
         let mode = NodePermission::from_bits_truncate(0o777 & !(kprocess::current_umask() as u16));
@@ -334,6 +368,9 @@ impl SocketOps for UnixDomainSocket {
             block_on(interruptible(self.transport.accept(options.nonblocking)))??;
         Ok(Socket::Unix(Box::new(Self {
             transport,
+            // The accepted socket keeps the listener's type, as Linux keeps the
+            // listening socket's `sk_type` for the connection it hands back.
+            socket_type: self.socket_type,
             local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),
             peer_endpoint: Mutex::new(peer_endpoint),
         })))

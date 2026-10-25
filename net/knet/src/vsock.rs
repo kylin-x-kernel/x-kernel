@@ -95,6 +95,11 @@ impl Configurable for VsockSocket {
 }
 
 impl SocketOps for VsockSocket {
+    /// Returns the `SO_TYPE` reported for this socket.
+    fn socket_type(&self) -> i32 {
+        linux_raw_sys::net::SOCK_STREAM as i32
+    }
+
     fn bind(&self, local_addr: SocketAddrEx) -> KResult {
         let local_addr = local_addr.into_vsock()?;
         self.transport.bind(local_addr)

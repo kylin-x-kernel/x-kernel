@@ -7,7 +7,7 @@ use core::ffi::c_char;
 use kerrno::KError;
 use knet::{
     ConnectOptions, SocketAddrEx, SocketOps,
-    unix::{StreamTransport, UnixAddr, UnixDomainSocket},
+    unix::{StreamTransport, UnixAddr, UnixDomainSocket, UnixSocketType},
 };
 use kprocess;
 use tee_raw_sys::{
@@ -61,7 +61,10 @@ pub(super) fn sys_tee_scn_log(buf: *const c_char, len: usize) -> TeeResult {
 /// Kernel-direct panic notification. Wire format NOTE/TODO: [`crate::tee::protocal`].
 pub(super) fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
     // Connect to current TA via Unix socket
-    let socket = UnixDomainSocket::new(StreamTransport::new(kprocess::current_user_thread().pid()));
+    let socket = UnixDomainSocket::new(
+        StreamTransport::new(kprocess::current_user_thread().pid()),
+        UnixSocketType::Stream,
+    );
     let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
     let path = ta_unix_socket_path(&uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));

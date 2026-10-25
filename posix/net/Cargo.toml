@@ -11,6 +11,10 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[package.metadata.cargo-shear]
+# Used by cfg(unittest) regressions under ut-tests, which cargo-shear does not scan.
+ignored = ["unittest_support"]
+
 [features]
 vsock = ["knet/vsock"]
 
@@ -30,6 +34,7 @@ linux-raw-sys.workspace = true
 osvm.workspace = true
 posix-types.workspace = true
 unittest.workspace = true
+unittest_support.workspace = true
 
 [lints]
 workspace = true

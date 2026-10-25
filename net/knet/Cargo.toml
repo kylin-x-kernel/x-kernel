@@ -33,6 +33,8 @@ kcred = { workspace = true }
 kerrno = { workspace = true }
 kvfs = { workspace = true }
 kio = { workspace = true, features = ["alloc"] }
+# `SO_TYPE` reports the `SOCK_*` creation type, which is an ABI constant.
+linux-raw-sys.workspace = true
 kpoll = { workspace = true }
 tipc = { workspace = true, optional = true }
 bitflags = { workspace = true }

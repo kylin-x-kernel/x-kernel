@@ -8,13 +8,13 @@ use core::bstr::ByteStr;
 use kerrno::{KErrorKind, LinuxError, LinuxResult};
 use knet::{
     RecvOptions, SocketAddrEx, SocketOps,
-    unix::{DgramTransport, UnixAddr, UnixDomainSocket},
+    unix::{DgramTransport, UnixAddr, UnixDomainSocket, UnixSocketType},
 };
 use kvfs::NodePermission;
 
 /// Bind /dev/log as a Unix domain socket for syslog messages
 pub fn bind_dev_log() -> LinuxResult<()> {
-    let server = UnixDomainSocket::new(DgramTransport::new(1));
+    let server = UnixDomainSocket::new(DgramTransport::new(1), UnixSocketType::Datagram);
     let cred = kcred::initial_cred();
     if let Err(err) = server.bind_with_cred(
         SocketAddrEx::Unix(UnixAddr::Path("/dev/log".into())),
