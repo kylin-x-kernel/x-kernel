@@ -53,10 +53,12 @@ current-process or scheduler dependency.
 On x86, `early_init` runs on the bootstrap CPU and establishes the frequency,
 conversion ratios, and TSC origin. PIT calibration requires exclusive channel 2
 ownership before secondary CPUs and other drivers can use its ports. Each sample
-polls with local interrupts disabled. The platform then initializes the APIC and
-calls `init_primary`; secondary CPUs initialize their own APIC before calling
-`init_secondary`. `early_init` reports the selected frequency in whole kHz and
-its discovery source through the boot console with `kernel_boot::bootln!`,
+polls with local interrupts disabled. The platform then initializes each CPU's
+APIC before calling the common `init_percpu`, which configures and unmasks that
+CPU's timer without repeating calibration. CPU IRQ delivery remains masked
+until runtime installs the timer handler. `early_init` reports the selected
+frequency in whole kHz and its discovery source through the boot console with
+`kernel_boot::bootln!`,
 because the runtime logger is not installed during early driver initialization;
 a platform-static selection is reported as a discovery failure.
 

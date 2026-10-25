@@ -130,7 +130,14 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
 
     memspace::init_memory_management_secondary();
 
-    khal::final_init_secondary(logical_cpu_id);
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: AP controller preparation \
+                  failed; this CPU must not activate sources or publish its run queue"
+    )]
+    khal::prepare_local_interrupts(logical_cpu_id).expect("secondary interrupt preparation failed");
+    #[cfg(unittest)]
+    super::tests_irq_startup::record_prepared();
 
     #[cfg(unittest)]
     super::tests_workqueue::deferred::prepare_local_boot_probe();
@@ -147,6 +154,9 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
     // Publish that this CPU's run queue is registered so the primary's
     // `start_secondary_cpus` can stop waiting and enter driver initialization
     // knowing cross-CPU placement onto this CPU is safe.
+    // This permits enqueueing, not synchronous execution or IPI acknowledgement.
+    // Fixed notifications remain pending until local services are enabled below;
+    // primary setup before INITED_CPUS publication must not wait for AP execution.
     SCHED_READY_CPUS.fetch_add(1, Ordering::Release);
 
     #[cfg(feature = "ipi")]
@@ -158,6 +168,9 @@ pub fn rust_main_secondary(logical_cpu_id: LogicalCpuId) -> ! {
         core::hint::spin_loop();
     }
 
+    // The primary has installed the global handlers. Pending notifications
+    // may reprogram this CPU's clockevent, so activate before draining them.
+    super::activate_local_interrupts();
     #[cfg(feature = "ipi")]
     kipi::enable_fixed_notifications();
 

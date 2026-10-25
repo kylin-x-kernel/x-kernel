@@ -59,15 +59,20 @@ impl BootHandler {
         kernel_boot::bootln!("rtc init");
     }
 
-    fn final_init(_boot_info: &BootInfo) {
+    fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
         x86_apic::init_primary(io_apic_paddr_from_firmware_or_fallback());
         console_driver::register_input_irq_handler();
-        timer_driver::x86_lapic_tsc::init_primary();
+        Ok(())
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_logical_cpu_id: kcpu_id_map::LogicalCpuId) {
+    fn prepare_local_interrupts(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> kerrno::KResult<()> {
         x86_apic::init_secondary();
-        timer_driver::x86_lapic_tsc::init_secondary();
+        Ok(())
+    }
+
+    fn activate_local_interrupts() -> kerrno::KResult<()> {
+        timer_driver::x86_lapic_tsc::init_percpu();
+        Ok(())
     }
 }

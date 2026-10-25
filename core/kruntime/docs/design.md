@@ -1,5 +1,33 @@
 # kruntime — 设计文档
 
+## IRQ Startup Ownership
+
+Runtime owns the cross-subsystem ordering: install current, publish foundation
+handlers, activate local sources, prepare IRQ-exit services, then enable CPU IRQ
+delivery. The AP runqueue-ready and service-ready rendezvous serve different
+consumers and remain separate. Neither a controller driver nor kirq can infer
+that scheduler, clockevent and worker prerequisites have all completed.
+
+Platform boot hooks select the hardware and invoke controller preparation and
+local source activation. irqchip drivers own register programming and their
+hardware readiness; timer drivers own clockevent programming. kirq owns generic
+descriptor, action, dispatch and line enable state. It does not own an additional
+global boot-ready state or the concrete controller drivers.
+
+The responsibility split follows Linux's startup organization, not its exact
+call sequence: `init/main.c::start_kernel` orders `early_irq_init`, `init_IRQ`,
+timer/softirq setup and `local_irq_enable`; arm64's `init_IRQ` invokes
+`drivers/irqchip/irqchip.c::irqchip_init`, while x86's `init_IRQ` invokes the
+architecture interrupt-initialization hook. A common phase interface does not
+require moving platform discovery or hardware implementation into the generic
+IRQ core. X-Kernel retains its own current-installation and AP rendezvous needs.
+
+The current early console/controller discovery path remains distinct from
+local source activation. Normal console input registration still needs its
+separate early-output/late-input transition; the phase split alone does not
+establish that contract. Validation and coverage limits are recorded in
+[IRQ startup validation](irq-startup-validation.md).
+
 ## RCU Host Adapters
 
 The execution-context adapter reports the common IRQ core's context facts,
@@ -341,9 +369,10 @@ BootInfo*
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
         (日志等级：优先取启动命令行 `loglevel=` / `quiet` / `debug`，否则 Kconfig 默认)
-    → final_init
+    → prepare_interrupts
     → init_scheduler
-    → init_interrupt (softirq runner, timer tick, IPI, PMU handlers, ksoftirqd)
+    → init_interrupt (softirq runner, timer/IPI/PMU handlers,
+                      activate_local_interrupts, ksoftirqd, enable_local_irq)
     → create late-init bootstrap thread (Internal, PID-less)
     → activate late-init thread
     → boot task (PID 0) block forever
@@ -427,7 +456,7 @@ NMI 机制由平台探测并在每 CPU 使能，`kruntime` 负责在正确的初
 - `early_driver_init`（GIC 初始化完成后）→ `khal::nmi::early_init()`：探测 GIC
   版本与 FEAT_NMI，写入运行时机制（`Pseudo` / `Hardware` / `None`），并打印
   `NMI mode: ...` 启动日志。
-- 主核 `final_init` 与每个从核 `final_init_ap` → `khal::nmi::late_init()`：每 CPU
+- 主核 `prepare_interrupts` 与每个从核 `prepare_local_interrupts` → `khal::nmi::late_init()`：每 CPU
   使能。hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT；pseudo 与降级（`None`）
   无需 per-CPU 寄存器操作。
 - late-init 线程中的 `[watchdog] init_primary`（以及从核 idle 前的
@@ -443,10 +472,11 @@ NMI 机制由平台探测并在每 CPU 使能，`kruntime` 负责在正确的初
 SecondaryKernelEntry::enter(logical_cpu_id)
     → percpu::init_secondary, init_trap
     → memspace::init_memory_management_secondary
-    → final_init_secondary, init_scheduler_secondary
+    → prepare_local_interrupts, init_scheduler_secondary
     → SCHED_READY_CPUS += 1  (供 start_secondary_cpus 等待; RQ 已注册, 跨核 spawn 安全)
     → [ipi] kipi::init
     -> wait until INITED_CPUS != 0 (primary services prepared)
+    -> activate_local_interrupts (before notifications can reprogram the timer)
     -> enable_fixed_notifications
     -> init_softirqd_current_cpu
     -> enable_local_irq
@@ -531,7 +561,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 
 ## 与 QEMU / 真机的边界
 
-`kruntime` 本身**平台无关**：`BootInfo` 内容由 `kernel-boot` + 平台 crate 填充。QEMU virt 与板级（如 raspi）差异在引导层和 `khal::final_init`，进入 `rust_main` 后的阶段表相同。
+`kruntime` 本身**平台无关**：`BootInfo` 内容由 `kernel-boot` + 平台 crate 填充。QEMU virt 与板级（如 raspi）差异在引导层和平台准备/激活 hook，进入 `rust_main` 后的阶段表相同。
 
 ## 冗余与过载
 

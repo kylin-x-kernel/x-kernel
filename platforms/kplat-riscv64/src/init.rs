@@ -45,14 +45,20 @@ impl BootHandler {
         }
     }
 
-    fn final_init(_boot_info: &BootInfo) {
-        irq_driver::riscv::init_percpu();
-        timer_driver::riscv_sbi::init_percpu();
+    fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
+        // The primary PLIC context was prepared during early discovery.
+        Ok(())
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_logical_cpu_id: LogicalCpuId) {
-        irq_driver::riscv::init_percpu();
+    fn prepare_local_interrupts(_logical_cpu_id: LogicalCpuId) -> kerrno::KResult<()> {
+        irq_driver::riscv::init_current_cpu_context();
+        Ok(())
+    }
+
+    fn activate_local_interrupts() -> kerrno::KResult<()> {
+        irq_driver::riscv::activate_local_interrupts();
         timer_driver::riscv_sbi::init_percpu();
+        Ok(())
     }
 }

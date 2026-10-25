@@ -12,6 +12,7 @@ use kcpu_id_map::RawCpuId;
 use super::{BOOT_DMW_BASE, BOOT_DMW_UNCACHED_BASE};
 
 const DIRECT_BOOT_LOAD_OFFSET: usize = 0x0020_0000;
+const CRMD_IE: usize = 1 << 2;
 
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -48,6 +49,10 @@ unsafe extern "C" fn _start() -> ! {
         .dword  0
         .word   0x818223cd
         .word   0x0
+        // Preserve the fixed boot header and all CRMD fields except IE.
+        move        $t0, $zero
+        li.w        $t1, {crmd_ie}
+        csrxchg     $t0, $t1, 0x0
         // Firmware's tp is not a kernel task pointer. Keep the boot header intact.
         move        $tp, $zero
         move        $s0, $a1
@@ -93,6 +98,7 @@ unsafe extern "C" fn _start() -> ! {
         la.abs      $t0, {entry}
         li.d        $ra, 0
         jirl        $zero, $t0, 0",
+        crmd_ie = const CRMD_IE,
         kernel_entry = const DIRECT_BOOT_LOAD_OFFSET + 0x40,
         kernel_load_offset = const DIRECT_BOOT_LOAD_OFFSET,
         dmw_uncached_base = const BOOT_DMW_UNCACHED_BASE,
@@ -121,6 +127,10 @@ unsafe extern "C" fn _start() -> ! {
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
         "
+        // Exclude ordinary IRQs before installing traps, stacks or current.
+        move        $t0, $zero
+        li.w        $t1, {crmd_ie}
+        csrxchg     $t0, $t1, 0x0
         // Each CPU has no current task until scheduler initialization.
         move        $tp, $zero
         li.d        $t0, {dmw_uncached_base} | 0x1
@@ -142,6 +152,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         csrrd       $a0, 0x20
         la.abs      $t0, {entry}
         jirl        $zero, $t0, 0",
+        crmd_ie = const CRMD_IE,
         dmw_uncached_base = const BOOT_DMW_UNCACHED_BASE,
         phys_boot_offset = const BOOT_DMW_BASE,
         enable_fp_simd = sym enable_fp_simd,

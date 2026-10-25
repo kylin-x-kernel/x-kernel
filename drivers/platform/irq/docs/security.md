@@ -33,6 +33,11 @@ network/file data path in this crate.
 
 ## Unsafe Code
 
+RISC-V source activation changes only the current hart's SIE source bits.
+Platform startup must retain the global SSTATUS.SIE mask across preparation
+and activation until runtime handlers are installed. PLIC context preparation
+does not itself provide that CPU-wide exclusion.
+
 On x86, fixed LAPIC spurious/error vectors are consumed before ordinary
 claims are constructed. Spurious delivery must not acknowledge any ISR entry;
 error delivery captures controller status and acknowledges once in x86-apic.

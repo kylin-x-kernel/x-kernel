@@ -25,10 +25,28 @@ pub trait BootHandler {
     /// driver model only when a later subsystem needs a `DeviceObject` handle.
     fn early_driver_init();
 
-    /// Final initialization on the boot CPU.
-    fn final_init(boot_info: &BootInfo);
+    /// Complete boot-CPU controller preparation before scheduler setup.
+    ///
+    /// CPU IRQ delivery must remain masked. Clockevent activation is separate.
+    /// Early console/controller discovery still belongs to `early_driver_init`.
+    ///
+    /// # Errors
+    /// Returns an error if mandatory controller preparation cannot complete.
+    fn prepare_interrupts(boot_info: &BootInfo) -> kerrno::KResult<()>;
 
     #[cfg(feature = "smp")]
-    /// Final initialization on an application processor (SMP only).
-    fn final_init_ap(logical_cpu_id: LogicalCpuId);
+    /// Prepare an AP's controller interface with CPU IRQ delivery masked.
+    ///
+    /// # Errors
+    /// Returns an error if local controller preparation fails.
+    fn prepare_local_interrupts(logical_cpu_id: LogicalCpuId) -> kerrno::KResult<()>;
+
+    /// Activate local foundation sources after their handlers are installed.
+    ///
+    /// Runs with current installed and CPU IRQ delivery masked. Does not start
+    /// tasks, register handlers, open global IRQ delivery or publish readiness.
+    ///
+    /// # Errors
+    /// Returns an error if local source activation fails.
+    fn activate_local_interrupts() -> kerrno::KResult<()>;
 }

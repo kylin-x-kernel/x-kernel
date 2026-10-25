@@ -12,7 +12,7 @@
 //! `IntrManagerIf`, `ClockSourceIf`/`ClockEventIf`, and `SysCtrl`
 //! providers, so there is no direct API to call. The activation
 //! sequence is: `early_driver_init` (clock, interrupts, console, RTC
-//! sample) -> `final_init`/`final_init_ap` (per-CPU timer), with
+//! sample) -> interrupt preparation -> `activate_local_interrupts` (per-CPU timer), with
 //! `dispatch_irq` running from the IRQ entry afterwards. A production
 //! bring-up trace is in `src/init.rs`.
 //!

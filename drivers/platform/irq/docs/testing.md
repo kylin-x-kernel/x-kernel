@@ -1,4 +1,4 @@
-# ARM Controller Preparation Validation
+# Interrupt Controller Preparation Validation
 
 Use a disposable disk image and the repository build workflow. These checks
 cover boot preparation, not CPU hotplug or arbitrary controller reinitialization.
@@ -86,3 +86,18 @@ simulate physical delivery or use the entry's return value as classification
 evidence; the separate dispatcher test checks that regular dispatch is bypassed.
 Do not invoke the real error handler directly from a test: its EOI requires an
 in-service error interrupt. Physical APIC error injection is not covered here.
+
+## RISC-V Source Activation
+
+```sh
+cp platforms/kplat-riscv64/qemu_defconfig .config
+make defconfig
+make UNITTEST=y clippy
+make unittest UNITTEST_CRATE=irq_driver XKMAKE_ARGS='--no-net --no-vsock'
+```
+
+The local CSR test masks global IRQ delivery and excludes migration, clears
+SSIE/STIE/SEIE, then invokes source activation. It checks the resulting source
+bits and that global delivery remains masked. The original SIE value is restored
+before assertions. This validates activation on the hart executing the test;
+it does not inject physical PLIC interrupts or prove boot-handler ordering.

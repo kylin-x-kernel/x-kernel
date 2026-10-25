@@ -37,6 +37,7 @@ unittest.workspace = true
 riscv = "0.14"
 riscv_plic = { version = "0.2" }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
+unittest.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_apic = { workspace = true }

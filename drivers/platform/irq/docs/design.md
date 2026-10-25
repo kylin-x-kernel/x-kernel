@@ -74,7 +74,7 @@ Reproducible boot checks and their coverage limits are in [testing.md](testing.m
 - `init` / `init_from_device_tree` run once during platform bring-up,
   before device interrupts are enabled and include primary CPU-interface
   initialization. Each AP calls `init_current_cpu` once before activating local
-  sources. The primary final-init hook must not repeat it: local initialization
+  sources. The primary interrupt-preparation hook must not repeat it: local initialization
   resets priority/interface state and private IRQ enable/active bits.
   A per-CPU attempt flag rejects repeated local setup before destructive MMIO,
   including retries after failure. IRQ-enabled entry is rejected without
@@ -104,6 +104,16 @@ Reproducible boot checks and their coverage limits are in [testing.md](testing.m
   initialization, after allocator and local GIC initialization, with migration
   excluded. It may allocate and take locks, but does not sleep. It must not be
   called from NMI, IRQ handlers, or early platform initialization.
+
+## RISC-V Local Preparation And Activation
+
+`init_current_cpu_context` sets the current hart's PLIC threshold to zero;
+it does not clear source enable bits. The primary prepares its context after
+global PLIC discovery, and each AP prepares its own context during local setup.
+`activate_local_interrupts` only sets SSIE/STIE/SEIE, without repeating PLIC
+preparation or opening the global SSTATUS.SIE gate. Runtime owns that final
+gate and must install handlers before permitting delivery. Timer programming
+remains a separate timer-driver operation.
 
 ## Local irq_work Notification
 

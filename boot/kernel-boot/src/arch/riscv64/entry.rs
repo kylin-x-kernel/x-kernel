@@ -15,6 +15,8 @@ use riscv::register::sstatus::{self, FS};
 
 use super::mmu;
 
+const SSTATUS_SIE: usize = 1 << 1;
+
 /// Boot stack for the primary CPU.
 #[unsafe(link_section = ".bss.stack")]
 static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
@@ -47,6 +49,9 @@ fn enable_fp_simd() {
 #[unsafe(link_section = ".text.boot")]
 unsafe extern "C" fn _start() -> ! {
     naked_asm!(
+        // Keep ordinary IRQ delivery off before installing traps or current.
+        // Unlike clearing sie, this preserves individual source enables.
+        "csrci   sstatus, {sstatus_sie}",
         // Firmware's tp is not a kernel task pointer.
         "mv      tp, zero",
         "mv      s0, a0",
@@ -69,6 +74,7 @@ unsafe extern "C" fn _start() -> ! {
         "add     t0, t0, s2",
         "jalr    t0",
         "j       .",
+        sstatus_sie = const SSTATUS_SIE,
         boot_stack = sym BOOT_STACK,
         boot_stack_size = const BOOT_STACK_SIZE,
         create_boot_page_tables = sym mmu::create_boot_page_tables,
@@ -92,6 +98,8 @@ unsafe extern "C" fn _start() -> ! {
 #[unsafe(link_section = ".text.boot")]
 pub unsafe extern "C" fn _start_secondary() -> ! {
     naked_asm!(
+        // APs establish the same global exclusion as the primary hart.
+        "csrci   sstatus, {sstatus_sie}",
         // Each hart has no current task until scheduler initialization.
         "mv      tp, zero",
         "mv      s0, a0",
@@ -107,6 +115,7 @@ pub unsafe extern "C" fn _start_secondary() -> ! {
         "add     t0, t0, s1",
         "jalr    t0",
         "j       .",
+        sstatus_sie = const SSTATUS_SIE,
         enable_fp_simd = sym enable_fp_simd,
         init_mmu = sym mmu::init_mmu,
         kernel_start = sym _start,

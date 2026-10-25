@@ -13,7 +13,7 @@ LoongArch machines (QEMU virt-class platforms).
 - Boot handoff: the `BootHandler` provider runs
   `early_driver_init` (clock, interrupts, console from the device tree,
   RTC sample seeding `ktime::initialize_realtime`) and per-CPU
-  `final_init` (timer enablement).
+  `activate_local_interrupts` (timer enablement after handler installation).
 - Clock: the architectural stable counter (`Time::read`, `TCFG`
   registers) exposed as the `ClockSourceIf` / `ClockEventIf` providers,
   with a once-computed `NANOS_PER_TICK` conversion.
@@ -50,7 +50,7 @@ LoongArch machines (QEMU virt-class platforms).
 platforms/kplat-loongarch64/
 ├── src/
 │   ├── lib.rs        # module wiring, default platform contracts
-│   ├── init.rs       # BootHandler provider (early/final init)
+│   ├── init.rs       # BootHandler provider (early init, IRQ preparation/activation)
 │   ├── time.rs       # stable counter, ClockSourceIf/ClockEventIf
 │   ├── irq.rs        # IntrManagerIf provider, IrqType routing
 │   ├── irq/
@@ -86,7 +86,7 @@ or user-mode flags.
 BootHandler (kiface)
   early_driver_init ─> time::early_init, irq::init (EIOINTC+PCH PIC),
                        console from DT, RTC sample -> ktime
-  final_init(_ap)   ─> per-CPU timer enablement (TCFG + IRQ 11)
+  activate_local_interrupts ─> per-CPU timer enablement (TCFG + IRQ 11)
 
 kirq::IntrManagerIf (kiface)
   enable:   Timer -> ECFG.LIE | Ex -> range gate -> EIOINTC + PCH PIC
@@ -122,7 +122,7 @@ separate allocation/routing/activation lifecycle, not a wider PCH range check.
 - `early_driver_init` runs on the boot hart before the driver model;
   the RTC path maps its MMIO aperture through `memspace` and must run
   after `memspace` is available.
-- `final_init_ap` runs per application CPU; `time::init_percpu` touches
+- `activate_local_interrupts` runs on each CPU; `time::init_percpu` touches
   only CPU-local registers and enables the local timer IRQ.
 - `dispatch_irq` runs in interrupt context: it must not sleep or
   allocate, and external lines are claimed/completed inside the

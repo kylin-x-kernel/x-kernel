@@ -56,12 +56,17 @@ impl BootHandler {
         }
     }
 
-    fn final_init(_boot_info: &BootInfo) {
-        crate::time::init_percpu();
+    fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
+        Ok(())
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_logical_cpu_id: kcpu_id_map::LogicalCpuId) {
+    fn prepare_local_interrupts(_logical_cpu_id: kcpu_id_map::LogicalCpuId) -> kerrno::KResult<()> {
+        Ok(())
+    }
+
+    fn activate_local_interrupts() -> kerrno::KResult<()> {
         crate::time::init_percpu();
+        Ok(())
     }
 }

@@ -343,7 +343,7 @@ pub fn init_stdout_ioport(port: u16, irq: Option<IrqDesc>) {
 /// Register the stdout console's input interrupt handler.
 ///
 /// Must be called after the platform IRQ provider is up; platforms differ on
-/// whether that is `early_driver_init` or `final_init`.
+/// whether that is `early_driver_init` or `prepare_interrupts`.
 pub fn register_input_irq_handler() {
     let Some(desc) = serial::stdout_irq() else {
         return;

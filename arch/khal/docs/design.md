@@ -63,7 +63,7 @@ watchdog / perf 消费者
 - `khal::irq` 自身不保存 `IRQ_STATE` 或 `NMI_TABLE`，避免两个活跃 IRQ core。
 - `khal::nmi::early_init()`：GIC 初始化后、任何 NMI 使能前调用一次（平台
   early_driver_init），探测机制并写入运行时 `NmiMode`。
-- `khal::nmi::late_init()`：主核 `final_init` 与每个从核 `final_init_ap` 各调用
+- `khal::nmi::late_init()`：主核 `prepare_interrupts` 与每个从核 `prepare_local_interrupts` 各调用
   一次（每 CPU）；hardware 模式在此开启 `SCTLR_EL1.NMI` / ALLINT 使能。
 - `khal::nmi::enable_periodic_nmi(period_ns, cb)`：每 CPU 调用；返回 `false`
   表示本 CPU 无法武装（机制不可用或资源冲突），消费者应显式降级。

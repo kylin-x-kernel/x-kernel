@@ -8,8 +8,7 @@
 //! monotonic time, and programs the per-CPU LAPIC timer for one-shot deadlines.
 //!
 //! Platform boot code calls [`early_init`] once to establish clock-source state,
-//! then [`init_primary`] after bootstrap APIC initialization. Each secondary CPU
-//! calls [`init_secondary`] after its own APIC initialization. Runtime users
+//! then each CPU calls [`init_percpu`] after its own LAPIC initialization. Runtime users
 //! access the providers through `khal::time`.
 //!
 //! [`TimerConfig`] supplies the nominal frequency used for the calibration
@@ -417,52 +416,30 @@ fn read_tsc_raw() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
-/// Configures the bootstrap CPU's LAPIC timer in one-shot mode.
+/// Configures and unmasks the current CPU's LAPIC timer in one-shot mode.
 ///
-/// The local APIC must be initialized for the bootstrap CPU before this call.
+/// The local APIC must already be initialized on this CPU. Shared clock
+/// calibration belongs to [`early_init`]; local setup is identical on the
+/// bootstrap CPU and application CPUs. The caller keeps CPU IRQ delivery
+/// masked until the timer handler is installed.
 ///
 /// # Panics
 ///
 /// Panics if the calling CPU has no initialized local APIC handle.
-pub fn init_primary() {
-    {
-        use x2apic::lapic::{TimerDivide, TimerMode};
-        x86_apic::with_local_apic(|lapic| {
-            // SAFETY: with_local_apic retains the initialized current-CPU
-            // controller with IRQs/preemption disabled and exclusive access.
-            unsafe { lapic.set_timer_mode(TimerMode::OneShot) };
-            // SAFETY: with_local_apic retains the initialized current-CPU
-            // controller with IRQs/preemption disabled and exclusive access.
-            unsafe { lapic.set_timer_divide(TimerDivide::Div1) };
-            // SAFETY: with_local_apic retains the initialized current-CPU
-            // controller with IRQs/preemption disabled and exclusive access.
-            unsafe { lapic.enable_timer() };
-        });
-    }
-}
+pub fn init_percpu() {
+    use x2apic::lapic::{TimerDivide, TimerMode};
 
-/// Configures a secondary CPU's LAPIC timer in one-shot mode.
-///
-/// The local APIC must be initialized for the calling CPU before this call.
-///
-/// # Panics
-///
-/// Panics if the calling CPU has no initialized local APIC handle.
-pub fn init_secondary() {
-    {
-        use x2apic::lapic::{TimerDivide, TimerMode};
-        x86_apic::with_local_apic(|lapic| {
-            // SAFETY: with_local_apic retains the initialized current-CPU
-            // controller with IRQs/preemption disabled and exclusive access.
-            unsafe { lapic.set_timer_mode(TimerMode::OneShot) };
-            // SAFETY: with_local_apic retains the initialized current-CPU
-            // controller with IRQs/preemption disabled and exclusive access.
-            unsafe { lapic.set_timer_divide(TimerDivide::Div1) };
-            // SAFETY: with_local_apic retains the initialized current-CPU
-            // controller with IRQs/preemption disabled and exclusive access.
-            unsafe { lapic.enable_timer() };
-        })
-    }
+    x86_apic::with_local_apic(|lapic| {
+        // SAFETY: with_local_apic retains the initialized current-CPU
+        // controller with IRQs/preemption disabled and exclusive access.
+        unsafe { lapic.set_timer_mode(TimerMode::OneShot) };
+        // SAFETY: with_local_apic retains the initialized current-CPU
+        // controller with IRQs/preemption disabled and exclusive access.
+        unsafe { lapic.set_timer_divide(TimerDivide::Div1) };
+        // SAFETY: with_local_apic retains the initialized current-CPU
+        // controller with IRQs/preemption disabled and exclusive access.
+        unsafe { lapic.enable_timer() };
+    });
 }
 
 /// Returns elapsed TSC ticks since primary timer initialization.

@@ -62,25 +62,27 @@ impl BootHandler {
         khal::nmi::early_init();
     }
 
-    fn final_init(_boot_info: &BootInfo) {
+    fn prepare_interrupts(_boot_info: &BootInfo) -> kerrno::KResult<()> {
         // Early GIC discovery already prepared the primary CPU interface.
         // Reinitializing it would reset private IRQ state and priority masks.
-        timer_driver::arm_generic::init_percpu();
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
+        Ok(())
     }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_cpu_id: kcpu_id_map::LogicalCpuId) {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: AP GIC preparation \
-                      failed; this boot hook has no error return and must not activate local \
-                      sources"
-        )]
-        irq_driver::gic::init_current_cpu().expect("secondary GIC initialization failed");
-        timer_driver::arm_generic::init_percpu();
+    fn prepare_local_interrupts(_cpu_id: kcpu_id_map::LogicalCpuId) -> kerrno::KResult<()> {
+        irq_driver::gic::init_current_cpu().map_err(|error| {
+            error!("secondary GIC preparation failed: {error}");
+            kerrno::KError::BadState
+        })?;
         #[cfg(feature = "nmi")]
         khal::nmi::late_init();
+        Ok(())
+    }
+
+    fn activate_local_interrupts() -> kerrno::KResult<()> {
+        timer_driver::arm_generic::init_percpu();
+        Ok(())
     }
 }

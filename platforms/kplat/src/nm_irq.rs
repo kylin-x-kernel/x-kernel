@@ -64,7 +64,7 @@ pub trait NmiDef {
 
     /// Per‑CPU NMI initialization.
     ///
-    /// Called during `final_init` / `final_init_ap`, after the controller
+    /// Called during `prepare_interrupts` / `prepare_local_interrupts`, after the controller
     /// CPU interface is ready.  Typically configures per‑redistributor
     /// registers and per‑CPU architecture‑level NMI enables (e.g.
     /// `SCTLR_EL1.NMI`, `PSTATE.ALLINT`, `GICR_INMIR`).

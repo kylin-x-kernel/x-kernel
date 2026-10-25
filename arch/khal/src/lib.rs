@@ -95,7 +95,8 @@ pub mod context {
 
 pub use kcpu::{instrs as asm, userspace as uspace};
 #[cfg(feature = "smp")]
-pub use kplat::boot::final_init_ap as final_init_secondary;
+pub use kplat::boot::prepare_local_interrupts;
+pub use kplat::boot::{activate_local_interrupts, prepare_interrupts};
 
 #[cfg(feature = "nmi")]
 pub mod nmi {
@@ -140,11 +141,6 @@ pub fn boot_info(arg: usize) -> &'static boot_info::BootInfo {
 
 pub fn early_driver_init() {
     kplat::boot::early_driver_init();
-}
-
-/// Completes platform initialization from the unified boot handoff payload.
-pub fn final_init(boot_info: &boot_info::BootInfo) {
-    kplat::boot::final_init(boot_info);
 }
 
 macro_rules! addr_of_sym {

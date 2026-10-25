@@ -15,10 +15,18 @@ impl BootHandler {
 
     fn early_driver_init() {}
 
-    fn final_init(_boot_info: &kplat::boot::BootInfo) {}
+    fn prepare_interrupts(_boot_info: &kplat::boot::BootInfo) -> kerrno::KResult<()> {
+        Ok(())
+    }
 
     #[cfg(feature = "smp")]
-    fn final_init_ap(_logical_cpu_id: LogicalCpuId) {}
+    fn prepare_local_interrupts(_logical_cpu_id: LogicalCpuId) -> kerrno::KResult<()> {
+        Ok(())
+    }
+
+    fn activate_local_interrupts() -> kerrno::KResult<()> {
+        Ok(())
+    }
 }
 
 #[kiface::provide]

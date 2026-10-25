@@ -111,11 +111,19 @@ fn send_ipi_to_raw_hart(raw_hart_id: usize) {
     }
 }
 
+/// Prepare this hart's PLIC threshold without changing its interrupt-source enables.
+///
+/// Called after global PLIC setup, with CPU IRQ delivery still masked.
 pub fn init_current_cpu_context() {
     plic().lock().init_by_context(this_context());
 }
 
-pub fn init_percpu() {
+/// Enable this hart's software, timer and external interrupt sources.
+///
+/// Platform startup prepares the PLIC context separately and keeps global
+/// supervisor IRQ delivery masked until runtime handlers are ready. This
+/// function does not change the global SSTATUS.SIE gate or PLIC state.
+pub fn activate_local_interrupts() {
     // SAFETY: Local interrupt initialization runs in supervisor mode; SSIE belongs to this hart.
     unsafe { sie::set_ssoft() };
     // SAFETY: The current hart owns its supervisor timer-enable CSR bit during local
@@ -124,8 +132,9 @@ pub fn init_percpu() {
     // SAFETY: The current hart owns its supervisor external-enable CSR bit during local
     // initialization.
     unsafe { sie::set_sext() };
-    init_current_cpu_context();
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/riscv.rs");
 
 macro_rules! with_cause {
     (

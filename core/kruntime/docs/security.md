@@ -1,5 +1,25 @@
 # kruntime — 安全与可靠性分析
 
+## Foundation IRQ Startup
+
+Controller preparation runs before scheduler installation with ordinary CPU
+delivery masked. Runtime checks timer and (when configured) IPI registration
+before local source activation. A rejected registration is fatal startup failure:
+runtime must not activate local clockevents, enable CPU IRQ delivery or launch
+APs. Already installed handlers are not rolled back before reclamation services
+exist. Platform preparation/activation errors likewise stop mandatory bring-up.
+
+Local activation precedes softirqd task placement on the primary and pending
+fixed-notification drain on APs; both can program a clockevent. AP runqueue and
+service-ready rendezvous remain distinct. NMI feature setup stays in controller
+preparation; NMI consumers still require the later irq_work readiness contract.
+
+This phase split does not yet relocate early console mapping/registration or
+its UART source control. Those legacy operations remain an explicitly separate
+console-input change, not evidence that all device sources obey this foundation
+startup sequence. Boot observations test preparation, current/handler readiness
+and IRQ exclusion at activation; they do not inject a controller failure.
+
 ## irq_work Initialization And Live Validation
 
 Runtime initializes irq_work in allocator-ready, CPU-local startup before NMI

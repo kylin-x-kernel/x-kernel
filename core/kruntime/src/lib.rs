@@ -68,6 +68,7 @@ pub fn run_boot_benchmarks() {
 }
 
 unittest::path_mod_test!(tests_workqueue, "../ut-tests/tests_workqueue/mod.rs");
+unittest::path_mod_test!(tests_irq_startup, "../ut-tests/irq_startup.rs");
 
 #[macro_use]
 extern crate klogger;
@@ -506,8 +507,15 @@ pub fn rust_main(arg: usize) -> ! {
         backtrace::init(ip_range, fp_range);
     }
 
-    info!("Initialize platform devices...");
-    khal::final_init(boot_info);
+    info!("Prepare platform interrupts...");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory controller \
+                  preparation failed; runtime must not activate sources or enter scheduling"
+    )]
+    khal::prepare_interrupts(boot_info).expect("primary interrupt preparation failed");
+    #[cfg(unittest)]
+    tests_irq_startup::record_prepared();
 
     ktask::init_scheduler();
     // Prepare IRQ services and the late-init task before any newly activated
@@ -733,6 +741,19 @@ fn init_local_irq_work() {
     );
 }
 
+fn activate_local_interrupts() {
+    #[cfg(unittest)]
+    tests_irq_startup::record_activation_entry();
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory local sources \
+                  cannot be activated; runtime must not enable IRQs or publish readiness"
+    )]
+    khal::activate_local_interrupts().expect("local interrupt activation failed");
+    #[cfg(unittest)]
+    tests_irq_startup::record_activation_return();
+}
+
 fn init_interrupt() {
     init_local_irq_work();
     if !kirq::softirq::init() {
@@ -742,8 +763,9 @@ fn init_interrupt() {
     // Timer interrupt handler. All hardware-timer driving — periodic-tick
     // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in
     // `ktask::on_timer_fire`.
-    kirq::register(
-        khal::time::interrupt_id(),
+    let timer_irq = khal::time::interrupt_id();
+    let timer_registration = kirq::try_register(
+        timer_irq,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
             timer_driver::arm_generic::dispatch_resume_fixup();
@@ -751,9 +773,17 @@ fn init_interrupt() {
             kirq::IrqEvent::HANDLED
         }),
     );
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory timer handler \
+                  registration failed; runtime cannot activate sources without its handler"
+    )]
+    if !matches!(timer_registration, Ok(true)) {
+        panic!("mandatory timer IRQ {timer_irq:?} registration failed: {timer_registration:?}");
+    }
 
     #[cfg(feature = "ipi")]
-    kirq::register(
+    let ipi_registration = kirq::try_register(
         kbuild_config::IPI_IRQ,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
@@ -763,6 +793,20 @@ fn init_interrupt() {
             kirq::IrqEvent::HANDLED
         }),
     );
+    #[cfg(feature = "ipi")]
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory IPI handler \
+                  registration failed; runtime cannot activate sources without its handler"
+    )]
+    if !matches!(ipi_registration, Ok(true)) {
+        panic!(
+            "mandatory IPI IRQ {:?} registration failed: {ipi_registration:?}",
+            kbuild_config::IPI_IRQ
+        );
+    }
+    #[cfg(unittest)]
+    tests_irq_startup::record_handlers_ready();
 
     // PMU overflow dispatch.  Perf counters report overflow on the PMU
     // interrupt line; register the dispatch handler under the `pmu` feature
@@ -771,6 +815,9 @@ fn init_interrupt() {
     #[cfg(feature = "pmu")]
     khal::pmu::register_overflow_dispatch();
 
+    // Activation must precede task placement, which can reprogram clockevents.
+    // Handler publication succeeded above; ordinary CPU delivery is still off.
+    activate_local_interrupts();
     ktask::init_softirqd_current_cpu();
     // Enable IRQs before starting app
     karch::enable_local_irq();
