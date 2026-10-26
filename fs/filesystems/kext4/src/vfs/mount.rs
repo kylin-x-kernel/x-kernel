@@ -6,6 +6,8 @@
 
 use core::ops::{Deref, DerefMut};
 
+use kvfs::SuperBlock;
+
 use crate::{
     Ext4SbInfo,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
@@ -39,8 +41,11 @@ impl Ext4Mount {
     }
 
     /// Enters an exclusive core operation, including allocator prefetch windows.
-    pub(crate) fn write(&self) -> Ext4MountWriteGuard<'_> {
-        Ext4MountWriteGuard(self.state.write())
+    ///
+    /// `super_block` must own this mount. Journal abort publishes its read-only
+    /// flag before the guard releases mutation protection.
+    pub(crate) fn write<'a>(&'a self, super_block: &'a SuperBlock) -> Ext4MountWriteGuard<'a> {
+        Ext4MountWriteGuard(self.state.write(), super_block)
     }
 }
 
@@ -62,7 +67,7 @@ impl Drop for Ext4MountReadGuard<'_> {
 }
 
 /// Exclusive core access; drop occurs after the operation's allocator work.
-pub(crate) struct Ext4MountWriteGuard<'a>(RwLockWriteGuard<'a, Ext4SbInfo>);
+pub(crate) struct Ext4MountWriteGuard<'a>(RwLockWriteGuard<'a, Ext4SbInfo>, &'a SuperBlock);
 
 impl Deref for Ext4MountWriteGuard<'_> {
     type Target = Ext4SbInfo;
@@ -80,6 +85,16 @@ impl DerefMut for Ext4MountWriteGuard<'_> {
 
 impl Drop for Ext4MountWriteGuard<'_> {
     fn drop(&mut self) {
+        if self
+            .0
+            .journal
+            .as_ref()
+            .is_some_and(|journal| journal.is_aborted())
+        {
+            // Publish the write ban before releasing mount mutation protection,
+            // including for writes which would otherwise only dirty PageCache.
+            self.1.mark_read_only();
+        }
         let _ = self.0.metadata_io.reclaim_cache(METADATA_CACHE_SCAN_LIMIT);
     }
 }

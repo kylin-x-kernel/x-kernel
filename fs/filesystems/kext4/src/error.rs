@@ -159,7 +159,7 @@ pub enum Ext4Error {
     Device(DriverError),
     /// The journal has aborted and no further metadata mutation is allowed.
     JournalAborted,
-    /// A transaction handle ran out of metadata credits.
+    /// A reservation exceeds journal capacity or a handle exhausted its credits.
     InsufficientJournalCredits,
     /// No free space is available for the requested allocation.
     NoSpace,

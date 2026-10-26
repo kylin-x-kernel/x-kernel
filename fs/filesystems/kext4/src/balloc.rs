@@ -25,6 +25,9 @@ use crate::{
 };
 
 const BLOCK_ALLOCATOR_METADATA_CREDITS: u32 = 3;
+/// Allocator metadata plus create access to one new metadata block.
+pub(crate) const BLOCK_ALLOCATION_METADATA_CREDITS: u32 = BLOCK_ALLOCATOR_METADATA_CREDITS + 1;
+// Release updates allocator metadata and records one revoke, without creation.
 const METADATA_BLOCK_RELEASE_CREDITS: u32 = BLOCK_ALLOCATOR_METADATA_CREDITS + 1;
 
 impl Ext4SbInfo {

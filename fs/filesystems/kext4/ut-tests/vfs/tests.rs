@@ -17,9 +17,26 @@ use super::{
     supports_rename_flags, walk_file_extents, xattr_set_mode,
 };
 use crate::{
-    BlockCount, BlockMapping, BlockMappingFlags, Ext4InodeStat, Ext4Timestamp,
-    Ext4XattrNamespace, Ext4XattrSetMode, PhysicalBlock, superblock::Ext4StatFsMode,
+    BlockCount, BlockMapping, BlockMappingFlags, Ext4InodeStat, Ext4Timestamp, Ext4XattrNamespace,
+    Ext4XattrSetMode, PhysicalBlock, superblock::Ext4StatFsMode,
 };
+
+#[def_test]
+fn journal_errors_preserve_space_and_read_only_semantics() {
+    for error in [
+        crate::Ext4Error::NoSpace,
+        crate::Ext4Error::InsufficientJournalCredits,
+    ] {
+        assert_eq!(
+            super::into_vfs_err(error),
+            VfsError::from(LinuxError::ENOSPC).canonicalize()
+        );
+    }
+    assert_eq!(
+        super::into_vfs_err(crate::Ext4Error::JournalAborted),
+        VfsError::from(LinuxError::EROFS).canonicalize()
+    );
+}
 
 #[def_test]
 fn setattr_result_uses_post_encoding_inode_values() {

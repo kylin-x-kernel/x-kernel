@@ -14,6 +14,70 @@ use crate::{
     superblock::{JournalStatus, test_fixtures::*},
 };
 
+#[def_test]
+fn mutation_admission_rejects_nested_handles_before_waiting() {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    filesystem.metadata_journal().unwrap();
+    limit_transaction_credits(&mut filesystem, 4);
+    let journal = filesystem
+        .metadata_journal_for_mutation(
+            JournalCredits::new(3),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+        .unwrap();
+    let handle = journal.begin(JournalCredits::new(3)).unwrap();
+    let writes = device.write_count();
+    assert!(matches!(
+        filesystem.metadata_journal_for_mutation(
+            JournalCredits::new(2),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+        ),
+        Err(Ext4Error::InvalidJournalTransaction)
+    ));
+    assert_eq!(device.write_count(), writes);
+    assert!(!journal.is_aborted());
+    handle.stop().unwrap();
+    filesystem
+        .metadata_journal_for_mutation(
+            JournalCredits::new(2),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+        .unwrap();
+}
+
+#[def_test]
+fn exhausted_handle_aborts_and_rejects_following_mutations() {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+    let block = FilesystemBlock::new(6);
+    let access = filesystem
+        .metadata_io
+        .write_access(block, &mut handle)
+        .unwrap();
+    drop(access);
+    let result = filesystem
+        .metadata_io
+        .write_access(FilesystemBlock::new(7), &mut handle)
+        .map(|_| ());
+    assert_eq!(result, Err(Ext4Error::InsufficientJournalCredits));
+    assert_eq!(
+        filesystem.complete_metadata_mutation(handle, result),
+        Err(Ext4Error::InsufficientJournalCredits)
+    );
+    assert!(journal.is_aborted());
+    let writes = device.write_count();
+    assert!(matches!(
+        filesystem.metadata_journal(),
+        Err(Ext4Error::JournalAborted)
+    ));
+    assert!(matches!(
+        journal.begin(JournalCredits::new(1)),
+        Err(Ext4Error::JournalAborted)
+    ));
+    assert_eq!(device.write_count(), writes);
+}
+
 fn revoke_journal_test_filesystem(sequence: u32) -> (Ext4SbInfo, Arc<TestDevice>) {
     revoke_journal_test_filesystem_with_log_blocks(sequence, 1023)
 }

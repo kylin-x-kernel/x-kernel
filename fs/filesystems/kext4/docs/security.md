@@ -263,7 +263,7 @@ metadata 覆盖 unlink、rmdir、覆盖 rename 和乱序 final eviction；镜像
 | F-02 | journal commit 或 checkpoint 失败 | 设备写入/flush 错误 | committing 或 pending checkpoint 状态保留并 abort journal | 当前 mount 后续 sync/mutation 拒绝继续，重新挂载时依赖 recovery | 2 | 失败返回前永久 abort；保留 recovery evidence 和 pending state，禁止后续 sync 假成功 |
 | F-03 | recovery-time orphan cleanup 失败 | crash 发生在 namespace commit 之后、final cleanup 之前，bad legacy chain 需要切断，或 orphan-file/bitmap/inode metadata、设备失败、inode 使用尚未支持的格式 | 明确的 legacy bad-orphan 在 durable clear 后终止；不能安全降级的错误保留 orphan entry 或 recovery evidence 并返回 | filesystem 不会在未持久化 cleanup 时被当作可写 root 暴露，也不会把 checksum/I/O 错误当成 stale orphan 丢弃 | 2 | orphan cleanup 使用独立 journal transaction；bad legacy clear 与普通 inode cleanup 都采用 `PreserveDuringRecovery`，checkpoint 后只重载 mutable superblock/group state 并增量维护 orphan-file free count，成功后再继续；N3 在最终执行图上补齐 fault/powercut 矩阵 |
 | F-04 | 粗粒度 write lock 串行化慢 mutation I/O | live kext4 KVFS 层在 blocking filesystem mutation 周围持有 mount-level core write guard | 吞吐下降 | 其他 KExt4 mutation 等待；只读路径仍可共享 read guard | 4 | inode private state 已有独立 state lock；N2 根据实际 worker 和共享状态继续建立 per-group/journal/metadata-buffer 锁域；锁拆分前不宣称 mutation 并发性能 |
-| F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | 单次 mutation 无法容纳时在修改 metadata 前失败；writeback transaction 扩展失败时只提交完整前缀 | admission 失败保持磁盘不变；分段 writeback 的后续 transaction 若再失败，调用方可收到错误而 durable prefix 保留 | 3 | namespace 与 final eviction 分开预算；目录插入计划在事务前识别 HTree 转换/split，并把独立块 mapping 和 HTree credits 纳入同一预检；ordered writeback 在每个 live mapping run 前保证该操作及 inode publish 余量，先尝试 `reserve_more()`，容量不足则提交已 flush 的前缀、精确结算其 delalloc 后重开 transaction，只有连单次 mutation 都无法容纳时才在 admission 阶段拒绝；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 small-journal actual-run restart、fragmented unwritten、failure/retry、rename-overwrite、balanced-split 和 preallocation-tail credit 回归测试约束 |
+| F-05 | journal reservation 空间不足 | operation 的实际 metadata targets 超过空 journal 容量，或 reservation 混入另一个 lifecycle 阶段的工作 | 单次 mutation 无法容纳时在修改 metadata 前失败；writeback transaction 扩展失败时只提交完整前缀 | admission 失败保持磁盘不变；分段 writeback 的后续 transaction 若再失败，调用方可收到错误而 durable prefix 保留 | 3 | namespace 与 final eviction 分开预算；目录插入在事务前检查磁盘容量，额度按当前 extent 深度的结构上界预留，仅可能转换的单块目录计入第二次 append；ordered writeback 在每个 live mapping run 前保证该操作及 inode publish 余量，先尝试 `reserve_more()`，容量不足则提交已 flush 的前缀、精确结算其 delalloc 后重开 transaction，只有连单次 mutation 都无法容纳时才在 admission 阶段拒绝；跨叶 truncate 在首个 metadata 写入前选择按 tree blocks/groups 估算的全树路径；由 small-journal actual-run restart、fragmented unwritten、failure/retry、rename-overwrite、balanced-split 和 preallocation-tail credit 回归测试约束 |
 | F-06 | PageCache 与 filesystem core 锁序反转 | writeback 持有 core mutex 等待 mapping mutex，同时 cache miss 持有 mapping mutex 进入 backing read | 并发 buffered I/O 和 `sync()` 停止推进 | watchdog 报告 mutex deadlock，filesystem workload 无法继续 | 2 | kext4 KVFS 层不在 PageCache traversal 外层持有 core mutex；同 inode writeback 独立串行化，batch callback 在 mapping/folio mutex 释放后才进入核心；VFS/MM 后续仍需消除 tree lock 下的 backing I/O |
 | F-07 | committed journal 占满可追加空间 | checkpoint 落后于 commit，head 接近 oldest tail | 新 transaction 暂时不能持久化 | mutation 等待 checkpoint progress | 3 | append 前按环形 live range 校验空间并保留一个空 block；提交路径捕获 `JournalBusy`，同步处理足够释放空间的 pending checkpoint 前缀后重试 |
 | F-08 | FIEMAP 查询遇到损坏 mapping | extent tree/legacy pointer 返回非法长度或物理范围 | 当前 ioctl 返回数据错误 | 文件内容不被修改，调用方不能取得布局 | 3 | 复用 ext4 mapping 校验；KVFS operation 拒绝零进度和算术溢出，不输出未经检查的 extent |
@@ -418,11 +418,34 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
 
 ### Directory growth extent-credit boundary
 
-Namespace insertion admits both free space and journal credits from one preflight plan.
-`growth_credits` covers every planned directory/extent block's allocator headroom and
-create access, plus old external levels rewritten by each independent append.
-Checked arithmetic rejects overflow before metadata publication. In-place insertion
-adds no growth allowance; create does not double-reserve it. The existing transaction
-abort semantics remain intact. Regression fixtures cover inline-root and full external
-leaf splits for both link and rename, separate inode-table blocks, bounded transaction
-admission, and persistence after reopen.
+Namespace insertion reserves an operation bound independent of directory contents or
+predicted insertion paths. The extent layer bounds new blocks and old external rewrites
+using the validated current depth: existing external blocks are reused, each level can
+add one sibling, and inline spill/root growth are included. Only a single-block linear
+directory eligible for index conversion reserves a second append, allowing one level
+of depth growth between appends. HTree dispatch and credits share the feature-and-inode
+index predicate. Allocation/create and release/revoke keep distinct credit definitions.
+Capacity validation remains ahead of metadata publication because namespace mutations
+have no operation-local rollback. No plan object or cached growth-credit field is retained.
+
+An oversized admission returns `NoSpace` without aborting or publishing metadata. A full
+running transaction waits for active handles, then commits before the caller retries its
+reservation; exact-capacity admission is allowed. Waiters observe the existing transaction
+state and share its notification queue. Handle stop and abort notify outside journal locks.
+The mount mutation lock serializes complete filesystem mutations. Admission checks the
+existing active-handle count and rejects nested handles before any setup or wait, so a
+caller cannot wait for its own handle while holding that lock. Independent journal-core
+users retain the wait/stop protocol; handle stop requires no mount lock.
+
+Credit exhaustion during mutation aborts the journal and maps to `ENOSPC`. The existing
+abort state rejects subsequent mutation with `EROFS` before feature or superblock setup;
+the mount write guard publishes `RDONLY` to the existing VFS superblock before releasing
+mutation protection. Writable remount validates the same abort state before applying
+options; buffered-write admission and delayed reservation also reject abort independently
+of VFS flag publication, before dirtying the page cache. The guard borrows the caller's
+superblock; the mount retains no additional reference or
+writable-state field. Regression fixtures cover HTree conversion,
+conversion followed by split, indexed leaf splits with external extents, fragmented linear
+link/rename, admission one credit below the bound, 64-credit batching across conversion,
+feature/index-flag mismatch, nested admission, remount rejection, stop/abort wakeups and
+durable reopen.

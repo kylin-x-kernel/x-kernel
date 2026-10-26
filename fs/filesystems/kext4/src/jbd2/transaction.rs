@@ -377,7 +377,7 @@ impl JournalCheckpoint {
 /// checkpoint ordering. `MountedJournal` drives persistence while the same
 /// runtime transaction moves through the phases represented here.
 pub(crate) struct JournalTransactions {
-    checkpoint_waiters: WaitQueue,
+    state_waiters: WaitQueue,
     max_reserved_credits: u32,
     inner: Mutex<JournalInner>,
 }
@@ -413,7 +413,7 @@ impl JournalTransactions {
         max_reserved_credits: u32,
     ) -> Self {
         Self {
-            checkpoint_waiters: WaitQueue::new(),
+            state_waiters: WaitQueue::new(),
             max_reserved_credits,
             inner: Mutex::new(JournalInner {
                 aborted: None,
@@ -452,11 +452,11 @@ impl JournalTransactions {
 
     /// Starts or joins the running transaction.
     pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
-        if credits.get() > self.max_reserved_credits {
-            return Err(Ext4Error::InsufficientJournalCredits);
-        }
         let mut inner = lock(&self.inner);
         check_not_aborted(&inner)?;
+        if credits.get() > self.max_reserved_credits {
+            return Err(Ext4Error::NoSpace);
+        }
 
         let id = match &mut inner.running {
             Some(transaction) => {
@@ -482,22 +482,32 @@ impl JournalTransactions {
         })
     }
 
-    /// Returns an idle transaction that must be committed before reserving
-    /// credits for another handle.
+    /// Waits for active handles when the next reservation needs a commit.
     ///
-    /// Active handles may continue sharing a transaction while the projected
-    /// reservation remains below the limit. Once the limit is reached, the
-    /// caller must wait for those handles instead of freezing their
-    /// transaction underneath them.
+    /// Sleeps without holding journal or transaction locks. The mount mutation
+    /// lock must exclude competing admission and commit drivers; existing
+    /// handles must be able to stop without acquiring that lock.
     pub(crate) fn transaction_to_commit_before_reservation(
         &self,
         incoming_credits: JournalCredits,
     ) -> Ext4Result<Option<TransactionId>> {
-        if incoming_credits.get() > self.max_reserved_credits {
-            return Err(Ext4Error::InsufficientJournalCredits);
-        }
+        let mut result = Ok(None);
+        self.state_waiters.wait_until(|| {
+            result = self.try_transaction_to_commit_before_reservation(incoming_credits);
+            !matches!(result, Err(Ext4Error::JournalBusy))
+        });
+        result
+    }
+
+    fn try_transaction_to_commit_before_reservation(
+        &self,
+        incoming_credits: JournalCredits,
+    ) -> Ext4Result<Option<TransactionId>> {
         let inner = lock(&self.inner);
         check_not_aborted(&inner)?;
+        if incoming_credits.get() > self.max_reserved_credits {
+            return Err(Ext4Error::NoSpace);
+        }
         let Some(running) = inner.running.as_ref() else {
             return Ok(None);
         };
@@ -505,7 +515,7 @@ impl JournalTransactions {
         let projected_credits = reserved_credits
             .checked_add(incoming_credits.get())
             .ok_or(Ext4Error::Overflow)?;
-        if projected_credits < self.max_reserved_credits {
+        if projected_credits <= self.max_reserved_credits {
             return Ok(None);
         }
         if active_handles != 0 {
@@ -560,9 +570,25 @@ impl JournalTransactions {
     }
 
     /// Returns whether this journal has been aborted.
-    #[cfg(unittest)]
     pub(crate) fn is_aborted(&self) -> bool {
         lock(&self.inner).aborted.is_some()
+    }
+
+    /// Rejects writes after journal abort without maintaining a second flag.
+    pub(crate) fn ensure_writable(&self) -> Ext4Result<()> {
+        check_not_aborted(&lock(&self.inner))
+    }
+
+    /// Validates admission by a caller that serializes complete mutations.
+    pub(crate) fn ensure_no_active_handles(&self) -> Ext4Result<()> {
+        let inner = lock(&self.inner);
+        check_not_aborted(&inner)?;
+        if let Some(running) = inner.running.as_ref()
+            && running.running_state()?.0 != 0
+        {
+            return Err(Ext4Error::InvalidJournalTransaction);
+        }
+        Ok(())
     }
 
     /// Aborts the journal. After this, new handles and metadata writes fail.
@@ -574,7 +600,7 @@ impl JournalTransactions {
         let mut inner = lock(&self.inner);
         inner.aborted.get_or_insert(error);
         drop(inner);
-        self.notify_checkpoint_waiters();
+        self.notify_state_waiters();
     }
 
     /// Freezes the running transaction into its committing phase.
@@ -617,7 +643,7 @@ impl JournalTransactions {
                 .ok_or(Ext4Error::InvalidJournalTransaction)?;
             inner.committing = Some(commit.clone());
             drop(inner);
-            self.notify_checkpoint_waiters();
+            self.notify_state_waiters();
             return Ok(commit);
         }
 
@@ -763,7 +789,7 @@ impl JournalTransactions {
         }
         inner.checkpoint_transactions.push_back(committing);
         drop(inner);
-        self.notify_checkpoint_waiters();
+        self.notify_state_waiters();
         Ok(())
     }
 
@@ -808,7 +834,7 @@ impl JournalTransactions {
         inner.checkpoint_transactions.pop_front();
         inner.checkpointed_through = commit.id();
         drop(inner);
-        self.notify_checkpoint_waiters();
+        self.notify_state_waiters();
         Ok(JournalCheckpoint {
             transaction: commit.id(),
         })
@@ -861,7 +887,7 @@ impl JournalTransactions {
         &self,
         transaction: TransactionId,
     ) -> Ext4Result<JournalCheckpoint> {
-        self.checkpoint_waiters.wait_until(|| {
+        self.state_waiters.wait_until(|| {
             let inner = lock(&self.inner);
             inner.aborted.is_some()
                 || is_checkpointed(&inner, transaction)
@@ -885,7 +911,10 @@ impl JournalTransactions {
         if running.id() != transaction {
             return Err(Ext4Error::InvalidJournalTransaction);
         }
-        running.with_running(|running| running.finish_handle(unused_credits))
+        let result = running.with_running(|running| running.finish_handle(unused_credits));
+        drop(inner);
+        self.notify_state_waiters();
+        result
     }
 
     fn with_running<R>(
@@ -902,8 +931,8 @@ impl JournalTransactions {
         running.with_running(f)
     }
 
-    fn notify_checkpoint_waiters(&self) {
-        self.checkpoint_waiters.notify_all(false);
+    fn notify_state_waiters(&self) {
+        self.state_waiters.notify_all(false);
     }
 }
 

@@ -21,6 +21,22 @@ use crate::{
 };
 
 impl Ext4SbInfo {
+    /// Bounds independent directory appends without predicting physical placement.
+    pub(crate) fn directory_append_metadata_credits(
+        &self,
+        inode: &Ext4Inode,
+        append_count: u16,
+    ) -> Ext4Result<u32> {
+        let mut depth = decode_header(&inode.raw_i_block())?.depth();
+        let mut credits = 0;
+        for _ in 0..append_count {
+            credits += directory_append_credits(depth);
+            // Each append can grow the root by at most one level.
+            depth = (depth + 1).min(disk_extent::EXTENT_MAX_DEPTH);
+        }
+        Ok(credits)
+    }
+
     /// Returns a conservative credit bound for an ordered-data writeback.
     pub(crate) fn extent_writeback_metadata_credits(
         &self,
@@ -1324,6 +1340,16 @@ fn balanced_partition_ranges(
         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
     }
     Ok(ranges)
+}
+
+/// Bounds one directory append, including allocation, tree splits and rewrites.
+const fn directory_append_credits(depth: u16) -> u32 {
+    let depth = depth as u32;
+    // An inline leaf can spill into two blocks. External splits reuse the old
+    // block, add one sibling per level, and can grow the root by one level.
+    // Include the new directory block and rewrites of the old external path.
+    let new_blocks = depth + 3;
+    new_blocks * crate::balloc::BLOCK_ALLOCATION_METADATA_CREDITS + depth
 }
 
 pub(crate) fn ordered_writeback_credit_bound(

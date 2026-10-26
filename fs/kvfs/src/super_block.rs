@@ -345,6 +345,10 @@ impl AtomicSuperBlockFlags {
     fn store(&self, flags: SuperBlockFlags) {
         self.0.store(flags.bits(), Ordering::Relaxed);
     }
+
+    fn insert(&self, flags: SuperBlockFlags) {
+        self.0.fetch_or(flags.bits(), Ordering::Relaxed);
+    }
 }
 
 bitflags::bitflags! {
@@ -547,6 +551,15 @@ impl SuperBlock {
     /// Returns VFS superblock flags without issuing `statfs`.
     pub fn flags(&self) -> SuperBlockFlags {
         self.flags.load()
+    }
+
+    /// Rejects further VFS mutations after an unrecoverable filesystem failure.
+    ///
+    /// Preserves other flags and does not flush dirty state. The filesystem
+    /// must prevent further internal writes, handle its failed transactions,
+    /// and reject writable reconfiguration while the failure persists.
+    pub fn mark_read_only(&self) {
+        self.flags.insert(SuperBlockFlags::RDONLY);
     }
 
     pub(crate) fn is_available(&self) -> bool {

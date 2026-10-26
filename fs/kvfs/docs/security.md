@@ -604,3 +604,12 @@ Filesystem-driven resident traversal uses one invalidate read guard per bounded
 mapping, and must check EOF while guarded. Missing snapshot slots never allocate
 storage. Partial data before a later callback/initialization error remains visible
 to the filesystem caller, which decides its normal short-read completion.
+
+
+## Unrecoverable filesystem write failure
+
+`SuperBlock::mark_read_only()` 只在现有 flags 上执行原子置位，不创建另一份可写状态，
+也不覆盖同时存在的其他标志。该接口不保证脏数据持久化或事务恢复；调用方必须先处理
+不可恢复的内部错误，并在释放 mutation 保护前发布只读标志。VFS 写入口据此拒绝后续写入。
+remount 可修改普通挂载标志；文件系统必须用已有失败状态拒绝重新启用写入，并在内部
+写入边界继续校验该状态，避免仅依靠 `RDONLY` 位保证错误恢复期间的保护。

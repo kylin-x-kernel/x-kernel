@@ -1128,3 +1128,12 @@ The cache publishes non-uptodate reservations before filesystem I/O and keeps
 its index lock out of I/O, preserving the current main concurrency contract.
 Unconsumed readahead reservations detach while locked and return capacity only
 after their final allocation reference is dropped outside the locks.
+
+
+## Unrecoverable filesystem write failure
+
+`SuperBlock::mark_read_only()` 在不可恢复的文件系统错误后原子设置现有 `RDONLY` 位，
+保留其他标志。它不执行 flush 或 transaction 处理；文件系统负责停止内部写入，并在
+释放 mutation 保护前发布只读状态，使现有 VFS 写入口和 statfs 导出立即观察该状态。
+文件系统的 reconfigure 回调必须依据已有的失败状态拒绝恢复可写，且在返回错误前不应用
+其他挂载选项。`RDONLY` 本身仍是挂载标志，不能替代文件系统内部的写入准入校验。

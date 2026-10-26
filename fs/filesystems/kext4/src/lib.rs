@@ -189,11 +189,14 @@ fn ext4_get_tree(
 fn ext4_reconfigure(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     let options = *context.private::<Ext4MountOptions>()?;
     let super_block = context.super_block()?;
+    let flags = (super_block.flags() & !context.sb_flags_mask())
+        | (context.sb_flags() & context.sb_flags_mask());
+    let mut state = super_block.private::<vfs::Ext4Mount>()?.write(super_block);
+    if !flags.contains(kvfs::SuperBlockFlags::RDONLY) {
+        state.ensure_writable().map_err(vfs::into_vfs_err)?;
+    }
     if let Some(statfs_mode) = options.statfs_mode {
-        super_block
-            .private::<vfs::Ext4Mount>()?
-            .write()
-            .set_statfs_mode(statfs_mode);
+        state.set_statfs_mode(statfs_mode);
     }
     Ok(())
 }

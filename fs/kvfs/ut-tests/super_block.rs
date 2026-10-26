@@ -49,7 +49,7 @@ fn superblock_separates_operations_from_private_state() {
         &TEST_FILE_SYSTEM_TYPE,
         &TEST_SUPER_OPERATIONS,
         TestPrivate(0x5f5f_494e_464f),
-        SuperBlockFlags::empty(),
+        SuperBlockFlags::NOATIME,
         4096,
         1 << 30,
         |_| {
@@ -70,6 +70,12 @@ fn superblock_separates_operations_from_private_state() {
     assert_eq!(super_block.max_file_size(), 1 << 30);
     assert!(super_block.private::<TestSuperOperations>().is_err());
     assert!(super_block.stat().is_ok());
+    super_block.mark_read_only();
+    super_block.mark_read_only();
+    assert_eq!(
+        super_block.flags(),
+        SuperBlockFlags::NOATIME | SuperBlockFlags::RDONLY
+    );
 }
 
 static FILL_COUNT: AtomicUsize = AtomicUsize::new(0);

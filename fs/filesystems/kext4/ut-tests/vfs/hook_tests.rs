@@ -58,6 +58,98 @@ fn with_state<R>(super_block: &SuperBlock, f: impl FnOnce(&Ext4SbInfo) -> R) -> 
 }
 
 #[def_test]
+fn journal_abort_marks_superblock_read_only_and_rejects_buffered_writes() {
+    let (mut filesystem, storage) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let private = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_test_internal_journal(&mut filesystem, 8104);
+    let (super_block, file) = writable_mount(filesystem, private);
+    assert!(!super_block.flags().contains(SuperBlockFlags::RDONLY));
+    {
+        let mut state = ext4_private(&super_block).unwrap().write(&super_block);
+        let journal = state.metadata_journal().unwrap();
+        let mut handle = journal.begin(crate::jbd2::JournalCredits::new(1)).unwrap();
+        handle
+            .consume_metadata_credit(FilesystemBlock::new(6))
+            .unwrap();
+        let result = handle.consume_metadata_credit(FilesystemBlock::new(7));
+        assert_eq!(
+            state.complete_metadata_mutation(handle, result),
+            Err(crate::Ext4Error::InsufficientJournalCredits)
+        );
+    }
+    assert!(super_block.flags().contains(SuperBlockFlags::RDONLY));
+    let stats = with_state(&super_block, |state| state.statfs().unwrap());
+    let cred = kcred::initial_cred();
+    let mut context = kvfs::FsContext::new_reconfigure(
+        &super_block,
+        None,
+        Some(b"minixdf"),
+        SuperBlockFlags::empty(),
+        SuperBlockFlags::RDONLY,
+        &cred,
+    )
+    .unwrap();
+    assert_eq!(
+        super_block.reconfigure(&mut context),
+        Err(VfsError::from(kerrno::LinuxError::EROFS).canonicalize())
+    );
+    assert!(super_block.flags().contains(SuperBlockFlags::RDONLY));
+    assert_eq!(
+        with_state(&super_block, |state| state.statfs().unwrap()),
+        stats
+    );
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let mut count = 1;
+    assert_eq!(
+        check_write_limit(
+            ext4_private(&super_block).unwrap(),
+            &super_block,
+            &inode,
+            0,
+            &mut count
+        ),
+        Err(VfsError::from(kerrno::LinuxError::EROFS).canonicalize())
+    );
+    assert_eq!(
+        with_state(&super_block, |state| state.reserve_delalloc_range(
+            &inode,
+            LogicalBlock::new(0),
+            1
+        )),
+        Err(crate::Ext4Error::JournalAborted)
+    );
+    let writes = storage.write_count();
+    assert_eq!(
+        file.write(b"must not dirty the cache"),
+        Err(VfsError::from(kerrno::LinuxError::EROFS).canonicalize())
+    );
+    assert_eq!(storage.write_count(), writes);
+}
+
+#[def_test]
+fn healthy_journal_allows_remount_read_write() {
+    let (mut filesystem, _storage) =
+        journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let private = allocate_checkpointed_regular_inode(&mut filesystem);
+    install_test_internal_journal(&mut filesystem, 8105);
+    let (super_block, _file) = writable_mount(filesystem, private);
+    super_block.mark_read_only();
+    let cred = kcred::initial_cred();
+    let mut context = kvfs::FsContext::new_reconfigure(
+        &super_block,
+        None,
+        None,
+        SuperBlockFlags::empty(),
+        SuperBlockFlags::RDONLY,
+        &cred,
+    )
+    .unwrap();
+    super_block.reconfigure(&mut context).unwrap();
+    assert!(!super_block.flags().contains(SuperBlockFlags::RDONLY));
+}
+
+#[def_test]
 fn eviction_drops_every_prealloc_space() {
     let (mut filesystem, _storage) =
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
@@ -79,7 +171,9 @@ fn eviction_drops_every_prealloc_space() {
     EXT4_SUPER_OPERATIONS.evict_inode(&vfs_inode).unwrap();
 
     assert_eq!(prealloc_count(&inode), 0);
-    with_state(&super_block, |state| assert_eq!(prealloc_twin_count(state), 0));
+    with_state(&super_block, |state| {
+        assert_eq!(prealloc_twin_count(state), 0)
+    });
 }
 
 #[def_test]
@@ -98,13 +192,17 @@ fn last_writable_close_releases_prealloc_spaces() {
     assert_eq!(vfs_inode.write_count(), 1);
     assert!(!inode.has_delalloc_reservations());
 
-    with_state(&super_block, |state| insert_prealloc_space(state, &inode, 0, 6, 4, 0));
+    with_state(&super_block, |state| {
+        insert_prealloc_space(state, &inode, 0, 6, 4, 0)
+    });
     assert_eq!(prealloc_count(&inode), 1);
 
     <Ext4Inode as FileOperations>::release(&inode, &vfs_inode, &file).unwrap();
 
     assert_eq!(prealloc_count(&inode), 0);
-    with_state(&super_block, |state| assert_eq!(prealloc_twin_count(state), 0));
+    with_state(&super_block, |state| {
+        assert_eq!(prealloc_twin_count(state), 0)
+    });
 }
 
 #[def_test]
@@ -170,10 +268,14 @@ fn close_retains_spaces_while_delalloc_reservations_exist() {
     // Close with an outstanding reservation: spaces survive.
     <Ext4Inode as FileOperations>::release(&inode, &vfs_inode, &file).unwrap();
     assert_eq!(prealloc_count(&inode), 1);
-    with_state(&super_block, |state| assert_eq!(prealloc_twin_count(state), 1));
+    with_state(&super_block, |state| {
+        assert_eq!(prealloc_twin_count(state), 1)
+    });
 
     // Eviction must still clean up whatever remains.
     EXT4_SUPER_OPERATIONS.evict_inode(&vfs_inode).unwrap();
     assert_eq!(prealloc_count(&inode), 0);
-    with_state(&super_block, |state| assert_eq!(prealloc_twin_count(state), 0));
+    with_state(&super_block, |state| {
+        assert_eq!(prealloc_twin_count(state), 0)
+    });
 }

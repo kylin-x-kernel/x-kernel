@@ -234,7 +234,7 @@ fn mount_cache_maintenance_preserves_allocator_prefetch_window() {
     );
     let mount = ext4_private(&super_block).unwrap();
     {
-        let state = mount.write();
+        let state = mount.write(&super_block);
         state.metadata_io.invalidate_all();
         let block = crate::FilesystemBlock::new(0);
         state.prefetch_metadata_blocks(&[block]).unwrap();

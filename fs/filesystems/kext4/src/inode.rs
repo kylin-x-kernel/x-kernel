@@ -1796,14 +1796,15 @@ impl Ext4SbInfo {
     ///
     /// # Errors
     ///
-    /// Returns an extent-validation, overflow, accounting, or no-space error
-    /// without publishing a partial mount reservation.
+    /// Returns an aborted-journal, extent-validation, overflow, accounting,
+    /// or no-space error without publishing a partial mount reservation.
     pub(crate) fn reserve_delalloc_range(
         &self,
         inode: &Ext4Inode,
         start: LogicalBlock,
         block_count: u64,
     ) -> Ext4Result<()> {
+        self.ensure_writable()?;
         inode.reserve_delalloc_range(self, start, block_count)
     }
 

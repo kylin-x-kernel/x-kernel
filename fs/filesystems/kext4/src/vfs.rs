@@ -160,9 +160,10 @@ fn into_xattr_vfs_err(err: Ext4Error) -> VfsError {
     }
 }
 
-fn into_vfs_err(error: Ext4Error) -> VfsError {
+pub(super) fn into_vfs_err(error: Ext4Error) -> VfsError {
     let linux_error = match error {
-        Ext4Error::NoSpace => LinuxError::ENOSPC,
+        Ext4Error::NoSpace | Ext4Error::InsufficientJournalCredits => LinuxError::ENOSPC,
+        Ext4Error::JournalAborted => LinuxError::EROFS,
         Ext4Error::AlreadyExists => LinuxError::EEXIST,
         Ext4Error::NotFound => LinuxError::ENOENT,
         Ext4Error::DirectoryNotEmpty => LinuxError::ENOTEMPTY,
@@ -180,8 +181,6 @@ fn into_vfs_err(error: Ext4Error) -> VfsError {
         Ext4Error::Device(_)
         | Ext4Error::InvalidDelayedAllocationState
         | Ext4Error::InvalidInodeState
-        | Ext4Error::JournalAborted
-        | Ext4Error::InsufficientJournalCredits
         | Ext4Error::InvalidJournalTransaction
         | Ext4Error::Overflow
         | Ext4Error::NeedsRecovery
@@ -377,7 +376,7 @@ impl Ext4SuperOperations {
                 let root = Dentry::new_dir_from_inode(root_inode, None, String::new());
                 if !is_read_only {
                     ext4_private(super_block)?
-                        .write()
+                        .write(super_block)
                         .persist_directory_hash_policy()
                         .map_err(into_vfs_err)?;
                 }
@@ -489,7 +488,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
 
     fn sync_fs(&self, super_block: &SuperBlock) -> VfsResult<()> {
         ext4_private(super_block)?
-            .write()
+            .write(super_block)
             .sync_filesystem()
             .map_err(into_vfs_err)
     }
@@ -516,19 +515,19 @@ impl SuperBlockOperations for Ext4SuperOperations {
             return Ok(());
         }
         let timestamp = current_ext4_timestamp(inode);
-        ext4.write()
+        ext4.write(&super_block)
             .eviction_prepare(private)
             .map_err(into_vfs_err)?;
         loop {
             let (_, is_done) = ext4
-                .write()
+                .write(&super_block)
                 .eviction_release_batch(private, EVICTION_BATCH_BLOCKS)
                 .map_err(into_vfs_err)?;
             if is_done {
                 break;
             }
         }
-        ext4.write()
+        ext4.write(&super_block)
             .eviction_finish(private, timestamp)
             .map_err(into_vfs_err)
     }
@@ -864,6 +863,7 @@ fn check_write_limit(
     if *count == 0 {
         return Ok(());
     }
+    ext4.read().ensure_writable().map_err(into_vfs_err)?;
     let max_file_size = Ext4SuperOperations::max_file_size(ext4, super_block, inode);
     if pos >= max_file_size {
         return Err(VfsError::FileTooLarge);
@@ -959,13 +959,13 @@ impl InodeOperations for Ext4Inode {
         let is_visible_shrink = len < visible_size;
         let is_disk_shrink = len < disk_size;
         {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .prepare_regular_inode_truncate(self, len, current_ext4_timestamp(vfs_inode))
                 .map_err(into_vfs_err)?
         }
         vfs_inode.truncate_setsize(len)?;
-        let mut state = ext4.write();
+        let mut state = ext4.write(&super_block);
         if is_visible_shrink {
             let first_unneeded = first_logical_block_after_len(len, super_block.block_size());
             state
@@ -1026,7 +1026,7 @@ impl InodeOperations for Ext4Inode {
         }
         let super_block = dentry.super_block().ok_or(VfsError::InvalidInput)?;
         let ext4 = ext4_private(&super_block)?;
-        let mut state = ext4.write();
+        let mut state = ext4.write(&super_block);
 
         let ctime = update
             .ctime
@@ -1096,7 +1096,7 @@ impl InodeOperations for Ext4Inode {
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
         let mode = xattr_set_mode(flags);
-        ext4.write()
+        ext4.write(&super_block)
             .set_xattr_with_mode(
                 self,
                 namespace,
@@ -1112,7 +1112,7 @@ impl InodeOperations for Ext4Inode {
         let (namespace, suffix) = parse_xattr_name(name)?;
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
-        ext4.write()
+        ext4.write(&super_block)
             .remove_xattr(self, namespace, suffix, current_ext4_timestamp(inode))
             .map_err(into_xattr_vfs_err)
     }
@@ -1212,7 +1212,7 @@ impl InodeDirOperations for Ext4Inode {
         let ext4 = ext4_private(&super_block)?;
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .create_regular_file(
                     self,
@@ -1241,7 +1241,7 @@ impl InodeDirOperations for Ext4Inode {
         let name = dentry.name();
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .create_directory(
                     self,
@@ -1277,7 +1277,7 @@ impl InodeDirOperations for Ext4Inode {
         };
         let (mode, uid, gid) = inode_init_owner(dir, mode, cred);
         let child = {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .create_special_file(
                     self,
@@ -1314,7 +1314,7 @@ impl InodeDirOperations for Ext4Inode {
             cred,
         );
         let child = {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .create_symlink(
                     self,
@@ -1343,7 +1343,7 @@ impl InodeDirOperations for Ext4Inode {
         let name = dentry.name();
         let target: Arc<Self> = old_dentry.downcast()?;
         {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .link(self, name.as_bytes(), &target, current_ext4_timestamp(dir))
                 .map_err(into_vfs_err)?
@@ -1360,7 +1360,7 @@ impl InodeDirOperations for Ext4Inode {
         let name = dentry.name();
         let child: Arc<Self> = dentry.downcast()?;
         {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             if dentry.is_dir() {
                 state
                     .remove_directory(self, name.as_bytes(), &child, current_ext4_timestamp(dir))
@@ -1398,7 +1398,7 @@ impl InodeDirOperations for Ext4Inode {
             None
         };
         {
-            let mut state = ext4.write();
+            let mut state = ext4.write(&old_super_block);
             state
                 .rename(
                     self,
@@ -1506,7 +1506,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             let visible_size = vfs_inode.size();
             let disk_size = inode.disk_size();
             let write_end = offset.saturating_add(data.len() as u64);
-            let mut state = ext4.write();
+            let mut state = ext4.write(&super_block);
             state
                 .writeback_ordered_at(inode, offset, data, visible_size, timestamp, intent)
                 .map_err(|failure| {
@@ -1592,7 +1592,7 @@ impl FileOperations for Ext4Inode {
         kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
-        ext4.write()
+        ext4.write(&super_block)
             .sync_inode(self, Ext4SyncIntent::from_data_only(data_only))
             .map_err(into_vfs_err)
     }
@@ -1606,7 +1606,7 @@ impl FileOperations for Ext4Inode {
         }
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
-        let mut state = ext4.write();
+        let mut state = ext4.write(&super_block);
         // Spaces survive the close while delalloc reservations still expect to
         // allocate through them; eviction reclaims whatever remains. Linux:
         // `ext4_release_file` gates the discard on `i_reserved_data_blocks`.

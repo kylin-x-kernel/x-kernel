@@ -11,6 +11,300 @@ use unittest::def_test;
 use super::*;
 use crate::{journal::RecoveryFlagPolicy, superblock::test_fixtures::*};
 
+#[def_test]
+fn pointer_mapped_directory_keeps_in_place_insertion() {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
+    let physical =
+        u32::try_from(filesystem.mapped_directory_block(&root, 0).unwrap().get()).unwrap();
+    let timestamp = Ext4Timestamp::new(152, 0);
+    let journal = filesystem
+        .namei_metadata_journal(JournalCredits::new(1))
+        .unwrap();
+    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+    filesystem
+        .update_dirty_inode_metadata(&root, &mut handle, |_filesystem, bytes| {
+            bytes[0x20..0x24]
+                .copy_from_slice(&(root.flags() & !disk_inode::EXT4_EXTENTS_FL).to_le_bytes());
+            let start = disk_inode::I_BLOCK_OFFSET;
+            bytes[start..start + disk_inode::INODE_BLOCK_BYTES].fill(0);
+            bytes[start..start + 4].copy_from_slice(&physical.to_le_bytes());
+            Ok(())
+        })
+        .unwrap();
+    filesystem
+        .complete_metadata_mutation(handle, Ok(()))
+        .unwrap();
+    assert!(!root.has_extents());
+    let target = filesystem
+        .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
+        .unwrap();
+    filesystem
+        .link(&root, b"alias", &target, timestamp)
+        .unwrap();
+    filesystem.sync_filesystem().unwrap();
+    drop(filesystem);
+    let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
+    let root = reopened.internal_iget(root.number()).unwrap();
+    assert!(!root.has_extents());
+    assert_eq!(
+        reopened.lookup(&root, "alias").unwrap().unwrap().inode(),
+        target.number()
+    );
+}
+
+#[def_test]
+fn inode_index_flag_without_feature_uses_linear_directory_semantics() {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
+    let timestamp = Ext4Timestamp::new(150, 0);
+    let target = filesystem
+        .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
+        .unwrap();
+    assert!(!filesystem.superblock().features().has_dir_index());
+    let journal = filesystem
+        .namei_metadata_journal(JournalCredits::new(1))
+        .unwrap();
+    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+    filesystem
+        .update_inode_flags_timestamps_metadata(
+            &root,
+            root.flags() | disk_inode::EXT4_INDEX_FL,
+            timestamp,
+            &mut handle,
+        )
+        .unwrap();
+    filesystem
+        .complete_metadata_mutation(handle, Ok(()))
+        .unwrap();
+    assert!(root.has_indexed_directory());
+    assert!(!filesystem.is_indexed_directory(&root));
+    filesystem
+        .link(&root, b"alias", &target, timestamp)
+        .unwrap();
+    assert_eq!(
+        filesystem.lookup(&root, "alias").unwrap().unwrap().inode(),
+        target.number()
+    );
+    assert!(
+        filesystem
+            .read_dir(&root)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.name_bytes() == b"alias")
+    );
+    filesystem
+        .unlink(&root, b"alias", &target, timestamp)
+        .unwrap();
+    filesystem.sync_filesystem().unwrap();
+    drop(filesystem);
+    let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
+    let root = reopened.internal_iget(root.number()).unwrap();
+    assert!(reopened.lookup(&root, "alias").unwrap().is_none());
+    assert_eq!(
+        reopened.lookup(&root, "target").unwrap().unwrap().inode(),
+        target.number()
+    );
+}
+
+#[def_test]
+fn small_transaction_batches_links_through_index_conversion() {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    set_allocator_feature_bits(
+        &mut filesystem,
+        crate::disk::features::CompatFeatures::DIR_INDEX,
+        crate::disk::features::ReadOnlyCompatFeatures::empty(),
+    );
+    let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
+    let timestamp = Ext4Timestamp::new(151, 0);
+    let directory = filesystem
+        .create_directory(&root, b"small", 0o755, 0, 0, timestamp)
+        .unwrap();
+    let target = filesystem
+        .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
+        .unwrap();
+    filesystem.sync_filesystem().unwrap();
+    // A fixed capacity catches admission regressions independently of the estimator.
+    crate::journal::tests::limit_transaction_credits(&mut filesystem, 64);
+    let mut transaction = None;
+    for index in 0..24 {
+        let name = format!("{index:03}{}", "x".repeat(247));
+        filesystem
+            .link(&directory, name.as_bytes(), &target, timestamp)
+            .unwrap();
+        let current = filesystem
+            .journal
+            .as_ref()
+            .unwrap()
+            .running_transaction()
+            .unwrap();
+        if index == 0 {
+            transaction = current;
+            assert!(transaction.is_some());
+        }
+        assert_eq!(current, transaction);
+    }
+    assert!(filesystem.is_indexed_directory(&directory));
+    assert!(!filesystem.journal.as_ref().unwrap().is_aborted());
+    filesystem.sync_filesystem().unwrap();
+    drop(filesystem);
+    let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
+    let directory = reopened.internal_iget(directory.number()).unwrap();
+    for index in 0..24 {
+        let name = format!("{index:03}{}", "x".repeat(247));
+        assert_eq!(
+            reopened.lookup(&directory, &name).unwrap().unwrap().inode(),
+            target.number()
+        );
+    }
+}
+
+#[def_test]
+fn indexed_conversion_reserves_both_independent_appends() {
+    for (name_len, appended_blocks) in [(180, 1), (250, 2)] {
+        let (mut filesystem, device) = recovery_test_filesystem();
+        set_allocator_feature_bits(
+            &mut filesystem,
+            crate::disk::features::CompatFeatures::DIR_INDEX,
+            crate::disk::features::ReadOnlyCompatFeatures::empty(),
+        );
+        let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
+        let timestamp = Ext4Timestamp::new(148, 0);
+        let directory = filesystem
+            .create_directory(&root, b"indexed", 0o755, 0, 0, timestamp)
+            .unwrap();
+        let target = filesystem
+            .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
+            .unwrap();
+        for index in 0..15 {
+            let name = format!("{index:03}{}", "x".repeat(247));
+            filesystem
+                .link(&directory, name.as_bytes(), &target, timestamp)
+                .unwrap();
+        }
+        let name = "y".repeat(name_len);
+        assert!(!directory.has_indexed_directory());
+        assert_eq!(directory.size(), TEST_BLOCK_SIZE as u64);
+        assert_eq!(
+            filesystem
+                .directory_insert_required_blocks(&directory, name.as_bytes())
+                .unwrap(),
+            appended_blocks
+        );
+        filesystem.sync_filesystem().unwrap();
+        let credits = Ext4Credits::link(&filesystem, &directory).unwrap().get();
+        crate::journal::tests::limit_transaction_credits(&mut filesystem, credits - 1);
+        let links = target.links_count();
+        let writes = device.write_count();
+        assert_eq!(
+            filesystem.link(&directory, name.as_bytes(), &target, timestamp),
+            Err(Ext4Error::NoSpace)
+        );
+        assert_eq!(device.write_count(), writes);
+        assert_eq!(target.links_count(), links);
+        assert!(!directory.has_indexed_directory());
+        assert!(!filesystem.journal.as_ref().unwrap().is_aborted());
+        crate::journal::tests::limit_transaction_credits(&mut filesystem, credits);
+        filesystem
+            .link(&directory, name.as_bytes(), &target, timestamp)
+            .unwrap();
+        assert!(directory.has_indexed_directory());
+        assert_eq!(
+            directory.size(),
+            (1 + appended_blocks) * TEST_BLOCK_SIZE as u64
+        );
+        assert_eq!(
+            filesystem
+                .lookup(&directory, &name)
+                .unwrap()
+                .unwrap()
+                .inode(),
+            target.number()
+        );
+        filesystem.sync_filesystem().unwrap();
+        drop(filesystem);
+        let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
+        let directory = reopened.internal_iget(directory.number()).unwrap();
+        assert_eq!(
+            reopened.lookup(&directory, &name).unwrap().unwrap().inode(),
+            target.number()
+        );
+    }
+}
+
+#[def_test]
+fn indexed_leaf_split_covers_external_extent_rewrites() {
+    let (mut filesystem, device) = recovery_test_filesystem_with_free_blocks(900);
+    set_allocator_feature_bits(
+        &mut filesystem,
+        crate::disk::features::CompatFeatures::DIR_INDEX,
+        crate::disk::features::ReadOnlyCompatFeatures::empty(),
+    );
+    let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
+    let timestamp = Ext4Timestamp::new(149, 0);
+    let directory = filesystem
+        .create_directory(&root, b"indexed", 0o755, 0, 0, timestamp)
+        .unwrap();
+    let target = filesystem
+        .create_regular_file(&root, b"target", 0o644, 0, 0, timestamp)
+        .unwrap();
+    let mut pending = None;
+    for index in 0..256 {
+        let name = format!("{index:03}{}", "x".repeat(247));
+        let depth = crate::disk::extent::ExtentHeader::decode(&directory.raw_i_block())
+            .unwrap()
+            .depth();
+        if directory.has_indexed_directory()
+            && depth >= 1
+            && filesystem
+                .directory_insert_required_blocks(&directory, name.as_bytes())
+                .unwrap()
+                > 0
+        {
+            pending = Some(name);
+            break;
+        }
+        filesystem
+            .link(&directory, name.as_bytes(), &target, timestamp)
+            .unwrap();
+        // Leave physical gaps between directory growth allocations so its
+        // mappings cannot collapse into one inline extent.
+        let journal = filesystem
+            .namei_metadata_journal(JournalCredits::new(4))
+            .unwrap();
+        let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+        filesystem.allocate_block(None, &mut handle).unwrap();
+        filesystem
+            .complete_metadata_mutation(handle, Ok(()))
+            .unwrap();
+    }
+    let name = pending.expect("fixture must reach a full indexed leaf with external extents");
+    let old_size = directory.size();
+    filesystem.sync_filesystem().unwrap();
+    let credits = Ext4Credits::link(&filesystem, &directory).unwrap().get();
+    crate::journal::tests::limit_transaction_credits(&mut filesystem, credits);
+    filesystem
+        .link(&directory, name.as_bytes(), &target, timestamp)
+        .unwrap();
+    assert_eq!(directory.size(), old_size + TEST_BLOCK_SIZE as u64);
+    assert_eq!(
+        filesystem
+            .lookup(&directory, &name)
+            .unwrap()
+            .unwrap()
+            .inode(),
+        target.number()
+    );
+    filesystem.sync_filesystem().unwrap();
+    drop(filesystem);
+    let reopened = open_test_filesystem(crate::io::test_block_device(device)).unwrap();
+    let directory = reopened.internal_iget(directory.number()).unwrap();
+    assert_eq!(
+        reopened.lookup(&directory, &name).unwrap().unwrap().inode(),
+        target.number()
+    );
+}
+
 // Populate a real full directory while separating its data blocks physically.
 // The filler names are hard links to one live inode, keeping the inode count
 // small enough for the existing journal fixture even at external-leaf capacity.
@@ -144,19 +438,19 @@ fn fragmented_linear_directory_mutation(external_leaf: bool, rename: bool) {
         );
     }
     let name = "z".repeat(250);
-    let plan = filesystem
-        .preflight_directory_entry_insert(&target, name.as_bytes())
+    let required_blocks = filesystem
+        .directory_insert_required_blocks(&target, name.as_bytes())
         .unwrap();
-    assert_eq!(plan.path, DirectoryInsertPath::LinearAppend);
     assert!(
-        plan.required_blocks > 1,
+        required_blocks > 1,
         "fixture must require extent metadata blocks"
     );
     let credits = if rename {
-        Ext4Credits::rename(&filesystem, &root, &target, &moved, None, Some(plan))
+        Ext4Credits::rename(&filesystem, &root, &target, &moved, None)
     } else {
-        Ext4Credits::link(&filesystem, &target, &moved, plan)
-    };
+        Ext4Credits::link(&filesystem, &target)
+    }
+    .unwrap();
     crate::journal::tests::limit_transaction_credits(&mut filesystem, credits.get());
     if rename {
         filesystem
@@ -228,13 +522,14 @@ fn rename_into_full_linear_directory_reserves_growth_credits() {
             .unwrap();
     }
     let destination = "y".repeat(250);
-    let plan = filesystem
-        .preflight_directory_entry_insert(&target, destination.as_bytes())
+    let required_blocks = filesystem
+        .directory_insert_required_blocks(&target, destination.as_bytes())
         .unwrap();
-    assert_eq!(plan.path, DirectoryInsertPath::LinearAppend);
-    assert!(plan.required_blocks > 0);
+    assert!(required_blocks > 0);
     // A fresh transaction prevents earlier creates from donating metadata credits.
     filesystem.sync_filesystem().unwrap();
+    let credits = Ext4Credits::rename(&filesystem, &source, &target, &moved, None).unwrap();
+    crate::journal::tests::limit_transaction_credits(&mut filesystem, credits.get());
     filesystem
         .rename(
             &source,
@@ -271,10 +566,7 @@ fn rename_into_full_linear_directory_reserves_growth_credits() {
 
 #[def_test]
 fn regular_create_fits_parent_growth_journal_budget() {
-    for (entries, credits, expected_path) in [
-        (15, 14, DirectoryInsertPath::LinearAppend),
-        (0, 10, DirectoryInsertPath::InPlace),
-    ] {
+    for entries in [0, 15] {
         let (mut filesystem, device) = recovery_test_filesystem();
         let root = filesystem
             .internal_iget(crate::InodeNumber::new(2))
@@ -290,13 +582,11 @@ fn regular_create_fits_parent_growth_journal_budget() {
                 .unwrap();
         }
         let name = "y".repeat(250);
-        let plan = filesystem
-            .preflight_directory_entry_insert(&target, name.as_bytes())
+        let required_blocks = filesystem
+            .directory_insert_required_blocks(&target, name.as_bytes())
             .unwrap();
-        assert_eq!(plan.path, expected_path);
-        // Bound this test-owned transaction engine after setup, retaining
-        // the valid 1024-block journal. Fourteen credits cover growth; ten
-        // cover an in-place insert. A regular child allocates no data block.
+        assert_eq!(required_blocks > 0, entries != 0);
+        let credits = Ext4Credits::create(&filesystem, &target).unwrap().get();
         filesystem.sync_filesystem().unwrap();
         crate::journal::tests::limit_transaction_credits(&mut filesystem, credits);
 

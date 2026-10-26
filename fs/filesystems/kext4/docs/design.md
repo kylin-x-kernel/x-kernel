@@ -572,26 +572,46 @@ Namei 修改先验证 parent/name，查找目标 dirent，检查 inode kind 和�
 一个 journal transaction 中完成 dirent 和 inode 更新。Rename 使用准备、替换、删除、收尾
 的顺序，保证目录父链接计数和 `..` 更新保持一致。
 
-目录插入预检返回一份同时供空间检查和 journal credits 使用的计划，区分原地插入、线性
-append、已有 HTree leaf split、线性目录转 HTree，以及转换后立即 split。最后一种路径实际
-执行两次独立的单块分配，因此 extent 预检在同一份临时叶子状态中加入两个最坏情况下不合并
-的单块 mapping，不能把它们视为一个连续的两块 extent。计划一旦进入 HTree 路径，即使事务
-开始时 inode 尚未设置 `EXT4_INDEX_FL`，credits 也包含 HTree 更新余量。
+目录插入的额度按操作上界预留，查槽、append、HTree 转换和分裂由执行路径决定。
+`DirectoryInsertPlan`、路径枚举及其派生字段已删除；额度计算不读取目录内容，也不依赖
+空间预检选中了哪条路径。`Ext4Credits` 组合 inode、dirent、HTree 和 extent 各自的预算。
+extent 层按 inode 已校验的当前树深计算一次 append 的新块与旧路径重写上界。一次插入
+复用旧外部块，每层至多增加一个兄弟；inline leaf 外溢及 root 增高也计入上界。只有启用
+索引且尚未索引的单块目录可能转换，才计入两次 append；第二次按至多增高一层预算。
+目录是否使用 HTree 由文件系统特性和 inode index 标志共同决定，查找、扫描、修改和额度
+计算共享该判定。分配器层导出的
+`BLOCK_ALLOCATION_METADATA_CREDITS` 统一表示分配元数据加新块 create access，父目录增长
+与 mkdir/长 symlink 的 child 块都复用该定义。
 
-目录插入计划同时保存 `required_blocks` 和 `growth_credits`。前者仍是目录数据块与
-extent 元数据块的空间上界；后者在相同预检结果上，为每个计划新块预留 4 个 credit
-（分配器入口要求 3 个余量，以及新块 create access），再按当前 extent depth 乘独立追加的
-目录块数，覆盖旧叶与索引沿路径的重写。新 extent 块的后续改写由同一 handle 的 metadata
-去重覆盖；转换后立即 split 的两次独立追加使用既有 independent-block 上界。所有换算均在
-metadata 发布前检查溢出，原地插入的增长预算为零。`dirent_insert` 使用计划中的预算，
-不再把所有增长路径都折算成固定 4；HTree 更新余量仍独立保留。
+空间检查仍在 metadata 发布前校验目录和 extent 容量，仅返回所需块数。它保留原地插入在
+无空闲块时仍可完成的行为，并避免当前没有局部回滚的 namespace 路径在分配失败后留下
+半完成修改；它不再承担 journal 预算协议。转换后立即分裂仍按两个独立单块 mapping
+检查 extent 空间，不能假设物理分配连续。
+传统块指针目录仍可使用已有槽位；其 mapping 增长由容量检查在 admission 前拒绝，
+不会为了预算而把块指针误解码成 extent root。
 
-普通文件与 inline child 创建只通过 `dirent_insert` 预留父目录增长额度，不重复申请；
-`mkdir` 与 block-mapped symlink 保留原数值的 `CHILD_BLOCK_ALLOCATION_METADATA`，服务
-child 自身数据块。新增回归用4个内联 extent及340个外部满叶 extent构造碎片化目录，
-分别执行 link/rename；目标与目录 inode 位于不同 inode-table block。准备阶段完成 sync，
-操作仅获得自身公式声明的事务额度，随后 lookup、sync、重开检查持久化。夹具保持合法
-1024-block journal，并通过测试专用 free-block 参数提供容量，不缩小日志来模拟预算。
+预算是保守上界，原地插入也申请同一操作额度，handle stop 归还未消耗部分。单次请求超过
+journal 事务容量时返回 `NoSpace`，不 abort；多个 handle 的总额度恰好等于上限时允许加入，
+超过上限时 journal 核心可等待已有 handle 退出。文件系统 mutation 在 mount 写锁下
+串行执行，admission 使用现有 active-handle 计数拒绝嵌套，再持久化旧事务，因此不会
+持 mount 锁等待自己的 handle。等待复用事务状态队列，stop、commit、checkpoint 和 abort
+均通知该队列，不增加另一套 reservation 状态。
+
+执行中额度耗尽仍 abort journal，当前调用对 VFS 返回 `ENOSPC`；后续 mutation 在 journal
+入口返回 `JournalAborted`，映射为 `EROFS`，且不会先修改 journal 特性或 superblock 元数据。
+journal 的 abort 状态是写入禁用依据。`Ext4MountWriteGuard` 借用调用方已有 superblock，
+在释放 mount 写锁前将 abort 发布到其既有 `RDONLY` 标志，阻止后续缓冲写进入页缓存；
+remount 为可写前同样校验 journal abort，失败不应用挂载选项或清除只读标志。缓存写入
+校验与 delalloc reservation 也检查同一个 abort 状态，避免 VFS 标志更新窗口允许继续
+标脏；不保存额外的 superblock 引用或 read-only 字段。
+
+`ut-tests/namei/` 的预算回归覆盖原地插入、碎片化 inline/external extent 的 link/rename、
+HTree 转换、转换后立即分裂及带外部 extent 的已有 HTree leaf split。特殊路径在各自额度
+上限下完成并重开检查持久化；少一个 admission credit 时返回 `NoSpace`，不写盘、不改链接
+计数且不 abort。`ut-tests/jbd2/transaction/` 验证精确容量、真实等待、stop/abort 唤醒；
+`ut-tests/journal/` 与 `ut-tests/vfs/` 验证嵌套 admission、额度耗尽的 abort 边界、
+remount 校验及缓存写入 errno。固定 64-credit 事务覆盖连续 hard link 跨越 HTree 转换，
+断言仍共享同一 running transaction，并重开检查持久化。
 
 目录磁盘语义由既有对象分层承担：`RawDirectoryEntry` 统一完成 `rec_len` 编解码，并与 Linux
 `ext4_rec_len_from_disk()` 一致地把原始 `0` 和 `0xffff` 解释为整个目录块；64 KiB 整块写回使用

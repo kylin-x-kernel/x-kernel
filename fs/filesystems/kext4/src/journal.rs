@@ -32,9 +32,8 @@ fn transaction_credit_limit(superblock: &JournalSuperblock) -> Ext4Result<u32> {
         .max_blocks()
         .checked_sub(superblock.first_log_block().get())
         .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidJournal))?;
-    // Linux bounds a normal transaction below roughly one third of the
-    // journal so descriptor, revoke, and commit overhead still fit while a
-    // checkpoint can make progress.
+    // Keep room for descriptor, revoke and commit overhead while a checkpoint
+    // makes progress alongside the running transaction.
     Ok((log_blocks / 3).max(1))
 }
 
@@ -162,7 +161,6 @@ impl MountedJournal {
         self.transactions.begin(credits)
     }
 
-    #[cfg(unittest)]
     pub(crate) fn is_aborted(&self) -> bool {
         self.transactions.is_aborted()
     }
@@ -174,6 +172,14 @@ impl MountedJournal {
 }
 
 impl Ext4SbInfo {
+    /// Rejects further writes using the journal's authoritative abort state.
+    pub(crate) fn ensure_writable(&self) -> Ext4Result<()> {
+        if let Some(journal) = self.journal.as_ref() {
+            journal.transactions.ensure_writable()?;
+        }
+        Ok(())
+    }
+
     /// Returns whether the mounted journal can persist revoke records.
     pub(crate) fn journal_supports_revoke(&self) -> bool {
         self.journal
@@ -200,24 +206,32 @@ impl Ext4SbInfo {
     }
 
     pub(crate) fn metadata_journal(&mut self) -> Ext4Result<Arc<MountedJournal>> {
-        if !self.journal_supports_revoke() {
-            self.drain_pending_checkpoints()?;
-            self.enable_journal_revoke_feature()?;
-        }
         let journal = self
             .journal
             .as_ref()
             .cloned()
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite))?;
+        journal.transactions.ensure_writable()?;
+        if !self.journal_supports_revoke() {
+            self.drain_pending_checkpoints()?;
+            self.enable_journal_revoke_feature()?;
+        }
         self.set_ext4_orphan_present_feature()?;
         Ok(journal)
     }
 
+    /// Admits a complete mutation under exclusive mount protection.
+    ///
+    /// The previous handle must have stopped before admission. An active handle
+    /// violates this serialization contract and is rejected before any wait.
     pub(crate) fn metadata_journal_for_mutation(
         &mut self,
         credits: JournalCredits,
         recovery_flag_policy: RecoveryFlagPolicy,
     ) -> Ext4Result<Arc<MountedJournal>> {
+        if let Some(journal) = self.journal.as_ref() {
+            journal.transactions.ensure_no_active_handles()?;
+        }
         let journal = self.metadata_journal()?;
         if recovery_flag_policy == RecoveryFlagPolicy::PreserveDuringRecovery {
             self.commit_running_metadata_transaction_with_policy(recovery_flag_policy)?;

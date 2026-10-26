@@ -134,6 +134,11 @@ struct ScannedDirectoryEntry<'a> {
 }
 
 impl Ext4SbInfo {
+    /// Interprets the inode index flag in the mounted feature set.
+    pub(crate) fn is_indexed_directory(&self, inode: &Ext4Inode) -> bool {
+        self.superblock().features().has_dir_index() && inode.has_indexed_directory()
+    }
+
     /// Reads all supported directory entries from a directory inode.
     pub(crate) fn read_dir(&self, inode: &Ext4Inode) -> Ext4Result<Vec<DirectoryEntry>> {
         let mut entries = Vec::new();
@@ -214,7 +219,7 @@ impl Ext4SbInfo {
             return Ok(());
         }
 
-        if inode.has_indexed_directory() {
+        if self.is_indexed_directory(inode) {
             self.scan_indexed_directory_from(inode, pos, visitor)
         } else {
             self.scan_linear_directory_from(inode, pos, visitor)
