@@ -6,7 +6,7 @@
 ktask RunQueue（生产调用方）
    │  持有 RQ 锁后调用 Scheduler
    v
-Stop（未接线） -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
+Stop（每 RQ 单槽） -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
 ```
 
 - 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经
@@ -149,6 +149,10 @@ steal 用游标 `get_ptr` 构造 `ManuallyDrop<Arc<_>>`，不经 `&T` 再向前�
 8. RT 任务同一时刻只挂在一条优先级链表上。归属字等于该链表的身份。摘除
    失败不得减少 `queued`。节流期间任务仍可留在链表里，但 `has_runnable`
    为假，`pick_next` 不得选出它们。
+9. 每个 RQ 至多一个 Stop 任务。waiter 槽至多持有它排队时的一份 `Arc`；runner
+   在 `Scheduler::curr`，不在槽里。第二个 `enqueue`，或在 waiter 已在时
+   `install_current` 另一个 Stop 任务，都是契约破坏，必须断言失败，不能覆盖
+   前一个 `Arc`。调用方在创建和唤醒时自行保证每 RQ 只有一个 Stop 任务。
 
 ## 线程安全
 
@@ -168,6 +172,7 @@ IRQ/preempt 约束提供。
 | T-07 | 双树或缓存残留导致错误选取/持有 | 高 | 摘除、改键或 Drop 漏清一份链接 | 同锁摘双树，游标后继更新缓存，正常树 Drop；成员/引用/重入测试 |
 | T-08 | `Scheduler` 在未持 RQ 锁时写 `RqCell` | 高 | 调用方违反锁契约 | 文档约定；令牌只在 `Scheduler` 入口和未发布初始化处构造 |
 | T-09 | 仲裁器 `curr` 的 `Arc` 在 Block 后成为唯一引用 | 高 | 调用方未另持任务 | `leave` 释放仲裁器引用；调用方必须另持任务 |
+| T-10 | 同一 RQ 上出现第二个 Stop 任务 | 高 | 重复 activate、误入队，或在已有 waiter 时 `install_current` | `enqueue` 与 `set_curr` 在槽已被占用时断言失败 |
 
 ## 故障模式与影响分析（FMEA）
 
@@ -177,6 +182,7 @@ IRQ/preempt 约束提供。
 | F-02 | 唤醒未 PLACE_LAG | Block/Migrate 未记 lag | 放置偏差 | 延迟/公平性劣化 | 3 | disposition 区分 + 单测 |
 | F-03 | Block 后无额外强引用 | 调用方未 pin 任务 | `switch_to` 断言失败 | 调度停止 | 2 | `blocked_resched` 要求 `strong_count > 1` |
 | F-04 | idle-pull 迁入未 PLACE_LAG | 摘任务不走 `remove_task` | 目的 RQ 放置偏差 | 迁入任务公平性漂移 | 3 | `steal_ready_task` 走 `remove_task`；dest `enqueue_task` PLACE_LAG |
+| F-05 | 第二个 Stop 任务 | 同一 RQ 再次入队，或 waiter 已在时安装 Stop runner | 断言失败 | 调度停止（暴露 bug） | 2 | `enqueue` 与 `set_curr` 断言；`steal` 不搬走 Stop |
 
 ## 故障管理
 
@@ -189,7 +195,8 @@ IRQ/preempt 约束提供。
 
 ## 已知限制
 
-- Stop 没有队列。`SCHED_DEADLINE` 需携带合法 `DlParams`，否则 `SchedAttr::validate` 以 `InvalidPolicy` 拒绝；每 RQ 准入失败以 `AdmissionFull` 拒绝（非权限检查）。
+- Stop 队列已在仲裁器里，但 `ktask` 还不创建 Stop 任务，也没有 stop-machine。
+  `SCHED_DEADLINE` 需携带合法 `DlParams`，否则 `SchedAttr::validate` 以 `InvalidPolicy` 拒绝；每 RQ 准入失败以 `AdmissionFull` 拒绝（非权限检查）。
 - `sched_setscheduler` 尚未把 FIFO/RR 送进 `RtClass`，也没有
   `CAP_SYS_NICE` 检查。接线前必须先补上，否则非特权调用者可以长期占住 CPU。
 - `SCHED_RESET_ON_FORK` 能通过策略字校验并记在线程快照里，fork 尚未按该标志
@@ -216,7 +223,7 @@ IRQ/preempt 约束提供。
 - [ ] 排队任务改 nice 是否先扣除旧权重贡献，再按新权重入队；摘除后是否无残账。
 - [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
 - [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
-- [ ] 未接线 class（Stop）的用户策略是否仍被 `validate` 拒绝。
+- [ ] Stop / Idle 的 `set_attr` 是否仍返回 `KernelClassImmutable`，且第二个 Stop `enqueue` 或在 waiter 已在时 `install_current` 是否断言失败。
 - [ ] `DlParams` 的零值 / 次序颠倒 / 低于最小预算是否都被拒（不截断、不归一化）。
 - [ ] 准入失败是否在改动任务属性之前返回（拒绝后 `attr` 保持不变）。
 - [ ] Deadline 的两个链接在 `advance` / `dequeue` / `put_prev` 各路径是否**至多一个**处于链接状态（不得同时挂在就绪树与节流树上）。

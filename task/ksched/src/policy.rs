@@ -7,15 +7,13 @@
 /// Kernel dispatch class for a scheduled task.
 ///
 /// Rank is Linux order: Stop, Deadline, RT, Fair, Idle. Smaller
-/// discriminant wins. Fair, RT, and Idle have class operations. Stop and
-/// Deadline keep their ranks so a later PR can plug them in without
-/// renumbering.
+/// discriminant wins.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SchedClass {
     /// Highest rank. Kernel-only; not a user `SCHED_*` policy.
     Stop     = 0,
-    /// `SCHED_DEADLINE`. Not admitted until a Deadline class exists.
+    /// `SCHED_DEADLINE`.
     Deadline = 1,
     /// `SCHED_FIFO` / `SCHED_RR`.
     Rt       = 2,
@@ -55,8 +53,7 @@ impl SchedClass {
 
 /// Linux `SCHED_*` values.
 ///
-/// FIFO and RR decode onto the RT class. Deadline decodes onto its rank,
-/// but [`SchedAttr::validate`] still rejects it until that class is wired.
+/// FIFO and RR decode onto the RT class. Deadline decodes onto its rank.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedPolicy {

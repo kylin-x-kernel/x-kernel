@@ -1425,3 +1425,109 @@ fn execution_runtime_ignores_stale_clock_samples() {
     s.exit_current(60);
     assert_eq!(runner.sum_exec_runtime_ns(), 50);
 }
+
+// ============================================================================
+// Stop
+// ============================================================================
+
+fn stop_task(id: usize) -> Arc<SchedTask<usize>> {
+    Arc::new(SchedTask::new_kernel(id, KernelClass::Stop))
+}
+
+#[def_test]
+fn stop_preempts_lower_classes() {
+    let mut s = sched();
+    let fair = task(1);
+    let rt = task(2);
+    let dl = dl_task(3);
+    let stop = stop_task(9);
+    s.set_attr(&rt, rt_attr(SchedPolicy::Fifo, 99), 0).unwrap();
+    enqueue_new(&mut s, fair);
+    enqueue_new(&mut s, rt);
+    enqueue_new(&mut s, dl.clone());
+    assert!(Arc::ptr_eq(&s.pick_next(0), &dl));
+    let woke = s.enqueue(stop.clone(), EnqueueKind::Wake { sync: false }, 0);
+    assert!(woke.resched);
+    assert_eq!(woke.next_event_ns, Some(0));
+    s.preempt_current(0);
+    assert!(Arc::ptr_eq(&s.pick_next(0), &stop));
+    assert_eq!(s.nr_queued(), 3);
+}
+
+#[def_test]
+fn stop_runner_is_not_preempted() {
+    let mut s = sched();
+    let stop = stop_task(9);
+    s.enqueue(stop.clone(), EnqueueKind::New, 0);
+    assert!(Arc::ptr_eq(&s.pick_next(0), &stop));
+    let woke = enqueue_new(&mut s, task(1));
+    assert!(!woke.resched);
+    assert!(woke.next_event_ns.is_none());
+    let tick = s.update(UNIT_NS, UpdateKind::SchedTick);
+    assert!(!tick.resched);
+    s.yield_current(UNIT_NS);
+    assert!(Arc::ptr_eq(&s.pick_next(UNIT_NS), &stop));
+    assert_eq!(s.nr_queued(), 1);
+}
+
+#[def_test]
+fn stop_block_migrate_and_exit_clear_the_slot() {
+    let mut blocked = sched();
+    let stop = stop_task(9);
+    blocked.enqueue(stop.clone(), EnqueueKind::New, 0);
+    assert!(Arc::ptr_eq(&blocked.pick_next(0), &stop));
+    blocked.block_current(0);
+    assert_eq!(blocked.nr_queued(), 0);
+    assert!(blocked.pick_next(0).is_idle_class());
+
+    let mut migrated = sched();
+    let moving = stop_task(8);
+    migrated.enqueue(moving.clone(), EnqueueKind::New, 0);
+    assert!(Arc::ptr_eq(&migrated.pick_next(0), &moving));
+    migrated.migrate_current(0);
+    assert_eq!(migrated.nr_queued(), 0);
+
+    let mut exiting = sched();
+    let done = stop_task(7);
+    exiting.enqueue(done.clone(), EnqueueKind::New, 0);
+    assert!(Arc::ptr_eq(&exiting.pick_next(0), &done));
+    assert!(Arc::ptr_eq(&exiting.exit_current(0), &done));
+    assert_eq!(exiting.nr_queued(), 0);
+}
+
+#[def_test]
+fn stop_dequeue_and_steal_leave_the_slot_local() {
+    let mut s = sched();
+    let stop = stop_task(9);
+    let fair = task(1);
+    s.enqueue(stop.clone(), EnqueueKind::New, 0);
+    enqueue_new(&mut s, fair.clone());
+    let stolen = s.steal(&mut |_| true, 0);
+    assert!(stolen.is_some_and(|task| Arc::ptr_eq(&task, &fair)));
+    assert_eq!(s.nr_queued(), 1);
+    assert!(s.dequeue(&stop, 0).is_some());
+    assert_eq!(s.nr_queued(), 0);
+    assert!(s.pick_next(0).is_idle_class());
+}
+
+#[def_test]
+fn stop_install_current_uses_the_empty_slot() {
+    let mut s = sched();
+    let stop = stop_task(9);
+    s.install_current(stop.clone(), 0);
+    assert!(s.current().is_some_and(|curr| Arc::ptr_eq(curr, &stop)));
+    assert_eq!(s.nr_queued(), 0);
+    let woke = enqueue_new(&mut s, task(1));
+    assert!(!woke.resched);
+}
+
+#[def_test]
+fn set_attr_rejects_stop() {
+    let mut s = sched();
+    let stop = stop_task(9);
+    assert_eq!(
+        s.set_attr(&stop, SchedAttr::DEFAULT, 0),
+        Err(SchedError::KernelClassImmutable)
+    );
+    assert_eq!(stop.sched_class(), SchedClass::Stop);
+}

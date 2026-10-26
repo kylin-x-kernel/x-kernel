@@ -241,6 +241,8 @@ impl FairEntity {
 /// Kernel-only class used at task construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernelClass {
+    /// Per-CPU stop / migration helper. Not activated by `ktask` yet.
+    Stop,
     /// Per-CPU idle thread.
     Idle,
 }
@@ -248,6 +250,7 @@ pub enum KernelClass {
 impl KernelClass {
     const fn sched_class(self) -> SchedClass {
         match self {
+            Self::Stop => SchedClass::Stop,
             Self::Idle => SchedClass::Idle,
         }
     }
@@ -278,7 +281,7 @@ impl<T> SchedTask<T> {
         Self::new_with_class(inner, SchedClass::Fair, SchedAttr::DEFAULT)
     }
 
-    /// Wraps `inner` as a kernel-only Idle task.
+    /// Wraps `inner` as a kernel-only Stop or Idle task.
     pub const fn new_kernel(inner: T, class: KernelClass) -> Self {
         Self::new_with_class(inner, class.sched_class(), SchedAttr::DEFAULT)
     }

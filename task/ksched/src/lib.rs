@@ -13,7 +13,14 @@ mod owner;
 mod policy;
 mod ready_list;
 mod scheduler;
-unittest::path_mod_test!(tests, "../ut-tests/scheduler.rs");
+unittest::path_mod_test!(
+    /// Kernel unit tests for Stop, Deadline, RT, Fair, and Idle arbitration.
+    ///
+    /// Deadline `set_attr` requires a valid `DlParams`. Stop and Idle reject
+    /// `set_attr`.
+    mod tests,
+    "../ut-tests/scheduler.rs"
+);
 
 extern crate alloc;
 

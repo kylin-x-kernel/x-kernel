@@ -4,8 +4,8 @@
 
 `ksched` 的生产调度器是类仲裁器。`ktask` 在持有运行队列锁时调用
 `Scheduler`。仲裁器按 Linux 秩遍历 Stop、Deadline、RT、Fair、Idle：这一层
-实现 Deadline（CBS + EDF）、RT（FIFO/RR）、Fair（EEVDF）和 Idle。Stop 仍只占
-秩，`pick_next` 返回空、`enqueue` 视为编程错误。用户任务仍由 `SchedTask::new`
+实现 Stop（每 RQ 至多一个 waiter）、Deadline（CBS + EDF）、RT（FIFO/RR）、
+Fair（EEVDF）和 Idle。用户任务仍由 `SchedTask::new`
 建成 Fair：`sched_setscheduler` / `sched_setattr` 只写线程快照，还不调用
 `Scheduler::set_attr`，所以生产路径上 `sched_class()` 目前仍是 Fair。
 `ktask` 在任务已经是 RT 时按 `find_lowest_rq` 选核，并在 idle 时保留节流定时器。
@@ -59,10 +59,10 @@ task/ksched/
 │   ├── owner.rs        # SharedOwner 与 intrusive PointerOps 适配
 │   ├── ready_list.rs   # RT 用的 intrusive FIFO 与 O(1) 摘除
 │   ├── class.rs        # ClassOps
-│   ├── classes/        # deadline.rs（CBS+EDF）、rt.rs、fair.rs（EEVDF）、idle.rs
-│   ├── scheduler.rs    # 五档仲裁；Stop 未接线
+│   ├── classes/        # stop.rs、deadline.rs（CBS+EDF）、rt.rs、fair.rs（EEVDF）、idle.rs
+│   ├── scheduler.rs    # 五档仲裁
 │   └── clock.rs
-├── ut-tests/           # Deadline / RT / Fair / Idle 仲裁器单测
+├── ut-tests/           # Stop / Deadline / RT / Fair / Idle 仲裁器单测
 └── docs/
 ```
 
@@ -92,12 +92,13 @@ Blocked|Migrating --enqueue_task--> Ready
 
 ```
 pick_next: Stop -> Deadline -> RT -> Fair -> Idle
-           未接线   CBS+EDF    FIFO/RR   EEVDF    永远返回钉住的 idle
+           单槽    CBS+EDF    FIFO/RR   EEVDF    永远返回钉住的 idle
 ```
 
 | 组件 | 职责 |
 |------|------|
 | `SchedTask` | 调用方内部数据、class、seat、attr，以及每任务一份 `FairEntity`、`RtEntity` 和 `DeadlineEntity` |
+| `StopClass` | 每 RQ 至多一个 waiter；不计时间片；不参与 steal |
 | `DeadlineClass` | 就绪 / 节流两棵侵入式 RB 树；CBS 预算；EDF 选人；每 RQ 带宽准入 |
 | `RtClass` | 优先级 `1..=99` 的侵入式 FIFO；RR 时间片；RT 带宽节流 |
 | `FairClass` | 双侵入式 RB 树、lag、NEXT_BUDDY、request |
@@ -117,10 +118,29 @@ idle，不会返回空。
 `attr_changed` 必须按旧 nice 对应的入队权重扣除 `total_weight` / `sum_wv`，
 再按新权重重新入队；整个过程在同一 RQ 锁内完成。运行任务离树，不走这条扣账路径。
 
-Stop 只占秩。`SchedAttr::validate` 按 `policy` 校验各档字段是否自洽：
+`SchedAttr::validate` 按 `policy` 校验各档字段是否自洽：
 Deadline 必须携带合法 `DlParams`，FIFO/RR 要求优先级 `1..=99`，Fair 策略
 必须带 `RtPrio::NONE`；任何非 Deadline 策略都不得携带 `dl_params`。
-Idle 任务拒绝 `set_attr`（`KernelClassImmutable`）。
+Stop 和 Idle 是内核类，`set_attr` 返回 `KernelClassImmutable`。用户策略字
+里没有 Stop。
+
+### Stop 类
+
+每个 RQ 至多一个 Stop 任务，给以后的 per-CPU `migration/%u` 用。它可以
+是 waiter，或是 `Scheduler::curr` 里的 runner，不能是两个不同的任务。这一层
+只实现队列：`ktask` 还不创建 Stop 任务，也不走 stop-machine。接线时，创建
+和唤醒都必须先满足这一条。
+
+- 调用方保证每个 RQ 只有一个 Stop 任务。`enqueue`（waiter 已在，或当前
+  runner 已是 Stop）和 `install_current`（经 `set_curr`，waiter 已在）发现
+  违反时 `assert` 失败。这是编程错误，不返回 `SchedError`：`ClassOps::enqueue`
+  没有错误通道，第二个 Stop 任务也不是用户可恢复的失败。runner 记在
+  `Scheduler::curr`，不占 `waiter` 槽。
+- `pick_next` 先看这一档。Yield / Preempt 把 runner 放回唯一槽，因此更低
+  类唤醒它时 `resched` 为假，tick 也不抢占。
+- Block / Migrate / Exit 清空槽，不入队。`steal` 恒为 `None`：Stop 留在进入
+  的那颗 RQ 上。
+- 不计时间片，`curr_timer_ns` / `class_timer_ns` 为 `None`。
 
 ### Deadline 类（CBS + EDF）
 
@@ -230,7 +250,7 @@ RT 优先级”。`ktask` 在会改变这个字节的操作（记账/`charge`、
   `SCHED_FAIR_REQUEST_US`。RR 时间片是 `SCHED_RR_SLICE_US`（默认 100 ms）。
   RT 带宽是 `SCHED_RT_RUNTIME_US` / `SCHED_RT_PERIOD_US`（默认 0.95 s / 1 s）。
   Deadline 的最小预算与准入余量是 `SCHED_DL_MIN_RUNTIME_US`（默认 100 µs）与
-  `SCHED_DL_BW_MARGIN_PCT`（默认 5）。Stop 仍只占秩。
+  `SCHED_DL_BW_MARGIN_PCT`（默认 5）。Stop 是每 RQ 一个槽，没有时间片。
 - **Deadline 用两棵独立树，而不是就绪与节流共用一棵/一个链接**。曾考虑的
   备选是单树单链接（省一个 `RBTreeAtomicLink`），被否决，理由有两条：
   1. **`nr_queued` 的语义会被污染**。`ktask` 的 `load_count` 用
@@ -278,8 +298,9 @@ RT 优先级”。`ktask` 在会改变这个字节的操作（记账/`charge`、
 ## Drop / 资源释放
 
 `FairClass` 的两棵树和最早缓存、`next_buddy` 持有排队任务的 `Arc`。
-`Scheduler::curr` 持有运行任务的 `Arc`，leave 后不再持有。Idle 槽钉住每 RQ
-的 idle 任务，随 `Scheduler` 一起释放。树 Drop 走库的 `clear()`，不调用
+`StopClass` 的 waiter 槽至多再持一份。`Scheduler::curr` 持有运行任务的
+`Arc`，leave 后不再持有。Idle 槽钉住每 RQ 的 idle 任务，随 `Scheduler`
+一起释放。树 Drop 走库的 `clear()`，不调用
 `get_key`，因此不在无锁路径上读 `RqCell`。
 
 插件调度器 ready 队列持有 Ready 任务的 `Arc`。运行任务的 owner 在 `ktask` 侧

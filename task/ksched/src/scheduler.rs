@@ -4,178 +4,29 @@
 
 //! Class arbitrator. `ktask` drives this type on the production path.
 //!
-//! [`Scheduler`] owns the five class ranks and the runner `Arc`. Stop and
-//! Deadline are rank slots: `pick_next` returns [`None`] and `enqueue`
-//! panics. RT is fixed-priority FIFO/RR. Fair is EEVDF. Idle is the lowest
-//! rank, so a finished pick never returns [`None`]. Every public method takes
-//! an absolute
-//! `now_ns`, advances [`RqClock`], and returns a [`Decision`] when the
-//! caller may need to reschedule or reprogram a timer. This crate does not
-//! sample the clock, hold the RQ lock, or switch stacks.
+//! [`Scheduler`] owns the five class ranks and the runner `Arc`. Stop is the
+//! highest rank and holds at most one waiter. Deadline is CBS+EDF. RT is
+//! fixed-priority FIFO/RR. Fair is EEVDF. Idle is the lowest rank, so a
+//! finished pick never returns [`None`]. Every public method takes an
+//! absolute `now_ns`, advances [`RqClock`], and returns a [`Decision`] when
+//! the caller may need to reschedule or reprogram a timer. This crate does
+//! not sample the clock, hold the RQ lock, or switch stacks.
 
 use alloc::sync::Arc;
-use core::marker::PhantomData;
 
 use crate::{
     class::{ClassOps, Decision, EnqueueKind, LeaveReason, UpdateKind},
-    classes::{DeadlineClass, FairClass, IdleClass, RtClass},
+    classes::{DeadlineClass, FairClass, IdleClass, RtClass, StopClass},
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
     owner::SharedOwner,
     policy::{SchedAttr, SchedClass, SchedError},
 };
 
-/// Rank that is defined but has no queue yet.
-struct UnwiredClass<T, Owner: SharedOwner<SchedTask<T>>> {
-    class: SchedClass,
-    _task: PhantomData<(T, Owner)>,
-}
-
-impl<T, Owner: SharedOwner<SchedTask<T>>> UnwiredClass<T, Owner> {
-    const fn new(class: SchedClass) -> Self {
-        Self {
-            class,
-            _task: PhantomData,
-        }
-    }
-}
-
-impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for UnwiredClass<T, Owner> {
-    fn class(&self) -> SchedClass {
-        self.class
-    }
-
-    fn nr_queued(&self) -> usize {
-        0
-    }
-
-    fn has_runnable(&self) -> bool {
-        false
-    }
-
-    fn advance(&mut self, _clk: &RqClock, _tok: RqLocked) {}
-
-    #[expect(
-        clippy::panic,
-        reason = "CG-021-no-panic-on-reachable-failure: SchedAttr::validate admits only Fair \
-                  policies until other classes are wired, so no task reaches an unwired class's \
-                  enqueue"
-    )]
-    fn enqueue(
-        &mut self,
-        _task: Owner,
-        _kind: EnqueueKind,
-        _curr: Option<&SchedTask<T>>,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) {
-        panic!("enqueue on an unwired scheduling class");
-    }
-
-    fn dequeue(
-        &mut self,
-        _task: &Owner,
-        _curr: Option<&SchedTask<T>>,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) -> Option<Owner> {
-        None
-    }
-
-    fn steal(
-        &mut self,
-        _want: &mut dyn FnMut(&SchedTask<T>) -> bool,
-        _curr: Option<&SchedTask<T>>,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) -> Option<Owner> {
-        None
-    }
-
-    fn pick_next(&mut self, _clk: &RqClock, _tok: RqLocked) -> Option<Owner> {
-        None
-    }
-
-    fn set_curr(&mut self, _task: &SchedTask<T>, _clk: &RqClock, _tok: RqLocked) {}
-
-    fn put_prev(
-        &mut self,
-        _prev: Owner,
-        _reason: LeaveReason,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) -> bool {
-        false
-    }
-
-    fn account(
-        &mut self,
-        _curr: &SchedTask<T>,
-        _elapsed_ns: u64,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) -> bool {
-        false
-    }
-
-    fn tick_preempts(&mut self, _curr: &SchedTask<T>, _clk: &RqClock, _tok: RqLocked) -> bool {
-        false
-    }
-
-    fn wakeup_preempts(&mut self, _curr: &SchedTask<T>, _clk: &RqClock, _tok: RqLocked) -> bool {
-        false
-    }
-
-    fn curr_timer_ns(&self, _curr: &SchedTask<T>, _clk: &RqClock, _tok: RqLocked) -> Option<u64> {
-        None
-    }
-
-    fn class_timer_ns(&self, _clk: &RqClock, _tok: RqLocked) -> Option<u64> {
-        None
-    }
-
-    fn attr_changed(
-        &mut self,
-        _task: &Owner,
-        _old: SchedAttr,
-        _is_curr: bool,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) {
-    }
-
-    fn can_admit(
-        &self,
-        _task: &SchedTask<T>,
-        _new: SchedAttr,
-        _tok: RqLocked,
-    ) -> Result<(), SchedError> {
-        Err(SchedError::InvalidPolicy)
-    }
-
-    fn switched_from(
-        &mut self,
-        _task: &SchedTask<T>,
-        _is_curr: bool,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) {
-    }
-
-    fn switched_to(
-        &mut self,
-        _task: &SchedTask<T>,
-        _is_curr: bool,
-        _clk: &RqClock,
-        _tok: RqLocked,
-    ) {
-    }
-}
-
 /// Stop, Deadline, RT, Fair, then Idle. `curr` and `clock` stay outside so a
 /// queue can be borrowed mutably beside the runner.
 pub(crate) struct ClassSet<T, Owner: SharedOwner<SchedTask<T>>> {
-    stop: UnwiredClass<T, Owner>,
+    stop: StopClass<T, Owner>,
     deadline: DeadlineClass<T, Owner>,
     rt: RtClass<T, Owner>,
     fair: FairClass<T, Owner>,
@@ -234,7 +85,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
             clock: RqClock::new(now_ns),
             curr: None,
             classes: ClassSet {
-                stop: UnwiredClass::new(SchedClass::Stop),
+                stop: StopClass::new(),
                 deadline: DeadlineClass::new(),
                 rt: RtClass::new(),
                 fair: FairClass::new(),
@@ -366,7 +217,8 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// # Panics
     ///
     /// Panics if a runner is already recorded in `curr`
-    /// (`assert!(self.curr.is_none())`).
+    /// (`assert!(self.curr.is_none())`). Installing a Stop task also panics
+    /// when this runqueue already has a Stop waiter.
     ///
     /// # Examples
     ///
@@ -576,7 +428,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// Returns the first [`SchedAttr::validate`] failure, including
     /// [`SchedError::InvalidPriority`] for a bad FIFO/RR priority.
     ///
-    /// Returns [`SchedError::KernelClassImmutable`] when `task` is Idle.
+    /// Returns [`SchedError::KernelClassImmutable`] when `task` is Stop or Idle.
     ///
     /// # Panics
     ///
