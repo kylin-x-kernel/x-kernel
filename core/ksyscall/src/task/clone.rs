@@ -11,6 +11,8 @@
 //!
 //! The core logic is shared between `sys_clone` and `sys_clone3` via [`CloneRequest::do_clone`].
 
+use alloc::sync::Arc;
+
 use bitflags::bitflags;
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
@@ -215,6 +217,42 @@ impl CloneRequest {
         // Namespace flag validation
         self.validate_namespace_flags()?;
 
+        let namespace_flags = self.extract_namespace_flags();
+
+        // Linux `copy_process()` rejects CLONE_THREAD combined with the
+        // namespace flags that would change the thread group's view with
+        // `EINVAL` (fork.c spells out NEWUSER/NEWPID; the same rule guards
+        // every namespace switch here). This kernel attaches the namespace
+        // bundle to the process, so a thread clone cannot switch namespaces
+        // at all — the flags are rejected instead of being silently ignored
+        // (and silently bypassing the privilege gate below).
+        if self.flags.contains(CloneFlags::THREAD) && !namespace_flags.is_empty() {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
+        // The same Linux check has a third arm that needs no namespace flag:
+        // `task_active_pid_ns(current) != nsp->pid_ns_for_children` is also
+        // `EINVAL`, i.e. a thread cannot join a group whose PID namespace its
+        // own view has already left (`unshare(CLONE_NEWPID)`/`setns`). Without
+        // this arm such a clone succeeds here and fails on Linux.
+        if self.flags.contains(CloneFlags::THREAD) {
+            let process = kprocess::current_user_process();
+            if !Arc::ptr_eq(
+                &process.active_pid_namespace(),
+                &process.pid_ns_for_children()?,
+            ) {
+                return Err(KError::from(LinuxError::EINVAL));
+            }
+        }
+
+        // Creating a namespace requires `CAP_SYS_ADMIN` (Linux
+        // `copy_namespaces()`); a user namespace would be the only
+        // unprivileged escape hatch and is not implemented. `unshare(2)`
+        // and `setns(2)` apply the same gate, so the clone path must not
+        // be a way around it.
+        if !namespace_flags.is_empty() && !kprocess::current_cred().has_sys_admin() {
+            return Err(KError::from(LinuxError::EPERM));
+        }
+
         let mut new_uctx = *uctx;
         if self.stack != 0 {
             new_uctx.set_sp(self.stack);
@@ -263,7 +301,7 @@ impl CloneRequest {
                 } else {
                     ForkFdTable::Private
                 },
-                namespace_flags: self.extract_namespace_flags(),
+                namespace_flags,
                 exit_signal,
             })?
         };
@@ -379,8 +417,10 @@ impl CloneRequest {
         }
 
         // Unimplemented namespace flags: return ENOSYS. These namespaces have
-        // no table isolation yet (see `kns::NsProxy::prepare_unshare`), so
-        // accepting their flags would create pseudo-isolation.
+        // no table isolation yet (see `kns::NsProxy::clone_for_child`), so
+        // accepting their flags would create pseudo-isolation: `knet` still
+        // resolves sockets through its global protocol stack, so a network
+        // namespace without a per-namespace data plane stays unsupported.
         let unimplemented =
             CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
         if ns.intersects(unimplemented) {

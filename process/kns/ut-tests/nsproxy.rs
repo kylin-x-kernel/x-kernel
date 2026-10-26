@@ -127,21 +127,20 @@ fn test_nsproxy_clone_newns_with_clone_fs_rejected() {
 #[def_test]
 fn test_nsproxy_clone_unimplemented_flags_rejected() {
     let parent = make_nsproxy();
-    assert!(
-        parent
-            .clone_for_child(NamespaceFlags::NEWNET, NamespaceFsContext::Shared)
-            .is_err()
-    );
-    assert!(
-        parent
-            .clone_for_child(NamespaceFlags::NEWUSER, NamespaceFsContext::Shared)
-            .is_err()
-    );
-    assert!(
-        parent
-            .clone_for_child(NamespaceFlags::NEWCGROUP, NamespaceFsContext::Shared)
-            .is_err()
-    );
+    // NEWNET is rejected: knet still resolves sockets through its global
+    // protocol stack, so a fresh identity alone would be pseudo-isolation.
+    for flags in [
+        NamespaceFlags::NEWNET,
+        NamespaceFlags::NEWUSER,
+        NamespaceFlags::NEWCGROUP,
+    ] {
+        assert!(
+            parent
+                .clone_for_child(flags, NamespaceFsContext::Shared)
+                .is_err(),
+            "clone must reject {flags:?} while the data plane is global"
+        );
+    }
 }
 
 #[def_test]
@@ -197,6 +196,9 @@ fn test_unshare_prepare_rejects_unsupported_and_unprivileged() {
         unshare_files: false,
     };
 
+    // NEWNET is rejected like the other unimplemented namespaces: knet still
+    // resolves sockets through its global protocol stack, so a fresh identity
+    // alone would be pseudo-isolation.
     for flags in [
         NamespaceFlags::NEWNET,
         NamespaceFlags::NEWUSER,
@@ -364,6 +366,9 @@ fn test_with_namespace_swaps_only_requested_slot() {
 #[def_test]
 fn test_with_namespace_rejects_pseudo_isolation_kinds() {
     let proxy = make_nsproxy();
+    // Net is rejected like the other pseudo-isolation kinds: knet still
+    // resolves sockets through its global protocol stack, so switching only
+    // the namespace reference would not isolate anything.
     for nsfd in [
         NsFd::Net(Arc::new(crate::NetNamespace::new())),
         NsFd::User(kcred::initial_user_namespace()),

@@ -6,7 +6,10 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::LinuxError;
-use kprocess::{current_user_process, process_exit, wait_reap};
+use kprocess::{
+    ProcessForkConfig, current_user_process, current_user_thread, process_exit, wait_reap,
+};
+use kns::NamespaceFlags;
 use ksignal::{SignalAction, SignalActionFlags, SignalDisposition, Signo};
 use ktask::WaitQueue;
 use unittest::{assert_eq, def_test};
@@ -422,4 +425,84 @@ fn test_sigchld_nocldwait_autoreap_leaves_no_waitable_child() {
         .unwrap();
 
     assert_eq!(LinuxError::from(err), LinuxError::ECHILD);
+}
+
+/// A subreaper ancestor adopts an orphaned grandchild instead of the global
+/// init (Linux `find_new_reaper`): the middle process exits first, and the
+/// nearest `PR_SET_CHILD_SUBREAPER` ancestor — not init — becomes the new
+/// parent of the grandchild.
+#[def_test(user, serial)]
+fn child_subreaper_adopts_orphaned_grandchild() {
+    let subreaper = current_user_process();
+    subreaper.set_child_subreaper(true);
+
+    let child = subreaper.fork(8_300);
+    let grandchild = child.fork(8_301);
+
+    // The middle process exits and reparents its surviving children.
+    process_exit::finalize_process_exit(&child);
+
+    let adopted = subreaper
+        .children()
+        .iter()
+        .find(|proc| proc.pid() == grandchild.pid())
+        .cloned();
+    assert!(
+        adopted.is_some(),
+        "orphaned grandchild must be adopted by the subreaper, not init"
+    );
+
+    // Cleanup: retire the adopted orphans and the child zombie.
+    if let Some(grandchild) = adopted {
+        process_exit::finalize_process_exit(&grandchild);
+        wait_reap::assert_reap_zombie_process(&grandchild);
+    }
+    wait_reap::assert_reap_zombie_process(&child);
+    subreaper.set_child_subreaper(false);
+}
+
+/// A non-root PID namespace's reaper exiting must not adopt orphans: with
+/// the registered reaper gone, adoption walks past the namespace boundary to
+/// the outer subreaper (Linux's observable outcome of
+/// `zap_pid_ns_processes()` without ns teardown).
+#[def_test(user, serial)]
+fn pid_ns_reaper_exit_hands_orphans_past_the_namespace_boundary() {
+    let outer = current_user_process();
+    outer.set_child_subreaper(true);
+
+    // First process of a fresh PID namespace: registered as that
+    // namespace's child reaper by the fork path (Linux `is_child_reaper()`).
+    let prepared = current_user_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: kprocess::ForkParent::Caller,
+            address_space: kprocess::ForkAddressSpace::Private,
+            fs: kprocess::ForkFs::Private,
+            signal_actions: kprocess::ForkSignalActions::Private,
+            fd_table: kprocess::ForkFdTable::Private,
+            namespace_flags: NamespaceFlags::NEWPID,
+            exit_signal: Some(Signo::SIGCHLD),
+        })
+        .expect("privileged NEWPID fork must succeed for the test caller");
+    let ns_reaper = prepared.process().clone();
+    let orphans = ns_reaper.fork(8_311);
+
+    // The namespace reaper itself exits, leaving its orphan behind.
+    process_exit::finalize_process_exit(&ns_reaper);
+
+    let adopted = outer
+        .children()
+        .iter()
+        .find(|proc| proc.pid() == orphans.pid())
+        .cloned();
+    assert!(
+        adopted.is_some(),
+        "orphan must be adopted past the namespace boundary by the outer subreaper"
+    );
+
+    if let Some(orphans) = adopted {
+        process_exit::finalize_process_exit(&orphans);
+        wait_reap::assert_reap_zombie_process(&orphans);
+    }
+    wait_reap::assert_reap_zombie_process(&ns_reaper);
+    outer.set_child_subreaper(false);
 }

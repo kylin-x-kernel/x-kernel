@@ -658,6 +658,55 @@ fn test_exit_reparent_resets_child_exit_signal_to_sigchld() {
 }
 
 #[def_test(serial)]
+fn test_reparented_zombie_is_reported_to_its_new_parent() {
+    // Linux `reparent_leader()` reports a zombie whose parent just changed with
+    // `do_notify_parent()`, so the parent that inherits it is told about the
+    // death. The report is prepared outside the process-domain lock; this case
+    // pins what the exit transaction carries out of it (the synthetic test
+    // processes have no signal runtime, so the delivery itself is only
+    // observable in a live system).
+    let init = ensure_init();
+    let subreaper = init.fork(310);
+    subreaper.set_child_subreaper(true);
+    let parent = subreaper.fork(311);
+    let zombie = parent.fork(312);
+
+    zombie.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    let transition = parent.finish_exit_in_process_domain(
+        ProcessExitPublication::WaitableZombie,
+        |observed_parent| Some((observed_parent.pid(), false)),
+    );
+
+    assert_eq!(
+        zombie.parent().map(|parent| parent.pid()),
+        Some(subreaper.pid()),
+        "the orphaned zombie must be adopted by the subreaper"
+    );
+    assert_eq!(
+        transition.reparented_zombies.len(),
+        1,
+        "the exit transaction must carry the zombie handed to the new parent"
+    );
+    let reported = &transition.reparented_zombies[0];
+    assert_eq!(reported.child.pid(), zombie.pid());
+    assert_eq!(
+        reported.parent.pid(),
+        subreaper.pid(),
+        "the report targets the subreaper that now owns the zombie"
+    );
+    assert_eq!(
+        zombie.exit_signal(),
+        Some(ksignal::Signo::SIGCHLD),
+        "orphaned children report to the new parent using SIGCHLD"
+    );
+
+    parent.free();
+    zombie.free();
+    subreaper.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    subreaper.free();
+}
+
+#[def_test(serial)]
 fn test_reap_after_reparent_removes_child_from_current_parent() {
     let init = ensure_init();
     let parent = init.fork(304);

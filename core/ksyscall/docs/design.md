@@ -268,7 +268,11 @@ validation and `kprocess` commit (see above). `clone`/`clone3` now accept
 `CLONE_NEWNS`/`CLONE_NEWUTS`/`CLONE_NEWIPC`, while `CLONE_NEWNET`,
 `CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return `ENOSYS`
 from the namespace-flag validator instead of improvising namespace creation
-without isolation. Until unified user-namespace capability authorization
+without isolation. A thread clone cannot switch namespaces — the namespace
+bundle hangs off the process — so `CLONE_THREAD` combined with any namespace
+flag is rejected with `EINVAL` (Linux `copy_process()`), and every namespace
+flag on any clone is gated on the caller's privilege before the thread or
+process branch is chosen. Until unified user-namespace capability authorization
 exists, both syscalls gate on the caller's privilege flag (effective UID zero
 as the `CAP_SYS_ADMIN` proxy): `unshare` through
 `UnshareContext::privileged`, and `setns` before either channel dispatches —

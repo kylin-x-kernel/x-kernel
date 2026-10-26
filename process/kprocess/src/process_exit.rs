@@ -8,7 +8,9 @@ use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Si
 use ktask::KtaskRef;
 use ktime_types::TimeSpan;
 
-use crate::{Process, ProcessExitPublication, process_signals, wait_reap};
+use crate::{
+    Process, ProcessExitPublication, process::exit::ReparentedZombie, process_signals, wait_reap,
+};
 
 /// Removes an exiting thread from its process and publishes the exit code when needed.
 ///
@@ -74,9 +76,7 @@ pub fn complete_process_exit(process: &Arc<Process>) -> bool {
                 .ok()
         });
 
-    if let Some(parent) = transition.reparented_zombie_parent {
-        notify_child_exit(&parent);
-    }
+    notify_reparented_zombies(&transition.reparented_zombies);
     if transition.autoreaped {
         wait_reap::reap_detached_process_identity(process);
     }
@@ -104,6 +104,30 @@ pub fn complete_process_exit(process: &Arc<Process>) -> bool {
     notify_child_exit(&parent);
 
     transition.autoreaped
+}
+
+/// Reports reparented zombie children to the parent that now owns them.
+///
+/// Linux `reparent_leader()` sets `p->exit_signal = SIGCHLD` and calls
+/// `do_notify_parent()` for a zombie whose parent just changed, so the new
+/// parent is told about the death it inherited; the wait-event wake alone
+/// (`notify_child_exit`) does not reach a supervisor that only watches
+/// `SIGCHLD`/`signalfd`. The immediate-reap half of `do_notify_parent` — a
+/// parent ignoring `SIGCHLD` makes the zombie reap on the spot — is not
+/// replicated: the zombie stays until it is waited for.
+pub(crate) fn notify_reparented_zombies(zombies: &[ReparentedZombie]) {
+    for ReparentedZombie { child, parent } in zombies {
+        let siginfo = sigchld_child_exit_signal_info(child, parent);
+        match process_signals::prepare_child_exit_to_process_ref(parent, siginfo) {
+            Ok(delivery) => delivery.commit_and_interrupt(),
+            Err(err) => warn!(
+                "failed to notify new parent {} about reparented zombie {}: {err:?}",
+                parent.pid(),
+                child.pid()
+            ),
+        }
+        notify_child_exit(parent);
+    }
 }
 
 /// Wakes parent waiters after child-exit signal/autoreap handling is complete.

@@ -241,7 +241,8 @@ impl NsProxy {
         flags: NamespaceFlags,
         fs_context: NamespaceFsContext<'_>,
     ) -> Result<Arc<Self>, CloneNsError> {
-        // Reject unimplemented namespace flags
+        // Reject unimplemented namespace flags. Their backing tables are not
+        // isolated, so cloning the reference would create pseudo-isolation.
         let unimplemented = NamespaceFlags::NEWNET
             | NamespaceFlags::NEWUSER
             | NamespaceFlags::NEWCGROUP
@@ -290,6 +291,9 @@ impl NsProxy {
             uts_ns,
             ipc_ns,
             pid_ns_for_children,
+            // `clone` of the remaining flags shares the network namespace: it
+            // has no isolated backing table, so a fresh identity alone would
+            // be pseudo-isolation (see `clone_for_child`'s rejection above).
             net_ns: self.net_ns.clone(),
             cgroup_ns: self.cgroup_ns.clone(),
             time_ns: self.time_ns.clone(),
@@ -304,9 +308,11 @@ impl NsProxy {
     /// installs precomputed state:
     ///
     /// - `NEWNET`, `NEWUSER`, `NEWCGROUP`, and `NEWTIME` are rejected with
-    ///   [`UnshareError::Unsupported`]. The X-Kernel container plan forbids
-    ///   creating namespace objects that only change an ID without isolating
-    ///   the underlying tables.
+    ///   [`UnshareError::Unsupported`]: creating namespace objects that only
+    ///   change an ID without isolating the underlying tables would be
+    ///   pseudo-isolation. `knet` still resolves sockets through its global
+    ///   protocol stack, so a network namespace without a per-namespace data
+    ///   plane stays unsupported.
     /// - Any `NEW*` flag requires [`UnshareContext::privileged`]
     ///   (`CAP_SYS_ADMIN` in the absence of user namespaces).
     /// - `NEWNS` while the `fs_struct` is shared with another task and
@@ -411,12 +417,17 @@ impl NsProxy {
             self.pid_ns_for_children.clone()
         };
 
+        // `unshare` of the remaining flags shares the network namespace: it
+        // has no isolated backing table, so a fresh identity alone would be
+        // pseudo-isolation (see `prepare_unshare`'s rejection above).
+        let net_ns = self.net_ns.clone();
+
         let nsproxy = Arc::new(Self {
             mnt_ns,
             uts_ns,
             ipc_ns,
             pid_ns_for_children,
-            net_ns: self.net_ns.clone(),
+            net_ns,
             cgroup_ns: self.cgroup_ns.clone(),
             time_ns: self.time_ns.clone(),
             time_ns_for_children: self.time_ns_for_children.clone(),
@@ -439,11 +450,11 @@ impl NsProxy {
     ///
     /// # Errors
     ///
-    /// Returns [`UnshareError::Unsupported`] for `Net`, `User`, and `Cgroup`
-    /// namespaces, whose underlying tables are not isolated yet; switching only
-    /// the namespace reference would create pseudo-isolation.
+    /// Returns [`UnshareError::Unsupported`] for `User`, `Cgroup`, and `Net`
+    /// namespaces, whose underlying tables are not isolated yet; switching
+    /// only the namespace reference would create pseudo-isolation.
     pub fn with_namespace(&self, replacement: &NsFd) -> Result<Arc<Self>, UnshareError> {
-        if matches!(replacement, NsFd::Net(_) | NsFd::User(_) | NsFd::Cgroup(_)) {
+        if matches!(replacement, NsFd::User(_) | NsFd::Cgroup(_) | NsFd::Net(_)) {
             return Err(UnshareError::Unsupported);
         }
 
@@ -463,13 +474,14 @@ impl NsProxy {
             NsFd::Pid(ns) => ns.clone(),
             _ => self.pid_ns_for_children.clone(),
         };
+        let net_ns = self.net_ns.clone();
 
         Ok(Arc::new(Self {
             mnt_ns,
             uts_ns,
             ipc_ns,
             pid_ns_for_children,
-            net_ns: self.net_ns.clone(),
+            net_ns,
             cgroup_ns: self.cgroup_ns.clone(),
             time_ns: self.time_ns.clone(),
             time_ns_for_children: self.time_ns_for_children.clone(),

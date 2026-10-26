@@ -4,13 +4,16 @@
 
 //! Process structure and lifecycle management.
 mod exec_gate;
-mod exit;
+pub(crate) mod exit;
 mod runtime_access;
 mod thread_membership;
 mod tree;
 
 use alloc::sync::{Arc, Weak};
-use core::{fmt, sync::atomic::AtomicU32};
+use core::{
+    fmt,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+};
 
 use exit::{AtomicProcessExitState, ProcessExitState};
 pub use exit::{
@@ -53,7 +56,12 @@ pub struct Process {
     /// first (`prctl(PR_SET_PDEATHSIG)`).
     pdeath_signal: AtomicU32,
 
-    // TODO: child subreaper9
+    /// Whether this thread group is a child subreaper (`PR_SET_CHILD_SUBREAPER`).
+    ///
+    /// Orphaned descendants reparent to the nearest subreaper ancestor instead
+    /// of the child reaper, so runtimes such as containerd shims can observe
+    /// and reap reparented container processes.
+    child_subreaper: AtomicBool,
     /// Current children linked under this process. Mutate only under
     /// `process_domain` write lock.
     children: SpinNoIrq<List<Arc<ChildRelationSlot>>>,
@@ -141,6 +149,18 @@ impl Process {
     pub fn exit_signal(&self) -> Option<Signo> {
         let _domain = process_domain::read_lock();
         self.parent_relation.exit_signal()
+    }
+
+    /// Returns whether this thread group is a child subreaper.
+    pub fn is_child_subreaper(&self) -> bool {
+        self.child_subreaper.load(Ordering::Relaxed)
+    }
+
+    /// Turns this thread group into (`true`) or out of (`false`) a child
+    /// subreaper: orphaned descendants reparent to it instead of the child
+    /// reaper.
+    pub fn set_child_subreaper(&self, enabled: bool) {
+        self.child_subreaper.store(enabled, Ordering::Relaxed)
     }
 
     /// Returns `true` if the [`Process`] is the init process.
@@ -268,6 +288,7 @@ impl Process {
             exec_gate: exec_gate::ExecGate::new(),
             pdeath_signal: AtomicU32::new(0),
             lifecycle: ProcessLifecycleState::new(),
+            child_subreaper: AtomicBool::new(false),
             children: SpinNoIrq::new(List::new()),
             parent_relation,
             group_membership,

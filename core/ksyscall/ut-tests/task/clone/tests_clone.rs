@@ -56,6 +56,30 @@ fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
     }
 }
 
+/// A thread clone cannot switch namespaces: the namespace bundle hangs off
+/// the process, so namespace flags combined with `CLONE_THREAD` are rejected
+/// with `EINVAL` (Linux `copy_process()`) instead of being silently ignored.
+#[def_test]
+fn test_clone_rejects_namespace_flags_with_thread() {
+    // NEWPID | THREAD already fails flag validation with EINVAL; the
+    // thread-clone gate must cover the flags validation alone accepts.
+    for flags in [CloneFlags::NEWUTS, CloneFlags::NEWIPC, CloneFlags::NEWNS] {
+        let mut req = CloneRequest::new();
+        req.set_flags(flags | CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND);
+        assert!(
+            req.validate_namespace_flags().is_ok(),
+            "{flags:?} alone passes flag validation"
+        );
+        let uctx = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+        let err = req.do_clone(&uctx).unwrap_err();
+        assert_eq!(
+            LinuxError::from(err),
+            LinuxError::EINVAL,
+            "CLONE_THREAD | {flags:?} must be EINVAL"
+        );
+    }
+}
+
 #[def_test]
 fn test_validate_rejects_newcgroup_without_capability_model() {
     let mut req = CloneRequest::new();

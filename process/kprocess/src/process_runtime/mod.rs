@@ -529,6 +529,13 @@ pub(crate) fn fork_process_runtime(
         config.parent,
         config.exit_signal,
     )?;
+    // Linux `copy_process()`: the process that receives number 1 in its
+    // namespace becomes that namespace's child reaper (`is_child_reaper()` in
+    // `kernel/fork.c`) — the fallback adoption target of `find_child_reaper`.
+    // (No line number: it moves between kernel versions.)
+    if leader_task_number.number_in(alloc_ns) == Some(1) {
+        crate::process::exit::register_child_reaper(alloc_ns, &process);
+    }
     let attached_process = AttachedForkProcess::new(process);
 
     let address_space = prepare_fork_address_space(parent, config.address_space)?;

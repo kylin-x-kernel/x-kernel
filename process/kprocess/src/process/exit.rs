@@ -2,15 +2,72 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::sync::atomic::{AtomicU8, Ordering};
 
+use kidentity::PidNamespace;
 use kpoll::PollSet;
 use ksignal::Signo;
+use kspin::SpinNoIrq;
 use ktime_types::TimeSpan;
 
 use super::{INIT_PROC, Process};
 use crate::{Pid, process_domain};
+
+// An IRQ-safe spin lock, not a sleeping `Mutex`: the lookup runs inside the
+// process-domain write critical section on the exit path.
+kspin::static_lock! {
+/// Child reapers of the non-root PID namespaces, keyed by namespace id —
+/// the counterpart of Linux's `struct pid_namespace::child_reaper`.
+///
+/// Linux assigns a namespace's reaper in `copy_process()` when a fork
+/// allocates PID 1 in that namespace (`is_child_reaper()`), and re-promotes
+/// it in `find_child_reaper()` when the reaper dies. Entries hold weak
+/// references: once the reaper process is gone the namespace is dying, and
+/// adoption falls back to the global init — the namespace-teardown zap of
+/// Linux `zap_pid_ns_processes()` is out of scope here.
+static PID_NS_REAPERS: SpinNoIrq<BTreeMap<u64, Weak<Process>>> =
+    SpinNoIrq::new(BTreeMap::new());
+}
+
+/// Registers `process` as the child reaper of `ns`.
+///
+/// Called from the fork path for the process that receives number 1 in a
+/// namespace (Linux `is_child_reaper()`); the root namespace's reaper is
+/// the global init and is never registered here.
+pub(crate) fn register_child_reaper(ns: &Arc<PidNamespace>, process: &Arc<Process>) {
+    PID_NS_REAPERS
+        .lock()
+        .insert(ns.id(), Arc::downgrade(process));
+}
+
+/// Returns `ns`'s registered child reaper while it is still alive **and
+/// running**: an exited-but-unreaped zombie holds strong references (its
+/// parent's child slot), yet adopting onto it would orphan the orphan
+/// forever — nothing will ever wait it.
+fn ns_child_reaper(ns: &Arc<PidNamespace>) -> Option<Arc<Process>> {
+    let mut reapers = PID_NS_REAPERS.lock();
+    // Prune reapers whose process is fully gone (weak upgrade failed) so
+    // the table does not grow with every destroyed namespace.
+    reapers.retain(|_, weak| weak.strong_count() > 0);
+    let reaper = reapers.get(&ns.id())?.upgrade()?;
+    (!reaper.is_exited()).then_some(reaper)
+}
+
+/// Returns whether `ns`'s registered reaper exists but already exited (a
+/// zombie not yet reaped), so it cannot adopt orphans.
+fn ns_reaper_is_exited(ns: &Arc<PidNamespace>) -> bool {
+    let mut reapers = PID_NS_REAPERS.lock();
+    reapers.retain(|_, weak| weak.strong_count() > 0);
+    reapers
+        .get(&ns.id())
+        .and_then(Weak::upgrade)
+        .is_some_and(|reaper| reaper.is_exited())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -84,12 +141,25 @@ impl ProcessExitPublication {
     }
 }
 
+/// A zombie child whose parent changed during an exit transaction.
+///
+/// Collected under the process-domain lock and reported afterwards, outside it.
+pub(crate) struct ReparentedZombie {
+    /// The zombie that changed parent.
+    pub(crate) child: Arc<Process>,
+    /// The parent that now owns it.
+    pub(crate) parent: Arc<Process>,
+}
+
 pub(crate) struct ProcessExitTransition<T> {
     pub(crate) parent: Option<Arc<Process>>,
     pub(crate) exit_signal: Option<Signo>,
     pub(crate) prepared_sigchld: Option<T>,
     pub(crate) autoreaped: bool,
-    pub(crate) reparented_zombie_parent: Option<Arc<Process>>,
+    /// Orphaned zombie children this process handed to a new parent, in
+    /// `reparent_leader()`'s sense: each is reported to that new parent with
+    /// `SIGCHLD` once the exit transaction has been published.
+    pub(crate) reparented_zombies: Vec<ReparentedZombie>,
 }
 
 struct ExitParentSnapshot {
@@ -260,9 +330,7 @@ impl Process {
     /// Terminates the [`Process`] with the requested publication mode.
     pub(crate) fn exit_with_publication(self: &Arc<Self>, publication: ProcessExitPublication) {
         let transition = self.finish_exit_in_process_domain(publication, |_| None::<((), bool)>);
-        if let Some(parent) = transition.reparented_zombie_parent {
-            parent.notify_child_exit();
-        }
+        crate::process_exit::notify_reparented_zombies(&transition.reparented_zombies);
     }
 
     /// Finishes process exit with child-exit signal policy prepared outside the
@@ -303,13 +371,13 @@ impl Process {
                             exit_signal: current.exit_signal,
                             prepared_sigchld: None,
                             autoreaped: false,
-                            reparented_zombie_parent: None,
+                            reparented_zombies: Vec::new(),
                         },
                         false,
                         true,
                     )
                 } else {
-                    let (state_changed, reparented_zombie_parent) =
+                    let (state_changed, reparented_zombies) =
                         self.finish_exit_locked(&domain, autoreap, current.parent.as_ref());
                     let prepared_sigchld = if state_changed {
                         prepared_sigchld
@@ -323,7 +391,7 @@ impl Process {
                             exit_signal: current.exit_signal,
                             prepared_sigchld,
                             autoreaped: autoreap && state_changed,
-                            reparented_zombie_parent,
+                            reparented_zombies,
                         },
                         state_changed,
                         false,
@@ -370,17 +438,11 @@ impl Process {
         domain: &process_domain::ProcessDomainWriteGuard<'_>,
         autoreap: bool,
         parent: Option<&Arc<Process>>,
-    ) -> (bool, Option<Arc<Process>>) {
-        // TODO: child subreaper
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: the initial process is published \
-                      before any process can enter exit and reparent children"
-        )]
-        let reaper = INIT_PROC.get().unwrap();
+    ) -> (bool, Vec<ReparentedZombie>) {
+        let reaper = self.find_child_reaper_locked();
 
-        if Arc::ptr_eq(self, reaper) {
-            return (false, None);
+        if Arc::ptr_eq(self, &reaper) {
+            return (false, Vec::new());
         }
 
         let exit_state = if autoreap {
@@ -398,7 +460,7 @@ impl Process {
             )
             .is_err()
         {
-            return (false, None);
+            return (false, Vec::new());
         }
 
         if autoreap && let Some(parent) = parent {
@@ -406,7 +468,7 @@ impl Process {
             self.clear_published_identity_locked(domain);
         }
 
-        let mut reparented_zombie_parent = None;
+        let mut reparented_zombies = Vec::new();
         loop {
             let Some(old_slot) = self.children.lock().pop_front() else {
                 break;
@@ -415,16 +477,98 @@ impl Process {
                 continue;
             };
             old_slot.clear();
-            child.attach_to_parent_slot_locked(domain, reaper, Some(Signo::SIGCHLD));
+            child.attach_to_parent_slot_locked(domain, &reaper, Some(Signo::SIGCHLD));
             if child.exit_state_locked(domain) == ProcessExitState::Dead {
                 continue;
             }
             if child.exit_state_locked(domain) == ProcessExitState::Zombie {
-                reparented_zombie_parent = Some(reaper.clone());
+                reparented_zombies.push(ReparentedZombie {
+                    child,
+                    parent: reaper.clone(),
+                });
             }
         }
 
-        (true, reparented_zombie_parent)
+        (true, reparented_zombies)
+    }
+
+    /// Selects the reaper that adopts this process's orphaned children.
+    ///
+    /// Linux `find_new_reaper()`: walk the parent chain from the exiting
+    /// process upward and use the nearest child subreaper (`PR_SET_CHILD_
+    /// SUBREAPER`). Container runtimes set themselves as subreapers so
+    /// reparented container processes surface as their children instead of
+    /// being adopted by init.
+    ///
+    /// Like Linux, the walk is bounded to the exiting process's PID namespace
+    /// (`task_pid(reaper)->level == ns_level`): a subreaper in an outer
+    /// namespace must not adopt orphans that belong to this namespace's own
+    /// reaper. The fallback is likewise the ACTIVE namespace's child reaper
+    /// (`pid_ns->child_reaper`, its PID-1 process) — for the root namespace
+    /// that is the global init. A reaper that is already gone means the
+    /// namespace is dying; Linux would zap it (`zap_pid_ns_processes()`),
+    /// which is out of scope here, so adoption falls back to the global init
+    /// as a documented approximation.
+    fn find_child_reaper_locked(&self) -> Arc<Process> {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: the initial process is published \
+                      before any process can enter exit and reparent children"
+        )]
+        let init = INIT_PROC.get().unwrap();
+        let active_ns = self.active_pid_namespace();
+        let mut ancestor = self.parent_relation.snapshot().0;
+        while let Some(process) = ancestor {
+            if Arc::ptr_eq(&process, init) {
+                break;
+            }
+            if !Arc::ptr_eq(&process.active_pid_namespace(), &active_ns) {
+                break;
+            }
+            if process.is_child_subreaper() {
+                return process;
+            }
+            ancestor = process.parent_relation.snapshot().0;
+        }
+        // Fallback: the active namespace's own child reaper (Linux
+        // `pid_ns->child_reaper`, the namespace's PID-1 process); for the
+        // root namespace none is registered and the global init, which IS
+        // that namespace's reaper, applies.
+        if let Some(reaper) = ns_child_reaper(&active_ns) {
+            if !core::ptr::eq(Arc::as_ptr(&reaper), self) {
+                return reaper;
+            }
+            Self::adopt_outside_namespace(self, init)
+        } else if ns_reaper_is_exited(&active_ns) {
+            // The namespace's registered reaper already exited (a zombie
+            // nobody waited): it must not adopt either — walk past the
+            // namespace boundary for the outer subreaper or the global
+            // init, like the self-adoption case.
+            Self::adopt_outside_namespace(self, init)
+        } else {
+            init.clone()
+        }
+    }
+
+    /// Walks past the namespace boundary for an outer subreaper — the
+    /// container runtime shim — falling back to the global init.
+    ///
+    /// This is the observable approximation of Linux's
+    /// `zap_pid_ns_processes()`: when a non-root namespace's reaper exits
+    /// (or is the dying process itself), it cannot adopt, and without
+    /// namespace teardown the outer reaper takes the orphans instead.
+    fn adopt_outside_namespace(father: &Process, init: &Arc<Process>) -> Arc<Process> {
+        let mut ancestor = father.parent_relation.snapshot().0;
+        while let Some(process) = ancestor {
+            if Arc::ptr_eq(&process, init) {
+                break;
+            }
+            if process.is_child_subreaper() {
+                return process;
+            }
+            ancestor = process.parent_relation.snapshot().0;
+        }
+        init.clone()
     }
 
     /// Frees a waitable zombie [`Process`]. Removes it from the parent.

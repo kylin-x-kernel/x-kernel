@@ -203,13 +203,18 @@ pub(crate) fn sys_prctl(
         // securebits are not tracked; nothing is set.
         PR_GET_SECUREBITS => return Ok(0),
         PR_SET_SECUREBITS => {}
-        // child subreaper semantics are not tracked.
+        // Child subreaper: orphaned descendants reparent to the nearest
+        // subreaper ancestor instead of the child reaper; container runtimes
+        // (containerd shims) rely on this to observe container process exits.
         PR_GET_CHILD_SUBREAPER => {
             if arg2 != 0 {
-                write_vm_mem(arg2 as _, &[0u32])?;
+                let flag = kprocess::current_user_process().is_child_subreaper() as u32;
+                write_vm_mem(arg2 as _, &[flag])?;
             }
         }
-        PR_SET_CHILD_SUBREAPER => {}
+        PR_SET_CHILD_SUBREAPER => {
+            kprocess::current_user_process().set_child_subreaper(arg2 != 0);
+        }
         // We do not expose a separate tid_address; report none.
         PR_GET_TID_ADDRESS => {
             if arg2 != 0 {
