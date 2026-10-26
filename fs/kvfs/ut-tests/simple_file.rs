@@ -180,3 +180,39 @@ fn command_file_consumes_each_write_independently_of_offset() {
         ]
     );
 }
+
+/// `/proc` and `/sys` (and cgroup v2) serve their attribute files as
+/// `SimpleFile`s, and all three Linux file operation sets provide a poll
+/// operation even when the entry has no handler of its own
+/// (`proc_reg_file_ops`/`proc_reg_poll`, `kernfs_file_fops`/`kernfs_fop_poll`,
+/// both falling back to `DEFAULT_POLLMASK`). `epoll_ctl` asks only whether such
+/// a handler exists, so a generated file must answer yes.
+#[def_test]
+fn generated_file_provides_the_linux_poll_fallback() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut root = DirMapping::new();
+        root.add(
+            "status",
+            SimpleFile::new_regular(fs.clone(), || Ok(String::from("ok\n"))),
+        );
+        SimpleDir::new_maker(fs, Arc::new(root))
+    });
+    let root = Mount::new_root(&super_block).root_path();
+    let file = Filename::new("/status")
+        .open_with_flags_at(
+            &root,
+            &root,
+            linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+        .unwrap();
+
+    assert!(file.can_poll());
+    let expected = IoEvents::IN | IoEvents::OUT;
+    assert_eq!(
+        file.poll_handler().map(|events| events.bits()),
+        Some(expected.bits())
+    );
+}

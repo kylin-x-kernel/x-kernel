@@ -459,8 +459,8 @@ impl<R: TtyRead, W: TtyWrite> DeviceFileOps for Tty<R, W> {
         NodeFlags::NON_CACHEABLE
     }
 
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        Pollable::poll(self)
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(Pollable::poll(self))
     }
 
     fn register_poll(
@@ -541,10 +541,17 @@ impl DeviceFileOps for CurrentTty {
         tty.tty.ioctl(file, cred, cmd, arg)
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        // `/dev/tty` is a tty and its file type always provides a poll handler,
+        // exactly as `tty_fops` does in Linux. The error arm models a file that
+        // never went through `CurrentTty::open`, i.e. one that is not a
+        // `/dev/tty` at all; reporting it as "not ready" keeps `epoll_ctl`
+        // accepting the node and leaves the `poll`/`select` fallback alone,
+        // whereas `None` would mean "no handler" and turn that fallback into
+        // always-ready.
         match tty_file_private(file) {
             Ok(tty) => tty.tty.poll(file),
-            Err(_) => IoEvents::empty(),
+            Err(_) => Some(IoEvents::empty()),
         }
     }
 

@@ -276,8 +276,8 @@ impl FileOperations for SignalfdFops {
         Ok(())
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::access(file).map_or(IoEvents::ERR, |access| access.poll())
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(Self::access(file).map_or(IoEvents::ERR, |access| access.poll()))
     }
 
     fn register_poll(

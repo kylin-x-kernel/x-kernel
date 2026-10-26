@@ -34,10 +34,12 @@ mod source;
 #[cfg(feature = "entropy_virtio_rng")]
 mod virtio;
 
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use khal::time::now_ticks;
 use klazy::Lazy;
+use kpoll::PollSet;
 use ksync::Mutex;
 use ktask::WaitQueue;
 use rand_chacha::{
@@ -62,6 +64,9 @@ static CRNG_READY: AtomicBool = AtomicBool::new(false);
 /// Waiters for [`wait_until_ready`]; notified on the false→true transition of
 /// [`CRNG_READY`].
 static READY_WQ: WaitQueue = WaitQueue::new();
+/// Poll waiters on the same false→true transition, for `/dev/random`
+/// (`random_poll` waits on `crng_ready_wait_queue` in Linux).
+static READY_POLL: Lazy<Arc<PollSet>> = Lazy::new(|| Arc::new(PollSet::new()));
 
 struct EntropyPool {
     rng: ChaCha20Rng,
@@ -208,10 +213,22 @@ pub fn wait_until_ready() {
     READY_WQ.wait_until(is_ready);
 }
 
+/// Returns the poll source that fires on the false→true transition of
+/// [`is_ready`].
+///
+/// `/dev/random` registers its poll waiters here, so a poll that starts while
+/// the pool is still unseeded wakes as soon as it becomes ready — the role of
+/// `crng_ready_wait_queue` in Linux `random_poll`. The returned handle keeps
+/// the source alive; dropping it does not cancel existing registrations.
+pub fn ready_poll_set() -> Arc<PollSet> {
+    (*READY_POLL).clone()
+}
+
 fn mark_ready() {
     // Only wake waiters on the false→true transition.
     if !CRNG_READY.swap(true, Ordering::AcqRel) {
         READY_WQ.notify_all(false);
+        READY_POLL.wake();
     }
 }
 

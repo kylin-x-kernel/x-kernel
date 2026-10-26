@@ -60,8 +60,25 @@ pub(crate) fn sys_epoll_ctl(
     let file = kprocess::current_files().get_file(fd)?;
     debug!("sys_epoll_ctl <= epfd: {epfd}, op: {op}, fd: {fd}");
 
-    let parse_event = || -> KResult<(EpollEvent, EpollFlags)> {
-        let event = event.read_vm()?;
+    // Linux orders this exactly so: the syscall wrapper copies the user event
+    // for every operation except `DEL` (`ep_op_has_event`, `__do_sys_epoll_ctl`
+    // -> EFAULT), then `do_epoll_ctl` tests `file_can_poll` (-> EPERM) *before*
+    // dispatching on `op`, and only the dispatch reports an unknown operation
+    // (-> EINVAL). Keeping the copy here and the gate before the dispatch means
+    // an unpollable target answers EPERM even when `op` is also invalid, as
+    // Linux does.
+    let user_event = if op == EPOLL_CTL_DEL {
+        None
+    } else {
+        Some(event.read_vm()?)
+    };
+    if !file.can_poll() {
+        return Err(KError::OperationNotPermitted);
+    }
+
+    // Bit validation stays with the operation that needs the event, after the
+    // gate: Linux rejects unknown event bits inside `ep_insert`/`ep_modify`.
+    let parse_event = |event: k_epoll_event| -> KResult<(EpollEvent, EpollFlags)> {
         let events = IoEvents::from_bits_truncate(event.events());
         let flags =
             EpollFlags::from_bits(event.events() & !events.bits()).ok_or(KError::InvalidInput)?;
@@ -76,11 +93,11 @@ pub(crate) fn sys_epoll_ctl(
 
     match op {
         EPOLL_CTL_ADD => {
-            let (event, flags) = parse_event()?;
+            let (event, flags) = parse_event(user_event.ok_or(KError::InvalidInput)?)?;
             epoll.add(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_MOD => {
-            let (event, flags) = parse_event()?;
+            let (event, flags) = parse_event(user_event.ok_or(KError::InvalidInput)?)?;
             epoll.modify(fd, file.clone(), event, flags)?;
         }
         EPOLL_CTL_DEL => {
@@ -209,4 +226,9 @@ unittest::path_mod_test!(
 unittest::path_mod_test!(
     tests_epoll_sigmask,
     "../../ut-tests/io_mpx/epoll/tests_epoll_sigmask.rs"
+);
+
+unittest::path_mod_test!(
+    tests_epoll_pollable,
+    "../../ut-tests/io_mpx/epoll/tests_epoll_pollable.rs"
 );

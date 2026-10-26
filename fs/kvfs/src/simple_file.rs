@@ -13,6 +13,7 @@ use alloc::{
 
 use inherit_methods_macro::inherit_methods;
 use iov_iter::IovIterSource;
+use kpoll::{IoEvents, PollContext, PollRegisterError};
 
 use crate::{
     FileOperations, InodeOperations, Kiocb, Metadata, MetadataUpdate, NodeFlags, NodePermission,
@@ -308,6 +309,23 @@ impl FileOperations for SimpleFile {
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
         self.file_operations.write_iter(iocb, iter)
     }
+
+    /// Forwards the poll operation to the generated/snapshot file operations,
+    /// which is where the Linux fallback documented there lives. The inode
+    /// carries this wrapper as its fops, so without the forwarding the
+    /// capability would exist one level down and never be seen.
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        self.file_operations.poll(file)
+    }
+
+    fn register_poll(
+        &self,
+        file: &VfsFile,
+        context: &mut PollContext<'_>,
+        events: IoEvents,
+    ) -> Result<(), PollRegisterError> {
+        self.file_operations.register_poll(file, context, events)
+    }
 }
 
 impl FileOperations for GeneratedFileOperations {
@@ -317,6 +335,19 @@ impl FileOperations for GeneratedFileOperations {
 
     fn supports_write(&self) -> bool {
         true
+    }
+
+    /// Implements the poll operation these files' Linux fops always carry.
+    ///
+    /// The files built here are the attribute/diagnostic files of `/proc`,
+    /// `/sys` and cgroup v2. Linux serves all three through an fops that
+    /// provides `poll` even when the entry has no handler of its own:
+    /// `proc_reg_file_ops` (`proc_reg_poll`) and `kernfs_file_fops`
+    /// (`kernfs_fop_poll`) both fall back to `DEFAULT_POLLMASK`. Reporting that
+    /// same fallback is what keeps `epoll_ctl` accepting these files, since
+    /// `file_can_poll` only asks whether the fops provides a handler at all.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
     }
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
@@ -345,6 +376,13 @@ impl FileOperations for SnapshotFileOperations {
 
     fn supports_read(&self) -> bool {
         true
+    }
+
+    /// Same poll operation as [`GeneratedFileOperations`]: the snapshot form is
+    /// the read-only shape of the same `/proc` and `/sys` files, whose Linux
+    /// fops provide `poll` and fall back to `DEFAULT_POLLMASK`.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {

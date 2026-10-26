@@ -30,6 +30,7 @@ kclass = { workspace = true, features = ["hwrng"], optional = true }
 khal.workspace = true
 karch = { workspace = true, optional = true }
 klazy.workspace = true
+kpoll.workspace = true
 ksync.workspace = true
 ktask.workspace = true
 ktime_types.workspace = true

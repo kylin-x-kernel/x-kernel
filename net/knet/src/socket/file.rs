@@ -87,10 +87,12 @@ impl FileOperations for SocketFileOps {
         }
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::socket(file)
-            .map(|socket| socket.poll())
-            .unwrap_or_else(|_| IoEvents::ERR)
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(
+            Self::socket(file)
+                .map(|socket| socket.poll())
+                .unwrap_or_else(|_| IoEvents::ERR),
+        )
     }
 
     fn register_poll(

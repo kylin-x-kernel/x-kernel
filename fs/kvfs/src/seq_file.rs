@@ -7,6 +7,7 @@
 use alloc::{string::String, sync::Arc};
 use core::{cmp::min, fmt};
 
+use kpoll::IoEvents;
 use ksync::Mutex;
 
 use crate::{
@@ -235,6 +236,16 @@ impl<I: SeqIterator> FileOperations for SeqFileInode<I> {
 
     fn supports_read(&self) -> bool {
         true
+    }
+
+    /// Implements the poll operation every `/proc` file carries.
+    ///
+    /// Linux wraps proc files in `proc_reg_file_ops`, whose `proc_reg_poll`
+    /// answers `DEFAULT_POLLMASK` when the entry itself has no handler, so
+    /// `file_can_poll` accepts them; this iterator-backed form is used by
+    /// `/proc/meminfo`, `/proc/<pid>/...` and `/proc/devices`.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN | IoEvents::OUT)
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {

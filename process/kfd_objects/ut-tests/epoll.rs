@@ -117,8 +117,8 @@ impl TestFileFops {
 }
 
 impl FileOperations for TestFileFops {
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::state(file).poll()
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(Self::state(file).poll())
     }
 
     fn register_poll(
@@ -169,13 +169,13 @@ impl CapturedSourceFile {
 struct CapturedSourceFops;
 
 impl FileOperations for CapturedSourceFops {
-    fn poll(&self, file: &VfsFile) -> IoEvents {
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
         let state = file.private_data_get::<CapturedSourceFile>().unwrap();
-        if state.is_ready.load(Ordering::Acquire) {
+        Some(if state.is_ready.load(Ordering::Acquire) {
             IoEvents::IN
         } else {
             IoEvents::empty()
-        }
+        })
     }
 
     fn capture_poll_source(

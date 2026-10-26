@@ -29,3 +29,7 @@ pub(crate) mod log;
 pub(crate) mod memtrack;
 #[cfg(feature = "serial")]
 pub(crate) mod serial;
+unittest::path_mod_test!(
+    pub(crate) mod test_device,
+    "../../ut-tests/test_device.rs"
+);

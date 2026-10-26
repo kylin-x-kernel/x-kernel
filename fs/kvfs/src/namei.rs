@@ -329,9 +329,9 @@ impl<'a> Nameidata<'a> {
     ) -> VfsResult<()> {
         let qstr = self.hash_name(name);
         let name = qstr.as_str();
-        if !d_is_dir(self.path.dentry()) {
-            return Err(VfsError::NotADirectory);
-        }
+        // The container's directory-ness is owned by `link_path_walk`'s
+        // `d_can_lookup` check, which runs for every component before it is
+        // walked (and before the search permission), mirroring Linux.
         let containing_dir = self.path.clone();
         let next = match self.lookup_fast(name) {
             Some(dentry) => dentry?,
@@ -360,8 +360,11 @@ impl<'a> Nameidata<'a> {
             let result = match component {
                 "" if *at_start => Some((LastType::Root, "/")),
                 "" => None,
-                "." if *at_start => Some((LastType::Dot, ".")),
-                "." => None,
+                // A "." is a component wherever it appears: Linux keeps it (leading or
+                // not), so the walk still verifies that the component it follows
+                // sits in a directory (`d_can_lookup` -> ENOTDIR). Dropping a
+                // non-leading "." made `file/.` resolve as `file` and succeed.
+                "." => Some((LastType::Dot, ".")),
                 ".." => Some((LastType::Dotdot, "..")),
                 name => Some((LastType::Norm, name)),
             };
@@ -419,6 +422,15 @@ impl<'a> Nameidata<'a> {
         {
             let has_more = Self::has_more_path_components(pathname, at_start);
             if last_type != LastType::Root {
+                // The component being resolved must sit in a directory, and
+                // Linux checks that before the search permission: `d_can_lookup`
+                // reports ENOTDIR first, `may_lookup` only then EACCES
+                // (fs/namei.c `link_path_walk`). Without this ordering a path
+                // like `file/child` or `file/.` failed the MAY_EXEC check on the
+                // regular file itself and surfaced EACCES instead.
+                if !self.path.dentry().can_lookup() {
+                    return Err(VfsError::NotADirectory);
+                }
                 self.path.permission(crate::Permission::MAY_EXEC, cred)?;
             }
             if !has_more {
@@ -607,7 +619,12 @@ impl<'a> Nameidata<'a> {
         Ok(MayOpenResult { truncate })
     }
 
-    fn check_resolved_open(path: &Path, flags: &OpenParams, was_created: bool) -> VfsResult<()> {
+    fn check_resolved_open(
+        path: &Path,
+        flags: &OpenParams,
+        lookup_flags: LookupFlags,
+        was_created: bool,
+    ) -> VfsResult<()> {
         if flags.will_create() {
             if flags.is_exclusive_create() && !was_created {
                 return Err(VfsError::AlreadyExists);
@@ -616,7 +633,10 @@ impl<'a> Nameidata<'a> {
                 return Err(VfsError::IsADirectory);
             }
         }
-        if flags.lookup_flags().contains(LookupFlags::DIRECTORY) && !d_is_dir(path.dentry()) {
+        // The trailing-slash demand rides the lookup flags across symlink
+        // expansion (see [`Self::open_path`]) and is consumed here exactly as
+        // [`Self::complete_path_lookup`] consumes it for plain lookups.
+        if lookup_flags.contains(LookupFlags::DIRECTORY) && !path.dentry().can_lookup() {
             return Err(VfsError::NotADirectory);
         }
         Ok(())
@@ -632,10 +652,11 @@ impl<'a> Nameidata<'a> {
     fn may_open_resolved(
         path: &Path,
         flags: &OpenParams,
+        lookup_flags: LookupFlags,
         was_created: bool,
         cred: &Cred,
     ) -> VfsResult<MayOpenResult> {
-        Self::check_resolved_open(path, flags, was_created)?;
+        Self::check_resolved_open(path, flags, lookup_flags, was_created)?;
         let (open_flag, acc_mode) = flags.may_open_args(was_created);
         Self::may_open(path, acc_mode, open_flag, cred)
     }
@@ -771,19 +792,28 @@ impl<'a> Nameidata<'a> {
         let mut name = filename.clone();
         let mut walk_base = base.clone();
         let mut total_link_count = 0;
+        // Resolution constraints accumulate in the lookup flags, as Linux keeps
+        // them in `nd->flags` while it expands symlinks (`path_openat`). A
+        // trailing slash demands a directory for the final resolved path, and
+        // that demand cannot live in the path string: `link/` where `link`
+        // points at a regular file must fail with ENOTDIR, yet the expanded
+        // target ("target") carries no slash. Each hop's `Nameidata` inherits
+        // the accumulated flags and contributes its own trailing-slash demand
+        // through `lookup_fast_for_open`.
+        let mut lookup_flags = flags.lookup_flags();
         loop {
-            let mut nd = Nameidata::new(
-                root,
-                &walk_base,
-                &name,
-                LookupIntent::Open,
-                flags.lookup_flags(),
-            );
+            let mut nd = Nameidata::new(root, &walk_base, &name, LookupIntent::Open, lookup_flags);
             nd.total_link_count = total_link_count;
             nd.link_path_walk(&walk_base, cred)?;
-            let Some(next) = nd.open_last_lookups(&mut file, flags, umask, cred)? else {
+            // `open_last_lookups` is where `lookup_fast_for_open` turns this
+            // hop's trailing slash into `DIRECTORY`, so the demand is only
+            // visible in `nd.flags` after it runs.
+            let next = nd.open_last_lookups(&mut file, flags, umask, cred)?;
+            lookup_flags |= nd.flags;
+            let Some(next) = next else {
                 let path = nd.path.clone();
-                let may_open = Self::may_open_resolved(&path, flags, file.was_created(), cred)?;
+                let may_open =
+                    Self::may_open_resolved(&path, flags, lookup_flags, file.was_created(), cred)?;
                 let opened = file.vfs_open(path)?;
                 Self::handle_truncate(&opened, &may_open)?;
                 return Ok(opened);

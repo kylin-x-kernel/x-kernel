@@ -132,3 +132,13 @@ fn test_hardware_presence_matches_sources() {
         assert!(present);
     }
 }
+
+#[def_test]
+fn ready_poll_set_is_one_shared_source() {
+    // `/dev/random` registrations are made against whatever this returns, so a
+    // fresh source per call would leave every waiter attached to an object that
+    // `mark_ready` never wakes.
+    let first = ready_poll_set();
+    let second = ready_poll_set();
+    assert!(alloc::sync::Arc::ptr_eq(&first, &second));
+}

@@ -370,8 +370,22 @@ pub trait FileOperations: Send + Sync + 'static {
     }
 
     /// Polls an open file description.
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        IoEvents::IN | IoEvents::OUT
+    ///
+    /// `None` mirrors Linux `file->f_op->poll == NULL`: the file type provides
+    /// no poll handler. [`VfsFile::poll`] then falls back to reporting the file
+    /// as always ready (`DEFAULT_POLLMASK`, Linux `vfs_poll`), while `epoll_ctl`
+    /// refuses to register such a target with `EPERM` (Linux `file_can_poll`,
+    /// `fs/eventpoll.c`) — which is how a user-space runtime learns that a
+    /// descriptor has to stay in blocking mode (the Go runtime's poller relies
+    /// on exactly that for regular files).
+    ///
+    /// Providing this method *is* the capability: regular files and directories
+    /// do not, so no implementation needs to declare pollability separately.
+    ///
+    /// The handler must be side-effect free apart from polling readiness; both
+    /// wait paths (`poll`/`select` and `epoll`) call it to observe readiness.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        None
     }
 
     /// Registers a poll waiter for an open file description.
@@ -1252,9 +1266,28 @@ impl VfsFile {
         self.operations().fallocate(self, flags, offset, len)
     }
 
-    /// Polls this open file.
+    /// Polls this open file (Linux `vfs_poll`).
+    ///
+    /// A file type without a poll handler reports itself as always ready
+    /// (`DEFAULT_POLLMASK`); `epoll` uses [`Self::can_poll`] to refuse such a
+    /// target instead of falling back.
     pub fn poll(&self) -> IoEvents {
+        self.poll_handler().unwrap_or(IoEvents::IN | IoEvents::OUT)
+    }
+
+    /// Runs this file's poll handler, or `None` when the file type provides
+    /// none (Linux `f_op->poll == NULL`).
+    pub fn poll_handler(&self) -> Option<IoEvents> {
         self.operations().poll(self)
+    }
+
+    /// Returns whether this open file may be registered with `epoll_ctl`.
+    ///
+    /// Mirrors Linux `file_can_poll`: an unpollable target is rejected with
+    /// `EPERM`. The capability is exactly "the file type provides a poll
+    /// handler", so it cannot drift from [`Self::poll_handler`].
+    pub fn can_poll(&self) -> bool {
+        self.poll_handler().is_some()
     }
 
     /// Registers a poll waiter for this open file.

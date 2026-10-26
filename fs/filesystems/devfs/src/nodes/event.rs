@@ -469,12 +469,14 @@ impl DeviceFileOps for EventDev {
         }
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
         if !self.device.is_available() {
-            return IoEvents::ERR | IoEvents::HUP;
+            return Some(IoEvents::ERR | IoEvents::HUP);
         }
-        file.private_data_get::<EventClient>()
-            .map_or(IoEvents::ERR | IoEvents::HUP, |client| client.poll())
+        Some(
+            file.private_data_get::<EventClient>()
+                .map_or(IoEvents::ERR | IoEvents::HUP, |client| client.poll()),
+        )
     }
 
     fn register_poll(

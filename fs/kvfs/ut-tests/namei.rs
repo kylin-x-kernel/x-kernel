@@ -1382,3 +1382,108 @@ fn writable_open_lifetime_updates_inode_write_count() {
     let release_write_counts = file_ops.release_write_counts.lock();
     assert_eq!(release_write_counts.as_slice(), &[2, 1]);
 }
+
+#[def_test]
+fn trailing_dot_over_regular_file_is_not_a_directory() {
+    let tree = test_tree();
+
+    // `target` is a regular file. Linux rejects `target/.` with ENOTDIR because
+    // the walk requires the component a `.` follows to be a directory
+    // (`d_can_lookup` in fs/namei.c `link_path_walk`); dropping the component
+    // made this path resolve as plain `target` and succeed.
+    for intent in [LookupIntent::Open, LookupIntent::Stat] {
+        let err = Filename::new("/target/.")
+            .lookup_at(
+                &tree.root,
+                &tree.base,
+                intent,
+                LookupFlags::follow(),
+                &kcred::initial_cred(),
+            )
+            .unwrap_err();
+        assert_eq!(err, VfsError::NotADirectory);
+    }
+
+    // An open that would create or truncate through the file is rejected too.
+    for flags in [
+        linux_raw_sys::general::O_RDONLY,
+        linux_raw_sys::general::O_WRONLY,
+        linux_raw_sys::general::O_CREAT | linux_raw_sys::general::O_WRONLY,
+    ] {
+        let err = Filename::new("/target/.")
+            .open_with_flags_at(
+                &tree.root,
+                &tree.base,
+                flags,
+                NodePermission::default(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err, VfsError::NotADirectory);
+    }
+
+    // A directory still accepts the same shape.
+    Filename::new("/dir/.")
+        .lookup_at(
+            &tree.root,
+            &tree.base,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &kcred::initial_cred(),
+        )
+        .unwrap();
+}
+
+#[def_test]
+fn component_under_regular_file_is_not_a_directory() {
+    let tree = test_tree();
+
+    // Linux runs `d_can_lookup` (ENOTDIR) before `may_lookup` (EACCES), so a
+    // last component under a regular file reports ENOTDIR for every mode.
+    let err = Filename::new("/target/leaf")
+        .lookup_at(
+            &tree.root,
+            &tree.base,
+            LookupIntent::Open,
+            LookupFlags::follow(),
+            &kcred::initial_cred(),
+        )
+        .unwrap_err();
+    assert_eq!(err, VfsError::NotADirectory);
+}
+
+#[def_test]
+fn trailing_slash_survives_final_symlink_expansion() {
+    let tree = test_tree();
+
+    // `link` points at the regular file `target`: the trailing slash still
+    // demands a directory, and the demand must not be lost when the final
+    // symlink is expanded (Linux keeps it in `nd->flags`).
+    let err = Filename::new("/link/")
+        .open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            linux_raw_sys::general::O_RDONLY,
+            NodePermission::default(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(err, VfsError::NotADirectory);
+
+    // A symlink to a directory keeps accepting the trailing slash.
+    Filename::new("/dirlink/")
+        .open_with_flags_at(
+            &tree.root,
+            &tree.base,
+            linux_raw_sys::general::O_RDONLY,
+            NodePermission::default(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+        .map(|_| ())
+        .unwrap();
+}

@@ -130,12 +130,12 @@ impl DeviceFileOps for CharacterBackend {
         self.can_write
     }
 
-    fn poll(&self, _: &VfsFile) -> IoEvents {
-        if self.is_ready.load(Ordering::Acquire) {
+    fn poll(&self, _: &VfsFile) -> Option<IoEvents> {
+        Some(if self.is_ready.load(Ordering::Acquire) {
             IoEvents::IN
         } else {
             IoEvents::empty()
-        }
+        })
     }
 
     fn register_poll(

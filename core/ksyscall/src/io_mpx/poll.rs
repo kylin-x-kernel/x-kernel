@@ -101,14 +101,21 @@ fn do_poll(
 /// Poll file descriptors with millisecond timeout
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
-    let mut poll_fds = fds.load_vm_vec(nfds as usize)?;
+    // Linux `do_sys_poll` copies the descriptor array only for `nfds > 0`
+    // (`len = min(nfds, N_STACK_PPS)`), so a NULL array with a zero count is
+    // legal. Loading through the NULL pointer would fail with EFAULT instead.
+    let mut poll_fds = if nfds == 0 {
+        Vec::new()
+    } else {
+        fds.load_vm_vec(nfds as usize)?
+    };
     let timeout = if timeout < 0 {
         None
     } else {
         Some(TimeSpan::from_millis(timeout as u64))
     };
     let result = do_poll(&mut poll_fds, timeout, None);
-    if result.is_ok() {
+    if result.is_ok() && nfds > 0 {
         fds.write_vm_slice(&poll_fds)?;
     }
     result
@@ -131,7 +138,14 @@ pub(crate) fn sys_ppoll(
         posix_types::check_sigset_size(sigsetsize)?;
     }
     let nfds = nfds.try_into().map_err(|_| KError::InvalidInput)?;
-    let mut poll_fds = fds.load_vm_vec(nfds)?;
+    // Same rule as `sys_poll`: Linux copies the descriptor array only for
+    // `nfds > 0` (`len = min(nfds, N_STACK_PPS)` in `do_sys_poll`), so
+    // `ppoll(NULL, 0, ...)` is legal and must not fail with EFAULT.
+    let mut poll_fds = if nfds == 0 {
+        Vec::new()
+    } else {
+        fds.load_vm_vec(nfds)?
+    };
     let timeout = if timeout.is_null() {
         None
     } else {
@@ -144,7 +158,7 @@ pub(crate) fn sys_ppoll(
         Some(sigmask.read_vm()?.into())
     };
     let result = do_poll(&mut poll_fds, timeout, sigmask);
-    if result.is_ok() {
+    if result.is_ok() && nfds > 0 {
         fds.write_vm_slice(&poll_fds)?;
     }
     result
@@ -158,4 +172,9 @@ unittest::path_mod_test!(
 unittest::path_mod_test!(
     tests_ppoll_sigmask,
     "../../ut-tests/io_mpx/poll/tests_ppoll_sigmask.rs"
+);
+
+unittest::path_mod_test!(
+    tests_poll_null_array,
+    "../../ut-tests/io_mpx/poll/tests_poll_null_array.rs"
 );

@@ -13,6 +13,7 @@ anon_inodefs.workspace = true
 hashbrown.workspace = true
 kerrno.workspace = true
 kcred.workspace = true
+kpoll.workspace = true
 ksync.workspace = true
 kvfs.workspace = true
 macros.workspace = true

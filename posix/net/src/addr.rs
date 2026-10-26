@@ -155,6 +155,35 @@ impl SocketAddrExt for SocketAddrV6 {
     }
 }
 
+/// Serializes a unix address in the Linux `sockaddr_un` layout.
+///
+/// Linux leads with `__kernel_sa_family_t` (an `unsigned short`, two bytes)
+/// and then `sun_path`; a leading NUL marks an abstract name. Emitting the
+/// `u32` `AF_UNIX` constant would shift `sun_path` by two bytes, so user space
+/// reads an empty address — Go's `net.ListenUnix` then reports `"@"` from
+/// `Addr()` and dials that empty name instead of the bound path.
+fn unix_addr_bytes(addr: &UnixAddr) -> Vec<u8> {
+    let data_len = match addr {
+        UnixAddr::Unbound => 0,
+        UnixAddr::Abstract(name) => name.len() + 1,
+        UnixAddr::Path(path) => 1 + path.len(),
+    };
+    let mut buf = Vec::with_capacity(size_of::<__kernel_sa_family_t>() + data_len);
+    buf.extend_from_slice(&(AF_UNIX as __kernel_sa_family_t).to_ne_bytes());
+    match addr {
+        UnixAddr::Unbound => {}
+        UnixAddr::Abstract(name) => {
+            buf.push(0);
+            buf.extend_from_slice(name);
+        }
+        UnixAddr::Path(path) => {
+            buf.extend_from_slice(path.as_bytes());
+            buf.push(0);
+        }
+    }
+    buf
+}
+
 /// SocketAddrExt implementation for Unix domain socket addresses
 impl SocketAddrExt for UnixAddr {
     /// Read Unix domain socket address from user space
@@ -181,26 +210,7 @@ impl SocketAddrExt for UnixAddr {
 
     /// Write Unix domain socket address to user space
     fn write_to_user(&self, addr: UserPtr<sockaddr>, addrlen: &mut socklen_t) -> KResult<()> {
-        let data_len = match self {
-            UnixAddr::Unbound => 0,
-            UnixAddr::Abstract(name) => name.len() + 1,
-            UnixAddr::Path(path) => 1 + path.len(),
-        };
-        let mut buf = Vec::with_capacity(size_of::<__kernel_sa_family_t>() + data_len);
-        buf.extend_from_slice(&AF_UNIX.to_ne_bytes());
-        match self {
-            UnixAddr::Unbound => {}
-            UnixAddr::Abstract(name) => {
-                buf.push(0);
-                buf.extend_from_slice(name);
-            }
-            UnixAddr::Path(path) => {
-                buf.extend_from_slice(path.as_bytes());
-                buf.push(0);
-            }
-        }
-
-        fill_addr(addr, addrlen, &buf)
+        fill_addr(addr, addrlen, &unix_addr_bytes(self))
     }
 }
 
@@ -342,3 +352,5 @@ impl SocketAddrExt for SocketAddrEx {
         }
     }
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/unix_sockaddr.rs");

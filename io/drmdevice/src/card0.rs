@@ -1071,8 +1071,8 @@ impl DeviceFileOps for DrmCard {
         NodeFlags::NON_CACHEABLE
     }
 
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        Pollable::poll(self)
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(Pollable::poll(self))
     }
 
     fn register_poll(

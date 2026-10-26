@@ -249,7 +249,12 @@ impl FileOperations for ChrdevFileOperations {
         self.ops.release(inode, file)
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
+    /// Polls an open device file through the backend's poll handler.
+    ///
+    /// A char/block device has a poll handler exactly when its [`DeviceFileOps`]
+    /// provides one, so the adapter forwards the backend capability instead of
+    /// declaring its own.
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
         self.ops.poll(file)
     }
 
@@ -678,10 +683,14 @@ pub trait DeviceFileOps: Send + Sync {
     }
 
     /// Polls an open device file.
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        IoEvents::IN | IoEvents::OUT
+    ///
+    /// `None` mirrors Linux device files with no `poll` operation: `def_chr_fops`
+    /// and `def_blk_fops` provide none, so `/dev/null`, `/dev/zero`, `/dev/full`
+    /// and block devices are `EPERM` for `epoll_ctl` while `poll`/`select` fall
+    /// back to reporting them as always ready.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        None
     }
-
     /// Registers a poll waiter for an open device file.
     fn register_poll(
         &self,

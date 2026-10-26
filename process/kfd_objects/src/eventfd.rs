@@ -168,10 +168,12 @@ impl FileOperations for EventfdFops {
         block_on(Self::write_wait(file, buf))
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
-        Self::state(file)
-            .map(|state| state.poll())
-            .unwrap_or_else(|_| IoEvents::empty())
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
+        Some(
+            Self::state(file)
+                .map(|state| state.poll())
+                .unwrap_or_else(|_| IoEvents::empty()),
+        )
     }
 
     fn register_poll(

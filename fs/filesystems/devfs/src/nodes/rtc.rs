@@ -6,6 +6,7 @@ use alloc::sync::Arc;
 use core::ffi::c_int;
 
 use chrono::{Datelike, Timelike};
+use kpoll::IoEvents;
 use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsError, VfsFile, VfsResult,
 };
@@ -71,6 +72,17 @@ impl DeviceFileOps for Rtc {
         Ok(0)
     }
 
+    /// Implements `rtc_dev_poll`.
+    ///
+    /// `rtc_dev_poll` reports readable only while an update interrupt is queued
+    /// (`RTC_UF | RTC_IRQF` in `drivers/rtc/dev.c`). This device has no
+    /// interrupt queue, so no interrupt is ever pending and the answer is
+    /// always "not ready"; providing the handler is what `file_can_poll` tests,
+    /// and in Linux `rtc_dev_fops` does provide one.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::empty())
+    }
+
     fn flags(&self) -> NodeFlags {
         NodeFlags::NON_CACHEABLE
     }
@@ -83,3 +95,5 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
         DeviceFile::new_character(fs.clone(), RTC0_DEVICE_ID, Arc::new(Rtc)),
     );
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/rtc.rs");

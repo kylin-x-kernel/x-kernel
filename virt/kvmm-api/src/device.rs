@@ -157,7 +157,7 @@ impl DeviceFileOps for KvmmVmDevice {
         Ok(())
     }
 
-    fn poll(&self, file: &VfsFile) -> IoEvents {
+    fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
         // Always writable (console input is accepted whenever the VM runs).
         // Readable only when the guest has produced output, so a poll-driven
         // reader (e.g. `kvmm-run`) calls `read` exactly when `drain_console`
@@ -169,7 +169,7 @@ impl DeviceFileOps for KvmmVmDevice {
         {
             events |= IoEvents::IN;
         }
-        events
+        Some(events)
     }
 
     fn flags(&self) -> NodeFlags {

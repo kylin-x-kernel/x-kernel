@@ -24,8 +24,8 @@ use crate::{FdTable, Kstat};
 struct SnapshotTestFops;
 
 impl FileOperations for SnapshotTestFops {
-    fn poll(&self, _file: &VfsFile) -> IoEvents {
-        IoEvents::IN
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::IN)
     }
 }
 

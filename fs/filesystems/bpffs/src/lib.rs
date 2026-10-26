@@ -21,6 +21,7 @@ use alloc::{
 use anon_inodefs::AnonInodeFs;
 use hashbrown::HashMap;
 use kerrno::KResult;
+use kpoll::IoEvents;
 use ksync::Mutex;
 use kvfs::{
     Dentry, DirContext, FMode, FileDirOperations, FileOperations, FsContext, FsContextOperations,
@@ -277,7 +278,18 @@ impl BpfMap {
     }
 }
 
-impl FileOperations for BpfMap {}
+impl FileOperations for BpfMap {
+    /// Implements `bpf_map_poll`.
+    ///
+    /// Linux delegates to the map type's `map_poll` and reports `EPOLLERR` when
+    /// the type provides none (`kernel/bpf/syscall.c`). The map here is the
+    /// minimal array map and implements no `map_poll`, so error is the whole
+    /// answer — and `bpf_map_fops` does provide a poll operation, which is what
+    /// `epoll_ctl` checks.
+    fn poll(&self, _file: &VfsFile) -> Option<IoEvents> {
+        Some(IoEvents::ERR)
+    }
+}
 
 #[derive(Clone)]
 enum BpfEntry {
