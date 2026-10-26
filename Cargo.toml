@@ -194,6 +194,7 @@ anon = { path = "mm/anon" }
 memspace = { path = "mm/memspace" }
 filemap = { path = "mm/filemap" }
 pagecache = { path = "mm/pagecache" }
+page-meta = { path = "mm/page-meta" }
 page_table = { path = "mm/page_table" }
 vmobj = { path = "mm/vmobj" }
 kext4 = { path = "fs/filesystems/kext4", default-features = false }

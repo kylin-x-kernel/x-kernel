@@ -69,6 +69,7 @@ pub fn run_boot_benchmarks() {
 
 unittest::path_mod_test!(tests_workqueue, "../ut-tests/tests_workqueue/mod.rs");
 unittest::path_mod_test!(tests_irq_startup, "../ut-tests/irq_startup.rs");
+unittest::path_mod_test!(page_metadata_tests, "../ut-tests/page_metadata.rs");
 
 #[macro_use]
 extern crate klogger;
@@ -692,25 +693,65 @@ fn should_summarize_region(summary: &RegionLogSummary) -> bool {
     summary.count >= REGION_LOG_SUMMARY_THRESHOLD && summary.name.starts_with("uefi ")
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: physical metadata and allocator \
+              initialization have no recovery path before runtime startup"
+)]
 fn init_allocator() {
     use khal::mem::{MemFlags, memory_regions, p2v};
 
     info!("Initialize global memory allocator...");
     info!("  use {} allocator.", kalloc::global_allocator().name());
-    let mut free_regions = memory_regions().filter(|r| r.flags.contains(MemFlags::FREE));
-    if let Some(region) = free_regions.next() {
-        kalloc::global_init(p2v(region.paddr).as_usize(), region.size);
+    // This input bound matches the HAL boot table. Adjacent entries can merge
+    // before the metadata backend checks its own coverage capacity.
+    const MAX_BOOT_RAM_REGIONS: usize = 256;
+    let mut regions = heapless::Vec::<memaddr::PhysAddrRange, MAX_BOOT_RAM_REGIONS>::new();
+    for r in memory_regions().filter(|r| r.flags.contains(MemFlags::FREE)) {
+        let range = memaddr::PhysAddrRange::try_from_start_size(r.paddr, r.size)
+            .expect("boot RAM range overflows");
+        regions.push(range).expect("too many boot RAM regions");
     }
-    for region in free_regions {
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: a free memory region \
-                      cannot be added to the allocator; allocator initialization has no error \
-                      return or recovery"
-        )]
-        kalloc::global_add_memory(p2v(region.paddr).as_usize(), region.size)
-            .expect("failed to add free region to allocator");
+    // SAFETY: boot owns all FREE RAM exclusively, before other allocator users
+    // or APs run. p2v provides a permanent writable mapping for the complete
+    // metadata backing selected from this RAM; only remaining RAM is handed off.
+    let table = unsafe {
+        page_meta::init(&mut regions, |backing| {
+            core::ptr::NonNull::new(p2v(backing.start).as_mut_ptr())
+                .ok_or(page_meta::PageMetaError::InvalidRange)
+        })
     }
+    .expect("failed to initialize physical page metadata");
+    // SAFETY: boot serializes the only publication and retains metadata RAM
+    // forever. Only the remaining nonempty ranges are handed to the allocator.
+    let table = unsafe { page_meta::publish(table) }.expect("page metadata already published");
+    let free_pages = regions
+        .iter()
+        .map(|r| r.size() / memaddr::PAGE_SIZE_4K)
+        .sum::<usize>();
+    let covered_pages = table.covered_pages();
+    let metadata_pages = covered_pages - free_pages;
+    let free = regions.as_slice();
+    // normalize preserves physical-address order. The buddy scans registered
+    // regions in order, so low RAM must precede high RAM for DMA32 allocations.
+    let first = free
+        .iter()
+        .position(|r| !r.is_empty())
+        .expect("page metadata consumed all free RAM");
+    let region = free[first];
+    kalloc::global_init(p2v(region.start).as_usize(), region.size());
+    for (index, region) in free.iter().enumerate() {
+        if index != first && !region.is_empty() {
+            kalloc::global_add_memory(p2v(region.start).as_usize(), region.size())
+                .expect("failed to add remaining free RAM to allocator");
+        }
+    }
+    kernel_boot::bootln!(
+        "[boot] page metadata: covered_pages={}, metadata_pages={}, free inventory pages={}",
+        covered_pages,
+        metadata_pages,
+        free_pages
+    );
 }
 
 fn finish_allocator_init() {

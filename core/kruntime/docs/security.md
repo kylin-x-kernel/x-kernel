@@ -191,6 +191,7 @@ kernel-boot / 平台固件
 | 边界 | 输入 | 风险 | 当前约束 |
 |------|------|------|----------|
 | `BootInfo` | CPU ID、内存表、boot console PA/VA/size | 错误内存映射、错误 CPU 初始化、MMIO 区域越界 | `khal::firmware::init`、`khal::mem::init` 和 `memspace` 负责校验；boot console VA/PA 页内偏移由 `assert_eq!` 检查 |
+| Boot RAM handoff | `FREE` PA/VA/size tuples | Misclassified or aliased RAM could overwrite live owners | Bounded heapless collection; `kalloc` checks arithmetic, overlap and linear mapping, while boot/HAL must establish ownership and mapping lifetime |
 | 链接符号 | `_stext`、`_etext`、`.init_array` 边界 | backtrace 范围错误、构造函数表越界、任意跳转 | 只取 ZST 符号地址；`.init_array` 通过链接脚本和 `#[register_init]` 约束 |
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
 | IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after ksoftirqd setup and before publishing service completion. Workqueue service publication follows the all-CPU barrier. PMU IRQ enable follows watchdog setup. |
@@ -200,6 +201,20 @@ kernel-boot / 平台固件
 本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
 
 ## unsafe 代码清单
+
+### Boot RAM transfer (`src/lib.rs::init_allocator`)
+
+unsafe `page_meta::init(&mut ranges, map_storage)` 在 allocator 使用者和从核
+启动前调用。Boot/HAL 保证物理列表中的 RAM 独占，回调的 p2v 映射覆盖完整后备区，
+并且后备 RAM 与映射永久有效。FREE 过滤本身不能证明这些事实。
+
+page-meta 原地扣除自身后备区，保留完整物理覆盖。runtime 只把更新后列表中的非空
+区间交给 kalloc；物理页内容映射不作为每个覆盖区间的固定字段。主核串行调用 unsafe
+publish，承诺 static 元数据借用的生命周期。
+
+元数据服务维护索引、描述符初始化和发布；kalloc 维护自身库存与 heap；runtime
+维护映射能力和启动顺序。初始化错误不发布，with_reserved_storage 的单次失败预留不扣除，较早成功的预留
+和规范化结果不承诺回滚。元数据表发布后 allocator 失败即停止启动，不部分重试。
 
 ### 链接文本边界（`src/lib.rs`）
 

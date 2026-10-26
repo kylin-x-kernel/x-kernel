@@ -1,0 +1,17 @@
+[package]
+name = "page-meta"
+description = "Resident physical-page identities and metadata directory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+memaddr.workspace = true
+klazy.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

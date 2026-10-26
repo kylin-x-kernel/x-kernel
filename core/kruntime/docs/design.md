@@ -364,7 +364,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 BootInfo*
     → firmware::init / percpu::init_primary / init_trap
     → mem::init
-    → init_allocator (kalloc 全局堆)
+    → init_allocator (resident physical-page metadata, page inventory, then byte heap)
     → register_boot_console_runtime_region (可选 MMIO UART)
     → memspace::init_memory_management
     → early_driver_init
@@ -408,6 +408,27 @@ init (PID 1, 全新 spawn 的用户任务):
     → 调度器 switch-in 时自动激活用户页表 (switch_page_table_root)
     → run_user_thread_loop → 进入用户态
 ```
+
+### Boot RAM handoff
+
+`init_allocator()` 将 HAL 的 `MemFlags::FREE` 区间收集到调用方的有界
+`heapless::Vec<PhysAddrRange, 256>`。`page_meta::init(&mut ranges, map_storage)`
+原地规范化并扣除后备区，只返回 PageMetaTable；映射回调仅将实际后备区 PA
+转换为稳定可写 VA，不在每个物理范围上保存映射信息。
+
+runtime 串行发布统一 PFN 查询服务，再按 PA 升序以首个非空剩余区间调用既有 global_init，
+用 global_add_memory 依次交接后续非空区间。buddy 按注册顺序选区间，低地址优先可避免
+DMA32 分配先命中高于 4 GiB 的区间后直接失败。VA 转换在这两个实际使用位置完成。
+输入容器容量属于 runtime/HAL 接线，不作为 page-meta 的公共 region 抽象。
+256 是规范化前输入条目数；当前后端接受最多 64 个合并后的不连续段，现有 buddy
+同样最多注册 64 个 region。这两个上限统计的对象不同。
+
+page-meta 拥有存储规划、索引和自身预留，allocator 拥有 bitmap、空闲库存与 heap，
+runtime 只负责物理列表、映射能力和交接顺序。覆盖范围包括扣除的后备页，当前只
+描述输入 FREE RAM 的完整页。覆盖页数通过 covered_pages() 从段表推导，启动日志的
+metadata_pages 由覆盖页数减去交接前剩余页数局部计算，均不保存为表字段。
+错误不发布元数据表；输入可能已规范化。元数据表发布后 allocator 失败按 fatal-boot 停止，
+不重试整个事务。
 
 ### PID 1 启动约定
 

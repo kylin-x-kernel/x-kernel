@@ -58,6 +58,7 @@ klazy.workspace = true
 ksync.workspace = true
 kspin.workspace = true
 kalloc.workspace = true
+page-meta.workspace = true
 ktty = { workspace = true, optional = true }
 backtrace.workspace = true
 boot_info.workspace = true
