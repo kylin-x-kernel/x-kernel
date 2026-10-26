@@ -19,7 +19,7 @@ fn pointer_mapped_directory_keeps_in_place_insertion() {
         u32::try_from(filesystem.mapped_directory_block(&root, 0).unwrap().get()).unwrap();
     let timestamp = Ext4Timestamp::new(152, 0);
     let journal = filesystem
-        .namei_metadata_journal(JournalCredits::new(1))
+        .namei_metadata_journal_for_allocation(JournalCredits::new(1), 0, [])
         .unwrap();
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     filesystem
@@ -63,7 +63,7 @@ fn inode_index_flag_without_feature_uses_linear_directory_semantics() {
         .unwrap();
     assert!(!filesystem.superblock().features().has_dir_index());
     let journal = filesystem
-        .namei_metadata_journal(JournalCredits::new(1))
+        .namei_metadata_journal_for_allocation(JournalCredits::new(1), 0, [])
         .unwrap();
     let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
     filesystem
@@ -270,7 +270,7 @@ fn indexed_leaf_split_covers_external_extent_rewrites() {
         // Leave physical gaps between directory growth allocations so its
         // mappings cannot collapse into one inline extent.
         let journal = filesystem
-            .namei_metadata_journal(JournalCredits::new(4))
+            .namei_metadata_journal_for_allocation(JournalCredits::new(4), 1, [])
             .unwrap();
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
         filesystem.allocate_block(None, &mut handle).unwrap();
@@ -341,7 +341,7 @@ fn fragmented_linear_directory_mutation(external_leaf: bool, rename: bool) {
     };
     for logical in 0..blocks {
         let journal = filesystem
-            .namei_metadata_journal(JournalCredits::new(64))
+            .namei_metadata_journal_for_allocation(JournalCredits::new(64), 64, [])
             .unwrap();
         let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
         let physical = if logical == 0 {
@@ -840,6 +840,11 @@ fn symlink_create_delete_recreate_cycle_reads_current_target() {
             free_blocks_before,
             "iteration {iteration} leaked the symlink target block"
         );
+        // Reuse is legal only after the freeing commit. Keep checkpoint
+        // pending so this still exercises the original stale-cache hazard.
+        filesystem
+            .commit_running_metadata_transaction()
+            .expect("commit freed target without checkpoint");
         assert!(
             filesystem
                 .metadata_journal()

@@ -425,3 +425,76 @@ fn block_allocator_skips_bitmap_checksum_without_metadata_csum() {
 
     assert_eq!(allocation.block(), PhysicalBlock::new(6));
 }
+
+#[def_test]
+fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
+    let (filesystem, _) = allocator_test_filesystem(25, 0b0111_1111);
+    let journal = JournalTransactions::new(TransactionId::new(991));
+    let mut handle = journal.begin(JournalCredits::new(12)).unwrap();
+    filesystem
+        .release_allocated_block(PhysicalBlock::new(6), &mut handle)
+        .unwrap();
+    // A cache rebuild sees the cleared authoritative bitmap; the transaction
+    // must continue protecting the old on-disk owner's data independently.
+    filesystem.reset_block_allocation_caches();
+    let allocation = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    assert_ne!(allocation.block(), PhysicalBlock::new(6));
+    handle.stop().unwrap();
+    let commit = journal.force_commit(TransactionId::new(991)).unwrap();
+    let mut next = journal.begin(JournalCredits::new(6)).unwrap();
+    let mut pending = alloc::vec::Vec::new();
+    crate::superblock::lock(&filesystem.allocator)
+        .pending_frees
+        .append_ranges(
+            BlockGroupNumber::new(0),
+            FilesystemBlock::new(6),
+            FilesystemBlock::new(6),
+            &mut pending,
+        );
+    assert_eq!(
+        pending,
+        [(FilesystemBlock::new(6), FilesystemBlock::new(6))]
+    );
+    filesystem
+        .metadata_io
+        .checkpoint_committed(&commit)
+        .unwrap();
+    journal.start_checkpoint_for_test(&commit).unwrap();
+    crate::superblock::lock(&filesystem.allocator)
+        .pending_frees
+        .complete(commit.id());
+    let allocation = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut next)
+        .unwrap();
+    assert_eq!(allocation.block(), PhysicalBlock::new(6));
+}
+
+#[def_test]
+fn range_release_rejects_already_free_bits_before_publication() {
+    let (filesystem, _) = allocator_test_filesystem(25, 0b0111_1111);
+    let journal = JournalTransactions::new(TransactionId::new(992));
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    assert_eq!(
+        filesystem.release_allocated_block_range(
+            PhysicalBlock::new(6),
+            crate::BlockCount::new(2),
+            crate::balloc::BlockReleaseKind::Data,
+            &mut handle
+        ),
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))
+    );
+    assert!(!handle.has_updates());
+    assert_eq!(filesystem.free_blocks_count(), 25);
+    assert_eq!(
+        crate::superblock::lock(&filesystem.allocator)
+            .pending_frees
+            .block_count(),
+        0
+    );
+    filesystem
+        .release_allocated_block(PhysicalBlock::new(6), &mut handle)
+        .unwrap();
+    assert_eq!(filesystem.free_blocks_count(), 26);
+}

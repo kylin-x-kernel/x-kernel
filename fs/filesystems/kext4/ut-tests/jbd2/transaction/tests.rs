@@ -657,3 +657,36 @@ fn checkpoint_watermark_advances_across_transaction_wrap() {
     let inner = lock(&journal.inner);
     assert_eq!(inner.checkpointed_through, TransactionId::new(0));
 }
+
+#[def_test]
+fn committed_query_follows_existing_transaction_lifecycle_across_wrap() {
+    let journal = JournalTransactions::new(TransactionId::new(u32::MAX));
+    let first = journal.begin(JournalCredits::new(0)).unwrap();
+    let first_id = first.id();
+    assert!(!journal.is_committed(first_id));
+    first.stop().unwrap();
+    assert!(!journal.is_committed(first_id));
+    let first = journal.force_commit(first_id).unwrap();
+    assert!(!journal.is_committed(first_id));
+    journal.start_checkpoint_for_test(&first).unwrap();
+    assert!(journal.is_committed(first_id));
+    let second = journal.begin(JournalCredits::new(0)).unwrap();
+    let second_id = second.id();
+    assert_eq!(second_id, TransactionId::new(0));
+    assert!(!journal.is_committed(second_id));
+    second.stop().unwrap();
+    let second = journal.force_commit(second_id).unwrap();
+    journal.start_checkpoint_for_test(&second).unwrap();
+    assert!(journal.is_committed(first_id));
+    assert!(journal.is_committed(second_id));
+    journal.finish_checkpoint_for_test(&first).unwrap();
+    journal.finish_checkpoint_for_test(&second).unwrap();
+    let third = journal.begin(JournalCredits::new(0)).unwrap();
+    let third_id = third.id();
+    third.stop().unwrap();
+    journal.force_commit(third_id).unwrap();
+    journal.abort(Ext4Error::NoSpace);
+    assert!(journal.is_committed(first_id));
+    assert!(journal.is_committed(second_id));
+    assert!(!journal.is_committed(third_id));
+}

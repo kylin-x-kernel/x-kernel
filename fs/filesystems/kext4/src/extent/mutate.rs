@@ -48,6 +48,101 @@ impl Ext4SbInfo {
         ordered_writeback_credit_bound(allocation_runs, extent_mutations)
     }
 
+    /// Plans one rightmost-leaf edit. No retained subtree is collected or rebuilt.
+    pub(crate) fn plan_extent_tail_release(
+        &self,
+        inode: &Ext4Inode,
+        max_blocks: u32,
+    ) -> Ext4Result<ExtentTailRelease> {
+        self.ensure_extent_mutation_supported(inode)?;
+        if max_blocks == 0 {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        let path = self.locate_extent_path(inode, u32::MAX)?;
+        let mut remaining = path.decode_leaf_extents(self, inode)?;
+        let mut released = Vec::new();
+        let mut freed = 0;
+        while let Some(last) = remaining.last_mut() {
+            let count = last.len.min(max_blocks - freed);
+            let keep = last.len - count;
+            released.push(MutableExtent {
+                logical: last.logical + keep,
+                physical: PhysicalBlock::new(last.physical.get() + u64::from(keep)),
+                len: count,
+                is_unwritten: last.is_unwritten,
+            });
+            freed += count;
+            if keep == 0 {
+                remaining.pop();
+            } else {
+                last.len = keep;
+            }
+            if freed == max_blocks {
+                break;
+            }
+        }
+        let mut groups = BTreeSet::new();
+        for extent in &released {
+            self.collect_extent_block_groups(*extent, &mut groups)?;
+        }
+        let mut path_blocks = 0u32;
+        for block in path
+            .parents
+            .iter()
+            .filter_map(|parent| parent.block)
+            .chain(path.block)
+        {
+            groups.insert(self.block_group_for_block(FilesystemBlock::new(block.get()))?);
+            path_blocks += 1;
+        }
+        // Every path node may be rewritten or revoked, each touched allocator
+        // group needs bitmap+descriptor, plus inode, superblock and API headroom.
+        let revokes = if self.extent_data_blocks_need_metadata_release(inode)
+            && self.journal_supports_revoke()
+        {
+            freed
+        } else {
+            0
+        };
+        let credits = 6
+            + path_blocks * 2
+            + u32::try_from(groups.len()).map_err(|_| Ext4Error::Overflow)? * 2
+            + revokes;
+        Ok(ExtentTailRelease {
+            path,
+            remaining,
+            released,
+            freed,
+            credits,
+        })
+    }
+
+    /// Applies a plan under mount mutation exclusion; this path cannot allocate.
+    pub(crate) fn release_extent_tail(
+        &mut self,
+        inode: &Ext4Inode,
+        plan: ExtentTailRelease,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<u32> {
+        self.begin_extent_mutation(inode)?;
+        let metadata_freed = if plan.remaining.is_empty() {
+            plan.path.prune_empty_leaf(self, inode, handle)?
+        } else {
+            plan.path
+                .rewrite_leaf(self, inode, &plan.remaining, handle)?;
+            0
+        };
+        for extent in plan.released {
+            self.release_extent_data_blocks(inode, extent, handle)?;
+        }
+        self.update_inode_extent_block_delta(
+            inode,
+            -i128::from(metadata_freed + u64::from(plan.freed)),
+            handle,
+        )?;
+        Ok(plan.freed)
+    }
+
     /// Returns a conservative credit bound for rewriting an extent tree and
     /// releasing every mapping at or beyond `new_blocks`.
     pub(crate) fn extent_truncate_metadata_credits(
@@ -60,10 +155,8 @@ impl Ext4SbInfo {
         self.extent_truncate_metadata_credits_from(inode, &collected, new_blocks)
     }
 
-    /// Credit bound variant that reuses an already-collected extent tree,
-    /// avoiding a redundant tree walk.  Used by the eviction path, which
-    /// collects the tree once per batch and reuses it for the credit estimate
-    /// and the truncation itself.
+    /// Credit bound for the general truncation fallback using a collected tree.
+    /// Eviction instead plans and edits one tail leaf without tree rebuilding.
     pub(crate) fn extent_truncate_metadata_credits_from(
         &self,
         inode: &Ext4Inode,
@@ -213,14 +306,27 @@ impl Ext4SbInfo {
             return Err(Ext4Error::Unsupported(UnsupportedKind::ExtentDepth));
         }
 
-        // A split reuses at most one block at each existing level. Reserving
-        // two fresh blocks for the leaf and every parent/root level is a
-        // bounded overestimate that keeps NoSpace ahead of metadata access.
-        u64::try_from(path.parents.len())
-            .map_err(|_| Ext4Error::Overflow)?
-            .checked_add(2)
-            .and_then(|levels| levels.checked_mul(2))
-            .ok_or(Ext4Error::Overflow)
+        path.split_allocation_blocks(self, &extents)
+    }
+
+    /// Uses the same leaf edit and split layout as unwritten conversion.
+    pub(crate) fn extent_conversion_allocation_blocks(
+        &self,
+        inode: &Ext4Inode,
+        logical: LogicalBlock,
+        len: BlockCount,
+    ) -> Ext4Result<u64> {
+        let range = LogicalExtentRange::new(logical, len)?;
+        let path = self.locate_extent_path(inode, range.start_u32()?)?;
+        if !path.contains_range(range) {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::ExtentMutation));
+        }
+        let mut extents = path.decode_leaf_extents(self, inode)?;
+        set_extent_range_state(&mut extents, range, ExtentMappingState::Initialized)?;
+        if extents.len() <= usize::from(path.leaf_header()?.max()) {
+            return Ok(0);
+        }
+        path.split_allocation_blocks(self, &extents)
     }
 
     fn collect_extent_block_groups(
@@ -318,9 +424,7 @@ impl Ext4SbInfo {
         if self.try_remove_extent_range_path_local(inode, range, handle)? {
             return Ok(());
         }
-        self.mutate_extent_tree(inode, handle, None, |extents| {
-            remove_extent_range(extents, range)
-        })
+        self.mutate_extent_tree(inode, handle, |extents| remove_extent_range(extents, range))
     }
 
     pub(crate) fn truncate_extent_mappings(
@@ -336,31 +440,7 @@ impl Ext4SbInfo {
         if self.try_remove_extent_range_path_local(inode, range, handle)? {
             return Ok(());
         }
-        self.mutate_extent_tree(inode, handle, None, |extents| {
-            remove_extent_range(extents, range)
-        })
-    }
-
-    /// Truncation variant that reuses an already-collected extent tree,
-    /// avoiding a redundant tree walk in the full-tree fallback path.  Used by
-    /// the eviction path, which collects the tree once per batch.
-    pub(crate) fn truncate_extent_mappings_with(
-        &mut self,
-        inode: &Ext4Inode,
-        collected: &CollectedExtentTree,
-        new_blocks: LogicalBlock,
-        handle: &mut crate::jbd2::JournalHandle<'_>,
-    ) -> Ext4Result<()> {
-        self.begin_extent_mutation(inode)?;
-        let Some(range) = LogicalExtentRange::from_logical_to_tree_end(new_blocks)? else {
-            return Ok(());
-        };
-        if self.try_remove_extent_range_path_local(inode, range, handle)? {
-            return Ok(());
-        }
-        self.mutate_extent_tree(inode, handle, Some(collected), |extents| {
-            remove_extent_range(extents, range)
-        })
+        self.mutate_extent_tree(inode, handle, |extents| remove_extent_range(extents, range))
     }
 
     fn insert_extent_mapping_path_local(
@@ -919,13 +999,9 @@ impl Ext4SbInfo {
         &mut self,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-        collected: Option<&CollectedExtentTree>,
         mutate: impl FnOnce(&mut Vec<MutableExtent>) -> Ext4Result<Vec<MutableExtent>>,
     ) -> Ext4Result<Option<ExtentMutationState>> {
-        let collected = match collected {
-            Some(tree) => tree.clone(),
-            None => self.collect_extent_tree(inode)?,
-        };
+        let collected = self.collect_extent_tree(inode)?;
         let mut extents = collected.extents;
         let old_extents = extents.clone();
         let released_data = mutate(&mut extents)?;
@@ -955,11 +1031,9 @@ impl Ext4SbInfo {
         &mut self,
         inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-        collected: Option<&CollectedExtentTree>,
         mutate: impl FnOnce(&mut Vec<MutableExtent>) -> Ext4Result<Vec<MutableExtent>>,
     ) -> Ext4Result<()> {
-        let Some(state) = self.prepare_extent_tree_mutation(inode, handle, collected, mutate)?
-        else {
+        let Some(state) = self.prepare_extent_tree_mutation(inode, handle, mutate)? else {
             return Ok(());
         };
         for extent in state.released_data {
@@ -1269,31 +1343,22 @@ impl Ext4SbInfo {
         extent: MutableExtent,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
-        let start = extent.physical.get();
-        let end = extent.physical_end()?;
-        for block in start..end {
-            // Directory blocks and block-mapped symlink targets are journaled
-            // metadata buffers even though they are mapped as data extents.
-            // Linux's get_default_free_blocks_flags() treats S_ISLNK the same
-            // as S_ISDIR; fold both kinds in so any pending metadata checkpoint
-            // is revoked or forgotten before the blocks can be reallocated.
-            // Otherwise a quick create/delete/recreate cycle can reallocate a
-            // block whose old metadata checkpoint is still pending and abort
-            // the journal.
-            if self.extent_data_blocks_need_metadata_release(inode) {
-                if self.journal_supports_revoke() {
-                    self.release_allocated_metadata_block(PhysicalBlock::new(block), handle)?;
-                } else {
-                    self.release_allocated_metadata_block_without_revoke(
-                        PhysicalBlock::new(block),
-                        handle,
-                    )?;
-                }
+        use crate::balloc::BlockReleaseKind;
+        let kind = if self.extent_data_blocks_need_metadata_release(inode) {
+            if self.journal_supports_revoke() {
+                BlockReleaseKind::Metadata
             } else {
-                self.release_allocated_block(PhysicalBlock::new(block), handle)?;
+                BlockReleaseKind::MetadataWithoutRevoke
             }
-        }
-        Ok(())
+        } else {
+            BlockReleaseKind::Data
+        };
+        self.release_allocated_block_range(
+            extent.physical,
+            BlockCount::new(extent.len),
+            kind,
+            handle,
+        )
     }
 }
 
@@ -1706,6 +1771,15 @@ pub(crate) struct CollectedExtentTree {
     pub(crate) metadata_blocks: Vec<PhysicalBlock>,
 }
 
+/// Bounded leaf contents and credits consumed by the same tail operation.
+pub(crate) struct ExtentTailRelease {
+    path: ExtentPath,
+    remaining: Vec<MutableExtent>,
+    released: Vec<MutableExtent>,
+    pub(crate) freed: u32,
+    pub(crate) credits: u32,
+}
+
 struct ExtentPath {
     block: Option<PhysicalBlock>,
     expected_lblk: Option<u32>,
@@ -1820,6 +1894,40 @@ impl ExtentPath {
         Ok(false)
     }
 
+    /// Counts fresh blocks in the split layout used below, including root growth.
+    fn split_allocation_blocks(
+        &self,
+        filesystem: &Ext4SbInfo,
+        extents: &[MutableExtent],
+    ) -> Ext4Result<u64> {
+        if !self.is_split_supported(filesystem, extents)? {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::ExtentDepth));
+        }
+        let mut replacements =
+            balanced_partition_ranges(extents.len(), self.leaf_capacity(filesystem)?)?.len();
+        let mut allocated = replacements - usize::from(self.block.is_some());
+        let mut root_children = replacements;
+        for parent in self.parents.iter().rev() {
+            let header = decode_header(&parent.bytes)?;
+            let count = usize::from(header.entries()) - 1 + replacements;
+            if parent.block.is_none() {
+                root_children = count;
+                break;
+            }
+            replacements = balanced_partition_ranges(count, usize::from(header.max()))?.len();
+            allocated += replacements - 1;
+        }
+        let inline_capacity = usize::from(disk_extent::inline_extent_capacity()?);
+        let capacity = usize::from(disk_extent::extent_block_capacity(
+            filesystem.device.block_size(),
+        )?);
+        while root_children > inline_capacity {
+            root_children = root_children.div_ceil(capacity);
+            allocated += root_children;
+        }
+        u64::try_from(allocated).map_err(|_| Ext4Error::Overflow)
+    }
+
     fn split_leaf(
         &self,
         filesystem: &mut Ext4SbInfo,
@@ -1827,9 +1935,7 @@ impl ExtentPath {
         extents: &[MutableExtent],
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<u64> {
-        if !self.is_split_supported(filesystem, extents)? {
-            return Err(Ext4Error::Unsupported(UnsupportedKind::ExtentDepth));
-        }
+        let planned_blocks = self.split_allocation_blocks(filesystem, extents)?;
 
         let leaf_ranges =
             balanced_partition_ranges(extents.len(), self.leaf_capacity(filesystem)?)?;
@@ -1884,6 +1990,7 @@ impl ExtentPath {
                 &mut new_metadata_blocks,
                 handle,
             )?;
+            debug_assert_eq!(new_metadata_blocks, planned_blocks);
             return Ok(new_metadata_blocks);
         }
 
@@ -1929,6 +2036,7 @@ impl ExtentPath {
             &mut new_metadata_blocks,
             handle,
         )?;
+        debug_assert_eq!(new_metadata_blocks, planned_blocks);
         Ok(new_metadata_blocks)
     }
 

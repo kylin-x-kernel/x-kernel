@@ -459,6 +459,8 @@ pub(crate) struct AllocatorState {
     /// conservation invariant (`== Σ preallocs_by_group[].phys_len`) is
     /// debug-asserted after every mutation.
     pub(crate) preallocated_blocks: u64,
+    /// Physical reuse protection, independent of reclaimable bitmap caches.
+    pub(crate) pending_frees: crate::balloc::pending_free::PendingBlockFrees,
 }
 
 /// A validated ext4 filesystem mount core.
@@ -711,6 +713,7 @@ impl Ext4SbInfo {
                 block_free_extent_caches,
                 preallocs_by_group: BTreeMap::new(),
                 preallocated_blocks: 0,
+                pending_frees: Default::default(),
             }),
             delalloc_reserved_blocks: Mutex::new(0),
             superblock,

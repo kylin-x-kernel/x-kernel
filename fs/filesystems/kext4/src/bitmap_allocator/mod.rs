@@ -15,7 +15,7 @@ mod inode;
 
 pub(crate) use block::{
     BlockAllocation, BlockGroupRange, BlockRunAllocation, allocate_block_run_from_bitmap,
-    release_block_to_bitmap,
+    range_end_containing, release_block_to_bitmap,
 };
 pub(crate) use inode::{
     InodeAllocation, InodeGroupRange, allocate_inode_from_bitmap, release_inode_to_bitmap,

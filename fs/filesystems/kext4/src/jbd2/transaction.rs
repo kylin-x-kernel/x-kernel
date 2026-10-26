@@ -450,11 +450,29 @@ impl JournalTransactions {
         Ok(())
     }
 
+    /// Whether one handle fits an empty transaction, independent of current use.
+    pub(crate) const fn can_fit_handle(&self, credits: JournalCredits) -> bool {
+        credits.get() <= self.max_reserved_credits
+    }
+
+    /// Whether an issued transaction has passed durable commit. Its id must be
+    /// within the live half of the sequence space, as for checkpoint waits.
+    /// A later abort does not undo earlier commits. Read the existing ordered
+    /// checkpoint queue/frontier rather than keeping another completion cursor.
+    pub(crate) fn is_committed(&self, transaction: TransactionId) -> bool {
+        let inner = lock(&self.inner);
+        is_checkpointed(&inner, transaction)
+            || inner
+                .checkpoint_transactions
+                .back()
+                .is_some_and(|last| transaction_is_same_or_older(transaction, last.id()))
+    }
+
     /// Starts or joins the running transaction.
     pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
         let mut inner = lock(&self.inner);
         check_not_aborted(&inner)?;
-        if credits.get() > self.max_reserved_credits {
+        if !self.can_fit_handle(credits) {
             return Err(Ext4Error::NoSpace);
         }
 
@@ -505,7 +523,7 @@ impl JournalTransactions {
     ) -> Ext4Result<Option<TransactionId>> {
         let inner = lock(&self.inner);
         check_not_aborted(&inner)?;
-        if incoming_credits.get() > self.max_reserved_credits {
+        if !self.can_fit_handle(incoming_credits) {
             return Err(Ext4Error::NoSpace);
         }
         let Some(running) = inner.running.as_ref() else {

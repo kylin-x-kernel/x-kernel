@@ -359,7 +359,16 @@ impl BlockGroupFreeExtentCache {
         Ok(())
     }
 
+    #[cfg(unittest)]
     pub(crate) fn mark_free(&mut self, bit: u32) -> Ext4Result<()> {
+        self.mark_free_run(bit, 1)
+    }
+
+    pub(crate) fn mark_free_run(&mut self, bit: u32, count: u32) -> Ext4Result<()> {
+        if count == 0 {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        let end = bit.checked_add(count).ok_or(Ext4Error::Overflow)?;
         let mut insert_at = 0usize;
         while insert_at < self.free_runs.len() && self.free_runs[insert_at].first_bit < bit {
             if self.free_runs[insert_at].contains(bit) {
@@ -368,6 +377,13 @@ impl BlockGroupFreeExtentCache {
             insert_at += 1;
         }
 
+        if self
+            .free_runs
+            .get(insert_at)
+            .is_some_and(|right| right.first_bit < end)
+        {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
+        }
         let merge_left = insert_at
             .checked_sub(1)
             .and_then(|left| self.free_runs.get(left).copied())
@@ -376,7 +392,7 @@ impl BlockGroupFreeExtentCache {
             .free_runs
             .get(insert_at)
             .copied()
-            .is_some_and(|right| bit.checked_add(1) == Some(right.first_bit));
+            .is_some_and(|right| end == right.first_bit);
 
         match (merge_left, merge_right) {
             (true, true) => {
@@ -387,7 +403,7 @@ impl BlockGroupFreeExtentCache {
                     .ok_or(Ext4Error::OutOfBounds)?;
                 left.len = left
                     .len
-                    .checked_add(1)
+                    .checked_add(count)
                     .and_then(|len| len.checked_add(right.len))
                     .ok_or(Ext4Error::Overflow)?;
             }
@@ -396,7 +412,7 @@ impl BlockGroupFreeExtentCache {
                     .free_runs
                     .get_mut(insert_at - 1)
                     .ok_or(Ext4Error::OutOfBounds)?;
-                left.len = left.len.checked_add(1).ok_or(Ext4Error::Overflow)?;
+                left.len = left.len.checked_add(count).ok_or(Ext4Error::Overflow)?;
             }
             (false, true) => {
                 let right = self
@@ -404,17 +420,20 @@ impl BlockGroupFreeExtentCache {
                     .get_mut(insert_at)
                     .ok_or(Ext4Error::OutOfBounds)?;
                 right.first_bit = bit;
-                right.len = right.len.checked_add(1).ok_or(Ext4Error::Overflow)?;
+                right.len = right.len.checked_add(count).ok_or(Ext4Error::Overflow)?;
             }
             (false, false) => self.free_runs.insert(
                 insert_at,
                 FreeBlockRun {
                     first_bit: bit,
-                    len: 1,
+                    len: count,
                 },
             ),
         }
-        self.free_blocks = self.free_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
+        self.free_blocks = self
+            .free_blocks
+            .checked_add(count)
+            .ok_or(Ext4Error::Overflow)?;
         self.rebuild_order_buckets()?;
         Ok(())
     }

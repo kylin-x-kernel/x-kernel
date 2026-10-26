@@ -157,6 +157,16 @@ impl MountedJournal {
         Ok(())
     }
 
+    /// Whether one operation's credits fit the mounted journal's transaction capacity.
+    pub(crate) fn can_fit_handle(&self, credits: JournalCredits) -> bool {
+        self.transactions.can_fit_handle(credits)
+    }
+
+    /// Queries durable completion for an issued transaction, including after abort.
+    pub(crate) fn is_committed(&self, transaction: TransactionId) -> bool {
+        self.transactions.is_committed(transaction)
+    }
+
     pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
         self.transactions.begin(credits)
     }
@@ -225,6 +235,92 @@ impl Ext4SbInfo {
     /// The previous handle must have stopped before admission. An active handle
     /// violates this serialization contract and is rejected before any wait.
     pub(crate) fn metadata_journal_for_mutation(
+        &mut self,
+        credits: JournalCredits,
+        recovery_flag_policy: RecoveryFlagPolicy,
+    ) -> Ext4Result<Arc<MountedJournal>> {
+        let journal = self.metadata_journal_without_allocation(credits, recovery_flag_policy)?;
+        // Legacy mutation paths without a physical growth bound retain the
+        // conservative boundary; they must not commit from an active handle.
+        if let Some(transaction) = self.freeing_transaction_to_commit(&journal)? {
+            self.commit_metadata_transaction_with_policy(transaction, recovery_flag_policy)?;
+        }
+        Ok(journal)
+    }
+
+    /// Whether physical-space admission can release space by committing frees.
+    pub(crate) fn has_pending_block_frees(&self) -> Ext4Result<bool> {
+        if let Some(journal) = self.journal.as_ref() {
+            journal.transactions.ensure_writable()?;
+        }
+        Ok(lock(&self.allocator).pending_frees.block_count() != 0)
+    }
+
+    fn freeing_transaction_to_commit(
+        &self,
+        journal: &MountedJournal,
+    ) -> Ext4Result<Option<TransactionId>> {
+        let Some(transaction) = journal.transactions.running_transaction()? else {
+            return Ok(None);
+        };
+        if !lock(&self.allocator)
+            .pending_frees
+            .contains_transaction(transaction)
+        {
+            return Ok(None);
+        }
+        journal.transactions.ensure_no_active_handles()?;
+        journal.transactions.idle_running_transaction(transaction)
+    }
+
+    /// Admits a bounded physical allocation before opening its handle.
+    ///
+    /// `required_blocks` includes data and new metadata blocks, not journal
+    /// credits. Callers without a bound use the conservative mutation entry.
+    /// Mount mutation exclusion keeps this check valid until the handle stops.
+    pub(crate) fn metadata_journal_for_allocation(
+        &mut self,
+        credits: JournalCredits,
+        recovery_flag_policy: RecoveryFlagPolicy,
+        required_blocks: u64,
+    ) -> Ext4Result<Arc<MountedJournal>> {
+        let journal = self.metadata_journal_without_allocation(credits, recovery_flag_policy)?;
+        let pending = lock(&self.allocator).pending_frees.block_count();
+        if pending != 0 && required_blocks != 0 {
+            let available = {
+                let alloc = lock(&self.allocator);
+                alloc
+                    .free_blocks_count
+                    .saturating_sub(alloc.preallocated_blocks)
+                    .saturating_sub(pending)
+            };
+            if required_blocks > available {
+                // Speculative spaces are reclaimable without a persistence
+                // boundary. Recheck before paying for a freeing transaction.
+                self.discard_preallocs_for_space(required_blocks.saturating_sub(available));
+                let available = {
+                    let alloc = lock(&self.allocator);
+                    alloc
+                        .free_blocks_count
+                        .saturating_sub(alloc.preallocated_blocks)
+                        .saturating_sub(pending)
+                };
+                if required_blocks > available
+                    && let Some(transaction) = self.freeing_transaction_to_commit(&journal)?
+                {
+                    self.commit_metadata_transaction_with_policy(
+                        transaction,
+                        recovery_flag_policy,
+                    )?;
+                }
+            }
+        }
+        Ok(journal)
+    }
+
+    /// Admits credits without imposing a physical-allocation boundary.
+    /// Callers must not allocate blocks unless a separate admission covers them.
+    pub(crate) fn metadata_journal_without_allocation(
         &mut self,
         credits: JournalCredits,
         recovery_flag_policy: RecoveryFlagPolicy,
@@ -463,6 +559,7 @@ impl Ext4SbInfo {
             let _ = journal.remove_checkpoint_policy(transaction);
             return Err(error);
         }
+        lock(&self.allocator).pending_frees.complete(transaction);
         Ok(())
     }
 

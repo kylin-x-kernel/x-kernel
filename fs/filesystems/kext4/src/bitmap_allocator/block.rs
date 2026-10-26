@@ -159,12 +159,27 @@ impl BlockRunAllocation {
     }
 }
 
+/// Returns the exclusive end of the group-relative range containing `bit`.
+/// Callers provide sorted, disjoint half-open ranges, as produced by merging
+/// preallocation and pending-free exclusions for a block group.
+pub(crate) fn range_end_containing(ranges: &[(u32, u32)], bit: u32) -> Option<u32> {
+    ranges
+        .partition_point(|&(start, _)| start <= bit)
+        .checked_sub(1)
+        .and_then(|index| ranges.get(index))
+        .filter(|&&(_, end)| bit < end)
+        .map(|&(_, end)| end)
+}
+
+/// Finds and marks a free run, skipping sorted, disjoint group-relative
+/// half-open `excluded_ranges` without probing their individual bitmap bits.
 pub(crate) fn allocate_block_run_from_bitmap(
     bitmap: &mut [u8],
     range: BlockGroupRange,
     goal: Option<FilesystemBlock>,
     min_len: BlockCount,
     expected_len: BlockCount,
+    excluded_ranges: &[(u32, u32)],
     mut is_protected: impl FnMut(FilesystemBlock) -> bool,
 ) -> Ext4Result<BlockRunAllocation> {
     validate_bitmap_capacity(bitmap, range)?;
@@ -182,6 +197,7 @@ pub(crate) fn allocate_block_run_from_bitmap(
         start,
         min_len,
         expected_len,
+        excluded_ranges,
         &mut is_protected,
     )? {
         set_bitmap_run(
@@ -192,8 +208,15 @@ pub(crate) fn allocate_block_run_from_bitmap(
         return Ok(allocation);
     }
     if start != 0
-        && let Some(allocation) =
-            find_free_run_linear(bitmap, range, 0, min_len, expected_len, &mut is_protected)?
+        && let Some(allocation) = find_free_run_linear(
+            bitmap,
+            range,
+            0,
+            min_len,
+            expected_len,
+            excluded_ranges,
+            &mut is_protected,
+        )?
     {
         set_bitmap_run(
             bitmap,
@@ -233,10 +256,15 @@ fn find_free_run_linear(
     start: u32,
     min_len: u32,
     expected_len: u32,
+    excluded_ranges: &[(u32, u32)],
     is_protected: &mut impl FnMut(FilesystemBlock) -> bool,
 ) -> Ext4Result<Option<BlockRunAllocation>> {
     let mut bit_index = start;
     while bit_index < range.block_count() {
+        if let Some(end) = range_end_containing(excluded_ranges, bit_index) {
+            bit_index = end;
+            continue;
+        }
         if is_bitmap_bit_set(bitmap, bit_index)? {
             bit_index += 1;
             continue;
@@ -247,7 +275,14 @@ fn find_free_run_linear(
             continue;
         }
 
-        let run_len = free_run_len(bitmap, range, bit_index, expected_len, is_protected)?;
+        let run_len = free_run_len(
+            bitmap,
+            range,
+            bit_index,
+            expected_len,
+            excluded_ranges,
+            is_protected,
+        )?;
         if run_len >= min_len {
             return Ok(Some(BlockRunAllocation::new(
                 range,
@@ -268,6 +303,7 @@ fn free_run_len(
     range: BlockGroupRange,
     start: u32,
     expected_len: u32,
+    excluded_ranges: &[(u32, u32)],
     is_protected: &mut impl FnMut(FilesystemBlock) -> bool,
 ) -> Ext4Result<u32> {
     let end = start
@@ -276,7 +312,9 @@ fn free_run_len(
         .min(range.block_count());
     let mut len = 0u32;
     for bit_index in start..end {
-        if is_bitmap_bit_set(bitmap, bit_index)? {
+        if range_end_containing(excluded_ranges, bit_index).is_some()
+            || is_bitmap_bit_set(bitmap, bit_index)?
+        {
             break;
         }
         let block = range.block_at(bit_index)?;

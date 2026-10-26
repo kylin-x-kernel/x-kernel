@@ -9,7 +9,7 @@ use crate::{
     UnsupportedKind,
     extent::{self, BlockMapping, ExtentMappingState},
     inode::{Ext4Inode, Ext4Timestamp, InodeKind},
-    jbd2::JournalCredits,
+    jbd2::{JournalCredits, TransactionId},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
 };
 
@@ -67,6 +67,8 @@ impl OrderedWritebackCreditUsage {
 struct OrderedWritebackCursor {
     input_offset: usize,
     settled_input_offset: usize,
+    // Dependency identity only; completion remains owned by the journal.
+    transaction: Option<TransactionId>,
     remaining_extra_prealloc_blocks: u32,
 }
 
@@ -75,6 +77,7 @@ impl OrderedWritebackCursor {
         Self {
             input_offset: 0,
             settled_input_offset: 0,
+            transaction: None,
             remaining_extra_prealloc_blocks,
         }
     }
@@ -99,6 +102,7 @@ impl OrderedWritebackCursor {
 
     const fn settle(&mut self) {
         self.settled_input_offset = self.input_offset;
+        self.transaction = None;
     }
 
     const fn settled_failure(&self, error: Ext4Error) -> Ext4WritebackError {
@@ -113,6 +117,7 @@ impl OrderedWritebackCursor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OrderedWritebackTransactionProgress {
     Complete,
+    Readmit,
     Restart,
 }
 
@@ -638,15 +643,38 @@ impl Ext4SbInfo {
                 )
                 .map_err(|error| cursor.settled_failure(error))?,
             );
-            let journal = self
-                .metadata_journal_for_mutation(
-                    credits,
-                    crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            let allocation_blocks = if self
+                .has_pending_block_frees()
+                .map_err(|error| cursor.settled_failure(error))?
+            {
+                // Optional preallocation must not force persistence of unrelated frees.
+                cursor.remaining_extra_prealloc_blocks = 0;
+                let remaining_blocks = block_count_for_byte_span(
+                    usize::try_from(absolute % block_size_usize as u64)
+                        .map_err(|_| cursor.settled_failure(Ext4Error::Overflow))?,
+                    input.len() - cursor.input_offset,
+                    block_size_usize,
                 )
                 .map_err(|error| cursor.settled_failure(error))?;
+                self.ordered_writeback_allocation_blocks(inode, logical, remaining_blocks)
+                    .map_err(|error| cursor.settled_failure(error))?
+            } else {
+                0
+            };
+            let admission = self.metadata_journal_for_allocation(
+                credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+                allocation_blocks,
+            );
+            // Admission may commit the preceding handle, even if a later step
+            // fails. Confirm that prefix before propagating an admission error.
+            self.settle_committed_writeback_prefix(inode, offset, block_size_usize, &mut cursor)
+                .map_err(|error| cursor.current_failure(error))?;
+            let journal = admission.map_err(|error| cursor.settled_failure(error))?;
             let mut handle = journal
                 .begin(credits)
                 .map_err(|error| cursor.settled_failure(error))?;
+            cursor.transaction = Some(handle.id());
             let result = self.writeback_ordered_metadata_transaction(
                 inode,
                 offset,
@@ -660,56 +688,61 @@ impl Ext4SbInfo {
                 &mut cursor,
                 &mut handle,
             );
-            let progress = match result {
-                Ok(progress) => progress,
-                Err(error) => {
-                    #[expect(
-                        clippy::expect_used,
-                        reason = "CG-021-no-panic-on-reachable-failure: \
-                                  complete_metadata_mutation preserves the supplied operation \
-                                  error even when transaction completion also fails"
-                    )]
-                    let error = self
-                        .complete_metadata_mutation::<()>(handle, Err(error))
-                        .expect_err("ordered writeback transaction returned an error");
-                    return Err(cursor.settled_failure(error));
-                }
-            };
-            match progress {
-                OrderedWritebackTransactionProgress::Complete => {
-                    if let Err(error) = self.complete_metadata_mutation(handle, Ok(())) {
-                        return Err(cursor.settled_failure(error));
-                    }
-                    if let Err(error) = self.release_ordered_writeback_cursor_range(
-                        inode,
-                        offset,
-                        block_size_usize,
-                        &cursor,
-                    ) {
-                        return Err(cursor.current_failure(error));
-                    }
-                    return Ok(input.len());
-                }
-                OrderedWritebackTransactionProgress::Restart => {
-                    if let Err(error) = self.complete_metadata_mutation_and_commit_with_policy(
+            let completion = match result {
+                Ok(OrderedWritebackTransactionProgress::Restart) => self
+                    .complete_metadata_mutation_and_commit_with_policy(
                         handle,
-                        Ok(()),
+                        result,
                         crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
-                    ) {
-                        return Err(cursor.settled_failure(error));
-                    }
-                    if let Err(error) = self.release_ordered_writeback_cursor_range(
-                        inode,
-                        offset,
-                        block_size_usize,
-                        &cursor,
-                    ) {
-                        return Err(cursor.current_failure(error));
-                    }
-                    cursor.settle();
-                }
+                    ),
+                _ => self.complete_metadata_mutation(handle, result),
+            };
+            // Both explicit restart and handle completion can commit. Query
+            // durable state even on error: a later failure cannot undo a commit.
+            self.settle_committed_writeback_prefix(inode, offset, block_size_usize, &mut cursor)
+                .map_err(|error| cursor.current_failure(error))?;
+            let progress = completion.map_err(|error| cursor.settled_failure(error))?;
+            if progress == OrderedWritebackTransactionProgress::Complete {
+                self.release_ordered_writeback_cursor_range(
+                    inode,
+                    offset,
+                    block_size_usize,
+                    &cursor,
+                )
+                .map_err(|error| cursor.current_failure(error))?;
+                return Ok(input.len());
             }
         }
+    }
+
+    /// Admit just the next mapping operation; execution re-admits after it.
+    fn ordered_writeback_allocation_blocks(
+        &self,
+        inode: &Ext4Inode,
+        logical: LogicalBlock,
+        remaining_blocks: u32,
+    ) -> Ext4Result<u64> {
+        let mapping = self.map_blocks(inode, logical)?;
+        let count = validate_ordered_writeback_mapping(mapping)?.min(remaining_blocks);
+        let blocks = match mapping {
+            BlockMapping::Mapped { .. } => 0,
+            BlockMapping::Unwritten { .. } => {
+                self.extent_conversion_allocation_blocks(inode, logical, BlockCount::new(count))?
+            }
+            // Physical placement is not known before allocation. A contiguous
+            // run needs at most the insertion layout for an unmerged extent;
+            // with optional preallocation disabled, conversion adds no entry.
+            BlockMapping::Hole { .. } => {
+                let count = count.min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN));
+                u64::from(count)
+                    + self.extent_insert_metadata_block_bound(
+                        inode,
+                        logical,
+                        BlockCount::new(count),
+                    )?
+            }
+        };
+        Ok(blocks + self.inode_extra_isize_allocation_blocks(inode))
     }
 
     fn ordered_writeback_range_needs_metadata(
@@ -739,6 +772,34 @@ impl Ext4SbInfo {
                 .ok_or(Ext4Error::Overflow)?;
         }
         Ok(false)
+    }
+
+    /// Confirms only prefixes whose transaction has actually committed. Closing
+    /// a handle alone leaves the cursor and delalloc reservations unchanged.
+    fn settle_committed_writeback_prefix(
+        &mut self,
+        inode: &Ext4Inode,
+        write_offset: u64,
+        block_size_usize: usize,
+        cursor: &mut OrderedWritebackCursor,
+    ) -> Ext4Result<()> {
+        let Some(transaction) = cursor.transaction else {
+            return Ok(());
+        };
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(Ext4Error::InvalidJournalTransaction)?;
+        if journal.is_committed(transaction) {
+            self.release_ordered_writeback_cursor_range(
+                inode,
+                write_offset,
+                block_size_usize,
+                cursor,
+            )?;
+            cursor.settle();
+        }
+        Ok(())
     }
 
     fn release_ordered_writeback_cursor_range(
@@ -810,9 +871,10 @@ impl Ext4SbInfo {
             self.validate_inode_timestamp_update(inode, timestamp)?;
         }
         let credits = JournalCredits::for_regular_inode_write_metadata();
-        let journal = self.metadata_journal_for_mutation(
+        let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            self.inode_extra_isize_allocation_blocks(inode),
         )?;
         let mut handle = journal.begin(credits)?;
         let result =
@@ -917,7 +979,9 @@ impl Ext4SbInfo {
                             .ok_or(Ext4Error::OutOfBounds)?,
                         block_size_usize,
                     )?;
-                    let requested = remaining_blocks.min(len.get());
+                    let requested = remaining_blocks
+                        .min(len.get())
+                        .min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN));
                     if requested == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
@@ -928,7 +992,8 @@ impl Ext4SbInfo {
                     let extra = normalized
                         .checked_sub(requested)
                         .ok_or(Ext4Error::Overflow)?
-                        .min(cursor.remaining_extra_prealloc_blocks);
+                        .min(cursor.remaining_extra_prealloc_blocks)
+                        .min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN) - requested);
                     let expected = requested.checked_add(extra).ok_or(Ext4Error::Overflow)?;
                     let request = Ext4AllocationRequest::new(
                         logical,
@@ -1004,6 +1069,17 @@ impl Ext4SbInfo {
                     handle,
                 )?;
                 return Ok(OrderedWritebackTransactionProgress::Complete);
+            }
+
+            if self.has_pending_block_frees()? {
+                let size = inode.disk_size().max(cursor.absolute_offset(offset)?);
+                self.update_regular_inode_write_metadata(
+                    inode,
+                    size,
+                    RegularWriteMetadata::SizeOnly,
+                    handle,
+                )?;
+                return Ok(OrderedWritebackTransactionProgress::Readmit);
             }
 
             let next_absolute = cursor.absolute_offset(offset)?;

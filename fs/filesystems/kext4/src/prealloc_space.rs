@@ -68,7 +68,7 @@ use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
 use crate::{
     BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock, PhysicalBlock,
-    bitmap_allocator::{BlockGroupRange, BlockRunAllocation},
+    bitmap_allocator::{BlockGroupRange, BlockRunAllocation, range_end_containing},
     error::{Ext4Error, Ext4Result},
     inode::Ext4Inode,
     jbd2::JournalHandle,
@@ -332,23 +332,6 @@ fn reserve_in_inode_map(
     PreallocInsertion::Inserted
 }
 
-/// The end bit of the range of `ranges` that covers `bit`, or `None` when no
-/// range does. One binary search suffices because
-/// [`AllocatorState::prealloc_bit_ranges_in_group`] yields the group's runs
-/// ascending by start: the scanner's protection predicate and the caller's
-/// goal advance share this single definition of the half-open shape.
-///
-/// - `ranges`: group-relative `[start_bit, end_bit)` runs, ascending.
-/// - `bit`: the bitmap bit to locate.
-pub(crate) fn range_end_containing(ranges: &[(u32, u32)], bit: u32) -> Option<u32> {
-    ranges
-        .partition_point(|&(start, _)| start <= bit)
-        .checked_sub(1)
-        .and_then(|index| ranges.get(index))
-        .filter(|&&(_, end)| bit < end)
-        .map(|&(_, end)| end)
-}
-
 /// Whether `bit` is claimed by any of the group's prealloc runs, i.e. the
 /// scanner must treat it like a system-zone block: free on the bitmap, yet
 /// not allocatable.
@@ -546,6 +529,13 @@ impl Ext4SbInfo {
                     .get()
                     .saturating_add(u64::from(allocation.block_count().get())),
             );
+            // The sampling cache includes uncommitted frees. Decide under the
+            // same allocator lock as publication and surplus registration.
+            let surplus_budget = if alloc.pending_frees.block_count() == 0 {
+                surplus_budget
+            } else {
+                0
+            };
             registered = self.register_prealloc_surplus_locked(
                 alloc,
                 inode,

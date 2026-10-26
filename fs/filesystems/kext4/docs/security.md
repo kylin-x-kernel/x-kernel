@@ -99,6 +99,28 @@ hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
 - inode sync/datasync tid 应属于 VFS runtime inode identity。当前接口尚未承载该状态，因此
   `fsync/fdatasync` 保守提交整个 running transaction 并 flush；不得以 inode number 为 key
   在 journal 中保存 mount-wide cursor，以免 inode number 复用继承旧 durability 状态。
+- 释放 bitmap 位之前，分配器必须按块组和 freeing transaction ID 登记待复用区间；
+  区间、统计与 bitmap/cache 发布归同一 allocator owner、受同一锁保护。JBD2 不保存物理
+  空间记录；文件系统胶水仅在提交持久化成功后、释放 journal 锁后通知分配器解除该事务的
+  保护。handle stop、freeze、缓存重建或失败都不能解除；无需等待 home checkpoint。
+  连续区间按组有界处理，跨段失败必须走 mutation-error abort。分配同时排除 prealloc 与
+  待复用区间；surplus 登记不得通过 bitmap-free 采样承诺不可复用块。提交失败保留记录并
+  abort，不能向后续分配开放这些块。
+- 回收阶段可共享事务，但每个因同步/额度压力提交的前缀必须保持 orphan 与剩余映射一致；
+  每个回收阶段在 handle 创建成功后独立禁止 dying inode 的 extra-isize 自动扩展，不能
+  依赖上一阶段标志，也不能在清理 xattr 后重新建立 EA block；准入失败不改变该标志。
+  运行态回收仅裁剪最右侧叶并沿路径回收空节点，不分配或重建子树；操作前失效映射缓存。
+  批次超过单事务容量时必须先有界缩批，容量判断共用 journal 契约；其他 NoSpace 或
+  提交错误不能被吞掉并当成缩批重试。
+- 有界物理空间准入只能在 mount mutation 排他下、打开 handle 前进行，不把 metadata
+  credits 当成物理块需求。空间不足可先丢弃可选预分配，再提交可解禁的 freeing transaction；
+  不得持有 active handle 等待自身提交，也不得重试已经部分发布 metadata 的 namespace 操作。
+  writeback 转换以实际叶项变化与分裂布局计树块需求，零增长操作不能为固定预算推动提交。
+  有待复用块时逐映射关闭 handle 再准入，停止 handle 本身不建立持久化边界。
+  准入或 handle completion 隐式提交成功后，必须与显式 Restart 一样确认完成前缀、
+  释放该范围预留。后续错误/abort 不得把已提交前缀重新算作未完成；失败的提交不得
+  推进前缀。完成依据来自 journal 原有事务生命周期，并遵循事务 ID 回绕规则。
+  现有 admission 失败不 abort、mutation 后失败 abort 并发布只读状态的边界不变。
 - truncate 必须在释放旧 block mapping 前强制提交 orphan + `i_disksize` transaction；恢复期
   orphan cleanup 不得与普通 transaction 混合，并须在保持 recovery evidence 的策略下同步
   完成 commit/checkpoint。

@@ -1107,3 +1107,242 @@ fn regular_file_mutation_rejects_inode_using_huge_file_accounting() {
         Ext4Error::Unsupported(UnsupportedKind::HugeFile)
     );
 }
+
+#[def_test]
+fn mapped_full_metadata_writeback_keeps_pending_frees_on_a_full_filesystem() {
+    writeback_without_growth_preserves_pending_frees(ExtentMappingState::Initialized, 1, 0, 0);
+}
+
+#[def_test]
+fn unwritten_full_conversion_keeps_pending_frees_on_a_full_filesystem() {
+    writeback_without_growth_preserves_pending_frees(ExtentMappingState::Unwritten, 1, 0, 0);
+}
+
+#[def_test]
+fn unwritten_partial_conversion_uses_spare_inline_entries_without_commit() {
+    writeback_without_growth_preserves_pending_frees(ExtentMappingState::Unwritten, 3, 1, 0);
+}
+
+#[def_test]
+fn small_hole_uses_leaf_capacity_without_committing_frees() {
+    writeback_without_growth_preserves_pending_frees(ExtentMappingState::Initialized, 1, 1, 1);
+}
+
+fn writeback_without_growth_preserves_pending_frees(
+    state: ExtentMappingState,
+    initial_blocks: u32,
+    write_block: u64,
+    reusable_blocks: u64,
+) {
+    let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    inode.disable_extra_isize_expansion();
+    let setup = JournalTransactions::new(TransactionId::new(760));
+    let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
+    let physical = allocate_contiguous_blocks(&mut filesystem, initial_blocks, &mut handle);
+    filesystem
+        .insert_extent_mapping(
+            &inode,
+            LogicalBlock::new(0),
+            physical,
+            BlockCount::new(initial_blocks),
+            state,
+            &mut handle,
+        )
+        .unwrap();
+    let mut spare = None;
+    while filesystem.free_blocks_count() > reusable_blocks {
+        spare = Some(
+            filesystem
+                .allocate_block(None, &mut handle)
+                .unwrap()
+                .block(),
+        );
+    }
+    inode.set_size((u64::from(initial_blocks).max(write_block + 1)) * TEST_BLOCK_SIZE as u64);
+    filesystem
+        .update_regular_inode_write_metadata(
+            &inode,
+            inode.size(),
+            RegularWriteMetadata::SizeOnly,
+            &mut handle,
+        )
+        .unwrap();
+    handle.stop().unwrap();
+    let commit = setup.force_commit(TransactionId::new(760)).unwrap();
+    filesystem
+        .metadata_io
+        .checkpoint_committed(&commit)
+        .unwrap();
+    setup.finish_checkpoint_for_test(&commit).unwrap();
+    install_credit_limited_journal(&mut filesystem, 761, 341, true);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(spare.unwrap(), &mut handle)
+        .unwrap();
+    let transaction = handle.id();
+    handle.stop().unwrap();
+    let flushes = device.flush_count();
+    let input = vec![0x73; TEST_BLOCK_SIZE];
+    let offset = write_block * TEST_BLOCK_SIZE as u64;
+    assert_eq!(
+        filesystem
+            .writeback_ordered_at_with_prealloc_budget(
+                &inode,
+                offset,
+                &input,
+                inode.size(),
+                crate::Ext4Timestamp::new(5700, 0),
+                Ext4SyncIntent::FullMetadata,
+                32
+            )
+            .unwrap(),
+        input.len()
+    );
+    assert_eq!(device.flush_count(), flushes);
+    assert_eq!(
+        journal.begin(JournalCredits::new(0)).unwrap().id(),
+        transaction
+    );
+    assert_eq!(filesystem.pending_checkpoint_count(), 0);
+    assert!(filesystem.has_pending_block_frees().unwrap());
+    filesystem
+        .sync_inode(&inode, Ext4SyncIntent::FullMetadata)
+        .unwrap();
+    assert!(!filesystem.has_pending_block_frees().unwrap());
+    let mut output = vec![0; TEST_BLOCK_SIZE];
+    assert_eq!(
+        filesystem.read_at(&inode, offset, &mut output).unwrap(),
+        input.len()
+    );
+    assert_eq!(output, input);
+}
+
+#[def_test]
+fn readmission_credit_commit_confirms_prefix_before_later_io_failure() {
+    readmission_failure_preserves_prefix(78, false, false, 5);
+}
+
+#[def_test]
+fn readmission_space_commit_confirms_prefix_before_later_io_failure() {
+    readmission_failure_preserves_prefix(1000, true, false, 5);
+}
+
+#[def_test]
+fn readmission_without_commit_does_not_confirm_prefix() {
+    readmission_failure_preserves_prefix(1000, false, false, 0);
+}
+
+#[def_test]
+fn failed_readmission_commit_does_not_confirm_prefix() {
+    readmission_failure_preserves_prefix(78, false, true, 0);
+}
+
+fn readmission_failure_preserves_prefix(
+    credits: u32,
+    fill_space: bool,
+    fail_commit: bool,
+    completed_blocks: usize,
+) {
+    let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    inode.disable_extra_isize_expansion();
+    let setup = JournalTransactions::new(TransactionId::new(770));
+    let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
+    let physical = filesystem
+        .allocate_block(Some(crate::FilesystemBlock::new(6)), &mut handle)
+        .unwrap()
+        .block();
+    assert_eq!(physical, PhysicalBlock::new(6));
+    filesystem
+        .insert_extent_mapping(
+            &inode,
+            LogicalBlock::new(4),
+            physical,
+            BlockCount::new(1),
+            ExtentMappingState::Initialized,
+            &mut handle,
+        )
+        .unwrap();
+    let spare = filesystem
+        .allocate_block(Some(crate::FilesystemBlock::new(7)), &mut handle)
+        .unwrap()
+        .block();
+    assert_eq!(spare, PhysicalBlock::new(7));
+    if fill_space {
+        while filesystem.free_blocks_count() > 4 {
+            filesystem
+                .allocate_block(Some(crate::FilesystemBlock::new(12)), &mut handle)
+                .unwrap();
+        }
+    }
+    inode.set_size((6 * TEST_BLOCK_SIZE) as u64);
+    filesystem
+        .update_regular_inode_write_metadata(
+            &inode,
+            inode.size(),
+            RegularWriteMetadata::SizeOnly,
+            &mut handle,
+        )
+        .unwrap();
+    handle.stop().unwrap();
+    let commit = setup.force_commit(TransactionId::new(770)).unwrap();
+    filesystem
+        .metadata_io
+        .checkpoint_committed(&commit)
+        .unwrap();
+    setup.finish_checkpoint_for_test(&commit).unwrap();
+    install_credit_limited_journal(&mut filesystem, 771, credits, true);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(spare, &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    filesystem
+        .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
+        .unwrap();
+    filesystem
+        .reserve_delalloc_range(&inode, LogicalBlock::new(5), 1)
+        .unwrap();
+    let flushes = device.flush_count();
+    if fail_commit {
+        device.fail_flush_at(flushes + 1);
+    } else {
+        // The initial hole occupies 8..12. Reuse of block 7 proves commit;
+        // without a commit the last hole must skip it and allocate block 12.
+        device.fail_write_block(if completed_blocks == 0 {
+            PhysicalBlock::new(12)
+        } else {
+            spare
+        });
+    }
+    let failure = filesystem
+        .writeback_ordered_at_with_prealloc_budget(
+            &inode,
+            0,
+            &vec![0x6b; 6 * TEST_BLOCK_SIZE],
+            inode.size(),
+            crate::Ext4Timestamp::new(5710, 0),
+            Ext4SyncIntent::FullMetadata,
+            0,
+        )
+        .unwrap_err();
+    assert_eq!(failure.error(), Ext4Error::Device(DriverError::Io));
+    assert_eq!(
+        failure.completed_bytes(),
+        completed_blocks * TEST_BLOCK_SIZE
+    );
+    assert_eq!(
+        filesystem.delalloc_reserved_blocks(),
+        if completed_blocks == 0 { 5 } else { 1 }
+    );
+    assert_eq!(
+        filesystem.pending_checkpoint_count() > 0,
+        completed_blocks != 0
+    );
+    if !fail_commit && completed_blocks == 0 {
+        assert_eq!(device.flush_count(), flushes);
+    }
+}

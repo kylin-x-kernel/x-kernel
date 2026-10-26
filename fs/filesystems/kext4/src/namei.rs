@@ -24,7 +24,7 @@ use crate::{
 
 const EXT4_LINK_MAX: u16 = 65_000;
 
-/// Credit total for the Phase C eviction finish transaction.
+/// Credit total for the Phase C eviction finish handle.
 ///
 /// `update_unlinked_inode_metadata` (1) + `remove_orphan` (2) +
 /// `release_allocated_inode` (8).
@@ -229,10 +229,11 @@ impl Ext4SbInfo {
             return Err(Ext4Error::AlreadyExists);
         }
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.ensure_namespace_insert_capacity(parent, name, 0)?;
+        let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
         let credits = Ext4Credits::create(self, parent)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_regular_file_in_transaction(
             parent,
@@ -266,10 +267,11 @@ impl Ext4SbInfo {
             .checked_add(1)
             .filter(|links| *links <= EXT4_LINK_MAX)
             .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
-        self.ensure_namespace_insert_capacity(parent, name, 1)?;
+        let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
         let credits = Ext4Credits::mkdir(self, parent)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_directory_in_transaction(
             parent,
@@ -345,10 +347,11 @@ impl Ext4SbInfo {
             return Err(Ext4Error::AlreadyExists);
         }
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.ensure_namespace_insert_capacity(parent, name, 1)?;
+        let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 1)?;
 
         let credits = Ext4Credits::block_mapped_symlink(self, parent)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_block_mapped_symlink_in_transaction(
             parent,
@@ -402,10 +405,11 @@ impl Ext4SbInfo {
         self.validate_inode_timestamp_update(parent, timestamp)?;
         self.validate_inode_timestamp_update(target, timestamp)?;
         let file_type = directory_file_type_for_inode_kind(target.kind());
-        self.ensure_namespace_insert_capacity(parent, name, 0)?;
+        let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
         let credits = Ext4Credits::link(self, parent)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent, target])?;
         let mut handle = journal.begin(credits)?;
         let result =
             self.link_in_transaction(parent, name, target, file_type, timestamp, &mut handle);
@@ -443,7 +447,9 @@ impl Ext4SbInfo {
         self.validate_inode_timestamp_update(child, timestamp)?;
 
         let credits = Ext4Credits::unlink(self, parent, child);
-        let journal = self.namei_metadata_journal(credits)?;
+        let required_blocks = 0;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent, child])?;
         let mut handle = journal.begin(credits)?;
         let result = self.unlink_in_transaction(parent, name, child, timestamp, &mut handle);
         self.complete_metadata_mutation(handle, result)
@@ -481,7 +487,9 @@ impl Ext4SbInfo {
         self.validate_inode_timestamp_update(child, timestamp)?;
 
         let credits = Ext4Credits::rmdir(self, parent, child);
-        let journal = self.namei_metadata_journal(credits)?;
+        let required_blocks = 0;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent, child])?;
         let mut handle = journal.begin(credits)?;
         let result =
             self.remove_directory_in_transaction(parent, name, child, timestamp, &mut handle);
@@ -557,9 +565,11 @@ impl Ext4SbInfo {
                 self.ensure_unlinked_inode_eviction_supported(target)?;
             }
         }
-        if replaced.is_none() {
-            self.ensure_namespace_insert_capacity(target_parent, target_name, 0)?;
-        }
+        let required_blocks = if replaced.is_none() {
+            self.ensure_namespace_insert_capacity(target_parent, target_name, 0)?
+        } else {
+            0
+        };
         if moved.kind() == InodeKind::Directory
             && !same_parent
             && replaced.is_none_or(|target| target.kind() != InodeKind::Directory)
@@ -571,7 +581,13 @@ impl Ext4SbInfo {
                 .ok_or(Ext4Error::Unsupported(UnsupportedKind::LinkCountLimit))?;
         }
         let credits = Ext4Credits::rename(self, source_parent, target_parent, moved, replaced)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal = self.namei_metadata_journal_for_allocation(
+            credits,
+            required_blocks,
+            [source_parent, target_parent, moved]
+                .into_iter()
+                .chain(replaced),
+        )?;
         let mut handle = journal.begin(credits)?;
         let result = self.rename_in_transaction(
             source_parent,
@@ -663,10 +679,11 @@ impl Ext4SbInfo {
             return Err(Ext4Error::AlreadyExists);
         }
         self.validate_inode_timestamp_update(parent, timestamp)?;
-        self.ensure_namespace_insert_capacity(parent, name, 0)?;
+        let required_blocks = self.ensure_namespace_insert_capacity(parent, name, 0)?;
 
         let credits = Ext4Credits::create(self, parent)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal =
+            self.namei_metadata_journal_for_allocation(credits, required_blocks, [parent])?;
         let mut handle = journal.begin(credits)?;
         let result = self.create_initialized_child_in_transaction(
             parent,
@@ -937,9 +954,9 @@ impl Ext4SbInfo {
 
     /// Phase A — prepare eviction.
     ///
-    /// In a single journal transaction:
+    /// In a bounded handle that may share the running transaction:
     /// 1. Read and verify the zero-link inode.
-    /// 2. `add_namespace_orphan` — persist the orphan link.
+    /// 2. `add_namespace_orphan` — stage the orphan link.
     /// 3. `release_external_xattr_block_for_eviction` — free the xattr block.
     ///
     /// The extent tree is **not** truncated in this phase.  It remains on disk
@@ -947,8 +964,10 @@ impl Ext4SbInfo {
     /// Phase B completes, the orphan inode recovery will find the extent tree
     /// and finish the truncation.
     ///
-    /// After this call the inode is orphaned.  The caller should release the
-    /// `KExt4Core` lock before calling Phase B.
+    /// Phase boundaries do not force durability; any committed prefix retains
+    /// the orphan and the remaining mappings needed for recovery.
+    /// After this call the inode is orphaned in the running transaction. The
+    /// caller should release the `KExt4Core` lock before calling Phase B.
     pub(crate) fn eviction_prepare(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
         if inode.links_count() != 0 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInode));
@@ -956,14 +975,21 @@ impl Ext4SbInfo {
         self.ensure_unlinked_inode_eviction_supported(inode)?;
 
         let credits = Ext4Credits::eviction_prepare(inode)?;
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal = self.metadata_journal_without_allocation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
         let mut handle = journal.begin(credits)?;
+        // VFS has removed the last live reference before eviction; this inode
+        // cannot return to fd operations, even on failure. Suppress optional EA
+        // growth only after admission succeeds, before publishing any cleanup.
+        inode.disable_extra_isize_expansion();
         let result = (|| -> Ext4Result<()> {
             self.add_namespace_orphan(inode, &mut handle)?;
             self.release_external_xattr_block_for_eviction(inode, &mut handle)
         })();
 
-        self.complete_metadata_mutation_and_commit_with_policy(
+        self.complete_metadata_mutation_with_policy(
             handle,
             result,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -974,14 +1000,12 @@ impl Ext4SbInfo {
     ///
     /// Each batch removes at most `max_blocks` physical blocks' worth of
     /// extent mappings from the tail of the file and releases the underlying
-    /// physical blocks in a single atomic journal transaction.  This approach
-    /// is crash-safe: the extent tree on disk always reflects exactly the
-    /// blocks that have not yet been freed.
+    /// physical blocks in a bounded handle. Freed blocks remain withheld until
+    /// commit. The durable extent tree always reflects exactly the blocks that
+    /// have not yet been durably freed.
     ///
     /// Returns `(freed, done)` where:
-    /// - `freed` is the number of blocks actually released (best-effort
-    ///   upper bound; the actual count may be slightly higher if an extent
-    ///   crosses the `max_blocks` boundary),
+    /// - `freed` is the number of data blocks released, at most `max_blocks`,
     /// - `done` is `true` when the extent tree is fully empty.
     ///
     /// The caller should release the `KExt4Core` lock between batches.
@@ -995,67 +1019,38 @@ impl Ext4SbInfo {
             return Ok((0, true));
         }
 
-        // Collect current extent tree to determine how much to release.
-        let collected = self.collect_extent_tree(inode)?;
-
-        // From the tail, accumulate at most `max_blocks` physical blocks.
-        let mut physical_count = 0u32;
-        let mut keep_count = collected.extents.len();
-        for i in (0..collected.extents.len()).rev() {
-            let extent_blocks = collected.extents[i].len;
-            if physical_count.saturating_add(extent_blocks) > max_blocks {
-                break;
+        let policy = crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint;
+        let journal = self.metadata_journal()?;
+        let mut batch_limit = max_blocks;
+        let plan = loop {
+            let plan = self.plan_extent_tail_release(inode, batch_limit)?;
+            if plan.freed == 0 {
+                return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
             }
-            physical_count += extent_blocks;
-            keep_count = i;
-        }
-
-        // Determine the truncation point.
-        let (new_blocks, estimated_freed) = if keep_count == collected.extents.len() {
-            // Even the last extent alone exceeds max_blocks.  Truncate a
-            // portion of it by computing a logical block inside the extent.
-            let last = collected
-                .extents
-                .last()
-                .copied()
-                .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
-            let release_len = max_blocks.min(last.len);
-            let keep_logical = last
-                .logical
-                .checked_add(last.len.saturating_sub(release_len))
-                .ok_or(Ext4Error::Overflow)?;
-            (LogicalBlock::new(u64::from(keep_logical)), release_len)
-        } else if keep_count == 0 {
-            // All remaining extents fit in this batch.
-            (LogicalBlock::new(0), physical_count)
-        } else {
-            // Truncate from the first extent in the release batch.
-            let start = collected.extents[keep_count].logical;
-            (LogicalBlock::new(u64::from(start)), physical_count)
+            if journal.can_fit_handle(JournalCredits::new(plan.credits)) {
+                break plan;
+            }
+            // Capacity is a planning constraint, not an allocator/commit error.
+            // A smaller batch cannot help once even one block exceeds it.
+            if batch_limit <= 1 {
+                return Err(Ext4Error::NoSpace);
+            }
+            batch_limit /= 2;
         };
-
-        // Get conservative credits for this truncation scope, reusing the tree
-        // already collected above to avoid a second full tree walk.
-        let credits = self.extent_truncate_metadata_credits_from(inode, &collected, new_blocks)?;
-        // Fast check above confirmed there are data blocks, so a zero-credit
-        // result means the extent tree is inconsistent with the inode block
-        // count — refuse to proceed.
-        if credits == 0 {
-            return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
-        }
-
-        let credits = JournalCredits::new(credits);
-        let journal = self.namei_metadata_journal(credits)?;
+        let credits = JournalCredits::new(plan.credits);
+        let journal = self.metadata_journal_without_allocation(credits, policy)?;
         let mut jh = journal.begin(credits)?;
+        // Enforce this phase's no-EA-allocation premise locally, rather than
+        // relying on the policy left by eviction_prepare.
+        inode.disable_extra_isize_expansion();
 
         let result = (|| -> Ext4Result<(u32, bool)> {
-            self.truncate_extent_mappings_with(inode, &collected, new_blocks, &mut jh)?;
+            let freed = self.release_extent_tail(inode, plan, &mut jh)?;
             let done = self.unlinked_inode_data_blocks(inode)? == 0;
-            let freed = estimated_freed;
             Ok((freed, done))
         })();
 
-        self.complete_metadata_mutation_and_commit_with_policy(
+        self.complete_metadata_mutation_with_policy(
             jh,
             result,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -1064,7 +1059,7 @@ impl Ext4SbInfo {
 
     /// Phase C — finish eviction.
     ///
-    /// In a single journal transaction:
+    /// In a bounded handle that may share the running transaction:
     /// 1. `update_unlinked_inode_metadata` — update ctime (i_size left as-is;
     ///    orphan recovery will handle it on crash).
     /// 2. `remove_orphan` — remove from the orphan list.
@@ -1080,8 +1075,14 @@ impl Ext4SbInfo {
         }
 
         let credits = JournalCredits::new(EVICTION_FINISH_CREDITS);
-        let journal = self.namei_metadata_journal(credits)?;
+        let journal = self.metadata_journal_without_allocation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )?;
         let mut jh = journal.begin(credits)?;
+        // Enforce this phase's no-EA-allocation premise locally, rather than
+        // relying on the policy left by eviction_prepare.
+        inode.disable_extra_isize_expansion();
 
         let result = (|| -> Ext4Result<()> {
             self.update_unlinked_inode_metadata(inode, None, timestamp, &mut jh)?;
@@ -1090,7 +1091,7 @@ impl Ext4SbInfo {
             Ok(())
         })();
 
-        self.complete_metadata_mutation_and_commit_with_policy(
+        self.complete_metadata_mutation_with_policy(
             jh,
             result,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
@@ -1409,7 +1410,7 @@ impl Ext4SbInfo {
         directory: &Ext4Inode,
         name: &[u8],
         additional_blocks: u64,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<u64> {
         let required = self
             .directory_insert_required_blocks(directory, name)?
             .checked_add(additional_blocks)
@@ -1417,7 +1418,7 @@ impl Ext4SbInfo {
         if required > self.free_blocks_count() {
             return Err(Ext4Error::NoSpace);
         }
-        Ok(())
+        Ok(required)
     }
 
     // Capacity checks keep ordinary allocation failures ahead of metadata
@@ -2614,13 +2615,22 @@ impl Ext4SbInfo {
         )
     }
 
-    fn namei_metadata_journal(
+    fn namei_metadata_journal_for_allocation<'a>(
         &mut self,
         credits: JournalCredits,
+        required_blocks: u64,
+        inodes: impl IntoIterator<Item = &'a Ext4Inode>,
     ) -> Ext4Result<Arc<MountedJournal>> {
-        self.namei_metadata_journal_with_policy(
+        let mut required = required_blocks;
+        for inode in inodes {
+            required = required
+                .checked_add(self.inode_extra_isize_allocation_blocks(inode))
+                .ok_or(Ext4Error::Overflow)?;
+        }
+        self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            required,
         )
     }
 

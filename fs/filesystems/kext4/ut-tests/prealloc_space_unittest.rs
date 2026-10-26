@@ -1231,3 +1231,33 @@ fn discard_preallocs_returns_zero_when_no_spaces_exist() {
     let freed = filesystem.discard_preallocs_for_space(100);
     assert_eq!(freed, 0);
 }
+
+#[def_test]
+fn birth_does_not_promise_uncommitted_freed_surplus() {
+    let (mut filesystem, _) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    let journal = JournalTransactions::new(TransactionId::new(300));
+    let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+    let freed = filesystem
+        .allocate_block(Some(FilesystemBlock::new(10)), &mut handle)
+        .unwrap();
+    filesystem
+        .release_allocated_block(freed.block(), &mut handle)
+        .unwrap();
+    let request = Ext4AllocationRequest::new(
+        LogicalBlock::new(0),
+        Some(FilesystemBlock::new(6)),
+        BlockCount::new(4),
+        BlockCount::new(4),
+        Ext4AllocationFlags::EXACT,
+        BlockGroupNumber::new(0),
+    )
+    .unwrap();
+    let (run, registered) = filesystem
+        .allocate_blocks_for_write_with_prealloc(request, &inode, 8, &mut handle)
+        .unwrap();
+    assert_eq!(run.physical_start(), PhysicalBlock::new(6));
+    assert_eq!(registered, 0);
+    assert_eq!(prealloc_count(&inode), 0);
+    assert_eq!(prealloc_twin_count(&filesystem), 0);
+}

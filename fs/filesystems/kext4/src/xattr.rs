@@ -340,9 +340,10 @@ impl Ext4SbInfo {
         else {
             return Ok(());
         };
-        let journal = self.metadata_journal_for_mutation(
+        let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            u64::from(storage.external_block_action == ExternalXattrBlockAction::Allocate),
         )?;
         let mut handle = journal.begin(credits)?;
         let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, storage);
@@ -367,9 +368,10 @@ impl Ext4SbInfo {
         else {
             return Ok(());
         };
-        let journal = self.metadata_journal_for_mutation(
+        let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            u64::from(storage.external_block_action == ExternalXattrBlockAction::Allocate),
         )?;
         let mut handle = journal.begin(credits)?;
         let result = self.update_xattr_in_transaction(inode, timestamp, &mut handle, storage);

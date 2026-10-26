@@ -4,10 +4,12 @@
 
 //! Block allocator entry points for the mounted ext4 filesystem.
 
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 use crate::{
-    bitmap_allocator::{self, BlockAllocation, BlockGroupRange, BlockRunAllocation},
+    bitmap_allocator::{
+        self, BlockAllocation, BlockGroupRange, BlockRunAllocation, range_end_containing,
+    },
     disk::{
         GroupMutableState, checksum, decrement_group_free_blocks_count,
         increment_group_free_blocks_count, set_group_free_blocks_count, superblock,
@@ -15,7 +17,7 @@ use crate::{
     },
     error::{CorruptKind, Ext4Error, Ext4Result},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest, ensure_block_group_free_cache_inner},
-    prealloc_space::{bit_in_ranges, range_end_containing},
+    prealloc_space::bit_in_ranges,
     superblock::{
         AllocatorState, Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits,
         ensure_metadata_credits, ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, lock,
@@ -24,11 +26,18 @@ use crate::{
     types::{BlockCount, BlockGroupNumber, FilesystemBlock, PhysicalBlock},
 };
 
+pub(crate) mod pending_free;
+
 const BLOCK_ALLOCATOR_METADATA_CREDITS: u32 = 3;
 /// Allocator metadata plus create access to one new metadata block.
 pub(crate) const BLOCK_ALLOCATION_METADATA_CREDITS: u32 = BLOCK_ALLOCATOR_METADATA_CREDITS + 1;
-// Release updates allocator metadata and records one revoke, without creation.
-const METADATA_BLOCK_RELEASE_CREDITS: u32 = BLOCK_ALLOCATOR_METADATA_CREDITS + 1;
+/// How freed blocks participate in metadata checkpoint protection.
+#[derive(Clone, Copy)]
+pub(crate) enum BlockReleaseKind {
+    Data,
+    Metadata,
+    MetadataWithoutRevoke,
+}
 
 impl Ext4SbInfo {
     #[allow(dead_code)]
@@ -213,14 +222,10 @@ impl Ext4SbInfo {
         } else {
             None
         };
-        // Prealloc spaces are not marked in the bitmap, so the free-extent
-        // cache (which mirrors the bitmap) does not see them.  Snapshot the
-        // group's prealloc ranges once under the allocator lock and reject
-        // those bits in the low-level scanner — the role Linux's buddy marks
-        // play.  The cache stays pure because spaces come and go after cache
-        // construction; `mark_allocated` would trip on blocks the cache never
-        // knew were occupied.
-        let prealloc_ranges = alloc.prealloc_bit_ranges_in_group(range);
+        // The free-extent cache mirrors the bitmap, so it cannot see either
+        // prealloc spaces or uncommitted frees. Snapshot both under the
+        // allocator lock instead of making protection depend on cache lifetime.
+        let excluded_ranges = Self::allocation_exclusion_ranges(alloc, range)?;
         let suggested_goal = ensure_block_group_free_cache_inner(
             alloc,
             group,
@@ -233,24 +238,23 @@ impl Ext4SbInfo {
             }),
             |block| self.is_system_zone_block(block),
         )?
-        // A cache-suggested goal may fall inside a prealloc range that the
+        // A cache-suggested goal may fall inside an excluded range that the
         // cache cannot see; drop the hint rather than pointing the scanner at
         // a block it must immediately skip.
         .filter(|&g| {
             range
                 .bit_index(g)
-                .is_ok_and(|bit| !bit_in_ranges(&prealloc_ranges, bit))
+                .is_ok_and(|bit| !bit_in_ranges(&excluded_ranges, bit))
         });
         // The caller's own goal often lands on a preallocated range start (a
         // writeback goal is the previous run's physical end, which is exactly
         // where this inode's sampler files a space). Advance it past the
-        // range - or drop it when the range ends at the group's edge - so the
-        // scanner does not walk the whole range bit by bit: a goal is
-        // advisory, walking is not. A goal outside this group keeps its
-        // existing meaning (the scanner wraps to zero on its own).
+        // range, or drop it when the range ends at the group's edge. The
+        // scanner also skips exclusions reached after this initial hint.
+        // A goal outside this group retains the default scan from zero.
         let scan_goal = suggested_goal.or(goal).and_then(|goal| {
             let bit = range.bit_index(goal).ok()?;
-            match range_end_containing(&prealloc_ranges, bit) {
+            match range_end_containing(&excluded_ranges, bit) {
                 Some(end_bit) => range.block_at(end_bit).ok(),
                 None => Some(goal),
             }
@@ -261,21 +265,16 @@ impl Ext4SbInfo {
             scan_goal,
             min_len,
             expected_len,
-            |block| {
-                self.is_system_zone_block(block)
-                    || range
-                        .bit_index(block)
-                        .is_ok_and(|bit| bit_in_ranges(&prealloc_ranges, bit))
-            },
+            &excluded_ranges,
+            |block| self.is_system_zone_block(block),
         ) {
             Ok(allocation) => allocation,
-            Err(Ext4Error::NoSpace) if min_len.get() == 1 && prealloc_ranges.is_empty() => {
+            Err(Ext4Error::NoSpace) if min_len.get() == 1 && excluded_ranges.is_empty() => {
                 // Only system zones can reject a clear-bit candidate (their
                 // bits are always set in a valid bitmap, so is_protected is
-                // unreachable for them).  Prealloc spaces, in contrast, are
-                // clear in the bitmap and rejected by is_protected — a
-                // one-block request that finds no acceptable bit is ordinary
-                // ENOSPC when prealloc spaces cover every free block.
+                // unreachable for them). Withheld frees and prealloc spaces
+                // are clear but unavailable; exhausting those is ordinary
+                // ENOSPC rather than bitmap corruption.
                 return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
             }
             Err(Ext4Error::NoSpace) => return Err(Ext4Error::NoSpace),
@@ -299,9 +298,9 @@ impl Ext4SbInfo {
                     !self.is_system_zone_block(block)
                         && range
                             .bit_index(block)
-                            .is_ok_and(|bit| !bit_in_ranges(&prealloc_ranges, bit))
+                            .is_ok_and(|bit| !bit_in_ranges(&excluded_ranges, bit))
                 })),
-            "block allocator handed out system-zone or preallocated blocks"
+            "block allocator handed out system-zone, preallocated or uncommitted freed blocks"
         );
 
         let mut descriptor_bytes = self
@@ -394,7 +393,7 @@ impl Ext4SbInfo {
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, false, false)
+        self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Data)
     }
 
     pub(crate) fn release_allocated_metadata_block(
@@ -402,7 +401,7 @@ impl Ext4SbInfo {
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, true, true)
+        self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Metadata)
     }
 
     pub(crate) fn release_allocated_metadata_block_without_revoke(
@@ -410,15 +409,47 @@ impl Ext4SbInfo {
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
-        self.release_allocated_block_inner(block, handle, false, true)
+        self.release_allocated_block_inner(
+            block,
+            1,
+            handle,
+            BlockReleaseKind::MetadataWithoutRevoke,
+        )
+    }
+
+    /// Releases a contiguous extent in bounded group-local bitmap updates.
+    /// Failure after a completed group has joined metadata and must abort through
+    /// the caller's mutation completion, like every other partial metadata edit.
+    pub(crate) fn release_allocated_block_range(
+        &self,
+        first: PhysicalBlock,
+        count: BlockCount,
+        kind: BlockReleaseKind,
+        handle: &mut crate::jbd2::JournalHandle<'_>,
+    ) -> Ext4Result<()> {
+        let end = first
+            .get()
+            .checked_add(u64::from(count.get()))
+            .ok_or(Ext4Error::Overflow)?;
+        let mut next = first.get();
+        while next < end {
+            let block = FilesystemBlock::new(next);
+            let range = self.block_group_range(self.block_group_for_block(block)?)?;
+            let count = (end - next)
+                .min(u64::from(range.block_count() - range.bit_index(block)?))
+                .min(256) as u32;
+            self.release_allocated_block_inner(PhysicalBlock::new(next), count, handle, kind)?;
+            next += u64::from(count);
+        }
+        Ok(())
     }
 
     fn release_allocated_block_inner(
         &self,
         block: PhysicalBlock,
+        count: u32,
         handle: &mut crate::jbd2::JournalHandle<'_>,
-        revoke_metadata: bool,
-        forget_metadata: bool,
+        kind: BlockReleaseKind,
     ) -> Ext4Result<BlockAllocation> {
         let block = FilesystemBlock::new(block.get());
         // Linux ext4_sb_block_valid() lets the owning inode map its own
@@ -428,14 +459,19 @@ impl Ext4SbInfo {
         // handed out again by the allocator as free, corrupting the bitmap.
         // Releases of any system-zone block are therefore rejected
         // unconditionally, matching Linux.
-        if self.is_system_zone_block(block) {
+        let end = block
+            .get()
+            .checked_add(u64::from(count))
+            .ok_or(Ext4Error::Overflow)?;
+        if (block.get()..end).any(|block| self.is_system_zone_block(FilesystemBlock::new(block))) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap));
         }
-        let required_credits = if revoke_metadata {
-            METADATA_BLOCK_RELEASE_CREDITS
-        } else {
-            BLOCK_ALLOCATOR_METADATA_CREDITS
-        };
+        let required_credits = BLOCK_ALLOCATOR_METADATA_CREDITS
+            + if matches!(kind, BlockReleaseKind::Metadata) {
+                count
+            } else {
+                0
+            };
         ensure_metadata_credits(handle, required_credits)?;
         let group = self.block_group_for_block(block)?;
         let group_index = usize::try_from(group.get()).map_err(|_| Ext4Error::Overflow)?;
@@ -494,19 +530,14 @@ impl Ext4SbInfo {
             block,
             |candidate| self.is_system_zone_block(candidate) && candidate != block,
         )?;
-        // Linux asserts block identity on the free path with BUG_ON; here
-        // the bitmap primitive guarantees it, so only the cleared bit is
-        // worth re-checking.
-        debug_assert_eq!(
-            released.block().get(),
-            block.get(),
-            "freed a different block"
-        );
-        debug_assert_eq!(
-            crate::superblock::is_ext4_bitmap_bit_set(&bitmap_bytes, released.bitmap_bit()),
-            Ok(false),
-            "released block {block} is still marked allocated in the bitmap"
-        );
+        for next in block.get() + 1..end {
+            bitmap_allocator::release_block_to_bitmap(
+                &mut bitmap_bytes,
+                range,
+                FilesystemBlock::new(next),
+                |candidate| self.is_system_zone_block(candidate),
+            )?;
+        }
 
         let mut descriptor_bytes = self
             .read_metadata_block(descriptor_block)?
@@ -521,7 +552,7 @@ impl Ext4SbInfo {
             self.superblock().checksum_seed(),
             self.superblock().features().has_64bit(),
             self.superblock().features().has_metadata_checksum(),
-            1,
+            count,
         )?;
         let updated_descriptor = update_group_block_bitmap_metadata(
             descriptor_slice,
@@ -543,14 +574,14 @@ impl Ext4SbInfo {
         let superblock_slice = superblock_bytes
             .get_mut(superblock_offset..superblock_offset + superblock_len)
             .ok_or(Ext4Error::OutOfBounds)?;
-        let updated_superblock = superblock::increment_free_blocks_count(superblock_slice, 1)?;
+        let updated_superblock = superblock::increment_free_blocks_count(superblock_slice, count)?;
         let mut updated_free_cache = alloc
             .block_free_extent_caches
             .get(group_index)
             .and_then(Option::as_ref)
             .cloned()
             .ok_or(Ext4Error::OutOfBounds)?;
-        updated_free_cache.mark_free(released.bitmap_bit())?;
+        updated_free_cache.mark_free_run(released.bitmap_bit(), count)?;
 
         // Publication stays inside the allocator lock: the bitmap bytes are
         // the bit-level source of truth, so releasing the lock before the
@@ -559,12 +590,24 @@ impl Ext4SbInfo {
         let bitmap_access = self.metadata_io.write_access(bitmap_block, handle)?;
         let descriptor_access = self.metadata_io.write_access(descriptor_block, handle)?;
         let superblock_access = self.metadata_io.write_access(superblock_block, handle)?;
-        if revoke_metadata {
-            self.metadata_io.forget_metadata_block(block, handle)?;
-        } else if forget_metadata {
-            self.metadata_io
-                .forget_metadata_block_without_revoke(block, handle)?;
+        for next in block.get()..end {
+            let block = FilesystemBlock::new(next);
+            match kind {
+                BlockReleaseKind::Metadata => {
+                    self.metadata_io.forget_metadata_block(block, handle)?
+                }
+                BlockReleaseKind::MetadataWithoutRevoke => self
+                    .metadata_io
+                    .forget_metadata_block_without_revoke(block, handle)?,
+                BlockReleaseKind::Data => {}
+            }
         }
+        // Until the freeing bitmap is durable, old on-disk extent mappings
+        // still own this block. A new data write must not overwrite them even
+        // when the current bitmap and free-extent cache already show it free.
+        alloc
+            .pending_frees
+            .insert(group, handle.id(), block, FilesystemBlock::new(end - 1))?;
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
@@ -572,6 +615,35 @@ impl Ext4SbInfo {
         alloc.groups[group_index] = GroupMutableState::from_descriptor(&updated_descriptor);
         alloc.free_blocks_count = updated_superblock.on_disk_free_blocks_count();
         Ok(released)
+    }
+
+    fn allocation_exclusion_ranges(
+        alloc: &AllocatorState,
+        range: BlockGroupRange,
+    ) -> Ext4Result<Vec<(u32, u32)>> {
+        let mut ranges = alloc.prealloc_bit_ranges_in_group(range);
+        let mut pending = Vec::new();
+        alloc.pending_frees.append_ranges(
+            range.group(),
+            range.block_at(0)?,
+            range.block_at(range.block_count() - 1)?,
+            &mut pending,
+        );
+        for (first, last) in pending {
+            ranges.push((range.bit_index(first)?, range.bit_index(last)? + 1));
+        }
+        ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some(previous) = merged.last_mut()
+                && start <= previous.1
+            {
+                previous.1 = previous.1.max(end);
+                continue;
+            }
+            merged.push((start, end));
+        }
+        Ok(merged)
     }
 
     pub(crate) fn prepare_block_bitmap_for_group(

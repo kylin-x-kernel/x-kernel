@@ -507,6 +507,65 @@ flush revoke feature，后续释放路径必须写 revoke record。
 truncate/remove 会在任何 metadata 写入前回退全树重写。局部 split 会均衡新旧节点，避免
 `capacity + 1` 条目形成“满节点 + 单条节点”并在后续插入时反复分配 metadata block。
 
+### 回收事务合批与物理空间准入
+
+运行态 zero-link eviction 的 prepare、release batch、finish 各自仍使用有界 handle，
+但阶段结束不再固定强制 commit。它们可与 namespace 修改共享 running transaction；
+显式同步、credits 或日志空间压力仍会推动提交。每个已提交前缀保留 orphan 与剩余 extent，
+恢复流程仍可完成回收。各阶段在准入和 handle 创建成功后，分别禁止 dying inode 再做
+extra-isize 扩展，避免清理 EA 后因后续 extent/inode 更新重新分配 EA block，也不依赖
+前一阶段留下的运行态标志。prepare 准入失败不改变该标志。VFS 最后引用释放才进入
+运行态 eviction，不能把这些失败路径当作仍有打开 fd 的普通 inode 操作。恢复期强制
+commit/checkpoint 以及普通 truncate 先提交 orphan/缩小后的磁盘大小的边界不变。
+
+`AllocatorState::pending_frees` 持有待复用物理区间和块数，按块组查询、按事务 ID
+解除保护。相邻区间在同组、同事务内合并；事务反向索引使完成通知只访问该事务涉及的组。
+分配时只查询分配器状态，不再经 journal/transaction 锁复制全局物理区间。
+JBD2 仅管理事务生命周期；文件系统 journal 胶水在持久化成功、进入 checkpoint 后，
+释放 journal 锁再通知分配器。停止 handle、freeze、缓存回收/重建以及提交失败均不能解除
+保护，且不必等待 home checkpoint。已提交日志和 revoke 协议保证恢复顺序。
+
+连续物理区间由分配器按组、每段最多 256 块释放：验证 bitmap 后更新本地 bitmap、
+free-extent cache、组计数及超级块计数，每段登记一次待复用记录并发布 metadata。
+metadata 数据块仍逐块 forget/revoke；`JournalHandle` 不保存物理释放区间或释放算法缓存。
+跨段失败必须走 mutation-error abort，不能把已部分发布的释放当成普通准入失败。
+存在待复用块时，surplus 登记在分配器锁内暂停，避免将 bitmap-free 但不可复用的块承诺出去。
+
+运行态 eviction 每批只读取最右侧叶及其路径，最多裁剪调用方给定的数据块数。
+保留叶时原地改写，空叶及空父节点沿路径回收；不收集整文件 extent，不重建剩余子树，
+也不分配新树块。计划包含执行所用的叶内容和额度；先用 journal 的单 handle 容量判断
+检查批次，超限则减半重规划，最小批次仍超限才返回 `NoSpace`。该判断与 begin/准入
+共用，不能通过捕获通用 `NoSpace` 重试来混淆物理空间或提交失败。能装进空事务但
+当前事务剩余额度不足时，由现有 credits 准入提交事务。执行前失效 inode extent-status
+缓存，阶段前缀继续满足 orphan 恢复契约。
+
+`metadata_journal_for_allocation` 在 mount mutation 排他下、没有 active handle 时执行
+准入。物理需求与 journal credits 分开：namespace 使用现有目录容量检查返回的块数，加上
+受影响 inode 可能新建的 EA block；xattr 使用已验证 storage plan。存在待复用块时，writeback
+只估算下一个叶范围内映射操作：mapped 不需要数据或树块；unwritten 复用状态转换的边界
+处理，按转换后叶项数和实际分裂布局计算新增树块；hole 计数据需求及一个连续分配结果的
+插入布局。分配前物理相邻性未知，hole 按不合并到旧 extent 的插入结果计上界；叶有容量时
+树块需求为零。分裂计数和执行共用路径容量、分区和 root-growth 检查。
+
+有待复用块时暂停当前 writeback 的可选预分配，避免为了可选增长提交无关释放。每完成一个
+映射操作便停止 handle 重新准入，继续共享同一事务；仅 credits 或实际空间压力触发提交。
+writeback cursor 只保留本次未确认前缀所属的事务 ID；完成状态仍从 journal 已有的有序
+checkpoint 队列和 checkpoint 完成位置查询，不另外保存持久化状态镜像。每次准入和
+handle completion 后（包括错误返回），统一确认已提交前缀、释放对应 delalloc 预留并
+推进 settled offset；显式 Restart 也走同一路径。后续 abort 不撤销已经成功的提交。
+普通 handle stop 或失败的 commit 不确认前缀；后续错误只报告已经确认的完成字节数。
+完整 unwritten 转换及容量足够的局部转换无需新物理块。EA 扩展需求另计。
+先完成 credits 准入，再以 `free_blocks - preallocated_blocks - pending_free_blocks`
+判断空间；不足先回收 speculative spaces 并重查，仍不足才提交 idle freeing transaction。
+该检查不是通用空间预留，也不保证连续物理区间，allocator 原有搜索和错误契约仍有效。
+没有物理增长上界的 legacy mutation 仍保守提交；普通 truncate 的整树 fallback 保留，
+运行态 eviction 已不使用它。不得在已经部分修改 metadata 的 handle 内重试整个操作。
+
+同步屏障、精确 inode sync tid、恢复标志生命周期以及后台 worker 不在这项改造范围内。
+测试覆盖缓存重建后的复用隔离、提交失败、空间充足/最后一个块的准入、预分配旁路保护、
+回收阶段共享事务以及阶段提交前后丢失运行态的恢复。阶段镜像测试不等同于 torn-write
+或设备易失缓存重排测试。
+
 ### Namespace zero-link 删除
 
 ```text

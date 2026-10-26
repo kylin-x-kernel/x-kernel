@@ -777,3 +777,216 @@ pub(crate) fn limit_transaction_credits(filesystem: &mut Ext4SbInfo, credits: u3
     journal.transactions =
         JournalTransactions::new_with_credit_limit(journal.superblock().sequence(), credits);
 }
+
+#[def_test]
+fn allocation_admission_commits_frees_before_reuse_without_checkpoint() {
+    let (mut filesystem, _) = revoke_journal_test_filesystem(990);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    let allocation = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    filesystem.sync_filesystem().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(allocation.block(), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    assert_eq!(filesystem.pending_checkpoint_count(), 0);
+    let journal = filesystem
+        .metadata_journal_for_mutation(
+            JournalCredits::new(3),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+        .unwrap();
+    assert_eq!(filesystem.pending_checkpoint_count(), 1);
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    let reused = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    assert_eq!(reused.block(), allocation.block());
+}
+
+#[def_test]
+fn failed_freeing_commit_aborts_allocation_admission() {
+    let (mut filesystem, device) = revoke_journal_test_filesystem(995);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    let allocation = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    filesystem.sync_filesystem().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(allocation.block(), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    device.fail_flush_at(device.flush_count() + 1);
+    assert!(
+        filesystem
+            .metadata_journal_for_mutation(
+                JournalCredits::new(3),
+                RecoveryFlagPolicy::ClearAfterCheckpoint
+            )
+            .is_err()
+    );
+    assert!(journal.transactions.is_aborted());
+    assert!(journal.begin(JournalCredits::new(3)).is_err());
+    assert_eq!(filesystem.pending_checkpoint_count(), 0);
+}
+
+#[def_test]
+fn allocation_admission_makes_the_last_freed_block_available() {
+    let (mut filesystem, _) = journal_allocator_test_filesystem(0, 0xff);
+    install_credit_limited_journal(&mut filesystem, 998, 32, true);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(crate::PhysicalBlock::new(6), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    let journal = filesystem
+        .metadata_journal_for_allocation(
+            JournalCredits::new(3),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+            1,
+        )
+        .unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    let allocation = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    assert_eq!(allocation.block(), crate::PhysicalBlock::new(6));
+    assert_eq!(filesystem.free_blocks_count(), 0);
+}
+
+#[def_test]
+fn allocation_with_spare_space_keeps_freeing_transaction_open() {
+    let (mut filesystem, device) = revoke_journal_test_filesystem(1002);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    let old = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    filesystem.sync_filesystem().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(old.block(), &mut handle)
+        .unwrap();
+    let transaction = handle.id();
+    handle.stop().unwrap();
+    let flushes = device.flush_count();
+    let journal = filesystem
+        .metadata_journal_for_allocation(
+            JournalCredits::new(3),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+            1,
+        )
+        .unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    assert_eq!(handle.id(), transaction);
+    let next = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    assert_ne!(next.block(), old.block());
+    handle.stop().unwrap();
+    assert_eq!(device.flush_count(), flushes);
+    assert_eq!(filesystem.pending_checkpoint_count(), 0);
+    filesystem.sync_filesystem().unwrap();
+}
+
+#[def_test]
+fn bounded_allocation_pressure_commit_failure_keeps_frees_unavailable() {
+    let (mut filesystem, device) = journal_allocator_test_filesystem(0, 0xff);
+    install_credit_limited_journal(&mut filesystem, 1003, 32, true);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    filesystem
+        .release_allocated_block(crate::PhysicalBlock::new(6), &mut handle)
+        .unwrap();
+    handle.stop().unwrap();
+    device.fail_flush_at(device.flush_count() + 1);
+    assert!(
+        filesystem
+            .metadata_journal_for_allocation(
+                JournalCredits::new(3),
+                RecoveryFlagPolicy::ClearAfterCheckpoint,
+                1,
+            )
+            .is_err()
+    );
+    assert!(journal.transactions.is_aborted());
+    assert!(journal.begin(JournalCredits::new(0)).is_err());
+    assert_eq!(filesystem.pending_checkpoint_count(), 0);
+    filesystem.reset_block_allocation_caches();
+    assert_eq!(lock(&filesystem.allocator).pending_frees.block_count(), 1);
+}
+
+#[def_test]
+fn allocation_reclaims_speculative_space_before_committing_frees() {
+    let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    install_credit_limited_journal(&mut filesystem, 1004, 32, true);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    let old = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    filesystem
+        .release_allocated_block(old.block(), &mut handle)
+        .unwrap();
+    let transaction = handle.id();
+    handle.stop().unwrap();
+    insert_prealloc_space(&filesystem, &inode, 0, 7, TEST_FREE_BLOCKS - 1, 0);
+    let flushes = device.flush_count();
+    let journal = filesystem
+        .metadata_journal_for_allocation(
+            JournalCredits::new(3),
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+            1,
+        )
+        .unwrap();
+    assert_eq!(prealloc_count(&inode), 0);
+    assert_eq!(prealloc_twin_count(&filesystem), 0);
+    assert_eq!(device.flush_count(), flushes);
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+    assert_eq!(handle.id(), transaction);
+    let allocation = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap();
+    assert_eq!(allocation.block(), crate::PhysicalBlock::new(7));
+    handle.stop().unwrap();
+    filesystem.sync_filesystem().unwrap();
+}
+
+#[def_test]
+fn partial_release_aborts_on_failure() {
+    let (mut filesystem, _) = revoke_journal_test_filesystem(1010);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    let block = filesystem
+        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .unwrap()
+        .block();
+    handle.stop().unwrap();
+    filesystem.sync_filesystem().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(6)).unwrap();
+    filesystem
+        .release_allocated_block(block, &mut handle)
+        .unwrap();
+    // The next bitmap bit was already free: abort instead of retaining a
+    // usable transaction with a partially executed release reservation.
+    let result =
+        filesystem.release_allocated_block(crate::PhysicalBlock::new(block.get() + 1), &mut handle);
+    assert!(result.is_err());
+    assert!(
+        filesystem
+            .complete_metadata_mutation(handle, result)
+            .is_err()
+    );
+    assert!(journal.is_aborted());
+    assert!(journal.begin(JournalCredits::new(3)).is_err());
+}

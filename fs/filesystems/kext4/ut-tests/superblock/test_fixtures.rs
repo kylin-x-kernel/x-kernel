@@ -94,6 +94,7 @@ pub(crate) fn journal_allocator_test_filesystem(
             block_free_extent_caches: vec![None; groups.len()],
             preallocs_by_group: BTreeMap::new(),
             preallocated_blocks: 0,
+            pending_frees: Default::default(),
             groups,
         }),
         delalloc_reserved_blocks: Mutex::new(0),
@@ -271,6 +272,7 @@ pub(crate) struct TestDevice {
     pub(crate) fail_flush_at: Mutex<Option<usize>>,
     write_count: Mutex<usize>,
     fail_write_at: Mutex<Option<usize>>,
+    fail_write_block: Mutex<Option<u64>>,
 }
 
 impl TestDevice {
@@ -281,6 +283,7 @@ impl TestDevice {
             fail_flush_at: Mutex::new(None),
             write_count: Mutex::new(0),
             fail_write_at: Mutex::new(None),
+            fail_write_block: Mutex::new(None),
         }
     }
 
@@ -294,6 +297,11 @@ impl TestDevice {
 
     pub(crate) fn fail_write_at(&self, write_count: usize) {
         *lock(&self.fail_write_at) = Some(write_count);
+    }
+
+    /// Injects a data-write error independently of preceding journal I/O counts.
+    pub(crate) fn fail_write_block(&self, block: PhysicalBlock) {
+        *lock(&self.fail_write_block) = Some(block.get());
     }
 
     pub(crate) fn flush_count(&self) -> usize {
@@ -344,7 +352,9 @@ impl TestDevice {
     fn write_block(&self, block_id: u64, input: &[u8]) -> DriverResult {
         let mut write_count = lock(&self.write_count);
         *write_count += 1;
-        if *lock(&self.fail_write_at) == Some(*write_count) {
+        if *lock(&self.fail_write_at) == Some(*write_count)
+            || *lock(&self.fail_write_block) == Some(block_id)
+        {
             return Err(DriverError::Io);
         }
         drop(write_count);
@@ -640,6 +650,7 @@ fn allocator_multigroup_test_filesystem_inner(
             block_free_extent_caches: vec![None; groups.len()],
             preallocs_by_group: BTreeMap::new(),
             preallocated_blocks: 0,
+            pending_frees: Default::default(),
             groups,
         }),
         delalloc_reserved_blocks: Mutex::new(0),
@@ -824,6 +835,7 @@ pub(crate) fn allocator_test_filesystem_with_options(
             block_free_extent_caches: vec![None; groups.len()],
             preallocs_by_group: BTreeMap::new(),
             preallocated_blocks: 0,
+            pending_frees: Default::default(),
             groups,
         }),
         delalloc_reserved_blocks: Mutex::new(0),
@@ -1039,6 +1051,16 @@ pub(crate) fn le_u16(bytes: &[u8], offset: usize) -> u16 {
 pub(crate) fn eviction_test_unlinked_inode(
     extents: &[(u64, u32)],
 ) -> (Ext4SbInfo, Ext4Inode, crate::Ext4Timestamp) {
+    eviction_test_unlinked_inode_with_initialization(
+        extents,
+        InodeInitialization::regular_file(0o644, 0, 0),
+    )
+}
+
+pub(crate) fn eviction_test_unlinked_inode_with_initialization(
+    extents: &[(u64, u32)],
+    initialization: InodeInitialization,
+) -> (Ext4SbInfo, Ext4Inode, crate::Ext4Timestamp) {
     let (mut filesystem, _device) = journal_allocator_test_filesystem(512, 0b0011_1111);
     install_test_internal_journal(&mut filesystem, 2000);
     let journal = JournalTransactions::new(TransactionId::new(2000));
@@ -1046,11 +1068,7 @@ pub(crate) fn eviction_test_unlinked_inode(
     let transaction = handle.id();
 
     let inode_allocation = filesystem
-        .allocate_inode(
-            None,
-            InodeInitialization::regular_file(0o644, 0, 0),
-            &mut handle,
-        )
+        .allocate_inode(None, initialization, &mut handle)
         .unwrap();
     let inode = filesystem.internal_iget(inode_allocation.inode()).unwrap();
 

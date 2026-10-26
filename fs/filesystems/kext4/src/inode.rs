@@ -2135,6 +2135,15 @@ impl Ext4SbInfo {
         })
     }
 
+    /// Upper bound for optional external-xattr allocation while dirtying an inode.
+    pub(crate) fn inode_extra_isize_allocation_blocks(&self, inode: &Ext4Inode) -> u64 {
+        let extra_isize = self
+            .superblock()
+            .want_extra_isize()
+            .max(self.superblock().min_extra_isize());
+        u64::from(!inode.is_extra_isize_expansion_disabled() && inode.extra_isize() < extra_isize)
+    }
+
     /// Applies a journaled inode metadata update.
     pub(crate) fn update_inode_metadata(
         &mut self,
@@ -2146,9 +2155,10 @@ impl Ext4SbInfo {
         }
 
         let credits = JournalCredits::new(2);
-        let journal = self.metadata_journal_for_mutation(
+        let journal = self.metadata_journal_for_allocation(
             credits,
             crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            self.inode_extra_isize_allocation_blocks(inode),
         )?;
         let mut handle = journal.begin(credits)?;
         let result = self.update_inode_metadata_in_transaction(inode, update, &mut handle);
