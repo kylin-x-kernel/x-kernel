@@ -113,13 +113,8 @@ Before considering a code change aligned with this skill, verify:
 
 - names are descriptive, accurate, and unit-aware where needed;
 - comments and rustdoc explain intent and contracts;
-- current-context semantics are explicit where the API depends on them;
-- every `unsafe` site has a concrete safety argument;
 - `unsafe` review uses the scenario catalog from `unsafety.md`
   instead of ad hoc reasoning;
-- uninitialized storage uses `MaybeUninit<T>` or an equivalent explicit model;
-- raw-pointer and FFI code states validity, alignment,
-  lifetime, aliasing, and ABI assumptions where relevant;
 - shared-state code has sane lock scope and lock ordering;
 - boundary validation happens at subsystem edges;
 - modules, visibility, imports, and attributes stay narrowly scoped;

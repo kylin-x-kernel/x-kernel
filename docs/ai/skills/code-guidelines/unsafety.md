@@ -3,88 +3,13 @@
 Use this file for any change that adds,
 modifies, or reviews `unsafe` code.
 
-## Mandatory Rules
-
-- safety arguments must state concrete invariants and who upholds them;
-- avoid vague claims like "this is safe by construction"
-  without naming the construction and the invariant.
-- when a crate or module is expected to remain safe-only,
-  do not introduce `unsafe` casually; push unsafe operations behind existing safe layers when possible.
-
-## SAFETY Comment Standard
-
-Use `// SAFETY:` comments as local proof obligations,
-not as labels.
-
-Each `// SAFETY:` comment should:
-
-- describe the specific unsafe operation being justified;
-- name the concrete invariants it relies on;
-- say who established those invariants
-  or what earlier check/guard/state transition established them;
-- mention all relevant categories when there is more than one,
-  such as validity plus alignment, or initialization plus exclusivity;
-- be placed immediately above the `unsafe {}` block it justifies.
-
-Good `// SAFETY:` comments usually answer one or more of:
-
-- why is this pointer valid for reads or writes here?
-- why is alignment satisfied, or why is unaligned access intentional?
-- why is the pointee initialized as the target type?
-- why is mutable access exclusive?
-- why is concurrent access synchronized?
-- why is this ABI/layout assumption valid?
-
-Avoid `// SAFETY:` comments that only say:
-
-- "pointer is valid";
-- "caller guarantees safety";
-- "safe because checked above";
-- "FFI call";
-- "this is safe by construction".
-
-If the safety story depends on a previous check,
-name that check explicitly.
-If it depends on a lock, guard, state bit, ownership rule,
-or current-CPU confinement, name that explicitly.
-
 ## Audit Surface
 
 - encapsulate unsafe state in the smallest practical module;
 - if private fields participate in a safety invariant,
   any code that can mutate them is part of the same audit surface;
-- prefer exposing safe wrappers rather than pushing unsafe obligations outward;
 - when multiple unsafe paths share one invariant,
   review them together rather than independently.
-
-## Invariant Categories
-
-When writing a safety argument,
-spell out which kind of invariant is being relied on:
-
-- pointer validity, lifetime, and owning allocation;
-- alignment and in-bounds access;
-- initialization state;
-- aliasing and exclusivity of mutable access;
-- thread-safety, lock ownership, or interrupt/preemption state;
-- pinning, immovability, or publication ordering;
-- FFI ABI, callback lifetime, and unwind assumptions.
-
-Do not compress several independent claims into a single
-"pointer is valid" statement when the code also depends on
-alignment, exclusivity, or initialization.
-
-## Writing Guidance
-
-- explain why the operation is sound under the current invariant;
-- mention the guard, lock, state check, ownership rule,
-  or lifetime relationship that makes it sound;
-- if the safety story depends on ordering or publication,
-  say so explicitly.
-- if the code relies on caller obligations from `# Safety`,
-  say which obligations are being discharged at the call site.
-- for `unsafe impl Send` or `unsafe impl Sync`,
-  explain the real concurrency model rather than restating the trait name.
 
 ## Preferred Techniques
 
@@ -95,18 +20,6 @@ alignment, exclusivity, or initialization.
   `NonNull<T>`, pin wrappers, newtypes for raw handles,
   or guard/token types for validated access;
 - use types to carry as much of the safety story as possible;
-- prefer a safe wrapper API around raw-pointer or FFI internals
-  when the invariant can be centralized;
-- when an `unsafe fn` has cheap, deterministic precondition checks,
-  add debug assertions for them instead of leaving all checking implicit;
-- prefer `MaybeUninit<T>` for uninitialized storage
-  rather than constructing invalid `T` values;
-- when initializing fields in place,
-  prefer `MaybeUninit`, `write`, and raw field pointers
-  over creating references to uninitialized memory;
-- prefer existing safe helpers for user memory, MMIO,
-  refcounting, pinning, and synchronization
-  instead of open-coding raw operations.
 
 ## Governance Workflow
 
@@ -148,7 +61,6 @@ abstraction shape, or review rule.
 Unsafe reduction goals, in preferred order:
 
 - remove real UB or latent invariant breaks;
-- replace open-coded raw operations with existing typed APIs;
 - encode caller obligations in types;
 - improve `SAFETY:` arguments and `# Safety` contracts.
 
@@ -163,53 +75,21 @@ The review should name the scenario explicitly.
 
 ### User Memory And Syscall ABI
 
-Prefer:
-
-- `UserPtr<T>` / `UserConstPtr<T>` for typed user pointers;
-- `UserRead` / `UserWrite` for by-value syscall ABI objects;
-- `core/kuaccess` and `process/osvm` helpers for checked copy-in/copy-out;
-- `IoVectorBuf`, `VmBytes`, `VmBytesMut`,
-  or equivalent existing wrappers for bulk or vectored buffers.
-
-Avoid:
-
-- direct dereference of user pointers in syscall code;
-- ad hoc `from_raw_parts` over user addresses.
-
-Repository examples:
-
-- [posix/types/src/ptr.rs](/home/laoyekang/code/x-kernel/posix/types/src/ptr.rs:41)
-- [core/kuaccess/src/lib.rs](/home/laoyekang/code/x-kernel/core/kuaccess/src/lib.rs:30)
+For syscall access placement and validation, read
+[CG-019](../../../code-guidelines/CG-019-user-pointers-stop-at-syscall-boundary.md);
+for the type and copy contracts, read
+the pending Dylint lint `unsound_user_abi_impl` ([pending](../../../code-guidelines/pending.md)) and
+the pending Dylint lint `user_copy_without_abi_contract` ([pending](../../../code-guidelines/pending.md)).
+Repository examples: [typed pointers](../../../../posix/types/src/ptr.rs)
+and [checked access](../../../../core/kuaccess/src/lib.rs).
 
 ### Uninitialized Storage
 
-Prefer:
-
-- `MaybeUninit<T>` for storage that is not always initialized;
-- `[MaybeUninit<T>; N]` plus an initialized-length/count invariant;
-- `write`, `assume_init`, and `assume_init_drop`
-  only at the point where initialization state is proven;
-- raw field pointers plus `write` for field-by-field initialization.
-
-Avoid:
-
-- creating `&T` / `&mut T` before the pointee is fully initialized;
-- whole-array `assume_init()` unless initialization of every element is proven.
-
-Repository examples:
-
-- [api/linux_sysno/src/map.rs](/home/laoyekang/code/x-kernel/api/linux_sysno/src/map.rs:10)
-- [task/kpoll/src/lib.rs](/home/laoyekang/code/x-kernel/task/kpoll/src/lib.rs:73)
-
-Relevant standard references:
-
-- `MaybeUninit` exists specifically to model data that may be invalid
-  until initialization is complete, and invalid values for references,
-  `bool`, and other types are immediate UB. See
-  <https://doc.rust-lang.org/std/mem/union.MaybeUninit.html>.
-- The Rustonomicon explicitly states that interpreting uninitialized memory
-  as a value is UB. See
-  <https://doc.rust-lang.org/nomicon/uninitialized.html>.
+For slots, arrays, and field-by-field initialization, read
+[CG-018](../../../code-guidelines/CG-018-uninitialized-storage-model.md),
+including its initialization-state checks, repository examples, and standard
+references. This scenario applies before shared-state or ownership review
+when storage does not yet contain a valid value.
 
 ### Shared Mutable State
 
@@ -224,7 +104,6 @@ Prefer:
 
 Avoid:
 
-- `static mut` for ordinary shared state;
 - exposing raw `UnsafeCell` pointers outside the owning abstraction;
 - claiming `UnsafeCell` alone solves concurrency.
 
@@ -244,16 +123,9 @@ Relevant standard references:
 
 ### One-Time Initialization And Lazy Globals
 
-Prefer:
-
-- `klazy::Once<T>` and `Lazy<T, F>` / `LazyInit<T>` for one-time global initialization;
-- explicit state machines with atomic publication only when existing once/lazy types
-  do not fit the lifecycle.
-
 Avoid:
 
 - partially synchronized “init if null” patterns;
-- duplicating once-state machines outside foundational crates without reason.
 
 Repository examples:
 
@@ -300,7 +172,6 @@ Avoid:
 
 - creating `&T` from raw bytes unless alignment, initialization,
   and lifetime are all proven;
-- using `&packed.field as *const _` on unaligned packed fields;
 - joining contiguous slices across allocations and treating them as one slice.
 
 Repository examples:
@@ -320,25 +191,6 @@ Relevant standard references:
 
 ### Fixed-Capacity Raw Output Buffers
 
-Prefer:
-
-- a typed size calculation or cursor-offset model
-  before writing structured data into a raw buffer;
-- `checked_add` and explicit capacity checks
-  before advancing a raw write cursor;
-- `write`, `write_unaligned`, or `copy_nonoverlapping`
-  only after the destination byte range is proven in-bounds;
-- typed wrappers over the output buffer when the format is reused.
-
-Avoid:
-
-- incrementing a raw pointer through a fixed buffer
-  without proving remaining capacity at each write;
-- relying on a later final length field as if it proved
-  earlier writes were in-bounds;
-- treating "bootloader allocated this page" as proof
-  that any amount of serialization will fit.
-
 Repository examples:
 
 - [boot/x86_64-uefi-loader/src/multiboot.rs](/home/laoyekang/code/x-kernel/boot/x86_64-uefi-loader/src/multiboot.rs:12)
@@ -357,15 +209,12 @@ Relevant standard references:
 
 Prefer:
 
-- existing MMIO/PIO helpers and device-resource abstractions;
-- typed register wrappers or central driver glue that localizes volatile access;
 - volatile reads/writes only for externally observable device memory semantics.
 
 Avoid:
 
 - using volatile accesses as a substitute for synchronization;
 - mixing ordinary references with MMIO register semantics casually;
-- open-coding fixed-address register access when a subsystem helper exists.
 
 Repository examples:
 
@@ -383,21 +232,15 @@ Relevant standard references:
 Prefer:
 
 - a narrow `unsafe extern` declaration layer;
-- safe wrappers that translate raw buffers and ownership into Rust types;
 - `repr(C)` structs and explicit ABI newtypes at the boundary;
 - explicit ownership and unwind policy in the wrapper docs.
 
 Avoid:
 
-- scattering raw foreign calls across higher-level logic;
 - assuming foreign pointers are valid “because C gave them to us”;
-- exposing foreign ownership obligations to unrelated callers.
 
 Relevant standard references:
 
-- the Nomicon recommends hiding raw FFI details behind a safe interface
-  whenever the wrapper can validate inputs and centralize obligations. See
-  <https://doc.rust-lang.org/nomicon/ffi.html>.
 - Linux’s Rust coding guidelines are broadly abstraction-first
   and kernel-facing rather than “open-code unsafe everywhere.” See
   <https://docs.kernel.org/rust/coding-guidelines.html>.
@@ -416,8 +259,6 @@ Prefer:
 
 Avoid:
 
-- leaving boot-entry assumptions implicit
-  just because the code is architecture-specific;
 - mixing ordinary initialization logic into naked-entry or
   CPU-transition blocks when it can run after the unsafe handoff.
 
@@ -438,9 +279,6 @@ Relevant standard references:
   for register state, callee-saved registers, memory access,
   and control flow to avoid UB. See
   <https://doc.rust-lang.org/reference/inline-assembly.html>.
-- Linux Rust coding guidelines require explicit `// SAFETY:`
-  comments before unsafe blocks even in low-level code. See
-  <https://docs.kernel.org/rust/coding-guidelines.html>.
 
 ### Address-Sensitive And Self-Referential State
 
@@ -465,10 +303,7 @@ Relevant standard references:
 
 When the scenario matches, prefer these local building blocks before inventing new ones:
 
-- user memory: `UserPtr`, `UserConstPtr`, `UserRead`, `UserWrite`, `VmBytes`, `VmBytesMut`, `IoVectorBuf`, `core/kuaccess`;
-- one-time init: `klazy::Once`, `Lazy`, `LazyInit`;
 - interior mutability with synchronization: `SpinLock` and existing guard types;
-- uninitialized arrays and slots: `MaybeUninit` plus explicit initialized-count invariants;
 - owned raw buffers: `NonNull<u8>` paired with an owner or allocation API;
 - boot/firmware byte parsing: bounds checks plus `read_unaligned` by value.
 
@@ -489,24 +324,8 @@ For each nontrivial unsafe site, answer these in review:
 
 Avoid patterns like:
 
-- creating `&T` or `&mut T` before the pointee is fully initialized;
-- widening the unsafe region to include ordinary safe logic
-  such as error handling, logging, or branching;
-- documenting only that an unsafe operation is "FFI" or "raw pointer"
-  without naming the actual invariants.
-
 ## When Reviewing
 
 Check specifically for:
 
-- invariants that are asserted but not actually enforced;
-- `unsafe` sites that rely on several conditions
-  but document only one of them;
-- uses of uninitialized storage that should instead be modeled
-  with `MaybeUninit<T>`;
 - private mutable state shared across too large a module boundary;
-- `unsafe impl` added without a clear thread-safety or ownership argument;
-- FFI calls or callbacks whose ABI, lifetime, ownership,
-  or unwind assumptions are not stated;
-- opportunities to move the unsafe edge behind an existing safe abstraction
-  instead of exporting new unsafe obligations.

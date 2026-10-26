@@ -16,15 +16,7 @@ imports, crate dependencies, macros, lints, or attributes.
   multiple peer crates;
 - avoid catch-all crates that aggregate unrelated resources only because migration or wiring
   is temporarily convenient;
-- keep internal representation objects, staging types, registry plumbing,
-  and bridge helpers at `pub(crate)` unless they are intentionally part of the crate's
-  external semantic model;
-- a crate should publicly expose its natural domain objects and stable capabilities,
-  not the internal structures used to assemble or cache them;
 - use workspace dependencies instead of ad hoc per-crate version drift.
-
-## Attributes
-
 
 ## Macros
 
@@ -41,7 +33,5 @@ Check specifically for:
 - implementation-only modules promoted to crates without a real cross-crate reuse boundary;
 - shared state/data components left inside one crate even though multiple peer crates depend
   on them;
-- internal structs or free functions that were made public only for convenience,
-  testing, or migration wiring;
 - dependency declarations that bypass workspace conventions;
 - macros used where a normal function would be clearer.

@@ -25,9 +25,9 @@ belong to the tool's own README.
 
 - [lints.md](lints.md): rustc/Clippy levels, configuration, coverage, pending
   candidates, auxiliary checks, and open questions.
-- `CG-*.md`: the rule registry for all backends, indexed below. Reused ids
-  CG-016, CG-018 and CG-021 receive their AI checks when the stack lands;
-  CG-017 stays the separate Send/Sync argument rule.
+- `CG-*.md`: the rule registry for all backends, indexed below. Rules with
+  mechanical and AI checks state both the enforced condition and the remaining
+  judgment; CG-017 separately covers Send/Sync arguments.
 - [pending.md](pending.md): Dylint candidates; landing a lint removes its row.
   Rustc/Clippy candidates stay in [lints.md](lints.md).
 
@@ -99,9 +99,16 @@ checked through the configured kernel's `make clippy` during this migration.
 | Rule | Level | Backend | Lints |
 | --- | --- | --- | --- |
 | [CG-001-static-spinlock-registration](CG-001-static-spinlock-registration.md) | MUST | dylint | `unregistered_static_spinlock` |
-| [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | clippy | `clippy::undocumented_unsafe_blocks` |
-| [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | clippy | `clippy::disallowed_methods` |
-| [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy | `clippy::panic`, `clippy::unwrap_used`, `clippy::expect_used` |
+| [CG-013-no-sleep-under-spinlock](CG-013-no-sleep-under-spinlock.md) | MUST | ai | — |
+| [CG-014-spin-noirq-needs-irq-contender](CG-014-spin-noirq-needs-irq-contender.md) | SHOULD | ai | — |
+| [CG-015-no-split-critical-section](CG-015-no-split-critical-section.md) | MUST | ai | — |
+| [CG-016-safety-comment-substance](CG-016-safety-comment-substance.md) | MUST | clippy, ai | `clippy::undocumented_unsafe_blocks` |
+| [CG-017-unsafe-impl-send-sync-argument](CG-017-unsafe-impl-send-sync-argument.md) | MUST | ai | — |
+| [CG-018-uninitialized-storage-model](CG-018-uninitialized-storage-model.md) | MUST | clippy, ai | `clippy::disallowed_methods` |
+| [CG-019-user-pointers-stop-at-syscall-boundary](CG-019-user-pointers-stop-at-syscall-boundary.md) | MUST | ai | — |
+| [CG-020-raw-output-buffer-capacity](CG-020-raw-output-buffer-capacity.md) | MUST | ai | — |
+| [CG-021-no-panic-on-reachable-failure](CG-021-no-panic-on-reachable-failure.md) | MUST | clippy, ai | `clippy::panic`, `clippy::unwrap_used`, `clippy::expect_used` |
+| [CG-022-log-level-matches-event](CG-022-log-level-matches-event.md) | SHOULD | ai | — |
 | [CG-023-unfinished-implementations](CG-023-unfinished-implementations.md) | MUST | clippy | `clippy::todo`, `clippy::unimplemented` |
 | [CG-024-lint-exceptions](CG-024-lint-exceptions.md) | MUST | clippy | `clippy::allow_attributes`, `clippy::allow_attributes_without_reason` |
 | [CG-025-minimal-unsafe-scope](CG-025-minimal-unsafe-scope.md) | MUST | clippy, rustc | `clippy::multiple_unsafe_ops_per_block`, `unsafe_op_in_unsafe_fn` |
@@ -116,6 +123,34 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-034-used-binding-names](CG-034-used-binding-names.md) | SHOULD | clippy | `clippy::used_underscore_binding` |
 | [CG-035-declared-cfgs](CG-035-declared-cfgs.md) | SHOULD | rustc | `unexpected_cfgs` |
 | [CG-036-ordinary-error-propagation](CG-036-ordinary-error-propagation.md) | SHOULD | clippy | `clippy::question_mark` |
+| [CG-037-spin-raw-context-precondition](CG-037-spin-raw-context-precondition.md) | MUST | ai | — |
+| [CG-038-prepare-reusable-work-handles](CG-038-prepare-reusable-work-handles.md) | MUST | ai | — |
+| [CG-039-execution-context-contract](CG-039-execution-context-contract.md) | MUST | ai | — |
+| [CG-040-lock-stat-accounting](CG-040-lock-stat-accounting.md) | MUST | ai | — |
+| [CG-041-reuse-safe-boundary-abstractions](CG-041-reuse-safe-boundary-abstractions.md) | SHOULD | ai | — |
+| [CG-042-abi-carrier-semantic-conversion](CG-042-abi-carrier-semantic-conversion.md) | SHOULD | ai | — |
+| [CG-043-reuse-once-lazy-lifecycle](CG-043-reuse-once-lazy-lifecycle.md) | SHOULD | ai | — |
+| [CG-044-unsafe-precondition-assertions](CG-044-unsafe-precondition-assertions.md) | SHOULD | ai | — |
+| [CG-045-non-time-integer-units](CG-045-non-time-integer-units.md) | SHOULD | ai | — |
+| [CG-046-atomic-ordering-rationale](CG-046-atomic-ordering-rationale.md) | SHOULD | ai | — |
+
+### Candidates not yet ruled
+
+The second AI batch defers these candidates; their text remains in the skill:
+
+- R02, Name semantics, scans and observable work honestly:
+  [naming-and-structure.md](../ai/skills/code-guidelines/naming-and-structure.md#names),
+  [performance-and-resources.md](../ai/skills/code-guidelines/performance-and-resources.md#performance)
+  and the [SKILL.md checklist](../ai/skills/code-guidelines/SKILL.md#review-checklist).
+- R11, Keep the crate logging facade consistent:
+  [error-handling-and-logging.md](../ai/skills/code-guidelines/error-handling-and-logging.md#logging)
+  and the [SKILL.md checklist](../ai/skills/code-guidelines/SKILL.md#review-checklist).
+- R12, Cite the external behavioral contract:
+  [comments-and-rustdoc.md](../ai/skills/code-guidelines/comments-and-rustdoc.md#comments).
+- R14, Keep contract comments true after behavior changes, and R15, Explain
+  non-obvious intent rather than paraphrase code:
+  [comments-and-rustdoc.md](../ai/skills/code-guidelines/comments-and-rustdoc.md#comments)
+  and its [review checklist](../ai/skills/code-guidelines/comments-and-rustdoc.md#when-reviewing).
 
 ## Adding a rule
 

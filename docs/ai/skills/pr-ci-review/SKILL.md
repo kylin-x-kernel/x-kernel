@@ -1,6 +1,6 @@
 ---
 name: pr-ci-review
-description: Use when creating a Gitee Pull Request for X-Kernel, checking the latest CI status of a PR (Jenkins x-kernel-ci-test), or reading the latest code-review opinions for a PR. Review opinions are read from the Gitee PR comment area (AI summary + human comments).
+description: Use when creating a Gitee Pull Request for X-Kernel, checking the latest CI status of a PR (Jenkins x-kernel-ci-test), or reading and answering the latest code-review opinions for a PR. AI review results come from xreview (its PR comment, review page and agent API); human opinions from the Gitee PR comment area.
 ---
 
 # PR CI and Review Tracking
@@ -10,16 +10,26 @@ Use this skill when an AI agent needs to:
 - create or update a Pull Request against `openkylin/x-kernel`;
 - find the latest Jenkins CI build for a given PR number;
 - check whether the CI build is still running, what stage it is on, or why it failed;
-- read the latest review opinions for a PR, from the Gitee comment area.
+- read the latest review opinions for a PR (xreview's AI review and human
+  comments), request an AI review, or answer an AI finding.
 
 ## Key Context
 
 - Code repository: `https://gitee.com/openkylin/x-kernel` (Gitee, PR-based workflow)
 - CI job: Jenkins `x-kernel-ci-test` at `https://jenkins.openkylin.top/job/x-kernel-ci-test/`
-- AI review job: Jenkins `ai-review` at `https://jenkins.openkylin.top/job/ai-review/`
-- The AI review comments on PRs are posted by user `x-cibot` (markers
-  `<!-- x-review:summary -->` / `<!-- x-review:review -->`, headings
-  `## AI Re-review` / `## AI Code Review Summary`).
+- AI review: xreview at `https://review.x-kernel.com`, triggered by the Gitee
+  webhook on every push. It posts one comment per PR as user `x-cibot` (first
+  line `<!-- xreview:summary arm=pipe -->`) and edits that comment in place as
+  rounds finish; there are no inline comments. Each PR has a review page at
+  `https://review.x-kernel.com/r/prs/<n>` and agent instructions at
+  `https://review.x-kernel.com/r/prs/<n>/agent.md` (generic version:
+  `https://review.x-kernel.com/r/agent.md`). The agent instructions are the
+  source of truth for the review API; read them instead of copying calls from
+  here.
+- Comments by `x-cibot` with the older markers `<!-- x-review:summary -->` /
+  `<!-- x-review:review -->` (headings `## AI Re-review` /
+  `## AI Code Review Summary`) come from the retired Jenkins `ai-review` job;
+  treat them as history, not as the current verdict.
 - CI status is also posted back to the PR as comments by user `openkylin-cibot`
   with an HTML comment marker `<!-- x-kernel-ci -->`.
 
@@ -30,9 +40,9 @@ Use this skill when an AI agent needs to:
 Review opinions (AI summary and human comments) live in the PR comment list
 on Gitee (`pulls/<n>/comments`). Read them from there:
 
-- AI review comments by `x-cibot` (markers `<!-- x-review:summary -->` /
-  `<!-- x-review:review -->`, headings `## AI Re-review` /
-  `## AI Code Review Summary`);
+- the xreview comment by `x-cibot` (first line
+  `<!-- xreview:summary arm=pipe -->`): status table, the latest round's
+  verdict, and links to the review page and agent instructions;
 - CI status comments by `openkylin-cibot` (marker `<!-- x-kernel-ci -->`);
 - human comments and commands by any other user (e.g. `rerun`).
 
@@ -40,6 +50,7 @@ on Gitee (`pulls/<n>/comments`). Read them from there:
 
 Both the Jenkins API and the Gitee API v5 are readable without credentials
 for this project (state-changing actions need a Jenkins account, see below).
+The xreview review page, `agent.md` and its status call are public too.
 
 ### Rule 3: Control actions require Jenkins auth; never do them passively
 
@@ -115,10 +126,13 @@ review's Description dimension can pass; reference related issues with
 
 4. After the PR is open, the Gitee webhook automatically triggers:
    - Jenkins `x-kernel-ci-test` (build pipeline);
-   - Jenkins `ai-review` (posts `## AI Code Review Summary` to the PR).
+   - an xreview round on the head commit (posts or updates the xreview comment).
+     Large PRs above the approval threshold wait for a maintainer; the author
+     (or the author's agent) can start a round from the review page or with the
+     review call in `agent.md`.
 
 5. Update the PR (new commits / `--amend`) pushes again; CI re-runs and
-   `ai-review` re-reviews the new head commit.
+   xreview reviews the new head (a follow-up round against the previous one).
 
 ### B. Get the latest CI status for a PR
 
@@ -175,7 +189,15 @@ for h in hits: print(h['number'], h.get('result') or 'RUNNING', h['url'])
 4. Determine flake vs regression by comparing the same stage/case in the
    previous successful builds still inside the 31-build window.
 
-### D. Read the latest review opinions (from the PR comment area)
+### D. Read the latest review opinions
+
+For the AI review, use xreview's status call (see
+`https://review.x-kernel.com/r/prs/<n>/agent.md`): it returns the state, the
+latest round's verdict and every item with its id. The same page explains how
+to answer a finding (false positive, won't fix, withdraw) and how to request a
+new round; send the client header it describes on every call.
+
+For human opinions and CI reports, read the PR comment area:
 
 ```bash
 PR=759
@@ -191,10 +213,12 @@ for c in json.load(sys.stdin):
 
 Classify each comment:
 
-- `x-cibot` + `<!-- x-review:summary -->` / `<!-- x-review:review -->` markers:
-  latest AI verdict (`## AI Re-review`
-  or `## AI Code Review Summary`: dimensions table, conclusion like "建议合并"
-  or blocking issues, reviewed commit SHA).
+- `x-cibot` + `<!-- xreview:summary arm=pipe -->`: the xreview comment
+  (status table with the reviewed commit, verdict 可合并 / 需修改 / 需复核,
+  stale marker when the PR has newer commits). Prefer the status call for
+  details.
+- `x-cibot` + `<!-- x-review:summary -->` / `<!-- x-review:review -->`: the
+  retired Jenkins `ai-review` job; history only.
 - `openkylin-cibot` + `<!-- x-kernel-ci -->`: CI result report posted to PR.
 - any other user (e.g. a `rerun` command by a maintainer): human opinion/command.
 
@@ -228,5 +252,6 @@ At minimum, report:
 - the latest build number/result and which stage failed (or is running);
 - for failures: the failing stage, failing case, and the key error line from
   the per-case or host-companion log;
-- the latest review opinion (AI summary conclusion + any human comments),
-  citing the comment id from the Gitee comment area.
+- the latest review opinion: xreview's verdict for the current head (from the
+  status call or the xreview comment) and any human comments, citing the
+  Gitee comment id for human comments.

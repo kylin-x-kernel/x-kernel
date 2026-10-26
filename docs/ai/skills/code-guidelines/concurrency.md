@@ -6,16 +6,9 @@ atomics, interrupts, wait/wake paths, or shared mutable state.
 ## Mandatory Rules
 
 - establish and preserve a consistent lock order;
-- do not perform I/O or blocking work while holding a spinlock;
-- do not acquire blocking synchronization primitives
-  such as `ksync::Mutex`, `RwLock`, `Semaphore`,
-  or `WaitQueue` while holding a spinlock;
-- do not split atomic critical sections across separate lock acquisitions;
 - use atomics only for genuinely independent state;
 - if multiple fields must change consistently,
   prefer a lock over scattered atomics;
-- when memory ordering matters,
-  explain it in code comments or surrounding docs.
 
 ## Lock Selection By Context
 
@@ -27,38 +20,13 @@ atomics, interrupts, wait/wake paths, or shared mutable state.
   critical sections in task context when preemption
   must not interleave updates on the current CPU,
   but IRQ handlers do not touch the same state;
-- use `SpinNoIrq` only when the same state is accessed
-  from local IRQ or similarly IRQ-like contexts,
-  or when the caller must be valid in interrupt context;
-- use `SpinRaw` only when the caller already guarantees
-  IRQs and preemption are disabled for the whole critical section,
-  and document that precondition explicitly.
 
 ## X-Kernel Lock Guidance
 
-- do not use `SpinNoIrq` as the default "safe" choice;
-  if there is no interrupt-context contender for the same state,
-  prefer a sleepable lock or `SpinNoPreempt`;
-- if a path may reach `block_on`, `wait`, `sleep`,
-  event listeners, scheduler operations, or code that can return
-  `WouldBlock` and then wait, the path must not hold a spinlock;
-  `ktask` enforces this at runtime: the sleep entry points
-  (`sleep`, `sleep_until`, `interruptible_sleep_until`,
-  `wait_for_poll_event_until`) panic when local IRQs are disabled
-  or a no-preempt section is held, in addition to interrupt-like
-  contexts, because a switch there could migrate the task while the
-  masked section still assumes it is pinned;
-- if driver callbacks are wrapped by a class or runtime spinlock,
-  keep that lock scope tightly around the actual driver register
-  or queue access, then drop it before touching sleepable subsystem locks;
 - if state is shared between task and IRQ context,
   split the design into:
   a tiny IRQ-safe data path under `SpinNoIrq`
   and a larger sleepable path outside it;
-- document context assumptions in the API contract:
-  whether the function may run in IRQ context,
-  whether it may sleep,
-  and which lock families callers may hold.
 
 ## Lock Construction (`KFEAT_LOCK_STAT`)
 
@@ -74,8 +42,7 @@ make olddefconfig
 make clippy   # or make build / make run
 ```
 
-Write lock initialization so the `stats` paths compile when that feature
-is on. `make clippy` follows `.config`; do not special-case the feature
+`make clippy` follows `.config`; do not special-case the feature
 in the build tool.
 
 ### Heap and lazy runtime init
@@ -84,24 +51,10 @@ Use `Mutex::new` / `RwLock::new` (and `Arc::new(Mutex::new(...))`,
 `Lazy::new(|| Mutex::new(...))`). With `stats` they bind a per-init-site
 class via `#[track_caller]` and are **not** `const`.
 
-Do not call them from `const fn` or from a `static` initializer.
-
-### Recording
-
-Lock implementations must call `LockClassStats::record_acquisitions`
-and `record_contentions`. Do not write private counter fields.
-
-Contention accounting: record a successful take as one acquisition;
-record one contention when the waiter actually blocks (Mutex / RwLock
-before `block_on`; SMP spin after a failed first try). See
-`docs/ai/skills/performance-analysis/references/lock-stat.md`.
-
 ## Workerqueue Usage
 
 - use `kworkng` when hardirq, softirq, timer, or other non-sleepable paths need
   to defer sleepable work into task context;
-- prepare `WorkHandle` or `DelayedWorkHandle` in sleepable task context and
-  reuse it for allocation-free IRQ-safe submissions;
 - use `NormalQueue::new()` when a subsystem needs independent routing,
   flush/closure or per-CPU active limits; system defaults share normal workers;
 - use safe static work publication for kernel-lifetime Work; borrowed Work and
@@ -130,8 +83,7 @@ device_teardown() {
 
 ## Design Guidance
 
-- keep lock scope narrow but not so fragmented
-  that invariants leak across reacquisitions;
+- keep lock scope narrow;
 - make wait/wake behavior explicit in code review;
 - treat IRQ context, task context, and sleepability
   as first-class parts of the contract;
@@ -142,15 +94,6 @@ device_teardown() {
 Check specifically for:
 
 - lock inversion risk;
-- blocking operations under spinlocks;
-- `SpinNoIrq` used where no IRQ-context competitor exists;
-- sleepable locks acquired while a spinlock,
-  IRQ-disable guard, or preempt-disable guard is held;
-- TOCTOU bugs caused by split critical sections;
 - atomics used where a lock would be clearer and safer;
 - unstated assumptions about IRQ state, scheduler availability,
   or wakeup ordering;
-- `Mutex::new` / `RwLock::new` inside `const fn` or a `static`
-  initializer (including `Foo(Mutex::new(...))` wrappers);
-- lock-stat counters updated by writing private fields instead of
-  `record_acquisitions` / `record_contentions`.

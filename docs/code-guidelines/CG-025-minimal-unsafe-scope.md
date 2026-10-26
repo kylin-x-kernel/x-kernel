@@ -16,7 +16,10 @@ checks:
 - **Why**: A small unsafe scope makes each proof obligation and the safe surrounding work visible.
 - **How to check**:
   1. Run the backend with the configured platform and review each diagnostic.
-  2. Clippy checks multiple unsafe operations and rustc requires explicit blocks in unsafe fn. Review safe work embedded in an unsafe block: unrelated allocation, control flow or state changes belong outside it. Preserve required lock and cleanup ordering.
+  2. Clippy checks multiple unsafe operations and rustc requires explicit
+     blocks in unsafe fn. Review safe work embedded in an unsafe block:
+     unrelated allocation, safe error handling, logging, branching or state
+     changes belong outside it. Preserve required lock and cleanup ordering.
 - **Exceptions**: Macro-internal unsafe sequences may use a narrow expectation, or a macro allowance if the expectation is unreliable. No crate opt-outs are registered. Use the syntax in [README.md](README.md#suppressing-a-check).
 - **Counter-example**:
 

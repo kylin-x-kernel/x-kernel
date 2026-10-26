@@ -91,11 +91,14 @@ curl -sk -u "$U:$T" -H "Jenkins-Crumb: $CRUMB" -X POST \
 
 Comment classification (verified across PRs #751/#755/#757/#727/#759):
 
-- AI verdict: user `x-cibot`, HTML marker `<!-- x-review: -->`, headings
-  `## AI Re-review` / `## AI Code Review Summary`, dimensions table
-  (`Description`, `Design Documentation`, `Security Documentation`,
-  `Rustdoc`, `POSIX`, `Bug`, `Performance`, `Logic`, `Guidelines`), a conclusion
-  (e.g. "建议合并" or blocking notes), and `Reviewed commit: <sha>`.
+- AI verdict: user `x-cibot`, first line `<!-- xreview:summary arm=pipe -->`,
+  one comment per PR edited in place by xreview (status table with the
+  reviewed commit, the latest round's verdict, links to the review page and
+  `agent.md`). Item-level details come from xreview's status call, described
+  in `https://review.x-kernel.com/r/prs/<n>/agent.md`.
+- Retired AI verdicts: user `x-cibot`, HTML marker `<!-- x-review: -->`,
+  headings `## AI Re-review` / `## AI Code Review Summary`, from the former
+  Jenkins `ai-review` job; history only.
 - CI report: user `openkylin-cibot`, HTML marker `<!-- x-kernel-ci -->`,
   heading `## ❌ Jenkins CI 构建失败` or success text, plus per-stage table.
 - Human comments/commands: any other user (e.g. maintainer `rerun`).

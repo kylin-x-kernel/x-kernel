@@ -9,9 +9,6 @@ types, functions, fields, locals, modules, or files.
 - use accurate names that reflect actual semantics and cost;
 - prefer familiar Rust and Linux naming conventions
   over project-local synonyms;
-- encode units in names when the type does not;
-- keep boolean names assertion-like
-  (`is_*`, `has_*`, `can_*`, `should_*`, `needs_*`);
 - prefer full words over ambiguous abbreviations;
 - avoid names that hide collection scans or side effects
   behind accessor-sounding verbs.
@@ -20,8 +17,6 @@ types, functions, fields, locals, modules, or files.
 
 Examples:
 
-- use `timeout_ns`, not `timeout`
-- use `size_pages`, not `size`
 - use `read_command()`, not `command()`
 - use `collect_all()`, not `get_all()` when the path is O(n)
 - use `task_fn` for a closure local, not `task`
@@ -40,5 +35,4 @@ Examples:
 Check specifically for:
 
 - misleading names that hide cost, units, or side effects;
-- negated boolean names;
 - modules that are too broad to audit comfortably;
