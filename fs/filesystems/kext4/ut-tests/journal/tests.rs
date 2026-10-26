@@ -61,9 +61,11 @@ fn exhausted_handle_aborts_and_rejects_following_mutations() {
         .write_access(FilesystemBlock::new(7), &mut handle)
         .map(|_| ());
     assert_eq!(result, Err(Ext4Error::InsufficientJournalCredits));
+    assert!(handle.has_updates());
+    // Exhaustion after metadata publication violates mutation prevalidation.
     assert_eq!(
         filesystem.complete_metadata_mutation(handle, result),
-        Err(Ext4Error::InsufficientJournalCredits)
+        Err(Ext4Error::InvalidJournalTransaction)
     );
     assert!(journal.is_aborted());
     let writes = device.write_count();

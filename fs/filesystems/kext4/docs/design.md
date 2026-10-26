@@ -597,7 +597,9 @@ journal 事务容量时返回 `NoSpace`，不 abort；多个 handle 的总额度
 持 mount 锁等待自己的 handle。等待复用事务状态队列，stop、commit、checkpoint 和 abort
 均通知该队列，不增加另一套 reservation 状态。
 
-执行中额度耗尽仍 abort journal，当前调用对 VFS 返回 `ENOSPC`；后续 mutation 在 journal
+元数据发布前额度不足原样返回 `InsufficientJournalCredits`，对 VFS 映射为 `ENOSPC`，
+不 abort journal。元数据发布后额度耗尽说明修改前校验遗漏，按事务不变量失败升级为
+`InvalidJournalTransaction` 并 abort journal，当前调用对 VFS 返回 `EIO`；后续 mutation 在 journal
 入口返回 `JournalAborted`，映射为 `EROFS`，且不会先修改 journal 特性或 superblock 元数据。
 journal 的 abort 状态是写入禁用依据。`Ext4MountWriteGuard` 借用调用方已有 superblock，
 在释放 mount 写锁前将 abort 发布到其既有 `RDONLY` 标志，阻止后续缓冲写进入页缓存；

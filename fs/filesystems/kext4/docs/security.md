@@ -437,7 +437,9 @@ existing active-handle count and rejects nested handles before any setup or wait
 caller cannot wait for its own handle while holding that lock. Independent journal-core
 users retain the wait/stop protocol; handle stop requires no mount lock.
 
-Credit exhaustion during mutation aborts the journal and maps to `ENOSPC`. The existing
+Credit exhaustion before metadata publication returns `InsufficientJournalCredits`, maps
+to `ENOSPC`, and leaves the journal writable. Exhaustion after publication violates mutation
+prevalidation, becomes `InvalidJournalTransaction`, aborts the journal, and maps to `EIO`. The existing
 abort state rejects subsequent mutation with `EROFS` before feature or superblock setup;
 the mount write guard publishes `RDONLY` to the existing VFS superblock before releasing
 mutation protection. Writable remount validates the same abort state before applying

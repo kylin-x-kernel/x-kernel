@@ -73,9 +73,11 @@ fn journal_abort_marks_superblock_read_only_and_rejects_buffered_writes() {
             .consume_metadata_credit(FilesystemBlock::new(6))
             .unwrap();
         let result = handle.consume_metadata_credit(FilesystemBlock::new(7));
+        assert_eq!(result, Err(crate::Ext4Error::InsufficientJournalCredits));
+        assert!(handle.has_updates());
         assert_eq!(
             state.complete_metadata_mutation(handle, result),
-            Err(crate::Ext4Error::InsufficientJournalCredits)
+            Err(crate::Ext4Error::InvalidJournalTransaction)
         );
     }
     assert!(super_block.flags().contains(SuperBlockFlags::RDONLY));
