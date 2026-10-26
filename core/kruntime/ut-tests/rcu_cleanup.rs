@@ -32,22 +32,22 @@ fn host_preemption_controls_preserve_deferred_cleanup_until_checkpoint() {
     ktask::test_support::set_current_reschedule_pending(false);
     let mut calls = 0;
     let mut observations = None;
-    krcu::host::RcuTaskIf::with_preempt_check_deferred(&mut || {
+    kiface_task_api::TaskPreemptionIf::with_preempt_check_deferred(&mut || {
         calls += 1;
         // SAFETY: host's body supplies preemption exclusion; the outer IRQ
         // guard pins current. The explicit checkpoint below drains enrollment.
         unsafe { leave_deferred_reader(&task) };
-        krcu::host::RcuTaskIf::request_current_reschedule();
+        kiface_task_api::TaskPreemptionIf::request_current_reschedule();
         observations = Some((
-            krcu::host::RcuTaskIf::current_preemption_disabled(),
+            kiface_task_api::TaskPreemptionIf::current_preemption_disabled(),
             !karch::local_irq_enabled(),
         ));
     });
     let (was_excluded, irqs_stayed_masked) = observations.unwrap();
     let remained_enrolled = reader(&task).is_enrolled();
     let remained_pending = ktask::test_support::is_current_reschedule_pending();
-    let credit_released = !krcu::host::RcuTaskIf::current_preemption_disabled();
-    krcu::host::RcuTaskIf::check_preempt_pending();
+    let credit_released = !kiface_task_api::TaskPreemptionIf::current_preemption_disabled();
+    kiface_task_api::TaskPreemptionIf::check_preempt_pending();
     let cleaned = !reader(&task).is_enrolled();
 
     // Restore the fixture independently before an assertion can return early.

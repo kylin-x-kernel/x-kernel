@@ -1,0 +1,18 @@
+[package]
+name = "kiface-task-wait-api"
+description = "Task-bound allocation-free completion waiting contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kiface.workspace = true
+kcompletion.workspace = true
+kerrno.workspace = true
+
+[lints]
+workspace = true

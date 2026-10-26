@@ -16,6 +16,7 @@ ns16550-mmio = []
 ns16550-ioport = ["dep:uart_16550"]
 
 [dependencies]
+kiface-console-api.workspace = true
 driver_base = { workspace = true }
 kclass = { workspace = true, features = ["char"] }
 kdevice = { workspace = true }

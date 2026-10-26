@@ -664,6 +664,7 @@ dependencies = [
  "kdevice",
  "khal",
  "kiface",
+ "kiface-console-api",
  "kirq",
  "kspin",
  "lazyinit",
@@ -2113,6 +2114,7 @@ dependencies = [
  "kcpu_id_map",
  "kcpu_slot",
  "kiface",
+ "kiface-cpu-api",
  "loongArch64",
  "memaddr",
  "riscv",
@@ -2183,6 +2185,8 @@ dependencies = [
  "kcpu_id_map",
  "kcpu_slot",
  "kerrno",
+ "kiface",
+ "kiface-cpu-api",
  "klazy",
  "lazyinit",
  "linkme",
@@ -2219,7 +2223,7 @@ dependencies = [
  "kaddr_layout",
  "kbuild_config",
  "kcpu_id_map",
- "kiface",
+ "kiface-cpu-api",
  "x86_64",
 ]
 
@@ -2262,9 +2266,8 @@ dependencies = [
  "alloc-engine",
  "kalloc",
  "kbuild_config",
- "kerrno",
  "khal",
- "kiface",
+ "kiface-mm-api",
  "kplat",
  "kspin",
  "log",
@@ -2472,6 +2475,7 @@ dependencies = [
  "fs_boot",
  "inputdev",
  "kalloc",
+ "karch",
  "kbpf",
  "kdriver",
  "kexec",
@@ -2480,6 +2484,7 @@ dependencies = [
  "kipi",
  "kirq",
  "knet",
+ "kplat",
  "kplat-aarch64",
  "kplat-loongarch64",
  "kplat-riscv64",
@@ -2493,12 +2498,14 @@ dependencies = [
  "ksync",
  "ksyscall",
  "ktask",
+ "ktimer-core",
  "ktracing",
  "kworkng",
  "kxarray",
  "kxarray-kernel-tests",
  "linux_sysno",
  "memspace",
+ "page_table",
  "procfs",
  "tee_kernel",
  "tee_task_iface",
@@ -2545,6 +2552,9 @@ dependencies = [
  "kernel-boot",
  "kerrno",
  "kiface",
+ "kiface-console-api",
+ "kiface-task-api",
+ "kiface-time-api",
  "kirq",
  "kplat",
  "kspin",
@@ -2580,6 +2590,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiface-console-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kiface",
+]
+
+[[package]]
+name = "kiface-cpu-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kcpu_id_map",
+ "kerrno",
+ "kiface",
+]
+
+[[package]]
+name = "kiface-irq-context-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kiface",
+]
+
+[[package]]
+name = "kiface-logging-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kiface",
+ "ktime_types",
+]
+
+[[package]]
+name = "kiface-mm-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "kiface",
+ "memaddr",
+]
+
+[[package]]
+name = "kiface-task-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kiface",
+]
+
+[[package]]
+name = "kiface-task-wait-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kcompletion",
+ "kerrno",
+ "kiface",
+]
+
+[[package]]
+name = "kiface-time-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "kiface",
+ "ktime_types",
+]
+
+[[package]]
 name = "kio"
 version = "0.3.0-dev"
 dependencies = [
@@ -2599,8 +2674,12 @@ dependencies = [
  "kbuild_config",
  "kcpu_id_map",
  "kcpu_slot",
+ "kerrno",
  "khal",
  "kiface",
+ "kiface-cpu-api",
+ "kiface-task-api",
+ "kiface-time-api",
  "kirq",
  "kspin",
  "ktime_types",
@@ -2621,6 +2700,9 @@ dependencies = [
  "kcompletion",
  "kcpu_slot",
  "kiface",
+ "kiface-irq-context-api",
+ "kiface-task-api",
+ "kiface-task-wait-api",
  "krcu-core",
  "kspin",
  "log",
@@ -2659,11 +2741,20 @@ version = "0.3.0-dev"
 dependencies = [
  "cfg-if",
  "chrono",
- "kiface",
+ "kiface-logging-api",
  "kspin",
- "ktime_types",
  "log",
  "unittest",
+]
+
+[[package]]
+name = "kmutex"
+version = "0.3.0-dev"
+dependencies = [
+ "event-listener",
+ "kiface-task-api",
+ "klockstat",
+ "lock_api",
 ]
 
 [[package]]
@@ -2735,8 +2826,8 @@ dependencies = [
  "kcpu_slot",
  "kerrno",
  "kiface",
+ "kiface-cpu-api",
  "kplat-macros",
- "kspin",
 ]
 
 [[package]]
@@ -2784,6 +2875,7 @@ dependencies = [
  "kerrno",
  "khal",
  "kiface",
+ "kiface-time-api",
  "kirq",
  "kplat",
  "kspin",
@@ -2922,7 +3014,13 @@ dependencies = [
  "kcpu_slot",
  "kerrno",
  "kiface",
+ "kiface-cpu-api",
+ "kiface-irq-context-api",
+ "kiface-task-api",
+ "kiface-task-wait-api",
+ "kiface-time-api",
  "klazy",
+ "kmutex",
  "krcu-core",
  "kspin",
  "unittest",
@@ -3003,25 +3101,27 @@ dependencies = [
  "kalloc",
  "karch",
  "kbuild_config",
- "kcompletion",
  "kcpu",
  "kcpu_id_map",
- "kdma",
  "kdriver",
  "kernel-boot",
  "kerrno",
  "kfinalize",
  "khal",
  "kiface",
+ "kiface-cpu-api",
+ "kiface-irq-context-api",
+ "kiface-logging-api",
+ "kiface-task-api",
+ "kiface-time-api",
  "kipi",
  "kirq",
- "klazy",
  "klogger",
+ "kmutex",
  "knet",
  "krcu",
  "krcu-core",
  "kspin",
- "ksync",
  "ktask",
  "ktime",
  "ktime_types",
@@ -3086,6 +3186,8 @@ dependencies = [
  "karch",
  "kcpu_slot",
  "kiface",
+ "kiface-cpu-api",
+ "kiface-task-api",
  "klockstat",
  "linkme",
  "unittest",
@@ -3096,8 +3198,8 @@ name = "ksync"
 version = "0.3.0-dev"
 dependencies = [
  "event-listener",
- "khal",
  "klockstat",
+ "kmutex",
  "kspin",
  "ktask",
  "linkme",
@@ -3175,9 +3277,13 @@ dependencies = [
  "khal",
  "kidentity",
  "kiface",
+ "kiface-task-api",
+ "kiface-task-wait-api",
+ "kiface-time-api",
  "kipi",
  "kirq",
  "klazy",
+ "kmutex",
  "kpoll",
  "krcu-core",
  "ksched",
@@ -3681,6 +3787,8 @@ dependencies = [
  "kcpu_id_map",
  "kerrno",
  "khal",
+ "kiface",
+ "kiface-mm-api",
  "kplat",
  "kspin",
  "ksync",
@@ -5444,6 +5552,7 @@ dependencies = [
  "kernel-boot",
  "khal",
  "kiface",
+ "kiface-time-api",
  "kirq",
  "klazy",
  "kspin",

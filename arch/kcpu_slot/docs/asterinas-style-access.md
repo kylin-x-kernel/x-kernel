@@ -57,7 +57,7 @@ pub trait CpuLocalIrqIf {
 }
 
 #[kiface::provide]
-impl kcpu_slot::CpuLocalIrqIf {
+impl kiface_cpu_api::CpuLocalIrqIf {
     fn save_and_disable() -> usize { crate::irq::save_irq_and_disable() }
     fn restore(state: usize) { crate::irq::restore_irq(state) }
 }

@@ -80,7 +80,10 @@ impl ClockEventIf {
     fn disarm_timer() {
         tcfg::set_en(false);
     }
+}
 
+#[kiface::provide]
+impl kiface_time_api::ClockResumeIf {
     fn handle_idle_return(_previous_ticks: TimerTicks) -> bool {
         false
     }

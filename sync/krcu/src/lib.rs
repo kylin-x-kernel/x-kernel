@@ -187,13 +187,13 @@ mod service;
 pub use context::{enter_user_quiescent, exit_user_quiescent};
 pub use krcu_core::CallbackNode;
 pub use read::{ReadScope, with_interrupt_read, with_read};
-#[cfg(unittest)]
-#[doc(hidden)]
-pub use service::has_installed_drain_markers_for_tests;
 pub use service::{
     PreparedCallback, Rcu, drain_callbacks, init_service, preflight_callback_submission,
     synchronize_rcu,
 };
+#[cfg(unittest)]
+#[doc(hidden)]
+pub use service::{has_installed_drain_markers_for_tests, with_drain_lock_for_tests};
 
 /// Observes deferred-cleanup demand without consuming it or authorizing cleanup.
 ///

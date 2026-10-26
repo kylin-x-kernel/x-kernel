@@ -5,10 +5,10 @@
 //! CPU power management.
 //!
 //! [`halt`] and [`power_off`] are the system power terminals for normal
-//! execution contexts. Before entering the bare platform terminal they stop
-//! every other CPU through [`SmpStopIf`], so no surviving CPU keeps
-//! executing tasks, handling interrupts, or mutating shared state while the
-//! system goes down. When the stop provider is unavailable (UP builds) or
+//! execution contexts. Before entering the bare platform terminal they request a best-effort
+//! stop of other CPUs through [`SmpStopIf`]. A bounded timeout does not prove
+//! that remote execution has stopped; callers must not use return as a
+//! resource-reclamation barrier. When the stop provider is unavailable (UP builds) or
 //! not ready yet (terminals reached before runtime initialization
 //! completes) the stop is a no-op and the terminal proceeds with the
 //! calling CPU only.
@@ -33,8 +33,9 @@ pub use kplat::sys::{
 
 /// `kiface` for stopping all other CPUs on the terminal path.
 ///
-/// The provider must stop every present CPU except its caller before
-/// returning, and must be callable with local interrupts disabled.
+/// The provider requests other present CPUs to stop with a bounded wait and
+/// must be callable with local interrupts disabled. Return does not certify
+/// remote acknowledgment after timeout.
 /// Providers degrade to a no-op while their machinery is not ready yet
 /// (for example before IPI delivery is initialized).
 ///
@@ -56,7 +57,7 @@ impl SmpStopIf {
     fn stop_other_cpus() {}
 }
 
-/// Stops every other CPU, then halts the system with power kept.
+/// Requests other CPUs to stop, then halts the system with power kept.
 ///
 /// See the module documentation for the terminal contract; this never
 /// returns.

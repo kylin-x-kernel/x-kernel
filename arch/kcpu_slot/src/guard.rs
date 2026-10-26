@@ -14,7 +14,7 @@ pub(crate) struct LocalIrqGuard {
 impl LocalIrqGuard {
     pub(crate) fn new() -> Self {
         Self {
-            saved_state: crate::CpuLocalIrqIf::save_and_disable(),
+            saved_state: kiface_cpu_api::CpuLocalIrqIf::save_and_disable(),
             _not_send_sync: PhantomData,
         }
     }
@@ -22,7 +22,7 @@ impl LocalIrqGuard {
 
 impl Drop for LocalIrqGuard {
     fn drop(&mut self) {
-        crate::CpuLocalIrqIf::restore(self.saved_state);
+        kiface_cpu_api::CpuLocalIrqIf::restore(self.saved_state);
     }
 }
 

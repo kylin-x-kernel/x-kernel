@@ -20,6 +20,7 @@ mod aarch64_asid;
 mod aspace;
 pub mod backend;
 mod cpu_residency;
+mod dma_mapping;
 mod fault;
 mod iomap;
 mod lifetime;

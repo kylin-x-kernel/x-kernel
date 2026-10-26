@@ -17,7 +17,7 @@ ignored-paths = ["src/dummy.rs"]
 
 [features]
 default = []
-smp = ["kplat/smp",]
+smp = []
 fp-simd = ["kcpu/fp-simd",]
 vmm = ["kernel_boot/vmm", "kcpu/vmm"]
 rtc = []
@@ -30,6 +30,9 @@ pmu = ["kplat/pmu"]
 irq = []
 
 [dependencies]
+kiface-console-api.workspace = true
+kiface-task-api.workspace = true
+kiface-time-api.workspace = true
 kalloc = { workspace = true }
 boot_info = { workspace = true }
 firmware_handoff = { workspace = true }

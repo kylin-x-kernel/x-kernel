@@ -57,7 +57,7 @@ pub use trampoline::map_signal_trampoline;
 /// `kprocess` implements this via `kiface::provide`; the trait lets `ksignal`
 /// dependents (for example `ktimer`) request current-thread signal delivery
 /// without a direct `kprocess` dependency.
-pub trait CurrentSignalDispatch {
+pub trait CurrentThreadSignalIf {
     /// Queues `signo` on the current user thread.
     ///
     /// # Errors
@@ -68,11 +68,11 @@ pub trait CurrentSignalDispatch {
 }
 
 /// Sends a signal to the current user thread through the registered
-/// [`CurrentSignalDispatch`] provider.
+/// [`CurrentThreadSignalIf`] provider.
 ///
 /// # Errors
 ///
-/// Returns the provider's error; see [`CurrentSignalDispatch::send_sig_current`].
+/// Returns the provider's error; see [`CurrentThreadSignalIf::send_sig_current`].
 pub fn send_sig_current(signo: Signo) -> kerrno::KResult<()> {
-    CurrentSignalDispatch::send_sig_current(signo)
+    CurrentThreadSignalIf::send_sig_current(signo)
 }

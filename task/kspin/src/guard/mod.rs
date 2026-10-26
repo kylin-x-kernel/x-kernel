@@ -7,20 +7,6 @@
 //! This module provides a composable guard system for implementing
 //! kernel spinlocks with different synchronization guarantees.
 
-/// Low-level kernel interfaces for guard operations.
-#[kiface::interface]
-pub trait KernelGuardIf {
-    /// Enable kernel preemption.
-    fn enable_preempt();
-
-    /// Releases one preemption credit without checking pending work.
-    /// The caller supplies the subsequent explicit scheduling checkpoint.
-    fn enable_preempt_without_check();
-
-    /// Disable kernel preemption.
-    fn disable_preempt();
-}
-
 /// Base trait for all guard types.
 ///
 /// Guards implement RAII pattern to automatically manage critical sections.
@@ -39,5 +25,4 @@ mod arch;
 mod percpu;
 mod types;
 
-pub use percpu::CurrentCpuIf;
 pub use types::{IrqSave, NoOp, NoPreempt, NoPreemptIrqSave};

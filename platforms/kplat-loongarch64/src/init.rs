@@ -4,13 +4,13 @@
 
 use kbuild_config::RTC_PADDR;
 use khal::mem::PhysAddr;
-use kplat::boot::{BootHandler, BootInfo};
+use kplat::boot::{BootInfo, PlatformBootIf};
 
 /// Size of the LS7A RTC MMIO aperture.
 const LS7A_RTC_SIZE: usize = 0x1000;
 
 #[kiface::provide]
-impl BootHandler {
+impl PlatformBootIf {
     fn prepare_boot_memory(_boot_info: &BootInfo) {}
 
     fn firmware_init(_boot_info: &BootInfo) {}

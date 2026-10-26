@@ -88,7 +88,7 @@ fn test_softirq_drain_action() {
 
 #[def_test]
 fn test_softirq_resched_without_current_task_is_false() {
-    assert_eq!(task_needs_resched(None), false);
+    assert_eq!(crate::task_api::task_needs_resched(None), false);
 }
 
 #[def_test(serial)]
@@ -97,9 +97,9 @@ fn test_softirq_resched_query_preserves_task_request() {
     let task = crate::current();
     let previous = task.is_preempt_pending();
     task.set_preempt_pending(false);
-    let before = kirq::softirq::SoftirqDaemonIf::needs_resched();
+    let before = kiface_task_api::TaskPreemptionIf::needs_resched();
     task.set_preempt_pending(true);
-    let after = kirq::softirq::SoftirqDaemonIf::needs_resched();
+    let after = kiface_task_api::TaskPreemptionIf::needs_resched();
     let preserved = task.is_preempt_pending();
     task.set_preempt_pending(previous);
 

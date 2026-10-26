@@ -13,9 +13,12 @@ documentation.workspace = true
 default = []
 # kfeat selects matching protocol and host-provider capabilities together.
 ipi = []
-smp = ["kspin/smp"]
+smp = []
 
 [dependencies]
+kiface-time-api.workspace = true
+kiface-irq-context-api.workspace = true
+kiface-cpu-api.workspace = true
 krcu-core.workspace = true
 karch.workspace = true
 kcpu_id_map.workspace = true
@@ -25,7 +28,10 @@ kspin.workspace = true
 kiface.workspace = true
 kerrno.workspace = true
 klazy.workspace = true
+kmutex.workspace = true
 kcompletion.workspace = true
+kiface-task-api.workspace = true
+kiface-task-wait-api.workspace = true
 unittest.workspace = true
 
 [lints]

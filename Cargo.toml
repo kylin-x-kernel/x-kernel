@@ -4,6 +4,14 @@ members = [
     "arch/kcpu_slot",
     "util/kxarray",
     "util/krcu-list",
+    "util/kiface/crates/task-api",
+    "util/kiface/crates/mm-api",
+    "util/kiface/crates/logging-api",
+    "util/kiface/crates/console-api",
+    "util/kiface/crates/time-api",
+    "util/kiface/crates/irq-context-api",
+    "util/kiface/crates/cpu-api",
+    "util/kiface/crates/task-wait-api",
     # kernel entry
     "entry",
     # boot and loader
@@ -134,6 +142,15 @@ kuaccess = { path = "core/kuaccess" }
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await-macro"] }
 kpoll = { path = "task/kpoll" }
 kcompletion = { path = "sync/kcompletion" }
+kmutex = { path = "sync/kmutex" }
+kiface-task-api = { path = "util/kiface/crates/task-api" }
+kiface-mm-api = { path = "util/kiface/crates/mm-api" }
+kiface-logging-api = { path = "util/kiface/crates/logging-api" }
+kiface-console-api = { path = "util/kiface/crates/console-api" }
+kiface-time-api = { path = "util/kiface/crates/time-api" }
+kiface-irq-context-api = { path = "util/kiface/crates/irq-context-api" }
+kiface-cpu-api = { path = "util/kiface/crates/cpu-api" }
+kiface-task-wait-api = { path = "util/kiface/crates/task-wait-api" }
 krcu = { path = "sync/krcu" }
 krcu-core = { path = "sync/krcu/crates/krcu-core" }
 kspin = { path = "task/kspin" }

@@ -14,7 +14,7 @@
 //! Serial integration publishes the adopted boot port through
 //! [`runtime::register_stdout_console`]. The native TTY obtains its runtime
 //! handle through [`runtime::stdout_console`] and keeps that connection fixed.
-//! Normal and emergency kernel output use the early port through `ConsoleIf`,
+//! Normal and emergency kernel output use the early port through kiface-console-api contracts,
 //! independently of runtime device publication.
 //!
 //! ```ignore
@@ -120,22 +120,16 @@ pub fn boot_console_io_port() -> u16 {
     0x3f8
 }
 
-// The single `ConsoleIf` implementation. `kiface` permits exactly one
+// Ordinary console I/O provider. `kiface` permits exactly one
 // implementation per interface, so it lives here at the crate root and routes
 // printk to the early stdout [`SerialPort`]. The stdout port is brought up in
 // platform `early_driver_init`, before the driver model exists, so this is the
 // one console path that must not depend on kdriver.
 #[kiface::provide]
-impl khal::console::ConsoleIf {
+impl kiface_console_api::ConsoleIoIf {
     fn write_data(buf: &[u8]) {
         if let Some(port) = serial::stdout_port() {
             port.write_data(buf);
-        }
-    }
-
-    fn write_data_atomic(buf: &[u8]) {
-        if let Some(port) = serial::stdout_port() {
-            port.write_data_atomic(buf);
         }
     }
 
@@ -143,24 +137,6 @@ impl khal::console::ConsoleIf {
         serial::stdout_port()
             .map(|port| port.read_data(buf))
             .unwrap_or(0)
-    }
-
-    fn interrupt_id() -> Option<usize> {
-        INPUT_IRQ
-            .lock()
-            .registration
-            .as_ref()
-            .map(|(virq, _)| *virq)
-    }
-
-    fn prepare_input() {
-        prepare_input_with(
-            &INPUT_IRQ,
-            serial::stdout_port().zip(serial::stdout_irq()),
-            SerialPort::prepare_irq_input,
-            kirq::try_map,
-            kirq::try_register_shared,
-        );
     }
 }
 
@@ -400,3 +376,33 @@ unittest::path_mod_test!(input_setup_tests, "../ut-tests/input_setup.rs");
 
 #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]
 unittest::path_mod_test!(irq_desc_unittest, "../ut-tests/irq_desc_unittest.rs");
+
+#[kiface::provide]
+impl kiface_console_api::EmergencyConsoleWriteIf {
+    fn write_data_atomic(buf: &[u8]) {
+        if let Some(port) = serial::stdout_port() {
+            port.write_data_atomic(buf);
+        }
+    }
+}
+
+#[kiface::provide]
+impl kiface_console_api::ConsoleInputSetupIf {
+    fn interrupt_id() -> Option<usize> {
+        INPUT_IRQ
+            .lock()
+            .registration
+            .as_ref()
+            .map(|(virq, _)| *virq)
+    }
+
+    fn prepare_input() {
+        prepare_input_with(
+            &INPUT_IRQ,
+            serial::stdout_port().zip(serial::stdout_irq()),
+            SerialPort::prepare_irq_input,
+            kirq::try_map,
+            kirq::try_register_shared,
+        );
+    }
+}

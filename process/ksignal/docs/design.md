@@ -19,7 +19,7 @@ permission checks, and the teardown actions behind `SignalOsAction`.
 
 ```text
 process/ksignal/src/
-├── lib.rs               crate root, CurrentSignalDispatch provider contract
+├── lib.rs               crate root, CurrentThreadSignalIf provider contract
 ├── types.rs             Signo, SignalSet, SignalInfo, ChildExitInfo, SignalStack
 ├── action.rs            SignalAction, SignalActionFlags, dispositions, OS actions
 ├── pending.rs           PendingSignals (standard + real-time queues)

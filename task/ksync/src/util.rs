@@ -4,31 +4,8 @@
 
 //! Utility types and functions for synchronization primitives.
 
+pub use kmutex::SpinConfig;
 use ktask::yield_now;
-
-/// Spin configuration for blocking synchronization primitives.
-///
-/// # Valid Ranges
-///
-/// - `max_spins`: Should be in the range 1..=100 for reasonable behavior
-/// - `spin_before_yield`: Should be <= `max_spins` and typically <= 10 to avoid
-///   excessive spin loop iterations (exponential backoff)
-#[derive(Debug, Clone, Copy)]
-pub struct SpinConfig {
-    /// Maximum number of spin iterations before blocking
-    pub max_spins: u32,
-    /// Number of spins before yielding
-    pub spin_before_yield: u32,
-}
-
-impl Default for SpinConfig {
-    fn default() -> Self {
-        Self {
-            max_spins: 10,
-            spin_before_yield: 3,
-        }
-    }
-}
 
 /// Helper for adaptive spinning with configurable strategy.
 pub(crate) struct Spin {

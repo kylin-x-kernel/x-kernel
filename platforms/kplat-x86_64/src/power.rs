@@ -7,7 +7,7 @@
 #[cfg(feature = "smp")]
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kerrno::{KError, KResult};
-use kplat::sys::SysCtrl;
+use kplat::sys::{CpuStartIf, PlatformPowerIf};
 use x86_64::instructions::port::PortWriteOnly;
 
 /// PM1 control register field positions (ACPI 5.0 §4.8.3.2): `SLP_TYP`
@@ -41,7 +41,7 @@ fn pm1a_control_port() -> Option<u16> {
 }
 
 #[kiface::provide]
-impl SysCtrl {
+impl CpuStartIf {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         use khal::mem::pa;
@@ -60,7 +60,10 @@ impl SysCtrl {
         crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr));
         Ok(())
     }
+}
 
+#[kiface::provide]
+impl PlatformPowerIf {
     fn power_off() -> ! {
         info!("Shutting down...");
         // The register comes from the firmware declaration (FADT PM1a

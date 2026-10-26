@@ -47,32 +47,33 @@ Without it, only local RCU softirq notification is supported and may wake its
 daemon. Scheduler-locked cleanup still relies on periodic progress in that
 configuration. Neither notification certifies a quiescent state or consumes
 reader cleanup demand. This crate does not depend on ktask, kirq, khal, kipi
-or ksync. Runtime supplies their concrete capabilities; scheduler/IRQ hooks
+or ksync. Domain APIs bind their owning providers directly; runtime supplies only RCU-specific
+integration. Scheduler/IRQ hooks
 reach the RCU owner through the existing krcu-core integration contract.
 
 Task and interrupt read scopes, scheduler cleanup checks and final user-entry
-cleanup borrow current storage through `RcuTaskIf`.
+cleanup borrow current storage through `RcuReaderStorageIf`.
 The runtime retains its concrete CurrentTask handle until RCU nesting and task
 exit cleanup finish. No allocation or owner-count increment is added. The
 adapter preserves IRQ/preemption state and does not decide watching or unlink
 eligibility. Task bodies remain preemptible; interrupt bodies remain strictly
 nested and skip task-exit cleanup. User entry releases the borrowed handle
 before turning watching off; cleanup retains the handle through guard release.
-`RcuExecutionIf` supplies interrupt-context facts through runtime integration.
+`kiface_irq_context_api::InterruptContextIf` supplies IRQ-context facts directly from kirq.
 The broad interrupt-context predicate includes BH-disabled tasks; the handler
 predicate excludes those tasks and includes only executing IRQ/NMI/softirq
 handlers. Queries check NMI before ordinary context snapshots and do not run
 scheduler checks. RCU retains scope admission and cleanup eligibility.
-`RcuTaskIf::is_sleepable_context` supplies a nonallocating task-context query
+`kiface_task_api::TaskBlockingContextIf::is_sleepable_context` supplies a nonallocating task-context query
 without preparing a wait or changing exclusion/pending state. Preflight rejects
 NMI before this query, and samples it before adding temporary IRQ exclusion.
 RCU separately owns exception and watching checks.
-`RcuTaskIf` also supplies the current preemption-count query, reschedule-request
+`kiface_task_api::TaskPreemptionIf` supplies the current preemption-count query, reschedule-request
 bit, ordinary scheduling checkpoint and scoped check deferral. Deferral removes
 only its own preemption credit, without changing IRQ state or running cleanup.
 RCU decides when to retain enrollment and when to request a later checkpoint;
-the host decides whether that checkpoint may schedule. `RcuExecutionIf` supplies
-CPU identity and exception snapshots. Read admission runs in its synchronous
+the task subsystem decides whether that checkpoint may schedule. `kiface-cpu-api` supplies
+CPU identity and protected exception snapshots. Read admission runs in its synchronous
 exception-snapshot body while the host retains ordinary IRQ exclusion; RCU
 checks NMI, exception presence, watching and interrupt state inside that body.
 The host restores IRQ state before the actual read scope, without a scheduling
@@ -80,8 +81,9 @@ check or preemption-count update. Cleanup uses the independent protected
 exception query. CPU identity is not a pin: queue transfer/execution retains
 its existing exclusion, while a demand notification may target a sampled CPU.
 The `ipi` feature selects RCU's remote notification protocol, not a scheduler
-implementation. The `smp` feature also enables `kspin/smp` for its own shared
-state. `kfeat/ipi` selects matching RCU, runtime and task/IPI capabilities
+implementation. The local `smp` feature does not enable dependency features;
+`kfeat/smp` selects `krcu/smp` and `kspin/smp` together for shared-state exclusion.
+`kfeat/ipi` selects matching RCU, runtime and task/IPI capabilities
 together; `kfeat/smp` includes that assembly. Enabling an RCU feature alone
 does not initialize or configure the host scheduler. An alternative host must
 provide the selected notification contract; krcu does not depend on kruntime.
@@ -106,7 +108,7 @@ scheduler integration tokens, not unrestricted access to private RCU state.
 The unittest-only `reader_cleanup_requested_for_tests` snapshot lets them
 observe demand without clearing it, supplying quiescence or authorizing cleanup.
 The marker-installation snapshot similarly observes only whether any drain
-marker is installed while a fixture holds the host's drain serialization gate.
+marker is installed while a fixture holds the RCU-owned drain serialization gate (`src/drain.rs::DRAIN_LOCK`).
 
 `krcu_core::RcuContextIf` is defined in the core's `src/integration.rs` and
 implemented here, not in the IRQ crate. Its production operations are
@@ -327,8 +329,8 @@ The raw queue transfer boundary remains private to owning adapters and tests.
 
 ## Owning Consumer Policies And Evidence
 
-Synchronous waits borrow a `TaskWait` from the runtime's stack-local
-`ktask::completion::CompletionWait` adapter. The host validates sleepability
+Synchronous waits borrow a `kiface_task_wait_api::PreparedCompletionWait` from ktask's
+stack-local `CompletionWait` provider. The provider validates sleepability
 before invoking the RCU body. RCU then prepares its callback record before
 giving the caller a `PreparedGracePeriodWait`. Owning replacement retains
 the new Box until this body is entered, so either preparation failure returns
@@ -337,7 +339,7 @@ The adapter and completion primitive allocate nothing, and the adapter cannot
 return an error after invoking its body. Its `wait_for_completion` returns only
 after acquiring completion, never merely on a wake hint. Callback drain uses
 the same completion contract. The startup caller and GP task instead borrow
-`ServiceWait`, preserving their existing `PreparedTaskWait` park/Waker contract
+`kiface_task_wait_api::PreparedParking`, preserving their existing `PreparedTaskWait` park/Waker contract
 and allocation policy. Startup prepares its wait before any control claim. The GP
 task prepares a different wait on its own stack, then prepares its timer and
 publishes readiness. The startup caller still checks RCU's waker publication

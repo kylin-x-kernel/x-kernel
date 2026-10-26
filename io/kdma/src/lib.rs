@@ -51,7 +51,6 @@ mod dma;
 use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::AllocResult;
-pub use dma::DmaPageTableIf;
 use memaddr::PhysAddr;
 
 use self::dma::ALLOCATOR;

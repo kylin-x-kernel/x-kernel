@@ -31,7 +31,7 @@ fn run_round(cpus: &[LogicalCpuId], batch: usize, round: usize) {
             })
             .collect();
         let mut samples = Vec::with_capacity(batch);
-        let output = Arc::new(ksync::Mutex::new(Vec::new()));
+        let output = Arc::new(kmutex::Mutex::new(Vec::new()));
         outputs.push(output.clone());
         let can_start = can_start.clone();
         let worker = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(

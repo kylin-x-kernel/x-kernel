@@ -7,7 +7,7 @@ Its inputs are hardware events (timer interrupts and NMI/PMU overflows) and inte
 kernel state (task scheduling and mutexes).
 It accepts no user input.
 
-The optional `WorkqueueStallCheck` contract adds a trusted kernel provider taking
+The optional `WorkqueueStallInspectorIf` contract adds a trusted kernel provider taking
 CPU identity, a monotonic sample and a threshold. It accepts no raw pointers or
 external payload. Its caller must be a sleepable task with no held spinlocks;
 it must not be called from the existing NMI or timer IRQ checks. A provider that

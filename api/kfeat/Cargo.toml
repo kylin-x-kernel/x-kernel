@@ -20,9 +20,14 @@ default = []
 # Selected by the unittest entry, not ordinary kernel configurations.
 kernel-tests = ["dep:krcu-list", "dep:krcu-list-kernel-tests", "dep:kxarray", "dep:kxarray-kernel-tests"]
 
-# Multicore
+# Multicore: only this assembly forwards SMP features between kernel crates.
 smp = [
     "ipi",
+    "karch/smp",
+    "kplat/smp",
+    "kipi/smp",
+    "ktimer_core/smp",
+    "page_table/smp",
     "khal/smp",
     "kruntime/smp",
     "krcu/smp",
@@ -30,6 +35,7 @@ smp = [
     "krcu-list-kernel-tests?/smp",
     "memspace/smp",
     "fs_boot?/smp",
+    "procfs?/smp",
     "ktracing?/smp",
     "ktask/smp",
     "kspin/smp",
@@ -207,6 +213,10 @@ tracepoint = ["ktracing/tracepoint"]
 ebpf = ["dep:kbpf", "dep:fs_boot", "ksyscall/ebpf", "kruntime/fs_ebpf"]
 
 [dependencies]
+karch = { workspace = true, optional = true }
+kplat = { workspace = true, optional = true }
+ktimer_core = { workspace = true, optional = true }
+page_table = { workspace = true, optional = true }
 kworkng = { workspace = true, optional = true }
 alloc-engine = { workspace = true, optional = true }
 memspace = { workspace = true, optional = true }

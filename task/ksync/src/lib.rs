@@ -11,6 +11,11 @@
 //! - [`Semaphore`]: Counting semaphore for resource management
 //! - [`spin`]: Re-export of `kspin` for spinlocks
 //!
+//! Mutex types and [`SpinConfig`] are re-exported from `kmutex`. Mutex guards
+//! cannot move to another task; their owning task may migrate between CPUs.
+//! The linked task runtime supplies `kiface_task_api::TaskExecutionIf` and
+//! `kiface_task_api::TaskLockDiagnosticsIf`; `kmutex` consumes those domain contracts.
+//!
 //! # Examples
 //!
 //! ## Mutex

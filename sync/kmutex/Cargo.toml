@@ -1,0 +1,24 @@
+[package]
+name = "kmutex"
+description = "Task-owned blocking mutex with a scheduler provider boundary"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+stats = ["dep:klockstat", "klockstat/stats"]
+watchdog = []
+
+[dependencies]
+kiface-task-api.workspace = true
+event-listener.workspace = true
+lock_api.workspace = true
+klockstat = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -22,7 +22,9 @@ stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
 default = []
 
 [dependencies]
+kiface-cpu-api.workspace = true
 kiface = { workspace = true }
+kiface-task-api = { workspace = true }
 karch = { workspace = true }
 kcpu_slot = { workspace = true }
 klockstat = { workspace = true, optional = true }

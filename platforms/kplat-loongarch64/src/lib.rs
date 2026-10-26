@@ -8,8 +8,8 @@
 //! platform contracts for the loongarch64 target.
 //!
 //! The crate is selected by the build (`loongarch64` target); the
-//! kernel core invokes it through the generated `BootHandler`,
-//! `IntrManagerIf`, `ClockSourceIf`/`ClockEventIf`, and `SysCtrl`
+//! kernel core invokes it through the generated `PlatformBootIf`,
+//! `IntrManagerIf`, `ClockSourceIf`/`ClockEventIf`, and `CpuStartIf`/`PlatformPowerIf`
 //! providers, so there is no direct API to call. The activation
 //! sequence is: `early_driver_init` (clock, interrupts, console, RTC
 //! sample) -> interrupt preparation -> `activate_local_interrupts` (per-CPU timer), with
@@ -18,14 +18,14 @@
 //!
 //! ```ignore
 //! use kiface::provide;
-//! use kplat::boot::BootHandler;
+//! use kplat::boot::PlatformBootIf;
 //!
-//! // The platform's early bring-up is expressed as a `BootHandler`
+//! // The platform's early bring-up is expressed as a `PlatformBootIf`
 //! // provider — the same shape used by `src/init.rs` (the crate's own
 //! // implementation, which the kernel core invokes in this order:
 //! // early_driver_init -> time/irq/console/RTC, then per-CPU timer).
 //! #[provide]
-//! impl BootHandler {
+//! impl PlatformBootIf {
 //!     fn early_driver_init() {
 //!         // Platform bring-up runs here, before the driver model
 //!         // exists; when it returns, interrupts are dispatchable and

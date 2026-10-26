@@ -37,24 +37,6 @@ pub use single_instr::{
 };
 pub use static_slot::{CpuSlot, CpuSlotCell, StaticSlotValue};
 
-/// Platform contract for saving and disabling local IRQs around scoped slot
-/// access and the single-instruction fallback.
-///
-/// Architectures without a true single-instruction per-CPU access implement
-/// [`SingleInstructionLoad`] and friends by masking local IRQs, touching the
-/// value, and restoring the mask. `kcpu_slot` cannot own that logic because the
-/// correct mask primitive (including AArch64's PMR/NMI handling) lives above it
-/// in `karch`; the platform thus provides exactly one implementation.
-#[kiface::interface]
-pub trait CpuLocalIrqIf {
-    /// Saves the current local IRQ state and disables local IRQs, returning an
-    /// opaque token for [`Self::restore`].
-    fn save_and_disable() -> usize;
-    /// Restores the local IRQ state previously returned by
-    /// [`Self::save_and_disable`].
-    fn restore(state: usize);
-}
-
 #[cfg(test)]
 #[path = "../tests/host/kcpu_slot_host.rs"]
 mod kcpu_slot_host_tests;

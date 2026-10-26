@@ -20,7 +20,7 @@ fs9p = [
     "kclass/virtio-9p",
 ]
 rootfs-secondary-block = []
-smp = ["procfs/smp"]
+smp = []
 
 [dependencies]
 anon_inodefs.workspace = true

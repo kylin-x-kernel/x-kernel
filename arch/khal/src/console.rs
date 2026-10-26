@@ -4,36 +4,9 @@
 
 use core::fmt::{Arguments, Result, Write};
 
-/// Provides platform console input, output, and input interrupt discovery.
-///
-/// Normal I/O may use console locks; emergency output must remain usable when
-/// an NMI interrupts a normal I/O operation.
-#[kiface::interface]
-pub trait ConsoleIf {
-    fn write_data(buf: &[u8]);
-
-    /// Attempt emergency output without ordinary locks or allocation.
-    ///
-    /// Implementations must tolerate NMI interruption of normal console I/O
-    /// and bound hardware polling. Output may be interleaved, truncated, or
-    /// discarded if the console is unavailable.
-    fn write_data_atomic(buf: &[u8]);
-
-    fn read_data(buf: &mut [u8]) -> usize;
-
-    /// Attempt input IRQ setup once, in sleepable boot-task context after
-    /// runtime services start and before any TTY chooses its input mode.
-    /// The boot task serializes this call with consumer publication.
-    /// Failure preserves polled I/O; the provider reports its diagnostic.
-    fn prepare_input();
-
-    /// Return the installed input IRQ, not merely firmware IRQ metadata.
-    fn interrupt_id() -> Option<usize>;
-}
-
 #[inline]
 pub fn write_data(buf: &[u8]) {
-    ConsoleIf::write_data(buf)
+    kiface_console_api::ConsoleIoIf::write_data(buf)
 }
 
 /// Attempt best-effort emergency output, including from NMI context.
@@ -41,12 +14,12 @@ pub fn write_data(buf: &[u8]) {
 /// Bypasses normal console locks; does not guarantee complete or ordered output.
 #[inline]
 pub fn write_data_atomic(buf: &[u8]) {
-    ConsoleIf::write_data_atomic(buf)
+    kiface_console_api::EmergencyConsoleWriteIf::write_data_atomic(buf)
 }
 
 #[inline]
 pub fn read_data(buf: &mut [u8]) -> usize {
-    ConsoleIf::read_data(buf)
+    kiface_console_api::ConsoleIoIf::read_data(buf)
 }
 
 /// Prepare optional interrupt input before publishing console consumers.
@@ -56,12 +29,12 @@ pub fn read_data(buf: &mut [u8]) -> usize {
 /// The caller must serialize setup with consumer publication; this is not a
 /// concurrent initialization barrier or a runtime retry interface.
 pub fn prepare_input() {
-    ConsoleIf::prepare_input()
+    kiface_console_api::ConsoleInputSetupIf::prepare_input()
 }
 
 #[inline]
 pub fn interrupt_id() -> Option<usize> {
-    ConsoleIf::interrupt_id()
+    kiface_console_api::ConsoleInputSetupIf::interrupt_id()
 }
 
 struct Logger;

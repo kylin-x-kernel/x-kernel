@@ -15,7 +15,7 @@ use core::{
 use kcpu_id_map::KCpuMaskExt;
 use kerrno::KError;
 use krcu::{CallbackNode, PreparedCallback, drain_callbacks};
-use ksync::Mutex;
+use kmutex::Mutex;
 use ktask::future::PreparedTaskWait;
 use unittest::{assert, assert_eq, def_test};
 
@@ -214,7 +214,7 @@ fn concurrent_drains_serialize_and_observe_completed_destruction() {
     let results = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
     let destroyed: [_; 2] = core::array::from_fn(|_| Arc::new(AtomicUsize::new(0)));
     let mut observations = None;
-    krcu::host::RcuTaskIf::with_serialized_drain(&mut || {
+    krcu::with_drain_lock_for_tests(&mut || {
         let tasks: [_; 2] = core::array::from_fn(|id| {
             let results = results.clone();
             let own_destroyed = destroyed[id].clone();

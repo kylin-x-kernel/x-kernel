@@ -205,7 +205,7 @@ fn reprogram_endpoint_does_not_deliver_prepared_callbacks() {
     // SAFETY: initialized CPU, IRQs masked, static set and owned storage; the
     // endpoint below programs hardware but cannot recursively deliver callbacks.
     let started = unsafe { timer.start_on(cpu, instant(0)) }.is_ok();
-    kipi::TimerReprogramIpiIf::on_timer_reprogram();
+    kiface_time_api::LocalTimerReprogramIf::on_timer_reprogram();
     let calls = timer.handler().calls.load(Ordering::Acquire);
     let removed = timer.cancel_sync();
     refresh_local();

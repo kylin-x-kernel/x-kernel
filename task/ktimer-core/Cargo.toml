@@ -17,7 +17,7 @@ ignored-paths = ["benches/host/*.rs"]
 
 [features]
 default = []
-smp = ["kspin/smp"]
+smp = []
 preempt = ["kspin/preempt"]
 
 [dependencies]

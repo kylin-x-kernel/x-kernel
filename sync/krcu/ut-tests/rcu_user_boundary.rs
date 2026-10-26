@@ -6,7 +6,7 @@
 
 use unittest::{assert, assert_eq, def_test};
 
-use crate::host::{RcuExecutionIf, RcuTaskIf, with_current_reader, with_preempt_check_deferred};
+use crate::host::{with_current_reader, with_preempt_check_deferred};
 
 #[def_test]
 fn user_boundary_pair_preserves_cpu_and_interrupt_state() -> unittest::TestResult {
@@ -16,8 +16,8 @@ fn user_boundary_pair_preserves_cpu_and_interrupt_state() -> unittest::TestResul
 
 fn check_user_boundary(current: crate::host::CurrentReader<'_>) -> unittest::TestResult {
     let reader = current.reader();
-    assert!(!RcuTaskIf::current_preemption_disabled());
-    let cpu = RcuExecutionIf::current_cpu();
+    assert!(!kiface_task_api::TaskPreemptionIf::current_preemption_disabled());
+    let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu();
     let watching = krcu_core::RcuContextIf::current_cpu_watching();
     let sequence = watching.sequence_for_test();
     with_preempt_check_deferred(|| {
@@ -42,11 +42,11 @@ fn check_user_boundary(current: crate::host::CurrentReader<'_>) -> unittest::Tes
     unsafe { super::exit_user_quiescent() };
     assert!(was_enrolled);
     assert!(!reader.is_enrolled());
-    assert!(!RcuTaskIf::current_preemption_disabled());
+    assert!(!kiface_task_api::TaskPreemptionIf::current_preemption_disabled());
     assert!(was_quiescent);
     assert!(watching.is_watching());
     assert!(watching.sequence_for_test().wrapping_sub(sequence) >= 2);
-    assert_eq!(RcuExecutionIf::current_cpu(), cpu);
+    assert_eq!(kiface_cpu_api::CurrentCpuIf::current_cpu(), cpu);
     assert!(!karch::local_irq_enabled());
     assert!(with_current_reader(|after| core::ptr::eq(after.reader(), reader)));
     unittest::TestResult::Ok

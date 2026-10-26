@@ -3,7 +3,7 @@
 ## 定位
 
 `khal::power` 是系统电源终点的 HAL 边界。它把平台裸终点
-（`kplat::sys::SysCtrl`）包装成唯一的普通终点入口，并在进入终点前停止
+（`kplat::sys::PlatformPowerIf`）包装成唯一的普通终点入口，并在进入终点前停止
 其他 CPU。本模块不做任何上层收尾：filesystem sync、进程退出、设备
 teardown、orderly shutdown 阶段状态都不属于这里。
 
@@ -12,7 +12,7 @@ teardown、orderly shutdown 阶段状态都不属于这里。
 ```text
 arch/khal/src/power.rs # 本模块
 platforms/kplat/src/sys.rs
-                       # SysCtrl::halt / power_off 平台终点契约
+                       # PlatformPowerIf::halt / power_off 平台终点契约
 platforms/kplat-*/src/power.rs
                        # 各平台终点实现
 ```

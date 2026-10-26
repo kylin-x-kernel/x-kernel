@@ -56,13 +56,14 @@ duplicate driver ownership or return a recoverable failure that loses the
 claimed driver. Existing task/stack allocation retains fatal OOM behavior.
 The runtime does not infer readiness from successful activation.
 
-Arming the borrowed progress timer requires initialized scheduler/timer services
+The kiface-time-api provider in ktask owns scoped timer storage. Arming it requires initialized scheduler/timer services
 and an IRQ-compatible expiry function. The runtime neither invokes expiry
 inline on arm nor manufactures a quiescent observation. Cancellation and Drop
 drain delivery before freeing timer storage; callers must not hold callback-needed
 locks or cancel from that callback. The borrowed timer cannot outlive the body.
 
-Task wait preparation may reject a non-sleepable caller, but only before
+Task wait preparation is supplied directly by ktask through kiface-task-wait-api,
+not by the runtime RCU adapter. It may reject a non-sleepable caller, but only before
 invoking the RCU body. Afterward the adapter must retain the prepared wait for
 the full synchronous operation, including early completion and migration.
 CompletionWait acquires RCU's completion infallibly without allocation or signal
@@ -71,8 +72,8 @@ Startup and GP service waits retain the distinct PreparedTaskWait park/Waker
 contract, whose hints cannot establish RCU completion.
 
 Drain serialization requires sleepable task context and excludes recursive
-drain calls. The adapter invokes its body exactly once under the permanent
-mutex and releases it only after that body returns. Callers must not hold locks
+drain calls. RCU owns the permanent kmutex and releases it only after marker
+completion; no runtime drain adapter remains. Callers must not hold locks
 needed by callbacks or GP progress. Neither callbacks nor the service acquire
 this mutex; their marker accesses are synchronized by krcu independently.
 
@@ -181,7 +182,9 @@ kernel-boot / 平台固件
 
 - **boot 层 / 固件**必须提供可读且语义正确的 `BootInfo`、CPU 拓扑、内存区域和可选 boot console MMIO 描述。
 - **链接脚本和注册宏**必须提供有效的 `_stext` / `_etext`、`__init_array_start` / `__init_array_end`，并保证 `.init_array` 只包含 `extern "C" fn()` 条目。
-- **`kiface` exactly-one provider**保证 `PrimaryKernelEntry`、`SecondaryKernelEntry`、`LoggerAdapter`、`DmaPageTableIf` 和 `SystemInitEntry` 在链接期只有一个实现。
+- The `kiface` exactly-one provider contract enforces unique implementations
+  of `PrimaryKernelEntry`, `SecondaryKernelEntry`, `LogSinkIf`, `LogContextIf`
+  and `SystemInitEntry` at link time.
 - **`entry` provider**负责策略层启动：`SystemInitEntry::enter()` 必须发布并激活 PID 1 init 任务后返回。
 
 ## 外部边界 / 攻击面
@@ -196,7 +199,6 @@ kernel-boot / 平台固件
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
 | IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after ksoftirqd setup and before publishing service completion. Workqueue service publication follows the all-CPU barrier. PMU IRQ enable follows watchdog setup. |
 | NMI 机制 | GIC 版本 / FEAT_NMI 探测与每 CPU 使能（`khal::nmi::early_init` / `late_init`） | 机制误判导致无效寄存器访问，或 watchdog 误报 hardlockup | 平台 `detect_mode()` 门控；`NmiMode::None` 时 watchdog 启动期禁用硬锁检测；所有 NMI 寄存器访问均有 readiness 门控 |
-| DMA 页表属性 | `kdma` 传入的内核 VA、size、flags | 错误修改内核页表属性 | `DmaPageTableIf::protect` 委托 `memspace::kernel_layout().protect()` 进行范围和页表处理 |
 
 本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
 
@@ -280,7 +282,6 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - boot console 固定映射的 PA/VA 页内偏移必须一致；否则 `register_boot_console_runtime_region()` 立即 panic，避免注册错误映射。
 - `.init_array` 边界必须位于已映射内核镜像中，并且不会被可写数据覆盖。
 - 从核 boot stack 数组必须至少覆盖被实际启动的 AP 数量；超过 `NR_CPUS - 1` 的 present CPU 不会被 `kruntime` 启动。
-- `memspace::init_memory_management()` 之后，`DmaPageTableIf::protect()` 只能通过 `memspace` 持有内核地址空间锁来修改映射属性。
 - PID-less late-init 线程和普通内核 worker 不进入 root PID allocator；PID 1 只能由 `SystemInitEntry::enter()` 中的 init spawn 消耗并断言。
 
 ## 线程安全
@@ -291,12 +292,11 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
   observes the Release RMW sequence before entering device discovery or drivers.
   The counter describes CPU services, not completed filesystem/network startup.
 - `SCHED_READY_CPUS` 只表达 AP 已注册 run queue（进入 runtime 后进一步完成内存管理与调度器初始化），不代表 AP 初始化完成；它与 `INITED_CPUS` 分离，避免把“可跨核调度”/“可启动下一个 AP”和“全局 runtime ready”混在一起。
-- `LoggerAdapter::cpu_id()` 和 `task_id()` 在 `is_init_ok()` 前避免读取可能未就绪的 current task / CPU-local 运行时状态；非 SMP 构建下 CPU ID 固定为 0。
+- `LogContextIf::cpu_id()` 和 `task_id()` 在 `is_init_ok()` 前避免读取可能未就绪的 current task / CPU-local 运行时状态；非 SMP 构建下 CPU ID 固定为 0。
 - APs retain the startup preemption guard through fixed-notification enable,
   softirq/worker setup, IRQ enable, watchdog/PMU setup, and completion publication.
   They must not wait for primary driver initialization or local runnable tasks
   during this phase. The primary would otherwise wait for an AP that cannot finish.
-- `DmaPageTableIf::protect()` 通过 `memspace::kernel_layout().lock()` 串行化内核页表属性更新。
 
 ## 威胁分析
 
@@ -309,7 +309,6 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 | T-05 | PID 1 被提前消耗 | 中 | late-init 线程或后台 worker 获得 Linux-visible identity；`SystemInitEntry` 未先创建 init | boot、idle、late-init 和普通内核 worker 使用 PID-less identity；init 创建路径断言 root PID 为 1 |
 | T-06 | IRQ 在 handler 注册前启用 | 高 | `init_interrupt` 顺序被改坏、平台提前开 IRQ | 主核先安装 softirq hardirq-exit runner，再注册 timer/IPI/PMU handler，最后开本地 IRQ；从核初始化完成后再开 IRQ |
 | T-07 | per-CPU timer deadline raw access 在可迁移上下文运行 | 中 | handler 被改为普通线程调用或抢占语义变化 | unsafe 注释要求 IRQ/preemption 禁止迁移；审计 raw percpu 调用点 |
-| T-08 | `DmaPageTableIf::protect` 修改非法内核 VA 范围 | 高 | `kdma` 调用方传入错误地址或长度 | 委托 `memspace` 的内核 layout 锁和页表校验 |
 | T-09 | panic handler 在损坏栈上再次失败 | 中 | 栈溢出、页表损坏、backtrace 范围错误 | panic 后只做诊断并关机，不尝试恢复 |
 | T-10 | 启动日志泄露物理地址和设备映射 | 低 | 开启启动日志 | 限于内核日志；不处理用户数据，但部署时需按日志策略限制可见性 |
 
@@ -367,9 +366,12 @@ panic handler 本身是 safe Rust，但在已损坏栈或已损坏页表上捕�
 - [ ] 修改 `SystemInitEntry` provider 时，确认它 spawn 并激活 PID 1 后返回。
 - [ ] 新增 `register_init` 回调时，确认它不依赖用户态 init、避免长时间阻塞，并接受 panic 会中止启动。
 - [ ] 修改 timer/IPI/PMU handler 时，确认 handler 注册先于 IRQ enable，raw per-CPU 访问仍只发生在不可迁移上下文。
-- [ ] 修改 DMA protect 接线时，确认仍由 `memspace` 统一持锁和校验内核页表范围。
+- [ ] 不在 runtime 重新引入 DMA 页表适配层；相关校验和锁由 `memspace` 的 MM API provider 负责。
 - [ ] 修改启动日志时，评估是否新增物理地址、设备映射或任务身份泄露。
 
 ## ARM64 counter recovery dispatch
 
 With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-recovery notifications before processing task timers. Clock reads only repair shared counter state and rearm CPU-local registers; IPI delivery is deferred until caller-held clock-read locks have been released. The dispatch runs without the counter lock, does not sleep, and requires initialized interrupt routing. It does not reconstruct elapsed host sleep time.
+
+DMA mapping attributes no longer pass through a runtime adapter: kiface-mm-api owns
+DmaMappingMode and DmaMappingIf; memspace directly implements the transition.

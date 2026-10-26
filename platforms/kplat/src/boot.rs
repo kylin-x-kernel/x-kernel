@@ -10,7 +10,7 @@ use kcpu_id_map::LogicalCpuId;
 use kplat_macros::device_interface;
 
 #[device_interface]
-pub trait BootHandler {
+pub trait PlatformBootIf {
     /// Platform-specific boot-memory preparation before common memory assembly.
     fn prepare_boot_memory(boot_info: &BootInfo);
 

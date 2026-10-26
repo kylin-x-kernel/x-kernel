@@ -15,7 +15,7 @@
 //!
 //! This module knows about the **NMI mode** (hardware vs. pseudo), not about
 //! the NMI **source** (PMU today, future sources).  Source‑specific setup
-//! belongs to the source's own subsystem (see `NmiPeriodic` in `kplat`).
+//! belongs to the source's own subsystem (see `PeriodicNmiSourceIf` in `kplat`).
 
 #[macro_export]
 macro_rules! nmi_if_impl {
@@ -110,7 +110,7 @@ macro_rules! nmi_if_impl {
         }
 
         #[kiface::provide]
-        impl kplat::nm_irq::NmiDef {
+        impl kplat::nm_irq::NmiMechanismIf {
             fn early_init() -> bool {
                 let mode = detect_mode();
                 CURRENT_MODE.init_once(mode);

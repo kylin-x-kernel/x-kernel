@@ -485,7 +485,7 @@ pub fn stdout_port() -> Option<Arc<SerialPort>> {
 }
 
 /// Firmware/platform interrupt metadata, not input IRQ readiness.
-/// Mapping and action installation happen later through `ConsoleIf::prepare_input`.
+/// Mapping and action installation happen later through `kiface_console_api::ConsoleInputSetupIf::prepare_input`.
 pub(crate) fn stdout_irq() -> Option<IrqDesc> {
     STDOUT.get().and_then(|stdout| stdout.irq)
 }

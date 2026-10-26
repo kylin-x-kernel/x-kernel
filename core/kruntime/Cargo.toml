@@ -12,8 +12,9 @@ description = "Runtime library of X-kernel"
 
 [package.metadata.cargo-shear]
 # Used by cfg(unittest) probes in ut-tests/tests_workqueue/{deferred,irq_work}.rs.
-# krcu-core supplies watching observations for RCU integration fixtures.
-ignored = ["kfinalize", "irq_driver", "of", "krcu-core"]
+# krcu-core and capability APIs supply observations for cfg(unittest) RCU
+# integration fixtures; kmutex supplies their independent serialization lock.
+ignored = ["kfinalize", "irq_driver", "of", "krcu-core", "kiface-cpu-api", "kiface-irq-context-api", "kmutex", "kiface-time-api", "kiface-task-api"]
 
 [features]
 default = []
@@ -54,8 +55,12 @@ pmu = []
 nmi = []
 
 [dependencies]
-klazy.workspace = true
-ksync.workspace = true
+kiface-task-api.workspace = true
+kiface-time-api.workspace = true
+kmutex.workspace = true
+kiface-irq-context-api.workspace = true
+kiface-cpu-api.workspace = true
+kiface-logging-api.workspace = true
 kspin.workspace = true
 kalloc.workspace = true
 page-meta.workspace = true
@@ -67,7 +72,6 @@ fbdevice = { workspace = true, optional = true }
 fs_boot = { workspace = true, optional = true }
 inputdev = { workspace = true, optional = true }
 kdriver.workspace = true
-kdma.workspace = true
 memaddr.workspace = true
 khal.workspace = true
 kirq.workspace = true
@@ -83,7 +87,6 @@ kworkng = { workspace = true, features = ["system"] }
 kfinalize.workspace = true
 ktask = { workspace = true }
 krcu.workspace = true
-kcompletion.workspace = true
 krcu-core.workspace = true
 timer_driver = { workspace = true }
 watchdog = { workspace = true, optional = true }

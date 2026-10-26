@@ -10,15 +10,15 @@
 //! hardware NMI, falls back to pseudo-NMI, or has no NMI at all.  It is
 //! deliberately **not** tied to any specific NMI source.  Source‑specific
 //! configuration (counter thresholds, event numbers, handler registration)
-//! belongs to the source's own subsystem, which implements [`NmiPeriodic`]
+//! belongs to the source's own subsystem, which implements [`PeriodicNmiSourceIf`]
 //! behind a source‑neutral interface.
 //!
 //! ```text
 //!   Consumer (watchdog)
 //!     → khal::nmi::enable_periodic_nmi(period_ns, cb)
-//!       → NmiPeriodic provider (e.g. PMU cycle counter backend)
+//!       → PeriodicNmiSourceIf provider (e.g. PMU cycle counter backend)
 //!         → khal::irq::configure_nmi(hwirq)          (per CPU)
-//!           → NmiDef::configure_nmi(hwirq)
+//!           → NmiMechanismIf::configure_nmi(hwirq)
 //!             → NmiMode::Hardware → GIC NMI attribute
 //!             → NmiMode::Pseudo   → gic::set_prio(hwirq, 0)
 //!   pmu feature init (kruntime)
@@ -52,7 +52,7 @@ pub struct NmiSourceInfo {
 }
 
 #[device_interface]
-pub trait NmiDef {
+pub trait NmiMechanismIf {
     /// System‑wide (once‑per‑boot) NMI initialization.
     ///
     /// Called during `early_driver_init`, after the interrupt controller
@@ -76,7 +76,7 @@ pub trait NmiDef {
 
     /// Current operating NMI mode.
     ///
-    /// Used by [`NmiDef::configure_nmi`] to decide how to promote an IRQ
+    /// Used by [`NmiMechanismIf::configure_nmi`] to decide how to promote an IRQ
     /// line to NMI delivery.
     fn mode() -> NmiMode;
 
@@ -107,14 +107,14 @@ pub trait NmiDef {
 /// second source is added, the platform NMI module should become the sole
 /// provider and dispatch to per‑source backends.
 #[device_interface]
-pub trait NmiPeriodic {
+pub trait PeriodicNmiSourceIf {
     /// Arm a periodic NMI with period `period_ns`.
     ///
     /// Must be called on **each CPU** so every CPU arms its own source.
     /// This method never registers an IRQ-level handler: the line's
     /// overflow-dispatch handler is registered exactly once by the PMU
     /// feature init (`khal::pmu::register_overflow_dispatch`, backed by
-    /// `PerfMgr::register_overflow_irq`) — as a normal IRQ handler in
+    /// `PmuInterruptIf::register_overflow_irq`) — as a normal IRQ handler in
     /// pmu-only builds, or as an NMI handler with normal-IRQ fallback when
     /// the PMU is the compiled NMI source.  This method only arms the local
     /// CPU's source: it registers the consumer callback into the per-CPU
@@ -127,7 +127,7 @@ pub trait NmiPeriodic {
     /// Quiesce the calling CPU's periodic NMI source for a terminal stop.
     ///
     /// This is intentionally a one-way lifecycle operation: it stops a
-    /// source armed by [`NmiPeriodic::enable_periodic_nmi`] without
+    /// source armed by [`PeriodicNmiSourceIf::enable_periodic_nmi`] without
     /// unregistering its callback or undoing its IRQ/NMI-line configuration.
     /// It is a no-op when the local source was never armed. Callers must be
     /// pinned to the CPU whose source they are stopping and must not attempt

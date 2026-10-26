@@ -19,7 +19,7 @@ sysrq = ["ktask/snapshot"]
 tee = ["kprocess/tee", "dep:tee_task_iface"]
 lock_stat = ["dep:klockstat", "klockstat/stats"]
 sched_stat = ["ktask/sched_stat"]
-smp = ["ktracing/smp"]
+smp = []
 vmm = ["dep:kvmm"]
 
 [dependencies]

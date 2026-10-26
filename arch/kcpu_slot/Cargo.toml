@@ -12,10 +12,10 @@ repository.workspace = true
 default = []
 
 [dependencies]
+kiface-cpu-api.workspace = true
 kaddr_layout.workspace = true
 kbuild_config.workspace = true
 kcpu_id_map.workspace = true
-kiface.workspace = true
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86_64 = { workspace = true }

@@ -11,7 +11,7 @@ periodically updates the local CPU timestamp. Timer interrupt callbacks check
 whether that timestamp is stale.
 
 With `KFEAT_KWORK_STALL_CHECK`, the per-CPU watchdog task also requests warning-only
-workqueue backlog inspection through `WorkqueueStallCheck`. This never runs in
+workqueue backlog inspection through `WorkqueueStallInspectorIf`. This never runs in
 NMI or timer IRQ context, does not panic or recover queues, and does not require
 workqueue callbacks to run in order to inspect their progress. The old fatal
 system-workqueue check is no longer registered.

@@ -5,10 +5,10 @@
 //! Dummy implementation of platform-related interfaces defined in [`kplat`].
 
 use kcpu_id_map::LogicalCpuId;
-use kplat::{boot::BootHandler, sys::SysCtrl};
+use kplat::{boot::PlatformBootIf, sys::{CpuStartIf, PlatformPowerIf}};
 
 #[kiface::provide]
-impl BootHandler {
+impl PlatformBootIf {
     fn prepare_boot_memory(_boot_info: &kplat::boot::BootInfo) {}
 
     fn firmware_init(_boot_info: &kplat::boot::BootInfo) {}
@@ -30,7 +30,7 @@ impl BootHandler {
 }
 
 #[kiface::provide]
-impl crate::console::ConsoleIf {
+impl kiface_console_api::ConsoleIoIf {
     fn write_data(_bytes: &[u8]) {
         unimplemented!()
     }
@@ -39,10 +39,18 @@ impl crate::console::ConsoleIf {
         unimplemented!()
     }
 
+}
+
+#[kiface::provide]
+impl kiface_console_api::EmergencyConsoleWriteIf {
     fn write_data_atomic(_bytes: &[u8]) {
         unimplemented!()
     }
 
+}
+
+#[kiface::provide]
+impl kiface_console_api::ConsoleInputSetupIf {
     fn prepare_input() {}
 
     fn interrupt_id() -> Option<usize> {
@@ -79,18 +87,26 @@ impl crate::time::ClockEventIf {
 
     fn disarm_timer() {}
 
+}
+
+#[kiface::provide]
+impl kiface_time_api::ClockResumeIf {
     fn handle_idle_return(_previous_ticks: crate::time::TimerTicks) -> bool {
         false
     }
 }
 
 #[kiface::provide]
-impl SysCtrl {
+impl CpuStartIf {
     #[cfg(feature = "smp")]
     fn boot_ap(_logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) -> kerrno::KResult {
         Ok(())
     }
 
+}
+
+#[kiface::provide]
+impl PlatformPowerIf {
     fn halt() -> ! {
         unimplemented!()
     }

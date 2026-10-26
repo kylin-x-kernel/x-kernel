@@ -21,6 +21,77 @@ Everything the generated code does at runtime is owned by the two sides
 the macros wire together: the interface crate owns the contract, the
 provider crate owns the behavior. This crate ships no runtime component.
 
+## Interface Ownership and Dependency Rules
+
+These rules govern contracts wired through `kiface`, not only the macros:
+
+1. Group interfaces by the domain that owns the capability, not by individual
+   consumers. Shared task capabilities belong to a task API contract; do not
+   duplicate them as consumer-specific `MutexTaskIf` and `IrqTaskIf` contracts.
+   Subsystem-specific policy is not a shared task capability merely because its
+   implementation calls the scheduler.
+2. API crates contain contracts and necessary boundary types only. Scheduling
+   algorithms, global runtime state, and concrete implementations remain in
+   their owning implementation crates. Document execution-context, lifetime,
+   ownership, and failure obligations as part of each contract.
+3. API crates must not depend back on their implementation crates. Consumers
+   depend only on the APIs they need; a common directory or documentation entry
+   must not become an umbrella dependency that pulls every API into the build.
+   Providers implement the contracts without exporting internal implementation
+   types through that boundary.
+4. Before breaking a dependency cycle with an interface, check whether data or
+   behavior belongs in a different module. Correct misplaced responsibilities
+   first. Use the appropriate domain API when a genuine reverse call remains;
+   a dependency cycle alone does not justify another interface.
+
+Interface organization and binding are separate responsibilities: `kiface`
+provides the wiring mechanism, while domain API crates own their contracts.
+These rules do not require replacing generic libraries such as `lock_api`:
+its typed lock and guard implementation is not a single-provider wiring layer.
+
+## Domain API Index
+
+Contract packages use `kiface-<domain>-api`; Rust paths use the corresponding
+`kiface_<domain>_api` name. Both consumers and providers reference that same
+contract package. The prefix distinguishes contracts from implementation
+libraries, not consumers from providers. Directories remain `crates/<domain>-api`
+because the parent directory already identifies kiface ownership. Concrete
+synchronization libraries such as kmutex and kspin do not use this prefix.
+
+- [`kiface-task-api`](../crates/task-api/docs/design.md): task execution and current-task
+  lock diagnostics, implemented by `ktask`.
+- [`kiface-task-wait-api`](../crates/task-wait-api/docs/design.md): task-bound completion
+  waiting shared by IRQ and RCU, above the low-level task/preemption contracts.
+- [kiface-cpu-api](../crates/cpu-api/docs/design.md): CPU identity, IRQ exclusion,
+  protected exception observations and reschedule transport.
+- [kiface-irq-context-api](../crates/irq-context-api/docs/design.md): IRQ/NMI/BH facts,
+  provided by the IRQ core, without consumer admission policy.
+- [kiface-time-api](../crates/time-api/docs/design.md): clock domains, events, idle
+  repair, scoped timers and local reprogramming.
+- [kiface-console-api](../crates/console-api/docs/design.md): ordinary I/O, emergency
+  output and input readiness, with distinct execution-context contracts.
+- [kiface-logging-api](../crates/logging-api/docs/design.md): log sink and optional
+  initialization-aware context, not a mandatory current-task query.
+- [kiface-mm-api](../crates/mm-api/docs/design.md): DMA mapping-attribute transitions,
+  implemented by the address-space owner rather than a runtime forwarder.
+
+The API crates are separate dependencies; the `kiface` proc-macro crate does
+not depend on or reexport them.
+
+## Specialized Contracts
+
+Cohesive subsystem protocols remain with their owners: IRQ controller and MSI
+contracts in kirq, RCU lifecycle contracts in krcu, and platform boot, power and
+NMI contracts in kplat. Shared task operations do not belong in these protocols
+merely because they are used internally. The API directory is not a requirement
+to move every domain-specific interface out of its owning subsystem.
+
+Synchronization libraries own lock state and algorithms; task providers own
+execution and scheduling. kmutex is a concrete lock implementation, not an API
+contract crate. ksync currently reexports Mutex while still implementing RwLock
+and Semaphore with direct ktask dependencies; complete synchronization/task
+decoupling is not established by the capability contracts alone.
+
 ## Dependencies
 
 Build-time only: `proc-macro2`, `quote`, and `syn`. The crate is a

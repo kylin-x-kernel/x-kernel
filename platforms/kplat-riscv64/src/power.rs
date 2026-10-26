@@ -4,9 +4,9 @@
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kerrno::{KError, KErrorKind, KResult};
-use kplat::sys::SysCtrl;
+use kplat::sys::{CpuStartIf, PlatformPowerIf};
 #[kiface::provide]
-impl SysCtrl {
+impl CpuStartIf {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         use khal::mem::{v2p, va};
@@ -39,7 +39,10 @@ impl SysCtrl {
         )?;
         Ok(())
     }
+}
 
+#[kiface::provide]
+impl PlatformPowerIf {
     fn power_off() -> ! {
         info!("Shutting down...");
         sbi_rt::system_reset(sbi_rt::Shutdown, sbi_rt::NoReason);

@@ -145,7 +145,7 @@ fn irq_guard_release_defers_all_checks_to_explicit_tail() {
     let is_balanced = task.can_preempt(0);
     let is_pending = task.is_preempt_pending();
     // Exercise the same provider as the HAL tail, after its guard was consumed.
-    khal::irq::IrqExitIf::check_preempt_pending();
+    kiface_task_api::TaskIrqExitCheckpointIf::check_preempt_pending();
     let after_tail = probe.checks.load(Ordering::Relaxed);
     let remaining = probe.remaining.load(Ordering::Relaxed);
     let is_irq_masked = !karch::local_irq_enabled();

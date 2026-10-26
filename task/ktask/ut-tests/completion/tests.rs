@@ -35,10 +35,10 @@ fn completion_wait_rejects_non_sleepable_context_even_if_complete() {
             Err(KError::InvalidInput)
         ));
         assert_eq!(wait_for_completion(&completion), Err(KError::InvalidInput));
-        assert!(!kirq::IrqSyncWaitIf::can_wait());
+        assert!(!kiface_task_api::TaskBlockingContextIf::is_sleepable_context());
         assert!(matches!(
-            kirq::IrqSyncWaitIf::wait_for_completion(&completion),
-            Err(kirq::IrqDescError::InvalidContext { .. })
+            kiface_task_wait_api::wait_for_completion(&completion),
+            Err(KError::InvalidInput)
         ));
     }
     {

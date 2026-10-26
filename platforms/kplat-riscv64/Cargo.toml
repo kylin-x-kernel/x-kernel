@@ -11,7 +11,7 @@ repository.workspace = true
 [features]
 fp-simd = ["kcpu/fp-simd"]
 rtc = ["rtc_driver/goldfish"]
-smp = ["kplat/smp"]
+smp = []
 vmm = []
 
 [dependencies]

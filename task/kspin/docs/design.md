@@ -26,7 +26,7 @@
 ## 范围
 
 `NoPreempt::release_without_check` consumes one guard and restores only its
-preemption credit through `KernelGuardIf::enable_preempt_without_check`.
+preemption credit through `TaskPreemptionIf::enable_preempt_without_check`.
 It leaves IRQ state and outer credits unchanged. The completed normal IRQ
 adapter uses this before its explicit scheduler checkpoint, avoiding an earlier
 ordinary guard-drop check. Normal Drop behavior is unchanged; with preemption
@@ -43,7 +43,7 @@ task/kspin/
 │   ├── lib.rs                  # crate 文档、公开 re-export 和类型别名
 │   ├── lock.rs                 # SpinLock 与 SpinLockGuard
 │   ├── guard/
-│   │   ├── mod.rs              # BaseGuard 与 KernelGuardIf
+│   │   ├── mod.rs              # BaseGuard
 │   │   ├── types.rs            # NoOp/IrqSave/NoPreempt/NoPreemptIrqSave
 │   │   └── arch/mod.rs         # karch IRQ save/restore 适配
 │   └── tests.rs                # unittest 测试
@@ -92,7 +92,7 @@ caller
 | `SpinRwLockReadGuard` | 持读锁期间提供 `Deref`，drop 时释放 reader slot 并恢复 guard 状态 |
 | `SpinRwLockWriteGuard` | 持写锁期间提供 `Deref` / `DerefMut`，drop 时释放 writer slot 并恢复 guard 状态 |
 | `BaseGuard` | 抽象进入/退出本地临界区的 acquire/release 协议 |
-| `KernelGuardIf` | `preempt` feature 下由调度器提供 enable/disable preempt 接口 |
+| `TaskPreemptionIf` | `preempt` feature 下由调度器提供 enable/disable preempt 接口 |
 | `NoOp` | 不执行本地保护，适合调用方已关闭 IRQ/抢占的上下文 |
 | `IrqSave` | 保存并关闭本地 IRQ，drop 时恢复 |
 | `NoPreempt` | 关闭内核抢占，drop 时恢复 |
@@ -102,8 +102,8 @@ caller
 
 `kspin` 的职责保持在“底层自旋锁与本地临界区 guard”：
 
-- 不实现调度器逻辑，
-  抢占开关只通过 `KernelGuardIf` 由 `ktask` 等上层提供。
+- Preemption control uses `kiface_task_api::TaskPreemptionIf`, provided by `ktask`.
+  kspin consumes this contract; it does not define it or implement scheduling.
 - 不直接操作架构寄存器，
   IRQ save/restore 经 `karch` 统一封装。
 - 不封装睡眠等待、条件变量或 semaphore，
@@ -115,10 +115,10 @@ caller
 
 公开 API 自审结果：
 
-- 保留 `SpinLock`、`SpinLockGuard`、`SpinRwLock`、
-  `SpinRwLockReadGuard`、`SpinRwLockWriteGuard`、`BaseGuard`、
-  `KernelGuardIf` 和 `SpinRaw` / `SpinNoPreempt` / `SpinNoIrq` /
-  `SpinRwNoIrq` 类型别名。
+- Public exports include `SpinLock`, `SpinLockGuard`, `SpinRwLock`,
+  `SpinRwLockReadGuard`, `SpinRwLockWriteGuard`, `BaseGuard`, `IrqSave`, `NoOp`,
+  `NoPreempt`, `NoPreemptIrqSave` and the lock aliases. `TaskPreemptionIf`
+  belongs to kiface-task-api and is not reexported by kspin.
 - `guard::arch` 是私有模块，
   IRQ save/restore helper 没有跨 crate 暴露。
 - 未接入模块树的旧重复实现 `src/base.rs` 已删除，
@@ -276,7 +276,7 @@ Normal
 | Feature | 作用 |
 |---------|------|
 | `smp` | 启用 `AtomicBool` lock flag，实现跨 CPU 互斥 |
-| `preempt` | 通过 `KernelGuardIf` 调用调度器的抢占开关 |
+| `preempt` | 通过 `TaskPreemptionIf` 调用调度器的抢占开关 |
 
 未启用 `preempt` 时，
 `NoPreempt` 和 `NoPreemptIrqSave` 的抢占开关部分会被编译为空操作。

@@ -7,10 +7,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use kcpu_id_map::LogicalCpuId;
+use kiface_task_api::TaskPreemptionIf;
 use krcu_core::{CpuWatching, RcuContextIf, ReaderNode, TaskReader};
 
 use crate::{
-    host::{RcuExecutionIf, RcuTaskIf, with_current_reader, with_preempt_check_deferred},
+    host::{with_current_reader, with_preempt_check_deferred},
     service,
 };
 
@@ -86,7 +87,7 @@ pub(crate) fn request_reader_cleanup(current: &crate::host::CurrentReader<'_>) {
         current_state()
             .cleanup_requested
             .store(true, Ordering::Release);
-        RcuTaskIf::request_current_reschedule();
+        TaskPreemptionIf::request_current_reschedule();
     }
     // Preserve the caller's deferred exit: our temporary pin must not itself
     // trigger cleanup while restoring IRQ/preemption state. No IPI/controller
@@ -128,7 +129,7 @@ pub(crate) unsafe fn finish_reader_cleanup(reader: &TaskReader) {
 #[kiface::provide]
 impl RcuContextIf {
     fn request_completion_pass() {
-        if !RcuExecutionIf::is_in_nmi() {
+        if !kiface_irq_context_api::InterruptContextIf::is_in_nmi() {
             service::request_completion_pass();
         }
     }
@@ -160,21 +161,21 @@ impl RcuContextIf {
 }
 
 fn check_reader_cleanup() {
-    if RcuExecutionIf::is_in_nmi() {
+    if kiface_irq_context_api::InterruptContextIf::is_in_nmi() {
         return;
     }
     with_current_reader(|current| {
         let reader = current.reader();
         if (reader.is_enrolled() || needs_local_reader_cleanup())
             && !reader.is_reading()
-            && !RcuTaskIf::current_preemption_disabled()
-            && !RcuExecutionIf::is_in_exception_context()
+            && !TaskPreemptionIf::current_preemption_disabled()
+            && !kiface_cpu_api::ExceptionContextIf::is_in_exception_context()
         {
             // Exclusion covers owner lookup and reader removal, not merely the
             // context queries, which provide their own snapshot protection.
             let guard = kspin::NoPreemptIrqSave::new();
             if RcuContextIf::current_cpu_watching().is_watching()
-                && !RcuExecutionIf::is_in_interrupt_context()
+                && !kiface_irq_context_api::InterruptContextIf::is_in_interrupt_context()
             {
                 // SAFETY: host-retained current, watched task context, IRQ/preemption
                 // excluded and no reader-node lock held. Nesting is rechecked.
@@ -210,7 +211,9 @@ pub unsafe fn enter_user_quiescent() {
             // final user-entry callback. Its caller already masks ordinary IRQs.
             with_preempt_check_deferred(|| {
                 debug_assert!(!reader.is_reading());
-                debug_assert!(!RcuExecutionIf::is_in_interrupt_context());
+                debug_assert!(
+                    !kiface_irq_context_api::InterruptContextIf::is_in_interrupt_context()
+                );
                 // SAFETY: host-retained current, watched task context, IRQs masked
                 // and preemption excluded; no node lock is held at this boundary.
                 unsafe { finish_reader_cleanup(reader) };

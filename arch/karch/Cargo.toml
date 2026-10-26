@@ -16,6 +16,7 @@ nmi-pseudo = []
 smp = []
 
 [dependencies]
+kiface-cpu-api.workspace = true
 cfg-if = { workspace = true }
 memaddr = { workspace = true }
 kbuild_config = { workspace = true }

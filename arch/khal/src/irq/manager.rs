@@ -6,18 +6,6 @@
 
 use kcpu::excp::{IRQ, NMI, register_trap_handler};
 
-/// Scheduler checkpoint after normal IRQ dispatch and controller completion.
-///
-/// The trap adapter calls this with IRQs masked, its preemption guard released
-/// and the architecture exception marker suspended. The provider must retain
-/// outer preemption, interrupt-context and CPU-watching exclusions. Dedicated
-/// NMI entry must not use this checkpoint.
-#[kiface::interface]
-pub trait IrqExitIf {
-    /// Checks pending scheduling work without enabling local IRQs on return.
-    fn check_preempt_pending();
-}
-
 /// Pseudo-NMI trap entry adapter.
 ///
 /// Called by the architecture exception layer while handling an NMI-class trap.
@@ -49,7 +37,7 @@ pub fn irq_handler(vector: usize) -> bool {
     // with the interrupted task.
     let suspended_exception = crate::context::suspend_active_exception_context();
     guard.release_without_check();
-    IrqExitIf::check_preempt_pending();
+    kiface_task_api::TaskIrqExitCheckpointIf::check_preempt_pending();
     crate::context::resume_active_exception_context(suspended_exception);
     handled
 }

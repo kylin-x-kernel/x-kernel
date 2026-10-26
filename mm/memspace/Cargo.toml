@@ -8,9 +8,11 @@ homepage.workspace = true
 
 [features]
 default = []
-smp = ["page_table/smp"]
+smp = []
 
 [dependencies]
+kiface.workspace = true
+kiface-mm-api.workspace = true
 anon = { workspace = true }
 kalloc = { workspace = true }
 kcpu_id_map = { workspace = true }

@@ -16,7 +16,7 @@ ignored = ["kcpu", "kspin"]
 [features]
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/cmos"]
-smp = ["kplat/smp", "kspin/smp"]
+smp = []
 vmm = []
 
 [dependencies]

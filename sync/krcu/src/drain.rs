@@ -9,13 +9,19 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
 use kcompletion::Completion;
 use kerrno::{KError, KResult};
+use kiface_task_wait_api::PreparedCompletionWait;
+use klazy::Lazy;
+use kmutex::Mutex;
 use krcu_core::CallbackNode;
 use kspin::SpinNoIrq;
 
 use super::SERVICE;
-use crate::host::{RcuTaskIf, TaskWait, with_prepared_wait};
+use crate::host::with_prepared_wait;
 
-/// Permanent marker storage; the host supplies serialization but owns no marker.
+// Drain marker installation and completion belong to the same RCU service.
+static DRAIN_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+/// Permanent marker storage; drain serialization and markers share RCU ownership.
 pub(super) struct CallbackDrain {
     markers: [DrainMarker; kbuild_config::NR_CPUS],
 }
@@ -28,9 +34,18 @@ struct DrainMarker {
 
 const _: () = assert!(core::mem::offset_of!(DrainMarker, node) == 0);
 
+/// Holds the production drain gate for deterministic serialization fixtures.
+/// The body must not call drain_callbacks itself or wait for a drain to finish.
+#[cfg(unittest)]
+#[doc(hidden)]
+pub fn with_drain_lock_for_tests(body: &mut dyn FnMut()) {
+    let _guard = DRAIN_LOCK.lock();
+    body();
+}
+
 /// Samples marker installation for controlled kernel serialization fixtures.
 ///
-/// The caller holds the host drain gate while observing blocked drain callers.
+/// The caller holds the drain gate while observing blocked drain callers.
 /// This exposes no marker storage or mutation; it is not a completion predicate.
 #[cfg(unittest)]
 #[doc(hidden)]
@@ -102,7 +117,7 @@ pub unsafe fn drain_callbacks() -> KResult<()> {
     with_prepared_wait(drain_with_wait)?
 }
 
-fn drain_with_wait(wait: &mut dyn TaskWait) -> KResult<()> {
+fn drain_with_wait(wait: &mut dyn PreparedCompletionWait) -> KResult<()> {
     {
         let _guard = kspin::NoPreemptIrqSave::new();
         if !krcu_core::RcuContextIf::current_cpu_watching().is_watching() {
@@ -114,7 +129,8 @@ fn drain_with_wait(wait: &mut dyn TaskWait) -> KResult<()> {
         .filter(|service| service.waker.get().is_some())
         .ok_or(KError::BadState)?;
     let completion = Arc::new(DrainCompletion::new());
-    RcuTaskIf::with_serialized_drain(&mut || {
+    {
+        let _guard = DRAIN_LOCK.lock();
         let mut has_markers = false;
         for cpu in 0..kcpu_id_map::nr_cpus() {
             let marker = &service.drain.markers[cpu];
@@ -145,7 +161,7 @@ fn drain_with_wait(wait: &mut dyn TaskWait) -> KResult<()> {
         completion.finish_one();
         wait.wait_for_completion(&completion.completion);
         fence(Ordering::SeqCst);
-    });
+    }
     Ok(())
 }
 

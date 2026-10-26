@@ -186,3 +186,12 @@
 运行时完成回调必须位于 PTE 删除和 TLB finish 之后，且由同一 MM 独占锁
 串行；只能释放通知区间的运行时引用，不能额外清除其他映射。失效失败
 不得触发回调，故仍可能可见的 PTE 始终有 backing 引用保护。
+
+## DMA Mapping Capability
+
+memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent
+or Normal mode, not arbitrary flags. The provider serializes protection with
+the existing kernel layout lock and preserves previous error behavior.
+Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
+allocation and quiesces device access before restoration. Allocation, platform
+sharing, rollback and device-cache synchronization are outside this capability.

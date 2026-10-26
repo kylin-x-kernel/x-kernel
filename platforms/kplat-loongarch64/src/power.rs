@@ -8,7 +8,9 @@ use kerrno::{KError, KResult};
 #[cfg(feature = "smp")]
 use khal::mem::pa;
 use khal::mem::{PhysAddr, VirtAddr};
-use kplat::sys::SysCtrl;
+#[cfg(feature = "smp")]
+use kplat::sys::CpuStartIf;
+use kplat::sys::PlatformPowerIf;
 
 /// The GED sleep-control register (ACPI 5.0 §4.8.3.7 on HW-reduced
 /// platforms), mapped through the kernel device mapper.
@@ -57,7 +59,7 @@ fn fdt_poweroff() -> Option<(PhysAddr, u8)> {
 }
 
 #[kiface::provide]
-impl SysCtrl {
+impl CpuStartIf {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top_paddr: usize) -> KResult {
         #[expect(
@@ -74,7 +76,10 @@ impl SysCtrl {
         crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr));
         Ok(())
     }
+}
 
+#[kiface::provide]
+impl PlatformPowerIf {
     fn power_off() -> ! {
         info!("Shutting down...");
         // Firmware declares the S5 request; this crate carries no

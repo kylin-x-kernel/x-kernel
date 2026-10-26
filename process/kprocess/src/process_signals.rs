@@ -51,7 +51,7 @@ impl PreparedChildExitSignal {
 }
 
 #[kiface::provide]
-impl ksignal::CurrentSignalDispatch {
+impl ksignal::CurrentThreadSignalIf {
     fn send_sig_current(signo: ksignal::Signo) -> KResult<()> {
         let task = current();
         let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;

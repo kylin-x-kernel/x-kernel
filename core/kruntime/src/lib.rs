@@ -80,7 +80,6 @@ mod lang_items;
 #[cfg(feature = "smp")]
 mod mp;
 
-mod dma_integration;
 mod init_setup;
 
 use boot_info::BootConsoleTransport;
@@ -120,11 +119,14 @@ const LOGO: &str = r#"
 "#;
 
 #[kiface::provide]
-impl klogger::LoggerAdapter {
+impl kiface_logging_api::LogSinkIf {
     fn write_str(s: &str) {
         khal::console::write_data(s.as_bytes());
     }
+}
 
+#[kiface::provide]
+impl kiface_logging_api::LogContextIf {
     fn now() -> ktime_types::TimeSpan {
         khal::time::monotonic_time().span_since_origin()
     }
@@ -160,10 +162,11 @@ static INITED_CPUS: AtomicUsize = AtomicUsize::new(0);
 ///
 /// The provider owns policy-level startup such as runtime feature init and
 /// spawning the first user program (PID 1) as a fresh user task. The provider
-/// returns once init has been published and activated.
+/// normally returns once init has been published and activated. A unittest
+/// provider instead runs kernel tests and may terminate the system.
 #[kiface::interface]
 pub trait SystemInitEntry {
-    /// Spawn PID 1 and return once it is runnable.
+    /// Enter the selected system-startup policy (user init or kernel tests).
     fn enter();
 }
 
@@ -242,7 +245,7 @@ fn is_init_ok() -> bool {
 /// Run late subsystem initialization on the PID-less late-init bootstrap thread.
 ///
 /// The thread starts in kernel context, brings up secondary CPUs and late
-/// subsystems, then crosses [`SystemInitEntry`], which spawns PID 1 init, before
+/// subsystems, then crosses [`SystemInitEntry`], which selects user init or kernel tests, before
 /// returning. Because the late-init thread holds an `Internal` identity and
 /// allocates no root PID itself, init receives the system's first root PID.
 fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {

@@ -6,6 +6,9 @@ These runtime-owned runners follow kworkng's opt-in boot validation mechanism.
 They use only public `krcu` APIs; task setup, load and reporting belong here,
 not in the RCU service. The ownership runner uses the real
 RCU service and public APIs, not a host simulation or default unit test.
+The latency runner uses `kmutex::Mutex` for task-owned sample buffers; it does
+not require the ksync compatibility facade. These locks are not taken in the
+RCU read-side hot-path measurement.
 Cargo benchmark auto-discovery is disabled. Stress counters are correctness
 observations, not performance results; latency measurements use the separate
 RCU_BENCH runner described below.

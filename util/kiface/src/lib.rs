@@ -22,6 +22,16 @@
 //!     }
 //! }
 //! ```
+//!
+//! # Interface ownership
+//!
+//! Organize shared contracts by capability-owning domain, not by consumer.
+//! API crates contain contracts and necessary boundary types, never concrete
+//! implementations or global runtime state. They must not depend on provider
+//! crates or pull unrelated APIs through an umbrella dependency. Before using
+//! an interface to break a dependency cycle, correct any misplaced ownership;
+//! use a domain API only for the reverse calls that remain. See
+//! `docs/design.md`, "Interface Ownership and Dependency Rules", for the policy.
 
 use proc_macro::TokenStream;
 use syn::{ItemImpl, ItemTrait, parse_macro_input};

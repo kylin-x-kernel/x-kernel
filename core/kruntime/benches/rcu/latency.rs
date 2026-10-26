@@ -183,7 +183,7 @@ pub(crate) fn run() {
     );
     for &cpu in &cpus {
         for round in 0..=ROUNDS {
-            let result = Arc::new(ksync::Mutex::new(RoundSamples::default()));
+            let result = Arc::new(kmutex::Mutex::new(RoundSamples::default()));
             let output = result.clone();
             let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
                 move || {

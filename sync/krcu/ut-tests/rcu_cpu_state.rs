@@ -9,7 +9,7 @@ use unittest::{assert, assert_eq, def_test};
 #[def_test]
 fn current_and_remote_slots_name_the_same_permanent_state() {
     let _pin = kspin::NoPreemptIrqSave::new();
-    let cpu = crate::host::RcuExecutionIf::current_cpu();
+    let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu();
     let area = kcpu_slot::area(cpu).unwrap();
     let local = super::current_state();
     let remote = super::CPU_STATE.at(&area);

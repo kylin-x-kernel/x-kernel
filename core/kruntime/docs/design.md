@@ -31,11 +31,11 @@ coverage limits for controller startup are recorded in
 
 ## RCU Host Adapters
 
-The execution-context adapter reports the common IRQ core's context facts,
+The kiface-irq-context-api provider in kirq reports the common IRQ core's context facts,
 including the distinction between BH exclusion and serving a handler. It
 preserves NMI-first queries and existing snapshot protection, without deciding
 RCU scope admission, watching or cleanup eligibility.
-It also supplies CPU identity and exception presence. The scoped exception
+kiface-cpu-api providers in kplat and kcpu supply CPU identity and exception presence. The scoped exception
 snapshot holds the existing IRQ-only guard through RCU's admission assertions,
 then restores the caller's mask before read-side execution. It does not add
 preemption accounting or a scheduling checkpoint. The independent exception
@@ -56,7 +56,7 @@ the kernel task. Its temporary task reference may be dropped after activation:
 the scheduler retains the runnable task. Both the caller's startup wait and the
 GP task's own parking use the task-wait adapter, each bound to its own current.
 
-The timer adapter owns the concrete ktask Timer and lends a one-shot capability
+The kiface-time-api provider in ktask owns the concrete Timer and lends a one-shot capability
 on its stack. It translates monotonic nanoseconds to the timer deadline type,
 preserves owner routing across migration and synchronously drains delivery on
 return. The expiry function has no captured allocation; RCU's permanent service
@@ -65,30 +65,30 @@ wakes, assistance and GP completion remain krcu policy. Service readiness is
 published from inside the adapter body, after timer preparation.
 
 The same integration module lends current task reader storage to krcu through
-`RcuTaskIf`. Its stack-local CurrentTask borrow spans the synchronous body,
+`RcuReaderStorageIf`. Its stack-local CurrentTask borrow spans the synchronous body,
 without allocation or an owner-count update. It supplies no scope-admission or
 cleanup policy; those remain in krcu. IRQ/NMI use the same storage adapter without
 locks or changes to IRQ/preemption state.
 
-Task preemption controls delegate directly to ktask: querying its actual count,
+Task preemption controls use kiface-task-api directly, provided by ktask: querying its actual count,
 setting a request, running a normal checkpoint and deferring checks around one
-synchronous body. Runtime adds no scheduling policy or credit of its own. RCU
+synchronous body. Runtime no longer forwards these generic task methods. RCU
 owns cleanup decisions; ktask owns count balancing and switch eligibility.
 
-The synchronous task-wait adapter owns a `ktask::completion::CompletionWait`
-on its stack and lends infallible `wait_for_completion` operations. Preparation
+Synchronous completion waiting now uses kiface-task-wait-api directly, implemented by
+ktask with a stack-local `CompletionWait`, rather than an RCU runtime adapter.
+It lends infallible `wait_for_completion` operations. Preparation
 validates sleepability before calling the RCU body; preparation and waiting do
 not allocate or use poll registrations. RCU keeps callback completion and
 retirement ownership, including its existing callback/drain Arc allocations.
-The separate service-wait adapter retains `PreparedTaskWait` waker cloning and
+TaskParkingIf, also provided by ktask, retains `PreparedTaskWait` waker cloning and
 park operations for startup acknowledgment and GP progress. Wake hints merely
 allow those callers to check their predicates again. Neither adapter returns
 a preparation error after invoking its body.
 
-The drain adapter holds one permanent sleepable mutex across the supplied body,
-including its completion wait. Lazy initialization constructs the mutex on the
-first admitted drain call, before any marker is installed. The mutex payload
-contains no RCU state: markers, counters and completion checks belong to krcu.
+RCU now owns its drain serialization mutex through kmutex, including marker
+installation and the completion wait. There is no runtime drain adapter or
+runtime-owned RCU lock. Initialization remains lazy before marker installation.
 
 `src/rcu.rs` provides krcu's static notification contract through existing kipi
 delivery, or local Rcu softirq raising without IPI support. It owns no reader,
@@ -248,7 +248,7 @@ helper retains the distinction between current-task operations and remote
 atomic observations. Unittest-only RCU snapshots expose cleanup demand and
 whether drain markers are installed. They cannot clear demand, unlink a reader,
 mutate marker ownership or certify a GP. The marker check runs while the fixture
-holds the host drain gate and verifies that blocked drain callers install nothing.
+holds the RCU-owned drain gate and verifies that blocked drain callers install nothing.
 Isolated startup, deadline and completion policy tests remain in krcu and use
 its host contracts without depending on concrete task or IRQ implementations.
 
@@ -298,7 +298,6 @@ core/kruntime/
 │   ├── lib.rs              # 主核 rust_main、日志适配、中断/分配器、内存区日志
 │   ├── mp.rs               # SMP 从核启动、TLB 单测
 │   ├── init_setup.rs       # .init_array 构造函数表遍历
-│   ├── dma_integration.rs  # kdma::DmaPageTableIf 实现
 │   └── lang_items.rs       # #[panic_handler]
 ├── Cargo.toml
 └── docs/
@@ -341,8 +340,7 @@ kernel-boot (汇编 / MMU / BootInfo)
 └───────────────────────────────────────────────────────────────┘
 
 侧向接线（链接期，非启动顺序）：
-  dma_integration  ──provide──►  kdma::DmaPageTableIf  ──►  memspace
-  lib.rs            ──provide──►  klogger::LoggerAdapter
+  lib.rs            ──provide──►  kiface_logging_api::LogSinkIf / LogContextIf
   lib.rs            ──provide──►  kernel_boot::PrimaryKernelEntry
   mp.rs             ──provide──►  kernel_boot::SecondaryKernelEntry
 ```
@@ -353,7 +351,6 @@ kernel-boot (汇编 / MMU / BootInfo)
 | `rust_main_secondary` | 从核初始化；由 `SecondaryKernelEntry` provider 进入；最终 `run_idle` |
 | `mp::start_secondary_cpus` | 为 AP 准备栈、调用 `boot_ap`、等待 AP 注册其 run queue（跨核 spawn 安全前提） |
 | `init_setup` | 执行链接段 `.init_array` 中的 `register_init` 回调 |
-| `dma_integration` | 将 DMA 页表属性更新委托给 `memspace::kernel_layout` |
 | `lang_items` | Panic 时打印 backtrace 并调用裸平台终点 `khal::power::platform_power_off`（绕过 SMP stop 钩子，避免 panic 持锁时 IPI 停机死锁） |
 
 ## 启动流程（主核）
@@ -543,8 +540,7 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 
 | 接口 | 实现位置 | 目的 |
 |------|----------|------|
-| `kdma::DmaPageTableIf` | `dma_integration.rs` | 打破 `kdma` ↔ `memspace` 循环依赖 |
-| `klogger::LoggerAdapter` | `lib.rs` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
+| `kiface_logging_api::LogSinkIf / LogContextIf` | `lib.rs` | 日志输出到 `khal::console`，附带 CPU/任务 ID |
 | `kernel_boot::PrimaryKernelEntry` | `lib.rs` | 主核从 boot 层进入 `rust_main` |
 | `kernel_boot::SecondaryKernelEntry` | `mp.rs` | 从核从 boot 层进入 `rust_main_secondary` |
 | `kruntime::SystemInitEntry` | `entry/src/main.rs` | runtime 就绪后进入系统级 init 策略层 |
@@ -575,13 +571,9 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 
 `.init_array` 回调假定中断子系统已注册、且尚未进入多任务应用阶段；放在 `init_interrupt` 之后、调用 `SystemInitEntry::enter()` 之前，与 C 运行时 constructor 时机相近，但由内核显式控制调用点。
 
-### 为何 DMA 接线放在独立模块
-
-保持 `lib.rs` 聚焦启动编排；`dma_integration` 仅一行业务逻辑，便于审查与替换实现。
-
 ### 日志适配放在 `lib.rs`
 
-`LoggerAdapter` 需在 `klogger::init_klogger` 之前通过 `kiface` provider 链接生效；与 `rust_main` 同文件可避免初始化顺序问题。
+`LogSinkIf` and `LogContextIf` 需在 `klogger::init_klogger` 之前通过 `kiface` provider 链接生效；与 `rust_main` 同文件可避免初始化顺序问题。
 
 ## 与 QEMU / 真机的边界
 
@@ -595,3 +587,6 @@ sleep-control 寄存器地址与 S5 写值）。x86-64（SeaBIOS）不受影响�
 ## ARM64 counter recovery dispatch
 
 With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-recovery notifications before processing task timers. Clock reads only repair shared counter state and rearm CPU-local registers; IPI delivery is deferred until caller-held clock-read locks have been released. The dispatch runs without the counter lock, does not sleep, and requires initialized interrupt routing. It does not reconstruct elapsed host sleep time.
+
+DMA mapping attributes no longer pass through a runtime adapter: kiface-mm-api owns
+DmaMappingMode and DmaMappingIf; memspace directly implements the transition.

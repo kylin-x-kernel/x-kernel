@@ -99,13 +99,13 @@ mod kernel {
         #[inline]
         fn acquire() -> Self::State {
             #[cfg(feature = "preempt")]
-            crate::guard::KernelGuardIf::disable_preempt();
+            kiface_task_api::TaskPreemptionIf::disable_preempt();
         }
 
         #[inline]
         fn release(_state: Self::State) {
             #[cfg(feature = "preempt")]
-            crate::guard::KernelGuardIf::enable_preempt();
+            kiface_task_api::TaskPreemptionIf::enable_preempt();
         }
     }
 
@@ -126,7 +126,7 @@ mod kernel {
         pub fn release_without_check(self) {
             let _guard = core::mem::ManuallyDrop::new(self);
             #[cfg(feature = "preempt")]
-            crate::guard::KernelGuardIf::enable_preempt_without_check();
+            kiface_task_api::TaskPreemptionIf::enable_preempt_without_check();
         }
     }
 
@@ -152,7 +152,7 @@ mod kernel {
         fn acquire() -> Self::State {
             // Order: disable preemption first, then IRQs
             #[cfg(feature = "preempt")]
-            crate::guard::KernelGuardIf::disable_preempt();
+            kiface_task_api::TaskPreemptionIf::disable_preempt();
 
             crate::guard::arch::save_disable()
         }
@@ -163,7 +163,7 @@ mod kernel {
             crate::guard::arch::restore(state);
 
             #[cfg(feature = "preempt")]
-            crate::guard::KernelGuardIf::enable_preempt();
+            kiface_task_api::TaskPreemptionIf::enable_preempt();
         }
     }
 

@@ -2,11 +2,11 @@
 
 ## Purpose and Scope
 
-This crate connects `khal::console::ConsoleIf` to the platform UART and shares
+This crate connects kiface-console-api contracts to the platform UART and shares
 the early stdout instance with the runtime serial driver.
 It separates normal and NMI emergency output and owns optional bounded input storage.
 
-- `src/lib.rs`: Resolves stdout, maps MMIO, implements `ConsoleIf`, and registers input IRQs.
+- `src/lib.rs`: Resolves stdout, maps MMIO, implements kiface-console-api contracts, and registers input IRQs.
 - `src/serial.rs`: Defines one `SerialPort` per UART, publishes stdout, and shares instances.
 - `src/serial/emergency.rs`: Transmits emergency output without taking ordinary locks.
 - `src/serial/input.rs`: Stores bounded input and counts software overflow under the port lock.
@@ -20,7 +20,7 @@ It separates normal and NMI emergency output and owns optional bounded input sto
 that handle and performs I/O without holding the registry lock. The owning
 serial driver's character-device implementation forwards to the same early
 `SerialPort`. The established TTY remains connected to that port.
-Kernel normal/emergency output uses the early port through `ConsoleIf`, not
+Kernel normal/emergency output uses the early port through kiface-console-api contracts, not
 the runtime registry.
 
 ```text
@@ -72,7 +72,7 @@ context, outside the UART lock. Reading the report clears only the count, not
 buffered data. Before attachment the count accumulates for the initial pass.
 
 Early stdout publication retains only the physical IRQ descriptor; it does not
-map or register an IRQ. The runtime boot task calls `ConsoleIf::prepare_input`
+map or register an IRQ. The runtime boot task calls `kiface_console_api::ConsoleInputSetupIf::prepare_input`
 after GP and worker startup, before device discovery can construct N_TTY.
 This one-shot attempt prepares storage, maps the IRQ, and installs a shared action.
 Absent IRQ metadata or a failed preparation/map/registration keeps polled input
@@ -88,7 +88,7 @@ recover overflowed input. This is an early-output/late-input boundary, not a
 promise to buffer boot-time commands.
 
 Only successful registration enables RX under the port lock. The token and
-logical IRQ are then published together; `ConsoleIf::interrupt_id` reports only
+logical IRQ are then published together; `kiface_console_api::ConsoleInputSetupIf::interrupt_id` reports only
 this completed setup, never mere firmware metadata or a mapped descriptor.
 This step does not reinitialize or flush the FIFO. Mapping
 and action registration do not hold the port lock; the controller line may be

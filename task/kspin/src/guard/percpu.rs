@@ -14,24 +14,11 @@
 //! that single type receives one combined impl set so generic test code can
 //! treat any guard as a pin.
 
-use kcpu_slot::CpuId;
-
-/// Platform contract supplying the logical CPU of the current context.
-///
-/// The authoritative CPU id lives in the platform's per-CPU area, so guards
-/// ask for it through this single-implementation interface instead of
-/// depending on the platform crate. The platform links exactly one provider.
-#[kiface::interface]
-pub trait CurrentCpuIf {
-    /// Returns the logical CPU the current execution context runs on.
-    fn current_cpu() -> CpuId;
-}
-
 #[cfg(target_os = "none")]
 mod imp {
     use kcpu_slot::{CpuId, CpuLocalGuard, CpuPin};
+    use kiface_cpu_api::CurrentCpuIf;
 
-    use super::CurrentCpuIf;
     use crate::guard::types::{IrqSave, NoPreempt, NoPreemptIrqSave};
 
     // SAFETY: Saving and disabling local IRQs blocks the tick or IPI a
@@ -71,8 +58,8 @@ mod imp {
 #[cfg(not(target_os = "none"))]
 mod imp {
     use kcpu_slot::{CpuId, CpuLocalGuard, CpuPin};
+    use kiface_cpu_api::CurrentCpuIf;
 
-    use super::CurrentCpuIf;
     use crate::guard::types::NoOp;
 
     // SAFETY: Host test builds alias every kernel guard to `NoOp`; tests are

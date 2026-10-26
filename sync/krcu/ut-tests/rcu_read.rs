@@ -6,7 +6,7 @@
 
 use unittest::{assert, assert_eq, def_test};
 
-use crate::host::{self, RcuExecutionIf};
+use crate::host;
 
 #[def_test]
 fn host_borrow_preserves_current_reader_without_entering_a_scope() {
@@ -32,11 +32,11 @@ fn host_borrow_preserves_current_reader_without_entering_a_scope() {
 #[def_test]
 fn cleanup_without_notification_still_unlinks_finished_membership() {
     let mut observed = None;
-    RcuExecutionIf::with_exception_snapshot(&mut |_| {
+    kiface_cpu_api::ExceptionContextIf::with_exception_snapshot(&mut |_| {
         host::with_preempt_check_deferred(|| {
             host::with_current_reader(|current| {
                 let reader = current.reader();
-                let cpu = RcuExecutionIf::current_cpu();
+                let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu();
                 // SAFETY: retained current at a watched task boundary under
                 // IRQ/preemption exclusion; no node lock or active scope.
                 unsafe { crate::context::finish_reader_cleanup(reader) };
@@ -75,11 +75,11 @@ fn cleanup_without_notification_still_unlinks_finished_membership() {
 #[def_test]
 fn cleanup_demand_survives_reentry_and_is_consumed_locally() {
     let mut observed = None;
-    RcuExecutionIf::with_exception_snapshot(&mut |_| {
+    kiface_cpu_api::ExceptionContextIf::with_exception_snapshot(&mut |_| {
         host::with_preempt_check_deferred(|| {
             host::with_current_reader(|current| {
                 let reader = current.reader();
-                let cpu = RcuExecutionIf::current_cpu();
+                let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu();
                 let enroll_fn = |_: &krcu_core::ReadGuard<'_>| {
                     // SAFETY: excluded active current reader; no node lock is
                     // held and its permanent owner outlives explicit cleanup.

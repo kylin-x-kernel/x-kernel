@@ -4,57 +4,15 @@
 
 //! Host capabilities; RCU retains participation, demand and progress policy.
 
-use core::{marker::PhantomData, task::Waker};
+use core::marker::PhantomData;
 
 use kcpu_id_map::LogicalCpuId;
 use kerrno::KResult;
+use kiface_task_api::TaskPreemptionIf;
+use kiface_task_wait_api::{PreparedParking, TaskParkingIf};
 use krcu_core::TaskReader;
 
 pub use crate::service::PreparedGpTask;
-
-/// CPU and execution-context facts, not permission to enter a read scope or unlink it.
-///
-/// Requires initialized CPU slots. Queries preserve IRQ/preemption state and
-/// never allocate, schedule, or run cleanup checks. Results describe the call,
-/// not a lasting exclusion token; callers retain protection across dependent
-/// operations. RCU owns watching, nesting and admission decisions.
-#[kiface::interface]
-pub trait RcuExecutionIf {
-    /// Samples the current logical CPU without pinning subsequent operations.
-    ///
-    /// Never allocates, locks or checks scheduling. Callers keep their own
-    /// exclusion across CPU-local queue operations that use this identity.
-    fn current_cpu() -> LogicalCpuId;
-
-    /// Samples exception presence under temporary IRQ exclusion, then restores it.
-    ///
-    /// Do not dereference the trapframe or run a scheduling/cleanup check.
-    fn is_in_exception_context() -> bool;
-
-    /// Lends exception presence to one synchronous body while ordinary IRQs stay masked.
-    ///
-    /// Pin before sampling the per-CPU exception marker and retain that same
-    /// exclusion through the body. Restore the caller's mask on return or unwind,
-    /// without changing preemption counts or running scheduling/cleanup checks.
-    /// Do not allocate, lock or access current just to supply the snapshot.
-    /// The body must not enable IRQs, block or migrate; it owns admission checks.
-    fn with_exception_snapshot(body_fn: &mut dyn FnMut(bool));
-
-    /// Reports effective NMI nesting without locks, guards or task access.
-    fn is_in_nmi() -> bool;
-
-    /// Reports NMI, hardirq, serving softirq, or task-context BH exclusion.
-    ///
-    /// Test NMI before any ordinary context lock. Outside NMI, protect the
-    /// per-CPU snapshot without running a scheduler check on guard release.
-    fn is_in_interrupt_context() -> bool;
-
-    /// Reports an executing NMI, hardirq or softirq handler, excluding BH-only tasks.
-    ///
-    /// In NMI this must return without locks, guards or task access. Outside
-    /// NMI, preserve the same snapshot protection as is_in_interrupt_context.
-    fn is_in_interrupt_handler() -> bool;
-}
 
 /// A task-local borrow retained by the host, not permission to enter a read scope.
 ///
@@ -64,7 +22,7 @@ pub trait RcuExecutionIf {
 ///
 /// ```compile_fail
 /// let mut escaped = None;
-/// krcu::host::RcuTaskIf::with_current_reader(&mut |reader| escaped = Some(reader));
+/// krcu::host::RcuReaderStorageIf::with_current_reader(&mut |reader| escaped = Some(reader));
 /// ```
 pub struct CurrentReader<'task> {
     reader: &'task TaskReader,
@@ -92,116 +50,9 @@ impl<'task> CurrentReader<'task> {
     }
 }
 
-/// Prepared task-bound parking; wakeups are hints, never RCU completion.
-///
-/// The host retains this object on the preparing task's stack. It must remember
-/// a wake delivered before park and permit spurious returns. Neither method
-/// registers a wait or allocates; all fallible preparation precedes the borrow.
-/// The borrow is not Send/Sync and must not escape the synchronous adapter body.
-pub trait ServiceWait {
-    /// Clones the prepared waker without allocating. It may outlive this borrow.
-    fn waker(&self) -> Waker;
-
-    /// Parks this same task without returning an interruption error.
-    ///
-    /// Requires sleepable context and no reader/service lock. Must not consume
-    /// pending signals; the caller rechecks its completion predicate on return.
-    fn park(&mut self);
-}
-
-/// Prepared completion waiting bound to the current sleepable task.
-///
-/// The host retains this object on the preparing task's stack. Preparation
-/// validates context before the body can change publication or install markers.
-pub trait TaskWait {
-    /// Waits infallibly and without allocation until completion is acquired.
-    ///
-    /// Requires the preparing task in sleepable context with no reader/service
-    /// lock held. Signals and spurious wakeups cannot end the wait early.
-    fn wait_for_completion(&self, completion: &kcompletion::Completion);
-}
-
-/// Borrowed one-shot timer; RCU owns the deadline and the meaning of expiry.
-///
-/// The host keeps its allocation alive for the whole adapter body. Rearming
-/// reuses that allocation and never invokes the expiry callback inline.
-pub trait ProgressTimer {
-    /// Starts or replaces a deadline in monotonic nanoseconds since boot.
-    ///
-    /// # Errors
-    /// Reports invalid deadlines or CPU routing without changing the old timer.
-    ///
-    /// # Safety
-    /// The current CPU's scheduler and timer IRQ service must be initialized.
-    /// The supplied expiry callback must not sleep, unwind, enable IRQs, reenter
-    /// timer dispatch or synchronously cancel this timer.
-    unsafe fn arm(&mut self, deadline_ns: u64) -> KResult<()>;
-
-    /// Removes pending expiry and waits for any running callback to return.
-    ///
-    /// Hold no lock needed by the callback and do not prevent its CPU's progress.
-    /// Never call from the expiry callback itself.
-    fn cancel_sync(&mut self);
-}
-
-/// Supplies timer mechanics, not progress intervals or quiescent observations.
+/// Launches the unique RCU grace-period driver in a task context.
 #[kiface::interface]
-pub trait RcuTimerIf {
-    /// Samples the same monotonic nanosecond clock used by timer deadlines.
-    fn monotonic_time_nanos() -> u64;
-
-    /// Lends an initially inactive timer to exactly one synchronous body.
-    ///
-    /// Requires initialized per-CPU storage. Preparation follows the kernel's
-    /// allocation policy; no extra allocation is needed solely for type erasure.
-    /// The body may park or migrate. Expiry invokes notify_fn from timer IRQ
-    /// context, and the host drains delivery before releasing storage on return.
-    /// Before returning, release callback-needed locks and leave its CPU able
-    /// to progress; implicit draining has the same constraints as cancel_sync.
-    /// The timer borrow cannot escape this body.
-    fn with_progress_timer(notify_fn: fn(), body_fn: &mut dyn FnMut(&mut dyn ProgressTimer));
-}
-
-/// Supplies task storage, execution controls and parking without owning RCU policy.
-#[kiface::interface]
-pub trait RcuTaskIf {
-    /// Samples whether current may enter a blocking wait, without preparing one.
-    ///
-    /// Call outside NMI with initialized CPU context, before adding temporary
-    /// IRQ/preemption exclusion. Return false for absent/idle current, masked
-    /// IRQs, interrupt/BH context, tracked preemption exclusion or an active
-    /// reader scope. Preserve exclusion and pending requests; never allocate,
-    /// schedule, wake or run cleanup checks. RCU separately checks exception
-    /// presence and watching. This snapshot does not detect dependency cycles
-    /// or certify caller-held sleepable locks.
-    fn is_sleepable_context() -> bool;
-
-    /// Reads current's actual preemption-disable count, not its IRQ mask.
-    ///
-    /// Requires initialized current; never schedules or changes exclusion.
-    fn current_preemption_disabled() -> bool;
-
-    /// Sets current's reschedule request without checking it or notifying a CPU.
-    ///
-    /// Requires initialized current outside NMI. A later normal scheduling
-    /// checkpoint must consume the request; RCU owns progress notification.
-    fn request_current_reschedule();
-
-    /// Runs the ordinary task checkpoint, including deferred reader cleanup.
-    ///
-    /// May schedule when the host's IRQ, exception and preemption checks permit.
-    /// Call outside NMI with no RCU bookkeeping lock held. RCU decides when
-    /// its read-scope exit requests this checkpoint, not whether a task switches.
-    fn check_preempt_pending();
-
-    /// Invokes one synchronous body with an extra preemption-disable credit.
-    ///
-    /// Requires initialized current outside NMI. Preserve IRQ state and remove
-    /// only this credit on return or unwind, without running a scheduling or
-    /// cleanup check. The body must not block or consume this credit; callers
-    /// arrange a later normal checkpoint, including on unwind. Do not allocate.
-    fn with_preempt_check_deferred(body_fn: &mut dyn FnMut());
-
+pub trait RcuGpTaskLaunchIf {
     /// Transfers the prepared entry into one ordinary PID-less kernel task.
     ///
     /// Requires sleepable task context after scheduler startup. Run the entry
@@ -211,7 +62,11 @@ pub trait RcuTaskIf {
     /// existing fatal policy; do not discard the entry or add a recoverable
     /// failure after accepting its unique driver ownership.
     fn start_gp_task(entry: PreparedGpTask);
+}
 
+/// Borrows task-owned RCU reader storage without exporting the task implementation.
+#[kiface::interface]
+pub trait RcuReaderStorageIf {
     /// Invokes the body exactly once on this stack with retained current storage.
     ///
     /// Requires initialized current. Preserve IRQ/preemption state; do not take
@@ -220,46 +75,6 @@ pub trait RcuTaskIf {
     /// Task-context bodies may be involuntarily preempted or migrated. The body
     /// owns all RCU admission, nesting and cleanup decisions.
     fn with_current_reader(body_fn: &mut dyn FnMut(CurrentReader<'_>));
-
-    /// Prepares completion waiting, then lends it to the body exactly once.
-    ///
-    /// On failure do not invoke the body; after invoking it return only Ok.
-    /// Retain the concrete wait on this stack through the body, without an
-    /// allocation. The body may wait on completions on the preparing task.
-    ///
-    /// # Errors
-    /// Rejects contexts where the current task cannot sleep before invoking
-    /// the body. Preparation and waiting do not allocate.
-    ///
-    /// The host's task-bound wait cannot escape the body:
-    ///
-    /// ```compile_fail
-    /// let mut escaped = None;
-    /// let _ = krcu::host::RcuTaskIf::with_prepared_wait(&mut |wait| {
-    ///     escaped = Some(wait);
-    /// });
-    /// ```
-    fn with_prepared_wait(body_fn: &mut dyn FnMut(&mut dyn TaskWait)) -> KResult<()>;
-
-    /// Prepares service parking, then lends it to the body exactly once.
-    ///
-    /// Retains early wake hints and permits spurious returns. The body owns
-    /// its readiness predicate. No allocation or interruption error occurs
-    /// during park; preparation retains the host's fatal allocation policy.
-    /// On failure do not invoke the body; after invoking it return only Ok.
-    ///
-    /// # Errors
-    /// Rejects contexts where the current task cannot sleep before the body.
-    fn with_prepared_service_wait(body_fn: &mut dyn FnMut(&mut dyn ServiceWait)) -> KResult<()>;
-
-    /// Holds the permanent kernel RCU drain mutex across one synchronous body.
-    ///
-    /// Invoke the body exactly once after acquiring a sleepable mutex shared
-    /// by all callers, and release it only after the body returns. The body may
-    /// park; it owns marker installation and completion. Requires sleepable
-    /// task context, no recursive call and no lock needed by callbacks/service.
-    /// The provider owns no markers or completion counters.
-    fn with_serialized_drain(body_fn: &mut dyn FnMut());
 }
 
 /// Defers checks around a once-only body that may consume an exclusion guard.
@@ -271,7 +86,7 @@ pub trait RcuTaskIf {
 pub(crate) fn with_preempt_check_deferred<R>(body_fn: impl FnOnce() -> R) -> R {
     let mut body_fn = Some(body_fn);
     let mut result = None;
-    RcuTaskIf::with_preempt_check_deferred(&mut || {
+    TaskPreemptionIf::with_preempt_check_deferred(&mut || {
         result = Some(body_fn
             .take()
             .expect("RCU preemption provider invokes once")(
@@ -286,10 +101,12 @@ pub(crate) fn with_preempt_check_deferred<R>(body_fn: impl FnOnce() -> R) -> R {
     reason = "CG-021-no-panic-on-reachable-failure: the static task provider calls its body \
               exactly once after successful preparation and never fails afterward"
 )]
-pub(crate) fn with_prepared_wait<R>(body_fn: impl FnOnce(&mut dyn TaskWait) -> R) -> KResult<R> {
+pub(crate) fn with_prepared_wait<R>(
+    body_fn: impl FnOnce(&mut dyn kiface_task_wait_api::PreparedCompletionWait) -> R,
+) -> KResult<R> {
     let mut body_fn = Some(body_fn);
     let mut result = None;
-    RcuTaskIf::with_prepared_wait(&mut |wait| {
+    kiface_task_wait_api::TaskCompletionWaitIf::with_prepared_wait(&mut |wait| {
         result = Some(body_fn.take().expect("RCU wait provider invokes once")(
             wait,
         ));
@@ -304,11 +121,11 @@ pub(crate) fn with_prepared_wait<R>(body_fn: impl FnOnce(&mut dyn TaskWait) -> R
               exactly once after successful preparation and never fails afterward"
 )]
 pub(crate) fn with_prepared_service_wait<R>(
-    body_fn: impl FnOnce(&mut dyn ServiceWait) -> R,
+    body_fn: impl FnOnce(&mut dyn PreparedParking) -> R,
 ) -> KResult<R> {
     let mut body_fn = Some(body_fn);
     let mut result = None;
-    RcuTaskIf::with_prepared_service_wait(&mut |wait| {
+    TaskParkingIf::with_prepared_parking(&mut |wait| {
         result = Some(body_fn
             .take()
             .expect("RCU service wait provider invokes once")(
@@ -327,7 +144,7 @@ pub(crate) fn with_prepared_service_wait<R>(
 pub(crate) fn with_current_reader<R>(body_fn: impl FnOnce(CurrentReader<'_>) -> R) -> R {
     let mut body_fn = Some(body_fn);
     let mut result = None;
-    RcuTaskIf::with_current_reader(&mut |reader| {
+    RcuReaderStorageIf::with_current_reader(&mut |reader| {
         result = Some(body_fn.take().expect("RCU task provider invokes once")(
             reader,
         ));
@@ -374,14 +191,4 @@ pub trait RcuNotifyIf {
     /// # Errors
     /// Returns an error when the target notification transport is unavailable.
     fn notify_rcu(cpu: LogicalCpuId) -> KResult<()>;
-
-    /// Requests a scheduling opportunity without reporting quiescence itself.
-    ///
-    /// Requires initialized IPI delivery. Must not allocate, wait or wake a task
-    /// inline. RCU retains the decision whether a CPU needs this notification.
-    ///
-    /// # Errors
-    /// Returns an error when the target notification transport is unavailable.
-    #[cfg(feature = "ipi")]
-    fn notify_reschedule(cpu: LogicalCpuId) -> KResult<()>;
 }

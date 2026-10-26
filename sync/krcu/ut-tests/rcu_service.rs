@@ -43,7 +43,7 @@ fn callback_batches_rearm_only_for_ready_budget_remainder() {
         })
         .collect();
     let _guard = kspin::NoPreemptIrqSave::new();
-    let cpu = RcuExecutionIf::current_cpu().as_usize();
+    let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize();
     // SAFETY: this serial fixture alone coordinates its static nodes, enrolls
     // no readers and drains all unpublished probes before releasing the state.
     let callbacks =
@@ -194,7 +194,7 @@ fn callback_preflight_checks_isolated_readiness_without_claiming_control() {
     service.waker.call_once(|| Waker::noop().clone());
     assert_eq!(service.preflight_callback_submission(), Ok(()));
     assert!(karch::local_irq_enabled());
-    assert!(!RcuTaskIf::current_preemption_disabled());
+    assert!(!kiface_task_api::TaskPreemptionIf::current_preemption_disabled());
 
     let (task_preflight, callback_readiness) = {
         let _irq = kspin::IrqSave::new();
@@ -325,15 +325,15 @@ unsafe fn finish_progress_probe(node: *mut CallbackNode) {
     let probe = unsafe { Box::from_raw(node.cast::<ProgressCallbackProbe>()) };
     // Runtime's callback tests verify the specific softirq carrier. This
     // internal fixture checks its host-visible execution and reader contracts.
-    let is_valid_context = RcuExecutionIf::is_in_interrupt_handler()
-        && !RcuExecutionIf::is_in_nmi()
-        && RcuTaskIf::current_preemption_disabled();
-    if !is_valid_context || RcuExecutionIf::current_cpu().as_usize() != probe.cpu {
+    let is_valid_context = kiface_irq_context_api::InterruptContextIf::is_in_interrupt_handler()
+        && !kiface_irq_context_api::InterruptContextIf::is_in_nmi()
+        && kiface_task_api::TaskPreemptionIf::current_preemption_disabled();
+    if !is_valid_context || kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize() != probe.cpu {
         probe.violations.fetch_add(1, Ordering::Relaxed);
     }
     crate::host::with_current_reader(|current| {
         let reader = current.reader();
-        let cpu = RcuExecutionIf::current_cpu();
+        let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu();
         let before = (
             reader.is_reading(),
             reader.is_enrolled(),
@@ -345,9 +345,9 @@ unsafe fn finish_progress_probe(node: *mut CallbackNode) {
         let scopes_were_active = crate::with_interrupt_read(|_| {
             let inner_was_active = crate::with_interrupt_read(|_| {
                 reader.is_reading()
-                    && RcuExecutionIf::is_in_interrupt_handler()
-                    && !RcuExecutionIf::is_in_nmi()
-                    && RcuTaskIf::current_preemption_disabled()
+                    && kiface_irq_context_api::InterruptContextIf::is_in_interrupt_handler()
+                    && !kiface_irq_context_api::InterruptContextIf::is_in_nmi()
+                    && kiface_task_api::TaskPreemptionIf::current_preemption_disabled()
                     && krcu_core::RcuContextIf::current_cpu_watching().is_watching()
             });
             inner_was_active && reader.is_reading()
@@ -459,7 +459,7 @@ fn cleanup_demand_kicks_an_already_observed_cpu() {
         static NODES: [krcu_core::ReaderNode; kbuild_config::NR_CPUS] =
             [const { krcu_core::ReaderNode::new() }; kbuild_config::NR_CPUS];
         let irq = kspin::IrqSave::new();
-        let cpu = RcuExecutionIf::current_cpu().as_usize();
+        let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize();
         // SAFETY: this serial fixture exclusively controls its static nodes and
         // completes all callbacks before returning. No real object is retired.
         let callbacks =
@@ -495,9 +495,9 @@ fn cleanup_demand_kicks_an_already_observed_cpu() {
         // Suppress the pin's cleanup probe to leave the IRQ-only deferred case.
         crate::host::with_preempt_check_deferred(|| drop(pin));
         drop(irq);
-        let start_ns = RcuTimerIf::monotonic_time_nanos();
+        let start_ns = kiface_time_api::monotonic_time_nanos();
         while current.reader().is_enrolled()
-            && RcuTimerIf::monotonic_time_nanos().saturating_sub(start_ns) < 5_000_000_000
+            && kiface_time_api::monotonic_time_nanos().saturating_sub(start_ns) < 5_000_000_000
         {
             core::hint::spin_loop();
         }

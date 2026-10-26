@@ -88,7 +88,7 @@ retains init identity; orphan reparenting reserves an init relation slot.
 - `timer_delivery` registers `ktimer` expiry and `ksignal` dequeue observers;
   CPU timers run on current-user-thread return and wall timers on the alarm task.
   `UserTaskRuntime for Thread` supplies CPU residency and AArch64 switch roots to
-  `ktask`; `CurrentSignalDispatch` adapts current-task signal injection.
+  `ktask`; `CurrentThreadSignalIf` adapts current-task signal injection.
 - `TaskStat`, `system_view`, nice/scheduler and CPU-accounting APIs provide
   procfs/scheduler snapshots rather than owning hardware scheduling policy.
 

@@ -9,7 +9,7 @@ generic `kirq` API。
 - `kcpu` trap dispatch 只在正确异常上下文调用 `irq_handler()` / `nmi_handler()`；
 - `kspin::NoPreempt` 能覆盖进入 `kirq` 的 adapter 调用区间；
 - `kirq` 维护 IRQ state、NMI table、dispatch 和 completion 不变量；
-- `kplat::nm_irq` 的平台实现（`NmiDef` / `NmiPeriodic`）与 `karch` 的 NMI 寄存器
+- `kplat::nm_irq` 的平台实现（`NmiMechanismIf` / `PeriodicNmiSourceIf`）与 `karch` 的 NMI 寄存器
   访问（PMR / ALLINT / SCTLR_EL1.NMI）正确反映机制与降级状态。
 
 ## 外部边界 / 攻击面
@@ -38,7 +38,8 @@ generic `kirq` API。
 
 - `khal::irq` 不保存 `IRQ_STATE` 或 `NMI_TABLE`，避免与 `kirq` 形成重复活跃 state。
 - `NoPreempt` guard 必须覆盖整个 `kirq::handle_irq()` / `kirq::handle_nmi()` 调用。
-- `IrqExitIf` is reserved for the completed normal IRQ tail, after controller
+- `kiface_task_api::TaskIrqExitCheckpointIf` (defined by kiface-task-api, provided by ktask)
+  is reserved for the completed normal IRQ tail, after controller
   completion and dispatch cleanup. It may exempt only the entry IRQ mask from
   ordinary preemption checks, never outer preemption guards or NMI context.
   The adapter restores the suspended exception marker after the checkpoint.

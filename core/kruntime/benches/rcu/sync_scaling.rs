@@ -104,7 +104,7 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
             let mut tasks = Vec::with_capacity(workers);
             let mut results = Vec::with_capacity(workers);
             for &cpu in &cpus[..workers] {
-                let output = Arc::new(ksync::Mutex::new(Vec::new()));
+                let output = Arc::new(kmutex::Mutex::new(Vec::new()));
                 results.push(output.clone());
                 let gate = gate.clone();
                 let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
@@ -177,7 +177,7 @@ fn run_load(cpus: &[LogicalCpuId], hold_ns: u64, is_rcu_reader: bool) {
 
 fn report(
     cpus: &[LogicalCpuId],
-    results: &[Arc<ksync::Mutex<Vec<u64>>>],
+    results: &[Arc<kmutex::Mutex<Vec<u64>>>],
     round: usize,
     hold_ns: u64,
     elapsed_ns: u64,

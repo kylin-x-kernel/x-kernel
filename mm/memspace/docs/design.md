@@ -350,3 +350,12 @@ anonymous origin and the virtual displacement. Object invalidation asks that
 runtime for the same coordinate used by faults, fork and relocation; splitting,
 prefix unmapping and protection do not maintain a second VMA offset field.
 
+
+## DMA Mapping Capability
+
+memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent
+or Normal mode, not arbitrary flags. The provider serializes protection with
+the existing kernel layout lock and preserves previous error behavior.
+Coherent is READ|WRITE|UNCACHED|SHARED; Normal is READ|WRITE. The caller owns the
+allocation and quiesces device access before restoration. Allocation, platform
+sharing, rollback and device-cache synchronization are outside this capability.

@@ -26,7 +26,7 @@ fn run_round(cpus: &[LogicalCpuId], round: usize, use_rcu: bool) {
     let mut competitors = Vec::new();
     for &cpu in cpus {
         let progress = Arc::new(Progress::default());
-        let output = Arc::new(ksync::Mutex::new((0u64, 0u64)));
+        let output = Arc::new(kmutex::Mutex::new((0u64, 0u64)));
         let observed = progress.clone();
         let competitor = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
             move || {

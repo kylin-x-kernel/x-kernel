@@ -13,7 +13,7 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::{
     drain_callbacks,
-    host::{TaskWait, with_prepared_wait},
+    host::with_prepared_wait,
 };
 
 #[def_test]
@@ -37,7 +37,7 @@ fn final_marker_after_installation_releases_wait() -> unittest::TestResult {
 }
 
 fn check_final_marker_after_installation_releases_wait(
-    wait: &mut dyn TaskWait,
+    wait: &mut dyn PreparedCompletionWait,
 ) -> unittest::TestResult {
     let completion = DrainCompletion::new();
     completion.remaining.fetch_add(1, Ordering::Relaxed);
@@ -76,8 +76,9 @@ fn marker_reuse_during_old_wakeup_keeps_completion_owners_separate() -> unittest
     // permanent marker; no resource required by those callbacks is held.
     let drained = unsafe { drain_callbacks() };
     assert_eq!(drained, Ok(()));
-    let mut observations = None;
-    RcuTaskIf::with_serialized_drain(&mut || {
+    let observations;
+    {
+        let _guard = DRAIN_LOCK.lock();
         let marker = &service.drain.markers[0];
         let next = Arc::new(DrainCompletion::new());
         let was_retained = Arc::new(AtomicBool::new(false));
@@ -104,7 +105,7 @@ fn marker_reuse_during_old_wakeup_keeps_completion_owners_separate() -> unittest
         unsafe { previous.completion.wait_with(&wake, finish_marker) };
         drop(previous);
         let installed = marker.completion.lock().take();
-        observations = Some((
+        observations = (
             was_retained.load(Ordering::Acquire),
             observer.upgrade().is_none(),
             installed
@@ -112,10 +113,10 @@ fn marker_reuse_during_old_wakeup_keeps_completion_owners_separate() -> unittest
                 .is_some_and(|installed| Arc::ptr_eq(installed, &next)),
             next.completion.try_wait(),
             next.remaining.load(Ordering::Relaxed),
-        ));
-    });
+        );
+    }
     let (was_retained, is_previous_released, is_next_installed, is_next_complete, remaining) =
-        observations.unwrap();
+        observations;
     assert!(was_retained);
     assert!(is_previous_released);
     assert!(is_next_installed);

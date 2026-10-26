@@ -15,9 +15,10 @@ ignored = ["kcpu"]
 [features]
 fp-simd = ["kcpu/fp-simd", "kernel_boot/fp-simd"]
 rtc = ["rtc_driver/ls7a"]
-smp = ["kplat/smp", "kspin/smp"]
+smp = []
 
 [dependencies]
+kiface-time-api.workspace = true
 console_driver = { workspace = true, features = ["ns16550-mmio"] }
 kspin = { workspace = true }
 lazyinit = "0.2"

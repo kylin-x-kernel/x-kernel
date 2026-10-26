@@ -14,7 +14,7 @@ extern crate alloc;
 /// services may skip inspection without reporting.
 #[cfg(feature = "workqueue-stall-check")]
 #[kiface::interface]
-pub trait WorkqueueStallCheck {
+pub trait WorkqueueStallInspectorIf {
     /// Inspects this CPU's queues using a monotonic sample and warning threshold.
     /// Requires sleepable task context with no caller-held spinlocks.
     fn inspect(

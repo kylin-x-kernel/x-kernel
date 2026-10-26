@@ -20,8 +20,8 @@ and arming, retain callback storage through delivery, and drain on cancellation
 or body return. RCU publishes readiness only after timer preparation. Expiry
 requests a pass; neither expiry nor timer cancellation proves GP completion.
 
-Callback drain borrows runtime-prepared completion waiting and a runtime-owned
-sleepable serialization gate. The gate covers installation and the entire wait;
+Callback drain borrows task-prepared completion waiting and an RCU-owned
+sleepable serialization gate (`src/drain.rs::DRAIN_LOCK`). The gate covers installation and the entire wait;
 only krcu's final countdown transition publishes sticky completion authorizing
 return and marker reuse. The installation sentinel prevents early markers from
 finishing an incomplete installation. A SeqCst fence follows the wait. The runtime
@@ -36,7 +36,7 @@ enters its exchange body only after host preparation and callback storage setup,
 preserving the unused owner on rejection. Callback and drain Arc allocations
 still follow fatal OOM policy. Each notifying callback retains an independent
 Arc through notification, even if the waiter returns and markers are reused.
-Startup and GP progress retain the separate ServiceWait park/Waker contract;
+Startup and GP progress retain the separate kiface_task_wait_api::PreparedParking park/Waker contract;
 their wake hints only prompt readiness checks and do not authorize reclamation.
 
 The current-reader provider must retain initialized current task storage across
@@ -93,7 +93,7 @@ remain in [krcu-core](../crates/krcu-core/docs/security.md).
 The unittest-only cleanup-demand query reads a published CPU's permanent
 atomic flag. It neither consumes demand nor grants scope, cleanup or GP
 authority. The unittest-only marker query observes installation under marker
-locks while the fixture holds the host drain gate; it cannot change markers or
+locks while the fixture holds the RCU-owned drain gate; it cannot change markers or
 certify completion. Runtime fixtures retain task storage and use the same excluded
 integration boundaries as production; private queue/marker ownership is not
 exported to those fixtures. This observation API is absent from normal builds.

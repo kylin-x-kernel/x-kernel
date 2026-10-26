@@ -1,0 +1,16 @@
+[package]
+name = "kiface-task-api"
+description = "Low-level task execution, preemption and diagnostic contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+kiface.workspace = true
+
+[lints]
+workspace = true

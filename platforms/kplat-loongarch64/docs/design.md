@@ -10,7 +10,7 @@ LoongArch machines (QEMU virt-class platforms).
 
 ## Responsibilities
 
-- Boot handoff: the `BootHandler` provider runs
+- Boot handoff: the `PlatformBootIf` provider runs
   `early_driver_init` (clock, interrupts, console from the device tree,
   RTC sample seeding `ktime::initialize_realtime`) and per-CPU
   `activate_local_interrupts` (timer enablement after handler installation).
@@ -23,10 +23,11 @@ LoongArch machines (QEMU virt-class platforms).
   gating.
 - SMP: `start_secondary_cpu` sends the entry point and stack top through
   CSR mailboxes and kicks the AP with an IPI (feature `smp`).
-- Power: the `SysCtrl` provider implements `power_off` (device-tree
+- Power: the `PlatformPowerIf` provider implements `power_off` (device-tree
   `syscon-poweroff` declaration written to the GED sleep-control
-  register), `halt` (park without powering off), `boot_ap`, and an
-  unsupported `suspend_to_ram`.
+  register), `halt` (park without powering off), and an unsupported
+  `suspend_to_ram`. The separate `CpuStartIf` provider implements `boot_ap`
+  when SMP is enabled.
 - Default platform contracts: `kplat::default_dma_if_impl!` and
   `default_mmio_if_impl!` are instantiated here.
 
@@ -50,14 +51,14 @@ LoongArch machines (QEMU virt-class platforms).
 platforms/kplat-loongarch64/
 ├── src/
 │   ├── lib.rs        # module wiring, default platform contracts
-│   ├── init.rs       # BootHandler provider (early init, IRQ preparation/activation)
+│   ├── init.rs       # PlatformBootIf provider (early init, IRQ preparation/activation)
 │   ├── time.rs       # stable counter, ClockSourceIf/ClockEventIf
 │   ├── irq.rs        # IntrManagerIf provider, IrqType routing
 │   ├── irq/
 │   │   ├── eiointc.rs  # EIOINTC (256 vectors, IOCSR)
 │   │   └── pch_pic.rs  # LS7A PCH PIC (64 lines, MMIO)
 │   ├── mp.rs         # AP bring-up (CSR mailbox + IPI)
-│   └── power.rs      # SysCtrl provider, GED S5 power-off
+│   └── power.rs      # CpuStartIf/PlatformPowerIf providers, GED S5 power-off
 ├── ut-tests/
 │   ├── irq.rs         # boot parent-gate check (non-SMP only)
 │   ├── irq_eiointc.rs # recording-backend EIOINTC tests
@@ -90,7 +91,7 @@ hardware behavior. No case uses user-mode flags.
 ## Architecture
 
 ```text
-BootHandler (kiface)
+PlatformBootIf (kiface)
   early_driver_init ─> time::early_init, irq::init (EIOINTC+PCH PIC),
                        console from DT, RTC sample -> ktime
   activate_local_interrupts ─> per-CPU timer enablement (TCFG + IRQ 11)
@@ -99,7 +100,7 @@ kirq::IntrManagerIf (kiface)
   enable:   Timer -> ECFG.LIE | Ex -> range gate -> EIOINTC + PCH PIC
   dispatch: Io -> EIOINTC claim; Timer -> TICLR clear; Ex -> complete
 
-SysCtrl (kiface)
+CpuStartIf / PlatformPowerIf (kiface)
   power_off -> of::syscon_poweroff -> GED S5 byte write
   boot_ap   -> mp::start_secondary_cpu (CSR mail + IPI)
 ```

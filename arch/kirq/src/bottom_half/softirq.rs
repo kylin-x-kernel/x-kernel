@@ -31,13 +31,6 @@ pub type SoftirqAction = fn();
 /// task layer owns the sleepable daemon task that drains deferred work.
 #[kiface::interface]
 pub trait SoftirqDaemonIf {
-    /// Reports a pending scheduling request for the current task.
-    ///
-    /// Called with local IRQs disabled and the CPU pinned. This query must not
-    /// schedule, block, or consume the request. Return false before task setup
-    /// and when kernel preemption is disabled by configuration.
-    fn needs_resched() -> bool;
-
     /// Wakes the daemon serving the current CPU's pending softirq state.
     ///
     /// Implementations must be callable from IRQ-disabled context.
@@ -330,7 +323,7 @@ pub fn run_pending_softirqs() -> SoftirqRunResult {
 ///
 /// The function is public within the crate for IRQ-tail and BH-enable paths.
 pub(crate) fn run_pending_softirqs_irqoff() -> SoftirqRunResult {
-    run_pending_softirqs_irqoff_with_resched(SoftirqDaemonIf::needs_resched)
+    run_pending_softirqs_irqoff_with_resched(kiface_task_api::TaskPreemptionIf::needs_resched)
 }
 
 fn run_pending_softirqs_irqoff_with_resched(needs_resched: impl Fn() -> bool) -> SoftirqRunResult {

@@ -210,7 +210,7 @@ impl Services {
 
 #[cfg(feature = "stall-check")]
 #[kiface::provide]
-impl watchdog::WorkqueueStallCheck {
+impl watchdog::WorkqueueStallInspectorIf {
     fn inspect(cpu: LogicalCpuId, now: ktime_types::MonotonicInstant, threshold: TimeSpan) {
         inspect_stalls(cpu, now, threshold, |name, cpu, elapsed| {
             log::warn!(

@@ -385,7 +385,7 @@ fn watchdog_observes_only_published_services() {
         let _storage = ScopedServices::new();
         let cpu = khal::percpu::this_cpu_id();
         let now = khal::time::monotonic_time();
-        watchdog::WorkqueueStallCheck::inspect(cpu, now, TimeSpan::from_secs(20));
+        watchdog::WorkqueueStallInspectorIf::inspect(cpu, now, TimeSpan::from_secs(20));
         assert!(!inspect_stalls(
             cpu,
             now,

@@ -50,14 +50,6 @@ enum AnsiBrightColor {
     BrightBlack = 90,
 }
 
-#[kiface::interface]
-pub trait LoggerAdapter {
-    fn write_str(s: &str);
-    fn now() -> ktime_types::TimeSpan;
-    fn cpu_id() -> Option<usize>;
-    fn task_id() -> Option<u64>;
-}
-
 struct KernelLogger;
 
 impl Write for KernelLogger {
@@ -66,7 +58,7 @@ impl Write for KernelLogger {
             if #[cfg(feature = "std")] {
                 std::print!("{s}");
             } else {
-                LoggerAdapter::write_str(s);
+                kiface_logging_api::LogSinkIf::write_str(s);
             }
         }
         Ok(())
@@ -122,9 +114,9 @@ impl Log for KernelLogger {
                     ))
                 };
             } else {
-                let cpu_id = LoggerAdapter::cpu_id();
-                let tid = LoggerAdapter::task_id();
-                let now = LoggerAdapter::now();
+                let cpu_id = kiface_logging_api::LogContextIf::cpu_id();
+                let tid = kiface_logging_api::LogContextIf::task_id();
+                let now = kiface_logging_api::LogContextIf::now();
 
                 // Logging is best effort; reporting its format error via the logger would recurse.
                 let _ = match (compact, cpu_id, tid) {

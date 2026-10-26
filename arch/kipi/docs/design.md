@@ -5,18 +5,27 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## 定位
 
-The `reschedule` feature selects fixed scheduler notifications; `ktask/ipi`
-enables it and supplies the receiver. Depending on generic kipi alone, such as
+The `reschedule` feature selects fixed scheduler notifications; `kfeat/ipi`
+selects it together with the ktask receiver. Depending on generic kipi alone, such as
 in a non-SMP kworkng configuration, does not require a scheduler provider or
 enable the scheduler handler branch. Fixed BH notification support is independent.
+
+The local `smp` feature includes the remote instruction-cache, TLB and CPU-stop
+providers. Only `kfeat/smp` assembles it with `karch/smp`, `khal/smp` and
+`page_table/smp`; kipi does not enable dependency features. In UP builds,
+generic notification queues remain available, while karch and khal retain
+their local no-op providers. Linking generic kipi must not select SMP implicitly.
 
 固定调度通知由 `notification.rs` 提供：`notify_reschedule` 在静态 CPU 槽中发布原因，
 不经过通用闭包队列。原因与单向 ENABLED 位共用一个原子字，以 AcqRel RMW
 连接发送、启用和 drain。启用前只记请求；启用后每次发送 IPI，即使原因已经置位。
 公共处理顺序是 stop、TLB、固定通知、通用回调。`ktask` 通过静态
-`RescheduleIpiIf` 实现处理端，不引入反向 crate 依赖或动态订阅。
+`kiface_task_api::TaskRescheduleRequestIf` 实现处理端，不引入反向 crate 依赖或动态订阅。
 主/AP 在 runtime 指定阶段调用 `enable_fixed_notifications`，此入口以 IRQ guard
 保护线路开启、ENABLED 发布及 drain，不在退出时主动执行抢占检查。
+The kiface-task-api contract is implemented by ktask and consumed by this transport.
+For outward reschedule delivery, kipi implements
+`kiface_cpu_api::CpuRescheduleNotifyIf`; it does not own a second task interface.
 The protocol has no runtime shutdown or CPU-hotplug support.
 
 ### RCU Notifications
@@ -31,8 +40,8 @@ Callers install the action and prepare destination services before requesting it
 ### Timer Reprogram Notifications
 
 The independent `timer-reprogram` feature exports `notify_timer_reprogram` and
-`TimerReprogramIpiIf`; `kfeat/ipi` selects it together with `ktask/ipi`, which
-supplies the static endpoint.
+calls the `kiface_time_api::LocalTimerReprogramIf` contract defined in kiface-time-api.
+`kfeat/ipi` selects it together with `ktask/ipi`, which supplies the endpoint.
 Any fixed-notification feature compiles `notification.rs`; generic IPI users
 without these features require no fixed endpoint. The scheduler and timer
 features each require their own provider, including non-SMP configurations that

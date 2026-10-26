@@ -12,10 +12,11 @@ use core::{
 
 use kcompletion::Completion;
 use kerrno::{KError, KResult};
+use kiface_task_wait_api::PreparedCompletionWait;
 use krcu_core::CallbackNode;
 
 use super::{SERVICE, callback::PreparedCallback};
-use crate::host::{TaskWait, with_prepared_wait};
+use crate::host::with_prepared_wait;
 
 #[repr(C)]
 struct GracePeriodCompletion {
@@ -30,7 +31,7 @@ const _: () = assert!(core::mem::offset_of!(GracePeriodCompletion, node) == 0);
 pub(super) struct PreparedGracePeriodWait<'wait> {
     callback: PreparedCallback,
     completion: Arc<GracePeriodCompletion>,
-    wait: &'wait mut dyn TaskWait,
+    wait: &'wait mut dyn PreparedCompletionWait,
 }
 
 /// Invokes the update only after task waiting and callback storage are prepared.
@@ -41,7 +42,7 @@ pub(super) fn with_prepared_grace_period<R>(
 }
 
 impl<'wait> PreparedGracePeriodWait<'wait> {
-    fn prepare(wait: &'wait mut dyn TaskWait) -> KResult<Self> {
+    fn prepare(wait: &'wait mut dyn PreparedCompletionWait) -> KResult<Self> {
         SERVICE
             .get()
             .filter(|service| service.waker.get().is_some())

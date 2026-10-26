@@ -33,7 +33,7 @@
 //! # Feature Flags
 //!
 //! - `smp`: Enable for multi-core systems (adds atomic lock state)
-//! - `preempt`: Enable preemption control (requires implementing [`KernelGuardIf`])
+//! - `preempt`: Enable preemption control (requires implementing [`kiface_task_api::TaskPreemptionIf`])
 //!
 //! # Usage Patterns
 //!
@@ -64,15 +64,13 @@
 //! }
 //! ```
 //!
-//! ## Implementing KernelGuardIf
+//! ## Implementing TaskPreemptionIf
 //!
 //! ```rust,ignore
-//! use kspin::KernelGuardIf;
-//!
-//! struct MyKernelGuard;
+//! use kiface_task_api::TaskPreemptionIf;
 //!
 //! #[kiface::provide]
-//! impl KernelGuardIf for MyKernelGuard {
+//! impl TaskPreemptionIf {
 //!     fn enable_preempt() {
 //!         // Your implementation
 //!     }
@@ -96,9 +94,7 @@ mod kspin_unittest_tests;
 mod lock;
 mod rwlock;
 
-pub use guard::{
-    BaseGuard, CurrentCpuIf, IrqSave, KernelGuardIf, NoOp, NoPreempt, NoPreemptIrqSave,
-};
+pub use guard::{BaseGuard, IrqSave, NoOp, NoPreempt, NoPreemptIrqSave};
 /// Declares a static lock unchanged when lock statistics are disabled.
 #[cfg(not(feature = "stats"))]
 #[macro_export]

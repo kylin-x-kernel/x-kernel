@@ -2,6 +2,17 @@
 
 ## Scope and trust model
 
+`src/task_api.rs` implements `kiface_task_api::TaskExecutionIf` and
+`kiface_task_api::TaskLockDiagnosticsIf`, not a consumer-specific lock factory.
+It uses the existing `lock_owner::holder_key` identity, including the live-task
+address fallback for an unknown identity token, and returns a nonzero key.
+Identity must remain stable across suspension and migration. The provider lends
+the pinned waiter to synchronous `block_on`; it cannot retain that borrow.
+Callers must establish sleepable context for blocking acquisition. Startup
+try-lock requires a current task but does not yield. Diagnostic hooks only update
+current-task lock metadata. Mutex exclusion and listener wakeup ordering remain
+owned by `kmutex`; its non-Send guard prohibits transfer to another task.
+
 Failed `try_join` means the target may still execute and access resources; error
 handling must not release them as though exit had completed. The legacy `join`
 retains a narrowly annotated fail-stop until those callers can propagate errors
@@ -98,12 +109,21 @@ consumer admission or a progress guarantee without a later safe boundary.
 This document covers the security boundaries of the entire `task/ktask` crate:
 the `lib.rs` integration and `api.rs` entry points; task lifetime and context
 in `task.rs`; scheduling in `run_queue.rs`; blocking in `future/` and
-`wait_queue.rs`; timers in `timers.rs`; IRQ wait and daemon integration in
-`irq_wait.rs` and `softirqd.rs`; and diagnostics in `tracing_hooks.rs`,
+`wait_queue.rs`; timers in `timers.rs` and the scoped provider in `timer_api.rs`;
+completion wait and daemon integration in
+`task_api.rs` and `softirqd.rs`; and diagnostics in `tracing_hooks.rs`,
 `task_registry.rs` and `snapshot/` when enabled. No production module is
 excluded from this scope. The unsafe inventory below highlights critical
 boundaries rather than claiming to enumerate every unsafe expression or prove
 all configurations correct.
+
+The unsafe `ScopedTimer::arm` in `src/timer_api.rs` forwards to `Timer::start`.
+The caller must provide initialized local scheduler/timer services and an expiry
+callback that does not sleep, unwind, enable IRQs, reenter timer dispatch or
+synchronously cancel itself. The owned Timer retains callback storage and
+revalidates CPU routing after migration. Its Drop drains delivery before freeing
+storage; the caller must leave callback-needed locks free and the target CPU
+able to progress, including when returning from the scoped body.
 
 Test-only integration in `tests.rs` and `tests_timer_routing.rs` is covered
 as validation infrastructure, not as a production service. The prepared-timer
@@ -514,7 +534,7 @@ Invariants:
 | T-07e | Early or spurious wake loses a notification or completes early | High | Predicate check races `park`, or the scheduler wakes the task alone | Reuse `KWaker` dual latch checks and the RQ handshake; hold a strong task ref across switch; `park` only returns a wake hint; the caller rechecks the predicate and owns event registration. |
 | T-08 | A long or repeatedly rearmed callback stalls scheduling | High | Callback abuse or repeated already-due rearm | API requires short, non-blocking hardirq callbacks. Core dispatch bounds catch-up rounds for deadlines reached during delivery. Residual: it cannot interrupt a callback or bound one round that continually rearms at or before its fixed cutoff. |
 | T-09 | Remote wake is not scheduled promptly | Medium | Task is on a remote RQ but that CPU has not reached a preempt safe point | SMP requires IPI. Remote IPI only sets `need_resched`. A failed probe arms backup hrtick in dest `preempt_resched`. Residual: IPI send failure or a late safe point. |
-| T-09b | IRQ teardown wait blocks the current task in the wrong context | High | Hardirq/softirq/BH-disabled path indirectly calls the `IrqSyncWaitIf` provider | `IrqSyncWaitIf::can_wait` checks sleepable task context before IRQ teardown mutates actions; rejection maps to `IrqDescError::InvalidContext`. `CompletionWait::prepare` independently rejects invalid current, IRQ, BH, preemption and RCU context, even for a signaled completion. Subsequent scoped registration cannot fail. |
+| T-09b | IRQ teardown wait blocks the current task in the wrong context | High | Hardirq/softirq/BH-disabled path indirectly calls the `TaskCompletionWaitIf` provider | `TaskBlockingContextIf::is_sleepable_context` checks sleepable task context before IRQ teardown mutates actions; rejection maps to `IrqDescError::InvalidContext`. `CompletionWait::prepare` independently rejects invalid current, IRQ, BH, preemption and RCU context, even for a signaled completion. Subsequent scoped registration cannot fail. |
 | T-09g | Completion notification accesses a retired stack waiter | High | Concurrent notification races synchronous wait return | kcompletion owns pinned scoped nodes and serializes callback delivery with unlinking; the private Sync wake capability borrows a locked latch and strong task ref without retaining either borrow. |
 | T-09h | Completion callback inverts scheduler locks | High | Exit publishes completion or a waiter parks concurrently | Exit accounting releases the scheduler lock before notify_exit; parking never acquires completion locks, and notify releases the latch before scheduler enqueue. The run-queue context guard is not a scheduler lock. |
 | T-09f | Softirq schedule query consumes the task request early | Medium | A batch-boundary query clears `need_resched` or schedules directly | `SoftirqDaemonIf::needs_resched()` only Acquire-reads. Real scheduling stays at a safe point. Returns false with no task. |

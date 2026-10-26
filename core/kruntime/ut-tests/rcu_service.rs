@@ -16,7 +16,7 @@ use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use kerrno::KError;
 use krcu::{
     CallbackNode, PreparedCallback,
-    host::{RcuSoftirqIf, RcuTimerIf},
+    host::RcuSoftirqIf,
 };
 use ktask::{TaskInner, future::PreparedTaskWait};
 use unittest::{assert, assert_eq, def_test};
@@ -53,17 +53,17 @@ fn progress_timer_adapter_delivers_without_inline_execution() {
 
     DELIVERIES.store(0, Ordering::Release);
     let mut observations = None;
-    RcuTimerIf::with_progress_timer(notify_fn, &mut |timer| {
+    kiface_time_api::ScopedOneShotTimerIf::with_timer(notify_fn, &mut |timer| {
         let irq = kspin::IrqSave::new();
         // SAFETY: boot prepared all timer owners; this fixture's handler only
         // increments static storage and never waits or reenters timer dispatch.
-        let armed = unsafe { timer.arm(RcuTimerIf::monotonic_time_nanos()) };
+        let armed = unsafe { timer.arm(kiface_time_api::monotonic_time_nanos()) };
         let before_irq_restore = DELIVERIES.load(Ordering::Acquire);
         drop(irq);
-        let started_ns = RcuTimerIf::monotonic_time_nanos();
+        let started_ns = kiface_time_api::monotonic_time_nanos();
         while armed.is_ok()
             && DELIVERIES.load(Ordering::Acquire) == 0
-            && RcuTimerIf::monotonic_time_nanos().saturating_sub(started_ns) < 5_000_000_000
+            && kiface_time_api::monotonic_time_nanos().saturating_sub(started_ns) < 5_000_000_000
         {
             ktask::yield_now();
         }
@@ -496,7 +496,7 @@ fn reschedule_ipi_cleans_deferred_reader_after_cpu_observation() {
     let retained = task_reader(&task).is_enrolled();
     // The private service decision is covered in krcu. This fixture exercises
     // the real IPI carrier with an already-observed, still-enrolled reader.
-    let kicked = krcu::host::RcuNotifyIf::notify_reschedule(LogicalCpuId::new(cpu)).is_ok();
+    let kicked = kiface_cpu_api::CpuRescheduleNotifyIf::notify_reschedule(LogicalCpuId::new(cpu)).is_ok();
     let demand_retained = krcu::reader_cleanup_requested_for_tests(LogicalCpuId::new(cpu));
     // Suppress the pin's cleanup probe to leave the IRQ-only deferred case.
     ktask::with_preempt_check_deferred(|| drop(pin));

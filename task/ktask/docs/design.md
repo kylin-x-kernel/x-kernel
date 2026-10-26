@@ -17,6 +17,16 @@ hardware FP-register coverage on soft-float targets.
 
 ## Purpose and ownership
 
+`src/task_api.rs` implements `kiface_task_api::TaskExecutionIf` for stable nonzero task
+ownership keys, yielding and synchronous waiting on a borrowed pinned future.
+It separately implements `kiface_task_api::TaskLockDiagnosticsIf` for optional lock
+diagnostics, with no-op hooks when snapshots are disabled. Both contracts live
+in `util/kiface/crates/task-api`, without a dependency back on `ktask`.
+Mutex state, waiter registration, retry ordering and unlock policy remain in
+the single `kmutex` implementation, reexported by `ksync`. No IRQ transaction
+is passed to these providers. `lock_api` guards remain on the acquiring
+task and are not Send; moving that task between CPUs does not change ownership.
+
 `TaskInner::try_join` returns `InvalidInput` if an unfinished task would require
 sleeping from an invalid context. It never substitutes a stale exit code for
 failed waiting; the caller must retain all resources the target might access.
@@ -25,8 +35,10 @@ The legacy `join -> i32` wrapper still fail-stops on misuse. Its local CG-021
 TODO is to migrate callers and teardown ownership to the fallible interface,
 not to claim public misuse is unreachable or silently continue cleanup.
 
-The IRQ wait provider similarly returns `InvalidContext` to invalid direct
-callers. Its immediate prepare-and-wait sequence does not change sleepability
+The task completion-wait provider returns `KError::InvalidInput` to invalid
+direct callers; kirq maps its own admission failures to
+`IrqDescError::InvalidContext`. Its immediate prepare-and-wait sequence does
+not change sleepability
 between checks. KIRQ's private post-removal wait asserts its separately proven
 prevalidation/context-restoration invariant rather than exposing a public panic.
 
@@ -41,7 +53,7 @@ locks; task and timer providers must still be initialized before startup.
 
 Remote reschedule and a running-task signal kick use the fixed
 `kipi::notify_reschedule` notification. They do not enqueue a closure on the
-ordinary IPI callback queue. The static `RescheduleIpiIf` implementation only
+ordinary IPI callback queue. The static `kiface_task_api::TaskRescheduleRequestIf` implementation only
 calls the existing `on_remote_resched_ipi` path to set the current task's
 preempt pending bit. It does not account runtime or reprogram timers. With
 preemption compiled out the handler is empty, but an SMP signal kick still
@@ -132,7 +144,7 @@ X-Kernel splits class algorithms from the task runtime:
 - `ktask` owns lifecycle, current-task context, per-CPU run queues, switch,
   and block/wake.
 
-`ktask` implements `kspin::KernelGuardIf` so `kspin` guard acquire/release
+`ktask` implements `kiface_task_api::TaskPreemptionIf` so `kspin` guard acquire/release
 hooks the task preempt count: a critical section defers the preemption check
 until it exits.
 
@@ -163,7 +175,8 @@ task/ktask/
 │   ├── lib.rs                 # exports and feature overview
 │   ├── api.rs                 # spawn / yield / sleep / affinity / exit / tick
 │   ├── task.rs                # TaskInner / CurrentTask / state / context
-│   ├── irq_wait.rs            # kirq::IrqSyncWaitIf provider
+│   ├── task_api.rs            # shared task execution/context/completion providers
+│   ├── timer_api.rs           # kiface-time-api scoped one-shot timer provider
 │   ├── softirqd.rs            # ksoftirqd/N daemon
 │   ├── run_queue/             # per-CPU RQ: ownership, placement, switch
 │   │   ├── mod.rs             # RunQueue type, per-CPU slots, registry, init
@@ -302,7 +315,7 @@ procfs 读取并换算成 `/proc/[pid]/stat` 的 `starttime` 字段（USER_HZ=10
 自己创建的那个。任务生命周期全程不修改它。
 
 `kfeat/ipi` enables both `ktask/ipi` and `kipi/timer-reprogram`;
-`ktask/ipi` supplies `TimerReprogramIpiIf`.
+`ktask/ipi` supplies `kiface_time_api::LocalTimerReprogramIf`.
 The endpoint only re-reads current deadlines and programs hardware; it does not
 dispatch callbacks, account runtime or mark a reschedule request. Notifications
 must follow accepted registration after releasing timer locks and target the
@@ -322,8 +335,9 @@ notification-only service and repeated remote advances/pending migrations.
 
 `kspin` and `ktimer_core` preemption are always on. The leftover `preempt`
 Cargo feature still forwards the same knobs; this crate does not gate
-code on it. The `smp` feature forwards to `ktimer_core/smp` so lock
-configuration stays consistent. Feature forwarding does not initialize
+code on it. The local `smp` feature does not forward dependency features.
+`kfeat/smp` selects `ktask/smp`, `ktimer_core/smp` and `kspin/smp` together
+so lock configuration stays consistent. Feature selection does not initialize
 timer-service state or mark a CPU ready.
 
 ## Execution context and calling constraints
@@ -637,7 +651,7 @@ preemption is allowed again.
 ### Preemption and the kspin interface
 
 `kspin` guard acquire/release call
-`KernelGuardIf::disable_preempt` / `enable_preempt`. `ktask` implements that
+`TaskPreemptionIf::disable_preempt` / `enable_preempt`. `ktask` implements that
 interface:
 
 - `disable_preempt()`: current task `preempt_disable_count += 1`
@@ -657,7 +671,8 @@ trapframe.
 After IRQ dispatch completes and the interrupt controller is acked, `khal`
 temporarily suspends the active-exception mark and releases the IRQ handler's
 `NoPreempt` guard with `release_without_check`, then calls the explicit
-`IrqExitIf` scheduler checkpoint. Guard release only restores its count;
+`kiface_task_api::TaskIrqExitCheckpointIf` scheduler checkpoint. Guard release only
+restores its count;
 RCU cleanup and pending-work inspection run at the explicit checkpoint.
 Only this completed-IRQ entry may consume pending while IRQs are still off;
 outer preemption guards and the NMI/exception exclusions remain effective.
@@ -806,7 +821,7 @@ readiness precedence and Linux restart policy belong to their callers.
   `TaskState::Exited`; completion avoids a lost wake and supports a late
   joiner. A blocking join uses `CompletionWait`, without `block_on`, poll
   registration or allocation retries. Already-exited tasks return immediately.
-- `ktask` provides `kirq::IrqSyncWaitIf` completion-backed blocking wait so
+- `ktask` provides `kiface_task_wait_api::TaskCompletionWaitIf` completion-backed blocking wait so
   `kirq::synchronize_irq()` / `free_irq()` can block the current task. IRQ
   descriptor lifetime and the `in_flight` predicate stay in `kirq`.
 
@@ -1218,11 +1233,13 @@ Consequences:
   inconsistency is rejected by `SchedAttr::validate` inside
   `Scheduler::set_attr`, before any state changes.
 
-### Why `KernelGuardIf`
+### Why `TaskPreemptionIf`
 
-`kspin` as a base library must not depend on `ktask`. Injecting the
-interface the other way breaks a potential cycle and keeps the crate
-boundary clear.
+Preemption credits and scheduling checkpoints are task-runtime capabilities,
+not lock policy. `kiface-task-api` owns their contract; `ktask` owns the counters and
+checks, while `kspin` composes calls with IRQ exclusion in its guards. This
+ownership also keeps the low-level lock implementation independent of the
+scheduler implementation, without duplicating a consumer-specific interface.
 
 ### Why lock owners are compared, not dereferenced
 

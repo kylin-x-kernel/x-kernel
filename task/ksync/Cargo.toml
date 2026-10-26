@@ -16,17 +16,17 @@ ignored = ["linkme"]
 
 [features]
 default = []
-watchdog = ["dep:khal"]
-stats = ["dep:klockstat", "dep:linkme", "klockstat/stats"]
+watchdog = ["kmutex/watchdog"]
+stats = ["dep:klockstat", "dep:linkme", "klockstat/stats", "kmutex/stats"]
 
 [dependencies]
 ktask.workspace = true
+kmutex.workspace = true
 event-listener.workspace = true
 kspin.workspace = true
 klockstat = { workspace = true, optional = true }
 linkme = { workspace = true, optional = true }
 lock_api.workspace = true
-khal = { workspace = true, optional = true }
 unittest = { workspace = true}
 
 [lints]

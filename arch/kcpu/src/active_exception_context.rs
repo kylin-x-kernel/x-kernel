@@ -229,3 +229,16 @@ impl Drop for ExceptionContextGuard {
 }
 
 unittest::path_mod_test!(pub(crate) mod tests_active_exception_context, "../ut-tests/active_exception_context.rs");
+
+#[kiface::provide]
+impl kiface_cpu_api::ExceptionContextIf {
+    fn is_in_exception_context() -> bool {
+        in_exception_context()
+    }
+
+    fn with_exception_snapshot(body: &mut dyn FnMut(bool)) {
+        ACTIVE_EXCEPTION_CONTEXT_PTR.with_current_irq_disabled(|slot| {
+            body(slot.load(Ordering::Relaxed) != 0);
+        });
+    }
+}

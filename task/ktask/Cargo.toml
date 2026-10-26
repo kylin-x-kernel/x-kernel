@@ -16,14 +16,18 @@ snapshot = ["dep:backtrace"]
 ipi = ["dep:kipi"]
 watchdog = ["snapshot"]
 preempt = ["kspin/preempt", "ktimer_core/preempt"]
-smp = ["kspin/smp", "ktimer_core/smp"]
+smp = []
 
 sched_stat = []
 arm-timer-resume-fixup = []
 
 
 [dependencies]
+kiface-time-api.workspace = true
 kcompletion.workspace = true
+kmutex.workspace = true
+kiface-task-api.workspace = true
+kiface-task-wait-api.workspace = true
 kerrno.workspace = true
 kfinalize.workspace = true
 krcu-core.workspace = true

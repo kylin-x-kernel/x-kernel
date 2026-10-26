@@ -70,11 +70,6 @@ pub fn init_current_cpu() {
 
 #[kiface::provide]
 impl kirq::softirq::SoftirqDaemonIf {
-    fn needs_resched() -> bool {
-        let current = crate::current_may_uninit();
-        task_needs_resched(current.as_ref().map(|task| -> &TaskInner { task }))
-    }
-
     fn wake_current_cpu() {
         let _guard = NoPreempt::new();
         let cpu_id = khal::percpu::this_cpu_id();
@@ -82,10 +77,6 @@ impl kirq::softirq::SoftirqDaemonIf {
             let _ = source.wake();
         }
     }
-}
-
-fn task_needs_resched(task: Option<&TaskInner>) -> bool {
-    task.is_some_and(TaskInner::is_preempt_pending)
 }
 
 fn softirqd_main(cpu_id: LogicalCpuId, wake_source: PollSet) {

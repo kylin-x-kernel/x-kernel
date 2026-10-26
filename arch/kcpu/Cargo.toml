@@ -18,6 +18,8 @@ arm-el2 = ["karch/arm-el2"]
 nmi-pseudo = ["nmi", "karch/nmi-pseudo"]
 
 [dependencies]
+kiface.workspace = true
+kiface-cpu-api.workspace = true
 backtrace = { workspace = true }
 karch = { workspace = true }
 linkme = { workspace = true }

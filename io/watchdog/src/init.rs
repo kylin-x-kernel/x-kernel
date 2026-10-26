@@ -249,7 +249,7 @@ fn softlockup_watchdog_task() {
     loop {
         crate::touch_softlockup(khal::time::monotonic_time());
         #[cfg(feature = "workqueue-stall-check")]
-        crate::WorkqueueStallCheck::inspect(
+        crate::WorkqueueStallInspectorIf::inspect(
             khal::percpu::this_cpu_id(),
             khal::time::monotonic_time(),
             crate::lockup_detection::DEFAULT_SOFTLOCKUP_THRESHOLD,

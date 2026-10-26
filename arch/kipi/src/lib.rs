@@ -30,17 +30,20 @@ use kirq::TargetCpu as IpiTarget;
 use kspin::SpinNoIrq;
 
 mod event;
+#[cfg(feature = "smp")]
 mod icache;
 mod notification;
 mod queue;
+#[cfg(feature = "smp")]
 mod stop;
+#[cfg(feature = "smp")]
 pub mod tlb;
 
 pub use event::{Callback, MulticastCallback};
 #[cfg(feature = "reschedule")]
-pub use notification::{RescheduleIpiIf, notify_reschedule};
+pub use notification::notify_reschedule;
 #[cfg(feature = "timer-reprogram")]
-pub use notification::{TimerReprogramIpiIf, notify_timer_reprogram};
+pub use notification::notify_timer_reprogram;
 pub use notification::{
     enable_fixed_notifications, notify_bottom_half, notify_highpri_bottom_half, notify_rcu,
 };
@@ -333,9 +336,11 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
 /// Panics if the current CPU's slot area is not published or its local IPI
 /// queue has not been initialized.
 pub fn ipi_handler() {
+    #[cfg(feature = "smp")]
     stop::handle_stop_request();
 
     // Process TLB shootdown requests before handling generic callbacks.
+    #[cfg(feature = "smp")]
     tlb::handle_shootdown();
 
     notification::handle_pending();

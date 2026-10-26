@@ -10,7 +10,7 @@ use kerrno::KResult;
 use kplat_macros::device_interface;
 
 #[device_interface]
-pub trait SysCtrl {
+pub trait CpuStartIf {
     #[cfg(feature = "smp")]
     /// Boots an application processor selected by logical CPU ID.
     ///
@@ -18,7 +18,10 @@ pub trait SysCtrl {
     /// firmware- or hardware-specific raw CPU identifier before issuing the
     /// actual boot command.
     fn boot_ap(logical_cpu_id: LogicalCpuId, stack_top: usize) -> KResult;
+}
 
+#[device_interface]
+pub trait PlatformPowerIf {
     /// Halts the calling CPU without cutting system power.
     ///
     /// This is a bare platform terminal: it stops execution of the calling

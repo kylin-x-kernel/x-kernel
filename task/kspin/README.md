@@ -142,16 +142,14 @@ fn irq_handler() {
 }
 ```
 
-### Implementing KernelGuardIf
-To use the `preempt` feature, implement the `KernelGuardIf` trait:
+### Implementing TaskPreemptionIf
+To use the `preempt` feature, implement the `TaskPreemptionIf` trait:
 
 ```rust
-use kspin::KernelGuardIf;
-
-struct MyKernelGuard;
+use kiface_task_api::TaskPreemptionIf;
 
 #[kiface::provide]
-impl KernelGuardIf for MyKernelGuard {
+impl TaskPreemptionIf {
     fn enable_preempt() {
         // Your implementation
     }

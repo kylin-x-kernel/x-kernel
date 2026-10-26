@@ -4,9 +4,10 @@
 
 //! Scoped participation for tasks and initialized interrupt handlers.
 
+use kiface_task_api::TaskPreemptionIf;
 use krcu_core::ReadGuard;
 
-use crate::host::{CurrentReader, RcuExecutionIf, RcuTaskIf, with_current_reader};
+use crate::host::{CurrentReader, with_current_reader};
 
 /// Borrowed proof of participation in a task or interrupt kernel RCU read scope.
 ///
@@ -71,13 +72,13 @@ pub fn with_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadScope<'_>) -> R
 /// No token borrow may escape. Permanent task exit uses terminal cleanup, not
 /// this stack's destructor. This private entry rejects interrupt/BH contexts.
 pub(super) fn with_task_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadGuard<'_>) -> R) -> R {
-    RcuExecutionIf::with_exception_snapshot(&mut |is_exception_active| {
+    kiface_cpu_api::ExceptionContextIf::with_exception_snapshot(&mut |is_exception_active| {
         // The host pins CPU selection through every admission check. Reject
         // NMI before ordinary context queries touch task preemption accounting.
-        assert!(!RcuExecutionIf::is_in_nmi());
+        assert!(!kiface_irq_context_api::InterruptContextIf::is_in_nmi());
         assert!(!is_exception_active);
         assert!(krcu_core::RcuContextIf::current_cpu_watching().is_watching());
-        assert!(!RcuExecutionIf::is_in_interrupt_context());
+        assert!(!kiface_irq_context_api::InterruptContextIf::is_in_interrupt_context());
         // Context queries do not run scheduler/RCU checks on return. IRQ
         // exclusion alone pins admission; the read body remains preemptible.
     });
@@ -118,7 +119,7 @@ pub(super) fn with_task_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadGua
 pub fn with_interrupt_read<R>(read_fn: impl for<'scope> FnOnce(&'scope ReadScope<'_>) -> R) -> R {
     // This query checks the lock-free NMI counter first, before considering
     // ordinary context locks. Never replace it with an unconditional snapshot.
-    assert!(RcuExecutionIf::is_in_interrupt_handler());
+    assert!(kiface_irq_context_api::InterruptContextIf::is_in_interrupt_handler());
     assert!(krcu_core::RcuContextIf::current_cpu_watching().is_watching());
     with_current_reader(|current| {
         // SAFETY: the surrounding handler excludes scheduling/migration and
@@ -144,7 +145,7 @@ impl Drop for TaskReadExit<'_, '_> {
         if reader.is_reading() || !reader.is_enrolled() {
             return;
         }
-        if !karch::local_irq_enabled() || RcuTaskIf::current_preemption_disabled() {
+        if !karch::local_irq_enabled() || TaskPreemptionIf::current_preemption_disabled() {
             // Like Linux's non-expedited special unlock, retain the membership
             // and request a later scheduler evaluation. Never clear an existing
             // request or wake the scheduler while the caller holds exclusion.
@@ -153,7 +154,7 @@ impl Drop for TaskReadExit<'_, '_> {
         }
         // Reuse the guarded context checks and recursion suppression. This
         // drains even without need_resched, but does not invent a CPU report.
-        RcuTaskIf::check_preempt_pending();
+        TaskPreemptionIf::check_preempt_pending();
     }
 }
 

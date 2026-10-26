@@ -86,7 +86,7 @@ no user-space input.
 | T-02 | Out-of-range external hwirq | Medium — writes into an unrelated controller vector | Bad IRQ number from above | Range gate in `IntrManagerIf::enable` against `PCH_PIC_IRQ_COUNT` plus backend-level re-checks (`eiointc`/`pch_pic` reject before access). |
 | T-03 | Invalid RTC sample (torn year) | Low — wall clock not initialized | LS7A TOY counters straddling new-year | `rtc_driver` LS7A backend re-samples until the year halves agree and rejects persistent instability; `early_driver_init` propagates the failure as a panic. |
 | T-04 | Spurious external IRQ line | Low — wasted IRQ cycle | Noise on a PCH PIC input | EIOINTC claim returns `None`; the dispatcher logs `"Spurious external IRQ"` and returns without dispatching. |
-| T-05 | `boot_ap` for an unmapped logical CPU | Medium — AP boots with a wrong context | CPU-id table missing an entry | Named panic in the `SysCtrl::boot_ap` provider before any mailbox write. |
+| T-05 | `boot_ap` for an unmapped logical CPU | Medium — AP boots with a wrong context | CPU-id table missing an entry | Named panic in the `CpuStartIf::boot_ap` provider before any mailbox write. |
 
 ## Failure Modes
 

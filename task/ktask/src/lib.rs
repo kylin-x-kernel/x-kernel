@@ -46,7 +46,6 @@ unittest::path_mod_test!(tests_timer_irq, "../ut-tests/tests_timer_irq.rs");
 
 #[macro_use]
 mod api;
-mod irq_wait;
 mod lock_owner;
 mod park;
 mod run_queue;
@@ -54,8 +53,10 @@ mod run_queue;
 pub mod snapshot;
 mod softirqd;
 mod task;
+mod task_api;
 #[cfg(feature = "snapshot")]
 mod task_registry;
+mod timer_api;
 mod timers;
 mod tracing_hooks;
 mod wait_queue;

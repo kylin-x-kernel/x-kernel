@@ -62,30 +62,6 @@ impl PendingWord {
 static PENDING: [PendingWord; kbuild_config::NR_CPUS] =
     [const { PendingWord::new() }; kbuild_config::NR_CPUS];
 
-/// Statically linked scheduler endpoint supplied by the task subsystem.
-#[cfg(feature = "reschedule")]
-#[kiface::interface]
-pub trait RescheduleIpiIf {
-    /// Marks a local reschedule request, or does nothing without preemption.
-    ///
-    /// Called with local IRQs disabled after scheduler initialization, either
-    /// during boot drain or from the IPI handler. Must not allocate or sleep.
-    fn on_reschedule();
-}
-
-/// Statically linked local hardware-timer arbitration endpoint.
-#[cfg(feature = "timer-reprogram")]
-#[kiface::interface]
-pub trait TimerReprogramIpiIf {
-    /// Re-reads local deadline sources and refreshes the hardware timer.
-    ///
-    /// Runs with local IRQs disabled, after per-CPU timer state is initialized,
-    /// during boot drain or IPI handling. Must not allocate, sleep, invoke timer
-    /// callbacks or acquire a run-queue lock. The endpoint must synchronize
-    /// deadline reads through the hardware write, not program a stale snapshot.
-    fn on_timer_reprogram();
-}
-
 /// Requests a scheduler CPU kick without allocating or queueing a callback.
 ///
 /// The caller must first publish its task state to an initialized destination
@@ -212,11 +188,11 @@ pub(crate) fn handle_pending() {
     let reasons = PENDING[this_cpu_id().as_usize()].take();
     #[cfg(feature = "timer-reprogram")]
     if reasons.contains(NotificationFlags::TIMER_REPROGRAM) {
-        TimerReprogramIpiIf::on_timer_reprogram();
+        kiface_time_api::LocalTimerReprogramIf::on_timer_reprogram();
     }
     #[cfg(feature = "reschedule")]
     if reasons.contains(NotificationFlags::RESCHEDULE) {
-        RescheduleIpiIf::on_reschedule();
+        kiface_task_api::TaskRescheduleRequestIf::on_reschedule();
     }
     handle_bottom_half(reasons);
 }
@@ -245,3 +221,11 @@ unittest::path_mod_test!(
     notification_unittest,
     "../ut-tests/notification_unittest.rs"
 );
+
+#[cfg(feature = "reschedule")]
+#[kiface::provide]
+impl kiface_cpu_api::CpuRescheduleNotifyIf {
+    fn notify_reschedule(cpu: LogicalCpuId) -> kerrno::KResult<()> {
+        notify_reschedule(cpu).map_err(|_| kerrno::KError::BadState)
+    }
+}

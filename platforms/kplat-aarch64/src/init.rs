@@ -5,10 +5,10 @@
 //! Platform initialization hooks for aarch64.
 
 use kbuild_config::PSCI_METHOD;
-use kplat::boot::{BootHandler, BootInfo};
+use kplat::boot::{BootInfo, PlatformBootIf};
 
 #[kiface::provide]
-impl BootHandler {
+impl PlatformBootIf {
     fn prepare_boot_memory(_boot_info: &BootInfo) {
         crate::mmio::prepare_boot_memory();
     }

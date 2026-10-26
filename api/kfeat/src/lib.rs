@@ -9,8 +9,13 @@
 //! selects the participating subsystems' SMP support. Runtime's local feature
 //! switches are not substitutes for these system-level selections.
 //! PMU, NMI and ARM timer recovery likewise select their runtime and provider
-//! capabilities here. Subsystems retain features needed by their own internal
-//! implementation dependencies, such as shared-lock support.
+//! capabilities here. Each kernel crate's `smp` feature controls only its own
+//! code; it must not forward SMP to dependencies or force it in dependency
+//! declarations. This crate selects platform, scheduler, lock, page-table and
+//! IPI-provider SMP support together. Enabling a leaf crate's `smp` feature
+//! alone is not a complete multicore kernel configuration.
+//! Host multithreaded tests may select real locks through dev-dependencies;
+//! those test-only selections do not configure production kernels.
 //!
 //! # Cargo Features
 //!

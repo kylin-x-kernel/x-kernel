@@ -10,15 +10,13 @@ use core::{
 };
 
 use kerrno::{KError, KResult};
+use kiface_task_wait_api::PreparedParking;
 use klazy::Once;
 use krcu_core::{CallbackDriver, CallbackState};
 
 use crate::{
     context::READER_NODES,
-    host::{
-        ProgressTimer, RcuExecutionIf, RcuNotifyIf, RcuSoftirqIf, RcuTaskIf, RcuTimerIf,
-        ServiceWait, with_prepared_service_wait,
-    },
+    host::{RcuGpTaskLaunchIf, RcuNotifyIf, RcuSoftirqIf, with_prepared_service_wait},
 };
 
 const PROGRESS_INTERVAL_NS: u64 = 10_000_000;
@@ -42,7 +40,7 @@ mod owned;
 pub use callback::{PreparedCallback, preflight_callback_submission};
 pub use drain::drain_callbacks;
 #[cfg(unittest)]
-pub use drain::has_installed_drain_markers_for_tests;
+pub use drain::{has_installed_drain_markers_for_tests, with_drain_lock_for_tests};
 pub use owned::Rcu;
 pub use synchronize::synchronize_rcu;
 
@@ -86,7 +84,7 @@ impl PreparedGpTask {
         )]
         with_prepared_service_wait(|wait| {
             let mut startup_waker = Some(startup_waker);
-            RcuTimerIf::with_progress_timer(request_timed_pass, &mut |timer| {
+            kiface_time_api::ScopedOneShotTimerIf::with_timer(request_timed_pass, &mut |timer| {
                 #[expect(
                     clippy::expect_used,
                     reason = "CG-021-no-panic-on-reachable-failure: the static timer provider \
@@ -155,7 +153,7 @@ pub unsafe fn init_service() -> KResult<()> {
         });
         let driver =
             service.claim_driver_with_action(|| RcuSoftirqIf::install(process_callbacks))?;
-        RcuTaskIf::start_gp_task(PreparedGpTask {
+        RcuGpTaskLaunchIf::start_gp_task(PreparedGpTask {
             service,
             driver,
             startup_waker: startup.waker(),
@@ -173,11 +171,13 @@ impl GracePeriodTask {
     fn preflight_callback_submission(&self) -> KResult<()> {
         // NMI must reject before task/context queries can acquire ordinary locks.
         // Sample sleepability before our temporary IRQ exclusion changes it.
-        if RcuExecutionIf::is_in_nmi() || !RcuTaskIf::is_sleepable_context() {
+        if kiface_irq_context_api::InterruptContextIf::is_in_nmi()
+            || !kiface_task_api::TaskBlockingContextIf::is_sleepable_context()
+        {
             return Err(KError::InvalidInput);
         }
         let mut result = Err(KError::InvalidInput);
-        RcuExecutionIf::with_exception_snapshot(&mut |is_exception_active| {
+        kiface_cpu_api::ExceptionContextIf::with_exception_snapshot(&mut |is_exception_active| {
             if !is_exception_active {
                 result = self.check_callback_readiness();
             }
@@ -216,13 +216,13 @@ impl GracePeriodTask {
     /// notification without IPIs may wake the softirq daemon. On success do not
     /// access the transferred node without independent ownership.
     unsafe fn submit_callback(&self, node: *mut krcu_core::CallbackNode) -> KResult<()> {
-        if RcuExecutionIf::is_in_nmi() {
+        if kiface_irq_context_api::InterruptContextIf::is_in_nmi() {
             return Err(KError::InvalidInput);
         }
         {
             let _guard = kspin::NoPreemptIrqSave::new();
             self.check_callback_readiness()?;
-            let cpu = RcuExecutionIf::current_cpu().as_usize();
+            let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize();
             // SAFETY: the caller retains unique stable storage and supplies a
             // withdrawn object with softirq-safe cleanup. The guard keeps CPU
             // selection and queue transfer in one watched, non-NMI interval.
@@ -253,7 +253,8 @@ impl GracePeriodTask {
             reason = "CG-021-no-panic-on-reachable-failure: fixed participants completed \
                       notification startup before the GP task was activated"
         )]
-        RcuNotifyIf::notify_reschedule(cpu_id).expect("RCU progress CPU completed boot services");
+        kiface_cpu_api::CpuRescheduleNotifyIf::notify_reschedule(cpu_id)
+            .expect("RCU progress CPU completed boot services");
         true
     }
 
@@ -296,16 +297,16 @@ impl GracePeriodTask {
             reason = "CG-021-no-panic-on-reachable-failure: service callers run on discovered \
                       CPUs after notification startup"
         )]
-        RcuNotifyIf::notify_rcu(RcuExecutionIf::current_cpu())
+        RcuNotifyIf::notify_rcu(kiface_cpu_api::CurrentCpuIf::current_cpu())
             .expect("RCU notifier runs on an initialized present CPU");
     }
 
     fn run_with_timer(
         &self,
         driver: &mut CallbackDriver<'static, 'static, { kbuild_config::NR_CPUS }>,
-        wait: &mut dyn ServiceWait,
+        wait: &mut dyn PreparedParking,
         startup_waker: Waker,
-        timer: &mut dyn ProgressTimer,
+        timer: &mut dyn kiface_time_api::OneShotTimer,
     ) -> ! {
         // Publishing the waker acknowledges both prepared resources. The wait
         // itself remains bound to this task, never to the boot task.
@@ -317,7 +318,7 @@ impl GracePeriodTask {
             // survive for the next iteration. The prepared waker retains races
             // between this exchange, processing and actual park.
             let has_demand = self.has_demand.swap(false, Ordering::AcqRel);
-            let now = RcuTimerIf::monotonic_time_nanos();
+            let now = kiface_time_api::monotonic_time_nanos();
             let is_due = deadline.is_some_and(|deadline| now >= deadline);
             if has_demand || is_due {
                 for cpu in 0..kcpu_id_map::nr_cpus() {
@@ -370,7 +371,7 @@ impl GracePeriodTask {
                     deadline = None;
                     timer.cancel_sync();
                 } else if let Some(next) =
-                    progress_rearm_deadline(now, deadline, RcuTimerIf::monotonic_time_nanos())
+                    progress_rearm_deadline(now, deadline, kiface_time_api::monotonic_time_nanos())
                 {
                     #[expect(
                         clippy::expect_used,
@@ -409,7 +410,7 @@ fn process_callbacks() {
         // during this action remains pending in the ordinary softirq machinery.
         waker.wake_by_ref();
     }
-    let cpu = RcuExecutionIf::current_cpu().as_usize();
+    let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize();
     // SAFETY: the softirq carrier excludes migration and holds no RCU lock.
     // Admission is limited to internal owning adapters and synchronous-wait
     // markers, all retained through their nonblocking callbacks. Periods use

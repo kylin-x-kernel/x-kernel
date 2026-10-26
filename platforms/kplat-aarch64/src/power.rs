@@ -6,10 +6,10 @@
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
 use kerrno::{KError, KResult};
-use kplat::sys::SysCtrl;
+use kplat::sys::{CpuStartIf, PlatformPowerIf};
 
 #[kiface::provide]
-impl SysCtrl {
+impl CpuStartIf {
     #[cfg(feature = "smp")]
     fn boot_ap(logical_cpu_id: LogicalCpuId, _stack_top_paddr: usize) -> KResult {
         use khal::mem::{v2p, va};
@@ -29,7 +29,10 @@ impl SysCtrl {
         });
         crate::peripherals::psci::cpu_on(raw_cpu_id, entry_paddr.as_usize(), 0).map_err(Into::into)
     }
+}
 
+#[kiface::provide]
+impl PlatformPowerIf {
     fn power_off() -> ! {
         crate::peripherals::psci::system_power_off()
     }

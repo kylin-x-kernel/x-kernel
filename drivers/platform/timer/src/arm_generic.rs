@@ -159,7 +159,10 @@ impl khal::time::ClockEventIf {
     fn disarm_timer() {
         disarm_timer()
     }
+}
 
+#[kiface::provide]
+impl kiface_time_api::ClockResumeIf {
     #[cfg(feature = "arm-timer-resume-fixup")]
     fn handle_idle_return(previous_ticks: khal::time::TimerTicks) -> bool {
         handle_idle_return(previous_ticks.as_raw())

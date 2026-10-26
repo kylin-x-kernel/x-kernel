@@ -76,7 +76,7 @@ pub fn ap_cpu_init(id: LogicalCpuId) {
 /// `kcpu_slot`'s `CpuPin` contract. This crate owns the per-CPU CPU-id
 /// storage, so it is the single provider of the interface.
 #[kiface::provide]
-impl kspin::CurrentCpuIf {
+impl kiface_cpu_api::CurrentCpuIf {
     fn current_cpu() -> LogicalCpuId {
         id()
     }

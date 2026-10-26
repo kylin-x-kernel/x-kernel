@@ -10,7 +10,7 @@
 //! masking interrupts on that CPU's hot path.
 //!
 //! Architectures without such an instruction implement these traits by saving
-//! and disabling local IRQs through [`crate::CpuLocalIrqIf`], performing a
+//! and disabling local IRQs through [`kiface_cpu_api::CpuLocalIrqIf`], performing a
 //! plain read/modify/write, and restoring the mask. Both forms are only sound
 //! for a scalar that is never borrowed and is accessed exclusively from the CPU
 //! whose area the base register selects.
@@ -100,57 +100,57 @@ macro_rules! impl_single_instr_fallback_arith {
     ($($ty:ty),* $(,)?) => {$(
         impl crate::single_instr::SingleInstructionAddAssign<$ty> for $ty {
             unsafe fn add_assign(offset: usize, rhs: Self) {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 let ptr = (base + offset) as *mut $ty;
                 // SAFETY: the caller guarantees `offset` names a live per-CPU
                 // scalar; local IRQs are masked, so no same-CPU handler aliases it.
                 unsafe { ptr.write(ptr.read().wrapping_add(rhs)) };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
             }
         }
 
         impl crate::single_instr::SingleInstructionSubAssign<$ty> for $ty {
             unsafe fn sub_assign(offset: usize, rhs: Self) {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 let ptr = (base + offset) as *mut $ty;
                 // SAFETY: as `add_assign`.
                 unsafe { ptr.write(ptr.read().wrapping_sub(rhs)) };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
             }
         }
 
         impl crate::single_instr::SingleInstructionBitOrAssign<$ty> for $ty {
             unsafe fn bitor_assign(offset: usize, rhs: Self) {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 let ptr = (base + offset) as *mut $ty;
                 // SAFETY: as `add_assign`.
                 unsafe { ptr.write(ptr.read() | rhs) };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
             }
         }
 
         impl crate::single_instr::SingleInstructionBitAndAssign<$ty> for $ty {
             unsafe fn bitand_assign(offset: usize, rhs: Self) {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 let ptr = (base + offset) as *mut $ty;
                 // SAFETY: as `add_assign`.
                 unsafe { ptr.write(ptr.read() & rhs) };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
             }
         }
 
         impl crate::single_instr::SingleInstructionBitXorAssign<$ty> for $ty {
             unsafe fn bitxor_assign(offset: usize, rhs: Self) {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 let ptr = (base + offset) as *mut $ty;
                 // SAFETY: as `add_assign`.
                 unsafe { ptr.write(ptr.read() ^ rhs) };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
             }
         }
     )*};
@@ -171,23 +171,23 @@ macro_rules! impl_single_instr_fallback_load_store {
     ($($ty:ty),* $(,)?) => {$(
         impl crate::single_instr::SingleInstructionLoad for $ty {
             unsafe fn load(offset: usize) -> Self {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 // SAFETY: the caller guarantees `offset` names a live per-CPU
                 // scalar; local IRQs are masked for the read.
                 let val = unsafe { ((base + offset) as *const $ty).read() };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
                 val
             }
         }
 
         impl crate::single_instr::SingleInstructionStore for $ty {
             unsafe fn store(offset: usize, val: Self) {
-                let state = crate::CpuLocalIrqIf::save_and_disable();
+                let state = kiface_cpu_api::CpuLocalIrqIf::save_and_disable();
                 let base = crate::arch::current_base();
                 // SAFETY: as `load`.
                 unsafe { ((base + offset) as *mut $ty).write(val) };
-                crate::CpuLocalIrqIf::restore(state);
+                kiface_cpu_api::CpuLocalIrqIf::restore(state);
             }
         }
     )*};

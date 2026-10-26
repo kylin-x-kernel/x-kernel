@@ -784,16 +784,20 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 `IRQ_STATE` 后 wake waiter。这样上一代 dispatch 的 delayed wake 不能在下一代
 `begin_dispatch()` 之后重新把同一个 completion 置为 completed，同时避免在全局
 IRQ state 锁内运行同步 wake callback。`kcompletion::DeferredWake` 持有 completion
-的 `Arc`，不持有可逃逸的栈上 waiter 指针。`kirq` 通过 `IrqSyncWaitIf`
+的 `Arc`，不持有可逃逸的栈上 waiter 指针。`kirq` 通过 `TaskCompletionWaitIf`
 调用 scheduler 层提供的等待实现，因此不依赖 `ktask`/`ksync`。等待实现按
 作用域内 pinned 栈上 waiter 协议消费 completion token，使用 ktask 的
 `CompletionWait` 与共享 park latch 握手，不分配 poll registration 或 Waker。
-`IrqSyncWaitIf::can_wait()` 在进入同步操作前验证完整 sleepable task context，
-失败返回 `IrqDescError::InvalidContext`。`free_irq*()` 在摘除 action 之前完成该检查，
-释放控制锁后调用 `wait_for_completion()`；公开 provider 对非法直接调用返回
-`InvalidContext`，不存在登记失败或内存不足分支。manager 内部已在副作用前验证
-上下文，所有临时 IRQ 锁在等待前恢复，期间不得遗留改变睡眠条件的状态；因此
-其错误分支是站点级断言，而不能在 action 摘除后把失败当作释放成功。
+`kiface_task_api::TaskBlockingContextIf::is_sleepable_context()` checks sleepable task
+context before synchronization; kirq rejects invalid callers with
+`IrqDescError::InvalidContext`. `free_irq*()` checks before removing actions,
+then calls `kiface_task_wait_api::wait_for_completion()` after releasing control locks.
+The task provider returns `KError::InvalidInput` for invalid direct calls;
+registration has no allocation-failure branch. IRQ error mapping stays in kirq.
+The manager validates before side effects and restores all temporary IRQ locks
+before waiting, without leaving state that changes sleepability. Its post-removal
+wait therefore asserts that site-specific invariant rather than treating a
+failed wait as successful teardown.
 `Completion` 只作为 wake source；
 真实完成条件始终是 descriptor-local `in_flight == 0`，并在等待返回后重新验证。
 `synchronize_irq()` 不 mask line，持续 IRQ 仍可能让等待条件反复变为非零；teardown

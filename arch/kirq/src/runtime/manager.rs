@@ -4,10 +4,11 @@
 
 //! IRQ manager public API and dispatch-entry orchestration.
 
+use kiface_task_api::TaskBlockingContextIf;
 use krcu_core::RcuContextIf;
 use kspin::{SpinNoIrq, static_lock};
 
-use super::{rcu::with_nmi_context, sync_wait::IrqSyncWaitIf};
+use super::rcu::with_nmi_context;
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
     action::IrqAction,
@@ -213,7 +214,7 @@ pub fn try_disable_irq_nosync(spec: impl Into<IrqSpec>) -> Result<(), IrqDescErr
 
 /// Disable an IRQ line and wait for currently running handlers to finish.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`],
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is currently in flight. Returns `false` for an unknown
 /// descriptor or invalid context; use [`try_disable_irq`] to distinguish them.
 ///
@@ -231,7 +232,7 @@ pub fn disable_irq(spec: impl Into<IrqSpec>) -> bool {
 
 /// Try to disable an IRQ line and wait for currently running handlers to finish.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`]:
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`]:
 /// a non-idle task, enabled IRQs, no interrupt/BH-disabled context, preemption
 /// protection or explicit RCU read scope. Validation precedes masking, even
 /// when no handler is in flight. Misuse returns [`IrqDescError::InvalidContext`].
@@ -264,7 +265,7 @@ pub fn synchronize_irq(spec: impl Into<IrqSpec>) -> bool {
 
 /// Try to wait until the current software hardirq dispatch for an IRQ line has finished.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`],
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. IRQ-off, preemption-protected, explicit
 /// RCU read and interrupt/BH-disabled contexts are rejected before lookup with
 /// [`IrqDescError::InvalidContext`].
@@ -285,7 +286,7 @@ pub fn try_synchronize_irq(spec: impl Into<IrqSpec>) -> Result<bool, IrqDescErro
 }
 
 fn can_wait_for_irq_sync(api: &'static str) -> Result<(), IrqDescError> {
-    if crate::context::is_in_interrupt_context() || !IrqSyncWaitIf::can_wait() {
+    if crate::context::is_in_interrupt_context() || !TaskBlockingContextIf::is_sleepable_context() {
         warn!("{api} called from non-sleepable IRQ context");
         return Err(IrqDescError::InvalidContext { operation: api });
     }
@@ -312,7 +313,7 @@ fn wait_for_virq_in_flight(virq: Virq) {
                       mutation; scoped IRQ locks restore that context before this call, with no \
                       intervening sleep-context change; registration cannot fail"
         )]
-        IrqSyncWaitIf::wait_for_completion(&completion)
+        kiface_task_wait_api::wait_for_completion(&completion)
             .expect("validated IRQ synchronization context must remain sleepable");
     }
 }
@@ -537,7 +538,7 @@ pub fn unregister(spec: impl Into<IrqSpec>) -> Option<Handler> {
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`],
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. Invalid context is rejected before
 /// action removal and returns `None`; use [`try_free_irq`] to distinguish
 /// context errors from absence. `None` is not proof of successful teardown.
@@ -553,7 +554,7 @@ pub fn free_irq(spec: impl Into<IrqSpec>) -> Option<Handler> {
 
 /// Try to remove the regular OS IRQ handler and synchronize dispatch teardown.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`],
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. Context misuse is reported as
 /// [`IrqDescError::InvalidContext`] without removing the action.
 ///
@@ -570,7 +571,7 @@ pub fn try_free_irq(spec: impl Into<IrqSpec>) -> Result<Option<Handler>, IrqDesc
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`],
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. Invalid context leaves the action intact
 /// and returns `None`; use [`try_free_irq_action`] to distinguish errors from
 /// absence. `None` is not proof of successful teardown.
@@ -586,7 +587,7 @@ pub fn free_irq_action(spec: impl Into<IrqSpec>, token: IrqActionToken) -> Optio
 
 /// Try to remove one shared IRQ action by token and synchronize dispatch teardown.
 ///
-/// Requires sleepable task context accepted by [`IrqSyncWaitIf::can_wait`],
+/// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. Context misuse is reported as
 /// [`IrqDescError::InvalidContext`] without removing the action.
 ///

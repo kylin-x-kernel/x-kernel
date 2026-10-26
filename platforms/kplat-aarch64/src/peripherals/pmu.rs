@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use aarch64_pmuv3::pmuv3::{PmuCounter, PmuEvent};
-use kplat::perf::PerfCb;
+type PerfCb = fn();
 const MAX_PMU_COUNTERS: usize = 32;
 
 /// Index of the PMU cycle counter (PMCCNTR), used by the periodic NMI backend.
@@ -184,18 +184,8 @@ pub fn set_threshold(index: u32, threshold: u64) {
 #[macro_export]
 macro_rules! pmu_if_impl {
     () => {
-        use kplat::perf::PerfCb;
-
         #[kiface::provide]
-        impl kplat::perf::PerfMgr {
-            fn on_overflow() -> bool {
-                $crate::peripherals::pmu::handle_overflows()
-            }
-
-            fn reg_cb(index: u32, handler: PerfCb) -> bool {
-                $crate::peripherals::pmu::register_overflow_handler(index, handler)
-            }
-
+        impl kplat::perf::PmuInterruptIf {
             fn register_overflow_irq() -> bool {
                 let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
                 let desc = kirq::gic_level_irq_desc(irq);
@@ -227,7 +217,7 @@ macro_rules! pmu_if_impl {
     };
 }
 
-/// Implements the source‑neutral [`kplat::nm_irq::NmiPeriodic`] interface
+/// Implements the source‑neutral [`kplat::nm_irq::PeriodicNmiSourceIf`] interface
 /// using the PMU cycle counter as the NMI source.
 ///
 /// This is the PMU backend of the NMI subsystem: it computes the overflow
@@ -243,7 +233,7 @@ macro_rules! pmu_if_impl {
 ///
 /// # Single‑provider note
 ///
-/// `NmiPeriodic` allows exactly one provider.  As long as PMU is the only
+/// `PeriodicNmiSourceIf` allows exactly one provider.  As long as PMU is the only
 /// source this macro implements the interface directly; when a second source
 /// is added, `peripherals/nmi.rs` must become the sole provider and dispatch
 /// to this backend (and the new one) according to the platform strategy.
@@ -253,7 +243,7 @@ macro_rules! nmi_pmu_if_impl {
         use kplat::nm_irq::NmiCb;
 
         #[kiface::provide]
-        impl kplat::nm_irq::NmiPeriodic {
+        impl kplat::nm_irq::PeriodicNmiSourceIf {
             fn enable_periodic_nmi(period_ns: u64, handler: NmiCb) -> bool {
                 // ── 1. Compute cycle threshold ────────────────────────
                 // TODO: read CPU max frequency from DT OPP table (opp-hz).
@@ -293,7 +283,7 @@ macro_rules! nmi_pmu_if_impl {
                 // registered by the `pmu` feature init, so this path only
                 // changes how that same line is delivered.
                 if !khal::irq::configure_nmi(irq) {
-                    // NmiDef::configure_nmi logged the reason; roll back the
+                    // NmiMechanismIf::configure_nmi logged the reason; roll back the
                     // counter state so a retry starts from a clean CPU.
                     $crate::peripherals::pmu::deinit_cycle_counter();
                     return false;

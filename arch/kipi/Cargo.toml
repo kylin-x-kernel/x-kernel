@@ -10,16 +10,19 @@ repository.workspace = true
 
 [features]
 default = []
+smp = []
 reschedule = []
 timer-reprogram = []
 
 [dependencies]
+kerrno.workspace = true
+kiface-cpu-api.workspace = true
+kiface-task-api.workspace = true
+kiface-time-api.workspace = true
 bitflags.workspace = true
 kiface.workspace = true
-karch = { workspace = true, features = ["smp"] }
-# `smp` here compiles khal's SmpStopIf no-op fallback out, so linking this
-# crate leaves exactly one provider (this crate's) in the final image.
-khal = { workspace = true, features = ["smp"] }
+karch.workspace = true
+khal.workspace = true
 kirq = { workspace = true }
 ktime_types.workspace = true
 kcpu_id_map.workspace = true
@@ -27,7 +30,7 @@ kspin.workspace = true
 lazyinit.workspace = true
 log.workspace = true
 memaddr.workspace = true
-page_table = { workspace = true, features = ["smp"] }
+page_table.workspace = true
 kcpu_slot.workspace = true
 unittest.workspace = true
 kbuild_config.workspace = true

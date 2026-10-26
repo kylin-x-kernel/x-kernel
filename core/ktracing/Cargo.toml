@@ -15,7 +15,7 @@ categories.workspace = true
 ignored = ["kcompletion", "ktime_types"]
 
 [features]
-smp = ["kspin/smp"]
+smp = []
 tracepoint = []
 
 [dependencies]

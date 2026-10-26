@@ -37,7 +37,31 @@ pub(crate) type KTask = ksched::SchedTask<TaskInner>;
 pub(crate) type Scheduler = ksched::Scheduler<TaskInner, KtaskRef>;
 
 #[kiface::provide]
-impl kspin::KernelGuardIf {
+impl kiface_task_api::TaskPreemptionIf {
+    fn needs_resched() -> bool {
+        crate::task_api::task_needs_resched(
+            current_may_uninit()
+                .as_deref()
+                .map(|task| -> &TaskInner { task }),
+        )
+    }
+
+    fn current_preemption_disabled() -> bool {
+        crate::current_preemption_disabled()
+    }
+
+    fn request_current_reschedule() {
+        crate::request_current_reschedule();
+    }
+
+    fn check_preempt_pending() {
+        crate::check_preempt_pending();
+    }
+
+    fn with_preempt_check_deferred(body_fn: &mut dyn FnMut()) {
+        crate::with_preempt_check_deferred(body_fn);
+    }
+
     fn enable_preempt_without_check() {
         if let Some(curr) = current_may_uninit() {
             curr.enable_preempt(false);
@@ -58,7 +82,7 @@ impl kspin::KernelGuardIf {
 }
 
 #[kiface::provide]
-impl khal::irq::IrqExitIf {
+impl kiface_task_api::TaskIrqExitCheckpointIf {
     fn check_preempt_pending() {
         if current_may_uninit().is_some() {
             TaskInner::current_check_preempt_pending_at_irq_exit();
@@ -458,7 +482,7 @@ pub(crate) fn on_remote_resched_ipi() {
 
 #[cfg(feature = "ipi")]
 #[kiface::provide]
-impl kipi::RescheduleIpiIf {
+impl kiface_task_api::TaskRescheduleRequestIf {
     fn on_reschedule() {
         #[cfg(feature = "smp")]
         on_remote_resched_ipi();
@@ -467,7 +491,7 @@ impl kipi::RescheduleIpiIf {
 
 #[cfg(feature = "ipi")]
 #[kiface::provide]
-impl kipi::TimerReprogramIpiIf {
+impl kiface_time_api::LocalTimerReprogramIf {
     fn on_timer_reprogram() {
         // IRQs stay masked through arbitration. No accounting, scheduling or
         // timer delivery belongs in this notification endpoint.

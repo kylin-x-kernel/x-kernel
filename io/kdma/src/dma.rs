@@ -9,7 +9,8 @@ use core::{alloc::Layout, ptr::NonNull};
 
 use alloc_engine::{AllocError, AllocResult};
 use kalloc::{UsageKind, global_allocator};
-use khal::{mem::v2p, paging::MappingFlags};
+use khal::mem::v2p;
+use kiface_mm_api::{DmaMappingIf, DmaMappingMode};
 use kspin::{SpinNoIrq, static_lock};
 use log::error;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr, va};
@@ -19,14 +20,6 @@ use crate::{
     bounce_pool::{BounceMapping, BouncePool, DMA_BOUNCE_POOL_PAGES, bounce_pool_size},
     p2b,
 };
-
-/// Interface for updating page table flags.
-/// This breaks the cyclic dependency: kdma -> axmm -> axfs -> axdriver -> kdma.
-#[kiface::interface]
-pub trait DmaPageTableIf {
-    /// Update the mapping flags for the given virtual address range.
-    fn protect(vaddr: VirtAddr, size: usize, flags: MappingFlags) -> kerrno::KResult;
-}
 
 static_lock! {
     pub(crate) static ALLOCATOR: SpinNoIrq<DmaAllocator> = SpinNoIrq::new(DmaAllocator::new());
@@ -91,11 +84,7 @@ impl DmaAllocator {
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
-        let flags = MappingFlags::READ
-            | MappingFlags::WRITE
-            | MappingFlags::UNCACHED
-            | MappingFlags::SHARED;
-        self.update_flags(vaddr, num_pages, flags)?;
+        self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?;
         self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
         let dma_info = DmaInfo {
             // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
@@ -107,14 +96,14 @@ impl DmaAllocator {
         Ok(dma_info)
     }
 
-    fn update_flags(
+    fn update_mapping_mode(
         &mut self,
         vaddr: VirtAddr,
         num_pages: usize,
-        flags: MappingFlags,
+        mode: DmaMappingMode,
     ) -> AllocResult<()> {
         let expand_size = num_pages * PAGE_SIZE_4K;
-        DmaPageTableIf::protect(vaddr, expand_size, flags).map_err(|_| {
+        DmaMappingIf::set_mode(vaddr, expand_size, mode).map_err(|_| {
             error!("change table flag fail");
             AllocError::NoMemory
         })
@@ -152,8 +141,8 @@ impl DmaAllocator {
 
         // Deallocation cannot fail; the helper already logs platform release errors.
         let _ = self.release_platform_dma(v2p(vaddr), size);
-        // Deallocation cannot fail; update_flags already logs restoration errors.
-        let _ = self.update_flags(vaddr, num_pages, MappingFlags::READ | MappingFlags::WRITE);
+        // Deallocation cannot fail; update_mapping_mode already logs restoration errors.
+        let _ = self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
 
         global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
     }

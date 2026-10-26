@@ -107,10 +107,7 @@ pub mod nmi {
 
 #[cfg(feature = "pmu")]
 pub mod pmu {
-    pub use kplat::perf::{
-        PerfCb, enable_irq, on_overflow as handle_overflows, reg_cb as register_overflow_handler,
-        register_overflow_irq as register_overflow_dispatch,
-    };
+    pub use kplat::perf::{enable_irq, register_overflow_irq as register_overflow_dispatch};
 }
 
 /// Quiesces the local NMI (or pseudo-NMI) source on the current CPU.

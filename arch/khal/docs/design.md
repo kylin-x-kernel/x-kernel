@@ -17,7 +17,7 @@ arch/khal/src/
 ├── irq/
 │   ├── mod.rs       # adapter helper exports only
 │   ├── manager.rs   # trap handlers
-│   └── nmi.rs       # khal::irq::configure_nmi（每 CPU 中断线提升，委托平台 NmiDef）
+│   └── nmi.rs       # khal::irq::configure_nmi（每 CPU 中断线提升，委托平台 NmiMechanismIf）
 └── lib.rs           # khal::nmi / khal::pmu 机制中立 facade（re-export kplat）
 ```
 
@@ -82,7 +82,8 @@ IRQ shared state、NMI table 和 lifecycle hooks 的锁模型都在 `kirq` 内�
 
 After normal IRQ completion, the adapter suspends the architecture exception
 marker, releases its local guard without a pending-work check and invokes
-`IrqExitIf`. Guard release preserves outer credits and IRQ state; cleanup and
+`kiface_task_api::TaskIrqExitCheckpointIf`, defined by kiface-task-api and provided by ktask.
+Guard release preserves outer credits and IRQ state; cleanup and
 scheduling checks belong to that single explicit entry. This is an explicit
 scheduler checkpoint under the entry IRQ mask, not an ordinary preempt-enable
 operation. Outer guards still exclude scheduling. The marker resumes on the

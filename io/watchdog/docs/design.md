@@ -6,7 +6,7 @@ Enable `KFEAT_WATCHDOG=y` in the kernel configuration to include these tests.
 
 ## Purpose
 
-The optional `workqueue-stall-check` feature declares `WorkqueueStallCheck` through
+The optional `workqueue-stall-check` feature declares `WorkqueueStallInspectorIf` through
 `kiface`. A linked workqueue provider implements task-context, warning-only backlog
 inspection. The per-CPU watchdog task invokes it after updating its soft-lockup
 timestamp and before sleeping for four seconds. It does not depend on a concrete
@@ -31,7 +31,7 @@ scheduled for an extended period.
 Soft-lockup detection depends on scheduling and timers, which may themselves be affected.
 Hard-lockup detection uses an NMI source independent of ordinary IRQs and can still
 run when ordinary interrupts have stopped entirely.
-X-Kernel uses the PMU cycle counter as its NMI source through `kplat::NmiPeriodic`;
+X-Kernel uses the PMU cycle counter as its NMI source through `kplat::PeriodicNmiSourceIf`;
 this crate is the NMI consumer.
 
 ## Scope

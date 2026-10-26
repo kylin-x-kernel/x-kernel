@@ -3,10 +3,10 @@
 // See LICENSES for license details.
 
 use kcpu_id_map::LogicalCpuId;
-use kplat::boot::{BootHandler, BootInfo};
+use kplat::boot::{BootInfo, PlatformBootIf};
 
 #[kiface::provide]
-impl BootHandler {
+impl PlatformBootIf {
     fn prepare_boot_memory(boot_info: &BootInfo) {
         let _ = boot_info;
     }

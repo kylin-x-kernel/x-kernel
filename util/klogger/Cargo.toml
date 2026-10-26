@@ -11,11 +11,10 @@ std = ["dep:chrono"]
 default = []
 
 [dependencies]
+kiface-logging-api.workspace = true
 cfg-if.workspace = true
 chrono = { workspace = true, default-features = true, optional = true }
-kiface.workspace = true
 kspin.workspace = true
-ktime_types.workspace = true
 log.workspace = true
 unittest.workspace = true
 

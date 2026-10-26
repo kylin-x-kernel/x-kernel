@@ -77,7 +77,10 @@ impl khal::time::ClockEventIf {
     fn disarm_timer() {
         disarm_timer()
     }
+}
 
+#[kiface::provide]
+impl kiface_time_api::ClockResumeIf {
     fn handle_idle_return(_previous_ticks: khal::time::TimerTicks) -> bool {
         false
     }

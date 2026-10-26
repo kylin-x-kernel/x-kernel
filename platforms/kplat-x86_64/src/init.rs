@@ -6,7 +6,7 @@
 
 use kbuild_config::TIMER_FREQUENCY_HZ;
 use khal::mem::pa;
-use kplat::boot::{BootHandler, BootInfo};
+use kplat::boot::{BootInfo, PlatformBootIf};
 
 fn io_apic_paddr_from_firmware_or_fallback() -> khal::mem::PhysAddr {
     khal::firmware::devices::io_apic_paddr()
@@ -18,7 +18,7 @@ fn io_apic_paddr_from_firmware_or_fallback() -> khal::mem::PhysAddr {
 }
 
 #[kiface::provide]
-impl BootHandler {
+impl PlatformBootIf {
     fn prepare_boot_memory(boot_info: &BootInfo) {
         crate::peripherals::bootmem::init_ap_trampoline_page(boot_info);
     }

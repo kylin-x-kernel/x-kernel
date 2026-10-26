@@ -12,7 +12,10 @@
 
 pub mod cache;
 
-/// `kiface` for cross-PE pipeline synchronisation.
+/// Requests remote instruction-pipeline maintenance.
+///
+/// The transport may queue work asynchronously. Return is not a remote
+/// completion acknowledgment and must not be treated as a reclamation fence.
 ///
 /// SMP builds use the provider implemented by `kipi`; uniprocessor builds use
 /// the local no-op provider below because there are no remote PEs to flush.
@@ -66,7 +69,7 @@ cfg_if::cfg_if! {
 /// IRQ save/disable primitive, so AArch64's PMR/NMI masking rules stay in one
 /// place.
 #[kiface::provide]
-impl kcpu_slot::CpuLocalIrqIf {
+impl kiface_cpu_api::CpuLocalIrqIf {
     fn save_and_disable() -> usize {
         crate::save_irq_and_disable()
     }

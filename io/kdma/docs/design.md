@@ -8,15 +8,15 @@ transactions through a pooled coherent bounce area, and defines the bus
 address type and physical↔bus conversion shared by all DMA-capable
 drivers. It exposes two flat unsafe entry pairs —
 `allocate_dma_memory`/`deallocate_dma_memory` and
-`map_dma_buffer`/`unmap_dma_buffer` — plus the `DmaPageTableIf` extension
-point for address-space integration.
+`map_dma_buffer`/`unmap_dma_buffer` and consumes the MM-owned `kiface_mm_api::DmaMappingIf` capability for mapping
+attribute transitions.
 
 ## Responsibilities
 
 - Coherent allocation: `allocate_dma_memory(layout)` carves page-granular
   regions from the global allocator (`kalloc`, `UsageKind::Dma`), applies
   `READ | WRITE | UNCACHED | SHARED` mapping flags through
-  `DmaPageTableIf::protect`, and registers the range with the platform
+  `kiface_mm_api::DmaMappingIf::set_mode`, and registers the range with the platform
   (`kplat::dma::prepare`). `deallocate_dma_memory` reverses all three
   steps.
 - Temporary mappings: `map_dma_buffer(buffer, direction)` stages the
@@ -33,8 +33,9 @@ point for address-space integration.
 - Bounce pool: a lazily created 1024-page coherent region sub-allocated
   by a TLSF byte allocator (`bounce_pool`), sized once from the same
   coherent path.
-- Platform hook: `DmaPageTableIf` (a `kiface::interface` trait) lets the
-  address-space owner implement flag updates without a crate cycle.
+- Mapping attributes: kiface-mm-api accepts only Coherent or Normal mode; memspace
+  chooses the corresponding flags and owns page-table locking. DMA owns page
+  allocation and platform sharing, not arbitrary page-table permissions.
 
 ## Non-Responsibilities
 
@@ -56,7 +57,7 @@ point for address-space integration.
 io/kdma/
 ├── src/
 │   ├── lib.rs          # public unsafe API, DmaBusAddress, DmaInfo, p2b/b2p
-│   ├── dma.rs          # DmaAllocator, DmaPageTableIf, coherent paths,
+│   ├── dma.rs          # DmaAllocator, coherent paths,
 │   │                   # bounce mapping bookkeeping, dma-trace
 │   └── bounce_pool.rs  # TLSF-backed coherent bounce pool
 └── Cargo.toml
@@ -71,7 +72,7 @@ drivers
 SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   |  alloc_coherent_pages                             |
   |    kalloc alloc_dma_pages (UsageKind::Dma)        v
-  |    DmaPageTableIf::protect (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
+  |    kiface_mm_api::DmaMappingIf::set_mode (UNCACHED|SHARED)   BouncePool (lazy, 1024 pages)
   |    kplat::dma::prepare / release                 TLSF byte allocator
   |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
   |                                           active_mappings: BTreeMap<bus, BounceMapping>
@@ -154,7 +155,7 @@ internal forwardings, each with `# Safety` sections and matching
 - Page-granular coherent allocations: page-table attribute updates and
   platform prepare/release hooks stay balanced per allocation, avoiding
   partial-page flag aliasing between coherent and cached uses.
-- `DmaPageTableIf` via `kiface`: the address-space owner implements flag
+- `kiface_mm_api::DmaMappingIf` via `kiface`: the address-space owner implements flag
   updates as a provider, breaking the historical
   `kdma -> mm -> ... -> kdma` dependency cycle while keeping the kernel
   build platform-agnostic.

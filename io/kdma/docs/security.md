@@ -4,7 +4,7 @@
 
 This analysis covers the entire crate: `src/lib.rs` (public unsafe API
 and address translation), `src/dma.rs` (`DmaAllocator`, mapping
-bookkeeping, `DmaPageTableIf`), and `src/bounce_pool.rs` (the TLSF-backed
+bookkeeping, `kiface_mm_api::DmaMappingIf`), and `src/bounce_pool.rs` (the TLSF-backed
 coherent pool). No modules are excluded; the private modules are reachable
 only through the four public unsafe entry points audited below.
 

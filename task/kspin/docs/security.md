@@ -41,7 +41,9 @@ karch IRQ state / ktask preemption interface
 
 - safe API 调用者信任 `kspin` 在 guard 生命周期内提供唯一 mutable access。
 - `kspin` 信任 `BaseGuard` 实现的 acquire/release 成对且可嵌套语义正确。
-- `kspin` 信任 `KernelGuardIf` 的 preemption 开关不会睡眠或破坏当前 CPU 状态。
+- kspin trusts `kiface_task_api::TaskPreemptionIf` to pair preemption credits correctly:
+  acquisition and deferred-check release do not schedule; ordinary release may
+  check and schedule when the context permits. Neither modifies the IRQ mask.
 - `force_unlock` 调用者必须自行证明当前执行路径确实持有该锁。
 
 ## unsafe 代码清单
@@ -235,8 +237,8 @@ pub unsafe fn force_unlock(&self)
 | `SpinRwLockWriteGuard<'_, G, T>` | 不显式实现；由字段决定 | 写 guard 持有独占访问，不应跨线程共享可变访问 |
 | `NoOp` | zero-sized | zero-sized |
 | `IrqSave` | 保存 IRQ flags | 只应在当前 CPU 上 acquire/release |
-| `NoPreempt` | zero-sized | 依赖 `KernelGuardIf` |
-| `NoPreemptIrqSave` | 保存 IRQ flags | 依赖 `KernelGuardIf` + `karch` IRQ restore |
+| `NoPreempt` | zero-sized | 依赖 `TaskPreemptionIf` |
+| `NoPreemptIrqSave` | 保存 IRQ flags | 依赖 `TaskPreemptionIf` + `karch` IRQ restore |
 
 ## 威胁分析
 
@@ -268,7 +270,7 @@ pub unsafe fn force_unlock(&self)
 |------|----------|----------|----------|----------|--------|----------|
 | F-01 | 死锁 | 同一上下文重复获取同一 non-reentrant 锁 | 当前 CPU 自旋 | 可能全系统卡死 | 1 | 避免递归锁；`lock` 文档标注可能死锁 |
 | F-02 | IRQ 状态未恢复 | guard release 漏调或 guard 泄漏 | 本 CPU IRQ 关闭 | 定时器和设备中断停滞 | 1 | RAII drop；`try_lock` 失败释放；测试覆盖 fake guard |
-| F-03 | 抢占状态未恢复 | `KernelGuardIf` 实现错误 | 当前任务不可抢占 | 调度延迟或卡死 | 2 | `preempt` feature 下由调度器集中实现接口 |
+| F-03 | 抢占状态未恢复 | `TaskPreemptionIf` 实现错误 | 当前任务不可抢占 | 调度延迟或卡死 | 2 | `preempt` feature 下由调度器集中实现接口 |
 | F-04 | 自旋时间过长 | 临界区过大或持锁者卡死 | CPU 占用升高 | 系统延迟上升 | 2 | 仅用于短临界区；避免持锁 I/O |
 | F-05 | `force_unlock` 后继续使用泄漏 guard | unsafe 调用者破坏契约 | 两个 guard 同时访问数据 | 数据竞争或内存破坏 | 1 | 保持 unsafe API；审计所有调用点 |
 | F-06 | 单核配置下误以为有跨 CPU 互斥 | `smp` feature 未启用但运行在多核 | 无 atomic flag | 数据竞争 | 1 | defconfig 必须与 CPU 拓扑一致 |

@@ -36,5 +36,25 @@ pub use model::desc::{
     IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc,
     gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
 };
+pub use runtime::manager::*;
 pub(crate) use runtime::{action, dispatch, nmi, state};
-pub use runtime::{manager::*, sync_wait::IrqSyncWaitIf};
+
+#[kiface::provide]
+impl kiface_irq_context_api::InterruptContextIf {
+    fn is_in_nmi() -> bool {
+        context::is_in_nmi()
+    }
+
+    fn is_in_interrupt_context() -> bool {
+        context::is_in_interrupt_context()
+    }
+
+    fn is_in_interrupt_handler() -> bool {
+        matches!(
+            context::interrupt_context_level(),
+            context::InterruptContextLevel::Nmi
+                | context::InterruptContextLevel::Hardirq
+                | context::InterruptContextLevel::Softirq
+        )
+    }
+}
