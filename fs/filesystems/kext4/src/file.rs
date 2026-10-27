@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 use crate::{
     BlockCount, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock, LogicalBlock,
@@ -493,14 +493,20 @@ impl Ext4SbInfo {
     /// remaining suffix.
     /// Device or journal failures may abort the mounted journal, in which case
     /// recovery is required before the data can be submitted again.
+    ///
+    /// `is_open_for_write` answers whether a writable open currently holds the
+    /// inode, re-evaluated at each settlement (Linux `inode_is_open_for_write`);
+    /// prealloc spaces survive writeback settlement only while it holds.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn writeback_ordered_at(
         &mut self,
-        inode: &Ext4Inode,
+        inode: &Arc<Ext4Inode>,
         offset: u64,
         input: &[u8],
         visible_size: u64,
         timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
+        is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
         self.writeback_ordered_at_with_prealloc_budget(
             inode,
@@ -510,6 +516,7 @@ impl Ext4SbInfo {
             timestamp,
             intent,
             u32::MAX,
+            is_open_for_write,
         )
     }
 
@@ -525,16 +532,21 @@ impl Ext4SbInfo {
     /// remaining suffix.
     /// Device or journal failures may abort the mounted journal, in which case
     /// recovery is required before the data can be submitted again.
+    ///
+    /// `is_open_for_write` answers whether a writable open currently holds the
+    /// inode, re-evaluated at each settlement (Linux `inode_is_open_for_write`);
+    /// prealloc spaces survive writeback settlement only while it holds.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn writeback_ordered_at_with_prealloc_budget(
         &mut self,
-        inode: &Ext4Inode,
+        inode: &Arc<Ext4Inode>,
         offset: u64,
         input: &[u8],
         visible_size: u64,
         timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
         max_extra_prealloc_blocks: u32,
+        is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
         self.ensure_regular_file_mutation_supported(inode)?;
         if self.journal.is_none() && intent.requires_full_metadata() {
@@ -602,6 +614,7 @@ impl Ext4SbInfo {
                 offset,
                 block_size_usize,
                 &cursor,
+                &is_open_for_write,
             ) {
                 return Err(cursor.current_failure(error));
             }
@@ -668,8 +681,14 @@ impl Ext4SbInfo {
             );
             // Admission may commit the preceding handle, even if a later step
             // fails. Confirm that prefix before propagating an admission error.
-            self.settle_committed_writeback_prefix(inode, offset, block_size_usize, &mut cursor)
-                .map_err(|error| cursor.current_failure(error))?;
+            self.settle_committed_writeback_prefix(
+                inode,
+                offset,
+                block_size_usize,
+                &mut cursor,
+                &is_open_for_write,
+            )
+            .map_err(|error| cursor.current_failure(error))?;
             let journal = admission.map_err(|error| cursor.settled_failure(error))?;
             let mut handle = journal
                 .begin(credits)
@@ -699,8 +718,14 @@ impl Ext4SbInfo {
             };
             // Both explicit restart and handle completion can commit. Query
             // durable state even on error: a later failure cannot undo a commit.
-            self.settle_committed_writeback_prefix(inode, offset, block_size_usize, &mut cursor)
-                .map_err(|error| cursor.current_failure(error))?;
+            self.settle_committed_writeback_prefix(
+                inode,
+                offset,
+                block_size_usize,
+                &mut cursor,
+                &is_open_for_write,
+            )
+            .map_err(|error| cursor.current_failure(error))?;
             let progress = completion.map_err(|error| cursor.settled_failure(error))?;
             if progress == OrderedWritebackTransactionProgress::Complete {
                 self.release_ordered_writeback_cursor_range(
@@ -708,6 +733,7 @@ impl Ext4SbInfo {
                     offset,
                     block_size_usize,
                     &cursor,
+                    &is_open_for_write,
                 )
                 .map_err(|error| cursor.current_failure(error))?;
                 return Ok(input.len());
@@ -715,7 +741,16 @@ impl Ext4SbInfo {
         }
     }
 
-    /// Admit just the next mapping operation; execution re-admits after it.
+    /// Admits the physical blocks the next mapping operation needs: data blocks
+    /// it must allocate plus any new extent-tree blocks.
+    ///
+    /// A registered space that covers the run's first block serves its prefix
+    /// without allocating, and those blocks are already excluded from the free
+    /// pool, so only the unserved remainder counts as new data demand and the
+    /// tree estimate follows the run actually inserted. The lookup is a
+    /// leaf-lock hint; consumption re-validates it under the allocator lock, so
+    /// a space reclaimed in between sends the run down the normal allocation
+    /// path instead of trusting a cached plan.
     fn ordered_writeback_allocation_blocks(
         &self,
         inode: &Ext4Inode,
@@ -734,11 +769,13 @@ impl Ext4SbInfo {
             // with optional preallocation disabled, conversion adds no entry.
             BlockMapping::Hole { .. } => {
                 let count = count.min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN));
-                u64::from(count)
+                let served = inode.prealloc_map().servable_prefix(logical, count);
+                let run = if served == 0 { count } else { served };
+                u64::from(count - served)
                     + self.extent_insert_metadata_block_bound(
                         inode,
                         logical,
-                        BlockCount::new(count),
+                        BlockCount::new(run),
                     )?
             }
         };
@@ -774,14 +811,16 @@ impl Ext4SbInfo {
         Ok(false)
     }
 
-    /// Confirms only prefixes whose transaction has actually committed. Closing
-    /// a handle alone leaves the cursor and delalloc reservations unchanged.
+    /// Confirms only prefixes whose transaction has actually committed.
+    /// Closing a handle alone leaves the cursor and delalloc reservations
+    /// unchanged.
     fn settle_committed_writeback_prefix(
         &mut self,
         inode: &Ext4Inode,
         write_offset: u64,
         block_size_usize: usize,
         cursor: &mut OrderedWritebackCursor,
+        is_open_for_write: &impl Fn() -> bool,
     ) -> Ext4Result<()> {
         let Some(transaction) = cursor.transaction else {
             return Ok(());
@@ -796,18 +835,32 @@ impl Ext4SbInfo {
                 write_offset,
                 block_size_usize,
                 cursor,
+                is_open_for_write,
             )?;
             cursor.settle();
         }
         Ok(())
     }
 
+    /// Releases the delalloc reservation for the bytes this cursor settled and,
+    /// when neither a reservation nor a writable open remains, drops the inode's
+    /// prealloc spaces.
+    ///
+    /// - `inode`: the written file.
+    /// - `write_offset`: absolute byte offset of the submitted input.
+    /// - `block_size_usize`: filesystem block size in bytes.
+    /// - `cursor`: the completed writeback cursor.
+    /// - `is_open_for_write`: gate answering whether a writable open still
+    ///   holds the inode.
+    ///
+    /// Locking: caller holds the filesystem write guard; may sleep.
     fn release_ordered_writeback_cursor_range(
         &mut self,
         inode: &Ext4Inode,
         write_offset: u64,
         block_size_usize: usize,
         cursor: &OrderedWritebackCursor,
+        is_open_for_write: &impl Fn() -> bool,
     ) -> Ext4Result<()> {
         if cursor.input_offset == cursor.settled_input_offset {
             return Ok(());
@@ -831,26 +884,31 @@ impl Ext4SbInfo {
             LogicalBlock::new(first),
             end.checked_sub(first).ok_or(Ext4Error::Overflow)?,
         )?;
-        // Writeback completing may have cleared the last delalloc
-        // reservation that kept prealloc spaces alive past close. If
-        // no reservation remains, drop any spaces now — the close that
-        // deferred them has already returned and won't check again,
-        // and eviction won't fire while read-only handles still hold
-        // the inode.
+        // Writeback completing may have cleared the last delalloc reservation
+        // that kept prealloc spaces alive past close, matching Linux
+        // `ext4_da_update_reserve_space` (`ext4_discard_preallocations` when
+        // `i_reserved_data_blocks == 0 && !inode_is_open_for_write`). While a
+        // writer still holds the inode, the spaces this writeback produced
+        // stay for a later run to reuse.
         //
-        // NB: this hook can also fire in write→fsync loops while the
-        // file is still open for write, discarding spaces the current
-        // writeback just produced.  That is harmless while birth is
-        // not wired (no spaces exist); once birth lands the gate
-        // should additionally require write_count == 0, which needs
-        // write_count threaded through from the VFS writepages path.
+        // The gate is the live writer count. The VFS decrements it only after
+        // the release hook returns, so a settlement that runs inside that
+        // window still observes a writable open and keeps the spaces; a later
+        // settlement or eviction reclaims them. No historical close state is
+        // kept, so a writer that reopened the inode is always judged by its
+        // current count.
         //
-        // `is_empty` is a per-inode leaf-lock hint that keeps the
-        // allocator mutex out of the common no-space case: the writeback
-        // path never took that mutex before, and an inode holding no
-        // spaces stays that way. A space born after the check is owed
-        // to close/eviction, not to this call.
-        if !inode.has_delalloc_reservations() && !inode.prealloc_map().is_empty() {
+        // `is_empty` is a leaf-lock hint that keeps the allocator mutex out of
+        // the no-space case. Births and consumptions for one inode are
+        // serialized by its writeback lock, so a space born by an earlier batch
+        // of this same call is visible here; close and eviction hold the mount
+        // lock this settlement holds, and a group-driven ENOSPC discard can
+        // only remove spaces, so an empty result never hides a space this
+        // settlement must release.
+        if !is_open_for_write()
+            && !inode.has_delalloc_reservations()
+            && !inode.prealloc_map().is_empty()
+        {
             self.release_preallocs(inode);
         }
         Ok(())
@@ -885,7 +943,7 @@ impl Ext4SbInfo {
     #[allow(clippy::too_many_arguments)]
     fn writeback_ordered_metadata_transaction(
         &mut self,
-        inode: &Ext4Inode,
+        inode: &Arc<Ext4Inode>,
         offset: u64,
         input: &[u8],
         visible_size: u64,
@@ -985,30 +1043,67 @@ impl Ext4SbInfo {
                     if requested == 0 {
                         return Err(Ext4Error::Corrupt(CorruptKind::InvalidExtent));
                     }
-                    let locality_group = self.block_group_for_inode(inode.number())?;
-                    let goal = self.allocation_goal_after_previous_extent(inode, logical)?;
-                    let normalized =
-                        normalize_write_allocation_len(requested, len.get(), goal.is_some());
-                    let extra = normalized
-                        .checked_sub(requested)
-                        .ok_or(Ext4Error::Overflow)?
-                        .min(cursor.remaining_extra_prealloc_blocks)
-                        .min(u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN) - requested);
-                    let expected = requested.checked_add(extra).ok_or(Ext4Error::Overflow)?;
-                    let request = Ext4AllocationRequest::new(
+                    // Linux order: reuse a prealloc space first
+                    // (`ext4_mb_use_preallocated`), and normalize and allocate
+                    // only on a miss. A hit marks exactly the consumed span
+                    // inside the same allocator lock section; the hole mapping
+                    // already reserved one allocation run, so it needs no extra
+                    // credits.
+                    let (physical_start, allocated_blocks) = match self.consume_prealloc_for_write(
+                        inode,
                         logical,
-                        goal,
-                        BlockCount::new(expected),
-                        BlockCount::new(1),
-                        Ext4AllocationFlags::ALLOW_PARTIAL,
-                        locality_group,
-                    )?;
-                    let allocation = self.allocate_blocks_for_write(request, handle)?;
-                    let allocated_blocks = allocation.block_count();
+                        u64::from(requested),
+                        handle,
+                    )? {
+                        Some(consumed) => consumed,
+                        None => {
+                            let locality_group = self.block_group_for_inode(inode.number())?;
+                            let goal =
+                                self.allocation_goal_after_previous_extent(inode, logical)?;
+                            let normalized = normalize_write_allocation_len(
+                                requested,
+                                len.get(),
+                                goal.is_some(),
+                            );
+                            let surplus_budget = normalized
+                                .checked_sub(requested)
+                                .ok_or(Ext4Error::Overflow)?
+                                .min(cursor.remaining_extra_prealloc_blocks)
+                                .min(
+                                    u32::from(crate::disk::extent::EXT_UNWRITTEN_MAX_LEN)
+                                        - requested,
+                                );
+                            // The surplus is registered in memory, never marked
+                            // on disk, so the request asks for the dirty window
+                            // only and the birth hook samples the rest.
+                            let request = Ext4AllocationRequest::new(
+                                logical,
+                                goal,
+                                BlockCount::new(requested),
+                                BlockCount::new(1),
+                                Ext4AllocationFlags::ALLOW_PARTIAL,
+                                locality_group,
+                            )?;
+                            let (allocation, registered) = self
+                                .allocate_blocks_for_write_with_prealloc(
+                                    request,
+                                    inode,
+                                    surplus_budget,
+                                    handle,
+                                )?;
+                            cursor.remaining_extra_prealloc_blocks = cursor
+                                .remaining_extra_prealloc_blocks
+                                .saturating_sub(registered);
+                            (allocation.physical_start(), allocation.block_count())
+                        }
+                    };
+                    // Registration stays inside the allocation lock section (it
+                    // cannot move below), so a failed mapping insert leaves the
+                    // space in memory for close or eviction to reclaim.
                     self.insert_extent_mapping(
                         inode,
                         logical,
-                        allocation.physical_start(),
+                        physical_start,
                         allocated_blocks,
                         ExtentMappingState::Unwritten,
                         handle,
@@ -1025,14 +1120,8 @@ impl Ext4SbInfo {
                     )?;
                     let block_count =
                         block_count_for_byte_span(in_block, write_len, block_size_usize)?;
-                    if allocated_blocks.get() > block_count {
-                        let extra_blocks = allocated_blocks.get() - block_count;
-                        cursor.remaining_extra_prealloc_blocks = cursor
-                            .remaining_extra_prealloc_blocks
-                            .saturating_sub(extra_blocks);
-                    }
                     let run = AllocatedWriteRun {
-                        first_block: FilesystemBlock::new(allocation.physical_start().get()),
+                        first_block: FilesystemBlock::new(physical_start.get()),
                         block_count,
                         input_offset: cursor.input_offset,
                         in_block,

@@ -4,7 +4,7 @@
 
 //! Component invariants exercised in the kernel with synthetic metadata.
 
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 
 use unittest::def_test;
 
@@ -140,7 +140,7 @@ fn truncate_grow_keeps_new_range_sparse_and_zero_reading() {
 fn truncate_grow_zeroes_mapped_old_eof_tail() {
     let (mut filesystem, _device) =
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_test_internal_journal(&mut filesystem, 732);
     let input = vec![0x6d; TEST_BLOCK_SIZE];
     inode.set_size(input.len() as u64);
@@ -152,6 +152,7 @@ fn truncate_grow_zeroes_mapped_old_eof_tail() {
             input.len() as u64,
             crate::Ext4Timestamp::new(18, 0),
             Ext4SyncIntent::FullMetadata,
+            || true,
         )
         .unwrap();
     install_test_internal_journal(&mut filesystem, 733);
@@ -192,7 +193,7 @@ fn truncate_grow_zeroes_mapped_old_eof_tail() {
 fn truncate_shrink_releases_tail_blocks_and_zeroes_partial_eof_block() {
     let (mut filesystem, _device) =
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_test_internal_journal(&mut filesystem, 741);
     let input = vec![0xa5; TEST_BLOCK_SIZE * 3];
     inode.set_size(input.len() as u64);
@@ -204,6 +205,7 @@ fn truncate_shrink_releases_tail_blocks_and_zeroes_partial_eof_block() {
             input.len() as u64,
             crate::Ext4Timestamp::new(21, 0),
             Ext4SyncIntent::FullMetadata,
+            || true,
         )
         .unwrap();
     assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);

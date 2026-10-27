@@ -4,7 +4,7 @@
 
 //! Component invariants exercised in the kernel with synthetic metadata.
 
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 
 use unittest::def_test;
 
@@ -58,7 +58,7 @@ fn removing_orphan_tail_does_not_restore_stale_predecessor_next() {
 fn orphan_cleanup_finishes_committed_shrink_after_crash_point() {
     let (mut filesystem, _device) =
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_test_internal_journal(&mut filesystem, 751);
     let input = vec![0x5c; TEST_BLOCK_SIZE * 3];
     inode.set_size(input.len() as u64);
@@ -70,6 +70,7 @@ fn orphan_cleanup_finishes_committed_shrink_after_crash_point() {
             input.len() as u64,
             crate::Ext4Timestamp::new(31, 0),
             Ext4SyncIntent::FullMetadata,
+            || true,
         )
         .unwrap();
     assert_eq!(inode.blocks(), (TEST_BLOCK_SIZE / 512 * 3) as u64);

@@ -440,15 +440,14 @@ pub(crate) struct AllocatorState {
     /// Group-side index of the live speculative writeback prealloc spaces,
     /// keyed by `(group, first physical block)` - the physical twin of the
     /// per-inode maps (`Ext4Inode::prealloc_map`). A space's blocks are *not*
-    /// marked in the bitmap until a writeback run consumes it; once wired,
-    /// group scans exclude these ranges from this index (the role Linux's
-    /// in-core buddy marks play) and the ENOSPC discard enumerates it
-    /// group-locally (the role of `bb_prealloc_list`). Each twin carries a
-    /// strong owner reference (the `pa_inode` analog) so a group-driven
-    /// discard removes the inode-side entry in the same allocator-mutex
-    /// section; the close/evict hooks (wiring commit) will guarantee a twin
-    /// dies before its owner, so a missed hook leaks memory instead of
-    /// dangling.
+    /// marked in the bitmap until a writeback run consumes it; group scans
+    /// exclude these ranges from this index (the role Linux's in-core buddy
+    /// marks play) and the ENOSPC discard enumerates it group-locally (the
+    /// role of `bb_prealloc_list`). Each twin carries a strong owner
+    /// reference (the `pa_inode` analog) so a group-driven discard removes
+    /// the inode-side entry in the same allocator-mutex section; the
+    /// close/evict hooks guarantee a twin dies before its owner, so a missed
+    /// hook leaks memory instead of dangling.
     ///
     /// Both sides mutate only together, under the allocator mutex (lock
     /// order: prealloc-space module). The free aggregate never deducts

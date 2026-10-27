@@ -458,13 +458,15 @@ PageCache 仍以固定上限聚合 folio；dirty range 的必需数据块已由 
 credit plan。实际写回由 byte cursor 推进，每处理一个 mapped、unwritten 或 hole allocation run
 都重新调用 `map_blocks()`；unwritten conversion 和 hole allocation/insert/conversion 按实际
 发生的 run 增长 credit usage，并优先通过 `JournalHandle::reserve_more()` 扩展当前 transaction。
-transaction credit limit 只由 journal engine 持有并在 `begin()`/`reserve_more()` 内执行约束，
-file 层不读取或重复解释该上限。若 handle 无法继续扩展，core 先 flush 当前数据、只推进该前缀
-的 `i_disksize`，清除本事务已满足的数据依赖，同步提交 transaction 并精确释放该前缀的
-delalloc reservation，再从同一 cursor 开启下一 transaction。optional preallocation 只使用扣除 reserved blocks 和全部
-delalloc reservation 后的可用块，并保存在 cursor 中按 allocator 实际多分配的 block 扣减；
-最后一个 transaction 才发布完整 timestamp/size。异步 dependency 对象和后台 writeback 属于
-后续阶段。
+The transaction credit limit is owned and enforced only by the journal engine inside `begin()`/`reserve_more()`;
+the file layer neither reads nor reinterprets it. If the handle cannot be extended, core first flushes the current
+data, advances only that prefix's `i_disksize`, clears the data dependencies this transaction already satisfied,
+synchronously commits the transaction and releases exactly that prefix's delalloc reservation, then opens the
+next transaction from the same cursor. Optional preallocation uses only the blocks left after reserved blocks and
+every delalloc reservation are subtracted, and the cursor budget is decremented by the number of blocks the
+writeback actually registered as in-memory prealloc spaces; the dirty window itself is allocated and marked in
+the bitmap as usual, and registration does not change this allocation's size. Only the last transaction
+publishes the complete timestamp/size. Async dependency objects and background writeback belong to a later stage.
 
 operation savepoint、operation token 和 operation-local metadata byte copy 已删除。ext4
 mutation 在首次 metadata access 前完成格式、目标状态、空间、credits 和 extent path
@@ -595,12 +597,12 @@ kext4 KVFS 层则继续使用有界的三阶段 eviction。
 ### 写回 speculative prealloc space
 
 ```text
-写回窗口分配 surplus      -> Registered（inode 逻辑图 + group 孪生表，同一 allocator 临界区发布）
-后续写命中已登记区间      -> Consumed（整段/前缀/后缀/内部消费，剩余拆为新的 Registered 条目）
-shrink truncate          -> Clipped（EOF 之后部分回收，前缀保持 Registered）
-最后一次 writable close  -> Dropped（仅当无 delalloc reservation）
-写回结算 reservation 清零 -> Dropped（close 已推迟、只有只读句柄持有时兜住）
-eviction                 -> Dropped（无条件，含 nlink 非零的 cache eviction）
+surplus sampled by writeback        -> Registered (inode logical map + group twin table, published inside one allocator critical section)
+later write hits a registered span  -> Consumed (whole/prefix/suffix/interior consumption, the remainder split into new Registered entries)
+shrink truncate                     -> Clipped (the part past EOF reclaimed, the prefix stays Registered)
+last writable close                 -> Dropped (only when no delalloc reservation remains)
+writeback settlement (reserved==0)  -> Dropped (only when no writable open remains; a racing settlement may defer to the next one or eviction)
+eviction                            -> Dropped (unconditional, including cache eviction with nonzero nlink)
 ```
 
 一条 space 是"某文件的某段逻辑区间由这段物理 run 兑现"的许诺，只存在于内存：位图、group
@@ -621,9 +623,21 @@ free 口径不受 space 影响：`free_blocks_count()` 返回磁盘聚合值，�
 kext4 没有 locality-group PA 生产者；写路径的长度归一化对小于 `EXT4_PREALLOC_MIN_WRITE_BLOCKS`
 （4 块）的请求不做放大，因此小写入不产生 surplus，也就不登记 space。
 
-**当前接线状态**：两侧索引、组扫描排除、ENOSPC 重试阀、shrink clip 以及 close/eviction 的
-生命周期 discard 已接入生产路径；space 的**产出（birth）与消费（consume）入口尚无生产调用者**，
-由写回 wiring 提交接入，在此之前生产路径不会登记任何 space，上述回收侧代码只由单元测试驱动。
+The writeback Hole branch wires birth and consume into the production path: a registered space is consumed
+first (a hit takes the physical span under the 1:1 rule, marks the bitmap and re-splits the remaining head and
+tail inside the allocator critical section); only on a miss does the branch normalize the length and allocate,
+and a successful allocation registers the surplus inside the same lock section. **Consume is therefore the only
+point where a space reaches disk or the bitmap** (Linux `ext4_mb_mark_diskspace_used` marks only the consumed
+span), while birth writes only the in-memory indexes; the block bitmap, group descriptor, free-extent cache and
+the free aggregate stay unaware of a space until it is consumed.
+
+`MAX_PREALLOC_SPACES_PER_INODE` (16) is a birth-admission threshold, not a live-entry bound: a new entry is
+rejected once the inode's map already holds 16, which stops a long-lived writer that jumps between sparse
+regions from registering unconsumed free runs without limit. Consuming an interior span replaces one entry
+with a head and a tail, so the map can exceed the threshold and those entries live until a later consume or
+discard; the threshold also says nothing about other inodes sharing the group. Adjacent births fuse, so an
+appending writer normally keeps one. Reaching the threshold is an ordinary "no preallocation this time", not
+an error.
 
 ## 算法流程
 
@@ -922,6 +936,19 @@ discard 只可能出现在第一次之后的每次搜索之前，且 discard 返
 返回，但不会禁止健康组在回收后重试。阀自带 allocator 锁，因此必须在扫描的锁段
 之外调用，否则会重入死锁。
 
+The writeback Hole branch follows the order of Linux `ext4_mb_new_blocks`: `consume_prealloc_for_write()` first
+reuses a registered space (a hit marks only the consumed span, with no length normalization and no prealloc
+budget spent); only on a miss does `normalize_write_allocation_len()` compute the surplus budget, allocate with
+`expected_len = requested` and mark it on disk, after which the birth hook inside the allocation lock section
+(`allocate_blocks_for_write_with_prealloc()`) registers the trailing free window. The budget is decremented by
+the number of blocks actually registered.
+
+The physical-space admission preceding each run follows the same split: it subtracts the prefix a registered
+space can serve from the run's new data demand and sizes the extent-tree estimate to the run that will be
+inserted, so a hit is not charged as new space and cannot trigger a prealloc discard before consumption.
+Consumption re-validates the prefix under the allocator lock; a space reclaimed in between simply sends the
+run down the normal allocation path.
+
 ## 并发模型
 
 运行态仍需联合修改 superblock/group metadata 的 mutation 当前通过 `Ext4Mount` 内的挂载级 `RwLock`
@@ -964,9 +991,12 @@ allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域�
   旁路。当前 transaction restart 仍需同步 `flush` 建立 ordered-data durability 边界；只有通用
   block 层提供 request completion/FUA 或等价 dependency 后，才能把多个 transaction 的数据与
   commit 安全流水化，不能在 filesystem 层直接删除该 barrier。
-- speculative prealloc space 只做内存记账：不在位图、也不在 in-core free-extent cache 中预先
-  打标（Linux 会给 buddy 打标并要求与 PA 生命周期同步），两侧索引是唯一记录。代价是 space 对
-  free 聚合不可见，"聚合非零但选不出块"因此成为正常状态，由 ENOSPC 重试阀处理而非改记账口径。
+- A speculative prealloc space is memory accounting only: it is premarked neither in the bitmap nor in the
+  in-core free-extent cache (Linux marks the buddy and requires it to track the PA lifetime), and the two
+  indexes are the only record; a space reaches the bitmap only when consumed, through the normal allocation
+  path (Linux likewise marks only the consumed span). The price is that a space stays invisible to the free
+  aggregate, so "aggregate nonzero yet no run can be selected" becomes a normal state, handled by the ENOSPC
+  retry valve rather than by changing the accounting.
 - 不实现 `MB_GROUP_PA`：kext4 没有 locality-group PA 生产者，且小于 `EXT4_PREALLOC_MIN_WRITE_BLOCKS`
   的请求不被归一化放大、不产生 surplus，小写入因此不登记 space，不需要 inode PA 未命中时的
   组级回退。
@@ -999,15 +1029,24 @@ eviction token 或另一种 inode handle。完成后 KVFS 精确删除旧 cache 
 nlink 非零的 cache eviction 不释放磁盘 inode；后续 `iget` 可从仍分配的磁盘 inode构造新的
 private component。
 
-speculative prealloc space 的回收挂在 file/inode 生命周期与写回结算上。最后一次 writable close 只在
-没有 delalloc reservation 时丢弃该文件的全部 space；有 reservation 时保留，由写回结算或 eviction
-兜底（对应 Linux `ext4_release_file()` 的 `i_reserved_data_blocks` 门）。写回结算在 reservation
-清零后补一次回收，覆盖"close 已返回、只剩只读句柄、eviction 不会发生"的场景。eviction 在检查 nlink
-之前丢弃全部 space，包括 nlink 非零的 cache eviction：group 侧孪生条目持有 owner 的强引用，漏丢
-即让条目活过其 owner 对象。无 space 的 inode 由 per-inode map 的叶子锁判空，在取 allocator 互斥锁
-之前早退，因此写回结算不会为一次空回收触碰全局 allocator 锁。各回收点都只更新内存索引并把块退回
-可分配池，不产生磁盘写入、不需要 journal credits；块在被消费前从未在位图中打标，因此不存在需要
-回退的磁盘状态。
+Speculative prealloc space reclamation hangs off the file/inode lifecycle and writeback settlement. The last
+writable close drops all of the file's spaces only when no delalloc reservation remains; with reservations it
+keeps them and lets writeback settlement or eviction reclaim them (Linux `ext4_release_file()`'s
+`i_reserved_data_blocks` gate). Writeback settlement reclaims once the reservations reach zero and no
+writable open remains (Linux `ext4_da_update_reserve_space()` with `i_reserved_data_blocks == 0 &&
+!inode_is_open_for_write`); the writable-open gate is the live writer count, read at the settlement point.
+The VFS drops that count only after the release hook returns, so a settlement racing the decrement still
+observes a writable open and keeps the spaces; a later settlement or eviction reclaims them. No per-inode
+close state is kept, so a writer that reopened the inode is judged by its current count.
+While the file is still open for write, the spaces this writeback produced stay for a later writeback run to
+reuse. Eviction drops every space before checking nlink, including cache eviction with nonzero nlink: a
+group-side twin holds a strong reference to its owner, and a missed drop would let the entry outlive the owner
+object. An inode with no spaces is detected empty via the per-inode map's leaf lock, avoiding the allocator
+mutex for an empty reclaim; the birth of this same writeback completes before that check, same-inode
+births/consumes are serialized by the writeback lock, and close/eviction are blocked by the mount lock this
+settlement holds, so an empty result here cannot miss a space registered by this call. Every reclaim point
+only updates the in-memory indexes and returns blocks to the allocatable pool, without disk writes or journal
+credits; a block is never marked in the bitmap before it is consumed, so there is no disk state to roll back.
 
 Recovery 不创建 resident inode 表。它在 mount/VFS identity 尚未发布时通过 orphan-aware decode
 取得临时 private state，复用正常 truncate 或 zero-link eviction。若 cleanup 失败，恢复证据

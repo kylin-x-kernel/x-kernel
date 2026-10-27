@@ -153,8 +153,10 @@ impl Ext4SbInfo {
     /// speculative consume path can take a space and mark the run inside a
     /// *single* lock section (exclusion must not lapse between selection and
     /// mark). Callers that know the group beforehand warm the cache with
-    /// [`Self::prefetch_group_allocation_metadata`]; consume cannot (it
-    /// learns the group under this lock) and accepts the cold-read latency.
+    /// [`Self::prefetch_group_allocation_metadata`] outside the lock; consume
+    /// learns the group from its inode-side space with a leaf-lock peek and
+    /// warms it the same way. If that advisory peek misses, the in-lock read
+    /// still decides, at the cost of a cold read under the mutex.
     ///
     /// Locking: caller must hold the allocator mutex.
     pub(crate) fn allocate_block_run_in_group_locked(

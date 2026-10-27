@@ -1490,7 +1490,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
         let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.private::<Ext4Inode>()?;
+        let inode = vfs_inode.downcast::<Ext4Inode>()?;
         let _writeback_guard = inode.lock_writeback();
         let super_block = vfs_inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
@@ -1504,11 +1504,24 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
             // A filesystem-wide sync may reach this inode while another task
             // is still extending it, so sample the visible size per batch.
             let visible_size = vfs_inode.size();
+            // Prealloc spaces outlive this batch while a writable open holds
+            // the inode (Linux `inode_is_open_for_write`). The gate is a live
+            // predicate re-read at settlement; a close that deferred on a live
+            // reservation leaves an inode marker the settlement also honors.
+            let is_open_for_write = || vfs_inode.write_count() != 0;
             let disk_size = inode.disk_size();
             let write_end = offset.saturating_add(data.len() as u64);
             let mut state = ext4.write(&super_block);
             state
-                .writeback_ordered_at(inode, offset, data, visible_size, timestamp, intent)
+                .writeback_ordered_at(
+                    &inode,
+                    offset,
+                    data,
+                    visible_size,
+                    timestamp,
+                    intent,
+                    is_open_for_write,
+                )
                 .map_err(|failure| {
                     error!(
                         "KExt4 inode {} writeback at offset {offset} for {} bytes failed: \
@@ -1608,8 +1621,9 @@ impl FileOperations for Ext4Inode {
         let ext4 = ext4_private(&super_block)?;
         let mut state = ext4.write(&super_block);
         // Spaces survive the close while delalloc reservations still expect to
-        // allocate through them; eviction reclaims whatever remains. Linux:
-        // `ext4_release_file` gates the discard on `i_reserved_data_blocks`.
+        // allocate through them; writeback settlement or eviction reclaims
+        // whatever remains. Linux: `ext4_release_file` gates the discard on
+        // `i_reserved_data_blocks`.
         if !self.has_delalloc_reservations() {
             state.release_preallocs(self);
         }

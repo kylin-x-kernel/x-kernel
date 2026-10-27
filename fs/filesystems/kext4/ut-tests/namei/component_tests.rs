@@ -302,9 +302,11 @@ fn eviction_recovers_at_each_phase_before_and_after_commit() {
             let free_inodes = filesystem.free_inodes_count();
             let root = filesystem.internal_iget(InodeNumber::new(2)).unwrap();
             let timestamp = Ext4Timestamp::new(2020, 0);
-            let inode = filesystem
-                .create_regular_file(&root, b"evict-crash", 0o644, 0, 0, timestamp)
-                .unwrap();
+            let inode = Arc::new(
+                filesystem
+                    .create_regular_file(&root, b"evict-crash", 0o644, 0, 0, timestamp)
+                    .unwrap(),
+            );
             let input = vec![0x5a; 16 * 1024];
             inode.set_size(input.len() as u64);
             filesystem
@@ -315,6 +317,7 @@ fn eviction_recovers_at_each_phase_before_and_after_commit() {
                     input.len() as u64,
                     timestamp,
                     Ext4SyncIntent::FullMetadata,
+                    || true,
                 )
                 .unwrap();
             filesystem

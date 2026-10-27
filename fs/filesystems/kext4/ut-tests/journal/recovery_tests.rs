@@ -31,16 +31,18 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
         .internal_iget(crate::InodeNumber::new(2))
         .expect("read root inode");
     let free_inodes_before_create = filesystem.free_inodes_count();
-    let created = filesystem
-        .create_regular_file(
-            &root,
-            b"kext4-recovery-orphan",
-            0o644,
-            0,
-            0,
-            crate::Ext4Timestamp::new(130, 0),
-        )
-        .expect("create orphan recovery target");
+    let created = Arc::new(
+        filesystem
+            .create_regular_file(
+                &root,
+                b"kext4-recovery-orphan",
+                0o644,
+                0,
+                0,
+                crate::Ext4Timestamp::new(130, 0),
+            )
+            .expect("create orphan recovery target"),
+    );
     created.set_size(23);
     filesystem
         .writeback_ordered_at(
@@ -50,6 +52,7 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
             23,
             crate::Ext4Timestamp::new(131, 0),
             crate::Ext4SyncIntent::FullMetadata,
+            || true,
         )
         .expect("write ordinary inode on huge_file filesystem");
     filesystem

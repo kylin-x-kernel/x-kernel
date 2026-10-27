@@ -128,7 +128,7 @@ fn ext4_failed_readahead_does_not_publish_prefix_and_buffered_retry_is_complete(
 fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     let (mut filesystem, storage) =
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let private = allocate_checkpointed_regular_inode(&mut filesystem);
+    let private = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_test_internal_journal(&mut filesystem, 8081);
     let mut expected = vec![0x41; PAGE_SIZE_4K];
     private.set_size(PAGE_SIZE_4K as u64);
@@ -140,6 +140,7 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
             PAGE_SIZE_4K as u64,
             Ext4Timestamp::new(1234, 0),
             Ext4SyncIntent::DataOnly,
+            || true,
         )
         .unwrap();
     let device = ReadDevice::new(crate::io::test_block_device(storage));
@@ -153,7 +154,7 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     );
     let (_super_block, file) = cached_file(
         filesystem,
-        private,
+        Arc::into_inner(private).expect("test inode Arc is unique"),
         SuperBlockFlags::empty(),
         OpenFlags::READ_WRITE,
     );

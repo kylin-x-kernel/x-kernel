@@ -70,10 +70,14 @@ hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
   capability 拒绝只能发生在 checksum 通过后，并在首次 open 及 recovery reload 发布运行态前执行。
 - block number 和 inode number 必须通过 layout、group、bitmap 和 system-zone 规则校验。
 - JBD2 handle 在 dirty 或 revoke metadata buffer 前必须拥有足够 credits。
-- speculative prealloc space 只存在于内存：不在 block bitmap、group descriptor 或 inode 中打标，
-  因此任何时刻丢弃它都不留下磁盘残留；反之，一条只存在于单侧索引的条目既不提供保护，也不该被
-  当作可用空间——inode 侧逻辑区间与 group 侧孪生条目必须在同一 allocator 临界区内一起增删，
-  `preallocated_blocks` 必须恒等于 group 侧各段长度之和（debug build 每次变更后校验）。
+- A speculative prealloc space exists only in memory: it is not marked in the block bitmap, the group
+  descriptor or the inode, so discarding it at any moment leaves no disk residue; it reaches the bitmap only
+  when consumed, through the normal allocation path, and inside that same critical section both indexes are
+  detached before the consumed span is marked, so no window separates exclusion from the disk mark.
+  Conversely, an entry kept on one side alone protects nothing and must not be treated as available space -
+  the inode-side logical range and the group-side twin entry must be added and removed together inside one
+  allocator critical section, and `preallocated_blocks` must always equal the sum of the group-side span
+  lengths (verified after every change in debug builds).
 - group 侧孪生条目持有 owner inode 的强引用，所以 eviction 必须无条件丢弃该文件的 space；漏丢
   会让条目与其强引用一起活过 inode 对象。
 - mount 生命周期内的 `MountedJournal` 是生产路径唯一 journal identity，同时拥有磁盘 mapping、
@@ -268,7 +272,7 @@ inode-state 使用者构成 ABBA。ENOSPC 重试阀自带 allocator 锁，只能
 | T-18 | 128-byte inode 对外暴露不存在的纳秒精度，或新建 inode 丢失纳秒/扩展 epoch 并在 2038 年后回绕 | 中 | 只在 inode-table encode 时截断、VFS 比较原始高精度时间，或初始化结构只保存 base `u32` 秒 | KExt4 按 inode size 返回共享的 `TimestampLimits`，由唯一 KVFS `SuperBlock` 持有；`VfsInode::current_time()` 在比较、callback 和 publication 前只截断一次；新建 inode 保存完整 `Ext4Timestamp` 并通过 base/extra encoder 写盘，128-byte 格式在边界钳制，256-byte 格式保留纳秒和 epoch；回归测试覆盖两种 inode size 的能力选择、初始化编码和 resident publication |
 | T-19 | 合法 SIPHASH HTree 被误报损坏 | 中 | root `hash_version=6` 进入目录写路径 | 共享 HTree root decoder 只接受磁盘版本 `0/1/2/6`，HTree signedness 来自 mount state；SIPHASH 在需要密钥的 hash 边界返回 `Unsupported`，相关事务不能提交 metadata mutation |
 | T-20 | 未标 signedness 的旧 HTree 镜像跨 Linux 挂载后名称不可见，或 Orlov 目录放置漂移 | 高 | 磁盘两种 signedness flag 都为空时按 signed 计算，或 Orlov 复用 HTree default/unsigned policy | mount state 按 Linux unsigned-char 语义生成 `hash_unsigned`，RW 持久化 unsigned flag、RO 保持磁盘不变；HTree 只经 mount policy hash，Orlov 独立固定 signed HALF_MD4 + seed；高位字节名称回归测试区分 signed/unsigned |
-| T-21 | speculative prealloc space 两侧索引失同步：单侧残留条目保护不到任何块却被当作可用区间，或 group 孪生条目活过其 owner inode | 中 | inode 侧与 group 侧在不同临界区变更，或 close/写回结算/eviction 漏丢一侧 | 两侧只在同一 allocator 临界区内一起增删；`preallocated_blocks` 与 group 侧长度之和守恒并由 debug 断言校验；孪生条目持 owner 强引用，close（无 delalloc reservation 时）、写回结算（reservation 清零后，先以 inode 侧判空跳过空回收）与 eviction（无条件，不以 inode 侧判空早退，以免两侧漂移时漏掉孪生条目）都丢弃；回归测试覆盖 close/evict/shrink 三条回收路径与双索引一致 |
+| T-21 | The two indexes of a speculative prealloc space drift apart: a leftover entry on one side protects no block yet is treated as an available span, or a group twin outlives its owner inode | Medium | The inode side and the group side change in different critical sections, or close / writeback settlement / eviction drops only one side | Both sides change only together inside one allocator critical section; `preallocated_blocks` is conserved against the sum of the group-side span lengths and checked by a debug assertion; each twin holds a strong owner reference; close (when no delalloc reservation remains), writeback settlement (when reservations reach zero and no writable open remains, with an empty reclaim skipped via the inode-side emptiness hint) and eviction (unconditional, never short-circuited on the inode-side hint so a drifted pair cannot leave a twin behind) all discard; regression tests cover the close, evict and shrink reclaim paths and dual-index consistency |
 | T-22 | ENOSPC 重试阀在"聚合非零但选不出块"状态下无界重扫，或用重试掩盖位图损坏 | 中 | free 聚合把未消费 space 计为空闲；损坏组被每轮重扫再次命中 | 搜索次数上界固定为 `PREALLOC_DISCARD_SEARCH_LIMIT`（3 次，discard 只可能出现在第一次之后）；discard 返回 0 立即结束；重试只由健康组的无空间结论触发，几何/描述符预检跳过不置位；扫描中首个 `InvalidBlockBitmap` 被记住并优先于 `NoSpace` 返回，但不封闭健康组的回收重试 |
 
 ## 故障模式与影响分析（FMEA）
@@ -292,7 +296,7 @@ metadata 覆盖 unlink、rmdir、覆盖 rename 和乱序 final eviction；镜像
 | F-09 | eviction 与并发 `iget` 交错 | final teardown 已开始时另一路按相同 inode number 加载 | 调用方可能观察正在释放的 metadata，或建立并行 identity | stale I/O、重复释放或 transient state 串线 | 2 | KVFS cache mutex 下完成 `Live -> Freeing`；lookup/insert 在内部等待，finish 精确移除旧 Weak entry 并唤醒后重试，不向路径操作返回 `EINVAL`/`ESTALE` |
 | F-10 | 存量 inode 的 extra-isize 扩展在每次脏写重复失败 | xattr 布局或 external block 资源持续不满足，但失败结论没有驻留状态 | 每次 ordinary inode dirty 重复 metadata I/O、checksum、解码、排序和布局规划 | 元数据更新吞吐下降，磁盘满场景可能被放大 | 4 | 确定布局不可行时在唯一 resident `Ext4Inode` 状态中设置 `no_expand`；成功删除 xattr 后清除，journal busy/credits 不足保持可重试 |
 | F-11 | statfs 总容量模式选择错误 | context 丢失显式选项、无选项 reconfigure 重置现值，或默认模式成为 minixdf | `f_blocks` 与 Linux ext4 ABI 口径不一致 | 容量监控与应用空间判断错误 | 3 | 新挂载默认 `Bsd`，显式模式保存在唯一 `Ext4SbInfo`；无选项 reconfigure 保留现值；分别验证 minixdf 精确总块数和 bsddf overhead 结果 |
-| F-12 | speculative prealloc space 未随 owner 生命周期回收 | close 被 delalloc reservation 门挡下而 eviction 未兜底，或两侧索引只改了一侧 | 块计入 `preallocated_blocks` 却无归属，组扫描持续排除这些位 | 表现为"统计有空闲但分配失败"，由 ENOSPC 重试阀 discard 兜住；group 孪生条目持强引用，漏丢会拖住已死的 inode | 2 | 两侧在同一 allocator 临界区增删；守恒 debug 断言；eviction 无条件丢弃；重试有界且 discard 返回 0 即停；close/evict/shrink 回归测试断言双索引与计数器归零 |
+| F-12 | A speculative prealloc space is not reclaimed with its owner's lifecycle | Close was gated by a delalloc reservation and eviction did not cover the gap, or only one of the two indexes was changed | Blocks are counted in `preallocated_blocks` without an owner, and the group scan keeps excluding those bits | Shows up as "the free aggregate is nonzero but allocation fails"; the ENOSPC retry valve's discard bounds it, and a group twin holds a strong reference so a missed drop would keep a dead inode alive | 2 | Both sides change inside one allocator critical section; the conservation debug assertion; eviction discards unconditionally; close drops only when no reservation remains, and otherwise writeback settlement (reservations zero and no writable open) or eviction reclaims; a settlement racing the writer-count decrement keeps the spaces for the next settlement or eviction; retries are bounded and stop when discard returns 0; close/evict/shrink/settlement regression tests assert both indexes and the counter return to zero |
 
 ## 故障管理
 
@@ -397,10 +401,11 @@ KExt4 会存储并返回 filesystem data 和 metadata，其中 xattr value 可�
   abort 整个 running transaction，保证正确性但降低该次 mount 的可用性。
 - 当前通用 block 接口仍是逐请求同步完成路径；多请求 in-flight、完成通知和 VirtIO 中断驱动
   等待属于 block/driver 外部依赖，KExt4 只能先减少并聚合请求。
-- speculative prealloc space 目前只接线了回收侧（close/eviction/shrink）、组扫描排除与 ENOSPC
-  重试阀；space 的产出与消费入口尚无生产调用者，需写回 wiring 提交接入。在此之前生产路径不会
-  登记任何 space，分配行为与接入前一致，回收侧代码仅由单元测试驱动；`preallocated_blocks`
-  守恒断言在 debug build 始终生效，因此未来接入 birth/consume 时若两侧失同步会立即暴露。
+- Birth and consume of speculative prealloc spaces are wired into the writeback path: the Hole branch consumes
+  a registered space first and, only on a miss, allocates and registers the surplus inside the same allocator
+  lock section; the reclaim side (close, eviction, shrink, writeback settlement), group-scan exclusion and the
+  ENOSPC retry valve are all live. The `preallocated_blocks` conservation assertion is checked after every
+  change in debug builds, so the two sides desynchronizing is exposed immediately.
 
 ## 审计清单
 

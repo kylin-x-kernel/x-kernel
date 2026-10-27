@@ -4,7 +4,7 @@
 
 //! Component invariants exercised in the kernel with synthetic metadata.
 
-use alloc::vec;
+use alloc::{sync::Arc, vec};
 
 use block::DriverError;
 use unittest::def_test;
@@ -290,8 +290,8 @@ fn failed_handle_reusing_shared_metadata_aborts_mount_journal() {
 #[def_test]
 fn ordered_writeback_batches_and_inodes_share_one_data_barrier() {
     let (mut filesystem, device) = journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-    let first = allocate_checkpointed_regular_inode(&mut filesystem);
-    let second = allocate_checkpointed_regular_inode(&mut filesystem);
+    let first = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    let second = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_credit_limited_journal(&mut filesystem, 720, 341, true);
     drop(filesystem.metadata_journal().unwrap());
     let before = device.flush_count();
@@ -308,6 +308,7 @@ fn ordered_writeback_batches_and_inodes_share_one_data_barrier() {
                     crate::Ext4Timestamp::new(5690, 0),
                     Ext4SyncIntent::FullMetadata,
                     0,
+                    || true,
                 )
                 .unwrap();
         }
@@ -344,7 +345,7 @@ fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
     for fail_data_flush in [true, false] {
         let (mut filesystem, original) =
             journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
-        let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+        let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
         install_credit_limited_journal(&mut filesystem, 721, 341, true);
         drop(filesystem.metadata_journal().unwrap());
         let initial = original.bytes();
@@ -376,6 +377,7 @@ fn ordered_data_barrier_precedes_journal_writes_and_failure_aborts() {
                     crate::Ext4Timestamp::new(5691, 0),
                     Ext4SyncIntent::FullMetadata,
                     0,
+                    || true,
                 )
                 .unwrap();
         }

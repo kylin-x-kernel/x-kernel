@@ -136,7 +136,7 @@ fn space_logical_end(logical_start: u64, phys_len: u32) -> u64 {
 fn insert_into_empty_map() {
     let mut map: BTreeMap<LogicalBlock, PreallocSpace> = BTreeMap::new();
     let space = make_space(10, 100, 5);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(10, 5));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(10, 5), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Inserted));
     assert_eq!(map.len(), 1);
     assert_eq!(map.get(&LogicalBlock::new(10)).unwrap().phys_len, BlockCount::new(5));
@@ -149,7 +149,7 @@ fn rejected_overlapping_predecessor() {
     map.insert(LogicalBlock::new(0), make_space(0, 100, 5));
     // candidate [3, 8) — overlaps because 3 < 5
     let space = make_space(3, 105, 5);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(3, 5));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(3, 5), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Rejected));
     assert_eq!(map.len(), 1); // unchanged
 }
@@ -159,7 +159,7 @@ fn rejected_same_key() {
     let mut map: BTreeMap<LogicalBlock, PreallocSpace> = BTreeMap::new();
     map.insert(LogicalBlock::new(10), make_space(10, 100, 5));
     let space = make_space(10, 200, 5);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(10, 5));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(10, 5), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Rejected));
 }
 
@@ -170,7 +170,7 @@ fn rejected_overlapping_successor() {
     map.insert(LogicalBlock::new(10), make_space(10, 100, 5));
     // candidate [0, 12) — 10 < 12 → successor overlap
     let space = make_space(0, 200, 12);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(0, 12));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(0, 12), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Rejected));
     assert_eq!(map.len(), 1);
 }
@@ -182,7 +182,7 @@ fn rejected_successor_fully_inside_candidate() {
     map.insert(LogicalBlock::new(5), make_space(5, 100, 3));
     // candidate [0, 10) covers the successor entirely
     let space = make_space(0, 200, 10);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(0, 10));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(0, 10), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Rejected));
 }
 
@@ -193,7 +193,7 @@ fn merged_adjacent_same_group_contiguous() {
     map.insert(LogicalBlock::new(0), make_space(0, 100, 5));
     // candidate [5, 8), phys [105, 108) — adjacent both logically and physically
     let space = make_space(5, 105, 3);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(5, 3));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(5, 3), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Merged { .. }));
     // Merged entry: [0, 8), phys [100, 108), len=8
     let merged = map.get(&LogicalBlock::new(0)).unwrap();
@@ -223,7 +223,7 @@ fn no_merge_different_group() {
         phys_start: FilesystemBlock::new(105),
         phys_len: BlockCount::new(3),
     };
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(5, 3));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(5, 3), Some(MAX_PREALLOC_SPACES_PER_INODE));
     // Different groups prevent merge.
     assert!(matches!(outcome, PreallocInsertion::Inserted));
     assert_eq!(map.len(), 2);
@@ -236,7 +236,7 @@ fn no_merge_physical_gap() {
     map.insert(LogicalBlock::new(0), make_space(0, 100, 5));
     // candidate [5, 8), phys [200, 203) — logically adjacent but physical gap
     let space = make_space(5, 200, 3);
-    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(5, 3));
+    let outcome = reserve_in_inode_map(&mut map, space, space_logical_end(5, 3), Some(MAX_PREALLOC_SPACES_PER_INODE));
     assert!(matches!(outcome, PreallocInsertion::Inserted));
     assert_eq!(map.len(), 2);
 }
@@ -254,7 +254,7 @@ fn no_merge_overflow_sum() {
     let outcome = reserve_in_inode_map(
         &mut map,
         space,
-        space_logical_end(u64::from(u32::MAX), u32::MAX),
+        space_logical_end(u64::from(u32::MAX), u32::MAX), Some(MAX_PREALLOC_SPACES_PER_INODE)
     );
     // Should be Inserted, not Merged, because the sum overflows u32.
     assert!(matches!(outcome, PreallocInsertion::Inserted));
@@ -268,18 +268,67 @@ fn insert_multiple_non_overlapping() {
     let b = make_space(10, 200, 5);
     let c = make_space(5, 300, 5); // between a and b, different phys
     assert!(matches!(
-        reserve_in_inode_map(&mut map, a, space_logical_end(0, 5)),
+        reserve_in_inode_map(&mut map, a, space_logical_end(0, 5), Some(MAX_PREALLOC_SPACES_PER_INODE)),
         PreallocInsertion::Inserted
     ));
     assert!(matches!(
-        reserve_in_inode_map(&mut map, b, space_logical_end(10, 5)),
+        reserve_in_inode_map(&mut map, b, space_logical_end(10, 5), Some(MAX_PREALLOC_SPACES_PER_INODE)),
         PreallocInsertion::Inserted
     ));
     assert!(matches!(
-        reserve_in_inode_map(&mut map, c, space_logical_end(5, 5)),
+        reserve_in_inode_map(&mut map, c, space_logical_end(5, 5), Some(MAX_PREALLOC_SPACES_PER_INODE)),
         PreallocInsertion::Inserted
     ));
     assert_eq!(map.len(), 3);
+}
+
+#[def_test]
+fn birth_cap_rejects_new_entries_but_not_restores() {
+    let mut map: BTreeMap<LogicalBlock, PreallocSpace> = BTreeMap::new();
+    for index in 0..MAX_PREALLOC_SPACES_PER_INODE as u64 {
+        let logical = index * 10;
+        let space = make_space(logical, logical, 5);
+        assert!(matches!(
+            reserve_in_inode_map(
+                &mut map,
+                space,
+                space_logical_end(logical, 5),
+                Some(MAX_PREALLOC_SPACES_PER_INODE),
+            ),
+            PreallocInsertion::Inserted
+        ));
+    }
+    assert_eq!(map.len(), MAX_PREALLOC_SPACES_PER_INODE);
+
+    let over_cap = make_space(10_000, 10_000, 5);
+    assert!(matches!(
+        reserve_in_inode_map(
+            &mut map,
+            over_cap,
+            space_logical_end(10_000, 5),
+            Some(MAX_PREALLOC_SPACES_PER_INODE),
+        ),
+        PreallocInsertion::Rejected
+    ));
+    // An adjacent birth still fuses at the cap instead of growing the map.
+    let last = u64::try_from(MAX_PREALLOC_SPACES_PER_INODE - 1).unwrap() * 10;
+    let fused = make_space(last + 5, last + 5, 5);
+    assert!(matches!(
+        reserve_in_inode_map(
+            &mut map,
+            fused,
+            space_logical_end(last + 5, 5),
+            Some(MAX_PREALLOC_SPACES_PER_INODE),
+        ),
+        PreallocInsertion::Merged { .. }
+    ));
+    assert_eq!(map.len(), MAX_PREALLOC_SPACES_PER_INODE);
+    // A restore must always re-insert its vacated span.
+    let restored = make_space(20_000, 20_000, 5);
+    assert!(matches!(
+        reserve_in_inode_map(&mut map, restored, space_logical_end(20_000, 5), None),
+        PreallocInsertion::Inserted
+    ));
 }
 
 // ---- helpers for prealloc lifecycle tests ----
@@ -405,6 +454,22 @@ fn consume_empty_request_returns_none() {
     // Space untouched.
     assert_eq!(prealloc_count(&inode), 1);
     assert_eq!(preallocated_blocks(&filesystem), 4);
+}
+
+#[def_test]
+fn consume_empty_inode_returns_none() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+
+    let journal = JournalTransactions::new(TransactionId::new(200));
+    let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+    let result = filesystem
+        .consume_prealloc_for_write(&inode, LogicalBlock::new(0), 4, &mut handle)
+        .unwrap();
+    drop(handle);
+
+    assert_eq!(result, None);
+    assert_eq!(prealloc_count(&inode), 0);
 }
 
 #[def_test]

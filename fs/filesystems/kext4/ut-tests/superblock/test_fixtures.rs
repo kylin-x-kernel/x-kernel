@@ -1180,7 +1180,7 @@ pub(crate) fn checksummed_orphan_test_filesystem() -> (Ext4SbInfo, Ext4Inode) {
 /// Reopen through the real orphan-file loader after creating its backing inode.
 pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDevice>) {
     let (mut filesystem, device) = recovery_test_filesystem();
-    let inode = allocate_checkpointed_regular_inode(&mut filesystem);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     let mut bytes = vec![0; TEST_BLOCK_SIZE];
     put_u32(&mut bytes, TEST_BLOCK_SIZE - 8, 0x0b10_ca04);
     inode.set_size(TEST_BLOCK_SIZE as u64);
@@ -1192,6 +1192,7 @@ pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDev
             TEST_BLOCK_SIZE as u64,
             crate::Ext4Timestamp::new(127, 0),
             crate::Ext4SyncIntent::FullMetadata,
+            || true,
         )
         .unwrap();
     filesystem.sync_filesystem().unwrap();

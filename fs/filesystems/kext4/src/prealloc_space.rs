@@ -47,8 +47,10 @@
 //! PAs under the allocation's own group lock too), consumed atomically
 //! ([`Ext4SbInfo::consume_prealloc_for_write`]), cut back by shrink truncate
 //! ([`Ext4SbInfo::clip_preallocs_from_logical`]), and dropped at the last
-//! writable close and at eviction ([`Ext4SbInfo::release_preallocs`], the
-//! `ext4_discard_preallocations` sites).
+//! writable close, at writeback settlement when no reservation and no
+//! writable open remains, and at eviction
+//! ([`Ext4SbInfo::release_preallocs`], the `ext4_discard_preallocations`
+//! sites).
 //!
 //! The free aggregate never sees spaces: [`Ext4SbInfo::free_blocks_count`] is
 //! the raw on-disk count, so an unconsumed surplus still reads as free
@@ -63,6 +65,11 @@
 //! the allocator guard and must acquire no further lock. The allocator mutex
 //! stays held across consumption, which closes the window between selecting a
 //! space and marking its bitmap bits.
+//!
+//! Births and consumptions for one inode are serialized by its writeback lock,
+//! so the consume entry's leaf-lock peek can only miss a space that a
+//! concurrent close, eviction or group-driven discard removed; the lookup under
+//! the allocator lock is authoritative.
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 
@@ -84,6 +91,16 @@ use crate::{
 /// requested group. Linux: `++retries < 3` in `ext4_mb_new_blocks`
 /// (fs/ext4/mballoc.c:6337).
 pub(crate) const PREALLOC_DISCARD_SEARCH_LIMIT: u32 = 3;
+
+/// Birth-admission threshold for one inode's prealloc map: a new entry is
+/// rejected once the map already holds this many, so a long-lived sparse writer
+/// cannot keep adding unconsumed entries without limit. This is not a bound on
+/// live entries: consuming an interior span replaces one entry with a head and
+/// a tail that can outlive the threshold, it says nothing about the entries of
+/// other inodes sharing a group, and restores bypass it. Adjacent births fuse,
+/// so an appending writer normally stays at one. Hitting the threshold is an
+/// ordinary "no preallocation this time", never an error.
+const MAX_PREALLOC_SPACES_PER_INODE: usize = 16;
 
 /// Debug-only conservation check: the counter must equal the sum of the
 /// group-index lengths. Every mutation ends with it.
@@ -232,6 +249,42 @@ impl InodePreallocMap {
     pub(crate) fn is_empty(&self) -> bool {
         mutex_lock(&self.map).is_empty()
     }
+
+    /// Returns the group of the space that would serve `logical_start`, taking
+    /// only the leaf lock.
+    ///
+    /// A warm-up hint for the writeback path: the allocator mutex must not
+    /// cover the cold metadata read of the serving group, so consumption
+    /// prefetches it before taking that mutex. Close, eviction or a
+    /// group-driven ENOSPC discard can still remove the space afterwards; the
+    /// authoritative lookup under the allocator lock decides.
+    pub(crate) fn containing_group(&self, logical_start: LogicalBlock) -> Option<BlockGroupNumber> {
+        let map = mutex_lock(&self.map);
+        map.range(..=logical_start)
+            .next_back()
+            .filter(|(_, space)| logical_start.get() < space.logical_end())
+            .map(|(_, space)| space.group)
+    }
+
+    /// Returns how many blocks of a `len`-block request starting at
+    /// `logical_start` a registered space can serve without allocating, taking
+    /// only the leaf lock.
+    ///
+    /// A writeback-admission hint: the served blocks already belong to a space
+    /// and are excluded from the free pool, so they must not be counted as new
+    /// physical demand (the claim is re-validated when consumption takes the
+    /// allocator lock). Close, eviction or a group-driven discard may remove
+    /// the space in between; the normal allocation path then decides.
+    pub(crate) fn servable_prefix(&self, logical_start: LogicalBlock, len: u32) -> u32 {
+        let map = mutex_lock(&self.map);
+        let Some((_, space)) = map.range(..=logical_start).next_back() else {
+            return 0;
+        };
+        if logical_start.get() >= space.logical_end() {
+            return 0;
+        }
+        u32::try_from((space.logical_end() - logical_start.get()).min(u64::from(len))).unwrap_or(0)
+    }
 }
 
 /// The physical range handed to a consuming writeback run. Linux
@@ -275,15 +328,19 @@ enum PreallocInsertion {
 /// - `preallocs`: the owner's logical map, under its map lock.
 /// - `space`: the candidate.
 /// - `logical_end`: the candidate's precomputed logical end.
+/// - `new_entry_cap`: maximum map length at which a *new* entry may be stored;
+///   `None` for a restore, which must re-insert its vacated span.
 ///
 /// Physical overlaps (including cross-file) are checked group-side before
-/// this runs. A *logical* overlap is settled per caller: the sampler treats
-/// [`PreallocInsertion::Rejected`] as an ordinary "no preallocation this
-/// time"; restore treats it as an invariant breach.
+/// this runs. A *logical* overlap, or a new entry at `new_entry_cap`, is
+/// settled per caller: the sampler treats [`PreallocInsertion::Rejected`] as
+/// an ordinary "no preallocation this time"; restore passes `None` and treats
+/// a rejection as an invariant breach.
 fn reserve_in_inode_map(
     preallocs: &mut BTreeMap<LogicalBlock, PreallocSpace>,
     space: PreallocSpace,
     logical_end: u64,
+    new_entry_cap: Option<usize>,
 ) -> PreallocInsertion {
     // Overlap with a successor whose start lies inside the candidate's
     // window must be caught before any merge: merging extends the
@@ -327,6 +384,11 @@ fn reserve_in_inode_map(
                 pred_phys_len: pred.phys_len,
             };
         }
+    }
+    // Fusing does not grow the map; a new entry must respect the birth bound so
+    // a sparse writer cannot grow a group's scan exclusion list without limit.
+    if new_entry_cap.is_some_and(|cap| preallocs.len() >= cap) {
+        return PreallocInsertion::Rejected;
     }
     preallocs.insert(space.logical_start, space);
     PreallocInsertion::Inserted
@@ -509,11 +571,6 @@ impl Ext4SbInfo {
     /// Locking: takes the allocator mutex internally (through the allocation
     /// core); the map leaf lock is taken and released inside the same
     /// section, so the caller needs no lock precondition.
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: the wiring commit calls this birth entry; \
-                  expect is unreliable under --cfg unittest (tests exercise this)"
-    )]
     pub(crate) fn allocate_blocks_for_write_with_prealloc(
         &self,
         request: Ext4AllocationRequest,
@@ -708,9 +765,14 @@ impl Ext4SbInfo {
             phys_start,
             phys_len,
         };
-        let outcome = inode
-            .prealloc_map()
-            .update(|preallocs| reserve_in_inode_map(preallocs, space, logical_end));
+        let outcome = inode.prealloc_map().update(|preallocs| {
+            reserve_in_inode_map(
+                preallocs,
+                space,
+                logical_end,
+                Some(MAX_PREALLOC_SPACES_PER_INODE),
+            )
+        });
         match outcome {
             // Ordinary "no preallocation this time": an earlier run may
             // already cover the logical range. Linux likewise proceeds
@@ -787,13 +849,10 @@ impl Ext4SbInfo {
     /// on both sides): a lost hint, never a lost block. At most one space is
     /// consumed per call, like Linux.
     ///
-    /// Locking: takes the allocator mutex and holds it across the whole
-    /// operation; the map leaf lock is taken and released inside.
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: the wiring commit calls this consume entry; \
-                  expect is unreliable under --cfg unittest (tests exercise this)"
-    )]
+    /// Locking: a leaf-lock peek takes only the leaf lock and returns when no
+    /// space serves the request; otherwise the serving group is warmed outside
+    /// the allocator mutex, which is then taken and held across the whole
+    /// operation, with the map leaf lock taken and released inside.
     pub(crate) fn consume_prealloc_for_write(
         &self,
         inode: &Ext4Inode,
@@ -810,6 +869,19 @@ impl Ext4SbInfo {
         let Some(request_end) = logical_start.get().checked_add(logical_len) else {
             return Ok(None);
         };
+        // Leaf-lock peek: the group that would serve this request, or none. An
+        // absent space cannot be served, so this keeps the common first-write
+        // case off the allocator mutex. The group is learned here, so warm its
+        // metadata before taking that mutex: a cold device read must not
+        // serialize every allocator behind it. The peek is advisory - close,
+        // eviction or a group-driven discard may remove the space - and the
+        // authoritative lookup below re-checks it.
+        let Some(group) = inode.prealloc_map().containing_group(logical_start) else {
+            return Ok(None);
+        };
+        // Warm-up only: the in-lock read is authoritative, so a failure here is
+        // reported by that read instead.
+        let _ = self.prefetch_group_allocation_metadata(group);
         let mut alloc = lock(&self.allocator);
         let taken = inode.prealloc_map().update(|preallocs| {
             // Hit lookup: the space containing the request's first block.
@@ -947,7 +1019,7 @@ impl Ext4SbInfo {
         };
         let outcome = inode
             .prealloc_map()
-            .update(|preallocs| reserve_in_inode_map(preallocs, span, taken.consumed_end));
+            .update(|preallocs| reserve_in_inode_map(preallocs, span, taken.consumed_end, None));
         match outcome {
             // Impossible: the span was vacated moments ago inside this same
             // lock section. Leave the counter decremented so the ledger
@@ -1014,7 +1086,9 @@ impl Ext4SbInfo {
 
     /// Drops every prealloc space of `inode`, handing its blocks back to the
     /// free pool. In-memory only - these blocks were never marked. Called at the
-    /// last writable close and at eviction, so a space never outlives its owner.
+    /// last writable close, at writeback settlement when no reservation and no
+    /// writable open remains, and at eviction, so a space never outlives its
+    /// owner.
     ///
     /// - `inode`: the file whose spaces die; may hold none.
     ///
