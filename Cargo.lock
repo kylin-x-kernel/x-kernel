@@ -2771,6 +2771,7 @@ dependencies = [
  "etherparse",
  "event-listener",
  "hashbrown 0.16.1",
+ "iov_iter",
  "kclass",
  "kcpu_id_map",
  "kcred",

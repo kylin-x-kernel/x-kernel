@@ -228,69 +228,70 @@ impl UnixTransportOps for DgramTransport {
     }
 
     fn recv(&self, mut dst: impl Write + IoBufMut, mut options: RecvOptions) -> KResult<usize> {
-        self.options.recv_poller(self, move || {
-            let mut guard = self.rx.lock();
-            let Some((rx, _)) = guard.as_mut() else {
-                return Err(KError::NotConnected);
-            };
+        self.options
+            .recv_poller_with_nonblocking(self, options.flags.nonblocking(), move || {
+                let mut guard = self.rx.lock();
+                let Some((rx, _)) = guard.as_mut() else {
+                    return Err(KError::NotConnected);
+                };
 
-            let Datagram {
-                data,
-                ancillary,
-                sender,
-                unix_sender_credentials,
-            } = match rx.try_recv() {
-                Ok(packet) => packet,
-                Err(TryRecvError::Empty) => {
-                    return Err(KError::WouldBlock);
-                }
-                Err(TryRecvError::Closed) => {
-                    return Ok(0);
-                }
-            };
-            let count = dst.write(&data)?;
-            if count < data.len() {
-                warn!("UDP message truncated: {} -> {} bytes", data.len(), count);
-            }
-
-            if let Some(from) = options.from.as_mut() {
-                **from = SocketAddrEx::Unix(sender);
-            }
-            match options.ancillary.as_mut() {
-                Some(dst) => {
-                    // Deliver identity before passed files so a short control
-                    // buffer cannot spend the credential space on descriptors.
-                    if self.options.pass_credentials()
-                        && let Some(credentials) = unix_sender_credentials
-                    {
-                        dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
-                            credentials,
-                        )));
+                let Datagram {
+                    data,
+                    ancillary,
+                    sender,
+                    unix_sender_credentials,
+                } = match rx.try_recv() {
+                    Ok(packet) => packet,
+                    Err(TryRecvError::Empty) => {
+                        return Err(KError::WouldBlock);
                     }
-                    dst.extend(ancillary);
+                    Err(TryRecvError::Closed) => {
+                        return Ok(0);
+                    }
+                };
+                let count = dst.write(&data)?;
+                if count < data.len() {
+                    warn!("UDP message truncated: {} -> {} bytes", data.len(), count);
                 }
-                // The receive gave no control buffer: the datagram is consumed
-                // either way, but its control data cannot be delivered. Report
-                // the loss so the caller sets `MSG_CTRUNC`, like Linux
-                // `__scm_recv_common`, which also covers `SO_PASSCRED` sender
-                // credentials and not only passed file descriptions.
-                None => {
-                    let exposes_credentials =
-                        self.options.pass_credentials() && unix_sender_credentials.is_some();
-                    if (!ancillary.is_empty() || exposes_credentials)
-                        && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
-                    {
-                        *discarded = true;
+
+                if let Some(from) = options.from.as_mut() {
+                    **from = SocketAddrEx::Unix(sender);
+                }
+                match options.ancillary.as_mut() {
+                    Some(dst) => {
+                        // Deliver identity before passed files so a short control
+                        // buffer cannot spend the credential space on descriptors.
+                        if self.options.pass_credentials()
+                            && let Some(credentials) = unix_sender_credentials
+                        {
+                            dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
+                                credentials,
+                            )));
+                        }
+                        dst.extend(ancillary);
+                    }
+                    // The receive gave no control buffer: the datagram is consumed
+                    // either way, but its control data cannot be delivered. Report
+                    // the loss so the caller sets `MSG_CTRUNC`, like Linux
+                    // `__scm_recv_common`, which also covers `SO_PASSCRED` sender
+                    // credentials and not only passed file descriptions.
+                    None => {
+                        let exposes_credentials =
+                            self.options.pass_credentials() && unix_sender_credentials.is_some();
+                        if (!ancillary.is_empty() || exposes_credentials)
+                            && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
+                        {
+                            *discarded = true;
+                        }
                     }
                 }
-            }
 
-            Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
-                data.len()
-            } else {
-                count
+                Ok(if options.flags.contains(RecvFlags::TRUNCATE) {
+                    data.len()
+                } else {
+                    count
+                })
             })
-        })
     }
 }
 

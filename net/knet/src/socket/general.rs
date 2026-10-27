@@ -192,15 +192,6 @@ impl GeneralOptions {
         ))?
     }
 
-    /// Poll for receive readiness and run the provided operation.
-    pub(crate) fn recv_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
-        &self,
-        pollable: &P,
-        f: F,
-    ) -> KResult<T> {
-        self.recv_poller_with_nonblocking(pollable, false, f)
-    }
-
     /// Poll for receive readiness and run the operation with a per-call
     /// nonblocking override.
     pub(crate) fn recv_poller_with_nonblocking<P: Pollable, F: FnMut() -> KResult<T>, T>(

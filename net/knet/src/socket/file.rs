@@ -7,10 +7,12 @@
 use alloc::{format, sync::Arc};
 
 use anon_inodefs::AnonInodeFs;
+use iov_iter::{IovIterDest, IovIterSource};
 use kcred::Cred;
 use kerrno::{KError, KResult};
+use kio::{IoBuf, IoBufMut, Read, Write};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
-use kvfs::{FMode, FileOperations, OpenFlags, VfsFile, VfsResult};
+use kvfs::{FMode, FileOperations, Kiocb, OpenFlags, VfsFile, VfsResult};
 
 use crate::{
     RecvFlags, RecvOptions, SendFlags, SendOptions, Socket, SocketOps,
@@ -38,9 +40,69 @@ pub fn sock_from_file(file: &VfsFile) -> KResult<Arc<Socket>> {
 
 struct SocketFileOps;
 
+struct SocketInput<'a, 'b>(&'a mut IovIterSource<'b>);
+
+impl Read for SocketInput<'_, '_> {
+    fn read(&mut self, buf: &mut [u8]) -> KResult<usize> {
+        self.0.copy_from_iter(buf)
+    }
+}
+
+impl IoBuf for SocketInput<'_, '_> {
+    fn remaining(&self) -> usize {
+        self.0.count()
+    }
+}
+
+struct SocketOutput<'a, 'b>(&'a mut IovIterDest<'b>);
+
+impl Write for SocketOutput<'_, '_> {
+    fn write(&mut self, buf: &[u8]) -> KResult<usize> {
+        self.0.copy_to_iter(buf)
+    }
+
+    fn flush(&mut self) -> KResult<()> {
+        Ok(())
+    }
+}
+
+impl IoBufMut for SocketOutput<'_, '_> {
+    fn remaining_mut(&self) -> usize {
+        self.0.count()
+    }
+}
+
 impl SocketFileOps {
     fn socket(file: &VfsFile) -> VfsResult<Arc<Socket>> {
         sock_from_file(file)
+    }
+
+    fn recv(file: &VfsFile, dst: impl Write + IoBufMut) -> VfsResult<usize> {
+        let socket = Self::socket(file)?;
+        let mut options = RecvOptions::default();
+        if file.is_nonblocking() {
+            options.flags |= RecvFlags::DONT_WAIT;
+        }
+        socket.recv(dst, options)
+    }
+
+    fn send(file: &VfsFile, src: impl Read + IoBuf) -> VfsResult<usize> {
+        let socket = Self::socket(file)?;
+        let mut options = SendOptions::default();
+        if file.is_nonblocking() {
+            options.flags |= SendFlags::DONT_WAIT;
+        }
+        match socket.as_ref() {
+            Socket::Netlink(_) => {
+                let cred = kprocess::current_cred();
+                socket.send_with_cred(src, options, &cred)
+            }
+            Socket::Unix(unix) if unix.is_datagram() => {
+                options.unix_sender_credentials = Some(current_sender_credentials());
+                socket.send(src, options)
+            }
+            _ => socket.send(src, options),
+        }
     }
 }
 
@@ -58,33 +120,23 @@ impl FileOperations for SocketFileOps {
     }
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], _offset: u64) -> VfsResult<usize> {
-        let socket = Self::socket(file)?;
-        let mut dst = buf;
-        let mut options = RecvOptions::default();
-        if file.is_nonblocking() {
-            options.flags |= RecvFlags::DONT_WAIT;
-        }
-        socket.recv(&mut dst, options)
+        Self::recv(file, buf)
     }
 
     fn write(&self, file: &VfsFile, buf: &[u8], _offset: u64) -> VfsResult<usize> {
-        let socket = Self::socket(file)?;
-        let src = buf;
-        let mut options = SendOptions::default();
-        if file.is_nonblocking() {
-            options.flags |= SendFlags::DONT_WAIT;
+        Self::send(file, buf)
+    }
+
+    fn read_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterDest<'_>) -> VfsResult<usize> {
+        if iter.count() == 0 {
+            return Ok(0);
         }
-        match socket.as_ref() {
-            Socket::Netlink(_) => {
-                let cred = kprocess::current_cred();
-                socket.send_with_cred(src, options, &cred)
-            }
-            Socket::Unix(unix) if unix.is_datagram() => {
-                options.unix_sender_credentials = Some(current_sender_credentials());
-                socket.send(src, options)
-            }
-            _ => socket.send(src, options),
-        }
+        Self::recv(iocb.file(), SocketOutput(iter))
+    }
+
+    fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
+        // One iterator request is one socket send, including an empty datagram.
+        Self::send(iocb.file(), SocketInput(iter))
     }
 
     fn poll(&self, file: &VfsFile) -> Option<IoEvents> {
@@ -107,6 +159,8 @@ impl FileOperations for SocketFileOps {
         Ok(())
     }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/socket/file/tests.rs");
 
 impl Pollable for Socket {
     fn poll(&self) -> IoEvents {

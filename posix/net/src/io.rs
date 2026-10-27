@@ -398,7 +398,15 @@ fn recv_impl(
 
     if let Some(remote_addr) = remote_addr {
         let mut addrlen_value = output.addrlen.read()?;
-        remote_addr.write_to_user(output.addr, &mut addrlen_value)?;
+        if matches!(
+            remote_addr,
+            SocketAddrEx::Unix(knet::unix::UnixAddr::Unbound)
+        ) {
+            // Unlike getsockname, recvfrom reports no name for an unbound sender.
+            addrlen_value = 0;
+        } else {
+            remote_addr.write_to_user(output.addr, &mut addrlen_value)?;
+        }
         output.addrlen.write(addrlen_value)?;
     }
 

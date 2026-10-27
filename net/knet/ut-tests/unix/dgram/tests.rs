@@ -9,6 +9,26 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::KernelAncillaryData;
 
+#[def_test]
+fn unix_datagram_receive_honors_per_call_nonblocking_after_empty_message() {
+    let (sender, receiver) = DgramTransport::new_pair(7);
+    let mut data = [0; 1];
+    let receive = |data: &mut [u8]| {
+        receiver.recv(
+            data,
+            RecvOptions {
+                flags: RecvFlags::DONT_WAIT,
+                ..RecvOptions::default()
+            },
+        )
+    };
+
+    assert_eq!(receive(&mut data), Err(KError::WouldBlock));
+    assert_eq!(sender.send(&b""[..], SendOptions::default()), Ok(0));
+    assert_eq!(receive(&mut data), Ok(0));
+    assert_eq!(receive(&mut data), Err(KError::WouldBlock));
+}
+
 fn send_credentials(sender: &DgramTransport, credentials: UnixCredentials) {
     sender
         .send(

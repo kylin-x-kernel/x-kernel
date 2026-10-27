@@ -15,7 +15,9 @@ fn test_ioevents_constants() {
 
 #[def_test(serial)]
 fn test_pidfd_poll_becomes_readable_after_exit() {
-    let proc = Process::new_init(9000).fork(9001);
+    // Keep the parent alive even when another test already initialized global init.
+    let parent = Process::new_init(9000);
+    let proc = parent.fork(9001);
     let pidfd = PidFd::new(&proc);
 
     assert!(

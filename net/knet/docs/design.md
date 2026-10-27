@@ -979,6 +979,17 @@ RX, TX, and timers have separate budgets, and each `Service` round has a 1 ms so
 
 TCP sends fill the smoltcp buffer and notify the poller, which advances the protocol and dispatches TX in bounded batches. TCP receives publish `RxWindow` when free buffer space before the read is below the maximum window-scaling quantum; subsequent window growth uses RX and timer processing. TCP and raw sockets register aggregate send wakers with smoltcp. `DataTxQueue` owns bounded data-TX packets and capacity waiters under the Router mutex. `Service` registers send waiters and wakes them after TX releases queue capacity and the Router lock; `NetworkPoller` owns execution scheduling. Separate atomic deadline sources track protocol and deferred-close timers and IPv4 reassembly. Periodic sampling wakes socket waiters and notifies the poller when deadlines expire.
 
+### Socket File I/O
+
+`SocketFileOps` adapts VFS source and destination iterators directly to the
+socket's byte-buffer interfaces. Each file write invokes one socket send,
+including empty datagrams, without splitting a message into generic scalar
+I/O chunks. Each nonempty file read invokes one socket receive. An empty file
+read returns zero without consuming a message. File nonblocking flags become
+per-call send and receive flags, including on Unix datagram receives. POSIX
+receive returns zero address length for an unbound Unix sender, while
+getsockname retains the family-only representation of an unbound socket.
+
 ### Control-Plane State Ownership
 
 The network device registry assigns stable `NetDeviceId` values independently of its storage slots. Device removal preserves surviving interface indices. The current allocator reserves index 1 for loopback and assigns monotonically increasing indices from 2 through `i32::MAX`, returning `ENOSPC` after exhaustion. Removing the loopback entry clears its registration flag so a subsequent loopback registration can use index 1 again.
