@@ -133,6 +133,7 @@ checked through the configured kernel's `make clippy` during this migration.
 | [CG-044-unsafe-precondition-assertions](CG-044-unsafe-precondition-assertions.md) | SHOULD | ai | — |
 | [CG-045-non-time-integer-units](CG-045-non-time-integer-units.md) | SHOULD | ai | — |
 | [CG-046-atomic-ordering-rationale](CG-046-atomic-ordering-rationale.md) | SHOULD | ai | — |
+| [CG-047-kconfig-feature-ownership](CG-047-kconfig-feature-ownership.md) | MUST | ai | — |
 
 ### Candidates not yet ruled
 

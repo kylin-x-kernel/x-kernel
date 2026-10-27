@@ -199,7 +199,6 @@ diff 出现内联汇编、手写底层 CPU 操作或通用数据结构/算法时
 
 - workspace 已声明的依赖是否使用 `.workspace = true`；
 - 可能被多个成员使用的新依赖是否应由 workspace 统一管理；
-- feature 是否在 crate、workspace、Kconfig 和调用点之间正确传递；
 - `cfg` 是否导致未覆盖或语义不一致的构建组合；
 - attribute 是否缩小到必要 item，而不是掩盖整个模块的 warning；
 - 新依赖是否适用于 no_std、目标架构和项目许可要求。

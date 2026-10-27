@@ -14,7 +14,7 @@ checks:
 - **Why**: A misspelled cfg silently excludes intended code.
 - **How to check**:
   1. Run the backend with the configured platform and review each diagnostic.
-  2. Use Kconfig-generated features and declared cfgs. Declare a custom name at its owning configuration boundary, rather than suppressing a typo.
+  2. Check cfg names and feature values against their declarations. Declare a custom name at its owning configuration boundary, rather than suppressing a typo.
 - **Exceptions**: None. Use the syntax in [README.md](README.md#suppressing-a-check).
 - **Counter-example**:
 
