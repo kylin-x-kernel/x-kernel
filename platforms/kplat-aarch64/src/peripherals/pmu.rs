@@ -198,11 +198,25 @@ macro_rules! pmu_if_impl {
                 // compiled NMI source, so the line can later be promoted.
                 #[cfg(feature = "nmi-pmu")]
                 {
-                    kirq::register_nmi(desc, handler)
+                    kirq::register_nmi_startup(desc, handler)
                 }
                 #[cfg(not(feature = "nmi-pmu"))]
                 {
-                    kirq::register(desc, handler)
+                    match kirq::try_register_startup(
+                        desc,
+                        handler,
+                        kirq::IrqRegisterOptions::auto_enable(),
+                    ) {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            log::warn!("PMU registration rejected: desc={desc:?}");
+                            false
+                        }
+                        Err(err) => {
+                            log::warn!("PMU registration failed: desc={desc:?}, error={err:?}");
+                            false
+                        }
+                    }
                 }
             }
 

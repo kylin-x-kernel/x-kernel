@@ -219,7 +219,7 @@ CPU trap entry
 try_map/try_register/try_enable/unregister
     └── IRQ_CONTROL_LOCK
     └── IRQ_STATE
-            ├── virq -> IrqStateDesc
+            ├── virq -> Arc<IrqLine> -> SpinNoIrq<IrqStateDesc>
             └── (domain, hwirq) -> virq
 
 domain::Published<ReverseMap>
@@ -342,7 +342,7 @@ barrier；调用者不应在每个 IPI call site 重复补 fence。
 ```text
 unknown
    -> try_resolve_and_publish(IrqSpec)
-   -> descs[virq] = IrqStateDesc { desc, actions[] }
+   -> descs[virq] = Arc<IrqLine { state: SpinNoIrq<IrqStateDesc> }>
    -> register() installs one regular action
    -> dispatch_actions()
    -> disable_irq_nosync() masks without waiting
@@ -690,10 +690,11 @@ fanout increments the descriptor's unhandled count. `HANDLED` with no source
 bits is still a claim; a claim is not proof that a device deasserted its IRQ.
 
 The count and pending suppressed-report count are saturating `u64`s owned by
-`IrqDescRuntimeState`. Accounting uses the existing `IRQ_STATE` acquisition at
-in-flight guard cleanup, before the descriptor can be removed. CPUs sharing a
-virq, including a per-CPU IRQ descriptor, share this diagnostic count. There is
-no new lock, atomic, allocation, clock read, feature switch, or controller call.
+`IrqDescRuntimeState`. Accounting uses the retained Line's state critical section
+at in-flight guard cleanup, under the outer `IRQ_STATE` lock. CPUs sharing a
+Line, including a per-CPU IRQ descriptor, share this diagnostic count. Accounting
+adds no lock beyond those used by cleanup, nor an atomic, allocation, clock read,
+feature switch or controller call.
 This warning budget remains active without `KFEAT_IRQ_STAT`; it records only
 unclaimed fanout, rather than adding general per-CPU IRQ activity statistics.
 The existing guard and claim completion ordering is retained; an owned summary
@@ -800,6 +801,32 @@ wait therefore asserts that site-specific invariant rather than treating a
 failed wait as successful teardown.
 `Completion` 只作为 wake source；
 真实完成条件始终是 descriptor-local `in_flight == 0`，并在等待返回后重新验证。
+
+Each synchronous operation captures an `IrqDrain` under `IRQ_STATE` at its
+lookup, disable decision or action withdrawal. The directory now owns
+`Arc<IrqLine>` entries. Each Line contains its descriptor/action state behind
+a short IRQ-safe lock, and the drain retains that same Line. Predicate rechecks
+lock the original Line directly: neither a missing directory entry nor a reused
+number implies that the original dispatch is complete. Completion remains only
+a wake mechanism; the retained Line's in-flight count is authoritative.
+
+Dispatch snapshots retain the same Line through their in-flight guard. Guard
+cleanup and teardown finish update that instance directly and only remove a
+directory entry if it still points to the same allocation. Short-lock ordering
+is existing global control lock, registry lock, then Line state lock. Never
+acquire a registry/control lock while holding a Line state lock. Wait and wake
+callbacks run after all these short locks are released.
+
+Each Line also owns management exclusion, acquired before short locks and
+retained across request/free transactions, including dispatch drain. Directory
+removal requires no admitted management transaction as well as zero in-flight
+dispatch. Candidate Line and completion storage is prepared outside
+short locks and retained by its preparer until those locks have been released.
+Global control serialization and the current software-dispatch drain boundary
+remain unchanged; extending drain through controller completion is separate.
+Synchronous disable captures this identity in the same transaction as its
+disable plan; it cannot mask one instance and then synchronize another.
+
 `synchronize_irq()` 不 mask line，持续 IRQ 仍可能让等待条件反复变为非零；teardown
 路径应使用 `disable_irq()` 或 `free_irq()`。
 
@@ -863,13 +890,17 @@ IRQ lifecycle enter；GIC 只在其中用 `generic_handle_nmi()` 替换普通 ac
 
 ## 并发模型
 
-- `IRQ_STATE` 使用 `SpinNoIrq`，因为 descriptor 状态会被普通 IRQ 路径读取和修改。
+- `IRQ_STATE` uses `SpinNoIrq` to protect directory and mapping transactions;
+  the short `IrqLine` lock protects descriptor/action state. Normal IRQ paths
+  access both, always acquiring the directory lock before the Line lock.
 - domain reverse-map snapshot 由控制面在 `IRQ_STATE` 锁内发布；IRQ 数据面只做
   atomic load 和 immutable snapshot lookup。普通 IRQ unregister 不删除 domain
   mapping；MSI resource final free 删除 mapping 后会发布替换 snapshot。
-- normal dispatch 从 `IRQ_STATE` 中复制 action list 后释放锁，避免
-  在执行驱动 handler 时持有全局 IRQ state。resolve 和 descriptor lookup 保持在同一
-  临界区内，避免并发 unregister 造成“已解析但 descriptor 已删除”的中间态。
+- Normal dispatch snapshots the action list, records in-flight dispatch and
+  retains the original Line under `IRQ_STATE -> Line` exclusion. Driver handlers
+  run after both locks are released. Resolution and descriptor lookup share one
+  directory critical section; dispatch cleanup updates the retained Line rather
+  than selecting an instance again by number.
 - `in_flight` 是 descriptor-local 计数，由 dispatch snapshot guard 维护；对应的
   `in_flight_zero` completion 只负责唤醒等待者，不参与 cleanup 判定。最后一个
   guard drop 时在 `IRQ_STATE` 锁内发布 completion done state，锁外执行 wake，保证
@@ -968,9 +999,15 @@ pseudo-NMI 可以打断 normal IRQ critical section；hardware NMI 也会在 nor
 它可能和被打断的 normal IRQ 路径自锁。因此 NMI handler 表独立存储，并以 hwirq 为
 key 直接查找。
 
-同 CPU 上的 NMI 嵌套由机制保证排除：pseudo-NMI 路径保持 PMR 不低于 `NMI_ONLY`，
-hardware NMI 路径保持 `PSTATE.ALLINT` 置位。因此 NMI 表写者（boot-time 或 NMI
-handler 自身）不会与读者并发。
+The NMI mechanism excludes same-CPU nesting: the pseudo-NMI path keeps PMR
+masking at least as restrictive as `NMI_ONLY`, and the hardware NMI path keeps
+`PSTATE.ALLINT` set. This excludes nested readers on the same CPU, but does not
+make management operations safe in NMI context. NMI table writes are limited
+to startup or management contexts where the caller has stopped and drained the
+target source and excluded all local NMI readers of the shared table throughout
+the operation, including across task migration. Stopping only the target source
+does not protect the global table lock. Registration and unregistration from
+NMI handlers are rejected before acquiring any lock.
 
 ### 为什么 normal IRQ claim 使用 `PendingIrq`
 
@@ -992,3 +1029,76 @@ lock-free snapshot 解析，避免每次中断都查询控制面的 mapping tabl
   scheduler wait provider 在 action 摘除前检查可睡眠上下文；通过后使用栈上
   waiter 等待 escaped handler snapshot 退出，不存在摘除后的登记失败分支。
 - `unregister_nmi()` 同时清理 `NMI_TABLE`、fallback action 和 `PER_CPU` 标记。
+  The fallback carries an internal `NMI_FALLBACK` action marker; ordinary
+  `free_irq()` must not withdraw it separately, and NMI cleanup must not remove
+  an unmarked ordinary action. Both removed handler references are released
+  after short locks and platform operations finish. The caller must still stop
+  and drain the NMI source first; this API does not provide NMI drain.
+
+Management map/enable/disable/register/free/synchronize checked entry points
+reject NMI context before ordinary lock acquisition. Their compatibility wrappers
+silently return the failure value in NMI rather than entering a potentially
+locking logger. `descriptor()` is still an ordinary locked query, not an NMI
+observation API. Request/free and NMI-fallback writers share the Line management
+boundary; the existing NMI table and its caller-side quiescence contract remain.
+
+Linux `kernel/irq/manage.c` distinguishes `request_nmi`/`free_nmi`, records NMI
+ownership in descriptor state and requires non-interrupt context for `free_irq`.
+Our fallback action marker is specific to the current two-table representation;
+it is not a claim that Linux has the same fallback or identical misuse handling.
+
+## Line Management Transactions
+
+Each Line embeds a `kmutex::Mutex<()>`, built on `lock_api`. KIRQ holds the
+ordinary RAII guard on the acquiring task's stack across its transaction.
+`kmutex` owns the single sleeping-mutex algorithm also reexported by `ksync`;
+`ktask` provides task identity, yield, wait and optional diagnostic operations.
+There is no IRQ-specific mutex factory or runtime-held transaction callback.
+KIRQ owns transaction policy and context admission. `kiface-task-api` supplies
+sleepability and current-task presence observations; `kiface-task-wait-api`
+supplies completion waiting. Neither owns the IRQ management mutex.
+
+Ordinary acquisition requires sleepable task context. Explicit startup
+try-acquisition requires an installed current task and rejects interrupt/BH/NMI
+context, but permits masked IRQs and the startup idle task. Contention performs
+no transaction. The guard is not Send: migration of its owning task is allowed,
+but transfer to a different task is not.
+The caller must not recursively wait on this mutex or acquire it under short
+IRQ locks; a startup transaction must not sleep.
+
+After acquiring a retained Line's mutex, management rechecks that the
+directory still names that allocation. Registration retries against the current
+Line if its first candidate was retired; removal never redirects an old request
+to a replacement sharing the same number. New Lines acquire management before
+publication. Explicit startup registration performs try-acquisition only:
+contention must not install an action or change hardware/descriptor metadata.
+Identity retries retain the first unpublished candidate instead of allocating
+another Line on every missing-directory observation. A published or retired
+Line is never recycled as that candidate; retry remains progress-dependent.
+
+Boolean NMI registration wrappers report rejected admission and concrete
+registration errors after releasing management locks, except in NMI context,
+where logging itself is unsafe. Startup SGI and PMU callers likewise distinguish
+`Ok(false)` rejection from `Err` diagnostics without changing startup policy.
+
+Admission is recorded under the registry/Line locks so dispatch cleanup and MSI
+cleanup cannot remove a Line while its management transaction is active. Free
+withdraws the action and masks the last action's source under short locks, then
+releases those locks before waiting on the original Line. Management exclusion
+remains held through that wait. Removed handlers and losing candidates retain
+an owner outside the transaction so their final destructors do not run under
+the management mutex or short locks.
+
+After drain, teardown completion, admission release and unused-Line withdrawal
+share one control/registry transaction. Clearing teardown earlier would let a
+legacy force-enable race with later withdrawal. NMI duplicate checking and
+paired table/fallback publication also retain control exclusion throughout,
+including when two descriptors name the same hwirq through different Lines.
+
+Linux `kernel/irq/manage.c` uses `request_mutex` outside descriptor and chip-bus
+locks for request/free serialization, releasing the short locks before
+`__synchronize_irq` while retaining `request_mutex`. The RAII guard expresses
+that ownership directly in Rust. Registry
+BTreeMap/reverse-map snapshot allocation remains legacy behavior for the later
+Domain-directory ticket; this step moves Line-owned preparation, not every
+registry allocation, out of short locks.

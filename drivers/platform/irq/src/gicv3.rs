@@ -40,13 +40,24 @@ pub(super) fn prepare_local_irq_work() -> Option<fn()> {
 
     let desc = super::edge_irq_desc(IRQ_WORK_SGI as usize).with_flags(kirq::IrqFlags::PER_CPU);
     IRQ_WORK_HANDLER_REGISTERED.call_once(|| {
-        kirq::register_disabled(
+        match kirq::try_register_startup(
             desc,
             Arc::new(|_| {
                 kirq::irq_work::handle_irq();
                 kirq::IrqEvent::HANDLED
             }),
-        )
+            kirq::IrqRegisterOptions::disabled(),
+        ) {
+            Ok(true) => true,
+            Ok(false) => {
+                warn!("irq_work registration rejected: desc={desc:?}");
+                false
+            }
+            Err(err) => {
+                warn!("irq_work registration failed: desc={desc:?}, error={err:?}");
+                false
+            }
+        }
     });
     if IRQ_WORK_HANDLER_REGISTERED.get() != Some(&true) {
         warn!("irq_work SGI15 handler registration failed");

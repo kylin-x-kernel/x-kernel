@@ -58,6 +58,7 @@ bitflags! {
         const ONESHOT = 1 << 1;
         const PER_CPU = 1 << 2;
         const NO_THREAD = 1 << 3;
+        const NMI_FALLBACK = 1 << 4;
     }
 }
 
@@ -82,6 +83,17 @@ pub(super) struct IrqAction {
 }
 
 impl IrqAction {
+    /// Builds the normal-dispatch fallback owned by an NMI registration.
+    pub(super) fn nmi_fallback(primary: Handler) -> Self {
+        let mut action = Self::regular(primary);
+        action.flags.insert(IrqActionFlags::NMI_FALLBACK);
+        action
+    }
+
+    pub(super) fn is_nmi_fallback(&self) -> bool {
+        self.flags.contains(IrqActionFlags::NMI_FALLBACK)
+    }
+
     /// Builds the current public single-handler registration as one action.
     pub(super) fn regular(primary: Handler) -> Self {
         Self {

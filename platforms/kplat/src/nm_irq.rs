@@ -23,8 +23,8 @@
 //!             → NmiMode::Pseudo   → gic::set_prio(hwirq, 0)
 //!   pmu feature init (kruntime)
 //!     → khal::pmu::register_overflow_dispatch(hwirq)
-//!       → pmu-only build: kirq::register(...)
-//!       → PMU as NMI source (nmi-pmu): kirq::register_nmi(...)
+//!       → pmu-only build: kirq::try_register_startup(...)
+//!       → PMU as NMI source (nmi-pmu): kirq::register_nmi_startup(...)
 //!         → NMI_TABLE (+ normal-IRQ fallback)
 //! ```
 

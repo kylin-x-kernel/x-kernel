@@ -590,3 +590,25 @@ With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-
 
 DMA mapping attributes no longer pass through a runtime adapter: kiface-mm-api owns
 DmaMappingMode and DmaMappingIf; memspace directly implements the transition.
+
+## IRQ Management Integration
+
+Runtime does not provide an IRQ-specific mutex. KIRQ owns its `kmutex::Mutex`
+and the RAII guard across membership validation, action withdrawal and drain.
+`ktask` supplies the generic mutex's scheduling operations, and `ksync` reexports
+the same implementation. Timer/IPI registration still uses the explicit startup
+entry, rather than inferring startup from masked IRQs.
+
+Generic mutex contention and guard migration tests live beside the scheduler
+provider in `ktask/ut-tests/task_api.rs`. Lifecycle membership, stale-Line
+selection and dispatch drain remain KIRQ responsibilities with separate tests.
+
+`ut-tests/irq_management_lifecycle.rs` combines real task acquisition and drain
+waits with KIRQ's unittest-only retained in-flight fixture. It observes both the
+remover and same-Line requester blocked, verifies another Line can progress,
+then explicitly releases the in-flight operation and checks completion and
+handler destruction. The fixture retains the original Line and balances its
+dispatch accounting without fabricating a controller claim or running a
+sleeping IRQ handler. This is lifecycle integration coverage, not hardware IRQ
+delivery or controller-completion coverage. Handshake stalls are bounded by the
+external QEMU runner; elapsed time does not decide correctness.

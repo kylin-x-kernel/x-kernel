@@ -11,7 +11,7 @@ use alloc::{
 use core::array;
 
 use kcompletion::{Completion, DeferredWake};
-use kspin::{SpinNoIrq, static_lock};
+use kspin::{SpinNoIrq, SpinNoIrqGuard, static_lock};
 
 use super::unhandled::{UnhandledIrqReport, UnhandledIrqState};
 use crate::{
@@ -285,16 +285,38 @@ impl IrqDescRuntimeState {
     }
 
     fn take_regular_action(&mut self) -> Option<IrqAction> {
+        if self.actions[0]
+            .as_ref()
+            .is_some_and(IrqAction::is_nmi_fallback)
+        {
+            return None;
+        }
+        self.take_single_action()
+    }
+
+    fn take_nmi_fallback(&mut self) -> Option<IrqAction> {
+        if !self.actions[0]
+            .as_ref()
+            .is_some_and(IrqAction::is_nmi_fallback)
+        {
+            return None;
+        }
+        self.take_single_action()
+    }
+
+    fn take_single_action(&mut self) -> Option<IrqAction> {
         if self.action_count != 1 {
             return None;
         }
-        if self.actions[0].as_ref().is_some_and(IrqAction::is_shared) {
+        // Shared removal leaves holes; a count of one does not imply slot zero
+        // is occupied. Only regular/NMI installation guarantees that slot.
+        if self.actions[0].as_ref()?.is_shared() {
             return None;
         }
-        let action = self.actions[0].take();
+        let action = self.actions[0].take()?;
         self.action_count = 0;
         self.oneshot_mask_pending = false;
-        action
+        Some(action)
     }
 
     fn install_shared_action(
@@ -421,9 +443,38 @@ impl IrqDescRuntimeState {
     }
 }
 
+/// Retained storage for one original IRQ line's mutable state.
+///
+/// The registry owns an `Arc`; retaining another owner preserves this object
+/// after namespace removal, without redirecting it to a same-number successor.
+/// Construct candidates outside short locks, including their runtime completion
+/// and management mutex. Acquire management exclusion before global state or
+/// Line state locks; the short-lock order remains global state then Line, never
+/// Line then global state. Release the Line guard before registry removal.
+/// Retention alone does not admit an operation: callers must revalidate original
+/// Line membership and pair management admission under global state serialization.
+pub(super) struct IrqLine {
+    pub(super) management: kmutex::Mutex<()>,
+    state: SpinNoIrq<IrqStateDesc>,
+}
+
+impl IrqLine {
+    pub(super) fn new(state: IrqStateDesc) -> Self {
+        Self {
+            management: kmutex::Mutex::new(()),
+            state: SpinNoIrq::new(state),
+        }
+    }
+
+    pub(super) fn lock(&self) -> SpinNoIrqGuard<'_, IrqStateDesc> {
+        self.state.lock()
+    }
+}
+
 pub(super) struct IrqStateDesc {
     pub(super) desc: IrqDesc,
     runtime: IrqDescRuntimeState,
+    is_managed: bool,
 }
 
 impl IrqStateDesc {
@@ -431,6 +482,7 @@ impl IrqStateDesc {
         Self {
             desc,
             runtime: IrqDescRuntimeState::new(desc),
+            is_managed: false,
         }
     }
 
@@ -455,6 +507,10 @@ impl IrqStateDesc {
 
     pub(super) fn take_regular_action(&mut self) -> Option<IrqAction> {
         self.runtime.take_regular_action()
+    }
+
+    pub(super) fn take_nmi_fallback(&mut self) -> Option<IrqAction> {
+        self.runtime.take_nmi_fallback()
     }
 
     pub(super) fn install_shared_action(
@@ -565,7 +621,19 @@ impl IrqStateDesc {
     }
 
     pub(super) fn is_unused(&self) -> bool {
-        self.runtime.is_unused()
+        !self.is_managed && self.runtime.is_unused()
+    }
+
+    /// Pins directory membership for an admitted management transaction.
+    pub(super) fn begin_management(&mut self) {
+        debug_assert!(!self.is_managed, "management admission must be paired");
+        self.is_managed = true;
+    }
+
+    /// Releases admission before testing whether the Line can be removed.
+    pub(super) fn end_management(&mut self) {
+        debug_assert!(self.is_managed, "management completion requires admission");
+        self.is_managed = false;
     }
 
     #[cfg(unittest)]
@@ -613,7 +681,7 @@ pub(super) struct IrqState {
     ///
     /// `virq` is the stable key used by registration, unregister, descriptor
     /// queries, and normal action dispatch.
-    pub(super) descs: BTreeMap<Virq, IrqStateDesc>,
+    pub(super) descs: BTreeMap<Virq, Arc<IrqLine>>,
     /// Per-domain control-plane state.
     ///
     /// Each domain owns its mutable `hwirq -> virq` build table. This is not
@@ -658,13 +726,18 @@ impl IrqState {
         }
     }
 
+    /// Resolves under the registry lock using a fresh candidate if absent.
+    ///
+    /// The caller retains `prepared` until outside short locks. An existing
+    /// entry ignores it; a missing entry requires an unpublished candidate.
     pub(super) fn try_resolve_desc(
         &mut self,
         mut desc: IrqDesc,
+        prepared: Option<&Arc<IrqLine>>,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
         let (virq, mapping_to_insert) = if let Some(virq) = desc.logical_irq() {
             if let Some(existing) = self.descs.get(&virq) {
-                existing.desc.try_merge(desc)?;
+                existing.lock().desc.try_merge(desc)?;
             }
             if let Some(domain) = desc.domain {
                 let existing_virq = self.domain_virq(domain, desc.hwirq);
@@ -699,7 +772,7 @@ impl IrqState {
         };
         desc = desc.with_virq(virq);
         let stored_desc = if let Some(existing) = self.descs.get(&virq) {
-            existing.desc.try_merge(desc)?
+            existing.lock().desc.try_merge(desc)?
         } else {
             desc
         };
@@ -722,10 +795,11 @@ impl IrqState {
                 snapshot_domain_to_publish = Some(domain);
             }
         }
-        self.descs
-            .entry(virq)
-            .and_modify(|state| state.update_desc(stored_desc))
-            .or_insert_with(|| IrqStateDesc::new(stored_desc));
+        if let Some(line) = self.descs.get(&virq) {
+            line.lock().update_desc(stored_desc);
+        } else {
+            self.insert_prepared_line(virq, stored_desc, prepared);
+        }
         Ok(ResolvedIrqDesc::new(
             stored_desc,
             snapshot_domain_to_publish,
@@ -735,12 +809,14 @@ impl IrqState {
     pub(super) fn try_resolve_spec(
         &mut self,
         spec: IrqSpec,
+        prepared: Option<&Arc<IrqLine>>,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
         match spec {
-            IrqSpec::PlainVirq(virq) => {
-                Ok(ResolvedIrqDesc::new(self.resolve_plain_virq(virq), None))
-            }
-            IrqSpec::Desc(desc) => self.try_resolve_desc(desc),
+            IrqSpec::PlainVirq(virq) => Ok(ResolvedIrqDesc::new(
+                self.resolve_plain_virq(virq, prepared),
+                None,
+            )),
+            IrqSpec::Desc(desc) => self.try_resolve_desc(desc, prepared),
         }
     }
 
@@ -770,18 +846,39 @@ impl IrqState {
     }
 
     pub(super) fn stored_desc(&self, virq: Virq) -> Option<IrqDesc> {
-        self.descs.get(&virq).map(|state| state.desc)
+        self.descs.get(&virq).map(|line| line.lock().desc)
     }
 
-    fn resolve_plain_virq(&mut self, virq: Virq) -> IrqDesc {
+    fn resolve_plain_virq(&mut self, virq: Virq, prepared: Option<&Arc<IrqLine>>) -> IrqDesc {
         if let Some(existing) = self.stored_desc(virq) {
             return existing;
         }
         let desc = IrqDesc::from_virq(virq);
-        self.descs
-            .entry(virq)
-            .or_insert_with(|| IrqStateDesc::new(desc));
+        self.insert_prepared_line(virq, desc, prepared);
         desc
+    }
+
+    fn insert_prepared_line(&mut self, virq: Virq, desc: IrqDesc, prepared: Option<&Arc<IrqLine>>) {
+        // Production admission is in manager::try_map,
+        // manager::try_enable_irq_inner (force-enable only), and
+        // manager::with_registration_line_checked. Each rechecks lookup_line
+        // under IRQ_STATE, including the domain-less hwirq fallback, and
+        // supplies a candidate before resolving a missing Line. The registry
+        // stays locked through this insertion, so that check cannot go stale.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: caller rechecked that an existing \
+                      Line or supplied candidate is available under the registry lock"
+        )]
+        let line = prepared.expect("missing Line requires a prepared candidate");
+        {
+            let mut entry = line.lock();
+            // First publication resolves candidate metadata without changing its
+            // initial generation or replacing preallocated runtime storage.
+            entry.desc = desc;
+            entry.runtime.remember_desc(desc);
+        }
+        self.descs.insert(virq, line.clone());
     }
 
     fn domain_virq(&self, domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
@@ -815,14 +912,16 @@ impl IrqState {
     }
 
     fn remove_if_unused_inner(&mut self, virq: Virq, remove_msi: bool) -> Option<IrqDesc> {
-        let entry = self.descs.get(&virq)?;
-        if entry.desc.flags.contains(IrqFlags::MSI) && !remove_msi {
-            return None;
-        }
-        if !entry.is_unused() {
-            return None;
-        }
-        let desc = entry.desc;
+        let desc = {
+            let entry = self.descs.get(&virq)?.lock();
+            if entry.desc.flags.contains(IrqFlags::MSI) && !remove_msi {
+                return None;
+            }
+            if !entry.is_unused() {
+                return None;
+            }
+            entry.desc
+        };
         if remove_msi
             && let Some(domain) = desc.domain
             && let Some(domain_state) = self.domain_states.get_mut(&domain)
@@ -844,11 +943,11 @@ impl IrqState {
 
     #[cfg(any(target_arch = "x86_64", unittest))]
     pub(super) fn remove_msi_if_unused(&mut self, virq: Virq) -> Option<Hwirq> {
-        let entry = self.descs.get(&virq)?;
-        if !entry.desc.flags.contains(IrqFlags::MSI) {
+        let stored_desc = self.stored_desc(virq)?;
+        if !stored_desc.flags.contains(IrqFlags::MSI) {
             return None;
         }
-        let domain = entry.desc.domain;
+        let domain = stored_desc.domain;
         let desc = self.remove_if_unused_inner(virq, true)?;
         if let Some(domain) = domain {
             let published =
@@ -865,18 +964,23 @@ impl IrqState {
 
     #[cfg(target_arch = "x86_64")]
     pub(super) fn is_unused(&self, virq: Virq) -> bool {
-        self.descs.get(&virq).is_some_and(IrqStateDesc::is_unused)
+        self.descs
+            .get(&virq)
+            .is_some_and(|line| line.lock().is_unused())
     }
 
     #[cfg(target_arch = "x86_64")]
     pub(super) fn is_msi(&self, virq: Virq) -> bool {
-        self.descs.get(&virq).is_some_and(IrqStateDesc::is_msi)
+        self.descs
+            .get(&virq)
+            .is_some_and(|line| line.lock().is_msi())
     }
 }
 
 pub(super) fn try_resolve_and_publish(
     state: &mut IrqState,
     spec: IrqSpec,
+    prepared: Option<&Arc<IrqLine>>,
 ) -> Result<IrqDesc, IrqDescError> {
     let domain_id = match spec {
         IrqSpec::PlainVirq(_) => None,
@@ -887,7 +991,7 @@ pub(super) fn try_resolve_and_publish(
     {
         return Err(IrqDescError::UnknownDomain { domain: domain_id });
     }
-    let resolved = state.try_resolve_spec(spec)?;
+    let resolved = state.try_resolve_spec(spec, prepared)?;
     if let Some(domain_id) = resolved.snapshot_domain_to_publish() {
         let published =
             crate::domain::publish_snapshot(domain_id, state.domain_mapping_entries(domain_id));
@@ -920,3 +1024,5 @@ pub(crate) fn free_msi_if_unused(
 
     state.remove_msi_if_unused(virq).is_some()
 }
+
+unittest::path_mod_test!(tests_line_admission, "../../ut-tests/line_admission.rs");

@@ -19,6 +19,7 @@ kiface-irq-context-api.workspace = true
 kcompletion.workspace = true
 kiface-task-api.workspace = true
 kiface-task-wait-api.workspace = true
+kmutex.workspace = true
 bitflags = { workspace = true }
 karch = { workspace = true }
 kbuild_config = { workspace = true }

@@ -45,6 +45,10 @@ fn owner_key_for_task(task: &crate::TaskInner) -> NonZeroU64 {
 
 #[kiface::provide]
 impl kiface_task_api::TaskExecutionIf {
+    fn has_current_task() -> bool {
+        crate::current_may_uninit().is_some()
+    }
+
     fn current_owner_key() -> NonZeroU64 {
         owner_key_for_task(&crate::current())
     }

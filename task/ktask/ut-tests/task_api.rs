@@ -16,6 +16,15 @@ use super::Mutex;
 use unittest::{assert, assert_eq, assert_ne, def_test};
 
 #[def_test]
+fn current_task_presence_query_preserves_irq_exclusion() {
+    let _irq = kspin::IrqSave::new();
+    let is_present = kiface_task_api::TaskExecutionIf::has_current_task();
+    let is_irq_masked = !karch::local_irq_enabled();
+    assert!(is_present);
+    assert!(is_irq_masked);
+}
+
+#[def_test]
 fn completion_provider_blocks_until_completion() {
     let completion = Arc::new(Completion::new());
     let finished = Arc::new(AtomicBool::new(false));

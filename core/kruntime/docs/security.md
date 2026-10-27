@@ -375,3 +375,10 @@ With `arm-timer-resume-fixup`, the timer IRQ handler dispatches pending counter-
 
 DMA mapping attributes no longer pass through a runtime adapter: kiface-mm-api owns
 DmaMappingMode and DmaMappingIf; memspace directly implements the transition.
+## IRQ Management Exclusion
+
+Runtime no longer implements an IRQ management-lock adapter. KIRQ checks context
+and holds a `kmutex` guard directly; `ktask` supplies the shared mutex's scheduling
+operations. The runtime lifecycle test validates actual task waits with a
+test-owned in-flight operation, without enabling a hardware source or pretending
+to exercise controller completion. Startup ordering remains runtime's duty.

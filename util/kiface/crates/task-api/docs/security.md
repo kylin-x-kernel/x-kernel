@@ -9,6 +9,11 @@ Blocking-context queries require initialized CPU context outside NMI, preserve
 exclusion and pending work, and return false without a usable current task.
 They are snapshots, not permits to block after changing execution context.
 
+`TaskExecutionIf::has_current_task` may observe absence after CPU-local storage
+initialization, outside interrupt/NMI contexts. It permits masked IRQs and
+preemption exclusion, does not schedule, and treats idle as present. Consumers
+must not use presence as a substitute for blocking-context validation.
+
 Preemption credits must balance on the same task and must not cross initial
 current-task installation. The provider must not schedule on acquisition or
 unchecked release. Checked release may schedule only when surrounding context

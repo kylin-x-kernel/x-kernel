@@ -298,14 +298,42 @@ mapping；最终清理由 `free_msix()` 在确认 handler state 已撤销后完�
 
 `NMI_TABLE` 使用 `SpinRaw`。这依赖以下约束：
 
-- 常规写入发生在 boot-time 或 NMI handler 自身；
-- normal IRQ 和进程上下文不读写 NMI 表；
+- Writes occur at boot time or in management contexts where the caller has
+  stopped and drained the target source and excluded all local NMI readers of
+  the shared table throughout the operation, including across task migration.
+  Stopping only the target source does not prevent other NMI sources from
+  preempting the table lock holder.
+- Registration and unregistration from NMI handlers are rejected before lock
+  acquisition; normal IRQ handlers must not modify the table.
+- Sleepable task context alone does not establish NMI exclusion. Runtime
+  writers need globally stopped NMI delivery or a caller-owned exclusion
+  mechanism valid across migration. The management mutex is acquired before
+  the table lock; control/registry/Line short guards exclude preemption while
+  the writer holds the table lock, and no wait occurs under that lock.
 - pseudo-NMI 不会在同一 CPU 上嵌套打断另一个 pseudo-NMI handler（PMR 保持 `NMI_ONLY`）；
 - hardware NMI 不会在同一 CPU 上嵌套另一个 NMI（NMI path 保持 `PSTATE.ALLINT`
   置位；normal IRQ path 只在打开 ALLINT 窗口时允许 Superpriority NMI 抢占，且
   normal IRQ handler 从不访问 NMI 表）；
 - 运行时降级（`NmiMode::None`）时，NMI 条目对应的 regular fallback action 走
   normal IRQ dispatch，`SpinRaw` 约束退化为普通 IRQ action 约束。
+
+Fallback actions carry a private ownership marker distinct from resource-level
+`PER_CPU`. Ordinary free cannot withdraw one while leaving the NMI table owner
+installed; NMI cleanup cannot withdraw an ordinary action. Removed table and
+fallback references outlive state/table locks and platform updates, so final
+client destruction is outside those locks. The existing NMI removal API still
+requires source quiescence and does not wait for in-flight NMI callbacks.
+
+Shared action removal may leave empty slots before the surviving action.
+Tokenless removal requires an occupied, non-shared slot zero before changing
+the action count or oneshot state. A rejected removal must preserve the shared
+owner, its token, dispatch eligibility and the Line's enabled state.
+
+NMI rejection in checked normal management APIs happens before any ordinary
+IRQ lock. Compatibility wrappers do not log this rejection in NMI. This does
+not make arbitrary handler destructors NMI-safe: passing ownership into an
+invalid-context call can still drop the rejected input on the caller's stack.
+The caller remains responsible for the destruction context of its inputs.
 
 ### Lifecycle hooks
 
@@ -509,6 +537,13 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   等待 `in_flight` 归零；completion 只是 wake source，等待返回后仍必须重查
   descriptor predicate。后续 IRQ thread / workerqueue 引入后可以复用同一等待边界，
   但上下文禁止规则保持不变。
+- Synchronous waits and dispatch guards retain the original `Arc<IrqLine>` and
+  update only its locked state. Number reuse or directory withdrawal cannot
+  redirect them to a replacement. Cleanup compares Line identity before removing
+  a directory entry. Production removal still requires zero in-flight dispatch;
+  retaining storage neither grants management admission nor establishes hardware
+  quiescence. Lock ordering is control, registry, Line; wait/wake callbacks must
+  run outside all three short locks.
 - `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
   delayed-work product API and timer adapter have been removed. Automatic delayed
   retry, full Linux concurrent-flusher handoff, CPU hotplug drain and rescuer
@@ -542,3 +577,22 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   hardirq-exit handoff 进入；独立 irq_work 则必须由普通 IRQ 分发，不能在 NMI exit 消费。
 - deferred executor 是否在 completion 之后、lifecycle exit 之前运行。
 - deferred executor 是否仍保持单 owner 且不引入 `ktask`/`kprocess` 依赖。
+## Management Mutex Contract
+
+The management guard is held directly by KIRQ and is not Send; it must not
+be unlocked by a different task. NMI is rejected before ordinary task-context
+queries; waiting acquisition rejects every context rejected by the scheduler's
+sleepability predicate. Startup try-acquisition never parks, including when
+running on the initialized idle task. It is not permission to sleep inside a
+masked or otherwise non-sleepable transaction. Preparing a Line must happen
+outside short locks, and an unlocked mutex's final destruction must not wait.
+
+These checks do not validate IRQ directory membership, hardware quiescence or
+application dependency cycles. KIRQ revalidates retained Line identity after
+acquisition and records admission before releasing the registry lock; unused
+cleanup excludes admitted Lines. A stale remover cannot touch a replacement.
+Registration may retry, but only after releasing the old mutex. Waiting for
+dispatch holds management exclusion, not control/registry/Line spinlocks.
+Caller-owned handler dependencies must not require the same management mutex
+while a removal waits for that handler; serialization cannot resolve such a
+dependency cycle.

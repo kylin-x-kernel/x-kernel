@@ -120,7 +120,8 @@ remains a separate timer-driver operation.
 GICv3 reserves ordinary Group 1 SGI15 for irq_work. Preparation rejects an
 out-of-range SGI, a conflict with `IPI_IRQ`, or MPIDR Aff0 >= 16 (the sender
 does not implement the optional range selector). A global `LazyInit<bool>`
-serializes one `register_disabled` call; the permanent handler invokes
+serializes one `kirq::try_register_startup` call with
+`kirq::IrqRegisterOptions::disabled()`; the permanent handler invokes
 `kirq::irq_work::handle_irq`. Registration and enablement share a descriptor
 marked `IrqFlags::PER_CPU`, identifying the SGI's CPU-local hardware state.
 Registration failure is retained and yields

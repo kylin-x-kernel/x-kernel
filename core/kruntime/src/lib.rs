@@ -70,6 +70,10 @@ pub fn run_boot_benchmarks() {
 unittest::path_mod_test!(tests_workqueue, "../ut-tests/tests_workqueue/mod.rs");
 unittest::path_mod_test!(tests_irq_startup, "../ut-tests/irq_startup.rs");
 unittest::path_mod_test!(page_metadata_tests, "../ut-tests/page_metadata.rs");
+unittest::path_mod_test!(
+    tests_irq_management_lifecycle,
+    "../ut-tests/irq_management_lifecycle.rs"
+);
 
 #[macro_use]
 extern crate klogger;
@@ -811,7 +815,7 @@ fn init_interrupt() {
     // bookkeeping, soft-timer wheel drain, and hardware re-arm — lives in
     // `ktask::on_timer_fire`.
     let timer_irq = khal::time::interrupt_id();
-    let timer_registration = kirq::try_register(
+    let timer_registration = kirq::try_register_startup(
         timer_irq,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
@@ -819,6 +823,7 @@ fn init_interrupt() {
             ktask::on_timer_fire();
             kirq::IrqEvent::HANDLED
         }),
+        kirq::IrqRegisterOptions::auto_enable(),
     );
     #[expect(
         clippy::panic,
@@ -830,7 +835,7 @@ fn init_interrupt() {
     }
 
     #[cfg(feature = "ipi")]
-    let ipi_registration = kirq::try_register(
+    let ipi_registration = kirq::try_register_startup(
         kbuild_config::IPI_IRQ,
         alloc::sync::Arc::new(|_| {
             #[cfg(feature = "arm-timer-resume-fixup")]
@@ -839,6 +844,7 @@ fn init_interrupt() {
             kipi::ipi_handler();
             kirq::IrqEvent::HANDLED
         }),
+        kirq::IrqRegisterOptions::auto_enable(),
     );
     #[cfg(feature = "ipi")]
     #[expect(

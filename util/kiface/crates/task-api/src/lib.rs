@@ -81,13 +81,21 @@ pub trait TaskPreemptionIf {
 
 /// Task identity and synchronous scheduling services.
 ///
-/// Calls require an installed current task and are not interrupt/NMI services.
+/// Except for the presence query, calls require an installed current task.
+/// These operations are not interrupt/NMI services.
 /// Identity queries may run with IRQs masked or preemption disabled; yielding
 /// and waiting require sleepable task context, without spinlocks, IRQ masking,
 /// preemption protection, or other scopes that prohibit scheduling.
 /// Callers establish these conditions; the interface does not validate them.
 #[kiface::interface]
 pub trait TaskExecutionIf {
+    /// Reports whether a current task is installed, including the startup idle task.
+    ///
+    /// Requires initialized CPU-local storage and non-interrupt execution.
+    /// May run with IRQs masked or preemption disabled. Does not schedule,
+    /// allocate, or acquire a task reference; absence is reported as false.
+    fn has_current_task() -> bool;
+
     /// Returns the current task's nonzero, stable, unique ownership key.
     ///
     /// Keys must survive yielding, waiting and CPU migration, must not be shared

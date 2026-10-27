@@ -11,11 +11,16 @@ level completion waiting lives in sibling kiface-task-wait-api: kcompletion depe
 kspin, which consumes this lower-level crate. RCU-specific admission remains RCU
 policy, not part of the scheduler's general blocking-context query.
 
-`TaskExecutionIf` supplies a nonzero stable owner key, voluntary yielding and
+`TaskExecutionIf` supplies current-task presence, a nonzero stable owner key, voluntary yielding and
 synchronous execution of a borrowed pinned future. Identity queries do not
 schedule. Yield and wait require sleepable current-task context. Waiting does
 not transfer ownership of the future or require it to be Send; the provider
 must complete it on the calling task before returning.
+
+KIRQ uses `has_current_task` before startup try-lock acquisition. The ktask
+provider reports presence including idle, without scheduling; KIRQ separately
+rejects interrupt/BH/NMI contexts and owns startup authorization. Presence does
+not imply sleepability or grant permission to block.
 
 `TaskLockDiagnosticsIf` supplies acquired, waiting and released hooks for the
 current task. The provider owns time and diagnostic storage, not exclusion or

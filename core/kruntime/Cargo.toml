@@ -14,7 +14,8 @@ description = "Runtime library of X-kernel"
 # Used by cfg(unittest) probes in ut-tests/tests_workqueue/{deferred,irq_work}.rs.
 # krcu-core and capability APIs supply observations for cfg(unittest) RCU
 # integration fixtures; kmutex supplies their independent serialization lock.
-ignored = ["kfinalize", "irq_driver", "of", "krcu-core", "kiface-cpu-api", "kiface-irq-context-api", "kmutex", "kiface-time-api", "kiface-task-api"]
+# kcompletion and kiface-task-wait-api supply IRQ lifecycle test handshakes.
+ignored = ["kfinalize", "irq_driver", "of", "krcu-core", "kiface-cpu-api", "kiface-irq-context-api", "kmutex", "kiface-time-api", "kiface-task-api", "kcompletion", "kiface-task-wait-api"]
 
 [features]
 default = []
@@ -58,6 +59,8 @@ nmi = []
 kiface-task-api.workspace = true
 kiface-time-api.workspace = true
 kmutex.workspace = true
+kcompletion.workspace = true
+kiface-task-wait-api.workspace = true
 kiface-irq-context-api.workspace = true
 kiface-cpu-api.workspace = true
 kiface-logging-api.workspace = true

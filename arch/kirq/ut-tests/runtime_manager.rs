@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use kcompletion::SyncWake;
 use unittest::def_test;
@@ -27,7 +27,7 @@ use crate::{
         raise_softirq, run_pending_softirqs, softirq_diagnostics,
         test_support::ScopedSoftirqAction,
     },
-    state::MAX_IRQ_ACTIONS,
+    state::{IrqLine, MAX_IRQ_ACTIONS},
 };
 
 #[expect(
@@ -61,6 +61,11 @@ static IRQ_IN_FLIGHT_OBSERVED: AtomicUsize = AtomicUsize::new(0);
 static IRQ_WAIT_TEST_TARGET: AtomicUsize = AtomicUsize::new(0);
 static IRQ_WAIT_TEST_OBSERVED: AtomicUsize = AtomicUsize::new(0);
 static IRQ_WAIT_TEST_RELEASES: AtomicUsize = AtomicUsize::new(0);
+static IRQ_MANAGEMENT_HELD: AtomicBool = AtomicBool::new(false);
+static IRQ_MANAGEMENT_SAME_REJECTED: AtomicBool = AtomicBool::new(false);
+static IRQ_MANAGEMENT_OTHER_REGISTERED: AtomicBool = AtomicBool::new(false);
+static IRQ_MANAGEMENT_METADATA_UNCHANGED: AtomicBool = AtomicBool::new(false);
+static IRQ_MANAGEMENT_REMOVAL_REJECTED: AtomicBool = AtomicBool::new(false);
 
 const IRQ_TAIL_TEST_VECTOR: usize = 0xdead;
 const IRQ_TAIL_TEST_VIRQ: usize = 0x2f02;
@@ -73,6 +78,65 @@ const IRQ_LIFECYCLE_TEST_VIRQ: usize = 0x5f11;
 const IRQ_IN_FLIGHT_TEST_VIRQ: usize = 0x5f21;
 const MSI_TEST_HWIRQ_BASE: usize = 0x30_000;
 const MSI_TEST_VIRQ_BASE: usize = 0x40_000;
+const IRQ_MANAGEMENT_TEST_VIRQ: usize = 0x3153;
+const IRQ_MANAGEMENT_OTHER_VIRQ: usize = 0x3154;
+const IRQ_MANAGEMENT_TEST_HWIRQ: usize = 0x4353;
+
+/// One synthetic in-flight operation on a retained, disabled test Line.
+///
+/// This unittest-only capability exercises drain accounting, not IRQ delivery.
+/// It creates no controller claim, invokes no handler and changes no hardware.
+/// Dropping it finishes exactly its own operation and wakes drain waiters after
+/// releasing state locks. Keep it alive only across test-controlled handshakes.
+pub struct RetainedInFlight {
+    virq: usize,
+    line: Arc<IrqLine>,
+}
+
+impl RetainedInFlight {
+    /// Begins accounting on an existing test-owned disabled Line with an action.
+    ///
+    /// Returns `None` for absent, enabled, empty or already tearing-down Lines.
+    /// Call after disabled registration; never use this fixture on a live source.
+    pub fn begin(virq: usize) -> Option<Self> {
+        let state = IRQ_STATE.lock();
+        let line = state.descs.get(&virq)?;
+        let mut entry = line.lock();
+        if entry.is_enabled_for_tests() || !entry.has_actions() || entry.is_teardown_in_progress() {
+            return None;
+        }
+        entry.begin_dispatch();
+        Some(Self {
+            virq,
+            line: line.clone(),
+        })
+    }
+
+    /// Observes teardown on the original Line, never a reused IRQ number.
+    pub fn is_teardown_in_progress(&self) -> bool {
+        self.line.lock().is_teardown_in_progress()
+    }
+}
+
+impl Drop for RetainedInFlight {
+    fn drop(&mut self) {
+        let wake = {
+            let mut state = IRQ_STATE.lock();
+            let wake = self.line.lock().finish_dispatch();
+            if state
+                .descs
+                .get(&self.virq)
+                .is_some_and(|line| Arc::ptr_eq(line, &self.line))
+            {
+                state.remove_if_unused(self.virq);
+            }
+            wake
+        };
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+    }
+}
 
 fn test_handler(_irq: usize) -> IrqEvent {
     REGULAR_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -104,7 +168,7 @@ fn test_in_flight_handler(_irq: usize) -> IrqEvent {
         .lock()
         .descs
         .get(&IRQ_IN_FLIGHT_TEST_VIRQ)
-        .map_or(0, IrqStateDesc::in_flight_for_tests);
+        .map_or(0, |line| line.lock().in_flight_for_tests());
     IRQ_IN_FLIGHT_OBSERVED.store(in_flight, Ordering::Relaxed);
     IrqEvent::HANDLED
 }
@@ -131,7 +195,7 @@ fn test_release_in_flight_on_wait(virq: usize, in_flight: usize) {
             .lock()
             .descs
             .get_mut(&virq)
-            .and_then(IrqStateDesc::finish_dispatch);
+            .and_then(|line| line.lock().finish_dispatch());
         if let Some(wait_set) = wait_set {
             wait_set.wake();
         }
@@ -231,6 +295,10 @@ fn unused_msi_test_hwirq_except(
 
 #[def_test(serial)]
 fn test_simulated_irq_tail_dispatches_regular_handler() {
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(IRQ_SIMULATED_TEST_VIRQ),
+        Some(IrqAction::regular(Arc::new(test_handler))),
+    )));
     let _executor = crate::deferred::ScopedDeferredExecutor::clear();
     let _irq_guard = kspin::NoPreemptIrqSave::new();
     REGULAR_CALLS.store(0, Ordering::Relaxed);
@@ -238,13 +306,7 @@ fn test_simulated_irq_tail_dispatches_regular_handler() {
 
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            IRQ_SIMULATED_TEST_VIRQ,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(IRQ_SIMULATED_TEST_VIRQ),
-                Some(IrqAction::regular(Arc::new(test_handler))),
-            ),
-        );
+        state.descs.insert(IRQ_SIMULATED_TEST_VIRQ, line.clone());
     }
 
     let pending = PendingIrq::new(
@@ -298,12 +360,12 @@ fn test_try_map_rolls_back_domain_mapping_on_desc_conflict() {
     let domain = GIC_ROOT_DOMAIN;
     let hwirq = 0x2f21;
     let virq = 0x2f22;
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(
+        IrqDesc::new(0x2f23, IrqTrigger::EdgeRising).with_virq(virq),
+    )));
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            virq,
-            IrqStateDesc::new(IrqDesc::new(0x2f23, IrqTrigger::EdgeRising).with_virq(virq)),
-        );
+        state.descs.insert(virq, line.clone());
     }
 
     let conflict = IrqDesc::new(hwirq, IrqTrigger::EdgeRising)
@@ -447,6 +509,10 @@ fn test_teardown_disable_plan_ignores_existing_teardown_waiter() {
 
 #[def_test(serial)]
 fn test_irq_lifecycle_hooks_fire_around_normal_irq_handler() {
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(IRQ_LIFECYCLE_TEST_VIRQ),
+        Some(IrqAction::regular(Arc::new(test_handler))),
+    )));
     let _executor = crate::deferred::ScopedDeferredExecutor::clear();
     let _test_guard = IRQ_LIFECYCLE_TEST_LOCK.lock();
     let _irq_guard = kspin::NoPreemptIrqSave::new();
@@ -457,13 +523,7 @@ fn test_irq_lifecycle_hooks_fire_around_normal_irq_handler() {
     let exit_before = IRQ_EXIT_CALLS.load(Ordering::Relaxed);
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            IRQ_LIFECYCLE_TEST_VIRQ,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(IRQ_LIFECYCLE_TEST_VIRQ),
-                Some(IrqAction::regular(Arc::new(test_handler))),
-            ),
-        );
+        state.descs.insert(IRQ_LIFECYCLE_TEST_VIRQ, line.clone());
     }
 
     assert!(register_irq_lifecycle_hooks(IrqLifecycleHooks {
@@ -514,6 +574,10 @@ fn test_irq_lifecycle_guard_uses_exit_snapshot() {
 
 #[def_test(serial)]
 fn test_claimed_irq_tail_orders_completion_deferred_and_lifecycle_exit() {
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(IRQ_TAIL_TEST_VIRQ),
+        Some(IrqAction::regular(Arc::new(test_irq_tail_handler))),
+    )));
     let _executor = crate::deferred::ScopedDeferredExecutor::clear();
     let _test_guard = IRQ_LIFECYCLE_TEST_LOCK.lock();
     let _irq_guard = kspin::NoPreemptIrqSave::new();
@@ -530,13 +594,7 @@ fn test_claimed_irq_tail_orders_completion_deferred_and_lifecycle_exit() {
     clear_irq_lifecycle_hooks();
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            IRQ_TAIL_TEST_VIRQ,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(IRQ_TAIL_TEST_VIRQ),
-                Some(IrqAction::regular(Arc::new(test_irq_tail_handler))),
-            ),
-        );
+        state.descs.insert(IRQ_TAIL_TEST_VIRQ, line.clone());
     }
     assert!(crate::deferred::register_deferred_executor(
         crate::deferred::DeferredExecutorHooks {
@@ -634,6 +692,12 @@ fn test_irq_on_empty_result_runs_common_deferred_tail() {
 
 #[def_test(serial)]
 fn test_softirq_runs_from_claimed_irq_tail_after_hardirq_exit() {
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(IRQ_TAIL_SOFTIRQ_VIRQ),
+        Some(IrqAction::regular(Arc::new(
+            test_irq_tail_raise_softirq_handler,
+        ))),
+    )));
     let _executor = crate::deferred::ScopedDeferredExecutor::clear();
     let _test_guard = IRQ_LIFECYCLE_TEST_LOCK.lock();
     let _irq_guard = kspin::NoPreemptIrqSave::new();
@@ -651,15 +715,7 @@ fn test_softirq_runs_from_claimed_irq_tail_after_hardirq_exit() {
         ScopedSoftirqAction::install(SoftirqVec::High, test_irq_tail_softirq_action);
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            IRQ_TAIL_SOFTIRQ_VIRQ,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(IRQ_TAIL_SOFTIRQ_VIRQ),
-                Some(IrqAction::regular(Arc::new(
-                    test_irq_tail_raise_softirq_handler,
-                ))),
-            ),
-        );
+        state.descs.insert(IRQ_TAIL_SOFTIRQ_VIRQ, line.clone());
     }
 
     assert!(crate::softirq::init());
@@ -736,7 +792,7 @@ fn test_shared_irq_fanout_runs_all_actions() {
 }
 
 #[def_test(serial)]
-fn test_shared_irq_free_one_action_keeps_line_active() {
+fn test_tokenless_free_preserves_shared_action_after_first_slot_removal() {
     let virq = 0x3121;
     SHARED_A_CALLS.store(0, Ordering::Relaxed);
     SHARED_B_CALLS.store(0, Ordering::Relaxed);
@@ -748,9 +804,17 @@ fn test_shared_irq_free_one_action_keeps_line_active() {
         .expect("second shared register should work")
         .expect("second shared action token");
     assert!(try_free_irq_action(virq, token_a).unwrap().is_some());
+    // The remaining shared action is not in slot zero. Tokenless removal
+    // must leave both its ownership and the enabled Line unchanged.
+    assert!(try_free_irq(virq).unwrap().is_none());
+    assert!(unregister(virq).is_none());
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.action_count(), 1);
         assert!(entry.is_enabled_for_tests());
     }
@@ -784,7 +848,11 @@ fn test_shared_irq_action_limit_is_enforced() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.action_count(), MAX_IRQ_ACTIONS);
     }
 
@@ -813,7 +881,11 @@ fn test_free_irq_rejects_single_shared_action_without_token() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.action_count(), 1);
     }
 
@@ -832,7 +904,11 @@ fn test_free_irq_action_rejects_forged_regular_token() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.action_count(), 1);
     }
 
@@ -862,13 +938,15 @@ fn test_register_rejected_during_teardown_has_no_descriptor_side_effect() {
         .with_domain(GIC_ROOT_DOMAIN)
         .with_source(IrqSource::Acpi);
 
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(initial_desc)));
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(virq, IrqStateDesc::new(initial_desc));
+        state.descs.insert(virq, line.clone());
         state
             .descs
             .get_mut(&virq)
             .expect("descriptor must exist")
+            .lock()
             .begin_teardown();
     }
 
@@ -879,15 +957,24 @@ fn test_register_rejected_during_teardown_has_no_descriptor_side_effect() {
 
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.desc, initial_desc);
         assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
     }
 
     {
         let mut state = IRQ_STATE.lock();
-        let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor must exist")
+            .lock();
         entry.finish_teardown();
+        drop(entry);
         let _ = state.remove_if_unused(virq);
     }
 }
@@ -902,13 +989,15 @@ fn test_shared_register_rejected_during_teardown_has_no_descriptor_side_effect()
         .with_domain(GIC_ROOT_DOMAIN)
         .with_source(IrqSource::Acpi);
 
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(initial_desc)));
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(virq, IrqStateDesc::new(initial_desc));
+        state.descs.insert(virq, line.clone());
         state
             .descs
             .get_mut(&virq)
             .expect("descriptor must exist")
+            .lock()
             .begin_teardown();
     }
 
@@ -920,7 +1009,11 @@ fn test_shared_register_rejected_during_teardown_has_no_descriptor_side_effect()
 
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.desc, initial_desc);
         assert_eq!(entry.action_count(), 0);
         assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
@@ -928,8 +1021,13 @@ fn test_shared_register_rejected_during_teardown_has_no_descriptor_side_effect()
 
     {
         let mut state = IRQ_STATE.lock();
-        let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor must exist")
+            .lock();
         entry.finish_teardown();
+        drop(entry);
         let _ = state.remove_if_unused(virq);
     }
 }
@@ -941,7 +1039,11 @@ fn test_try_register_auto_enable_marks_runtime_enabled() {
     assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(entry.is_enabled_for_tests());
         assert_eq!(
@@ -962,7 +1064,11 @@ fn test_try_register_disabled_leaves_runtime_disabled() {
     );
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
         assert_eq!(entry.configured_generation_for_tests(), None);
@@ -981,7 +1087,11 @@ fn test_enable_irq_starts_disabled_registration() {
     try_enable_irq(virq).expect("explicit enable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(entry.is_enabled_for_tests());
         assert_eq!(
@@ -997,15 +1107,16 @@ fn test_enable_irq_starts_disabled_registration() {
 fn test_enable_irq_rejects_teardown_wait_window() {
     let virq = 0x3127;
     let desc = IrqDesc::from_virq(virq);
+    let mut entry = IrqStateDesc::new(desc);
+    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+    let _ = entry.prepare_auto_enable();
+    assert!(entry.take_regular_action().is_some());
+    let _ = entry.prepare_disable_if_no_actions();
+    entry.begin_teardown();
+    let line = Arc::new(IrqLine::new(entry));
     {
         let mut state = IRQ_STATE.lock();
-        let mut entry = IrqStateDesc::new(desc);
-        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-        let _ = entry.prepare_auto_enable();
-        assert!(entry.take_regular_action().is_some());
-        let _ = entry.prepare_disable_if_no_actions();
-        entry.begin_teardown();
-        state.descs.insert(virq, entry);
+        state.descs.insert(virq, line.clone());
     }
 
     let err = try_enable_irq(virq).expect_err("teardown enable must fail");
@@ -1015,15 +1126,24 @@ fn test_enable_irq_rejects_teardown_wait_window() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert!(!entry.is_enabled_for_tests());
         assert_eq!(entry.teardown_depth_for_tests(), 1);
     }
 
     {
         let mut state = IRQ_STATE.lock();
-        let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor must exist")
+            .lock();
         entry.finish_teardown();
+        drop(entry);
         let _ = state.remove_if_unused(virq);
     }
 }
@@ -1038,11 +1158,12 @@ fn test_legacy_enable_rejected_during_teardown_has_no_descriptor_side_effect() {
         .with_domain(GIC_ROOT_DOMAIN)
         .with_source(IrqSource::Acpi);
 
+    let mut entry = IrqStateDesc::new(initial_desc);
+    entry.begin_teardown();
+    let line = Arc::new(IrqLine::new(entry));
     {
         let mut state = IRQ_STATE.lock();
-        let mut entry = IrqStateDesc::new(initial_desc);
-        entry.begin_teardown();
-        state.descs.insert(virq, entry);
+        state.descs.insert(virq, line.clone());
     }
 
     let err = try_enable(richer_desc, true).expect_err("teardown legacy enable must fail");
@@ -1052,15 +1173,24 @@ fn test_legacy_enable_rejected_during_teardown_has_no_descriptor_side_effect() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.desc, initial_desc);
         assert_eq!(state.translated_hwirq(GIC_ROOT_DOMAIN, hwirq), None);
     }
 
     {
         let mut state = IRQ_STATE.lock();
-        let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor must exist")
+            .lock();
         entry.finish_teardown();
+        drop(entry);
         let _ = state.remove_if_unused(virq);
     }
 }
@@ -1068,11 +1198,10 @@ fn test_legacy_enable_rejected_during_teardown_has_no_descriptor_side_effect() {
 #[def_test(serial)]
 fn test_enable_irq_rejects_descriptor_without_action() {
     let virq = 0x3128;
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
     {
         let mut state = IRQ_STATE.lock();
-        state
-            .descs
-            .insert(virq, IrqStateDesc::new(IrqDesc::from_virq(virq)));
+        state.descs.insert(virq, line.clone());
     }
 
     let err = try_enable_irq(virq).expect_err("action-less enable must fail");
@@ -1082,7 +1211,11 @@ fn test_enable_irq_rejects_descriptor_without_action() {
     ));
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert!(!entry.is_enabled_for_tests());
         assert_eq!(entry.disable_depth_for_tests(), 0);
     }
@@ -1109,7 +1242,11 @@ fn test_disable_irq_nosync_uses_nested_depth() {
     try_disable_irq_nosync(virq).expect("nested disable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 2);
         assert!(!entry.is_enabled_for_tests());
     }
@@ -1117,7 +1254,11 @@ fn test_disable_irq_nosync_uses_nested_depth() {
     try_enable_irq(virq).expect("first enable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
     }
@@ -1125,7 +1266,11 @@ fn test_disable_irq_nosync_uses_nested_depth() {
     try_enable_irq(virq).expect("second enable should work");
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 0);
         assert!(entry.is_enabled_for_tests());
     }
@@ -1147,15 +1292,13 @@ fn test_disable_irq_nosync_rejects_unknown_virq_without_creating_descriptor() {
 #[def_test(serial)]
 fn test_dispatch_tracks_line_level_in_flight() {
     IRQ_IN_FLIGHT_OBSERVED.store(0, Ordering::Relaxed);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(IRQ_IN_FLIGHT_TEST_VIRQ),
+        Some(IrqAction::regular(Arc::new(test_in_flight_handler))),
+    )));
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            IRQ_IN_FLIGHT_TEST_VIRQ,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(IRQ_IN_FLIGHT_TEST_VIRQ),
-                Some(IrqAction::regular(Arc::new(test_in_flight_handler))),
-            ),
-        );
+        state.descs.insert(IRQ_IN_FLIGHT_TEST_VIRQ, line.clone());
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(IRQ_IN_FLIGHT_TEST_VIRQ), 0);
@@ -1167,7 +1310,8 @@ fn test_dispatch_tracks_line_level_in_flight() {
         let entry = state
             .descs
             .get(&IRQ_IN_FLIGHT_TEST_VIRQ)
-            .expect("descriptor must remain while action exists");
+            .expect("descriptor must remain while action exists")
+            .lock();
         assert_eq!(entry.in_flight_for_tests(), 0);
     }
 
@@ -1289,7 +1433,11 @@ fn test_free_irq_waits_for_in_flight_dispatch() {
     assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
     {
         let mut state = IRQ_STATE.lock();
-        let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor must exist")
+            .lock();
         entry.begin_dispatch();
     }
 
@@ -1306,6 +1454,241 @@ fn test_free_irq_waits_for_in_flight_dispatch() {
     assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
 }
 
+fn check_management_isolation_on_wait(virq: usize, in_flight: usize) {
+    if virq != IRQ_MANAGEMENT_TEST_VIRQ
+        || IRQ_WAIT_TEST_TARGET.load(Ordering::Acquire) != virq
+        || IRQ_WAIT_TEST_RELEASES.load(Ordering::Acquire) != 0
+    {
+        return;
+    }
+    let line = IRQ_STATE.lock().descs.get(&virq).unwrap().clone();
+    let snapshot_fn = || {
+        let entry = line.lock();
+        (
+            entry.desc,
+            entry.generation_for_tests(),
+            entry.configured_generation_for_tests(),
+            entry.is_enabled_for_tests(),
+            entry.disable_depth_for_tests(),
+            entry.action_count(),
+            entry.in_flight(),
+            entry.teardown_depth_for_tests(),
+        )
+    };
+    let before = snapshot_fn();
+    IRQ_MANAGEMENT_HELD.store(line.management.try_lock().is_none(), Ordering::Release);
+    let richer_desc = before
+        .0
+        .with_controller(IrqController::Gic)
+        .with_domain(GIC_ROOT_DOMAIN)
+        .with_source(IrqSource::Acpi);
+    // Never recursively wait on the teardown's management mutex. The explicit
+    // startup path only tries admission and cannot park this drain hook.
+    let same = super::try_register_startup(
+        richer_desc,
+        Arc::new(test_handler),
+        super::IrqRegisterOptions::disabled(),
+    );
+    let other = super::try_register_startup(
+        IRQ_MANAGEMENT_OTHER_VIRQ,
+        Arc::new(test_handler),
+        super::IrqRegisterOptions::disabled(),
+    );
+    IRQ_MANAGEMENT_SAME_REJECTED.store(matches!(same, Ok(false)), Ordering::Release);
+    IRQ_MANAGEMENT_OTHER_REGISTERED.store(matches!(other, Ok(true)), Ordering::Release);
+    let has_unchanged_metadata = snapshot_fn() == before
+        && IRQ_STATE
+            .lock()
+            .translated_hwirq(GIC_ROOT_DOMAIN, IRQ_MANAGEMENT_TEST_HWIRQ)
+            .is_none();
+    IRQ_MANAGEMENT_METADATA_UNCHANGED.store(has_unchanged_metadata, Ordering::Release);
+    IRQ_MANAGEMENT_REMOVAL_REJECTED.store(
+        IRQ_STATE.lock().remove_if_unused(virq).is_none(),
+        Ordering::Release,
+    );
+    test_release_in_flight_on_wait(virq, in_flight);
+}
+
+#[def_test(serial)]
+fn test_free_holds_management_per_line_until_dispatch_drains() {
+    let virq = IRQ_MANAGEMENT_TEST_VIRQ;
+    let desc = IrqDesc::new(IRQ_MANAGEMENT_TEST_HWIRQ, IrqTrigger::Unknown(0)).with_virq(virq);
+    {
+        let state = IRQ_STATE.lock();
+        assert!(!state.descs.contains_key(&virq));
+        assert!(!state.descs.contains_key(&IRQ_MANAGEMENT_OTHER_VIRQ));
+        assert!(
+            state
+                .translated_hwirq(GIC_ROOT_DOMAIN, IRQ_MANAGEMENT_TEST_HWIRQ)
+                .is_none()
+        );
+    }
+    IRQ_WAIT_TEST_TARGET.store(virq, Ordering::Release);
+    IRQ_WAIT_TEST_OBSERVED.store(0, Ordering::Release);
+    IRQ_WAIT_TEST_RELEASES.store(0, Ordering::Release);
+    IRQ_MANAGEMENT_HELD.store(false, Ordering::Release);
+    IRQ_MANAGEMENT_SAME_REJECTED.store(false, Ordering::Release);
+    IRQ_MANAGEMENT_OTHER_REGISTERED.store(false, Ordering::Release);
+    IRQ_MANAGEMENT_METADATA_UNCHANGED.store(false, Ordering::Release);
+    IRQ_MANAGEMENT_REMOVAL_REJECTED.store(false, Ordering::Release);
+    assert!(try_register_disabled(desc, Arc::new(test_handler)).unwrap());
+    let line = IRQ_STATE.lock().descs.get(&virq).unwrap().clone();
+    line.lock().begin_dispatch();
+    let old_hook = WAIT_FOR_IN_FLIGHT_HOOK
+        .lock()
+        .replace(check_management_isolation_on_wait);
+
+    let removed = try_free_irq(virq);
+
+    *WAIT_FOR_IN_FLIGHT_HOOK.lock() = old_hook;
+    IRQ_WAIT_TEST_TARGET.store(0, Ordering::Release);
+    let was_removed = !IRQ_STATE.lock().descs.contains_key(&virq);
+    let registered_after_free = try_register_disabled(desc, Arc::new(test_handler));
+    let final_removed = try_free_irq(virq);
+    let other_removed = try_free_irq(IRQ_MANAGEMENT_OTHER_VIRQ);
+    // Report only after restoring the hook and withdrawing both test actions.
+    assert!(removed.unwrap().is_some());
+    assert!(was_removed);
+    assert_eq!(registered_after_free, Ok(true));
+    assert!(final_removed.unwrap().is_some());
+    assert!(other_removed.unwrap().is_some());
+    assert_eq!(IRQ_WAIT_TEST_OBSERVED.load(Ordering::Acquire), 1);
+    assert_eq!(IRQ_WAIT_TEST_RELEASES.load(Ordering::Acquire), 1);
+    assert!(IRQ_MANAGEMENT_HELD.load(Ordering::Acquire));
+    assert!(IRQ_MANAGEMENT_SAME_REJECTED.load(Ordering::Acquire));
+    assert!(IRQ_MANAGEMENT_OTHER_REGISTERED.load(Ordering::Acquire));
+    assert!(IRQ_MANAGEMENT_METADATA_UNCHANGED.load(Ordering::Acquire));
+    assert!(IRQ_MANAGEMENT_REMOVAL_REJECTED.load(Ordering::Acquire));
+}
+
+fn replace_drained_instance_on_wait(virq: usize, _in_flight: usize) {
+    if IRQ_WAIT_TEST_TARGET.load(Ordering::Acquire) != virq {
+        return;
+    }
+    let pass = IRQ_WAIT_TEST_RELEASES.fetch_add(1, Ordering::AcqRel);
+    let replacement = (pass == 0).then(|| {
+        let mut entry = IrqStateDesc::test_with_runtime(
+            IrqDesc::from_virq(virq),
+            Some(IrqAction::regular(Arc::new(test_handler))),
+        );
+        entry.begin_dispatch();
+        Arc::new(IrqLine::new(entry))
+    });
+    let (wake, removed_action) = {
+        let mut state = IRQ_STATE.lock();
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("waiting instance exists")
+            .lock();
+        let wake = entry
+            .finish_dispatch()
+            .expect("one synthetic dispatch remains");
+        let removed_action = if pass == 0 {
+            let action = entry.take_regular_action();
+            drop(entry);
+            assert!(state.remove_if_unused(virq).is_some());
+            assert!(
+                state
+                    .descs
+                    .insert(virq, replacement.as_ref().unwrap().clone())
+                    .is_none()
+            );
+            action
+        } else {
+            // A regressed waiter reaches the replacement. Finish it so this
+            // test fails an assertion instead of hanging the entire runner.
+            None
+        };
+        (wake, removed_action)
+    };
+    wake.wake();
+    drop(removed_action);
+}
+
+fn check_wait_keeps_original_instance(wait_fn: impl FnOnce(usize) -> Result<bool, IrqDescError>) {
+    let virq = 0x3152;
+    assert!(try_register(virq, Arc::new(test_handler)).unwrap());
+    IRQ_STATE
+        .lock()
+        .descs
+        .get_mut(&virq)
+        .unwrap()
+        .lock()
+        .begin_dispatch();
+    IRQ_WAIT_TEST_TARGET.store(virq, Ordering::Release);
+    IRQ_WAIT_TEST_RELEASES.store(0, Ordering::Release);
+    let old_hook = WAIT_FOR_IN_FLIGHT_HOOK
+        .lock()
+        .replace(replace_drained_instance_on_wait);
+
+    let result = wait_fn(virq);
+
+    *WAIT_FOR_IN_FLIGHT_HOOK.lock() = old_hook;
+    IRQ_WAIT_TEST_TARGET.store(0, Ordering::Release);
+    let passes = IRQ_WAIT_TEST_RELEASES.load(Ordering::Acquire);
+    let (replacement_in_flight, wake) = {
+        let mut state = IRQ_STATE.lock();
+        let mut entry = state.descs.get_mut(&virq).unwrap().lock();
+        let in_flight = entry.in_flight();
+        let wake = (in_flight != 0).then(|| entry.finish_dispatch().unwrap());
+        (in_flight, wake)
+    };
+    if let Some(wake) = wake {
+        wake.wake();
+    }
+    assert!(unregister(virq).is_some());
+
+    assert_eq!(result, Ok(true));
+    assert_eq!(passes, 1, "wait must not follow the reused IRQ number");
+    assert_eq!(
+        replacement_in_flight, 1,
+        "replacement was not part of this wait"
+    );
+}
+
+#[def_test(serial)]
+fn test_synchronize_irq_does_not_follow_reused_number() {
+    check_wait_keeps_original_instance(try_synchronize_irq);
+}
+
+#[def_test(serial)]
+fn test_disable_irq_does_not_follow_reused_number() {
+    check_wait_keeps_original_instance(try_disable_irq);
+}
+
+#[def_test(serial)]
+fn test_irq_drain_retains_line_after_directory_removal() {
+    let virq = 0x3153;
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let weak = Arc::downgrade(&line);
+    let (drain, removed) = {
+        let mut state = IRQ_STATE.lock();
+        assert!(!state.descs.contains_key(&virq));
+        state.descs.insert(virq, line.clone());
+        let drain = super::IrqDrain::new(virq, state.descs.get(&virq).unwrap());
+        let removed = state.remove_if_unused(virq);
+        (drain, removed)
+    };
+    drop(line);
+
+    assert!(removed.is_some());
+    assert!(
+        weak.upgrade().is_some(),
+        "drain must retain the withdrawn Line"
+    );
+    drain.wait();
+    assert!(
+        weak.upgrade().is_some(),
+        "waiting must not release drain ownership"
+    );
+    drop(drain);
+    assert!(
+        weak.upgrade().is_none(),
+        "the final drain owner must release the Line"
+    );
+}
+
 #[def_test(serial)]
 fn test_disable_irq_waits_after_nosync_disable() {
     let virq = 0x3116;
@@ -1314,7 +1697,11 @@ fn test_disable_irq_waits_after_nosync_disable() {
     assert!(try_disable_irq(virq).expect("disable_irq should not fail"));
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must exist");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must exist")
+            .lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
     }
@@ -1354,7 +1741,8 @@ fn test_free_irq_rejects_masked_irqs_before_action_removal() {
         let entry = state
             .descs
             .get(&virq)
-            .expect("action must remain installed");
+            .expect("action must remain installed")
+            .lock();
         assert_eq!(entry.action_count(), 1);
         assert!(!entry.is_teardown_in_progress());
     }
@@ -1390,7 +1778,11 @@ fn test_synchronize_irq_waits_for_in_flight_dispatch() {
     assert!(try_register(virq, Arc::new(test_handler)).expect("register should work"));
     {
         let mut state = IRQ_STATE.lock();
-        let entry = state.descs.get_mut(&virq).expect("descriptor must exist");
+        let mut entry = state
+            .descs
+            .get_mut(&virq)
+            .expect("descriptor must exist")
+            .lock();
         entry.begin_dispatch();
     }
 
@@ -1402,7 +1794,11 @@ fn test_synchronize_irq_waits_for_in_flight_dispatch() {
     assert_eq!(IRQ_WAIT_TEST_RELEASES.load(Ordering::Acquire), 1);
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("descriptor must remain");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("descriptor must remain")
+            .lock();
         assert_eq!(entry.in_flight_for_tests(), 0);
     }
     assert!(unregister(virq).is_some());
@@ -1453,15 +1849,13 @@ fn test_single_regular_action_dispatch_remains_compatible() {
     let virq = 0x3102;
     REGULAR_CALLS.store(0, Ordering::Relaxed);
 
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(virq),
+        Some(IrqAction::regular(Arc::new(test_not_handled_handler))),
+    )));
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            virq,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(virq),
-                Some(IrqAction::regular(Arc::new(test_not_handled_handler))),
-            ),
-        );
+        state.descs.insert(virq, line.clone());
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
@@ -1489,20 +1883,18 @@ fn test_unsupported_threaded_action_does_not_run_primary() {
     let virq = 0x3103;
     REGULAR_CALLS.store(0, Ordering::Relaxed);
 
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(virq),
+        Some(IrqAction::test_new(
+            Arc::new(test_handler),
+            Some(IrqThreadSlot),
+            IrqActionFlags::NO_THREAD,
+            Some("future-threaded"),
+        )),
+    )));
     {
         let mut state = IRQ_STATE.lock();
-        state.descs.insert(
-            virq,
-            IrqStateDesc::test_with_runtime(
-                IrqDesc::from_virq(virq),
-                Some(IrqAction::test_new(
-                    Arc::new(test_handler),
-                    Some(IrqThreadSlot),
-                    IrqActionFlags::NO_THREAD,
-                    Some("future-threaded"),
-                )),
-            ),
-        );
+        state.descs.insert(virq, line.clone());
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
@@ -1515,6 +1907,7 @@ fn test_unsupported_threaded_action_does_not_run_primary() {
             .descs
             .get(&virq)
             .expect("descriptor must remain")
+            .lock()
             .has_actions()
     );
     assert!(unregister(virq).is_some());
@@ -1522,30 +1915,38 @@ fn test_unsupported_threaded_action_does_not_run_primary() {
 
 #[def_test(serial)]
 fn test_unregister_keeps_msi_descriptor_for_free_msix() {
-    let (hwirq, virq) = {
+    let (hwirq, virq) =
+        unused_msi_test_mapping(&IRQ_STATE.lock()).expect("MSI test mapping space exhausted");
+    let desc = IrqDesc::new(hwirq, IrqTrigger::EdgeRising)
+        .with_domain(MSI_DOMAIN)
+        .with_flags(IrqFlags::MSI)
+        .with_virq(virq);
+    let prepared = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let action = IrqAction::regular(Arc::new(test_handler));
+    {
         let mut state = IRQ_STATE.lock();
-        let (hwirq, virq) =
-            unused_msi_test_mapping(&state).expect("MSI test mapping space exhausted");
-        let desc = IrqDesc::new(hwirq, IrqTrigger::EdgeRising)
-            .with_domain(MSI_DOMAIN)
-            .with_flags(IrqFlags::MSI)
-            .with_virq(virq);
+        assert!(unused_msi_test_hwirq(&state, hwirq));
+        assert!(!state.descs.contains_key(&virq));
         let desc = state
-            .try_resolve_desc(desc)
+            .try_resolve_desc(desc, Some(&prepared))
             .expect("MSI descriptor should be accepted")
             .into_desc();
-        let entry = state
+        let mut entry = state
             .descs
             .get_mut(&desc.logical_irq().unwrap())
-            .expect("descriptor state must exist after try_resolve_desc");
-        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-        (hwirq, virq)
-    };
+            .expect("descriptor state must exist after try_resolve_desc")
+            .lock();
+        assert!(entry.install_regular_action(action));
+    }
 
     assert!(unregister(virq).is_some());
     {
         let state = IRQ_STATE.lock();
-        let entry = state.descs.get(&virq).expect("MSI descriptor must stay");
+        let entry = state
+            .descs
+            .get(&virq)
+            .expect("MSI descriptor must stay")
+            .lock();
         assert!(entry.is_unused());
         assert_eq!(state.translated_hwirq(MSI_DOMAIN, hwirq), Some(virq));
     }
