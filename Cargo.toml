@@ -28,6 +28,7 @@ exclude = [
     "vendor/x2apic",
     "vendor/arm_pl011",
     "vendor/uart_16550",
+    "vendor/kvirtiodrivers",
     # platform-specific boot code that is not intended to be built as part of the main workspace
     "boot/x86_64-linuxboot",
     # build config tools (std crates, not part of the no_std kernel workspace)
@@ -46,6 +47,8 @@ x2apic = { path = "vendor/x2apic" }
 # Separate UART preparation from RX notification; provenance: vendor/README.md.
 arm_pl011 = { path = "vendor/arm_pl011" }
 uart_16550 = { path = "vendor/uart_16550" }
+# kvirtiodrivers rebased on upstream virtio-drivers; provenance: vendor/README.md.
+kvirtiodrivers = { path = "vendor/kvirtiodrivers" }
 
 [workspace.metadata.cargo-shear]
 # unittest is used only by cfg(unittest) tests under ut-tests; cargo-shear

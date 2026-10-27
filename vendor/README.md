@@ -76,3 +76,14 @@ wrong initialization API.
 refresh ESR (subject to the legacy maximum-LVT guard), read status, and EOI
 once. The host register-access tests verify this order and the legacy branch;
 they do not emulate the hardware mechanism that latches physical error bits.
+
+## kvirtiodrivers
+
+- Published version: 0.13.5
+- Upstream: https://github.com/727Hsj/kvirtiodrivers.git
+- Imported branch: `kmain` (rebased on the upstream virtio-drivers line)
+- Source revision: ab99294a6860704142d3b18a9a4884349adceede
+- License: MIT; original license file is retained.
+
+Local changes belong in separate commits. When updating, re-import the target branch, reapply only required patches, and rerun the kernel virtio driver build and boot tests. Remove the
+patch override once an upstream release supplies the required behavior.

@@ -1,6 +1,6 @@
 change_in_place: true
 # Preserve upstream licensing in the separately maintained dependency.
-excludes: ["(^|/)vendor/(x2apic|arm_pl011|uart_16550)/"]
+excludes: ["(^|/)vendor/(x2apic|arm_pl011|uart_16550|kvirtiodrivers)/"]
 
 licenses:
   - files: any
