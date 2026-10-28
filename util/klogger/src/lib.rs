@@ -36,6 +36,19 @@ macro_rules! color_fmt {
     };
 }
 
+/// Colour wrapper whose terminating SGR reset stays **inside** the line.
+///
+/// `color_fmt!` emits its reset after the wrapped text; when that text ends with
+/// a newline the reset lands at the start of the *next* console line, where it
+/// breaks anything that anchors on a line start — a `grep '^<N>'` over a serial
+/// capture, or a CI status marker matched line-exact. Keeping the newline outside
+/// the wrapper removes that class of surprises.
+macro_rules! color_line {
+    ($color_code:expr, $($arg:tt)*) => {
+        format_args!("{}\n", color_fmt!($color_code, $($arg)*))
+    };
+}
+
 #[repr(u8)]
 enum AnsiColor {
     Red    = 31,
@@ -97,16 +110,16 @@ impl Log for KernelLogger {
         cfg_if::cfg_if! {
             if #[cfg(feature = "std")] {
                 let _ = if compact {
-                    print_fmt(color_fmt!(
+                    print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{time}] {args}\n",
+                        "[{time}] {args}",
                         time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
                         args = color_fmt!(color, "{}", record.args()),
                     ))
                 } else {
-                    print_fmt(color_fmt!(
+                    print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{time} {path}:{line}] {args}\n",
+                        "[{time} {path}:{line}] {args}",
                         time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f"),
                         path = path,
                         line = line,
@@ -120,33 +133,33 @@ impl Log for KernelLogger {
 
                 // Logging is best effort; reporting its format error via the logger would recurse.
                 let _ = match (compact, cpu_id, tid) {
-                    (true, Some(c), Some(t)) => print_fmt(color_fmt!(
+                    (true, Some(c), Some(t)) => print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{:>3}.{:06} {c}:{t}] {args}\n",
+                        "[{:>3}.{:06} {c}:{t}] {args}",
                         now.as_secs(),
                         now.subsec_micros(),
                         c = c,
                         t = t,
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    (true, Some(c), None) => print_fmt(color_fmt!(
+                    (true, Some(c), None) => print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{:>3}.{:06} {c}] {args}\n",
+                        "[{:>3}.{:06} {c}] {args}",
                         now.as_secs(),
                         now.subsec_micros(),
                         c = c,
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    (true, _, _) => print_fmt(color_fmt!(
+                    (true, _, _) => print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{:>3}.{:06}] {args}\n",
+                        "[{:>3}.{:06}] {args}",
                         now.as_secs(),
                         now.subsec_micros(),
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    (false, Some(c), Some(t)) => print_fmt(color_fmt!(
+                    (false, Some(c), Some(t)) => print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}\n",
+                        "[{:>3}.{:06} {c}:{t} {path}:{line}] {args}",
                         now.as_secs(),
                         now.subsec_micros(),
                         c = c,
@@ -155,9 +168,9 @@ impl Log for KernelLogger {
                         line = line,
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    (false, Some(c), None) => print_fmt(color_fmt!(
+                    (false, Some(c), None) => print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{:>3}.{:06} {c} {path}:{line}] {args}\n",
+                        "[{:>3}.{:06} {c} {path}:{line}] {args}",
                         now.as_secs(),
                         now.subsec_micros(),
                         c = c,
@@ -165,9 +178,9 @@ impl Log for KernelLogger {
                         line = line,
                         args = color_fmt!(color, "{}", record.args()),
                     )),
-                    (false, _, _) => print_fmt(color_fmt!(
+                    (false, _, _) => print_fmt(color_line!(
                         AnsiColor::White,
-                        "[{:>3}.{:06} {path}:{line}] {args}\n",
+                        "[{:>3}.{:06} {path}:{line}] {args}",
                         now.as_secs(),
                         now.subsec_micros(),
                         path = path,

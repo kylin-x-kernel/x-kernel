@@ -82,8 +82,35 @@ pub(crate) fn generate(bundle: &Bundle, args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Whether the guest printed `status` as a line of its own.
+///
+/// The console carries SGR colour sequences, and a record whose text ends with a
+/// newline leaves its reset at the start of the following line; strip escapes
+/// before comparing so a coloured log line cannot hide a status marker.
 fn has_guest_status(output: &str, status: &str) -> bool {
-    output.lines().any(|line| line.trim() == status)
+    output.lines().any(|line| strip_ansi(line).trim() == status)
+}
+
+/// Removes ANSI SGR sequences (`ESC [ ... m`) from one line.
+fn strip_ansi(line: &str) -> String {
+    let mut cleaned = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            cleaned.push(c);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        // Consume parameters/digits/';' until the final byte of the sequence.
+        for c in chars.by_ref() {
+            if c.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    cleaned
 }
 
 // QEMU can exit successfully after a guest error. Require evidence from the
