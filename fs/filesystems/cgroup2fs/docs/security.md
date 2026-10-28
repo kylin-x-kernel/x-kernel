@@ -1,5 +1,12 @@
 # cgroup2fs — 安全与可靠性分析
 
+## Fallible directory iterators
+
+Iterator allocation failure propagates NoMemory and drops the name snapshot
+and operation reservation. Existing Vec/String snapshot allocations remain
+outside the fallible-owner guarantee. Holding a lifecycle reservation does not
+authorize holding hierarchy or reclaim-required locks over child_names.
+
 ## 信任模型
 
 VFS 复制写入内容并执行 pathname/inode DAC。`cgroup2fs` 仍把所有命令视为不可信输入；

@@ -505,6 +505,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 name = "cgroup2fs"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "kcgroup",
  "kcred",
  "klazy",
@@ -1140,6 +1141,7 @@ dependencies = [
  "inputdev",
  "iov_iter",
  "kalloc",
+ "kalloc-types",
  "kclass",
  "kcred",
  "kdevice",
@@ -4486,6 +4488,7 @@ version = "0.3.0-dev"
 dependencies = [
  "kaddr_layout",
  "kalloc",
+ "kalloc-types",
  "kbuild_config",
  "kcpu_id_map",
  "kcred",
@@ -5314,6 +5317,7 @@ dependencies = [
 name = "sysfs"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "kdevice",
  "kdevice-uevent",
  "klazy",

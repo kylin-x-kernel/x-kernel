@@ -1,5 +1,34 @@
 # kvfs - 设计文档
 
+## Fallible directory iterators
+
+SimpleDirOps::child_names returns a fallibly allocated KBox iterator. DirMapping
+releases its entries lock after collecting the name snapshot; ChainedDirOps owns
+both child iterators and releases the first if the second fails. The outer owner
+also propagates NoMemory. All use the default KERNEL policy. The getdents path
+obtains an owned file handle; VfsFile::iterate_dir samples/updates position with
+separate lock acquisitions and holds no position lock over iterate_shared.
+SimpleDir::read_dir_at constructs the child iterator before publishing even dot
+entries. These paths require sleepable task context, enabled IRQs/preemption,
+and no non-sleepable RCU section or lock required by reclaim/IO/FS callbacks.
+There is no current held-lock reason to restrict these allocations to NOWAIT or
+NOFS; future callers must preserve this contract.
+
+## Fallible mount-transaction private state
+
+`FsContext` owns both private-state slots through `KBox<dyn Any + Send + Sync>`.
+The setters return `VfsResult<()>`; allocation succeeds before replacement,
+so failure drops the input but preserves the installed state. tmpfs/ext4
+initializers propagate failures through the existing mount/remount Result.
+These allocations use KERNEL policy in sleepable task context, before mount
+publication or superblock reconfiguration locking. The process filesystem
+snapshot lock is released before context initialization. Other callers must
+also avoid locks required by reclaim IO/FS callbacks. State destruction has
+its own context requirements and does not inherit allocation flags.
+Boot mounts run from kruntime's preemptible late-init kernel thread after
+scheduler initialization, not from the IRQ/preemption-disabled early boot path.
+Persistent superblock-private state remains a separate, unmigrated owner.
+
 ## Fallible file-lock context
 
 Inodes own advisory-lock contexts through `Once<KBox<FileLockContext>>`.

@@ -1,10 +1,20 @@
 # kalloc-types 设计
 
+## Fallible directory iterators
+
+KBox<T: Iterator + ?Sized> delegates next, size_hint and nth to T. This supports
+owned chain/enumerate/skip adapters even after erasure to a borrowed-lifetime
+trait object. Forwarding adds no allocation and does not introduce unsafe code.
+
 ## 范围和接口
 
-首批只提供 `KBox<T>`：单对象独占所有权、可失败构造、`Deref`、
-`DerefMut` 和自动释放。暂不提供 DST、raw pointer 转换、克隆、容器或
-pinning。调用方不接触标准 `Box`，后续可以在内部演进分配机制。
+The initial API provides `KBox` for exclusive ownership of a single object,
+fallible construction, `Deref`, `DerefMut`, and automatic destruction.
+`KBox<T: ?Sized>` allows sized owners to unsize into trait objects or slices
+without allocating, preserving pointer metadata and borrowed lifetimes.
+Constructors still accept sized values; runtime-length slice/string construction,
+raw pointer conversion, cloning, containers, and pinning are not provided.
+Callers do not use the standard `Box` through this API.
 
 构造接口统一返回 `KResult<KBox<T>>`，不使用 `try_` 前缀：
 
@@ -49,10 +59,17 @@ Linux 推荐通过作用域 API 处理跨调用链的 NOFS/NOIO 约束；本次�
 
 非零大小值使用 `Layout::new::<T>()` 申请，成功后一次写入完成初始化。
 ZST 使用对齐的 dangling 指针，不调用分配和释放接口，但正常运行析构。
-`KBox` 析构值，私有 `Storage` 随后释放内存；即使值析构展开，字段清理
-仍释放存储。当前内核通常采用 panic abort，展开行为不是内核恢复保证。
+`KBox` stores only `NonNull<T>` and an ownership marker, with a transparent
+representation and a derived `CoercePointee` implementation. Following Linux
+KBox's DST ownership model, it does not store a layout in every owner.
+Before destroying the value, it computes `Layout::for_value` from the still-valid
+value and creates a private stack-local `Storage` guard. The guard frees storage
+with the saved layout and never creates a reference after value destruction.
+The guard also frees storage if destruction unwinds. The kernel normally uses
+panic abort, so this is not a kernel recovery guarantee. Unsizing neither
+allocates nor changes the allocation-policy contract.
 所有权移动不改变堆地址，但 `DerefMut` 允许替换值，因此不提供 pinning。
-`Send` 和 `Sync` 分别要求 `T: Send` 和 `T: Sync`。
+`Send` and `Sync` require `T: Send` and `T: Sync`, respectively, including for DSTs.
 
 ## 调用点迁移约束
 
@@ -93,6 +110,24 @@ guest 测试覆盖实际分配、对齐、移动、可变访问、析构、ZST �
 
 定向执行命令为 `make unittest UNITTEST_CRATE=kalloc_types,kvfs`；
 过滤器使用 Rust crate 名称 `kalloc_types`，而不是 Cargo 包名中的连字符。
+
+## Second batch: mount-transaction private state
+
+Both private-state slots in `FsContext` use `KBox<dyn Any + Send + Sync>`.
+After parsing initialization options, tmpfs/ext4 allocate owners with the default
+KERNEL policy before mount publication or superblock reconfiguration locks.
+The interfaces require sleepable task context with no locks needed by reclaim.
+The process fs_context snapshot lock is released before transaction construction.
+`set_private` and `set_super_private` return `VfsResult<()>` and allocate before
+replacing the slot, preserving the old state on failure. Callers propagate errors
+without introducing a fatal OOM path for owner allocation. Persistent superblock
+private state and other Box uses remain for subsequent migration batches.
+
+New tests cover borrowed trait objects, slices and empty slices, dynamic
+destruction of aligned ZSTs, owner layout, and positive Send/Sync bounds.
+VFS tests cover private-state replacement and cleanup after initializer failure.
+Existing local allocation-failure injection still verifies that the input value
+is destroyed exactly once.
 
 ## 参考
 

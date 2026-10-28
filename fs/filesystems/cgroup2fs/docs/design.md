@@ -1,5 +1,13 @@
 # cgroup2fs — 设计文档
 
+## Fallible directory iterators
+
+CgroupDir child_names uses a KBox iterator with default KERNEL policy under
+SimpleDirOps' sleepable-task contract. begin_operation returns a lifecycle
+reservation, not a held hierarchy mutex: its transaction guard is released
+before return. Child-name and inode-registry snapshot locks are also released
+before iterator allocation; the iterator owns names rather than any guard.
+
 ## 定位
 
 `cgroup2fs` 是 Linux cgroup v2 文件系统 ABI 适配器。层级、controller 状态和 task

@@ -9,6 +9,7 @@
 //! these types through `GlobalAlloc`, whose kernel OOM path is fatal.
 
 #![no_std]
+#![feature(derive_coerce_pointee)]
 
 mod kbox;
 

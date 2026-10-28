@@ -4,7 +4,6 @@
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     format,
     string::{String, ToString},
     sync::{Arc, Weak},
@@ -14,6 +13,7 @@ use alloc::{
 use core::{ffi::CStr, fmt, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
+use kalloc_types::KBox;
 use kcred::Cred;
 use khal::paging::MappingFlags;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
@@ -62,16 +62,16 @@ impl SimpleDirOps for ProcessTaskDir {
         Ok(Some(2 + threads as u64))
     }
 
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let Some(process) = self.process.upgrade() else {
-            return Ok(Box::new(iter::empty()));
+            return Ok(KBox::new(iter::empty())?);
         };
-        Ok(Box::new(
+        Ok(KBox::new(
             process
                 .threads()
                 .into_iter()
                 .map(|tid| tid.to_string().into()),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -655,20 +655,20 @@ struct ThreadFdDir {
 }
 
 impl SimpleDirOps for ThreadFdDir {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let Some(task) = self.task.upgrade() else {
-            return Ok(Box::new(iter::empty()));
+            return Ok(KBox::new(iter::empty())?);
         };
         let resources = task.as_thread().files();
         let Ok(fd_table) = resources.fd_table() else {
-            return Ok(Box::new(iter::empty()));
+            return Ok(KBox::new(iter::empty())?);
         };
         let ids = fd_table
             .read()
             .ids()
             .map(|id| Cow::Owned(id.to_string()))
             .collect::<Vec<_>>();
-        Ok(Box::new(ids.into_iter()))
+        Ok(KBox::new(ids.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -939,12 +939,12 @@ struct ThreadNsDir {
 }
 
 impl SimpleDirOps for ThreadNsDir {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             ProcNsKind::ALL
                 .into_iter()
                 .map(|kind| Cow::Borrowed(kind.name())),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -959,8 +959,8 @@ impl SimpleDirOps for ThreadNsDir {
 }
 
 impl SimpleDirOps for ThreadDir {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             [
                 "stat",
                 "status",
@@ -979,7 +979,7 @@ impl SimpleDirOps for ThreadDir {
             ]
             .into_iter()
             .map(Cow::Borrowed),
-        ))
+        )?)
     }
 
     #[expect(
@@ -1234,13 +1234,13 @@ impl ProcFsHandler {
 }
 
 impl SimpleDirOps for ProcFsHandler {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             procfs::visible_processes()
                 .into_iter()
                 .map(|process| Cow::Owned(process.pid().to_string()))
                 .chain([Cow::Borrowed("self")]),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

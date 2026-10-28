@@ -4,11 +4,11 @@
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     sync::{Arc, Weak},
     vec::Vec,
 };
 
+use kalloc_types::KBox;
 use kcgroup::Cgroup;
 use kvfs::{
     Dentry, LockedDentry, SimpleDirLookup, SimpleDirOps, Umode, VfsError, VfsInode, VfsResult,
@@ -33,7 +33,7 @@ impl CgroupDir {
 }
 
 impl SimpleDirOps for CgroupDir {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let _operation = self.cgroup.begin_operation()?;
         let mut names: Vec<_> = self
             .cgroup
@@ -46,7 +46,7 @@ impl SimpleDirOps for CgroupDir {
         {
             names.extend(node.file_names().map(Cow::Borrowed));
         }
-        Ok(Box::new(names.into_iter()))
+        Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

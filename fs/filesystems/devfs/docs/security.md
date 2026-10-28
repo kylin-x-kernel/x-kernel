@@ -1,5 +1,12 @@
 # devfs — Security and reliability
 
+## Fallible directory iterators
+
+Directory iterator storage failure propagates as NoMemory instead of a fatal
+Box allocation. Snapshot Vec/String allocation and lazy PTY number formatting
+are not covered by this guarantee. Callers must satisfy SimpleDirOps' reclaim,
+IO and filesystem re-entry constraints, not merely be outside an IRQ handler.
+
 ## Named character-device projection
 
 Fixed VT nodes are materialized from KVFS registration handles; retired handles

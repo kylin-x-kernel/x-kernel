@@ -1,5 +1,12 @@
 # sysfs — Security and reliability
 
+## Fallible directory iterators
+
+Iterator-owner allocation failure returns NoMemory and releases the snapshot.
+BTreeMap, String and Vec snapshot allocations remain outside this fallible
+boundary. Future callers must not enclose child_names in locks required by
+reclaim, IO or filesystem callbacks.
+
 Named character identity attributes retain the cdev registration lifetime,
 not merely copied bytes. Retirement marks snapshots unavailable before the
 registry notifies sysfs, so held attribute reads return NoSuchDevice after

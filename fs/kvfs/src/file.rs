@@ -1095,6 +1095,11 @@ impl VfsFile {
     }
 
     /// Runs directory iteration for this open file description.
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled, outside
+    /// non-sleepable RCU sections and locks needed by reclaim, IO or filesystem
+    /// callbacks. Directory implementations may allocate with the default
+    /// KERNEL policy. No position lock is held across the implementation call.
     pub fn iterate_dir(&self, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
         if self.inode().node_type() != NodeType::Directory {
             return Err(VfsError::NotADirectory);

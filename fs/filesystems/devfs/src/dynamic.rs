@@ -4,8 +4,9 @@
 
 //! Dynamic devtmpfs projection for device-core node assignments.
 
-use alloc::{borrow::Cow, boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
+use kalloc_types::KBox;
 use kclass::find_display_device;
 #[cfg(feature = "input")]
 use kclass::find_input_device;
@@ -223,7 +224,7 @@ impl DynamicDeviceDir {
 }
 
 impl SimpleDirOps for DynamicDeviceDir {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let names: Vec<Cow<'a, str>> = projection()
             .lock()
             .records
@@ -231,7 +232,7 @@ impl SimpleDirOps for DynamicDeviceDir {
             .filter_map(|record| self.local_name(&record.node))
             .map(|name| Cow::Owned(String::from(name)))
             .collect();
-        Ok(Box::new(names.into_iter()))
+        Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

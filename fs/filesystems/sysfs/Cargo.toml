@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+kalloc-types.workspace = true
 kdevice.workspace = true
 kdevice_uevent.workspace = true
 ksync.workspace = true

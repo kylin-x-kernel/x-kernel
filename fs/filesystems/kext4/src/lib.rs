@@ -206,7 +206,7 @@ static FS_CONTEXT_OPERATIONS: kvfs::FsContextOperations =
 
 fn init_fs_context(context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
     context.set_operations(&FS_CONTEXT_OPERATIONS);
-    context.set_private(Ext4MountOptions::parse(context.data())?);
+    context.set_private(Ext4MountOptions::parse(context.data())?)?;
     Ok(())
 }
 

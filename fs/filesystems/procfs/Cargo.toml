@@ -23,6 +23,7 @@ smp = []
 vmm = ["dep:kvmm"]
 
 [dependencies]
+kalloc-types.workspace = true
 kbuild_config.workspace = true
 kcred.workspace = true
 kns.workspace = true

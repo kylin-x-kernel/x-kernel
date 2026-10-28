@@ -19,14 +19,14 @@ fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
         .map_err(|_| KError::NoMemory)
 }
 
-struct Storage<T> {
-    pointer: NonNull<T>,
-    owner: PhantomData<T>,
+struct Storage {
+    pointer: NonNull<u8>,
+    layout: Layout,
 }
 
-impl<T> Drop for Storage<T> {
+impl Drop for Storage {
     fn drop(&mut self) {
-        let layout = Layout::new::<T>();
+        let layout = self.layout;
         if layout.size() != 0 {
             kalloc::global_allocator().dealloc(self.pointer.cast(), layout);
         }
@@ -39,14 +39,20 @@ impl<T> Drop for Storage<T> {
 /// replace the value. This type does not provide pinning or implicit cloning.
 /// Dropping the owner destroys the value and releases its storage. A zero-sized
 /// value needs no allocation, but its destructor still runs.
+/// Sized owners can coerce to trait objects or slices without allocating.
+/// Constructors still take sized values; dynamically sized slice/string
+/// construction and raw ownership conversion are not provided.
 ///
 /// # Execution context
 /// Borrowing through `Deref`/`DerefMut` neither allocates nor sleeps; operations
 /// on `T` retain their own context requirements. Dropping the owner does not
 /// perform reclaim, but executes `T::drop` in the dropping caller's context.
 /// Allocation flags are not retained and do not constrain that destructor.
-pub struct KBox<T> {
-    storage: Storage<T>,
+#[repr(transparent)]
+#[derive(core::marker::CoercePointee)]
+pub struct KBox<T: ?Sized> {
+    pointer: NonNull<T>,
+    owner: PhantomData<T>,
 }
 
 impl<T> KBox<T> {
@@ -123,47 +129,69 @@ impl<T> KBox<T> {
         } else {
             allocate(layout, flags)?.cast::<T>()
         };
-        let storage = Storage {
+        let owned = Self {
             pointer,
             owner: PhantomData,
         };
         // SAFETY: the private allocator supplies unique storage for Layout<T>,
         // or an aligned dangling pointer for a ZST. Writing initializes the slot.
-        unsafe { storage.pointer.as_ptr().write(value) };
-        Ok(Self { storage })
+        unsafe { owned.pointer.as_ptr().write(value) };
+        Ok(owned)
     }
 }
 
-impl<T> Deref for KBox<T> {
+impl<T: ?Sized> Deref for KBox<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
         // SAFETY: construction initialized this exclusively owned slot; the
         // returned shared reference is bounded by the owner's shared borrow.
-        unsafe { self.storage.pointer.as_ref() }
+        unsafe { self.pointer.as_ref() }
     }
 }
 
-impl<T> DerefMut for KBox<T> {
+impl<T: ?Sized> DerefMut for KBox<T> {
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: construction initialized the slot and the exclusive owner
         // borrow excludes any other references for the returned lifetime.
-        unsafe { self.storage.pointer.as_mut() }
+        unsafe { self.pointer.as_mut() }
     }
 }
 
-impl<T> Drop for KBox<T> {
+/// Delegation does not allocate; the iterator retains its own context requirements.
+impl<T: Iterator + ?Sized> Iterator for KBox<T> {
+    type Item = T::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        (**self).next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (**self).size_hint()
+    }
+
+    fn nth(&mut self, count: usize) -> Option<Self::Item> {
+        (**self).nth(count)
+    }
+}
+
+impl<T: ?Sized> Drop for KBox<T> {
     fn drop(&mut self) {
+        let _storage = Storage {
+            pointer: self.pointer.cast(),
+            layout: Layout::for_value(&**self),
+        };
         // SAFETY: the slot contains one initialized T, uniquely owned here.
-        // Storage remains live until field drop, including if T::drop unwinds.
-        unsafe { self.storage.pointer.as_ptr().drop_in_place() };
+        // The guard retains its allocation and pre-drop layout through drop,
+        // including unwinding; no reference is created after destruction.
+        unsafe { self.pointer.as_ptr().drop_in_place() };
     }
 }
 
 // SAFETY: ownership can cross threads only when the owned T can; the allocator
 // supports freeing on a different CPU and no references outlive the owner.
-unsafe impl<T: Send> Send for KBox<T> {}
+unsafe impl<T: ?Sized + Send> Send for KBox<T> {}
 // SAFETY: shared access exposes only &T, and mutation requires &mut KBox<T>.
-unsafe impl<T: Sync> Sync for KBox<T> {}
+unsafe impl<T: ?Sized + Sync> Sync for KBox<T> {}
 
 unittest::path_mod_test!(mod tests, "../ut-tests/kbox.rs");

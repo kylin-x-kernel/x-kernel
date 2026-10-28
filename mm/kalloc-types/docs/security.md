@@ -1,5 +1,12 @@
 # kalloc-types 安全与可靠性
 
+## Fallible directory iterators
+
+Iterator forwarding preserves the underlying iterator's execution-context
+requirements. Allocation flags neither constrain next/nth nor the iterator's
+destructor. Failed allocation of a chained iterator drops both input owners;
+private allocator-injection tests cover this cleanup without exhausting memory.
+
 ## 边界与不变量
 
 输入是有效 Rust 值和可信内核调用方声明的分配策略，没有用户裸指针。
@@ -25,7 +32,7 @@ NOIO/NOFS 只约束这次申请，不建立隐式的跨调用链回收作用域�
 | --- | --- |
 | `KBox::new_with_allocator` | 后端提供有效对齐的布局存储，ZST 使用对齐 dangling；写入前不创建引用 |
 | `Deref` / `DerefMut` | 完整初始化后才能构造 KBox；引用生命周期受所有者借用限制，写访问要求独占借用 |
-| `KBox::drop` | 唯一拥有者只析构一次，Storage 在析构结束或展开后才释放 |
+| `KBox::drop` | Compute the dynamic layout while the value is valid; the stack-local Storage guard frees storage after destruction or unwinding, without accessing the destroyed value |
 | `Send` / `Sync` | 仅允许符合对应 trait 的值跨线程移动或共享；内部指针不暴露 |
 
 ## 威胁分析
@@ -33,7 +40,7 @@ NOIO/NOFS 只约束这次申请，不建立隐式的跨调用链回收作用域�
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 | --- | --- | --- | --- | --- |
 | T-01 | 内存压力导致 fatal OOM | 中 | 可满足布局但后端资源不足 | 直接调用可失败 kalloc 接口，返回 KError::NoMemory，不经过 GlobalAlloc fatal 路径 |
-| T-02 | 错误布局或重复释放造成内存损坏 | 高 | 破坏私有存储来源或所有权 | 私有字段，无 Clone/raw API；申请释放使用相同 Layout<T> |
+| T-02 | Memory corruption from an incorrect layout or double free | High | Corruption of private storage provenance or DST metadata | Private fields and no Clone/raw API; compiler-generated unsizing preserves provenance, and the dynamic layout matches the original allocation |
 | T-03 | 后续回收在不可睡眠上下文阻塞 | 高 | 错用默认 new 或忽略 NOWAIT | 非睡眠调用点使用 new_nowait；未来分派必须遵守 flags；当前后端不执行睡眠回收 |
 
 ## FMEA

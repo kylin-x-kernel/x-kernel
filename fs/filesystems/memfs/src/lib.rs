@@ -81,7 +81,7 @@ fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
     context.set_private(shmem::parse_tmpfs_context_options(
         context.data(),
         total_pages,
-    )?);
+    )?)?;
     Ok(())
 }
 

@@ -29,7 +29,6 @@ extern crate alloc;
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     collections::BTreeMap,
     format,
     string::{String, ToString},
@@ -37,6 +36,7 @@ use alloc::{
     vec::Vec,
 };
 
+use kalloc_types::KBox;
 use kdevice::{
     DeviceLocation, DeviceNode, DeviceNodeEvent, DeviceNodeKind, subscribe_device_nodes,
 };
@@ -746,7 +746,7 @@ impl SysfsDirectory {
 }
 
 impl SimpleDirOps for SysfsDirectory {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let prefix = if self.path.is_empty() {
             String::new()
         } else {
@@ -765,7 +765,7 @@ impl SimpleDirOps for SysfsDirectory {
         }
         drop(projection);
         let names: Vec<Cow<'a, str>> = names.into_keys().map(Cow::Owned).collect();
-        Ok(Box::new(names.into_iter()))
+        Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

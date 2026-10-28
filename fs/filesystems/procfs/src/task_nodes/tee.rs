@@ -4,8 +4,9 @@
 
 #![allow(clippy::format_push_string)]
 
-use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 
+use kalloc_types::KBox;
 use kprocess::AsThread;
 use ktask::{KtaskRef, WeakKtaskRef};
 use kvfs::{
@@ -45,8 +46,10 @@ struct TaInfoDir {
 }
 
 impl SimpleDirOps for TaInfoDir {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(["uuid", "ta_head"].into_iter().map(Cow::Borrowed)))
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
+            ["uuid", "ta_head"].into_iter().map(Cow::Borrowed),
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

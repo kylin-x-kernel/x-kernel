@@ -6,11 +6,11 @@
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     string::{String, ToString},
     sync::Arc,
 };
 
+use kalloc_types::KBox;
 use kvfs::{
     CommandFile, Dentry, SimpleDir, SimpleDirLookup, SimpleDirOps, SimpleFile, SimpleFileOperation,
     SimpleFs, VfsError,
@@ -36,12 +36,12 @@ struct TracingEventDir {
 }
 
 impl SimpleDirOps for TracingDir {
-    fn child_names<'a>(&'a self) -> kvfs::VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> kvfs::VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             ["trace", "capture_stats", "snapshot_abi", "events"]
                 .into_iter()
                 .map(Cow::Borrowed),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
@@ -75,10 +75,10 @@ impl SimpleDirOps for TracingDir {
 }
 
 impl SimpleDirOps for TracingEventsDir {
-    fn child_names<'a>(&'a self) -> kvfs::VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> kvfs::VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             ktracing::subsystem_names().into_iter().map(Cow::Owned),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
@@ -99,12 +99,12 @@ impl SimpleDirOps for TracingEventsDir {
 }
 
 impl SimpleDirOps for TracingSubsystemDir {
-    fn child_names<'a>(&'a self) -> kvfs::VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> kvfs::VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             ktracing::event_names(&self.subsystem)
                 .into_iter()
                 .map(Cow::Owned),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {
@@ -129,10 +129,10 @@ impl SimpleDirOps for TracingSubsystemDir {
 }
 
 impl SimpleDirOps for TracingEventDir {
-    fn child_names<'a>(&'a self) -> kvfs::VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> kvfs::VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             ["enable", "format", "id"].into_iter().map(Cow::Borrowed),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> kvfs::VfsResult<Dentry> {

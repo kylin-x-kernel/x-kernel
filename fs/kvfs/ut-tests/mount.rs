@@ -87,13 +87,66 @@ static MOCK_CONTEXT_OPERATIONS: crate::FsContextOperations =
 
 fn init_mock_context(context: &mut FsContext<'_>) -> VfsResult<()> {
     context.set_operations(&MOCK_CONTEXT_OPERATIONS);
-    context.set_private(context.purpose());
-    context.set_super_private(context.sb_flags());
+    context.set_private(context.purpose())?;
+    context.set_super_private(context.sb_flags())?;
     Ok(())
 }
 
 static MOCK_FILE_SYSTEM_TYPE: crate::FileSystemType =
     crate::FileSystemType::nodev("mockfs", init_mock_context);
+
+#[def_test]
+fn context_private_state_replacement_drops_erased_values() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    struct PrivateState(u64);
+    impl Drop for PrivateState {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let cred = kcred::initial_cred();
+    let mut context = FsContext::new(
+        &MOCK_FILE_SYSTEM_TYPE, None, None, SuperBlockFlags::empty(), &cred,
+    ).unwrap();
+    let before = DROPS.load(Ordering::Relaxed);
+    context.set_private(PrivateState(1)).unwrap();
+    context.set_super_private(PrivateState(2)).unwrap();
+    assert_eq!(context.private::<PrivateState>().unwrap().0, 1);
+    assert_eq!(context.super_private::<PrivateState>().unwrap().0, 2);
+    context.set_private(PrivateState(3)).unwrap();
+    context.set_super_private(PrivateState(4)).unwrap();
+    assert_eq!(DROPS.load(Ordering::Relaxed), before + 2);
+    assert_eq!(context.private::<PrivateState>().unwrap().0, 3);
+    assert_eq!(context.super_private::<PrivateState>().unwrap().0, 4);
+    drop(context);
+    assert_eq!(DROPS.load(Ordering::Relaxed), before + 4);
+}
+
+#[def_test]
+fn failed_context_initialization_drops_both_private_states() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    struct PrivateState(u64);
+    impl Drop for PrivateState {
+        fn drop(&mut self) {
+            DROPS.fetch_add(self.0 as usize, Ordering::Relaxed);
+        }
+    }
+    fn initialize(context: &mut FsContext<'_>) -> VfsResult<()> {
+        context.set_private(PrivateState(1))?;
+        context.set_super_private(PrivateState(2))?;
+        Err(VfsError::NoMemory)
+    }
+    static FS_TYPE: crate::FileSystemType = crate::FileSystemType::nodev("fail", initialize);
+    let cred = kcred::initial_cred();
+    let before = DROPS.load(Ordering::Relaxed);
+    let result = FsContext::new(&FS_TYPE, None, None, SuperBlockFlags::empty(), &cred);
+    assert_eq!(result.err(), Some(VfsError::NoMemory));
+    assert_eq!(DROPS.load(Ordering::Relaxed), before + 3);
+}
 
 struct MockDirOps {
     mount_flags: StatFsFlags,

@@ -1,5 +1,13 @@
 # devfs — Design
 
+## Fallible directory iterators
+
+Dynamic device and devpts child_names return KBox iterators using the default
+KERNEL policy under SimpleDirOps' sleepable-task contract. Device projection
+locks are released at the snapshot statement boundary; pty_slave_numbers
+returns an owned snapshot after releasing its registry lock. Neither iterator
+retains a registry guard across allocation or iteration.
+
 ## Purpose
 
 `devfs` provides X-Kernel's singleton `devtmpfs` instance. It projects

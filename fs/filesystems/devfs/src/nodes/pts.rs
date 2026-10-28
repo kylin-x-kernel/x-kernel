@@ -6,12 +6,12 @@
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     string::ToString,
     sync::{Arc, Weak},
 };
 
 use inherit_methods_macro::inherit_methods;
+use kalloc_types::KBox;
 use kerrno::{KError, KResult};
 use ktty::tty::{self, PtyPair};
 use kvfs::{
@@ -92,12 +92,12 @@ impl SimpleDirOps for PtsDir {
         false
     }
 
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
             tty::pty_slave_numbers()
                 .into_iter()
                 .map(|id| Cow::Owned(id.to_string())),
-        ))
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> KResult<Dentry> {

@@ -11,14 +11,89 @@ use crate::{FileSystemType, Mount, Path};
 
 static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::internal("simple-dir-test");
 
+struct NamesOps {
+    drops: Arc<AtomicU64>,
+    fail: bool,
+}
+
+struct NamesIter<'a> {
+    drops: Arc<AtomicU64>,
+    remaining: core::option::IntoIter<Cow<'a, str>>,
+}
+
+impl<'a> Iterator for NamesIter<'a> {
+    type Item = Cow<'a, str>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.remaining.next()
+    }
+}
+
+impl Drop for NamesIter<'_> {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl SimpleDirOps for NamesOps {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        if self.fail {
+            return Err(VfsError::NoMemory);
+        }
+        Ok(KBox::new(NamesIter {
+            drops: self.drops.clone(),
+            remaining: Some(Cow::Borrowed("entry")).into_iter(),
+        })?)
+    }
+
+    fn lookup_child(&self, _lookup: SimpleDirLookup<'_>, _name: &str) -> VfsResult<Dentry> {
+        Err(VfsError::NotFound)
+    }
+}
+
+#[def_test]
+fn chained_names_propagate_failure_and_drop_first_iterator() {
+    let drops = Arc::new(AtomicU64::new(0));
+    let chained = NamesOps { drops: drops.clone(), fail: false }
+        .chain(NamesOps { drops: drops.clone(), fail: true });
+    assert_eq!(chained.child_names().err(), Some(VfsError::NoMemory));
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
+fn chained_names_preserve_order_and_release_iterators() {
+    let drops = Arc::new(AtomicU64::new(0));
+    let chained = NamesOps { drops: drops.clone(), fail: false }
+        .chain(NamesOps { drops: drops.clone(), fail: false });
+    let names: Vec<_> = chained.child_names().unwrap().collect();
+    assert_eq!(names.as_slice(), [Cow::Borrowed("entry"), Cow::Borrowed("entry")]);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[def_test]
+fn child_names_failure_does_not_publish_dot_entries() {
+    let root = root_path(Arc::new(NamesOps {
+        drops: Arc::new(AtomicU64::new(0)),
+        fail: true,
+    }));
+    let file = crate::dentry_open(root, 0, kcred::initial_cred()).unwrap();
+    let mut accepted = 0;
+    let mut sink = |_: &str, _, _, _| { accepted += 1; true };
+    let mut context = DirContext::new(0, &mut sink);
+    assert_eq!(file.iterate_dir(&mut context), Err(VfsError::NoMemory));
+    assert_eq!(context.pos(), 0);
+    assert_eq!(file.position(), 0);
+    assert_eq!(accepted, 0);
+}
+
 struct LinkCountOps {
     value: AtomicU64,
     fail: bool,
 }
 
 impl SimpleDirOps for LinkCountOps {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(core::iter::empty()))
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(core::iter::empty())?)
     }
 
     fn lookup_child(&self, _lookup: SimpleDirLookup<'_>, _name: &str) -> VfsResult<Dentry> {

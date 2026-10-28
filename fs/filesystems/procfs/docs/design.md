@@ -5,6 +5,14 @@ retained, overwritten, oversized and uninitialized record counters. Reopening
 refreshes it without initializing tracing. Formatting takes place outside the
 capture spinlock; the trace snapshot ABI and header remain unchanged.
 
+## Fallible directory iterators
+
+Task, namespace, TEE and tracing directory child_names implementations return
+KBox iterators with default KERNEL policy and propagate allocation failure.
+Thread/process/tracing helpers return owned snapshots; fd-table read guards
+end at the snapshot statement. Static-name and empty iterators retain no locks.
+All allocations obey SimpleDirOps' sleepable-task and reclaim-safe-lock contract.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 

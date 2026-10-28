@@ -6,7 +6,6 @@
 
 use alloc::{
     borrow::{Cow, ToOwned},
-    boxed::Box,
     collections::btree_map::BTreeMap,
     string::String,
     sync::Arc,
@@ -14,6 +13,7 @@ use alloc::{
 };
 use core::any::Any;
 
+use kalloc_types::KBox;
 use ksync::Mutex;
 
 use crate::{
@@ -131,7 +131,19 @@ impl<'a> SimpleDirLookup<'a> {
 /// Operations for a simple directory.
 pub trait SimpleDirOps: Send + Sync + 'static {
     /// Get the names of all children in the directory.
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>>;
+    ///
+    /// # Execution context
+    /// Requires sleepable task context with IRQs and preemption enabled, no
+    /// non-sleepable RCU section, and no locks needed by reclaim, IO or filesystem
+    /// callbacks. Implementations release snapshot locks before allocating the
+    /// iterator with the default KERNEL policy; returned iterators must not
+    /// retain those locks. Iteration and destruction run in the caller's context.
+    ///
+    /// # Errors
+    /// Iterator storage allocation failure returns `VfsError::NoMemory`.
+    /// Snapshot containers and name formatting retain their own allocation
+    /// behavior; this does not make the entire enumeration fallible on OOM.
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>>;
     /// Look up a child directory or file by name.
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry>;
 
@@ -191,14 +203,14 @@ pub trait SimpleDirOps: Send + Sync + 'static {
 }
 
 impl SimpleDirOps for DirMapping {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         let names: Vec<Cow<'a, str>> = self
             .entries
             .lock()
             .keys()
             .map(|name| Cow::Owned(name.clone()))
             .collect();
-        Ok(Box::new(names.into_iter()))
+        Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
@@ -315,8 +327,10 @@ impl Default for DirMapping {
 pub struct ChainedDirOps<A, B>(A, B);
 
 impl<A: SimpleDirOps, B: SimpleDirOps> SimpleDirOps for ChainedDirOps<A, B> {
-    fn child_names<'a>(&'a self) -> VfsResult<Box<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
-        Ok(Box::new(self.0.child_names()?.chain(self.1.child_names()?)))
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        Ok(KBox::new(
+            self.0.child_names()?.chain(self.1.child_names()?),
+        )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {

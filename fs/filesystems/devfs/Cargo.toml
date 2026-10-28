@@ -23,6 +23,7 @@ dice = ["dep:dice_driver", "dep:tee_crypto"]
 vmm = ["dep:kvmm-api"]
 
 [dependencies]
+kalloc-types.workspace = true
 block.workspace = true
 iov_iter.workspace = true
 kalloc.workspace = true

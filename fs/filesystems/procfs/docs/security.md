@@ -6,6 +6,14 @@ trace configuration. Each open is coherent on its own, not with an independently
 opened `tracing/trace` snapshot; consumers must not infer losslessness from the
 trace header alone.
 
+## Fallible directory iterators
+
+Iterator storage failures propagate as NoMemory through directory iteration;
+empty ZST iterators do not allocate storage. Vec/String snapshots and lazy PID
+or TID formatting retain their existing infallible allocation behavior. No
+snapshot guard survives into the KBox allocation; future callers must preserve
+the contract even though the current allocator does not perform reclaim.
+
 Named character devices are read from KVFS's registration snapshot; procfs
 does not claim a fixed tty exists when registration failed. A snapshot can
 become stale during concurrent removal, as can hardware topology output; the

@@ -4,8 +4,10 @@
 
 //! Filesystem construction context.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::any::Any;
+
+use kalloc_types::KBox;
 
 use crate::{
     FileSystemType, FsContextOperations, Path, SuperBlock, SuperBlockFlags, VfsError, VfsResult,
@@ -39,12 +41,17 @@ pub struct FsContext<'a> {
     cred: &'a kcred::Cred,
     target_super_block: Option<&'a SuperBlock>,
     operations: Option<&'static FsContextOperations>,
-    fs_private: Option<Box<dyn Any + Send + Sync>>,
-    proposed_super_private: Option<Box<dyn Any + Send + Sync>>,
+    fs_private: Option<KBox<dyn Any + Send + Sync>>,
+    proposed_super_private: Option<KBox<dyn Any + Send + Sync>>,
 }
 
 impl<'a> FsContext<'a> {
     /// Creates a filesystem context from a validated mount request.
+    ///
+    /// # Execution context
+    /// Requires sleepable task context. Initializers may allocate private
+    /// state with the default KBox policy (including reclaim IO and FS entry).
+    /// Do not hold locks needed by reclaim; initialize before mount publication.
     ///
     /// # Errors
     ///
@@ -72,6 +79,10 @@ impl<'a> FsContext<'a> {
     }
 
     /// Creates a transaction that proposes changes to an existing superblock.
+    ///
+    /// # Execution context
+    /// Same constraints as [`Self::new`]. Initialize before taking the
+    /// superblock reconfiguration or namespace mutation locks.
     ///
     /// # Errors
     ///
@@ -181,11 +192,22 @@ impl<'a> FsContext<'a> {
     }
 
     /// Installs parsed filesystem-private transaction state.
-    pub fn set_private<T>(&mut self, private: T)
+    ///
+    /// # Execution context
+    /// Uses the default KBox policy: the caller must permit sleeping reclaim,
+    /// IO and filesystem callbacks, without locks needed by those paths.
+    /// Construction and destruction of private state have their own context
+    /// requirements; allocation flags do not constrain them.
+    ///
+    /// # Errors
+    /// Returns [`VfsError::NoMemory`] on allocation failure, dropping the new
+    /// value and leaving the installed state unchanged.
+    pub fn set_private<T>(&mut self, private: T) -> VfsResult<()>
     where
         T: Any + Send + Sync,
     {
-        self.fs_private = Some(Box::new(private));
+        self.fs_private = Some(KBox::new(private)?);
+        Ok(())
     }
 
     /// Borrows parsed filesystem-private transaction state.
@@ -208,11 +230,19 @@ impl<'a> FsContext<'a> {
     ///
     /// This corresponds to Linux `fs_context::s_fs_info`, independently of
     /// parsed option state in `fs_private`.
-    pub fn set_super_private<T>(&mut self, private: T)
+    ///
+    /// # Execution context
+    /// Same allocation and destruction constraints as [`Self::set_private`].
+    ///
+    /// # Errors
+    /// Returns [`VfsError::NoMemory`] on allocation failure, dropping the new
+    /// value and leaving the proposed state unchanged.
+    pub fn set_super_private<T>(&mut self, private: T) -> VfsResult<()>
     where
         T: Any + Send + Sync,
     {
-        self.proposed_super_private = Some(Box::new(private));
+        self.proposed_super_private = Some(KBox::new(private)?);
+        Ok(())
     }
 
     /// Borrows the proposed superblock-private state.

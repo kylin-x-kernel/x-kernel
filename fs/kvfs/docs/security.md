@@ -1,5 +1,24 @@
 # kvfs - 安全与可靠性分析
 
+## Fallible directory iterators
+
+Iterator allocation errors propagate before directory entries are emitted, so
+this failure leaves the directory position unchanged. Child-iterator errors and
+outer-owner allocation errors release already-created iterators. Vec/String
+snapshots and lazy name formatting remain infallible allocations: migrating the
+iterator owner is not a guarantee of end-to-end OOM-safe directory enumeration.
+
+## Mount-transaction private-state allocation failure
+
+Both FsContext setters allocate fallibly before changing their slot. An OOM
+leaves the old state intact; initialization errors destroy already installed
+state without publishing the failed transaction. tmpfs/ext4 propagate errors
+instead of converting them to fatal OOM. Tests cover erased-state replacement
+and cleanup after initializer failure; they do not force global allocator OOM.
+Default KBox allocation requires sleepable task context and reclaim-compatible
+locking, even though the backend does not currently reclaim. This does not
+make parsers, nested Vec/String/Arc allocations or superblock creation fallible.
+
 ## File-lock context allocation failure
 
 The inode's first advisory-lock context allocation can return `NoMemory`.

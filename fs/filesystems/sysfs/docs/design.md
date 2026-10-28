@@ -1,5 +1,12 @@
 # sysfs — Design
 
+## Fallible directory iterators
+
+SysfsDirectory::child_names returns a KBox iterator with default KERNEL policy.
+The projection guard is explicitly dropped before collecting the final name
+vector and allocating the iterator. The returned iterator owns its snapshot,
+not a projection lock, and requires SimpleDirOps' sleepable-task context.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
