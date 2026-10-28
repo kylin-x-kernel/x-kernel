@@ -729,3 +729,31 @@ Registration errors propagate rather than being swallowed or treated as expirati
 Generation is sampled before reading the deadline predicate and rechecked after
 registration. The IRQ-waker and cancellation-context restrictions of `TimerFuture`
 still apply.
+
+## Local clock-event PM boundary
+
+The local event lifecycle trusts a privileged PM owner to park execution and
+quiesce timer producers/repair, preserve CPU ownership, restore interrupt
+controllers and mappings, restore MONOTONIC and settle sleep before final rearm.
+It does not authenticate a real sleep or mask all external programming paths.
+Calling legacy low-level HAL/backend operations or idle repair directly during
+the transition violates this coordination contract. No userspace entry or new
+device pointer is exposed. Hardware accesses remain in existing backend helpers.
+
+| ID | Threat | Impact | Implemented control and residual obligation |
+|---|---|---|---|
+| TE-01 | Late timer IRQ or ordinary reprogramming uses a frozen clock | Medium | Scheduler arbitration is gated and paused timer IRQs return before sampling or callbacks. PM must separately quiesce backend repair and low-level bypasses. |
+| TE-02 | Old or wrong-CPU token restores unrelated hardware | Medium | CPU identity, checked generation and phase validation precede all device operations; identities never wrap. PM must prevent scheduling/migration across calls. |
+| TE-03 | Resume replays an obsolete deadline | Medium | Existing arbitration reads live scheduler/prepared slots and holds its timer lock through programming. No cached hardware compare is restored; callbacks run only through later IRQ delivery. |
+| TE-04 | Early abort or lost token leaves events stopped | Medium | Explicit restore/resume also handles abort. must_use and private token fields retain ownership; Drop does not guess hardware/time readiness. Forgotten tokens require PM recovery and are unsupported. |
+| TE-05 | Nested pause breaks timer wake-batch suppression | Medium | Separate per-CPU state, with entry rejected in a deferred wake batch or IRQ/NMI context. |
+
+State uses the existing CPU-slot abstraction with IRQ/preemption guards and
+adds one unsafe StaticSlotValue implementation for EventState: its Copy u64 and
+fieldless enum contain no references, ownership, destructor or self-relative
+addresses, so copying the template into independent CPU areas is valid. No raw
+register access or manual Send/Sync implementation is added. Tests use scoped
+local event restoration and owned callback storage, cancelled before IRQs are
+unmasked. State-machine tests do not touch the live event. The tests do not
+establish real device-power-loss recovery, NMI quiescence or multi-CPU PM order.
+The feature processes no user private data.

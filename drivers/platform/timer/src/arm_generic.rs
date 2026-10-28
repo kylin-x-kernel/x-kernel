@@ -175,6 +175,12 @@ impl khal::time::ClockEventIf {
         arm_timer_after(interval)
     }
 
+    fn restore_local_timer() {
+        // Do not reuse init_percpu: its zero countdown requests an event.
+        disarm_timer();
+        kirq::enable(interrupt_id(), true);
+    }
+
     fn disarm_timer() {
         disarm_timer()
     }

@@ -77,6 +77,14 @@ impl ClockEventIf {
         tcfg::set_en(true);
     }
 
+    fn restore_local_timer() {
+        // Restore one-shot mode without the boot path's zero-count event.
+        tcfg::set_en(false);
+        tcfg::set_periodic(false);
+        tcfg::set_init_val(0);
+        kirq::enable(TIMER_IRQ, true);
+    }
+
     fn disarm_timer() {
         tcfg::set_en(false);
     }

@@ -194,3 +194,11 @@ separate allocation/routing/activation lifecycle, not a wider PCH range check.
 - `notify_cpu` and `set_prio` in the LoongArch `IntrManagerIf` are
   `todo!()` placeholders — this platform has no priority routing or
   IPI-based interrupt steering wired into `kirq` yet.
+
+## Local event restoration
+
+ClockEventIf::restore_local_timer disables TCFG, selects one-shot mode and clears
+the initial value, then restores timer IRQ delivery without enabling a
+countdown. It does not initialize NANOS_PER_TICK or reset the stable counter.
+PM first restores CPU/controller access and IRQ routing with local IRQs masked;
+software deadline arbitration happens later after timekeeping is ready.

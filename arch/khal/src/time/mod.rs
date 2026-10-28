@@ -86,6 +86,16 @@ fn timer_interval(
     }
 }
 
+/// Restores the current CPU's event configuration with its countdown stopped.
+///
+/// Requires initialized per-CPU timer state, restored interrupt-controller
+/// access/routing, masked local IRQs and quiesced competing programming/repair.
+/// Does not restore the clock source or re-arbitrate software deadlines.
+#[inline]
+pub fn restore_local_timer() {
+    ClockEventIf::restore_local_timer()
+}
+
 #[inline]
 pub fn disarm_timer() {
     ClockEventIf::disarm_timer()

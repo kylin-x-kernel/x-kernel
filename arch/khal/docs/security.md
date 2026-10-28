@@ -121,3 +121,11 @@ is odd. Readers depend on writer progress, which remains a privileged PM
 control-plane obligation. The tests do not change the live kernel clock and do
 not prove real S3, device ordering or multiprocessor coordination. No user
 private data is processed by this layer.
+
+## Event restoration boundary
+
+The time facade trusts initialized per-CPU event state, restored interrupt
+controller/device mappings and routing, masked IRQs and PM-quiesced competing
+programming/repair. It adds no raw memory access or source calibration. The
+provider leaves the event stopped; final rearm requires restored timekeeping
+and separate software deadline arbitration. No production PM caller is added.

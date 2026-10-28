@@ -210,3 +210,14 @@ cannot stand in for per-CPU timer restoration. Relative clock-event intervals
 prevent a logical post-resume timestamp from being programmed as a raw counter
 compare value. Counter frequency changes are not supported. No new unsafe
 blocks are introduced; existing register/PIO safety preconditions still apply.
+
+## Event restore safety
+
+restore_local_timer retains the existing initialized-current-CPU register/SBI
+access contracts. x86 reuses the audited init_percpu/disarm helpers; no new raw
+pointer or inline-assembly access is added. Controller mapping, vector/routing
+and hart IRQ restoration remain platform PM responsibilities. ARM event
+restoration does not run counter fixup or alter the clock origin. The caller
+masks IRQs and quiesces concurrent programming/repair. Events remain stopped
+until a separate final software arbitration; real power-loss recovery is not
+validated by the guest state-machine tests.

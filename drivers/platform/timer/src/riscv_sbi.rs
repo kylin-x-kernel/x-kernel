@@ -46,6 +46,11 @@ impl khal::time::ClockEventIf {
         arm_timer_after(interval)
     }
 
+    fn restore_local_timer() {
+        // SBI owns comparator access; platform PM restores hart IRQ enables.
+        disarm_timer();
+    }
+
     fn disarm_timer() {
         disarm_timer()
     }

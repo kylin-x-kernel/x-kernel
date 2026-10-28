@@ -78,6 +78,15 @@ pub trait ClockEventIf {
     /// Arms after a non-negative interval; zero requests prompt delivery.
     /// The HAL converts logical deadlines before calling this backend.
     fn arm_timer_after(interval: TimeSpan);
+    /// Restores local event configuration after controller access is restored.
+    ///
+    /// Leaves the countdown stopped. Runs on the initialized owning CPU with
+    /// local IRQs masked and competing timer programming/repair quiesced. The
+    /// platform restores the interrupt controller, vector/routing and device
+    /// access first. Must not reset the clock source, calibrate, allocate,
+    /// sleep, deliver callbacks or arm an event. Software deadline arbitration
+    /// happens separately after timekeeping and sleep accounting are restored.
+    fn restore_local_timer();
     /// Disarms the local clock event so it will not interrupt until re-armed.
     fn disarm_timer();
 }

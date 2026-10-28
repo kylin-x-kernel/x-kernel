@@ -125,3 +125,12 @@ no user-space input.
   declaration rather than machine constants.
 - Any new `kiface` provider method either has a real implementation or
   a recorded limitation here, not a silent `todo!()`.
+
+## Local event restore boundary
+
+The restore hook uses existing TCFG and kirq accessors on the initialized owning
+CPU, with IRQs masked and competing programming quiesced. Controller access and
+routing must already be restored. The hook leaves TCFG disabled, does not reset
+the stable counter or conversion ratio, and does not deliver timer callbacks.
+Final deadline arbitration remains a separate PM-ordered task-service operation.
+Real suspend or lost-controller-state recovery is not established by unit tests.

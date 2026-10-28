@@ -78,6 +78,14 @@ impl khal::time::ClockEventIf {
         arm_timer_after(interval)
     }
 
+    fn restore_local_timer() {
+        // Stop any retained countdown before restoring one-shot mode/divisor.
+        // The platform has already restored LAPIC access and vector routing.
+        disarm_timer();
+        init_percpu();
+        disarm_timer();
+    }
+
     fn disarm_timer() {
         disarm_timer()
     }

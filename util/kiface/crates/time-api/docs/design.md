@@ -37,3 +37,13 @@ allocate, sleep, invoke callbacks or acquire a run-queue lock.
 
 See [capability ownership rules](../../../docs/design.md) for the common
 contract/provider boundary. This crate contains no implementation state.
+
+## Local event restoration
+
+ClockEventIf::restore_local_timer restores the initialized current CPU's event
+mode after platform interrupt-controller access and routing have been restored.
+Its postcondition is a stopped countdown; it does not calibrate or reset the
+clock source, select deadlines or invoke callbacks. The PM owner calls it with
+IRQs masked and competing producers/repair quiesced. The task timer service
+separately re-arbitrates software deadlines only after timekeeping and sleep
+accounting are ready. No PM registry or scheduling policy lives in time-api.

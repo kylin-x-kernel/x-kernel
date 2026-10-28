@@ -184,3 +184,11 @@ rebase and event-domain boundaries only, not complete clocksource/syscore,
 device PM or RTC sleep estimation. The isolated epoch tests cover counter
 resets, progress, wrap, repeated cycles, stale tokens, identity exhaustion and
 read retries; they do not prove real S3 or multiprocessor stop coordination.
+
+## Local event restore capability
+
+`time::restore_local_timer` forwards ClockEventIf::restore_local_timer to the
+selected backend. It restores event configuration with a stopped countdown;
+clocksource state and software deadline arbitration are separate. The task
+timer service owns the pause gate and final arbitration. Platform PM must
+restore controller access/routing and quiesce competing programming first.

@@ -31,3 +31,11 @@ The HAL freeze/rebase control path requires the PM owner to quiesce competing
 CPUs, event programming and NMI clock readers; logical reads are not NMI-safe
 across those transitions. Relative event intervals cross the hardware boundary,
 so an adjusted logical epoch cannot leak into a raw compare register.
+
+## Event restore contract
+
+The event restoration capability trusts an initialized owning CPU and restored
+controller mappings/vector routing. Masked local IRQs and quiesced programming
+are required. Providers must leave the countdown stopped and must not reset
+clocksource state, allocate, sleep or invoke expiry. This contract does not
+prove global PM coordination; final deadline arbitration belongs to the caller.

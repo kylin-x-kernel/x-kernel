@@ -314,3 +314,16 @@ interval to its hardware counter before SBI programming. Platform PM must
 restore controller/local-event configuration and re-arbitrate every CPU's
 software deadlines after time recovery. This change supplies no device PM or
 host/guest protocol and does not enable sleep compensation.
+
+## Local clock-event restoration
+
+Each event backend implements ClockEventIf::restore_local_timer independently
+of clock-source origin/calibration. PM restores controller access and vector
+routing, masks local IRQs and quiesces programming/repair before calling it.
+ARM stops CNTP/CNTV and restores IRQ delivery without the boot path's zero-count
+arm. x86 stops the retained LAPIC countdown, restores one-shot mode and Div1 via
+existing per-CPU initialization, then ensures the count is zero; LAPIC vector
+routing is a platform prerequisite. RISC-V writes the disabled SBI comparator
+value; hart interrupt enables remain a platform duty. No backend restarts the
+source, emits callbacks or restores a cached deadline. The task timer service
+keeps programming inhibited until PM finishes timekeeping and sleep accounting.

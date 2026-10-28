@@ -1344,3 +1344,43 @@ clock domain before the change listener and underlying monotonic timer. A clock
 change or old timer expiration triggers reconversion; a backward REALTIME step
 extends an absolute wait. Relative REALTIME keeps ordinary monotonic sleep.
 Cancellation releases poll registrations and synchronously cancels the owned timer.
+
+## Local clock-event suspend lifecycle
+
+`timer_suspend.rs` owns a per-CPU Running -> Suspended -> Restored -> Running
+state and a non-copyable, non-Send/Sync `LocalTimerSuspend` token. Each cycle
+receives a checked, never-reused generation; every token operation checks the
+CPU and generation before hardware access. Local IRQ masking and the existing
+NoPreemptIrqSave guard serialize state, without a new global lock or allocation.
+
+PM calls suspend_local_timer on each initialized CPU after quiescing ordinary
+execution, producers and backend repair. It preserves scheduler and prepared
+timer deadlines while stopping hardware. rearm_local_timer refuses hardware
+writes in both suspended phases. A late timer IRQ stops the event and returns
+before reading time, accounting runtime, invoking hooks or delivering callbacks.
+The independent timer-wake-batch deferral flag is not reused or overwritten;
+entry during such a batch is rejected.
+
+After restoring interrupt-controller access and routing, restore_hardware
+invokes ClockEventIf::restore_local_timer, leaving hardware stopped and the
+software gate closed. PM restores MONOTONIC, settles sleep and completes
+clock-change processing before resume releases the gate. Resume uses the
+existing prepared-timer lock through the final hardware write to arbitrate the
+current deadlines, including updates made while stopped. It never replays a
+cached compare or dispatches expiry inline: overdue deadlines request an IRQ,
+future deadlines retain their absolute value and empty queues disarm.
+
+Abort uses the same explicit restore/resume sequence after any required clock
+rollback. Drop cannot safely restore missing hardware or a frozen clock, so it
+deliberately leaves suspension active. PM must keep the token, retain CPU
+ownership and exclude scheduling/migration between calls. IRQ-disabled checks
+validate local entry, not system-wide quiescence. No production PM caller, CPU
+rendezvous, device PM, wake source or sleep-accounting path is introduced.
+
+This follows the separation of Linux tick_suspend_local/tick_resume_local and
+clock-event tick-resume from clocksource timekeeping. It does not import Linux
+periodic ticks, broadcast timers or CPU-hotplug machinery. The guest regressions
+in ut-tests/timer_suspend.rs include independent state-machine cases and scoped
+initialized-CPU fixtures. The fixtures restore events and cancel test timers
+before releasing IRQ/preemption guards, without time injection or latency
+thresholds; they do not prove real S3 or simultaneous multi-CPU suspension.

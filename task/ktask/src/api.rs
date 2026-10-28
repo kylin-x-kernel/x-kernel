@@ -332,7 +332,7 @@ pub(crate) fn rearm_local_timer() {
     let guard = NoPreemptIrqSave::new();
     let sched_ns = NEXT_SCHED_DEADLINE_NS.read(&guard);
     let sched = (sched_ns != 0).then_some(sched_ns);
-    if DEFER_LOCAL_TIMER_REARM.read(&guard) {
+    if DEFER_LOCAL_TIMER_REARM.read(&guard) || crate::timer_suspend::is_suspended(&guard) {
         return;
     }
     // SAFETY: the guard pins this CPU with IRQs masked. The static set and all
@@ -352,6 +352,11 @@ pub(crate) fn rearm_local_timer() {
         )
     }
     .expect("current CPU must have a prepared timer slot");
+}
+
+/// Whether a timer-IRQ wake batch currently owns local reprogramming.
+pub(crate) fn is_local_timer_rearm_deferred(guard: &NoPreemptIrqSave) -> bool {
+    DEFER_LOCAL_TIMER_REARM.read(guard)
 }
 
 /// Begins deferring hardware timer writes on this CPU (timer-IRQ wake batch).
@@ -423,6 +428,15 @@ pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
 /// not panic; this entry does not catch their panics.
 pub fn on_timer_fire() {
     use kspin::NoOp;
+    // An already pending IRQ may survive disarm. Do not account, dispatch
+    // callbacks or sample a frozen clock while the local event is suspended.
+    {
+        let guard = NoPreemptIrqSave::new();
+        if crate::timer_suspend::is_suspended(&guard) {
+            khal::time::disarm_timer();
+            return;
+        }
+    }
     let now_ns = khal::time::monotonic_time_nanos();
     let cpu_id = khal::percpu::this_cpu_id();
     // Any local timer IRQ means this CPU is still taking interrupts. Watchdog

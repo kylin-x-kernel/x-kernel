@@ -57,6 +57,7 @@ mod task_api;
 #[cfg(feature = "snapshot")]
 mod task_registry;
 mod timer_api;
+pub mod timer_suspend;
 mod timers;
 mod tracing_hooks;
 mod wait_queue;
