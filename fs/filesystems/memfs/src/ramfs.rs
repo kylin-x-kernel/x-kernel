@@ -54,6 +54,11 @@ pub fn new_rootfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
     new_ramfs_with_file_system_type_and_flags(&ROOTFS_TYPE, superblock_flags)
 }
 
+/// Creates a ramfs-shaped tree: `RAMFS_MAGIC` and a 0755 root directory.
+///
+/// Both are fixed here rather than taken from the caller, so a ramfs root is
+/// recognisable by its magic; a filesystem that needs a different magic or
+/// root mode (mqueue) constructs its tree directly.
 pub(crate) fn new_ramfs_with_file_system_type_and_flags(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,

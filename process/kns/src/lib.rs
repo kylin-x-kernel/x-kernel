@@ -36,7 +36,7 @@ pub mod types;
 pub mod uts;
 
 pub use error::{CloneNsError, UtsError};
-pub use ipc::IpcNamespace;
+pub use ipc::{IpcNamespace, register_ipc_ns_drop_hook};
 pub use kcgroup::CgroupNamespace;
 pub use kcred::{NamespaceId, UserNamespace};
 pub use kvfs::MntNamespace;

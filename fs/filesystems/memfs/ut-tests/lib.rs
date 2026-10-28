@@ -510,3 +510,94 @@ fn tmpfs_batched_mixed_read_preserves_eof_and_capacity() {
     assert_eq!(file.mapping().nrpages(), resident_before);
     assert_eq!(mount.filesystem_stat().unwrap().blocks_free, free_before);
 }
+
+/// Linux's mqueue root directory is `S_IFDIR | S_ISVTX | S_IRWXUGO` (01777),
+/// not the 0755 a fresh ramfs root gets (`ipc/mqueue.c`). Container tooling
+/// mounts `/dev/mqueue` and compares that mode, and the sticky bit is what
+/// lets any task create its own queues in a shared instance.
+#[def_test]
+fn mqueue_root_carries_linuxs_sticky_world_writable_mode() {
+    let fs = new_mqueue_with_type(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let permission = Mount::new_root(&fs).root_path().metadata().mode.permission();
+    assert_eq!(permission.bits(), 0o1777);
+    // The sticky bit is what lets any task create its own queues here.
+    assert_eq!(permission.bits() & NodePermission::STICKY.bits(), 0o1000);
+}
+
+/// One mqueue tree per IPC namespace: mounts inside a namespace reuse the same
+/// superblock (Linux keys it on the namespace), a read-only mount does not
+/// freeze that tree's write policy, and a dead cache entry is rebuilt instead
+/// of handed out.
+#[def_test(user, serial)]
+fn mqueue_tree_is_shared_and_rebuilt_per_ipc_namespace() {
+    // The provider strips a `-o ro` request from the shared tree's own
+    // flags. Exercised on a fresh unregistered tree so the assertion can
+    // actually fail if the strip is removed — a cached tree would make it
+    // tautological.
+    let direct = new_mqueue_with_type(&MQUEUE_TYPE, SuperBlockFlags::RDONLY);
+    assert!(
+        !direct.flags().contains(SuperBlockFlags::RDONLY),
+        "the provider strips RDONLY from the shared tree's own flags"
+    );
+
+    let shared = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let again = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    assert!(Arc::ptr_eq(&shared, &again), "one tree per IPC namespace");
+    assert_eq!(shared.stat().unwrap().fs_type, MQUEUE_MAGIC);
+    assert!(!shared.flags().contains(SuperBlockFlags::RDONLY));
+
+    // A read-only mount reuses the tree: the namespace's tree keeps its own
+    // write policy regardless of the requesting mount's flags.
+    let readonly = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::RDONLY);
+    assert!(Arc::ptr_eq(&shared, &readonly));
+
+    // The tree is pinned for the IPC namespace's own lifetime (Linux
+    // `ns->mq_mnt`): dropping every mount reference leaves it alive and
+    // usable, and a later mount reuses the same tree instead of starting a
+    // fresh one.
+    let weak_shared = Arc::downgrade(&shared);
+    drop(shared);
+    drop(again);
+    drop(readonly);
+    let surviving = weak_shared
+        .upgrade()
+        .expect("the shared tree outlives its mounts");
+    assert!(surviving.is_available(), "the pinned tree stays usable");
+    let remounted = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    assert!(
+        Arc::ptr_eq(&surviving, &remounted),
+        "re-mounts reuse the pinned tree"
+    );
+}
+
+/// The mqueue root is sealed: until queues exist the provider presents an
+/// empty read-only directory, so child creation through the generic memfs
+/// mutators is refused with `EPERM`.
+#[def_test]
+fn mqueue_root_rejects_child_creation() {
+    let fs = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let mount = Mount::new_root(&fs);
+    let root = mount.root_path();
+    let created = kvfs::Filename::new("queue").open_with_flags_at(
+        &root,
+        &root,
+        O_RDWR | O_CREAT | O_EXCL,
+        NodePermission::from_bits_truncate(0o600),
+        NodePermission::empty(),
+        kcred::initial_cred(),
+    );
+    assert!(
+        created.is_err(),
+        "queue file creation is refused on the sealed mqueue root"
+    );
+    assert!(
+        root
+            .mkdir(
+                "subdir",
+                NodePermission::from_bits_truncate(0o755),
+                &kcred::initial_cred(),
+            )
+            .is_err(),
+        "mkdir is refused on the sealed mqueue root"
+    );
+}

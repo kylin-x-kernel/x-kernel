@@ -990,3 +990,18 @@ fn partial_release_aborts_on_failure() {
     assert!(journal.is_aborted());
     assert!(journal.begin(JournalCredits::new(3)).is_err());
 }
+
+/// Credit exhaustion is retryable precisely because it is raised before any
+/// metadata is published (`ensure_metadata_credits` pre-flight checks at the
+/// allocator entry points, e.g. `ialloc.rs` / `balloc.rs`), so it must NOT
+/// abort the journal. A failure that reaches the journal AFTER metadata was
+/// published surfaces as `InvalidJournalTransaction`, which MUST abort.
+#[def_test]
+fn credit_exhaustion_is_retryable_while_post_publish_failures_abort() {
+    assert!(!super::mutation_error_requires_abort(
+        Ext4Error::InsufficientJournalCredits
+    ));
+    assert!(super::mutation_error_requires_abort(
+        Ext4Error::InvalidJournalTransaction
+    ));
+}

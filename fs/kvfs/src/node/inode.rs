@@ -2082,6 +2082,12 @@ impl VfsInode {
         self.attributes.generation()
     }
 
+    /// Returns a typed handle to the filesystem-owned private data this
+    /// inode was constructed with, if its type matches.
+    pub fn private_data_get<T: core::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.private_data.clone().downcast::<T>().ok()
+    }
+
     /// Returns the special-device id.
     pub fn rdev(&self) -> DeviceId {
         self.attributes.rdev()

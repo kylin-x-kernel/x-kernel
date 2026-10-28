@@ -41,6 +41,12 @@ use slab::Slab;
 static ZERO_PAGE: [u8; memaddr::PAGE_SIZE_4K] = [0; memaddr::PAGE_SIZE_4K];
 
 pub(crate) const RAMFS_MAGIC: u32 = 0x8584_58f6;
+/// `MQUEUE_MAGIC` (`#define MQUEUE_MAGIC` in `ipc/mqueue.c` — a source-local
+/// define, not part of `uapi/linux/magic.h`): the `f_type` a POSIX
+/// message-queue mount reports, which is how user space distinguishes
+/// `/dev/mqueue` from ramfs. No line number is cited because it moves between
+/// kernel versions.
+pub(crate) const MQUEUE_MAGIC: u32 = 0x1980_0202;
 pub(crate) const TMPFS_MAGIC: u32 = 0x0102_1994;
 
 fn tmpfs_get_tree(
@@ -88,6 +94,133 @@ fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 /// Registered tmpfs filesystem type.
 pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpfs_context);
 
+fn mqueue_get_tree(
+    context: &mut FsContext<'_>,
+    _lookup_root: &kvfs::Path,
+    _lookup_pwd: &kvfs::Path,
+) -> VfsResult<Arc<SuperBlock>> {
+    get_tree_nodev(context, |file_system_type, flags| {
+        Ok(mqueue_tree_for_ipc_namespace(file_system_type, flags))
+    })
+}
+
+ksync::static_lock! {
+/// Trees of the mqueue filesystems, keyed by the owning IPC namespace id.
+///
+/// POSIX mqueue mounts inside one IPC namespace must present one shared queue
+/// set (Linux keys the superblock on the namespace). Queues are stored as the
+/// directory children of this tree once `mq_open` exists; sharing the tree is
+/// what makes re-mounts inside the same namespace consistent today.
+///
+/// Entries are strong and each tree is pinned active
+/// (`SuperBlock::pin_active`), the role Linux's internal mount `ns->mq_mnt`
+/// plays: the shared tree survives the umount of every user mount and dies
+/// with its IPC namespace — [`kns::register_ipc_ns_drop_hook`] releases the
+/// pin (and with it this entry) when the namespace's last reference goes
+/// away.
+static MQUEUE_TREES: Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Arc<SuperBlock>>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+}
+
+/// Returns the mqueue superblock of the calling task's IPC namespace,
+/// creating it on first mount.
+///
+/// Without a resolvable current IPC namespace the mount gets an unrecorded
+/// private tree: functional, and never shared with other callers.
+fn mqueue_tree_for_ipc_namespace(
+    file_system_type: &'static FileSystemType,
+    flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
+    // Without a resolvable IPC namespace the mount gets its own private
+    // tree that is NOT recorded in the shared table — a sentinel key would
+    // glue unrelated callers onto one pseudo-namespace.
+    let Some(namespace) = kprocess::Process::current_ipc_ns().ok() else {
+        return new_mqueue_with_type(file_system_type, flags);
+    };
+    let namespace_id = namespace.id();
+    // Pinned trees are always available, so a cache hit is unconditional;
+    // building a tree allocates and creates the root dentry, which should
+    // not happen under this module-level lock. The namespace is held alive
+    // across the whole critical section, so its death hook cannot fire in
+    // here.
+    let mut trees = MQUEUE_TREES.lock();
+    if let Some(cached) = trees.get(&namespace_id.as_u64()) {
+        return cached.clone();
+    }
+    let super_block = new_mqueue_with_type(file_system_type, flags);
+    // The first mount of a namespace pins the tree active for the
+    // namespace's own lifetime (Linux `ns->mq_mnt`): queues survive an
+    // umount, and the drop hook releases the pin — killing the tree — when
+    // the namespace's last reference goes away. The registration races with
+    // nothing: the entry exists only after this point.
+    super_block.pin_active();
+    let key = namespace_id.as_u64();
+    // An existing hook means the tree was created earlier and this is a
+    // concurrent second first-mount; either way exactly one hook per
+    // namespace is registered.
+    let _ = kns::register_ipc_ns_drop_hook(
+        namespace_id,
+        Arc::new(move || {
+            if let Some(pinned) = MQUEUE_TREES.lock().remove(&key) {
+                pinned.unpin_active();
+            }
+        }),
+    );
+    trees.insert(namespace_id.as_u64(), super_block.clone());
+    super_block
+}
+
+/// Creates one POSIX message-queue tree.
+///
+/// Two details differ from a plain ramfs root:
+///
+/// - The root directory is `S_IFDIR | S_ISVTX | S_IRWXUGO` (01777) with the
+///   sticky bit set (`ipc/mqueue.c`), not 0755: container tooling mounts
+///   `/dev/mqueue` and compares that mode, and the sticky bit is what lets any
+///   task create its own queues there.
+/// - `RDONLY` is dropped from the superblock flags. A shared tree is created
+///   by whichever mount happens first, and baking that mount's `-o ro` into
+///   the tree would silently freeze the write policy of every later mount of
+///   the same namespace. Linux keeps the namespace's mqueue superblock
+///   writable and carries `MS_RDONLY` as a per-mount flag, and so does this
+///   kernel: `Path::is_effectively_readonly()` checks the mount flag as well,
+///   so a read-only mount stays read-only while its tree does not impose that
+///   on its siblings.
+fn new_mqueue_with_type(
+    file_system_type: &'static FileSystemType,
+    flags: SuperBlockFlags,
+) -> Arc<SuperBlock> {
+    let super_block = MemoryFs::new_with_name_superblock_flags_and_root_mode(
+        file_system_type,
+        MQUEUE_MAGIC,
+        flags - SuperBlockFlags::RDONLY,
+        NodePermission::from_bits_truncate(0o1777),
+    );
+    // Until queues exist the provider presents an empty read-only directory:
+    // the sealed root rejects create/mkdir/mknod/symlink with `EPERM`, so the
+    // generic memfs mutators never run on `/dev/mqueue`. Sealed before the
+    // superblock escapes `get_tree`, so no mount can observe it unsealed.
+    let root_inode = super_block.root_dir().inode_ref();
+    if let Some(node) = root_inode.private_data_get::<MemoryNode>() {
+        node.inode.seal();
+    }
+    super_block
+}
+
+static MQUEUE_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(mqueue_get_tree);
+
+fn init_mqueue_context(context: &mut FsContext<'_>) -> VfsResult<()> {
+    context.set_operations(&MQUEUE_CONTEXT_OPERATIONS);
+    Ok(())
+}
+
+/// Registered mqueue filesystem type.
+///
+/// POSIX message queue nodes are not implemented yet; every mount presents an
+/// empty directory tree shared across the mounts of the same IPC namespace
+/// ([`mqueue_tree_for_ipc_namespace`]), which is what container rootfs setup
+/// (`/dev/mqueue`) requires to succeed.
+pub static MQUEUE_TYPE: FileSystemType = FileSystemType::nodev("mqueue", init_mqueue_context);
 #[macros::register_init]
 fn init_memory_filesystems() {
     #[expect(
@@ -103,6 +236,12 @@ fn init_memory_filesystems() {
                   registered once by its unique linker initialization entry"
     )]
     kvfs::register_filesystem(&TMPFS_TYPE).expect("tmpfs filesystem type must register once");
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
+                  registered once by its unique linker initialization entry"
+    )]
+    kvfs::register_filesystem(&MQUEUE_TYPE).expect("mqueue filesystem type must register once");
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
@@ -296,6 +435,10 @@ struct Inode {
     metadata: Mutex<Metadata>,
     content: Option<InodeContent>,
     private: Mutex<InodePrivate>,
+    /// Set on roots whose filesystem contracts child creation away (the
+    /// mqueue provider presents an empty read-only directory until queues
+    /// exist); child-creating operations answer `EPERM`.
+    sealed: core::sync::atomic::AtomicBool,
 }
 
 impl Inode {
@@ -340,6 +483,7 @@ impl Inode {
             metadata: Mutex::new(metadata),
             content,
             private: Mutex::default(),
+            sealed: core::sync::atomic::AtomicBool::new(false),
         });
         entry.insert(());
         drop(inode_numbers);
@@ -352,6 +496,13 @@ impl Inode {
             );
         }
         Ok(result)
+    }
+
+    /// Seals the inode against child-creating operations — the mqueue
+    /// root's contract while queues do not exist.
+    pub(crate) fn seal(&self) {
+        self.sealed
+            .store(true, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn as_file(&self) -> VfsResult<&FileContent> {
@@ -493,6 +644,15 @@ impl MemoryNode {
         device: DeviceId,
         cred: &Cred,
     ) -> VfsResult<()> {
+        if self
+            .inode
+            .sealed
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            // The mqueue root's contract: no child creation until queues
+            // exist (Linux's mqueuefs supports them through its own ops).
+            return Err(VfsError::OperationNotPermitted);
+        }
         let super_block = dir_inode.super_block()?;
         let name = dentry.name();
         let content = self.inode.as_dir()?;
@@ -693,6 +853,13 @@ impl InodeDirOperations for MemoryNode {
         target: &str,
         cred: &Cred,
     ) -> VfsResult<()> {
+        if self
+            .inode
+            .sealed
+            .load(core::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(VfsError::OperationNotPermitted);
+        }
         let super_block = dir_inode.super_block()?;
         let name = dentry.name();
         let content = self.inode.as_dir()?;

@@ -3759,6 +3759,8 @@ dependencies = [
  "kalloc",
  "kcred",
  "kerrno",
+ "kns",
+ "kprocess",
  "ksync",
  "ktime_types",
  "kvfs",

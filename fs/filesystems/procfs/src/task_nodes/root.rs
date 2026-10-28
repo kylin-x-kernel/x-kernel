@@ -164,6 +164,17 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         return Ok(None);
     }
 
+    // Linux `oom_score_adj_write()` copies into a zero-initialized buffer
+    // (`char buffer[PROC_NUMBUF] = {}` + `copy_from_user`, fs/proc/base.c) and
+    // parses it with `kstrtoint(strstrip(buffer))`, so the first NUL byte
+    // terminates the number. Writers such as runc's nsexec send the netlink
+    // payload verbatim including its NUL terminator ("0\0"); that trailing
+    // NUL must not poison the parse.
+    let data = match data.iter().position(|&b| b == 0) {
+        Some(end) => &data[..end],
+        None => data,
+    };
+
     str::from_utf8(data)
         .ok()
         .map(str::trim)
@@ -782,12 +793,38 @@ impl ProcNsKind {
     }
 }
 
+/// Returns the namespace object a node of `kind` pins at lookup time.
+///
+/// Only `ns/net` does: libnetwork bind-mounts it and re-opens the file
+/// through `setns(2)` long after the creator exited, so the reference must
+/// outlive the task. Every other kind resolves through the task's weak
+/// reference at open, keeping the "owner gone -> `NoSuchProcess`" contract.
+///
+/// The identity and the pinned object come from one snapshot: resolving the
+/// namespace twice would let a concurrent `setns(CLONE_NEWNET)` give the
+/// inode number of one namespace and the pin of another, so `stat()` (which
+/// container tooling compares to identify namespaces) would disagree with the
+/// namespace `open()` hands to `setns(2)`.
+fn namespace_identity(
+    kind: ProcNsKind,
+    task: &KtaskRef,
+) -> VfsResult<(u64, Option<Arc<kns::NetNamespace>>)> {
+    match kind {
+        ProcNsKind::Net => {
+            let net_ns = task.as_thread().process().net_ns()?;
+            Ok((net_ns.id().as_u64(), Some(net_ns)))
+        }
+        _ => Ok((task_namespace_inode(kind, task)?, None)),
+    }
+}
+
 /// Returns the namespace-identity inode for `kind` of `task`.
 ///
 /// The inode is the namespace's stable kernel identity, so two processes
 /// attached to the same namespace report the same number (Linux nsfs style),
 /// and `stat(2)` can distinguish namespaces. This is the identity used when a
-/// namespace file is bind-mounted.
+/// namespace file is bind-mounted, and it is derived from the same snapshot as
+/// any pinned namespace object (see [`namespace_identity`]).
 fn task_namespace_inode(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<u64> {
     let process = task.as_thread().process();
     Ok(match kind {
@@ -828,12 +865,22 @@ fn task_namespace_fd(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<kns::NsFd> 
 /// The inode number is the namespace identity (so `stat()` distinguishes
 /// namespaces and a bind mount preserves identity), and opening the file
 /// attaches an [`NsFd`] to the open description, which `setns(2)` downcasts.
-/// The file holds only a weak task reference: once the owning process exits,
-/// opening it fails with `ESRCH`, mirroring `get_proc_task()`.
+///
+/// Survival of the owning process depends on the kind: `ns/net` keeps the
+/// namespace object pinned at lookup ([`pinned_net_ns`], Linux nsfs semantics),
+/// so it still opens after the creator exited, while every other kind holds
+/// only a weak task reference and fails with `ESRCH` once that process is
+/// gone, mirroring `get_proc_task()`.
 struct NsProcFile {
     task: WeakKtaskRef,
     kind: ProcNsKind,
     inode: u64,
+    /// Network namespace files survive their owning process (Linux nsfs pins
+    /// the namespace object): libnetwork bind-mounts `ns/net` and re-opens it
+    /// through `setns(2)` long after the creator exited, so the namespace
+    /// reference is pinned at lookup instead of resolved from the task at
+    /// open. Every other kind keeps the weak task reference.
+    pinned_net_ns: Option<Arc<kns::NetNamespace>>,
 }
 
 impl NsProcFile {
@@ -842,11 +889,12 @@ impl NsProcFile {
         kind: ProcNsKind,
         task: &KtaskRef,
     ) -> VfsResult<Dentry> {
-        let inode = task_namespace_inode(kind, task)?;
+        let (inode, pinned_net_ns) = namespace_identity(kind, task)?;
         let node = Arc::new(Self {
             task: KtaskRef::downgrade(task),
             kind,
             inode,
+            pinned_net_ns,
         });
         let private_data: Arc<dyn core::any::Any + Send + Sync> = node.clone();
         let inode_operations: Arc<dyn InodeOperations> = node.clone();
@@ -919,8 +967,12 @@ impl InodeOperations for NsProcFile {
 
 impl FileOperations for NsProcFile {
     fn open(self: Arc<Self>, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let task = self.task.upgrade().ok_or(VfsError::NoSuchProcess)?;
-        let nsfd = task_namespace_fd(self.kind, &task)?;
+        let nsfd = if let Some(net_ns) = &self.pinned_net_ns {
+            kns::NsFd::Net(net_ns.clone())
+        } else {
+            let task = self.task.upgrade().ok_or(VfsError::NoSuchProcess)?;
+            task_namespace_fd(self.kind, &task)?
+        };
         file.set_private_data(Arc::new(nsfd));
         Ok(())
     }

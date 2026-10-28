@@ -2,6 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::sync::Arc;
 use khal::paging::MappingFlags;
 use kprocess::AsThread;
 use kvfs::SeqIterator;
@@ -9,8 +10,8 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::{
     MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, ProcNsKind, format_oom_score_adj,
-    format_task_status, maps_permissions, parse_oom_score_adj_input, render_maps_line,
-    special_mapping_name,
+    format_task_status, maps_permissions, namespace_identity, parse_oom_score_adj_input,
+    render_maps_line, special_mapping_name, task_namespace_inode,
 };
 
 fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::Path {
@@ -444,6 +445,18 @@ fn test_parse_oom_score_adj_accepts_newline_terminated_input() {
 }
 
 #[def_test]
+fn test_parse_oom_score_adj_accepts_nul_terminated_input() {
+    // runc's nsexec writes the netlink payload verbatim: "0\0".
+    assert_eq!(parse_oom_score_adj_input(b"0\0").unwrap(), Some(0));
+}
+
+#[def_test]
+fn test_parse_oom_score_adj_rejects_nul_only_input() {
+    // Linux `kstrtoint("")` fails, so a bare NUL is still EINVAL.
+    assert!(parse_oom_score_adj_input(b"\0").is_err());
+}
+
+#[def_test]
 fn test_parse_oom_score_adj_accepts_empty_input_as_noop() {
     assert_eq!(parse_oom_score_adj_input(b"").unwrap(), None);
 }
@@ -495,4 +508,44 @@ fn test_render_maps_line_aligns_path_column() {
 
     assert_eq!(&line[..PROC_MAPS_ADDR_WIDTH], "000040000000");
     assert_eq!(line.chars().nth(PROC_MAPS_PATH_COLUMN), Some('/'));
+}
+
+/// `ns/net` is the only namespace node that pins its namespace at lookup:
+/// libnetwork re-opens that file through `setns(2)` after the creator exited,
+/// so it must not resolve through the task's weak reference. Every other kind
+/// keeps the weak reference and reports `NoSuchProcess` once the owner is
+/// gone (the existing retirement contract).
+#[def_test(user)]
+fn only_the_net_namespace_node_pins_a_namespace() {
+    let task = ktask::current();
+    let net = task.as_thread().process().net_ns().unwrap();
+    let (inode, pinned) = namespace_identity(ProcNsKind::Net, &task).unwrap();
+    assert!(
+        pinned.as_ref().is_some_and(|pinned| Arc::ptr_eq(pinned, &net)),
+        "ns/net pins the process's own namespace object"
+    );
+    // The inode number and the pin describe the same snapshot of that
+    // namespace, so `stat()` can never name one and `open()` return another.
+    assert_eq!(inode, net.id().as_u64());
+
+    for kind in [
+        ProcNsKind::Mnt,
+        ProcNsKind::Pid,
+        ProcNsKind::PidForChildren,
+        ProcNsKind::Ipc,
+        ProcNsKind::Uts,
+        ProcNsKind::User,
+        ProcNsKind::Cgroup,
+    ] {
+        let (inode, pinned) = namespace_identity(kind, &task).unwrap();
+        assert!(
+            pinned.is_none(),
+            "{kind:?} must resolve through the task, not a pin"
+        );
+        assert_eq!(
+            inode,
+            task_namespace_inode(kind, &task).unwrap(),
+            "{kind:?} reports the task-resolved identity"
+        );
+    }
 }

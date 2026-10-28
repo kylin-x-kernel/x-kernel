@@ -24,7 +24,16 @@ use crate::{
     VfsResult, WritebackControl, node,
 };
 
-fn has_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) -> bool {
+/// Compares an extant superblock's read-only state with a mount request the
+/// way Linux `get_tree_bdev()` does: a block-device superblock refuses EITHER
+/// direction of change (`(fc->sb_flags ^ s->s_flags) & SB_RDONLY` -> EBUSY,
+/// fs/super.c). Only block-backed superblocks get this check: Linux's
+/// nodev/keyed reuse reaches `sget_fc()`'s `share_extant_sb` label, which
+/// takes the extant superblock without comparing `SB_RDONLY` - read-only is
+/// carried by the mount's own flag there, while the superblock's flag keeps
+/// writes out either way. (`share_extant_sb` is Linux's symbol, not this
+/// crate's.)
+fn bdev_readonly_mismatch(current: SuperBlockFlags, requested: SuperBlockFlags) -> bool {
     (current ^ requested).contains(SuperBlockFlags::RDONLY)
 }
 
@@ -228,7 +237,7 @@ impl SuperBlockRegistry {
             if !super_block.wait_until_available_or_dead() {
                 continue;
             }
-            if has_readonly_mismatch(super_block.flags(), flags) {
+            if bdev_readonly_mismatch(super_block.flags(), flags) {
                 return Err(VfsError::ResourceBusy);
             }
             return Ok(super_block);
@@ -562,7 +571,11 @@ impl SuperBlock {
         self.flags.insert(SuperBlockFlags::RDONLY);
     }
 
-    pub(crate) fn is_available(&self) -> bool {
+    /// Returns whether the superblock has finished initializing and has not
+    /// started dying — a cached instance must not be handed out for a new
+    /// mount while it is shutting down, or the mount retry loop can keep
+    /// re-selecting the same unusable instance.
+    pub fn is_available(&self) -> bool {
         self.lifecycle.lock().is_available()
     }
 
@@ -984,6 +997,24 @@ impl SuperBlock {
         );
     }
 
+    /// Pins the superblock in the active state without a mount — the
+    /// reference a namespace owner keeps where Linux holds an internal mount
+    /// (the mqueue superblock in `ns->mq_mnt`). A pinned superblock survives
+    /// the umount of every user mount and shuts down when the pin is
+    /// released.
+    ///
+    /// Returns `false` when the superblock is not available; pair a `true`
+    /// return with [`Self::unpin_active`].
+    pub fn pin_active(&self) -> bool {
+        self.try_activate_mount(None).unwrap_or(false)
+    }
+
+    /// Releases one [`Self::pin_active`] reference; the last release shuts
+    /// the superblock down, like the final [`Self::deactivate_mount`].
+    pub fn unpin_active(&self) {
+        self.deactivate_mount();
+    }
+
     /// Attempts to acquire one active mount reference.
     ///
     /// Activation is serialized with final shutdown so a mount either becomes
@@ -998,8 +1029,17 @@ impl SuperBlock {
         if !lifecycle.is_available() {
             return Ok(false);
         }
-        if requested_flags
-            .is_some_and(|requested_flags| has_readonly_mismatch(self.flags(), requested_flags))
+        // The RO comparison is a block-device rule: Linux `get_tree_bdev()`
+        // refuses a bdev superblock whose RO state differs from the request,
+        // while nodev/keyed reuse never compares it (the mount's own flag and
+        // the superblock flag govern writes independently, so a writable
+        // superblock — Linux's shared sysfs instance, say — can back a
+        // read-only mount via the per-mount `MNT_READONLY` flag, and writes
+        // onto a read-only superblock reused by a writable request are
+        // stopped by the path-level EROFS check).
+        if self.block_device().is_some()
+            && requested_flags
+                .is_some_and(|requested| bdev_readonly_mismatch(self.flags(), requested))
         {
             return Err(VfsError::ResourceBusy);
         }

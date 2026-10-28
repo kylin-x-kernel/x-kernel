@@ -18,6 +18,8 @@ pagecache.workspace = true
 macros.workspace = true
 memaddr.workspace = true
 ktime_types.workspace = true
+kprocess.workspace = true
+kns.workspace = true
 
 ksync.workspace = true
 hashbrown.workspace = true

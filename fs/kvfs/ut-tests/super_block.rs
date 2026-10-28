@@ -287,6 +287,9 @@ fn sget_dev_reuses_identity_and_rejects_readonly_mismatch() {
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(FILL_COUNT.load(Ordering::Relaxed), 1);
     first.activate_mount();
+    // Linux `get_tree_bdev()` refuses to change an extant superblock's RO
+    // state in either direction, so a read-only request over the live
+    // writable superblock is EBUSY (`ResourceBusy`).
     assert!(matches!(
         registry.get_or_try_init_bdev(
             &BDEV_TEST_FILE_SYSTEM_TYPE,
@@ -433,6 +436,40 @@ fn sget_dev_uses_canonical_device_object_identity() {
     old_super_block.deactivate_mount();
     new_super_block.deactivate_mount();
     block::del_gendisk(new_disk.device_number()).expect("remove replacement disk");
+}
+
+/// The single-direction rule keeps the OTHER direction: a read-only
+/// superblock still cannot back a writable mount request (Linux refuses to
+/// widen an existing read-only superblock either).
+#[def_test(serial)]
+fn read_only_superblock_rejects_a_writable_request() {
+    let (disk, block_device) = add_test_disk("kvfs-ro-sb-rw-request", 252);
+    let registry = super_block_registry();
+    let read_only = registry
+        .get_or_try_init_bdev(
+            &BDEV_TEST_FILE_SYSTEM_TYPE,
+            block_device.clone(),
+            SuperBlockFlags::RDONLY,
+            fill_test_bdev,
+        )
+        .expect("read-only request initializes the superblock");
+    assert!(read_only.flags().contains(SuperBlockFlags::RDONLY));
+    read_only.activate_mount();
+
+    assert_eq!(
+        registry
+            .get_or_try_init_bdev(
+                &BDEV_TEST_FILE_SYSTEM_TYPE,
+                block_device,
+                SuperBlockFlags::empty(),
+                fill_test_bdev,
+            )
+            .err(),
+        Some(VfsError::ResourceBusy)
+    );
+
+    read_only.deactivate_mount();
+    block::del_gendisk(disk.device_number()).expect("remove ro-sb test disk");
 }
 
 #[def_test(serial)]

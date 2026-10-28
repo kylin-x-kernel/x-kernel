@@ -183,6 +183,29 @@ impl Process {
         *self.runtime_ref.lock() = Some(Arc::downgrade(runtime));
     }
 
+    /// Returns the current task's IPC namespace while its owner is attached.
+    ///
+    /// Mount-time companion of [`crate::current_cred`]: filesystems keyed by
+    /// namespace state (the mqueue per-IPC-namespace tree) resolve the caller's
+    /// namespace the same way they resolve their credentials.
+    ///
+    /// Requires a current user-process thread (the namespace owner); may
+    /// sleep; must not run in IRQ context; callable without the caller
+    /// holding spinlocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoSuchProcess`] when the current task is not a user
+    /// thread (a kernel task has no namespace owner) or when the runtime or
+    /// namespace owner has been released. Never panics.
+    pub fn current_ipc_ns() -> KResult<Arc<kns::IpcNamespace>> {
+        // `current_may_uninit()` so an uninitialized current task reports
+        // `NoSuchProcess` instead of panicking.
+        let task = ktask::current_may_uninit().ok_or(KError::NoSuchProcess)?;
+        let thread = task.try_as_thread().ok_or(KError::NoSuchProcess)?;
+        thread.process().ipc_ns()
+    }
+
     /// Returns the process runtime while a strong owner still exists.
     pub(crate) fn runtime_ref(&self) -> Option<Arc<ProcessRuntime>> {
         self.runtime_ref.lock().as_ref().and_then(Weak::upgrade)
