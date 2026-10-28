@@ -4,7 +4,7 @@
 
 //! Journal lifecycle tests executed in the kernel with in-memory storage.
 
-use block::DriverError;
+use block::{BlockDeviceOperations, DriverError};
 use unittest::{assert_eq, assert_ne, def_test};
 
 use super::*;
@@ -1004,4 +1004,168 @@ fn credit_exhaustion_is_retryable_while_post_publish_failures_abort() {
     assert!(super::mutation_error_requires_abort(
         Ext4Error::InvalidJournalTransaction
     ));
+}
+
+/// Verifies the lock contract at the actual device boundary, for both append
+/// and checkpoint (including recovery-feature and journal-tail updates).
+struct PersistenceProbeDevice {
+    device: Arc<TestDevice>,
+    journal: Arc<MountedJournal>,
+}
+
+impl PersistenceProbeDevice {
+    fn verify_persistence_context(&self) {
+        assert!(self.journal.persistence.try_lock().is_none());
+        assert!(self.journal.state.try_lock().is_some());
+        self.journal.transactions.running_transaction().unwrap();
+    }
+}
+
+impl block::Device for PersistenceProbeDevice {
+    fn name(&self) -> &str {
+        "kext4-persistence-probe"
+    }
+
+    fn device_kind(&self) -> block::DeviceKind {
+        block::DeviceKind::Block
+    }
+}
+
+impl BlockDeviceOperations for PersistenceProbeDevice {
+    fn num_blocks(&self) -> u64 {
+        self.device.num_blocks()
+    }
+
+    fn block_size(&self) -> usize {
+        self.device.block_size()
+    }
+}
+
+impl block::BioOperations for PersistenceProbeDevice {
+    fn submit_bio(&self, bio: block::Bio) {
+        if matches!(
+            bio.operation(),
+            block::BioOperation::Write | block::BioOperation::Flush
+        ) {
+            self.verify_persistence_context();
+        }
+        self.device.submit_bio(bio);
+    }
+}
+
+#[def_test]
+fn persistence_guard_spans_device_io_and_duplicate_commit_is_a_noop() {
+    let (mut filesystem, device) = revoke_journal_test_filesystem(600);
+    let journal = filesystem.metadata_journal().unwrap();
+    // Install before touching the cache; device and metadata I/O must keep the
+    // same backing storage rather than introducing a second buffer identity.
+    filesystem.device = Arc::new(
+        crate::io::FilesystemDevice::open(
+            crate::io::test_block_device(Arc::new(PersistenceProbeDevice {
+                device: device.clone(),
+                journal: journal.clone(),
+            })),
+            TEST_BLOCK_SIZE,
+            TEST_JOURNAL_FILESYSTEM_BLOCK_COUNT as u64,
+        )
+        .unwrap(),
+    );
+    filesystem.metadata_io = crate::buffer::Ext4MetadataIo::new(filesystem.device.clone());
+    let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let transaction = handle.id();
+    filesystem.allocate_block(None, &mut handle).unwrap();
+    drop(handle);
+
+    filesystem.commit_metadata_transaction(transaction).unwrap();
+    let after_append = (device.write_count(), device.flush_count());
+    filesystem.commit_metadata_transaction(transaction).unwrap();
+    assert_eq!((device.write_count(), device.flush_count()), after_append);
+    assert_eq!(filesystem.pending_checkpoint_count(), 1);
+
+    filesystem.drain_pending_checkpoints().unwrap();
+    let after_checkpoint = (device.write_count(), device.flush_count());
+    filesystem.commit_metadata_transaction(transaction).unwrap();
+    filesystem.drain_pending_checkpoints().unwrap();
+    assert_eq!(
+        (device.write_count(), device.flush_count()),
+        after_checkpoint
+    );
+    assert_eq!(filesystem.pending_checkpoint_count(), 0);
+}
+
+#[def_test]
+fn competing_commit_request_observes_persisted_target_after_execution_handoff() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    let (mut filesystem, _device) = revoke_journal_test_filesystem(601);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let transaction = handle.id();
+    filesystem.allocate_block(None, &mut handle).unwrap();
+    drop(handle);
+
+    let persistence = journal.lock_persistence();
+    let requested = Arc::new(AtomicBool::new(false));
+    let result = Arc::new(Mutex::new(None));
+    let competitor = {
+        let journal = journal.clone();
+        let requested = requested.clone();
+        let result = result.clone();
+        ktask::spawn(move || {
+            requested.store(true, Ordering::Release);
+            let _persistence = journal.lock_persistence();
+            *lock(&result) = Some(
+                journal
+                    .transactions
+                    .prepare_commit(transaction)
+                    .map(|commit| commit.is_none()),
+            );
+        })
+    };
+    while !requested.load(Ordering::Acquire) {
+        ktask::yield_now();
+    }
+    assert!(lock(&result).is_none());
+    filesystem
+        .commit_metadata_transaction_inner(
+            &persistence,
+            transaction,
+            RecoveryFlagPolicy::ClearAfterCheckpoint,
+        )
+        .unwrap();
+    drop(persistence);
+    competitor.join();
+    assert_eq!(lock(&result).take().unwrap(), Ok(true));
+    assert_eq!(filesystem.pending_checkpoint_count(), 1);
+    filesystem.drain_pending_checkpoints().unwrap();
+}
+
+#[def_test]
+fn frozen_commit_failure_aborts_before_following_admission() {
+    let (mut filesystem, _) = revoke_journal_test_filesystem_with_log_blocks(1100, 4);
+    // Deliberately bypass normal capacity admission to inject a non-device
+    // persistence error after freeze without adding production fault hooks.
+    limit_transaction_credits(&mut filesystem, 8);
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
+    let transaction = handle.id();
+    for block in 6..9 {
+        filesystem
+            .metadata_io
+            .write_access(FilesystemBlock::new(block), &mut handle)
+            .unwrap()
+            .mark_dirty()
+            .unwrap();
+    }
+    handle.stop().unwrap();
+    assert_eq!(
+        filesystem.commit_metadata_transaction(transaction),
+        Err(Ext4Error::Unsupported(UnsupportedKind::JournalTooLarge))
+    );
+    assert!(journal.is_aborted());
+    assert!(matches!(
+        journal.begin(JournalCredits::new(1)),
+        Err(Ext4Error::JournalAborted)
+    ));
+    assert_eq!(filesystem.sync_filesystem(), Err(Ext4Error::JournalAborted));
 }

@@ -25,7 +25,7 @@ use crate::{
     reason = "CG-021-no-panic-on-reachable-failure: test scenario: setup must bind a real ext4 \
               inode, superblock and open-file readahead policy or abort the fixture"
 )]
-fn cached_file(
+pub(super) fn cached_file(
     filesystem: Ext4SbInfo,
     private: Ext4Inode,
     flags: SuperBlockFlags,
@@ -138,12 +138,21 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
             0,
             &expected,
             PAGE_SIZE_4K as u64,
-            Ext4Timestamp::new(1234, 0),
             Ext4SyncIntent::DataOnly,
             || true,
         )
         .unwrap();
+    let data_block = match filesystem
+        .map_blocks(&private, LogicalBlock::new(0))
+        .unwrap()
+    {
+        BlockMapping::Mapped { physical, .. } => physical.get(),
+        _ => panic!("fixture must map its data block"),
+    };
     let device = ReadDevice::new(crate::io::test_block_device(storage));
+    // Fail only the folio read; write-time timestamp updates must still be able
+    // to read journal metadata without aborting the filesystem.
+    *device.read_failure_block.lock() = Some(data_block);
     filesystem.device = Arc::new(
         FilesystemDevice::open(
             crate::io::test_block_device(device.clone()),
@@ -171,10 +180,18 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     // A partial write must retry the backing read before copying its bytes;
     // otherwise the earlier 0xee prefix could become visible as dirty data.
     *device.fail_reads.lock() = false;
-    let reads_before_retry = device.destinations.lock().len();
+    let data_reads = || {
+        device
+            .destinations
+            .lock()
+            .iter()
+            .filter(|(block, ..)| *block == data_block)
+            .count()
+    };
+    let reads_before_retry = data_reads();
     assert_eq!(file.write_from(b"new", &mut position), Ok(3));
     assert_eq!(position, 67);
-    assert_eq!(device.destinations.lock().len(), reads_before_retry + 1);
+    assert_eq!(data_reads(), reads_before_retry + 1);
     expected[64..67].copy_from_slice(b"new");
     mapping.with_folio(0, |folio| {
         let folio = folio.unwrap();
@@ -394,4 +411,30 @@ fn metadata_cache_retains_reused_hot_blocks_during_cold_stream() {
         assert_eq!(mounted.total_reloads, reference.total_reloads);
         assert!(mounted.resident_blocks <= 1024);
     }
+}
+
+#[def_test]
+fn allocator_prefetch_pins_survive_reclaim_without_mount_exclusion() {
+    let (filesystem, _private, device, _) =
+        crate::file::read_tests::read_fixture_with_blocks(PAGE_SIZE_4K, 512, 1152);
+    let block = crate::FilesystemBlock::new(0);
+    let pins = filesystem.prefetch_metadata_blocks(&[block]).unwrap();
+    for index in 1..1152 {
+        drop(
+            filesystem
+                .read_metadata_block(crate::FilesystemBlock::new(index))
+                .unwrap(),
+        );
+    }
+    let reads = device.destinations.lock().len();
+    filesystem.metadata_io.reclaim_unused(usize::MAX);
+    {
+        let _allocator = crate::sync::mutex_lock(&filesystem.allocator);
+        drop(filesystem.read_metadata_block(block).unwrap());
+    }
+    assert_eq!(device.destinations.lock().len(), reads);
+    drop(pins);
+    filesystem.metadata_io.reclaim_unused(usize::MAX);
+    drop(filesystem.read_metadata_block(block).unwrap());
+    assert_eq!(device.destinations.lock().len(), reads + 1);
 }

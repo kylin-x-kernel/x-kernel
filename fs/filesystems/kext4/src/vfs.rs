@@ -308,6 +308,7 @@ fn applied_metadata_update(requested: MetadataUpdate, applied: Ext4InodeStat) ->
 
 mod mount;
 
+mod writeback;
 pub(crate) use mount::Ext4Mount;
 
 fn ext4_private(super_block: &SuperBlock) -> VfsResult<&Ext4Mount> {
@@ -496,6 +497,7 @@ impl SuperBlockOperations for Ext4SuperOperations {
     fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
         default_evict_inode(inode)?;
         let private = inode.private::<Ext4Inode>()?;
+        let _writeback_guard = private.lock_writeback();
         let super_block = inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         let state = ext4.read();
@@ -950,6 +952,7 @@ fn finish_delalloc_write(
 
 impl InodeOperations for Ext4Inode {
     fn set_len(&self, vfs_inode: &VfsInode, len: u64) -> VfsResult<()> {
+        let _writeback_guard = self.lock_writeback();
         let super_block = vfs_inode.super_block()?;
         let ext4 = ext4_private(&super_block)?;
         if len > Ext4SuperOperations::max_file_size(ext4, &super_block, self) {
@@ -1489,53 +1492,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
     }
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.downcast::<Ext4Inode>()?;
-        let _writeback_guard = inode.lock_writeback();
-        let super_block = vfs_inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
-        let intent = Ext4SyncIntent::from_data_only(control.is_data_only());
-        let timestamp = current_ext4_timestamp(&vfs_inode);
-
-        // A cache miss may enter `read_folio()` while the PageCache mapping lock is
-        // held. Keep the core mutex out of PageCache traversal so writeback
-        // cannot acquire the same locks in the opposite order.
-        mapping.writeback_cached_ranges(control, MAX_WRITEBACK_BYTES, |offset, data| {
-            // A filesystem-wide sync may reach this inode while another task
-            // is still extending it, so sample the visible size per batch.
-            let visible_size = vfs_inode.size();
-            // Prealloc spaces outlive this batch while a writable open holds
-            // the inode (Linux `inode_is_open_for_write`). The gate is a live
-            // predicate re-read at settlement; a close that deferred on a live
-            // reservation leaves an inode marker the settlement also honors.
-            let is_open_for_write = || vfs_inode.write_count() != 0;
-            let disk_size = inode.disk_size();
-            let write_end = offset.saturating_add(data.len() as u64);
-            let mut state = ext4.write(&super_block);
-            state
-                .writeback_ordered_at(
-                    &inode,
-                    offset,
-                    data,
-                    visible_size,
-                    timestamp,
-                    intent,
-                    is_open_for_write,
-                )
-                .map_err(|failure| {
-                    error!(
-                        "KExt4 inode {} writeback at offset {offset} for {} bytes failed: \
-                         completed {} bytes, visible size {visible_size}, disk size {disk_size}, \
-                         write end {write_end}: {:?}",
-                        inode.number().get(),
-                        data.len(),
-                        failure.completed_bytes(),
-                        failure.error()
-                    );
-                    (failure.completed_bytes(), into_vfs_err(failure.error()))
-                })
-        })?;
-        Ok(())
+        writeback::writepages(mapping, control)
     }
 
     fn readahead(&self, control: &mut ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
@@ -1617,6 +1574,7 @@ impl FileOperations for Ext4Inode {
         if inode.write_count() != 1 {
             return Ok(());
         }
+        let _writeback_guard = self.lock_writeback();
         let super_block = ext4_super_block(inode)?;
         let ext4 = ext4_private(&super_block)?;
         let mut state = ext4.write(&super_block);
@@ -1697,3 +1655,5 @@ unittest::path_mod_test!(hook_tests, "../ut-tests/vfs/hook_tests.rs");
 unittest::path_mod_test!(read_tests, "../ut-tests/vfs/read_tests.rs");
 
 unittest::path_mod_test!(tests, "../ut-tests/vfs/tests.rs");
+
+unittest::path_mod_test!(writeback_tests, "../ut-tests/vfs/writeback_tests.rs");

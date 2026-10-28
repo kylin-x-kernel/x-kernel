@@ -170,6 +170,41 @@ impl FilesystemDevice {
         Ok(())
     }
 
+    /// Prepares an owned, block-aligned write without submitting it.
+    /// BIO addresses are always 512-byte sectors, independent of device blocks.
+    pub(crate) fn prepare_owned_write(
+        &self,
+        start: FilesystemBlock,
+        input: alloc::boxed::Box<[u8]>,
+    ) -> Ext4Result<(block::Bio, block::completion::BioWait)> {
+        if input.is_empty() || !input.len().is_multiple_of(self.filesystem_block_size) {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        let blocks = (input.len() / self.filesystem_block_size) as u64;
+        let end = start.get().checked_add(blocks).ok_or(Ext4Error::Overflow)?;
+        if end > self.filesystem_blocks {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        let byte_offset = start
+            .get()
+            .checked_mul(self.filesystem_block_size as u64)
+            .ok_or(Ext4Error::Overflow)?;
+        if !byte_offset.is_multiple_of(512) {
+            return Err(Ext4Error::OutOfBounds);
+        }
+        block::completion::BioWait::prepare(
+            self.device.clone(),
+            byte_offset / 512,
+            block::BioOperation::Write,
+            vec![block::BioVec::new(input)],
+        )
+        .map_err(|(error, _)| Ext4Error::Device(error))
+    }
+
+    pub(crate) fn submit_owned_write(&self, bio: block::Bio) {
+        self.device.submit_bio(bio);
+    }
+
     /// Flushes pending device writes.
     pub(crate) fn flush(&self) -> Ext4Result<()> {
         self.device.flush().map_err(Ext4Error::Device)

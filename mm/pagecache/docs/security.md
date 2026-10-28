@@ -24,12 +24,14 @@ visible `i_size`。它不执行访问控制，也不拥有文件长度或 VM 生
 
 ## 内存安全不变量
 
-- 写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
+- 同步写回错误返回前保留已完成页的预算更新，并结束所有已开始的 folio writeback；
+- 提交式写回转移完成责任，callback 返回不清 writeback；owner 必须限制在途批次，
+  在所有 I/O 结束后于任务上下文完成或丢弃 completion，不得在 IRQ/BH 中获取 cache mutex；
 - 每个 `Folio` 独占一页；
 - `FolioBatch` 只持有有界、按遍历顺序排列的引用；引用存活不等于 mapping identity 仍有效；
 - batch clear/drop 不结束 writeback；任何已开始的写回必须先显式完成，包括失败后缀；
 - 遍历候选和待完成批次各最多 31 页，连续写回数据最多 31 页；临时内存不随
-  整个 dirty range 或被截断的页数增长；
+  整个 dirty range 或被截断的页数增长；提交式回写的总在途内存由调用方另行限额；
 - 一个 page index 最多关联一个 cached folio；发布前校验 tree key 与 folio immutable index 一致；
 - folio bytes、dirty 和 writeback 状态只在 folio lock 下访问；
 - pinned-folio copy-to-uninit 在稳定页对象自身的锁内读取完整初始化页；
@@ -164,3 +166,7 @@ before exposing data; initialization errors are preserved. The owner holds
 invalidation shared through the batch, including EOF checks and user copies.
 Only one folio is locked at a time; callbacks cannot reenter this mapping or
 wait for another folio. An initialized hit takes no additional index lock.
+
+完成对象通过内部 Arc 保留同一索引及 folio identity，最后一个完成引用释放前不销毁
+索引。该保活不授予物理块映射寿命：文件系统仍须阻止 truncate/eviction 过早释放块。
+完成只接受原始快照长度内的前缀；非法前缀重脏整批，成功完成不能抹掉并发重新写脏。

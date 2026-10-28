@@ -4,15 +4,16 @@
 
 //! Writeback control and filesystem dispatch.
 
-use pagecache::{PageIndex, WritebackRangeResult};
+use pagecache::{PageIndex, WritebackBatch, WritebackRangeResult};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
 
 /// Writeback request and authoritative progress for one `writepages` operation.
 ///
-/// Cache algorithms borrow the budget and skip fields in place. Successfully
-/// completed pages remain accounted even if a later write fails.
+/// Cache algorithms borrow the budget and skip fields in place. Synchronous
+/// adapters count completed pages; submission adapters count handed-off pages.
+/// Earlier progress remains accounted even if a later write fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WritebackControl {
     range_start: u64,
@@ -154,6 +155,32 @@ impl AddressSpace {
             &mut control.nr_to_write,
             &mut control.pages_skipped,
             &mut write_folio_fn,
+        )
+    }
+
+    /// Transfers dirty snapshots to a filesystem submission owner.
+    ///
+    /// Budget counts submitted folios, not completed folios. The filesystem must
+    /// bound outstanding batches, drain before returning from synchronous
+    /// writepages, and retain inode/mapping protection through completion. This
+    /// helper does not record deferred errors or make a nonblocking pass safe.
+    /// Completion and batch destruction require sleepable task context.
+    ///
+    /// # Errors
+    /// Returns scan/submission errors; the owner must still drain earlier I/O.
+    pub fn submit_cached_ranges<'a>(
+        &'a self,
+        control: &mut WritebackControl,
+        max_bytes: usize,
+        mut submit: impl FnMut(WritebackBatch<'a>) -> VfsResult<()>,
+    ) -> VfsResult<()> {
+        self.i_pages.submit_cache_pages(
+            self.visible_len()?,
+            control.range_start()..control.range_end(),
+            &mut control.nr_to_write,
+            &mut control.pages_skipped,
+            max_bytes,
+            &mut submit,
         )
     }
 

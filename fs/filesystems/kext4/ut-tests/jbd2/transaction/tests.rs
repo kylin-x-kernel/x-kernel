@@ -428,15 +428,11 @@ fn running_transaction_trigger_accounts_for_outstanding_credits() {
 
     assert_eq!(journal.running_transaction().unwrap(), Some(transaction));
     assert_eq!(
-        journal
-            .transaction_to_commit_before_reservation(JournalCredits::new(1))
-            .unwrap(),
+        journal.prepare_reservation(JournalCredits::new(1)).unwrap(),
         None
     );
     assert_eq!(
-        journal
-            .transaction_to_commit_before_reservation(JournalCredits::new(3))
-            .unwrap(),
+        journal.prepare_reservation(JournalCredits::new(3)).unwrap(),
         Some(transaction)
     );
 }
@@ -446,13 +442,11 @@ fn admission_rejects_one_handle_that_exceeds_limit() {
     let journal = JournalTransactions::new_with_credit_limit(TransactionId::new(33), 4);
 
     assert_eq!(
-        journal
-            .transaction_to_commit_before_reservation(JournalCredits::new(4))
-            .unwrap(),
+        journal.prepare_reservation(JournalCredits::new(4)).unwrap(),
         None
     );
     assert_eq!(
-        journal.transaction_to_commit_before_reservation(JournalCredits::new(5)),
+        journal.prepare_reservation(JournalCredits::new(5)),
         Err(Ext4Error::NoSpace)
     );
     assert_eq!(
@@ -475,27 +469,21 @@ fn admission_allows_exact_capacity_and_waits_above_limit() {
         .unwrap();
 
     assert_eq!(
-        journal
-            .transaction_to_commit_before_reservation(JournalCredits::new(1))
-            .unwrap(),
+        journal.prepare_reservation(JournalCredits::new(1)).unwrap(),
         None
     );
     assert_eq!(
-        journal
-            .transaction_to_commit_before_reservation(JournalCredits::new(2))
-            .unwrap(),
+        journal.prepare_reservation(JournalCredits::new(2)).unwrap(),
         None
     );
     assert_eq!(
-        journal.try_transaction_to_commit_before_reservation(JournalCredits::new(3)),
-        Err(Ext4Error::JournalBusy)
+        journal.prepare_reservation(JournalCredits::new(3)),
+        Ok(Some(transaction))
     );
 
     drop(handle);
     assert_eq!(
-        journal
-            .transaction_to_commit_before_reservation(JournalCredits::new(3))
-            .unwrap(),
+        journal.prepare_reservation(JournalCredits::new(3)).unwrap(),
         Some(transaction)
     );
 }
@@ -530,7 +518,7 @@ fn completion_requests_commit_only_after_the_last_handle_closes() {
 }
 
 #[def_test]
-fn reservation_waits_for_handle_stop_or_abort() {
+fn reserved_commit_waits_for_handle_stop_or_abort() {
     for should_abort in [false, true] {
         let journal = Arc::new(JournalTransactions::new_with_credit_limit(
             TransactionId::new(60),
@@ -545,16 +533,19 @@ fn reservation_waits_for_handle_stop_or_abort() {
             .consume_metadata_credit(FilesystemBlock::new(2))
             .unwrap();
         assert_eq!(
-            journal.try_transaction_to_commit_before_reservation(JournalCredits::new(3)),
-            Err(Ext4Error::JournalBusy)
+            journal.prepare_reservation(JournalCredits::new(3)),
+            Ok(Some(transaction))
         );
         let result = Arc::new(Mutex::new(None));
         let waiter = {
             let journal = journal.clone();
             let result = result.clone();
             ktask::spawn(move || {
-                *lock(&result) =
-                    Some(journal.transaction_to_commit_before_reservation(JournalCredits::new(3)));
+                *lock(&result) = Some(
+                    journal
+                        .prepare_commit(transaction)
+                        .map(|commit| commit.map(|entry| entry.id())),
+                );
             })
         };
         while waiter.state() != ktask::TaskState::Blocked {

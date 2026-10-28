@@ -84,7 +84,6 @@ fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
             TEST_BLOCK_SIZE as u64,
             &input,
             inode.size(),
-            crate::Ext4Timestamp::new(5692, 0),
             Ext4SyncIntent::DataOnly,
             0,
             || true,
@@ -112,7 +111,6 @@ fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
             TEST_BLOCK_SIZE as u64,
             &input,
             inode.size(),
-            crate::Ext4Timestamp::new(5692, 0),
             Ext4SyncIntent::DataOnly,
             0,
             || true,
@@ -336,7 +334,6 @@ fn ordered_writeback_commits_disk_size_without_changing_visible_size() {
             0,
             &input,
             visible_size,
-            timestamp,
             Ext4SyncIntent::DataOnly,
             || true,
         )
@@ -397,15 +394,14 @@ fn ordered_writeback_append_preserves_existing_partial_block_data() {
         journal_allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     install_test_internal_journal(&mut filesystem, 711);
-    let timestamp = crate::Ext4Timestamp::new(5678, 0);
 
     inode.set_size(3);
     filesystem
-        .writeback_ordered_at(&inode, 0, b"abc", 3, timestamp, Ext4SyncIntent::DataOnly, || true)
+        .writeback_ordered_at(&inode, 0, b"abc", 3, Ext4SyncIntent::DataOnly, || true)
         .unwrap();
     inode.set_size(6);
     filesystem
-        .writeback_ordered_at(&inode, 3, b"def", 6, timestamp, Ext4SyncIntent::DataOnly, || true)
+        .writeback_ordered_at(&inode, 3, b"def", 6, Ext4SyncIntent::DataOnly, || true)
         .unwrap();
 
     let mut output = vec![0; 6];
@@ -430,7 +426,6 @@ fn ordered_writeback_registers_prealloc_space_without_disk_tail() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5680, 0),
             Ext4SyncIntent::DataOnly,
             || true,
         )
@@ -493,7 +488,6 @@ fn ordered_writeback_prealloc_budget_zero_allocates_only_dirty_blocks() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5683, 0),
             Ext4SyncIntent::DataOnly,
             0,
             || true,
@@ -540,7 +534,6 @@ fn ordered_writeback_restarts_transaction_for_actual_allocation_runs() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5684, 0),
             Ext4SyncIntent::DataOnly,
             0,
             || true,
@@ -623,7 +616,6 @@ fn ordered_writeback_preserves_prealloc_budget_across_five_restarts() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5687, 0),
             Ext4SyncIntent::DataOnly,
             4,
             || true,
@@ -641,7 +633,8 @@ fn ordered_writeback_preserves_prealloc_budget_across_five_restarts() {
     );
     assert_eq!(filesystem.free_blocks_count(), free_before_write - 9);
     let Ok(crate::BlockMapping::Mapped {
-        len: dirty_tail_len, ..
+        len: dirty_tail_len,
+        ..
     }) = filesystem.map_blocks(&inode, LogicalBlock::new(10))
     else {
         panic!("dirty tail must be mapped after writeback");
@@ -708,7 +701,7 @@ fn ordered_writeback_restarts_across_hole_mapped_and_unwritten_runs() {
 
     install_credit_limited_journal(&mut filesystem, 717, 75, true);
     let input = vec![0x4e; TEST_BLOCK_SIZE * 4];
-    let timestamp = crate::Ext4Timestamp::new(5688, 0);
+    let original_times = (inode.ctime(), inode.mtime());
     inode.set_size(input.len() as u64);
     filesystem
         .reserve_delalloc_range(&inode, LogicalBlock::new(0), 4)
@@ -720,7 +713,6 @@ fn ordered_writeback_restarts_across_hole_mapped_and_unwritten_runs() {
             0,
             &input,
             input.len() as u64,
-            timestamp,
             Ext4SyncIntent::FullMetadata,
             0,
             || true,
@@ -729,8 +721,7 @@ fn ordered_writeback_restarts_across_hole_mapped_and_unwritten_runs() {
 
     assert!(filesystem.pending_checkpoint_count() >= 1);
     assert_eq!(inode.disk_size(), input.len() as u64);
-    assert_eq!(inode.ctime(), timestamp);
-    assert_eq!(inode.mtime(), timestamp);
+    assert_eq!((inode.ctime(), inode.mtime()), original_times);
     assert!(!inode.has_delalloc_reservations());
     assert_eq!(filesystem.delalloc_reserved_blocks(), 0);
     for logical in 0..4u64 {
@@ -783,7 +774,7 @@ fn mapped_full_metadata_writeback_fits_the_eight_credit_boundary() {
     // therefore complete without entering the Restart branch.
     install_credit_limited_journal(&mut filesystem, 719, 8, false);
     let input = vec![0x2a; TEST_BLOCK_SIZE];
-    let timestamp = crate::Ext4Timestamp::new(5689, 0);
+    let original_times = (inode.ctime(), inode.mtime());
     inode.set_size(input.len() as u64);
 
     filesystem
@@ -792,7 +783,6 @@ fn mapped_full_metadata_writeback_fits_the_eight_credit_boundary() {
             0,
             &input,
             input.len() as u64,
-            timestamp,
             Ext4SyncIntent::FullMetadata,
             || true,
         )
@@ -800,8 +790,7 @@ fn mapped_full_metadata_writeback_fits_the_eight_credit_boundary() {
 
     assert_eq!(filesystem.pending_checkpoint_count(), 0);
     assert_eq!(inode.disk_size(), input.len() as u64);
-    assert_eq!(inode.ctime(), timestamp);
-    assert_eq!(inode.mtime(), timestamp);
+    assert_eq!((inode.ctime(), inode.mtime()), original_times);
     let mut output = vec![0; input.len()];
     assert_eq!(filesystem.read_at(&inode, 0, &mut output), Ok(input.len()));
     assert_eq!(output, input);
@@ -831,7 +820,6 @@ fn failed_split_writeback_publishes_only_the_durable_prefix() {
             0,
             &input,
             visible_size,
-            timestamp,
             Ext4SyncIntent::FullMetadata,
             0,
             || true,
@@ -908,7 +896,6 @@ fn ordered_writeback_credits_follow_fragmented_unwritten_runs() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5686, 0),
             Ext4SyncIntent::DataOnly,
             0,
             || true,
@@ -948,7 +935,6 @@ fn ordered_writeback_reuses_preallocated_space_tail() {
             0,
             &first,
             first.len() as u64,
-            crate::Ext4Timestamp::new(5681, 0),
             Ext4SyncIntent::DataOnly,
             || true,
         )
@@ -971,7 +957,6 @@ fn ordered_writeback_reuses_preallocated_space_tail() {
             first.len() as u64,
             &second,
             (first.len() + second.len()) as u64,
-            crate::Ext4Timestamp::new(5682, 0),
             Ext4SyncIntent::DataOnly,
             || true,
         )
@@ -1016,7 +1001,6 @@ fn writeback_consumes_space_prefix_and_keeps_tail() {
             0,
             &first,
             first.len() as u64,
-            crate::Ext4Timestamp::new(5691, 0),
             Ext4SyncIntent::DataOnly,
             || true,
         )
@@ -1030,7 +1014,6 @@ fn writeback_consumes_space_prefix_and_keeps_tail() {
             first.len() as u64,
             &second,
             (first.len() + second.len()) as u64,
-            crate::Ext4Timestamp::new(5692, 0),
             Ext4SyncIntent::DataOnly,
             || true,
         )
@@ -1076,7 +1059,6 @@ fn writeback_settlement_drops_spaces_without_open_writer() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5690, 0),
             Ext4SyncIntent::DataOnly,
             4,
             || false,
@@ -1110,7 +1092,6 @@ fn writeback_admission_excludes_the_prefix_a_registered_space_serves() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(5720, 0),
             Ext4SyncIntent::DataOnly,
             4,
             || true,
@@ -1152,7 +1133,6 @@ fn writeback_settlement_re_reads_the_writer_gate_at_each_settlement() {
             0,
             &first,
             first.len() as u64,
-            crate::Ext4Timestamp::new(5700, 0),
             Ext4SyncIntent::DataOnly,
             4,
             || true,
@@ -1207,7 +1187,6 @@ fn writeback_settlement_re_reads_the_writer_gate_at_each_settlement() {
             u64::try_from(start).unwrap(),
             &second,
             inode.size(),
-            crate::Ext4Timestamp::new(5701, 0),
             Ext4SyncIntent::DataOnly,
             4,
             gate,
@@ -1258,15 +1237,7 @@ fn ordered_writeback_converts_unwritten_extent_and_zero_fills_partial_block() {
 
     inode.set_size(4);
     filesystem
-        .writeback_ordered_at(
-            &inode,
-            2,
-            b"xy",
-            4,
-            crate::Ext4Timestamp::new(9, 0),
-            Ext4SyncIntent::DataOnly,
-            || true,
-        )
+        .writeback_ordered_at(&inode, 2, b"xy", 4, Ext4SyncIntent::DataOnly, || true)
         .unwrap();
 
     assert_eq!(
@@ -1296,15 +1267,7 @@ fn regular_file_mutation_accepts_huge_file_feature_for_sector_accounted_inode() 
 
     inode.set_size(1);
     filesystem
-        .writeback_ordered_at(
-            &inode,
-            0,
-            b"x",
-            1,
-            crate::Ext4Timestamp::new(35, 0),
-            Ext4SyncIntent::FullMetadata,
-            || true,
-        )
+        .writeback_ordered_at(&inode, 0, b"x", 1, Ext4SyncIntent::FullMetadata, || true)
         .expect("write ordinary inode on huge_file filesystem");
     filesystem
         .truncate_regular_inode(&inode, 0, crate::Ext4Timestamp::new(36, 0))
@@ -1343,15 +1306,7 @@ fn regular_file_mutation_rejects_inode_using_huge_file_accounting() {
     journal.finish_checkpoint_for_test(&commit).unwrap();
 
     let failure = filesystem
-        .writeback_ordered_at(
-            &inode,
-            0,
-            b"x",
-            1,
-            crate::Ext4Timestamp::new(38, 0),
-            Ext4SyncIntent::FullMetadata,
-            || true,
-        )
+        .writeback_ordered_at(&inode, 0, b"x", 1, Ext4SyncIntent::FullMetadata, || true)
         .expect_err("huge-file block accounting remains unsupported");
     assert_eq!(failure.completed_bytes(), 0);
     assert_eq!(
@@ -1445,7 +1400,6 @@ fn writeback_without_growth_preserves_pending_frees(
                 offset,
                 &input,
                 inode.size(),
-                crate::Ext4Timestamp::new(5700, 0),
                 Ext4SyncIntent::FullMetadata,
                 32,
                 || true,
@@ -1577,7 +1531,6 @@ fn readmission_failure_preserves_prefix(
             0,
             &vec![0x6b; 6 * TEST_BLOCK_SIZE],
             inode.size(),
-            crate::Ext4Timestamp::new(5710, 0),
             Ext4SyncIntent::FullMetadata,
             0,
             || true,

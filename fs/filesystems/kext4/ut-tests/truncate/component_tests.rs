@@ -150,7 +150,6 @@ fn truncate_grow_zeroes_mapped_old_eof_tail() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(18, 0),
             Ext4SyncIntent::FullMetadata,
             || true,
         )
@@ -203,7 +202,6 @@ fn truncate_shrink_releases_tail_blocks_and_zeroes_partial_eof_block() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(21, 0),
             Ext4SyncIntent::FullMetadata,
             || true,
         )

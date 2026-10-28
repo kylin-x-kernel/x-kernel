@@ -169,7 +169,7 @@ impl Ext4SbInfo {
         // that write_access from cold-reading inside the critical section.
         // The inode-table block cannot be prefetched because its address
         // depends on the inode selected from the bitmap.
-        self.prefetch_metadata_blocks(&[
+        let _prefetch = self.prefetch_metadata_blocks(&[
             inode_bitmap_block,
             block_bitmap_block,
             descriptor_block,
@@ -375,7 +375,11 @@ impl Ext4SbInfo {
         }
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(
+            &inode_table_access,
+            allocation.inode(),
+            &inode_table_bytes,
+        )?;
         alloc.groups[group_index] = GroupMutableState::from_descriptor(&updated_descriptor);
         alloc.free_blocks_count = updated_superblock.on_disk_free_blocks_count();
         alloc.free_inodes_count = updated_superblock.on_disk_free_inodes_count();
@@ -416,7 +420,7 @@ impl Ext4SbInfo {
         // cold-cache device read does not serialize every allocator behind
         // the mutex; the authoritative snapshots are re-read inside the
         // lock below.
-        self.prefetch_metadata_blocks(&[
+        let _prefetch = self.prefetch_metadata_blocks(&[
             inode_bitmap_block,
             inode_table_block,
             descriptor_block,
@@ -522,7 +526,7 @@ impl Ext4SbInfo {
         replace_metadata_access_bytes(&bitmap_access, bitmap_bytes)?;
         replace_metadata_access_bytes(&descriptor_access, descriptor_bytes)?;
         replace_metadata_access_bytes(&superblock_access, superblock_bytes)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(&inode_table_access, inode, &inode_table_bytes)?;
         alloc.groups[group_index] = GroupMutableState::from_descriptor(&updated_descriptor);
         alloc.free_blocks_count = updated_superblock.on_disk_free_blocks_count();
         alloc.free_inodes_count = updated_superblock.on_disk_free_inodes_count();

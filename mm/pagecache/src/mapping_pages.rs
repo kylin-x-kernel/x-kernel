@@ -67,10 +67,6 @@ impl MappingPagesState {
         self.entries.remove(&index);
     }
 
-    pub(super) fn take_folios(&mut self) -> BTreeMap<PageIndex, Arc<Folio>> {
-        core::mem::take(&mut self.entries)
-    }
-
     pub(super) fn is_current(&self, index: PageIndex, candidate: &Arc<Folio>) -> bool {
         self.entries
             .get(&index)

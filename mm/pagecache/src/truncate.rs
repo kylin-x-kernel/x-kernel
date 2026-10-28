@@ -182,23 +182,13 @@ impl MappingPages {
     }
 }
 
-impl Drop for MappingPages {
+impl Drop for MappingPagesState {
     fn drop(&mut self) {
-        // Final ownership excludes mapping operations: synchronous writeback
-        // borrows this container through completion. I/O waits belong to the
-        // explicit truncate_final path, not field destruction. As with other
-        // mapping operations, accessing these mutexes requires task context.
-        let entries = {
-            let mut state = self.state.lock();
-            state.dirty_marks.clear();
-            state.writeback_marks.clear();
-            state.take_folios()
-        };
-        for entry in entries.values() {
+        // Completion objects borrow the index through the last writeback. Final
+        // destruction therefore cannot race I/O and runs in task context.
+        for entry in self.entries.values() {
             let mut folio = entry.lock();
             debug_assert!(!folio.is_under_writeback());
-            // External references may outlive the container. Invalidate them
-            // before Rust drops the entries and their derived marks.
             folio.invalidate();
         }
     }

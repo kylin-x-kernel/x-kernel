@@ -746,7 +746,7 @@ impl Ext4SbInfo {
                 // cold-cache device read must not serialize every allocator
                 // behind the mutex. The attempt re-reads authoritatively
                 // inside.
-                self.prefetch_group_allocation_metadata(group)?;
+                let _prefetch = self.prefetch_group_allocation_metadata(group)?;
                 // One lock section covers the attempt and the post-allocation
                 // hook, so the hook observes - and may extend - exactly the
                 // state the allocation published.

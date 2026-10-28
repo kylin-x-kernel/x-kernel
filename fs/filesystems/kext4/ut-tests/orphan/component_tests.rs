@@ -68,7 +68,6 @@ fn orphan_cleanup_finishes_committed_shrink_after_crash_point() {
             0,
             &input,
             input.len() as u64,
-            crate::Ext4Timestamp::new(31, 0),
             Ext4SyncIntent::FullMetadata,
             || true,
         )

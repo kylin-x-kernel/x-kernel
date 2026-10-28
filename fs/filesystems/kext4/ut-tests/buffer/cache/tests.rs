@@ -123,3 +123,30 @@ fn explicit_reclaim_does_not_wait_for_recent_access_bits() {
     assert_eq!(cache.reclaim_unused(usize::MAX), 1);
     assert_idle_maintenance_skips_index_lock(&cache);
 }
+
+#[def_test]
+fn old_snapshot_pins_slot_identity_after_replacement_and_forget() {
+    let device = Arc::new(TestDevice::new(4, 0, TimeSpan::ZERO));
+    let cache = cache_for(device.clone());
+    let block = FilesystemBlock::new(1);
+    let old = cache.read(block).unwrap();
+    let transaction = TransactionId::new(20);
+    let access = cache.write_access(block, transaction).unwrap();
+    access
+        .update_bytes(|_, bytes| {
+            bytes[0] = 0x55;
+            Ok(())
+        })
+        .unwrap();
+    drop(access);
+    cache
+        .forget_or_revoke_checkpointed(block, transaction)
+        .unwrap();
+    assert_eq!(cache.reclaim_unused(usize::MAX), 0);
+    let current = cache.read(block).unwrap();
+    assert_eq!(current.as_ref()[0], 0x55);
+    assert_eq!(device.read_count.load(Ordering::Relaxed), 1);
+    drop(current);
+    drop(old);
+    assert_eq!(cache.reclaim_unused(usize::MAX), 1);
+}

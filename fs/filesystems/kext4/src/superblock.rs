@@ -1012,19 +1012,23 @@ impl Ext4SbInfo {
     /// Warms the metadata cache for `blocks` before the caller takes the
     /// allocator lock, so a cold-cache device read runs while other
     /// allocators can still proceed instead of serializing every one of
-    /// them behind the mutex (Linux reads the bitmap buffer before
-    /// `ext4_lock_group` for the same reason). Cache slots stay resident,
-    /// so the authoritative in-lock re-reads hit memory; an error here
-    /// fails the caller before it ever takes the lock. The prefetched
+    /// them behind the mutex. Retain the returned pins until the allocator
+    /// guard is released: reclaim cannot remove a pinned slot, even if a
+    /// publication replaces its immutable bytes. Authoritative in-lock
+    /// re-reads therefore hit memory without relying on mount exclusion.
+    /// An error here fails before the caller takes its allocator lock. The prefetched
     /// bytes are a latency pre-warm only — never an authoritative
     /// snapshot; safety relies on the `MetadataBlockCache` publish-then-
     /// read contract (every publish replaces the slot bytes) that makes
     /// the in-lock re-read observe the latest committed content.
-    pub(crate) fn prefetch_metadata_blocks(&self, blocks: &[FilesystemBlock]) -> Ext4Result<()> {
-        for block in blocks {
-            let _ = self.read_metadata_block(*block)?;
-        }
-        Ok(())
+    pub(crate) fn prefetch_metadata_blocks(
+        &self,
+        blocks: &[FilesystemBlock],
+    ) -> Ext4Result<Vec<MetadataBuffer>> {
+        blocks
+            .iter()
+            .map(|block| self.read_metadata_block(*block))
+            .collect()
     }
 
     pub(crate) fn reload_mutable_metadata_state(&mut self) -> Ext4Result<()> {

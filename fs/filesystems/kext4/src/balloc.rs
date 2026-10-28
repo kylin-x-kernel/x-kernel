@@ -80,14 +80,15 @@ impl Ext4SbInfo {
     ///
     /// Call this *outside* the allocator lock: a cold-cache device read must
     /// not serialize every allocator behind the mutex. The allocation
-    /// re-reads all three authoritatively under the lock, so this is pure
-    /// warm-up.
+    /// re-reads all three authoritatively under the lock. Retain the returned
+    /// pins through that lock's lifetime; the prefetched bytes are not an
+    /// authoritative allocation snapshot.
     ///
     /// Locking: must NOT hold the allocator mutex.
     pub(crate) fn prefetch_group_allocation_metadata(
         &self,
         group: BlockGroupNumber,
-    ) -> Ext4Result<()> {
+    ) -> Ext4Result<alloc::vec::Vec<crate::buffer::MetadataBuffer>> {
         let bitmap_block = FilesystemBlock::new(
             self.group_geometry(group)
                 .ok_or(Ext4Error::OutOfBounds)?
@@ -129,7 +130,7 @@ impl Ext4SbInfo {
         if min_len.get() == 0 || expected_len.get() == 0 || min_len > expected_len {
             return Err(Ext4Error::OutOfBounds);
         }
-        self.prefetch_group_allocation_metadata(group)?;
+        let _prefetch = self.prefetch_group_allocation_metadata(group)?;
         let mut alloc = lock(&self.allocator);
         self.allocate_block_run_in_group_locked(
             &mut alloc,
@@ -495,7 +496,8 @@ impl Ext4SbInfo {
         // cold-cache device read does not serialize every allocator behind
         // the mutex; the authoritative snapshots are re-read inside the
         // lock below.
-        self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])?;
+        let _prefetch =
+            self.prefetch_metadata_blocks(&[bitmap_block, descriptor_block, superblock_block])?;
 
         // The allocator lock still spans the in-lock read-modify-write so
         // concurrent releases keep the bitmap and counters consistent with

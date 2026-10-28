@@ -674,3 +674,89 @@ fn readahead_marker_survives_writeback() {
     assert!(!folio.is_readahead());
     assert!(!folio.take_readahead());
 }
+
+#[def_test]
+fn submitted_snapshot_outlives_scan_and_preserves_redirty_and_failed_tail() {
+    let cache = new_cache();
+    write_cached(&cache, 0, &vec![0x31; PAGE_SIZE_4K * 2]).unwrap();
+    let mut pending = Vec::new();
+    let mut budget = 2;
+    cache
+        .submit_cache_pages(
+            (PAGE_SIZE_4K * 2) as u64,
+            0..u64::MAX,
+            &mut budget,
+            &mut 0,
+            PAGE_SIZE_4K * 2,
+            &mut |batch| {
+                pending.push(batch);
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(budget, 0);
+    for page in 0..2 {
+        cache.with_folio(page, |folio| assert!(folio.unwrap().is_under_writeback()));
+    }
+    write_cached(&cache, 0, b"newer").unwrap();
+    let (data, completion) = pending.pop().unwrap().into_parts();
+    assert!(data.iter().all(|byte| *byte == 0x31));
+    assert_eq!(completion.complete(PAGE_SIZE_4K), Ok(1));
+    assert_eq!(dirty_indices(&cache), vec![0, 1]);
+    for page in 0..2 {
+        cache.with_folio(page, |folio| assert!(!folio.unwrap().is_under_writeback()));
+    }
+}
+
+#[def_test]
+fn rejected_submission_redirties_its_batch_without_ending_prior_io() {
+    let cache = new_cache();
+    write_cached(&cache, 0, &vec![0x31; PAGE_SIZE_4K * 2]).unwrap();
+    let mut pending = None;
+    assert_eq!(
+        cache.submit_cache_pages(
+            (PAGE_SIZE_4K * 2) as u64,
+            0..u64::MAX,
+            &mut 2,
+            &mut 0,
+            PAGE_SIZE_4K,
+            &mut |batch| {
+                if pending.is_none() {
+                    pending = Some(batch);
+                    Ok(())
+                } else {
+                    Err(KError::Io)
+                }
+            }
+        ),
+        Err(KError::Io)
+    );
+    assert_eq!(dirty_indices(&cache), vec![1]);
+    cache.with_folio(0, |folio| assert!(folio.unwrap().is_under_writeback()));
+    drop(pending);
+    assert_eq!(dirty_indices(&cache), vec![0, 1]);
+    cache.wait_on_writeback_range(0..u64::MAX);
+}
+
+#[def_test]
+fn completion_borrows_index_until_last_writeback_finishes() {
+    let cache = new_cache();
+    write_cached(&cache, 0, b"snapshot").unwrap();
+    let folio = cache.state.lock().entries.get(&0).unwrap().clone();
+    let mut pending = None;
+    cache
+        .submit_cache_pages(8, 0..8, &mut 1, &mut 0, PAGE_SIZE_4K, &mut |batch| {
+            pending = Some(batch);
+            Ok(())
+        })
+        .unwrap();
+    assert!(folio.lock().is_under_writeback());
+    assert!(!folio.lock().is_invalidated());
+    let (_, completion) = pending.unwrap().into_parts();
+    assert_eq!(completion.complete(9), Err(KError::InvalidInput));
+    assert!(!folio.lock().is_under_writeback());
+    assert!(folio.lock().is_dirty());
+    assert!(!folio.lock().is_invalidated());
+    drop(cache);
+    assert!(folio.lock().is_invalidated());
+}

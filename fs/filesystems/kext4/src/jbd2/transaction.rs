@@ -24,6 +24,8 @@ use super::{
 };
 use crate::{Ext4Error, Ext4Result, FilesystemBlock};
 
+mod progress;
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
 }
@@ -53,7 +55,8 @@ struct RunningTransactionState {
     active_handles: u32,
     reserved_credits: u32,
     used_credits: u32,
-    has_unflushed_ordered_data: bool,
+    ordered_generation: u64,
+    flushed_generation: u64,
     metadata_blocks: BTreeSet<FilesystemBlock>,
     revoked_blocks: BTreeSet<FilesystemBlock>,
 }
@@ -64,7 +67,8 @@ impl RunningTransactionState {
             active_handles: 0,
             reserved_credits: 0,
             used_credits: 0,
-            has_unflushed_ordered_data: false,
+            ordered_generation: 0,
+            flushed_generation: 0,
             metadata_blocks: BTreeSet::new(),
             revoked_blocks: BTreeSet::new(),
         }
@@ -112,7 +116,7 @@ impl RunningTransactionState {
         FrozenTransactionState {
             reserved_credits: self.reserved_credits,
             used_credits: self.used_credits,
-            has_unflushed_ordered_data: self.has_unflushed_ordered_data,
+            has_unflushed_ordered_data: self.ordered_generation != self.flushed_generation,
             metadata_blocks: Arc::from(
                 self.metadata_blocks
                     .into_iter()
@@ -155,6 +159,7 @@ struct JournalInner {
     committing: Option<Arc<RuntimeTransaction>>,
     checkpoint_transactions: VecDeque<Arc<RuntimeTransaction>>,
     checkpointed_through: TransactionId,
+    closing: Option<TransactionId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,8 +239,8 @@ impl RuntimeTransaction {
 
     /// Flushes pending ordered data before acknowledging its durability.
     ///
-    /// The caller serializes commit/checkpoint operations with the mount write
-    /// lock. The barrier runs without the transaction phase lock held.
+    /// The mounted journal serializes persistence. This transaction is frozen,
+    /// so it accepts no new data dependencies. No phase lock is held during I/O.
     pub(crate) fn flush_ordered_data(
         &self,
         barrier_fn: impl FnOnce() -> Ext4Result<()>,
@@ -393,8 +398,8 @@ impl fmt::Debug for JournalTransactions {
 
 /// Selected FIFO prefix and the persisted boundary that remains live.
 ///
-/// The mount mutation lock must exclude append/checkpoint until this selection
-/// has been written and retired. Merely selecting a prefix frees no log space.
+/// The journal persistence coordinator excludes append/checkpoint until this
+/// selection has been written and retired. Merely selecting a prefix frees no log space.
 pub(crate) struct JournalCheckpointBatch {
     pub(crate) transactions: Vec<(Arc<RuntimeTransaction>, JournalPersistedCommit)>,
     pub(crate) next_oldest: Option<JournalPersistedCommit>,
@@ -422,6 +427,7 @@ impl JournalTransactions {
                 committing: None,
                 checkpoint_transactions: VecDeque::new(),
                 checkpointed_through: previous_transaction(first_transaction),
+                closing: None,
             }),
         }
     }
@@ -446,6 +452,7 @@ impl JournalTransactions {
             committing: None,
             checkpoint_transactions: VecDeque::new(),
             checkpointed_through: previous_transaction(first_transaction),
+            closing: None,
         };
         Ok(())
     }
@@ -468,13 +475,26 @@ impl JournalTransactions {
                 .is_some_and(|last| transaction_is_same_or_older(transaction, last.id()))
     }
 
-    /// Starts or joins the running transaction.
+    /// Starts or joins the running transaction, waiting if it has been sealed.
+    ///
+    /// Do not nest begin while retaining a handle or a lock needed to stop one.
+    /// Capacity preflight and begin require the caller's mutation exclusion.
     pub(crate) fn begin(&self, credits: JournalCredits) -> Ext4Result<JournalHandle<'_>> {
-        let mut inner = lock(&self.inner);
-        check_not_aborted(&inner)?;
+        self.ensure_writable()?;
         if !self.can_fit_handle(credits) {
             return Err(Ext4Error::NoSpace);
         }
+        let mut inner = loop {
+            self.state_waiters.wait_until(|| {
+                let inner = lock(&self.inner);
+                inner.aborted.is_some() || inner.closing.is_none()
+            });
+            let inner = lock(&self.inner);
+            check_not_aborted(&inner)?;
+            if inner.closing.is_none() {
+                break inner;
+            }
+        };
 
         let id = match &mut inner.running {
             Some(transaction) => {
@@ -500,48 +520,6 @@ impl JournalTransactions {
         })
     }
 
-    /// Waits for active handles when the next reservation needs a commit.
-    ///
-    /// Sleeps without holding journal or transaction locks. The mount mutation
-    /// lock must exclude competing admission and commit drivers; existing
-    /// handles must be able to stop without acquiring that lock.
-    pub(crate) fn transaction_to_commit_before_reservation(
-        &self,
-        incoming_credits: JournalCredits,
-    ) -> Ext4Result<Option<TransactionId>> {
-        let mut result = Ok(None);
-        self.state_waiters.wait_until(|| {
-            result = self.try_transaction_to_commit_before_reservation(incoming_credits);
-            !matches!(result, Err(Ext4Error::JournalBusy))
-        });
-        result
-    }
-
-    fn try_transaction_to_commit_before_reservation(
-        &self,
-        incoming_credits: JournalCredits,
-    ) -> Ext4Result<Option<TransactionId>> {
-        let inner = lock(&self.inner);
-        check_not_aborted(&inner)?;
-        if !self.can_fit_handle(incoming_credits) {
-            return Err(Ext4Error::NoSpace);
-        }
-        let Some(running) = inner.running.as_ref() else {
-            return Ok(None);
-        };
-        let (active_handles, reserved_credits) = running.running_state()?;
-        let projected_credits = reserved_credits
-            .checked_add(incoming_credits.get())
-            .ok_or(Ext4Error::Overflow)?;
-        if projected_credits <= self.max_reserved_credits {
-            return Ok(None);
-        }
-        if active_handles != 0 {
-            return Err(Ext4Error::JournalBusy);
-        }
-        Ok(Some(running.id()))
-    }
-
     /// Returns this transaction after its last handle closes and its retained
     /// credits reach the batching limit.
     pub(crate) fn transaction_to_commit_after_handle(
@@ -554,7 +532,13 @@ impl JournalTransactions {
             return Ok(None);
         };
         if running.id() != transaction {
-            return Err(Ext4Error::InvalidJournalTransaction);
+            // Another commit request may have advanced this closed handle's
+            // transaction before its completion callback acquired the lock.
+            return if transaction_is_same_or_older(transaction, running.id()) {
+                Ok(None)
+            } else {
+                Err(Ext4Error::InvalidJournalTransaction)
+            };
         }
         let (active_handles, reserved_credits) = running.running_state()?;
         if active_handles != 0 || reserved_credits < self.max_reserved_credits {
@@ -574,7 +558,13 @@ impl JournalTransactions {
             return Ok(None);
         };
         if running.id() != transaction {
-            return Err(Ext4Error::InvalidJournalTransaction);
+            // Another commit request may have advanced this closed handle's
+            // transaction before its completion callback acquired the lock.
+            return if transaction_is_same_or_older(transaction, running.id()) {
+                Ok(None)
+            } else {
+                Err(Ext4Error::InvalidJournalTransaction)
+            };
         }
         let (active_handles, _) = running.running_state()?;
         Ok((active_handles == 0).then_some(running.id()))
@@ -660,6 +650,7 @@ impl JournalTransactions {
                 .take()
                 .ok_or(Ext4Error::InvalidJournalTransaction)?;
             inner.committing = Some(commit.clone());
+            inner.closing = None;
             drop(inner);
             self.notify_state_waiters();
             return Ok(commit);
@@ -682,7 +673,7 @@ impl JournalTransactions {
 
     /// Snapshots the pending FIFO under the transaction lock, without doing I/O.
     ///
-    /// The mount write lock must serialize checkpoint and append until this
+    /// The journal persistence coordinator serializes checkpoint and append until this
     /// batch has completed. Its size is bounded by the occupied journal ring.
     /// Production entries carry persistence evidence before enqueueing; missing
     /// evidence is an invalid transaction, not a commit still in progress.
@@ -707,7 +698,7 @@ impl JournalTransactions {
     ///
     /// Only the selected prefix, its successor and the newest evidence are read;
     /// the unselected suffix is neither snapshotted nor scanned. No I/O runs under
-    /// the transaction lock. The mount mutation lock serializes selection through
+    /// the transaction lock. The journal persistence coordinator serializes selection through
     /// retirement, just as for [`Self::checkpoint_batch`].
     pub(crate) fn checkpoint_batch_for_append(
         &self,
@@ -877,6 +868,8 @@ impl JournalTransactions {
             return Err(error);
         }
         inner.checkpoint_transactions.push_back(committing);
+        drop(inner);
+        self.notify_state_waiters();
         Ok(())
     }
 
@@ -1025,26 +1018,30 @@ impl<'a> JournalHandle<'a> {
     /// metadata access can leave the data dependency pending for a later commit.
     pub(crate) fn require_ordered_data_flush(&mut self) -> Ext4Result<()> {
         self.journal.with_running(self.id, |running| {
-            running.has_unflushed_ordered_data = true;
+            running.ordered_generation = running
+                .ordered_generation
+                .checked_add(1)
+                .ok_or(Ext4Error::Overflow)?;
             Ok(())
         })?;
         Ok(())
     }
 
-    /// Executes a device-wide barrier and then clears running data dependencies.
+    /// Executes a device-wide barrier and acknowledges its dependency snapshot.
     ///
-    /// The mount write lock excludes concurrent writes while the barrier and this
-    /// acknowledgement run, including writes from other handles in this transaction.
-    /// The barrier runs without journal or transaction locks held. Data dependencies
-    /// remain set when the barrier fails.
+    /// Acknowledges only dependencies registered before this barrier started.
+    /// Other handles may register newer writes during I/O; those remain pending.
+    /// The barrier holds no journal/phase lock. Failure acknowledges nothing.
     pub(crate) fn flush_ordered_data(
         &mut self,
         barrier_fn: impl FnOnce() -> Ext4Result<()>,
     ) -> Ext4Result<()> {
-        self.journal.with_running(self.id, |_| Ok(()))?;
+        let generation = self
+            .journal
+            .with_running(self.id, |running| Ok(running.ordered_generation))?;
         barrier_fn()?;
         self.journal.with_running(self.id, |running| {
-            running.has_unflushed_ordered_data = false;
+            running.flushed_generation = running.flushed_generation.max(generation);
             Ok(())
         })
     }

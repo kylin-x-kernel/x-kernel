@@ -1166,3 +1166,12 @@ after their final allocation reference is dropped outside the locks.
 释放 mutation 保护前发布只读状态，使现有 VFS 写入口和 statfs 导出立即观察该状态。
 文件系统的 reconfigure 回调必须依据已有的失败状态拒绝恢复可写，且在返回错误前不应用
 其他挂载选项。`RDONLY` 本身仍是挂载标志，不能替代文件系统内部的写入准入校验。
+
+### 提交式回写批次
+
+`AddressSpace::submit_cached_ranges` 将 PageCache 的有界快照和完成责任交给文件系统，
+与原同步 `writeback_cached_ranges` 共用底层枚举逻辑。此入口的 `nr_to_write` 按
+交给提交回调的页数扣减；原同步入口仍按已完成页数扣减。callback 返回不等于回写完成。
+文件系统负责限制在途数量、排空 I/O、在任务上下文结束 folio writeback，并保持
+inode/extent 生命周期保护。KVFS 的 invalidate shared guard 仍覆盖整个 writepages；
+此适配器未增加异步错误序列或后台提交能力，现有同步调用必须在返回前完成所有批次。

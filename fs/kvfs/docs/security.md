@@ -632,3 +632,8 @@ to the filesystem caller, which decides its normal short-read completion.
 不可恢复的内部错误，并在释放 mutation 保护前发布只读标志。VFS 写入口据此拒绝后续写入。
 remount 可修改普通挂载标志；文件系统必须用已有失败状态拒绝重新启用写入，并在内部
 写入边界继续校验该状态，避免仅依靠 `RDONLY` 位保证错误恢复期间的保护。
+
+提交式 `submit_cached_ranges` 不自动等待 I/O，也不保存延迟错误。文件系统必须在
+同步 writepages 返回前排空已提交批次，包括扫描/准入失败路径；不得让 invalidate
+保护结束后仍存在未受其他机制保护的物理映射使用。PageCache completion 的消费与
+Drop 需要任务上下文，且只能在对应 I/O 结束后执行。

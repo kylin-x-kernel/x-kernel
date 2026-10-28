@@ -176,7 +176,9 @@ bitmap checksum 等可变字段，刻意不含地址字段，地址因此只有�
 支持特性），避免冻结几何与重载状态分裂后操作错误的 bitmap/inode table。取锁前，
 balloc/ialloc 入口先完成冻结几何解析与元数据缓存预热（`prefetch_metadata_blocks`），
 冷缓存设备读在锁外完成、失败也在锁外返回，不串行化全体分配器（对应 Linux 先读
-bitmap buffer 再 `ext4_lock_group`）；权威快照在锁内重读，预热结果绝不作为权威
+bitmap buffer 再 `ext4_lock_group`）；返回的 `MetadataBuffer` 集合保留到 allocator guard
+释放之后，同时 pin 不可变字节和槽位身份，回收不能在预取与重读之间重建槽位。
+权威快照在锁内重读，预热结果绝不作为权威
 数据。balloc/ialloc 的
 单组分配/释放入口（`*_in_group`）整体为单一临界区：从读组描述符、位图 buffer 读改、
 journal write-access 到内存状态发布全程持锁，入口之间不会基于同一位图快照重复选取
@@ -347,7 +349,7 @@ transaction。新 handle 加入前按 journal 格式开销采用约三分之一�
 以覆盖 final inode eviction 产生的新 metadata。正常提交直接检查 running/committing 槽位，
 只有针对旧 pending transaction 的重试才扫描 FIFO，避免每次提交都承担 backlog 长度的开销。
 
-checkpoint worker 在 mount 写锁下执行两类工作：显式同步快照全部队列并排空；append
+checkpoint worker 在 journal 持久化执行锁下执行两类工作（生产仍持有 mount 写锁）：显式同步快照全部队列并排空；append
 返回 `JournalBusy` 时，选取达到空间目标的最短连续前缀。令 `A` 为当前 frozen transaction
 实际需要的 descriptor、metadata、revoke 和 commit 块数，`B` 为 mounted transaction credit
 上限对应的最坏日志开销，`C` 为可用 ring 总块数，则回收目标为 `min(C - 1, A + B)` 个可写
@@ -407,8 +409,9 @@ cache mutex 统一保护索引、需求复核、游标和淘汰资格；预算�
 [元数据缓存回收验证](metadata-cache-reclaim-validation.md)。
 checkpoint 定向回收和显式全量回收不受访问位延迟，仍检查 pin/ownership/frozen image。
 一次访问只做有界扫描，不周期性全扫；剩余需求由后续 mount 访问继续推进。
-普通 read/insert 自身不淘汰。allocator mutation 持有 mount 写 guard，回收在它的 allocator
-锁及预取/权威重读窗口结束后执行；读 guard 的回收仍排斥 allocator mutation。回收不做
+普通 read/insert 自身不淘汰。allocator mutation 当前仍持有 mount 写 guard，维护入口在它的 allocator
+锁及预取/权威重读窗口结束后执行；预取集合本身已 pin 槽位，不依赖外层排他来抵御普通回收。
+读 guard 的维护仍按现有入口执行。回收不做
 设备 I/O，因此不把新的冷读插入 allocator 临界区。显式全回收和失效重置扫描游标。
 
 4 MiB 仅为 resident block payload 的保留策略，不统计 frozen image 和索引开销，不是
@@ -427,8 +430,8 @@ revoke 仍通过原有缓存规则抑制旧版本写回。提交者完成前缀�
 
 只有批次排空 FIFO 时，才按批末事务策略处理 recovery 状态；保留后缀时用 `next_oldest`
 把日志尾部推进到剩余首笔事务，保持 journal active 和 ext4 recovery evidence，不执行缓存
-失效或 mutable metadata 重载。`PreserveDuringRecovery` 事务追加后在 mount
-写锁下立即同步 checkpoint，因此它若出现在批中必为最后一笔，不会有后续普通事务
+失效或 mutable metadata 重载。`PreserveDuringRecovery` 事务追加后在 journal
+持久化执行锁下立即同步 checkpoint，因此它若出现在批中必为最后一笔，不会有后续普通事务
 在排空前加入。批中可以有更早的 `ClearAfterCheckpoint` 事务，整批仍保留 recovery
 evidence 并重载最新 mutable metadata state。所有 policy 记录在 frozen image 写回前
 校验存在。尾部校验借用现有 batch 中的 persisted evidence 迭代器，不构造第二份凭据容器；
@@ -442,17 +445,19 @@ VFS runtime inode identity 上，对应 Linux inode 内的 sync/datasync tid。�
 这保证 durability，但可能连带提交无关 inode 的 metadata。待共享 VFS runtime inode 接口具备
 后，再实现目标 transaction 等待；不能重新引入按 inode number 索引的 mount-wide cursor map。
 `syncfs` 和 KVFS unmount writeback 仍提交 running transaction 并 drain 全部 checkpoint。
-当前 ordered-data dependency 记录在 running transaction 的 `has_unflushed_ordered_data` 中：
-发布 metadata 的 writeback batch 在成功的数据 write 后设置该位，多个 PageCache batch 和 inode 可以共享同一事务。普通 batch
-结束只更新内存 metadata，不单独 flush；freeze 把依赖位带入 committing phase，persist 在
+当前 ordered-data dependency 由 running transaction 的 `ordered_generation` 和
+`flushed_generation` 记录：发布 metadata 的 writeback batch 在成功的数据 write 后递增
+登记代次，多个 PageCache batch 和 inode 可以共享同一事务。普通 batch 结束只更新内存
+metadata，不单独 flush；freeze 根据两个代次是否相等生成 committing phase 的待 flush 位，persist 在
 任何 recovery evidence 或 journal write 之前统一 flush，成功后才清除依赖并继续提交。
 因此 writeback 完成不代表当前事务的数据已持久化；inode/filesystem sync 或容量压力提交提供
 持久化边界。metadata-only transaction 不增加数据 flush。仅覆盖已映射且不超过 `i_disksize`
 的数据在 data-only 路径不加入 metadata 事务；inode sync 提交已有事务时的同设备 journal flush，
 或无事务时的直接设备 flush，以及 filesystem sync 的最终 flush，保证同步返回时的数据持久化。
-该路径不承诺覆盖内容先于无关事务的 commit record 持久化。`flush_ordered_data` 把设备 barrier
-与依赖清除封装在同一入口：成功才清除，失败保留；barrier 期间不持有 journal/transaction 内部锁，
-调用者仍须持有 mount 写锁串行化数据写入与 commit/checkpoint。
+该路径不承诺覆盖内容先于无关事务的 commit record 持久化。`flush_ordered_data` 在 barrier
+开始前快照登记代次，成功后只确认该代次，失败不确认；较旧的 barrier 后完成时也不能降低已确认
+代次。barrier 期间不持有 journal/transaction 短状态锁，并发新增依赖留给后续 barrier；
+此确认协议不再依赖 mount 排斥其他 handle。冻结后的 flush 与 journal I/O 由持久化执行锁串行。
 PageCache 仍以固定上限聚合 folio；dirty range 的必需数据块已由 `write_begin` 或
 `page_mkwrite` 纳入 delayed-allocation accounting，writeback 不再扫描完整范围生成静态空间/
 credit plan。实际写回由 byte cursor 推进，每处理一个 mapped、unwritten 或 hole allocation run
@@ -665,7 +670,7 @@ extent 层按 inode 已校验的当前树深计算一次 append 的新块与旧�
 
 预算是保守上界，原地插入也申请同一操作额度，handle stop 归还未消耗部分。单次请求超过
 journal 事务容量时返回 `NoSpace`，不 abort；多个 handle 的总额度恰好等于上限时允许加入，
-超过上限时 journal 核心可等待已有 handle 退出。文件系统 mutation 在 mount 写锁下
+超过上限时先封闭旧事务的准入，再由提交入口等待已有 handle 退出。文件系统 mutation 在 mount 写锁下
 串行执行，admission 使用现有 active-handle 计数拒绝嵌套，再持久化旧事务，因此不会
 持 mount 锁等待自己的 handle。等待复用事务状态队列，stop、commit、checkpoint 和 abort
 均通知该队列，不增加另一套 reservation 状态。
@@ -959,7 +964,11 @@ slot 使用自己的等待队列，等待发生在释放 cache mutex 之后，�
 mutation 不进入另一张 inode cache。
 核心内部的 metadata buffer
 和 JBD2 transaction handle 仍会记录 buffer ownership、credit consumption 和 revoke 状态。
-同一 inode 的 `writepages()` 由 `Ext4Inode` 的 sleepable writeback mutex 串行化，但进入 PageCache
+同一 inode 的 `writepages()`、VFS 两阶段 `set_len()`、最后写者预分配清理和 final eviction
+共同使用 `Ext4Inode` 的 sleepable writeback mutex；truncate 保持到 PageCache 调整和物理释放
+完成，eviction 保持到所有释放批次完成。KVFS 要求的 data/invalidate 保护先取得，再取得
+writeback mutex，随后才进入 mount。禁止持 mount 或 inode-state guard 反向取得 writeback mutex。
+恢复期只操作未发布 inode，仍由独占恢复流程保护。进入 PageCache
 遍历时不持有挂载级 core mutex；PageCache 在释放 mapping/folio mutex 后调用 batch writer，
 batch writer 才短暂取得 core write guard；delalloc accounting 由独立 reservation mutex 更新。这样
 普通 cache miss 的 `MappingInner -> core` 路径不会与 writeback 形成反向锁序。
@@ -969,10 +978,93 @@ mapping；core `report_mapping()` 只短暂读取 delayed extent lock，随后�
 `page_mkwrite` 使用 address-space invalidate shared lock 和 folio lock，truncate 同时使用
 invalidate exclusive 侧。三条路径通过同一个 delayed-set lock 发布 mapping/reservation
 状态。用户页错误或大输出因此不会持有挂载级 core read lock。
+
+### 共享状态与映射保护基础
+
+生产仍保留 `Ext4Mount` 的外层读写锁，本阶段不启用跨 inode 数据 I/O 并行。
+新增的内部契约用于后续逐步解除该依赖，而不是把所有 `&mut self` 改成共享访问。
+
+| 状态/操作 | 本阶段保护 | 剩余前置条件 |
+|---|---|---|
+| 元数据块读改写 | `MetadataWriteAccess::update_bytes` 在同一 slot mutex 下读取最新字节、执行内存更新并发布；失败保留旧值和状态 | callback 不得 I/O、调用 journal 或重新访问该 buffer/cache |
+| 共享 inode-table 发布 | `replace_inode_table_entry` 只把已验证的目标 entry 合入最新 block；普通 inode、xattr、分配/释放及 orphan-next 路径共用 | 同一 inode 的逻辑修改仍须串行；此机制不提供多 inode 操作的原子事务 |
+| 不可变读取及预热 | `MetadataBuffer` 同时持有 bytes 和 slot 的 Arc；预热 pins 保持至 allocator 锁释放 | pins 不是权威内容快照，锁内仍重读最新 bytes |
+| 回收/forget 后移除槽位 | cache index mutex 下校验 slot 唯一引用及 clean、无 frozen、字节无读者等条件 | 整体失效仍是独占恢复/生命周期操作，不能与活跃访问并行 |
+| 文件映射寿命 | 同 inode writeback mutex 覆盖回写、truncate 两阶段和 VFS 释放边界 | KVFS invalidate/data 锁先取得；底层 core API 仍由其调用者提供操作排他 |
+
+分开调用 `snapshot()` 与完整块 `replace_bytes()` 不构成原子读改写；仅允许由已有
+allocator、目录/extent 操作或 mount 排他保证的完整块重写。共享 inode-table 不能使用
+这种方式发布整个旧 block，否则会覆盖邻居 inode 的新 entry。slot mutex 与 cache index 的
+关系保持单向：index 可检查 slot；更新 callback 不得反向进入 index。commit snapshot 与
+原子修改使用同一 slot mutex；事务冻结、ordered-data 确认和 checkpoint 总顺序由下述协议保护。
+
+### 事务准入与持久化协调
+
+`MountedJournal::persistence` 是任务上下文中的 sleepable execution mutex，覆盖事务冻结、
+append、空间压力 checkpoint、home flush、tail flush、确认/退休，以及首次 feature 初始化
+和 syncfs 最终 recovery/orphan flag 更新。内部入口借用同一 `JournalPersistence` guard，
+压力回收不重新取得执行锁。错误须在释放执行权前记录 journal abort，避免下一个持久化请求
+把失败事务当作已完成；已持久化或退休的目标重复提交直接成功，不重复写盘或入队。
+
+`prepare_commit(tid)` 先在事务状态锁下将 running 标记为 closing，禁止新 handle 加入，
+随后释放状态锁等待已有 handle 退出。最后一个 handle stop、事务阶段推进和 abort 都唤醒
+progress waiters；freeze 后清除 closing，新 handle 可以加入下一笔 running transaction。
+已有 handle 仍能登记 metadata/ordered data 并正常 stop。等待者不能持有自己的 handle，
+也不能持有 stop 所需的锁；不允许在保留 handle 时嵌套 begin 等待新准入。旧 handle 的
+completion callback 若遇到更新的 running transaction，不重新提交或误报非法事务。
+容量预检超过预算时先封闭旧事务，再由提交入口等待其退出；恰好达到上限仍允许加入，
+单个 handle 超过容量保留 `NoSpace` 契约。不把正常 active-handle 竞争当作 `JournalBusy`
+错误暴露。物理空间准入仍由 allocator 待复用记录提供依据，只有持久化成功后
+才解除对应事务的复用限制；journal 协调不复制物理空间状态。
+
+当前锁序和 I/O 边界：
+
+```text
+KVFS data/invalidate -> inode writeback -> mount mutation
+    -> journal persistence -> 短 journal/transaction、allocator 或 buffer 状态临界区
+                         -> 设备 I/O（不持有上述短状态 guard）
+handle stop -> transaction 状态 -> 释放后唤醒（不取得 persistence）
+```
+
+append 和 checkpoint 的选择至退休由同一 execution guard 保护；checkpoint 使用冻结版本、
+FIFO 前缀、原有下一笔事务空间预算及 ring spare 规则。先 home 写回及 flush，再持久化 tail，
+最后退休和释放空间；未选中的后缀及 recovery evidence 保留。`PreserveDuringRecovery`
+的 append 与同步 drain 不释放执行权。显式 replay/reset 仍是发布 mount 身份前的独占恢复，
+不与普通访问并发；本步骤没有创建后台 checkpoint worker。
+
+生产仍保留 mount mutation 排他以及 `&mut Ext4SbInfo`。`prepare_reservation` 到 `begin`
+之间的容量预检/准入仍在同一次 mutation 排他中，不是可脱离该排他的 credit ticket；
+allocator/superblock 的完整块修改和恢复重载仍遵守原有排他边界。后续开放数据及 sync 并发
+必须适配这些调用窗口，不能仅删除外层 guard。此步骤提供 journal 内部等待与持久化协议，
+不等同于全文件系统元数据并发或已经获得端到端性能收益。
+
 N1 已将 journal mapping/superblock、transaction engine 和 checkpoint queue 固定到同一
 `MountedJournal`。N2 才根据后台 commit/checkpoint、inode writeback、metadata buffer 和 group
 allocator 的实际并发关系建立锁顺序；不以字段分组预设锁域。不得在 spinlock 下执行块 I/O、
 等待 PageCache 或获取 sleepable lock。
+
+### 已映射覆盖写的 BIO 提交与完成
+
+VFS `writepages` 对不增长、整文件系统块对齐、全部已经 initialized 的范围，
+在 mount read guard 内解析完整映射，释放 guard 后提交持有数据快照的 BIO。
+每个 inode 至多保留四个 PageCache 批次（每批至多 31 页），再按提交顺序等待；
+底层可以乱序完成。常见单 extent 直接转移快照，多 extent 分拆为独立拥有的缓冲区。
+准备失败不提交任何 BIO；已提交的请求即使中途失败也全部等待结束。
+
+成功数据的 metadata publication 在 mount write guard 下进行，保留既有的实际
+allocation admission 和 ordered-data flush 登记；最后才结束 PageCache writeback。
+正常完成和 DataOnly 失败前缀结算均实时检查 VFS writable-open 数量；写者仍在时
+保留预分配空间，最后写者关闭后的结算沿用主线回收条件。分配回退持有同一 resident
+`Arc<Ext4Inode>`，避免预分配 owner 与 VFS inode 脱离。
+DataOnly 失败只确认连续成功前缀；FullMetadata 数据失败不发布 metadata，保留
+全批 dirty 并按原有策略 abort journal。BIO 完成只发布结果与唤醒；页状态、额度
+回收、metadata 更新都由原任务完成，不在 IRQ/BH 上获取睡眠锁。
+
+本阶段两种 writeback mode 都在返回前排空，inode writeback mutex 和 KVFS
+invalidate shared 保护覆盖整个过程。等待数据时没有 mount guard，但同一 inode
+仍串行，分配、unwritten、增长和部分块写继续走原 ordered path，切换前先排空
+已有 BIO。尚未接入后台返回、errseq、异步 unwritten completion 或后台调度。
+这些限制保留现有 fsync/truncate 错误与生命周期边界，不代表完整异步回写已经完成。
 
 ## 设计决策
 

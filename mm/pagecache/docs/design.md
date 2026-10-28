@@ -95,7 +95,7 @@ growth 和 shrink 在索引锁下取得候选引用，释放索引锁后锁页�
 写回进度只由 KVFS `WritebackControl` 拥有。MappingPages 独占借用其预算和 skip
 字段原地更新，返回 `KResult<()>`，后续错误不会丢失先前进度；不另建 stats/pass
 对象。byte callback 使用 `Result<usize, (usize, KError)>` 返回完成前缀，或完成前缀
-与错误。完成所有已开始的 folio 后再传播错误，只有完整成功页消耗预算。
+与错误。同步适配器完成所有已开始的 folio 后再传播错误，只有完整成功页消耗预算。
 
 `writeback_until` 和 `write_cache_pages` 接收 owner 传入的
 `visible_len`，据此裁剪最后一个 folio 的有效字节。成功后清 dirty；失败时恢复
@@ -127,6 +127,19 @@ clean → dirty 状态变化时重新插入 tag。
 `with_folio` 和 `with_folio_or_create` 只在 closure 前后的最终 dirty 状态不同时执行
 reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只读访问 dirty folio
 时额外获取 MappingPages state lock。
+
+`submit_cache_pages` 与同步 `write_cache_pages` 共用枚举和状态转换逻辑，
+但把数据快照与完成责任交给 `WritebackBatch`。`into_parts` 将数据交给 BIO、
+将 folio 引用和索引引用留给 `WritebackCompletion`；提交回调返回不结束写回。
+该入口按交给 callback 的页数扣预算，包括 callback 拒绝的批次；同步入口仍按
+完成页数扣预算。每批至多 31 页，文件系统必须另行限制在途批次数。
+
+索引 mutex 使用内部 Arc 保活，完成对象不会复制索引或获得 inode 操作权。
+最终索引销毁在全部完成引用释放后执行，届时失效仍驻留的 folio。文件系统还必须
+保留自己的 inode/映射寿命保护，索引保活不能代替物理块映射保护。
+完成按字节前缀结束完整页、重脏后缀并保留并发 redirty；非法前缀或未消费对象
+的 Drop 重脏整批。所有完成和 Drop 都在任务上下文执行，不能放在 BIO 的 IRQ/BH
+回调内，且必须先排空关联 I/O。异步错误记录、后台调度和 fsync 语义由上层负责。
 
 ## 并发模型
 

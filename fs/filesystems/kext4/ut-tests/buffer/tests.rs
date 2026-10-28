@@ -20,7 +20,7 @@ pub(super) const TEST_BLOCK_SIZE: usize = 512;
 
 pub(super) struct TestDevice {
     bytes: crate::sync::Mutex<Box<[u8]>>,
-    read_count: AtomicUsize,
+    pub(super) read_count: AtomicUsize,
     write_count: AtomicUsize,
     flush_count: AtomicUsize,
     failures_remaining: AtomicUsize,

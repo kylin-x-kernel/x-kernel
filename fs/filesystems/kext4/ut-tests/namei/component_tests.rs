@@ -315,7 +315,6 @@ fn eviction_recovers_at_each_phase_before_and_after_commit() {
                     0,
                     &input,
                     input.len() as u64,
-                    timestamp,
                     Ext4SyncIntent::FullMetadata,
                     || true,
                 )

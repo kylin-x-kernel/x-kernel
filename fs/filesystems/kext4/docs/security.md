@@ -84,6 +84,17 @@ hole/unwritten 分支不能读取物理旧数据，部分块和 EOF 不能把
   活跃 superblock 状态、transaction engine 和 FIFO checkpoint queue。同一个 runtime
   transaction 必须按 Running → Committing → Checkpoint → Finished 迁移；队列只保存该对象，
   持久化证据属于其 Checkpoint phase，不复制 payload 或携带可替换的 coordinator 引用。
+- 提交请求在事务锁下先关闭目标 running transaction 的新 handle 准入，再释放状态锁等待
+  活跃 handle 退出；stop 和 abort 必须唤醒等待者。不能持有自身 handle 或退出方需要的锁
+  等待提交，也不能嵌套 begin 等待自己所在事务解封。重复持久化请求必须识别 pending/finished
+  目标，不能重复 append 或退休；无效未来目标必须失败，不能等待不相关事务。
+- 可变事务的 ordered-data flush 只能确认 barrier 开始前快照的依赖代次；较旧 barrier
+  完成不能倒退确认水位，失败不能清除依赖。冻结后不再接受新依赖，commit 在日志写入前
+  满足其完整 ordered-data 依赖。
+- journal 持久化 execution mutex 串行 append、checkpoint、ring/tail 与 recovery flag I/O；
+  短 transaction/state/buffer guard 不得跨设备 I/O。home 和 tail 两次持久化成功前不退休，
+  失败须在交出执行权前 abort。首次 feature 更新和 PreserveDuringRecovery 同样参加该协议；
+  replay/reset 仍限于 mount 身份发布前的独占恢复。
 - replay 完成后必须先把 transaction engine 的 next sequence、运行态 ring 和 checkpoint
   水位重置到 replay report，再开始 orphan cleanup；否则旧 sequence 不得用于创建新 transaction。
 - internal-journal extent 必须连续且至少覆盖 JBD2 `s_maxlen` 声明的 logical block 数；
@@ -234,9 +245,14 @@ superblock/group metadata 的 mutation 由挂载级 write guard 串行化；只�
 delalloc range 与 mount aggregate 则在 shared guard 下由独立 reservation mutex 联合更新。KVFS
 cache 合并并发 `iget` 并封闭 `New/Freeing`；ext4 private metadata 与 transient state 在 inode
 state mutex 下更新，KExt4 不再取得另一把 inode-cache lock。内部 JBD2 和 metadata-buffer 状态仍会记录
-transaction ownership，避免同一事务内出现冲突的 metadata access。同一 inode 的 writeback pass 另由 Ext4Inode mutex
-串行化；writeback 扫描 PageCache 时不持有 core mutex，batch writer 只在 PageCache 释放
-mapping/folio mutex 后进入核心。后续引入细粒度锁时，必须保持该跨层边界，以及 buffer
+transaction ownership。共享 buffer 原子修改在 slot mutex 下完成，失败不替换旧字节；同一事务
+的不同写者也不能分别读旧快照后整块覆盖。inode-table 的发布只合并目标 entry，保留
+邻居 inode 的最新数据；同一 inode 修改仍要求调用者串行。writeback、VFS truncate 两阶段、
+最后写者预分配清理和 final eviction 共同由 Ext4Inode mutex 串行化；它先于 mount 获取，
+不得在 mount 或 inode-state guard 内反向等待。writeback 扫描 PageCache 时不持有 core mutex，batch writer 只在 PageCache 释放
+mapping/folio mutex 后进入核心。journal execution mutex 位于 mount 之后；handle stop 不取得它。
+容量 preflight 与 begin 仍由同一次 mount mutation 排他保证，尚不是独立 credit reservation，
+不得据此放开全部 metadata mutation。后续引入细粒度锁时，必须保持该跨层边界，以及 buffer
 ownership、journal handle、allocator bitmap 和 inode metadata 之间的顺序约束。
 FIEMAP 由 VFS inode shared lock 稳定单 inode mapping；core read lock 和 delayed-block
 mutex 只分别短暂取得，并在安全 writer 访问用户页前释放。不得把用户内存访问放进挂载级
@@ -340,9 +356,12 @@ clean、无 pin 且无后续 ownership 的 entry；后缀或 committing transact
 不获取 cache mutex；提示在每次索引增删/失效的同一 cache 临界区内从实际长度更新，
 避免旧扫描覆盖新插入的需求。它不发布 buffer 数据或授予淘汰权限，并发旧值只允许
 推迟维护或触发一次多余复核。真正的需求复核、游标和资格检查在同一 cache mutex 下进行；
-不持有该锁执行设备 I/O。普通缓存 read/insert 不淘汰；allocator 的预取和临界区重读
-始终处于同一 mount 写访问内，guard 的清理在 allocator 锁释放后执行，读访问的清理也
-不能与 allocator mutation 交错。显式全回收和整个缓存失效重置游标，syncfs 仍排空并全局回收。
+不持有该锁执行设备 I/O。普通缓存 read/insert 不淘汰；不可变 buffer 同时 pin 字节和
+槽位，allocator 持有预取 pins 至临界区结束，即使 bytes 被新发布替换，也不能回收并
+重建该槽位。forget/revoke 后的移除同样在 index mutex 下检查是否另有槽位引用。
+mount guard 的维护入口暂时保留，但上述普通回收正确性不依赖 mount 排他。
+整体 invalidate 仍要求独占恢复/生命周期边界，不得与活跃 pins 并行。
+显式全回收和整个缓存失效重置游标，syncfs 仍排空并全局回收。
 没有周期全扫或 checkpoint 次数状态。软保留额度不包括索引/frozen image 开销，不能保证
 硬内存上界：pin/事务持有、单次访问的大量插入或新增速度超过扫描速度都可能造成超额；
 没有后续访问也没有自动进度。尚无通用 shrinker、容量准入或内存压力反馈。
@@ -478,3 +497,15 @@ conversion followed by split, indexed leaf splits with external extents, fragmen
 link/rename, admission one credit below the bound, 64-credit batching across conversion,
 feature/index-flag mismatch, nested admission, remount rejection, stop/abort wakeups and
 durable reopen.
+
+### 覆盖写在途 BIO
+
+已映射覆盖写先完整验证映射和数据几何，再在 mount guard 外提交 owned BIO；
+原任务持有 inode writeback/invalidate 保护直到全部请求及 metadata 完成，避免
+truncate/eviction 释放仍被设备使用的块。最多四个、每个至多 31 页的批次在途；
+部分块读改写、分配与 unwritten 不进入该路径。等待与错误清理不持 mount guard。
+
+设备可以乱序失败，完成前缀只跨越连续成功请求；失败后的请求仍须排空。
+PageCache completion 在 metadata/额度处理之后于任务上下文消费，Drop 不能先于
+设备完成。同步入口不遗留后台错误，原始设备/事务错误优先于收尾错误。现有
+ordered-data barrier 和 commit barrier 均保留，BIO 完成不等于持久化完成。

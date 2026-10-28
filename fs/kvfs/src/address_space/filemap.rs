@@ -344,6 +344,9 @@ impl AddressSpace {
             return Ok(0);
         }
 
+        // Updating timestamps may acquire filesystem locks, so do it
+        // before perform_write takes a folio lock or exposes dirty data.
+        iocb.file().file_update_time()?;
         let written = self.perform_write(iocb.ki_pos(), iter, count)?;
         iocb.advance(written);
         Ok(written)

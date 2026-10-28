@@ -13,12 +13,12 @@ use ktime_types::TimestampLimits;
 use crate::{
     BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,
     InodeNumber, LogicalBlock, UnsupportedKind,
+    buffer::MetadataWriteAccess,
     disk::{checksum, extent as disk_extent, inode as disk_inode},
     extent::InodeMappingRoot,
     file::RegularWriteMetadata,
     jbd2::{JournalCredits, JournalHandle},
     prealloc_space::InodePreallocMap,
-    superblock::replace_metadata_access_bytes,
     sync::{self, Mutex, RwLock},
 };
 
@@ -772,6 +772,13 @@ impl Ext4Inode {
         }
     }
 
+    /// Serializes writeback with mapping changes and release of physical blocks.
+    ///
+    /// KVFS callers acquire their invalidate guard first when required, then
+    /// this guard, then mount protection. Keep it across both truncate phases
+    /// or the entire writeback pass. Never acquire it while holding mount or
+    /// inode-state protection. Recovery uses unpublished inodes under exclusive
+    /// mount ownership and does not enter the KVFS callbacks.
     pub(crate) fn lock_writeback(&self) -> sync::MutexGuard<'_, ()> {
         sync::mutex_lock(&self.writeback_lock)
     }
@@ -2003,6 +2010,32 @@ impl Ext4SbInfo {
         Ext4InodeMetadata::from_raw(raw, allow_zero_links)
     }
 
+    /// Publishes only the prepared inode entry, preserving neighboring inodes
+    /// in the latest version of the shared inode-table block.
+    ///
+    /// Callers serialize changes to the target inode and validate/encode its
+    /// entry before requesting write access. The slot mutex serializes this
+    /// merge with other inode publications and journal snapshots.
+    pub(crate) fn replace_inode_table_entry(
+        &self,
+        access: &MetadataWriteAccess,
+        number: InodeNumber,
+        prepared: &[u8],
+    ) -> Ext4Result<()> {
+        let location = self.inode_location(number)?;
+        let end = location
+            .byte_offset
+            .checked_add(location.inode_size)
+            .ok_or(Ext4Error::Overflow)?;
+        let entry = prepared
+            .get(location.byte_offset..end)
+            .ok_or(Ext4Error::OutOfBounds)?;
+        access.update_bytes(|_, current| {
+            inode_entry_mut(current, location)?.copy_from_slice(entry);
+            Ok(())
+        })
+    }
+
     /// Persists one ordinary inode metadata change after best-effort expansion
     /// of the inode's extra fields.
     ///
@@ -2029,7 +2062,7 @@ impl Ext4SbInfo {
             |inode_bytes| update(self, inode_bytes),
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         self.publish_inode_metadata(inode, updated_inode)
     }
 
@@ -2273,7 +2306,7 @@ impl Ext4SbInfo {
             },
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         self.publish_inode_metadata(inode, updated_inode)
     }
 
@@ -2306,7 +2339,7 @@ impl Ext4SbInfo {
             |inode_bytes| put_u32(inode_bytes, disk_inode::DTIME_OFFSET, next),
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(&inode_table_access, inode, &inode_table_bytes)?;
         Ok(())
     }
 

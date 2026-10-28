@@ -207,12 +207,16 @@ impl MetadataBlockCache {
         slot.load_result()?;
         slot.forget_or_revoke_checkpointed(transaction)?;
 
-        if slot.is_reclaimable() {
+        {
             let mut entries = lock(&self.inner.entries);
-            if entries
-                .blocks
-                .get(&block)
-                .is_some_and(|cached| Arc::ptr_eq(&cached.slot, &slot))
+            // The index and this local lookup must be the only slot owners.
+            // An old immutable reader still pins identity after publication.
+            if Arc::strong_count(&slot) == 2
+                && slot.is_reclaimable()
+                && entries
+                    .blocks
+                    .get(&block)
+                    .is_some_and(|cached| Arc::ptr_eq(&cached.slot, &slot))
             {
                 entries.blocks.remove(&block);
                 self.update_reclaim_demand(&entries);

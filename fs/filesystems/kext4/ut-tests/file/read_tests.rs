@@ -24,6 +24,7 @@ pub(crate) struct ReadDevice {
     caller_destinations: Mutex<Vec<usize>>,
     pub(crate) destinations: Mutex<Vec<(u64, usize, usize)>>,
     pub(crate) fail_reads: Mutex<bool>,
+    pub(crate) read_failure_block: Mutex<Option<u64>>,
 }
 
 impl ReadDevice {
@@ -33,6 +34,7 @@ impl ReadDevice {
             caller_destinations: Mutex::new(Vec::new()),
             destinations: Mutex::new(Vec::new()),
             fail_reads: Mutex::new(false),
+            read_failure_block: Mutex::new(None),
         })
     }
 }
@@ -81,7 +83,10 @@ impl ReadDevice {
                 if !(aligned.as_ptr() as usize).is_multiple_of(4) {
                     return Err(DriverError::InvalidInput);
                 }
-                if *self.fail_reads.lock() {
+                let matches_failure_block = self.read_failure_block.lock().is_none_or(|failed| {
+                    failed >= block && failed - block < (aligned.len() / self.block_size()) as u64
+                });
+                if *self.fail_reads.lock() && matches_failure_block {
                     // Failed I/O may have modified a prefix. Leave failure
                     // enabled until the test starts a successful full retry.
                     let prefix = aligned.len().min(17);

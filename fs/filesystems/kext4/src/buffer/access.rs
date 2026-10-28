@@ -2,15 +2,17 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 
 use super::slot::MetadataBufferSlot;
 use crate::{Ext4Error, Ext4Result, jbd2::TransactionId};
 
-/// An immutable ext4 metadata block.
+/// An immutable ext4 metadata block that also pins its cache-slot identity.
 #[derive(Clone)]
 pub(crate) struct MetadataBuffer {
     pub(super) bytes: Arc<[u8]>,
+    // Retain cache identity even if a later publication replaces `bytes`.
+    pub(super) _slot: Arc<MetadataBufferSlot>,
 }
 
 impl AsRef<[u8]> for MetadataBuffer {
@@ -46,18 +48,22 @@ impl MetadataWriteAccess {
         self.slot.result()
     }
 
+    /// Replaces a complete block prepared under the caller's logical mutation
+    /// exclusion. Use `update_bytes` to merge changes into a shared live block.
     pub(crate) fn replace_bytes(&self, bytes: Arc<[u8]>) -> Ext4Result<()> {
         self.slot.replace_bytes(self.transaction, bytes)
     }
 
-    pub(crate) fn update_bytes(
+    /// Updates the latest bytes atomically with respect to other updates and
+    /// commit snapshots. Failure leaves both bytes and dirty state unchanged.
+    ///
+    /// The callback runs under the slot mutex. It must only edit memory: no
+    /// device I/O, journal calls or re-entry into this buffer is permitted.
+    pub(crate) fn update_bytes<T>(
         &self,
-        update: impl FnOnce(&[u8], &mut [u8]) -> Ext4Result<()>,
-    ) -> Ext4Result<()> {
-        let snapshot = self.snapshot()?;
-        let mut bytes = Vec::from(snapshot.as_ref());
-        update(snapshot.as_ref(), &mut bytes)?;
-        self.replace_bytes(Arc::from(bytes.into_boxed_slice()))
+        update: impl FnOnce(&[u8], &mut [u8]) -> Ext4Result<T>,
+    ) -> Ext4Result<T> {
+        self.slot.update_bytes(self.transaction, update)
     }
 
     pub(crate) fn mark_dirty(&self) -> Ext4Result<()> {
@@ -78,6 +84,7 @@ impl MetadataWriteback {
     pub(crate) fn snapshot(&self) -> MetadataBuffer {
         MetadataBuffer {
             bytes: self.bytes.clone(),
+            _slot: self.slot.clone(),
         }
     }
 

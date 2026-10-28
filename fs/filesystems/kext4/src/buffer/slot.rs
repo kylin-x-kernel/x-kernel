@@ -2,13 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
 use super::{
     access::{MetadataBuffer, MetadataWriteAccess, MetadataWriteback},
     sync::{Mutex, WaitQueue, lock},
 };
 use crate::{Ext4Error, Ext4Result, UnsupportedKind, jbd2::TransactionId};
+
+unittest::path_mod_test!(tests, "../../ut-tests/buffer/slot/tests.rs");
 
 pub(super) enum BufferContents {
     // Initial state
@@ -121,6 +123,7 @@ impl MetadataBufferSlot {
                 }
                 Ok(MetadataBuffer {
                     bytes: bytes.clone(),
+                    _slot: self.clone(),
                 })
             }
             BufferContents::Failed(error) => Err(*error),
@@ -131,7 +134,7 @@ impl MetadataBufferSlot {
     }
 
     pub(super) fn snapshot_for_commit(
-        &self,
+        self: &Arc<Self>,
         transaction: TransactionId,
     ) -> Ext4Result<MetadataBuffer> {
         let mut contents = lock(&self.contents);
@@ -147,6 +150,7 @@ impl MetadataBufferSlot {
                 {
                     return Ok(MetadataBuffer {
                         bytes: snapshot.bytes.clone(),
+                        _slot: self.clone(),
                     });
                 }
 
@@ -172,7 +176,10 @@ impl MetadataBufferSlot {
                     is_writeback: false,
                 });
                 *state = MetadataBufferState::Clean;
-                Ok(MetadataBuffer { bytes: frozen })
+                Ok(MetadataBuffer {
+                    bytes: frozen,
+                    _slot: self.clone(),
+                })
             }
             BufferContents::Failed(error) => Err(*error),
             BufferContents::Loading => {
@@ -208,6 +215,36 @@ impl MetadataBufferSlot {
             BufferContents::Failed(error) => Err(*error),
             BufferContents::Loading => {
                 unreachable!("metadata buffer must finish loading before checkpoint replacement")
+            }
+        }
+    }
+
+    pub(super) fn update_bytes<T>(
+        &self,
+        transaction: TransactionId,
+        update: impl FnOnce(&[u8], &mut [u8]) -> Ext4Result<T>,
+    ) -> Ext4Result<T> {
+        let mut contents = lock(&self.contents);
+        match &mut *contents {
+            BufferContents::Ready { bytes, state, .. } => {
+                match *state {
+                    MetadataBufferState::Journaled(owner) | MetadataBufferState::Dirty(owner)
+                        if owner == transaction => {}
+                    MetadataBufferState::Created(owner) if owner == transaction => {
+                        return Err(buffer_state_error());
+                    }
+                    MetadataBufferState::Clean => return Err(buffer_state_error()),
+                    _ => return Err(transaction_conflict_error()),
+                }
+                let mut updated = Vec::from(bytes.as_ref());
+                let result = update(bytes.as_ref(), &mut updated)?;
+                *bytes = Arc::from(updated.into_boxed_slice());
+                *state = MetadataBufferState::Dirty(transaction);
+                Ok(result)
+            }
+            BufferContents::Failed(error) => Err(*error),
+            BufferContents::Loading => {
+                unreachable!("metadata buffer must finish loading before update")
             }
         }
     }

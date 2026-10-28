@@ -1190,7 +1190,6 @@ pub(crate) fn recovery_orphan_file_test_filesystem() -> (Ext4SbInfo, Arc<TestDev
             0,
             &bytes,
             TEST_BLOCK_SIZE as u64,
-            crate::Ext4Timestamp::new(127, 0),
             crate::Ext4SyncIntent::FullMetadata,
             || true,
         )

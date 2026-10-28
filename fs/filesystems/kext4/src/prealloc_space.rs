@@ -879,9 +879,9 @@ impl Ext4SbInfo {
         let Some(group) = inode.prealloc_map().containing_group(logical_start) else {
             return Ok(None);
         };
-        // Warm-up only: the in-lock read is authoritative, so a failure here is
-        // reported by that read instead.
-        let _ = self.prefetch_group_allocation_metadata(group);
+        // Pin cache identities through the allocator critical section so its
+        // authoritative re-read cannot turn into a cold device read.
+        let _prefetch = self.prefetch_group_allocation_metadata(group)?;
         let mut alloc = lock(&self.allocator);
         let taken = inode.prealloc_map().update(|preallocs| {
             // Hit lookup: the space containing the request's first block.

@@ -21,6 +21,77 @@ struct AllocatedWriteRun {
     write_len: usize,
 }
 
+/// Fully mapped, aligned overwrite prepared while mount state is protected.
+/// The inode writeback mutex must remain held through submission and completion.
+/// No journal handle or borrowed data buffer survives mapping preparation.
+pub(crate) struct MappedWriteback {
+    device: alloc::sync::Arc<crate::io::FilesystemDevice>,
+    runs: Vec<AllocatedWriteRun>,
+}
+
+/// Bounded owned BIOs, drained in their preparing task on every exit.
+/// Drop waits for remaining I/O before a surrounding PageCache completion can
+/// redirty/release the corresponding folios. No mount lock may be held then.
+pub(crate) struct PendingMappedWriteback {
+    requests: Vec<(block::completion::BioWait, usize)>,
+}
+
+impl MappedWriteback {
+    pub(crate) fn submit(self, input: Vec<u8>) -> Ext4Result<PendingMappedWriteback> {
+        // Prepare every request before publishing any; preparation failure has
+        // no partial device side effects. Keep the common contiguous path copy-free.
+        let mut prepared = Vec::with_capacity(self.runs.len());
+        if self.runs.len() == 1 {
+            let (bio, wait) = self
+                .device
+                .prepare_owned_write(self.runs[0].first_block, input.into_boxed_slice())?;
+            prepared.push((bio, wait, self.runs[0].write_len));
+        } else {
+            for run in self.runs {
+                let data = input[run.input_offset..run.input_offset + run.write_len]
+                    .to_vec()
+                    .into_boxed_slice();
+                let (bio, wait) = self.device.prepare_owned_write(run.first_block, data)?;
+                prepared.push((bio, wait, run.write_len));
+            }
+        }
+        let mut requests = Vec::with_capacity(prepared.len());
+        for (bio, wait, bytes) in prepared {
+            self.device.submit_owned_write(bio);
+            requests.push((wait, bytes));
+        }
+        Ok(PendingMappedWriteback { requests })
+    }
+}
+
+impl PendingMappedWriteback {
+    /// Waits every BIO, even after an error; reports only the contiguous prefix.
+    pub(crate) fn wait(mut self) -> Ext4WritebackResult {
+        let mut completed_bytes = 0;
+        let mut first_error = None;
+        for (wait, bytes) in self.requests.drain(..) {
+            let (result, _buffers) = wait.wait();
+            if first_error.is_none() {
+                match result {
+                    Ok(()) => completed_bytes += bytes,
+                    Err(error) => first_error = Some(Ext4Error::Device(error)),
+                }
+            }
+        }
+        first_error.map_or(Ok(completed_bytes), |error| {
+            Err(Ext4WritebackError::new(completed_bytes, error))
+        })
+    }
+}
+
+impl Drop for PendingMappedWriteback {
+    fn drop(&mut self) {
+        for (wait, _) in self.requests.drain(..) {
+            let _ = wait.wait();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct OrderedWritebackCreditUsage {
     allocation_runs: u32,
@@ -161,7 +232,7 @@ pub struct Ext4WritebackError {
 }
 
 impl Ext4WritebackError {
-    const fn new(completed_bytes: usize, error: Ext4Error) -> Self {
+    pub(crate) const fn new(completed_bytes: usize, error: Ext4Error) -> Self {
         Self {
             completed_bytes,
             error,
@@ -209,13 +280,6 @@ impl Ext4SyncIntent {
     /// Returns whether this sync must commit all regular-file metadata.
     pub const fn requires_full_metadata(self) -> bool {
         matches!(self, Self::FullMetadata)
-    }
-
-    const fn write_metadata(self, timestamp: Ext4Timestamp) -> RegularWriteMetadata {
-        match self {
-            Self::DataOnly => RegularWriteMetadata::SizeOnly,
-            Self::FullMetadata => RegularWriteMetadata::Full { timestamp },
-        }
     }
 }
 
@@ -481,6 +545,7 @@ impl Ext4SbInfo {
     }
 
     /// Writes a dirty page-cache range through the ordered-data path.
+    /// Timestamp mutations belong to writes/setattr; writeback preserves them.
     ///
     /// Successful writeback completes device I/O. Batches publishing metadata
     /// become durable when the shared transaction commits through inode/filesystem
@@ -504,7 +569,6 @@ impl Ext4SbInfo {
         offset: u64,
         input: &[u8],
         visible_size: u64,
-        timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
         is_open_for_write: impl Fn() -> bool,
     ) -> Ext4WritebackResult {
@@ -513,7 +577,6 @@ impl Ext4SbInfo {
             offset,
             input,
             visible_size,
-            timestamp,
             intent,
             u32::MAX,
             is_open_for_write,
@@ -543,7 +606,6 @@ impl Ext4SbInfo {
         offset: u64,
         input: &[u8],
         visible_size: u64,
-        timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
         max_extra_prealloc_blocks: u32,
         is_open_for_write: impl Fn() -> bool,
@@ -558,9 +620,6 @@ impl Ext4SbInfo {
         if write_end > visible_size || visible_size < inode.disk_size() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite).into());
         }
-        if intent.requires_full_metadata() {
-            self.validate_inode_timestamp_update(inode, timestamp)?;
-        }
 
         if input.is_empty() {
             if intent.is_data_only() && visible_size == inode.disk_size() {
@@ -570,7 +629,7 @@ impl Ext4SbInfo {
                 .commit_regular_inode_write_metadata(
                     inode,
                     visible_size,
-                    intent.write_metadata(timestamp),
+                    RegularWriteMetadata::SizeOnly,
                 )
                 .map(|()| 0)
                 .map_err(Into::into);
@@ -699,7 +758,6 @@ impl Ext4SbInfo {
                 offset,
                 input,
                 visible_size,
-                timestamp,
                 intent,
                 block_size_usize,
                 first_mapping,
@@ -947,7 +1005,6 @@ impl Ext4SbInfo {
         offset: u64,
         input: &[u8],
         visible_size: u64,
-        timestamp: Ext4Timestamp,
         intent: Ext4SyncIntent,
         block_size_usize: usize,
         mut mapping: BlockMapping,
@@ -1154,7 +1211,7 @@ impl Ext4SbInfo {
                 self.update_regular_inode_write_metadata(
                     inode,
                     disk_size,
-                    intent.write_metadata(timestamp),
+                    RegularWriteMetadata::SizeOnly,
                     handle,
                 )?;
                 return Ok(OrderedWritebackTransactionProgress::Complete);
@@ -1233,6 +1290,97 @@ impl Ext4SbInfo {
             }
             BlockMapping::Hole { .. } => Ok(None),
         }
+    }
+
+    /// Resolves a complete aligned overwrite before any I/O is submitted.
+    /// Partial filesystem blocks, growth, holes and unwritten extents retain
+    /// the existing ordered path. Caller retains inode writeback and KVFS
+    /// invalidate protection through all I/O and metadata completion.
+    pub(crate) fn prepare_mapped_writeback(
+        &self,
+        inode: &Ext4Inode,
+        offset: u64,
+        input: &[u8],
+        visible_size: u64,
+        intent: Ext4SyncIntent,
+    ) -> Ext4Result<Option<MappedWriteback>> {
+        let block_size = self.device.block_size();
+        if input.is_empty()
+            || visible_size != inode.disk_size()
+            || !offset.is_multiple_of(block_size as u64)
+            || !input.len().is_multiple_of(block_size)
+        {
+            return Ok(None);
+        }
+        self.ensure_regular_file_mutation_supported(inode)?;
+        if self.journal.is_none() && intent.requires_full_metadata() {
+            return Err(Ext4Error::Unsupported(UnsupportedKind::JournaledWrite));
+        }
+        let end = offset
+            .checked_add(input.len() as u64)
+            .ok_or(Ext4Error::Overflow)?;
+        if end > inode.disk_size() {
+            return Ok(None);
+        }
+        if self
+            .journal
+            .as_ref()
+            .is_some_and(|journal| journal.is_aborted())
+        {
+            return Err(Ext4Error::JournalAborted);
+        }
+        let runs = match self.collect_allocated_write_runs(inode, offset, input.len(), block_size) {
+            Ok(runs) => runs,
+            Err(Ext4Error::Unsupported(UnsupportedKind::UnallocatedWrite)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(MappedWriteback {
+            device: self.device.clone(),
+            runs,
+        }))
+    }
+
+    /// Publishes metadata only after successful data I/O, with the same ordered
+    /// flush dependency and allocation admission as the synchronous path.
+    /// Re-read the writable-open gate at settlement so in-use preallocations
+    /// survive both successful overwrites and cleanup of failed data prefixes.
+    pub(crate) fn finish_mapped_writeback(
+        &mut self,
+        inode: &Ext4Inode,
+        offset: u64,
+        completed_bytes: usize,
+        intent: Ext4SyncIntent,
+        is_open_for_write: impl Fn() -> bool,
+    ) -> Ext4WritebackResult {
+        if intent.requires_full_metadata() {
+            let credits = JournalCredits::new(self.extent_writeback_metadata_credits(inode, 0, 0)?);
+            let journal = self.metadata_journal_for_allocation(
+                credits,
+                crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+                self.inode_extra_isize_allocation_blocks(inode),
+            )?;
+            let mut handle = journal.begin(credits)?;
+            let result = handle.require_ordered_data_flush().and_then(|()| {
+                self.update_regular_inode_write_metadata(
+                    inode,
+                    inode.disk_size(),
+                    RegularWriteMetadata::SizeOnly,
+                    &mut handle,
+                )
+            });
+            self.complete_metadata_mutation(handle, result)?;
+        }
+        let mut cursor = OrderedWritebackCursor::new(0);
+        cursor.advance(completed_bytes)?;
+        self.release_ordered_writeback_cursor_range(
+            inode,
+            offset,
+            self.device.block_size(),
+            &cursor,
+            &is_open_for_write,
+        )
+        .map_err(|error| cursor.current_failure(error))?;
+        Ok(completed_bytes)
     }
 
     fn collect_allocated_write_runs(
@@ -1416,3 +1564,8 @@ unittest::path_mod_test!(component_tests, "../ut-tests/file/component_tests.rs")
 
 #[cfg(unittest)]
 unittest::path_mod_test!(pub(crate) mod read_tests, "../ut-tests/file/read_tests.rs");
+
+unittest::path_mod_test!(
+    async_writeback_tests,
+    "../ut-tests/file/async_writeback_tests.rs"
+);

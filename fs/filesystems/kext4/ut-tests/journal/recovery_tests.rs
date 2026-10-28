@@ -50,7 +50,6 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
             0,
             b"recover zero-link inode",
             23,
-            crate::Ext4Timestamp::new(131, 0),
             crate::Ext4SyncIntent::FullMetadata,
             || true,
         )

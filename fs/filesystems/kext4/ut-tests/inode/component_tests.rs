@@ -16,6 +16,48 @@ use crate::{
 };
 
 #[def_test]
+fn inode_entry_publication_preserves_neighbors_from_stale_table_snapshots() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let first = allocate_checkpointed_regular_inode(&mut filesystem);
+    let second = allocate_checkpointed_regular_inode(&mut filesystem);
+    let first_location = filesystem.inode_location(first.number()).unwrap();
+    let second_location = filesystem.inode_location(second.number()).unwrap();
+    assert_eq!(first_location.block, second_location.block);
+    // Both operations prepare their entries before either publication, as can
+    // happen for independent inodes occupying the same physical table block.
+    let mut first_bytes = filesystem
+        .read_metadata_block(first_location.block)
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let mut second_bytes = first_bytes.clone();
+    filesystem
+        .update_referenced_inode_table_entry(&mut first_bytes, &first, |bytes| {
+            super::put_u32(bytes, 0x04, 123)
+        })
+        .unwrap();
+    filesystem
+        .update_referenced_inode_table_entry(&mut second_bytes, &second, |bytes| {
+            super::put_u32(bytes, 0x04, 456)
+        })
+        .unwrap();
+    let journal = JournalTransactions::new(TransactionId::new(1691));
+    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+    let access = filesystem
+        .metadata_io
+        .write_access(first_location.block, &mut handle)
+        .unwrap();
+    filesystem
+        .replace_inode_table_entry(&access, first.number(), &first_bytes)
+        .unwrap();
+    filesystem
+        .replace_inode_table_entry(&access, second.number(), &second_bytes)
+        .unwrap();
+    assert_eq!(filesystem.raw_inode(first.number()).unwrap().size(), 123);
+    assert_eq!(filesystem.raw_inode(second.number()).unwrap().size(), 456);
+}
+
+#[def_test]
 fn newly_allocated_inode_starts_at_effective_want_extra_isize() {
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let effective_want_extra_isize = filesystem.superblock().want_extra_isize();

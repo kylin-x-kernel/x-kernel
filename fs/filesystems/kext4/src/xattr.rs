@@ -448,7 +448,7 @@ impl Ext4SbInfo {
         let (inode_table_block, inode_table_bytes, updated_inode) =
             self.prepare_xattr_inode_update(inode, &plan, new_external_block, timestamp)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         self.publish_inode_metadata(inode, updated_inode)
     }
 
@@ -825,7 +825,7 @@ impl Ext4SbInfo {
         )?;
         self.drop_external_xattr_block(inode, block, handle)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
-        replace_metadata_access_bytes(&inode_table_access, inode_table_bytes)?;
+        self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
         self.publish_inode_metadata(inode, updated_inode)
     }
 
