@@ -60,7 +60,7 @@ syscall / runtime
 
 These primitives give futex and robust-list paths a TOCTOU-free read or update of a user futex word. A read-only load does not require a writable mapping and does not trigger COW.
 
-`fault_in_user_writeable()` requests a write fault and does not store a new user word. The caller must be in a sleepable task context and must not hold a non-sleepable lock. `Resolved` means the address can now be written. `Retry` and `CowConflictRetry` keep handling the same write fault, with no attempt cap. Every other result returns `NoAccess`. `FUTEX_WAKE_OP` uses it for a COW page after `fork`: the nofault CAS fails, drops the bucket locks, and returns; the syscall calls this function, resolves both keys again, and retries the CAS. The new value is still stored only by the CAS while those locks are held.
+`fault_in_user_writeable()` makes one write-fault attempt and does not store a new user word. The caller must be in a sleepable task context and must not hold a non-sleepable lock. `Resolved` means the address can now be written. `Retry` and `CowConflictRetry` are also success: another task already published a new PTE or anonymous page, and the caller repeats its store. `OutOfMemory` returns `MemError::OutOfMemory` (`ENOMEM`). Every other result returns `NoAccess`. `FUTEX_WAKE_OP` uses it for a COW page after `fork`: the nofault CAS fails, drops the bucket locks, and returns; the syscall calls this function once, resolves both keys again, and retries the CAS. The new value is still stored only by the CAS while those locks are held.
 
 ### String loads
 

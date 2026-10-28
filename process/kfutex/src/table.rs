@@ -291,15 +291,17 @@ impl FutexTable {
     }
 
     fn apply_wake_op_locked(uaddr: usize, operation: FutexWakeOp) -> KResult<u32> {
-        loop {
-            let old = kuaccess::atomic_load_u32_nofault(uaddr).map_err(KError::from)?;
-            let new = operation.apply(old);
-            let (exchanged, _) =
-                atomic_cmpxchg_u32_nofault(uaddr, old, new).map_err(KError::from)?;
-            if exchanged {
-                return Ok(old);
-            }
-            core::hint::spin_loop();
+        // One attempt while the bucket locks are held. A changed word is
+        // `EAGAIN` so the caller can drop those locks and retry. The
+        // architecture compare-exchange already retries a failed exclusive
+        // store; this does not spin on a userspace race.
+        let old = kuaccess::atomic_load_u32_nofault(uaddr).map_err(KError::from)?;
+        let new = operation.apply(old);
+        let (exchanged, _) = atomic_cmpxchg_u32_nofault(uaddr, old, new).map_err(KError::from)?;
+        if exchanged {
+            Ok(old)
+        } else {
+            Err(KError::WouldBlock)
         }
     }
 
@@ -634,8 +636,9 @@ impl GlobalFutexTable {
     /// Returns `EFAULT` when the nofault store faults. The caller must drop
     /// any non-sleepable lock, fault the word in for write, and — for a
     /// non-private operation — resolve both keys again before retrying.
-    /// A mapping that does not allow writes fails the fault-in and must not
-    /// be retried.
+    /// Returns `EAGAIN` when the word changed before the store; retry without
+    /// a write fault-in. A mapping that does not allow writes fails the
+    /// fault-in and must not be retried.
     pub fn wake_op(
         self,
         source: FutexKey,

@@ -301,6 +301,19 @@ fn test_wake_op_invalid_address_precedes_illegal_encoding() {
     )
     .expect_err("a valid address still rejects an undefined operation");
     assert_eq!(LinuxError::from(err), LinuxError::ENOSYS);
+
+    // Non-private wake-op write-faults `uaddr2` before decoding, but alignment
+    // is still `EINVAL`, matching `get_futex_key`.
+    let err = sys_futex(
+        UserPtr::from(word.as_user_ptr()),
+        FUTEX_WAKE_OP,
+        0,
+        0,
+        UserPtr::from(1usize),
+        unsupported,
+    )
+    .expect_err("unaligned shared uaddr2");
+    assert_eq!(LinuxError::from(err), LinuxError::EINVAL);
 }
 
 /// A mapping the VMA does not allow to be written stays `EFAULT` and unchanged.

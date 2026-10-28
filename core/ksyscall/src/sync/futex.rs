@@ -198,16 +198,15 @@ pub(crate) fn sys_futex(
             let uaddr2_usize = uaddr2.as_ptr() as usize;
             let source_count = as_wake_count(value);
             let target_count = as_wake_count(timeout_or_value2 as u32);
-            // Linux checks `get_futex_key` before `futex_atomic_op_inuser`
-            // decodes the operation. An invalid address with an illegal
-            // encoding therefore returns `EFAULT`, not `EINVAL` or `ENOSYS`.
+            // `get_futex_key` rejects a misaligned address with `EINVAL` before
+            // `access_ok` or a write fault. Resolve first so that check still
+            // wins; a non-private call then write-faults `uaddr2` before the
+            // operation is decoded.
             let (mut key, mut key2) = resolve_key_pair(uaddr_usize, uaddr2_usize, is_private)?;
+            if !is_private {
+                kuaccess::fault_in_user_writeable(uaddr2_usize).map_err(KError::from)?;
+            }
             let operation = FutexWakeOp::decode(value3)?;
-            // A nofault fault drops the bucket locks, faults the word in for
-            // write, then retries. Private keys stay `{mm_id, address}`. A
-            // non-private retry resolves both addresses again so a remap
-            // during the fault-in cannot store into a new shared object while
-            // waking waiters queued on the old one.
             loop {
                 match global_table().wake_op(
                     key,
@@ -220,7 +219,17 @@ pub(crate) fn sys_futex(
                     Ok(count) => return Ok(count as isize),
                     Err(err) if err == KError::BadAddress => {
                         kuaccess::fault_in_user_writeable(uaddr2_usize).map_err(KError::from)?;
-                        (key, key2) = resolve_key_pair(uaddr_usize, uaddr2_usize, is_private)?;
+                        // Linux `cond_resched()` before taking the bucket locks again.
+                        ktask::check_preempt_pending();
+                        if !is_private {
+                            (key, key2) = resolve_key_pair(uaddr_usize, uaddr2_usize, is_private)?;
+                        }
+                    }
+                    Err(err) if err == KError::WouldBlock => {
+                        ktask::check_preempt_pending();
+                        if !is_private {
+                            (key, key2) = resolve_key_pair(uaddr_usize, uaddr2_usize, is_private)?;
+                        }
                     }
                     Err(err) => return Err(err),
                 }

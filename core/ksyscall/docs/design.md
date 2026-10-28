@@ -250,9 +250,13 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 - `sync/futex.rs`: `futex` / `get_robust_list` / `set_robust_list`;
   compound operations (`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`) resolve both
   keys under a single `address_space` lock before `WAKE_OP` decodes its
-  operation, so an invalid address with an illegal encoding returns
-  `EFAULT`. `WAKE_OP` repeats that resolution after
-  `fault_in_user_writeable` when the nofault store faults; the robust-list walk lives in
+  operation. Key resolution still reports a misaligned address as
+  `EINVAL` before that write fault. A non-private call then write-faults
+  `uaddr2`, so an out-of-range address with an illegal encoding returns
+  `EFAULT` or `ENOMEM`. After a
+  nofault fault the syscall write-faults, honors a pending preemption, and
+  resolves shared keys again. `EAGAIN` retries the same way without another
+  write fault. The robust-list walk lives in
   `posix/process`. An untimed wait interrupted by a signal returns
   `ERESTARTSYS`. A timed wait returns `ERESTART_RESTARTBLOCK` and records
   the monotonic deadline in a futex payload owned by this crate; `kprocess`

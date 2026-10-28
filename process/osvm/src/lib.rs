@@ -31,6 +31,9 @@ pub enum MemError {
     /// The provider rejected or faulted on the access; the destination
     /// buffer contents are unspecified (maps to `EFAULT`).
     NoAccess,
+    /// The provider ran out of memory while resolving the access (maps to
+    /// `ENOMEM`).
+    OutOfMemory,
     /// A length-limited load exceeded its fixed cap (`alloc` feature only;
     /// maps to `ENAMETOOLONG`).
     #[cfg(feature = "alloc")]
@@ -41,6 +44,7 @@ impl From<MemError> for KError {
     fn from(e: MemError) -> Self {
         match e {
             MemError::InvalidAddr | MemError::NoAccess => KError::BadAddress,
+            MemError::OutOfMemory => KError::NoMemory,
             #[cfg(feature = "alloc")]
             MemError::NameTooLong => KError::NameTooLong,
         }

@@ -248,17 +248,19 @@ pub fn atomic_cmpxchg_u32_nofault(addr: usize, old: u32, new: u32) -> MemResult<
     atomic_cmpxchg_u32_inner(addr, old, new, false)
 }
 
-/// Makes one user word writable without storing a new value.
+/// Makes one write-fault attempt for a user word without storing a new value.
 ///
 /// This is the slow path for a nofault store that faulted on a present,
-/// write-protected page such as a private page after `fork`. The page-fault
-/// handler copies a COW page or rejects a mapping that does not allow writes.
-/// Retry-class outcomes are retried until the fault resolves or a permanent
-/// error is reported. The caller must not hold a non-sleepable lock.
+/// write-protected page such as a private page after `fork`. One call invokes
+/// `MmSpace::handle_page_fault` once. `Resolved` means the address can now be
+/// written. A retry-class outcome is also success: another task already
+/// published a new PTE or anonymous page, and the caller repeats its store.
+/// The caller must not hold a non-sleepable lock.
 ///
 /// # Errors
 ///
-/// Returns [`MemError::InvalidAddr`] when `addr` is not 4-byte aligned, and
+/// Returns [`MemError::InvalidAddr`] when `addr` is not 4-byte aligned,
+/// [`MemError::OutOfMemory`] when the fault handler runs out of memory, and
 /// [`MemError::NoAccess`] when the address is outside user space or the VMA
 /// rejects the write.
 pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
@@ -275,16 +277,15 @@ pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
         .process()
         .address_space()
         .map_err(|_| MemError::NoAccess)?;
-    loop {
-        let outcome = address_space
-            .lock()
-            .handle_page_fault(VirtAddr::from_usize(addr), MappingFlags::WRITE);
-        if outcome.is_resolved() {
-            return Ok(());
-        }
-        if !outcome.is_retryable() {
-            return Err(MemError::NoAccess);
-        }
+    let outcome = address_space
+        .lock()
+        .handle_page_fault(VirtAddr::from_usize(addr), MappingFlags::WRITE);
+    if outcome.is_resolved() || outcome.is_retryable() {
+        Ok(())
+    } else if outcome == PageFaultOutcome::OutOfMemory {
+        Err(MemError::OutOfMemory)
+    } else {
+        Err(MemError::NoAccess)
     }
 }
 

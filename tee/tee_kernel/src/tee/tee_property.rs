@@ -8,15 +8,16 @@ use core::ffi::{CStr, c_uint, c_ulong, c_void};
 use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
-    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM_NOT_FOUND, TEE_ERROR_SHORT_BUFFER, TEE_Identity,
-    TEE_PROPSET_CURRENT_CLIENT, TEE_PROPSET_CURRENT_TA, TEE_PROPSET_TEE_IMPLEMENTATION,
-    TEE_PropSetHandle, TEE_UUID,
+    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM_NOT_FOUND, TEE_ERROR_OUT_OF_MEMORY,
+    TEE_ERROR_SHORT_BUFFER, TEE_Identity, TEE_PROPSET_CURRENT_CLIENT, TEE_PROPSET_CURRENT_TA,
+    TEE_PROPSET_TEE_IMPLEMENTATION, TEE_PropSetHandle, TEE_UUID,
 };
 
 use crate::tee::{TeeResult, tee_session::with_tee_session_ctx};
 
 fn map_user_mem_error(err: MemError) -> u32 {
     match err {
+        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
         MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
         _ => tee_raw_sys::TEE_ERROR_GENERIC,
     }

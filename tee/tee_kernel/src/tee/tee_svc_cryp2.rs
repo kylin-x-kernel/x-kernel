@@ -168,6 +168,7 @@ impl Default for TeeCrypState {
 
 fn map_user_mem_error(err: MemError) -> u32 {
     match err {
+        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
         MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
         _ => TEE_ERROR_GENERIC,
     }

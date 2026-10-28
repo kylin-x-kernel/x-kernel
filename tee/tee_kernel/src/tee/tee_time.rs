@@ -9,7 +9,8 @@ use ktime_types::{SystemTime, TimeSpan};
 use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
-    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OVERFLOW, TEE_ERROR_TIME_NOT_SET, TEE_UUID, TeeTime,
+    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OUT_OF_MEMORY, TEE_ERROR_OVERFLOW, TEE_ERROR_TIME_NOT_SET,
+    TEE_UUID, TeeTime,
 };
 
 use crate::tee::{
@@ -19,6 +20,7 @@ use crate::tee::{
 
 fn map_user_mem_error(err: MemError) -> u32 {
     match err {
+        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
         MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
         _ => tee_raw_sys::TEE_ERROR_GENERIC,
     }
