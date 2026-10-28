@@ -561,7 +561,7 @@ impl Process {
         let runtime = self.runtime()?;
         let mut manager = runtime.timer_manager().lock();
         let result = f(&mut manager);
-        runtime.set_cpu_timers_armed(manager.any_cpu_timer_armed());
+        self.set_cpu_timers_armed(manager.any_cpu_timer_armed());
         result
     }
 
@@ -694,14 +694,17 @@ impl Process {
 
     /// Polls CPU-driven timers while runtime remains attached.
     ///
-    /// Gated by [`ProcessRuntime::cpu_timers_armed`]: processes without any
-    /// CPU-time timer skip the process-wide CPU-time sampling, which is the
-    /// dominant fixed cost of this poll. The gate is re-derived from the
-    /// timer manager after every real poll so one-shot expiry and interval
-    /// exhaustion clear it without an explicit disarm call.
+    /// The user-return entry point [`crate::poll_cpu_timers_for`] gates the
+    /// poll on [`Process::cpu_timers_armed`]: it reads the gate on the
+    /// borrowed process without upgrading the weak runtime handle, so a
+    /// timer-free process never reaches this method. This method re-reads the
+    /// same gate purely to skip the process-wide CPU-time sample
+    /// ([`Self::process_cpu_times`], the dominant fixed cost) when a
+    /// concurrent disarm flips the gate between the two reads. The gate is
+    /// re-derived from the timer manager after every real poll so one-shot
+    /// expiry and interval exhaustion clear it without an explicit disarm call.
     pub(crate) fn poll_cpu_timers(&self) -> KResult<Vec<TimerDelivery>> {
-        let runtime = self.runtime()?;
-        if !runtime.cpu_timers_armed() {
+        if !self.cpu_timers_armed() {
             return Ok(Vec::new());
         }
         let (process_utime, process_stime) = self.process_cpu_times();

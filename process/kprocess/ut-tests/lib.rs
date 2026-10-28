@@ -2948,3 +2948,63 @@ fn task_files_unshare_preserves_siblings_and_clone_files_policy() {
     private.files().exit_files();
     process.discard_unpublished();
 }
+
+/// Arms and disarms CPU-time itimers and checks the process gate follows.
+///
+/// Wall-clock itimers must never open the gate; every arm/disarm path funnels
+/// through the single timer-manager wrapper that re-derives it.
+#[def_test(serial)]
+fn test_cpu_timer_gate_tracks_cpu_itimer_arm_and_disarm() {
+    use posix_types::ITimerType;
+
+    let period = TimeSpan::from_nanos(1_000_000);
+    let (process, _task) = build_prepared_test_user_task();
+    assert!(!process.cpu_timers_armed());
+
+    process
+        .set_itimer(ITimerType::Real, period, period)
+        .expect("wall-clock itimer must arm on an attached runtime");
+    assert!(
+        !process.cpu_timers_armed(),
+        "wall-clock itimers must not open the CPU-time gate"
+    );
+
+    process
+        .set_itimer(ITimerType::Virtual, TimeSpan::ZERO, period)
+        .expect("CPU-time itimer must arm on an attached runtime");
+    assert!(
+        process.cpu_timers_armed(),
+        "an armed CPU-time itimer must open the gate"
+    );
+
+    process
+        .set_itimer(ITimerType::Virtual, TimeSpan::ZERO, TimeSpan::ZERO)
+        .expect("disarming the CPU-time itimer must succeed");
+    assert!(
+        !process.cpu_timers_armed(),
+        "disarming the last CPU-time itimer must close the gate"
+    );
+}
+
+/// Checks the gate short-circuits the poll before the runtime is touched.
+///
+/// A process with no attached runtime distinguishes the two branches: the
+/// closed gate returns an empty delivery list, while an open gate must reach
+/// the runtime and report it as gone.
+#[def_test(serial)]
+fn test_cpu_timer_gate_skips_poll_before_runtime_lookup() {
+    let process = ensure_init().fork(9_150);
+    assert!(!process.cpu_timers_armed());
+
+    let deliveries = process
+        .poll_cpu_timers()
+        .expect("gate-closed poll must not reach the runtime");
+    assert!(deliveries.is_empty());
+
+    process.set_cpu_timers_armed(true);
+    assert_eq!(
+        process.poll_cpu_timers().err(),
+        Some(kerrno::KError::NoSuchProcess),
+        "an open gate must reach the runtime before polling"
+    );
+}

@@ -13,7 +13,7 @@ use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
     AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process,
-    current_user_process_address_space, current_user_thread, poll_cpu_timers, process_exit,
+    current_user_process_address_space, current_user_thread, poll_cpu_timers_for, process_exit,
     process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
@@ -180,7 +180,7 @@ pub(crate) fn run_user_thread_loop(
         // shot: a sender that keeps posting signals must not pin this thread in
         // the kernel before the handler runs.
         apply_syscall_restart(&thr, &mut uctx, runtime_action, || {
-            poll_cpu_timers();
+            poll_cpu_timers_for(&thr);
             ktask::check_preempt_pending();
         });
     }

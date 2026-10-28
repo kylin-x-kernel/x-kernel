@@ -15,7 +15,7 @@ use ksignal::{SignalDequeueAction, SignalInfo, Signo};
 use ktimer::{TimerDelivery, TimerSignal};
 
 use crate::{
-    Pid, current_user_thread, lookup,
+    Pid, Thread, current_user_thread, lookup,
     process_signals::{send_to_process, send_to_thread},
 };
 
@@ -49,20 +49,23 @@ pub(crate) fn poll_timer(pid: Pid) {
     dispatch_timer_deliveries(pid, deliveries);
 }
 
-/// Polls CPU-driven timers for the current user thread's process.
+/// Polls CPU-driven timers for the given user thread's process.
 ///
-/// This is part of the user-return path and requires a current user thread.
+/// Part of the user-return path; a timer-free process pays only one lock-free
+/// gate read.
 ///
 /// # Panics
 ///
-/// Panics if the current task has no user Thread runtime or its process
-/// timer runtime can no longer be reached.
-pub fn poll_cpu_timers() {
-    let thread = current_user_thread();
+/// Panics if the process timer runtime is gone, which a live `&Thread` rules
+/// out: the thread holds the runtime's strong `Arc`.
+pub fn poll_cpu_timers_for(thread: &Thread) {
+    if !thread.process().cpu_timers_armed() {
+        return;
+    }
     let process = thread.process().clone();
     let deliveries = process
         .poll_cpu_timers()
-        .expect("current thread must still expose process timer state");
+        .expect("a borrowed thread keeps its process timer runtime attached");
     dispatch_timer_deliveries(process.pid(), deliveries);
 }
 

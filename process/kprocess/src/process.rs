@@ -55,6 +55,16 @@ pub struct Process {
     /// Signal delivered to the parent's `wait` when this process's parent dies
     /// first (`prctl(PR_SET_PDEATHSIG)`).
     pdeath_signal: AtomicU32,
+    /// Fast-path gate for per-trap CPU-timer polling.
+    ///
+    /// True while any CPU-time-driven timer (ITIMER_VIRTUAL, ITIMER_PROF,
+    /// process-CPU POSIX timer) may be armed. Arm paths and each real poll
+    /// re-derive it, so expiry clears it without an explicit disarm.
+    ///
+    /// Read without the timer-manager lock, like Linux `timers_active`: a
+    /// concurrent arm may be delayed by one trap, never lost. Living on
+    /// `Process` lets the return path skip the runtime weak upgrade.
+    cpu_timers_armed: AtomicBool,
 
     /// Whether this thread group is a child subreaper (`PR_SET_CHILD_SUBREAPER`).
     ///
@@ -161,6 +171,31 @@ impl Process {
     /// reaper.
     pub fn set_child_subreaper(&self, enabled: bool) {
         self.child_subreaper.store(enabled, Ordering::Relaxed)
+    }
+
+    /// Returns whether per-trap CPU-timer polling must run for this process.
+    ///
+    /// Returns:
+    /// - `true`: at least one CPU-time-driven timer may be armed, so the
+    ///   return path polls the timer manager.
+    /// - `false`: no CPU-time timer can produce a delivery, so the poll is
+    ///   skipped.
+    ///
+    /// Locking: lock-free; pairs with [`Self::set_cpu_timers_armed`].
+    pub(crate) fn cpu_timers_armed(&self) -> bool {
+        self.cpu_timers_armed.load(Ordering::Acquire)
+    }
+
+    /// Publishes the CPU-timer polling gate.
+    ///
+    /// Parameters:
+    /// - `armed`: new gate value; `true` while any CPU-time-driven timer may
+    ///   be armed.
+    ///
+    /// Locking: lock-free; callers derive `armed` from the timer manager while
+    /// holding its lock, so the gate cannot lag a concurrent arm.
+    pub(crate) fn set_cpu_timers_armed(&self, armed: bool) {
+        self.cpu_timers_armed.store(armed, Ordering::Release)
     }
 
     /// Returns `true` if the [`Process`] is the init process.
@@ -287,6 +322,7 @@ impl Process {
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             exec_gate: exec_gate::ExecGate::new(),
             pdeath_signal: AtomicU32::new(0),
+            cpu_timers_armed: AtomicBool::new(false),
             lifecycle: ProcessLifecycleState::new(),
             child_subreaper: AtomicBool::new(false),
             children: SpinNoIrq::new(List::new()),

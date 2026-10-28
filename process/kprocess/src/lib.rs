@@ -126,7 +126,7 @@ pub use thread::{
     with_current_user_thread,
 };
 pub use timer_delivery::{
-    dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers, spawn_alarm_task,
+    dispatch_timer_delivery, init_timer_runtime, poll_cpu_timers_for, spawn_alarm_task,
 };
 
 pub(crate) fn allocate_thread_task_number()
