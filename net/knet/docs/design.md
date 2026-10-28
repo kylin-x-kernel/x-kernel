@@ -254,6 +254,16 @@ without changing lock order, queue capacity, or loopback delivery. A later queue
 ownership change can replace the adapter's backing owner without exposing the
 routing table to smoltcp again.
 
+### IPv4 Header Views
+
+`Ipv4Header` borrows header bytes, including options. `parse_header_only` checks
+structure; `parse_input` also validates datagram bounds and the header checksum.
+IPv4 processing trims padding and records the next-layer offset in `PacketBuf`;
+`transport_packet()` reads from that offset to the packet end. Mutable network
+access and truncation invalidate derived offsets, checksum state and UDP metadata.
+Fragment data does not imply a complete transport header. ICMP quotes permit
+truncated payloads; unfinished output derives its length from packet storage.
+
 ### IPv4 Filter Table Model
 
 `netfilter/filter` stores IPv4 filtering policies as immutable tables of ordered

@@ -63,7 +63,6 @@ struct Ipv4ReassemblyQueue {
 
 pub(crate) struct ExpiredIpv4Fragment {
     pub(crate) packet_type: PacketType,
-    pub(crate) header: Ipv4Header,
     pub(crate) packet: Vec<u8>,
 }
 
@@ -106,12 +105,18 @@ impl Ipv4Reassembler {
             .map(|expiration| expiration.expires_at)
     }
 
+    /// Consumes a fragment whose IPv4 bounds and checksum were checked by ingress.
     pub(crate) fn reassemble(
         &mut self,
         packet: PacketBuf,
-        header: Ipv4Header,
         now: MonotonicInstant,
     ) -> Ipv4ReassemblyResult {
+        let Some(header) = packet
+            .network_packet()
+            .and_then(|bytes| Ipv4Header::parse_header_only(bytes).ok())
+        else {
+            return Ipv4ReassemblyResult::Dropped;
+        };
         let key = Ipv4FragKey {
             src_addr: header.src_addr().octets(),
             dst_addr: header.dst_addr().octets(),
@@ -122,7 +127,7 @@ impl Ipv4Reassembler {
         let Some(ip_packet) = packet.network_packet() else {
             return Ipv4ReassemblyResult::Dropped;
         };
-        let Some(payload) = ipv4::payload(ip_packet, &header) else {
+        let Some(payload) = packet.transport_packet() else {
             self.remove_queue(&key);
             return Ipv4ReassemblyResult::Dropped;
         };
@@ -229,12 +234,12 @@ impl Ipv4Reassembler {
             let Some(first_packet) = queue.first_fragment_packet() else {
                 continue;
             };
-            let Ok(header) = Ipv4Header::parse_input(&first_packet) else {
+            // Non-final payloads may have been shortened to an eight-byte boundary.
+            if ipv4::Ipv4Header::parse_input(&first_packet).is_err() {
                 continue;
-            };
+            }
             fragments.push(ExpiredIpv4Fragment {
                 packet_type: queue.packet_type,
-                header,
                 packet: first_packet,
             });
         }

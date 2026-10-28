@@ -22,7 +22,7 @@ use crate::{
     ip::{IpAddress, Ipv4Address, Ipv4Cidr},
     network::{
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
-        ipv4::{self, Ipv4Error, Ipv4Header},
+        ipv4::{self, Ipv4Header},
         router::{ROUTE_SCOPE_UNIVERSE, RouteTable, Rule},
     },
     runtime::tx_queue::DataTxQueue,
@@ -658,12 +658,15 @@ impl Router {
     /// uses as its `poll_next` hint. Ethernet TX and dropped packets return
     /// `false`.
     fn dispatch_ipv4_packet(&mut self, mut packet: PacketBuf, timestamp: MonotonicInstant) -> bool {
-        let header = match Ipv4Header::prepare_output_packet(&mut packet) {
-            Ok(header) => header,
-            Err(Ipv4Error::Malformed | Ipv4Error::BadChecksum) => return false,
-        };
+        if crate::ipv4::prepare_output_packet(&mut packet).is_err() {
+            return false;
+        }
+        let header =
+            Ipv4Header::parse_header_only(packet.network_packet().expect("finalized IPv4 packet"))
+                .expect("finalized IPv4 header");
 
-        let src_addr = IpAddress::Ipv4(header.src_addr());
+        let ipv4_src_addr = header.src_addr();
+        let src_addr = IpAddress::Ipv4(ipv4_src_addr);
         let dst_addr = IpAddress::Ipv4(header.dst_addr());
         if header.dst_addr().is_broadcast() {
             if !self.is_valid_ipv4_broadcast_source(header.src_addr()) {
@@ -706,7 +709,7 @@ impl Router {
             );
             return false;
         }
-        if !self.is_local_ipv4_source(header.src_addr()) {
+        if !self.is_local_ipv4_source(ipv4_src_addr) {
             warn!(
                 "Dropping IPv4 packet with non-local source {} routed via {}",
                 src_addr, rule.src
@@ -723,7 +726,10 @@ impl Router {
     }
 
     fn fragment_ipv4_packet_for_output(&mut self, packet: Vec<u8>) -> KResult<Vec<Vec<u8>>> {
-        let header = Ipv4Header::parse_output(&packet).map_err(|_| KError::InvalidInput)?;
+        if packet.len() > usize::from(u16::MAX) {
+            return Err(KError::InvalidInput);
+        }
+        let header = Ipv4Header::parse_header_only(&packet).map_err(|_| KError::InvalidInput)?;
         let dst_addr = IpAddress::Ipv4(header.dst_addr());
         let Some(mtu) = self.route_mtu(&dst_addr) else {
             return Ok(vec![packet]);

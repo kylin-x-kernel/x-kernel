@@ -134,12 +134,11 @@ fn loopback_net_rx_delivers_udp_without_poller() {
 
     let mut udp = alloc::vec![0u8; UDP_HEADER_LEN + 1];
     udp[UDP_HEADER_LEN] = b'x';
-    write_udp_header(&mut udp, local_ip, local_ip, 4000, 5000)
-        .expect("UDP header length is valid");
+    write_udp_header(&mut udp, local_ip, local_ip, 4000, 5000).expect("UDP header length is valid");
     let packet = ipv4::build_ipv4_packet(local_ip, local_ip, ipv4::PROTOCOL_UDP, 64, &udp)
         .expect("IPv4 packet length is valid");
     let mut packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::Ipv4Stack);
-    ipv4::Ipv4Header::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
+    ipv4::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
 
     let mut device = LoopbackDevice::new();
     assert!(device.send_ip_packet(
@@ -173,12 +172,11 @@ fn unmatched_loopback_udp_stays_queued_for_the_poller() {
     let local_ip = Ipv4Address::new(127, 0, 0, 1);
     let mut udp = alloc::vec![0u8; UDP_HEADER_LEN + 1];
     udp[UDP_HEADER_LEN] = b'x';
-    write_udp_header(&mut udp, local_ip, local_ip, 4000, 5000)
-        .expect("UDP header length is valid");
+    write_udp_header(&mut udp, local_ip, local_ip, 4000, 5000).expect("UDP header length is valid");
     let packet = ipv4::build_ipv4_packet(local_ip, local_ip, ipv4::PROTOCOL_UDP, 64, &udp)
         .expect("IPv4 packet length is valid");
     let mut packet = PacketBuf::from_ip_packet_vec(1, packet, PacketOwner::Ipv4Stack);
-    ipv4::Ipv4Header::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
+    ipv4::prepare_output_packet(&mut packet).expect("IPv4 header is valid");
 
     let mut device = LoopbackDevice::new();
     assert!(device.send_ip_packet(

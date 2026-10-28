@@ -134,10 +134,8 @@ fn udp_datagram_is_written_into_preallocated_ipv4_packet() {
     let socket = UdpSocket::new();
     let src_addr = Ipv4Address::new(192, 0, 2, 1);
     let dst_addr = Ipv4Address::new(192, 0, 2, 2);
-    let local_endpoint: IpEndpoint =
-        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234).into();
-    let remote_endpoint: IpEndpoint =
-        SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 4321).into();
+    let local_endpoint: IpEndpoint = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 1234).into();
+    let remote_endpoint: IpEndpoint = SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 2), 4321).into();
     socket.state().set_local_endpoint(Some(local_endpoint));
     let mut packet = vec![0u8; IPV4_HEADER_LEN + UDP_HEADER_LEN + 4];
     packet[IPV4_HEADER_LEN + UDP_HEADER_LEN..].copy_from_slice(&[1, 2, 3, 4]);

@@ -11,6 +11,7 @@ use kerrno::LinuxError;
 use super::udp::{self, UdpSocketQueuedError};
 use crate::{
     SocketErrorInfo, SocketErrorOrigin,
+    buf::PacketBuf,
     ipv4::{self, Ipv4Header},
 };
 
@@ -101,19 +102,23 @@ fn icmpv4_errno(icmp: &Icmpv4Slice<'_>) -> Option<(LinuxError, u32)> {
 /// Inspect an IPv4 ICMP error and queue it for the affected UDP socket.
 ///
 /// ICMP errors quote the packet that triggered the error, so this path parses
-/// the outer IPv4 and ICMP headers, then the quoted IPv4 and UDP headers. The
+/// the ICMP and quoted IPv4/UDP headers after IPv4 input normalization. The
 /// quoted UDP 4-tuple and `ingress_ifindex` determine the receiving socket: a
 /// connected socket that matches the peer is preferred, and an unconnected
 /// socket bound to the local endpoint is used as a fallback.
 ///
 /// This mirrors Linux's UDP ICMP error lookup in
 /// `net/ipv4/udp.c::__udp4_lib_err()`.
-pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
-    let ip_packet = match Ipv4Header::parse_input(packet) {
-        Ok(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
+pub(crate) fn inspect_icmpv4_error(packet: &PacketBuf) {
+    let ip_packet = match packet
+        .network_packet()
+        .and_then(|bytes| Ipv4Header::parse_header_only(bytes).ok())
+    {
+        Some(header) if header.protocol() == ipv4::PROTOCOL_ICMP => header,
         _ => return,
     };
-    let icmp_packet = match ipv4::payload(packet, &ip_packet) {
+    let ingress_ifindex = packet.ifindex();
+    let icmp_packet = match packet.transport_packet() {
         Some(payload) => payload,
         _ => return,
     };
@@ -131,10 +136,17 @@ pub(crate) fn inspect_icmpv4_error(packet: &[u8], ingress_ifindex: i32) {
     };
 
     let original_packet = icmp.payload();
-    let original_ip = match Ipv4Header::parse_icmp_quote(original_packet) {
-        Ok(header) if header.protocol() == ipv4::PROTOCOL_UDP => header,
-        _ => return,
+    let original_ip = match Ipv4Header::parse_header_only(original_packet) {
+        Ok(header) => header,
+        Err(_) => return,
     };
+    // ICMP quotes may omit the original payload, but must retain a valid header.
+    if original_ip.total_len() < original_ip.header_len()
+        || original_ip.check_checksum().is_err()
+        || original_ip.protocol() != ipv4::PROTOCOL_UDP
+    {
+        return;
+    }
     let original_udp = match original_packet.get(original_ip.header_len()..) {
         Some(payload) => payload,
         _ => return,

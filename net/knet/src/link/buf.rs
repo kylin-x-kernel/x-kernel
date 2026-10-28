@@ -214,23 +214,41 @@ impl PacketBuf {
         self.inner.network_offset
     }
 
+    /// Mutably borrows network bytes, invalidating downstream bounds and validation.
     pub(crate) fn network_packet_mut(&mut self) -> Option<&mut [u8]> {
         let offset = self.inner.network_offset?;
         let inner = Arc::make_mut(&mut self.inner);
+        inner.transport_offset = None;
+        inner.checksum_state = ChecksumState::Unverified;
         inner.udp_metadata = None;
         inner.data.get_mut(offset..inner.tail)
     }
 
+    /// Shrinks the network packet and invalidates downstream bounds and validation.
     pub(crate) fn truncate_network_packet(&mut self, len: usize) -> Option<()> {
         let offset = self.inner.network_offset?;
         let tail = offset.checked_add(len)?;
-        if tail > self.inner.data.len() {
+        if tail > self.inner.tail {
             return None;
         }
         let inner = Arc::make_mut(&mut self.inner);
         inner.tail = tail;
+        inner.transport_offset = None;
+        inner.checksum_state = ChecksumState::Unverified;
         inner.udp_metadata = None;
         Some(())
+    }
+
+    /// Returns bytes from the recorded next-layer boundary to the packet end.
+    ///
+    /// The protocol layer establishes this boundary after checking network bounds.
+    /// IPv4 fragments expose fragment data here, not a complete transport packet.
+    pub(crate) fn transport_packet(&self) -> Option<&[u8]> {
+        let offset = self.inner.transport_offset?;
+        if offset < self.inner.network_offset? {
+            return None;
+        }
+        self.inner.data.get(offset..self.inner.tail)
     }
 
     #[cfg(unittest)]

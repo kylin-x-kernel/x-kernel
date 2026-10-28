@@ -49,7 +49,7 @@ fn test_ethernet_frame_records_link_metadata_and_packet_type() {
         0x45,
         0,
     ];
-    let packet = PacketBuf::from_ethernet_frame(
+    let mut packet = PacketBuf::from_ethernet_frame(
         3,
         &frame,
         LOCAL_MAC,
@@ -64,6 +64,20 @@ fn test_ethernet_frame_records_link_metadata_and_packet_type() {
     assert_eq!(packet.network_offset(), Some(14));
     assert_eq!(packet.network_packet().unwrap(), &[0x45, 0]);
     assert_eq!(packet.link_metadata().unwrap().protocol, EtherType::Ipv4);
+    assert!(packet.transport_packet().is_none());
+    for offset in [13, frame.len() + 1] {
+        packet.set_transport_offset(offset);
+        assert!(packet.transport_packet().is_none());
+    }
+    packet.set_transport_offset(15);
+    assert_eq!(packet.transport_packet(), Some([0].as_slice()));
+    packet.set_checksum_state(ChecksumState::Verified);
+    packet.truncate_network_packet(1).unwrap();
+    assert!(packet.transport_packet().is_none());
+    assert_eq!(packet.checksum_state(), ChecksumState::Unverified);
+    packet.set_transport_offset(15);
+    assert_eq!(packet.transport_packet(), Some([].as_slice()));
+    assert!(packet.truncate_network_packet(2).is_none());
 }
 
 #[def_test]
@@ -82,7 +96,9 @@ fn test_packet_copy_preserves_offsets_and_metadata() {
 
 #[def_test]
 fn test_packet_handle_is_pointer_sized_and_uses_copy_on_write() {
-    let packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
+    let mut packet = PacketBuf::from_ip_packet_vec(1, vec![0x45, 0, 0, 20], PacketOwner::DeviceRx);
+    packet.set_transport_offset(2);
+    packet.set_checksum_state(ChecksumState::Verified);
     let mut copy = packet.clone();
 
     assert_eq!(
@@ -96,6 +112,10 @@ fn test_packet_handle_is_pointer_sized_and_uses_copy_on_write() {
     assert!(!packet.shares_storage_with(&copy));
     assert_eq!(packet.network_packet().unwrap()[0], 0x45);
     assert_eq!(copy.network_packet().unwrap()[0], 0x60);
+    assert_eq!(packet.transport_packet(), Some([0, 20].as_slice()));
+    assert_eq!(packet.checksum_state(), ChecksumState::Verified);
+    assert!(copy.transport_packet().is_none());
+    assert_eq!(copy.checksum_state(), ChecksumState::Unverified);
 }
 
 #[def_test]

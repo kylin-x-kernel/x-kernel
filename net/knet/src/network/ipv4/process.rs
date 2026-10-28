@@ -69,207 +69,161 @@ pub(crate) enum Icmpv4Error {
     FragmentReassemblyTimeout,
 }
 
+/// Borrowed IPv4 header bytes, including options.
+///
+/// Structural parsing and complete-input validation are separate entry points.
+/// Fields are read from the packet; buffer normalization and protocol policy
+/// remain with their processing stages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Ipv4Header {
-    src_addr: Ipv4Address,
-    dst_addr: Ipv4Address,
-    protocol: u8,
-    ttl: u8,
-    header_len: usize,
-    total_len: usize,
-    identification: u16,
-    fragment_offset: usize,
-    more_fragments: bool,
-    dont_fragment: bool,
-    dscp_ecn: u8,
-    is_fragmented: bool,
+pub(crate) struct Ipv4Header<'a> {
+    slice: Ipv4HeaderSlice<'a>,
 }
 
-impl Ipv4Header {
-    pub(crate) fn parse_input(packet: &[u8]) -> Result<Self, Ipv4Error> {
-        Self::parse(packet, true)
-    }
-
-    /// Parses the original IPv4 header quoted by an ICMP error.
-    ///
-    /// ICMP only guarantees that the quote contains the IPv4 header and the
-    /// first eight payload bytes, so the original `total_len` may exceed the
-    /// available quote while the header itself still has to be complete and
-    /// checksum-valid.
-    pub(crate) fn parse_icmp_quote(packet: &[u8]) -> Result<Self, Ipv4Error> {
-        let header_slice = Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4Error::Malformed)?;
-        let header_len = header_slice.slice().len();
-        let total_len = header_slice.total_len() as usize;
-        if total_len < header_len {
+impl<'a> Ipv4Header<'a> {
+    /// Parses a complete datagram and validates its length and header checksum.
+    /// Trailing link padding is allowed.
+    pub(crate) fn parse_input(packet: &'a [u8]) -> Result<Self, Ipv4Error> {
+        let header = Self::parse_header_only(packet)?;
+        if header.total_len() < header.header_len() || header.total_len() > packet.len() {
             return Err(Ipv4Error::Malformed);
         }
-        if header_slice.header_checksum() != header_slice.to_header().calc_header_checksum() {
+        header.check_checksum()?;
+        Ok(header)
+    }
+
+    /// Parses a complete header without validating datagram bounds or checksum.
+    pub(crate) fn parse_header_only(packet: &'a [u8]) -> Result<Self, Ipv4Error> {
+        let slice = Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4Error::Malformed)?;
+        Ok(Self { slice })
+    }
+
+    /// Validates the checksum over the original header, including options.
+    pub(crate) fn check_checksum(self) -> Result<(), Ipv4Error> {
+        if self.slice.header_checksum() != self.slice.to_header().calc_header_checksum() {
             return Err(Ipv4Error::BadChecksum);
         }
-
-        Ok(Self::from_slice(&header_slice, total_len))
+        Ok(())
     }
 
-    pub(crate) fn validate_input_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        let header = Self::parse_input(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
-        header.apply_to_packet(packet)
-    }
-
-    pub(crate) fn prepare_output_packet(packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        let header = Self::parse_output(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
-        {
-            let data = packet.network_packet_mut().ok_or(Ipv4Error::Malformed)?;
-            let total_len = u16::try_from(data.len()).map_err(|_| Ipv4Error::Malformed)?;
-            data[2..4].copy_from_slice(&total_len.to_be_bytes());
-            let header_data = data
-                .get_mut(..header.header_len)
-                .ok_or(Ipv4Error::Malformed)?;
-            let mut ether_header = Ipv4HeaderSlice::from_slice(header_data)
-                .map_err(|_| Ipv4Error::Malformed)?
-                .to_header();
-            ether_header.header_checksum = ether_header.calc_header_checksum();
-            header_data.copy_from_slice(&ether_header.to_bytes());
-        }
-        header.apply_to_packet(packet)
-    }
-
-    pub(crate) fn parse_output(packet: &[u8]) -> Result<Self, Ipv4Error> {
-        if packet.len() > u16::MAX as usize {
-            return Err(Ipv4Error::Malformed);
-        }
-
-        let header_slice = Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4Error::Malformed)?;
-
-        Ok(Self::from_slice(&header_slice, packet.len()))
+    /// Returns the complete header bytes, including options.
+    pub(crate) fn bytes(self) -> &'a [u8] {
+        self.slice.slice()
     }
 
     pub(crate) fn src_addr(self) -> Ipv4Address {
-        self.src_addr
+        Ipv4Address::from_octets(self.slice.source())
     }
 
     pub(crate) fn dst_addr(self) -> Ipv4Address {
-        self.dst_addr
+        Ipv4Address::from_octets(self.slice.destination())
     }
 
     pub(crate) fn protocol(self) -> u8 {
-        self.protocol
+        self.slice.protocol().0
     }
 
     pub(crate) fn header_len(self) -> usize {
-        self.header_len
+        self.bytes().len()
     }
 
-    #[cfg(unittest)]
+    /// Returns the datagram length in bytes declared by the header.
     pub(crate) fn total_len(self) -> usize {
-        self.total_len
+        usize::from(self.slice.total_len())
     }
 
     pub(crate) fn identification(self) -> u16 {
-        self.identification
+        self.slice.identification()
     }
 
+    /// Returns the fragment payload offset in bytes.
     pub(crate) fn fragment_offset(self) -> usize {
-        self.fragment_offset
+        usize::from(self.slice.fragments_offset().value()) * IPV4_FRAGMENT_OFFSET_UNIT
     }
 
     pub(crate) fn more_fragments(self) -> bool {
-        self.more_fragments
+        self.slice.more_fragments()
     }
 
     pub(crate) fn dont_fragment(self) -> bool {
-        self.dont_fragment
+        self.slice.dont_fragment()
     }
 
     pub(crate) fn ecn(self) -> u8 {
-        self.dscp_ecn & 0b11
+        self.slice.ecn().value()
     }
 
     pub(crate) fn is_fragmented(self) -> bool {
-        self.is_fragmented
+        self.more_fragments() || self.fragment_offset() != 0
     }
 
     pub(crate) fn is_broadcast_or_multicast(self) -> bool {
-        self.dst_addr.is_broadcast() || self.dst_addr.is_multicast()
+        self.dst_addr().is_broadcast() || self.dst_addr().is_multicast()
     }
+}
 
-    fn parse(packet: &[u8], verify_checksum: bool) -> Result<Self, Ipv4Error> {
-        let header_slice = Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4Error::Malformed)?;
-        let header_len = header_slice.slice().len();
-        let total_len = header_slice.total_len() as usize;
-        if total_len < header_len || total_len > packet.len() {
-            return Err(Ipv4Error::Malformed);
-        }
+/// Validates input and normalizes the packet's length and transport offset.
+pub(crate) fn validate_input_packet(packet: &mut PacketBuf) -> Result<(), Ipv4Error> {
+    let header = Ipv4Header::parse_input(packet.network_packet().ok_or(Ipv4Error::Malformed)?)?;
+    let (total_len, header_len) = (header.total_len(), header.header_len());
+    apply_to_packet(packet, total_len, header_len)
+}
 
-        if verify_checksum
-            && header_slice.header_checksum() != header_slice.to_header().calc_header_checksum()
-        {
-            return Err(Ipv4Error::BadChecksum);
-        }
+/// Finalizes output length and checksum before publishing packet offsets.
+pub(crate) fn prepare_output_packet(packet: &mut PacketBuf) -> Result<(), Ipv4Error> {
+    let data = packet.network_packet_mut().ok_or(Ipv4Error::Malformed)?;
+    let total_len = u16::try_from(data.len()).map_err(|_| Ipv4Error::Malformed)?;
+    let mut header = Ipv4HeaderSlice::from_slice(data)
+        .map_err(|_| Ipv4Error::Malformed)?
+        .to_header();
+    header.total_len = total_len;
+    header.header_checksum = header.calc_header_checksum();
+    let header_len = header.header_len();
+    data[..header_len].copy_from_slice(&header.to_bytes());
+    apply_to_packet(packet, usize::from(total_len), header_len)
+}
 
-        Ok(Self::from_slice(&header_slice, total_len))
-    }
-
-    fn from_slice(header_slice: &Ipv4HeaderSlice<'_>, total_len: usize) -> Self {
-        Self {
-            src_addr: Ipv4Address::from_octets(header_slice.source()),
-            dst_addr: Ipv4Address::from_octets(header_slice.destination()),
-            protocol: header_slice.protocol().0,
-            ttl: header_slice.ttl(),
-            header_len: header_slice.slice().len(),
-            total_len,
-            identification: header_slice.identification(),
-            fragment_offset: usize::from(header_slice.fragments_offset().value())
-                * IPV4_FRAGMENT_OFFSET_UNIT,
-            more_fragments: header_slice.more_fragments(),
-            dont_fragment: header_slice.dont_fragment(),
-            dscp_ecn: header_slice.slice()[1],
-            is_fragmented: header_slice.is_fragmenting_payload(),
-        }
-    }
-
-    fn apply_to_packet(self, packet: &mut PacketBuf) -> Result<Self, Ipv4Error> {
-        packet
-            .truncate_network_packet(self.total_len)
-            .ok_or(Ipv4Error::Malformed)?;
-        let transport_offset = packet
-            .network_offset()
-            .and_then(|offset| offset.checked_add(self.header_len))
-            .ok_or(Ipv4Error::Malformed)?;
-        packet.set_transport_offset(transport_offset);
-        packet.set_checksum_state(ChecksumState::Verified);
-        Ok(self)
-    }
+fn apply_to_packet(
+    packet: &mut PacketBuf,
+    total_len: usize,
+    header_len: usize,
+) -> Result<(), Ipv4Error> {
+    packet
+        .truncate_network_packet(total_len)
+        .ok_or(Ipv4Error::Malformed)?;
+    let offset = packet
+        .network_offset()
+        .and_then(|offset| offset.checked_add(header_len))
+        .ok_or(Ipv4Error::Malformed)?;
+    packet.set_transport_offset(offset);
+    packet.set_checksum_state(ChecksumState::Verified);
+    Ok(())
 }
 
 pub(crate) fn ip_version(packet: &[u8]) -> Option<u8> {
     packet.first().map(|byte| byte >> 4)
 }
 
-pub(crate) fn payload<'a>(packet: &'a [u8], header: &Ipv4Header) -> Option<&'a [u8]> {
-    packet.get(header.header_len..header.total_len)
-}
-
 pub(crate) fn build_icmpv4_error_packet(
     error: Icmpv4Error,
     packet_type: PacketType,
-    offending_header: Ipv4Header,
     offending_packet: &[u8],
 ) -> Option<Vec<u8>> {
+    let offending_header = Ipv4Header::parse_header_only(offending_packet).ok()?;
     if !can_send_icmpv4_error(packet_type, offending_header, offending_packet) {
         return None;
     }
 
     let quote_len = offending_header
-        .total_len
-        .min(offending_header.header_len + ICMPV4_ERROR_QUOTE_BYTES);
+        .total_len()
+        .min(offending_header.header_len() + ICMPV4_ERROR_QUOTE_BYTES);
     let icmp_len = Icmpv4Header::MIN_LEN + quote_len;
     let total_len = IPV4_MIN_HEADER_LEN + icmp_len;
     let mut packet = vec![0u8; total_len];
 
     write_ipv4_header(
         &mut packet[..IPV4_MIN_HEADER_LEN],
-        offending_header.dst_addr,
-        offending_header.src_addr,
+        offending_header.dst_addr(),
+        offending_header.src_addr(),
         PROTOCOL_ICMP,
         IPV4_DEFAULT_TTL,
         icmp_len,
@@ -331,7 +285,10 @@ pub(crate) fn fragment_output_packet(
     path_mtu: usize,
     identification: u16,
 ) -> Result<Vec<Vec<u8>>, Ipv4FragmentError> {
-    let header = Ipv4Header::parse_output(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
+    if packet.len() > usize::from(u16::MAX) {
+        return Err(Ipv4FragmentError::Malformed);
+    }
+    let header = Ipv4Header::parse_header_only(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
     if packet.len() <= path_mtu {
         return Ok(vec![packet.to_vec()]);
     }
@@ -347,7 +304,8 @@ pub(crate) fn fragment_output_packet(
     // so every non-final fragment must carry a payload length aligned to that
     // unit. Stack-generated IPv4 output packets currently use a 20-byte header;
     // callers that introduce IPv4 options must add option-copy handling here.
-    let payload = payload(packet, &header).ok_or(Ipv4FragmentError::Malformed)?;
+    // Output length comes from storage until the header is finalized.
+    let payload = &packet[header.header_len()..];
     let max_payload_len = path_mtu
         .checked_sub(header.header_len())
         .ok_or(Ipv4FragmentError::MtuTooSmall)?;
@@ -357,6 +315,7 @@ pub(crate) fn fragment_output_packet(
         return Err(Ipv4FragmentError::MtuTooSmall);
     }
 
+    let template = header.slice.to_header();
     let mut fragments = Vec::new();
     let mut offset = 0;
     while offset < payload.len() {
@@ -368,8 +327,7 @@ pub(crate) fn fragment_output_packet(
         };
         let more_fragments = offset + fragment_payload_len < payload.len();
         fragments.push(build_ipv4_fragment(
-            packet,
-            &header,
+            &template,
             payload,
             offset,
             fragment_payload_len,
@@ -384,14 +342,15 @@ pub(crate) fn fragment_output_packet(
 
 fn can_send_icmpv4_error(
     packet_type: PacketType,
-    offending_header: Ipv4Header,
+    offending_header: Ipv4Header<'_>,
     offending_packet: &[u8],
 ) -> bool {
     if packet_type != PacketType::Host {
         return false;
     }
 
-    if offending_header.src_addr.is_unspecified() || offending_header.is_broadcast_or_multicast() {
+    if offending_header.src_addr().is_unspecified() || offending_header.is_broadcast_or_multicast()
+    {
         return false;
     }
 
@@ -399,12 +358,13 @@ fn can_send_icmpv4_error(
         return false;
     }
 
-    if offending_header.protocol != PROTOCOL_ICMP {
+    if offending_header.protocol() != PROTOCOL_ICMP {
         return true;
     }
 
-    let Some(icmp_type) =
-        payload(offending_packet, &offending_header).and_then(|payload| payload.first().copied())
+    let Some(icmp_type) = offending_packet
+        .get(offending_header.header_len()..offending_header.total_len())
+        .and_then(|payload| payload.first().copied())
     else {
         return false;
     };
@@ -477,17 +437,14 @@ fn write_ipv4_header(
 }
 
 fn build_ipv4_fragment(
-    packet: &[u8],
-    header: &Ipv4Header,
+    header: &EtherIpv4Header,
     payload: &[u8],
     offset: usize,
     fragment_payload_len: usize,
     more_fragments: bool,
     identification: u16,
 ) -> Result<Vec<u8>, Ipv4FragmentError> {
-    let header_slice =
-        Ipv4HeaderSlice::from_slice(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
-    let mut ether_header = header_slice.to_header();
+    let mut ether_header = header.clone();
     let total_len = header
         .header_len()
         .checked_add(fragment_payload_len)

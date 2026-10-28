@@ -31,12 +31,7 @@ use alloc::{collections::VecDeque, vec::Vec};
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
-use crate::{
-    buf::PacketBuf,
-    consts::SOCKET_BUFFER_SIZE,
-    ipv4::{self, Ipv4Header},
-    udp,
-};
+use crate::{buf::PacketBuf, consts::SOCKET_BUFFER_SIZE, ipv4, udp};
 
 /// Packets processed by one `NetRx` softirq invocation.
 pub(crate) const NET_RX_BUDGET: usize = 16;
@@ -98,22 +93,22 @@ pub(crate) fn has_work_for(ifindex: i32) -> bool {
 /// Returns `None` when the packet is IPv4 UDP but fails the checked parser;
 /// the caller should drop it without occupying the queue. Other packets are
 /// returned unchanged for the task poller.
-pub(crate) fn prepare_for_enqueue(packet: PacketBuf) -> Option<PacketBuf> {
+pub(crate) fn prepare_for_enqueue(mut packet: PacketBuf) -> Option<PacketBuf> {
     debug_assert!(
         !kirq::context::is_in_interrupt_context(),
         "prepare_for_enqueue requires task context"
     );
-    let udp_header = packet
+    let is_udp = packet
         .network_packet()
-        .and_then(|ip_packet| Ipv4Header::parse_input(ip_packet).ok())
-        .filter(|header| header.protocol() == ipv4::PROTOCOL_UDP && !header.is_fragmented());
-    match udp_header {
-        Some(header) => match udp::prepare_ipv4_packet(header, packet) {
-            Ok(prepared) => Some(prepared.into_packet()),
-            Err(_) => None,
-        },
-        None => Some(packet),
+        .and_then(|ip_packet| ipv4::Ipv4Header::parse_header_only(ip_packet).ok())
+        .is_some_and(|header| header.protocol() == ipv4::PROTOCOL_UDP && !header.is_fragmented());
+    if !is_udp {
+        return Some(packet);
     }
+    ipv4::validate_input_packet(&mut packet).ok()?;
+    udp::prepare_ipv4_packet(packet)
+        .ok()
+        .map(|prepared| prepared.into_packet())
 }
 
 /// Enqueue `packet` onto the matching shared handle queue.

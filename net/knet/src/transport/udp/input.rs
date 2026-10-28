@@ -22,20 +22,16 @@ pub(crate) enum InputDisposition {
 
 /// Validates an IPv4 UDP packet and records its receive metadata.
 ///
+/// The caller must validate and normalize IPv4 input before transferring ownership.
 /// This function must run in task context. Loopback stamps packets before
 /// disabling BH; ordinary ingress is already processed by a task. The existing
 /// reference-counted `PacketBuf` is retained without another allocation.
-pub(crate) fn prepare_ipv4_packet(
-    header: ipv4::Ipv4Header,
-    packet: PacketBuf,
-) -> Result<PreparedUdpPacket, PacketBuf> {
+pub(crate) fn prepare_ipv4_packet(packet: PacketBuf) -> Result<PreparedUdpPacket, PacketBuf> {
     debug_assert!(
         !kirq::context::is_in_interrupt_context(),
         "prepare_ipv4_packet requires task context"
     );
-    let Some((local_addr, remote_addr, payload_offset, payload_len)) = packet
-        .network_packet()
-        .and_then(|ip_packet| parse_udp_datagram(header, ip_packet))
+    let Some((local_addr, remote_addr, payload_offset, payload_len)) = parse_udp_datagram(&packet)
     else {
         return Err(packet);
     };
@@ -64,11 +60,9 @@ pub(crate) fn deliver_ipv4_packet(
     (InputDisposition::Accepted, None)
 }
 
-fn parse_udp_datagram(
-    header: ipv4::Ipv4Header,
-    ip_packet: &[u8],
-) -> Option<(SocketAddr, SocketAddr, usize, usize)> {
-    let udp_packet = ipv4::payload(ip_packet, &header)?;
+fn parse_udp_datagram(packet: &PacketBuf) -> Option<(SocketAddr, SocketAddr, usize, usize)> {
+    let header = ipv4::Ipv4Header::parse_header_only(packet.network_packet()?).ok()?;
+    let udp_packet = packet.transport_packet()?;
     let udp_header = UdpHeaderSlice::from_slice(udp_packet).ok()?;
     let udp_len = udp_header.length() as usize;
     if udp_len < UDP_HEADER_LEN || udp_len > udp_packet.len() {

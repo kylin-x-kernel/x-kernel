@@ -38,18 +38,19 @@ fn dont_fragment_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
 
 #[def_test]
 fn test_validate_input_packet_accepts_valid_checksum() {
-    let mut packet = PacketBuf::from_ip_packet_vec(
-        1,
-        ipv4_packet(PROTOCOL_UDP, &[1, 2]),
-        PacketOwner::DeviceRx,
-    );
+    let mut packet =
+        PacketBuf::from_ip_packet_vec(1, ipv4_packet(PROTOCOL_UDP, &[1, 2]), PacketOwner::DeviceRx);
 
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    let original = packet.clone();
+    crate::ipv4::validate_input_packet(&mut packet).unwrap();
+    let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
+    assert_eq!(original.checksum_state(), ChecksumState::Unverified);
 
     assert_eq!(header.protocol(), PROTOCOL_UDP);
     assert_eq!(header.header_len(), IPV4_MIN_HEADER_LEN);
     assert_eq!(header.total_len(), IPV4_MIN_HEADER_LEN + 2);
     assert_eq!(packet.transport_offset(), Some(IPV4_MIN_HEADER_LEN));
+    assert_eq!(packet.transport_packet(), Some([1, 2].as_slice()));
     assert_eq!(packet.checksum_state(), ChecksumState::Verified);
 }
 
@@ -62,7 +63,8 @@ fn test_validate_input_packet_marks_fragment() {
     bytes[..IPV4_MIN_HEADER_LEN].copy_from_slice(&header.to_bytes());
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
-    let header = Ipv4Header::validate_input_packet(&mut packet).unwrap();
+    crate::ipv4::validate_input_packet(&mut packet).unwrap();
+    let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
 
     assert!(header.is_fragmented());
 }
@@ -74,7 +76,7 @@ fn test_validate_input_packet_rejects_bad_checksum() {
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceRx);
 
     assert_eq!(
-        Ipv4Header::validate_input_packet(&mut packet),
+        crate::ipv4::validate_input_packet(&mut packet),
         Err(Ipv4Error::BadChecksum)
     );
 }
@@ -82,32 +84,39 @@ fn test_validate_input_packet_rejects_bad_checksum() {
 #[def_test]
 fn test_prepare_output_packet_repairs_checksum() {
     let mut bytes = ipv4_packet(PROTOCOL_ICMP, &[]);
-    bytes[10] = 0;
-    bytes[11] = 0;
+    bytes[2..4].fill(0);
+    bytes[10..12].fill(0);
     let mut packet = PacketBuf::from_ip_packet_vec(1, bytes, PacketOwner::DeviceTx);
 
-    Ipv4Header::prepare_output_packet(&mut packet).unwrap();
+    crate::ipv4::prepare_output_packet(&mut packet).unwrap();
 
     let header = Ipv4Header::parse_input(packet.network_packet().unwrap()).unwrap();
     assert_eq!(header.protocol(), PROTOCOL_ICMP);
+    assert_eq!(header.total_len(), packet.network_packet().unwrap().len());
 }
 
 #[def_test]
 fn test_fragment_output_packet_splits_on_aligned_payload() {
     let original_payload: Vec<u8> = (0..40).collect();
-    let packet = ipv4_packet(PROTOCOL_UDP, &original_payload);
+    let mut packet = ipv4_packet(PROTOCOL_UDP, &original_payload);
+    // Fragmentation uses the stored payload even before output is finalized.
+    packet[2..4].fill(0);
+    packet[10..12].fill(0);
 
     let fragments = fragment_output_packet(&packet, IPV4_MIN_HEADER_LEN + 18, 0x1234).unwrap();
 
     assert_eq!(fragments.len(), 3);
     let mut reassembled = Vec::new();
     for (idx, fragment) in fragments.iter().enumerate() {
-        let header = Ipv4Header::parse_input(fragment).unwrap();
+        let mut packet = PacketBuf::from_ip_packet_vec(1, fragment.clone(), PacketOwner::DeviceRx);
+        crate::ipv4::validate_input_packet(&mut packet).unwrap();
+        let header = Ipv4Header::parse_header_only(packet.network_packet().unwrap()).unwrap();
+        assert!(header.is_fragmented());
         assert_eq!(header.identification(), 0x1234);
         assert_eq!(header.fragment_offset(), idx * 16);
         assert_eq!(header.more_fragments(), idx != 2);
         assert!(!header.dont_fragment());
-        reassembled.extend_from_slice(payload(fragment, &header).unwrap());
+        reassembled.extend_from_slice(packet.transport_packet().unwrap());
     }
     assert_eq!(reassembled, original_payload);
 }
@@ -130,7 +139,6 @@ fn test_build_icmpv4_protocol_unreachable_packet() {
     let error = build_icmpv4_error_packet(
         Icmpv4Error::ProtocolUnreachable,
         PacketType::Host,
-        header,
         &offending,
     )
     .expect("ICMP error should be emitted");
@@ -147,4 +155,35 @@ fn test_build_icmpv4_protocol_unreachable_packet() {
         error[IPV4_MIN_HEADER_LEN + 1],
         etherparse::icmpv4::CODE_DST_UNREACH_PROTOCOL
     );
+}
+
+#[def_test]
+fn header_view_borrows_options_and_separates_structural_validation() {
+    let mut wire =
+        EtherIpv4Header::new(16, 37, IpNumber::UDP, [192, 0, 2, 1], [192, 0, 2, 2]).unwrap();
+    wire.options = [1, 1, 0, 0].into();
+    wire.set_payload_len(16).unwrap();
+    wire.header_checksum = wire.calc_header_checksum();
+    let mut bytes = wire.to_bytes().to_vec();
+    bytes.extend_from_slice(&[0xaa; 16]);
+    bytes.extend_from_slice(&[0xbb; 12]);
+    let header = Ipv4Header::parse_input(&bytes).unwrap();
+    assert_eq!(header.bytes().as_ptr(), bytes.as_ptr());
+    assert_eq!(&header.bytes()[20..], &[1, 1, 0, 0]);
+    let mut packet = PacketBuf::from_ip_packet_vec(1, bytes.clone(), PacketOwner::DeviceRx);
+    assert!(packet.transport_packet().is_none());
+    crate::ipv4::validate_input_packet(&mut packet).unwrap();
+    assert_eq!(packet.network_packet().unwrap().len(), wire.total_len as usize);
+    assert_eq!(packet.transport_packet().unwrap(), &[0xaa; 16]);
+    for len in [0, 19, 20, 23] {
+        assert!(Ipv4Header::parse_header_only(&bytes[..len]).is_err());
+    }
+    let quote = &bytes[..32];
+    assert_eq!(Ipv4Header::parse_input(quote), Err(Ipv4Error::Malformed));
+    bytes[22] ^= 1;
+    assert_eq!(Ipv4Header::parse_input(&bytes), Err(Ipv4Error::BadChecksum));
+    wire.total_len = (wire.header_len() - 1) as u16;
+    wire.header_checksum = wire.calc_header_checksum();
+    bytes[..wire.header_len()].copy_from_slice(&wire.to_bytes());
+    assert_eq!(Ipv4Header::parse_input(&bytes), Err(Ipv4Error::Malformed));
 }

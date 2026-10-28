@@ -12,9 +12,9 @@ use unittest::def_test;
 use super::*;
 use crate::{
     SocketErrorOrigin,
-    buf::PacketType,
+    buf::{PacketOwner, PacketType},
     ip::{IpAddress, IpEndpoint},
-    ipv4::{Icmpv4Error, Ipv4Header},
+    ipv4::Icmpv4Error,
     udp::{UdpSocketState, register_udp_state_for_test},
 };
 
@@ -176,7 +176,7 @@ fn test_udp_error_respects_bound_device() {
 }
 
 #[def_test(serial)]
-fn test_icmpv4_error_accepts_truncated_original_datagram() {
+fn test_icmpv4_error_validates_header_of_truncated_original_datagram() {
     clear_registry();
 
     let local = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 8080);
@@ -203,16 +203,39 @@ fn test_icmpv4_error_accepts_truncated_original_datagram() {
         &udp,
     )
     .unwrap();
-    let original_header = Ipv4Header::parse_input(&original).unwrap();
+    let original_header = ipv4::Ipv4Header::parse_input(&original).unwrap();
     let error = ipv4::build_icmpv4_error_packet(
         Icmpv4Error::PortUnreachable,
         PacketType::Host,
-        original_header,
         &original,
     )
     .unwrap();
 
-    inspect_icmpv4_error(&error, 1);
+    let outer_len = ipv4::Ipv4Header::parse_input(&error).unwrap().header_len();
+    let quote_start = outer_len + etherparse::Icmpv4Header::MIN_LEN;
+    // Keep the enclosing checksums valid so rejection exercises the quoted header.
+    for (total_len, checksum_mask) in [(19, 0), (original_header.total_len() as u16, 1)] {
+        let mut malformed = error.clone();
+        let mut quoted = etherparse::Ipv4HeaderSlice::from_slice(&malformed[quote_start..])
+            .unwrap()
+            .to_header();
+        quoted.total_len = total_len;
+        quoted.header_checksum = quoted.calc_header_checksum() ^ checksum_mask;
+        malformed[quote_start..quote_start + quoted.header_len()]
+            .copy_from_slice(&quoted.to_bytes());
+        let icmp = Icmpv4Slice::from_slice(&malformed[outer_len..]).unwrap();
+        let checksum = icmp.icmp_type().calc_checksum(icmp.payload());
+        malformed[outer_len + 2..outer_len + 4].copy_from_slice(&checksum.to_be_bytes());
+        let mut packet = PacketBuf::from_ip_packet_vec(1, malformed, PacketOwner::DeviceRx);
+        ipv4::validate_input_packet(&mut packet).unwrap();
+        inspect_icmpv4_error(&packet);
+        assert!(!connected.has_pending_error());
+        assert_eq!(connected.consume_socket_error(), 0);
+    }
+
+    let mut packet = PacketBuf::from_ip_packet_vec(1, error, PacketOwner::DeviceRx);
+    ipv4::validate_input_packet(&mut packet).unwrap();
+    inspect_icmpv4_error(&packet);
 
     assert_eq!(
         connected.consume_socket_error(),
