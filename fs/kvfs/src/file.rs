@@ -880,8 +880,7 @@ impl VfsFile {
         self.location.mapping()
     }
 
-    /// Updates write timestamps, then prepares and dirties a cached folio for
-    /// a shared writable fault.
+    /// Updates timestamps, then prepares a folio for a shared writable fault.
     ///
     /// The supplied closure updates the page table while the folio remains
     /// locked. A fault beyond the current EOF returns [`VfsError::BadAddress`].
@@ -890,8 +889,7 @@ impl VfsFile {
         index: PageIndex,
         update_mapping: impl FnOnce(&mut FolioGuard<'_>) -> VfsResult<R>,
     ) -> VfsResult<R> {
-        // Updating timestamps can enter the filesystem's journal. Do so before
-        // taking the mapping/folio locks used to establish writable access.
+        // Timestamp policy may acquire filesystem locks; keep it outside the folio.
         self.file_update_time()?;
         self.mapping().page_mkwrite(
             index,

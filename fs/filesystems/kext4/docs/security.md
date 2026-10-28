@@ -509,3 +509,16 @@ truncate/eviction 释放仍被设备使用的块。最多四个、每个至多 3
 PageCache completion 在 metadata/额度处理之后于任务上下文消费，Drop 不能先于
 设备完成。同步入口不遗留后台错误，原始设备/事务错误优先于收尾错误。现有
 ordered-data barrier 和 commit barrier 均保留，BIO 完成不等于持久化完成。
+
+## Deferred automatic timestamps
+
+Regular-file writes and shared writable faults retain immediate resident mtime/ctime
+updates. Only their journal staging is deferred. Per-field dirty state is protected
+by the existing inode-state lock; no state guard survives device I/O. Metadata
+publication acknowledges only captured values, preserving racing automatic updates
+and explicit setattr values. Failed staging leaves timestamps dirty.
+
+Full fsync, syncfs/unmount inode metadata writeback and linked-inode eviction stage
+pending timestamps. Data-only mapped overwrite may omit a timestamp-only transaction;
+a later full fsync must still persist timestamps with no dirty folios remaining.
+This does not weaken the data or journal flush barriers or add a background worker.

@@ -619,8 +619,53 @@ impl ExtentStatusTree {
     }
 }
 
+/// Timestamp values selected for one metadata publication. A concurrent update
+/// remains dirty unless its current value is the one this publication captured.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PendingInodeTimestamps {
+    atime: Option<Ext4Timestamp>,
+    mtime: Option<Ext4Timestamp>,
+    ctime: Option<Ext4Timestamp>,
+}
+
+impl PendingInodeTimestamps {
+    /// Merges the captured dirty fields before the caller's explicit mutation.
+    pub(crate) fn encode(self, inode_bytes: &mut [u8]) -> Ext4Result<()> {
+        let raw = disk_inode::RawInode::decode(inode_bytes)?;
+        let fields = [
+            (
+                self.atime,
+                0x08,
+                disk_inode::ATIME_EXTRA_OFFSET,
+                raw.atime_extra().is_some(),
+            ),
+            (
+                self.mtime,
+                0x10,
+                disk_inode::MTIME_EXTRA_OFFSET,
+                raw.mtime_extra().is_some(),
+            ),
+            (
+                self.ctime,
+                0x0c,
+                disk_inode::CTIME_EXTRA_OFFSET,
+                raw.ctime_extra().is_some(),
+            ),
+        ];
+        for (timestamp, base, extra, has_extra) in fields {
+            if let Some(timestamp) = timestamp {
+                update_inode_timestamp_bytes(inode_bytes, base, extra, has_extra, timestamp)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 struct Ext4InodeState {
     metadata: Ext4InodeMetadata,
+    has_dirty_atime: bool,
+    has_dirty_mtime: bool,
+    has_dirty_ctime: bool,
     delayed_extents: BTreeMap<u64, u64>,
     reserved_data_blocks: u64,
     extent_status: ExtentStatusTree,
@@ -761,6 +806,9 @@ impl Ext4Inode {
             visible_size: AtomicU64::new(visible_size),
             state: RwLock::new(Ext4InodeState {
                 metadata,
+                has_dirty_atime: false,
+                has_dirty_mtime: false,
+                has_dirty_ctime: false,
                 delayed_extents: BTreeMap::new(),
                 reserved_data_blocks: 0,
                 extent_status: ExtentStatusTree::default(),
@@ -859,6 +907,14 @@ impl Ext4Inode {
     }
 
     fn publish_metadata(&self, metadata: Ext4InodeMetadata) -> Ext4Result<()> {
+        self.publish_metadata_with_timestamps(metadata, PendingInodeTimestamps::default())
+    }
+
+    fn publish_metadata_with_timestamps(
+        &self,
+        mut metadata: Ext4InodeMetadata,
+        persisted: PendingInodeTimestamps,
+    ) -> Ext4Result<()> {
         self.update_state(|state| {
             if metadata.block != state.metadata.block
                 || metadata.flags != state.metadata.flags
@@ -867,9 +923,53 @@ impl Ext4Inode {
             {
                 state.extent_status.clear();
             }
+            // Mapping/xattr publications must not restore older on-disk times
+            // over an automatic update made while metadata I/O was in flight.
+            for (current, incoming, dirty, captured) in [
+                (
+                    &state.metadata.atime,
+                    &mut metadata.atime,
+                    &mut state.has_dirty_atime,
+                    persisted.atime,
+                ),
+                (
+                    &state.metadata.mtime,
+                    &mut metadata.mtime,
+                    &mut state.has_dirty_mtime,
+                    persisted.mtime,
+                ),
+                (
+                    &state.metadata.ctime,
+                    &mut metadata.ctime,
+                    &mut state.has_dirty_ctime,
+                    persisted.ctime,
+                ),
+            ] {
+                if *dirty && captured != Some(*current) {
+                    *incoming = *current;
+                } else {
+                    *dirty = false;
+                }
+            }
             state.metadata = metadata;
         });
         Ok(())
+    }
+
+    /// Captures dirty values without retaining inode-state protection over I/O.
+    pub(crate) fn pending_timestamps(&self) -> PendingInodeTimestamps {
+        self.with_state(|state| PendingInodeTimestamps {
+            atime: state.has_dirty_atime.then_some(state.metadata.atime),
+            mtime: state.has_dirty_mtime.then_some(state.metadata.mtime),
+            ctime: state.has_dirty_ctime.then_some(state.metadata.ctime),
+        })
+    }
+
+    /// Returns whether an automatic attribute update still needs staging.
+    pub(crate) fn has_dirty_timestamps(&self) -> bool {
+        self.with_state(|state| {
+            state.has_dirty_atime || state.has_dirty_mtime || state.has_dirty_ctime
+        })
     }
 
     /// Forgets initialized-range proofs before any extent-tree mutation,
@@ -1048,19 +1148,28 @@ impl Ext4Inode {
         });
     }
 
-    /// Updates the access time in the single resident inode state.
+    /// Updates the resident access time and marks changed values for writeback.
     pub fn set_atime(&self, atime: Ext4Timestamp) {
-        self.update_state(|state| state.metadata.atime = atime);
+        self.update_state(|state| {
+            state.has_dirty_atime |= state.metadata.atime != atime;
+            state.metadata.atime = atime;
+        });
     }
 
-    /// Updates the modification time in the single resident inode state.
+    /// Updates the resident modification time and marks changes for writeback.
     pub fn set_mtime(&self, mtime: Ext4Timestamp) {
-        self.update_state(|state| state.metadata.mtime = mtime);
+        self.update_state(|state| {
+            state.has_dirty_mtime |= state.metadata.mtime != mtime;
+            state.metadata.mtime = mtime;
+        });
     }
 
-    /// Updates the status-change time in the single resident inode state.
+    /// Updates the resident status-change time and marks changes for writeback.
     pub fn set_ctime(&self, ctime: Ext4Timestamp) {
-        self.update_state(|state| state.metadata.ctime = ctime);
+        self.update_state(|state| {
+            state.has_dirty_ctime |= state.metadata.ctime != ctime;
+            state.metadata.ctime = ctime;
+        });
     }
 
     /// Updates generic allocated-block accounting in the resident inode.
@@ -1881,6 +1990,16 @@ impl Ext4SbInfo {
         inode.publish_metadata(metadata)
     }
 
+    /// Acknowledges only timestamp values included in the prepared inode entry.
+    pub(crate) fn publish_inode_metadata_with_timestamps(
+        &self,
+        inode: &Ext4Inode,
+        metadata: Ext4InodeMetadata,
+        timestamps: PendingInodeTimestamps,
+    ) -> Ext4Result<()> {
+        inode.publish_metadata_with_timestamps(metadata, timestamps)
+    }
+
     fn is_public_inode_number(&self, number: InodeNumber) -> bool {
         !self.is_special_inode_number(number)
             && (number.get() == disk_inode::EXT4_ROOT_INO
@@ -2051,6 +2170,7 @@ impl Ext4SbInfo {
     ) -> Ext4Result<()> {
         self.try_expand_inode_extra_isize(inode, handle)?;
 
+        let timestamps = inode.pending_timestamps();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -2059,11 +2179,31 @@ impl Ext4SbInfo {
         let updated_inode = self.update_referenced_inode_table_entry(
             &mut inode_table_bytes,
             inode,
-            |inode_bytes| update(self, inode_bytes),
+            |inode_bytes| {
+                timestamps.encode(inode_bytes)?;
+                update(self, inode_bytes)
+            },
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        inode.publish_metadata_with_timestamps(updated_inode, timestamps)
+    }
+
+    /// Stages automatic timestamps once per inode writeback, not per write.
+    /// Failed staging leaves the resident values dirty for retry.
+    pub(crate) fn write_inode_timestamps(&mut self, inode: &Ext4Inode) -> Ext4Result<()> {
+        if !inode.has_dirty_timestamps() {
+            return Ok(());
+        }
+        let credits = JournalCredits::new(2);
+        let journal = self.metadata_journal_for_allocation(
+            credits,
+            crate::journal::RecoveryFlagPolicy::ClearAfterCheckpoint,
+            self.inode_extra_isize_allocation_blocks(inode),
+        )?;
+        let mut handle = journal.begin(credits)?;
+        let result = self.update_dirty_inode_metadata(inode, &mut handle, |_, _| Ok(()));
+        self.complete_metadata_mutation(handle, result)
     }
 
     pub(crate) fn update_regular_inode_write_metadata(
@@ -2289,6 +2429,7 @@ impl Ext4SbInfo {
         timestamp: Ext4Timestamp,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<()> {
+        let timestamps = inode.pending_timestamps();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
         let mut inode_table_bytes = self
             .read_metadata_block(inode_table_block)?
@@ -2298,6 +2439,7 @@ impl Ext4SbInfo {
             &mut inode_table_bytes,
             inode.number(),
             |inode_bytes| {
+                timestamps.encode(inode_bytes)?;
                 put_u16(inode_bytes, 0x1a, 0)?;
                 if let Some(size) = size {
                     update_inode_size_bytes(inode_bytes, size)?;
@@ -2307,7 +2449,7 @@ impl Ext4SbInfo {
         )?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        inode.publish_metadata_with_timestamps(updated_inode, timestamps)
     }
 
     pub(crate) fn update_inode_blocks_metadata(

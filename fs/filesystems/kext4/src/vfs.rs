@@ -13,11 +13,11 @@ use kvfs::{
     AddressSpace, AddressSpaceOperations, Dentry, DeviceId, DirContext, FMode, FiemapExtentFlags,
     FiemapExtentInfo, FiemapFlags, FileDirOperations, FileMappingOperations, FileOperations,
     InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeOperations,
-    InodeSymlinkOperations, InodeTimes, Kiocb, LockedDentry, Metadata, MetadataUpdate,
-    NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs, SuperBlock, SuperBlockFlags,
-    SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
-    WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef, XattrNameSink,
-    XattrSetFlags, default_evict_inode, inode_init_owner,
+    InodeSymlinkOperations, InodeTimes, InodeUpdateTime, Kiocb, LockedDentry, Metadata,
+    MetadataUpdate, NodePermission, NodeType, ReadaheadControl, RenameFlags, StatFs, SuperBlock,
+    SuperBlockFlags, SuperBlockOperations, Umode, VfsError, VfsFile, VfsInode, VfsInodeInit,
+    VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef,
+    XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
 };
 use pagecache::FolioGuard;
 
@@ -494,6 +494,15 @@ impl SuperBlockOperations for Ext4SuperOperations {
             .map_err(into_vfs_err)
     }
 
+    fn write_inode(&self, inode: &VfsInode, _control: &mut WritebackControl) -> VfsResult<()> {
+        let private = inode.private::<Ext4Inode>()?;
+        let super_block = inode.super_block()?;
+        ext4_private(&super_block)?
+            .write(&super_block)
+            .write_inode_timestamps(private)
+            .map_err(into_vfs_err)
+    }
+
     fn evict_inode(&self, inode: &VfsInode) -> VfsResult<()> {
         default_evict_inode(inode)?;
         let private = inode.private::<Ext4Inode>()?;
@@ -514,6 +523,9 @@ impl SuperBlockOperations for Ext4SuperOperations {
         state.release_all_delalloc(private).map_err(into_vfs_err)?;
         drop(state);
         if inode.link_count() != 0 {
+            ext4.write(&super_block)
+                .write_inode_timestamps(private)
+                .map_err(into_vfs_err)?;
             return Ok(());
         }
         let timestamp = current_ext4_timestamp(inode);
@@ -951,6 +963,44 @@ fn finish_delalloc_write(
 }
 
 impl InodeOperations for Ext4Inode {
+    fn update_time(
+        &self,
+        idmap: &kvfs::MountIdmap,
+        dentry: &Dentry,
+        timestamp: SystemTime,
+        update: InodeUpdateTime,
+    ) -> VfsResult<MetadataUpdate> {
+        if self.kind() == InodeKind::RegularFile && update == InodeUpdateTime::ChangeAndModification
+        {
+            let super_block = dentry.super_block().ok_or(VfsError::InvalidInput)?;
+            ext4_private(&super_block)?
+                .read()
+                .ensure_writable()
+                .map_err(into_vfs_err)?;
+            // KVFS publishes through our resident attribute setters. Their dirty
+            // timestamps join the next metadata mutation or explicit sync.
+            return Ok(MetadataUpdate {
+                mtime: Some(timestamp),
+                ctime: Some(timestamp),
+                ..Default::default()
+            });
+        }
+        let (atime, mtime, ctime) = match update {
+            InodeUpdateTime::Access => (Some(timestamp), None, None),
+            InodeUpdateTime::ChangeAndModification => (None, Some(timestamp), Some(timestamp)),
+        };
+        self.setattr(
+            idmap,
+            dentry,
+            MetadataUpdate {
+                atime,
+                mtime,
+                ctime,
+                ..Default::default()
+            },
+        )
+    }
+
     fn set_len(&self, vfs_inode: &VfsInode, len: u64) -> VfsResult<()> {
         let _writeback_guard = self.lock_writeback();
         let super_block = vfs_inode.super_block()?;
@@ -1562,7 +1612,11 @@ impl FileOperations for Ext4Inode {
         kvfs::libfs::simple_fsync_noflush(file, data_only)?;
         let super_block = ext4_super_block(file.inode())?;
         let ext4 = ext4_private(&super_block)?;
-        ext4.write(&super_block)
+        let mut state = ext4.write(&super_block);
+        if !data_only {
+            state.write_inode_timestamps(self).map_err(into_vfs_err)?;
+        }
+        state
             .sync_inode(self, Ext4SyncIntent::from_data_only(data_only))
             .map_err(into_vfs_err)
     }

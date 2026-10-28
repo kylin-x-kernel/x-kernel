@@ -184,13 +184,11 @@ fn mapped_writepages_releases_mount_protection_and_preserves_sync_barriers() {
         );
         assert_eq!(output, input);
         assert_eq!(file.fsync(data_only), Ok(()));
-        // Both sync intents commit the write-time timestamp transaction. Its
-        // first commit also activates the recovery flag and journal header,
-        // each with its own flush. Full writeback additionally registers an
-        // ordered-data dependency, while data-only keeps its mapped fast path.
+        // Automatic timestamps stay in memory for the mapped data-only path.
+        // Full sync stages them and activates the journal on its first commit.
         assert_eq!(
             device.storage.flush_count() - flushes,
-            if data_only { 3 } else { 4 }
+            if data_only { 1 } else { 4 }
         );
         if !data_only {
             assert_eq!(file.write_from(&input, &mut 0), Ok(input.len()));
@@ -328,6 +326,9 @@ fn assert_write_timestamps_persisted(
     file.fsync(data_only).unwrap();
     assert_eq!(inode.mtime(), written);
     assert_eq!(inode.ctime(), written);
+    // fdatasync may omit timestamps; full fsync must persist them even after
+    // data-only writeback has already cleaned every folio.
+    file.fsync(false).unwrap();
     let state = ext4_private(mount).unwrap().read();
     let reloaded = state.load_inode_private(inode.number()).unwrap();
     assert_eq!(reloaded.mtime(), written);
@@ -366,4 +367,118 @@ fn shared_writable_fault_updates_timestamps_before_writeback() {
         .unwrap();
         assert_write_timestamps_persisted(&mount, &file, before, data_only);
     }
+}
+
+#[def_test]
+fn buffered_timestamp_updates_do_not_admit_a_journal_transaction() {
+    let (mount, file, device) = overwrite_fixture_with_pages(1);
+    set_old_write_timestamps(&mount, &file);
+    file.fsync(false).unwrap();
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let flushes = device.storage.flush_count();
+    for byte in 0..32 {
+        file.write_from(&[byte], &mut 0).unwrap();
+    }
+    assert!(inode.has_dirty_timestamps());
+    let state = ext4_private(&mount).unwrap().read();
+    assert!(
+        state
+            .journal
+            .as_ref()
+            .unwrap()
+            .running_transaction()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(device.storage.flush_count(), flushes);
+    drop(state);
+    file.fsync(true).unwrap();
+    assert!(inode.has_dirty_timestamps());
+    file.fsync(false).unwrap();
+    assert!(!inode.has_dirty_timestamps());
+    let reloaded = ext4_private(&mount)
+        .unwrap()
+        .read()
+        .load_inode_private(inode.number())
+        .unwrap();
+    assert_eq!(reloaded.mtime(), inode.mtime());
+    assert_eq!(reloaded.ctime(), inode.ctime());
+}
+
+#[def_test]
+fn syncfs_persists_timestamps_after_data_only_writeback() {
+    let (mount, file, _device) = overwrite_fixture_with_pages(1);
+    set_old_write_timestamps(&mount, &file);
+    file.write_from(b"written", &mut 0).unwrap();
+    file.fsync(true).unwrap();
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    assert!(inode.has_dirty_timestamps());
+    mount.sync_fs().unwrap();
+    assert!(!inode.has_dirty_timestamps());
+    let reloaded = ext4_private(&mount)
+        .unwrap()
+        .read()
+        .load_inode_private(inode.number())
+        .unwrap();
+    assert_eq!(reloaded.mtime(), inode.mtime());
+    assert_eq!(reloaded.ctime(), inode.ctime());
+}
+
+#[def_test]
+fn timestamp_publication_preserves_concurrent_update_and_failed_staging() {
+    let (mount, file, _device) = overwrite_fixture_with_pages(1);
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let older = Ext4Timestamp::new(123, 0);
+    let newer = Ext4Timestamp::new(456, 0);
+    inode.set_mtime(older);
+    inode.set_ctime(older);
+    let mut state = ext4_private(&mount).unwrap().write(&mount);
+    let journal = state.metadata_journal().unwrap();
+    let mut handle = journal.begin(crate::jbd2::JournalCredits::new(2)).unwrap();
+    state
+        .update_dirty_inode_metadata(&inode, &mut handle, |_, _| {
+            inode.set_mtime(newer);
+            inode.set_ctime(newer);
+            Ok(())
+        })
+        .unwrap();
+    state.complete_metadata_mutation(handle, Ok(())).unwrap();
+    assert_eq!(inode.mtime(), newer);
+    assert_eq!(inode.ctime(), newer);
+    assert!(inode.has_dirty_timestamps());
+    let mut handle = journal.begin(crate::jbd2::JournalCredits::new(2)).unwrap();
+    assert_eq!(
+        state.update_dirty_inode_metadata(&inode, &mut handle, |_, _| {
+            Err(Ext4Error::Device(DriverError::Io))
+        }),
+        Err(Ext4Error::Device(DriverError::Io))
+    );
+    handle.stop().unwrap();
+    assert!(inode.has_dirty_timestamps());
+    state.write_inode_timestamps(&inode).unwrap();
+    state.sync_filesystem().unwrap();
+    let reloaded = state.load_inode_private(inode.number()).unwrap();
+    assert_eq!(reloaded.mtime(), newer);
+    assert_eq!(reloaded.ctime(), newer);
+    assert!(!inode.has_dirty_timestamps());
+}
+
+#[def_test]
+fn linked_inode_eviction_stages_metadata_after_data_only_sync() {
+    let (mount, file, _device) = overwrite_fixture_with_pages(1);
+    set_old_write_timestamps(&mount, &file);
+    file.write_from(b"written", &mut 0).unwrap();
+    file.fsync(true).unwrap();
+    let inode = file.inode().downcast::<Ext4Inode>().unwrap();
+    let modified = inode.mtime();
+    let changed = inode.ctime();
+    assert!(inode.has_dirty_timestamps());
+    // Exercise the filesystem's teardown hook with no dirty data left.
+    EXT4_SUPER_OPERATIONS.evict_inode(file.inode()).unwrap();
+    assert!(!inode.has_dirty_timestamps());
+    let mut state = ext4_private(&mount).unwrap().write(&mount);
+    state.sync_filesystem().unwrap();
+    let reloaded = state.load_inode_private(inode.number()).unwrap();
+    assert_eq!(reloaded.mtime(), modified);
+    assert_eq!(reloaded.ctime(), changed);
 }

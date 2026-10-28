@@ -1101,6 +1101,24 @@ invalidate shared 保护覆盖整个过程。等待数据时没有 mount guard�
 
 ## Drop / 资源释放
 
+### 自动写入时间戳的延迟持久化
+
+缓冲写和共享可写缺页保留 KVFS `file_update_time()`。regular inode 的
+`InodeOperations::update_time` 对自动 mtime/ctime 更新只返回需要发布的内存值，
+不申请 journal handle；attribute setters 在 resident inode state 中标脏变化的字段。
+显式 setattr/utimensat 仍走原有的 journaled mutation。
+
+每次 inode-table mutation 先捕获待写时间戳，在自己的显式字段修改之前合入；
+staging 后只确认捕获值，I/O 期间再次变化的字段保留最新内存值和 dirty 状态。
+xattr 与 zero-link mutation 采用同一规则；额外 inode 字段扩容不会用旧磁盘值覆盖
+尚未落盘的自动时间戳。失败的 staging 不确认 dirty 字段。
+
+Full fsync 在数据回写后补写仍脏的时间戳，再提交 journal；即使 fdatasync 已清理所有
+folio，仍执行此步骤。Mapped data-only overwrite 可只刷数据，不为时间戳新建事务。
+KVFS `write_inode` hook 为 syncfs/unmount 补写 metadata-only dirty inode；linked inode
+最终 eviction 也先 stage 时间戳。时间戳在内存中立即可见与磁盘持久化是两个阶段，
+后台 inode writeback 不在本变更范围内。
+
 Namespace removal 在修改目录项之前验证 inode 的数据回收格式。`unlink`、`rmdir` 和覆盖式
 `rename` 在链接数归零时分配 orphan-file slot，满时使用 legacy list；删除仍有其他硬链接的
 普通 inode 不分配 orphan entry。最后一个 VFS 引用释放前，inode bitmap 和数据仍保持分配。

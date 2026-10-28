@@ -637,3 +637,10 @@ remount 可修改普通挂载标志；文件系统必须用已有失败状态拒
 同步 writepages 返回前排空已提交批次，包括扫描/准入失败路径；不得让 invalidate
 保护结束后仍存在未受其他机制保护的物理映射使用。PageCache completion 的消费与
 Drop 需要任务上下文，且只能在对应 I/O 结束后执行。
+
+## Automatic write timestamps
+
+Removing timestamp publication from buffered write or shared writable faults violates
+the observable inode metadata contract. Deferred filesystem persistence must preserve
+resident visibility and retain pending metadata until the corresponding sync or
+eviction boundary; it must not acquire filesystem locks while holding a folio lock.

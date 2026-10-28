@@ -1175,3 +1175,11 @@ after their final allocation reference is dropped outside the locks.
 文件系统负责限制在途数量、排空 I/O、在任务上下文结束 folio writeback，并保持
 inode/extent 生命周期保护。KVFS 的 invalidate shared guard 仍覆盖整个 writepages；
 此适配器未增加异步错误序列或后台提交能力，现有同步调用必须在返回前完成所有批次。
+
+## Buffered-write timestamp publication
+
+Buffered writes and shared writable faults call `file_update_time()` outside folio
+protection. Filesystems may implement automatic `InodeOperations::update_time` with
+resident attribute publication and deferred persistence; explicit setattr remains
+a separate contract. The filesystem must retain metadata dirtiness through data-only
+writeback and cover full fsync, syncfs/unmount and inode eviction.

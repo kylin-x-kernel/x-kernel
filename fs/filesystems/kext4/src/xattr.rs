@@ -445,11 +445,12 @@ impl Ext4SbInfo {
             self.drop_external_xattr_block(inode, old_external_block, handle)?;
         }
 
-        let (inode_table_block, inode_table_bytes, updated_inode) =
-            self.prepare_xattr_inode_update(inode, &plan, new_external_block, timestamp)?;
+        let timestamps = inode.pending_timestamps();
+        let (inode_table_block, inode_table_bytes, updated_inode) = self
+            .prepare_xattr_inode_update(inode, &plan, new_external_block, timestamp, timestamps)?;
         let inode_table_access = self.metadata_io.write_access(inode_table_block, handle)?;
         self.replace_inode_table_entry(&inode_table_access, inode.number(), &inode_table_bytes)?;
-        self.publish_inode_metadata(inode, updated_inode)
+        self.publish_inode_metadata_with_timestamps(inode, updated_inode, timestamps)
     }
 
     fn xattr_mutation_plan(
@@ -516,7 +517,13 @@ impl Ext4SbInfo {
         let new_layout = plan.storage.layout();
         let planned_external_block = (!plan.storage.external.is_empty())
             .then_some(FilesystemBlock::new(old_external_block.max(1)));
-        self.prepare_xattr_inode_update(inode, &plan, planned_external_block, Some(timestamp))?;
+        self.prepare_xattr_inode_update(
+            inode,
+            &plan,
+            planned_external_block,
+            Some(timestamp),
+            inode.pending_timestamps(),
+        )?;
         Ok(XattrMutationPlan::Changed {
             credits: JournalCredits::new(xattr_mutation_credit_count(
                 old_layout,
@@ -657,6 +664,7 @@ impl Ext4SbInfo {
         plan: &InodeXattrStoragePlan,
         new_external_block: Option<FilesystemBlock>,
         timestamp: Option<Ext4Timestamp>,
+        timestamps: crate::inode::PendingInodeTimestamps,
     ) -> Ext4Result<(FilesystemBlock, Vec<u8>, Ext4InodeMetadata)> {
         let old_external_block = inode.file_acl_block();
         let inode_table_block = self.inode_table_entry_block(inode.number())?;
@@ -702,6 +710,7 @@ impl Ext4SbInfo {
                         has_64bit: self.superblock().features().has_64bit(),
                     },
                 )?;
+                timestamps.encode(inode_bytes)?;
                 if let Some(timestamp) = timestamp {
                     update_inode_ctime_bytes(inode_bytes, timestamp)?;
                 }
