@@ -133,18 +133,15 @@ pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
         Sysno::tee_scn_return => sys_tee_scn_return(uctx.arg0() as _),
         Sysno::tee_scn_log => sys_tee_scn_log(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::tee_scn_panic => sys_tee_scn_panic(uctx.arg0() as _),
-        Sysno::tee_scn_get_property => {
-            let prop_type: usize = 0;
-            sys_tee_scn_get_property(
-                uctx.arg0() as _,
-                uctx.arg1() as _,
-                uctx.arg2() as _,
-                uctx.arg3() as _,
-                uctx.arg4() as _,
-                uctx.arg5() as _,
-                prop_type as _,
-            )
-        }
+        Sysno::tee_scn_get_property => sys_tee_scn_get_property(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+            uctx.arg5() as _,
+            tee_syscall_arg6(uctx) as _,
+        ),
         Sysno::tee_scn_get_property_name_to_index => sys_tee_scn_get_property_name_to_index(
             uctx.arg0() as _,
             uctx.arg1() as _,
@@ -166,6 +163,9 @@ pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
             uctx.arg3() as _,
             uctx.arg4() as _,
         ),
+        Sysno::tee_scn_check_access_rights => {
+            vm::sys_tee_scn_check_access_rights(uctx.arg0(), uctx.arg1(), uctx.arg2())
+        }
         Sysno::tee_scn_get_cancellation_flag => sys_tee_scn_get_cancellation_flag(uctx.arg0() as _),
         Sysno::tee_scn_unmask_cancellation => sys_tee_scn_unmask_cancellation(uctx.arg0() as _),
         Sysno::tee_scn_mask_cancellation => sys_tee_scn_mask_cancellation(uctx.arg0() as _),

@@ -62,10 +62,12 @@ impl Default for TeeSessionCtx {
                 },
             },
             cancel: false,
-            cancel_mask: false,
+            // GP / OP-TEE：会话创建时取消是屏蔽的，且没有取消截止时间。
+            // `cancel_time.seconds == u32::MAX` 表示没有超时；0 会被当成已经到期。
+            cancel_mask: true,
             cancel_time: TeeTime {
-                seconds: 0,
-                millis: 0,
+                seconds: u32::MAX,
+                millis: u32::MAX,
             },
             objects: Slab::new(),
             storage_enums: Slab::new(),
