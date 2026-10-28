@@ -14,8 +14,12 @@ static TIMER_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 static NANOS_PER_TICK: AtomicU64 = AtomicU64::new(0);
 
 #[kiface::provide]
-impl khal::time::ClockSourceIf {
+impl khal::time::CounterSourceIf {
     fn now_ticks() -> khal::time::TimerTicks {
+        now_ticks()
+    }
+
+    fn resume_ticks() -> khal::time::TimerTicks {
         now_ticks()
     }
 
@@ -38,8 +42,8 @@ impl khal::time::ClockEventIf {
         interrupt_id()
     }
 
-    fn arm_timer(deadline: ktime_types::MonotonicInstant) {
-        arm_timer(deadline)
+    fn arm_timer_after(interval: ktime_types::TimeSpan) {
+        arm_timer_after(interval)
     }
 
     fn disarm_timer() {
@@ -131,9 +135,10 @@ fn interrupt_id() -> usize {
     irq
 }
 
-fn arm_timer(deadline: ktime_types::MonotonicInstant) {
-    let deadline_ns = deadline.as_nanos_u64_saturating();
-    sbi_rt::set_timer(nanos_to_ticks(deadline_ns));
+fn arm_timer_after(interval: ktime_types::TimeSpan) {
+    // SBI takes an absolute hardware deadline, never a logical clock value.
+    let ticks = nanos_to_ticks(interval.as_nanos_u64_saturating()).max(1);
+    sbi_rt::set_timer(read_timer_ticks_raw().saturating_add(ticks));
 }
 
 fn disarm_timer() {

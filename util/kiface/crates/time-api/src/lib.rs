@@ -9,13 +9,13 @@
 use kerrno::KResult;
 use ktime_types::{Frequency, MonotonicInstant, TimeSpan};
 
-/// Raw counter ticks in the platform monotonic timer domain.
+/// Tick value in the counter or logical monotonic domain named by its API.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct TimerTicks(u64);
 
 impl TimerTicks {
-    /// Wraps a raw hardware counter value at a timer backend boundary.
+    /// Wraps a tick representation at a counter or HAL boundary.
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
@@ -31,26 +31,53 @@ impl TimerTicks {
     }
 }
 
-/// Provides a monotonic counter and conversions for its tick domain.
+/// Supplies platform counter ticks before the HAL suspend-time mapping.
+///
+/// Initialization and frequency must remain stable across suspend/resume.
+/// Counter resets are permitted at the explicit resume boundary; while running,
+/// the backend must supply a continuous counter (including any platform repair).
 #[kiface::interface]
-pub trait ClockSourceIf {
-    /// Returns the current monotonic timer tick count.
+pub trait CounterSourceIf {
+    /// Samples the platform counter domain, not the suspend-adjusted clock.
     fn now_ticks() -> TimerTicks;
-    /// Converts monotonic timer ticks to elapsed time.
+    /// Re-establishes backend counter state at an explicit resume boundary.
+    /// Must not dispatch repair IPIs or enable clock events; returns the new
+    /// counter-domain anchor. The PM owner has quiesced other readers.
+    fn resume_ticks() -> TimerTicks;
+    /// Converts a tick duration using the initialized counter frequency.
     fn ticks_to_span(ticks: TimerTicks) -> TimeSpan;
-    /// Returns the monotonic counter frequency.
+    /// Returns the initialized counter frequency.
     fn frequency() -> Frequency;
-    /// Converts elapsed time to monotonic timer ticks.
+    /// Converts a duration into counter ticks.
     fn span_to_ticks(span: TimeSpan) -> TimerTicks;
 }
 
-/// Provides per-CPU clock events for monotonic deadlines.
+/// Supplies the logical monotonic clock, excluding explicit suspend intervals.
+///
+/// Reads must not interrupt a HAL mapping update from NMI context. PM quiesces
+/// such readers before suspend/resume; ordinary IRQ reads remain supported.
+/// The HAL provides this clock over CounterSourceIf. All consumers, including
+/// callers outside khal, observe the same suspend-adjusted domain.
+#[kiface::interface]
+pub trait ClockSourceIf {
+    /// Reads logical monotonic ticks; holds the suspend boundary while frozen.
+    fn now_ticks() -> TimerTicks;
+    /// Converts logical ticks to elapsed time.
+    fn ticks_to_span(ticks: TimerTicks) -> TimeSpan;
+    /// Returns the initialized counter frequency.
+    fn frequency() -> Frequency;
+    /// Converts elapsed time to logical ticks.
+    fn span_to_ticks(span: TimeSpan) -> TimerTicks;
+}
+
+/// Provides per-CPU hardware countdowns, independent of logical clock origins.
 #[kiface::interface]
 pub trait ClockEventIf {
     /// Returns the clock-event interrupt ID.
     fn interrupt_id() -> usize;
-    /// Arms the local clock event to trigger at the given deadline.
-    fn arm_timer(deadline: MonotonicInstant);
+    /// Arms after a non-negative interval; zero requests prompt delivery.
+    /// The HAL converts logical deadlines before calling this backend.
+    fn arm_timer_after(interval: TimeSpan);
     /// Disarms the local clock event so it will not interrupt until re-armed.
     fn disarm_timer();
 }

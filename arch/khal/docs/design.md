@@ -108,22 +108,79 @@ MSI-X vector allocation、APIC destination selection 和 MSI message composition
 `IPI_IRQ` 来自 Kconfig 生成常量。`kirq` 必须保持不依赖 `kbuild_config`，所以
 IPI 调用方直接使用 `kbuild_config::IPI_IRQ` 并调用 `kirq::notify_cpu()`。
 
-## crate 级 guest 测试布局
+## Crate-level guest test layout
 
-以下补充覆盖 `khal` crate 的基础测试，不属于 IRQ adapter 专项测试。
-guest 测试位于 crate 根目录 `ut-tests/`，由原所属源码模块通过
-`unittest::path_mod_test!` 挂载，保留原公开模块名及注册路径：
+Guest tests live in the crate-root `ut-tests/` directory and are mounted at
+their original source modules using `unittest::path_mod_test!`:
 
-| 源码挂载点 | 测试文件 | 模块名 | 用例数 |
+| Source mount | Test file | Module | Cases |
 |---|---|---|---|
 | `src/percpu.rs` | `ut-tests/percpu.rs` | `tests_percpu` | 1 |
 | `src/paging.rs` | `ut-tests/paging.rs` | `tests_paging` | 2 |
 | `src/mem/mod.rs` | `ut-tests/mem.rs` | `tests_mem` | 3 |
-| `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 2 |
+| `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 4 |
+| `src/time/epoch.rs` | `ut-tests/time_epoch.rs` | `tests` | 7 |
 
-共 4 个模块、8 个用例，仅在 `cfg(unittest)` 下注册，无额外 feature、架构、
-`serial` 或 `user` 门控。x86_64、AArch64、RISC-V64 和 LoongArch64 的
-对应平台内核均选择这 8 个用例；使用平台 defconfig 与 `UNITTEST=y` 验证。
-CPU 身份测试依赖已初始化的平台 CPU 环境，不是独立 host 测试。
-所有挂载外显式保留 `#[cfg(unittest)]`，使非 UT 构建无需解析该 runtime 宏；
-这不改变 Cargo 依赖图，也不代替 boot helper 清除内核 UT 编译标志。
+These 17 cases require `cfg(unittest)` without additional feature, architecture,
+serial or user gates. All four supported platform unittest builds select them.
+CPU identity tests require initialized CPU state. Independent epoch fixtures do
+not freeze the active kernel's global clock. Explicit cfg gates outside the
+mounts prevent non-UT builds from resolving the runtime test macro; they do not
+alter the dependency graph or replace boot-helper UT flag cleanup.
+
+## Monotonic time across explicit suspend
+
+`time/epoch.rs` maps backend counter ticks into logical MONOTONIC ticks.
+`time/suspend.rs` exposes explicit freeze/rebase operations. HAL provides
+`ClockSourceIf` over the platform's `CounterSourceIf`, so consumers outside HAL,
+including RCU, observe the same logical domain. Frequency and conversion ratios
+remain unchanged; sleep compensation stays in ktime.
+
+The state machine is Running -> Suspended(token) -> Running. Suspend saves the
+logical tick boundary; frozen reads return it without touching the backend.
+Resume replaces counter_base and preserves logical_base. Running time is
+logical_base + wrapping(counter - counter_base), with saturating accumulation.
+Counter progress, stoppage or reset inside the frozen interval is excluded.
+Backend continuity while running remains a platform obligation. Frequency
+changes are unsupported. The initial identity mapping preserves the existing
+backend origin until the first formal suspend.
+
+Read-side atomic fields and sequence validation avoid global locks and shared
+writes. Counter sampling occurs inside the sequence check. Writers acquire an
+even sequence with AcqRel CAS, publish an odd sequence, issue a release fence,
+update atomic fields, then release-publish the next even sequence. Readers
+acquire the initial sequence and recheck after an acquire fence. Mixed snapshots
+are discarded without non-atomic Rust data races. Identities never wrap; suspend
+reserves room for resume, and rejected operations preserve the active token.
+
+These control operations require a coordinated PM boundary: park other CPUs,
+stop devices and timer programming, and quiesce watchdog/NMI clock readers.
+Writers briefly mask local IRQs/preemption. NMI clock reads must be quiesced
+because they can interrupt an odd-sequence writer and deadlock. Busy waits and
+timeouts cannot progress while frozen. This layer does not implement that PM
+coordination or a host protocol. Tokens are non-copyable and do not resume on
+Drop; the PM owner retains them until explicit resume succeeds, including abort
+paths. A trusted external source must account for any omitted frozen interval.
+
+Clock events receive relative intervals through ClockEventIf::arm_timer_after.
+HAL preserves arm_timer(MonotonicInstant), subtracts the logical current time,
+and disarms instead of arming while frozen. ARM, x86 and LoongArch program
+countdowns; RISC-V adds the remaining interval to its raw counter before SBI
+programming. Logical absolute timestamps must not reach raw compare registers.
+NoPreemptIrqSave pins the sample-through-program sequence to the current CPU;
+PM excludes concurrent programming during epoch transitions.
+
+A future PM owner begins ktime accounting, disarms events on each CPU and
+quiesces execution, freezes the monotonic clock, sleeps, restores counter access,
+rebases MONOTONIC, settles confirmed sleep through ktime, restores local event
+hardware and re-arbitrates deadlines on every CPU before releasing execution.
+Suspend disarms the coordinator's event again after sampling, since legacy
+repair may have rearmed it. LocalTimerReprogramIf supplies existing deadline
+arbitration; PM decides when each CPU's hardware and software state are ready.
+
+The Linux reference is kernel/time/timekeeping.c timekeeping_suspend/resume:
+save the boundary and rebase cycle_last on resume. This change adapts freeze,
+rebase and event-domain boundaries only, not complete clocksource/syscore,
+device PM or RTC sleep estimation. The isolated epoch tests cover counter
+resets, progress, wrap, repeated cycles, stale tokens, identity exhaustion and
+read retries; they do not prove real S3 or multiprocessor stop coordination.

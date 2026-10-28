@@ -75,3 +75,20 @@ fn single_cpu_needs_no_remote_notification() {
     assert!(!requests.mark_peers(1, 0));
     assert!(!requests.take(0));
 }
+
+
+#[def_test]
+fn formal_resume_clears_old_peer_requests_and_allows_new_repairs() {
+    let requests = ResumeNotifications::<130>::new();
+    assert!(requests.mark_peers(130, 0));
+    assert!(requests.take(64));
+    requests.clear_quiesced();
+    for cpu in 0..130 {
+        assert!(!requests.take(cpu));
+    }
+    requests.clear_quiesced();
+    assert!(requests.mark_peers(130, 64));
+    assert!(!requests.take(64));
+    assert!(requests.take(0));
+    assert!(requests.take(129));
+}

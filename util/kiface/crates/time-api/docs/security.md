@@ -21,3 +21,13 @@ or acquire a run-queue lock.
 
 See [capability ownership rules](../../../docs/design.md) for the common
 contract/provider boundary. This crate contains no implementation state.
+
+
+## Counter and logical clock boundary
+
+CounterSourceIf is supplied by a platform backend, ClockSourceIf by the HAL.
+The backend's resume sampling must not enable events or dispatch repair IPIs.
+The HAL freeze/rebase control path requires the PM owner to quiesce competing
+CPUs, event programming and NMI clock readers; logical reads are not NMI-safe
+across those transitions. Relative event intervals cross the hardware boundary,
+so an adjusted logical epoch cannot leak into a raw compare register.

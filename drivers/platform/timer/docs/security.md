@@ -50,7 +50,7 @@ its external data boundaries.
 | --- | --- |
 | `src/x86_lapic_tsc.rs::read_tsc_raw` calls `_rdtsc` | Compiled only for supported x86_64 targets, where the instruction is available. It accesses counter state without dereferencing memory. All local TSC reads use this helper. |
 | `src/x86_lapic_tsc.rs::PitChannel2::{acquire,start_one_shot,has_elapsed}` and `Drop` perform port I/O | Bootstrap executes at CPL0 with exclusive ownership of channel 2. `start_one_shot` asserts a nonzero reload and writes both bytes. The platform calls `early_init` before secondary CPUs and other port users; calibration masks local interrupts around each sample. The guard restores the saved control byte before that interval ends. |
-| `src/x86_lapic_tsc.rs::{init_percpu,arm_timer,disarm_timer}` program LAPIC registers | The calling CPU's APIC must already be initialized. `x86_apic::with_local_apic` checks the local handle and masks local interrupts during its mutable borrow. Boot hooks order APIC initialization before timer setup and keep CPU IRQ delivery masked until the handler is installed; runtime calls depend on that completed setup. |
+| `src/x86_lapic_tsc.rs::{init_percpu,arm_timer_after,disarm_timer}` program LAPIC registers | The calling CPU's APIC must already be initialized. `x86_apic::with_local_apic` checks the local handle and masks local interrupts during its mutable borrow. Boot hooks order APIC initialization before timer setup and keep CPU IRQ delivery masked until the handler is installed; runtime calls depend on that completed setup. |
 | `src/arm_generic.rs::write_physical_timer_tval`, with `vmm`, executes `msr CNTHP_TVAL_EL2` | The host runs at EL2 with VHE as required by the physical-timer helpers. The assembly takes one `in(reg)` integer, writes the timer register, and has no pointer operand or Rust output. Initialization passes zero; deadline programming bounds positive intervals to `i32::MAX`, within the register's signed 32-bit range. |
 
 The RISC-V backend contains no explicit unsafe block; privileged counter and SBI
@@ -196,3 +196,17 @@ nodes or sparse hardware MPIDRs, and present logical IDs are exactly
 has no runtime removal/hotplug path. If this mapping contract changes to permit
 sparse logical IDs, the notification publisher must use explicit present IDs
 rather than a present count; the helper does not independently validate holes.
+
+## Formal suspend counter and event contracts
+
+HAL now owns the logical suspend-adjusted epoch; backend counter reads and
+`resume_ticks` remain privileged platform facts. PM must quiesce readers, programming and all in-flight ARM repair dispatch/IPI
+handlers before the transition. Formal resume clears the deferred report,
+remote-dispatch request and every peer notification flag while those paths are
+quiesced. Previously sent hardware IPIs may still arrive, but their cleared flags
+prevent obsolete fixup work; future repair publication works normally.
+Formal ARM resume reanchors without triggering anomaly notifications, so it
+cannot stand in for per-CPU timer restoration. Relative clock-event intervals
+prevent a logical post-resume timestamp from being programmed as a raw counter
+compare value. Counter frequency changes are not supported. No new unsafe
+blocks are introduced; existing register/PIO safety preconditions still apply.

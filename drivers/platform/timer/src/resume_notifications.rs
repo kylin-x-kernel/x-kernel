@@ -36,6 +36,16 @@ impl<const CPUS: usize> ResumeNotifications<CPUS> {
         true
     }
 
+    /// Discards requests belonging to the pre-suspend counter epoch.
+    /// The PM owner must have quiesced all publishers and consumers, including
+    /// already acquired repair dispatches and IPI handlers. No in-flight handler
+    /// may retain a consumed request across this boundary.
+    pub(super) fn clear_quiesced(&self) {
+        for pending in &self.pending {
+            pending.store(false, Ordering::Release);
+        }
+    }
+
     /// Consume this CPU's request once; repeated pending requests coalesce.
     pub(super) fn take(&self, cpu: usize) -> bool {
         self.pending

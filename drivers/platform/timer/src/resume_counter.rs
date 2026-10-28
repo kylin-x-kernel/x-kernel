@@ -42,6 +42,13 @@ impl ResumeCounter {
         self.logical_ticks = raw_ticks.saturating_sub(origin_ticks);
     }
 
+    /// Formal resume establishes a new raw anchor without anomaly recovery.
+    pub(super) fn resume(&mut self, raw_ticks: u64) -> u64 {
+        self.last_raw_ticks = raw_ticks;
+        self.pending_repair = None;
+        self.logical_ticks
+    }
+
     pub(super) fn queue_repair(&mut self, cpu: usize, sample: &CounterSample) {
         if sample.is_repaired && self.pending_repair.is_none() {
             self.pending_repair = Some(RepairReport {

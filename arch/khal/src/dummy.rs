@@ -59,8 +59,12 @@ impl kiface_console_api::ConsoleInputSetupIf {
 }
 
 #[kiface::provide]
-impl crate::time::ClockSourceIf {
+impl crate::time::CounterSourceIf {
     fn now_ticks() -> crate::time::TimerTicks {
+        crate::time::TimerTicks::from_raw(0)
+    }
+
+    fn resume_ticks() -> crate::time::TimerTicks {
         crate::time::TimerTicks::from_raw(0)
     }
 
@@ -83,7 +87,7 @@ impl crate::time::ClockEventIf {
         0
     }
 
-    fn arm_timer(_deadline: crate::time::MonotonicInstant) {}
+    fn arm_timer_after(_interval: ktime_types::TimeSpan) {}
 
     fn disarm_timer() {}
 

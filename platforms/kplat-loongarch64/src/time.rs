@@ -2,8 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use khal::time::{ClockEventIf, ClockSourceIf, TimerTicks};
-use ktime_types::{Frequency, MonotonicInstant, NANOS_PER_SEC};
+use khal::time::{ClockEventIf, CounterSourceIf, TimerTicks};
+use ktime_types::{Frequency, NANOS_PER_SEC, TimeSpan};
 use lazyinit::LazyInit;
 use loongArch64::{register::tcfg, time::Time};
 
@@ -39,8 +39,12 @@ pub(super) fn early_init() {
 }
 
 #[kiface::provide]
-impl ClockSourceIf {
+impl CounterSourceIf {
     fn now_ticks() -> TimerTicks {
+        TimerTicks::from_raw(read_timer_ticks_raw())
+    }
+
+    fn resume_ticks() -> TimerTicks {
         TimerTicks::from_raw(read_timer_ticks_raw())
     }
 
@@ -63,12 +67,8 @@ impl ClockEventIf {
         TIMER_IRQ
     }
 
-    fn arm_timer(deadline: MonotonicInstant) {
-        let ticks_now = read_timer_ticks_raw();
-        let deadline_ns = deadline.as_nanos_u64_saturating();
-        let ticks_deadline = nanos_to_ticks(deadline_ns);
-        let init_value = ticks_deadline
-            .saturating_sub(ticks_now)
+    fn arm_timer_after(interval: TimeSpan) {
+        let init_value = nanos_to_ticks(interval.as_nanos_u64_saturating())
             .max(MIN_TIMER_TICKS)
             .saturating_add(MIN_TIMER_TICKS - 1)
             / MIN_TIMER_TICKS

@@ -4,8 +4,37 @@
 
 //! Unified time capability exposed by `khal`.
 
-pub use kiface_time_api::{ClockEventIf, ClockSourceIf, TimerTicks};
+pub use kiface_time_api::{ClockEventIf, ClockSourceIf, CounterSourceIf, TimerTicks};
 use ktime_types::{Frequency, MonotonicInstant, TimeSpan};
+
+mod epoch;
+mod suspend;
+pub use suspend::{
+    MonotonicSuspendError, MonotonicSuspendToken, resume_monotonic_clock, suspend_monotonic_clock,
+};
+
+#[kiface::provide]
+impl ClockSourceIf {
+    fn now_ticks() -> TimerTicks {
+        TimerTicks::from_raw(
+            suspend::CLOCK
+                .read(|| CounterSourceIf::now_ticks().as_raw())
+                .0,
+        )
+    }
+
+    fn ticks_to_span(ticks: TimerTicks) -> TimeSpan {
+        CounterSourceIf::ticks_to_span(ticks)
+    }
+
+    fn frequency() -> Frequency {
+        CounterSourceIf::frequency()
+    }
+
+    fn span_to_ticks(span: TimeSpan) -> TimerTicks {
+        CounterSourceIf::span_to_ticks(span)
+    }
+}
 
 #[inline]
 pub fn now_ticks() -> TimerTicks {
@@ -34,7 +63,27 @@ pub fn interrupt_id() -> usize {
 
 #[inline]
 pub fn arm_timer(deadline: MonotonicInstant) {
-    ClockEventIf::arm_timer(deadline)
+    // PM must exclude reprogramming across epoch changes. Keep the CPU pinned
+    // from sampling through the local hardware write, as on the timer IRQ path.
+    let _guard = kspin::NoPreemptIrqSave::new();
+    let (ticks, is_suspended) = suspend::CLOCK.read(|| CounterSourceIf::now_ticks().as_raw());
+    let now = MonotonicInstant::from_span_since_origin(ticks_to_span(TimerTicks::from_raw(ticks)));
+    match timer_interval(deadline, now, is_suspended) {
+        Some(interval) => ClockEventIf::arm_timer_after(interval),
+        None => ClockEventIf::disarm_timer(),
+    }
+}
+
+fn timer_interval(
+    deadline: MonotonicInstant,
+    now: MonotonicInstant,
+    is_suspended: bool,
+) -> Option<TimeSpan> {
+    if is_suspended {
+        None
+    } else {
+        Some(deadline.saturating_duration_since(now))
+    }
 }
 
 #[inline]

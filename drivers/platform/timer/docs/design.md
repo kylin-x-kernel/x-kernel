@@ -29,7 +29,7 @@ platform boot hooks ---> backend configuration and initialization
                                       |
                          kiface provider registration
                                       |
-runtime clients ------> khal::time ---+--> ClockSourceIf: ticks and conversion
+runtime clients ------> khal::time ---+--> CounterSourceIf: ticks and conversion
                                       +--> ClockEventIf: local timer programming
                                                                   |
                                                         hardware timer IRQ
@@ -37,7 +37,8 @@ runtime clients ------> khal::time ---+--> ClockSourceIf: ticks and conversion
                                                         kirq and its consumers
 ```
 
-Each backend implements both interfaces through `kiface::provide`.
+Each backend implements CounterSourceIf and ClockEventIf through `kiface::provide`.
+HAL supplies the logical ClockSourceIf, including suspend-time mapping.
 Clock-source frequency describes the counter used for timekeeping. Clock events
 use the selected timer's own programming model; x86 uses separate TSC and LAPIC
 rates. Runtime clients use the HAL while platform code calls the backend's public
@@ -287,3 +288,29 @@ nodes or sparse hardware MPIDRs, and present logical IDs are exactly
 has no runtime removal/hotplug path. If this mapping contract changes to permit
 sparse logical IDs, the notification publisher must use explicit present IDs
 rather than a present count; the helper does not independently validate holes.
+
+## Explicit monotonic suspend mapping
+
+Backends now provide `CounterSourceIf`, while khal provides the logical
+`ClockSourceIf` over the suspend mapping. Counter frequency and duration
+conversions stay in the backend. `resume_ticks` establishes a backend anchor
+without enabling timer events or dispatching anomaly recovery. ARM with fixup
+uses `ResumeCounter::resume` to discard suspended raw progress and pending repair
+reports, remote dispatch requests and all peer notification flags. Formal resume
+does not trigger fixup logging or IPIs. PM must quiesce publishers and consumers,
+including in-flight dispatches and IPI handlers, before freezing the clock.
+Without fixup, ordinary origin subtraction remains saturating, preserving the
+pre-existing behavior for unexpected counter regression outside formal suspend.
+Only resume_ticks changes TIMER_INIT_TICKS to the restored raw count and returns
+zero as the new backend anchor. Subsequent reads advance from that origin; the
+HAL separately preserves the pre-suspend logical boundary. This also covers a
+restored counter below the original boot origin without publishing a wrapped
+value. Unexpected runtime resets are not repaired by this non-fixup path.
+
+`ClockEventIf::arm_timer_after` accepts an interval, not an absolute logical
+deadline. HAL owns deadline subtraction and suppresses programming while frozen.
+ARM uses bounded signed TVAL; x86 uses bounded LAPIC countdown; RISC-V adds the
+interval to its hardware counter before SBI programming. Platform PM must
+restore controller/local-event configuration and re-arbitrate every CPU's
+software deadlines after time recovery. This change supplies no device PM or
+host/guest protocol and does not enable sleep compensation.

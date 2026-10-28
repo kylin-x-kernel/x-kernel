@@ -15,7 +15,7 @@ LoongArch machines (QEMU virt-class platforms).
   RTC sample seeding `ktime::initialize_realtime`) and per-CPU
   `activate_local_interrupts` (timer enablement after handler installation).
 - Clock: the architectural stable counter (`Time::read`, `TCFG`
-  registers) exposed as the `ClockSourceIf` / `ClockEventIf` providers,
+  registers) exposed as the `CounterSourceIf` / `ClockEventIf` providers,
   with a once-computed `NANOS_PER_TICK` conversion.
 - Interrupts: the `kirq::IntrManagerIf` provider mapping logical IRQs to
   the LoongArch hierarchy — local timer interrupt 11, EIOINTC line 3,
@@ -52,7 +52,7 @@ platforms/kplat-loongarch64/
 ├── src/
 │   ├── lib.rs        # module wiring, default platform contracts
 │   ├── init.rs       # PlatformBootIf provider (early init, IRQ preparation/activation)
-│   ├── time.rs       # stable counter, ClockSourceIf/ClockEventIf
+│   ├── time.rs       # stable counter, CounterSourceIf/ClockEventIf
 │   ├── irq.rs        # IntrManagerIf provider, IrqType routing
 │   ├── irq/
 │   │   ├── eiointc.rs  # EIOINTC (256 vectors, IOCSR)

@@ -46,8 +46,12 @@ static NANOS_TO_LAPIC_TICKS_RATIO: Once<Ratio> = Once::initialized(Ratio::new(
 ));
 
 #[kiface::provide]
-impl khal::time::ClockSourceIf {
+impl khal::time::CounterSourceIf {
     fn now_ticks() -> khal::time::TimerTicks {
+        now_ticks()
+    }
+
+    fn resume_ticks() -> khal::time::TimerTicks {
         now_ticks()
     }
 
@@ -70,8 +74,8 @@ impl khal::time::ClockEventIf {
         interrupt_id()
     }
 
-    fn arm_timer(deadline: ktime_types::MonotonicInstant) {
-        arm_timer(deadline)
+    fn arm_timer_after(interval: ktime_types::TimeSpan) {
+        arm_timer_after(interval)
     }
 
     fn disarm_timer() {
@@ -503,7 +507,7 @@ fn interrupt_id() -> usize {
     x86_apic::APIC_TIMER_VECTOR as usize
 }
 
-/// Arms the current CPU's LAPIC timer for a monotonic deadline.
+/// Arms the current CPU's LAPIC timer for a relative interval.
 ///
 /// [`early_init`] and local APIC initialization for the calling CPU must
 /// complete before this function is called.
@@ -511,14 +515,13 @@ fn interrupt_id() -> usize {
 /// # Panics
 ///
 /// Panics if the TSC conversion ratio has not been initialized.
-fn arm_timer(deadline: ktime_types::MonotonicInstant) {
-    let now_ns = ticks_to_nanos(now_ticks().as_raw());
-    let deadline_ns = deadline.as_nanos_u64_saturating();
+fn arm_timer_after(interval: ktime_types::TimeSpan) {
+    let interval_ns = interval.as_nanos_u64_saturating();
     // SAFETY: the local APIC timer is initialized before deadline programming, and
     // the helper masks local interrupts while borrowing the CPU-local LAPIC handle.
     {
         x86_apic::with_local_apic(|lapic| {
-            if now_ns < deadline_ns {
+            if interval_ns != 0 {
                 #[expect(
                     clippy::expect_used,
                     reason = "CG-021-no-panic-on-reachable-failure: LAPIC timer initialization \
@@ -528,7 +531,7 @@ fn arm_timer(deadline: ktime_types::MonotonicInstant) {
                     .get()
                     .expect("x86 LAPIC deadline ratio is not initialized")
                     // Initial-count is 32-bit; clamp and re-arbitrate on the early IRQ.
-                    .mul_trunc(deadline_ns - now_ns)
+                    .mul_trunc(interval_ns)
                     .clamp(1, u32::MAX as u64);
                 // SAFETY: with_local_apic holds the initialized current-CPU
                 // controller exclusively with IRQs and preemption disabled.

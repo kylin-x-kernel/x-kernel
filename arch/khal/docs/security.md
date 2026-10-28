@@ -83,13 +83,13 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 
 - 本模块文档只覆盖 adapter；IRQ core 威胁模型见 `arch/kirq/docs/security.md`。
 
-## crate 级测试边界补充
+## Crate-level test boundaries
 
-`ut-tests/{percpu,paging,mem,time}.rs` 保存从原源码模块迁出的 8 个 guest
-用例，通过 `path_mod_test!` 在原模块层级注册，挂载点外另有 `cfg(unittest)`。
-这些测试不含本地 `unsafe`，只检查 CPU 身份、映射标志、内存区域构造与时间值；
-不构成 IRQ/NMI 并发安全验证。迁移保留原测试体和可见性，未扩大生产 API，
-也未改变现有生产 lint 例外或上述 IRQ adapter 信任边界。
+The original eight guest cases under ut-tests/{percpu,paging,mem,time}.rs retain
+their module registration. Nine new time cases use isolated epoch/deadline
+fixtures, giving 17 cases in total including ut-tests/time_epoch.rs. These tests
+contain no handwritten unsafe code and do not establish IRQ/NMI concurrency or
+real platform suspend safety. Test mounts remain gated by cfg(unittest).
 
 ## 审计清单
 
@@ -97,3 +97,27 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 - trap handler 是否在调用 `kirq` 前创建 `NoPreempt`。
 - `khal::irq` 是否没有重新导出 generic `kirq` API。
 - x86 APIC helper 是否仍未回流到 `khal::irq`。
+
+## Monotonic suspend/resume boundaries
+
+`time/epoch.rs` and `time/suspend.rs` contain no handwritten unsafe or user/device
+memory access. They trust backend sampling, stable frequency and PM quiescence.
+Atomic sequence validation prevents mixed epoch snapshots. Identities do not
+repeat; suspend reserves a resume identity, and rejected requests preserve the
+active mapping. Monotonic and ktime accounting tokens are independent: neither
+this layer nor its token proves that a real sleep occurred.
+
+| ID | Threat | Severity | Trigger | Implemented control and residual risk |
+|---|---|---|---|---|
+| TM-01 | Frozen time prevents normal timeout progress | Medium | PM enters without stopping competing activity | The contract requires parked CPUs, quiesced readers, programming and NMI/watchdog activity. No production caller exists; HAL cannot verify system-wide quiescence. |
+| TM-02 | NMI read deadlocks the writer | Medium | NMI interrupts an odd-sequence update | Writers mask ordinary IRQs/preemption; PM must separately quiesce NMI clock readers. Transitions are not NMI-safe. |
+| TM-03 | Lost token leaves time frozen | Medium | Owner drops the token before resume | Private non-copyable must_use token and explicit abort/resume contract; Drop cannot substitute for restoring hardware access. |
+| TM-04 | Invalid counter mapping | Medium | Frequency changes or unexpected runtime counter discontinuity | Frozen-interval changes are rebased; running continuity remains the backend's obligation. Frequency switching is unsupported. |
+
+AlreadySuspended, StaleToken and TransitionInProgress do not change the mapping.
+IdentityExhausted is checked with room reserved for resume. Logical tick sums
+saturate rather than wrap. Backend sampling must not unwind while the sequence
+is odd. Readers depend on writer progress, which remains a privileged PM
+control-plane obligation. The tests do not change the live kernel clock and do
+not prove real S3, device ordering or multiprocessor coordination. No user
+private data is processed by this layer.

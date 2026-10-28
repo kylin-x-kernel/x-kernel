@@ -122,3 +122,30 @@ fn forward_samples_do_not_queue_recovery() {
     state.queue_repair(0, &sample);
     assert!(state.take_repair().is_none());
 }
+
+#[def_test]
+fn formal_resume_reanchors_without_repair_or_sleep_progress() {
+    let mut counter = ResumeCounter::new();
+    counter.initialize(100, 0);
+    assert_eq!(counter.sample(150).ticks, 150);
+    assert_eq!(counter.resume(0), 150);
+    let sample = counter.sample(10);
+    assert_eq!(sample.ticks, 160);
+    assert!(!sample.is_repaired);
+    assert!(counter.take_repair().is_none());
+    assert_eq!(counter.resume(1_000_000), 160);
+    assert_eq!(counter.sample(1_000_010).ticks, 170);
+}
+
+
+#[def_test]
+fn formal_resume_discards_old_deferred_repair_report() {
+    let mut counter = ResumeCounter::new();
+    counter.initialize(100, 0);
+    let repair = counter.sample(0);
+    assert!(repair.is_repaired);
+    counter.queue_repair(0, &repair);
+    assert_eq!(counter.resume(1_000), 100);
+    assert!(counter.take_repair().is_none());
+    assert!(!counter.sample(1_010).is_repaired);
+}

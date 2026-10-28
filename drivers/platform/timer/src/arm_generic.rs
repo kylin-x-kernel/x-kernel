@@ -128,9 +128,28 @@ impl TimerConfig {
 }
 
 #[kiface::provide]
-impl khal::time::ClockSourceIf {
+impl khal::time::CounterSourceIf {
     fn now_ticks() -> khal::time::TimerTicks {
         now_ticks()
+    }
+
+    fn resume_ticks() -> khal::time::TimerTicks {
+        // Observe platform counter restoration before establishing the anchor.
+        aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
+        #[cfg(feature = "arm-timer-resume-fixup")]
+        {
+            let mut counter = RESUME_COUNTER.lock();
+            let ticks = counter.resume(raw_now_ticks());
+            REMOTE_FIXUP_REQUESTED.store(false, Ordering::Release);
+            IPI_FIXUP_PENDING.clear_quiesced();
+            khal::time::TimerTicks::from_raw(ticks)
+        }
+        #[cfg(not(feature = "arm-timer-resume-fixup"))]
+        {
+            // Only a formal resume may move the origin. Ordinary reads retain
+            // their saturating behavior for an unexpected counter regression.
+            rebase_counter_origin(&TIMER_INIT_TICKS, raw_now_ticks())
+        }
     }
 
     fn ticks_to_span(ticks: khal::time::TimerTicks) -> ktime_types::TimeSpan {
@@ -152,8 +171,8 @@ impl khal::time::ClockEventIf {
         interrupt_id()
     }
 
-    fn arm_timer(deadline: ktime_types::MonotonicInstant) {
-        arm_timer(deadline)
+    fn arm_timer_after(interval: ktime_types::TimeSpan) {
+        arm_timer_after(interval)
     }
 
     fn disarm_timer() {
@@ -252,8 +271,19 @@ fn now_ticks_raw() -> u64 {
 
     #[cfg(not(feature = "arm-timer-resume-fixup"))]
     {
-        raw_now_ticks().saturating_sub(TIMER_INIT_TICKS.load(Ordering::Relaxed))
+        ticks_since_origin(raw_now_ticks(), TIMER_INIT_TICKS.load(Ordering::Relaxed))
     }
+}
+
+#[cfg(any(not(feature = "arm-timer-resume-fixup"), unittest))]
+fn rebase_counter_origin(origin: &AtomicU64, restored_ticks: u64) -> khal::time::TimerTicks {
+    origin.store(restored_ticks, Ordering::Relaxed);
+    khal::time::TimerTicks::from_raw(0)
+}
+
+#[cfg(any(not(feature = "arm-timer-resume-fixup"), unittest))]
+fn ticks_since_origin(raw_ticks: u64, origin_ticks: u64) -> u64 {
+    raw_ticks.saturating_sub(origin_ticks)
 }
 
 #[cfg(feature = "arm-timer-resume-fixup")]
@@ -384,16 +414,9 @@ fn deadline_to_interval_ticks(deadline_ns: u64, now_ns: u64, frequency_hz: u64) 
         .min(MAX_TIMER_INTERVAL_TICKS)
 }
 
-fn arm_timer(deadline: ktime_types::MonotonicInstant) {
-    // Sample the same logical clock used by software deadlines, including
-    // the virtual-counter origin and optional resume offset. Converting an
-    // absolute deadline to ticks can wrap before a later interval clamp.
-    let now_ns = ticks_to_nanos(now_ticks_raw());
-    let interval = deadline_to_interval_ticks(
-        deadline.as_nanos_u64_saturating(),
-        now_ns,
-        frequency().as_hz(),
-    );
+fn arm_timer_after(interval: ktime_types::TimeSpan) {
+    let interval =
+        deadline_to_interval_ticks(interval.as_nanos_u64_saturating(), 0, frequency().as_hz());
     match mode() {
         TimerMode::Physical => {
             // TVAL then ENABLE: after `disarm_timer` the leftover TVAL may be 0.

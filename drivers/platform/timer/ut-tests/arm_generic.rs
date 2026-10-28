@@ -68,3 +68,24 @@ fn bounded_countdown_matches_wide_integer_reference() {
         }
     }
 }
+
+
+#[def_test]
+fn unexpected_counter_below_origin_does_not_wrap() {
+    assert_eq!(super::ticks_since_origin(999, 1_000), 0);
+    assert_eq!(super::ticks_since_origin(0, 1_000), 0);
+    assert_eq!(super::ticks_since_origin(1_010, 1_000), 10);
+}
+
+#[def_test]
+fn formal_resume_origin_allows_progress_after_counter_reset() {
+    // The resume backend returns zero and installs the restored raw count as
+    // origin; the HAL retains the old logical boundary in its separate epoch.
+    let origin = core::sync::atomic::AtomicU64::new(1_000);
+    assert_eq!(super::rebase_counter_origin(&origin, 20).as_raw(), 0);
+    let restored_origin = origin.load(core::sync::atomic::Ordering::Relaxed);
+    assert_eq!(restored_origin, 20);
+    assert_eq!(super::ticks_since_origin(20, restored_origin), 0);
+    assert_eq!(super::ticks_since_origin(30, restored_origin), 10);
+    assert_eq!(super::ticks_since_origin(19, restored_origin), 0);
+}
