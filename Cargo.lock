@@ -3308,6 +3308,7 @@ name = "ktime"
 version = "0.3.0-dev"
 dependencies = [
  "khal",
+ "kiface-time-api",
  "klazy",
  "kpoll",
  "kspin",
@@ -4841,6 +4842,7 @@ dependencies = [
  "arm_pl031",
  "chrono",
  "khal",
+ "kiface-time-api",
  "ktime_types",
  "log",
  "memspace",

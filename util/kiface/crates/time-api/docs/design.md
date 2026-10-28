@@ -47,3 +47,17 @@ clock source, select deadlines or invoke callbacks. The PM owner calls it with
 IRQs masked and competing producers/repair quiesced. The task timer service
 separately re-arbitrates software deadlines only after timekeeping and sleep
 accounting are ready. No PM registry or scheduling policy lives in time-api.
+
+## Persistent clock capability
+
+PersistentClock is an owned-value read contract, not a global provider or RTC
+registry. One value represents one initialized device/epoch with a fixed,
+nonzero timestamp quantum including driver truncation. read returns an optional
+SystemTime without changing system clocks. A PM adapter may keep that same
+value borrowed across a suspend interval to prevent accidental source swaps.
+
+The source may require sleepable context and enabled interrupts. Mapping and
+hardware access must be valid, no spinlock may surround I/O, and the PM owner
+serializes conflicting readers/writers as required by the backend. The contract
+does not establish cross-suspend continuity or device authenticity; source
+selection and confirmation of a real suspend boundary remain PM policy.

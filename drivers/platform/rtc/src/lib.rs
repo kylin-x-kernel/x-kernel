@@ -33,7 +33,8 @@
 #![warn(missing_docs)]
 
 use khal::mem::{PhysAddr, VirtAddr};
-use ktime_types::SystemTime;
+pub use kiface_time_api::PersistentClock;
+use ktime_types::{SystemTime, TimeSpan};
 
 #[cfg(all(feature = "cmos", target_arch = "x86_64"))]
 mod cmos;
@@ -137,6 +138,73 @@ impl RtcConfig {
     }
 }
 
+/// A prepared RTC binding whose identity and mapping remain fixed across reads.
+///
+/// Mapping lifetime and access permissions remain platform obligations, as for
+/// [`read`]. Preparing a binding does not establish that the emulated/physical
+/// RTC advances across host sleep; platform validation must establish that fact.
+#[derive(Debug)]
+pub struct RtcClock {
+    config: RtcConfig,
+}
+
+impl RtcClock {
+    /// Binds an enabled backend to an already initialized transport.
+    ///
+    /// Rejects unmapped MMIO, null mappings and disabled backend combinations.
+    /// The platform retains the mapping and hardware access for this value's
+    /// lifetime and serializes conflicting RTC register access. Does not read
+    /// hardware, allocate or require scheduler services.
+    ///
+    /// # Safety
+    /// For accepted MMIO configurations, the address must cover aligned,
+    /// initialized register storage for the backend and remain mapped for this
+    /// handle's entire lifetime. Platform transports require valid I/O access.
+    /// Restore access before resume reads and serialize conflicting users.
+    /// Rejected null/unmapped/unsupported configurations require no access.
+    pub unsafe fn from_config(config: RtcConfig) -> Option<Self> {
+        let is_supported = match (config.kind, config.transport) {
+            #[cfg(feature = "pl031")]
+            (RtcKind::Pl031, RtcTransport::MmioMapped { vaddr }) => vaddr.as_usize() != 0,
+            #[cfg(feature = "goldfish")]
+            (RtcKind::Goldfish, RtcTransport::MmioMapped { vaddr }) => vaddr.as_usize() != 0,
+            #[cfg(feature = "ls7a")]
+            (RtcKind::Ls7a, RtcTransport::MmioMapped { vaddr }) => vaddr.as_usize() != 0,
+            #[cfg(all(feature = "cmos", target_arch = "x86_64"))]
+            (RtcKind::Cmos, RtcTransport::Platform) => true,
+            _ => false,
+        };
+        is_supported.then_some(Self { config })
+    }
+
+    /// Discovers and maps the selected device once, for repeated PM samples.
+    /// Requires initialized firmware metadata and device mapping services; run
+    /// during platform preparation, before a no-allocation suspend boundary.
+    #[cfg(any(feature = "pl031", feature = "goldfish"))]
+    pub fn from_device_tree() -> Option<Self> {
+        let config = mapped_config_from_device_tree()?;
+        // SAFETY: discovery selects an enabled MMIO backend and preparation
+        // maps its register range into the kernel's retained device mappings.
+        // The opaque handle does not expose or release that mapping.
+        unsafe { Self::from_config(config) }
+    }
+}
+
+impl PersistentClock for RtcClock {
+    fn read(&mut self) -> Option<SystemTime> {
+        read(self.config)
+    }
+
+    fn resolution(&self) -> TimeSpan {
+        // Report the quantum preserved by the driver's returned timestamp,
+        // including truncation performed by whole-second backends.
+        match self.config.kind {
+            RtcKind::Ls7a => TimeSpan::from_millis(1),
+            _ => TimeSpan::from_secs(1),
+        }
+    }
+}
+
 /// Discovers an RTC configuration from the device tree.
 #[cfg(any(feature = "pl031", feature = "goldfish"))]
 fn config_from_device_tree() -> Option<RtcConfig> {
@@ -191,6 +259,11 @@ fn pl031_config_from_device_tree() -> Option<RtcConfig> {
 /// Panics if the discovered RTC configuration is unsupported.
 #[cfg(any(feature = "pl031", feature = "goldfish"))]
 pub fn read_from_device_tree() -> Option<SystemTime> {
+    RtcClock::from_device_tree()?.read()
+}
+
+#[cfg(any(feature = "pl031", feature = "goldfish"))]
+fn mapped_config_from_device_tree() -> Option<RtcConfig> {
     let config = config_from_device_tree()?;
     let mapped = match config {
         RtcConfig {
@@ -220,7 +293,7 @@ pub fn read_from_device_tree() -> Option<SystemTime> {
         )]
         other => panic!("unsupported rtc configuration: {other:?}"),
     };
-    read(mapped)
+    Some(mapped)
 }
 
 /// Samples an RTC using an initialized configuration.

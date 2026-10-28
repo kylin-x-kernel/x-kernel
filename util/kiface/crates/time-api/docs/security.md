@@ -39,3 +39,13 @@ controller mappings/vector routing. Masked local IRQs and quiesced programming
 are required. Providers must leave the countdown stopped and must not reset
 clocksource state, allocate, sleep or invoke expiry. This contract does not
 prove global PM coordination; final deadline arbitration belongs to the caller.
+
+## Persistent clock source trust
+
+PersistentClock identifies one device/epoch through a value whose resolution
+must stay nonzero and fixed. Backend reads may fail and must obey their device
+access context; callers must not hold spinlocks across them. Providers report
+the precision actually returned, including truncation. This API contains no
+implementation state, pointers, global source registry or clock updates.
+Source authenticity, mapping lifetime, concurrency and cross-host-sleep progress
+remain platform obligations; a successful timestamp read proves none of them.

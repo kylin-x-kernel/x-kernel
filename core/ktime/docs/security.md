@@ -10,7 +10,11 @@ timekeeper 状态。
 
 ## 外部边界 / 攻击面
 
-该 crate 不访问用户内存、设备、网络或文件系统。外部输入通过
+The crate does not access user memory, networks or filesystems. Its RTC
+adapter invokes the trusted `PersistentClock` provider, which may access device
+registers or perform sleepable I/O. The PM caller must restore device access
+and obey the provider's execution-context requirements; sampling runs outside
+timekeeper and observer locks. Other external inputs enter through
 `initialize_realtime`/`set_realtime_checked` 传入的 `SystemTime` sample，
 以及 `inject_sleeptime` 传入的 `TimeSpan` 进入；
 `SystemTime` 构造本身规范化并校验分量范围。`set_realtime_checked` 对
@@ -95,3 +99,31 @@ IRQ 锁内插入要求 Arc 唯一且 Vec 有剩余容量；该路径不扩容、
 正常错误返回可恢复结算所有权；显式 mem::forget 绕过析构不受支持，PM owner 必须
 另行撤销自己的硬件准备。
 独立 Timekeeper 的单测不修改全局时间，也不替代真实 PM 端到端验证。
+
+## RTC fallback boundary and failure handling
+
+`src/rtc.rs` adds no unsafe, device pointers or userspace entry. It calls a
+trusted `PersistentClock` provider outside timekeeper locks and checks sample
+latency, monotonic ordering, resolution consistency, RTC backsteps and the
+owner's maximum accepted RTC compensation. The provider/device remains an
+external time authority: a plausible forward edit within the bound is not
+independently authenticated. PM must establish cross-suspend continuity and
+prevent RTC writes; source trust is not inferred from a successful read.
+
+| ID | Threat | Impact | Control and remaining obligation |
+|---|---|---|---|
+| RTC-01 | Duplicate sleep injection from multiple sources | Medium | A session privately owns one generic SuspendToken. Preferred-source success consumes it before any RTC fallback; untracked nonzero injection is rejected while active. Separate later transactions still require correct PM ownership. |
+| RTC-02 | Quantization creates false or accumulating compensation | Medium | Cross-cycle BOOTTIME/RTC phase correction, bounded sample windows and a precision-scaled reference reset; errors below declared precision remain unavoidable. |
+| RTC-03 | Abort before actual freeze injects rounding noise | Medium | PM must explicitly mark the reached boundary; estimation rejects unmarked sessions. PM still has to make that assertion truthfully. |
+| RTC-04 | Unstable/stopped/edited RTC gives wrong elapsed time | Medium | Failed reads, backsteps, excessive deficits and excessive positive deltas fail without settlement. Plausible changes remain a source-trust risk. |
+| RTC-05 | I/O stalls or reenters under an IRQ lock | Medium | Sampling is outside locks in sleepable context. The latency budget is checked after return and cannot recover a nonreturning provider; backend access and progress are PM obligations. |
+
+Failed estimates/commits leave accounting active for retry or cancellation and
+retain the previously committed phase. Explicit cancel and unfinished Drop
+invalidate phase; token Drop cancels accounting only. No automatic hardware
+recovery occurs. Lost/forgotten sessions can strand accounting, as for #1093;
+PM must retain ownership and must not forget them. Type borrowing keeps one
+source fixed through each session. No manual Send/Sync implementations or new
+global locks are introduced. Tests use isolated state rather than global time
+injection and do not establish real S3, MMIO mapping or NMI safety. No user
+private data is processed by the adapter.

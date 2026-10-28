@@ -11,7 +11,8 @@ pub(super) fn read_mapped(vaddr: VirtAddr) -> Option<ktime_types::SystemTime> {
     }
 
     // SAFETY: `vaddr` is the mapped PL031 MMIO base selected by platform init
-    // and remains valid for the duration of this driver setup call.
+    // and remains valid throughout this read. PM restores device access before
+    // sampling a prepared binding after resume.
     let rtc = unsafe { Rtc::new(vaddr.as_mut_ptr() as _) };
     crate::system_time_from_unsigned_seconds(u64::from(rtc.get_unix_timestamp()))
 }

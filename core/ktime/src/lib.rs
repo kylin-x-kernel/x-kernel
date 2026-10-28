@@ -7,9 +7,9 @@
 //! `ktime` is the system timekeeping owner: it derives realtime from the
 //! monotonic hardware clock exposed by [`khal::time`] plus a clock
 //! correlation, and owns cumulative sleep time, initialization, updates, and reads.
-//! `khal` stays a pure hardware time source; the `drivers/platform/rtc` crate only
-//! provides persistent-clock samples that boot code passes to
-//! [`initialize_realtime`].
+//! Platform RTC drivers provide persistent-clock samples for boot initialization
+//! and an owned source for [`RtcSleepAccounting`]. RTC estimation is separate
+//! from counter restoration and the generic single-use settlement transaction.
 //!
 //! Semantics:
 //! - realtime advances 1:1 with monotonic time between explicit updates;
@@ -17,6 +17,8 @@
 //! - [`inject_sleeptime`] advances realtime and boottime without changing monotonic;
 //! - [`begin_suspend_accounting`] and [`resume_suspend_accounting`] provide a
 //!   single-use accounting transaction, without suspending clocks or hardware;
+//! - [`RtcSleepAccounting`] provides persistent-clock fallback after PM confirms
+//!   the freeze boundary and restores MONOTONIC;
 //! - before any persistent clock is sampled, realtime falls back to the Unix
 //!   epoch plus elapsed monotonic time and injected sleep intervals;
 //! - [`set_realtime_checked`] re-bases the correlation so a caller-supplied
@@ -37,6 +39,7 @@ use kspin::SpinRwNoIrq;
 
 mod change;
 mod observer;
+mod rtc;
 mod suspend;
 pub use change::{ClockChangeListener, ClockDomain, clock_change_listener};
 use ktime_types::{BoottimeInstant, MonotonicInstant, NANOS_PER_SEC, SystemTime, TimeSpan};
@@ -44,6 +47,7 @@ pub use observer::{
     ClockChangeId, ClockObserver, ClockObserverRegistration, ClockReading, ClockUpdate,
     register_clock_observer,
 };
+pub use rtc::{RtcSleepAccounting, RtcSleepError, RtcSleepSession};
 pub use suspend::{
     SuspendAccountingError, SuspendToken, begin_suspend_accounting, cancel_suspend_accounting,
     resume_suspend_accounting,

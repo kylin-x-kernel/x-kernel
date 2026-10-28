@@ -10,6 +10,7 @@ documentation.workspace = true
 description = "System timekeeping layer for X-Kernel: realtime correlation over the monotonic hardware clock"
 
 [dependencies]
+kiface-time-api.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 kspin.workspace = true

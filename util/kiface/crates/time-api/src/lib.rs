@@ -158,3 +158,22 @@ pub trait ClockResumeIf {
     /// not whether a reset occurred during idle: another read may repair first.
     fn handle_idle_return(previous_ticks: TimerTicks) -> bool;
 }
+
+/// One initialized persistent clock that keeps advancing across the target sleep.
+///
+/// A value identifies the same device and timestamp epoch for its entire life.
+/// The provider must not silently switch devices or clock domains. Readings may
+/// fail and are not proof of suspend or of hardware authenticity. PM owns source
+/// selection and serializes clock writes with sampling.
+pub trait PersistentClock {
+    /// Samples the selected device without changing system time.
+    ///
+    /// The backend may require sleepable task context and enabled interrupts.
+    /// Call with no spinlock held, only while its mapping and hardware access
+    /// are valid. The caller must obey the provider's device-specific contract.
+    fn read(&mut self) -> Option<ktime_types::SystemTime>;
+
+    /// Returns the fixed timestamp quantum, including any driver truncation.
+    /// Must be nonzero and stable across all reads from this value.
+    fn resolution(&self) -> TimeSpan;
+}

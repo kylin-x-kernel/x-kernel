@@ -10,7 +10,7 @@ realtime，并统一维护 realtime 关联（correlation）、累计睡眠时间
 
 ```text
 hardware counter -> khal::time (monotonic) --+
-RTC sample (drivers::rtc, boot only) --------+--> ktime --> SystemTime
+RTC boot sample / PersistentClock adapter -+--> ktime --> SystemTime
 Confirmed sleep interval (future PM) -------+          --> BoottimeInstant
 ```
 
@@ -19,7 +19,10 @@ Confirmed sleep interval (future PM) -------+          --> BoottimeInstant
 ```text
 ktime (timekeeping) -> khal (硬件单调时钟)
                      -> ktime_types (语义值类型)
+                     -> kiface-time-api (PersistentClock capability)
 khal -> ktime_types
+rtc-driver -> kiface-time-api (implements PersistentClock)
+ktime does not depend on rtc-driver; PM supplies its prepared provider value.
 ```
 
 `ktime` 依赖 `khal`，`khal` 不依赖 `ktime`，因此 timekeeping 的演化（NTP
@@ -138,7 +141,8 @@ REALTIME/BOOTTIME 通知及观察者；取消不改时钟，不发送通知。
 这是 Linux timekeeping_suspend/resume 职责中结算部分的适配，不是完整 PM 实现。
 期间读时钟与定时器仍运行，墙钟设置保留；恢复在当前关联上增加睡眠时长。
 调用方先恢复连续且不包含待补偿睡眠的 MONOTONIC，再提交确认的睡眠时长。
-本层不推断 RTC 差值，不冻结时钟，不恢复 clocksource/clockevent，不停止设备或 CPU，
+The generic transaction does not estimate RTC deltas; `rtc.rs` supplies that adapter.
+It does not freeze clocks, restore clocksource/clockevent, or stop CPUs/devices.
 也不提供宿主协议。旧 inject_sleeptime 非零调用在事务期间被拒绝；零调用仍是无操作。
 凭证只保证同一轮提交一次，不能识别调用方在后续新事务或旧注入 API 中重复报告同一睡眠。
 
@@ -149,3 +153,73 @@ REALTIME/BOOTTIME 通知及观察者；取消不改时钟，不发送通知。
 主动绕过析构不保证恢复所有权。标识耗尽时失败，不回绕。没有生产 PM 调用者，
 也不以单元测试证明
 真实硬件暂停、多核恢复顺序或跨宿主时钟可信性。
+
+## Persistent-clock RTC fallback
+
+`rtc.rs` owns `RtcSleepAccounting<C>` and `RtcSleepSession`, over the
+`kiface-time-api::PersistentClock` contract. An owner retains one source and its
+phase calibration. The session exclusively borrows that owner and holds the
+existing #1093 single-use `SuspendToken`; no second global transaction or RTC
+injection path is created. Driver mapping/discovery happens before this layer.
+
+```text
+prepared PersistentClock -> RTC / MONOTONIC / BOOTTIME samples
+                                  |
+                                  v
+                      missing-time estimate + bounds
+                                  |
+                                  v
+             existing resume_suspend_accounting -> notifications
+```
+
+The PM sequence is prepare source -> begin -> restore/coordinate device and CPU
+state as required -> freeze MONOTONIC -> mark_suspended -> sleep -> restore
+MONOTONIC and the device/IRQ resources needed for RTC access -> resume_from_rtc
+-> finish per-CPU event restoration and re-arbitrate deadlines.
+`mark_suspended` is an explicit PM assertion, not hardware detection. Resume
+before this boundary is rejected without reading RTC. Earlier aborts cancel.
+No production PM/host protocol is connected; real use requires the monotonic
+freeze/rebase capability supplied separately by #1165.
+
+RTC I/O runs in the backend's permitted sleepable context with no spinlock held.
+Two short `clock_reading()` calls bracket it, retaining the after-read coherent
+MONOTONIC/BOOTTIME sample and the read window. Regressing MONOTONIC, changed
+resolution, failed reads and windows above max_read_span are rejected. This
+budget detects late returns; it cannot interrupt a stuck backend. Constructors
+require initialized sources and nonzero resolution, sleep bound and budget.
+
+The estimate starts with RTC elapsed minus already-counted MONOTONIC elapsed.
+To avoid repeated whole-second truncation drift, it also subtracts the change
+in BOOTTIME-to-RTC phase since a previously committed reference. This adapts
+Linux drivers/rtc/class.c rtc_suspend/resume's old_delta/delta_delta correction,
+using BOOTTIME instead of REALTIME so wall-clock edits do not change running
+elapsed time. A phase shift at least twice (resolution + maximum read span)
+resets the reference, analogous to Linux's approximately two-second threshold.
+Negative estimates within one quantum plus both observed windows close with
+zero compensation; larger deficits fail. Positive compensation above the PM
+owner's max_sleep fails. i128 nanoseconds safely represent all input spans and
+timestamp differences before checked conversion to nonnegative TimeSpan.
+
+Calibration is committed only after ktime settlement succeeds. Errors retain
+the session and calibration for retry; successful zero settlement also closes
+the transaction. Explicit cancellation or unfinished Drop discards calibration
+and cancels accounting, without restoring hardware or injecting time. Known RTC
+edits between sessions require reset_calibration; plausible source edits during
+an interval cannot be distinguished from true sleep and must be excluded by PM.
+
+Linux prefers nonstop clocksource, then persistent clock, then RTC fallback.
+The PM owner makes that selection here. A prepared session can settle a
+confirmed preferred-source delta through resume_with_confirmed_time, without a
+resume RTC read; success closes the same token and invalidates RTC calibration.
+RTC fallback cannot subsequently inject again. If a preferred source is already
+known, PM can bypass RTC entirely and use ordinary ktime accounting. This is a
+source handoff protocol, not automatic clock discovery or a trust detector.
+
+The session adds no registry, heap allocation or shared hot-path state. Rust
+exclusive borrowing prevents source replacement or parallel use of one owner.
+Global transaction arbitration and notifications retain existing timekeeper
+locking. Unit tests under ut-tests/rtc.rs use fake clocks, explicit samples and
+independent timekeepers; they do not inject into the active kernel's clocks.
+Coverage includes quantization over repeated fractional sleeps, bounds, clock
+edits, capture failures, phase commit failure and boundary gating. They do not
+prove RTC continuity across real host sleep, device recovery or CPU quiescence.

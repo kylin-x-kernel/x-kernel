@@ -80,3 +80,29 @@ detect later drift, or support runtime resampling and clock adjustment.
 - Confirm new hardware timestamp formats are normalized at the driver boundary.
 - Confirm invalid samples return `None` rather than wrapping or saturating.
 - Confirm platform handling of a missing RTC matches that platform's boot policy.
+
+## Repeated PM sampling
+
+RtcClock retains an initialized RtcConfig and implements PersistentClock. The
+unsafe from_config constructor rejects unmapped/null MMIO and disabled backend combinations;
+private binding state prevents source replacement through the handle. Repeated
+reads reuse existing backend access, including the unsafe PL031 construction
+and LS7A volatile accesses listed above. Platform code must retain the mapping
+for the entire handle/session lifetime and restore hardware access after sleep,
+not merely for boot setup. The unsafe constructor contract requires callers to establish register storage,
+alignment, lifetime and access permissions before accepted bindings can expose
+safe repeated reads. from_device_tree is the new production unsafe call site:
+it obtains an enabled, mapped configuration from mapped_config_from_device_tree
+and retains the kernel mapping. Metadata tests use real aligned backing storage
+or rejected configurations. No arbitrary non-null virtual address is certified
+as valid by the numeric constructor checks.
+
+Sampling uses no timekeeper locks and does not mutate system time. PM must
+serialize other RTC/PIO users and prevent writes across a measurement. A valid
+numeric sample does not authenticate the clock or prove cross-host-suspend
+continuity. Resolution reflects the returned timestamp: one millisecond for
+LS7A, one second for PL031, Goldfish and CMOS. Advertising finer precision than
+the driver preserves would understate truncation; advertising a coarser quantum
+would unnecessarily widen the sleep-estimator's deficit allowance.
+Constructor/metadata tests do not read test addresses and do not verify hardware
+mapping lifetime, transport concurrency or real suspend behavior.

@@ -17,6 +17,7 @@ cmos = ["dep:x86_rtc"]
 ls7a = ["dep:chrono"]
 
 [dependencies]
+kiface-time-api.workspace = true
 khal = { workspace = true }
 ktime_types = { workspace = true }
 of = { workspace = true }
