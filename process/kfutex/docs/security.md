@@ -14,8 +14,8 @@ only from `memspace`-resolved stable backing metadata.
 
 | Boundary | Direction | Content |
 |---|---|---|
-| User memory (via `kuaccess`) | read/CAS | futex words: read-only compare loads, nofault compare/CAS under bucket locks |
-| Syscall layer | inbound | already range-checked addresses, decoded operations, clamped counts |
+| User memory (via `kuaccess`) | read/CAS | futex words: read-only compare loads, nofault compare/CAS under bucket locks; `WAKE_OP` write fault-in only after those locks are dropped |
+| Syscall layer | inbound | already range-checked addresses, decoded operations, clamped counts; `WAKE_OP` re-resolves both keys after a write fault-in |
 | Scheduler (`ktask`) | outbound | wakers invoked after lock release |
 
 ## Unsafe inventory
@@ -73,6 +73,7 @@ create.
 | T-05 | ABBA deadlock on two-bucket operations | High (if violated) | requeue/wake-op on opposite key orders | global lower-index-first ordering in all double-lock paths |
 | T-06 | Stale route cancellation removing the wrong queue entry | Medium | cancel racing with requeue | generation re-check inside the bucket lock before removal |
 | T-07 | Scheduler invoked under non-preemptible lock | High (if violated) | waker called during drain | `drain_inactive` collects first, wakes after unlock |
+| T-08 | `WAKE_OP` reports `EFAULT` for a writable COW word, or wakes the wrong shared object after remap | Medium | `fork` leaves the PTE read-only; a non-private `uaddr2` is remapped to another shared object during write fault-in | nofault CAS failure drops both bucket locks and marks no waiter; `fault_in_user_writeable` breaks COW without publishing the new word; the syscall resolves both keys again before the retry. A VMA that does not allow writes still returns `EFAULT` with the word unchanged |
 
 ## FMEA
 
@@ -85,7 +86,7 @@ create.
 
 ## Failure handling
 
-Errors surface as `KError` (`EFAULT` for inaccessible words, `EAGAIN`
+Errors surface as `KError` (`EFAULT` for words that stay inaccessible after write fault-in, `EAGAIN`
 (`WouldBlock`) for compare mismatches, `EINTR`/`ETIMEDOUT` via the
 interruptible wait). No panics are reachable from user input: the two
 `expect`s in requeue/drain loop invariants are backed by the lock-held

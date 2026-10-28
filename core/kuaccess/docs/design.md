@@ -1,24 +1,24 @@
-# kuaccess — 设计文档
+# kuaccess design
 
-## 定位
+## Purpose
 
-`kuaccess` 负责内核侧用户内存访问胶水：
+`kuaccess` is the kernel-side glue for accessing user memory:
 
-- 将 `osvm` 的通用虚拟内存访问入口接到当前线程地址空间；
-- 处理“内核在访问用户地址时允许页错误回填”的 trap 路径；
-- 提供少量高频的用户态字符串装载辅助函数；
-- 提供用户态 32-bit 原子 load 与 cmpxchg 原语（供 futex 等路径使用）。
+- connect `osvm`'s generic virtual-memory access entry points to the current thread's address space;
+- handle the trap path that lets the kernel resolve page faults while it is accessing a user address;
+- provide a few hot user-string load helpers;
+- provide user 32-bit atomic load and compare-exchange primitives for paths such as futex.
 
-调用方包括 syscall 实现、用户线程 runtime，以及依赖 `osvm` 指针包装的其他 crate。
+Callers include syscall implementations, the user-thread runtime, and other crates that use `osvm` pointer wrappers.
 
-## 范围
+## Scope
 
-当前范围包括：
+The current scope is:
 
 - `src/lib.rs`
-- `ut-tests/copy_tests.rs`（用户复制回归测试）
+- `ut-tests/copy_tests.rs` (user-copy regression tests)
 
-## 架构
+## Architecture
 
 ```text
 syscall / runtime
@@ -32,74 +32,53 @@ syscall / runtime
    \-- VirtMemIo(Vm) -> user_copy + current thread address space
 ```
 
-## 调用约束 / 执行上下文
+## Calling constraints and execution context
 
-- 必须运行在存在 current task 的上下文中。
-- `access_user_memory()` 要求 current task 可解析为线程。
-- 用户字符串装载会触发用户地址访问，因此允许睡眠/缺页处理。
-- 普通 `osvm` 复制入口要求可睡眠的线程上下文，不自行关闭 IRQ。页错误通过
-  exception-table fixup 退出汇编后，在调用任务中完成回填；文件页回填允许等待块 I/O。
-- 原子用户访问的 trap handler 依赖当前线程的 `accessing_user_memory` 标志，
-  只在该窗口内接管页错误。
+- Must run in a context where a current task exists.
+- `access_user_memory()` requires the current task to resolve to a thread.
+- User-string loads access user addresses, so they may sleep and resolve page faults.
+- Ordinary `osvm` copy entry points require a sleepable thread context and do not disable IRQs themselves. A page fault returns through the exception-table fixup, then the calling task fills the page back in. Filling a file page may wait for block I/O.
+- The trap handler for atomic user access depends on the current thread's `accessing_user_memory` flag and takes over page faults only inside that window.
 
-## 算法流程
+## Algorithms
 
-### 用户内存访问
+### User memory access
 
-1. 调用方通过 `osvm` 指针包装或 `vm_load_string*()` 发起访问。
-2. `Vm` 先做用户地址范围检查。
-3. `copy_user_pages()` 按用户地址的 4 KiB 页边界拆分复制，每段先调用 `user_copy`。
-4. 普通复制不打开 trap 内回填窗口。缺页时通过 exception-table fixup 返回，
-   随后在调用任务中调用当前进程的 `MmSpace::handle_page_fault()`。这样不会在
-   IRQ 被屏蔽的异常上下文里等待 IRQ 驱动的磁盘完成。
-5. 使用单一进度循环，每轮先尝试复制当前页片段：成功则推进 offset 并重置
-   当前页的缺页次数；失败则最多处理一次缺页，再进入下一轮复制。
-   `Resolved`、`Retry` 和 `CowConflictRetry` 都允许重试复制；
-   unmapped、permission、bus、OOM、no-progress 和 generic failure 返回 `NoAccess`。
-6. `Resolved` 后复制仍失败时继续处理当前页缺页，允许共享文件的
-   “未映射 → 只读 PTE → 可写 PTE”分阶段完成。每个用户页最多调用缺页处理
-   16 次，`Resolved` 和 retry-class outcome 共用该预算，下一页重新计数。
-   预算耗尽后复制仍失败则返回 `NoAccess`，防止后端反复报告成功或重试却
-   无实际进展时无限循环。该上限是防止无限重试的策略，并非通过次数判断 PTE 进展；
-   持续并发修改映射也可能耗尽预算并导致失败。
-   已映射页不需要取得地址空间锁；成功返回保证全部输出已初始化。
+1. The caller starts an access through an `osvm` pointer wrapper or `vm_load_string*()`.
+2. `Vm` first checks that the user address is in range.
+3. `copy_user_pages()` splits the copy on 4 KiB user-page boundaries and calls `user_copy` for each piece.
+4. Ordinary copies do not open the in-trap fill window. On a fault, the exception-table fixup returns, and the calling task then calls the current process's `MmSpace::handle_page_fault()`. This avoids waiting for IRQ-driven disk completion while IRQs are masked in exception context.
+5. One progress loop tries the current page fragment first. Success advances the offset and resets that page's fault count. Failure handles at most one fault, then tries the copy again. `Resolved`, `Retry`, and `CowConflictRetry` all allow the copy to be retried. Unmapped, permission, bus, OOM, no-progress, and generic failure return `NoAccess`.
+6. If the copy still fails after `Resolved`, fault handling for the current page continues. That allows a shared-file write to finish in stages: not mapped, then a read-only PTE, then a writable PTE. Each user page may call fault handling at most 16 times. `Resolved` and retry-class outcomes share that budget, and the next page starts again from zero. If the budget is exhausted and the copy still fails, the result is `NoAccess`, so a backend that keeps reporting success or retry without making progress cannot loop forever. The cap stops unbounded retries; it does not measure PTE progress by counting attempts. Continued concurrent changes to the mapping can also exhaust the budget and fail the copy. An already mapped page does not need the address-space lock. A successful return means the whole output has been initialized.
 
-### 用户态原子访问
+### User atomic access
 
-1. 校验 4 字节对齐与用户地址范围。
-2. faultable 形式在 `access_user_memory()` 窗口内调用架构原语，允许 MM 处理
-   可恢复缺页；nofault 形式直接依赖 exception-table fixup 返回失败。
-3. load 使用自然对齐的只读 32-bit load；nofault cmpxchg 的 exclusive/atomic
-   序列在 `IrqSave` 保护下执行。
-4. 成功时返回 observed value 或 `(exchanged, observed)`；fault 映射为
-   `MemError::NoAccess`。
+1. Check 4-byte alignment and the user address range.
+2. The faultable form calls the architecture primitive inside the `access_user_memory()` window so MM can resolve a recoverable fault. The nofault form relies on the exception-table fixup to return failure directly.
+3. Load uses a naturally aligned read-only 32-bit load. The nofault compare-exchange exclusive/atomic sequence runs under `IrqSave`.
+4. Success returns the observed value or `(exchanged, observed)`. A fault maps to `MemError::NoAccess`.
 
-这些原语供 futex / robust-list 等路径对用户态 futex word 做无 TOCTOU 的读取
-或更新。只读 load 不要求映射可写，也不会触发 COW。
+These primitives give futex and robust-list paths a TOCTOU-free read or update of a user futex word. A read-only load does not require a writable mapping and does not trigger COW.
 
-### 字符串装载
+`fault_in_user_writeable()` requests a write fault and does not store a new user word. The caller must be in a sleepable task context and must not hold a non-sleepable lock. `Resolved` means the address can now be written. `Retry` and `CowConflictRetry` keep handling the same write fault, with no attempt cap. Every other result returns `NoAccess`. `FUTEX_WAKE_OP` uses it for a COW page after `fork`: the nofault CAS fails, drops the bucket locks, and returns; the syscall calls this function, resolves both keys again, and retries the CAS. The new value is still stored only by the CAS while those locks are held.
 
-1. 从用户地址读取字节向量或 NUL 终止字节流。
-2. 做 UTF-8 校验。
-3. 失败返回 `IllegalBytes`。
+### String loads
 
-## 并发模型
+1. Read a byte vector or a NUL-terminated byte stream from the user address.
+2. Validate UTF-8.
+3. Failure returns `IllegalBytes`.
 
-- `Vm` 不使用 `IrqSave`，普通复制的 fault 慢路径与磁盘读取一样要求可睡眠。
-  nofault 原子访问仍保留其局部 `IrqSave` 保护。
-- 不维护全局共享状态；真正的并发控制由线程状态和地址空间锁负责。
+## Concurrency
 
-## 设计决策
+- `Vm` does not use `IrqSave`. The slow fault path of an ordinary copy, like a disk read, requires a sleepable context. Nofault atomic access keeps its local `IrqSave`.
+- There is no global shared state. Concurrency control belongs to thread state and the address-space lock.
 
-- 用户字符串装载留在 `kuaccess`，而不是 syscall crate，因为它属于“如何安全访问用户内存”这一职责，不属于某个单独 syscall 族。
-- 只保留字符串级 helper，不在这里扩张为新的通用用户态参数解析层。
-- trap handler 的外部 ABI 仍是 `bool`，但这个 bool 现在只是架构 trap 分发的适配结果；
-  MM 语义来自 `PageFaultOutcome`，避免 `kuaccess` 重新定义缺页分类。
+## Design decisions
 
-## 回归验证
+- User-string loads stay in `kuaccess` rather than a syscall crate because they are part of "how to access user memory safely", not of one syscall family.
+- Only string-level helpers are kept. This crate does not grow into a general user-argument parsing layer.
+- The trap handler's external ABI is still `bool`, but that bool is only the adapter result of architecture trap dispatch. MM semantics come from `PageFaultOutcome`, so `kuaccess` does not define its own fault classification.
 
-`ut-tests/copy_tests.rs` 使用要求 `PreparedTaskWait` 可用的按需映射后端，验证普通
-复制的缺页处理发生在异常外的可睡眠任务上下文，并覆盖跨页读、首次写缺页、
-只读保护和撤销映射。分阶段写缺页测试跨越多个页面并超过单页恢复预算，验证同一页连续缺页后
-复制结果完整；无进展测试覆盖反复报告成功、反复报告 COW retry 的有界退出，
-以及显式 `NoProgress` 的立即失败。测试不依赖真实磁盘或 IRQ 的时序。
+## Regression tests
+
+`ut-tests/copy_tests.rs` uses an on-demand mapping backend that requires `PreparedTaskWait`. It checks that ordinary-copy fault handling runs in the sleepable task context outside the exception, and covers cross-page reads, a first-touch write fault, read-only protection, and revoking a mapping. The staged write-fault test spans multiple pages and exceeds the per-page recovery budget, checking that the copy is complete after repeated faults on the same page. The no-progress tests cover a bounded exit when the backend keeps reporting success or a COW retry, and an immediate failure on an explicit `NoProgress`. The tests do not depend on real disk or IRQ timing.

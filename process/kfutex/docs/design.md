@@ -86,7 +86,16 @@ wake cannot be both counted and consumed by an `EINTR`/`ETIMEDOUT` return.
 - CMP_REQUEUE: locks both buckets in index order, performs the nofault
   compare (mismatch is `EAGAIN`), then completes the wake and route move.
 - WAKE_OP: under the same two-lock order, performs the nofault user-word
-  CAS loop, then selects waiters on both keys.
+  CAS loop, then selects waiters on both keys. A fault from that CAS drops
+  both bucket locks and returns `EFAULT` without marking waiters. The
+  syscall calls `kuaccess::fault_in_user_writeable` (which makes the word
+  writable without storing the operation result) and retries. Each retry
+  resolves both addresses again. Private keys stay `{mm_id, address}`.
+  A non-private retry sees a shared object replaced during the fault-in,
+  so the store and the conditional wake use the same new key. A mapping
+  that does not allow writes fails the fault-in; the word is unchanged
+  and no waiter is woken. As in Linux `futex_wake_op`, the retry has no
+  attempt cap: it stops when fault-in or key resolution fails.
 
 Faulting user accesses happen only outside bucket locks. Inside the locks
 only kuaccess nofault atomics run, so page-fault handling cannot happen

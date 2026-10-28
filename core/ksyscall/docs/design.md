@@ -249,7 +249,10 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   the task cannot migrate.
 - `sync/futex.rs`: `futex` / `get_robust_list` / `set_robust_list`;
   compound operations (`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`) resolve both
-  keys under a single `address_space` lock; the robust-list walk lives in
+  keys under a single `address_space` lock before `WAKE_OP` decodes its
+  operation, so an invalid address with an illegal encoding returns
+  `EFAULT`. `WAKE_OP` repeats that resolution after
+  `fault_in_user_writeable` when the nofault store faults; the robust-list walk lives in
   `posix/process`. An untimed wait interrupted by a signal returns
   `ERESTARTSYS`. A timed wait returns `ERESTART_RESTARTBLOCK` and records
   the monotonic deadline in a futex payload owned by this crate; `kprocess`

@@ -147,10 +147,35 @@ impl FutexTable {
         target_count: usize,
         operation: FutexWakeOp,
     ) -> KResult<usize> {
-        // Fault the word in before taking bucket locks. The locked CAS remains
-        // nofault so it cannot sleep while the futex ordering locks are held.
-        atomic_load_u32(uaddr2).map_err(KError::from)?;
+        let source_id = self.bucket_id(source);
+        let target_id = self.bucket_id(target);
+        let count = self.wake_op_attempt(
+            source,
+            target,
+            uaddr2,
+            source_count,
+            target_count,
+            operation,
+        )?;
+        // A nofault fault returns before this point, with both bucket locks
+        // already dropped and no waiter marked. The syscall fault-in path
+        // re-resolves keys before calling again.
+        self.drain_inactive(source_id);
+        if target_id != source_id {
+            self.drain_inactive(target_id);
+        }
+        Ok(count)
+    }
 
+    fn wake_op_attempt(
+        &self,
+        source: FutexKey,
+        target: FutexKey,
+        uaddr2: usize,
+        source_count: usize,
+        target_count: usize,
+        operation: FutexWakeOp,
+    ) -> KResult<usize> {
         let source_id = self.bucket_id(source);
         let target_id = self.bucket_id(target);
         let result = if source_id == target_id {
@@ -182,11 +207,6 @@ impl FutexTable {
             }
             count
         };
-
-        self.drain_inactive(source_id);
-        if target_id != source_id {
-            self.drain_inactive(target_id);
-        }
         Ok(result)
     }
 
@@ -611,7 +631,11 @@ impl GlobalFutexTable {
     ///
     /// # Errors
     ///
-    /// Returns `EFAULT` when `uaddr2` is not accessible.
+    /// Returns `EFAULT` when the nofault store faults. The caller must drop
+    /// any non-sleepable lock, fault the word in for write, and — for a
+    /// non-private operation — resolve both keys again before retrying.
+    /// A mapping that does not allow writes fails the fault-in and must not
+    /// be retried.
     pub fn wake_op(
         self,
         source: FutexKey,

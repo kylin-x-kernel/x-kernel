@@ -240,11 +240,52 @@ pub fn atomic_cmpxchg_u32(addr: usize, old: u32, new: u32) -> MemResult<(bool, u
 /// Atomically compare-exchanges a 32-bit user word without fault resolution.
 ///
 /// This operation is safe under a non-sleepable lock because a missing or
-/// inaccessible mapping is reported immediately. The caller must retry outside
-/// the lock through [`atomic_cmpxchg_u32`] when it needs to distinguish a
-/// resolvable page fault from a permanent access error.
+/// inaccessible mapping is reported immediately. Callers that can publish the
+/// store outside that lock retry through [`atomic_cmpxchg_u32`]. Callers that
+/// must keep the store inside the lock, such as `FUTEX_WAKE_OP`, instead call
+/// [`fault_in_user_writeable`] and then retry this nofault operation.
 pub fn atomic_cmpxchg_u32_nofault(addr: usize, old: u32, new: u32) -> MemResult<(bool, u32)> {
     atomic_cmpxchg_u32_inner(addr, old, new, false)
+}
+
+/// Makes one user word writable without storing a new value.
+///
+/// This is the slow path for a nofault store that faulted on a present,
+/// write-protected page such as a private page after `fork`. The page-fault
+/// handler copies a COW page or rejects a mapping that does not allow writes.
+/// Retry-class outcomes are retried until the fault resolves or a permanent
+/// error is reported. The caller must not hold a non-sleepable lock.
+///
+/// # Errors
+///
+/// Returns [`MemError::InvalidAddr`] when `addr` is not 4-byte aligned, and
+/// [`MemError::NoAccess`] when the address is outside user space or the VMA
+/// rejects the write.
+pub fn fault_in_user_writeable(addr: usize) -> MemResult<()> {
+    if !addr.is_multiple_of(core::mem::align_of::<u32>()) {
+        return Err(MemError::InvalidAddr);
+    }
+    check_access(addr, core::mem::size_of::<u32>())?;
+
+    let curr = current();
+    let Some(thread) = curr.try_as_thread() else {
+        return Err(MemError::NoAccess);
+    };
+    let address_space = thread
+        .process()
+        .address_space()
+        .map_err(|_| MemError::NoAccess)?;
+    loop {
+        let outcome = address_space
+            .lock()
+            .handle_page_fault(VirtAddr::from_usize(addr), MappingFlags::WRITE);
+        if outcome.is_resolved() {
+            return Ok(());
+        }
+        if !outcome.is_retryable() {
+            return Err(MemError::NoAccess);
+        }
+    }
 }
 
 fn atomic_cmpxchg_u32_inner(

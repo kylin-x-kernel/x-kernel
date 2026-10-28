@@ -1,70 +1,61 @@
-# kuaccess — 安全与可靠性分析
+# kuaccess security and reliability
 
-## 信任模型
+## Trust model
 
-- 用户态地址、长度、字符串内容均不可信。
-- `kuaccess` 负责把这些输入约束在当前进程用户地址空间内，并把失败显式返回给上层。
+- User addresses, lengths, and string contents are untrusted.
+- `kuaccess` constrains those inputs to the current process's user address space and returns failures explicitly to the caller.
 
-## 外部边界 / 攻击面
+## External boundaries and attack surface
 
-- 所有 `vm_load_string*()` 调用点。
-- 所有经 `osvm::VirtMemIo` 落到 `Vm` 的读写请求。
-- 访问窗口内触发的页错误处理。
+- Every `vm_load_string*()` call site.
+- Every read or write that reaches `Vm` through `osvm::VirtMemIo`.
+- Page-fault handling raised inside the access window.
+- `fault_in_user_writeable(addr)`, a public entry that takes a user-space address and runs explicit page-fault handling outside the access window, without going through `Vm` or `osvm::VirtMemIo`.
 
-## unsafe 代码清单
+## Unsafe inventory
 
-- `user_copy(...)`：
-  依赖调用前的用户地址范围检查、逐页复制边界和 exception-table fixup；普通复制
-  不在异常内回填，而是在返回任务上下文后处理缺页并重试当前页。
-- `user_atomic_load_u32(...)`：
-  依赖 4 字节对齐与用户地址范围检查；只读取用户字，并通过 exception-table
-  fixup 报告 fault。
-- `user_atomic_cmpxchg_u32(...)`：
-  依赖 4 字节对齐检查、用户地址范围检查，以及同一用户访问窗口与 exception-table fixup。
+- `user_copy(...)`:
+  Depends on the user-address range check before the call, per-page copy bounds, and the exception-table fixup. An ordinary copy does not fill the page inside the exception. It handles the fault after returning to task context and retries the current page.
+- `user_atomic_load_u32(...)`:
+  Depends on 4-byte alignment and the user-address range check. It only reads the user word and reports a fault through the exception-table fixup.
+- `user_atomic_cmpxchg_u32(...)`:
+  Depends on the 4-byte alignment check, the user-address range check, the same user-access window, and the exception-table fixup.
 
-## 内存安全不变量
+## Memory-safety invariants
 
-- `check_access()` 只允许访问用户空间有效区间。
-- `atomic_cmpxchg_u32()` / `atomic_load_u32()` / `atomic_u32_eq()` 额外要求地址 4 字节对齐。
-- `handle_page_fault()` 仅在当前线程显式进入用户内存访问窗口时处理 fault。
-- 普通复制不能在禁 IRQ 的异常处理路径等待块设备完成。调用方必须允许睡眠，
-  且不得持有禁止睡眠的锁；不通过放宽块驱动上下文检查规避这一要求。
-- `kuaccess` 必须保留 `MmSpace::handle_page_fault()` 的 typed outcome 分类：
-  只有 `Resolved` 和 retry-class outcome 可以转换为 trap handled；unmapped、
-  permission denied、bus error、OOM、no-progress 和 generic failure 必须转换为
-  user-copy / atomic-user 失败，而不是继续重试。
-- 普通复制允许同一页在 resolved 后继续缺页，以完成分阶段映射和写权限准备。
-  每页的全部缺页处理调用共用 16 次预算，包括 resolved 和 retry-class outcome；
-  显式 `NoProgress` 立即失败，预算耗尽仍不能复制则返回 `NoAccess`。
-  不能把部分初始化缓冲区报告为完整成功；读写分别使用 READ/WRITE fault 权限，
-  不能绕过只读映射。
-- 字符串 helper 只在成功读取完整字节流后再做 UTF-8 解释。
+- `check_access()` allows only the valid user-space interval.
+- `atomic_cmpxchg_u32()`, `atomic_load_u32()`, `atomic_u32_eq()`, and `fault_in_user_writeable()` also require the address to be 4-byte aligned.
+- `fault_in_user_writeable()` calls `MmSpace::handle_page_fault(WRITE)` directly in task context and does not modify the user word. The caller must be allowed to sleep and must not hold a non-sleepable lock. Only `Resolved` counts as success. Retry-class outcomes keep retrying, with no attempt cap. Permission denial, an unmapped address, and every other failure return `NoAccess` immediately. This path must not bypass a read-only mapping.
+- `handle_page_fault()` handles a fault only while the current thread has explicitly entered the user-memory access window.
+- An ordinary copy must not wait for block-device completion on the exception path with IRQs disabled. The caller must be allowed to sleep and must not hold a non-sleepable lock. The requirement is not met by relaxing block-driver context checks.
+- `kuaccess` must preserve the typed outcome classification of `MmSpace::handle_page_fault()`. Only `Resolved` and retry-class outcomes may become a handled trap. Unmapped, permission denied, bus error, OOM, no-progress, and generic failure must become a user-copy or atomic-user failure, not another retry.
+- An ordinary copy may fault the same page again after `Resolved`, so staged mapping and write-permission preparation can finish. Every fault-handling call for one page shares a budget of 16, including resolved and retry-class outcomes. An explicit `NoProgress` fails immediately. If the budget is exhausted and the copy still cannot finish, the result is `NoAccess`. A partially initialized buffer must not be reported as a complete success. Reads and writes use `READ` and `WRITE` fault permissions respectively and must not bypass a read-only mapping.
+- String helpers interpret bytes as UTF-8 only after the complete byte stream has been read successfully.
 
-## 线程安全
+## Thread safety
 
-- 不持有跨线程共享可变状态。
-- 线程本地的访问窗口标志由当前线程对象维护，不允许跨线程复用。
+- No mutable state is shared across threads.
+- The thread-local access-window flag is maintained by the current thread object and must not be reused across threads.
 
-## 威胁分析
+## Threat analysis
 
-- 越界地址：由 `check_access()` 拒绝。
-- 缺页或未映射页：转交地址空间 typed 缺页处理；无法解析为 resolved/retry 时向上传播失败。
-- 非 UTF-8 输入：映射为 `IllegalBytes`，避免把脏数据当路径或参数继续处理。
+- Out-of-range address: rejected by `check_access()`.
+- Fault or unmapped page: handed to the address space's typed fault handling. If it cannot be resolved as resolved or retry, the failure propagates upward.
+- Non-UTF-8 input: mapped to `IllegalBytes`, so dirty data is not processed further as a path or argument.
 
-## 故障模式与影响分析（FMEA）
+## Failure modes and effects (FMEA)
 
-- current task 不是线程：`access_user_memory()` 直接 panic，暴露调用方上下文错误。
-- 用户地址在访问过程中失效：返回 `MemError::NoAccess` 或等价 `KError`。
-- 页错误被错误线程接管：依赖访问窗口标志避免。
-- typed fault outcome 被错误压扁为 true：可能导致 user-copy 在不可恢复 fault 上反复重试；
-  `fault_outcome_to_trap_result()` 集中维护 outcome 到 trap bool 的唯一映射。
+- The current task is not a thread: `access_user_memory()` panics immediately, exposing a caller context error.
+- The user address becomes invalid during the access: returns `MemError::NoAccess` or the equivalent `KError`.
+- A page fault is taken over by the wrong thread: prevented by the access-window flag.
+- A typed fault outcome is incorrectly collapsed to true: a user copy could retry forever on an unrecoverable fault. `fault_outcome_to_trap_result()` is the single mapping from an outcome to the trap bool.
 
-## 故障管理
+## Failure handling
 
-- 地址/映射问题走 `Result` 返回。
-- 只有“线程上下文假设被破坏”这类内部不变量错误会 panic。
+- Address and mapping problems return through `Result`.
+- The only panic is an internal-invariant failure: the thread-context assumption was broken.
 
-## 已知限制
+## Known limitations
 
-- 当前 helper 只覆盖字符串装载与 `u32` 原子 load/cmpxchg；复杂结构体解析仍由各调用方自行组织。
-- 原子原语目前仅提供 32-bit load/cmpxchg；更大宽度或其它 RMW 操作按需再加。
+- The current helpers cover only string loads and `u32` atomic load/compare-exchange. Callers still assemble parsing of more complex structures themselves.
+- Atomic primitives currently provide only 32-bit load and compare-exchange. Wider operations or other read-modify-write operations are added when needed.
