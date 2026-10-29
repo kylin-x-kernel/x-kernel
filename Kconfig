@@ -14,6 +14,9 @@ config BUILD_TYPE_DEBUG
         A debug build with optimizations disabled and debug information enabled.
 endchoice
 
+# This is the build-time level: the console default and the floor of the logger's
+# filter. A runtime filter spec may raise verbosity above it and reveal the sites
+# compiled into the image; the logger never runs below it.
 choice
     prompt "LOG Level"
     default LOG_LEVEL_WARN

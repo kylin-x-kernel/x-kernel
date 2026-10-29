@@ -43,7 +43,11 @@ count can change immediately after observation and grants no admission guarantee
   inputs. Numeric lookup components are parsed, task-directory membership is
   checked, and unsupported names fail lookup (`src/task_nodes/root.rs`).
 - Writable controls include `comm`, `oom_score_adj`, trace event enables,
-  `sys/kernel/printk`, and optional `sysrq-trigger`. `comm` truncates to 15 bytes
+  `sys/kernel/printk`, `sys/kernel/log_filter`, and optional `sysrq-trigger`.
+  `log_filter` accepts one filter spec (`[<level>] [<target>=<level>]...`, at
+  most `MAX_FILTER_RULES` rules with `MAX_FILTER_TARGET`-byte targets); a write is
+  privilege-gated and either replaces the whole spec or fails with
+  `InvalidInput` and leaves the previous filter in place. `comm` truncates to 15 bytes
   and validates C-string/UTF-8 conversion; OOM adjustment accepts only parsed
   values in `[-1000, 1000]`. Tracing delegates validation to `ktracing`; SysRq
   accepts the first non-whitespace byte only when it is `t`.
@@ -120,7 +124,7 @@ different moments.
 | --- | --- | --- | --- | --- |
 | T-01 | Cross-image maps/heap mismatch | Medium | Binding changes after a reader captures its MM | Single-lock MM/heap capture and capability-local heap reads retain the pair. Contents remain live. |
 | T-02 | Stale task or torn-down MM access | High | Exit races with lookup, open, or read | Weak upgrades, fallible resource access, active MM-user retention, and locked VMA copies guard access. Retained views intentionally prolong mapping lifetime. |
-| T-03 | Information disclosure or unwanted controls | High | An insufficiently restricted caller reaches process/diagnostic nodes or writes controls | VFS permissions apply; `printk` explicitly checks `file.cred().is_privileged()`. Other listed callbacks have no equivalent local privilege check, and task reads have no local ptrace-style policy. Deployment access policy and further credential checks require separate audit. |
+| T-03 | Information disclosure or unwanted controls | High | An insufficiently restricted caller reaches process/diagnostic nodes or writes controls | VFS permissions apply; `printk` and `log_filter` both check `file.cred().is_privileged()` on write. The other listed callbacks have no equivalent local privilege check, and task reads have no local ptrace-style policy. Deployment access policy and further credential checks require separate audit. |
 | T-04 | Resource pressure and lock contention | Medium | Many retained maps opens, large VMA lists, or repeated rewinds | Ownership cleanup releases buffers and MM users, but procfs imposes no local quota on retained views or scan work. |
 | T-05 | Ambiguous diagnostic text | Low | Names or paths contain separators/newlines | Mount sources are mangled; maps paths and several other strings are emitted verbatim. Consumers must not treat all output as escaped records. |
 | T-06 | Zombie `exe` link resolves after exit | Low | `/proc/<pid>/exe` read while the target is a zombie | Read/follow/readlink require the target thread to be live and its process not exited, so a zombie's link reports `ENOENT` like Linux; `getattr` still succeeds with size 0. |

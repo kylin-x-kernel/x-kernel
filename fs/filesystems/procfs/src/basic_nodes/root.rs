@@ -116,17 +116,23 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 );
                 SimpleDir::new_maker(fs.clone(), Arc::new(pty))
             });
-            // Runtime log-level control: `cat` shows the current level as a
-            // number in X-Kernel's own level order (0=off, 1=error, 2=warn,
-            // 3=info, 4=debug, 5=trace); a privileged write (`echo 4 >
-            // /proc/sys/kernel/printk` or `echo debug > ...`) switches the
-            // level immediately without a rebuild.
+            // Runtime console-level control, with the contract this node has
+            // always had: `cat` reports the console default level as a number in
+            // X-Kernel's own order (0=off, 1=error, 2=warn, 3=info, 4=debug,
+            // 5=trace), and a privileged write (`echo 4 > ...`, `echo debug >
+            // ...`) changes it immediately without a rebuild.
+            //
+            // The per-target filter lives in `log_filter` below instead of here:
+            // this node keeps its historical single-value shape (and stays
+            // readable by existing scripts), and the module filter gets a node of
+            // its own rather than riding along in a private expression.
             //
             // NOTE: although this node reuses the Linux `/proc/sys/kernel/
             // printk` path, the value domain is X-Kernel-private and NOT
-            // Linux `console_loglevel`-compatible: here higher = more
-            // verbose (4 = debug), while Linux 4 means warn-only and its
-            // read side reports four numbers instead of one.
+            // Linux `console_loglevel`-compatible: numbers here are
+            // `0..=5` with higher = more verbose, while Linux reports four
+            // fields (`console_loglevel default_message_loglevel min max`) and
+            // treats a higher number as *less* verbose.
             kernel.add(
                 "printk",
                 SimpleFile::new_regular_with_permission(
@@ -148,7 +154,43 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                                 core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
                             let level =
                                 klogger::parse_log_level(text).ok_or(VfsError::InvalidInput)?;
-                            klogger::set_log_level_filter(level);
+                            // Level only: the module filter below is a separate
+                            // knob and must survive a level write.
+                            klogger::set_console_default(level);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            // Per-target console filter: an optional default level plus
+            // `target=level` overrides, matched by module-path prefix. Reads
+            // return the canonical spec of what is in force; a privileged write
+            // installs a whole spec. A level above the build cap is accepted (it
+            // stays readable) but has no records to act on.
+            kernel.add(
+                "log_filter",
+                SimpleFile::new_regular_with_permission(
+                    fs.clone(),
+                    NodePermission::OWNER_READ
+                        | NodePermission::OWNER_WRITE
+                        | NodePermission::GROUP_READ
+                        | NodePermission::OTHER_READ,
+                    CommandFile::new(|operation| match operation {
+                        SimpleFileOperation::Read => {
+                            let mut buf = [0u8; klogger::MAX_FILTER_SPEC];
+                            let len =
+                                klogger::filter_spec(&mut buf).ok_or(VfsError::InvalidInput)?;
+                            let spec = core::str::from_utf8(&buf[..len])
+                                .map_err(|_| VfsError::InvalidInput)?;
+                            Ok(Some(format!("{spec}\n")))
+                        }
+                        SimpleFileOperation::Write { file, data } => {
+                            if !file.cred().is_privileged() {
+                                return Err(VfsError::OperationNotPermitted);
+                            }
+                            let text =
+                                core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            klogger::set_filter_spec(text).map_err(|_| VfsError::InvalidInput)?;
                             Ok(None)
                         }
                     }),

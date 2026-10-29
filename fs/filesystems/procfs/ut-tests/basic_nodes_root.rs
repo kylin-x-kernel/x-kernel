@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{format, sync::Arc};
+use alloc::{format, string::String, sync::Arc};
 
 use kvfs::{
     DirMapping, FileSystemType, Filename, Mount, NodePermission, OpenFlags, SimpleDir, SimpleFs,
@@ -51,50 +51,98 @@ fn pty_nodes_report_limits_and_reject_root_writes() {
     }
 }
 
-#[def_test]
-fn printk_node_reads_and_writes_runtime_log_level() {
+/// `serial`: `printk` and `log_filter` own the process-global console filter, so
+/// they must not interleave with another test that reads or writes it.
+#[def_test(serial)]
+fn printk_and_log_filter_nodes_read_and_write_the_console_filter() {
     let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
         let mut root = DirMapping::new();
         add_root_entries(&mut root, fs.clone());
         SimpleDir::new_maker(fs, Arc::new(root))
     });
     let root = Mount::new_root(&super_block).root_path();
-    let printk = Filename::new("/sys/kernel/printk")
-        .open_with_flags_at(
-            &root,
-            &root,
-            OpenFlags::READ_WRITE.bits(),
-            NodePermission::empty(),
-            NodePermission::empty(),
-            kcred::initial_cred(),
-        )
-        .unwrap();
+    let open = |path: &str| {
+        Filename::new(path)
+            .open_with_flags_at(
+                &root,
+                &root,
+                OpenFlags::READ_WRITE.bits(),
+                NodePermission::empty(),
+                NodePermission::empty(),
+                kcred::initial_cred(),
+            )
+            .unwrap()
+    };
+    let printk = open("/sys/kernel/printk");
+    let log_filter = open("/sys/kernel/log_filter");
 
-    let previous = klogger::current_log_level();
+    // Restore whatever the boot (or a previous test) installed.
+    let mut previous_buf = [0u8; klogger::MAX_FILTER_SPEC];
+    let previous_len = klogger::filter_spec(&mut previous_buf).unwrap_or(0);
 
-    // A level number (with trailing newline, as `echo` writes it) takes
-    // effect immediately...
+    // `printk` keeps its historical single-value contract: a level number (with
+    // the trailing newline `echo` writes) or a level name, reflected by the
+    // number the node reports.
     assert_eq!(printk.write(b"4\n"), Ok(2));
     assert_eq!(klogger::current_log_level(), log::LevelFilter::Debug);
-    // ...and so does a level name.
     assert_eq!(printk.write(b"warn"), Ok(4));
     assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
-
-    // Reading reports the canonical number of the active level.
-    // (`read_from` with an explicit position sidesteps the file offset
-    // advanced by the writes above.)
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 64];
     let mut pos = 0;
     assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(2));
     assert_eq!(&buf[..2], b"2\n");
 
-    // Invalid or out-of-range levels are rejected and leave the level
-    // unchanged.
+    // A level write is a level write: the module filter is a separate knob, and
+    // the level it sets becomes the spec's default.
+    assert_eq!(log_filter.write(b"warn drv_uart=trace"), Ok(19));
+    assert_eq!(printk.write(b"4"), Ok(1));
+    let mut pos = 0;
+    assert_eq!(log_filter.read_from(&mut buf, &mut pos), Ok(21));
+    assert_eq!(&buf[..21], b"debug drv_uart=trace\n");
+    // ...while `printk` still reports the bare level.
+    let mut pos = 0;
+    assert_eq!(printk.read_from(&mut buf, &mut pos), Ok(2));
+    assert_eq!(&buf[..2], b"4\n");
+
+    // Invalid input is rejected and leaves the filter unchanged.
     assert!(printk.write(b"banana").is_err());
     assert!(printk.write(b"6").is_err());
-    assert_eq!(klogger::current_log_level(), log::LevelFilter::Warn);
+    assert!(log_filter.write(b"warn bogus=nonsense").is_err());
+    let mut pos = 0;
+    assert_eq!(log_filter.read_from(&mut buf, &mut pos), Ok(21));
+    assert_eq!(&buf[..21], b"debug drv_uart=trace\n");
 
-    klogger::set_log_level_filter(previous);
+    // A spec that is accepted must also be reportable: the canonical text is
+    // longer than any fixed 256-byte buffer once the rules are long, and a node
+    // that accepts a write but fails the read-back with EINVAL is worse than
+    // useless (the boot banner would silently show only the default level).
+    let mut long_spec = String::from("warn");
+    for index in 0..klogger::MAX_FILTER_RULES {
+        // Distinct 24-byte targets, one per rule: the maximum the spec grammar
+        // accepts.
+        long_spec.push_str(&format!(" {index:0>24}=debug"));
+    }
+    // The canonical form is larger than the 256-byte buffer an earlier revision
+    // used, which is exactly what made this read-back fail.
+    assert!(long_spec.len() > 256);
+    assert_eq!(log_filter.write(long_spec.as_bytes()), Ok(long_spec.len()));
+
+    let mut long_buf = [0u8; klogger::MAX_FILTER_SPEC];
+    let mut pos = 0;
+    assert_eq!(
+        log_filter.read_from(&mut long_buf, &mut pos),
+        Ok(long_spec.len() + 1)
+    );
+    assert_eq!(
+        core::str::from_utf8(&long_buf[..long_spec.len()]),
+        Ok(long_spec.as_str())
+    );
+
+    if let Ok(text) = core::str::from_utf8(&previous_buf[..previous_len]) {
+        klogger::set_log_level(text);
+    } else {
+        klogger::set_log_level_filter(log::LevelFilter::Warn);
+    }
 }
 
 /// Linux installs `proc_reg_file_ops` (whose `proc_reg_poll` falls back to

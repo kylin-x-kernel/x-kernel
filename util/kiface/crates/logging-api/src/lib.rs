@@ -23,4 +23,11 @@ pub trait LogContextIf {
     fn cpu_id() -> Option<usize>;
     /// Samples an optional task identity without creating a task reference.
     fn task_id() -> Option<u64>;
+    /// Whether the caller runs in non-maskable-interrupt context.
+    ///
+    /// The logger's locks only exclude ordinary interrupts, so an NMI arriving
+    /// while the same CPU holds them would deadlock. The logger therefore drops
+    /// records from NMI context instead of taking the locks; emergency output
+    /// from there has to use the platform's atomic console path.
+    fn in_nmi() -> bool;
 }

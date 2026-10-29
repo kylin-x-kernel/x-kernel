@@ -196,8 +196,14 @@ Maps retains an O(VMA-count) copied list and clones path strings while holding
 the MM mutex. Addresses use a minimum width of 12 hex digits and device numbers
 are rendered as `00:00`. Several status/memory fields and non-cgroup namespace
 identities are placeholders. Mount reporting uses synthetic device identities
-and is not a globally frozen namespace snapshot. `printk` uses X-Kernel log-level
-values, not Linux console-loglevel semantics.
+and is not a globally frozen namespace snapshot. `printk` keeps its historical
+single-value contract: it reads the console default level as a number in
+X-Kernel's order (`0=off … 5=trace`) and a privileged write of a level name or
+number changes that level, leaving the module filter untouched — a target with a
+surviving override therefore keeps printing, and full silence comes from writing
+`off`/`0` to `sys/kernel/log_filter`, which drops every rule. The filter spec
+lives in `sys/kernel/log_filter` (see the logging nodes above); the value domain
+is X-Kernel-private and *not* Linux's inverted `console_loglevel`.
 
 `/proc/<pid>/ns/<type>` inode numbers come from per-subsystem ID allocators
 (the `kcred` namespace allocator for mnt/net/ipc/uts/cgroup, the

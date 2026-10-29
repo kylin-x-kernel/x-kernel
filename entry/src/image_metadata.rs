@@ -12,10 +12,22 @@ pub(crate) fn print() {
         Ok(build_info) => {
             for line in build_info.trim_end_matches('\n').lines() {
                 if line.starts_with("log_level = ") {
-                    kprintln!(
-                        "log_level = {}",
-                        klogger::level_name(klogger::current_log_level())
-                    );
+                    // Report what is actually active, including per-target
+                    // overrides (`warn ksyscall=debug`), not the build default.
+                    let mut spec = [0u8; klogger::MAX_FILTER_SPEC];
+                    match klogger::filter_spec(&mut spec) {
+                        Some(len) => match core::str::from_utf8(&spec[..len]) {
+                            Ok(text) => kprintln!("log_level = {text}"),
+                            Err(_) => kprintln!(
+                                "log_level = {}",
+                                klogger::level_name(klogger::current_log_level())
+                            ),
+                        },
+                        None => kprintln!(
+                            "log_level = {}",
+                            klogger::level_name(klogger::current_log_level())
+                        ),
+                    }
                 } else {
                     kprintln!("{line}");
                 }

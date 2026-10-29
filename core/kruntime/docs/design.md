@@ -366,7 +366,12 @@ BootInfo*
     → memspace::init_memory_management
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
-        (日志等级：优先取启动命令行 `loglevel=` / `quiet` / `debug`，否则 Kconfig 默认)
+        (Log filtering: `init_klogger(configured_log_level())` fixes the build
+         level — the console default and the floor of the log filter — and
+         `resolve_log_level(khal::cmdline())` then applies an explicit
+         `loglevel=` / `quiet` / `debug` request on top of it. A rejected request is
+         reported through `kprintln!` and the scan continues, so a later valid one
+         still applies.)
     → prepare_interrupts
     → init_scheduler
     → init_interrupt (softirq runner, timer/IPI/PMU handlers,

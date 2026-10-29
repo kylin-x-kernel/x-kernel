@@ -72,6 +72,7 @@ pub fn run_boot_benchmarks() {
 unittest::path_mod_test!(tests_workqueue, "../ut-tests/tests_workqueue/mod.rs");
 unittest::path_mod_test!(tests_irq_startup, "../ut-tests/irq_startup.rs");
 unittest::path_mod_test!(page_metadata_tests, "../ut-tests/page_metadata.rs");
+unittest::path_mod_test!(log_filter_tests, "../ut-tests/log_filter.rs");
 unittest::path_mod_test!(
     tests_irq_management_lifecycle,
     "../ut-tests/irq_management_lifecycle.rs"
@@ -149,6 +150,12 @@ impl kiface_logging_api::LogContextIf {
         }
     }
 
+    fn in_nmi() -> bool {
+        // `kirq` tracks effective NMI nesting per CPU for RCU watching, which is
+        // exactly the condition under which the logger must not take its locks.
+        kirq::context::is_in_nmi()
+    }
+
     fn task_id() -> Option<u64> {
         if is_init_ok() {
             ktask::current_may_uninit().map(|curr| curr.owner_key())
@@ -191,43 +198,62 @@ const fn configured_log_level() -> &'static str {
     } else if kbuild_config::LOG_LEVEL_TRACE {
         "trace"
     } else {
-        "off"
+        // The Kconfig choice has no `off` option, so "no level selected" is a
+        // broken configuration rather than a request for silence. Report `error`
+        // so the console default, the logger floor and the boot banner all agree
+        // on the same conservative level instead of leaving the console mute.
+        "error"
     }
 }
 
-/// Resolve the boot-time log level: a `loglevel=` kernel command-line
-/// parameter overrides the Kconfig default, in the style of Linux's
-/// `loglevel=` parameter but using X-Kernel's own level values (`0..=5` in
-/// off/error/warn/info/debug/trace order, or a level name). `quiet` and
-/// `debug` are accepted as shorthand for `loglevel=2` (warn) and
-/// `loglevel=4` (debug) respectively. Invalid `loglevel=` values are
-/// reported and ignored, falling back to the Kconfig default.
-fn resolve_boot_log_level() -> &'static str {
-    if let Some(cmdline) = khal::cmdline() {
+/// Resolve the boot-time console filter from the kernel command line.
+///
+/// `loglevel=` takes a filter spec — a bare level here, since a multi-token spec
+/// has to stay inside one whitespace-free word — and `quiet`/`debug` are the
+/// `loglevel=2`/`loglevel=4` shorthands. A rejected `loglevel=` is reported and
+/// the scan continues, so a later valid one on the same command line still
+/// applies. Without a command-line request the build level is used.
+fn resolve_log_level(cmdline: Option<&'static str>) -> &'static str {
+    if let Some(cmdline) = cmdline {
         for token in cmdline.split_ascii_whitespace() {
-            if let Some(value) = token.strip_prefix("loglevel=")
-                && !value.is_empty()
+            if let Some(spec) = token.strip_prefix("loglevel=")
+                && !spec.is_empty()
             {
-                return if klogger::parse_log_level(value).is_some() {
-                    value
-                } else {
-                    warn!(
-                        "ignoring invalid loglevel={value} on the kernel command line; expected a \
-                         level 0..=5 or off/error/warn/info/debug/trace"
-                    );
-                    configured_log_level()
-                };
+                if klogger::set_filter_spec(spec).is_ok() {
+                    return spec;
+                }
+                // `kprintln!`, not `warn!`: the level this is installing is what
+                // would filter the warning.
+                kprintln!("ignoring invalid loglevel={spec} on the kernel command line");
+                continue;
             }
         }
         for token in cmdline.split_ascii_whitespace() {
-            match token {
-                "quiet" => return "2",
-                "debug" => return "4",
-                _ => {}
+            let shorthand = match token {
+                "quiet" => Some("2"),
+                "debug" => Some("4"),
+                _ => None,
+            };
+            if let Some(level) = shorthand {
+                let _ = klogger::set_filter_spec(level);
+                return level;
             }
         }
     }
-    configured_log_level()
+    apply_build_log_level()
+}
+
+/// Applies the build's log level as the console default.
+///
+/// `klogger::init_klogger` already installed it as the console default and as the
+/// logger's floor; re-applying it here keeps the two in step when `LOG_LEVEL_*`
+/// resolves through the fallback in `configured_log_level()`. The choice only
+/// ever yields a valid level, but a rejected spec must not abort boot: the
+/// previous filter stays in place.
+fn apply_build_log_level() -> &'static str {
+    let level = configured_log_level();
+    let _ = klogger::set_filter_spec(level);
+    level
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -487,8 +513,8 @@ pub fn rust_main(arg: usize) -> ! {
         ),
     );
 
-    klogger::init_klogger();
-    klogger::set_log_level(resolve_boot_log_level());
+    klogger::init_klogger(configured_log_level());
+    klogger::set_log_level(resolve_log_level(khal::cmdline()));
     info!("Logging is enabled.");
     info!(
         "Primary CPU {} started, boot_info = {arg:#x}.",
