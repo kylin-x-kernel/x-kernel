@@ -63,6 +63,23 @@ fn pty_slave_registration_conflict_rolls_back_only_its_master() {
     assert!(kvfs::cdev_del(slave, UNIX98_PTY_MINOR_COUNT).is_some());
 }
 
+/// A lightweight filesystem identity to record as the pty owner in unit
+/// tests (allocation bookkeeping only; no inodes are projected through it).
+fn test_owner_fs() -> Arc<SimpleFs> {
+    use kvfs::{DirMapping, FileSystemType, SimpleDir};
+    static FS_TYPE: FileSystemType = FileSystemType::nodev("ktty-pty-test-owner", init_test_fs);
+    let mut captured: Option<Arc<SimpleFs>> = None;
+    SimpleFs::new_with(&FS_TYPE, 0, |fs| {
+        captured = Some(fs.clone());
+        SimpleDir::new_maker(fs, alloc::sync::Arc::new(DirMapping::new()))
+    });
+    captured.expect("root builder runs with its filesystem")
+}
+
+fn init_test_fs(_context: &mut kvfs::FsContext) -> kvfs::VfsResult<()> {
+    Ok(())
+}
+
 fn slave_inode() -> Arc<VfsInode> {
     VfsInode::new_file_with_inode_operations(
         Arc::new(()),
@@ -79,14 +96,14 @@ fn slave_inode() -> Arc<VfsInode> {
 #[def_test(serial)]
 fn pty_unpublished_reservations_count_and_rollback() {
     let before = pty_allocated_count();
-    let pair = PtyPair::allocate().unwrap();
+    let pair = PtyPair::allocate(&test_owner_fs()).unwrap();
     let released = pair.number;
     // An unpublished pair consumes capacity even though no slave is visible.
     assert_eq!(pty_allocated_count(), before + 1);
     assert!(pty_slave_inode(released).is_none());
     drop(pair);
     assert_eq!(pty_allocated_count(), before);
-    let replacement = PtyPair::allocate().unwrap();
+    let replacement = PtyPair::allocate(&test_owner_fs()).unwrap();
     assert_eq!(replacement.number, released);
     drop(replacement);
     assert_eq!(pty_allocated_count(), before);
@@ -114,7 +131,7 @@ fn pty_reservations_exhaust_and_reuse_capacity() {
 #[def_test(serial)]
 fn pty_master_close_hides_node_but_slaves_retain_number() {
     let before = pty_allocated_count();
-    let pair = PtyPair::allocate().unwrap();
+    let pair = PtyPair::allocate(&test_owner_fs()).unwrap();
     let number = pair.number;
     assert!(pair.acquire_open(TtyKind::Terminal).is_err());
     let master = pair.acquire_open(TtyKind::PtyMaster).unwrap();
@@ -128,11 +145,11 @@ fn pty_master_close_hides_node_but_slaves_retain_number() {
     assert!(!pty_slave_numbers().contains(&number));
     assert!(pair.acquire_open(TtyKind::Terminal).is_err());
     if pty_allocated_count() < pty_limit() {
-        let other_pair = PtyPair::allocate().unwrap();
+        let other_pair = PtyPair::allocate(&test_owner_fs()).unwrap();
         assert_ne!(other_pair.number, number);
         drop(other_pair);
     } else {
-        assert_eq!(PtyPair::allocate().err(), Some(KError::StorageFull));
+        assert_eq!(PtyPair::allocate(&test_owner_fs()).err(), Some(KError::StorageFull));
     }
     drop(slave);
     assert_eq!(pty_allocated_count(), before + 1);
@@ -141,16 +158,46 @@ fn pty_master_close_hides_node_but_slaves_retain_number() {
 
     // Keeping the old pair or inode alive does not retain its number, and a
     // successor does not restore the old pair's admission.
-    let successor = PtyPair::allocate().unwrap();
+    let successor = PtyPair::allocate(&test_owner_fs()).unwrap();
     assert_eq!(successor.number, number);
     assert!(pair.acquire_open(TtyKind::PtyMaster).is_err());
     assert!(pair.acquire_open(TtyKind::Terminal).is_err());
 }
 
+/// The projection queries are owner-scoped: a pair published through one
+/// filesystem must be invisible to every other one, even though the pty number
+/// they would both ask for is global. devfs `/dev/pts` and each devpts mount
+/// rely on this to keep a container's ptys out of the host's view.
+#[def_test(serial)]
+fn pty_projection_is_scoped_to_the_owning_filesystem() {
+    let owner_a = test_owner_fs();
+    let owner_b = test_owner_fs();
+    let pair = PtyPair::allocate(&owner_a).unwrap();
+    let number = pair.number;
+    let master = pair.acquire_open(TtyKind::PtyMaster).unwrap();
+    let inode = slave_inode();
+    pair.publish_slave(inode.clone()).unwrap();
+
+    // The owner resolves its own slave, by number and in the listing.
+    assert!(Arc::ptr_eq(
+        &pty_slave_inode_for(&owner_a, number).unwrap(),
+        &inode
+    ));
+    assert!(pty_slave_numbers_for(&owner_a).contains(&number));
+    // A different filesystem asking for the same number gets nothing, so its
+    // directory cannot project another instance's slave.
+    assert!(pty_slave_inode_for(&owner_b, number).is_none());
+    assert!(!pty_slave_numbers_for(&owner_b).contains(&number));
+
+    drop(master);
+    assert!(pty_slave_inode_for(&owner_a, number).is_none());
+    assert!(!pty_slave_numbers_for(&owner_a).contains(&number));
+}
+
 #[def_test(serial)]
 fn pty_last_slave_close_does_not_retire_live_master() {
     let before = pty_allocated_count();
-    let pair = PtyPair::allocate().unwrap();
+    let pair = PtyPair::allocate(&test_owner_fs()).unwrap();
     let master = pair.acquire_open(TtyKind::PtyMaster).unwrap();
     let inode = slave_inode();
     pair.publish_slave(inode.clone()).unwrap();
@@ -165,7 +212,7 @@ fn pty_last_slave_close_does_not_retire_live_master() {
 #[def_test(user, serial)]
 fn pty_master_close_preserves_unprocessed_input_before_read_eio() {
     let before = pty_allocated_count();
-    let pair = PtyPair::allocate().unwrap();
+    let pair = PtyPair::allocate(&test_owner_fs()).unwrap();
     let master_open = pair.acquire_open(TtyKind::PtyMaster).unwrap();
     pair.publish_slave(slave_inode()).unwrap();
     let slave_open = pair.acquire_open(TtyKind::Terminal).unwrap();
@@ -260,7 +307,7 @@ fn pty_master_close_preserves_unprocessed_input_before_read_eio() {
 fn pty_slave_open_racing_master_close_never_resurrects_pair() {
     let before = pty_allocated_count();
     for _ in 0..32 {
-        let pair = PtyPair::allocate().unwrap();
+        let pair = PtyPair::allocate(&test_owner_fs()).unwrap();
         let master = pair.acquire_open(TtyKind::PtyMaster).unwrap();
         pair.publish_slave(slave_inode()).unwrap();
         let start = Arc::new(ksync::Semaphore::new(0));

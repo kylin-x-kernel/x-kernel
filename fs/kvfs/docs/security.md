@@ -272,7 +272,11 @@ umount lock 串行化 hook、发布与最终 shutdown。最后 active 引用先�
 lock，dying/dead 状态拒绝新的 mount activation。context 绑定唯一目标 superblock，callback
 只从 context 恢复 owner；VFS 在调用前验证 identity。context 分别独占 parsed `fs_private`
 和拟议 `s_fs_info`，并携带 `sb_flags_mask`，因此失败 transaction 不污染既有 `s_fs_info`。
-默认 hook 接受纯 VFS flags 变更；block-backed superblock 由 VFS 在 hook 前统一验证
+The default hook accepts pure VFS-flags changes; a block-backed superblock
+is validated by the VFS in two phases — pre-hook against the caller's
+proposed flags (gating hook execution) and post-hook against the
+data-adjusted final flags (gating publication, covering data-level
+`ro`/`rw` adjustments).
 canonical device 的只读状态。显式 filesystem
 sync 和全局 Weak registry sync snapshot
 也通过同一 umount lock 与 final shutdown 串行化，并跳过 dying/dead superblock。

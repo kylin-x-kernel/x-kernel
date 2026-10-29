@@ -55,6 +55,6 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     );
     root.add(
         "pts",
-        SimpleDir::new_maker(fs, alloc::sync::Arc::new(PtsDir)),
+        SimpleDir::new_maker(fs.clone(), alloc::sync::Arc::new(PtsDir::new(fs))),
     );
 }

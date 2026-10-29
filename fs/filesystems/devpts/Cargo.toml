@@ -1,0 +1,25 @@
+[package]
+name = "devpts"
+description = "Devpts pseudo-terminal filesystem for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+inherit-methods-macro = "0.1.0"
+ktty.workspace = true
+kcred.workspace = true
+kerrno.workspace = true
+kprocess.workspace = true
+kalloc-types.workspace = true
+kvfs.workspace = true
+ksync.workspace = true
+macros.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

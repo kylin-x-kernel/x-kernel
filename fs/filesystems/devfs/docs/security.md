@@ -52,7 +52,7 @@ the pair or its number allocated. ktty owns admission and reclamation; no devfs
 table or per-pair driver registration retains closed endpoints.
 VFS derives capabilities from the final backend and file open mode; poll results,
 event masks and registration errors remain the backend's responsibility.
-devfs supplies only an unpublished, weakly bound slave inode to `open_ptmx`;
+devfs supplies its own `SimpleFs` as the owner identity key to `open_ptmx` — ktty compares it (`Arc::ptr_eq`/`owned_by`) to scope which pty slaves devfs may project — plus an unpublished, weakly bound slave inode constructor;
 ktty controls allocation, master opening and publication. PTMX installs and
 opens its master once, without holding registry locks. Successful
 open transfers release responsibility to the final file; a failed backend open

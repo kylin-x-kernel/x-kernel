@@ -40,4 +40,13 @@ config KFEAT_FS_CGROUP2
       Enable the cgroup v2 filesystem and mount the unified hierarchy at
       /sys/fs/cgroup in the initial mount namespace.
 
+config KFEAT_FS_DEVPTS
+    bool "Enable devpts (Unix98 pty) filesystem support"
+    depends on KFEAT_FS
+    default y
+    help
+      Enable the per-mount devpts instances behind /dev/ptmx and /dev/pts.
+      Paired with devfs, which stays unconditionally linked as the /dev
+      backbone.
+
 endmenu

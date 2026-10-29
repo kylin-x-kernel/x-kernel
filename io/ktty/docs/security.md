@@ -146,6 +146,13 @@ after a foreground update completes.
 
 ## Threat Analysis
 
+The owning filesystem recorded on each pair is a protected asset: a pair's
+slave inode may be resolved (`pty_slave_inode_for`) or listed
+(`pty_slave_numbers_for`) only by the filesystem recorded as its owner —
+the check is the pair's `owned_by` comparison (`Arc::ptr_eq` on the recorded
+owner), and denial is a `None` answer or absence from the listing, never a
+foreign inode.
+
 The filesystem callback passed to `open_ptmx` constructs an unpublished
 inode outside PTY locks and must hold only a weak pair reference. ktty alone
 orders master opening and publication; callback errors release the reservation.

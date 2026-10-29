@@ -1113,12 +1113,24 @@ impl SuperBlock {
         {
             return Err(VfsError::InvalidInput);
         }
+        // Two-phase validation. Phase one gates hook execution with the
+        // caller-proposed flags, so a remount the VFS would reject never
+        // reaches the filesystem callback (whose side effects — ext4's
+        // statfs mode, say — are not rolled back on rejection).
+        let caller_flags = (self.flags() & !context.sb_flags_mask())
+            | (context.sb_flags() & context.sb_flags_mask());
+        if let Some(block_device) = self.block_device() {
+            validate_block_device_flags(block_device, caller_flags)?;
+        }
+        // The callback may adjust the proposal from its own mount data
+        // (`ro`/`rw`, Linux `vfs_parse_sb_flag`); phase two re-validates the
+        // adjusted values before anything is published.
+        context.reconfigure()?;
         let mask = context.sb_flags_mask();
         let flags = (self.flags() & !mask) | (context.sb_flags() & mask);
         if let Some(block_device) = self.block_device() {
             validate_block_device_flags(block_device, flags)?;
         }
-        context.reconfigure()?;
         self.flags.store(flags);
         Ok(())
     }

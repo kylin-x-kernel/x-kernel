@@ -331,7 +331,11 @@ close operation does not make destruction of a retained inode IRQ-safe.
 - `src/tty/mod.rs`: TTY file operations and the `TC*`/`TIOC*` ioctl
   boundary.
 - `src/tty/ntty.rs`, `src/tty/pty.rs`: the console TTY and PTY backends.
-- `src/tty/pty_pair.rs`: PTY admission, open-file uses, registry and number ownership.
+- `src/tty/pty_pair.rs`: PTY admission, open-file uses, registry and number
+  ownership; each pair records its allocating filesystem
+  (`PtyPair.owner: Weak<SimpleFs>`) and lookup/listing is owner-scoped
+  (`pty_slave_inode_for`/`pty_slave_numbers_for` answer only for the
+  requesting filesystem).
 
 ## Non-Responsibilities
 
@@ -340,8 +344,14 @@ close operation does not make destruction of a retained inode IRQ-safe.
 - No process, session, or credential ownership: sessions and process
   groups live in `kprocess`; `ktty` only holds weak references and asks
   it to resolve PGIDs.
-- No devfs node construction: devfs projects each PTY as a persistent slave inode;
-  ktty owns allocation/admission and retains the inode without constructing it.
+- No devfs node construction: projection is owner-scoped — the consumer
+  supplies its own `Arc<SimpleFs>` and sees only pairs it allocated. devfs
+  projects each of its own PTYs as a persistent slave inode, and each devpts
+  mount is a second projecting party: its `ptmx` node calls
+  `tty::open_ptmx` with its own filesystem, and
+  `pty_slave_inode_for`/`pty_slave_numbers_for` resolve only pairs owned by
+  that filesystem (a foreign owner gets nothing). ktty owns
+  allocation/admission and retains the inode without constructing it.
 - No signal delivery policy: control characters that generate signals
   are turned into `ksignal` requests by the line discipline; `ktty`
   does not decide delivery.

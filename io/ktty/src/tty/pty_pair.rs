@@ -4,14 +4,17 @@
 
 //! Original PTY identities, open-file ownership and allocated numbers.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 use intrusive_collections::{KeyAdapter, RBTree, RBTreeAtomicLink, intrusive_adapter};
 use kerrno::{KError, KResult};
 use kprocess::ControllingTerminal;
 use kspin::SpinNoPreempt;
 use ksync::Mutex;
-use kvfs::{DeviceFileOps, DeviceId, VfsFileBuilder, VfsInode, open_character_device};
+use kvfs::{DeviceFileOps, DeviceId, SimpleFs, VfsFileBuilder, VfsInode, open_character_device};
 
 use super::{PtyDriver, TtyKind, pty::create_endpoints};
 use crate::port::InputWork;
@@ -69,12 +72,20 @@ fn register_pty_ranges(master: DeviceId, slave: DeviceId) -> KResult<()> {
 /// holds only a weak pair reference. It runs without PTY locks held. Construction
 /// failure releases the reservation; later failure is covered by the builder's
 /// open-file use. The callback must not publish the inode independently.
+///
+/// `owner` is an identity key, not just a bookkeeping record: it is stored as
+/// a weak reference and later compared with [`Arc::ptr_eq`] by
+/// [`pty_slave_inode_for`]/[`pty_slave_numbers_for`], so every projection that
+/// must list this pair's slave has to pass that exact `Arc<SimpleFs>` — a
+/// different instance's filesystem sees an empty directory rather than an
+/// error.
 pub fn open_ptmx(
+    owner: &Arc<SimpleFs>,
     inode: &VfsInode,
     file: &mut VfsFileBuilder,
     create_slave_inode_fn: impl FnOnce(&Arc<PtyPair>) -> KResult<Arc<VfsInode>>,
 ) -> KResult<()> {
-    let pair = PtyPair::allocate()?;
+    let pair = PtyPair::allocate(owner)?;
     let slave_inode = create_slave_inode_fn(&pair)?;
     pair.open_master(inode, file)?;
     pair.publish_slave(slave_inode)
@@ -146,6 +157,11 @@ struct PairState {
 pub struct PtyPair {
     link: RBTreeAtomicLink,
     number: u32,
+    /// The filesystem whose `ptmx` allocated this pair (weak: the owner out
+    /// living the pair is fine, and the pair must not keep its filesystem
+    /// alive). Per-owner projection (devfs `/dev/pts` vs per-mount devpts
+    /// instances) keys on it, mirroring Linux's per-superblock devpts idr.
+    owner: Weak<SimpleFs>,
     state: Mutex<PairState>,
 }
 
@@ -153,7 +169,7 @@ impl PtyPair {
     /// Reserves a number and constructs connected endpoints, initially hidden.
     /// Dropping an unopened pair rolls back the reservation and endpoint work.
     /// Returns `ENOSPC` when all numbers are allocated; it never waits for space.
-    fn allocate() -> KResult<Arc<Self>> {
+    fn allocate(owner: &Arc<SimpleFs>) -> KResult<Arc<Self>> {
         let number = PtyNumber::reserve()?;
         Ok(Arc::new_cyclic(|weak| {
             let (master, slave) = create_endpoints(Some(weak.clone()));
@@ -171,6 +187,7 @@ impl PtyPair {
             Self {
                 link: RBTreeAtomicLink::new(),
                 number: number.0,
+                owner: Arc::downgrade(owner),
                 state: Mutex::new(PairState {
                     is_published: false,
                     has_master: false,
@@ -325,6 +342,13 @@ impl PtyPair {
         drop(removed);
     }
 
+    /// Returns whether this pair was allocated through `owner`'s filesystem.
+    fn owned_by(&self, owner: &Arc<SimpleFs>) -> bool {
+        self.owner
+            .upgrade()
+            .is_some_and(|recorded| Arc::ptr_eq(&recorded, owner))
+    }
+
     fn visible_inode(&self) -> Option<Arc<VfsInode>> {
         let state = self.state.lock();
         if !state.has_master || !state.is_published {
@@ -353,14 +377,54 @@ impl Drop for PtyOpen {
     }
 }
 
-/// Looks up the persistent inode of a currently visible slave in task context.
-pub fn pty_slave_inode(number: u32) -> Option<Arc<VfsInode>> {
+/// Looks up the persistent inode of a currently visible slave in task context,
+/// ignoring which filesystem owns the pair.
+#[cfg(unittest)]
+pub(crate) fn pty_slave_inode(number: u32) -> Option<Arc<VfsInode>> {
     let pair = PTYS.lock().pairs.find(&number).clone_pointer()?;
     pair.visible_inode()
 }
 
-/// Snapshots visible slave numbers; concurrent close may invalidate a result.
-pub fn pty_slave_numbers() -> Vec<u32> {
+/// Looks up a visible slave inode **owned by `owner`'s filesystem**.
+///
+/// Pair numbers are global, but each owner (the devfs `/dev/pts` view or a
+/// per-mount devpts instance) must only ever resolve its own pairs — a
+/// number recycled by another owner must not leak their slave inode.
+pub fn pty_slave_inode_for(owner: &Arc<SimpleFs>, number: u32) -> Option<Arc<VfsInode>> {
+    let pair = PTYS.lock().pairs.find(&number).clone_pointer()?;
+    (pair.owned_by(owner)).then(|| pair.visible_inode())?
+}
+
+/// Snapshots the visible slave numbers owned by `owner`'s filesystem.
+pub fn pty_slave_numbers_for(owner: &Arc<SimpleFs>) -> Vec<u32> {
+    // Two single-lock phases. Phase one collects the owner's candidate
+    // numbers under the registry lock; phase two re-validates each candidate
+    // with the owner-checked visibility lookup, which re-acquires the locks
+    // in the documented registry->pair order used by publish/release (the
+    // pair-state mutex is a blocking lock and must never be taken inside
+    // the PTYS spinlock scope). The answer is whatever phase two sees —
+    // nothing relies on the candidate set surviving the gap, so a number
+    // recycled to another instance in between is filtered out rather than
+    // misreported.
+    let candidates: Vec<u32> = {
+        let registry = PTYS.lock();
+        registry
+            .pairs
+            .iter()
+            .filter(|pair| pair.owned_by(owner))
+            .map(|pair| pair.number)
+            .collect()
+    };
+    candidates
+        .into_iter()
+        .filter(|&number| pty_slave_inode_for(owner, number).is_some())
+        .collect()
+}
+
+/// Snapshots visible slave numbers, ignoring which filesystem owns them;
+/// concurrent close may invalidate a result.
+#[cfg(unittest)]
+pub(crate) fn pty_slave_numbers() -> Vec<u32> {
     let mut numbers = Vec::with_capacity(PTY_CAPACITY as usize);
     {
         let registry = PTYS.lock();

@@ -1198,6 +1198,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "devpts"
+version = "0.3.0-dev"
+dependencies = [
+ "inherit-methods-macro",
+ "kalloc-types",
+ "kcred",
+ "kerrno",
+ "kprocess",
+ "ksync",
+ "ktty",
+ "kvfs",
+ "macros",
+ "unittest",
+]
+
+[[package]]
 name = "dice-driver"
 version = "0.3.0-dev"
 dependencies = [
@@ -2471,6 +2487,7 @@ dependencies = [
  "alloc-engine",
  "backtrace",
  "devfs",
+ "devpts",
  "entropy",
  "fat",
  "fbdevice",

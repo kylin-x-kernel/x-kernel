@@ -32,7 +32,7 @@ pub use pty::PtyDriver;
 #[cfg(unittest)]
 use pty::create_pty_pair;
 pub use pty_pair::{
-    PtyPair, open_ptmx, pty_allocated_count, pty_limit, pty_slave_inode, pty_slave_numbers,
+    PtyPair, open_ptmx, pty_allocated_count, pty_limit, pty_slave_inode_for, pty_slave_numbers_for,
     register_pty_drivers,
 };
 pub use vt::{VT_CONSOLE, VtConsole, register_fixed_vt_devices};

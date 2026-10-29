@@ -101,6 +101,7 @@ fs_ext4 = ["dep:kext4", "dep:fs_boot", "kruntime/fs"]
 fs_fat = ["dep:fat", "dep:fs_boot", "kruntime/fs"]
 fs_9p = ["dep:fs_boot", "kruntime/fs9p"]
 fs_cgroup2 = ["dep:fs_boot", "kruntime/fs_cgroup2"]
+fs_devpts = ["dep:devpts"]
 fs_times = ["fs_ext4", "kext4/times"]
 
 # Networking
@@ -245,6 +246,7 @@ kplat-loongarch64 = { workspace = true, optional = true, features = [
 ] }
 kexec = { workspace = true }
 devfs = { workspace = true }
+devpts = { workspace = true, optional = true }
 entropy = { workspace = true, optional = true }
 khal.workspace = true
 inputdev = { workspace = true, optional = true }

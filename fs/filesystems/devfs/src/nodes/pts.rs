@@ -72,18 +72,39 @@ impl FileOperations for SlaveNode {
 }
 
 /// Master pseudo-terminal multiplexer (/dev/ptmx).
+///
+/// The carried filesystem is this mount's owner: pairs allocated through it
+/// are published here and projected by [`PtsDir`], and never leak into (or
+/// from) a container's per-mount devpts instance.
+///
+/// This is why a container's pty flow needs `/dev/ptmx` to resolve into its
+/// own devpts mount (the OCI default symlinks it to `pts/ptmx`): opening THIS
+/// node allocates a devfs-owned pair, which [`PtsDir`] then shows in the host
+/// `/dev/pts`. Linux instead resolves the target instance from the ptmx file's
+/// path (`ptmx_open()` → `devpts_acquire()`), so any `/dev/ptmx` node reaches
+/// the same devpts instance; see the devpts design notes.
 pub struct Ptmx(pub Arc<SimpleFs>);
 
 impl DeviceFileOps for Ptmx {
     fn open(&self, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        tty::open_ptmx(inode, file, |pair| {
+        tty::open_ptmx(&self.0, inode, file, |pair| {
             Ok(SlaveNode::inode(self.0.clone(), pair))
         })
     }
 }
 
-/// /dev/pts directory containing only slaves with a live master.
-pub(crate) struct PtsDir;
+/// /dev/pts directory containing only slaves with a live master **allocated
+/// through this filesystem's ptmx** — per-owner projection keeps a
+/// container's per-mount devpts pairs out of the host view.
+pub(crate) struct PtsDir {
+    fs: Arc<SimpleFs>,
+}
+
+impl PtsDir {
+    pub(crate) fn new(fs: Arc<SimpleFs>) -> Self {
+        Self { fs }
+    }
+}
 
 impl SimpleDirOps for PtsDir {
     fn supports_dentry_cache(&self) -> bool {
@@ -94,15 +115,22 @@ impl SimpleDirOps for PtsDir {
 
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         Ok(KBox::new(
-            tty::pty_slave_numbers()
+            tty::pty_slave_numbers_for(&self.fs)
                 .into_iter()
                 .map(|id| Cow::Owned(id.to_string())),
         )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> KResult<Dentry> {
-        let number = name.parse::<u32>().map_err(|_| KError::NotFound)?;
-        let inode = tty::pty_slave_inode(number).ok_or(KError::NotFound)?;
+        // Only the canonical decimal form (what readdir lists, Linux dcache
+        // exact-match semantics): "007" must not alias "7". The devpts
+        // directory enforces the same rule on the same names.
+        let number = name
+            .parse::<u32>()
+            .ok()
+            .filter(|number| number.to_string() == name)
+            .ok_or(KError::NotFound)?;
+        let inode = tty::pty_slave_inode_for(&self.fs, number).ok_or(KError::NotFound)?;
         Ok(lookup.file_from_inode(name, inode))
     }
 }

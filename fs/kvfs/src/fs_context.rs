@@ -163,6 +163,20 @@ impl<'a> FsContext<'a> {
     }
 
     /// Returns the superblock flags changed by this transaction.
+    /// Overrides the superblock flags a reconfigure will apply (within the
+    /// caller's mask). Filesystems whose mount data carries sb-level tokens
+    /// (`ro`/`rw`, Linux `vfs_parse_sb_flag`) call this from their
+    /// reconfigure callback, which `SuperBlock::reconfigure` runs before
+    /// computing the stored flags.
+    pub fn set_sb_flags(&mut self, flags: SuperBlockFlags) {
+        self.sb_flags = flags;
+    }
+
+    /// Extends the mask of superblock flags a reconfigure will apply.
+    pub fn set_sb_flags_mask(&mut self, mask: SuperBlockFlags) {
+        self.sb_flags_mask = mask;
+    }
+
     pub const fn sb_flags_mask(&self) -> SuperBlockFlags {
         self.sb_flags_mask
     }

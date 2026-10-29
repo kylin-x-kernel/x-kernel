@@ -4,8 +4,9 @@
 
 Dynamic device and devpts child_names return KBox iterators using the default
 KERNEL policy under SimpleDirOps' sleepable-task contract. Device projection
-locks are released at the snapshot statement boundary; pty_slave_numbers
-returns an owned snapshot after releasing its registry lock. Neither iterator
+locks are released at the snapshot statement boundary; pty_slave_numbers_for
+returns an owned snapshot after releasing its registry lock, and each listed
+number is re-validated by the owner-checked visibility lookup. Neither iterator
 retains a registry guard across allocation or iteration.
 
 ## Purpose
@@ -77,8 +78,9 @@ stdout UART remains omitted because it is already available as `/dev/console`.
 `DeviceFile` projects special-device identity and inode flags; it is not an
 open-file operations adapter. KVFS owns character-device dispatch, including
 capabilities, I/O, poll registration and open/release forwarding.
-The PTMX node delegates creation to `ktty::tty::open_ptmx`, supplying only a
-slave inode constructor. ktty controls allocation, opening, publication and
+The PTMX node delegates creation to `ktty::tty::open_ptmx`, supplying its own
+`SimpleFs` as the owner identity key (so pairs allocated through devfs's ptmx
+are owned by — and projected only in — devfs) plus a slave inode constructor. ktty controls allocation, opening, publication and
 rollback, and installs the master through `kvfs::open_character_device`,
 the same adapter used by registry-based opens. It opens the master once during
 the multiplexer callback; VFS does not reopen the replacement table. Final file

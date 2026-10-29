@@ -73,6 +73,11 @@ extern crate kxarray_kernel_tests as _;
 #[cfg(feature = "kwork_stall_check")]
 extern crate kworkng as _;
 
+// Linked for its `register_init` entry: containers mount devpts by name at
+// runtime, and no other crate references its symbols.
+#[cfg(feature = "fs_devpts")]
+extern crate devpts as _;
+
 #[cfg(feature = "fs_fat")]
 extern crate fat as _;
 #[cfg(feature = "fs_ext4")]
