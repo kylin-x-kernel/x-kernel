@@ -183,3 +183,74 @@ fn fixed_root_handle_is_published_from_construction() {
     assert_eq!(handle.lifecycle_state(), PidLifecycleState::Published);
     assert!(handle.is_lookup_visible());
 }
+
+/// IKMFVQ phase 1: the constructor invariant phase 2 relies on — a handle
+/// carries exactly one projection per ancestor level, ordered from its active
+/// namespace up to the root, with contiguous parent links, so any ancestor can
+/// be resolved without re-walking the tree.
+#[def_test]
+fn allocation_covers_the_whole_ancestor_chain() {
+    let root = root_pid_namespace().clone();
+    let child = PidNamespace::new_child(&root);
+    let grandchild = PidNamespace::new_child(&child);
+    let handle = PidHandle::allocate_in(&grandchild).unwrap();
+
+    // One projection per level: grandchild, child, root.
+    let numbers = handle.numbers();
+    assert_eq!(numbers.len(), 3);
+    assert!(Arc::ptr_eq(numbers[0].ns(), &grandchild));
+    assert!(Arc::ptr_eq(numbers[1].ns(), &child));
+    assert!(Arc::ptr_eq(numbers[2].ns(), &root));
+    for window in numbers.windows(2) {
+        assert!(Arc::ptr_eq(
+            window[0].ns().parent().unwrap(),
+            window[1].ns()
+        ));
+    }
+    assert!(Arc::ptr_eq(handle.active_ns(), &grandchild));
+    assert_eq!(handle.active_nr(), numbers[0].nr());
+}
+
+/// IKMFVQ phase 1 (resolve direction): `number_in` reports a number only to an
+/// observer that owns that projection itself. Every namespace on the handle's
+/// creation chain owns one; siblings and unrelated roots own none, so a
+/// syscall-level `resolve(nr, observer)` built on `number_in` cannot cross into
+/// another namespace tree — the class where `kill` reached the host init.
+///
+/// `visible_number` is a separate, deliberately wider contract (it walks the
+/// observer's ancestors and answers for a namespace below a shared root), so it
+/// is not asserted here; `observer_projection_matches_inside_hierarchy_and_handles_sibling_children`
+/// covers that behaviour.
+#[def_test]
+fn number_in_requires_an_owned_projection() {
+    let root = root_pid_namespace().clone();
+    let child = PidNamespace::new_child(&root);
+    let grandchild = PidNamespace::new_child(&child);
+    let sibling = PidNamespace::new_child(&root);
+    let handle = PidHandle::allocate_in(&grandchild).unwrap();
+
+    assert_eq!(handle.number_in(&grandchild), Some(handle.active_nr()));
+    assert!(handle.number_in(&child).is_some());
+    assert_eq!(handle.number_in(&root), Some(handle.root_nr()));
+    assert_eq!(handle.number_in(&sibling), None);
+    assert_eq!(handle.number_in(&Arc::new(PidNamespace::new_root())), None);
+}
+
+/// IKMFVQ phase 1 characterization of the legacy API: `nr_in` falls back to the
+/// root projection for *any* root namespace, so a handle allocated in a nested
+/// namespace stays resolvable from an unrelated root. Linux `pid_nr_ns` returns
+/// 0 there, and `visible_number` already answers `None`.
+///
+/// The assertion pins today's behaviour on purpose: the identity refactor
+/// (phase 2) must retire or narrow `nr_in`, and this case failing is the signal
+/// to update the contract — a statically `ignore`d check would give none.
+#[def_test]
+fn legacy_nr_in_falls_back_to_the_root_projection() {
+    let root = root_pid_namespace().clone();
+    let child = PidNamespace::new_child(&root);
+    let handle = PidHandle::allocate_in(&child).unwrap();
+
+    let unrelated_root = Arc::new(PidNamespace::new_root());
+    assert_eq!(handle.nr_in(&unrelated_root), Some(handle.root_nr()));
+    assert_eq!(handle.visible_number(&unrelated_root), None);
+}
