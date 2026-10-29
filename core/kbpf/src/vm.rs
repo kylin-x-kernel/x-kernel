@@ -45,57 +45,61 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
+// eBPF opcode fields: class (bits 0-2), source (bit 3), operation (bits 4-7).
+// The bit values come from `crate::uapi` (generated from
+// `include/uapi/linux/bpf_common.h` / `bpf.h`) rather than being re-typed
+// here, so a wrong nibble cannot hide in the interpreter.
+use crate::uapi::defines as bpf;
 use crate::{
     error::{Error, Result},
     helpers::BPF_FUNC_TRACE_PRINTK,
     insn::{Insn, SLOT_SIZE},
 };
 
-// BPF_LD
+const OP_CALL: u8 = (bpf::BPF_JMP | bpf::BPF_CALL) as u8;
+const OP_EXIT: u8 = (bpf::BPF_JMP | bpf::BPF_EXIT) as u8;
+const CLASS_ALU: u8 = bpf::BPF_ALU as u8;
+const CLASS_JMP: u8 = bpf::BPF_JMP as u8;
+const CLASS_JMP32: u8 = bpf::BPF_JMP32 as u8;
+const CLASS_ALU64: u8 = bpf::BPF_ALU64 as u8;
+/// `BPF_X` — the source-operand bit (bit 3). A set bit means "the operand is
+/// a register", clear means "the operand is the immediate".
+const SOURCE_REG: u8 = bpf::BPF_X as u8;
 /// `lddw dst, imm64` (`BPF_LD | BPF_DW | BPF_IMM`).
-const OP_LD_DW_IMM: u8 = 0x18;
+const OP_LD_DW_IMM: u8 = (bpf::BPF_LD | bpf::BPF_DW | bpf::BPF_IMM) as u8;
 /// `lddw` source marker for map-value addresses.
-const BPF_PSEUDO_MAP_VALUE: u8 = 2;
-
-// eBPF opcode fields: class (bits 0-2), source (bit 3), operation (bits 4-7).
-const OP_CALL: u8 = 0x85;
-const OP_EXIT: u8 = 0x95;
-const CLASS_ALU: u8 = 0x04;
-const CLASS_JMP: u8 = 0x05;
-const CLASS_JMP32: u8 = 0x06;
-const CLASS_ALU64: u8 = 0x07;
-const SOURCE_REG: u8 = 0x08;
+const BPF_PSEUDO_MAP_VALUE: u8 = bpf::BPF_PSEUDO_MAP_VALUE as u8;
 
 // ALU operations (bits 4-7).
-const ALU_ADD: u8 = 0x00;
-const ALU_SUB: u8 = 0x10;
-const ALU_MUL: u8 = 0x20;
-const ALU_DIV: u8 = 0x30;
-const ALU_OR: u8 = 0x40;
-const ALU_AND: u8 = 0x50;
-const ALU_LSH: u8 = 0x60;
-const ALU_RSH: u8 = 0x70;
-const ALU_NEG: u8 = 0x80;
-const ALU_MOD: u8 = 0x90;
-const ALU_XOR: u8 = 0xa0;
-const ALU_MOV: u8 = 0xb0;
-const ALU_ARSH: u8 = 0xc0;
-const ALU_END: u8 = 0xd0;
+const ALU_ADD: u8 = bpf::BPF_ADD as u8;
+const ALU_SUB: u8 = bpf::BPF_SUB as u8;
+const ALU_MUL: u8 = bpf::BPF_MUL as u8;
+const ALU_DIV: u8 = bpf::BPF_DIV as u8;
+const ALU_OR: u8 = bpf::BPF_OR as u8;
+const ALU_AND: u8 = bpf::BPF_AND as u8;
+const ALU_LSH: u8 = bpf::BPF_LSH as u8;
+const ALU_RSH: u8 = bpf::BPF_RSH as u8;
+const ALU_NEG: u8 = bpf::BPF_NEG as u8;
+const ALU_MOD: u8 = bpf::BPF_MOD as u8;
+const ALU_XOR: u8 = bpf::BPF_XOR as u8;
+const ALU_MOV: u8 = bpf::BPF_MOV as u8;
+const ALU_ARSH: u8 = bpf::BPF_ARSH as u8;
+const ALU_END: u8 = bpf::BPF_END as u8;
 
 // Jump conditions (bits 4-7). The unsigned variants compare the operands as
 // unsigned; the `S` variants compare them as signed.
-const JMP_JA: u8 = 0x00;
-const JMP_JEQ: u8 = 0x10;
-const JMP_JGT: u8 = 0x20;
-const JMP_JGE: u8 = 0x30;
-const JMP_JSET: u8 = 0x40;
-const JMP_JNE: u8 = 0x50;
-const JMP_JSGT: u8 = 0x60;
-const JMP_JSGE: u8 = 0x70;
-const JMP_JLT: u8 = 0xa0;
-const JMP_JLE: u8 = 0xb0;
-const JMP_JSLT: u8 = 0xc0;
-const JMP_JSLE: u8 = 0xd0;
+const JMP_JA: u8 = bpf::BPF_JA as u8;
+const JMP_JEQ: u8 = bpf::BPF_JEQ as u8;
+const JMP_JGT: u8 = bpf::BPF_JGT as u8;
+const JMP_JGE: u8 = bpf::BPF_JGE as u8;
+const JMP_JSET: u8 = bpf::BPF_JSET as u8;
+const JMP_JNE: u8 = bpf::BPF_JNE as u8;
+const JMP_JSGT: u8 = bpf::BPF_JSGT as u8;
+const JMP_JSGE: u8 = bpf::BPF_JSGE as u8;
+const JMP_JLT: u8 = bpf::BPF_JLT as u8;
+const JMP_JLE: u8 = bpf::BPF_JLE as u8;
+const JMP_JSLT: u8 = bpf::BPF_JSLT as u8;
+const JMP_JSLE: u8 = bpf::BPF_JSLE as u8;
 
 // BPF_LDX | BPF_MEM
 /// `ldxb dst, [src+off]`.
@@ -126,10 +130,6 @@ const OP_STX_MEM_H: u8 = 0x6b;
 const OP_STX_MEM_W: u8 = 0x63;
 /// `stxdw [dst+off], src`.
 const OP_STX_MEM_DW: u8 = 0x7b;
-
-// BPF_ALU64
-
-// BPF_JMP
 
 /// Number of general-purpose eBPF registers (`r0..=r10`).
 pub const NUM_REGS: usize = 11;

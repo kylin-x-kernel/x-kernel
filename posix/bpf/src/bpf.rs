@@ -11,56 +11,38 @@ use core::{
 #[cfg(feature = "cgroup2")]
 use bpffs::device;
 use bpffs::{BpfMap, BpfProgram, BpfProgramMapValue};
+#[cfg(feature = "cgroup2")]
+use kbpf::uapi::bpf_attach_type::BPF_CGROUP_DEVICE as BPF_CGROUP_DEVICE_ATTACH_TYPE;
+// The uapi ABI values come from the single generated table
+// (`core/kbpf/src/uapi.rs`, produced from Linux's `include/uapi/linux/bpf.h`
+// and checked by `cargo test -p kbpf --test uapi_conformance`). They are used
+// directly — the generated constants carry `u32`, so they work as `match`
+// patterns without an alias layer.
+use kbpf::uapi::bpf_cmd::{
+    BPF_LINK_CREATE, BPF_MAP_CREATE, BPF_MAP_FREEZE, BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM,
+    BPF_OBJ_GET, BPF_OBJ_GET_INFO_BY_FD, BPF_OBJ_PIN, BPF_PROG_GET_FD_BY_ID, BPF_PROG_GET_NEXT_ID,
+    BPF_PROG_LOAD, BPF_PROG_QUERY, BPF_PROG_TEST_RUN,
+};
+#[cfg(feature = "cgroup2")]
+use kbpf::uapi::bpf_cmd::{BPF_PROG_ATTACH, BPF_PROG_DETACH};
+#[cfg(feature = "cgroup2")]
+use kbpf::uapi::defines::{BPF_F_ALLOW_MULTI, BPF_F_ALLOW_OVERRIDE, BPF_F_QUERY_EFFECTIVE};
+use kbpf::uapi::{
+    bpf_map_type::BPF_MAP_TYPE_ARRAY,
+    bpf_map_update_flags::BPF_ANY as BPF_ANY_FLAG,
+    bpf_prog_type::BPF_PROG_TYPE_CGROUP_DEVICE,
+    defines::{BPF_DW, BPF_IMM, BPF_LD, BPF_PSEUDO_MAP_VALUE},
+};
 use kerrno::{KError, KResult};
 use klogger::debug;
 use kuaccess::vm_load_string;
 use kvfs::{Filename, LookupFlags, LookupIntent};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
 
-/// `BPF_MAP_CREATE` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_MAP_CREATE: u32 = 0;
-/// `BPF_MAP_LOOKUP_ELEM` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_MAP_LOOKUP_ELEM: u32 = 1;
-/// `BPF_MAP_UPDATE_ELEM` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_MAP_UPDATE_ELEM: u32 = 2;
-/// `BPF_PROG_LOAD` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_PROG_LOAD: u32 = 5;
-/// `BPF_OBJ_PIN` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_OBJ_PIN: u32 = 6;
-/// `BPF_OBJ_GET` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_OBJ_GET: u32 = 7;
-/// `BPF_PROG_TEST_RUN` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_PROG_TEST_RUN: u32 = 10;
-/// `BPF_OBJ_GET_INFO_BY_FD` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_OBJ_GET_INFO_BY_FD: u32 = 15;
-/// `BPF_MAP_FREEZE` (`enum bpf_cmd` in Linux `uapi/linux/bpf.h`).
-const BPF_MAP_FREEZE: u32 = 22;
-const BPF_PROG_ATTACH: u32 = 8;
-const BPF_PROG_DETACH: u32 = 9;
-const BPF_PROG_GET_NEXT_ID: u32 = 11;
-const BPF_PROG_GET_FD_BY_ID: u32 = 13;
-const BPF_PROG_QUERY: u32 = 16;
-const BPF_LINK_CREATE: u32 = 28;
-
-/// `BPF_PROG_TYPE_CGROUP_DEVICE` (`enum bpf_prog_type`, value 15).
-const BPF_PROG_TYPE_CGROUP_DEVICE: u32 = 15;
-#[cfg(feature = "cgroup2")]
-const BPF_CGROUP_DEVICE_ATTACH_TYPE: u32 = 6;
-#[cfg(feature = "cgroup2")]
-const BPF_F_ALLOW_OVERRIDE: u32 = 1 << 0;
-#[cfg(feature = "cgroup2")]
-const BPF_F_ALLOW_MULTI: u32 = 1 << 1;
-#[cfg(feature = "cgroup2")]
-const BPF_F_QUERY_EFFECTIVE: u32 = 1 << 0;
-
-/// `BPF_MAP_TYPE_ARRAY` (`enum bpf_map_type` in Linux `uapi/linux/bpf.h`).
-const BPF_MAP_TYPE_ARRAY: u32 = 2;
-/// `BPF_ANY` update mode for `BPF_MAP_UPDATE_ELEM`.
-const BPF_ANY: u64 = 0;
 /// `lddw` opcode (`BPF_LD | BPF_DW | BPF_IMM`).
-const BPF_LD_DW_IMM: u8 = 0x18;
+const BPF_LD_DW_IMM: u8 = (BPF_LD | BPF_DW | BPF_IMM) as u8;
 /// `lddw` source marker for direct map-value addresses.
-const BPF_PSEUDO_MAP_VALUE: u8 = 2;
+const BPF_PSEUDO_MAP_VALUE_BYTE: u8 = BPF_PSEUDO_MAP_VALUE as u8;
 
 /// Minimum `size` for `BPF_MAP_CREATE` covering fields through `map_flags`
 /// (Linux `union bpf_attr` map_create prefix).
@@ -291,7 +273,7 @@ fn bpf_map_update_elem(attr_ptr: usize, size: u32) -> KResult<isize> {
     }
 
     let attr = UserConstPtr::<BpfMapElemAttrPrefix>::from(attr_ptr).read_vm()?;
-    if attr.key == 0 || attr.value == 0 || attr.flags != BPF_ANY {
+    if attr.key == 0 || attr.value == 0 || attr.flags != u64::from(BPF_ANY_FLAG) {
         return Err(KError::InvalidInput);
     }
 
@@ -496,7 +478,9 @@ fn bind_program_map_values(insns: &[u8]) -> KResult<Arc<[BpfProgramMapValue]>> {
     let slots = insns.len() / kbpf::SLOT_SIZE;
     for slot in 0..slots {
         let off = slot * kbpf::SLOT_SIZE;
-        if insns[off] != BPF_LD_DW_IMM || ((insns[off + 1] >> 4) & 0x0f) != BPF_PSEUDO_MAP_VALUE {
+        if insns[off] != BPF_LD_DW_IMM
+            || ((insns[off + 1] >> 4) & 0x0f) != BPF_PSEUDO_MAP_VALUE_BYTE
+        {
             continue;
         }
         if slot + 1 >= slots {

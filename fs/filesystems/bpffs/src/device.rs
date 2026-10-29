@@ -23,7 +23,11 @@ use alloc::{
     vec::Vec,
 };
 
-use kbpf::{ReadOnlyMemory, Vm, vm::InitialRegs};
+use kbpf::{
+    ReadOnlyMemory, Vm,
+    uapi::{bpf_devcg_acc, bpf_devcg_dev, defines},
+    vm::InitialRegs,
+};
 use kcgroup::Cgroup;
 use kerrno::{KError, KResult};
 use ksync::{Mutex, static_lock};
@@ -31,22 +35,27 @@ use kvfs::{DeviceAccess, DeviceAccessPolicy, VfsError, VfsFile, VfsInode, VfsRes
 
 use crate::BpfProgram;
 
-/// `BPF_DEVCG_DEV_BLOCK` (`include/uapi/linux/bpf.h`, `BPF_DEVCG_DEV_*`):
-/// the device-type half of `bpf_cgroup_dev_ctx::access_type`.
-pub const DEVICE_TYPE_BLOCK: u32 = 1;
+// Every uapi value below comes from `kbpf::uapi` — the single generated
+// table (`core/kbpf/src/uapi.rs`, generated from Linux's bpf.h and pinned by
+// `cargo test -p kbpf --test uapi_conformance`). The shifts that compose
+// `bpf_cgroup_dev_ctx::access_type` stay here because they are cgroup.c's
+// encoding rule, not a uapi constant.
+
+/// `BPF_DEVCG_DEV_BLOCK`: the device-type half of `access_type`.
+pub const DEVICE_TYPE_BLOCK: u32 = bpf_devcg_dev::BPF_DEVCG_DEV_BLOCK;
 /// `BPF_DEVCG_DEV_CHAR`.
-pub const DEVICE_TYPE_CHAR: u32 = 2;
-/// `BPF_DEVCG_ACC_MKNOD` (`BPF_DEVCG_ACC_*`): the access half, which Linux
-/// encodes in the bits above 16.
-pub const DEVICE_ACC_MKNOD: u32 = 1 << 16;
-/// `BPF_DEVCG_ACC_READ`.
-pub const DEVICE_ACC_READ: u32 = 1 << 17;
-/// `BPF_DEVCG_ACC_WRITE`.
-pub const DEVICE_ACC_WRITE: u32 = 1 << 18;
+pub const DEVICE_TYPE_CHAR: u32 = bpf_devcg_dev::BPF_DEVCG_DEV_CHAR;
+/// `BPF_DEVCG_ACC_MKNOD`, shifted into the access half: `kernel/bpf/cgroup.c`
+/// encodes `access_type = (access << 16) | dev_type`.
+pub const DEVICE_ACC_MKNOD: u32 = bpf_devcg_acc::BPF_DEVCG_ACC_MKNOD << 16;
+/// `BPF_DEVCG_ACC_READ`, shifted into the access half.
+pub const DEVICE_ACC_READ: u32 = bpf_devcg_acc::BPF_DEVCG_ACC_READ << 16;
+/// `BPF_DEVCG_ACC_WRITE`, shifted into the access half.
+pub const DEVICE_ACC_WRITE: u32 = bpf_devcg_acc::BPF_DEVCG_ACC_WRITE << 16;
 
 /// Linux `BPF_CGROUP_MAX_PROGS`: how many programs one cgroup may carry
 /// (direct attachments and links together).
-const MAX_CGROUP_PROGS: usize = 64;
+const MAX_CGROUP_PROGS: usize = defines::BPF_CGROUP_MAX_PROGS as usize;
 
 /// The attachment modes of a cgroup's device programs — Linux
 /// `cgrp->bpf.flags[atype]`: `0` (NONE, children may not attach),
@@ -54,9 +63,9 @@ const MAX_CGROUP_PROGS: usize = 64;
 /// `BPF_F_ALLOW_MULTI` (children attach in addition).
 pub const ATTACH_NONE: u32 = 0;
 /// `BPF_F_ALLOW_OVERRIDE`.
-pub const ATTACH_ALLOW_OVERRIDE: u32 = 1 << 0;
+pub const ATTACH_ALLOW_OVERRIDE: u32 = defines::BPF_F_ALLOW_OVERRIDE;
 /// `BPF_F_ALLOW_MULTI`.
-pub const ATTACH_ALLOW_MULTI: u32 = 1 << 1;
+pub const ATTACH_ALLOW_MULTI: u32 = defines::BPF_F_ALLOW_MULTI;
 
 /// Monotonically increasing identity for link attachments. Two links of the
 /// same program onto the same cgroup are two independent attachments (Linux

@@ -23,6 +23,7 @@ extern crate alloc;
 pub mod error;
 pub mod helpers;
 pub mod insn;
+pub mod uapi;
 pub mod vm;
 
 pub use error::{Error, Result};
