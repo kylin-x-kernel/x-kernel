@@ -14,8 +14,9 @@ pub(crate) use dentry::{
     d_really_is_positive,
 };
 pub use device::{
-    CharacterDeviceRegistration, DeviceFileOps, MmapMapper, cdev_add, cdev_add_named, cdev_del,
-    open_character_device, registered_character_devices, subscribe_character_devices,
+    CharacterDeviceRegistration, DeviceAccess, DeviceAccessPolicy, DeviceFileOps, MmapMapper,
+    cdev_add, cdev_add_named, cdev_del, check_device_access, open_character_device,
+    register_device_access_policy, registered_character_devices, subscribe_character_devices,
 };
 pub use dir::{DirContext, DirEntrySink};
 pub use inode::{

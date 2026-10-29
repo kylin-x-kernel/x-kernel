@@ -50,6 +50,17 @@ impl CgroupFsState {
         })
     }
 
+    /// Returns the cgroup object the given directory inode materializes, for
+    /// paths that must identify the cgroup itself (the bpf(2) device
+    /// controller resolves its attach target this way).
+    pub(crate) fn cgroup_of(&self, inode: &Arc<VfsInode>) -> Option<Arc<Cgroup>> {
+        self.nodes
+            .lock()
+            .values()
+            .find(|node| Arc::ptr_eq(&node.directory, inode))
+            .map(|node| node.cgroup.clone())
+    }
+
     pub(crate) fn node(self: &Arc<Self>, cgroup: Arc<Cgroup>) -> VfsResult<Arc<CgroupFsNode>> {
         self.node_with_owner(cgroup, NodePermission::from_bits_truncate(0o755), 0, 0)
     }

@@ -10,8 +10,12 @@ repository.workspace = true
 
 [dependencies]
 anon_inodefs.workspace = true
+kcgroup.workspace = true
+kbpf.workspace = true
+kprocess.workspace = true
 hashbrown.workspace = true
 kerrno.workspace = true
+unittest.workspace = true
 kcred.workspace = true
 kpoll.workspace = true
 ksync.workspace = true

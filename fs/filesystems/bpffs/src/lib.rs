@@ -17,12 +17,15 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use anon_inodefs::AnonInodeFs;
 use hashbrown::HashMap;
 use kerrno::KResult;
 use kpoll::IoEvents;
-use ksync::Mutex;
+use ksync::{Mutex, static_lock};
+
+pub mod device;
 use kvfs::{
     Dentry, DirContext, FMode, FileDirOperations, FileOperations, FsContext, FsContextOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
@@ -58,6 +61,7 @@ pub static FILE_SYSTEM_TYPE: kvfs::FileSystemType =
 
 #[macros::register_init]
 fn init_bpf_fs() {
+    device::install_policy();
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Each statically named filesystem is \
@@ -90,21 +94,45 @@ impl BpfProgramMapValue {
     }
 }
 
+/// Program ids are allocated monotonically from a `u32` counter for every
+/// loaded program object; the counter is not expected to wrap (each load
+/// consumes one id), so no wrap handling exists.
+static NEXT_PROGRAM_ID: AtomicU32 = AtomicU32::new(1);
+
+// Live programs by id, held weakly: an id is visible exactly while some fd
+// (or bpffs pin) references the program. Entries whose object is gone are
+// pruned on access, mirroring Linux's `prog_idr`.
+static_lock! {
+static PROGRAMS: Mutex<alloc::collections::BTreeMap<u32, alloc::sync::Weak<BpfProgram>>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+}
+
 /// Loaded BPF program object shared by anonymous fds and bpffs pins.
 pub struct BpfProgram {
+    id: u32,
     insns: Arc<[u8]>,
     prog_type: u32,
     map_values: Arc<[BpfProgramMapValue]>,
 }
 
 impl BpfProgram {
-    /// Creates a loaded BPF program object from validated instruction bytes.
+    /// Creates a loaded BPF program object from validated instruction bytes,
+    /// assigning it the next program id. The id becomes visible to
+    /// [`from_id`](Self::from_id)/[`next_id_after`](Self::next_id_after) once
+    /// the program is published through [`into_file`](Self::into_file).
     pub fn new(insns: Arc<[u8]>, prog_type: u32, map_values: Arc<[BpfProgramMapValue]>) -> Self {
         Self {
+            id: NEXT_PROGRAM_ID.fetch_add(1, Ordering::Relaxed),
             insns,
             prog_type,
             map_values,
         }
+    }
+
+    /// Returns the program id user space addresses this object by
+    /// (`BPF_PROG_GET_FD_BY_ID` / `BPF_PROG_QUERY`).
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
     /// Returns the Linux BPF program type supplied at load time.
@@ -132,6 +160,7 @@ impl BpfProgram {
     }
 
     pub fn into_file(self: Arc<Self>, cred: Arc<kcred::Cred>) -> VfsResult<Arc<VfsFile>> {
+        PROGRAMS.lock().insert(self.id, Arc::downgrade(&self));
         let fops: Arc<dyn FileOperations> = self.clone();
         AnonInodeFs::global().get_file(
             "bpf-prog",
@@ -147,6 +176,46 @@ impl BpfProgram {
         file.private_data_get::<Self>()
             .ok_or(VfsError::BadFileDescriptor)
     }
+
+    /// Returns a shareable handle to the program bytes the interpreter
+    /// executes (device-controller attachments keep these alive).
+    pub fn insns_shared(&self) -> Arc<[u8]> {
+        self.insns.clone()
+    }
+
+    /// Returns the live program registered under `id`
+    /// (`BPF_PROG_GET_FD_BY_ID`).
+    ///
+    /// # Errors
+    ///
+    /// [`kerrno::KError::NoSuchProcess`] when no live program holds that id.
+    pub fn from_id(id: u32) -> KResult<Arc<Self>> {
+        let mut programs = PROGRAMS.lock();
+        prune_dead_programs(&mut programs);
+        programs
+            .get(&id)
+            .and_then(alloc::sync::Weak::upgrade)
+            .ok_or(kerrno::KError::NotFound)
+    }
+
+    /// Returns the lowest live program id above `start`
+    /// (`BPF_PROG_GET_NEXT_ID`); `None` ends the scan (`ENOENT`).
+    pub fn next_id_after(start: u32) -> Option<u32> {
+        let mut programs = PROGRAMS.lock();
+        prune_dead_programs(&mut programs);
+        programs
+            .range(start.saturating_add(1)..)
+            .next()
+            .map(|(id, _)| *id)
+    }
+}
+
+/// Drops registry entries whose program object is gone (every fd and pin
+/// closed, no attachment left).
+fn prune_dead_programs(
+    programs: &mut alloc::collections::BTreeMap<u32, alloc::sync::Weak<BpfProgram>>,
+) {
+    programs.retain(|_, program| program.strong_count() > 0);
 }
 
 impl FileOperations for BpfProgram {}
@@ -356,6 +425,22 @@ impl Inode {
 }
 
 /// A bpffs directory or pinned object node.
+/// Resolves a bpffs-located program file into its program object: both an
+/// anonymous program fd (private data is the [`BpfProgram`]) and a pinned
+/// path (private data is the [`BpfNode`] wrapping the program inode)
+/// resolve, so attach paths accept either form like Linux's
+/// `bpf_prog_get()`.
+pub fn program_from_file(file: &VfsFile) -> Option<Arc<BpfProgram>> {
+    // An anonymous program fd carries the program as its file private data;
+    // a pinned path's file carries no private data of its own — the location
+    // node lives on the opened inode — so the fallback reads it from there.
+    if let Some(program) = file.private_data_get::<BpfProgram>() {
+        return Some(program);
+    }
+    let node = file.inode().private_data_get::<BpfNode>()?;
+    node.program().ok()
+}
+
 pub struct BpfNode {
     fs: Arc<SimpleFs>,
     inode: Arc<Inode>,
@@ -684,3 +769,5 @@ pub fn program_from_location(location: &kvfs::Path) -> KResult<Arc<BpfProgram>> 
     let file = location.downcast_node::<BpfNode>()?;
     file.program()
 }
+
+unittest::path_mod_test!(mod device_tests, "../ut-tests/device.rs");

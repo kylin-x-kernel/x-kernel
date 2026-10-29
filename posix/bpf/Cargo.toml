@@ -12,9 +12,11 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-ebpf = []
+cgroup2 = ["dep:cgroup2fs", "dep:kcgroup"]
 
 [dependencies]
+cgroup2fs = { workspace = true, optional = true }
+kcgroup = { workspace = true, optional = true }
 bpffs.workspace = true
 kbpf.workspace = true
 kerrno.workspace = true

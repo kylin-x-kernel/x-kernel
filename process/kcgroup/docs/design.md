@@ -93,6 +93,12 @@ outside a view render `..` components, which describe position rather than grant
 access. Parent links are weak: callers need the canonical hierarchy owner alive
 when interpreting ancestry/path snapshots.
 
+`parent() -> Option<Arc<Cgroup>>` is the public single-step ancestor accessor:
+the provider is `kcgroup::Cgroup`, consumers are crate-external policy walkers
+(the bpffs cgroup-v2 device controller collects a cgroup's own attachments plus
+every ancestor's), and the direction is kcgroup -> consumer. `None` means the
+hierarchy root or a dropped weak parent link.
+
 ## Decisions and resource release
 
 Strong child links and weak parents avoid ownership cycles. Membership retains

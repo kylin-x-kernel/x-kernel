@@ -1300,10 +1300,21 @@ impl Path {
         self.check_writable_mount()?;
         self.may_modify_directory(cred)?;
         let node_type = mode.node_type();
-        if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice)
-            && !cred.is_privileged()
-        {
-            return Err(VfsError::OperationNotPermitted);
+        if matches!(node_type, NodeType::CharacterDevice | NodeType::BlockDevice) {
+            // The DAC capability check above stays; the device controller's
+            // per-device policy (if any) is consulted for the creation access
+            // kind exactly like Linux's device cgroup mknod hook.
+            crate::node::check_device_access(
+                device,
+                crate::node::DeviceAccess::MKNOD
+                    | match node_type {
+                        NodeType::CharacterDevice => crate::node::DeviceAccess::TYPE_CHAR,
+                        _ => crate::node::DeviceAccess::TYPE_BLOCK,
+                    },
+            )?;
+            if !cred.is_privileged() {
+                return Err(VfsError::OperationNotPermitted);
+            }
         }
         let dir_inode = self.inode();
         let mode = dir_inode.prepare_create_mode(mode, umask, mode.permission(), node_type, cred);

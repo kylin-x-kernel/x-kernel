@@ -80,6 +80,15 @@ unlocking. devfs constructs an inode from the returned registration, procfs
 reads the current list, and sysfs subscribes and gates attributes on availability.
 Existing unnamed cdev_add callers and hardware DeviceNode consumers are unchanged.
 
+The global device-access policy slot is protected by
+`RwLock<Option<Arc<dyn DeviceAccessPolicy>>>`. The write path is
+`register_device_access_policy` (a second registration while one exists is
+rejected, and passing `None` clears the slot and drops the registered policy,
+returning device access to the unrestricted state); the read path is
+`check_device_access` at every open/mknod enforcement point — the `Arc` is
+cloned and the read lock released before the policy callback runs, so
+callbacks always execute outside the lock.
+
 
 ## 定位
 
@@ -101,6 +110,19 @@ poll 和 open/release；文件系统节点不再复制这层适配。
 安装替换表不会自动再次调用 open，统一入口负责调用选定后端一次。
 VFS 在 open 成功后按最终操作表计算能力，末引用释放时调用最终后端 release。
 注册表查找锁不跨后端回调；设备号的注册与注销仍由调用方拥有。
+
+### Device-access policy (reverse injection)
+
+kvfs defines the `DeviceAccessPolicy` trait and the registration entry
+`register_device_access_policy`, and invokes the policy at three enforcement
+points: character-device `open` (`open_character_device`) and block-device
+open (both map the open mode onto READ/WRITE bits and OR in the inode's
+TYPE_CHAR/TYPE_BLOCK), and device-node `mknod` (`MKNOD | TYPE_*`). The
+implementor is `bpffs`, which owns the controller state (the cgroup-v2 device
+controller) and injects it during `init_bpf_fs`. The dependency direction is
+inverted: kvfs does not depend on bpf/cgroup, and policy callbacks run after
+the registry read lock is released. With no policy registered, device access
+is unrestricted; a denial answers `VfsError::OperationNotPermitted` (`EPERM`).
 
 ## 块设备文件尺寸与范围操作
 
@@ -209,7 +231,10 @@ list. An expired captured source must not fall back to the default path.
 - `src/open_flags.rs`：原始 `O_*` 参数的规范化与 open intent。
 - `src/namei.rs`：路径遍历和 open 流程。
 - `src/permission.rs`：owner/group/other DAC 与 open access 映射。
-- `src/node/`：dentry、inode、inode identity 状态机及文件系统 operation traits。
+- `src/node/`: dentry, inode, inode-identity state machine and filesystem
+  operation traits; also the character/block device file operations and the
+  device-access policy registration (see "Device-access policy (reverse
+  injection)").
 - `src/address_space/`：inode-owned `AddressSpace`、其直接持有的 `MappingPages` 容器，以及
   writeback 与 truncate/invalidation 边界。`mod.rs` 定义对象和构造；`operations.rs`
   定义 callback 与默认实现；`filemap.rs`、`readahead.rs`、`writeback.rs`、`truncate.rs`

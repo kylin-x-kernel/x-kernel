@@ -814,6 +814,36 @@ transaction。
 - 为不同 cgroup namespace 输出相同伪 inode；
 - 固定返回 `0::/` 掩盖真实 membership。
 
+**已执行的控制器：cgroup v2 devices（`BPF_PROG_TYPE_CGROUP_DEVICE`）**
+
+本条曾以「记账桩豁免」登记；设备策略执行点接入后，豁免撤销，控制器真实生效：
+
+- 命令面：`bpf(2)` 支持 `BPF_PROG_LOAD`（`BPF_PROG_TYPE_CGROUP_DEVICE` =
+  15）、`BPF_PROG_ATTACH`/`BPF_PROG_DETACH`、`BPF_LINK_CREATE`、
+  `BPF_PROG_QUERY`、`BPF_PROG_GET_NEXT_ID`/`BPF_PROG_GET_FD_BY_ID`，attach
+  type 为 `BPF_CGROUP_DEVICE`（= 6）。attach 目标是 cgroup2 对象（非 cgroup2
+  fd → `EBADF`）；`BPF_CGROUP_MAX_PROGS` 上限、三种附着模式
+  （NONE/`BPF_F_ALLOW_OVERRIDE`/`BPF_F_ALLOW_MULTI`，模式粘滞不匹配
+  `EPERM`，`hierarchy_allows_attach` 父层准入，OVERRIDE+MULTI 组合
+  `EINVAL`）、重复 attach `EINVAL`、detach 按 `find_detach_entry` 语义
+  （multi 模式只认直接附着，fd 无效时 `EINVAL`；单附着移除唯一条目）、
+  effective 程序集的层级遮蔽（`compute_effective_progs`：single 层贡献后
+  遮蔽非 MULTI 祖先）按 Linux `kernel/bpf/syscall.c` 与
+  `kernel/bpf/cgroup.c` 对齐；link 按 link 身份判别（`BPF_LINK_CREATE` 为
+  multi 语义，追加不替换），同程序多 link 各自成条、各自消亡；
+- 执行点：字符设备 `open`（按打开模式映射 read/write 访问位）、块设备
+  `open`（同上 + 块类型位）与设备节点 `mknod`（mknod 访问位）经 kvfs 的设备
+  访问策略钩子进入控制器。程序收到
+  `bpf_cgroup_dev_ctx {access_type, major, minor}` 语义的上下文，目标 cgroup
+  及其祖先链上的全部 effective 程序都放行才允许，任一拒绝即 `EPERM`。附着与
+  程序的生命周期绑定 cgroup 对象与 link fd，不绑定附着时使用的描述符；附着
+  持有程序对象，最后的用户态描述符关闭后程序仍可被 id 查询；
+- 程序执行：`core/kbpf` 的 eBPF 解释器覆盖 runc `devicefilter` 生成的指令集
+  （ALU/ALU64、JMP/JMP32 全部条件、END 字节序）。没有 verifier 静态验证：无法
+  执行（未知指令/越界）的程序一律按拒绝处理，与「可疑策略保守拒绝」方向一致；
+- 仍不支持：cgroup v1 devices 控制器、其余 `BPF_PROG_TYPE_*`、程序数组/tail
+  call、verifier。
+
 ### 13.4 审计事件
 
 至少为以下操作提供 tracepoint：

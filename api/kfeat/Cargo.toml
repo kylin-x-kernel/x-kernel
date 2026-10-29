@@ -211,7 +211,7 @@ nmi_mode_hardware = ["khal/nmi_hardware", "kplat-aarch64?/nmi-hardware"]
 tracepoint = ["ktracing/tracepoint"]
 
 # eBPF
-ebpf = ["dep:kbpf", "dep:fs_boot", "ksyscall/ebpf", "kruntime/fs_ebpf"]
+ebpf = ["dep:kbpf", "ksyscall/ebpf", "dep:fs_boot", "kruntime/fs_ebpf"]
 
 [dependencies]
 karch = { workspace = true, optional = true }

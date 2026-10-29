@@ -397,12 +397,16 @@ version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
  "hashbrown 0.16.1",
+ "kbpf",
+ "kcgroup",
  "kcred",
  "kerrno",
  "kpoll",
+ "kprocess",
  "ksync",
  "kvfs",
  "macros",
+ "unittest",
 ]
 
 [[package]]
@@ -4273,7 +4277,9 @@ name = "posix-bpf"
 version = "0.3.0-dev"
 dependencies = [
  "bpffs",
+ "cgroup2fs",
  "kbpf",
+ "kcgroup",
  "kerrno",
  "klogger",
  "kprocess",

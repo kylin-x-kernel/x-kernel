@@ -72,6 +72,14 @@ magic link 的普通 open 跟随其持有的 Path，而不是重新解析用于 
 缓存命中与注销并发时，已选定的后端可能继续执行 open；注销不是同步 drain，
 后端必须自行检查实例准入。回调、失败注册和注销后的最终后端析构均在表锁外。
 
+Access by device number (`DeviceId`) is constrained by the global
+device-access policy (see design.md, "Device-access policy (reverse
+injection)"): when a registered policy denies the access, the
+`open_character_device`, block-device open and `mknod` enforcement points
+reject with `VfsError::OperationNotPermitted` (`EPERM`). The protected assets
+are device-number access itself and the policy slot. With no policy
+registered, access is unrestricted.
+
 用户提供的路径、open flags、rename flags、mount flags 和 mount data 不可信。POSIX syscall 层
 负责复制用户内存并完成 ABI 初步校验；`kvfs` 只接收内核拥有的路径字符串、opaque mount-data
 byte slice 和类型化 flags。

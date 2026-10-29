@@ -46,3 +46,17 @@ pub fn migrate_cgroup_process(
     };
     scheduler::migrate_process_cgroup_with(&process, destination, authorize)
 }
+
+/// Returns the cgroup the current user thread belongs to.
+///
+/// Execution context (CG-039): callable from any task context, kernel tasks
+/// included — it reads the current task pointer and clones the thread's
+/// cgroup `Arc`, so it never sleeps, is safe from IRQ context, and permits
+/// any caller-held locks. Kernel tasks and any task that never joined a
+/// cgroup yield `None`, which callers treat as "no cgroup policy applies";
+/// the function never panics.
+pub fn current_cgroup() -> Option<Arc<Cgroup>> {
+    ktask::current()
+        .try_as_thread()
+        .and_then(|thread| thread.cgroup())
+}

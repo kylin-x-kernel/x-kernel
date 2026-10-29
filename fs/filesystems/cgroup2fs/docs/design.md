@@ -15,6 +15,17 @@ membership 由 `kcgroup` 持有；进程查找和稳定 task identity 校验由 
 本 crate 把 VFS 操作翻译成 owner API，并拥有每个 mount 的 VFS node registry；registry
 只保存 inode identity/metadata，不复制 hierarchy 或 membership 状态。
 
+## Cross-crate interface
+
+- `cgroup_from_file(&VfsFile) -> Option<Arc<Cgroup>>` (`src/lib.rs`): resolves a
+  cgroup2 directory descriptor into its cgroup object for `posix/bpf`, which
+  uses it as the attach target of the cgroup-v2 device controller commands
+  (`BPF_PROG_ATTACH`/`DETACH`/`LINK_CREATE`/`QUERY`). Provider: cgroup2fs;
+  call direction `bpf(2)` -> `cgroup_from_file` ->
+  `state::CgroupFsState::cgroup_of(inode)` (per-mount registry lookup) ->
+  `Arc<Cgroup>`. Descriptors outside this filesystem return `None` (mapped to
+  `EBADF` by the caller).
+
 ## 范围
 
 内核单元测试位于 `ut-tests/lib.rs`，由 `src/lib.rs` 中的

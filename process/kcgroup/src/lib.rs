@@ -347,6 +347,11 @@ impl Cgroup {
             .ok_or_else(|| KError::from(LinuxError::EXDEV))
     }
 
+    /// Returns the parent cgroup, or `None` for the hierarchy root.
+    pub fn parent(&self) -> Option<Arc<Cgroup>> {
+        self.parent.upgrade()
+    }
+
     /// Returns the absolute path in the unified hierarchy.
     pub fn path(&self) -> String {
         if self.name.is_empty() {

@@ -15,7 +15,7 @@ use memaddr::PhysAddrRange;
 use osvm::VirtPtr;
 
 use crate::{
-    DeviceId, FMode, FallocateFlags, FileOperations, Mutex, NodeFlags, VfsError, VfsFile,
+    DeviceId, FMode, FallocateFlags, FileOperations, Mutex, NodeFlags, NodeType, VfsError, VfsFile,
     VfsFileBuilder, VfsInode, VfsResult,
 };
 
@@ -197,9 +197,99 @@ pub fn open_character_device(
     file: &mut VfsFileBuilder,
     ops: Arc<dyn DeviceFileOps>,
 ) -> VfsResult<()> {
+    // Linux derives the device type from the inode mode
+    // (`devcgroup_inode_permission`), so an open reports READ/WRITE plus the
+    // node's type half of `access_type`.
+    let access = device_access_for_mode(file)
+        | match inode.node_type() {
+            NodeType::BlockDevice => DeviceAccess::TYPE_BLOCK,
+            _ => DeviceAccess::TYPE_CHAR,
+        };
+    check_device_access(inode.rdev(), access)?;
     let fops = Arc::new(ChrdevFileOperations::new(ops));
     file.replace_fops(fops.clone());
     fops.open(inode, file)
+}
+
+/// A device-access policy consulted before a character device is opened and
+/// before a device node is created — the cgroup-v2 device controller's
+/// enforcement point (Linux `bpf_cgroup_dev_query`-style checks run the
+/// attached programs and answer `EPERM`).
+///
+/// kvfs cannot know about controllers, so the policy is inverted: the crate
+/// that owns controller state registers an implementation
+/// ([`register_device_access_policy`]) during initialization, and every
+/// device open/mknod consults it. With no policy registered, access is
+/// unrestricted.
+pub trait DeviceAccessPolicy: Send + Sync {
+    /// Decides whether access of `access` kind to the device `(major,
+    /// minor)` is permitted for the current task.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::OperationNotPermitted`] when the policy denies the access.
+    fn check_device_access(&self, device: DeviceId, access: DeviceAccess) -> VfsResult<()>;
+}
+
+bitflags::bitflags! {
+    /// The access kinds a device-policy check may see, mirroring Linux's
+    /// `bpf_cgroup_dev_ctx::access_type` encoding:
+    /// `(BPF_DEVCG_ACC_* << 16) | BPF_DEVCG_DEV_*` — access kinds in the
+    /// high half, device type in the low half.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DeviceAccess: u32 {
+        /// `BPF_DEVCG_DEV_BLOCK` — block device type.
+        const TYPE_BLOCK = 1;
+        /// `BPF_DEVCG_DEV_CHAR` — character device type.
+        const TYPE_CHAR = 2;
+        /// `BPF_DEVCG_ACC_MKNOD` — device-node creation (`mknod`).
+        const MKNOD = 1 << 16;
+        /// `BPF_DEVCG_ACC_READ` — open for reading.
+        const READ = 1 << 17;
+        /// `BPF_DEVCG_ACC_WRITE` — open for writing.
+        const WRITE = 1 << 18;
+    }
+}
+
+static_lock! {
+static DEVICE_ACCESS_POLICY: ksync::RwLock<Option<Arc<dyn DeviceAccessPolicy>>> =
+    ksync::RwLock::new(None);
+}
+
+/// Installs (or removes) the device-access policy consulted by every device
+/// open and device-node creation.
+pub fn register_device_access_policy(
+    policy: Option<Arc<dyn DeviceAccessPolicy>>,
+) -> Result<(), Arc<dyn DeviceAccessPolicy>> {
+    let mut slot = DEVICE_ACCESS_POLICY.write();
+    match (&*slot, &policy) {
+        (Some(existing), Some(_)) => Err(existing.clone()),
+        _ => {
+            *slot = policy;
+            Ok(())
+        }
+    }
+}
+
+/// Consults the registered policy, if any; unrestricted otherwise.
+pub fn check_device_access(device: DeviceId, access: DeviceAccess) -> VfsResult<()> {
+    let policy = DEVICE_ACCESS_POLICY.read().clone();
+    match policy {
+        Some(policy) => policy.check_device_access(device, access),
+        None => Ok(()),
+    }
+}
+
+/// Maps an open mode to the device-access kinds it exercises.
+fn device_access_for_mode(file: &VfsFileBuilder) -> DeviceAccess {
+    let mut access = DeviceAccess::empty();
+    if file.mode().contains(FMode::READ) {
+        access |= DeviceAccess::READ;
+    }
+    if file.mode().contains(FMode::WRITE) {
+        access |= DeviceAccess::WRITE;
+    }
+    access
 }
 
 struct ChrdevFileOperations {
@@ -283,6 +373,11 @@ impl FileOperations for DefaultChrdevFileOperations {
 
 impl FileOperations for DefaultBlkdevFileOperations {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
+        // The device controller gates block opens too (`devcgroup_inode_
+        // permission` covers every device inode), reporting the open mode's
+        // access bits with the block type.
+        let access = device_access_for_mode(file) | DeviceAccess::TYPE_BLOCK;
+        check_device_access(inode.rdev(), access)?;
         let device = block::lookup_block_device(inode.rdev())
             .ok_or_else(|| VfsError::from(LinuxError::ENXIO))?;
         BlockDevice::open(&device, block_open_mode(file.mode()))

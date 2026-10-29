@@ -173,14 +173,21 @@ impl DeviceFileOps for CharacterMultiplexer {
 }
 
 fn open_test_character(ops: Arc<dyn DeviceFileOps>) -> VfsResult<Arc<VfsFile>> {
+    open_test_character_at(DeviceId::default(), ops)
+}
+
+fn open_test_character_at(
+    device: DeviceId,
+    ops: Arc<dyn DeviceFileOps>,
+) -> VfsResult<Arc<VfsFile>> {
     // An inode-local registration exercises cached dispatch without
     // publishing a number or disturbing another test's registration.
-    let device = DeviceId::default();
     let init = VfsInodeInit::new(
         99,
         0,
         Umode::new(NodeType::CharacterDevice, NodePermission::default()),
-    );
+    )
+    .with_owner_links_and_rdev(0, 0, 1, device);
     let inode = VfsInode::new_special(
         Arc::new(TestChrdevInode { rdev: device }),
         NodeFlags::empty(),
@@ -1145,4 +1152,94 @@ fn block_device_fallocate_validates_mode_capacity_and_alignment() {
         .all(|&b| b == 0x35));
 
     block::del_gendisk(device.disk().device_number()).expect("remove fallocate test disk");
+}
+
+/// A device policy that denies every access to char 1:3 and records the
+/// (major, minor, access bits) it was consulted with.
+struct RecordingPolicy {
+    consulted: Mutex<Vec<(u32, u32, u32)>>,
+}
+
+impl DeviceAccessPolicy for RecordingPolicy {
+    fn check_device_access(&self, device: DeviceId, access: DeviceAccess) -> VfsResult<()> {
+        self.consulted
+            .lock()
+            .push((device.major(), device.minor(), access.bits()));
+        if device.major() == 1 && device.minor() == 3 {
+            Err(VfsError::OperationNotPermitted)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// The registered policy gates every character-device open and sees the
+/// mknod access kind; uninstalling it restores unrestricted access.
+///
+/// The guest image boots with bpffs's controller policy already registered,
+/// so the test swaps that incumbent out for a recording fake and restores it
+/// afterwards. `(Some, Some)` registration keeps the incumbent and reports
+/// it, which is how the incumbent is captured.
+#[def_test(serial)]
+fn device_access_policy_gates_open_and_mknod_kinds() {
+    let policy = Arc::new(RecordingPolicy {
+        consulted: Mutex::new(Vec::new()),
+    });
+    let incumbent = register_device_access_policy(Some(policy.clone() as Arc<dyn DeviceAccessPolicy>))
+        .err();
+    let _ = register_device_access_policy(None);
+    assert!(
+        register_device_access_policy(Some(policy.clone() as Arc<dyn DeviceAccessPolicy>)).is_ok(),
+        "the slot must hold our recording policy now"
+    );
+
+    // A denied device fails the open before any backend open runs.
+    let backend = CharacterBackend::new(true, true, false);
+    let denied = open_test_character_at(DeviceId::new(1, 3), backend.clone());
+    assert!(
+        matches!(denied, Err(VfsError::OperationNotPermitted)),
+        "char 1:3 must be denied by the policy"
+    );
+    assert_eq!(backend.opens.load(Ordering::Relaxed), 0);
+
+    // Another device opens; the policy saw READ|WRITE plus the char type.
+    let allowed = open_test_character_at(DeviceId::new(1, 9), backend.clone());
+    assert!(allowed.is_ok(), "1:9 is not denied");
+    assert_eq!(backend.opens.load(Ordering::Relaxed), 1);
+    drop(allowed);
+
+    let consulted = policy.consulted.lock();
+    assert!(consulted.contains(&(1, 3, DeviceAccess::READ.bits() | DeviceAccess::WRITE.bits() | DeviceAccess::TYPE_CHAR.bits())));
+    assert!(consulted.contains(&(1, 9, DeviceAccess::READ.bits() | DeviceAccess::WRITE.bits() | DeviceAccess::TYPE_CHAR.bits())));
+
+    // The mknod hook consults the same policy with the creation kind.
+    drop(consulted);
+    check_device_access(
+        DeviceId::new(6, 1),
+        DeviceAccess::MKNOD | DeviceAccess::TYPE_CHAR,
+    )
+    .expect("6:1 creation is allowed");
+    assert!(policy.consulted.lock().contains(&(
+        6,
+        1,
+        DeviceAccess::MKNOD.bits() | DeviceAccess::TYPE_CHAR.bits()
+    )));
+
+    // Uninstalling restores unrestricted access.
+    assert!(
+        register_device_access_policy(None).is_ok(),
+        "policy slot holds our registration"
+    );
+    let unrestricted = open_test_character_at(DeviceId::new(1, 3), backend.clone());
+    assert!(unrestricted.is_ok());
+    assert_eq!(backend.opens.load(Ordering::Relaxed), 2);
+
+    // Put the boot-time policy back so the image keeps its controller.
+    let _ = register_device_access_policy(None);
+    if let Some(real) = incumbent {
+        assert!(
+            register_device_access_policy(Some(real)).is_ok(),
+            "the incumbent policy must be restorable"
+        );
+    }
 }

@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
+ebpf = ["dep:posix-bpf", "posix-bpf/cgroup2"]
 vsock = ["posix-net/vsock"]
 tipc = ["dep:tipc", "posix-process/tipc"]
 tee = [
@@ -19,7 +20,6 @@ tee = [
     "tipc?/tee",
 ]
 tee_ta_sign = ["tee_task_iface?/tee_ta_sign"]
-ebpf = ["dep:posix-bpf", "posix-bpf/ebpf"]
 
 [package.metadata.cargo-shear]
 # kaddr_layout, kspin and unittest_support are used by cfg(unittest) fixtures

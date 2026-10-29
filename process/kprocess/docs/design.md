@@ -81,6 +81,9 @@ retains init identity; orphan reparenting reserves an init relation slot.
   `PollSet` notification source, while `Process::is_exited()` is the persistent
   readiness predicate. Poll users register then recheck that predicate to cover
   exit racing registration; late observers need no replayed notification.
+- `current_cgroup()` resolves the running thread's cgroup (`None` for kernel
+  tasks and tasks that never joined one); external callers include the bpffs
+  device-access policy, direction kprocess -> consumer.
 - `migrate_cgroup_process` adapts a PID and filesystem authorization callback to
   process-wide migration; `scheduler` coordinates published task memberships.
   `CurrentThread` credential preparation/commit replaces only the calling

@@ -3,9 +3,11 @@ menu "eBPF"
 config KFEAT_EBPF
     bool "Enable eBPF execution engine"
     depends on KFEAT_FS
-    default n
+    default y
     help
-      Enable the in-kernel eBPF interpreter (crate `kbpf`).
+      Enable the in-kernel eBPF interpreter (crate `kbpf`) and the bpf(2)
+      cgroup-v2 devices controller it executes — non-rootless containers
+      program that controller at startup and fail without it.
 
       Provides a minimal BPF virtual machine that can execute eBPF
       bytecode programs and dispatch to host-registered helper

@@ -12,6 +12,8 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
+
 mod command;
 mod control;
 mod controller;
@@ -21,6 +23,24 @@ mod pids;
 mod process;
 mod state;
 
+use kvfs::{SimpleFs, VfsFile};
 pub use mount::{FILE_SYSTEM_TYPE, new_cgroup2fs, new_initial_cgroup2fs};
+
+/// Resolves the cgroup object a cgroup2 directory file refers to.
+///
+/// `bpf(2)` attaches device programs through a cgroup directory fd; the
+/// syscall layer hands the opened file here to identify the target cgroup.
+///
+/// Returns `None` for files on other filesystems or non-directory inodes —
+/// the caller answers `EBADF`/`EINVAL`, mirroring `cgroup_get_from_fd`.
+pub fn cgroup_from_file(file: &VfsFile) -> Option<Arc<kcgroup::Cgroup>> {
+    let super_block = file.inode().super_block().ok()?;
+    if super_block.magic() != 0x6367_7270 {
+        return None;
+    }
+    let fs = super_block.private::<Arc<SimpleFs>>().ok()?;
+    fs.private::<state::CgroupFsState>()?
+        .cgroup_of(file.inode())
+}
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

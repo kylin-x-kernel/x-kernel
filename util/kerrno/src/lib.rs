@@ -174,6 +174,9 @@ pub enum KErrorKind {
     /// Defaults to EINTR. This does not establish that an enclosing transfer
     /// made no progress; its owner must preserve completed bytes first.
     IoWaitInterrupted,
+    /// Stale state: the caller's revision/epoch check failed against the
+    /// current state (Linux `ESTALE`, e.g. `bpf` compare-and-swap detach).
+    Stale,
 }
 
 impl KErrorKind {
@@ -218,6 +221,7 @@ impl KErrorKind {
             PermissionDenied => "Permission denied",
             ReadOnlyFilesystem => "Read-only filesystem",
             ResourceBusy => "Resource busy",
+            Stale => "Stale file handle",
             StorageFull => "No storage space",
             TimedOut => "Timed out",
             TooManyOpenFiles => "Too many open files",
@@ -288,6 +292,7 @@ impl KErrorKind {
             44 => ConnectionAborted,
             45 => FileTooLarge,
             46 => IoWaitInterrupted,
+            47 => Stale,
             _ => return None,
         })
     }
@@ -348,6 +353,7 @@ impl From<KErrorKind> for LinuxError {
             PermissionDenied => LinuxError::EACCES,
             ReadOnlyFilesystem => LinuxError::EROFS,
             ResourceBusy => LinuxError::EBUSY,
+            Stale => LinuxError::ESTALE,
             StorageFull => LinuxError::ENOSPC,
             TimedOut => LinuxError::ETIMEDOUT,
             TooManyOpenFiles => LinuxError::EMFILE,
@@ -400,6 +406,7 @@ impl TryFrom<LinuxError> for KErrorKind {
             LinuxError::EACCES => PermissionDenied,
             LinuxError::EROFS => ReadOnlyFilesystem,
             LinuxError::EBUSY => ResourceBusy,
+            LinuxError::ESTALE => Stale,
             LinuxError::ENOSPC => StorageFull,
             LinuxError::ETIMEDOUT => TimedOut,
             LinuxError::EMFILE => TooManyOpenFiles,
@@ -635,6 +642,7 @@ kerror_consts!(
     PermissionDenied,
     ReadOnlyFilesystem,
     ResourceBusy,
+    Stale,
     StorageFull,
     TimedOut,
     TooManyOpenFiles,

@@ -57,6 +57,46 @@ const OP_LD_DW_IMM: u8 = 0x18;
 /// `lddw` source marker for map-value addresses.
 const BPF_PSEUDO_MAP_VALUE: u8 = 2;
 
+// eBPF opcode fields: class (bits 0-2), source (bit 3), operation (bits 4-7).
+const OP_CALL: u8 = 0x85;
+const OP_EXIT: u8 = 0x95;
+const CLASS_ALU: u8 = 0x04;
+const CLASS_JMP: u8 = 0x05;
+const CLASS_JMP32: u8 = 0x06;
+const CLASS_ALU64: u8 = 0x07;
+const SOURCE_REG: u8 = 0x08;
+
+// ALU operations (bits 4-7).
+const ALU_ADD: u8 = 0x00;
+const ALU_SUB: u8 = 0x10;
+const ALU_MUL: u8 = 0x20;
+const ALU_DIV: u8 = 0x30;
+const ALU_OR: u8 = 0x40;
+const ALU_AND: u8 = 0x50;
+const ALU_LSH: u8 = 0x60;
+const ALU_RSH: u8 = 0x70;
+const ALU_NEG: u8 = 0x80;
+const ALU_MOD: u8 = 0x90;
+const ALU_XOR: u8 = 0xa0;
+const ALU_MOV: u8 = 0xb0;
+const ALU_ARSH: u8 = 0xc0;
+const ALU_END: u8 = 0xd0;
+
+// Jump conditions (bits 4-7). The unsigned variants compare the operands as
+// unsigned; the `S` variants compare them as signed.
+const JMP_JA: u8 = 0x00;
+const JMP_JEQ: u8 = 0x10;
+const JMP_JGT: u8 = 0x20;
+const JMP_JGE: u8 = 0x30;
+const JMP_JSET: u8 = 0x40;
+const JMP_JNE: u8 = 0x50;
+const JMP_JSGT: u8 = 0x60;
+const JMP_JSGE: u8 = 0x70;
+const JMP_JLT: u8 = 0xa0;
+const JMP_JLE: u8 = 0xb0;
+const JMP_JSLT: u8 = 0xc0;
+const JMP_JSLE: u8 = 0xd0;
+
 // BPF_LDX | BPF_MEM
 /// `ldxb dst, [src+off]`.
 const OP_LDX_MEM_B: u8 = 0x71;
@@ -88,24 +128,8 @@ const OP_STX_MEM_W: u8 = 0x63;
 const OP_STX_MEM_DW: u8 = 0x7b;
 
 // BPF_ALU64
-/// `add64 dst, imm`  (BPF_ALU64 | BPF_ADD | BPF_K).
-const OP_ADD64_IMM: u8 = 0x07;
-/// `add64 dst, src`  (BPF_ALU64 | BPF_ADD | BPF_X).
-const OP_ADD64_REG: u8 = 0x0f;
-/// `mov64 dst, imm`  (BPF_ALU64 | BPF_MOV | BPF_K).
-const OP_MOV64_IMM: u8 = 0xb7;
-/// `mov64 dst, src`  (BPF_ALU64 | BPF_MOV | BPF_X).
-const OP_MOV64_REG: u8 = 0xbf;
 
 // BPF_JMP
-/// `ja off`           (BPF_JMP   | BPF_JA).
-const OP_JA: u8 = 0x05;
-/// `jeq dst, imm, off` (BPF_JMP  | BPF_JEQ | BPF_K).
-const OP_JEQ_IMM: u8 = 0x15;
-/// `call imm`         (BPF_JMP   | BPF_CALL).
-const OP_CALL: u8 = 0x85;
-/// `exit`             (BPF_JMP   | BPF_EXIT).
-const OP_EXIT: u8 = 0x95;
 
 /// Number of general-purpose eBPF registers (`r0..=r10`).
 pub const NUM_REGS: usize = 11;
@@ -156,6 +180,26 @@ impl ReadOnlyMemory {
             base: bytes.as_ptr() as u64,
             bytes,
         }
+    }
+
+    /// Exposes `bytes` as the program's context argument, returning the
+    /// memory and the base address the context pointer (`r1`) must carry.
+    ///
+    /// This is how a host hands a `struct ..._ctx` to a program: the bytes
+    /// become read-only program memory and `r1` points at their start.
+    pub fn context(bytes: Arc<[u8]>) -> (Self, u64) {
+        // `u32::MAX` is reserved for the context so an `lddw` map-value
+        // relocation keyed by a caller-chosen id (map fd numbers) can never
+        // alias the context region.
+        let base = bytes.as_ptr() as u64;
+        (
+            Self {
+                id: u32::MAX,
+                base,
+                bytes,
+            },
+            base,
+        )
     }
 
     fn addr_at_offset(&self, offset: u32) -> Result<u64> {
@@ -357,40 +401,25 @@ impl Vm {
                     self.write_stack_value(addr, width, self.regs[src])?;
                 }
                 // BPF_ALU64
-                OP_ADD64_IMM => {
-                    let dst = reg_index(insn.dst)?;
-                    self.regs[dst] = self.regs[dst].wrapping_add(insn.imm as i64 as u64);
-                }
-                OP_ADD64_REG => {
-                    let dst = reg_index(insn.dst)?;
-                    let src = reg_index(insn.src)?;
-                    self.regs[dst] = self.regs[dst].wrapping_add(self.regs[src]);
-                }
-                OP_MOV64_IMM => {
-                    let dst = reg_index(insn.dst)?;
-                    self.regs[dst] = insn.imm as i64 as u64;
-                }
-                OP_MOV64_REG => {
-                    let dst = reg_index(insn.dst)?;
-                    let src = reg_index(insn.src)?;
-                    self.regs[dst] = self.regs[src];
-                }
-                // BPF_JMP
-                OP_JA => {
-                    pc = jump_target(pc, insn.off, num_slots)?;
-                }
-                OP_JEQ_IMM => {
-                    let dst = reg_index(insn.dst)?;
-                    if self.regs[dst] == insn.imm as i64 as u64 {
-                        pc = jump_target(pc, insn.off, num_slots)?;
-                    }
-                }
+                // BPF_ALU64 — the 64-bit ALU class.
+                opc if opc & 0x07 == CLASS_ALU64 => self.execute_alu(insn, true)?,
+                // BPF_ALU — the 32-bit ALU class; results zero-extend.
+                opc if opc & 0x07 == CLASS_ALU => self.execute_alu(insn, false)?,
+                // `call` and `exit` live in the jump class but terminate or
+                // dispatch instead of branching.
                 OP_CALL => {
-                    let id = insn.imm as u32;
-                    self.regs[0] = self.call_helper(id)?;
+                    self.regs[0] = self.call_helper(insn.imm as u32)?;
                 }
                 OP_EXIT => {
                     return Ok(self.regs[0]);
+                }
+                // BPF_JMP — 64-bit jump conditions.
+                opc if opc & 0x07 == CLASS_JMP => {
+                    pc = self.execute_jump(insn, pc, num_slots, false)?;
+                }
+                // BPF_JMP32 — jump conditions on the low 32 bits only.
+                opc if opc & 0x07 == CLASS_JMP32 => {
+                    pc = self.execute_jump(insn, pc, num_slots, true)?;
                 }
                 opc => return Err(Error::UnknownOpcode(opc)),
             }
@@ -404,6 +433,140 @@ impl Vm {
     /// Equivalent to `run_with_initial_regs(prog, InitialRegs::default())`.
     pub fn run(&mut self, prog: &[u8]) -> Result<u64> {
         self.run_with_initial_regs(prog, InitialRegs::default())
+    }
+
+    /// Executes one instruction of the ALU or ALU64 class.
+    ///
+    /// 64-bit operations work on the full register; 32-bit operations work on
+    /// the low 32 bits and zero-extend their result, per the eBPF
+    /// specification.
+    fn execute_alu(&mut self, insn: Insn, wide: bool) -> Result<()> {
+        let dst = reg_index(insn.dst)?;
+        let use_register = insn.opc & SOURCE_REG == SOURCE_REG;
+        let operation = insn.opc & 0xf0;
+
+        if operation == ALU_MOV {
+            self.regs[dst] = if wide {
+                if use_register {
+                    self.regs[reg_index(insn.src)?]
+                } else {
+                    insn.imm as i64 as u64
+                }
+            } else if use_register {
+                self.regs[reg_index(insn.src)?] as u32 as u64
+            } else {
+                insn.imm as u32 as u64
+            };
+            return Ok(());
+        }
+        if operation == ALU_END {
+            // The 6.8 interpreter's byte-order semantics on a little-endian
+            // host (`kernel/bpf/core.c`): the ALU-class encodings convert
+            // host order — TO_BE (0xdc) swaps within `imm` and TO_LE (0xd4)
+            // truncates — both zero-extending the result; the ALU64-class
+            // TO_LE encoding (0xd7) is the pure `BPF_BSWAP` form (swap
+            // within `imm`, zero-extended except width 64). The interpreter's
+            // ALU-class switches have no `imm == 64` case, so `end le64`/
+            // `end be64` in that class leave the register unchanged — the
+            // verifier accepts the encoding (`check_alu_op`: imm is
+            // 16/32/64; only the ALU64 class requires TO_LE). The ALU64
+            // TO_BE encoding (0xdf) has no interpreter label and
+            // `bpf_opcode_in_insntable()` rejects it at load.
+            let value = self.regs[dst];
+            let converted = match (insn.opc, insn.imm) {
+                (0xdc, 16) => (value as u16).swap_bytes() as u64,
+                (0xdc, 32) => (value as u32).swap_bytes() as u64,
+                (0xdc, 64) => value,
+                (0xd4, 16) => value as u16 as u64,
+                (0xd4, 32) => value as u32 as u64,
+                (0xd4, 64) => value,
+                (0xd7, 16) => (value as u16).swap_bytes() as u64,
+                (0xd7, 32) => (value as u32).swap_bytes() as u64,
+                (0xd7, 64) => value.swap_bytes(),
+                _ => return Err(Error::UnknownOpcode(insn.opc)),
+            };
+            self.regs[dst] = converted;
+            return Ok(());
+        }
+
+        let operand = if use_register {
+            self.regs[reg_index(insn.src)?]
+        } else if wide {
+            insn.imm as i64 as u64
+        } else {
+            insn.imm as u32 as u64
+        };
+        self.regs[dst] = if wide {
+            alu64_operation(operation, self.regs[dst], operand, insn.opc)?
+        } else {
+            alu32_operation(operation, self.regs[dst] as u32, operand as u32, insn.opc)? as u64
+        };
+        Ok(())
+    }
+
+    /// Executes one instruction of the JMP or JMP32 class.
+    ///
+    /// `wide == false` compares the full 64-bit registers; `wide == true`
+    /// (JMP32) compares only the low 32 bits. The branch target is a signed
+    /// slot delta from the instruction that follows the branch.
+    fn execute_jump(
+        &mut self,
+        insn: Insn,
+        pc: usize,
+        num_slots: usize,
+        narrow: bool,
+    ) -> Result<usize> {
+        let operation = insn.opc & 0xf0;
+        let use_register = insn.opc & SOURCE_REG == SOURCE_REG;
+        let dst = reg_index(insn.dst)?;
+
+        if operation == JMP_JA {
+            return jump_target(pc, insn.off, num_slots);
+        }
+
+        let (left, right) = if narrow {
+            let right = if use_register {
+                self.regs[reg_index(insn.src)?] as u32 as u64
+            } else {
+                insn.imm as u32 as u64
+            };
+            (self.regs[dst] as u32 as u64, right)
+        } else {
+            let right = if use_register {
+                self.regs[reg_index(insn.src)?]
+            } else {
+                insn.imm as i64 as u64
+            };
+            (self.regs[dst], right)
+        };
+
+        let taken = match operation {
+            JMP_JEQ => left == right,
+            JMP_JNE => left != right,
+            JMP_JGT => left > right,
+            JMP_JGE => left >= right,
+            // Linux jumps when the bitwise AND is non-zero.
+            JMP_JSET => left & right != 0,
+            JMP_JLT => left < right,
+            JMP_JLE => left <= right,
+            // The narrow (JMP32) class sign-extends both operands to compare
+            // them as `s32` — the zero-extended view used above would turn a
+            // negative low word into a huge positive number.
+            JMP_JSGT if narrow => (left as u32 as i32) as i64 > (right as u32 as i32) as i64,
+            JMP_JSGE if narrow => (left as u32 as i32) as i64 >= (right as u32 as i32) as i64,
+            JMP_JSLT if narrow => ((left as u32 as i32) as i64) < ((right as u32 as i32) as i64),
+            JMP_JSLE if narrow => ((left as u32 as i32) as i64) <= ((right as u32 as i32) as i64),
+            JMP_JSGT => (left as i64) > (right as i64),
+            JMP_JSGE => (left as i64) >= (right as i64),
+            JMP_JSLT => (left as i64) < (right as i64),
+            JMP_JSLE => (left as i64) <= (right as i64),
+            _ => return Err(Error::UnknownOpcode(insn.opc)),
+        };
+        if taken {
+            jump_target(pc, insn.off, num_slots)
+        } else {
+            Ok(pc)
+        }
     }
 
     fn call_helper(&self, id: u32) -> Result<u64> {
@@ -534,6 +697,54 @@ fn store_memory_value(dst: &mut [u8], value: u64) {
     for (idx, byte) in dst.iter_mut().enumerate() {
         *byte = (value >> (idx * 8)) as u8;
     }
+}
+
+/// Applies one ALU/ALU64 arithmetic-logic operation.
+///
+/// Division and modulo by zero yield zero and the dividend respectively,
+/// matching the kernel; shifts wrap by the operand width; the 32-bit results
+/// are computed on `u32` and returned for zero-extension.
+fn alu64_operation(operation: u8, left: u64, right: u64, opc: u8) -> Result<u64> {
+    // The interpreter masks register-source shift counts with 63/31
+    // (`SHT` in `kernel/bpf/core.c`) and leaves immediate shifts unmasked;
+    // this port uses the masked (wrapping) form for both so an over-wide
+    // immediate cannot panic — matching the kernel's documented
+    // implementation-defined over-shift behavior.
+    Ok(match operation {
+        ALU_ADD => left.wrapping_add(right),
+        ALU_SUB => left.wrapping_sub(right),
+        ALU_MUL => left.wrapping_mul(right),
+        ALU_DIV => left.checked_div(right).unwrap_or(0),
+        ALU_MOD => left.checked_rem(right).unwrap_or(left),
+        ALU_OR => left | right,
+        ALU_AND => left & right,
+        ALU_XOR => left ^ right,
+        ALU_LSH => left.wrapping_shl(right as u32 & 63),
+        ALU_RSH => left.wrapping_shr(right as u32 & 63),
+        ALU_ARSH => ((left as i64).wrapping_shr(right as u32 & 63)) as u64,
+        ALU_NEG => (left as i64).wrapping_neg() as u64,
+        _ => return Err(Error::UnknownOpcode(opc)),
+    })
+}
+
+/// Applies one ALU (32-bit) arithmetic-logic operation; the result is
+/// zero-extended by the caller.
+fn alu32_operation(operation: u8, left: u32, right: u32, opc: u8) -> Result<u32> {
+    Ok(match operation {
+        ALU_ADD => left.wrapping_add(right),
+        ALU_SUB => left.wrapping_sub(right),
+        ALU_MUL => left.wrapping_mul(right),
+        ALU_DIV => left.checked_div(right).unwrap_or(0),
+        ALU_MOD => left.checked_rem(right).unwrap_or(left),
+        ALU_OR => left | right,
+        ALU_AND => left & right,
+        ALU_XOR => left ^ right,
+        ALU_LSH => left.wrapping_shl(right & 31),
+        ALU_RSH => left.wrapping_shr(right & 31),
+        ALU_ARSH => (left as i32).wrapping_shr(right & 31) as u32,
+        ALU_NEG => (left as i32).wrapping_neg() as u32,
+        _ => return Err(Error::UnknownOpcode(opc)),
+    })
 }
 
 /// Compute the target slot of a relative jump.
