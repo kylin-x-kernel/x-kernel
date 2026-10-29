@@ -32,6 +32,7 @@ ksignal.workspace = true
 klazy.workspace = true
 kspin.workspace = true
 ksync.workspace = true
+ktime_types.workspace = true
 ktask.workspace = true
 kvfs.workspace = true
 linux-raw-sys = { workspace = true, features = ["ioctl"] }

@@ -133,6 +133,11 @@ The native console remains kernel-lifetime. PTY callbacks retain original buffer
 never resolve peers by number, and do not own their TTY endpoints. PTY allocation
 retirement is separate from safe input-work destruction.
 
+Without an input IRQ, the console connection owns a delayed polling handle.
+The polling callback retains only weak ownership of its poller and input Work;
+last-owner Drop lets kworkng drain its timer and callback in task context.
+Periodic checks do not directly notify file waiters or synthesize readiness.
+
 Native read/write/echo use one connection, including its selected source for
 loss accounting. Runtime adoption is limited to the registered early stdout
 identity. Handle availability is checked before I/O, but this check is not a

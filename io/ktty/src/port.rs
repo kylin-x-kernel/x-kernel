@@ -542,8 +542,10 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
         match &self.processor {
             Processor::Manual(_) => {
                 // Manual mode has no external wake source, so force an immediate
-                // recheck by waking the current waiter.
-                context.wake_by_ref();
+                // recheck. A permanently closed source cannot produce more input.
+                if !self.ingress.is_closed() {
+                    context.wake_by_ref();
+                }
             }
             Processor::None(_, set) | Processor::Work { poll_rx: set, .. } => {
                 context.register(set)?;

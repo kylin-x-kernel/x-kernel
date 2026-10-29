@@ -68,6 +68,7 @@ fn connection(
     let connection = ConsoleConnection {
         boot_port,
         runtime: SpinNoPreempt::new(Some(handle)),
+        input_poller: SpinNoPreempt::new(None),
     };
     (Arc::new(connection), calls)
 }
@@ -147,6 +148,7 @@ fn console_output_keeps_backend_owned_newline_processing() {
     let connection = Arc::new(ConsoleConnection {
         boot_port: Some(fixture.port()),
         runtime: SpinNoPreempt::new(None),
+        input_poller: SpinNoPreempt::new(None),
     });
     let tty = Tty::new(
         Arc::default(),

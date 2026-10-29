@@ -339,17 +339,22 @@ fn test_process_mode_none_reads_raw_stream_and_reports_would_block_when_empty() 
 }
 
 #[def_test]
-fn test_manual_register_rx_wakes_immediately() {
-    let (ldisc, _) = new_manual_ldisc(b"", |_| {});
-    let wake_counter = Arc::new(WakeCounter::default());
-    let waker = Waker::from(wake_counter.clone());
-    let cx = Context::from_waker(&waker);
-    let mut registrations = PollRegistrations::new();
-    let mut context = registrations.context(&cx);
+fn test_manual_register_rx_only_rechecks_open_input() {
+    for is_closed in [false, true] {
+        let (ldisc, _) = new_manual_ldisc(b"", |_| {});
+        if is_closed {
+            ldisc.ingress.close();
+        }
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(wake_counter.clone());
+        let cx = Context::from_waker(&waker);
+        let mut registrations = PollRegistrations::new();
+        let mut context = registrations.context(&cx);
 
-    ldisc.register_rx(&mut context).unwrap();
+        ldisc.register_rx(&mut context).unwrap();
 
-    assert!(wake_counter.woke.load(Ordering::Relaxed));
+        assert_eq!(wake_counter.woke.load(Ordering::Relaxed), !is_closed);
+    }
 }
 
 fn await_input<R: TtyRead>(ldisc: &mut TtyPort<R, MockWriter>) {

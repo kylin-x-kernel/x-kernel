@@ -99,11 +99,15 @@ of scope; current runtime validation results are recorded in PR material.
 
 ## Native Console Input Work
 
-Native consoles with an input IRQ use `ProcessMode::Work` and a prepared
+Native consoles use `ProcessMode::Work` and a prepared
 `kworkng::WorkHandle`; they do not subscribe to generic IRQ notifications.
 Preparation requires sleepable context after normal-worker initialization.
-Late-init attaches an input Waker to the stdout port before userspace opens TTY.
-Consoles without an IRQ retain Manual mode. PTY slaves use the same Work mode;
+IRQ consoles attach an input Waker to the stdout port before userspace opens TTY.
+Consoles without an IRQ own a `DelayedWorkHandle` in their connection and submit
+input checks every 10 ms. Its callback weakly references the polling owner and
+only submits input Work; file waiters are notified when processing publishes
+readable bytes. Closed Manual input sources do not request further rechecks.
+PTY slaves use the same Work mode;
 master writes notify slave input, while slave output notifies master readability.
 Creation connects both directions before an initial input check. No dedicated
 per-PTY input task is spawned.

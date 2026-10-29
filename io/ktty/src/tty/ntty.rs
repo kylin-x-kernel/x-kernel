@@ -2,7 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+};
 use core::task::Waker;
 
 use char_driver::CharDevice;
@@ -14,6 +17,8 @@ use kclass::{CharDeviceImpl, ClassDevice};
 use kerrno::KResult;
 use klazy::lazy_static;
 use kspin::SpinNoPreempt;
+use ktime_types::TimeSpan;
+use kworkng::DelayedWorkHandle;
 
 use super::{Tty, TtyKind};
 use crate::port::{ProcessMode, TtyConfig, TtyRead, TtyWrite};
@@ -26,9 +31,45 @@ pub type NTtyDriver = Tty<Arc<ConsoleConnection>, Arc<ConsoleConnection>>;
 /// Runtime access is adopted in task context. Global console selection does not
 /// redirect this established connection. The early port is kernel-lifetime;
 /// retaining its runtime wrapper does not provide general hot-unplug support.
+/// Without an input IRQ, the connection also owns periodic input Work submission.
 pub struct ConsoleConnection {
     boot_port: Option<Arc<SerialPort>>,
     runtime: SpinNoPreempt<Option<ClassDevice<CharDeviceImpl>>>,
+    input_poller: SpinNoPreempt<Option<Arc<ConsoleInputPoller>>>,
+}
+
+// Only consoles without an input IRQ need periodic backend progress. The
+// input Work publishes readability; this timer never wakes file waiters.
+struct ConsoleInputPoller {
+    work: DelayedWorkHandle<Box<dyn Fn() + Send + Sync>>,
+}
+
+impl ConsoleInputPoller {
+    fn new(input_waker: Waker) -> Arc<Self> {
+        Arc::new_cyclic(|weak: &Weak<Self>| {
+            let weak = weak.clone();
+            let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                if let Some(poller) = weak.upgrade() {
+                    input_waker.wake_by_ref();
+                    poller.queue();
+                }
+            });
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: native input Work was already \
+                          prepared in sleepable context after normal-worker startup"
+            )]
+            let work = DelayedWorkHandle::new(callback)
+                .expect("console input polling requires normal workers");
+            Self { work }
+        })
+    }
+
+    fn queue(&self) {
+        if let Err(error) = self.work.queue_default(TimeSpan::from_millis(10), None) {
+            warn!("console input polling could not be queued: {error:?}");
+        }
+    }
 }
 
 impl ConsoleConnection {
@@ -36,6 +77,7 @@ impl ConsoleConnection {
         Self {
             boot_port: serial::stdout_port(),
             runtime: SpinNoPreempt::new(None),
+            input_poller: SpinNoPreempt::new(None),
         }
     }
 
@@ -51,6 +93,13 @@ impl ConsoleConnection {
             .expect("console input IRQ requires a stdout port")
             .attach_input_waker(waker)
             .expect("failed to connect console input notification");
+    }
+
+    fn poll_input(&self, waker: Waker) {
+        let poller = ConsoleInputPoller::new(waker.clone());
+        poller.queue();
+        *self.input_poller.lock() = Some(poller);
+        waker.wake_by_ref();
     }
 
     fn try_handoff(&self) {
@@ -176,21 +225,19 @@ fn new_n_tty() -> Arc<NTtyDriver> {
         TtyConfig {
             reader: connection.clone(),
             writer: connection.clone(),
-            process_mode: if has_input_irq {
-                ProcessMode::Work(khal::percpu::this_cpu_id())
-            } else {
-                ProcessMode::Manual
-            },
+            process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
     );
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: native TTY uses ProcessMode::Work, which \
+                  always installs an input waker"
+    )]
+    let waker = tty.input.lock().input_waker().unwrap();
     if has_input_irq {
-        #[expect(
-            clippy::unwrap_used,
-            reason = "CG-021-no-panic-on-reachable-failure: has_input_irq selected \
-                      ProcessMode::Work when constructing this TTY, which installs the input waker"
-        )]
-        let waker = tty.input.lock().input_waker().unwrap();
         connection.attach_input(waker);
+    } else {
+        connection.poll_input(waker);
     }
     tty
 }
