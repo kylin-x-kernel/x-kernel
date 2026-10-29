@@ -8,18 +8,23 @@
 //! in socket I/O operations, including file descriptor passing and other protocol-specific data.
 
 use alloc::{sync::Arc, vec, vec::Vec};
-use core::{mem::size_of, net::SocketAddr, ptr};
+use core::{
+    ffi::{c_int, c_long},
+    mem::size_of,
+    net::SocketAddr,
+    ptr,
+};
 
 use bytemuck::{NoUninit, bytes_of};
 use kerrno::{KError, KResult, LinuxError};
 use knet::{SocketErrorInfo, SocketErrorOrigin};
 use kvfs::VfsFile;
 use linux_raw_sys::net::{
-    AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_RIGHTS, SOL_SOCKET, cmsghdr, in_addr,
-    sockaddr_in,
+    AF_INET, AF_UNSPEC, IP_RECVERR, IPPROTO_IP, SCM_CREDENTIALS, SCM_RIGHTS, SOL_IP, SOL_IPV6,
+    SOL_SOCKET, cmsghdr, in_addr, sockaddr_in, ucred,
 };
 use osvm::{VirtPtr, write_vm_mem};
-use posix_types::{UserConstPtr, UserPtr};
+use posix_types::UserPtr;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -162,55 +167,195 @@ pub(crate) enum CMsg {
     /// SCM_RIGHTS: file descriptor passing between processes
     Rights { fds: Vec<Arc<VfsFile>> },
 }
-impl CMsg {
-    /// Parse a control message header and extract its data.
-    ///
-    /// Explicit SCM_CREDENTIALS sends are unsupported and return EINVAL.
-    /// Accepting them would require validating the claimed identity first.
-    pub(crate) fn parse(
-        resources: &kresources::TaskFiles,
-        hdr_ptr: UserConstPtr<cmsghdr>,
-        hdr: cmsghdr,
-    ) -> KResult<Self> {
-        if hdr.cmsg_len < size_of::<cmsghdr>() {
+
+/// Upper bound for one control buffer: Linux `sysctl_optmem_max`'s default of
+/// 128 KiB (`net/core/net_namespace.c`). `sock_kmalloc`, which backs the
+/// control snapshot in `____sys_sendmsg`, requires the allocation to stay
+/// below this bound and returns `ENOBUFS` otherwise, so the same bound gates
+/// the snapshot here.
+pub(crate) const OPTMEM_MAX: usize = 128 * 1024;
+
+/// Alignment granularity of `cmsghdr` on the Linux ABI. Linux defines
+/// `CMSG_ALIGN` on `sizeof(long)` (`include/linux/socket.h`), so every header
+/// after the first starts at a `cmsg_len` rounded up to this unit.
+const CMSG_ALIGN_UNIT: usize = size_of::<c_long>();
+
+/// Rounds `len` up to the `cmsghdr` alignment granularity (Linux
+/// `CMSG_ALIGN`), rejecting overflow.
+pub(crate) fn cmsg_align(len: usize) -> KResult<usize> {
+    len.checked_next_multiple_of(CMSG_ALIGN_UNIT)
+        .ok_or(KError::InvalidInput)
+}
+
+/// The identity a sender may claim in an `SCM_CREDENTIALS` control message.
+///
+/// Linux `scm_check_creds` compares the claim against the caller's subjective
+/// credentials and TGID, so the parser carries both instead of reading them
+/// itself.
+pub(crate) struct ScmSenderContext {
+    /// The sender's TGID as its PID namespace reports it (Linux
+    /// `task_tgid_vnr`); `getpid(2)` in the same namespace returns this value.
+    pub(crate) pid: u32,
+    /// The sender's subjective credentials.
+    pub(crate) cred: Arc<kcred::Cred>,
+    /// The sender process identity. A validated claim is this process's own
+    /// credentials, so delivery resolves the pid in the receiver's PID
+    /// namespace at receive time (Linux `pid_vnr`) instead of forwarding the
+    /// sender-namespace number.
+    pub(crate) process: Arc<kprocess::Process>,
+}
+
+/// Reads a `cmsghdr` from the head of a kernel-side control buffer.
+///
+/// # SAFETY
+///
+/// The caller must guarantee `bytes` holds at least `size_of::<cmsghdr>()`
+/// bytes. `read_unaligned` tolerates any buffer alignment, so the only safety
+/// requirement is the byte count.
+fn read_cmsghdr(bytes: &[u8]) -> cmsghdr {
+    debug_assert!(bytes.len() >= size_of::<cmsghdr>());
+    // SAFETY: `bytes` is a live kernel slice with at least one full header of
+    // initialized bytes, and `read_unaligned` imposes no alignment constraint.
+    unsafe { ptr::read_unaligned(bytes.as_ptr().cast::<cmsghdr>()) }
+}
+
+/// Parses one control buffer snapshot in a single pass, mirroring Linux
+/// `__scm_send` over the kernel-side copy that `____sys_sendmsg` takes:
+///
+/// - headers advance by `cmsg_len` rounded up to [`CMSG_ALIGN_UNIT`]
+///   (`__cmsg_nxthdr`), and iteration stops when the next full header does not
+///   fit instead of failing;
+/// - a header shorter than `cmsghdr`, or whose `cmsg_len` overruns the buffer,
+///   is `EINVAL`;
+/// - non-`SOL_SOCKET` levels are skipped;
+/// - unknown `SOL_SOCKET` types are `EINVAL`.
+///
+/// Each `SCM_RIGHTS` body is handed to `resolve_rights` while the walk is on
+/// that message, so a bad descriptor reports `EBADF` before a malformed later
+/// message can turn the failure into `EINVAL`, matching Linux's in-loop
+/// `scm_fp_copy`. Validated `SCM_CREDENTIALS` claims are not records to relay:
+/// Linux consumes them into `scm->creds`, so the last claim wins and is
+/// returned separately.
+///
+/// `unix_sender` is `None` for non-Unix sockets. `SCM_RIGHTS` and
+/// `SCM_CREDENTIALS` are semantically Unix-only: Linux's `__sock_cmsg_send`
+/// silently ignores both on IP sockets (`net/core/sock.c`), while unknown
+/// `SOL_SOCKET` types stay `EINVAL` there too.
+///
+/// IPv4/IPv6-level control data (`SOL_IP`/`SOL_IPV6`, e.g. `IP_PKTINFO`) is
+/// applied to the packet by Linux. The IP transports here do not consume
+/// ancillary data yet, so those levels are rejected with `EINVAL` instead of
+/// being silently accepted and dropped.
+pub(crate) fn parse_control_msgs(
+    control: &[u8],
+    unix_sender: Option<&ScmSenderContext>,
+    resolve_rights: &mut dyn FnMut(Vec<i32>) -> KResult<CMsg>,
+) -> KResult<(Vec<CMsg>, Option<knet::SenderCredentials>)> {
+    let mut msgs = Vec::new();
+    let mut credentials = None;
+    let mut offset = 0usize;
+    while let Some(remaining) = control.len().checked_sub(offset) {
+        // A truncated final header ends the walk, the way `__cmsg_nxthdr`
+        // returns NULL when the next header does not fit.
+        if remaining < size_of::<cmsghdr>() {
+            break;
+        }
+        let hdr = read_cmsghdr(&control[offset..]);
+        let body_end = offset
+            .checked_add(hdr.cmsg_len)
+            .ok_or(KError::InvalidInput)?;
+        if hdr.cmsg_len < size_of::<cmsghdr>() || body_end > control.len() {
             return Err(KError::InvalidInput);
         }
 
-        let data = UserConstPtr::<u8>::from(hdr_ptr.as_ptr() as usize + size_of::<cmsghdr>())
-            .load_vm_vec(hdr.cmsg_len - size_of::<cmsghdr>())?;
-        Ok(match (hdr.cmsg_level as u32, hdr.cmsg_type as u32) {
-            (SOL_SOCKET, SCM_RIGHTS) => {
-                let fd_count = Self::rights_fd_count(data.len())?;
-                let mut fds = Vec::with_capacity(fd_count);
-                for fd in data.chunks_exact(size_of::<i32>()) {
-                    #[expect(
-                        clippy::unwrap_used,
-                        reason = "CG-021-no-panic-on-reachable-failure: \
-                                  chunks_exact(size_of::<i32>()) yields exactly the four bytes \
-                                  required by i32::from_ne_bytes"
-                    )]
-                    let fd = i32::from_ne_bytes(fd.try_into().unwrap());
-                    if fd < 0 {
-                        return Err(KError::BadFileDescriptor);
-                    }
-                    let f = resources.get_file(fd)?;
-                    fds.push(f);
-                }
-                Self::Rights { fds }
+        if hdr.cmsg_level == SOL_SOCKET as c_int {
+            let body = &control[offset + size_of::<cmsghdr>()..body_end];
+            match (hdr.cmsg_type as u32, unix_sender) {
+                (SCM_RIGHTS, Some(_)) => msgs.push(resolve_rights(parse_rights_fds(body)?)?),
+                (SCM_CREDENTIALS, Some(sender)) => credentials = Some(check_creds(body, sender)?),
+                // Unix-only control messages are ignored on other families.
+                (SCM_RIGHTS | SCM_CREDENTIALS, None) => {}
+                _ => return Err(KError::InvalidInput),
             }
-            _ => {
-                return Err(KError::InvalidInput);
-            }
-        })
-    }
-
-    /// Returns the number of file descriptors this message carries.
-    pub(crate) fn fd_count(&self) -> usize {
-        match self {
-            Self::Rights { fds } => fds.len(),
+        } else if unix_sender.is_none()
+            && (hdr.cmsg_level == SOL_IP as c_int || hdr.cmsg_level == SOL_IPV6 as c_int)
+        {
+            // Linux applies IP-level control data (`ip_cmsg_send` /
+            // `ip6_cmsg_send`). Without that support here, failing is honest.
+            return Err(KError::InvalidInput);
         }
-    }
 
+        let space = cmsg_align(hdr.cmsg_len)?;
+        offset = offset.checked_add(space).ok_or(KError::InvalidInput)?;
+    }
+    Ok((msgs, credentials))
+}
+
+/// Validates and converts one `SCM_RIGHTS` body (Linux `scm_fp_copy`'s length
+/// arithmetic, plus a whole-descriptor check).
+fn parse_rights_fds(body: &[u8]) -> KResult<Vec<i32>> {
+    let count = CMsg::rights_fd_count(body.len())?;
+    let mut fds = Vec::with_capacity(count);
+    for fd in body[..count * size_of::<i32>()].chunks_exact(size_of::<i32>()) {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "CG-021-no-panic-on-reachable-failure: chunks_exact(size_of::<i32>()) yields \
+                      exactly the four bytes required by i32::from_ne_bytes"
+        )]
+        fds.push(i32::from_ne_bytes(fd.try_into().unwrap()));
+    }
+    Ok(fds)
+}
+
+/// Validates an `SCM_CREDENTIALS` claim (Linux `scm_check_creds`).
+///
+/// The claimed pid must be the sender's own TGID unless the caller is
+/// privileged in the PID namespace, and each claimed id must be one the caller
+/// could adopt with `setuid`/`setgid` unless it holds `CAP_SETUID`/
+/// `CAP_SETGID` (proxied by effective UID 0 in x-kernel's pre-capability
+/// model).
+fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCredentials> {
+    if body.len() != size_of::<ucred>() {
+        return Err(KError::InvalidInput);
+    }
+    // SAFETY: `body` has exactly `size_of::<ucred>()` initialized bytes and
+    // `read_unaligned` imposes no alignment constraint.
+    let claim = unsafe { ptr::read_unaligned(body.as_ptr().cast::<ucred>()) };
+    // Linux `make_kuid`/`make_kgid` map `(uid_t)-1` to an invalid id even in
+    // the initial user namespace and `scm_check_creds` rejects it with EINVAL
+    // before any authorization check.
+    if claim.uid == u32::MAX || claim.gid == u32::MAX {
+        return Err(KError::InvalidInput);
+    }
+    let cred = &sender.cred;
+    let pid_ok = claim.pid == sender.pid || cred.has_sys_admin();
+    let uid_ok =
+        [cred.ruid(), cred.euid(), cred.suid()].contains(&claim.uid) || cred.is_privileged();
+    let gid_ok =
+        [cred.rgid(), cred.egid(), cred.sgid()].contains(&claim.gid) || cred.is_privileged();
+    if !(pid_ok && uid_ok && gid_ok) {
+        return Err(KError::from(LinuxError::EPERM));
+    }
+    // Linux links the claim to a `struct pid`: the sender's own when the
+    // numbers match, otherwise `find_get_pid` in the caller's active PID
+    // namespace (reachable only with CAP_SYS_ADMIN, as checked above), and a
+    // missing process is ESRCH. Delivery later resolves that identity in the
+    // receiver's namespace.
+    let pid = if claim.pid == sender.pid {
+        sender.process.pid_identity()
+    } else {
+        let observer = sender.process.active_pid_namespace();
+        kprocess::Process::pid_identity_in_namespace(claim.pid, &observer)
+            .ok_or(KError::NoSuchProcess)?
+    };
+    Ok(knet::SenderCredentials {
+        pid,
+        uid: claim.uid,
+        gid: claim.gid,
+    })
+}
+
+impl CMsg {
     /// Returns the descriptor count of one `SCM_RIGHTS` control body, rejecting
     /// a body that is not a whole number of `i32`s or that exceeds the
     /// per-message `SCM_MAX_FD` cap.
@@ -272,11 +417,10 @@ impl<'a> CMsgBuilder<'a> {
         };
         write_vm_mem(self.hdr.as_ptr().cast_mut(), core::slice::from_ref(&hdr))?;
 
-        // cmsg_len excludes trailing padding, but the next header must be
-        // aligned. A final message may fit without all of its trailing padding.
-        let space = cmsg_len
-            .checked_next_multiple_of(size_of::<usize>())
-            .ok_or(KError::InvalidInput)?;
+        // cmsg_len excludes trailing padding, but the next header must start
+        // at a CMSG_ALIGN boundary. A final message may fit without all of
+        // its trailing padding.
+        let space = cmsg_align(cmsg_len)?;
         let consumed = space.min(remaining);
         self.hdr = UserPtr::from(self.hdr.as_ptr() as usize + consumed);
         *self.len += consumed;

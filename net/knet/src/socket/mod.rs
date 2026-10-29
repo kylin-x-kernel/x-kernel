@@ -194,12 +194,29 @@ pub struct SocketErrorInfo {
     pub offender: Option<SocketAddr>,
 }
 
+/// The task identity behind a kernel-attached credentials record.
+///
+/// The pid is kept as a task-number identity (`struct pid`), not a number:
+/// Linux stores one per message (`scm_set_cred`) and resolves it with
+/// `pid_vnr` in the receiving task's active PID namespace, so the receiver
+/// sees its own namespace's view of the sender. Automatic credentials and an
+/// explicit claim naming the sender's TGID carry the process leader; a
+/// privileged claim may name any task.
+#[derive(Debug, Clone)]
+pub struct SenderCredentials {
+    pub pid: alloc::sync::Arc<kprocess::PidIdentity>,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Ancillary data produced by the networking stack itself.
 #[derive(Debug, Clone)]
 pub enum KernelAncillaryData {
     IpError(SocketErrorInfo),
-    /// Trusted sender credentials attached by a kernel transport.
+    /// Trusted sender credentials with a fixed numeric pid (kernel peers).
     Credentials(options::UnixCredentials),
+    /// Trusted sender credentials resolved in the receiver's PID namespace.
+    ProcessCredentials(SenderCredentials),
 }
 
 /// Options for sending data to a socket.
@@ -210,11 +227,11 @@ pub struct SendOptions {
     pub to: Option<SocketAddrEx>,
     pub flags: SendFlags,
     pub ancillary: Vec<AncillaryData>,
-    /// Authenticated credentials of the user process sending this Unix datagram.
+    /// Authenticated identity of the user process sending this Unix message.
     ///
     /// User-facing socket entry points populate this snapshot. Kernel callers
     /// without a current user process may leave it unset.
-    pub unix_sender_credentials: Option<options::UnixCredentials>,
+    pub unix_sender_credentials: Option<SenderCredentials>,
 }
 
 /// Options for receiving data from a socket.

@@ -32,8 +32,8 @@ use thread_membership::{ThreadGroupExitState, ThreadMembership};
 use tree::{ChildRelationSlot, GroupMembership, ParentRelation};
 
 use crate::{
-    Pid, ProcessGroup, ProcessRuntime, Session, lifecycle::ProcessLifecycleState, process_domain,
-    publication::PublishedProcessSlot,
+    AsThread, Pid, ProcessGroup, ProcessRuntime, Session, lifecycle::ProcessLifecycleState,
+    process_domain, publication::PublishedProcessSlot,
 };
 
 /// Stable process identity with parent/group relations, exit state and runtime capabilities.
@@ -149,10 +149,71 @@ impl Process {
     /// process matches — the caller turns that into `ESRCH`, matching Linux
     /// where a namespace-invisible PID simply does not exist.
     pub fn resolve_pid_in_namespace(nr: Pid, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
+        Self::process_in_namespace(nr, observer_ns).map(|proc| proc.pid())
+    }
+
+    /// Returns the published process whose leader reports `nr` in
+    /// `observer_ns`.
+    ///
+    /// This is the identity half of [`Self::resolve_pid_in_namespace`].
+    /// Callers that must keep the process itself — for example to resolve its
+    /// pid in a different namespace later (Linux `struct pid` retention) —
+    /// use this instead of the root number.
+    pub fn process_in_namespace(nr: Pid, observer_ns: &Arc<PidNamespace>) -> Option<Arc<Process>> {
         crate::lookup::published_processes()
             .into_iter()
             .find(|proc| proc.leader_task_number.number_in(observer_ns) == Some(nr))
-            .map(|proc| proc.pid())
+    }
+
+    /// Returns the task-number identity (`struct pid`) whose number in
+    /// `observer_ns` is `nr`, covering process leaders and member threads.
+    ///
+    /// Linux `find_get_pid` resolves numbers from the namespace idr, which
+    /// holds every task's `struct pid`, not only thread-group leaders; a
+    /// privileged `SCM_CREDENTIALS` claim may name a thread's TID.
+    pub fn pid_identity_in_namespace(
+        nr: Pid,
+        observer_ns: &Arc<PidNamespace>,
+    ) -> Option<Arc<crate::PidIdentity>> {
+        let processes = crate::lookup::published_processes();
+        for process in &processes {
+            if process.leader_task_number.number_in(observer_ns) == Some(nr) {
+                return Some(process.leader_task_number.clone());
+            }
+            for task in crate::lookup::process_tasks(process) {
+                let number = task.as_thread().task_number();
+                if number.number_in(observer_ns) == Some(nr) {
+                    return Some(number);
+                }
+            }
+        }
+        // Member-thread identities are allocated with a root projection only
+        // (`allocate_thread_task_number`), and `gettid(2)` reports that root
+        // number even inside a nested PID namespace. A caller therefore names
+        // its own threads by the root number, which the exact-projection pass
+        // above cannot see from a non-root observer. Restrict this fallback to
+        // processes the observer can see (the leader has a projection there):
+        // a root number of a task wholly outside the observer's hierarchy must
+        // stay invisible, like Linux `find_get_pid` scoping.
+        for process in &processes {
+            if process.leader_task_number.number_in(observer_ns).is_none() {
+                continue;
+            }
+            for task in crate::lookup::process_tasks(process) {
+                let number = task.as_thread().task_number();
+                if number.root_nr() == nr {
+                    return Some(number);
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the leader's task-number identity, the `struct pid` Linux uses
+    /// for `task_tgid` (automatic `SO_PASSCRED` credentials and
+    /// `SCM_CREDENTIALS` claims naming the sender's own TGID).
+    pub fn pid_identity(&self) -> Arc<crate::PidIdentity> {
+        self.leader_task_number.clone()
     }
 
     /// Returns the exit signal configured for this process.

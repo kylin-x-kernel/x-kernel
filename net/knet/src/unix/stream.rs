@@ -8,7 +8,7 @@ mod channel;
 mod listener;
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::sync::atomic::Ordering;
+use core::{any::TypeId, sync::atomic::Ordering};
 
 use async_trait::async_trait;
 use kerrno::{KError, KResult, LinuxError};
@@ -23,7 +23,8 @@ use self::{
     listener::{ConnRequest, ListenerQueue},
 };
 use crate::{
-    AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendOptions, Shutdown,
+    AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendOptions,
+    Shutdown,
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
@@ -268,8 +269,24 @@ impl UnixTransportOps for StreamTransport {
                 // the round that actually publishes bytes; a send that never
                 // publishes drops it with `options`, as with Linux stream
                 // sendmsg (no skb is queued and the cmsg fds are released).
-                let mut pending = (count > 0 && !options.ancillary.is_empty())
-                    .then(|| Arc::new(core::mem::take(&mut options.ancillary)));
+                // A validated explicit `SCM_CREDENTIALS` claim rides with the
+                // segment that publishes bytes. Linux attaches the claim to
+                // the skb and gates delivery on the reader, so the record is
+                // stored unconditionally and only emitted by a receive whose
+                // socket set `SO_PASSCRED`.
+                let mut pending = if count > 0 {
+                    let mut records = core::mem::take(&mut options.ancillary);
+                    if let Some(credentials) = options.unix_sender_credentials.take() {
+                        records.insert(
+                            0,
+                            Arc::new(KernelAncillaryData::ProcessCredentials(credentials))
+                                as AncillaryData,
+                        );
+                    }
+                    (!records.is_empty()).then(|| Arc::new(records))
+                } else {
+                    None
+                };
                 // Attach ancillary records BEFORE publishing the bytes: a
                 // concurrent receiver cannot consume unpublished bytes, so
                 // enqueue-then-publish makes a record visible no later than
@@ -404,7 +421,7 @@ impl UnixTransportOps for StreamTransport {
                             anc.recv_total += count as u64;
                             anc.pop_reached()
                         };
-                        deliver_reached(popped, &mut options);
+                        deliver_reached(popped, &mut options, self.options.pass_credentials());
                     } else {
                         // A peek duplicates the record it touched: the shared
                         // entry handles go to the sink (`scm_fp_dup`) and the
@@ -417,7 +434,7 @@ impl UnixTransportOps for StreamTransport {
                             let cursor_end = anc.recv_total + count as u64;
                             anc.peek_reached(cursor_end)
                         };
-                        deliver_peeked(touched, &mut options);
+                        deliver_peeked(touched, &mut options, self.options.pass_credentials());
                     }
                     return Ok(count);
                 }
@@ -527,18 +544,27 @@ fn finish_send_on_error(total: usize, error: KError) -> KResult<usize> {
 fn deliver_reached(
     popped: Option<(u64, u64, Arc<Vec<AncillaryData>>)>,
     options: &mut RecvOptions<'_>,
+    pass_credentials: bool,
 ) {
+    let Some((_, _, payload)) = popped else {
+        return;
+    };
     match options.ancillary.as_deref_mut() {
-        Some(sink) => popped
-            .into_iter()
-            .for_each(|(_, _, payload)| sink.extend(payload.iter().cloned())),
+        Some(sink) => sink.extend(
+            payload
+                .iter()
+                .filter(|record| is_deliverable(record, pass_credentials))
+                .cloned(),
+        ),
         None => {
-            if popped.is_some()
+            if payload
+                .iter()
+                .any(|record| is_deliverable(record, pass_credentials))
                 && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
             {
                 *discarded = true;
             }
-            drop(popped);
+            drop(payload);
         }
     }
 }
@@ -546,19 +572,54 @@ fn deliver_reached(
 /// Duplicates the record a peek touched, or reports the loss when the peek
 /// cannot emit the entries. The record stays queued for the later consuming
 /// receive either way.
-fn deliver_peeked(touched: Option<Arc<Vec<AncillaryData>>>, options: &mut RecvOptions<'_>) {
+fn deliver_peeked(
+    touched: Option<Arc<Vec<AncillaryData>>>,
+    options: &mut RecvOptions<'_>,
+    pass_credentials: bool,
+) {
     match options.ancillary.as_deref_mut() {
-        Some(sink) => touched
-            .into_iter()
-            .for_each(|payload| sink.extend(payload.iter().cloned())),
+        Some(sink) => touched.iter().for_each(|payload| {
+            sink.extend(
+                payload
+                    .iter()
+                    .filter(|record| is_deliverable(record, pass_credentials))
+                    .cloned(),
+            )
+        }),
         None => {
-            if touched.is_some()
+            if touched
+                .iter()
+                .any(|payload| payload.iter().any(|r| is_deliverable(r, pass_credentials)))
                 && let Some(discarded) = options.ancillary_discarded.as_deref_mut()
             {
                 *discarded = true;
             }
         }
     }
+}
+
+/// Whether a queued control record reaches the reader of this socket.
+///
+/// Kernel-attached credentials are emitted only when the receiving socket
+/// enabled `SO_PASSCRED` (`__scm_recv_common`); every other record is always
+/// delivered.
+fn is_deliverable(record: &AncillaryData, pass_credentials: bool) -> bool {
+    pass_credentials || !is_credentials_record(record)
+}
+
+fn is_credentials_record(record: &AncillaryData) -> bool {
+    if (*record).type_id() != TypeId::of::<KernelAncillaryData>() {
+        return false;
+    }
+    record
+        .clone()
+        .downcast::<KernelAncillaryData>()
+        .is_ok_and(|data| {
+            matches!(
+                data.as_ref(),
+                KernelAncillaryData::Credentials(_) | KernelAncillaryData::ProcessCredentials(_)
+            )
+        })
 }
 
 /// Registers `pending`'s payload for the byte range this round publishes, or

@@ -23,7 +23,7 @@ struct Datagram {
     data: Vec<u8>,
     ancillary: Vec<AncillaryData>,
     sender: UnixAddr,
-    unix_sender_credentials: Option<UnixCredentials>,
+    unix_sender_credentials: Option<crate::SenderCredentials>,
 }
 
 struct Channel {
@@ -264,7 +264,7 @@ impl UnixTransportOps for DgramTransport {
                         if self.options.pass_credentials()
                             && let Some(credentials) = unix_sender_credentials
                         {
-                            dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
+                            dst.push(Arc::new(crate::KernelAncillaryData::ProcessCredentials(
                                 credentials,
                             )));
                         }

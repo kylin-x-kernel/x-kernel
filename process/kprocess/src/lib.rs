@@ -101,6 +101,7 @@ extern crate klogger;
 
 pub use cgroup::{cgroup_member_process_ids, current_cgroup, migrate_cgroup_process};
 pub use credentials::{current_cred, current_real_cred};
+pub use kidentity::PidHandle as PidIdentity;
 pub use pidfd::PidFd;
 pub use posix_types::{Pid, Tid};
 pub use process::{

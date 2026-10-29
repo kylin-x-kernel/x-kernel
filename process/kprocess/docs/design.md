@@ -96,6 +96,17 @@ retains init identity; orphan reparenting reserves an init relation slot.
   `ktask`; `CurrentThreadSignalIf` adapts current-task signal injection.
 - `TaskStat`, `system_view`, nice/scheduler and CPU-accounting APIs provide
   procfs/scheduler snapshots rather than owning hardware scheduling policy.
+- PID-namespace identity resolution is public for cross-crate consumers:
+  `PidIdentity` (Linux `struct pid`), `Process::pid_identity` (the leader
+  identity `task_tgid` names), `Process::pid_identity_in_namespace` (lookup
+  across leaders and member threads, like `find_get_pid`) and
+  `Thread::task_number` (a single task's identity). Provider: kprocess;
+  user: posix-net control-data handling, which resolves an
+  `SCM_CREDENTIALS` claim to an identity and lets each receiver evaluate it
+  in its own namespace (direction kprocess -> posix-net). Member-thread
+  identities carry only a root projection and `gettid(2)` reports that root
+  number, so `pid_identity_in_namespace` also matches a thread's root number
+  when the observer namespace has no exact projection for it.
 
 CPU accounting uses `Inactive`, `Kernel`, and `User` states, following Linux
 generic vtime. Switch-out settles the interval; switch-in starts kernel time.

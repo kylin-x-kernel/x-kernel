@@ -619,7 +619,9 @@ impl Thread {
         &self.signal
     }
 
-    pub(crate) fn task_number(&self) -> Arc<kidentity::PidHandle> {
+    /// Returns this thread's task-number identity (`struct pid`), which names
+    /// the thread in every PID namespace that holds a projection for it.
+    pub fn task_number(&self) -> Arc<kidentity::PidHandle> {
         self.task_number.lock().clone()
     }
 

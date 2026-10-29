@@ -26,22 +26,24 @@ pub use self::{dgram::DgramTransport, stream::StreamTransport};
 use crate::{
     AcceptOptions, ConnectOptions, RecvOptions, SendOptions, Shutdown, Socket, SocketAddrEx,
     SocketOps,
-    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
+    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
 };
 
-/// Captures the current sending process's PID and real UID/GID.
+/// Captures the current sending process's identity and real UID/GID.
 ///
-/// User-facing Unix datagram send entry points call this once per send.
-/// Kernel callers without a user thread supply an explicit snapshot or none.
+/// User-facing Unix send entry points call this once per send. The pid stays a
+/// process identity so each receiver resolves it in its own PID namespace
+/// (Linux `pid_vnr` at delivery). Kernel callers without a user thread supply
+/// an explicit snapshot or none.
 ///
 /// # Panics
 ///
 /// Panics when the current task has no user-thread runtime.
-pub fn current_sender_credentials() -> UnixCredentials {
+pub fn current_sender_credentials() -> crate::SenderCredentials {
     let thread = kprocess::current_user_thread();
     let cred = thread.cred();
-    UnixCredentials {
-        pid: thread.pid(),
+    crate::SenderCredentials {
+        pid: thread.process().pid_identity(),
         uid: cred.ruid(),
         gid: cred.rgid(),
     }

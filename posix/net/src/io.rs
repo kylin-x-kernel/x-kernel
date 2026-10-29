@@ -38,7 +38,10 @@ use posix_types::{IoVec, IoVectorBuf, TimeSpanLike, UserConstPtr, UserPtr};
 
 use crate::{
     addr::SocketAddrExt,
-    cmsg::{CMsg, CMsgBuilder, ScmFdBudget, push_ip_recverr_cmsg},
+    cmsg::{
+        CMsg, CMsgBuilder, OPTMEM_MAX, ScmFdBudget, ScmSenderContext, parse_control_msgs,
+        push_ip_recverr_cmsg,
+    },
 };
 
 // Linux ABI for sendmmsg/recvmmsg limits vlen to UIO_MAXIOV (1024).
@@ -100,46 +103,93 @@ fn parse_recvmmsg_timeout(timeout: UserConstPtr<timespec>) -> KResult<Option<Tim
     Ok(Some(timeout.read_vm()?.try_into_time_span()?))
 }
 
+/// Parsed send-side control data: relayable ancillary records plus an
+/// optional validated `SCM_CREDENTIALS` claim.
+struct ParsedCmsgs {
+    ancillary: Vec<AncillaryData>,
+    credentials: Option<knet::SenderCredentials>,
+}
+
+/// Maximum control-buffer length accepted on the send path: Linux
+/// `sock_kmalloc` also requires the allocation to stay *below*
+/// `optmem_max`, so a buffer at the bound itself is rejected.
+const CONTROL_BUFFER_LIMIT: usize = OPTMEM_MAX;
+
+/// Parses the send control buffer into relayable ancillary records and an
+/// optional validated `SCM_CREDENTIALS` identity.
+///
+/// # Execution context
+///
+/// Requires a current user process thread when `is_unix` is true: the
+/// `SCM_CREDENTIALS` validator reads the caller's process identity and
+/// subjective credentials, and the helper panics otherwise (as with any
+/// `kprocess::current_user_thread` caller). Must not run in IRQ context: it
+/// copies the whole control buffer from user memory and may allocate, so it
+/// may sleep and the caller must not hold a lock the page-fault or allocator
+/// path needs. No other caller-held lock is assumed.
 fn parse_send_cmsgs(
     resources: &kresources::TaskFiles,
     control_ptr: usize,
     control_len: usize,
-) -> KResult<Vec<AncillaryData>> {
-    let mut ancillary = Vec::new();
+    is_unix: bool,
+) -> KResult<ParsedCmsgs> {
     if control_ptr == 0 || control_len == 0 {
-        return Ok(ancillary);
+        return Ok(ParsedCmsgs {
+            ancillary: Vec::new(),
+            credentials: None,
+        });
+    }
+    // Linux rejects a control length above INT_MAX in `____sys_sendmsg` and
+    // then caps the snapshot allocation at `optmem_max` in `sock_kmalloc`,
+    // both with ENOBUFS.
+    if control_len > i32::MAX as usize {
+        return Err(KError::from(LinuxError::ENOBUFS));
+    }
+    if control_len >= CONTROL_BUFFER_LIMIT {
+        return Err(KError::from(LinuxError::ENOBUFS));
     }
 
-    let mut ptr = control_ptr;
-    let ptr_end = ptr.checked_add(control_len).ok_or(KError::InvalidInput)?;
+    // Snapshot the whole control buffer into kernel memory so header
+    // validation, body parsing, and fd resolution all see one consistent
+    // copy, the way Linux `____sys_sendmsg` copies into `ctl_buf` before
+    // `__scm_send` parses it.
+    let control = UserConstPtr::<u8>::from(control_ptr).load_vm_vec(control_len)?;
+    // `SCM_CREDENTIALS`/`SCM_RIGHTS` are Unix-only; other families ignore
+    // them (Linux `__sock_cmsg_send`), so no identity context is needed.
+    let sender = is_unix.then(|| {
+        let thread = kprocess::current_user_thread();
+        ScmSenderContext {
+            pid: thread.process().visible_pid() as u32,
+            cred: kprocess::current_cred(),
+            process: thread.process().clone(),
+        }
+    });
+
     let mut fd_budget = ScmFdBudget::default();
-
-    while let Some(next) = ptr.checked_add(size_of::<cmsghdr>()) {
-        if next > ptr_end {
-            break;
-        }
-
-        let hdr_ptr = UserConstPtr::<cmsghdr>::from(ptr);
-        let hdr = hdr_ptr.read_vm()?;
-        if hdr.cmsg_len < size_of::<cmsghdr>() || ptr_end - ptr < hdr.cmsg_len {
-            return Err(KError::InvalidInput);
-        }
-
-        let cmsg = CMsg::parse(resources, hdr_ptr, hdr)?;
+    let (msgs, credentials) = parse_control_msgs(&control, sender.as_ref(), &mut |fds| {
         // Linux caps the descriptors of one `sendmsg` across all of its
-        // `SCM_RIGHTS` messages, not only within each message.
-        fd_budget.charge(cmsg.fd_count())?;
-        ancillary.push(Arc::new(cmsg) as AncillaryData);
-        ptr += hdr.cmsg_len;
-    }
-
-    Ok(ancillary)
+        // `SCM_RIGHTS` messages, not only within each.
+        fd_budget.charge(fds.len())?;
+        let mut files = Vec::with_capacity(fds.len());
+        for fd in fds {
+            files.push(resources.get_file(fd)?);
+        }
+        Ok(CMsg::Rights { fds: files })
+    })?;
+    Ok(ParsedCmsgs {
+        ancillary: msgs
+            .into_iter()
+            .map(|cmsg| Arc::new(cmsg) as AncillaryData)
+            .collect(),
+        credentials,
+    })
 }
 
 enum SocketAncillary {
     Rights { fds: Vec<Arc<VfsFile>> },
     IpError(SocketErrorInfo),
     Credentials(knet::options::UnixCredentials),
+    ProcessCredentials(knet::SenderCredentials),
 }
 
 fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
@@ -161,6 +211,9 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
             KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err.clone()),
             KernelAncillaryData::Credentials(credentials) => {
                 SocketAncillary::Credentials(credentials.clone())
+            }
+            KernelAncillaryData::ProcessCredentials(credentials) => {
+                SocketAncillary::ProcessCredentials(credentials.clone())
             }
         });
     }
@@ -195,26 +248,48 @@ fn push_socket_cmsg(
             Ok(written)
         }),
         SocketAncillary::IpError(err) => push_ip_recverr_cmsg(builder, err),
-        SocketAncillary::Credentials(credentials) => {
-            let mut is_complete = false;
-            let pushed = builder.push(SOL_SOCKET, SCM_CREDENTIALS, |data| {
-                // Linux put_cmsg preserves the header and any credential prefix
-                // that fits, even when the buffer ends in the middle of a field.
-                let fields = [
-                    credentials.pid.to_ne_bytes(),
-                    credentials.uid.to_ne_bytes(),
-                    credentials.gid.to_ne_bytes(),
-                ];
-                let bytes = fields.as_flattened();
-                let body_len = data.len().min(bytes.len());
-                data[..body_len].copy_from_slice(&bytes[..body_len]);
-                is_complete = body_len == bytes.len();
-                Ok(body_len)
-            })?;
-            // Report truncation only after the partial message has been written.
-            Ok(pushed && is_complete)
+        SocketAncillary::Credentials(credentials) => push_credentials_cmsg(builder, &credentials),
+        SocketAncillary::ProcessCredentials(credentials) => {
+            // Linux resolves the sender's `struct pid` in the receiving task's
+            // active PID namespace (`pid_vnr`), so a peer in another namespace
+            // sees its own view of the sender (0 when there is no projection).
+            let observer = kprocess::current_user_thread()
+                .process()
+                .active_pid_namespace();
+            let pid = credentials.pid.number_in(&observer).unwrap_or(0);
+            push_credentials_cmsg(
+                builder,
+                &knet::options::UnixCredentials {
+                    pid,
+                    uid: credentials.uid,
+                    gid: credentials.gid,
+                },
+            )
         }
     }
+}
+
+fn push_credentials_cmsg(
+    builder: &mut CMsgBuilder<'_>,
+    credentials: &knet::options::UnixCredentials,
+) -> KResult<bool> {
+    let mut is_complete = false;
+    let pushed = builder.push(SOL_SOCKET, SCM_CREDENTIALS, |data| {
+        // Linux put_cmsg preserves the header and any credential prefix that
+        // fits, even when the buffer ends in the middle of a field.
+        let fields = [
+            credentials.pid.to_ne_bytes(),
+            credentials.uid.to_ne_bytes(),
+            credentials.gid.to_ne_bytes(),
+        ];
+        let bytes = fields.as_flattened();
+        let body_len = data.len().min(bytes.len());
+        data[..body_len].copy_from_slice(&bytes[..body_len]);
+        is_complete = body_len == bytes.len();
+        Ok(body_len)
+    })?;
+    // Report truncation only after the partial message has been written.
+    Ok(pushed && is_complete)
 }
 
 /// Send data on a socket with optional destination address and ancillary data
@@ -224,7 +299,8 @@ fn send_impl(
     flags: u32,
     addr: UserConstPtr<sockaddr>,
     addrlen: socklen_t,
-    ancillary: Vec<AncillaryData>,
+    control_ptr: usize,
+    control_len: usize,
 ) -> KResult<isize> {
     let addr = if addr.is_null() || addrlen == 0 {
         None
@@ -234,16 +310,36 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let file = kprocess::current_files().get_file(fd)?;
+    let resources = kprocess::current_files();
+    let file = resources.get_file(fd)?;
     let socket = sock_from_file(&file)?;
+    // Control data is parsed only now, because `SCM_CREDENTIALS` validation
+    // and `SCM_RIGHTS` resolution depend on the socket family: a Unix socket
+    // owns those messages, while Linux ignores them on other families.
+    let ParsedCmsgs {
+        ancillary,
+        credentials,
+    } = parse_send_cmsgs(
+        &resources,
+        control_ptr,
+        control_len,
+        matches!(socket.as_ref(), Socket::Unix(_)),
+    )?;
     let mut send_flags = parse_send_flags(flags);
     if file.is_nonblocking() {
         send_flags |= SendFlags::DONT_WAIT;
     }
-    let unix_sender_credentials = match socket.as_ref() {
+    let mut unix_sender_credentials = match socket.as_ref() {
         Socket::Unix(unix) if unix.is_datagram() => Some(current_sender_credentials()),
         _ => None,
     };
+    // Linux consumes an explicit `SCM_CREDENTIALS` claim into `scm->creds`;
+    // the peer only observes it through the `SO_PASSCRED` record, never as a
+    // relayed control message. An explicit claim therefore replaces the
+    // automatically filled sender identity.
+    if credentials.is_some() {
+        unix_sender_credentials = credentials;
+    }
     let options = SendOptions {
         to: addr,
         flags: send_flags,
@@ -270,14 +366,12 @@ pub fn sys_sendto(
     addr: UserConstPtr<sockaddr>,
     addrlen: socklen_t,
 ) -> KResult<isize> {
-    send_impl(fd, VmBytes::new(buf, len), flags, addr, addrlen, Vec::new())
+    send_impl(fd, VmBytes::new(buf, len), flags, addr, addrlen, 0, 0)
 }
 
 /// Send data with vectored I/O and ancillary data (control messages)
 pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<isize> {
     let msg = msg.read_vm()?;
-    let resources = kprocess::current_files();
-    let ancillary = parse_send_cmsgs(&resources, msg.msg_control as usize, msg.msg_controllen)?;
     send_impl(
         fd,
         IoVectorBuf::from_iovecs(IoVec::load_from_user(
@@ -288,7 +382,8 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> KResult<is
         flags,
         UserConstPtr::from(msg.msg_name as usize),
         msg.msg_namelen as socklen_t,
-        ancillary,
+        msg.msg_control as usize,
+        msg.msg_controllen,
     )
 }
 
@@ -520,14 +615,8 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
     }
 
     let mut msgvec_value = msgvec.load_vm_vec(vlen as usize)?;
-    let resources = kprocess::current_files();
     let mut sent = 0;
     for msg in msgvec_value.iter_mut() {
-        let ancillary = parse_send_cmsgs(
-            &resources,
-            msg.msg_hdr.msg_control as usize,
-            msg.msg_hdr.msg_controllen,
-        )?;
         match send_impl(
             fd,
             IoVectorBuf::from_iovecs(IoVec::load_from_user(
@@ -538,7 +627,8 @@ pub fn sys_sendmmsg(fd: i32, msgvec: UserPtr<mmsghdr>, vlen: u32, flags: u32) ->
             flags,
             UserConstPtr::from(msg.msg_hdr.msg_name as usize),
             msg.msg_hdr.msg_namelen as socklen_t,
-            ancillary,
+            msg.msg_hdr.msg_control as usize,
+            msg.msg_hdr.msg_controllen,
         ) {
             Ok(n) => {
                 msg.msg_len = n as u32;

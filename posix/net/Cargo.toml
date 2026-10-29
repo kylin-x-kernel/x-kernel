@@ -28,6 +28,7 @@ kio.workspace = true
 klogger.workspace = true
 knet.workspace = true
 kprocess.workspace = true
+kcred.workspace = true
 kresources.workspace = true
 kvfs.workspace = true
 linux-raw-sys.workspace = true

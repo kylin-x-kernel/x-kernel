@@ -29,7 +29,15 @@ fn unix_datagram_receive_honors_per_call_nonblocking_after_empty_message() {
     assert_eq!(receive(&mut data), Err(KError::WouldBlock));
 }
 
-fn send_credentials(sender: &DgramTransport, credentials: UnixCredentials) {
+fn test_credentials() -> crate::SenderCredentials {
+    crate::SenderCredentials {
+        pid: kprocess::init_proc().pid_identity(),
+        uid: 1000,
+        gid: 1001,
+    }
+}
+
+fn send_credentials(sender: &DgramTransport, credentials: crate::SenderCredentials) {
     sender
         .send(
             &b"x"[..],
@@ -65,14 +73,7 @@ fn unix_dgram_passcred_returns_current_sender_credentials() {
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
-    send_credentials(
-        &sender,
-        UnixCredentials {
-            pid: 42,
-            uid: 1000,
-            gid: 1001,
-        },
-    );
+    send_credentials(&sender, test_credentials());
 
     let ancillary = recv_ancillary(&receiver);
     assert_eq!(ancillary.len(), 1);
@@ -82,10 +83,11 @@ fn unix_dgram_passcred_returns_current_sender_credentials() {
         .unwrap()
         .downcast::<KernelAncillaryData>()
         .unwrap();
-    let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
+    // The pid stays a process identity so the receive side can resolve it in
+    // the reader's PID namespace.
+    let KernelAncillaryData::ProcessCredentials(credentials) = credentials.as_ref() else {
         panic!("expected sender credentials");
     };
-    assert_eq!(credentials.pid, 42);
     assert_eq!(credentials.uid, 1000);
     assert_eq!(credentials.gid, 1001);
 }
@@ -93,14 +95,7 @@ fn unix_dgram_passcred_returns_current_sender_credentials() {
 #[def_test]
 fn unix_dgram_without_passcred_omits_sender_credentials() {
     let (sender, receiver) = DgramTransport::new_pair(7);
-    send_credentials(
-        &sender,
-        UnixCredentials {
-            pid: 42,
-            uid: 1000,
-            gid: 1001,
-        },
-    );
+    send_credentials(&sender, test_credentials());
 
     assert!(recv_ancillary(&receiver).is_empty());
 }
@@ -122,18 +117,18 @@ fn unix_dgram_passcred_preserves_each_sender_snapshot() {
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
-    for pid in [42, 43] {
+    for uid in [1042, 1043] {
         send_credentials(
             &sender,
-            UnixCredentials {
-                pid,
-                uid: pid + 1000,
-                gid: pid + 2000,
+            crate::SenderCredentials {
+                pid: kprocess::init_proc().pid_identity(),
+                uid,
+                gid: uid + 1000,
             },
         );
     }
 
-    for pid in [42, 43] {
+    for uid in [1042, 1043] {
         let mut ancillary = recv_ancillary(&receiver);
         assert_eq!(ancillary.len(), 1);
         let credentials = ancillary
@@ -141,12 +136,11 @@ fn unix_dgram_passcred_preserves_each_sender_snapshot() {
             .unwrap()
             .downcast::<KernelAncillaryData>()
             .unwrap();
-        let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
+        let KernelAncillaryData::ProcessCredentials(credentials) = credentials.as_ref() else {
             panic!("expected sender credentials");
         };
-        assert_eq!(credentials.pid, pid);
-        assert_eq!(credentials.uid, pid + 1000);
-        assert_eq!(credentials.gid, pid + 2000);
+        assert_eq!(credentials.uid, uid);
+        assert_eq!(credentials.gid, uid + 1000);
     }
 }
 
@@ -202,14 +196,7 @@ fn unix_dgram_without_control_buffer_reports_credentials_as_ctrunc() {
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
-    send_credentials(
-        &sender,
-        UnixCredentials {
-            pid: 42,
-            uid: 1000,
-            gid: 1001,
-        },
-    );
+    send_credentials(&sender, test_credentials());
 
     // Linux `__scm_recv_common` reports `MSG_CTRUNC` when no control buffer
     // is supplied and the receive would have delivered `SO_PASSCRED`
