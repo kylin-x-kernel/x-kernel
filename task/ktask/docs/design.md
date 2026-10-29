@@ -1384,3 +1384,38 @@ in ut-tests/timer_suspend.rs include independent state-machine cases and scoped
 initialized-CPU fixtures. The fixtures restore events and cancel test timers
 before releasing IRQ/preemption guards, without time injection or latency
 thresholds; they do not prove real S3 or simultaneous multi-CPU suspension.
+
+## Cooperative freezer
+
+`freezer::freeze_tasks` requests an explicit stable set on a single present CPU.
+The coordinator and idle tasks are rejected, as are duplicate targets. A global
+atomic admits one attempt and gives inactive checkpoints a constant-time fast
+path. Requests and task references are allocated before publication; each task
+has one task-only request slot under `SpinNoPreempt`, also inspected by the
+scheduler's exit path. IRQ handlers never access it. Preemption exclusion keeps
+a target checkpoint from preempting the owner while it holds that target's slot.
+No task-list scan, scheduler state extension or dispatch veto is introduced.
+
+A checkpoint prepares an allocation-free completion wait, publishes an
+acknowledgment and waits for the round's persistent release predicate. The
+coordinator waits with IRQs and MONOTONIC running, using an allocation-free completion notification queue,
+a prepared owned deadline timer and asynchronous cancellation. The deadline
+timer is synchronously drained before returning the guard. It accepts an explicit
+acknowledgment or permanent Exited state, never arbitrary Blocked state. On the
+sole CPU, it cannot execute concurrently with the acknowledging task's body.
+A wake between acknowledgment and park cannot permit ordinary work: the task
+must still pass the release predicate. Signals and unrelated wakes do not thaw.
+
+`FrozenTasks` retains targets and round state, is not transferable between tasks,
+and removes every request before reopening admission. Its Drop publishes thaw
+and wakes waiters outside request-slot locks. Timeout/cancellation use the same
+cleanup before returning; a completed guard ignores later cancellation until
+its owner drops it. Slot references are moved out before destruction. Atomics
+use release/acquire for confirmation, cancellation, thaw and attempt ownership.
+
+First entry and POSIX return-to-user are audited safe points. Kernel workers
+must call `checkpoint` explicitly after releasing dependencies needed by PM.
+A blocked syscall or worker without safe points causes timeout. The caller must
+provide complete target coverage and prevent creation/publication until thaw;
+there is no global task registry, automatic newborn enrollment, SMP rendezvous,
+device power control or firmware sleep in this module.

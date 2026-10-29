@@ -70,6 +70,9 @@ pub(crate) fn run_user_thread_loop(
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
 
     while !thr.is_exiting() {
+        // Syscall and signal handling have released their scoped kernel guards.
+        // Never block inside the IRQ-off architecture transfer callbacks.
+        let _ = ktask::freezer::checkpoint();
         let reason = uctx.run(
             || {
                 thr.set_cpu_state(CpuTimeState::User);

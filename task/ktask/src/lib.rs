@@ -63,6 +63,7 @@ mod tracing_hooks;
 mod wait_queue;
 
 pub mod completion;
+pub mod freezer;
 pub mod future;
 
 pub use self::{

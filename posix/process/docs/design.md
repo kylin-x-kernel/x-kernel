@@ -147,3 +147,11 @@ Stop currently terminates the group with exit code 1; CoreDump terminates with
 128 plus the signal number and does not write a core image. PI-tagged robust
 entries are skipped. Cleanup errors are generally logged or ignored so teardown
 can continue; these are current limitations, not complete Linux compatibility.
+
+## PM cooperative safe point
+
+The user-thread loop calls `ktask::freezer::checkpoint` before each user-mode
+entry, after syscall/signal handling has released its scoped kernel resources.
+It is outside both IRQ-off architecture transfer callbacks. Only explicitly
+requested tasks block; a task stuck inside a syscall is not falsely counted as
+frozen. Freezing does not set the process interruption bit or fabricate EINTR.

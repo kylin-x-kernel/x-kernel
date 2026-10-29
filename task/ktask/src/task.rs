@@ -26,7 +26,7 @@ use kcpu_id_map::LogicalCpuId;
 use kerrno::KResult;
 use khal::context::TaskContext;
 use kpoll::PollSet;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use memaddr::{VirtAddr, align_up_4k};
 
 use crate::{KCpuMask, KTask, KtaskRef, completion::CompletionWait};
@@ -248,6 +248,8 @@ pub struct TaskInner {
 
     entry: Cell<Option<Box<dyn FnOnce()>>>,
     state: AtomicU8,
+    // Task-only access needs preemption exclusion; no IRQ handler reads this slot.
+    pub(crate) freeze_request: SpinNoPreempt<Option<Arc<crate::freezer::Request>>>,
 
     /// CPU affinity mask.
     cpumask: SpinNoIrq<KCpuMask>,
@@ -730,6 +732,7 @@ impl TaskInner {
             start_time_ns: khal::time::monotonic_time_nanos(),
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
+            freeze_request: SpinNoPreempt::new(None),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
             cpu_id: AtomicU32::new(0),
@@ -1014,6 +1017,7 @@ impl TaskInner {
     pub(crate) fn notify_exit(&self, exit_code: i32) {
         self.exit_code.store(exit_code, Ordering::Release);
         self.set_state(TaskState::Exited);
+        crate::freezer::notify_exit(self);
         self.wait_for_exit.complete_all();
     }
 
@@ -1350,6 +1354,8 @@ extern "C" fn task_entry() -> ! {
     }
     // Enable irq (if feature "irq" is enabled) before running the task entry function.
     karch::enable_local_irq();
+    // Fresh task entry owns no ordinary-task resources.
+    let _ = crate::freezer::checkpoint();
     let task = crate::current();
     if let Some(entry) = task.entry.take() {
         entry()

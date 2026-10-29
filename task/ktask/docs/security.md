@@ -757,3 +757,30 @@ local event restoration and owned callback storage, cancelled before IRQs are
 unmasked. State-machine tests do not touch the live event. The tests do not
 establish real device-power-loss recovery, NMI quiescence or multi-CPU PM order.
 The feature processes no user private data.
+
+## Cooperative freezer
+
+The safe freezer API changes scheduler progress, not memory ownership or
+hardware state. Complete target coverage, stopped creation and dependency
+exemptions belong to its PM caller. An omitted task can continue executing;
+therefore the API must not be represented as a global process freeze.
+
+Only explicit checkpoints and permanent exit confirm quiescence. Blocking or
+preemption while holding a mutex is not a safe point. Callers must release PM
+and recovery dependencies before checkpointing. Deadlock or absent cooperation
+is reported by timeout while IRQs and logical time still run, before the PM
+caller can freeze clocks. Cancellation removes all requests and wakes partial
+acknowledgments. Once a confirmed guard is returned, cancellation cannot thaw
+it under hardware recovery. Its owner must drop it only when resources are safe.
+
+Per-task request slots use `SpinNoPreempt`: publication, checkpoint, cleanup
+and scheduler exit are task-only accessors, even though exit already masks IRQs.
+IRQ handlers never touch these slots. Preemption must remain excluded while
+a slot is held, preventing a target checkpoint from preempting its owner. No allocation, blocking, wake callback or final
+reference destruction occurs under those slot locks. Round/task ownership is
+strong and acyclic; task-local completion wait storage remains pinned and owned
+across scheduler blocking. One unsafe owned-timer start is justified by initialized task-context admission
+and an allocation-free completion-only IRQ callback; the timer is drained before
+returning a freeze guard. There are no new Send/Sync impls.
+Single-present-CPU admission excludes concurrent target execution; SMP freezing
+requires a separate remote rendezvous and cannot reuse this guarantee.

@@ -119,3 +119,11 @@ are simplified, and PI robust-futex cleanup is skipped.
 
 - `exec_de_thread` joins siblings before the address-space swap and undoes group-exit
   bookkeeping; changing the exec path must keep the group-kill flush ordering.
+
+## PM freezer boundary
+
+Returning to user mode is a cooperative checkpoint with enabled IRQs and no
+syscall guard retained. A pending freeze waits on the task subsystem's persistent
+release predicate; ordinary wakes/signals cannot bypass it. This hook does not
+discover tasks, stop creation or make a blocked syscall safe. PM must enumerate
+all non-exempt tasks and enforce those boundaries before power transitions.
