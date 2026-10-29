@@ -7,15 +7,15 @@ use alloc::sync::Arc;
 use kerrno::KError;
 use kprocess::AsThread;
 use kspin::SpinNoPreempt;
-use ktask::{TaskInner, current};
+use ktask::{RtPrio, SchedAttr, SchedPolicy, TaskInner, current, init_task_sched_attr};
 use linux_raw_sys::general::{SCHED_FIFO, SCHED_NORMAL};
 use posix_types::{UserConstPtr, UserPtr};
 use unittest::{TestResult, assert, assert_eq, def_test};
 use unittest_support::TestUserValue;
 
 use super::{
-    SchedParam, scheduler_target, sys_sched_getparam, sys_sched_getscheduler,
-    sys_sched_setparam, sys_sched_setscheduler,
+    SchedParam, scheduler_target, sys_sched_getparam, sys_sched_getscheduler, sys_sched_setparam,
+    sys_sched_setscheduler,
 };
 
 fn run_worker(check_fn: fn() -> TestResult) -> TestResult {
@@ -51,8 +51,16 @@ fn check_worker_queries() -> TestResult {
     let thread = caller.as_thread();
     let tid = thread.tid() as i32;
     assert!(tid != thread.pid() as i32, "fixture must be a non-leader");
-    // Distinct fixture metadata makes a wrong representative observable.
-    thread.set_scheduler(SCHED_FIFO, 7);
+    // Distinct live policy makes a wrong representative observable.
+    let param = TestUserValue::from_value(SchedParam { sched_priority: 7 }).unwrap();
+    assert_eq!(
+        sys_sched_setscheduler(
+            0,
+            SCHED_FIFO as i32,
+            UserConstPtr::from(param.as_user_ptr().addr()),
+        ),
+        Ok(0)
+    );
     let mut output = TestUserValue::from_value(SchedParam { sched_priority: -1 }).unwrap();
     for pid in [0, tid] {
         assert_eq!(sys_sched_getscheduler(pid), Ok(SCHED_FIFO as isize));
@@ -75,9 +83,15 @@ fn check_worker_setter_thread_targets() -> TestResult {
     let leader = scheduler_target(pid).expect("published process leader");
     assert!(!caller.ptr_eq(&leader));
     assert_eq!(leader.as_thread().tid() as i32, pid);
-    let leader_policy = leader.as_thread().scheduler_policy();
-    let leader_priority = leader.as_thread().scheduler_priority();
+    let leader_policy = sys_sched_getscheduler(pid).expect("leader policy");
+    let leader_param = TestUserValue::from_value(SchedParam { sched_priority: -1 }).unwrap();
+    assert_eq!(
+        sys_sched_getparam(pid, UserPtr::from(leader_param.as_user_ptr()).cast()),
+        Ok(0)
+    );
+    let leader_priority = leader_param.read().sched_priority;
     let mut param = TestUserValue::from_value(SchedParam { sched_priority: 7 }).unwrap();
+    let worker_param = TestUserValue::from_value(SchedParam { sched_priority: -1 }).unwrap();
     for target in [0, tid] {
         let resolved = scheduler_target(target).expect("calling worker target");
         assert!(caller.ptr_eq(&resolved));
@@ -95,9 +109,17 @@ fn check_worker_setter_thread_targets() -> TestResult {
             sys_sched_setparam(target, UserConstPtr::from(param.as_user_ptr().addr())),
             Ok(0)
         );
-        assert_eq!(thread.scheduler_priority(), 8);
-        assert_eq!(leader.as_thread().scheduler_policy(), leader_policy);
-        assert_eq!(leader.as_thread().scheduler_priority(), leader_priority);
+        assert_eq!(
+            sys_sched_getparam(tid, UserPtr::from(worker_param.as_user_ptr()).cast()),
+            Ok(0)
+        );
+        assert_eq!(worker_param.read().sched_priority, 8);
+        assert_eq!(sys_sched_getscheduler(pid), Ok(leader_policy));
+        assert_eq!(
+            sys_sched_getparam(pid, UserPtr::from(leader_param.as_user_ptr()).cast()),
+            Ok(0)
+        );
+        assert_eq!(leader_param.read().sched_priority, leader_priority);
         param.write(SchedParam { sched_priority: 7 });
     }
     // Reapplying the leader's own parameter must not modify this worker.
@@ -108,8 +130,16 @@ fn check_worker_setter_thread_targets() -> TestResult {
         sys_sched_setparam(pid, UserConstPtr::from(param.as_user_ptr().addr())),
         Ok(0)
     );
-    assert_eq!(thread.scheduler_priority(), 8);
-    assert_eq!(leader.as_thread().scheduler_priority(), leader_priority);
+    assert_eq!(
+        sys_sched_getparam(tid, UserPtr::from(worker_param.as_user_ptr()).cast()),
+        Ok(0)
+    );
+    assert_eq!(worker_param.read().sched_priority, 8);
+    assert_eq!(
+        sys_sched_getparam(pid, UserPtr::from(leader_param.as_user_ptr()).cast()),
+        Ok(0)
+    );
+    assert_eq!(leader_param.read().sched_priority, leader_priority);
     TestResult::Ok
 }
 
@@ -123,8 +153,14 @@ fn scheduler_queries_reject_negative_and_missing_ids() {
         );
     }
     assert_eq!(sys_sched_getscheduler(i32::MAX), Err(KError::NoSuchProcess));
+    // A null param is EINVAL before lookup, including for a missing tid.
     assert_eq!(
         sys_sched_getparam(i32::MAX, UserPtr::default()),
+        Err(KError::InvalidInput)
+    );
+    let mapped = TestUserValue::from_value(SchedParam { sched_priority: 0 }).unwrap();
+    assert_eq!(
+        sys_sched_getparam(i32::MAX, UserPtr::from(mapped.as_user_ptr()).cast()),
         Err(KError::NoSuchProcess)
     );
 }
@@ -209,7 +245,6 @@ fn scheduler_query_and_setters_address_published_worker_tid() -> TestResult {
     let tid = prepared.tid() as i32;
     let page_table_root = prepared.page_table_root();
     let (thread, task_number) = prepared.into_parts();
-    thread.set_scheduler(SCHED_FIFO, 7);
     let mut task = TaskInner::new_user(
         || {},
         "scheduler-inactive-worker".into(),
@@ -217,7 +252,19 @@ fn scheduler_query_and_setters_address_published_worker_tid() -> TestResult {
         thread,
     );
     task.ctx_mut().set_page_table_root(page_table_root);
-    let published = kprocess::publish_user_task(task).unwrap();
+    let published = kprocess::publish_user_task_with(task, |task| {
+        init_task_sched_attr(
+            task,
+            SchedAttr {
+                policy: SchedPolicy::Fifo,
+                rt_priority: RtPrio::new(7).expect("priority 7 is inside 1..=99"),
+                ..SchedAttr::DEFAULT
+            },
+        )
+        .expect("private worker accepts FIFO");
+        Ok(())
+    })
+    .unwrap();
     // This owned publication stays live deterministically until abort;
     // assertion returns still drop the handle and roll back publication.
     let outcome = (|| -> TestResult {
@@ -274,20 +321,32 @@ fn scheduler_query_and_setters_address_published_worker_tid() -> TestResult {
         // Restore credentials even when an inner assertion returns failure.
         caller.commit_creds((*saved_cred).clone());
         assert_eq!(denied, TestResult::Ok);
-        for pid in [-1, i32::MIN, i32::MAX] {
+        for pid in [-1, i32::MIN] {
             assert_eq!(
                 sys_sched_setscheduler(
                     pid,
                     SCHED_NORMAL as i32,
                     UserConstPtr::from(param.as_user_ptr().addr()),
                 ),
-                Err(KError::NoSuchProcess)
+                Err(KError::InvalidInput)
             );
             assert_eq!(
                 sys_sched_setparam(pid, UserConstPtr::from(param.as_user_ptr().addr())),
-                Err(KError::NoSuchProcess)
+                Err(KError::InvalidInput)
             );
         }
+        assert_eq!(
+            sys_sched_setscheduler(
+                i32::MAX,
+                SCHED_NORMAL as i32,
+                UserConstPtr::from(param.as_user_ptr().addr()),
+            ),
+            Err(KError::NoSuchProcess)
+        );
+        assert_eq!(
+            sys_sched_setparam(i32::MAX, UserConstPtr::from(param.as_user_ptr().addr())),
+            Err(KError::NoSuchProcess)
+        );
         assert_eq!(
             sys_sched_setscheduler(
                 tid,
@@ -311,17 +370,31 @@ fn scheduler_query_and_setters_address_published_worker_tid() -> TestResult {
     published.abort();
     // An unpublished worker TID must no longer be a read or write target.
     assert_eq!(sys_sched_getscheduler(tid), Err(KError::NoSuchProcess));
+    let absent = TestUserValue::from_value(SchedParam { sched_priority: 0 }).unwrap();
     assert_eq!(
         sys_sched_setscheduler(tid, SCHED_NORMAL as i32, UserConstPtr::default()),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        sys_sched_setscheduler(
+            tid,
+            SCHED_NORMAL as i32,
+            UserConstPtr::from(absent.as_user_ptr().addr()),
+        ),
         Err(KError::NoSuchProcess)
     );
     assert_eq!(
         sys_sched_setparam(tid, UserConstPtr::default()),
-        Err(KError::NoSuchProcess)
+        Err(KError::InvalidInput)
     );
     assert_eq!(
-        sys_sched_getparam(tid, UserPtr::default()),
+        sys_sched_setparam(tid, UserConstPtr::from(absent.as_user_ptr().addr())),
         Err(KError::NoSuchProcess)
+    );
+    // A null sched_param is EINVAL before lookup, including after unpublish.
+    assert_eq!(
+        sys_sched_getparam(tid, UserPtr::default()),
+        Err(KError::InvalidInput)
     );
     outcome
 }

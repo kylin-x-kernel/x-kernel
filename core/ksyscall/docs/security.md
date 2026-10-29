@@ -81,6 +81,7 @@ and NUMA-node output pointers still go through `UserPtr` and retain copyout erro
 | T-05 | Historically misleading directories keep collecting syscalls of the wrong owner | Medium | new additions | This crate-local design doc fixes the `vfs`/`ipc`/`time`/`task` adapter semantics |
 | T-06 | `setpriority` authorizes only a process representative and misses target identity | High | per-thread credentials | `PRIO_*` selection and scanning both resolve to concrete tasks; per task, caller euid is compared with target real/effective UID, and priority-raising permission is checked separately |
 | T-06a | Unprivileged process rewrites arbitrary task affinity | High | `sched_setaffinity` calling `set_cpumask` on non-current targets | After target resolution, caller euid is compared with target ruid/euid under `check_same_owner` semantics; root (approximating `CAP_SYS_NICE`) may bypass, otherwise `EPERM` |
+| T-06b | Unprivileged owner clears `SCHED_RESET_ON_FORK` and forks past a root-installed reset | High | `sched_setscheduler` / `sched_setattr` when the target already has the flag | Setting the flag needs no extra privilege. Clearing it compares the live flag with the request and returns `EPERM` unless `euid == 0` (the `CAP_SYS_NICE` approximation). `sched_setparam` does not carry the flag and leaves it unchanged |
 | T-07 | Unprivileged process renames the host | High | `sethostname` writing the UTS namespace directly | The syscall boundary checks a privileged credential and bounds nodename length and the user buffer access |
 | T-08 | Unprivileged process changes power state | High | `reboot` reaching platform power interfaces directly | Privileged credential, Linux magic, and the supported command set are checked |
 | T-09 | Unprivileged process shifts the wall clock | High | wall-clock setters updating the realtime association directly | `settimeofday` and `clock_settime` check a privileged credential in the shared setter and reject moving the wall clock before `CLOCK_MONOTONIC` |
@@ -115,11 +116,17 @@ registered wakeups rather than polling or a timer.
 
 ## Known limitations
 
-- `sched_setscheduler` and `sched_setparam` now accept published worker TIDs.
-  Policy/parameter setters enforce caller-euid vs target ruid/euid ownership
-  or privileged euid 0 before mutating metadata. Full capability/RT resource-limit
-  authorization remains unimplemented; these metadata writes do not establish
-  real RT execution.
+- `sched_setscheduler`, `sched_setparam`, and `sched_setattr` accept published
+  worker TIDs and submit the live class through `ktask::sched_update_attr`
+  under one run-queue lock.
+  Setters enforce caller-euid vs target ruid/euid ownership, and realtime or
+  Deadline policies also require privileged euid 0, before mutating the task.
+  Full capability and `RLIMIT_RTPRIO` authorization remains unimplemented.
+  `SCHED_RESET_ON_FORK` is sticky: an unprivileged owner may set it, and
+  clearing it requires privileged euid 0. Clone applies the flag. An RT or
+  Deadline parent becomes a `SCHED_NORMAL` child at nice 0; a Fair parent
+  drops only a negative nice. A Deadline parent without the flag fails the
+  clone with `EAGAIN`.
 - Exec supports only a live single-threaded process. Independent CLONE_VM peers
   retain their old MM; this is not a de_thread or vfork implementation.
 - `ioctl` first asks `posix-net::handle_net_ioctl` for exact commands, then

@@ -399,11 +399,9 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for RtClass<T, Owne
         // `1..=99`, no Deadline. This class has no bandwidth cap.
         //
         // Privilege is not decided here. `ksched` never sees credentials.
-        // The only party that may call `Scheduler::set_attr` with an RT
-        // policy is responsible for `CAP_SYS_NICE` (here, `euid == 0`)
-        // first. Today's `sys_sched_setscheduler` does not call `set_attr`;
-        // wiring it without that check lets an unprivileged FIFO 99 task
-        // starve every Fair task.
+        // `sys_sched_setscheduler` and `sys_sched_setattr` must reject an
+        // unprivileged FIFO/RR change before calling `Scheduler::set_attr`.
+        // An unprivileged FIFO 99 task would starve every Fair task.
         Ok(())
     }
 

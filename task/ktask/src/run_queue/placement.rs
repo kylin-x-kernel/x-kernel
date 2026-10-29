@@ -48,8 +48,8 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &KtaskRef) -> KRunQueueRef<'s
     }
     #[cfg(feature = "smp")]
     {
-        // Fair stays on find_idlest. RT uses find_lowest_rq. Production tasks
-        // stay Fair until sched_* calls Scheduler::set_attr.
+        // Fair stays on find_idlest. RT uses find_lowest_rq once
+        // sched_setscheduler / sched_setattr has moved the task onto RT.
         let index = if task.sched_class() == ksched::SchedClass::Rt {
             select_rt_cpu(task, this_cpu_id().as_usize(), &task.cpumask())
         } else {

@@ -230,12 +230,37 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   `getcpu` ignores its obsolete third cache argument without reading it.
   Null CPU/node outputs are allowed; non-null outputs use the existing user-copy wrappers.
   Scheduler policy/parameter getters and setters resolve positive published TIDs,
-  including workers. Zero selects the caller; a process PID denotes its leader
-  TID and never a representative worker. Missing or unpublished TIDs return ESRCH.
-  Getters reject negative IDs with EINVAL; setters retain their existing ESRCH.
-  Policy/parameter setters require the caller effective UID to match the target
-  real/effective UID, or root (the current privilege approximation); otherwise
-  they return EPERM before changing metadata.
+  including workers, and read or write the live `SchedAttr`. Getters use
+  `ktask::sched_getattr`. Zero selects the caller; a process
+  PID denotes its leader TID and never a representative worker. Missing or
+  unpublished TIDs return ESRCH. A negative pid, a null `sched_param` /
+  `sched_attr`, nonzero `sched_getattr` flags, or a negative policy in
+  `sched_setscheduler` or `sched_setattr` is EINVAL before lookup.
+  `sched_setscheduler` also copies `sched_param` before lookup, so a bad
+  pointer is EFAULT rather than ESRCH.
+  `sched_setscheduler`, `sched_setparam`, and `sched_setattr` copy user memory
+  and credential snapshots before the run-queue lock, then apply the live
+  attribute through `ktask::sched_update_attr` so the read and the store share
+  one critical section.
+  `sched_setscheduler` admits Fair, FIFO, and RR. `sched_setattr` also admits
+  `SCHED_DEADLINE` (a zero period is stored as the deadline). Realtime and
+  Deadline policies require root (`euid == 0`, the current `CAP_SYS_NICE`
+  approximation) in addition to the owner match; otherwise the call returns
+  EPERM before changing the task. An illegal priority or deadline triple is
+  EINVAL before that EPERM. `SCHED_RESET_ON_FORK` is stored on the live
+  attribute and returned in `sched_getscheduler` / `sched_getattr`. An
+  unprivileged owner may set the flag; clearing it requires the same root
+  privilege and otherwise returns EPERM without changing the attribute.
+  `sched_setparam` does not carry the flag and leaves it unchanged. Clone
+  copies that attribute with `SchedAttr::for_fork` and installs it before the
+  child is published. An RT or Deadline parent with the flag produces a
+  `SCHED_NORMAL` child at nice 0; a Fair parent drops only a negative nice.
+  `sched_getattr` reports `sched_runtime` as 0 except for Deadline, and
+  `sched_setattr` ignores that field for every other policy. Bytes past the
+  kernel `sched_attr` are cleared.
+  `sched_get_priority_min` / `max` and `sched_rr_get_interval` (including the
+  time64 number where the architecture has one) follow the same policy table:
+  FIFO/RR priorities are 1 and 99, and only `SCHED_RR` has a finite quantum.
   `PRIO_PROCESS` selects one task by TID; `PRIO_PGRP` and `PRIO_USER`
   iterate every published task — a process representative thread must not
   stand in for per-thread nice or real UID. `setpriority` compares the

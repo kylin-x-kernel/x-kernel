@@ -1233,6 +1233,18 @@ Consequences:
   inconsistency is rejected by `SchedAttr::validate` inside
   `Scheduler::set_attr`, before any state changes.
 
+`sched_getattr` reads under the owning run-queue lock. `sched_update_attr`
+is the only store for a published task: the callback sees the live
+`SchedAttr`, and `set_attr` plus the CPU kick both finish before that lock
+drops, so a second setter cannot publish a stale snapshot of fields it did
+not change. The callback must not sleep, copy user memory, or take another
+run-queue or credential lock.
+`init_task_sched_attr` is only
+for a task the caller still exclusively owns, before that task is published
+or activated.
+`sched_rr_interval` reports `DEFAULT_RR_SLICE_NS` for `SCHED_RR` and zero
+otherwise.
+
 ### Why `TaskPreemptionIf`
 
 Preemption credits and scheduling checkpoints are task-runtime capabilities,

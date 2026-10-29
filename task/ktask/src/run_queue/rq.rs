@@ -1115,6 +1115,40 @@ pub(crate) fn set_task_nice(task: &KtaskRef, prio: isize) -> bool {
     true
 }
 
+/// Read `task`'s attributes under the run queue that owns it.
+pub(crate) fn sched_getattr(task: &KtaskRef) -> ksched::SchedAttr {
+    let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
+    locked.scheduler().attr(task)
+}
+
+/// Read, update, and store `task`'s attributes under one run-queue lock.
+///
+/// `update` must not sleep, copy user memory, or take a run-queue or
+/// credential lock. Its [`Err`] leaves the live attribute unchanged.
+pub(crate) fn sched_update_attr<E>(
+    task: &KtaskRef,
+    update: impl FnOnce(&mut ksched::SchedAttr) -> Result<(), E>,
+) -> Result<ksched::SchedAttr, crate::api::SchedAttrUpdateError<E>> {
+    let now_ns = khal::time::monotonic_time_nanos();
+    let mut locked = task_rq_lock::<kspin::NoPreemptIrqSave>(task);
+    let mut attr = locked.scheduler().attr(task);
+    update(&mut attr).map_err(crate::api::SchedAttrUpdateError::Rejected)?;
+    commit_sched_attr(locked, task, attr, now_ns)
+        .map_err(crate::api::SchedAttrUpdateError::Sched)?;
+    Ok(attr)
+}
+
+fn commit_sched_attr<G: BaseGuard>(
+    mut locked: TaskRqLock<'_, G>,
+    task: &KtaskRef,
+    attr: ksched::SchedAttr,
+    now_ns: u64,
+) -> Result<(), ksched::SchedError> {
+    let decision = locked.scheduler().set_attr(task, attr, now_ns)?;
+    locked.kick(decision);
+    Ok(())
+}
+
 /// Replace only `nice` on `task` and submit the whole attribute.
 ///
 /// `None` when `prio` is outside the Linux nice range, or when `task` is the

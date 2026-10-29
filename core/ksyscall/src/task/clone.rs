@@ -18,8 +18,8 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::UserContext;
 use kns::NamespaceFlags;
 use kprocess::{
-    ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Pid, PidFd,
-    ProcessForkConfig, current_user_thread, publish_user_task,
+    AsThread, ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Pid, PidFd,
+    ProcessForkConfig, current_user_thread, publish_user_task_with,
 };
 use ksignal::Signo;
 use ktask::current;
@@ -269,6 +269,13 @@ impl CloneRequest {
         };
 
         let curr = current();
+        // Linux `sched_fork`: sample the creator's class before the child is
+        // built. A Deadline parent without SCHED_RESET_ON_FORK is EAGAIN and
+        // must not leave a half-built child behind. The attribute is written
+        // before publication, while the child is still private.
+        let child_attr = ktask::sched_getattr(&curr)
+            .for_fork()
+            .map_err(super::sched::sched_errno)?;
         let current_thread = current_user_thread();
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
             current_thread
@@ -346,7 +353,14 @@ impl CloneRequest {
             None
         };
 
-        publish_user_task(new_task)?.commit(|_| {
+        publish_user_task_with(new_task, |task| {
+            ktask::init_task_sched_attr(task, child_attr).map_err(super::sched::sched_errno)?;
+            if let Some(thread) = task.try_as_thread() {
+                thread.set_nice(kprocess::NiceValue::new_clamped(child_attr.nice.as_i32()));
+            }
+            Ok(())
+        })?
+        .commit(|_task| {
             if self.flags.contains(CloneFlags::PARENT_SETTID)
                 && let Err(err) = (self.parent_tid as *mut Pid).write_vm(tid)
             {

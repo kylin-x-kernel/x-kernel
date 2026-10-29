@@ -192,6 +192,31 @@ pub fn publish_user_task(task: ktask::TaskInner) -> kerrno::KResult<PublishedUse
     publication::prepare_user_task(task).publish()
 }
 
+/// Publishes `task` after `init` runs on the still-private task.
+///
+/// `init` runs once the task is a [`ktask::KtaskRef`] and before it is
+/// inserted into the TID table. The caller still exclusively owns it, so
+/// `ktask::init_task_sched_attr` is valid. An `init` error does not publish
+/// the task.
+///
+/// # Errors
+///
+/// Returns the error from `init`, or the [`publish_user_task`] cgroup error
+/// when publication itself fails.
+///
+/// # Panics
+///
+/// Panics on the same identity and publication-slot invariants as
+/// [`publish_user_task`].
+pub fn publish_user_task_with(
+    task: ktask::TaskInner,
+    init: impl FnOnce(&ktask::KtaskRef) -> kerrno::KResult<()>,
+) -> kerrno::KResult<PublishedUserTask> {
+    let prepared = publication::prepare_user_task(task);
+    init(prepared.task())?;
+    prepared.publish()
+}
+
 /// Builds a user thread bound to a freshly initialized process runtime.
 ///
 /// Pass the returned thread to [`ktask::TaskInner::new_user`] so the task and

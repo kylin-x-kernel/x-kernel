@@ -33,7 +33,9 @@ fn deferred_task(value: usize, is_idle: bool) -> DeferredTask {
     } else {
         SchedTask::new(value)
     };
-    DeferredTask::new(task).ok().expect("finalizer must be ready in the test task")
+    DeferredTask::new(task)
+        .ok()
+        .expect("finalizer must be ready in the test task")
 }
 
 #[def_test]
@@ -144,6 +146,7 @@ fn nice_attr(nice: i32) -> SchedAttr {
         nice: Nice::new(nice).unwrap(),
         rt_priority: RtPrio::NONE,
         dl_params: None,
+        reset_on_fork: false,
     }
 }
 
@@ -153,6 +156,7 @@ fn rt_attr(policy: SchedPolicy, priority: u8) -> SchedAttr {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::new(i32::from(priority)).unwrap(),
         dl_params: None,
+        reset_on_fork: false,
     }
 }
 
@@ -181,6 +185,37 @@ fn nice_getpriority_roundtrip() {
     let n = Nice::new(-10).unwrap();
     assert_eq!(Nice::from_getpriority_raw(n.to_getpriority_raw()), n);
     assert_eq!(Nice::DEFAULT.weight(), 1024);
+}
+
+#[def_test]
+fn fork_resets_realtime_and_rejects_deadline() {
+    let mut fifo = rt_attr(SchedPolicy::Fifo, 7);
+    fifo.reset_on_fork = true;
+    fifo.nice = Nice::new(5).unwrap();
+    let child = fifo.for_fork().unwrap();
+    assert_eq!(child.policy, SchedPolicy::Normal);
+    assert_eq!(child.rt_priority, RtPrio::NONE);
+    assert_eq!(child.nice, Nice::DEFAULT);
+    assert!(!child.reset_on_fork);
+
+    let mut fair = nice_attr(4);
+    fair.reset_on_fork = true;
+    assert_eq!(fair.for_fork().unwrap().nice, Nice::new(4).unwrap());
+    let mut lowered = nice_attr(-3);
+    lowered.reset_on_fork = true;
+    assert_eq!(lowered.for_fork().unwrap().nice, Nice::DEFAULT);
+
+    let kept = rt_attr(SchedPolicy::Rr, 3);
+    assert_eq!(kept.for_fork().unwrap(), kept);
+
+    assert_eq!(dl_attr().for_fork(), Err(SchedError::DeadlineFork));
+    let mut reset_dl = dl_attr();
+    reset_dl.reset_on_fork = true;
+    reset_dl.nice = Nice::new(6).unwrap();
+    let child = reset_dl.for_fork().unwrap();
+    assert_eq!(child.policy, SchedPolicy::Normal);
+    assert_eq!(child.nice, Nice::DEFAULT);
+    assert!(child.dl_params.is_none());
 }
 
 // ============================================================================
@@ -560,6 +595,7 @@ fn set_attr_invalid_does_not_change_class() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: None,
+        reset_on_fork: false,
     };
     assert_eq!(s.set_attr(&t, bad, 0), Err(SchedError::InvalidPolicy));
     assert_eq!(t.sched_class(), SchedClass::Fair);
@@ -568,6 +604,7 @@ fn set_attr_invalid_does_not_change_class() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: None,
+        reset_on_fork: false,
     };
     assert_eq!(
         s.set_attr(&t, bad_prio, 0),
@@ -1027,6 +1064,7 @@ fn dl_attr() -> SchedAttr {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: Some(dl_params()),
+        reset_on_fork: false,
     }
 }
 
@@ -1077,6 +1115,7 @@ fn sched_attr_validate_checks_field_policy_consistency() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: None,
+        reset_on_fork: false,
     };
     assert_eq!(missing.validate(), Err(SchedError::InvalidPolicy));
     let extra = SchedAttr {
@@ -1084,6 +1123,7 @@ fn sched_attr_validate_checks_field_policy_consistency() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: Some(dl_params()),
+        reset_on_fork: false,
     };
     assert_eq!(extra.validate(), Err(SchedError::InvalidPolicy));
     // An RT policy without a priority in `1..=99` is rejected by the RT rule.
@@ -1092,6 +1132,7 @@ fn sched_attr_validate_checks_field_policy_consistency() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: None,
+        reset_on_fork: false,
     };
     assert_eq!(rt.validate(), Err(SchedError::InvalidPriority));
     assert!(SchedAttr::DEFAULT.validate().is_ok());
@@ -1118,6 +1159,7 @@ fn deadline_at(deadline_ns: u64) -> SchedAttr {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: Some(DlParams::new(DL_RUNTIME_NS, deadline_ns, DL_PERIOD_NS).unwrap()),
+        reset_on_fork: false,
     }
 }
 
@@ -1176,6 +1218,7 @@ fn dl_admission_rejects_over_reserved_run_queue() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: Some(DlParams::new(DL_PERIOD_NS, DL_PERIOD_NS, DL_PERIOD_NS).unwrap()),
+        reset_on_fork: false,
     };
     assert_eq!(
         s.set_attr(&second, whole_cpu, 0),
@@ -1353,6 +1396,7 @@ fn dl_attr_change_is_admitted_before_mutation() {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: Some(DlParams::new(DL_PERIOD_NS, DL_PERIOD_NS, DL_PERIOD_NS).unwrap()),
+        reset_on_fork: false,
     };
     assert_eq!(s.set_attr(&t, greedy, 0), Err(SchedError::AdmissionFull));
     assert_eq!(s.attr(&t), dl_attr());

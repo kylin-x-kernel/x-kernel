@@ -8,6 +8,7 @@ use alloc::string::String;
 use core::{future::poll_fn, sync::atomic::AtomicUsize, task::Poll};
 
 use kcpu_slot::cpu_slot_cell;
+pub use ksched::{DEFAULT_RR_SLICE_NS, DlParams, Nice, RtPrio, SchedAttr, SchedError, SchedPolicy};
 use kspin::NoPreemptIrqSave;
 
 pub(crate) use crate::run_queue::{current_run_queue, select_run_queue, select_wake_run_queue};
@@ -645,6 +646,68 @@ pub fn set_prio(prio: isize) -> bool {
 /// The value is the Linux nice range `-20..=19`.
 pub fn set_task_prio(task: &KtaskRef, prio: isize) -> bool {
     crate::run_queue::set_task_nice(task, prio)
+}
+
+/// Read `task`'s user-visible scheduling attributes.
+///
+/// Takes the run-queue lock that owns `task`. Call from task context, not
+/// while that lock is already held.
+pub fn sched_getattr(task: &KtaskRef) -> SchedAttr {
+    crate::run_queue::sched_getattr(task)
+}
+
+/// `SCHED_RR` quantum for `sched_rr_get_interval(2)`.
+///
+/// A zero span means infinity. Only [`SchedPolicy::Rr`] has a finite slice
+/// ([`ksched::DEFAULT_RR_SLICE_NS`]). FIFO, Fair, and Deadline report zero.
+pub fn sched_rr_interval(task: &KtaskRef) -> ktime_types::TimeSpan {
+    if sched_getattr(task).policy == SchedPolicy::Rr {
+        ktime_types::TimeSpan::from_nanos(ksched::DEFAULT_RR_SLICE_NS)
+    } else {
+        ktime_types::TimeSpan::ZERO
+    }
+}
+
+/// Error from [`sched_update_attr`] when the live attribute is left unchanged.
+pub enum SchedAttrUpdateError<E> {
+    /// `update` refused the change. The live attribute is unchanged.
+    Rejected(E),
+    /// [`ksched::Scheduler::set_attr`] refused the attribute `update` produced.
+    Sched(SchedError),
+}
+
+/// Read `task`'s attributes, run `update`, and store the result under one lock.
+///
+/// `update` runs while the owning run-queue lock is held. It must not sleep,
+/// copy user memory, or acquire a run-queue or credential lock. [`Err`] from
+/// `update` leaves the live attribute unchanged. [`Ok`] submits that attribute
+/// through [`ksched::Scheduler::set_attr`] and kicks the CPU before the lock
+/// drops.
+///
+/// Returns the attribute that was stored.
+///
+/// # Errors
+///
+/// [`SchedAttrUpdateError::Rejected`] is `update`'s error.
+/// [`SchedAttrUpdateError::Sched`] is [`ksched::Scheduler::set_attr`]'s failure.
+/// A rejected `set_attr` does not publish the callback's attribute.
+pub fn sched_update_attr<E>(
+    task: &KtaskRef,
+    update: impl FnOnce(&mut SchedAttr) -> Result<(), E>,
+) -> Result<SchedAttr, SchedAttrUpdateError<E>> {
+    crate::run_queue::sched_update_attr(task, update)
+}
+
+/// Write `attr` on a prepared task before it is published.
+///
+/// The caller must still exclusively own `child`. The task must not be in
+/// the TID table or on a run queue: this does not take a scheduler lock.
+///
+/// # Errors
+///
+/// Returns the first [`SchedAttr::validate`] failure.
+pub fn init_task_sched_attr(child: &KtaskRef, attr: SchedAttr) -> Result<(), SchedError> {
+    child.init_attr_unpublished(attr)
 }
 
 /// Set the CPU affinity mask for `task`.

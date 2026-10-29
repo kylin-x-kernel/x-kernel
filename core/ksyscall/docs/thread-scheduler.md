@@ -14,14 +14,26 @@ https://man7.org/linux/man-pages/man2/sched_setparam.2.html .
 This corrects worker-thread queries used by pthread_getschedparam; process-only
 lookup incorrectly returned ESRCH for a live non-leader thread.
 
-The sched_setscheduler and sched_setparam adapters likewise resolve published
-TIDs, including workers, so pthread_setschedparam can update its thread.
-Positive getpid() still denotes the leader TID, never a representative worker.
-They retain their existing negative-ID ESRCH behavior; getters return EINVAL.
+The sched_setscheduler, sched_setparam, sched_setattr, and sched_getattr
+adapters likewise resolve published TIDs, including workers, so
+pthread_setschedparam can update its thread. Positive getpid() still denotes
+the leader TID, never a representative worker. A negative pid, a null
+parameter buffer, or a negative `sched_setscheduler` policy is EINVAL before
+lookup, matching Linux. That setter also copies `sched_param` before lookup,
+so a bad pointer is EFAULT rather than ESRCH. Getters and setters
+read and write the live SchedAttr, not the thread snapshot.
+The three setters copy user memory first, then read and store that attribute
+under one run-queue lock.
 Policy/parameter writes require the caller effective UID to match the target
 real/effective UID or a privileged caller (euid 0, the current CAP_SYS_NICE
-approximation). Otherwise they return EPERM and leave metadata unchanged.
-This owner gate does not implement RT resource limits or real RT/runqueue execution.
+approximation). Realtime and Deadline policies also require that privilege.
+Otherwise they return EPERM and leave the live class unchanged. An illegal
+priority or deadline triple is EINVAL before that EPERM.
+SCHED_RESET_ON_FORK is sticky: an unprivileged owner may set it, but clearing
+it requires the same privilege and otherwise returns EPERM with the flag left
+set. sched_setparam does not carry the flag and leaves it unchanged.
+This owner gate does not implement RT resource limits. FIFO/RR and Deadline
+do enter the scheduler class that sched_setattr submits.
 
 Guest unit tests call the actual adapters with mapped SchedParam buffers.
 They cover a running worker addressed by zero and its TID, a published inactive

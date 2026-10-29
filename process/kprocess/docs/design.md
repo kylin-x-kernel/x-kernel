@@ -59,8 +59,10 @@ retains init identity; orphan reparenting reserves an init relation slot.
 
 - Boot/clone owners call `build_process_thread`, `Thread::prepare_process_fork`
   or `prepare_thread_clone`, construct `TaskInner::new_user` using the matching
-  identity, then call `publish_user_task`. `PublishedUserTask::commit` runs
-  parent-side writeback before activation; abort/drop rolls back publication.
+  identity, then call `publish_user_task`. `publish_user_task_with` runs a
+  caller initializer while the task is still private, then publishes it.
+  `PublishedUserTask::commit` runs parent-side writeback before activation;
+  abort/drop rolls back publication.
 - `Process` runtime capabilities return filesystem/namespace/mm/resource/signal
   references and expose timer/exec/teardown operations. `LiveAddressSpace` owns
   an active mm-user handle; its mapping closure supplies both the locked space

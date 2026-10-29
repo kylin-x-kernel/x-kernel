@@ -292,6 +292,8 @@ pub struct SchedAttr {
     pub rt_priority: RtPrio,
     /// `Some` exactly when `policy` is [`SchedPolicy::Deadline`].
     pub dl_params: Option<DlParams>,
+    /// Linux `SCHED_RESET_ON_FORK` / `SCHED_FLAG_RESET_ON_FORK`.
+    pub reset_on_fork: bool,
 }
 
 impl SchedAttr {
@@ -301,6 +303,7 @@ impl SchedAttr {
         nice: Nice::DEFAULT,
         rt_priority: RtPrio::NONE,
         dl_params: None,
+        reset_on_fork: false,
     };
 
     /// Dispatch class implied by [`Self::policy`].
@@ -355,6 +358,36 @@ impl SchedAttr {
             }
         }
     }
+
+    /// Linux `sched_fork` child attributes.
+    ///
+    /// A Deadline parent without [`Self::reset_on_fork`] cannot be cloned.
+    /// Callers map [`SchedError::DeadlineFork`] to `EAGAIN`. The flag turns
+    /// an RT or Deadline policy into `SCHED_NORMAL` at nice 0. A Fair parent
+    /// drops only a negative nice back to 0. The flag is cleared on the child.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedError::DeadlineFork`] when `policy` is
+    /// [`SchedPolicy::Deadline`] and `reset_on_fork` is false.
+    pub const fn for_fork(&self) -> Result<SchedAttr, SchedError> {
+        if matches!(self.policy, SchedPolicy::Deadline) && !self.reset_on_fork {
+            return Err(SchedError::DeadlineFork);
+        }
+        let mut child = *self;
+        if self.reset_on_fork {
+            if self.policy.is_realtime() || matches!(self.policy, SchedPolicy::Deadline) {
+                child.policy = SchedPolicy::Normal;
+                child.rt_priority = RtPrio::NONE;
+                child.dl_params = None;
+                child.nice = Nice::DEFAULT;
+            } else if child.nice.as_i32() < 0 {
+                child.nice = Nice::DEFAULT;
+            }
+            child.reset_on_fork = false;
+        }
+        Ok(child)
+    }
 }
 
 /// Policy / placement errors returned to `ktask` and mapped to errno there.
@@ -369,6 +402,8 @@ pub enum SchedError {
     /// Per-RQ deadline bandwidth is exhausted; the caller maps this to
     /// `EBUSY`, distinct from the `EINVAL` of an invalid attribute.
     AdmissionFull,
-    /// Idle tasks are not user-modifiable.
+    /// Stop and Idle tasks are not user-modifiable.
     KernelClassImmutable,
+    /// Deadline parent without `SCHED_RESET_ON_FORK`. Callers map this to `EAGAIN`.
+    DeadlineFork,
 }

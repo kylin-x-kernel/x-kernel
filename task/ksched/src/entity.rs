@@ -350,17 +350,16 @@ impl<T> SchedTask<T> {
         self.sched_class() == SchedClass::Idle
     }
 
-    /// Write attr and class on a task that has not been published yet.
+    /// Write attr and class on a task that has not been published to a run queue.
+    ///
+    /// The caller must still exclusively own `self`, and the task must not
+    /// yet be visible in the TID table. Clone writes the inherited class
+    /// here so the child is not published as Fair and then switched.
     ///
     /// # Errors
     ///
     /// Returns the first [`SchedAttr::validate`] failure.
-    #[expect(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: ktask does not publish a non-Fair SchedAttr \
-                  until sched_* calls set_attr"
-    )]
-    pub(crate) fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
+    pub fn init_attr_unpublished(&self, attr: SchedAttr) -> Result<(), SchedError> {
         attr.validate()?;
         // SAFETY: the creator still exclusively owns this unpublished task;
         // it is not on any run queue and no other CPU can observe it.

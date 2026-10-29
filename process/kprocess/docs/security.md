@@ -40,7 +40,7 @@ their existing Arc ownership.
 
 | Boundary / entry | Inputs and direction | Local check / responsibility |
 |---|---|---|
-| `publish_user_task` | Kernel task carrying a user runtime into global visibility | Preparation asserts pointer-identical task/thread identity; cgroup reconciliation may fail; publish precedes activation. Caller must prepare a valid runtime and parent writeback. |
+| `publish_user_task` / `publish_user_task_with` | Kernel task carrying a user runtime into global visibility | Preparation asserts pointer-identical task/thread identity; cgroup reconciliation may fail; publish precedes activation. `publish_user_task_with` runs its initializer before the task is visible. Caller must prepare a valid runtime and parent writeback. |
 | Thread fork/clone | Typed clone policy, namespace flags and credential snapshot into runtime owners | Checks parent relation stability and Running state, delegates namespace/fs/mm/fd validation and cgroup charge; namespace InvalidFlagCombination/Unimplemented map to InvalidInput/Unsupported. |
 | Signal facade | PID/TID/group and optional `SignalInfo` into ksignal/task interrupt | Unpublished targets return NoSuchProcess, while published zombies accept the send and discard delivery (Linux `kill` semantics); thread runtime mismatch returns OperationNotPermitted; optional TGID must match. Syscall signal permission checks remain external. |
 | `ptrace::check_read_real_creds_access` | Caller/target threads into access decision | Same-process access succeeds; otherwise caller real IDs must match target real/effective/saved IDs or caller must be privileged. Failure returns OperationNotPermitted; effective UID zero is the current privilege approximation. |

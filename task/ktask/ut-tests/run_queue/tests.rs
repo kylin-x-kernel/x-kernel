@@ -372,6 +372,7 @@ mod tests_wake_affinity {
                 nice: ksched::Nice::DEFAULT,
                 rt_priority: ksched::RtPrio::new(1).expect("priority 1 is inside 1..=99"),
                 dl_params: None,
+                reset_on_fork: false,
             };
             current_run_queue::<NoPreemptIrqSave>()
                 .inner
@@ -874,6 +875,7 @@ mod tests_rt_wire {
             nice: Nice::DEFAULT,
             rt_priority: RtPrio::new(10).expect("priority 10 is inside 1..=99"),
             dl_params: None,
+            reset_on_fork: false,
         };
         current_run_queue::<NoPreemptIrqSave>()
             .inner

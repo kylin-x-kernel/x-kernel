@@ -1,233 +1,322 @@
-# ksched — 安全与可靠性分析
+# ksched — Security and reliability
 
-## 信任模型
+## Trust model
 
 ```
-ktask RunQueue（生产调用方）
-   │  持有 RQ 锁后调用 Scheduler
+ktask RunQueue (production caller)
+   │  calls Scheduler while holding the RQ lock
    v
-Stop（每 RQ 单槽） -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
+Stop (one slot per RQ) -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
 ```
 
-- 调用方必须保证：同一 RQ 上序列化访问；运行任务离开必经
-  `yield_current` / `preempt_current` / `block_current` / `migrate_current` /
-  `exit_current`。
-- `Scheduler` 的公有方法是安全的。`RqLocked::assume()` 只出现在私有
-  `token()` 里：`ktask` 在持有该 RQ 锁时调用这些方法。
-  `init_attr_unpublished` 仍是 `pub(crate)`，只适用于尚未发布、由创建者独占
-  的任务。本 crate 不检查锁本身。
-- 调度器信任传入的任务状态已由调用方校验。本 crate 只通过
-  `SchedAttr::validate` 检查结构：FIFO/RR 的优先级必须在 `1..=99`。
-  凭据校验不在这里做。调用 `set_attr` 放入 RT 之前，调用方必须已经确认
-  调用者具备实时调度权限（Linux `CAP_SYS_NICE`；当前内核用 `euid == 0` 代替）。
-  现在的 `sys_sched_setscheduler` 只校验 policy 和 priority 的取值，然后把
-  结果写进线程快照，既不查权限，也不调用 `Scheduler::set_attr`，所以非特权
-  进程可以让这次系统调用返回 0，但任务不会进入 `RtClass`。接线时如果漏掉
-  权限检查，FIFO 99 就能一直抢在全部 Fair 任务前面。
+- The caller must serialize access on one RQ. A running task leaves only
+  through `yield_current`, `preempt_current`, `block_current`,
+  `migrate_current`, or `exit_current`.
+- `Scheduler`'s public methods are safe. `RqLocked::assume()` appears in the
+  private `token()` and in `init_attr_unpublished`. The latter requires the
+  caller to still exclusively own a task that is not yet in the TID table and
+  not yet on any run queue. `ktask::init_task_sched_attr` is that path's
+  caller, used before clone publishes the task. This crate does not check the
+  lock itself.
+- The scheduler trusts that the caller has already validated the task state
+  it passes in. This crate checks structure only through
+  `SchedAttr::validate`: a FIFO/RR priority must be in `1..=99`. Credential
+  checks are not done here. Before `set_attr` places a task in RT or
+  Deadline, the caller must already have confirmed realtime scheduling
+  privilege (Linux `CAP_SYS_NICE`; this kernel approximates it with
+  `euid == 0`). `sys_sched_setscheduler` / `sys_sched_setattr` submit through
+  `ktask::sched_update_attr`. The owner check, and the privilege check for
+  FIFO/RR/Deadline, finish before `Scheduler::set_attr` changes the
+  attribute. If that check is skipped, FIFO 99 stays ahead of every Fair
+  task.
 
-## 外部边界 / 攻击面
+## External boundary / attack surface
 
-新增 `SharedOwner<T>` 是 unsafe 实现边界：实现必须保持同一值的稳定
-地址，Clone 创建独立 owner，raw 往返既不释放也不增加计数，有效指针的
-恢复不能 panic。调用方仍须保证 owner 的释放适合 RQ 锁和执行上下文。
-默认 Arc 的行为不变；DeferredArc 的末引用交接遵循 kfinalize 契约。
+`SharedOwner<T>` is an unsafe implementation boundary. An implementation must
+keep a stable address for the same value. `Clone` creates an independent
+owner. A raw round trip neither releases nor increments the count. Recovering
+a valid pointer must not panic. The caller must still make sure owner release
+fits the RQ lock and the execution context. Default `Arc` behavior is
+unchanged. Hand-off of a `DeferredArc`'s last reference follows the
+`kfinalize` contract.
 
-Ready/Fair/Deadline 的 OwnerPointerOps 只转交这份责任，不从借用引用
-恢复控制块。侵入式库可能用临时 ManuallyDrop owner 克隆节点引用，
-临时视图不消费队列保留的 count，真实 owner 覆盖其全部使用。适配器
-必须保留 into_raw 的完整指针 provenance，字段投影逆运算才可恢复
-DeferredArc 的 payload 头部。缓存、双索引和 current 的每份 owner 都
-独立计数；非空队列析构逐个摘除，不 fast_clear，也不现场析构 Deferred
-payload。真实三类队列的宿主/Miri 和 guest 测试覆盖该边界。
+Ready, Fair, and Deadline `OwnerPointerOps` only transfer that responsibility.
+They do not recover a control block from a borrowed reference. The intrusive
+library may clone a node reference with a temporary `ManuallyDrop` owner. The
+temporary view does not consume the count the queue retains. The real owner
+covers every use. The adapter must keep the full pointer provenance of
+`into_raw`. The inverse of the field projection is what recovers a
+`DeferredArc` payload header. Each owner in the cache, the dual index, and
+`current` is counted independently. A non-empty queue destructor unlinks one
+by one. It does not `fast_clear`, and it does not destroy a Deferred payload
+in place. Host, Miri, and guest tests of the three real queue kinds cover
+this boundary.
 
-RT 按任务摘除必须使用 &Owner 的原始指针，不能用 &SchedTask 派生
-指针跨越 payload 头部；Miri 曾在该路径报告越出借用权限。修正为
-Owner::as_ptr 后，RT 与核心 raw 案例通过 strict-provenance Miri。
-Fair/Deadline 所用 intrusive-collections 0.10.2 存在 parent/color
-整数指针编码，仅使用默认 provenance 模式验证并保留警告，不能称为
-严格 provenance 通过；不关闭 alias/leak 检查。
+RT removal by task must use `&Owner`'s raw pointer. A pointer derived from
+`&SchedTask` must not cross the payload header. Miri reported a borrow-stack
+violation on that path. After the fix to `Owner::as_ptr`, the RT and core raw
+cases pass strict-provenance Miri. The intrusive-collections 0.10.2 used by
+Fair and Deadline encodes parent and color as integer pointers. Those were
+verified only in the default provenance mode, and the warning remains. They
+are not a strict-provenance pass. Alias and leak checks stay enabled.
 
-`ksched` 不直接接触用户内存、设备或固件输入。攻击面主要是：
+`ksched` does not touch user memory, devices, or firmware input directly. The
+attack surface is mainly:
 
-- 错误的调度 API 使用顺序（漏 `leave_current`、重复入队）；
-- 优先级等参数范围（nice 边界由各实现校验）；
-- **Deadline 参数三元组**：`DlParams { runtime_ns, deadline_ns, period_ns }` 最终来自
-  `sched_setattr` 的用户缓冲区。本 crate 的入口是 `SchedAttr::validate` →
-  `DlParams::new`，校验非零、`runtime <= deadline <= period` 以及
-  `runtime >= SCHED_DL_MIN_RUNTIME_US`；非法组合一律返回 `InvalidPolicy`；
-- **带宽总量**：单 RQ 上任务 `runtime/period` 之和（就绪树 + 节流树 + runner）
-  不得超过 `1 - SCHED_DL_BW_MARGIN_PCT`。这是资源公平性约束而非安全边界：
-  越限返回 `AdmissionFull`，不会导致越界或状态损坏。
+- the wrong scheduling API order (a missing `leave_current`, a double
+  enqueue);
+- parameter ranges such as priority (each implementation checks nice bounds);
+- **the Deadline parameter triple.**
+  `DlParams { runtime_ns, deadline_ns, period_ns }` ultimately comes from the
+  `sched_setattr` user buffer. This crate's entry is `SchedAttr::validate`
+  then `DlParams::new`. It checks non-zero, `runtime <= deadline <= period`,
+  and `runtime >= SCHED_DL_MIN_RUNTIME_US`. An illegal combination returns
+  `InvalidPolicy`;
+- **total bandwidth.** The sum of `runtime/period` on one RQ (ready tree +
+  throttled tree + runner) must not exceed `1 - SCHED_DL_BW_MARGIN_PCT`.
+  This is a fairness constraint, not a safety boundary. Exceeding it returns
+  `AdmissionFull` and does not cause an out-of-bounds access or corrupt
+  state.
 
-## unsafe 代码清单
+## Unsafe inventory
 
-Deadline 类新增 `DlAdapter<T, const READY: bool>`，与 `FairAdapter` 同构：
-`get_link` / `get_value` 用 `core::mem::offset_of!` 在同一 `SchedTask<T>` 上做
-正反字段投影，分别指向 `deadline.ready_link` 与 `deadline.throttled_link`。
+The Deadline class adds `DlAdapter<T, const READY: bool>`, matching
+`FairAdapter`. `get_link` / `get_value` project fields forward and back on
+the same `SchedTask<T>` with `core::mem::offset_of!`, onto
+`deadline.ready_link` and `deadline.throttled_link`.
 
-不变量：
+Invariants:
 
-1. 每个实例化只投影一个真实存在的 `RBTreeAtomicLink` 字段；
-2. `link` 必须由同一适配器的 `get_link` 产出，且实体存活；
-3. 反向投影只做字段偏移减法，不构造独占引用，不改变所有权；
-4. 树的键在链接期间不可变：`deadline_ns` / `period_start_ns` / `tree_id` 只在
-   摘除后修改；
-5. `KeyAdapter::get_key` 里的 `RqLocked::assume()` 只在持有 RQ 锁的类方法
-   （insert / find / 游标遍历）中被库调用；树析构不调用 `get_key`。
+1. Each instantiation projects one real `RBTreeAtomicLink` field.
+2. `link` must have been produced by the same adapter's `get_link`, and the
+   entity must still be alive.
+3. The reverse projection only subtracts the field offset. It does not build
+   an exclusive reference and does not change ownership.
+4. Tree keys are immutable while linked. `deadline_ns`, `period_start_ns`,
+   and `tree_id` change only after removal.
+5. `RqLocked::assume()` inside `KeyAdapter::get_key` is called by the library
+   only from class methods that hold the RQ lock (insert, find, cursor
+   walk). Tree destruction does not call `get_key`.
 
-各算法实现主要依赖安全集合/`Arc`。FIFO/RR 的 unsafe 集中在 ready_list：
-ReadyItem 声明具体字段偏移，ReadyAdapter 完成正反指针投影；按实体删除先核对
-这条 `ReadyList` 的地址，再使用 cursor_mut_from_ptr。不能仅凭 is_linked
-判断属于本队列。源队列独占借用阻止检查到摘除之间发生本队列修改。
+The algorithm implementations mostly use safe collections and `Arc`. FIFO/RR
+unsafe code is concentrated in `ready_list`. `ReadyItem` declares the
+concrete field offset. `ReadyAdapter` projects the pointer forward and back.
+Removal by entity first checks this `ReadyList`'s address, then uses
+`cursor_mut_from_ptr`. `is_linked` alone does not mean the task belongs to
+this queue. The source queue's exclusive borrow covers the window from the
+check to the unlink.
 
-已经链接的任务不会改写 owner。未链接的先记下本链表地址再入链，并在库
-释放链接之前清零。错误队列删除返回 None。运行队列公布之后，含有
-节点的链表对象不能再移动，否则地址不再等于 owner。Drop 清除所有归属及
-拥有的 Arc。
-owner 不是链表同步锁；Relaxed 足够用于身份检查，同一队列的操作已有独占访问，
-其他队列只能写其自身地址或零，不能伪造本队列地址。跨队列取得链接依赖库的
-原子链接操作。所有链接和身份字段均不公开，不添加手写 Send/Sync。
+A task that is already linked does not rewrite its owner. An unlinked task
+records this list's address before linking, and the word is cleared before
+the library releases the link. Deleting from the wrong queue returns `None`.
+After the run queue is published, a list object that contains nodes must not
+move, or the address would no longer equal the owner. `Drop` clears every
+owner word and the owned `Arc`s.
+The owner word is not the list's synchronization lock. `Relaxed` is enough
+for the identity check. Operations on the same queue already have exclusive
+access. Another queue can write only its own address or zero, and cannot
+forge this queue's address. Taking a link across queues depends on the
+library's atomic link operations. No link or identity field is public. No
+hand-written `Send` or `Sync` is added.
 
-ReadyList::steal 通过游标 get 借用任务，谓词只接收 &T，不恢复临时 Arc，
-也不增加或减少强引用。游标借用保护谓词访问；命中后先清除归属标记，
-结束任务借用，再由 remove 转出列表原有的拥有型引用。拒绝或谓词 panic
-不会转移列表所有权。
+`ReadyList::steal` borrows the task through the cursor `get`. The predicate
+receives only `&T`. It does not restore a temporary `Arc` and does not
+increment or decrement a strong reference. The cursor borrow covers the
+predicate. On a hit the owner mark is cleared first, the task borrow ends,
+and `remove` then transfers the list's existing owning reference. A rejection
+or a predicate panic does not move list ownership.
 
-EEVDF 新增私有 EntityAdapter 的两个原始指针投影：get_link 将活实体指针加上
-本适配器选定字段的 offset_of，get_value 对该适配器先前产出的链接指针做逆运算。
-偏移取自同一具体 EevdfEntity<T,S> 类型，不假设 Rust 字段排列或整数地址重建。
-树使用库的 DefaultPointerOps<Arc<_>> 管理所有权；无裸借用索引。
-适配器只负责字段定位而非树的平衡算法。宏不支持 const 泛型，故这里显式实现。
-EEVDF steal 另有原始所有权指针审计点：从游标 get_ptr（不是 &T）取得
-树拥有的 Arc 数据指针，ManuallyDrop 只借用该强引用，谓词只接收 &Arc。
-树借用覆盖整个谓词调用，阻止摘除和析构；panic 不释放借来的强引用。
-只有命中才 clone 真正拥有的 Arc，临时视图结束后走 remove_task；不在
-摘除后访问临时视图，也不向调用方转交这份借来的引用。
+EEVDF adds two raw pointer projections on the private `EntityAdapter`.
+`get_link` adds the `offset_of` of the field this adapter selected to a live
+entity pointer. `get_value` inverts a link pointer previously produced by
+that adapter. The offset comes from the same concrete `EevdfEntity<T, S>`
+type. It does not assume Rust field order or rebuild an address from an
+integer. The tree manages ownership with the library's
+`DefaultPointerOps<Arc<_>>`. There is no raw borrowed index.
+The adapter locates fields. It is not the tree's balancing algorithm. The
+macro does not support const generics, so the adapter is implemented
+explicitly.
+EEVDF steal has a separate raw-ownership audit point. It takes the tree-owned
+`Arc` data pointer from the cursor's `get_ptr` (not from `&T`).
+`ManuallyDrop` only borrows that strong reference. The predicate receives
+only `&Arc`. The tree borrow covers the whole predicate call and blocks
+removal and destruction. A panic does not release the borrowed strong
+reference. Only a hit clones a truly owned `Arc`. After the temporary view
+ends, the path is `remove_task`. The temporary view is not used after
+removal, and the borrowed reference is not handed to the caller.
 
-`FairClass` 另有一套 `FairAdapter`，投影的是 `SchedTask<T>` 里
-`fair.deadline_link` / `fair.vruntime_link`，不是插件 `EevdfEntity`。
-`get_link` / `get_value` 用同一字段 `offset_of` 互逆，不改 `Arc` 所有权；
-两棵树各持一份 `Arc`。`KeyAdapter::get_key` 在安全函数里 `RqLocked::assume()`：
-插入、查找和游标只从已持有令牌的 `FairClass` 方法进入；`RBTree` 的 `Drop`
-走 `clear()`，不调用 `get_key`，所以非空 `Scheduler` 析构不会在无锁下读
-`RqCell`。
+`FairClass` has its own `FairAdapter`. It projects `fair.deadline_link` and
+`fair.vruntime_link` inside `SchedTask<T>`, not the plugin `EevdfEntity`.
+`get_link` and `get_value` invert the same field `offset_of` and do not
+change `Arc` ownership. Each tree holds one `Arc`.
+`KeyAdapter::get_key` calls `RqLocked::assume()` from a safe function.
+Insert, lookup, and cursors enter only from `FairClass` methods that already
+hold the token. `RBTree`'s `Drop` uses `clear()` and does not call
+`get_key`, so destroying a non-empty `Scheduler` does not read an `RqCell`
+without the lock.
 
-`RqCell` 的 `get` / `set` 是 `UnsafeCell` 读写。读要求指针有效、值已初始化、
-无并发写；写还要求独占。这三件事都由 `RqLocked` 加上 `new`/`set` 的完整 `Copy`
-值保证。`seat`、`attr`、Fair 虚拟时间和 `rr_left_ns` 走同一套令牌。
+`RqCell`'s `get` and `set` read and write an `UnsafeCell`. A read requires a
+valid pointer, an initialized value, and no concurrent write. A write also
+requires exclusive access. `RqLocked` plus a complete `Copy` value from
+`new` and `set` provide all three. `seat`, `attr`, Fair virtual time, and
+`rr_left_ns` use the same token.
 
-`class` 与 `rt_prio` 是 `AtomicU8`。`sched_class()` / `rt_priority_snapshot()`
-用 Acquire，配对 `set_class` / `store_rt_prio` 的 Release，给不持 RQ 锁的选核
-读。`seat` 仍走 `RqCell`，只在锁下读。
+`class` and `rt_prio` are `AtomicU8`. `sched_class()` and
+`rt_priority_snapshot()` load with Acquire, paired with the Release of
+`set_class` and `store_rt_prio`, so CPU selection can read them without the
+RQ lock. `seat` stays in an `RqCell` and is read only under the lock.
 
-RT 按地址摘除在 `ready_list`。`ReadyItem` 给出 `ReadyLinks` 的字段偏移，
-`ReadyAdapter` 用同一偏移做正反投影。摘除先核对归属字是否等于这条链表的
-地址，再调用 `cursor_mut_from_ptr`。不能只凭 `is_linked` 判断属于本队列。
-队列的独占借用盖住从检查到摘除的窗口。
+RT removal by address lives in `ready_list`. `ReadyItem` gives the field
+offset of `ReadyLinks`. `ReadyAdapter` projects both ways with that offset.
+Removal checks that the owner word equals this list's address, then calls
+`cursor_mut_from_ptr`. `is_linked` alone does not mean the task belongs to
+this queue. The queue's exclusive borrow covers the window from the check to
+the unlink.
 
-已经链接的任务不会改写归属。未链接的先记下本链表地址再入链，并在库释放
-链接之前清零。错误队列删除返回
-`None`；重复入队由 `AtomicLink` 拒绝，不覆盖归属。`Drop` 逐个摘除并清归属。
-归属不是链表锁；Relaxed 足够，因为同一条链表的操作已经独占，别的链表只能
-写自己的地址或零。
+A task that is already linked does not rewrite its owner. An unlinked task
+records this list's address before linking, and the word is cleared before
+the library releases the link. Deleting from the wrong queue returns `None`.
+A repeated enqueue is rejected by `AtomicLink` and does not overwrite the
+owner. `Drop` unlinks one by one and clears the owner word. The owner word
+is not the list lock. `Relaxed` is enough, because operations on the same
+list are already exclusive, and another list can write only its own address
+or zero.
 
-steal 用游标 `get_ptr` 构造 `ManuallyDrop<Arc<_>>`，不经 `&T` 再向前恢复
-`Arc` 头。链表仍持有原来的强引用。谓词只拿到 `&Arc`。命中后 `cursor.remove`
-转交那份 `Arc`，临时视图不再使用。
+Steal builds a `ManuallyDrop<Arc<_>>` from the cursor's `get_ptr`. It does
+not walk forward from `&T` to recover an `Arc` header. The list still holds
+the original strong reference. The predicate receives only `&Arc`. On a hit,
+`cursor.remove` transfers that `Arc`, and the temporary view is not used
+again.
 
-## 内存安全不变量
+## Memory-safety invariants
 
-1. EEVDF Ready 任务的两棵树各持有一份 Arc，两个最早缓存和 next_buddy 可额外持有；
-   树摘除后再转移 CPU，返还持有覆盖附加引用释放，不能提前最终析构。
-2. EEVDF `curr` 不得持有 `Arc`；仅保存调度数值快照。
-3. `pick_next_task` 前 `curr` 必须为空（已 `leave_current`）。
-4. Exit 不得设置 PLACE_LAG；Block/Migrate 必须设置，供后续 `enqueue_task`。
-5. 运行实体调度字段变更后，`curr` 快照必须同步刷新。
-6. 两棵 EEVDF 树成员相同；挂树期间排序字段不变。修改优先级先摘两树再更新。
-7. 按实体摘除先核对键与指针身份，不用 is_linked 推断属于本树；错误队列中的
-   set_priority 不得修改挂在别处的实体。重复入队为调用方契约错误，链接断言会拒绝。
-8. RT 任务同一时刻只挂在一条优先级链表上。归属字等于该链表的身份。摘除
-   失败不得减少 `queued`。节流期间任务仍可留在链表里，但 `has_runnable`
-   为假，`pick_next` 不得选出它们。
-9. 每个 RQ 至多一个 Stop 任务。waiter 槽至多持有它排队时的一份 `Arc`；runner
-   在 `Scheduler::curr`，不在槽里。第二个 `enqueue`，或在 waiter 已在时
-   `install_current` 另一个 Stop 任务，都是契约破坏，必须断言失败，不能覆盖
-   前一个 `Arc`。调用方在创建和唤醒时自行保证每 RQ 只有一个 Stop 任务。
+1. Each of an EEVDF Ready task's two trees holds one `Arc`. The two earliest
+   caches and `next_buddy` may hold more. After the trees unlink, the
+   returned holding covers release of the extra references. The entity must
+   not be finally destroyed early.
+2. EEVDF `curr` must not hold an `Arc`. It stores only a scheduling snapshot.
+3. `curr` must be empty before `pick_next_task` (`leave_current` has run).
+4. Exit must not set PLACE_LAG. Block and Migrate must set it for the later
+   `enqueue_task`.
+5. After a running entity's scheduling fields change, the `curr` snapshot
+   must be refreshed.
+6. The two EEVDF trees have the same members. Sort fields do not change
+   while linked. A priority change removes the task from both trees first.
+7. Removal by entity checks the key and the pointer identity first. It does
+   not infer membership from `is_linked`. `set_priority` on the wrong queue
+   must not modify an entity linked elsewhere. A double enqueue is a caller
+   contract error. The link assertion rejects it.
+8. An RT task is on at most one priority list at a time. The owner word
+   equals that list's identity. A failed removal must not decrement
+   `queued`. While throttled, tasks may stay on the list, but
+   `has_runnable` is false and `pick_next` must not select them.
+9. Each RQ has at most one Stop task. The waiter slot holds at most one
+   `Arc`, and only while that task is queued. The runner is in
+   `Scheduler::curr`, not in the slot. A second `enqueue`, or
+   `install_current` of another Stop task while a waiter is present, breaks
+   the contract and must assert. It must not overwrite the previous `Arc`.
+   The caller guarantees one Stop task per RQ at create and wake.
 
-## 线程安全
+## Thread safety
 
-`BaseScheduler` 本身不是可并发类型；并发安全由 `ktask` 的 per-CPU RQ 锁与
-IRQ/preempt 约束提供。
+`BaseScheduler` is not a concurrently shareable type. Concurrency safety
+comes from `ktask`'s per-CPU RQ lock and the IRQ/preemption constraints.
 
-## 威胁分析
+## Threat analysis
 
-| 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
+| ID | Threat | Impact | Trigger | Mitigation |
 |------|----------|----------|----------|----------|
-| T-01 | 漏 `leave_current` 导致陈旧 `curr`/统计失真 | 高 | 新 leave 路径未接入统一 API | 统一 `leave_current`；EEVDF `pick_next` 断言 |
-| T-02 | 调度器持有运行任务 `Arc` 拖住生命周期 | 高 | `curr` 强引用未释放 | `curr` 改为非 owning 快照 |
-| T-03 | Exit 误设 PLACE_LAG | 中 | Exit 与 Block 共用 sleep 记账 | `LeaveReason::Exit` 单独分支 |
-| T-04 | 迁移后源 RQ 仍计入任务权重 | 中 | Migrate 未清 current 记账 | Migrate 走 `leave_current` 清快照 |
-| T-05 | `curr` 快照过期导致错误抢占/放置 | 中 | 改运行实体字段后未刷新 | `update_current`/`set_priority` 刷新；测试辅助显式同步 |
-| T-06 | idle-pull 偷走仍 `on_cpu` 的实体 | 高 | yield/preempt 入树后远端 `steal_ready_task` | 调度器只摘 ready waiter；ktask 谓词拒绝 `on_cpu`，不 `pick_next` |
-| T-07 | 双树或缓存残留导致错误选取/持有 | 高 | 摘除、改键或 Drop 漏清一份链接 | 同锁摘双树，游标后继更新缓存，正常树 Drop；成员/引用/重入测试 |
-| T-08 | `Scheduler` 在未持 RQ 锁时写 `RqCell` | 高 | 调用方违反锁契约 | 文档约定；令牌只在 `Scheduler` 入口和未发布初始化处构造 |
-| T-09 | 仲裁器 `curr` 的 `Arc` 在 Block 后成为唯一引用 | 高 | 调用方未另持任务 | `leave` 释放仲裁器引用；调用方必须另持任务 |
-| T-10 | 同一 RQ 上出现第二个 Stop 任务 | 高 | 重复 activate、误入队，或在已有 waiter 时 `install_current` | `enqueue` 与 `set_curr` 在槽已被占用时断言失败 |
+| T-01 | A missing `leave_current` leaves a stale `curr` or skewed statistics | High | A new leave path is not wired to the shared API | One `leave_current`; EEVDF `pick_next` asserts |
+| T-02 | The scheduler holds a running task's `Arc` and pins its lifetime | High | The `curr` strong reference is not released | `curr` is a non-owning snapshot |
+| T-03 | Exit sets PLACE_LAG by mistake | Medium | Exit and Block share sleep accounting | A separate `LeaveReason::Exit` branch |
+| T-04 | The source RQ still counts a task's weight after migration | Medium | Migrate does not clear current accounting | Migrate goes through `leave_current` and clears the snapshot |
+| T-05 | A stale `curr` snapshot causes the wrong preemption or placement | Medium | A running entity's fields change without a refresh | `update_current` / `set_priority` refresh; test helpers sync explicitly |
+| T-06 | Idle-pull steals an entity that is still `on_cpu` | High | A remote `steal_ready_task` after yield/preempt enqueued the task | The scheduler removes only a ready waiter; the `ktask` predicate rejects `on_cpu` and does not `pick_next` |
+| T-07 | A leftover link in either tree or the cache selects or holds the wrong task | High | Removal, a key change, or `Drop` misses one link | Both trees unlink under the same lock; the cursor successor updates the cache; normal tree `Drop`; membership, reference, and re-entry tests |
+| T-08 | `Scheduler` writes an `RqCell` without the RQ lock | High | The caller breaks the lock contract | Documented; the token is built only at a `Scheduler` entry and at unpublished init |
+| T-09 | The arbiter `curr` `Arc` is the only reference after Block | High | The caller does not hold the task separately | `leave` releases the arbiter reference; the caller must hold the task |
+| T-10 | A second Stop task appears on the same RQ | High | A repeated activate, a mistaken enqueue, or `install_current` while a waiter exists | `enqueue` and `set_curr` assert when the slot is already occupied |
 
-## 故障模式与影响分析（FMEA）
+## Failure modes and effects (FMEA)
 
-| 编号 | 故障模式 | 故障原因 | 局部影响 | 系统影响 | 严重度 | 应对措施 |
+| ID | Failure mode | Cause | Local effect | System effect | Severity | Mitigation |
 |------|----------|----------|----------|----------|--------|----------|
-| F-01 | pick 时 curr 非空 | 调用顺序错误 | 断言失败 | 调度停止（暴露 bug） | 2 | 强制 leave 契约 |
-| F-02 | 唤醒未 PLACE_LAG | Block/Migrate 未记 lag | 放置偏差 | 延迟/公平性劣化 | 3 | disposition 区分 + 单测 |
-| F-03 | Block 后无额外强引用 | 调用方未 pin 任务 | `switch_to` 断言失败 | 调度停止 | 2 | `blocked_resched` 要求 `strong_count > 1` |
-| F-04 | idle-pull 迁入未 PLACE_LAG | 摘任务不走 `remove_task` | 目的 RQ 放置偏差 | 迁入任务公平性漂移 | 3 | `steal_ready_task` 走 `remove_task`；dest `enqueue_task` PLACE_LAG |
-| F-05 | 第二个 Stop 任务 | 同一 RQ 再次入队，或 waiter 已在时安装 Stop runner | 断言失败 | 调度停止（暴露 bug） | 2 | `enqueue` 与 `set_curr` 断言；`steal` 不搬走 Stop |
+| F-01 | `curr` is non-empty at pick | Call order is wrong | Assertion failure | Scheduling stops (exposes the bug) | 2 | The leave contract is mandatory |
+| F-02 | A wake has no PLACE_LAG | Block/Migrate did not record lag | Placement is off | Latency and fairness degrade | 3 | Dispositions differ, covered by tests |
+| F-03 | No extra strong reference after Block | The caller did not pin the task | `switch_to` assertion failure | Scheduling stops | 2 | `blocked_resched` requires `strong_count > 1` |
+| F-04 | Idle-pull migrate-in has no PLACE_LAG | Removal does not go through `remove_task` | Destination RQ placement is off | The migrated task's fairness drifts | 3 | `steal_ready_task` uses `remove_task`; dest `enqueue_task` applies PLACE_LAG |
+| F-05 | A second Stop task | Another enqueue on the same RQ, or a Stop runner is installed while a waiter exists | Assertion failure | Scheduling stops (exposes the bug) | 2 | `enqueue` and `set_curr` assert; `steal` does not move Stop |
 
-## 故障管理
+## Failure handling
 
-- 契约破坏优先 `assert!`（编程错误，不应静默恢复）。
-- 用户策略不合法时 `SchedAttr::validate` 返回 `SchedError`，由 `ktask` 传给调用方。
+- A broken contract prefers `assert!`. It is a programming error and must not
+  be recovered silently.
+- An illegal user policy makes `SchedAttr::validate` return `SchedError`,
+  which `ktask` passes to the caller.
 
-## 隐私分析
+## Privacy
 
-无用户数据；仅操作内核任务调度元数据。
+No user data. The crate operates only on kernel task scheduling metadata.
 
-## 已知限制
+## Known limitations
 
-- Stop 队列已在仲裁器里，但 `ktask` 还不创建 Stop 任务，也没有 stop-machine。
-  `SCHED_DEADLINE` 需携带合法 `DlParams`，否则 `SchedAttr::validate` 以 `InvalidPolicy` 拒绝；每 RQ 准入失败以 `AdmissionFull` 拒绝（非权限检查）。
-- `sched_setscheduler` 尚未把 FIFO/RR 送进 `RtClass`，也没有
-  `CAP_SYS_NICE` 检查。接线前必须先补上，否则非特权调用者可以长期占住 CPU。
-- `SCHED_RESET_ON_FORK` 能通过策略字校验并记在线程快照里，fork 尚未按该标志
-  把子任务打回 `SCHED_NORMAL`。
-- RT 带宽按每个 RQ 计算，没有跨 CPU 的根域带宽池。本 RQ 节流后不再
-  `pick_next` 这些任务，但 idle-pull 仍可把它们摘到另一颗 CPU，改记那颗
-  CPU 的 runtime。选核读 `rt_preempt_rank`：本周期尚未结束的节流 RQ 记为
-  255，与 Stop/Deadline 一样不视为可抢占，只在没有其他可抢占 CPU 时退回
-  hint。判定用 `is_throttled_at`（`now >= period_start_ns + rt_period_ns`
-  即不再节流）。队列被摘空后仍武装周期边界，空闲 CPU 到点会清标志并改写
-  已发布的 255，避免这颗核在低负载下一直被选核跳过。
-  没有 Linux `cpupri` push/pull。`sched_setscheduler` 仍不把任务送进这个类。
+- The Stop queue is in the arbiter, but `ktask` does not create Stop tasks
+  yet and has no stop-machine. `SCHED_DEADLINE` must carry a valid
+  `DlParams`, or `SchedAttr::validate` rejects it with `InvalidPolicy`. A
+  per-RQ admission failure is `AdmissionFull`, not a permission check.
+- `sched_setscheduler` / `sched_setattr` move FIFO/RR into `RtClass` and
+  `SCHED_DEADLINE` into Deadline. Realtime and Deadline policies require a
+  privileged caller (`euid == 0`, standing in for `CAP_SYS_NICE`). This is
+  still not a full capability or `RLIMIT_RTPRIO` check.
+- `SCHED_RESET_ON_FORK` is stored on `SchedAttr`. On clone, an RT or Deadline
+  child returns to `SCHED_NORMAL` at nice 0. A Fair child zeros only a
+  negative nice. A Deadline parent without the flag cannot fork (`EAGAIN`).
+- RT bandwidth is computed per RQ. There is no cross-CPU root-domain
+  bandwidth pool. After this RQ throttles, `pick_next` no longer selects
+  those tasks, but idle-pull can still move them to another CPU and charge
+  that CPU's runtime. CPU selection reads `rt_preempt_rank`. An RQ that is
+  still throttled in this period is recorded as 255 and, like Stop and
+  Deadline, is not treated as preemptible. It falls back to the hint only
+  when no other preemptible CPU exists. The decision uses
+  `is_throttled_at` (`now >= period_start_ns + rt_period_ns` means no longer
+  throttled). After the queue is emptied the period boundary stays armed.
+  An idle CPU clears the flag when it fires and rewrites the published 255,
+  so this CPU is not skipped by selection forever under low load. There is
+  no Linux `cpupri` push/pull. `sched_setscheduler` moves FIFO/RR into this
+  class.
 
-## 审计清单
+## Audit checklist
 
-- [ ] 新增离开路径是否只调用 `leave_current`。
-- [ ] EEVDF `curr` 是否仍保持非 owning。
-- [ ] Exit 是否避免 PLACE_LAG。
-- [ ] 迁移后源 RQ 的 V/weight 是否不再包含迁出任务。
-- [ ] Block 路径调用方是否另持强引用。
-- [ ] 单测是否覆盖五种 disposition 与 pick-without-leave。
-- [ ] `steal_ready_task` 是否走 `remove_task` 且不安装 `curr`。
-- [ ] EEVDF 双树和最早缓存是否一致，所有改键是否先摘树。
-- [ ] 排队任务改 nice 是否先扣除旧权重贡献，再按新权重入队；摘除后是否无残账。
-- [ ] Adapter 的正反投影是否使用同一字段偏移，树是否持有真实 Arc。
-- [ ] `Scheduler` 调用是否仍在 RQ 锁下；`curr` 的 `Arc` 是否在 leave 时释放。
-- [ ] Stop / Idle 的 `set_attr` 是否仍返回 `KernelClassImmutable`，且第二个 Stop `enqueue` 或在 waiter 已在时 `install_current` 是否断言失败。
-- [ ] `DlParams` 的零值 / 次序颠倒 / 低于最小预算是否都被拒（不截断、不归一化）。
-- [ ] 准入失败是否在改动任务属性之前返回（拒绝后 `attr` 保持不变）。
-- [ ] Deadline 的两个链接在 `advance` / `dequeue` / `put_prev` 各路径是否**至多一个**处于链接状态（不得同时挂在就绪树与节流树上）。
-- [ ] RT 摘除是否先核对队列身份，再 `cursor_mut_from_ptr`。
+- [ ] A new leave path calls only `leave_current`.
+- [ ] EEVDF `curr` stays non-owning.
+- [ ] Exit avoids PLACE_LAG.
+- [ ] After migration the source RQ's V/weight no longer includes the task
+      that left.
+- [ ] The Block-path caller holds another strong reference.
+- [ ] Tests cover the five dispositions and pick-without-leave.
+- [ ] `steal_ready_task` goes through `remove_task` and does not install
+      `curr`.
+- [ ] The EEVDF pair of trees and the earliest caches agree, and every key
+      change unlinks first.
+- [ ] A queued task that changes nice subtracts the old weight contribution
+      before enqueueing at the new weight, and removal leaves no residual
+      charge.
+- [ ] An adapter's forward and reverse projections use the same field offset,
+      and the tree holds a real `Arc`.
+- [ ] `Scheduler` calls still run under the RQ lock, and `curr`'s `Arc` is
+      released on leave.
+- [ ] Stop and Idle `set_attr` still return `KernelClassImmutable`, and a
+      second Stop `enqueue`, or `install_current` while a waiter exists,
+      asserts.
+- [ ] A zero, reversed, or below-minimum `DlParams` is rejected (not clamped
+      or normalized).
+- [ ] An admission failure returns before the task attribute changes (`attr`
+      is unchanged after rejection).
+- [ ] On `advance`, `dequeue`, and `put_prev`, at most one of Deadline's two
+      links is linked (never both the ready tree and the throttled tree).
+- [ ] RT removal checks queue identity before `cursor_mut_from_ptr`.
 
-实际运行时间的写入由所属 RQ 锁串行化；原子字段仅支持跨 CPU 安全读取，
-不发布其他任务状态。迁移须交接 RQ 所有权后再更新，累计溢出采用饱和语义。
+Writes of actual runtime are serialized by the owning RQ lock. The atomic
+field supports a cross-CPU read only. It does not publish other task state.
+A migration must hand off RQ ownership before updating. Accumulation overflow
+saturates.

@@ -311,6 +311,14 @@ pub(crate) fn task_identity_matches_thread(task: &KtaskRef) -> bool {
 }
 
 impl PreparedUserTask {
+    /// The task reference before it is inserted into the TID table.
+    ///
+    /// The caller still exclusively owns this task. Scheduler attribute
+    /// initialization that cannot take a run-queue lock belongs here.
+    pub(crate) fn task(&self) -> &KtaskRef {
+        &self.task
+    }
+
     /// Publishes the prepared user task to task/process registries.
     pub(crate) fn publish(self) -> KResult<PublishedUserTask> {
         let rollback = process_publication().publish_task(&self.task)?;
