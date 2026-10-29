@@ -42,6 +42,7 @@ ktime_types.workspace = true
 ktime.workspace = true
 klogger.workspace = true
 kns.workspace = true
+knet.workspace = true
 kpoll.workspace = true
 ktask.workspace = true
 ktimer.workspace = true

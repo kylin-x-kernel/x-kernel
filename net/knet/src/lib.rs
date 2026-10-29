@@ -28,6 +28,7 @@ mod ip;
 mod link;
 mod netfilter;
 pub mod netlink;
+pub mod netns;
 mod network;
 mod runtime;
 mod socket;

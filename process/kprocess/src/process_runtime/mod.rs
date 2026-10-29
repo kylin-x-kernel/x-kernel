@@ -387,10 +387,15 @@ impl ProcessRuntime {
 
     /// Replaces the process namespace bundle installed in this runtime.
     ///
-    /// Dropping the previous bundle releases the strong reference to the old
-    /// namespaces; namespace owners then release their own resources.
+    /// The previous bundle is released after the write guard is dropped:
+    /// dropping it releases the strong reference to the old namespaces, and a
+    /// namespace owner (the net namespace's drop hook tears down its protocol
+    /// stack) must not run under the process namespace lock — every other
+    /// thread resolving `nsproxy()` would block behind it. `exit_namespaces`
+    /// releases its bundle the same way.
     pub(crate) fn set_nsproxy(&self, nsproxy: Arc<NsProxy>) {
-        *self.nsproxy.write() = Some(nsproxy);
+        let previous = self.nsproxy.write().replace(nsproxy);
+        drop(previous);
     }
 
     /// Replaces the process filesystem context installed in this runtime.

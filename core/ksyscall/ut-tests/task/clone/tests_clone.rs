@@ -43,7 +43,7 @@ fn test_validate_accepts_newpid() {
 
 #[def_test]
 fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
-    for flags in [CloneFlags::NEWNET, CloneFlags::NEWUSER] {
+    for flags in [CloneFlags::NEWUSER, CloneFlags::NEWCGROUP, CloneFlags::NEWTIME] {
         let mut req = CloneRequest::new();
         req.set_flags(flags);
         let err = req.validate_namespace_flags().unwrap_err();

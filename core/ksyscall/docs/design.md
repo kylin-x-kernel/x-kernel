@@ -64,7 +64,7 @@ ksyscall::handle_syscall
     ├─ vfs adapter  ───────────> posix-fs / kvfs
     ├─ ipc adapter  ───────────> kfd_objects::{EventFd, PipeObject}
     ├─ time adapter ───────────> khal time sources / kprocess CPU-time state / kfd_objects::TimerFd
-    ├─ task adapter ───────────> kprocess / posix-process / kcred
+    ├─ task adapter ───────────> kprocess / posix-process / kcred / knet
     ├─ io_mpx adapter ─────────> kfd_objects::Epoll
     ├─ sync adapter ───────────> kfutex / kprocess
     └─ misc adapter ───────────> posix-mm / posix-net / ...
@@ -156,8 +156,10 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   `setns` splits into the `NsFd` channel (nstype must be zero or match the
   fd type) and the `PidFd` channel (nstype is an OR mask resolved against one
   snapshot of the target bundle, Linux 5.8+ semantics), and commits via
-  `Process::apply_setns`. Net/User/Cgroup swaps are `EOPNOTSUPP`
-  (no pseudo-isolation); both channels sit behind the `has_sys_admin` gate.
+  `Process::apply_setns`. User/Cgroup swaps are `EOPNOTSUPP` (no
+  pseudo-isolation); a Net swap is accepted and the syscall path materializes
+  the target namespace's protocol stack through `knet::netns::ensure_stack`.
+  Both channels sit behind the `has_sys_admin` gate.
 - `arch/`: architecture-specific system-info/control adapters (`arch/mod.rs`
   organizes per-architecture submodules via `cfg`, `lib.rs` declares the
   top-level `mod arch;`, and `sys.rs` only re-exports `crate::arch::*`),
@@ -297,10 +299,11 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 `unshare`/`setns` implement the namespace system calls over `kns` two-phase
 validation and `kprocess` commit (see above). `clone`/`clone3` now accept
 `CLONE_NEWPID` (the child is allocated in a fresh child PID namespace) and
-`CLONE_NEWNS`/`CLONE_NEWUTS`/`CLONE_NEWIPC`, while `CLONE_NEWNET`,
-`CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return `ENOSYS`
-from the namespace-flag validator instead of improvising namespace creation
-without isolation. A thread clone cannot switch namespaces — the namespace
+`CLONE_NEWNS`/`CLONE_NEWUTS`/`CLONE_NEWIPC`/`CLONE_NEWNET` (a fresh network
+namespace whose protocol stack is materialized by `knet::netns::ensure_stack`),
+while `CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return
+`ENOSYS` from the namespace-flag validator instead of improvising namespace
+creation without isolation. A thread clone cannot switch namespaces — the namespace
 bundle hangs off the process — so `CLONE_THREAD` combined with any namespace
 flag is rejected with `EINVAL` (Linux `copy_process()`), and every namespace
 flag on any clone is gated on the caller's privilege before the thread or

@@ -54,10 +54,15 @@ impl CgroupFsState {
     /// paths that must identify the cgroup itself (the bpf(2) device
     /// controller resolves its attach target this way).
     pub(crate) fn cgroup_of(&self, inode: &Arc<VfsInode>) -> Option<Arc<Cgroup>> {
+        // Match by inode number, not by `Arc` identity: a lookup may
+        // materialize a fresh inode object for the same directory (dentry
+        // caching is per-filesystem), and the bpf(2) query hands us whatever
+        // inode the caller's open file carries.
+        let ino = inode.metadata().inode;
         self.nodes
             .lock()
             .values()
-            .find(|node| Arc::ptr_eq(&node.directory, inode))
+            .find(|node| node.directory.metadata().inode == ino)
             .map(|node| node.cgroup.clone())
     }
 

@@ -127,13 +127,12 @@ fn test_nsproxy_clone_newns_with_clone_fs_rejected() {
 #[def_test]
 fn test_nsproxy_clone_unimplemented_flags_rejected() {
     let parent = make_nsproxy();
-    // NEWNET is rejected: knet still resolves sockets through its global
-    // protocol stack, so a fresh identity alone would be pseudo-isolation.
-    for flags in [
-        NamespaceFlags::NEWNET,
-        NamespaceFlags::NEWUSER,
-        NamespaceFlags::NEWCGROUP,
-    ] {
+    // NEWNET is supported: the child receives a fresh namespace identity.
+    let net_child = parent
+        .clone_for_child(NamespaceFlags::NEWNET, NamespaceFsContext::Shared)
+        .unwrap();
+    assert_ne!(net_child.net_ns().id(), parent.net_ns().id());
+    for flags in [NamespaceFlags::NEWUSER, NamespaceFlags::NEWCGROUP] {
         assert!(
             parent
                 .clone_for_child(flags, NamespaceFsContext::Shared)
@@ -196,11 +195,16 @@ fn test_unshare_prepare_rejects_unsupported_and_unprivileged() {
         unshare_files: false,
     };
 
-    // NEWNET is rejected like the other unimplemented namespaces: knet still
-    // resolves sockets through its global protocol stack, so a fresh identity
-    // alone would be pseudo-isolation.
+    // NEWNET is supported: unshare creates a fresh namespace identity.
+    let prepared = proxy
+        .prepare_unshare(NamespaceFlags::NEWNET, context, &fs)
+        .expect("NEWNET unshare is supported");
+    assert_ne!(
+        prepared.nsproxy().net_ns().id(),
+        proxy.net_ns().id(),
+        "unshare(CLONE_NEWNET) must create a distinct namespace identity"
+    );
     for flags in [
-        NamespaceFlags::NEWNET,
         NamespaceFlags::NEWUSER,
         NamespaceFlags::NEWCGROUP,
         NamespaceFlags::NEWTIME,
@@ -366,11 +370,14 @@ fn test_with_namespace_swaps_only_requested_slot() {
 #[def_test]
 fn test_with_namespace_rejects_pseudo_isolation_kinds() {
     let proxy = make_nsproxy();
-    // Net is rejected like the other pseudo-isolation kinds: knet still
-    // resolves sockets through its global protocol stack, so switching only
-    // the namespace reference would not isolate anything.
+    // Net is supported: entering swaps in the target's NetNamespace.
+    let net_target = Arc::new(crate::NetNamespace::new());
+    let net_swapped = proxy
+        .with_namespace(&NsFd::Net(net_target.clone()))
+        .unwrap();
+    assert!(Arc::ptr_eq(net_swapped.net_ns(), &net_target));
+    // User and Cgroup remain pseudo-isolation and stay rejected.
     for nsfd in [
-        NsFd::Net(Arc::new(crate::NetNamespace::new())),
         NsFd::User(kcred::initial_user_namespace()),
         NsFd::Cgroup(kcgroup::CgroupNamespace::initial()),
     ] {

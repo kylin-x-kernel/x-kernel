@@ -187,7 +187,7 @@ impl NsProxy {
             uts_ns: Arc::new(UtsNamespace::new()),
             ipc_ns: Arc::new(IpcNamespace::new()),
             pid_ns_for_children: root_pid_ns,
-            net_ns: Arc::new(NetNamespace::new()),
+            net_ns: Arc::new(NetNamespace::new_initial()),
             cgroup_ns: CgroupNamespace::initial(),
             time_ns: time_ns.clone(),
             time_ns_for_children: time_ns,
@@ -243,10 +243,10 @@ impl NsProxy {
     ) -> Result<Arc<Self>, CloneNsError> {
         // Reject unimplemented namespace flags. Their backing tables are not
         // isolated, so cloning the reference would create pseudo-isolation.
-        let unimplemented = NamespaceFlags::NEWNET
-            | NamespaceFlags::NEWUSER
-            | NamespaceFlags::NEWCGROUP
-            | NamespaceFlags::NEWTIME;
+        // `NEWNET` is implemented: the child receives a fresh namespace
+        // identity whose stack is materialized on the clone path.
+        let unimplemented =
+            NamespaceFlags::NEWUSER | NamespaceFlags::NEWCGROUP | NamespaceFlags::NEWTIME;
         if flags.intersects(unimplemented) {
             return Err(CloneNsError::Unimplemented);
         }
@@ -291,10 +291,11 @@ impl NsProxy {
             uts_ns,
             ipc_ns,
             pid_ns_for_children,
-            // `clone` of the remaining flags shares the network namespace: it
-            // has no isolated backing table, so a fresh identity alone would
-            // be pseudo-isolation (see `clone_for_child`'s rejection above).
-            net_ns: self.net_ns.clone(),
+            net_ns: if flags.contains(NamespaceFlags::NEWNET) {
+                Arc::new(NetNamespace::new())
+            } else {
+                self.net_ns.clone()
+            },
             cgroup_ns: self.cgroup_ns.clone(),
             time_ns: self.time_ns.clone(),
             time_ns_for_children: self.time_ns_for_children.clone(),
@@ -366,10 +367,8 @@ impl NsProxy {
         context: UnshareContext,
         fs_context: &FsStruct,
     ) -> Result<PreparedUnshare, UnshareError> {
-        let unsupported = NamespaceFlags::NEWNET
-            | NamespaceFlags::NEWUSER
-            | NamespaceFlags::NEWCGROUP
-            | NamespaceFlags::NEWTIME;
+        let unsupported =
+            NamespaceFlags::NEWUSER | NamespaceFlags::NEWCGROUP | NamespaceFlags::NEWTIME;
         if flags.intersects(unsupported) {
             return Err(UnshareError::Unsupported);
         }
@@ -417,10 +416,16 @@ impl NsProxy {
             self.pid_ns_for_children.clone()
         };
 
-        // `unshare` of the remaining flags shares the network namespace: it
-        // has no isolated backing table, so a fresh identity alone would be
-        // pseudo-isolation (see `prepare_unshare`'s rejection above).
-        let net_ns = self.net_ns.clone();
+        // `unshare(CLONE_NEWNET)` creates a fresh namespace identity; the
+        // protocol-stack instance backing it is materialized by
+        // `knet::netns::ensure_stack` on the syscall path. The new stack
+        // contains only a loopback device with 127.0.0.1/8, matching the
+        // Linux initial namespace state.
+        let net_ns = if flags.contains(NamespaceFlags::NEWNET) {
+            Arc::new(NetNamespace::new())
+        } else {
+            self.net_ns.clone()
+        };
 
         let nsproxy = Arc::new(Self {
             mnt_ns,
@@ -450,11 +455,13 @@ impl NsProxy {
     ///
     /// # Errors
     ///
-    /// Returns [`UnshareError::Unsupported`] for `User`, `Cgroup`, and `Net`
+    /// Returns [`UnshareError::Unsupported`] for `User` and `Cgroup`
     /// namespaces, whose underlying tables are not isolated yet; switching
-    /// only the namespace reference would create pseudo-isolation.
+    /// only the namespace reference would create pseudo-isolation. A `Net`
+    /// slot swaps in the target `NetNamespace`; the syscall path materializes
+    /// its protocol stack via `knet::netns::ensure_stack`.
     pub fn with_namespace(&self, replacement: &NsFd) -> Result<Arc<Self>, UnshareError> {
-        if matches!(replacement, NsFd::User(_) | NsFd::Cgroup(_) | NsFd::Net(_)) {
+        if matches!(replacement, NsFd::User(_) | NsFd::Cgroup(_)) {
             return Err(UnshareError::Unsupported);
         }
 
@@ -474,7 +481,10 @@ impl NsProxy {
             NsFd::Pid(ns) => ns.clone(),
             _ => self.pid_ns_for_children.clone(),
         };
-        let net_ns = self.net_ns.clone();
+        let net_ns = match replacement {
+            NsFd::Net(ns) => ns.clone(),
+            _ => self.net_ns.clone(),
+        };
 
         Ok(Arc::new(Self {
             mnt_ns,

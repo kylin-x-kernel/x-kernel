@@ -38,11 +38,39 @@ NsFd (namespace file descriptor)
 ```
 
 `NamespaceFlags` represents Linux creation bits. `NamespaceType` supplies names
-for namespace displays. IPC/net/time types hold IDs, not their managers. The
-current `posix-ipc` implementation still uses global message/shared-memory
-managers without keying them by this IPC identity. Creating a new IPC namespace
-ID therefore does not currently isolate those resources. This crate does not
-own their queues, segments or manager migration.
+for namespace displays. IPC/time types hold IDs, not their managers: the current
+`posix-ipc` implementation still uses global message/shared-memory managers
+without keying them by this IPC identity, so creating a new IPC namespace ID
+does not currently isolate those resources, and this crate does not own their
+queues, segments or manager migration.
+
+### Net namespace lifecycle
+
+`net.rs` holds more than an ID. `NetNamespace` carries the stable identity that
+also serves as the `/proc/<pid>/ns/net` inode, and it owns two lifecycle hooks:
+
+- `NetNamespace::new_initial()` records the boot namespace's id in the
+  `INITIAL_NET_ID` global. `NamespaceId` is a kernel-wide counter shared by
+  every namespace kind, so the initial net id is whatever the counter holds at
+  boot-time construction — not a fixed constant. `NetNamespace::initial_id()`
+  exposes it to the stack owner.
+- `impl Drop for NetNamespace` invokes the callback installed by
+  `set_net_namespace_drop_hook`, letting the protocol-stack owner (`knet`)
+  release per-namespace state when the last reference goes away.
+
+`set_net_namespace_drop_hook` is a cross-crate callback interface: the provider
+is `knet` (the protocol-stack owner) and the caller is `NetNamespace::drop`
+inside this crate. The direction is kns → external owner through a registered
+function pointer, so `kns` does not depend on `knet`. `NEWNET` creation,
+`setns` entry and clone all produce a fresh `NetNamespace` whose stack is
+materialized by `knet::netns::ensure_stack` on the syscall path.
+
+The drop-hook and initial-id globals are `ksync::Mutex`-protected and declared
+through `static_lock!` so they compile under both the plain and the lock-stat
+lock implementations. They are written once at boot (initial id) or when the
+owner installs its hook (`knet`'s first `ensure_stack` call) and read on
+namespace creation/destruction; neither is taken while holding a process-runtime
+lock, and the hook body only removes one map entry under its own mutex.
 
 ### NsFd
 
@@ -85,9 +113,11 @@ and reuses `CgroupNamespace::initial`. Independent explicit-mount bundles still
 share the initial cgroup hierarchy so boot mounts and PID 1 do not acquire
 separate system roots.
 
-`clone_for_child` rejects NEWNET, NEWUSER, NEWCGROUP, and NEWTIME with
-`Unimplemented`; the X-Kernel container plan forbids creating namespace objects
-that only change an ID without isolating the underlying tables. With NEWNS it
+`clone_for_child` rejects NEWUSER, NEWCGROUP, and NEWTIME with
+`Unimplemented`: creating a namespace object that only changes an ID without
+isolating the underlying tables would be pseudo-isolation. NEWNET is
+supported — the child receives a fresh `NetNamespace` identity whose protocol
+stack is materialized by `knet::netns::ensure_stack` on the clone path. With NEWNS it
 rejects `NamespaceFsContext::Shared`; otherwise it snapshots root/pwd, calls
 KVFS `clone_with_root_and_pwd`, retargets the private `FsStruct` as a pair, and
 retains the new mount namespace. NEWUTS copies both names into a new identity;
@@ -100,8 +130,10 @@ shared. The function does not install the result into a running process.
 `NsProxy::prepare_unshare` performs all Linux checks and returns a
 `PreparedUnshare`, so the commit phase only installs precomputed state:
 
-1. NEWNET/NEWUSER/NEWCGROUP/NEWTIME are rejected with `Unsupported`
-   (`EOPNOTSUPP`) — never pseudo-isolation.
+1. NEWUSER/NEWCGROUP/NEWTIME are rejected with `Unsupported`
+   (`EOPNOTSUPP`) — never pseudo-isolation. NEWNET is accepted: it creates a
+   fresh `NetNamespace` identity and the syscall path materializes its
+   protocol stack with `knet::netns::ensure_stack`.
 2. Any `NEW*` flag requires `UnshareContext::privileged` (CAP_SYS_ADMIN in the
    absence of user namespaces); plain `CLONE_FS`/`CLONE_FILES` do not.
 3. `NEWNS` while the `fs_struct` is shared and `CLONE_FS` was not requested is
@@ -118,8 +150,14 @@ is requested, so callers never need the explicit bit; the `check_fs_flag`
 rejection above remains as defense for direct `prepare_unshare` callers.
 
 `NsProxy::with_namespace` builds a proxy with one namespace slot swapped,
-used by `setns(2)`. Net/User/Cgroup slots are rejected as `Unsupported`
-("pseudo-isolation" guard).
+used by `setns(2)`. User/Cgroup slots are rejected as `Unsupported`
+("pseudo-isolation" guard); a Net slot swaps in the target `NetNamespace`
+and the syscall path materializes its protocol stack via
+`knet::netns::ensure_stack`. Socket creation, netlink dumps and the listen
+table still resolve through knet's global singletons — per-namespace
+data-plane routing is the follow-up layer — so a net namespace provides the
+lifecycle boundary (creation, `setns` entry, `/proc/<pid>/ns/net` identity)
+but not yet data-plane isolation.
 
 ## setns semantics
 
@@ -155,22 +193,32 @@ allocation is not a memory-ordering/publication protocol.
 ## Decisions, lifecycle, and limitations
 
 Unsupported clone flags fail explicitly instead of silently claiming isolation.
+Net namespaces are now created and entered (identity plus a private knet stack
+containing loopback and `127.0.0.1/8`); user and cgroup namespaces remain
+rejected because their credential and hierarchy tables are not isolated, and
+net *data-plane* routing (socket registry, listen table, netlink views) remains
+global as a documented follow-up rather than a rejected case.
 `NamespaceFsContext` makes mount-copy versus shared-filesystem conflicts visible
 in the API. Credential and active-PID roles are not folded into `NsProxy`.
 
-There is no custom bundle drop: final `Arc` release drops references and the
-respective namespace owners clean their resources. IPC/net/time ID-only types
-have no local resource manager teardown. `NsFd` pins the namespace for the fd
-lifetime, so a namespace survives while any fd or bundle references it.
+`NsProxy` itself has no custom drop: final `Arc` release drops the references
+it holds. The one namespace type with a paired teardown is net:
+`NetNamespace::drop` notifies the protocol-stack owner through the registered
+hook so the private stack is released with the namespace. IPC and time are
+ID-only types with no local resource manager teardown, and IPC managers remain
+global. `NsFd` pins the namespace for the fd lifetime, so a namespace survives
+while any fd or bundle references it.
 
 Non-goals and increments (explicitly out of scope, recorded because they echo
 the tgoskits gaps):
 
-- **NEWNET/NEWUSER/NEWCGROUP/NEWTIME isolation**: the object types exist and
-  NsFd/procfs expose them, but switching net/user/cgroup references without
-  isolating the underlying interface/credential/cgroup tables is rejected.
-  User namespaces additionally need `uid_map`/`gid_map` chown and mount
-  permission downgrade semantics.
+- **NEWUSER/NEWCGROUP/NEWTIME isolation**: the object types exist and
+  NsFd/procfs expose them, but switching user/cgroup references without
+  isolating the underlying credential/cgroup tables is rejected. User
+  namespaces additionally need `uid_map`/`gid_map` chown and mount permission
+  downgrade semantics. Net is no longer in this group: its identity and
+  lifecycle are implemented (see the net namespace lifecycle section), while
+  net *data-plane* routing stays global in knet as the documented follow-up.
 - **fs-sharing counting**: the shared-`fs_struct` (`NEWNS` without `CLONE_FS`)
   check covers published threads of the caller; cross-process `CLONE_FS`
   sharing is not counted (no `fs->users` counter yet).

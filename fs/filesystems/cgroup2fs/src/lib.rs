@@ -34,13 +34,14 @@ pub use mount::{FILE_SYSTEM_TYPE, new_cgroup2fs, new_initial_cgroup2fs};
 /// Returns `None` for files on other filesystems or non-directory inodes —
 /// the caller answers `EBADF`/`EINVAL`, mirroring `cgroup_get_from_fd`.
 pub fn cgroup_from_file(file: &VfsFile) -> Option<Arc<kcgroup::Cgroup>> {
-    let super_block = file.inode().super_block().ok()?;
-    if super_block.magic() != 0x6367_7270 {
-        return None;
-    }
+    // Identify the filesystem by its state object rather than by
+    // `SuperBlock::magic()`: KVFS does not publish a magic value on
+    // superblocks yet, and only a cgroup2fs superblock carries a
+    // `CgroupFsState`.
+    let inode = file.inode();
+    let super_block = inode.super_block().ok()?;
     let fs = super_block.private::<Arc<SimpleFs>>().ok()?;
-    fs.private::<state::CgroupFsState>()?
-        .cgroup_of(file.inode())
+    fs.private::<state::CgroupFsState>()?.cgroup_of(inode)
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

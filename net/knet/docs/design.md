@@ -32,7 +32,7 @@ the consumed buffer handle even on error.
 
 x-kernel needs socket semantics that can serve both POSIX syscalls and in-kernel clients. `knet` owns protocol state, packet queues, routing, and progress scheduling, while its surrounding subsystems supply device access, task scheduling, filesystem operations, and caller context.
 
-The POSIX network layer in `posix/net` handles syscall arguments, user-memory access, file descriptors, and ABI conversion. `kvfs` owns pathname resolution and access checks, and `anon_inodefs` creates socket files. `kclass` supplies registered network and vsock device handles; concrete drivers own hardware and virtqueue operations. `kirq` supplies the generic softirq mechanism, while `ktask`, `kworkng`, and `kpoll` supply timer callbacks, task-context polling, and readiness registration. `knet` determines how these facilities advance network work.
+The POSIX network layer in `posix/net` handles syscall arguments, user-memory access, file descriptors, and ABI conversion. `kvfs` owns pathname resolution and access checks, and `anon_inodefs` creates socket files. `kclass` supplies registered network and vsock device handles; concrete drivers own hardware and virtqueue operations. `kirq` supplies the generic softirq mechanism, while `ktask`, `kworkng`, and `kpoll` supply timer callbacks, task-context polling, and readiness registration. `kns` supplies network-namespace identity (`NetNamespace`, the boot namespace's id) and installs this crate's drop-notification hook; `knet` owns the per-namespace protocol stacks keyed by that identity. `knet` determines how these facilities advance network work.
 
 ## Scope
 
@@ -73,6 +73,7 @@ net/knet/
     │   ├── socket.rs
     │   ├── tests.rs
     │   └── wire.rs
+    ├── netns.rs
     ├── network/
     │   ├── ipv4/
     │   │   ├── mod.rs
@@ -204,6 +205,10 @@ Ethernet / ARP")
         end
     end
 
+    NLIFE("kns namespace lifecycle")
+    STACKS("netns registry
+per-namespace Service")
+
     NIC("kclass network device
 NIC driver")
     VIRTIO("kclass vsock device
@@ -217,6 +222,7 @@ virtio-vsock driver")
     IPV4 --> ROUTER
     PACKET -->|link TX| ROUTER
     NETLINK -.->|rtnetlink configuration| ROUTER
+    NLIFE -.->|ensure_stack / drop hook| STACKS
     ROUTER --> LOOP & ETH
     ETH --> NIC
     VSOCK --> VIRTIO
@@ -247,6 +253,7 @@ subscriptions from `EthernetDevice`, while Unix and vsock use their own transpor
 | EthernetDevice | Adapts kclass network devices to knet's NetDevice interface and handles Ethernet and ARP. |
 | kclass network device · NIC driver | Exposes the registered NIC and performs hardware packet I/O. |
 | kclass vsock device · virtio-vsock driver | Exposes the registered vsock device and transports guest-host packets. |
+| NetnsStacks (`netns.rs`) | Registry of per-network-namespace protocol stacks keyed by `kns` namespace id; materializes a private loopback-only stack for a new namespace via `ensure_stack` and releases it from the `kns` drop hook. |
 
 `Router::stack_device()` constructs a temporary `StackDevice` for interface
 initialization, ingress, and egress. Router still owns and serializes the queues;
@@ -923,6 +930,17 @@ Sources: [`unix/stream.rs`](../src/unix/stream.rs) and
 
 Concurrency is organized around a single owner for protocol progress, with finer-grained locks protecting socket, queue, and control-plane state.
 
+### Namespace stack registry
+
+`NAMESPACE_STACKS: Mutex<BTreeMap<u64, Arc<Service>>>` (declared through
+`static_lock!` so the lock-stat build gets a const initializer) guards the
+per-namespace stacks. It is taken only by `ensure_stack` (insert) and the
+`kns` drop hook (remove), never from the packet or socket paths, and it is
+independent of the `SERVICE` / `Router` / `Interface` locks: those protect the
+boot stack's protocol progress, while this registry only answers "has this
+namespace's stack been materialized". No code path holds this mutex and a
+`SERVICE`-side lock at the same time.
+
 ### Protocol Progress
 
 The global `SERVICE` is a `LazyInit<Service>`. Separate mutexes protect the smoltcp `Interface`, the `Router`, the `IngressProcessor`, and each reusable RX, accepted-packet, and control-packet batch. The poller acquires the first three with `try_lock`. If any of these locks is contended, the poller retains the batch and reports that work remains immediately available. These batches are accessed only by the executor that owns the global protocol-progress right.
@@ -1186,12 +1204,36 @@ With `vsock_tipc_bridge` enabled, `bind()` rejects explicit binding to ports in 
 | Unix datagrams | Receive queues use unbounded `async_channel` queues. |
 | Unix stream control data | Byte-marked `SCM_RIGHTS` delivery with the segment-end barrier and `MSG_PEEK` duplication. Each `recvmsg` consumes at most one control record. Zero-length `sendmsg` with ancillary drops the control data because there is no byte to attach it to. Pending-record retention is bounded by `MAX_PENDING_RECORDS` / `MAX_PENDING_ANCILLARY`; a send beyond the quota fails with `ENOBUFS`. |
 | Unix stream `MSG_PEEK` | `MSG_PEEK` preserves the byte stream and duplicates control data (shared open file descriptions). It still stops at the reached record's segment end, so a peek limited by that barrier returns fewer bytes than the destination buffer size. |
-| Network namespaces | Socket, route, interface, and netlink tables are global, not per-network-namespace. `kns::NetNamespace` is a placeholder id, and `CLONE_NEWNET` / `setns` are not wired into `knet`. Pathname sockets already resolve through KVFS per operation, so cross-mount-namespace path views are consistent with the active mount namespace even though the binding registry itself is global. per-process netns isolation is tracked in the namespace subsystem, not here. |
+| Network namespaces | The lifecycle boundary is wired: `netns::ensure_stack` materializes one protocol stack per non-initial namespace (loopback with `127.0.0.1/8`, no sampling timer, no physical-device ingress), and `kns`'s drop hook releases it when the namespace dies. Data-plane routing is still global: socket creation, the socket registry, the listen table, rtnetlink views and the boot `SERVICE` singleton do not consult the caller's namespace, so a namespace provides identity and lifecycle but not traffic isolation. Per-namespace data-plane routing is the follow-up layer. Pathname sockets already resolve through KVFS per operation, so cross-mount-namespace path views are consistent with the active mount namespace even though the binding registry itself is global. |
 | vsock / TIPC bridge | Stream transport only; the bridge forwards bytes, excluding TIPC handles and memory references. |
 | Ethernet progress | Failed RX-scheduler attachment falls back to timeout polling. ARP pending traffic is subject to head-of-line blocking. |
 | Device attachment | Initialization attaches at most one NIC. vsock accepts one raw transport; a second registration returns `AlreadyExists`. |
 
-Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../src/netlink/rtnetlink.rs), and [netlink/socket.rs](../src/netlink/socket.rs).
+### Network namespace stacks
+
+`netns.rs` owns the per-namespace protocol-stack registry. Its single entry
+point is `pub fn ensure_stack(id: u64)`, called by the namespace lifecycle path
+in `core/ksyscall` on `unshare(CLONE_NEWNET)`, `clone(CLONE_NEWNET)` and
+`setns(2)` — the private stack is materialized at the syscall boundary, not
+inside `knet`. The data flow is:
+
+```text
+kns::NetNamespace::initial_id()  -> knet::netns::ensure_stack(id)
+    id == initial  -> return (the boot-time global SERVICE is the stack)
+    otherwise      -> build Router + LoopbackDevice + 127.0.0.1/8 (ROUTE_SCOPE_HOST)
+                   -> insert Arc<Service> into NAMESPACE_STACKS
+
+dropping the last NetNamespace -> kns::set_net_namespace_drop_hook callback
+    -> on_namespace_drop(id) -> remove the id from NAMESPACE_STACKS
+```
+
+`ensure_stack` is idempotent: entering the same namespace again reuses the
+registered stack. The private stack carries no sampling timer and receives no
+physical-device ingress; the boot `SERVICE` singleton remains the only stack
+that the data plane consults. `kns` reaches `knet` only through the registered
+drop hook, so the dependency edge is `knet -> kns` and never the reverse.
+
+Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../src/netlink/rtnetlink.rs), [netlink/socket.rs](../src/netlink/socket.rs), and [netns.rs](../src/netns.rs).
 
 ## Drop and Resource Release
 
@@ -1205,6 +1247,7 @@ Implementation details: [packet.rs](../src/link/packet.rs), [rtnetlink.rs](../sr
 | UDP socket / PCB drop | Unregisters the socket from the PCB registry; PCB destruction releases receive and asynchronous-error queues. |
 | Raw socket drop | Shuts down both directions and removes the smoltcp handle. |
 | Packet socket drop | Releases queues and decrements the active-handler count. Later registration or publication prunes expired weak entries. |
+| Network namespace drop | `NetNamespace::drop` invokes the hook `knet` installed; `on_namespace_drop` removes the namespace's `Arc<Service>` from `NAMESPACE_STACKS`, releasing the private router, loopback device, smoltcp interface and poll sets with it. The boot namespace never enters the registry, so the global `SERVICE` is untouched. |
 | Netlink socket drop | Releases receive state with the last strong reference. Binding updates or event publication prune weak uevent subscriptions. |
 | Unix datagram drop | Clears the binding slot, releases the peer channel, and wakes peer waiters. |
 | Unix pathname socket close | Releases the transport binding; the inode remains under VFS ownership. |

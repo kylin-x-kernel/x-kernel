@@ -130,6 +130,11 @@ pub(crate) fn sys_unshare(flags: usize) -> KResult<isize> {
         .map_err(map_unshare_error)?;
     let unshare_files = prepared.unshare_files();
     process.apply_prepared_unshare(prepared)?;
+    if namespace_flags.contains(NamespaceFlags::NEWNET) {
+        // Materialize the private protocol stack of the new namespace before
+        // the caller can enter it or bind its `/proc/<pid>/ns/net` file.
+        knet::netns::ensure_stack(process.net_ns()?.id().as_u64());
+    }
     if unshare_files {
         current_files().unshare_fd_table()?;
     }
@@ -175,6 +180,12 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
             ensure_pid_ns_reachable(process, ns)?;
             None
         }
+        NsFd::Net(ns) => {
+            // Entering a network namespace materializes its protocol stack
+            // (loopback with 127.0.0.1/8 for a freshly unshared namespace).
+            knet::netns::ensure_stack(ns.id().as_u64());
+            None
+        }
         _ => None,
     };
     let new_proxy = process
@@ -198,7 +209,8 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
     let supported = NamespaceFlags::NEWNS
         | NamespaceFlags::NEWUTS
         | NamespaceFlags::NEWIPC
-        | NamespaceFlags::NEWPID;
+        | NamespaceFlags::NEWPID
+        | NamespaceFlags::NEWNET;
     if (requested & supported) != requested {
         return Err(KError::OperationNotSupported);
     }
@@ -216,6 +228,7 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
         NamespaceFlags::NEWUTS,
         NamespaceFlags::NEWIPC,
         NamespaceFlags::NEWPID,
+        NamespaceFlags::NEWNET,
     ] {
         if !requested.contains(flag) {
             continue;
@@ -224,6 +237,8 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
             let ns = target_bundle.mnt_ns().clone();
             target_mnt = Some(ns.clone());
             swaps.push(NsFd::Mnt(ns));
+        } else if flag == NamespaceFlags::NEWNET {
+            swaps.push(NsFd::Net(target_bundle.net_ns().clone()));
         } else if flag == NamespaceFlags::NEWUTS {
             swaps.push(NsFd::Uts(target_bundle.uts_ns().clone()));
         } else if flag == NamespaceFlags::NEWIPC {
@@ -237,6 +252,9 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
 
     let mut proxy = process.nsproxy()?;
     for nsfd in &swaps {
+        if let NsFd::Net(ns) = nsfd {
+            knet::netns::ensure_stack(ns.id().as_u64());
+        }
         proxy = proxy.with_namespace(nsfd).map_err(map_unshare_error)?;
     }
     process.apply_setns(proxy, target_mnt)?;

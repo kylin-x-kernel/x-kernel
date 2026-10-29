@@ -40,7 +40,7 @@ pub use ipc::{IpcNamespace, register_ipc_ns_drop_hook};
 pub use kcgroup::CgroupNamespace;
 pub use kcred::{NamespaceId, UserNamespace};
 pub use kvfs::MntNamespace;
-pub use net::NetNamespace;
+pub use net::{NetNamespace, set_net_namespace_drop_hook};
 pub use nsfd::NsFd;
 pub use nsproxy::{NamespaceFsContext, NsProxy, PreparedUnshare, UnshareContext, UnshareError};
 pub use pid::PidNamespace;

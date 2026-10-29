@@ -25,6 +25,7 @@ kirq = { workspace = true }
 khal = { workspace = true }
 ktime_types = { workspace = true }
 ksync = { workspace = true }
+kns.workspace = true
 kspin = { workspace = true }
 ktask = { workspace = true }
 kworkng.workspace = true

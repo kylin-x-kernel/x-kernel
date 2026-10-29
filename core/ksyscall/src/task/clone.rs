@@ -314,6 +314,15 @@ impl CloneRequest {
         };
         let tid = prepared.tid();
         let child_process = prepared.process().clone();
+        if self
+            .extract_namespace_flags()
+            .contains(NamespaceFlags::NEWNET)
+        {
+            // Materialize the private protocol stack of the child's fresh
+            // network namespace (loopback with 127.0.0.1/8) before the child
+            // can run.
+            knet::netns::ensure_stack(child_process.net_ns()?.id().as_u64());
+        }
         let page_table_root = prepared.page_table_root();
         let (thr, task_number) = prepared.into_parts();
         // Linux reports the new task's number in the forking process's active
@@ -435,8 +444,7 @@ impl CloneRequest {
         // accepting their flags would create pseudo-isolation: `knet` still
         // resolves sockets through its global protocol stack, so a network
         // namespace without a per-namespace data plane stays unsupported.
-        let unimplemented =
-            CloneFlags::NEWNET | CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
+        let unimplemented = CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
         if ns.intersects(unimplemented) {
             return Err(KError::from(LinuxError::ENOSYS));
         }

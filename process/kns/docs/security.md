@@ -52,7 +52,7 @@ namespace references.
 
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
-| T-01 | False namespace isolation | High | Caller requests unsupported NEW flags | `clone_for_child`/`prepare_unshare` reject `Unimplemented`/`Unsupported`; `with_namespace` rejects Net/User/Cgroup swaps; ID-only types do not prove manager isolation. Syscall policy and consumer state must be audited separately. |
+| T-01 | False namespace isolation | High | Caller requests unsupported NEW flags | `clone_for_child`/`prepare_unshare` reject `Unimplemented`/`Unsupported`; `with_namespace` rejects User/Cgroup swaps; ID-only types do not prove manager isolation. Net switching is now supported at the lifecycle layer: the swap installs the target `NetNamespace` and `knet` materializes a private protocol stack (loopback + `127.0.0.1/8`), while socket creation, netlink and the listen table still resolve through knet's global singletons — data-plane isolation remains a follow-up, so the residual risk is that a net namespace provides identity and lifecycle only, not traffic isolation. Syscall policy and consumer state must be audited separately. |
 | T-02 | Wrong root/pwd after mount copy | High | NEWNS is combined with shared filesystem state or paths are not retargeted | Shared state returns `InvalidFlagCombination`; `prepare_unshare` checks `fs_shared_with_others` + `CLONE_FS`; private copy uses KVFS retargeting and paired `replace_root_and_pwd`. Caller must supply initialized paths. |
 | T-03 | UTS buffer overrun | High | Name length is 65 or greater | Setters return `NameTooLong` before mutation; safe copying and zero-filled arrays retain termination. |
 | T-04 | Unauthorized hostname/namespace changes | High | Unprivileged request reaches trusted APIs | Authorization is external (syscall layer passes `UnshareContext::privileged`); these APIs check data/flag consistency, not caller credentials. |
@@ -81,8 +81,10 @@ kernel allocator policy. Hostname/domainname and namespace IDs may reveal system
 identity to consumers; this crate does not log them or handle other user payload.
 User/capability, namespace-FD policy, net isolation, and full user/cgroup
 namespace switching are external or documented non-goals; IPC/net/time payloads
-are not owned here. `unshare` maps to `EOPNOTSUPP` for NEWNET/NEWUSER/NEWCGROUP/
-NEWTIME, deliberately avoiding pseudo-isolation.
+are not owned here. `unshare` maps to `EOPNOTSUPP` for NEWUSER/NEWCGROUP/NEWTIME, deliberately
+avoiding pseudo-isolation; NEWNET is supported and materializes a private
+protocol stack through `knet` (data-plane routing stays global for now, see
+T-01).
 
 ## Audit checklist
 
@@ -91,5 +93,7 @@ NEWTIME, deliberately avoiding pseudo-isolation.
 - Preserve private, initialized filesystem context for NEWNS.
 - Keep UTS bounds, one-allocation borrowing, and byte semantics aligned.
 - Preserve the single initial cgroup hierarchy reference.
-- Ensure `setns` rejects Net/User/Cgroup swaps rather than switching references.
+- Ensure `setns` rejects User/Cgroup swaps rather than switching references;
+  a Net swap is supported and materializes the target namespace's protocol
+  stack (see T-01 for its data-plane residual risk).
 - Define owner, locks, authorization, and cleanup when adding namespace state.
