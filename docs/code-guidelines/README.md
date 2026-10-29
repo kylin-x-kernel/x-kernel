@@ -1,7 +1,7 @@
 # Code Guidelines
 
 Machine-checkable code rules, one rule per file, each with the human
-explanation. The YAML frontmatter is read by tooling such as x-review; the body
+explanation. The YAML frontmatter is read by tooling such as xreview; the body
 is written for people. English only.
 
 ## Frontmatter
@@ -12,7 +12,7 @@ is written for people. English only.
 | `level` | `MUST` or `SHOULD`. |
 | `paths` | Glob patterns the rule applies to, e.g. `["**/*.rs"]`. |
 | `checks` | List of `{ backend, lint }`. `backend` is `rustc`, `clippy`, `dylint` or `ai`; `lint` lists the lint names that enforce the rule (cargo JSON `code.code`). |
-| `triggers` | Optional list of case-sensitive ECMAScript regular expressions matched against added/modified diff lines in files matched by `paths`; read by x-review-ng, ignored by lint backends. |
+| `triggers` | Optional list of case-sensitive ECMAScript regular expressions matched against added/modified diff lines in files matched by `paths`; read by xreview (formerly x-review-ng), ignored by lint backends. |
 
 ## Body
 
@@ -160,7 +160,7 @@ root `Cargo.toml`; parameters live in root `clippy.toml`. Validate through
 `make clippy` after preparing a platform defconfig, as described in
 `docs/ai/skills/build-workflow/SKILL.md`. Dylint candidates are listed in
 [pending.md](pending.md); landing one removes its row. AI checks describe judgments the
-lint backends cannot prove. x-review-ng loads only `CG-*.md` and selects rules
+lint backends cannot prove. xreview loads only `CG-*.md` and selects rules
 with an `ai` check; files with only rustc/Clippy checks have no `triggers` and
 are ignored by AI review.
 

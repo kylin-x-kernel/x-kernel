@@ -6,43 +6,16 @@ Tool-neutral shared skills live under `docs/ai/skills/`.
 Any AI agent used in this repository should prefer those shared skills
 over tool-specific copies when both exist.
 
-Current shared skills:
+The skill index is `docs/ai/skills/README.md`; read it and load the skill
+that matches the task.
 
-- `docs/ai/skills/build-workflow/SKILL.md`:
-  project configuration, build, run, clippy, and fmt workflow.
-- `docs/ai/skills/module-docs/SKILL.md`:
-  module documentation generation workflow for `design.md`,
-  `security.md`, and required rustdoc coverage.
-- `docs/ai/skills/code-guidelines/SKILL.md`:
-  coding and code-review conventions for Rust kernel code.
-- `docs/ai/skills/test-harness/SKILL.md`:
-  external Starry Test Harness workflow for guest regression cases,
-  suite registration, execution, and syscall-focused test design constraints.
-- `docs/ai/skills/problem-diagnosis/SKILL.md`:
-  first-pass issue classification and localization workflow for build,
-  boot, panic, hang, regression, and performance problems.
-- `docs/ai/skills/performance-analysis/SKILL.md`:
-  performance investigation workflow (workloads, baselines, reporting);
-  lock_stat is under `references/lock-stat.md`; scheduler (schbench /
-  EEVDF / IRQ / affinity) is under `references/scheduler/`.
-- `docs/ai/skills/linux-mm-design-knowledge/SKILL.md`:
-  Linux memory-management semantic knowledge base for X-Kernel MM design,
-  covering address space, VMA, mmap, faults, anonymous memory, file-backed
-  mmap, COW, brk, madvise, msync, and mlock.
-- `docs/ai/skills/xkernel-mm-design-workflow/SKILL.md`:
-  multi-agent design-first workflow for X-Kernel memory subsystem topics,
-  coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
-  and implementation task splitting without code generation.
-- `docs/ai/skills/pr-ci-review/SKILL.md`:
-  Gitee PR lifecycle: creating/updating PRs, tracking the latest Jenkins CI
-  status and diagnosing failures, and reading the latest review opinions from
-  the Gitee PR comment area.
+## Pull Request Review
 
-The complete skill index is `docs/ai/skills/README.md`.
-
-The project's own automatic code review rules are located in `docs/ai/review/`.
-
-Before starting the analysis, the review agent must read the rule file corresponding to the current stage from the PR source branch that has been checkouted.
+After opening or pushing to a PR, read and follow
+`https://review.x-kernel.com:57482/r/prs/<n>/agent.md`; the `pr-ci-review`
+skill covers the rest of the PR workflow. xreview reads its rules from
+`docs/code-guidelines/CG-*.md` and `docs/ai/review/` on the PR head, so rule
+changes apply to the PR that makes them.
 
 ## Project Overview
 

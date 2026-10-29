@@ -26,30 +26,30 @@ Current skills:
 - `build-workflow/`:
   baseline project configuration, build, run, clippy, and formatting flow.
 - `module-docs/`:
-  module documentation generation flow for per-crate design,
-  security, and rustdoc content.
+  module documentation generation flow for per-crate `design.md`,
+  `security.md`, and required rustdoc coverage.
 - `code-guidelines/`:
   executable coding and code-review conventions for Rust kernel code,
-  backed by `docs/coding-guidelines/`.
+  backed by the rule registry in `docs/code-guidelines/`.
 - `test-harness/`:
-  shared Starry Test Harness workflow for regression cases,
-  suite registration, execution, and result inspection.
+  external Starry Test Harness workflow for guest regression cases,
+  suite registration, execution, result inspection, and syscall-focused
+  test design constraints.
 - `problem-diagnosis/`:
   first-pass issue classification and localization workflow for build,
   boot, panic, hang, regression, and performance problems.
 - `performance-analysis/`:
-  performance investigation workflow: workloads, baselines, reporting;
-  `lock_stat` lock contention is one sub-reference under `references/`.
+  performance investigation workflow (workloads, baselines, reporting);
+  `lock_stat` is under `references/lock-stat.md`; scheduler (schbench /
+  EEVDF / IRQ / affinity) is under `references/scheduler/`.
 - `linux-mm-design-knowledge/`:
   Linux MM semantic knowledge base used by X-Kernel memory design work,
-  including mm struct, VMA, mmap, page faults, anonymous memory, file-backed
-  mmap, COW, brk, madvise, msync, and mlock.
+  covering address space (mm struct), VMA, mmap, page faults, anonymous
+  memory, file-backed mmap, COW, brk, madvise, msync, and mlock.
 - `xkernel-mm-design-workflow/`:
   multi-agent design-first workflow for X-Kernel memory subsystem topics,
   coordinating Linux semantic analysis, X-Kernel adaptation, arbiter review,
   and implementation task splitting without code generation.
 - `pr-ci-review/`:
-  Gitee PR lifecycle: creating/updating PRs, tracking latest Jenkins CI
-  status and failure diagnosis, and reading the latest review opinions from
-  the Gitee PR comment area (AI summary + human comments) rather than from
-  the Jenkins console.
+  Gitee PR lifecycle, Jenkins CI status, and AI review via xreview (status,
+  requesting a review, responding to findings).

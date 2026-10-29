@@ -14,6 +14,7 @@ All endpoints below were verified with anonymous `curl` against
 | `GET /job/x-kernel-ci-test/api/json` | job info: `buildable`, `inQueue`, `lastBuild`, `lastCompletedBuild`, `nextBuildNumber` |
 | `GET /job/x-kernel-ci-test/api/json?tree=builds[number,result,url,actions[causes[shortDescription]]]` | recent builds (newest first, **max 31**), each with webhook cause like `Triggered by Gitee Pull Request #759: ...` |
 | `GET /job/x-kernel-ci-test/<n>/api/json` | build overview: `building`, `result` (`null` = running), `duration`, `estimatedDuration`, `timestamp`, `url`, `actions[].parameters[]` |
+| `GET /job/x-kernel-ci-test/<n>/api/json?tree=number,building,result,duration,estimatedDuration,url` | compact build overview for status reports |
 | `GET /job/x-kernel-ci-test/<n>/wfapi/describe` | stage-level progress: overall `status`, each stage `name/status/startTimeMillis/durationMillis`; running stage is `IN_PROGRESS` |
 | `GET /job/x-kernel-ci-test/<n>/consoleText` | full console log (plain text; large builds are MBs — save to file, then `grep`) |
 | `GET /job/x-kernel-ci-test/<n>/execution/node/<id>/wfapi/describe` | single stage detail (from `wfapi/describe` links) |
@@ -25,6 +26,26 @@ Notes:
   window return `404` for `api/json`, `consoleText`, `wfapi/*`, and artifacts.
 - `search/suggest?query=` does **not** index build causes; do the filtering client-side.
 
+### Map a PR number to its builds
+
+Filter the recent builds on the webhook cause (`#<n>` in
+`shortDescription`); the output is newest first, so the first line is the
+latest build:
+
+```bash
+PR=759
+BASE="https://jenkins.openkylin.top/job/x-kernel-ci-test"
+curl -sk "$BASE/api/json?tree=builds%5Bnumber,result,url,actions%5Bcauses%5BshortDescription%5D%5D%5D" |
+  python3 -c "
+import json,sys
+pr='$PR'
+hits=[b for b in json.load(sys.stdin)['builds']
+      for a in b.get('actions',[]) if a.get('_class')=='hudson.model.CauseAction'
+      for c in a.get('causes',[]) if '#%s'%pr in c.get('shortDescription','')]
+for h in hits: print(h['number'], h.get('result') or 'RUNNING', h['url'])
+"
+```
+
 ### Artifacts (deployed under `artifact/.ci/`, anonymous GET)
 
 The pipeline archives test logs as Jenkins artifacts under `.ci/`:
@@ -34,22 +55,38 @@ The pipeline archives test logs as Jenkins artifacts under `.ci/`:
 - `GET /job/x-kernel-ci-test/<n>/artifact/.ci/work/runtime-<arch>/test-harness/logs/ci/<YYYYMMDD-HHMMSS>/cases/<case>.log`
 - `GET /job/x-kernel-ci-test/<n>/artifact/.ci/work/runtime-<arch>/test-harness/logs/ci/<ts>/artifacts/<case>/host-ca.log`
 - `GET /job/x-kernel-ci-test/<n>/artifact/.ci/*zip*/.ci.zip` — download everything.
-
-Useful patterns for failure analysis:
-
-```bash
-# stage log → find the failing case and its exact log path
-curl -sk ".../artifact/.ci/stage-logs/Runtime_Test_kplat-x86_64.log" | grep -n "FAILED\|✗"
-# the stage log prints:  │ [16/30] xtee-regression logs/ci/<ts>/cases/xtee-regression.log
-```
+- `GET /job/x-kernel-ci-test/<n>/api/json?tree=artifacts[relativePath]` —
+  enumerate artifacts (see the size note below).
 
 Note: the artifact tree API returns *all* artifacts (tens of thousands); avoid
-dumping it wholesale — guess paths from the stage log instead.
+dumping it wholesale — guess paths from the stage log's `Log:` lines instead.
+
+### Failure analysis
+
+1. In `wfapi/describe`, find the stage whose status is `FAILED`; later stages
+   may show `ABORTED` as a cascade.
+2. Grep the console for the failing case:
+
+   ```bash
+   curl -sk "$BASE/<n>/consoleText" > console.txt
+   grep -n -B3 -A3 "FAILED\|timed out" console.txt
+   ```
+
+3. Open the failing stage log, find the case and its exact log path, then
+   fetch the per-case and host-companion logs listed under Artifacts:
+
+   ```bash
+   curl -sk "$BASE/<n>/artifact/.ci/stage-logs/Runtime_Test_kplat-x86_64.log" | grep -n "FAILED\|✗"
+   # the stage log prints:  │ [16/30] xtee-regression logs/ci/<ts>/cases/xtee-regression.log
+   ```
+
+4. Flake vs regression: compare the same stage/case in the previous
+   successful builds still inside the 31-build window.
 
 ### CI job list (view `xkernel`)
 
 `GET /view/xkernel/api/json?tree=jobs[name,url]` → jobs including
-`x-kernel-ci-test`, `ai-review`, `daily-test`, `x-kernel-longevity`, etc.
+`x-kernel-ci-test`, `ai-review` (retired), `daily-test`, `x-kernel-longevity`, etc.
 
 ## Jenkins: state-changing (needs auth + CSRF crumb)
 
@@ -81,22 +118,51 @@ curl -sk -u "$U:$T" -H "Jenkins-Crumb: $CRUMB" -X POST \
   --data-urlencode "ENABLE_DOC_CHECK=false"
 ```
 
+## Gitee API v5: create a PR (needs a token)
+
+`POST /repos/openkylin/x-kernel/pulls` is the call behind `ge pr create`:
+
+```bash
+curl -sk -X POST "https://gitee.com/api/v5/repos/openkylin/x-kernel/pulls" \
+  -d "access_token=$GITEE_TOKEN" \
+  -d "title=fix(sub): meaningful summary" \
+  -d "head=fix/your-topic" \
+  -d "base=main" \
+  -d "body=..."
+```
+
+The response carries the new pull's `number`.
+
 ## Gitee API v5: PRs and comments (read-only, anonymous OK)
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /repos/openkylin/x-kernel/pulls/<n>` | PR meta: `title`, `state`, `head.sha`, `head.ref`, `base.ref`, `html_url`, `diff_url`, `patch_url` |
-| `GET /repos/openkylin/x-kernel/pulls/<n>/comments?per_page=100&sort=id&order=desc` | **PR comments — the review source of truth** (see below) |
+| `GET /repos/openkylin/x-kernel/pulls/<n>/comments?per_page=100&sort=id&order=desc` | PR comments: human opinions and CI reports (see below); AI review state comes from the xreview status API |
 | `GET /repos/openkylin/x-kernel/pulls/<n>/commits` | commits in the PR; `statuses_url` is null here |
+
+List the comments (newest first) as one line per comment:
+
+```bash
+PR=759
+curl -sk "https://gitee.com/api/v5/repos/openkylin/x-kernel/pulls/$PR/comments?per_page=100&sort=id&order=desc" |
+  python3 -c "
+import json,sys
+for c in json.load(sys.stdin):
+    print('-', c['id'], c['user']['login'], (c.get('created_at') or '')[:19])
+    print('  ', (c.get('body') or '').replace(chr(10),' ')[:140])
+"
+```
 
 Comment classification (verified across PRs #751/#755/#757/#727/#759):
 
-- AI verdict: user `x-cibot`, first line `<!-- xreview:summary arm=pipe -->`,
-  one comment per PR edited in place by xreview (status table with the
-  reviewed commit, the latest round's verdict, links to the review page and
-  `agent.md`). Item-level details come from xreview's status call, described
-  in `https://review.x-kernel.com/r/prs/<n>/agent.md`.
-- Retired AI verdicts: user `x-cibot`, HTML marker `<!-- x-review: -->`,
+- AI review summary: user `x-cibot`, markers starting with `<!-- xreview:`,
+  one comment per PR edited in place by xreview, with the verdict
+  (可合并 / 需修改 / 需复核), a stale marker when the PR has newer commits,
+  and links to the review page and `agent.md`. It is a pointer only: review
+  state and items come from xreview's status call, described in
+  `https://review.x-kernel.com:57482/r/prs/<n>/agent.md`.
+- Retired AI verdicts: user `x-cibot`, marker prefix `<!-- x-review:`,
   headings `## AI Re-review` / `## AI Code Review Summary`, from the former
   Jenkins `ai-review` job; history only.
 - CI report: user `openkylin-cibot`, HTML marker `<!-- x-kernel-ci -->`,
@@ -115,9 +181,7 @@ Important:
 ## Worked example (PR #759 → build → failure → opinions)
 
 ```bash
-# 1. latest build for PR
-curl -sk "https://jenkins.openkylin.top/job/x-kernel-ci-test/api/json?tree=builds%5Bnumber,result,url,actions%5Bcauses%5BshortDescription%5D%5D%5D" \
- | python3 -c "import json,sys; [print(b['number'],b.get('result') or 'RUNNING') for b in json.load(sys.stdin)['builds'] for a in b.get('actions',[]) if a.get('_class')=='hudson.model.CauseAction' for c in a.get('causes',[]) if '#759' in c.get('shortDescription','')]"
+# 1. latest build for PR: run "Map a PR number to its builds" with PR=759
 
 # 2. stage progress
 curl -sk "https://jenkins.openkylin.top/job/x-kernel-ci-test/954/wfapi/describe" | python3 -m json.tool
@@ -125,6 +189,8 @@ curl -sk "https://jenkins.openkylin.top/job/x-kernel-ci-test/954/wfapi/describe"
 # 3. failing stage artifacts
 curl -sk "https://jenkins.openkylin.top/job/x-kernel-ci-test/954/artifact/.ci/stage-logs/Runtime_Test_kplat-x86_64.log" | grep -n "FAILED"
 
-# 4. review opinions (read from the Gitee comment area)
-curl -sk "https://gitee.com/api/v5/repos/openkylin/x-kernel/pulls/759/comments?per_page=100&sort=id&order=desc"
+# 4. AI review state (xreview status call; other calls are in agent.md)
+curl -s "https://review.x-kernel.com:57482/api/v1/prs/759/status"
+
+# 5. human opinions and CI reports: run the comment listing above with PR=759
 ```
