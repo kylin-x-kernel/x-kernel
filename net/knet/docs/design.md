@@ -62,8 +62,9 @@ net/knet/
     │   └── filter/
     │       ├── mod.rs
     │       ├── matcher.rs
+    │       ├── packet.rs
     │       ├── chain.rs
-    │       ├── errors.rs
+    │       ├── error.rs
     │       ├── rule.rs
     │       └── table.rs
     ├── netlink/
@@ -270,9 +271,10 @@ truncated payloads; unfinished output derives its length from packet storage.
 rules. Each table has INPUT, FORWARD, and OUTPUT chains for the LOCAL_IN,
 FORWARD, and LOCAL_OUT hooks, plus named user chains. Rules hold match conditions
 and a target; jumps refer to user chains by table-local `ChainId` values.
-Match conditions live in `matcher.rs`; rules, chains, and tables live in
+Match conditions and their evaluation methods live in `matcher.rs`;
+rules, chains, and tables live in
 `rule.rs`, `chain.rs`, and `table.rs`, respectively. Their construction errors
-are defined in `errors.rs`.
+are defined in `error.rs`.
 
 Rules validate extension counts and protocol compatibility, chains validate
 their names, and tables enforce name uniqueness, hook coverage, aggregate limits,
@@ -281,6 +283,29 @@ and jump-graph constraints. Tables allow at most 256 chains, 4096 rules,
 Jump nesting is bounded by the chain count and the acyclic-graph requirement.
 Chain-name lengths count UTF-8 bytes and follow the legacy iptables limit;
 extension counts are an X-Kernel resource limit.
+
+`FilterTable::evaluate_with_counter` accepts a `PacketBuf` normalized by IPv4
+input validation or output preparation, plus the hook's interface names.
+It prepares an internal `MatchContext` once before traversing rules, borrowing
+the header and `transport_packet()` payload from that buffer.
+`packet.rs` owns this read-only context and the shared `MatchOutcome` result.
+`Rule::evaluate_match` calls `BaseMatch::evaluate`, then checks transport
+extensions through `ExtensionMatch::evaluate` in rule order.
+Both return `MatchOutcome`; any result other than `Matched` ends rule evaluation.
+Each condition type owns its matching logic and reads the shared context
+without repeating checksum validation or deriving independent payload bounds.
+Missing packet bounds or an unparseable header return an error before evaluation
+or counter recording; byte accounting uses the normalized network packet length.
+
+`FilterTable::evaluate_with_counter` executes Continue, terminal verdicts, jumps,
+and RETURN.
+User-chain RETURN and fallthrough resume after the caller's jump; built-in
+RETURN and fallthrough apply the hook's policy. The caller supplies counter
+storage through a callback for matched rules and reached chain tails.
+Short transport headers and TCP fragments at offset eight bytes hot-drop.
+Each evaluation examines at most 4096 rules, counting repeated user-chain visits;
+budget exhaustion drops the packet even for an otherwise valid acyclic table.
+The budget is an X-Kernel limit added to Linux's traversal semantics.
 
 ## Calling Constraints and Execution Context
 
@@ -302,6 +327,14 @@ extension counts are an X-Kernel resource limit.
 
   Construct filter policies in task context after allocator initialization.
   Table validation allocates temporary storage.
+
+* **IPv4 filter evaluation**
+
+  Evaluation is reentrant and allocates no heap memory. On 64-bit targets its
+  fixed-capacity return stack reserves 4 KiB for frames plus length bookkeeping
+  and covers the table's maximum chain count. Frames are initialized only when
+  a jump pushes a return point.
+  It needs no current process; callbacks must obey the caller's execution context.
 
 * **IRQ handlers only signal RX work**
 

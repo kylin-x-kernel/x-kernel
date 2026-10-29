@@ -2,12 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Validated match-condition values for IPv4 filter rules.
+//! Validated match conditions and their IPv4 packet evaluation.
 
 use alloc::string::String;
 
+use etherparse::{Icmpv4Header, TcpHeader, UdpHeaderSlice};
+
+use super::packet::{MatchContext, MatchOutcome};
 use crate::{
-    ip::Ipv4Cidr,
+    ip::{IpAddress, Ipv4Cidr},
     ipv4::{PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP},
 };
 
@@ -30,6 +33,10 @@ impl<T> Negated<T> {
     pub(crate) const fn is_inverted(&self) -> bool {
         self.is_inverted
     }
+
+    fn matches(&self, match_fn: impl FnOnce(&T) -> bool) -> bool {
+        match_fn(&self.value) ^ self.is_inverted
+    }
 }
 
 /// IPv4 conditions shared by all transport protocols.
@@ -42,6 +49,31 @@ pub(crate) struct BaseMatch {
     pub(crate) input_interface: Option<Negated<InterfacePattern>>,
     pub(crate) output_interface: Option<Negated<InterfacePattern>>,
     pub(crate) protocol: Option<Negated<u8>>,
+}
+
+impl BaseMatch {
+    /// Checks all populated conditions with their independent inversions.
+    ///
+    /// Returns `Matched` or `NotMatched`; base conditions cannot request a hot-drop.
+    pub(super) fn evaluate(&self, packet: &MatchContext<'_>) -> MatchOutcome {
+        MatchOutcome::from(
+            self.source.as_ref().is_none_or(|condition| {
+                condition.matches(|cidr| {
+                    cidr.contains_addr(&IpAddress::Ipv4(packet.header().src_addr()))
+                })
+            }) && self.destination.as_ref().is_none_or(|condition| {
+                condition.matches(|cidr| {
+                    cidr.contains_addr(&IpAddress::Ipv4(packet.header().dst_addr()))
+                })
+            }) && self.input_interface.as_ref().is_none_or(|condition| {
+                condition.matches(|pattern| pattern.matches(packet.input_interface()))
+            }) && self.output_interface.as_ref().is_none_or(|condition| {
+                condition.matches(|pattern| pattern.matches(packet.output_interface()))
+            }) && self.protocol.as_ref().is_none_or(|condition| {
+                condition.matches(|protocol| packet.header().protocol() == *protocol)
+            }),
+        )
+    }
 }
 
 /// A closed inclusive transport-port range.
@@ -116,6 +148,14 @@ impl InterfacePattern {
     pub(crate) const fn is_prefix(&self) -> bool {
         self.is_prefix
     }
+
+    fn matches(&self, device_name: &str) -> bool {
+        if self.is_prefix() {
+            device_name.starts_with(self.name())
+        } else {
+            device_name == self.name()
+        }
+    }
 }
 
 /// TCP flag mask and expected value.
@@ -186,6 +226,31 @@ impl TcpMatch {
     pub(crate) const fn flags_condition(self) -> Option<Negated<TcpFlagsCondition>> {
         self.flags
     }
+
+    /// Checks the fixed TCP header, hot-dropping short headers and offset-eight fragments.
+    fn evaluate(&self, packet: &MatchContext<'_>) -> MatchOutcome {
+        if packet.header().fragment_offset() != 0 {
+            // Linux 6.8 xt_tcpudp.c::tcp_mt hot-drops TCP fragments at offset 1.
+            return if packet.header().fragment_offset() == 8 {
+                MatchOutcome::HotDrop
+            } else {
+                MatchOutcome::NotMatched
+            };
+        }
+        // Port and flag matching needs only the fixed header, not TCP options.
+        let Some(header) = packet.payload().get(..TcpHeader::MIN_LEN) else {
+            return MatchOutcome::HotDrop;
+        };
+        MatchOutcome::from(
+            self.source_port_range().is_none_or(|range| {
+                range.matches(|range| range.contains(u16::from_be_bytes([header[0], header[1]])))
+            }) && self.destination_port_range().is_none_or(|range| {
+                range.matches(|range| range.contains(u16::from_be_bytes([header[2], header[3]])))
+            }) && self.flags_condition().is_none_or(|flags| {
+                flags.matches(|flags| header[13] & flags.mask() == flags.expected())
+            }),
+        )
+    }
 }
 
 /// UDP conditions, ANDed after applying each populated field's inversion.
@@ -219,6 +284,23 @@ impl UdpMatch {
 
     pub(crate) const fn destination_port_range(self) -> Option<Negated<PortRange>> {
         self.destination_port
+    }
+
+    /// Checks UDP ports, rejecting later fragments and hot-dropping short headers.
+    fn evaluate(&self, packet: &MatchContext<'_>) -> MatchOutcome {
+        if packet.header().fragment_offset() != 0 {
+            return MatchOutcome::NotMatched;
+        }
+        let Ok(header) = UdpHeaderSlice::from_slice(packet.payload()) else {
+            return MatchOutcome::HotDrop;
+        };
+        MatchOutcome::from(
+            self.source_port_range()
+                .is_none_or(|range| range.matches(|range| range.contains(header.source_port())))
+                && self.destination_port_range().is_none_or(|range| {
+                    range.matches(|range| range.contains(header.destination_port()))
+                }),
+        )
     }
 }
 
@@ -266,6 +348,25 @@ impl IcmpMatch {
     pub(in crate::netfilter) const fn is_inverted(self) -> bool {
         self.is_inverted
     }
+
+    /// Checks ICMP type and code with joint inversion, hot-dropping short headers.
+    fn evaluate(&self, packet: &MatchContext<'_>) -> MatchOutcome {
+        if packet.header().fragment_offset() != 0 {
+            return MatchOutcome::NotMatched;
+        }
+        // Linux's ICMP match reads the base header even for timestamp messages.
+        let Some(header) = packet.payload().get(..Icmpv4Header::MIN_LEN) else {
+            return MatchOutcome::HotDrop;
+        };
+        MatchOutcome::from(
+            (self
+                .icmp_type()
+                .is_none_or(|expected| expected == header[0])
+                && header[1] >= self.code_start()
+                && header[1] <= self.code_end())
+                ^ self.is_inverted(),
+        )
+    }
 }
 
 /// Transport-specific rule conditions.
@@ -277,6 +378,15 @@ pub(crate) enum ExtensionMatch {
 }
 
 impl ExtensionMatch {
+    /// Evaluates the selected transport-specific condition.
+    pub(super) fn evaluate(&self, packet: &MatchContext<'_>) -> MatchOutcome {
+        match self {
+            Self::Tcp(spec) => spec.evaluate(packet),
+            Self::Udp(spec) => spec.evaluate(packet),
+            Self::Icmp(spec) => spec.evaluate(packet),
+        }
+    }
+
     pub(super) const fn required_protocol(&self) -> u8 {
         match self {
             Self::Tcp(_) => PROTOCOL_TCP,

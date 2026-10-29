@@ -29,8 +29,15 @@ The IPv4 filter model validates owned kernel values before constructing an
 immutable table. Rule and chain constructors establish local invariants;
 table construction checks aggregate limits, hook coverage, and the jump graph.
 These limits bound accepted policies and validation work. Callers must bound
-input allocation before construction. Userspace decoding and packet evaluation
-lie outside this model.
+input allocation before construction. Userspace decoding lies outside this model.
+Evaluation borrows a `PacketBuf` normalized by IPv4 input validation or output
+preparation; an unparseable header or missing or invalidated transport bounds
+return an error before rule traversal or counter recording.
+Transport reads stay within the IP payload; unavailable fragment fields do not
+match, and required short headers hot-drop. Execution uses a fixed return stack
+bounded by the validated graph and a 4096-rule budget, including repeated chain
+visits. Budget exhaustion drops the packet. Counter storage and synchronization
+belong to the callback's owner; evaluation itself mutates neither table nor packet.
 
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can

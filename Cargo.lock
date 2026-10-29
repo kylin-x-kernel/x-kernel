@@ -2787,6 +2787,7 @@ name = "knet"
 version = "0.3.0-dev"
 dependencies = [
  "anon_inodefs",
+ "arrayvec",
  "async-channel",
  "async-trait",
  "bitflags 2.13.2",

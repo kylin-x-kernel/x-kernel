@@ -10,6 +10,7 @@ use super::{
     chain::ChainId,
     error::RuleError,
     matcher::{BaseMatch, ExtensionMatch},
+    packet::{MatchContext, MatchOutcome},
 };
 
 // X-Kernel implementation resource limit.
@@ -74,6 +75,23 @@ impl Rule {
 
     pub(crate) const fn target(&self) -> Target {
         self.target
+    }
+
+    /// Checks base fields before evaluating extensions in their stored order.
+    ///
+    /// Stops at the first non-match or hot-drop without executing the target.
+    pub(super) fn evaluate_match(&self, packet: &MatchContext<'_>) -> MatchOutcome {
+        let outcome = self.base().evaluate(packet);
+        if outcome != MatchOutcome::Matched {
+            return outcome;
+        }
+        for extension in self.extensions() {
+            let outcome = extension.evaluate(packet);
+            if outcome != MatchOutcome::Matched {
+                return outcome;
+            }
+        }
+        MatchOutcome::Matched
     }
 }
 

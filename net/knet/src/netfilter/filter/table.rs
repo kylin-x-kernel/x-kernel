@@ -2,19 +2,26 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Immutable IPv4 filter tables and structural graph validation.
+//! Immutable IPv4 filter tables, structural validation, and bounded execution.
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
+
+use arrayvec::ArrayVec;
 
 use super::{
     chain::{Chain, ChainId, ChainKind, FilterHook},
     error::FilterTableError,
+    packet::{MatchContext, MatchOutcome},
     rule::{Target, Verdict},
 };
+use crate::{buf::PacketBuf, ipv4::Ipv4Error};
 
 // X-Kernel implementation resource limits.
 pub(crate) const MAX_CHAINS: usize = 256;
 pub(crate) const MAX_RULES: usize = 4096;
+
+/// Per-packet rule-examination budget, including repeated visits to user chains.
+pub(crate) const MAX_RULE_STEPS: usize = 4096;
 
 const BUILTIN_CHAIN_COUNT: usize = FilterTable::BUILTIN_HOOKS.len();
 
@@ -23,6 +30,12 @@ const BUILTIN_CHAIN_COUNT: usize = FilterTable::BUILTIN_HOOKS.len();
 pub(crate) struct FilterTable {
     chains: Vec<Chain>,
     built_in_chains: [ChainId; BUILTIN_CHAIN_COUNT],
+}
+
+#[derive(Clone, Copy)]
+struct JumpFrame {
+    chain_id: ChainId,
+    next_rule: usize,
 }
 
 impl FilterTable {
@@ -97,6 +110,94 @@ impl FilterTable {
 
     pub(crate) fn built_in_chain_id(&self, hook: FilterHook) -> ChainId {
         self.built_in_chains[Self::built_in_slot(hook)]
+    }
+
+    fn built_in_policy(&self, hook: FilterHook) -> Verdict {
+        let chain = &self.chains[self.built_in_chain_id(hook).index()];
+        // Construction maps hooks only to built-in chains; the table is immutable.
+        let ChainKind::BuiltIn { policy, .. } = chain.kind() else {
+            unreachable!("filter hook must reference a built-in chain");
+        };
+        *policy
+    }
+
+    /// Evaluates a hook with a caller-owned counter callback.
+    ///
+    /// Requires a packet normalized by IPv4 input validation or output preparation.
+    /// Empty interface names represent an absent hook interface.
+    ///
+    /// `Some(index)` records a matched rule before its target executes; `None`
+    /// records a chain's implicit RETURN or the built-in policy. An explicit
+    /// RETURN also records the policy when executed in a built-in chain.
+    /// Hot-drop and budget exhaustion drop without recording the failing rule.
+    /// The callback can use the normalized network packet's length for byte accounting.
+    ///
+    /// Execution allocates no heap memory and uses a fixed return stack bounded
+    /// by the validated acyclic graph. Callbacks must suit the caller's context.
+    ///
+    /// Returns an error before recording counters if the IPv4 header cannot be
+    /// parsed or the transport bounds are missing or invalidated.
+    pub(crate) fn evaluate_with_counter(
+        &self,
+        hook: FilterHook,
+        packet: &PacketBuf,
+        indev: &str,
+        outdev: &str,
+        mut record_fn: impl FnMut(ChainId, Option<usize>),
+    ) -> Result<Verdict, Ipv4Error> {
+        let context = MatchContext::new(packet, indev, outdev)?;
+        let entry = self.built_in_chain_id(hook);
+        let policy = self.built_in_policy(hook);
+        let mut cursor = JumpFrame {
+            chain_id: entry,
+            next_rule: 0,
+        };
+        let mut stack = ArrayVec::<JumpFrame, MAX_CHAINS>::new();
+        let mut steps = 0;
+
+        loop {
+            let chain = &self.chains()[cursor.chain_id.index()];
+            if let Some(rule) = chain.rules().get(cursor.next_rule) {
+                if steps == MAX_RULE_STEPS {
+                    return Ok(Verdict::Drop);
+                }
+                steps += 1;
+                match rule.evaluate_match(&context) {
+                    MatchOutcome::HotDrop => return Ok(Verdict::Drop),
+                    MatchOutcome::NotMatched => {
+                        cursor.next_rule += 1;
+                        continue;
+                    }
+                    MatchOutcome::Matched => {}
+                }
+                record_fn(cursor.chain_id, Some(cursor.next_rule));
+                cursor.next_rule += 1;
+                match rule.target() {
+                    Target::Continue => continue,
+                    Target::Verdict(verdict) => return Ok(verdict),
+                    Target::Jump(target) => {
+                        // Acyclic user-chain jumps bound active frames below the chain count.
+                        stack.push(cursor);
+                        cursor = JumpFrame {
+                            chain_id: target,
+                            next_rule: 0,
+                        };
+                        continue;
+                    }
+                    Target::Return => {
+                        if stack.is_empty() {
+                            record_fn(cursor.chain_id, None);
+                        }
+                    }
+                }
+            } else {
+                record_fn(cursor.chain_id, None);
+            }
+            let Some(frame) = stack.pop() else {
+                return Ok(policy);
+            };
+            cursor = frame;
+        }
     }
 
     fn built_in_slot(hook: FilterHook) -> usize {

@@ -312,6 +312,7 @@ klockstat-macros = { path = "util/klockstat-macros" }
 # External crates
 aarch64-cpu = "10.0"
 arm-gic-driver = "0.17.13"
+arrayvec = { version = "0.7.8", default-features = false }
 bitflags = "2.10"
 ringbuf = { version = "0.4.8", default-features = false, features = ["alloc"] }
 bytemuck = { version = "1.23", features = ["unsound_ptr_pod_impl"] }
