@@ -432,6 +432,27 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         // event
         Sysno::eventfd2 => sys_eventfd2(uctx.arg0() as _, uctx.arg1() as _),
 
+        // inotify
+        //
+        // Moved out of the `dummy fds` group below. Returning ENOSYS here is
+        // not a safe "probe and fall back" failure the way it is for `fsopen`
+        // or `io_uring_setup`: Chromium's `base::FilePathWatcher` has no
+        // equivalent fallback, so it reports `inotify_init() failed: Function
+        // not implemented (38)` and its browser process then never finishes
+        // starting up (no renderer is forked, no window is created). See
+        // `kfd_objects::inotify` for the object.
+        Sysno::inotify_init1 => sys_inotify_init1(uctx.arg0() as _),
+        // The legacy `inotify_init()` is `inotify_init1(0)` on Linux, and
+        // binaries built before the `_init1` spelling call it directly. It
+        // exists only on the 32-bit and x86-64 system call tables this crate
+        // lists; arm64 never had a separate number.
+        #[cfg(any(target_arch = "x86_64", target_arch = "arm"))]
+        Sysno::inotify_init => sys_inotify_init1(0),
+        Sysno::inotify_add_watch => {
+            sys_inotify_add_watch(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _)
+        }
+        Sysno::inotify_rm_watch => sys_inotify_rm_watch(uctx.arg0() as _, uctx.arg1() as _),
+
         // pidfd
         Sysno::pidfd_open => sys_pidfd_open(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::pidfd_getfd => sys_pidfd_getfd(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
@@ -844,7 +865,6 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
         // dummy fds
         Sysno::fanotify_init
-        | Sysno::inotify_init1
         | Sysno::userfaultfd
         | Sysno::perf_event_open
         | Sysno::io_uring_setup

@@ -23,6 +23,7 @@ mod open;
 mod path;
 mod stat;
 mod sync;
+pub mod watch;
 mod xattr;
 
 pub use self::{

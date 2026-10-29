@@ -4,7 +4,8 @@
 
 The entire crate is covered, including unit-test unsafe sites. Assets include
 counter/timer readiness, signal payloads, watched-file identity, poll registrations
-and file-opening credentials. Syscall adapters supply resolved files, flags,
+and file-opening credentials; inotify adds queued event bytes, the watch table
+and the overrun flag. Syscall adapters supply resolved files, flags,
 masks, clock IDs, descriptor numbers and user data; those values can originate
 in userspace. `kvfs` supplies valid kernel byte slices to file operations and owns
 file flags/credentials; `ksignal` owns pending signals, `ktask::future` owns
@@ -27,6 +28,14 @@ buffer; a full counter/empty read becomes `WouldBlock` through the polling helpe
 Timer `settime` rejects unrepresentable deadlines with `InvalidInput` before
 mutating the old setting. Signalfd access checks the current task for a `Thread`
 and returns `OperationNotPermitted` if absent.
+
+Inotify rejects unknown mask bits, stores watch paths only up to
+`INOTIFY_PATH_MAX`, and enforces the 16384-event and 8192-watch ceilings with
+`ENOSPC`. A read whose buffer cannot hold the next whole record returns
+`InvalidInput` before any record is consumed; an empty queue returns
+`WouldBlock`. `FIONREAD` is answered from the same locked snapshot that owns
+the queue, so the report cannot be raced into an over-count; every other
+ioctl keeps the trait default `NotATty`.
 
 Epoll control receives a resolved file and fd; duplicate ADD returns
 `AlreadyExists`, absent MOD/DEL returns `NotFound`, and source registration
@@ -97,6 +106,7 @@ mutex avoids unregister callbacks nesting under that lock.
 | T-08 | Timer IRQ recursively acquires an epoll lock held by the interrupted task | High | A source waker runs while task context owns the ready queue or config lock | Ready queue uses `SpinNoIrq`; IRQ-reachable wake and trace paths avoid the config lock. Keep IRQ-masked critical sections short. |
 | T-09 | User-controlled tiny intervals monopolize timer IRQ | Medium | Periodic timer expires repeatedly while unread | Mitigate: leave the core node idle after expiration; account elapsed periods arithmetically and rearm on read. Repeated userspace reads can still consume CPU. |
 | T-10 | Poll-before-IRQ accounting suppresses waiter notification | Medium | Poll observes and counts expiration before queued delivery | Mitigate: callback wakes whenever an unread count exists, not only when that callback changes zero to nonzero; wake is outside inner state. |
+| T-11 | Undrained inotify instance grows kernel memory without end | Medium | A process queues events nobody reads | Mitigate: per-instance 16384-event and 8192-watch ceilings; an overflowing push drops and raises the `IN_Q_OVERFLOW` flag instead of allocating. Residual: Linux bounds per *user* across instances; the per-user table is deferred and the weaker per-instance bound is documented. |
 
 ## Failure modes and management
 
@@ -107,6 +117,7 @@ mutex avoids unregister callbacks nesting under that lock.
 | F-03 | Timer interval advance overflows | Deadline exceeds clock representation | Next deadline can disappear | Periodic notification stops | 3 | Saturating expiration accounting and checked deadline addition; document finite representational range. |
 | F-04 | Short I/O buffer | Caller supplies insufficient bytes | No record transfer | Caller must supply valid size | 4 | InvalidInput before copying/consuming. |
 | F-05 | Callback/drain deadlock | Synchronous teardown while holding callback state or blocking its CPU | Final release cannot finish | Task or CPU stalls | 2 | Settime cancels outside inner state; callback never acquires programming; final-owner callers must permit callback progress. |
+| F-06 | Inotify queue overruns | Producer outpaces the reader past 16384 events | Excess events dropped | Watcher misses changes | 3 | Overrun flag under the queue lock makes the next read report `IN_Q_OVERFLOW` (`wd=-1`) exactly once, so the loss is visible; ceiling bounds memory. |
 
 ## Privacy, limitations and verification
 
@@ -119,7 +130,9 @@ credential snapshot or independently enforce syscall access policies.
 Existing tests cover eventfd readiness/accounting, timer validation, timer
 last-owner reclamation, periodic read/rearm, tiny intervals, competing
 programming and poll-before-IRQ notification, signalfd layout/payload and epoll
-registration/trigger races. Their presence is not a
+registration/trigger races. Inotify unit tests cover descriptor/mask semantics,
+the watch ceiling, `IN_IGNORED` delivery, overflow drop-and-report, and the
+record-size/`EINVAL` read rules. Their presence is not a
 claim they were executed by this documentation edit.
 
 MOD failure tests cover later readiness, repeated registration failure, queued
@@ -135,6 +148,9 @@ They use explicit source readiness and injected errors, not timing thresholds.
 - Keep epoll MOD identity, queue deduplication and generation checks together.
 - Drop registration owners outside their mutex; verify callback lock context.
 - Keep IRQ-reachable epoll wake paths on IRQ-safe state and avoid task-only locks.
+- Keep inotify record sizing (`len`-arithmetic, no name field for nameless
+  records) and the empty-queue `WouldBlock` vs too-small-buffer `InvalidInput`
+  distinction together; never report a partial record.
 - Keep limitations aligned with implementation rather than assumed Linux behavior.
 
 ### timerfd adjustable-clock contract

@@ -5,9 +5,10 @@ source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
 ## Purpose and scope
 
-This crate owns epoll, eventfd, signalfd and timerfd object state and file
-operations. `src/lib.rs` publicly exposes `epoll`, `eventfd`, `signalfd` and
-`timerfd`, implemented in the corresponding source files. `ksyscall` decodes ABI
+This crate owns epoll, eventfd, inotify, signalfd and timerfd object state and
+file operations. `src/lib.rs` publicly exposes `epoll`, `eventfd`, `inotify`,
+`signalfd` and `timerfd`, implemented in the corresponding source files.
+`ksyscall` decodes ABI
 arguments, resolves descriptor tables and validates operation-specific flags;
 `kfd_objects` accepts resolved `VfsFile` references and typed object inputs.
 `anon_inodefs` creates anonymous files, `kvfs` dispatches their file operations,
@@ -24,6 +25,7 @@ in object state. This crate does not own process descriptor-number allocation.
 | `TimerFd` | Owned `ktask::Timer<TimerFdHandler>` with embedded clock/count/poll state, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
 | `Signalfd` | `RwLock<SignalSet>` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. Signal configuration owns the shared notification source. |
 | `Epoll` | `Arc<EpollInner>`, interest table, ready queue and poll set | `add`/`modify` register watched file poll sources; callbacks enqueue weak interest references; `poll_events` returns ready ABI events and rearms interests. |
+| `Inotify` | Watch table (`Mutex<HashMap>`), event queue with overrun flag (`Mutex<EventQueue>`), poll set | `add_watch` keys watches by the caller's path bytes; `remove_watch` queues `IN_IGNORED`; `read` drains whole `struct inotify_event` records in order and reports `IN_Q_OVERFLOW` after a full queue; `FIONREAD` reports the drain size. |
 
 `from_file` retrieves the typed private data and rejects an unrelated file.
 The anonymous file operations implement `kvfs::FileOperations`; eventfd/timerfd
@@ -106,6 +108,26 @@ Ordinary reads return the entire pre-update counter and reset it to zero.
 A successful transfer is one native-endian `u64` in either mode; nonblocking
 reads of an empty counter return WouldBlock without copying data. Write rejects
 `u64::MAX` and only commits when the new counter is below it.
+
+### Inotify record ABI, queues and limits
+
+A record is the 16-byte `inotify_event` header plus the name NUL-terminated and
+padded to 8 bytes; a nameless record (`IN_IGNORED`, `IN_Q_OVERFLOW`) is exactly
+the header, matching the `len`-field arithmetic Linux readers apply. A buffer
+that cannot hold the next whole record fails with `EINVAL` rather than a
+partial record; an empty queue returns `WouldBlock`. Queued bytes are the
+records a full drain would return, including a pending overflow record.
+
+The per-instance ceilings follow Linux defaults — 16384 queued events,
+8192 watches — with one documented simplification: Linux accounts both per
+*user* across instances, this per *instance*. An overflow push drops the event
+and raises the overrun flag under the queue lock; the read that finds the
+queue empty then emits `wd = -1, IN_Q_OVERFLOW` once, so the loss is observable.
+Watch exhaustion returns `ENOSPC`. Event sourcing is bounded on purpose: this
+object queues only kernel-generated records (`IN_IGNORED`, `IN_Q_OVERFLOW`);
+the filesystem event source and its path registry land in a separate change,
+and until then a quiet filesystem is indistinguishable from an absent source —
+readiness is never synthesized.
 
 Epoll `TriggerMode` has Level, Edge and OneShot `{ fired }` states. OneShot
 consumption sets `fired=true`; `modify` rearms by replacing configuration on the

@@ -23,6 +23,7 @@ kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 kvfs.workspace = true
+iov_iter.workspace = true
 ksignal.workspace = true
 kspin.workspace = true
 ksync.workspace = true

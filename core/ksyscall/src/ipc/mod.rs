@@ -5,6 +5,7 @@
 //! IPC-related syscall adapters.
 
 mod eventfd;
+mod inotify;
 mod pipe;
 
-pub(crate) use self::{eventfd::*, pipe::*};
+pub(crate) use self::{eventfd::*, inotify::*, pipe::*};

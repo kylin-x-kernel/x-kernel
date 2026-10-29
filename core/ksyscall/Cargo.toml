@@ -46,7 +46,7 @@ kpoll.workspace = true
 ktask.workspace = true
 ktimer.workspace = true
 bitflags.workspace = true
-linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
+linux-raw-sys = { workspace = true, features = ["general", "ioctl", "loop_device"] }
 kprocess.workspace = true
 kseccomp.workspace = true
 krlimit.workspace = true
