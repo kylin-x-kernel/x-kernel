@@ -45,8 +45,9 @@ fn rule_validates_extensions() {
                 },
                 vec![tcp.clone()],
                 Target::Continue
-            ),
-            Err(error)
+            )
+            .err(),
+            Some(error)
         );
     }
     for (protocol, extension) in [
@@ -77,7 +78,7 @@ fn rule_validates_extensions() {
     assert!(Rule::new(base.clone(), extensions.clone(), Target::Continue).is_ok());
     extensions.push(tcp);
     assert_eq!(
-        Rule::new(base, extensions, Target::Continue),
-        Err(RuleError::TooManyExtensionMatches)
+        Rule::new(base, extensions, Target::Continue).err(),
+        Some(RuleError::TooManyExtensionMatches)
     );
 }

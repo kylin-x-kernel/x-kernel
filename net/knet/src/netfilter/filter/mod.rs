@@ -2,9 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Immutable IPv4 filter policies and bounded packet evaluation.
+//! Immutable IPv4 filter policies, publication, counters, and bounded evaluation.
 
 mod chain;
+pub(super) mod config;
+pub(super) mod counter;
 mod error;
 mod matcher;
 mod packet;

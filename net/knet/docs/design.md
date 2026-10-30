@@ -274,9 +274,9 @@ truncated payloads; unfinished output derives its length from packet storage.
 
 ### IPv4 Filter Table Model
 
-`netfilter/filter` stores IPv4 filtering policies as immutable tables of ordered
-rules. Each table has INPUT, FORWARD, and OUTPUT chains for the LOCAL_IN,
-FORWARD, and LOCAL_OUT hooks, plus named user chains. Rules hold match conditions
+`netfilter/filter` stores IPv4 filtering policies as immutable ordered rules
+with table-owned counters. Each table has INPUT, FORWARD, and OUTPUT chains for
+the LOCAL_IN, FORWARD, and LOCAL_OUT hooks, plus named user chains. Rules hold match conditions
 and a target; jumps refer to user chains by table-local `ChainId` values.
 Match conditions and their evaluation methods live in `matcher.rs`;
 rules, chains, and tables live in
@@ -291,7 +291,7 @@ Jump nesting is bounded by the chain count and the acyclic-graph requirement.
 Chain-name lengths count UTF-8 bytes and follow the legacy iptables limit;
 extension counts are an X-Kernel resource limit.
 
-`FilterTable::evaluate_with_counter` accepts a `PacketBuf` normalized by IPv4
+`FilterTable::evaluate` accepts a `PacketBuf` normalized by IPv4
 input validation or output preparation, plus the hook's interface names.
 It prepares an internal `MatchContext` once before traversing rules, borrowing
 the header and `transport_packet()` payload from that buffer.
@@ -304,15 +304,56 @@ without repeating checksum validation or deriving independent payload bounds.
 Missing packet bounds or an unparseable header return an error before evaluation
 or counter recording; byte accounting uses the normalized network packet length.
 
-`FilterTable::evaluate_with_counter` executes Continue, terminal verdicts, jumps,
-and RETURN.
+The internal `FilterTable::evaluate_with_observer` executor implements Continue,
+terminal verdicts, jumps, and RETURN.
 User-chain RETURN and fallthrough resume after the caller's jump; built-in
-RETURN and fallthrough apply the hook's policy. The caller supplies counter
-storage through a callback for matched rules and reached chain tails.
+RETURN and fallthrough apply the hook's policy. The executor directly updates
+matched rules and reached chain tails, then reports those events to an observer.
+`evaluate` uses the same executor with a no-op observer.
 Short transport headers and TCP fragments at offset eight bytes hot-drop.
 Each evaluation examines at most 4096 rules, counting repeated user-chain visits;
 budget exhaustion drops the packet even for an otherwise valid acyclic table.
 The budget is an X-Kernel limit added to Linux's traversal semantics.
+
+`filter/counter.rs` defines `EntryCounter` for atomic packet and byte totals,
+and plain `FilterCounter` and `ChainCounters` values for batch updates and exports.
+Each `Rule` owns its hit counter; each `Chain` owns its completion counter.
+Their constructors initialize counters to zero. Runtime rules and chains do not
+implement cloning or equality; management reads their semantic fields and
+collects counter values separately.
+`FilterTable` validates the complete update shape before adding any counters,
+and collects counters by traversing its chains and rules.
+Live counter fields are sampled independently: packet/byte pairs, separate
+rules, and batch additions need not appear at one instant. After updates stop,
+collection returns the final totals.
+
+`filter/config.rs` manages publication generations and replacement. Each
+`FilterState` holds a generation and directly owns its `FilterTable`. The table
+owns both rules and counters; the configuration delegates execution, batch
+addition, and counter collection to it. A state's table accessor borrows the table.
+
+`FilterConfig::with_state` borrows one `FilterState` under a shared lock without
+copying its contents. Callers can inspect its generation, borrow the table's
+rules, and collect counters only when needed. Counter sampling can run alongside
+evaluation and batch additions while the shared lock keeps the table, generation
+and counter layout paired. No separate snapshot model is maintained. Evaluation
+holds the shared lock for one complete packet traversal.
+
+Replacement takes an exclusive lock to wait for all old-generation updates
+through the configuration, checks the current generation, moves out the old
+state, and publishes the new state. It releases the lock before returning
+ownership of the old generation. Callers must not evaluate or add counters to
+retired tables. Their final counters can then be collected and their resources
+released outside the publication lock. The swap transfers table ownership
+without copying rules or counters.
+
+Generations are `u64` sequences scoped to one configuration instance: they start at zero and
+advance under the publication write lock only on successful replacement.
+Generation exhaustion rejects publication rather than reusing an earlier value.
+Rejected updates preserve the current state. These operations require sleepable
+task context; table construction and counter collection allocate bounded storage.
+The shared store starts with empty ACCEPT chains and remains internal pending
+network-path and ABI integration.
 
 ## Calling Constraints and Execution Context
 

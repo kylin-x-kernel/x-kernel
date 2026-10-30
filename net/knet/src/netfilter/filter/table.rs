@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Immutable IPv4 filter tables, structural validation, and bounded execution.
+//! Validated IPv4 filter rules, bounded execution, and table-owned counters.
 
 use alloc::{collections::BTreeSet, vec, vec::Vec};
 
@@ -10,6 +10,7 @@ use arrayvec::ArrayVec;
 
 use super::{
     chain::{Chain, ChainId, ChainKind, FilterHook},
+    counter::{ChainCounters, CounterShapeError},
     error::FilterTableError,
     packet::{MatchContext, MatchOutcome},
     rule::{Target, Verdict},
@@ -25,8 +26,7 @@ pub(crate) const MAX_RULE_STEPS: usize = 4096;
 
 const BUILTIN_CHAIN_COUNT: usize = FilterTable::BUILTIN_HOOKS.len();
 
-/// Immutable, validated representation of the IPv4 `filter` table.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Immutable, validated IPv4 `filter` rules and their mutable counters.
 pub(crate) struct FilterTable {
     chains: Vec<Chain>,
     built_in_chains: [ChainId; BUILTIN_CHAIN_COUNT],
@@ -45,7 +45,7 @@ impl FilterTable {
         FilterHook::LocalOut,
     ];
 
-    /// Builds a table from validated chains.
+    /// Builds a table from validated chains and their counters.
     ///
     /// Requires exactly one chain per supported hook and unique chain names.
     /// Jumps must target user chains and form an acyclic graph,
@@ -114,38 +114,110 @@ impl FilterTable {
 
     fn built_in_policy(&self, hook: FilterHook) -> Verdict {
         let chain = &self.chains[self.built_in_chain_id(hook).index()];
-        // Construction maps hooks only to built-in chains; the table is immutable.
+        // Construction maps hooks only to built-in chains; the rules are immutable.
         let ChainKind::BuiltIn { policy, .. } = chain.kind() else {
             unreachable!("filter hook must reference a built-in chain");
         };
         *policy
     }
 
-    /// Evaluates a hook with a caller-owned counter callback.
+    /// Evaluates a normalized IPv4 packet and records matched rules and chain completions.
     ///
-    /// Requires a packet normalized by IPv4 input validation or output preparation.
-    /// Empty interface names represent an absent hook interface.
+    /// Requires IPv4 input validation or output preparation. Byte accounting
+    /// uses the normalized network packet length without padding. Empty
+    /// interface names represent an absent hook interface. Execution allocates
+    /// no heap memory and leaves rules and packet contents unchanged.
+    /// Published tables must be evaluated through [`super::config::FilterConfig`]
+    /// so replacement waits for all updates to the old generation.
     ///
-    /// `Some(index)` records a matched rule before its target executes; `None`
-    /// records a chain's implicit RETURN or the built-in policy. An explicit
-    /// RETURN also records the policy when executed in a built-in chain.
-    /// Hot-drop and budget exhaustion drop without recording the failing rule.
-    /// The callback can use the normalized network packet's length for byte accounting.
+    /// # Errors
     ///
-    /// Execution allocates no heap memory and uses a fixed return stack bounded
-    /// by the validated acyclic graph. Callbacks must suit the caller's context.
-    ///
-    /// Returns an error before recording counters if the IPv4 header cannot be
-    /// parsed or the transport bounds are missing or invalidated.
-    pub(crate) fn evaluate_with_counter(
+    /// Returns an error without updating counters if the IPv4 header or
+    /// transport bounds are missing or invalidated.
+    pub(crate) fn evaluate(
         &self,
         hook: FilterHook,
         packet: &PacketBuf,
         indev: &str,
         outdev: &str,
-        mut record_fn: impl FnMut(ChainId, Option<usize>),
+    ) -> Result<Verdict, Ipv4Error> {
+        self.evaluate_with_observer(hook, packet, indev, outdev, |_, _| {})
+    }
+
+    /// Adds rule and chain-completion totals after validating the entire shape.
+    ///
+    /// Published tables must be updated through [`super::config::FilterConfig`]
+    /// to keep the update within one publication generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CounterShapeError` without changing counters if any chain or
+    /// rule count differs from this table.
+    pub(crate) fn add_counters(&self, updates: &[ChainCounters]) -> Result<(), CounterShapeError> {
+        if updates.len() != self.chains.len()
+            || updates
+                .iter()
+                .zip(&self.chains)
+                .any(|(update, chain)| update.rules.len() != chain.rules().len())
+        {
+            return Err(CounterShapeError);
+        }
+        for (update, chain) in updates.iter().zip(&self.chains) {
+            for (value, rule) in update.rules.iter().zip(chain.rules()) {
+                rule.counter().add(value.packets, value.bytes);
+            }
+            chain
+                .end_counter()
+                .add(update.end.packets, update.end.bytes);
+        }
+        Ok(())
+    }
+
+    /// Collects counters in table order, allocating storage for the result.
+    ///
+    /// Live fields are sampled independently; packet/byte pairs and separate
+    /// rules need not describe the same instant. Totals are final only after
+    /// callers exclude further evaluations and batch updates.
+    pub(crate) fn collect_counters(&self) -> Vec<ChainCounters> {
+        self.chains
+            .iter()
+            .map(|chain| ChainCounters {
+                rules: chain
+                    .rules()
+                    .iter()
+                    .map(|rule| rule.counter().load())
+                    .collect(),
+                end: chain.end_counter().load(),
+            })
+            .collect()
+    }
+
+    /// Evaluates a hook and reports counter updates to an observer.
+    ///
+    /// Requires a packet normalized by IPv4 input validation or output preparation.
+    /// Empty interface names represent an absent hook interface.
+    ///
+    /// After updating counters, `Some(index)` reports a matched rule before its
+    /// target executes; `None` reports a chain's implicit RETURN or built-in
+    /// policy. An explicit RETURN also records the policy in a built-in chain.
+    /// Hot-drop and budget exhaustion drop without recording the failing rule.
+    ///
+    /// Execution allocates no heap memory and uses a fixed return stack bounded
+    /// by the validated acyclic graph. Callbacks must suit the caller's context.
+    /// Published tables follow the locking requirements of [`Self::evaluate`].
+    ///
+    /// Returns an error before recording counters if the IPv4 header cannot be
+    /// parsed or the transport bounds are missing or invalidated.
+    pub(super) fn evaluate_with_observer(
+        &self,
+        hook: FilterHook,
+        packet: &PacketBuf,
+        indev: &str,
+        outdev: &str,
+        mut observe_fn: impl FnMut(ChainId, Option<usize>),
     ) -> Result<Verdict, Ipv4Error> {
         let context = MatchContext::new(packet, indev, outdev)?;
+        let bytes = packet.network_packet().ok_or(Ipv4Error::Malformed)?.len() as u64;
         let entry = self.built_in_chain_id(hook);
         let policy = self.built_in_policy(hook);
         let mut cursor = JumpFrame {
@@ -170,7 +242,8 @@ impl FilterTable {
                     }
                     MatchOutcome::Matched => {}
                 }
-                record_fn(cursor.chain_id, Some(cursor.next_rule));
+                rule.counter().add(1, bytes);
+                observe_fn(cursor.chain_id, Some(cursor.next_rule));
                 cursor.next_rule += 1;
                 match rule.target() {
                     Target::Continue => continue,
@@ -186,12 +259,14 @@ impl FilterTable {
                     }
                     Target::Return => {
                         if stack.is_empty() {
-                            record_fn(cursor.chain_id, None);
+                            chain.end_counter().add(1, bytes);
+                            observe_fn(cursor.chain_id, None);
                         }
                     }
                 }
             } else {
-                record_fn(cursor.chain_id, None);
+                chain.end_counter().add(1, bytes);
+                observe_fn(cursor.chain_id, None);
             }
             let Some(frame) = stack.pop() else {
                 return Ok(policy);

@@ -68,9 +68,15 @@ fn run(table: &FilterTable, bytes: &[u8]) -> (Verdict, Vec<(usize, Option<usize>
     let buffer = validated_packet(bytes);
     let mut events = Vec::new();
     let verdict = table
-        .evaluate_with_counter(FilterHook::LocalIn, &buffer, "eth0", "eth1", |chain, rule| {
-            events.push((chain.index(), rule));
-        })
+        .evaluate_with_observer(
+            FilterHook::LocalIn,
+            &buffer,
+            "eth0",
+            "eth1",
+            |chain, rule| {
+                events.push((chain.index(), rule));
+            },
+        )
         .unwrap();
     (verdict, events)
 }
@@ -134,7 +140,7 @@ fn builtin_return_and_fallthrough_record_policy_after_matching_rules() {
         let buffer = validated_packet(&bytes);
         for hook in [FilterHook::Forward, FilterHook::LocalOut] {
             assert_eq!(
-                table.evaluate_with_counter(hook, &buffer, "", "", |_, _| {}),
+                table.evaluate_with_observer(hook, &buffer, "", "", |_, _| {}),
                 Ok(Verdict::Accept)
             );
         }
@@ -395,7 +401,7 @@ fn output_evaluation_requires_preparation_and_accepts_absent_input_interface() {
     let table = FilterTable::accept_all();
     let mut events = Vec::new();
     assert_eq!(
-        table.evaluate_with_counter(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
+        table.evaluate_with_observer(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
             events.push((chain.index(), rule));
         }),
         Err(ipv4::Ipv4Error::Malformed)
@@ -423,9 +429,15 @@ fn output_evaluation_requires_preparation_and_accepts_absent_input_interface() {
         ])
         .unwrap();
         assert_eq!(
-            table.evaluate_with_counter(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
-                events.push((chain.index(), rule));
-            }),
+            table.evaluate_with_observer(
+                FilterHook::LocalOut,
+                &buffer,
+                "",
+                "eth0",
+                |chain, rule| {
+                    events.push((chain.index(), rule));
+                }
+            ),
             Ok(Verdict::Accept)
         );
     }
@@ -433,7 +445,7 @@ fn output_evaluation_requires_preparation_and_accepts_absent_input_interface() {
     events.clear();
     buffer.network_packet_mut().unwrap()[8] -= 1;
     assert_eq!(
-        table.evaluate_with_counter(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
+        table.evaluate_with_observer(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
             events.push((chain.index(), rule));
         }),
         Err(ipv4::Ipv4Error::Malformed)
@@ -441,7 +453,7 @@ fn output_evaluation_requires_preparation_and_accepts_absent_input_interface() {
     assert!(events.is_empty());
     ipv4::prepare_output_packet(&mut buffer).unwrap();
     assert_eq!(
-        table.evaluate_with_counter(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
+        table.evaluate_with_observer(FilterHook::LocalOut, &buffer, "", "eth0", |chain, rule| {
             events.push((chain.index(), rule));
         }),
         Ok(Verdict::Accept)
@@ -472,7 +484,9 @@ fn validated_maximum_chain_depth_fits_the_return_stack() {
 #[def_test]
 fn repeated_acyclic_jumps_stop_at_the_per_packet_rule_budget() {
     let linear = FilterTable::new(chains(
-        vec![rule(Target::Continue); MAX_RULE_STEPS],
+        (0..MAX_RULE_STEPS)
+            .map(|_| rule(Target::Continue))
+            .collect(),
         Verdict::Accept,
     ))
     .unwrap();
@@ -488,7 +502,9 @@ fn repeated_acyclic_jumps_stop_at_the_per_packet_rule_budget() {
         let rules = if index == 15 {
             vec![rule(Target::Continue)]
         } else {
-            vec![rule(Target::Jump(ChainId::from_index(index + 1))); 2]
+            (0..2)
+                .map(|_| rule(Target::Jump(ChainId::from_index(index + 1))))
+                .collect()
         };
         input.push(Chain::user_defined(alloc::format!("chain{index}"), rules).unwrap());
     }

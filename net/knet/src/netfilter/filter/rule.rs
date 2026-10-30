@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 
 use super::{
     chain::ChainId,
+    counter::EntryCounter,
     error::RuleError,
     matcher::{BaseMatch, ExtensionMatch},
     packet::{MatchContext, MatchOutcome},
@@ -33,16 +34,17 @@ pub(crate) enum Target {
     Jump(ChainId),
 }
 
-/// Fixed IPv4 conditions, ordered extension matches, and their selected action.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Fixed IPv4 conditions, ordered extension matches, an action, and hit counters.
+#[derive(Debug)]
 pub(crate) struct Rule {
     base: BaseMatch,
     extensions: Vec<ExtensionMatch>,
     target: Target,
+    counter: EntryCounter,
 }
 
 impl Rule {
-    /// Builds a rule whose extensions match its non-inverted base protocol.
+    /// Builds a zero-counter rule whose extensions match its non-inverted base protocol.
     ///
     /// # Errors
     ///
@@ -62,6 +64,7 @@ impl Rule {
             base,
             extensions,
             target,
+            counter: EntryCounter::new(),
         })
     }
 
@@ -75,6 +78,11 @@ impl Rule {
 
     pub(crate) const fn target(&self) -> Target {
         self.target
+    }
+
+    /// Returns the counters associated with this rule.
+    pub(super) fn counter(&self) -> &EntryCounter {
+        &self.counter
     }
 
     /// Checks base fields before evaluating extensions in their stored order.

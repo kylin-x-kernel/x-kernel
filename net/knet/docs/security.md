@@ -25,8 +25,8 @@ can still prevent receive progress.
 
 ## Trust Model
 
-The IPv4 filter model validates owned kernel values before constructing an
-immutable table. Rule and chain constructors establish local invariants;
+The IPv4 filter model validates owned kernel values before constructing a
+table with immutable rules. Rule and chain constructors establish local invariants;
 table construction checks aggregate limits, hook coverage, and the jump graph.
 These limits bound accepted policies and validation work. Callers must bound
 input allocation before construction. Userspace decoding lies outside this model.
@@ -36,8 +36,32 @@ return an error before rule traversal or counter recording.
 Transport reads stay within the IP payload; unavailable fragment fields do not
 match, and required short headers hot-drop. Execution uses a fixed return stack
 bounded by the validated graph and a 4096-rule budget, including repeated chain
-visits. Budget exhaustion drops the packet. Counter storage and synchronization
-belong to the callback's owner; evaluation itself mutates neither table nor packet.
+visits. Budget exhaustion drops the packet. Evaluation records matches in the
+table's atomic counters while leaving rules and packet contents unchanged.
+
+The filter configuration accepts validated tables. Each rule owns its hit
+counter and each chain owns its completion counter, so evaluation updates the
+counter of the object being traversed. `FilterTable` validates every batch's
+chain and rule counts before applying any update. The configuration's sleepable
+read/write lock keeps each evaluation and borrowed state read within one
+generation. Live statistics use independent atomic field loads; neither
+packet/byte pairs nor different rules or batch updates form a coherent snapshot.
+The table, generation and counter layout remain paired throughout a read.
+Replacement takes the write lock to wait for old-generation evaluations and
+counter updates through the configuration, then transfers ownership of the old
+state to the caller. Callers must not evaluate or update retired tables, so
+their final counters can be collected after unlocking. Publication checks,
+generation advancement and the swap share the write lock. Generation values
+are local to a configuration instance and never
+wrap: exhaustion rejects the replacement without changing the current state.
+Adapters must scope saved generations to the configuration instance that
+produced them. `FilterState` directly owns the table and exposes a
+borrowed table reference. Updates to published tables must go through the
+configuration to preserve replacement ordering. Management callbacks only
+inspect the table; they must not update counters, re-enter the store, acquire
+adapter locks, or wait for work needing exclusive access to the same
+configuration. This internal API relies on future management adapters for
+input-allocation limits and authorization.
 
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can

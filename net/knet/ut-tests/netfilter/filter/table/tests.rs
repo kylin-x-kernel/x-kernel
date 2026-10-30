@@ -18,7 +18,18 @@ use super::{
 };
 
 fn push_rule(chain: &mut Chain, rule: Rule) {
-    let mut rules = chain.rules().to_vec();
+    let mut rules: Vec<_> = chain
+        .rules()
+        .iter()
+        .map(|rule| {
+            Rule::new(
+                rule.base().clone(),
+                rule.extensions().to_vec(),
+                rule.target(),
+            )
+            .unwrap()
+        })
+        .collect();
     rules.push(rule);
     *chain = match chain.kind() {
         ChainKind::BuiltIn { hook, policy } => Chain::built_in(*hook, *policy, rules),
@@ -74,8 +85,8 @@ fn filter_table_validates_builtin_hooks() {
             !matches!(chain.kind(), ChainKind::BuiltIn { hook, .. } if *hook == missing_hook)
         });
         assert_eq!(
-            FilterTable::new(chains),
-            Err(FilterTableError::MissingHook(missing_hook))
+            FilterTable::new(chains).err(),
+            Some(FilterTableError::MissingHook(missing_hook))
         );
     }
 
@@ -86,22 +97,22 @@ fn filter_table_validates_builtin_hooks() {
         Vec::new(),
     ));
     assert_eq!(
-        FilterTable::new(duplicate_input),
-        Err(FilterTableError::DuplicateHook(FilterHook::LocalIn))
+        FilterTable::new(duplicate_input).err(),
+        Some(FilterTableError::DuplicateHook(FilterHook::LocalIn))
     );
 
     let mut duplicate_name = built_in_chains();
     duplicate_name.push(user_chain("CUSTOM".to_string(), Vec::new()));
     duplicate_name.push(user_chain("CUSTOM".to_string(), Vec::new()));
     assert_eq!(
-        FilterTable::new(duplicate_name),
-        Err(FilterTableError::DuplicateChainName)
+        FilterTable::new(duplicate_name).err(),
+        Some(FilterTableError::DuplicateChainName)
     );
     let mut reserved_name = built_in_chains();
     reserved_name.push(user_chain("INPUT".to_string(), Vec::new()));
     assert_eq!(
-        FilterTable::new(reserved_name),
-        Err(FilterTableError::DuplicateChainName)
+        FilterTable::new(reserved_name).err(),
+        Some(FilterTableError::DuplicateChainName)
     );
 }
 
@@ -111,31 +122,33 @@ fn filter_table_enforces_structural_limits() {
     for index in BUILTIN_CHAIN_COUNT..MAX_CHAINS {
         chains.push(user_chain(alloc::format!("CHAIN-{index}"), Vec::new()));
     }
-    assert!(FilterTable::new(chains.clone()).is_ok());
+    let mut chains = FilterTable::new(chains).unwrap().chains;
     chains.push(user_chain("EXTRA".to_string(), Vec::new()));
     assert_eq!(
-        FilterTable::new(chains),
-        Err(FilterTableError::TooManyChains)
+        FilterTable::new(chains).err(),
+        Some(FilterTableError::TooManyChains)
     );
 
     let mut chains = built_in_chains();
     chains[0] = Chain::built_in(
         FilterHook::LocalIn,
         Verdict::Accept,
-        vec![rule(BaseMatch::default(), Vec::new(), Target::Continue); MAX_RULES - 1],
+        (0..MAX_RULES - 1)
+            .map(|_| rule(BaseMatch::default(), Vec::new(), Target::Continue))
+            .collect(),
     );
     push_rule(
         &mut chains[1],
         rule(BaseMatch::default(), Vec::new(), Target::Return),
     );
-    assert!(FilterTable::new(chains.clone()).is_ok());
+    let mut chains = FilterTable::new(chains).unwrap().chains;
     push_rule(
         &mut chains[2],
         rule(BaseMatch::default(), Vec::new(), Target::Continue),
     );
     assert_eq!(
-        FilterTable::new(chains),
-        Err(FilterTableError::TooManyRules)
+        FilterTable::new(chains).err(),
+        Some(FilterTableError::TooManyRules)
     );
 }
 
@@ -156,7 +169,7 @@ fn filter_table_rejects_invalid_jump_targets() {
             &mut chains[0],
             rule(BaseMatch::default(), Vec::new(), Target::Jump(target)),
         );
-        assert_eq!(FilterTable::new(chains), Err(error));
+        assert_eq!(FilterTable::new(chains).err(), Some(error));
     }
 }
 
@@ -180,7 +193,10 @@ fn filter_table_rejects_recursive_user_chains() {
         )],
     ));
 
-    assert_eq!(FilterTable::new(chains), Err(FilterTableError::ChainCycle));
+    assert_eq!(
+        FilterTable::new(chains).err(),
+        Some(FilterTableError::ChainCycle)
+    );
 }
 
 #[def_test]

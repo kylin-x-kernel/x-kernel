@@ -7,6 +7,7 @@
 use alloc::{string::String, vec::Vec};
 
 use super::{
+    counter::EntryCounter,
     error::ChainError,
     rule::{Rule, Verdict},
 };
@@ -48,23 +49,25 @@ pub(crate) enum ChainKind {
     UserDefined { name: String },
 }
 
-/// Ordered rules belonging to one built-in or user-defined chain.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Ordered rules and completion counters for one built-in or user-defined chain.
+#[derive(Debug)]
 pub(crate) struct Chain {
     kind: ChainKind,
     rules: Vec<Rule>,
+    end_counter: EntryCounter,
 }
 
 impl Chain {
-    /// Builds a built-in chain named for its hook.
+    /// Builds a built-in chain named for its hook with zeroed completion counters.
     pub(crate) fn built_in(hook: FilterHook, policy: Verdict, rules: Vec<Rule>) -> Self {
         Self {
             kind: ChainKind::BuiltIn { hook, policy },
             rules,
+            end_counter: EntryCounter::new(),
         }
     }
 
-    /// Builds a user chain after validating its name.
+    /// Builds a user chain with zeroed completion counters after validating its name.
     ///
     /// # Errors
     ///
@@ -81,6 +84,7 @@ impl Chain {
         Ok(Self {
             kind: ChainKind::UserDefined { name },
             rules,
+            end_counter: EntryCounter::new(),
         })
     }
 
@@ -101,6 +105,11 @@ impl Chain {
 
     pub(crate) fn rules(&self) -> &[Rule] {
         &self.rules
+    }
+
+    /// Returns the counters for implicit RETURN or built-in policy execution.
+    pub(super) fn end_counter(&self) -> &EntryCounter {
+        &self.end_counter
     }
 }
 
