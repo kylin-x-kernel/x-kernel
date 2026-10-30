@@ -31,7 +31,7 @@ fn unix_datagram_receive_honors_per_call_nonblocking_after_empty_message() {
 
 fn test_credentials() -> crate::SenderCredentials {
     crate::SenderCredentials {
-        pid: kprocess::init_proc().pid_identity(),
+        pid: Some(kprocess::init_proc().pid_identity()),
         uid: 1000,
         gid: 1001,
     }
@@ -85,7 +85,7 @@ fn unix_dgram_passcred_returns_current_sender_credentials() {
         .unwrap();
     // The pid stays a process identity so the receive side can resolve it in
     // the reader's PID namespace.
-    let KernelAncillaryData::ProcessCredentials(credentials) = credentials.as_ref() else {
+    let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
         panic!("expected sender credentials");
     };
     assert_eq!(credentials.uid, 1000);
@@ -121,7 +121,7 @@ fn unix_dgram_passcred_preserves_each_sender_snapshot() {
         send_credentials(
             &sender,
             crate::SenderCredentials {
-                pid: kprocess::init_proc().pid_identity(),
+                pid: Some(kprocess::init_proc().pid_identity()),
                 uid,
                 gid: uid + 1000,
             },
@@ -136,7 +136,7 @@ fn unix_dgram_passcred_preserves_each_sender_snapshot() {
             .unwrap()
             .downcast::<KernelAncillaryData>()
             .unwrap();
-        let KernelAncillaryData::ProcessCredentials(credentials) = credentials.as_ref() else {
+        let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
             panic!("expected sender credentials");
         };
         assert_eq!(credentials.uid, uid);

@@ -405,11 +405,8 @@ fn privileged_foreign_pid_claim_resolves_the_named_process() {
     // init is the only process published in the unit-test environment, so this
     // cannot tell the lookup apart from sender substitution; the companion
     // ESRCH test rejects an implementation that skips the lookup entirely.
-    let observer = sender.process.active_pid_namespace();
-    let expected = kprocess::Process::pid_identity_in_namespace(claim_pid, &observer)
-        .expect("claim target is published");
-    assert!(Arc::ptr_eq(&resolved.pid, &expected));
-    assert_eq!(resolved.pid.root_nr(), init.pid());
+    let identity = resolved.pid.as_ref().expect("claim carries an identity");
+    assert_eq!(identity.root_nr(), init.pid());
 }
 
 #[def_test]

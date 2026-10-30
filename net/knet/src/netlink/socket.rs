@@ -293,8 +293,8 @@ impl SocketOps for NetlinkSocket {
                     && let Some(ancillary) = options.ancillary.as_deref_mut()
                 {
                     ancillary.push(Arc::new(crate::KernelAncillaryData::Credentials(
-                        crate::options::UnixCredentials {
-                            pid: 0,
+                        crate::SenderCredentials {
+                            pid: None,
                             uid: 0,
                             gid: 0,
                         },

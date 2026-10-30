@@ -188,8 +188,7 @@ fn parse_send_cmsgs(
 enum SocketAncillary {
     Rights { fds: Vec<Arc<VfsFile>> },
     IpError(SocketErrorInfo),
-    Credentials(knet::options::UnixCredentials),
-    ProcessCredentials(knet::SenderCredentials),
+    Credentials(knet::SenderCredentials),
 }
 
 fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
@@ -211,9 +210,6 @@ fn into_socket_ancillary(ancillary: AncillaryData) -> Option<SocketAncillary> {
             KernelAncillaryData::IpError(err) => SocketAncillary::IpError(err.clone()),
             KernelAncillaryData::Credentials(credentials) => {
                 SocketAncillary::Credentials(credentials.clone())
-            }
-            KernelAncillaryData::ProcessCredentials(credentials) => {
-                SocketAncillary::ProcessCredentials(credentials.clone())
             }
         });
     }
@@ -248,15 +244,21 @@ fn push_socket_cmsg(
             Ok(written)
         }),
         SocketAncillary::IpError(err) => push_ip_recverr_cmsg(builder, err),
-        SocketAncillary::Credentials(credentials) => push_credentials_cmsg(builder, &credentials),
-        SocketAncillary::ProcessCredentials(credentials) => {
+        SocketAncillary::Credentials(credentials) => {
             // Linux resolves the sender's `struct pid` in the receiving task's
             // active PID namespace (`pid_vnr`), so a peer in another namespace
-            // sees its own view of the sender (0 when there is no projection).
-            let observer = kprocess::current_user_thread()
-                .process()
-                .active_pid_namespace();
-            let pid = credentials.pid.number_in(&observer).unwrap_or(0);
+            // sees its own view of the sender (0 when there is no projection,
+            // which is also the fixed kernel-peer identity).
+            let pid = credentials
+                .pid
+                .as_ref()
+                .and_then(|pid| {
+                    let observer = kprocess::current_user_thread()
+                        .process()
+                        .active_pid_namespace();
+                    pid.number_in(&observer)
+                })
+                .unwrap_or(0);
             push_credentials_cmsg(
                 builder,
                 &knet::options::UnixCredentials {

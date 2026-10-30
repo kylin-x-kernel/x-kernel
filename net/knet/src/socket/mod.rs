@@ -201,22 +201,35 @@ pub struct SocketErrorInfo {
 /// `pid_vnr` in the receiving task's active PID namespace, so the receiver
 /// sees its own namespace's view of the sender. Automatic credentials and an
 /// explicit claim naming the sender's TGID carry the process leader; a
-/// privileged claim may name any task.
-#[derive(Debug, Clone)]
+/// privileged claim may name any task, including a member thread.
+/// `pid` is `None` for kernel peers with a fixed numeric identity (netlink
+/// kobject uevents report `pid=0`).
+#[derive(Clone)]
 pub struct SenderCredentials {
-    pub pid: alloc::sync::Arc<kprocess::PidIdentity>,
+    pub pid: Option<alloc::sync::Arc<kidentity::PidHandle>>,
     pub uid: u32,
     pub gid: u32,
 }
 
+impl core::fmt::Debug for SenderCredentials {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Only the root projection is printable; the handle's per-namespace
+        // number list is internal identity state.
+        f.debug_struct("SenderCredentials")
+            .field("pid", &self.pid.as_ref().map(|pid| pid.root_nr()))
+            .field("uid", &self.uid)
+            .field("gid", &self.gid)
+            .finish()
+    }
+}
+
 /// Ancillary data produced by the networking stack itself.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum KernelAncillaryData {
     IpError(SocketErrorInfo),
-    /// Trusted sender credentials with a fixed numeric pid (kernel peers).
-    Credentials(options::UnixCredentials),
-    /// Trusted sender credentials resolved in the receiver's PID namespace.
-    ProcessCredentials(SenderCredentials),
+    /// Trusted sender credentials attached by a kernel transport. The inner
+    /// identity is opaque to knet: only the producing layer can resolve it.
+    Credentials(SenderCredentials),
 }
 
 /// Options for sending data to a socket.

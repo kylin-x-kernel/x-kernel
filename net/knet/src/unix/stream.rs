@@ -279,7 +279,7 @@ impl UnixTransportOps for StreamTransport {
                     if let Some(credentials) = options.unix_sender_credentials.take() {
                         records.insert(
                             0,
-                            Arc::new(KernelAncillaryData::ProcessCredentials(credentials))
+                            Arc::new(KernelAncillaryData::Credentials(credentials))
                                 as AncillaryData,
                         );
                     }
@@ -614,12 +614,7 @@ fn is_credentials_record(record: &AncillaryData) -> bool {
     record
         .clone()
         .downcast::<KernelAncillaryData>()
-        .is_ok_and(|data| {
-            matches!(
-                data.as_ref(),
-                KernelAncillaryData::Credentials(_) | KernelAncillaryData::ProcessCredentials(_)
-            )
-        })
+        .is_ok_and(|data| matches!(data.as_ref(), KernelAncillaryData::Credentials(_)))
 }
 
 /// Registers `pending`'s payload for the byte range this round publishes, or

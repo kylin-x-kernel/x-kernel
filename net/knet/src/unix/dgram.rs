@@ -264,7 +264,7 @@ impl UnixTransportOps for DgramTransport {
                         if self.options.pass_credentials()
                             && let Some(credentials) = unix_sender_credentials
                         {
-                            dst.push(Arc::new(crate::KernelAncillaryData::ProcessCredentials(
+                            dst.push(Arc::new(crate::KernelAncillaryData::Credentials(
                                 credentials,
                             )));
                         }

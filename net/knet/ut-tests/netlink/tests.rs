@@ -1160,7 +1160,7 @@ fn test_kobject_uevent_passcred_reports_kernel_credentials() {
     let KernelAncillaryData::Credentials(credentials) = credentials.as_ref() else {
         panic!("expected SCM_CREDENTIALS ancillary data");
     };
-    assert_eq!(credentials.pid, 0);
+    assert!(credentials.pid.is_none());
     assert_eq!(credentials.uid, 0);
     assert_eq!(credentials.gid, 0);
 }

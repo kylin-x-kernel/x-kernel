@@ -341,7 +341,7 @@ fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCr
     // namespace (reachable only with CAP_SYS_ADMIN, as checked above), and a
     // missing process is ESRCH. Delivery later resolves that identity in the
     // receiver's namespace.
-    let pid = if claim.pid == sender.pid {
+    let identity = if claim.pid == sender.pid {
         sender.process.pid_identity()
     } else {
         let observer = sender.process.active_pid_namespace();
@@ -349,7 +349,7 @@ fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCr
             .ok_or(KError::NoSuchProcess)?
     };
     Ok(knet::SenderCredentials {
-        pid,
+        pid: Some(identity),
         uid: claim.uid,
         gid: claim.gid,
     })

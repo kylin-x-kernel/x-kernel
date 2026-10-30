@@ -43,7 +43,7 @@ pub fn current_sender_credentials() -> crate::SenderCredentials {
     let thread = kprocess::current_user_thread();
     let cred = thread.cred();
     crate::SenderCredentials {
-        pid: thread.process().pid_identity(),
+        pid: Some(thread.process().pid_identity()),
         uid: cred.ruid(),
         gid: cred.rgid(),
     }
