@@ -48,7 +48,7 @@ fn superblock_separates_operations_from_private_state() {
     let super_block = SuperBlock::try_new_with_flags_and_private(
         &TEST_FILE_SYSTEM_TYPE,
         &TEST_SUPER_OPERATIONS,
-        TestPrivate(0x5f5f_494e_464f),
+        kalloc_types::KBox::new(TestPrivate(0x5f5f_494e_464f)).unwrap(),
         SuperBlockFlags::NOATIME,
         4096,
         1 << 30,
@@ -79,6 +79,72 @@ fn superblock_separates_operations_from_private_state() {
 }
 
 static FILL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+struct PrivateDropProbe(Arc<AtomicUsize>);
+
+impl Drop for PrivateDropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn failed_root_initialization_releases_prepared_private_owner() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = kalloc_types::KBox::new(PrivateDropProbe(drops.clone())).unwrap();
+    let saw_private = core::cell::Cell::new(false);
+    let result = SuperBlock::try_new_with_flags_and_private(
+        &TEST_FILE_SYSTEM_TYPE,
+        &TEST_SUPER_OPERATIONS,
+        owner,
+        SuperBlockFlags::empty(),
+        4096,
+        MAX_LFS_FILESIZE,
+        |super_block| {
+            saw_private.set(super_block.private::<PrivateDropProbe>().is_ok());
+            Err::<Dentry, _>(VfsError::NoMemory)
+        },
+    );
+    assert!(matches!(result, Err(VfsError::NoMemory)));
+    assert!(saw_private.get());
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[def_test]
+fn prepared_private_owner_keeps_address_until_superblock_teardown() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = kalloc_types::KBox::new(PrivateDropProbe(drops.clone())).unwrap();
+    let address = core::ptr::from_ref(&*owner);
+    let super_block = SuperBlock::new_with_flags_and_private(
+        &TEST_FILE_SYSTEM_TYPE,
+        &TEST_SUPER_OPERATIONS,
+        owner,
+        SuperBlockFlags::empty(),
+        4096,
+        MAX_LFS_FILESIZE,
+        |_| {
+            Dentry::new_dir_from_inode(
+                VfsInode::new_dir_with_defaults(
+                    NodeFlags::empty(),
+                    VfsInodeInit::new(
+                        1,
+                        0,
+                        Umode::new(NodeType::Directory, NodePermission::default()),
+                    ),
+                ),
+                None,
+                String::new(),
+            )
+        },
+    );
+    assert_eq!(
+        core::ptr::from_ref(super_block.private::<PrivateDropProbe>().unwrap()),
+        address,
+    );
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(super_block);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
 static TRANSITION_STAGE: AtomicUsize = AtomicUsize::new(0);
 static TRANSITION_WAITER_STARTED: AtomicUsize = AtomicUsize::new(0);
 static TRANSITION_WAITER_DONE: AtomicUsize = AtomicUsize::new(0);

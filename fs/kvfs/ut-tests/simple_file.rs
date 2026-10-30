@@ -37,7 +37,8 @@ fn snapshot_partial_reads_are_stable_across_source_changes() {
             }),
         );
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let open = |flags| {
         Filename::new("/snapshot")
@@ -146,7 +147,8 @@ fn command_file_consumes_each_write_independently_of_offset() {
             ),
         );
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let file = Filename::new("/command")
         .open_with_flags_at(
@@ -196,7 +198,8 @@ fn generated_file_provides_the_linux_poll_fallback() {
             SimpleFile::new_regular(fs.clone(), || Ok(String::from("ok\n"))),
         );
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let file = Filename::new("/status")
         .open_with_flags_at(

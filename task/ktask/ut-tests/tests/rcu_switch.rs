@@ -4,12 +4,13 @@
 
 //! Reader enrollment and storage lifetime across scheduler transitions.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use kalloc_types::KBox;
 use kcpu_id_map::{KCpuMaskExt, LogicalCpuId};
 use unittest::{assert, assert_eq, def_test};
 
@@ -132,15 +133,15 @@ fn abandoned_reader_is_unlinked_and_reclaimed_after_switch() {
             for _ in 0..4 {
                 let runtime_dropped = Arc::new(AtomicBool::new(false));
                 let abandoned = crate::prepare_task(crate::TaskInner::new_user(
-                    || {
+                    crate::PreparedTaskEntry::new_nowait(|| {
                         let task = crate::current();
                         task.rcu_reader.with_read::<()>(|_| {
                             task.rcu_reader.with_read::<()>(|_| crate::exit(17));
                         });
-                    },
+                    }).expect("test entry preparation"),
                     "rcu-abandoned".into(),
                     kidentity::allocate_root_pid_handle().expect("test task identity"),
-                    Box::new(RuntimeDropProbe(runtime_dropped.clone())),
+                    KBox::new(RuntimeDropProbe(runtime_dropped.clone())).unwrap(),
                 ));
                 abandoned.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
                 crate::activate_task(&abandoned);
@@ -204,20 +205,21 @@ fn first_task_entry_cleans_the_exited_readers_handoff() {
             let outgoing = crate::KtaskRef::downgrade(&task);
             let outgoing_probe = outgoing.clone();
             let receiver = crate::prepare_task(crate::TaskInner::new_user(
-                move || {
+                crate::PreparedTaskEntry::new_nowait(move || {
                     let is_clean = outgoing.upgrade().is_some_and(|old| {
                         !old.rcu_reader.is_reading() && !old.rcu_reader.is_enrolled()
                     });
                     after_probe.store(is_clean, Ordering::Release);
-                },
+                }).expect("test entry preparation"),
                 "rcu-first-entry".into(),
                 kidentity::allocate_root_pid_handle().expect("test receiver identity"),
-                Box::new(FirstEntryProbe {
+                KBox::new(FirstEntryProbe {
                     outgoing: outgoing_probe,
                     saw_abandoned_reader: before_probe,
                     has_entered: AtomicBool::new(false),
                     is_reclaimed: finished_probe,
-                }),
+                })
+                .unwrap(),
             ));
             receiver.set_cpumask(crate::KCpuMask::one_shot_logical(cpu));
             // FIFO outranks the ordinary supervisor tasks. Keep scheduling

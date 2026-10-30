@@ -1,5 +1,14 @@
 # KExt4 — 设计文档
 
+## Prepared VFS mount owner
+
+`fill_super` prepares `KBox<Ext4Mount>` with NOWAIT before transferring it to
+`SuperBlock::initialize_with_private`. This path already owns a nascent canonical
+block-device identity and exclusive claim: owner allocation must not newly enter
+reclaim that could wait for mount completion. No mount-state lock is held at this
+allocation. NOWAIT is a conservative local policy for that initialization phase,
+not a claim that the whole fill operation is atomic or non-sleeping.
+
 ## Test Layout
 
 Guest unit, component and recovery tests live under `ut-tests/`, mirroring the

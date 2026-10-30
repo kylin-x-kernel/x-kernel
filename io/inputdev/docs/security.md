@@ -1,5 +1,15 @@
 # inputdev — Security and reliability
 
+## Fallible work callbacks
+
+Callback owner OOM maps to DriverError::NoMemory, distinct from worker-preparation
+BadState. The captured Weak is dropped while the local endpoint Arc is still alive,
+so callback allocation failure cannot trigger endpoint destruction via that Weak.
+The unpublished local endpoint then drops after construction returns an error;
+no notifier or registry entry was installed. Existing endpoints are unaffected.
+Arc, Vec, notifier and worker allocations remain outside the fallible guarantee;
+NOWAIT applies only to callback owner storage, not the whole initialization path.
+
 ## Trust boundaries
 
 `inputdev` receives hardware-origin event type, code, and value fields through

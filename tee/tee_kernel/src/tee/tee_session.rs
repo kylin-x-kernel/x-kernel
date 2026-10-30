@@ -2,12 +2,11 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::{any::Any, default::Default};
 
-#[cfg(unittest)]
-use kprocess::Thread;
-use kprocess::{self, TeeSessionCtxTrait};
+use kalloc_types::KBox;
+use kprocess::{self, TeeSessionCtxTrait, Thread};
 use ksync::Mutex;
 use slab::Slab;
 use tee_raw_sys::*;
@@ -76,6 +75,26 @@ impl Default for TeeSessionCtx {
     }
 }
 
+fn ensure_session_with(
+    thread: &Thread,
+    initialize: impl FnOnce() -> TeeResult<KBox<dyn TeeSessionCtxTrait>>,
+) -> TeeResult {
+    thread.with_tee_session_ctx_mut(|slot| {
+        if slot.is_none() {
+            *slot = Some(initialize()?);
+        }
+        Ok(())
+    })
+}
+
+fn ensure_session(thread: &Thread) -> TeeResult {
+    ensure_session_with(thread, || {
+        let context: KBox<dyn TeeSessionCtxTrait> =
+            KBox::new_nowait(TeeSessionCtx::default()).map_err(|_| TEE_ERROR_OUT_OF_MEMORY)?;
+        Ok(context)
+    })
+}
+
 /// Acquire a mutable reference to the current thread's tee_session_ctx
 /// Executes the provided closure with the mutable reference
 ///
@@ -87,12 +106,17 @@ impl Default for TeeSessionCtx {
 ///
 /// # Note
 /// Creates a default session context if none exists for the current thread
+/// using NOWAIT under the slot mutex. A missing owner's allocation failure
+/// returns TEE_ERROR_OUT_OF_MEMORY without invoking `f` or installing a context.
+/// An existing context requires no owner allocation, including on exit cleanup.
+/// Requires task context and no held session-slot lock; `f` runs under that
+/// lock and must not reenter it or introduce reclaim dependencies on it.
 pub(super) fn with_tee_session_ctx_mut<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&mut TeeSessionCtx) -> TeeResult<R>,
 {
     kprocess::with_current_user_thread(|thread| {
-        thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
+        ensure_session(thread)?;
 
         thread.with_tee_session_ctx_mut(|lock| {
             let concrete = {
@@ -119,12 +143,17 @@ where
 ///
 /// # Note
 /// Creates a default session context if none exists for the current thread
+/// using NOWAIT under the slot mutex. Missing-owner allocation failure returns
+/// TEE_ERROR_OUT_OF_MEMORY without invoking `f`; existing contexts allocate
+/// nothing for ownership. Requires task context without the session-slot lock
+/// held. The callback runs with that mutex held and must not reenter it or
+/// introduce reclaim dependencies on it.
 pub(super) fn with_tee_session_ctx<F, R>(f: F) -> TeeResult<R>
 where
     F: FnOnce(&TeeSessionCtx) -> TeeResult<R>,
 {
     kprocess::with_current_user_thread(|thread| {
-        thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
+        ensure_session(thread)?;
 
         thread.with_tee_session_ctx(|lock| {
             let concrete = {
@@ -164,8 +193,10 @@ pub fn tee_session_release_state() -> TeeResult {
 }
 
 #[cfg(unittest)]
-pub fn set_tee_session_ctx(thread: &Thread) {
-    thread.set_tee_session_ctx(Box::new(TeeSessionCtx::default()));
+/// Prepares a test thread's session using the normal idempotent NOWAIT path.
+/// Returns TEE_ERROR_OUT_OF_MEMORY before installation if allocation fails.
+pub fn set_tee_session_ctx(thread: &Thread) -> TeeResult {
+    ensure_session(thread)
 }
 
 #[cfg(unittest)]

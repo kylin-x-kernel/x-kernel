@@ -25,9 +25,11 @@
 //! reads state without republishing, [`SigTxn`] mutates it and records which
 //! slots it touched, and only those slots are recomputed.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use kalloc_types::{AllocFlags, KBox};
+use kerrno::KResult;
 use kspin::SpinNoIrq;
 
 use crate::{PendingSignals, SignalInfo, SignalSet, Signo};
@@ -83,16 +85,19 @@ impl ThreadSlot {
     /// allocation, so constructing it under the process-wide lock would put
     /// slab refill in a critical section that other threads' sends and
     /// slow-path dequeues spin on.
-    fn allocate(tid: u32, hint: Arc<AtomicBool>) -> Box<Self> {
-        Box::new(Self {
-            generation: 0,
-            tid,
-            is_target: true,
-            pending: PendingSignals::default(),
-            blocked: SignalSet::default(),
-            saved_sigmask: None,
-            hint,
-        })
+    fn allocate(tid: u32, hint: Arc<AtomicBool>, flags: AllocFlags) -> KResult<KBox<Self>> {
+        KBox::new_with_flags(
+            Self {
+                generation: 0,
+                tid,
+                is_target: true,
+                pending: PendingSignals::default(),
+                blocked: SignalSet::default(),
+                saved_sigmask: None,
+                hint,
+            },
+            flags,
+        )
     }
 
     /// Whether this thread has a deliverable signal, counting the
@@ -202,7 +207,7 @@ pub(crate) struct SigInner {
     /// Process-directed queue (Linux `signal->shared_pending`).
     shared: PendingSignals,
     /// Per-thread state, indexed by [`SlotId::index`].
-    slots: Vec<Option<Box<ThreadSlot>>>,
+    slots: Vec<Option<KBox<ThreadSlot>>>,
     /// Generation source for slot handles.
     next_generation: u32,
 }
@@ -288,11 +293,15 @@ impl SigLock {
     /// The table is pre-sized at construction, so linking is allocation-free
     /// until a process exceeds that capacity; past it the table may double,
     /// which moves 8-byte entries rather than the slot payload.
-    pub(crate) fn register(&self, tid: u32) -> (SlotId, Arc<AtomicBool>) {
+    pub(crate) fn register(
+        &self,
+        tid: u32,
+        flags: AllocFlags,
+    ) -> KResult<(SlotId, Arc<AtomicBool>)> {
         let hint = Arc::new(AtomicBool::new(false));
-        let slot = ThreadSlot::allocate(tid, hint.clone());
+        let slot = ThreadSlot::allocate(tid, hint.clone(), flags)?;
         let slot_id = self.transact(|txn| txn.register(slot));
-        (slot_id, hint)
+        Ok((slot_id, hint))
     }
 
     /// Runs `f` with read-only access to the guarded state.
@@ -404,7 +413,7 @@ impl<'a> SigTxn<'a> {
     }
 
     /// Links a slot prepared by [`SigLock::register`] and publishes it.
-    pub(crate) fn register(&mut self, mut slot: Box<ThreadSlot>) -> SlotId {
+    pub(crate) fn register(&mut self, mut slot: KBox<ThreadSlot>) -> SlotId {
         let generation = self.inner.next_generation;
         self.inner.next_generation = generation.wrapping_add(1);
         slot.generation = generation;

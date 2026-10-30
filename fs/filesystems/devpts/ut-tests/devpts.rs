@@ -208,7 +208,7 @@ fn reconfigure_updates_the_live_ptmx_mode() {
         SuperBlockFlags::empty(),
         MountOptions::parse(None).unwrap(),
         &kcred::initial_cred(),
-    );
+    ).unwrap();
     let root = fs.root_dir();
     let ptmx_mode = || {
         root.lookup("ptmx")
@@ -244,7 +244,7 @@ fn remount_data_ro_rw_lands_on_superblock_flags() {
         SuperBlockFlags::empty(),
         MountOptions::parse(None).unwrap(),
         &kcred::initial_cred(),
-    );
+    ).unwrap();
     assert!(!fs.flags().contains(SuperBlockFlags::RDONLY));
     let cred = kcred::initial_cred();
 

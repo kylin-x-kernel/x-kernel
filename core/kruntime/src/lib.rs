@@ -351,7 +351,9 @@ fn late_init_main(cpu_id: kcpu_id_map::LogicalCpuId) {
     fs_boot::init_device_discovery();
     kdriver::init_drivers();
     #[cfg(feature = "char")]
-    ktty::tty::try_handoff_console();
+    if let Err(error) = ktty::tty::try_handoff_console() {
+        warn!("tty: native console preparation failed ({error:?}); retaining boot console");
+    }
 
     // Probe CPU / SMCCC / VirtIO / jitter sources after drivers are visible.
     // Must run before TEE register_init paths that call fill_random().

@@ -4,10 +4,12 @@
 
 //! VirtIO demand-driven entropy collection (requires Host trust).
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
 use hwrng::HwrngDevice;
+use kalloc_types::KBox;
 use kclass::{ClassDevice, HwrngDeviceImpl, hwrng_devices, subscribe_hwrng_available};
+use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kspin::SpinNoIrq;
 use ksync::Mutex;
@@ -19,7 +21,7 @@ const READ_RETRY_DELAY: ktime_types::TimeSpan = ktime_types::TimeSpan::from_mill
 static SELECTED_SOURCE: Lazy<Mutex<Option<Arc<VirtioEntropySource>>>> =
     Lazy::new(|| Mutex::new(None));
 
-type CollectorWork = WorkHandle<Box<dyn Fn() + Send + Sync>>;
+type CollectorWork = WorkHandle<KBox<dyn Fn() + Send + Sync>>;
 
 struct VirtioEntropySource {
     collector: Arc<EntropyCollector>,
@@ -40,7 +42,15 @@ struct CollectorState {
 }
 
 impl VirtioEntropySource {
-    fn new(device: ClassDevice<HwrngDeviceImpl>) -> Result<Arc<Self>, HandleCreateError> {
+    /// Prepares a collector in sleepable, reclaim-safe task context with IRQs
+    /// and preemption enabled, outside non-sleepable RCU sections. Source,
+    /// collector and class-registry locks must not enclose this call. The KERNEL
+    /// callback allocation precedes publication; failure retains the old source.
+    /// Nested Arc and worker allocations keep their existing failure behavior.
+    fn new(device: ClassDevice<HwrngDeviceImpl>) -> KResult<Arc<Self>> {
+        if !ktask::is_sleepable_context() {
+            return Err(KError::InvalidInput);
+        }
         let collector = Arc::new(EntropyCollector {
             device,
             state: SpinNoIrq::new(CollectorState {
@@ -49,8 +59,11 @@ impl VirtioEntropySource {
             }),
         });
         let callback = collector.clone();
-        let work =
-            WorkHandle::new(Box::new(move || callback.run()) as Box<dyn Fn() + Send + Sync>)?;
+        let callback: KBox<dyn Fn() + Send + Sync> = KBox::new(move || callback.run())?;
+        let work = WorkHandle::new(callback).map_err(|error| match error {
+            HandleCreateError::InvalidContext => KError::InvalidInput,
+            HandleCreateError::ServicesUnavailable => KError::OperationNotSupported,
+        })?;
         Ok(Arc::new(Self { collector, work }))
     }
 

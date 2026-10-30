@@ -1,5 +1,16 @@
 # ksyscall design
 
+## Clone Entry Preparation
+
+Clone prepares its user entry with KERNEL after flag, namespace capability and
+exit-signal validation, but before process or sibling-thread preparation. This
+is sleepable syscall task context with no cgroup transaction or reclaim-dependent
+lock held. The current-task/thread handles retain owners, not lock guards.
+NoMemory propagates before child identities and relationships are created.
+The prepared entry is transferred to `new_user_task` after clone preparation,
+without adding another callback allocation beyond the rollback boundary.
+Stack and other legacy allocations are unchanged.
+
 ## Test Layout
 
 Guest cases and exec/exit-tail fixtures live in `ut-tests/`, mounted at their

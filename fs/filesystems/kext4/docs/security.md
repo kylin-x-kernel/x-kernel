@@ -1,5 +1,14 @@
 # KExt4 — 安全与可靠性分析
 
+## VFS owner allocation failure
+
+If the Ext4Mount owner cannot be allocated, fill_super returns NoMemory and drops
+the prepared state before installing operations, private data or a root. KVFS
+performs its existing failed-initialization transition and releases the reserved
+identity/claim. This does not undo prior on-disk recovery or make nested mount
+allocations fallible. NOFS still permits reclaim/I/O and is not used as a proof
+that canonical-device initialization can safely be re-entered.
+
 ## 信任模型
 
 KExt4 只把块设备视为 I/O 传输层，不信任其中的元数据天然有效。来自磁盘的

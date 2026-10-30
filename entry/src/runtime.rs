@@ -17,7 +17,12 @@ mod unittest_runtime {
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     fn init_unittest_tee_context(thread: &Thread) {
         if kbuild_config::KFEAT_TEE {
-            tee_kernel::tee::set_tee_session_ctx(thread);
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: test scenario: the user-test \
+                          executor requires its TEE session fixture before running the test"
+            )]
+            tee_kernel::tee::set_tee_session_ctx(thread).expect("prepare test TEE session");
         }
     }
 

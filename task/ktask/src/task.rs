@@ -19,6 +19,7 @@ use core::{
     task::Poll,
 };
 
+use kalloc_types::{AllocFlags, KBox};
 use kcompletion::Completion;
 #[cfg(feature = "smp")]
 use kcpu_id_map::KCpuMaskExt;
@@ -145,11 +146,11 @@ pub trait UserTaskRuntime: Send + Sync + Any {
 /// [`TaskInner::new_user`]); there is no longer an empty state that gets filled
 /// in later, so this is effectively an immutable, single-shot container.
 struct UserRuntimeSlot {
-    value: UnsafeCell<Option<Box<dyn UserTaskRuntime>>>,
+    value: UnsafeCell<Option<KBox<dyn UserTaskRuntime>>>,
 }
 
 impl UserRuntimeSlot {
-    fn ready(user_runtime: Box<dyn UserTaskRuntime>) -> Self {
+    fn ready(user_runtime: KBox<dyn UserTaskRuntime>) -> Self {
         Self {
             value: UnsafeCell::new(Some(user_runtime)),
         }
@@ -235,6 +236,85 @@ unsafe impl Send for TaskContextCell {}
 // mutate the stored `TaskContext`.
 unsafe impl Sync for TaskContextCell {}
 
+trait OwnedTaskEntry: Send {
+    fn run(self: KBox<Self>);
+}
+
+impl<F: FnOnce() + Send> OwnedTaskEntry for F {
+    fn run(self: KBox<Self>) {
+        KBox::into_inner(self)();
+    }
+}
+
+/// A fallibly prepared, consuming task entry, independent of task publication.
+///
+/// Prepare this owner before irreversible process/thread creation. Taking it
+/// into a task does not allocate callback storage. Cancellation drops captures
+/// in the caller's context; invocation runs in the new task after switch cleanup
+/// and IRQ enablement. Allocation flags do not constrain either operation.
+pub struct PreparedTaskEntry(KBox<dyn OwnedTaskEntry>);
+
+impl PreparedTaskEntry {
+    /// Prepares an entry with KERNEL permissions in sleepable task context.
+    /// No user process is required. Callers must hold no locks required by
+    /// reclaim, I/O or filesystem callbacks. NoMemory drops the unused captures.
+    pub fn new<F: FnOnce() + Send + 'static>(entry: F) -> KResult<Self> {
+        Self::new_with_flags(entry, AllocFlags::KERNEL)
+    }
+
+    /// Prepares an entry without sleeping reclaim. NoMemory drops the captures;
+    /// their destructors and allocator lock order must be safe in this context.
+    /// This does not make task construction IRQ-safe or promise NMI safety.
+    pub fn new_nowait<F: FnOnce() + Send + 'static>(entry: F) -> KResult<Self> {
+        Self::new_with_flags(entry, AllocFlags::NOWAIT)
+    }
+
+    /// Prepares an entry with explicit allocation permissions.
+    ///
+    /// Reclaim-capable flags require the context of [`Self::new`]; otherwise the
+    /// constraints of [`Self::new_nowait`] apply. Flags affect only this owner.
+    /// Unknown bits return InvalidInput; allocation failure returns NoMemory.
+    /// Both errors drop the captures without invoking the entry.
+    pub fn new_with_flags<F: FnOnce() + Send + 'static>(
+        entry: F,
+        flags: AllocFlags,
+    ) -> KResult<Self> {
+        Self::new_with_factory(entry, flags, KBox::new_with_flags)
+    }
+
+    fn new_with_factory<F: FnOnce() + Send + 'static>(
+        entry: F,
+        flags: AllocFlags,
+        allocate: impl FnOnce(F, AllocFlags) -> KResult<KBox<F>>,
+    ) -> KResult<Self> {
+        Ok(Self(allocate(entry, flags)?))
+    }
+
+    fn run(self) {
+        self.0.run();
+    }
+}
+
+enum TaskEntry {
+    Closure(Box<dyn FnOnce()>),
+    Prepared(PreparedTaskEntry),
+    Function(fn()),
+    #[cfg(feature = "smp")]
+    TaskArgument(fn(KtaskRef), KtaskRef),
+}
+
+impl TaskEntry {
+    fn run(self) {
+        match self {
+            Self::Closure(entry) => entry(),
+            Self::Prepared(entry) => entry.run(),
+            Self::Function(entry) => entry(),
+            #[cfg(feature = "smp")]
+            Self::TaskArgument(entry, task) => entry(task),
+        }
+    }
+}
+
 /// The inner task structure.
 pub struct TaskInner {
     identity: TaskIdentity,
@@ -246,7 +326,7 @@ pub struct TaskInner {
     /// `/proc/[pid]/stat` `starttime` field (converted to clock ticks).
     start_time_ns: u64,
 
-    entry: Cell<Option<Box<dyn FnOnce()>>>,
+    entry: Cell<Option<TaskEntry>>,
     state: AtomicU8,
     // Task-only access needs preemption exclusion; no IRQ handler reads this slot.
     pub(crate) freeze_request: SpinNoPreempt<Option<Arc<crate::freezer::Request>>>,
@@ -346,15 +426,53 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
+        Self::new_with_entry(
+            TaskEntry::Closure(Box::new(entry)),
+            name,
+            stack_size,
+            identity,
+        )
+    }
+
+    fn new_with_entry(
+        entry: TaskEntry,
+        name: String,
+        stack_size: usize,
+        identity: TaskIdentity,
+    ) -> Self {
         let mut t = Self::new_common(identity, name);
         debug!("new task: {}", t.id_name());
         let kstack = TaskStack::alloc(align_up_4k(stack_size));
 
-        t.entry = Cell::new(Some(Box::new(entry)));
+        t.entry = Cell::new(Some(entry));
         t.ctx_mut()
             .init(task_entry as *const () as usize, kstack.top());
         t.kstack = Some(kstack);
         t
+    }
+
+    /// Creates an internal helper with an inline task argument, without allocating
+    /// a closure owner. Intended for IRQ-disabled affinity migration preparation.
+    /// Requires scheduler task context, not hardirq, serving softirq or NMI;
+    /// no current user process is required. IRQs may remain disabled.
+    ///
+    /// Stack, task bookkeeping and later scheduler-owner allocations retain
+    /// their existing infallible contracts. This is not an allocation-free task
+    /// constructor or a NOFAIL policy. The argument is retained until entry runs
+    /// or the unpublished helper is dropped; neither path duplicates ownership.
+    #[cfg(feature = "smp")]
+    pub(crate) fn new_internal_with_task(
+        entry: fn(KtaskRef),
+        task: KtaskRef,
+        name: String,
+        stack_size: usize,
+    ) -> Self {
+        Self::new_with_entry(
+            TaskEntry::TaskArgument(entry, task),
+            name,
+            stack_size,
+            TaskIdentity::Internal,
+        )
     }
 
     /// Creates a scheduler-internal helper task.
@@ -384,6 +502,27 @@ impl TaskInner {
         F: FnOnce() + Send + 'static,
     {
         Self::new_internal(entry, name, stack_size)
+    }
+
+    /// Creates an unpublished PID-less kernel thread from a prepared entry.
+    ///
+    /// Prepare the entry before committing caller-owned startup state. This
+    /// constructor transfers it without another callback allocation or root PID.
+    /// Requires scheduler task context; no current user process is needed.
+    /// Capture destruction on cancellation must be valid in the caller's context.
+    /// Stack, name and scheduler bookkeeping retain their infallible contracts;
+    /// entry allocation permissions do not apply to those allocations.
+    pub fn new_pidless_kthread_with_entry(
+        entry: PreparedTaskEntry,
+        name: String,
+        stack_size: usize,
+    ) -> Self {
+        Self::new_with_entry(
+            TaskEntry::Prepared(entry),
+            name,
+            stack_size,
+            TaskIdentity::Internal,
+        )
     }
 
     /// Creates a Linux-visible kernel thread in the root/default PID namespace.
@@ -416,23 +555,29 @@ impl TaskInner {
     /// a user task can therefore never be observed without its runtime.
     /// Before making the task runnable, callers must set its saved page-table
     /// root through [`Self::ctx_mut`] to the address space retained by its runtime.
-    pub fn new_user<F>(
-        entry: F,
+    /// The runtime owner is already allocated: accepting it and coercing a
+    /// concrete `KBox` to the runtime trait object do not allocate. After task
+    /// preparation, runtime destruction follows deferred task finalization;
+    /// dropping an unprepared `TaskInner` destroys it in the caller's context.
+    /// Entry ownership must be prepared before committing process/thread state;
+    /// this constructor performs no callback allocation. Stack and task
+    /// bookkeeping allocations retain their existing infallible contracts.
+    /// Requires task context, with no current user process required; runtime
+    /// destruction on cancellation must be valid in the caller's context.
+    pub fn new_user(
+        entry: PreparedTaskEntry,
         name: String,
         task_number: Arc<kidentity::PidHandle>,
-        user_runtime: Box<dyn UserTaskRuntime>,
-    ) -> Self
-    where
-        F: FnOnce() + Send + 'static,
-    {
+        user_runtime: KBox<dyn UserTaskRuntime>,
+    ) -> Self {
         if user_runtime.identity_token() != kidentity::TaskIdentityToken::unknown() {
             assert!(
                 Arc::ptr_eq(&task_number, &user_runtime.task_number()),
                 "a user task's identity must match its runtime number"
             );
         }
-        Self::new_with_identity(
-            entry,
+        Self::new_with_entry(
+            TaskEntry::Prepared(entry),
             name,
             kbuild_config::KERNEL_STACK_SIZE,
             TaskIdentity::User {
@@ -782,11 +927,15 @@ impl TaskInner {
         t
     }
 
-    pub(crate) fn new_idle<F>(entry: F, name: String, stack_size: usize) -> Self
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        Self::new_with_identity(entry, name, stack_size, TaskIdentity::Idle)
+    /// Prepares an idle task with an inline function pointer and no closure owner.
+    /// Boot callers may have IRQs disabled; stack allocation remains infallible.
+    pub(crate) fn new_idle(entry: fn(), name: String, stack_size: usize) -> Self {
+        Self::new_with_entry(
+            TaskEntry::Function(entry),
+            name,
+            stack_size,
+            TaskIdentity::Idle,
+        )
     }
 
     pub(crate) fn new_current_idle(name: String) -> Self {
@@ -1358,7 +1507,7 @@ extern "C" fn task_entry() -> ! {
     let _ = crate::freezer::checkpoint();
     let task = crate::current();
     if let Some(entry) = task.entry.take() {
-        entry()
+        entry.run()
     }
     crate::exit(0);
 }

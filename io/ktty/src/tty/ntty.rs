@@ -15,7 +15,7 @@ use console_driver::{
 };
 use kclass::{CharDeviceImpl, ClassDevice};
 use kerrno::KResult;
-use klazy::lazy_static;
+use klazy::Once;
 use kspin::SpinNoPreempt;
 use ktime_types::TimeSpan;
 use kworkng::DelayedWorkHandle;
@@ -207,19 +207,28 @@ impl TtyWrite for Arc<ConsoleConnection> {
 /// Called in late-init task context after normal workers and device discovery.
 /// No runtime candidate leaves direct boot access intact; repeated calls are
 /// harmless. Input already collected before attachment receives an initial wake.
-pub fn try_handoff_console() {
-    N_TTY.writer.try_handoff();
+/// Returns native-terminal preparation errors; the boot console remains usable.
+pub fn try_handoff_console() -> KResult<()> {
+    native_tty()?.writer.try_handoff();
+    Ok(())
 }
 
-lazy_static! {
-    /// The default TTY device.
-    pub static ref N_TTY: Arc<NTtyDriver> = new_n_tty();
+static N_TTY: Once<Arc<NTtyDriver>> = Once::new();
+
+/// Returns the native terminal, retrying initialization after preparation failure.
+///
+/// Requires sleepable task context after normal worker and console input setup.
+/// Callback ownership uses NOWAIT because singleton initialization and callers
+/// holding the VT output mutex must not enter reclaim. No notification is
+/// attached on allocation failure; nested allocations remain infallible.
+pub fn native_tty() -> KResult<Arc<NTtyDriver>> {
+    N_TTY.try_call_once(new_n_tty).cloned()
 }
 
-fn new_n_tty() -> Arc<NTtyDriver> {
+fn new_n_tty() -> KResult<Arc<NTtyDriver>> {
     let has_input_irq = khal::console::interrupt_id().is_some();
     let connection = Arc::new(ConsoleConnection::new());
-    let tty = Tty::new(
+    let tty = Tty::new_with_flags(
         Arc::default(),
         TtyKind::Terminal,
         TtyConfig {
@@ -227,7 +236,9 @@ fn new_n_tty() -> Arc<NTtyDriver> {
             writer: connection.clone(),
             process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
-    );
+        None,
+        kalloc_types::AllocFlags::NOWAIT,
+    )?;
     #[expect(
         clippy::unwrap_used,
         reason = "CG-021-no-panic-on-reachable-failure: native TTY uses ProcessMode::Work, which \
@@ -239,7 +250,7 @@ fn new_n_tty() -> Arc<NTtyDriver> {
     } else {
         connection.poll_input(waker);
     }
-    tty
+    Ok(tty)
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/tty_ntty.rs");

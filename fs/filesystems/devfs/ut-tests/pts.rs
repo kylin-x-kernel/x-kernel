@@ -24,7 +24,8 @@ impl Drop for RegisteredDevice {
 fn test_filesystem() -> Arc<SimpleFs> {
     let super_block = SimpleFs::new_with(&crate::FILE_SYSTEM_TYPE, crate::DEVFS_MAGIC, |fs| {
         SimpleDir::new_maker(fs, Arc::new(DirMapping::new()))
-    });
+    })
+    .unwrap();
     super_block.private::<Arc<SimpleFs>>().unwrap().clone()
 }
 
@@ -32,7 +33,8 @@ fn test_filesystem() -> Arc<SimpleFs> {
 fn retained_slave_node_does_not_own_pair_or_number() {
     let super_block = SimpleFs::new_with(&crate::FILE_SYSTEM_TYPE, crate::DEVFS_MAGIC, |fs| {
         SimpleDir::new_maker(fs, Arc::new(DirMapping::new()))
-    });
+    })
+    .unwrap();
     let fs = super_block.private::<Arc<SimpleFs>>().unwrap().clone();
     struct RetainedSlave {
         inode: Arc<VfsInode>,

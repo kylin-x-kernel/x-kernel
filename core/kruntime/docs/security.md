@@ -1,5 +1,10 @@
 # kruntime — 安全与可靠性分析
 
+Native TTY callback allocation failure during late-init handoff is recoverable:
+runtime retains boot-console access and logs a warning. The failed initializer
+does not attach an input notification or poison subsequent retries. This does
+not guarantee a working `/dev/console` until devtmpfs preparation succeeds.
+
 ## Foundation IRQ Startup
 
 Controller preparation runs before scheduler installation with ordinary CPU

@@ -1,5 +1,13 @@
 # sysfs — Design
 
+## Fallible singleton mount state
+
+Sysfs uses `Once::try_call_once` with SimpleFs's explicit NOWAIT owner policy.
+The singleton initialization must not gain synchronous reclaim that can re-enter
+sysfs; NOFS/NOIO still permit reclaim and are not a general re-entry exclusion.
+Projection setup completes before entering the filesystem Once. Surrounding
+projection and mount operations still require task context.
+
 ## Fallible directory iterators
 
 SysfsDirectory::child_names returns a KBox iterator with default KERNEL policy.

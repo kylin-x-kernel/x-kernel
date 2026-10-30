@@ -1,5 +1,13 @@
 # sysfs — Security and reliability
 
+## Singleton allocation rollback
+
+A failed private-owner allocation returns NoMemory and resets the filesystem
+Once for retry. No superblock/internal mount is published by that attempt.
+Device projection registration is independent and is not rolled back. Existing
+Arc/tree/root allocations are not made fallible by this change; NOWAIT applies
+only to the private owner, not to the whole operation.
+
 ## Fallible directory iterators
 
 Iterator-owner allocation failure returns NoMemory and releases the snapshot.

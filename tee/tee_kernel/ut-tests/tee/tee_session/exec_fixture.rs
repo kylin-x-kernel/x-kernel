@@ -15,6 +15,50 @@ use crate::tee::{
     tee_svc_storage::tee_svc_storage_add_enum,
 };
 
+#[unittest::def_test(user)]
+fn session_owner_failure_is_retryable_and_existing_owner_skips_allocation() {
+    let prepared = kprocess::current_user_thread()
+        .prepare_thread_clone()
+        .unwrap();
+    let (thread, _) = prepared.into_parts();
+    assert_eq!(
+        ensure_session_with(&thread, || Err(TEE_ERROR_OUT_OF_MEMORY)),
+        Err(TEE_ERROR_OUT_OF_MEMORY)
+    );
+    thread.with_tee_session_ctx(|slot| assert!(slot.is_none()));
+    ensure_session(&thread).unwrap();
+    let address = thread.with_tee_session_ctx(|slot| {
+        core::ptr::from_ref(
+            slot.as_ref()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TeeSessionCtx>()
+                .unwrap(),
+        )
+    });
+    let attempted = Cell::new(false);
+    assert_eq!(
+        ensure_session_with(&thread, || {
+            attempted.set(true);
+            Err(TEE_ERROR_OUT_OF_MEMORY)
+        }),
+        Ok(())
+    );
+    assert!(!attempted.get());
+    thread.with_tee_session_ctx(|slot| {
+        assert_eq!(
+            core::ptr::from_ref(
+                slot.as_ref()
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TeeSessionCtx>()
+                    .unwrap()
+            ),
+            address
+        );
+    });
+}
+
 /// Real session resources observed across exec without owning the session.
 pub struct ExecSessionFixture {
     session_identity: usize,

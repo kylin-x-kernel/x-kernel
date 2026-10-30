@@ -4,7 +4,6 @@
 
 //! Superblock state and filesystem statistics.
 use alloc::{
-    boxed::Box,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -14,6 +13,7 @@ use core::{
 };
 
 use hashbrown::HashMap;
+use kalloc_types::KBox;
 use klazy::{Lazy, Once};
 use ktask::WaitQueue;
 use ktime_types::{SystemTime, TimestampLimits};
@@ -501,7 +501,7 @@ pub struct SuperBlock {
     /// Filesystem magic corresponding to Linux `s_magic`.
     magic: Once<u32>,
     /// Filesystem-private mount state corresponding to Linux `s_fs_info`.
-    private: Once<Box<dyn Any + Send + Sync>>,
+    private: Once<KBox<dyn Any + Send + Sync>>,
     root: Once<Dentry>,
     /// VFS-wide state corresponding to Linux `super_block::s_flags`.
     flags: AtomicSuperBlockFlags,
@@ -666,11 +666,15 @@ impl SuperBlock {
         Ok(super_block)
     }
 
-    /// Creates a superblock with distinct shared operations and mount-private state.
+    /// Creates a superblock with distinct shared operations and prepared private state.
+    ///
+    /// The caller allocates the private owner with a policy appropriate to its
+    /// context before entering this function. This function does not allocate
+    /// another private owner. Root initialization retains its own context requirements.
     pub fn new_with_flags_and_private<T>(
         file_system_type: &'static FileSystemType,
         ops: &'static dyn SuperBlockOperations,
-        private: T,
+        private: KBox<T>,
         flags: SuperBlockFlags,
         block_size: u64,
         max_file_size: u64,
@@ -697,7 +701,9 @@ impl SuperBlock {
     ///
     /// This is the object-model counterpart of Linux `fill_super()` installing
     /// static `s_op`, filesystem-owned `s_fs_info`, and generic `s_blocksize`
-    /// and `s_maxbytes` fields on the same nascent superblock.
+    /// and `s_maxbytes` fields on the same nascent superblock. Private ownership
+    /// must be prepared using the caller's permitted allocation policy, as in
+    /// [`Self::new_with_flags_and_private`]; this function does not reallocate it.
     ///
     /// # Errors
     ///
@@ -706,7 +712,7 @@ impl SuperBlock {
     pub fn try_new_with_flags_and_private<T, E>(
         file_system_type: &'static FileSystemType,
         ops: &'static dyn SuperBlockOperations,
-        private: T,
+        private: KBox<T>,
         flags: SuperBlockFlags,
         block_size: u64,
         max_file_size: u64,
@@ -744,11 +750,13 @@ impl SuperBlock {
     }
 
     /// Installs static operations, mount-private state, and a root on a
-    /// nascent superblock.
+    /// nascent superblock. The private owner must already be allocated using a
+    /// policy appropriate to the caller's context. Ownership is transferred
+    /// without allocation; initializer failure retains it until superblock teardown.
     pub fn initialize_with_private<T, E>(
         self: &Arc<Self>,
         ops: &'static dyn SuperBlockOperations,
-        private: T,
+        private: KBox<T>,
         block_size: u64,
         max_file_size: u64,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
@@ -759,7 +767,7 @@ impl SuperBlock {
         self.initialize_inner(
             ops,
             None,
-            Some(Box::new(private)),
+            Some(private),
             block_size,
             max_file_size,
             init_root_fn,
@@ -770,7 +778,7 @@ impl SuperBlock {
         self: &Arc<Self>,
         ops: &'static dyn SuperBlockOperations,
         default_dentry_operations: Option<&'static dyn DentryOperations>,
-        private: Option<Box<dyn Any + Send + Sync>>,
+        private: Option<KBox<dyn Any + Send + Sync>>,
         block_size: u64,
         max_file_size: u64,
         init_root_fn: impl FnOnce(&Arc<Self>) -> Result<Dentry, E>,
@@ -877,7 +885,7 @@ impl SuperBlock {
     {
         self.private
             .get()
-            .map(Box::as_ref)
+            .map(|private| &**private)
             .ok_or(VfsError::InvalidInput)?
             .downcast_ref::<T>()
             .ok_or(VfsError::InvalidInput)

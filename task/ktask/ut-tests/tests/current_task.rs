@@ -8,6 +8,163 @@ use crate::KtaskRef;
 
 use unittest::{assert, assert_eq, def_test};
 
+struct EntryDropProbe(alloc::sync::Arc<core::sync::atomic::AtomicUsize>);
+
+impl Drop for EntryDropProbe {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn prepared_kernel_entry_transfers_without_reboxing() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    for should_run in [false, true] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let probe = EntryDropProbe(drops.clone());
+        let entry = super::PreparedTaskEntry::new(move || drop(probe)).unwrap();
+        let address = (&*entry.0) as *const dyn super::OwnedTaskEntry as *const ();
+        let task = super::TaskInner::new_pidless_kthread_with_entry(
+            entry, "prepared-kernel-entry".into(), 16384,
+        );
+        assert!(matches!(task.identity, super::TaskIdentity::Internal));
+        let stored = task.entry.take().unwrap();
+        let super::TaskEntry::Prepared(entry) = stored else {
+            panic!("expected prepared kernel entry");
+        };
+        assert_eq!((&*entry.0) as *const dyn super::OwnedTaskEntry as *const (), address);
+        drop(task);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        if should_run {
+            entry.run();
+        } else {
+            drop(entry);
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[def_test]
+fn prepared_consuming_entry_runs_or_cancels_captures_once() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    for should_run in [false, true] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let invoked = calls.clone();
+        let probe = EntryDropProbe(drops.clone());
+        let entry = super::PreparedTaskEntry::new(move || {
+            invoked.fetch_add(1, Ordering::Relaxed);
+            drop(probe);
+        }).unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        if should_run {
+            entry.run();
+        } else {
+            drop(entry);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), usize::from(should_run));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[def_test]
+fn prepared_entry_allocation_failure_drops_without_invoking() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    for flags in [super::AllocFlags::KERNEL, super::AllocFlags::NOWAIT] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let invoked = calls.clone();
+        let probe = EntryDropProbe(drops.clone());
+        let requested = core::cell::Cell::new(None);
+        let result = super::PreparedTaskEntry::new_with_factory(move || {
+            invoked.fetch_add(1, Ordering::Relaxed);
+            drop(probe);
+        }, flags, |_, flags| {
+            requested.set(Some(flags));
+            Err(kerrno::KError::NoMemory)
+        });
+        assert_eq!(result.err(), Some(kerrno::KError::NoMemory));
+        assert_eq!(requested.get(), Some(flags));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[def_test]
+fn prepared_zero_sized_entry_does_not_add_adapter_storage() {
+    let entry = super::PreparedTaskEntry::new_nowait(|| {}).unwrap();
+    assert_eq!(core::alloc::Layout::for_value(&*entry.0).size(), 0);
+    entry.run();
+}
+
+#[def_test]
+fn idle_entry_keeps_a_function_pointer_without_closure_storage() {
+    static CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    fn entry() {
+        CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    let before = CALLS.load(core::sync::atomic::Ordering::Relaxed);
+    let task = super::TaskInner::new_idle(entry, "entry-test".into(), 16384);
+    let prepared = task.entry.take().unwrap();
+    assert!(matches!(&prepared, super::TaskEntry::Function(_)));
+    assert!(task.entry.take().is_none());
+    prepared.run();
+    assert_eq!(CALLS.load(core::sync::atomic::Ordering::Relaxed), before + 1);
+}
+
+#[cfg(feature = "smp")]
+#[def_test]
+fn task_argument_entry_transfers_and_releases_its_owner_once() {
+    let target = super::TaskInner::new_common(
+        super::TaskIdentity::Internal,
+        "argument-target".into(),
+    ).into_arc();
+    let before = KtaskRef::strong_count(&target);
+    let helper = super::TaskInner::new_internal_with_task(
+        |task| task.set_name("invoked"),
+        target.clone(),
+        "argument-helper".into(),
+        16384,
+    );
+    assert_eq!(KtaskRef::strong_count(&target), before + 1);
+    let prepared = helper.entry.take().unwrap();
+    assert!(matches!(&prepared, super::TaskEntry::TaskArgument(_, retained) if KtaskRef::ptr_eq(retained, &target)));
+    assert!(helper.entry.take().is_none());
+    drop(helper);
+    assert_eq!(KtaskRef::strong_count(&target), before + 1);
+    prepared.run();
+    assert_eq!(KtaskRef::strong_count(&target), before);
+    assert_eq!(target.name(), "invoked");
+}
+
+#[cfg(feature = "smp")]
+#[def_test]
+fn dropping_unpublished_task_argument_entry_releases_without_invoking() {
+    static CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let before_calls = CALLS.load(core::sync::atomic::Ordering::Relaxed);
+    let target = super::TaskInner::new_common(
+        super::TaskIdentity::Internal,
+        "cancel-target".into(),
+    ).into_arc();
+    let before = KtaskRef::strong_count(&target);
+    let helper = super::TaskInner::new_internal_with_task(
+        |_| {
+            CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        },
+        target.clone(),
+        "cancel-helper".into(),
+        16384,
+    );
+    assert_eq!(KtaskRef::strong_count(&target), before + 1);
+    drop(helper);
+    assert_eq!(KtaskRef::strong_count(&target), before);
+    assert_eq!(CALLS.load(core::sync::atomic::Ordering::Relaxed), before_calls);
+}
+
 #[def_test]
 fn current_task_read_preserves_irq_and_preempt_state() {
     let task = crate::current();

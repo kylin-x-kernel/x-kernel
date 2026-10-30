@@ -1,5 +1,36 @@
 # kvfs - 设计文档
 
+## Superblock private owners
+
+`SuperBlock::{new_with_flags_and_private,try_new_with_flags_and_private,
+initialize_with_private}` take a prepared `KBox<T>` and erase its type without
+allocating or moving its pointee. Policy selection and allocation failure now
+belong to the filesystem caller; root-initializer errors retain their existing
+error type. `SimpleFs` constructors return `VfsResult`, allocate the owner before
+calling the root factory, and use KERNEL by default. The explicit allocation-flags
+variant supports singleton builders that must not enter synchronous reclaim.
+
+KERNEL callers require sleepable task context, IRQs/preemption enabled, no
+non-sleepable RCU section, and no locks needed by reclaim, I/O or filesystem
+callbacks. NOWAIT changes only owner storage allocation, not the root callback
+or nested container allocations. In particular it does not make mounting IRQ-safe.
+
+| Private-owner preparation path | Policy | Context decision |
+| --- | --- | --- |
+| SimpleFs default, procfs, cgroup2fs, bpffs | KERNEL | Before the root factory; mount namespace and hierarchy locks are not held |
+| devfs and sysfs singleton | NOWAIT | Inside Once initialization; avoid reclaim re-entering the initializing singleton |
+| MemoryFs, ramfs, tmpfs mounts, private memfd | KERNEL | Reclaim-safe task context, before root/namespace/fd publication |
+| Shared kernel shmem | NOWAIT | KERNEL_SHM_FS mutex remains held to preserve singleton identity |
+| ext4 and FAT fill_super | NOWAIT | Canonical device identity is reserved but nascent; avoid new reclaim dependencies on mount completion |
+| 9P mount session | KERNEL | Negotiation and metadata transport calls have returned; no transport guard is retained |
+
+These choices cover the new private owner only. NOWAIT does not make input
+construction or destruction non-sleeping, and does not imply reserve access or
+guaranteed success. NOFS/NOIO still allow direct reclaim; neither is a general
+solution for initialization re-entry. Preparing outside an existing singleton
+gate would require a separate identity/publication redesign, not a mechanical
+owner conversion.
+
 ## Fallible directory iterators
 
 SimpleDirOps::child_names returns a fallibly allocated KBox iterator. DirMapping

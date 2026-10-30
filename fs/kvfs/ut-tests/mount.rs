@@ -326,7 +326,7 @@ fn mock_filesystem(mount_flags: StatFsFlags) -> Arc<SuperBlock> {
     SuperBlock::new_with_flags_and_private(
         &MOCK_FILE_SYSTEM_TYPE,
         &MOCK_SUPER_OPERATIONS,
-        MockSuperPrivate { mount_flags },
+        kalloc_types::KBox::new(MockSuperPrivate { mount_flags }).unwrap(),
         superblock_flags,
         1,
         crate::MAX_LFS_FILESIZE,

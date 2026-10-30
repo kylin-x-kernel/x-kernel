@@ -15,6 +15,23 @@ calls to those owners rather than duplicating their registries.
 
 ## Architecture and entry points
 
+`prepare_user_entry` owns the saved user context and dispatcher in a fallibly
+allocated `PreparedTaskEntry`. It uses KERNEL and requires sleepable task context
+without reclaim-dependent locks. Clone calls it before process/thread preparation;
+`new_user_task` now accepts this prepared owner instead of constructing a closure
+from context and dispatcher arguments. It adds no fallible callback allocation
+after prepared clone ownership is committed.
+
+PID 1 prepares its entry in the late-init task after releasing setup locks.
+Failure remains explicit at the existing fatal bootstrap boundary; this is not
+NOFAIL allocation or an implicit retry policy.
+
+`new_user_task` accepts a preallocated `KBox<Thread>` and transfers it directly
+to `TaskInner::new_user` as the user-runtime DST without reboxing. Initial
+`build_process_thread` errors are reported at PID 1's existing fatal bootstrap
+boundary; ordinary clone preparation returns errors before publication. This
+change does not make the remaining task-construction allocations fallible.
+
 Boot code calls `spawn_init_process` with argv, environment, a syscall dispatcher
 and an exit callback. It allocates root PID 1, resolves executable metadata,
 calls `prepare_user_app_request` to own a validated image and initial stack,

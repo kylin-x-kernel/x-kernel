@@ -10,6 +10,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use kalloc_types::AllocFlags;
 use kcpu::userspace::{UserContext, UserRestorableContext};
 use kerrno::{KResult, LinuxError};
 use kspin::SpinNoIrq;
@@ -63,15 +64,44 @@ pub struct ThreadSignalManager {
 }
 
 impl ThreadSignalManager {
-    /// Create a new thread signal manager attached to a process.
-    pub fn new(tid: u32, proc: Arc<ProcessSignalManager>) -> Arc<Self> {
-        let (slot, hint) = proc.siglock().register(tid);
-        Arc::new(Self {
+    /// Creates a thread signal manager using the default KERNEL slot policy.
+    ///
+    /// Requires sleepable task context, IRQs and preemption enabled, outside
+    /// non-sleepable RCU sections and without locks needed by reclaim, IO or
+    /// filesystem callbacks. See [`Self::new_with_flags`] for failure scope.
+    pub fn new(tid: u32, proc: Arc<ProcessSignalManager>) -> KResult<Arc<Self>> {
+        Self::new_with_flags(tid, proc, AllocFlags::KERNEL)
+    }
+
+    /// Creates a manager without sleeping or entering reclaim for slot storage.
+    ///
+    /// Intended for clone transactions that must not acquire new reclaim
+    /// dependencies while holding process locks. Not NMI-safe or allocator
+    /// reentrant; Arc allocation and slot-table growth remain infallible.
+    pub fn new_nowait(tid: u32, proc: Arc<ProcessSignalManager>) -> KResult<Arc<Self>> {
+        Self::new_with_flags(tid, proc, AllocFlags::NOWAIT)
+    }
+
+    /// Creates a manager with caller-selected slot allocation permissions.
+    ///
+    /// The caller must meet `KBox::new_with_flags` context requirements:
+    /// DIRECT_RECLAIM requires sleepable context and reclaim-compatible locks;
+    /// without it, allocator lock ordering and reentrancy constraints still apply.
+    /// Slot allocation precedes the signal lock. NoMemory or invalid flags leave
+    /// registration unchanged. Flags cover only slot storage, not Arc allocation
+    /// or table growth, which retain their existing infallible behavior.
+    pub fn new_with_flags(
+        tid: u32,
+        proc: Arc<ProcessSignalManager>,
+        flags: AllocFlags,
+    ) -> KResult<Arc<Self>> {
+        let (slot, hint) = proc.siglock().register(tid, flags)?;
+        Ok(Arc::new(Self {
             proc,
             slot,
             stack: SpinNoIrq::new(SignalStack::default()),
             hint,
-        })
+        }))
     }
 
     /// Rebinds this thread's delivery target after an `exec` identity takeover.

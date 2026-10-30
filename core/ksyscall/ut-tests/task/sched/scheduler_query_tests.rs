@@ -27,12 +27,12 @@ fn run_worker(check_fn: fn() -> TestResult) -> TestResult {
     let result = Arc::new(SpinNoPreempt::new(None));
     let worker_result = result.clone();
     let mut task = TaskInner::new_user(
-        move || {
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let outcome = check_fn();
             *worker_result.lock() = Some(outcome);
             // Remove this fixture's published TID before its task exits.
             posix_process::do_exit(0, false);
-        },
+        }).expect("test entry preparation"),
         "scheduler-query-worker".into(),
         task_number,
         thread,
@@ -246,7 +246,7 @@ fn scheduler_query_and_setters_address_published_worker_tid() -> TestResult {
     let page_table_root = prepared.page_table_root();
     let (thread, task_number) = prepared.into_parts();
     let mut task = TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         "scheduler-inactive-worker".into(),
         task_number,
         thread,

@@ -27,7 +27,8 @@ static NEXT_DEVICE: AtomicU32 = AtomicU32::new(0);
 pub(crate) fn open_character_node(name: &str, ops: Arc<dyn DeviceFileOps>) -> Arc<VfsFile> {
     let super_block = SimpleFs::new_with(&crate::FILE_SYSTEM_TYPE, crate::DEVFS_MAGIC, |fs| {
         SimpleDir::new_maker(fs, Arc::new(kvfs::DirMapping::new()))
-    });
+    })
+    .unwrap();
     let fs = super_block.private::<Arc<SimpleFs>>().unwrap().clone();
     let device = DeviceFile::new_character(
         fs,

@@ -14,6 +14,132 @@ use super::*;
 struct DropProbe<'a>(&'a Cell<usize>);
 
 #[def_test]
+fn into_inner_transfers_noncopy_value_without_running_drop() {
+    let drops = Cell::new(0);
+    let owned = KBox::new_nowait(DropProbe(&drops)).unwrap();
+    let value = KBox::into_inner(owned);
+    assert_eq!(drops.get(), 0);
+    assert!(core::ptr::eq(value.0, &drops));
+    drop(value);
+    assert_eq!(drops.get(), 1);
+}
+
+#[def_test]
+fn into_inner_preserves_aligned_value_and_owned_array() {
+    #[repr(align(256))]
+    struct Aligned<'a> {
+        value: usize,
+        probes: [DropProbe<'a>; 3],
+    }
+    let drops = Cell::new(0);
+    let mut owned = KBox::new_nowait(Aligned {
+        value: 7,
+        probes: core::array::from_fn(|_| DropProbe(&drops)),
+    }).unwrap();
+    owned.value = 19;
+    let value = KBox::into_inner(owned);
+    assert_eq!(value.value, 19);
+    assert_eq!(value.probes.len(), 3);
+    assert_eq!(core::ptr::from_ref(&value).addr() % 256, 0);
+    assert_eq!(drops.get(), 0);
+    drop(value);
+    assert_eq!(drops.get(), 3);
+}
+
+#[def_test]
+fn into_inner_preserves_aligned_zero_sized_destructor() {
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    #[repr(align(256))]
+    struct AlignedZero;
+    impl Drop for AlignedZero {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let before = DROPS.load(Ordering::Relaxed);
+    let owned = KBox::new_with_allocator(AlignedZero, AllocFlags::NOWAIT, |_, _| {
+        Err(KError::NoMemory)
+    }).unwrap();
+    let value = KBox::into_inner(owned);
+    assert_eq!(DROPS.load(Ordering::Relaxed), before);
+    drop(value);
+    assert_eq!(DROPS.load(Ordering::Relaxed), before + 1);
+}
+
+#[def_test]
+fn into_inner_can_consume_a_sized_fn_once_capture() {
+    let drops = Cell::new(0);
+    let probe = DropProbe(&drops);
+    let callback = KBox::new_nowait(move || probe).unwrap();
+    let callback = KBox::into_inner(callback);
+    assert_eq!(drops.get(), 0);
+    let captured = callback();
+    assert_eq!(drops.get(), 0);
+    drop(captured);
+    assert_eq!(drops.get(), 1);
+}
+
+#[def_test]
+fn shared_callback_forwards_arguments_and_preserves_captures() {
+    fn invoke(callback: impl Fn(usize, usize) -> usize) -> usize {
+        callback(2, 3)
+    }
+    let calls = Cell::new(0);
+    let drops = Cell::new(0);
+    let probe = DropProbe(&drops);
+    let callback = KBox::new(|left, right| {
+        calls.set(calls.get() + 1);
+        left + right + probe.drops()
+    }).unwrap();
+    let callback: KBox<dyn Fn(usize, usize) -> usize + '_> = callback;
+    assert_eq!(invoke(&callback), 5);
+    assert_eq!(invoke(callback), 5);
+    assert_eq!(calls.get(), 2);
+    assert_eq!(drops.get(), 0);
+    drop(probe);
+    assert_eq!(drops.get(), 1);
+}
+
+#[def_test]
+fn mutable_callback_consumption_drops_captures_once() {
+    fn consume(callback: impl FnOnce(usize) -> usize) -> usize {
+        callback(3)
+    }
+    let drops = Cell::new(0);
+    let probe = DropProbe(&drops);
+    let mut total = 0;
+    let callback = KBox::new(move |increment| {
+        total += increment;
+        total + probe.drops()
+    }).unwrap();
+    let mut callback: KBox<dyn FnMut(usize) -> usize + '_> = callback;
+    assert_eq!(callback(2), 2);
+    assert_eq!(consume(callback), 5);
+    assert_eq!(drops.get(), 1);
+}
+
+#[def_test]
+fn callback_allocation_failure_drops_capture_without_calling_it() {
+    for flags in [AllocFlags::KERNEL, AllocFlags::NOWAIT] {
+        let calls = Cell::new(0);
+        let calls_ref = &calls;
+        let drops = Cell::new(0);
+        let probe = DropProbe(&drops);
+        let callback = move || {
+            calls_ref.set(calls_ref.get() + 1);
+            probe.drops()
+        };
+        let result = KBox::new_with_allocator(callback, flags, |_, requested| {
+            assert_eq!(requested, flags);
+            Err(KError::NoMemory)
+        });
+        assert_eq!(result.err(), Some(KError::NoMemory));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(drops.get(), 1);
+    }
+}
+
+#[def_test]
 fn boxed_iterators_forward_and_support_owned_adapters() {
     let values = [2, 3, 5, 7];
     let mut sized = KBox::new(values.iter()).unwrap();

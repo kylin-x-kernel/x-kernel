@@ -21,7 +21,7 @@ fn interrupted_context(error: LinuxError) -> UserContext {
 #[def_test]
 fn default_continue_does_not_suppress_syscall_restart() {
     let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
-    let signal = ThreadSignalManager::new(1, process);
+    let signal = ThreadSignalManager::new(1, process).unwrap();
     let mut uctx = interrupted_context(LinuxError::ERESTARTSYS);
     let action = signal.handle_signal(
         &mut uctx,

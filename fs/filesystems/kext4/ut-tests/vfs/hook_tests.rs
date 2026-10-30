@@ -36,7 +36,7 @@ fn writable_mount(filesystem: Ext4SbInfo, private: Ext4Inode) -> (Arc<SuperBlock
     let super_block = SuperBlock::new_with_flags_and_private(
         &crate::FILE_SYSTEM_TYPE,
         &EXT4_SUPER_OPERATIONS,
-        Ext4Mount::new(filesystem),
+        kalloc_types::KBox::new(Ext4Mount::new(filesystem)).unwrap(),
         SuperBlockFlags::empty(),
         PAGE_SIZE_4K as u64,
         u64::MAX,

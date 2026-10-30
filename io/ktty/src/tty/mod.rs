@@ -27,7 +27,7 @@ mod pty;
 mod pty_pair;
 mod vt;
 
-pub use ntty::{N_TTY, NTtyDriver, try_handoff_console};
+pub use ntty::{NTtyDriver, native_tty, try_handoff_console};
 pub use pty::PtyDriver;
 #[cfg(unittest)]
 use pty::create_pty_pair;
@@ -35,7 +35,7 @@ pub use pty_pair::{
     PtyPair, open_ptmx, pty_allocated_count, pty_limit, pty_slave_inode_for, pty_slave_numbers_for,
     register_pty_drivers,
 };
-pub use vt::{VT_CONSOLE, VtConsole, register_fixed_vt_devices};
+pub use vt::{VtConsole, register_fixed_vt_devices, vt_console};
 
 fn current_tty_ops(file: &mut VfsFileBuilder) -> KResult<Arc<dyn DeviceFileOps>> {
     let term = kprocess::current_user_thread()
@@ -98,7 +98,7 @@ enum TtyKind {
 }
 
 impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
-    fn new(terminal: Arc<Terminal>, kind: TtyKind, config: TtyConfig<R, W>) -> Arc<Self> {
+    fn new(terminal: Arc<Terminal>, kind: TtyKind, config: TtyConfig<R, W>) -> KResult<Arc<Self>> {
         Self::new_with_pair(terminal, kind, config, None)
     }
 
@@ -107,13 +107,29 @@ impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
         kind: TtyKind,
         config: TtyConfig<R, W>,
         pty_pair: Option<Weak<PtyPair>>,
-    ) -> Arc<Self> {
+    ) -> KResult<Arc<Self>> {
+        Self::new_with_flags(
+            terminal,
+            kind,
+            config,
+            pty_pair,
+            kalloc_types::AllocFlags::KERNEL,
+        )
+    }
+
+    fn new_with_flags(
+        terminal: Arc<Terminal>,
+        kind: TtyKind,
+        config: TtyConfig<R, W>,
+        pty_pair: Option<Weak<PtyPair>>,
+        flags: kalloc_types::AllocFlags,
+    ) -> KResult<Arc<Self>> {
         let writer = config.writer.clone();
-        let port = TtyPort::new(terminal.clone(), config);
+        let port = TtyPort::new_with_flags(terminal.clone(), config, flags)?;
         let output = port.output.clone();
         let ingress = port.ingress.clone();
         let input = Mutex::new(port);
-        Arc::new_cyclic(|this| Self {
+        Ok(Arc::new_cyclic(|this| Self {
             this: this.clone(),
             terminal,
             input,
@@ -122,7 +138,7 @@ impl<R: TtyRead, W: TtyWrite + Clone> Tty<R, W> {
             ingress,
             kind,
             pty_pair,
-        })
+        }))
     }
 }
 

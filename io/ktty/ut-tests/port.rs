@@ -105,6 +105,43 @@ struct WakeCounter {
     woke: AtomicBool,
 }
 
+#[def_test]
+fn failed_work_preparation_preserves_ingress_binding_and_releases_captures() {
+    struct Reader(Arc<InputIngress>);
+    impl TtyRead for Reader {
+        fn read(&mut self, buf: &mut [u8]) -> usize {
+            self.0.read(buf)
+        }
+
+        fn input_ingress(&self) -> Option<Arc<InputIngress>> {
+            Some(self.0.clone())
+        }
+    }
+
+    let ingress = Arc::new(InputIngress::default());
+    let original = Waker::from(Arc::new(WakeCounter::default()));
+    *ingress.input_waker.lock() = Some(original.clone());
+    let writer = MockWriter::default();
+    let config = || TtyConfig {
+        reader: Reader(ingress.clone()),
+        writer: writer.clone(),
+        process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
+    };
+    let failed = TtyPort::new_with_flags(
+        Arc::default(),
+        config(),
+        AllocFlags::from_bits_retain(1 << 31),
+    );
+    assert_eq!(failed.err(), Some(KError::InvalidInput));
+    assert_eq!(Arc::strong_count(&writer.writes), 1);
+    assert_eq!(Arc::strong_count(&ingress), 1);
+    assert!(ingress.input_waker.lock().as_ref().unwrap().will_wake(&original));
+    let port = TtyPort::new(Arc::default(), config()).unwrap();
+    assert!(!ingress.input_waker.lock().as_ref().unwrap().will_wake(&original));
+    port.input_work().unwrap().shutdown();
+    drop(port);
+}
+
 impl Wake for WakeCounter {
     fn wake(self: Arc<Self>) {
         self.woke.store(true, Ordering::Relaxed);
@@ -142,7 +179,8 @@ fn new_manual_ldisc(
             writer: writer.clone(),
             process_mode: ProcessMode::Manual,
         },
-    );
+    )
+    .unwrap();
     (ldisc, writer)
 }
 
@@ -161,7 +199,8 @@ fn new_manual_ldisc_with_chunk_limit(
             writer: writer.clone(),
             process_mode: ProcessMode::Manual,
         },
-    );
+    )
+    .unwrap();
     (ldisc, writer)
 }
 
@@ -328,7 +367,8 @@ fn test_process_mode_none_reads_raw_stream_and_reports_would_block_when_empty() 
             writer,
             process_mode: ProcessMode::None(poll_rx),
         },
-    );
+    )
+    .unwrap();
 
     assert!(ldisc.poll_read());
 
@@ -442,7 +482,8 @@ fn work_drains_multiple_budgets_and_resumes_after_read_space() {
                 writer: MockWriter::default(),
                 process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
             },
-        );
+        )
+        .unwrap();
         let work = ldisc.input_work().unwrap();
         let input_waker = ldisc.input_waker().unwrap();
         let weak = Arc::downgrade(&work);
@@ -525,7 +566,8 @@ fn running_empty_read_keeps_a_concurrent_submission() {
             writer: MockWriter::default(),
             process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
-    );
+    )
+    .unwrap();
     let work = ldisc.input_work().unwrap();
     let input_waker = ldisc.input_waker().unwrap();
     input_waker.wake_by_ref();
@@ -550,7 +592,7 @@ fn input_notifications_stay_with_their_source() {
                 writer: MockWriter::default(),
                 process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
             },
-        )
+        ).unwrap()
     };
     let mut a = make_port(b"a\n");
     let mut b = make_port(b"b\n");
@@ -622,7 +664,8 @@ fn closing_input_reclaims_idle_pending_and_running_readers() {
                 writer: MockWriter::default(),
                 process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
             },
-        );
+        )
+        .unwrap();
         let work = port.input_work().unwrap();
         let waker = port.input_waker().unwrap();
         if mode == 2 {

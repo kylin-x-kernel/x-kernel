@@ -11,10 +11,11 @@
 //! File reads recheck expirations after signal interruption; a still-empty wait
 //! reports the VFS file-wait marker. Syscall return owns handler restart policy.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::mem::size_of;
 
 use anon_inodefs::AnonInodeFs;
+use kalloc_types::KBox;
 use kcred::Cred;
 use kerrno::{KError, KResult};
 use khal::time::monotonic_time;
@@ -239,16 +240,25 @@ impl TimerFd {
     /// Relative REALTIME arming uses MONOTONIC.
     /// The caller must initialize the timer runtime before programming it.
     /// Preparation allocates; subsequent programming reuses the timer storage.
+    /// Requires sleepable task context with IRQs/preemption enabled, outside
+    /// non-sleepable RCU sections and locks needed by reclaim, IO or filesystem
+    /// callbacks. The clock-change callback owner uses the default KERNEL policy
+    /// before observer publication and without the programming or handler lock.
     ///
     /// # Errors
     /// Returns InvalidInput outside sleepable preparation context, or
     /// OperationNotSupported if the normal work service needed by changing
     /// clocks is unavailable. MONOTONIC does not require that service.
+    /// Returns NoMemory if the clock-change callback owner cannot be allocated.
     ///
     /// # Panics
     /// Panics if the timer provider violates its newly allocated exclusive
-    /// storage invariant. Allocation failure follows the kernel allocator policy.
+    /// storage invariant. Nested Arc/timer allocations retain their existing
+    /// allocation-failure behavior; only callback owner allocation is fallible.
     pub fn new(clock: TimerFdClock) -> KResult<Arc<Self>> {
+        if !ktask::is_sleepable_context() {
+            return Err(KError::InvalidInput);
+        }
         let handler = TimerFdHandler {
             clock,
             inner: SpinNoIrq::new(TimerFdInner {
@@ -266,7 +276,7 @@ impl TimerFd {
         });
         let subscription = if matches!(clock, TimerFdClock::Realtime | TimerFdClock::Boottime) {
             let work_owner = runtime.clone();
-            let callback: Box<dyn Fn() + Send + Sync> = Box::new(move || work_owner.refresh());
+            let callback: KBox<dyn Fn() + Send + Sync> = KBox::new(move || work_owner.refresh())?;
             let work = kworkng::WorkHandle::new(callback).map_err(|error| match error {
                 kworkng::HandleCreateError::InvalidContext => KError::InvalidInput,
                 kworkng::HandleCreateError::ServicesUnavailable => KError::OperationNotSupported,
@@ -296,6 +306,9 @@ impl TimerFd {
     ///
     /// # Panics
     /// Has the timer-preparation invariant panic described by [`Self::new`].
+    ///
+    /// # Execution context
+    /// Requires the sleepable, reclaim-safe context documented by [`Self::new`].
     pub fn new_file(
         clock: TimerFdClock,
         open_flags: u32,
@@ -488,7 +501,7 @@ impl Pollable for TimerFd {
 // core Timer (and synchronously wait for delivery) in IRQ context.
 struct TimerFdObserver {
     runtime: Arc<TimerFdRuntime>,
-    work: kworkng::WorkHandle<Box<dyn Fn() + Send + Sync>>,
+    work: kworkng::WorkHandle<KBox<dyn Fn() + Send + Sync>>,
 }
 impl ktime::ClockObserver for TimerFdObserver {
     fn on_clock_update(&self, update: ktime::ClockUpdate) {

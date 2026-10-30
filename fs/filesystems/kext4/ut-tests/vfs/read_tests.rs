@@ -34,7 +34,7 @@ pub(super) fn cached_file(
     let super_block = SuperBlock::new_with_flags_and_private(
         &crate::FILE_SYSTEM_TYPE,
         &EXT4_SUPER_OPERATIONS,
-        Ext4Mount::new(filesystem),
+        kalloc_types::KBox::new(Ext4Mount::new(filesystem)).unwrap(),
         flags,
         PAGE_SIZE_4K as u64,
         u64::MAX,

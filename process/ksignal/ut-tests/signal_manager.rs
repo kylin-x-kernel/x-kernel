@@ -28,7 +28,47 @@ use crate::{
 
 fn new_thread_manager() -> alloc::sync::Arc<ThreadSignalManager> {
     let proc = alloc::sync::Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
-    ThreadSignalManager::new(1, proc)
+    ThreadSignalManager::new(1, proc).unwrap()
+}
+
+#[def_test]
+fn test_slot_policy_failure_does_not_publish_registration() {
+    let lock = crate::SigLock::new();
+    let invalid = kalloc_types::AllocFlags::from_bits_retain(1 << 31);
+    assert!(matches!(
+        lock.register(41, invalid),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert_eq!(
+        lock.inspect(|view| view.find_target(Signo::SIGUSR1)),
+        (None, false)
+    );
+    let (slot, hint) = lock.register(42, kalloc_types::AllocFlags::NOWAIT).unwrap();
+    assert!(!hint.load(Ordering::Acquire));
+    assert_eq!(
+        lock.inspect(|view| view.find_target(Signo::SIGUSR1)).0,
+        Some(42)
+    );
+    lock.transact(|txn| txn.retire(slot));
+    assert_eq!(
+        lock.inspect(|view| view.find_target(Signo::SIGUSR1)),
+        (None, false)
+    );
+}
+
+#[def_test]
+fn test_manager_policy_failure_releases_process_reference() {
+    let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+    let references = Arc::strong_count(&process);
+    let invalid = kalloc_types::AllocFlags::from_bits_retain(1 << 31);
+    assert!(matches!(
+        ThreadSignalManager::new_with_flags(51, process.clone(), invalid),
+        Err(kerrno::KError::InvalidInput)
+    ));
+    assert_eq!(Arc::strong_count(&process), references);
+    let thread = ThreadSignalManager::new_nowait(51, process.clone()).unwrap();
+    drop(thread);
+    assert_eq!(Arc::strong_count(&process), references);
 }
 
 struct PendingWake {
@@ -74,8 +114,10 @@ fn observe_pending(
 #[def_test]
 fn test_shared_arrival_notifications_do_not_share_pending() {
     let parent = new_thread_manager();
-    let shared = ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap()));
-    let private = ThreadSignalManager::new(3, Arc::new(parent.process().fork_private().unwrap()));
+    let shared =
+        ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap())).unwrap();
+    let private =
+        ThreadSignalManager::new(3, Arc::new(parent.process().fork_private().unwrap())).unwrap();
     let source = parent.pending_source().unwrap();
     let (observed, _registration) = observe_pending(&source, &shared, Signo::SIGUSR1);
     let (isolated, _private_registration) =
@@ -114,7 +156,8 @@ fn test_shared_arrival_notifications_do_not_share_pending() {
 #[def_test]
 fn test_exec_detaches_source_and_release_expires_it_with_manager_alive() {
     let parent = new_thread_manager();
-    let child = ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap()));
+    let child =
+        ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap())).unwrap();
     let old = child.pending_source().unwrap();
     child.process().reset_actions_for_exec().unwrap();
     let (old_observed, _old_registration) = observe_pending(&old, &child, Signo::SIGUSR1);
@@ -168,7 +211,8 @@ fn test_sole_owner_exec_preserves_source_and_pending_before_registration() {
 #[def_test]
 fn test_child_exit_commit_uses_source_current_at_publication() {
     let parent = new_thread_manager();
-    let child = ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap()));
+    let child =
+        ThreadSignalManager::new(2, Arc::new(parent.process().fork_shared().unwrap())).unwrap();
     let (old_observed, _old_registration) =
         observe_pending(&child.pending_source().unwrap(), &child, Signo::SIGCHLD);
     let prepared = child
@@ -841,7 +885,7 @@ fn test_availability_projection_tracks_both_queues() {
     }
 
     let lock = crate::SigLock::new();
-    let (slot, hint) = lock.register(11);
+    let (slot, hint) = lock.register(11, kalloc_types::AllocFlags::KERNEL).unwrap();
     assert!(!hint.load(Ordering::Acquire));
 
     // Thread-private queue: enqueue, mask, unmask, dequeue.
@@ -873,8 +917,8 @@ fn test_availability_projection_tracks_both_queues() {
 #[def_test]
 fn test_leave_group_removes_delivery_target() {
     let lock = crate::SigLock::new();
-    let (first, _) = lock.register(21);
-    let (second, _) = lock.register(22);
+    let (first, _) = lock.register(21, kalloc_types::AllocFlags::KERNEL).unwrap();
+    let (second, _) = lock.register(22, kalloc_types::AllocFlags::KERNEL).unwrap();
 
     let (target, blocked) = lock.inspect(|view| view.find_target(Signo::SIGUSR1));
     assert_eq!(target, Some(21));
@@ -906,11 +950,11 @@ fn test_leave_group_removes_delivery_target() {
 #[def_test]
 fn test_retired_slot_handle_cannot_address_reused_slot() {
     let lock = crate::SigLock::new();
-    let (stale, _) = lock.register(31);
+    let (stale, _) = lock.register(31, kalloc_types::AllocFlags::KERNEL).unwrap();
     lock.transact(|txn| txn.retire(stale));
 
     // The freed index is reused, with a new generation.
-    let (successor, hint) = lock.register(32);
+    let (successor, hint) = lock.register(32, kalloc_types::AllocFlags::KERNEL).unwrap();
     assert!(!hint.load(Ordering::Acquire));
 
     let mut set = SignalSet::default();
@@ -925,14 +969,17 @@ fn test_retired_slot_handle_cannot_address_reused_slot() {
 
     // The successor's own handle still works.
     assert!(lock.transact(|txn| txn.put_thread(successor, SignalInfo::new_kernel(Signo::SIGTERM))));
-    assert!(lock.inspect(|view| view.pending(successor)).has(Signo::SIGTERM));
+    assert!(
+        lock.inspect(|view| view.pending(successor))
+            .has(Signo::SIGTERM)
+    );
     assert!(hint.load(Ordering::Acquire));
 }
 
 #[def_test]
 fn test_blocked_write_entry_drops_unblockable_signals() {
     let lock = crate::SigLock::new();
-    let (slot, _hint) = lock.register(7);
+    let (slot, _hint) = lock.register(7, kalloc_types::AllocFlags::KERNEL).unwrap();
 
     let mut named = SignalSet::default();
     named.add(Signo::SIGTERM);

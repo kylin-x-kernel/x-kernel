@@ -1,5 +1,15 @@
 # kfd_objects — Design
 
+## Fallible work callbacks
+
+Timerfd's REALTIME/BOOTTIME refresh work owns `KBox<dyn Fn() + Send + Sync>`.
+`sys_timerfd_create` prepares it before taking the descriptor-table lock to install
+the file; the callback is allocated before clock-observer registration, with no
+programming mutex or handler spinlock held. Default KERNEL allocation is allowed
+only in the documented sleepable, reclaim-safe task context. `TimerFd::new`
+rejects non-sleepable preparation before allocating any runtime, for all clocks.
+MONOTONIC needs no refresh callback. Nested Arc/timer/work allocations are unchanged.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 

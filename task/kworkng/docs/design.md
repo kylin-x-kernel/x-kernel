@@ -1,5 +1,14 @@
 # Prepared Workqueue API
 
+Manager entry preparation can return `InitError::Normal(NormalRuntimeError::NoMemory)`.
+Normal services join previously started CPU runtimes before returning; no registry
+or softirq action has been published. Startup uses KERNEL allocation permissions
+and requires sleepable context without locks needed by reclaim, I/O or filesystem
+callbacks. Other allocations and dynamic worker growth remain infallible.
+The system boot caller still treats service initialization failure as fatal
+because drivers cannot start without workers; returning NoMemory from this API
+does not introduce NOFAIL allocation or guarantee successful boot under OOM.
+
 ## Purpose And Scope
 
 `kworkng` provides service initialization, default queue selectors, independent

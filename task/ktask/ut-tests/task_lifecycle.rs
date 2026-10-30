@@ -6,9 +6,10 @@
 //! Joining every worker bounds fixture lifetime; the guest harness supplies
 //! the hang bound, with no wall-clock latency assertion in these cases.
 
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+use alloc::{format, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kalloc_types::KBox;
 use unittest::{assert, assert_eq, def_test};
 
 use crate::{WaitQueue, api as ktask};
@@ -30,13 +31,36 @@ impl Drop for DeferredRuntimeProbe {
 }
 
 #[def_test]
+fn preallocated_runtime_preserves_address_and_drops_with_unprepared_task() {
+    let destroyed = Arc::new(AtomicBool::new(false));
+    let runtime = KBox::new(DeferredRuntimeProbe(destroyed.clone())).unwrap();
+    let address = core::ptr::from_ref(&*runtime);
+    let task = crate::TaskInner::new_user(
+        crate::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
+        "preallocated-runtime".into(),
+        kidentity::allocate_root_pid_handle().expect("test task identity"),
+        runtime,
+    );
+    let installed = task
+        .user_runtime()
+        .unwrap()
+        .as_any()
+        .downcast_ref::<DeferredRuntimeProbe>()
+        .unwrap();
+    assert_eq!(core::ptr::from_ref(installed), address);
+    assert!(!destroyed.load(Ordering::Acquire));
+    drop(task);
+    assert!(destroyed.load(Ordering::Acquire));
+}
+
+#[def_test]
 fn task_last_owner_under_irq_guard_defers_sleepable_runtime_drop() {
     let destroyed = Arc::new(AtomicBool::new(false));
     let task = crate::prepare_task(crate::TaskInner::new_user(
-        || {},
+        crate::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         "deferred-runtime-drop".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
-        Box::new(DeferredRuntimeProbe(destroyed.clone())),
+        KBox::new(DeferredRuntimeProbe(destroyed.clone())).unwrap(),
     ));
     let weak = crate::KtaskRef::downgrade(&task);
     let retained = task.clone();
@@ -60,14 +84,14 @@ fn task_exit_without_external_owner_reclaims_after_stack_switch() {
     let can_exit = Arc::new(AtomicBool::new(false));
     let worker_exit = can_exit.clone();
     let task = crate::prepare_task(crate::TaskInner::new_user(
-        move || {
+        crate::PreparedTaskEntry::new_nowait(move || {
             while !worker_exit.load(Ordering::Acquire) {
                 crate::yield_now();
             }
-        },
+        }).expect("test entry preparation"),
         "exit-without-owner".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
-        Box::new(DeferredRuntimeProbe(destroyed.clone())),
+        KBox::new(DeferredRuntimeProbe(destroyed.clone())).unwrap(),
     ));
     let weak = crate::KtaskRef::downgrade(&task);
     crate::activate_task(&task);
@@ -84,10 +108,10 @@ fn task_exit_without_external_owner_reclaims_after_stack_switch() {
 fn exited_task_last_external_owner_can_release_under_irq_guard() {
     let destroyed = Arc::new(AtomicBool::new(false));
     let task = crate::prepare_task(crate::TaskInner::new_user(
-        || {},
+        crate::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         "retained-exited-task".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
-        Box::new(DeferredRuntimeProbe(destroyed.clone())),
+        KBox::new(DeferredRuntimeProbe(destroyed.clone())).unwrap(),
     ));
     let weak = crate::KtaskRef::downgrade(&task);
     crate::activate_task(&task);
@@ -97,10 +121,10 @@ fn exited_task_last_external_owner_can_release_under_irq_guard() {
     }
     let other_destroyed = Arc::new(AtomicBool::new(false));
     let other = crate::prepare_task(crate::TaskInner::new_user(
-        || {},
+        crate::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         "independent-exited-task".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
-        Box::new(DeferredRuntimeProbe(other_destroyed.clone())),
+        KBox::new(DeferredRuntimeProbe(other_destroyed.clone())).unwrap(),
     ));
     crate::activate_task(&other);
     assert_eq!(other.join(), 0);

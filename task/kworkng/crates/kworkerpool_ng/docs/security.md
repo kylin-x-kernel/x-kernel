@@ -72,7 +72,18 @@ Recoverable startup/context/CPU errors use `NormalRuntimeError` and
 `BottomHalfPrepareError`. BH execution rejects with `BottomHalfRunError`
 before acquiring work. Invalid source ownership and impossible state/count
 transitions panic; adapter, callback and Waker panics are not recovered.
-Allocation follows kernel policy; this crate does not supply recoverable OOM handling.
+Manager entry allocation uses KERNEL in sleepable context without service or
+reclaim-dependent caller locks. NoMemory returns before task activation and
+worker reservation. The unpublished empty manager, startup wake and service
+owners are dropped; previously started CPU runtimes are stopped and joined.
+Other allocations still follow their existing infallible policy. In particular,
+dynamic worker entry allocation is not yet fallible: losing a reserved worker
+without a progress protocol would strand demand or the startup readiness wait.
+
+Tests inject entry preparation failure, check that the unpublished service is
+released, and start a fresh runtime afterwards. Collection tests inject NoMemory
+at every startup prefix and check release after joined rollback. These tests
+do not force allocator-wide OOM or claim whole-startup OOM safety.
 
 | Failure mode | Local/system effect | Control |
 | --- | --- | --- |

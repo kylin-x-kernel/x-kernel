@@ -1,5 +1,56 @@
 # ktask — Design
 
+## Inline Scheduler Entries
+
+Task entry storage distinguishes an ordinary owned closure, an inline function
+pointer for idle, and an inline function pointer plus KtaskRef for SMP affinity
+migration. The migration helper is created from IRQ-disabled yield/preemption
+paths after affinity may already exclude the source CPU. Introducing a fallible
+callback allocation there would require a recovery/progress protocol, not an
+expect or an allocation-policy flag. Instead, its single captured task owner is
+stored directly in the helper. Idle likewise retains a no-closure-allocation
+entry instead of acquiring a new failure point during boot.
+
+The shared trampoline still finishes the switch and enables IRQs before taking
+and consuming the entry exactly once. Migration keeps the same MigrateIn enqueue
+kind and target reference lifetime; dropping an unpublished helper releases its
+argument without invoking the callback. Ordinary kernel closure storage remains Box
+pending the fallible factory/caller migration. Stack, String and scheduler-owner
+allocations are unchanged and remain infallible: only the independent closure
+allocation is eliminated. The tagged entry may add per-task representation
+overhead; it is not a variable-size inline closure buffer.
+
+Tests inspect the inline variants, consume entries once, and check retained
+task counts on execution and unpublished cancellation. Existing remote-affinity
+regressions exercise the actual scheduler path and exclude simultaneous execution
+of a task on two CPUs.
+
+## Prepared User Entries
+
+`PreparedTaskEntry` owns a `KBox<dyn OwnedTaskEntry>` with Send and static
+captures. Its consuming receiver uses `arbitrary_self_types`; the concrete
+implementation extracts the closure with `KBox::into_inner` and invokes it
+once. There is no Option adapter or allocation added for zero-sized closures.
+Cancellation drops captures without invocation in the dropping context.
+
+`new` uses KERNEL in sleepable task context without reclaim-dependent locks;
+`new_nowait` and `new_with_flags` expose explicit allocation permissions, not
+a guarantee of success. Capture destructors must be safe in the failure context.
+`TaskInner::new_user` consumes a prepared entry without allocating callback
+storage. Clone callers prepare it before creating child process/thread state,
+not after committing a prepared clone. Ordinary kernel worker callbacks remain
+Box-backed pending their own failure and progress audits. Stack, String and
+scheduler-owner allocations remain infallible.
+
+Tests cover consuming captures, cancellation, injected allocation failure under
+both policies, and zero-sized storage. Injection does not force global OOM.
+
+`new_pidless_kthread_with_entry` also accepts a prepared owner. It creates an
+Internal task without reboxing the closure or allocating a PID. This enables
+callers with a rollback boundary to migrate independently of legacy `spawn`
+and worker-growth paths. Tests verify unchanged entry address, identity, and
+capture release on execution or cancellation. Stack allocation is unchanged.
+
 ## Test Layout
 
 Guest cases and scheduler probes live in `ut-tests/`, mounted by
@@ -1154,6 +1205,11 @@ context. `TaskIdentity::User` keeps `PidHandle` and `UserRuntimeSlot` on the
 same variant. Every user task, including PID 1 init, is filled once by
 `TaskInner::new_user(..., user_runtime)` at construction. There is no later
 install path. Kernel tasks (`KernelThread` / `Internal`) have no runtime.
+The runtime parameter is a preallocated `KBox<dyn UserTaskRuntime>`; converting
+a concrete owner to that DST neither reallocates nor moves the runtime. Runtime
+allocation policy and failure propagation belong to the constructing subsystem,
+not the scheduler. User entries are prepared fallibly before clone state;
+kernel-stack allocation remains unchanged.
 Unittests that need a user execution context construct and start a separate
 user task through normal `TaskInner::new_user` and wait for it to exit;
 they do not temporarily inject a runtime into a non-user task.

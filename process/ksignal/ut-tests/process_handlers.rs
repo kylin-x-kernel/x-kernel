@@ -81,7 +81,7 @@ fn released_manager_cannot_retain_or_recreate_handler_ownership() {
         observer.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)),
         None
     );
-    let thread = ThreadSignalManager::new(8_150, observer);
+    let thread = ThreadSignalManager::new(8_150, observer).unwrap();
     unittest::assert!(!thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR1)));
     unittest::assert!(thread.pending().is_empty());
     unittest::assert!(child.pending().is_empty());

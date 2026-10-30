@@ -37,7 +37,7 @@ fn get_tree(
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
     get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_devfs_with_type(file_system_type, flags))
+        new_devfs_with_type(file_system_type, flags)
     })
 }
 
@@ -66,28 +66,34 @@ fn init_devfs_fs() {
 ///
 /// The singleton retains the internal root mount used for kernel device-node
 /// updates, corresponding to Linux's private devtmpfs mount.
-pub fn new_devfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+/// Requires sleepable task context for root and mount preparation. Private-owner
+/// allocation uses NOWAIT inside the Once initializer to avoid reclaim re-entry;
+/// failure returns NoMemory and leaves the singleton available for retry.
+/// Nested allocations retain their existing behavior.
+pub fn new_devfs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_devfs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
 }
 
 fn new_devfs_with_type(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
-    let (super_block, _internal_mount) = DEVFS.call_once(|| {
+) -> VfsResult<Arc<SuperBlock>> {
+    let (super_block, _internal_mount) = DEVFS.try_call_once(|| {
+        let console = ktty::tty::native_tty()?;
         // Static root entries are fixed on the first mount, so capture firmware
         // before root construction rather than after the bootstrap /dev mount.
         nodes::dtb::capture_snapshot();
-        let super_block = SimpleFs::new_with_superblock_flags(
+        let super_block = SimpleFs::new_with_allocation_flags(
             file_system_type,
             DEVFS_MAGIC,
             superblock_flags,
-            root::builder,
-        );
+            kalloc_types::AllocFlags::NOWAIT,
+            |fs| root::builder(fs, console),
+        )?;
         let internal_mount = Mount::new_root(&super_block);
-        (super_block, internal_mount)
-    });
-    super_block.clone()
+        Ok::<_, kvfs::VfsError>((super_block, internal_mount))
+    })?;
+    Ok(super_block.clone())
 }
 
 #[cfg(feature = "dev-log")]

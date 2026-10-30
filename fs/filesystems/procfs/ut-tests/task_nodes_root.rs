@@ -22,7 +22,8 @@ fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::P
             process,
         });
         kvfs::SimpleDir::new_maker(fs, ops)
-    });
+    })
+    .unwrap();
     kvfs::Mount::new_root(&super_block).root_path()
 }
 
@@ -173,7 +174,7 @@ fn status_credential_target(
     };
     let (thread, identity) = prepared.into_parts();
     kprocess::publish_user_task(ktask::TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         alloc::string::String::from("procfs-status-credential-target"),
         identity,
         thread,
@@ -218,7 +219,8 @@ fn status_test_root() -> kvfs::Path {
             fs.clone(),
             alloc::sync::Arc::new(super::ProcFsHandler::new(fs)),
         )
-    });
+    })
+    .unwrap();
     kvfs::Mount::new_root(&fs).root_path()
 }
 

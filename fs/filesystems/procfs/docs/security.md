@@ -1,5 +1,12 @@
 # procfs - Security and Reliability
 
+## Superblock-owner failure
+
+Private-owner allocation failure returns NoMemory through get_tree before any
+procfs root is published. Existing Arc, inode and snapshot allocations remain
+outside this fallible boundary. Constructor callers must propagate the Result
+rather than turning ordinary mount-time memory pressure into a panic.
+
 Tracing loss counters in `tracing/capture_stats` expose dropped records without
 logging from IRQ/scheduler callbacks. Reading does not reset counters or mutate
 trace configuration. Each open is coherent on its own, not with an independently

@@ -1562,7 +1562,7 @@ impl MmSpace {
         match result {
             Ok(mut completion) => {
                 if let Some(cb) = completion.take_post_action() {
-                    cb(self);
+                    cb.call(self);
                 }
                 if completion.is_cow_conflict_retry() {
                     return PageFaultOutcome::CowConflictRetry;

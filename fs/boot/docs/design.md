@@ -1,5 +1,14 @@
 # fs_boot — 设计文档
 
+## Fallible filesystem-owner preparation
+
+Bootstrap rootfs and the initial cgroup filesystem now return VfsResult for
+private-owner allocation. Namespace preparation runs in the late-init kernel
+task, with no namespace lock held over these constructors, so their default
+KERNEL allocation policy is permitted. These are not early-boot allocations.
+The existing boot boundary still stops startup if a required filesystem cannot
+be constructed; ordinary filesystem constructors do not impose that policy.
+
 ## 定位
 
 `fs_boot` 拥有初始 mount namespace 的布局与 root device 选择策略，不拥有具体 block

@@ -121,7 +121,7 @@ Their selected Once remains Arc-owned through each reader closure and worker joi
 | Invalid CPU/admission/deadline | No newly accepted work | Core typed error; existing arrangement unchanged except independent concurrency |
 | Shutdown drain error after closure | Admission stays closed | Retry drain; final Drop still retains storage for reclamation |
 | Duplicate init / occupied actions | Candidate not published | Warning and typed error; stop candidate workers unlocked |
-| Allocator exhaustion | Kernel allocation failure | Kernel policy; no recoverable OOM promise |
+| Allocator exhaustion | Manager entry preparation returns Normal(NoMemory); other allocations retain kernel failure policy | Join the started CPU prefix before returning; no whole-startup recoverable OOM promise |
 | Reclaimer admission invariant failure | Cannot reclaim normally | Panic while raw strong reference still retains storage; no premature free |
 | Callback/destructor panic or nonreturn | Incomplete cleanup / halted progress | No unwind recovery, cancellation timeout or progress guarantee |
 

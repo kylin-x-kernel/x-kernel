@@ -2,6 +2,12 @@
 
 ## IRQ Startup Ownership
 
+Late-init native-console handoff now reports preparation errors. Runtime logs
+the error and keeps the existing boot-console route; it does not manufacture a
+NOFAIL allocation or publish a partially prepared TTY. A later native-terminal
+request can retry initialization. Ordinary devtmpfs creation propagates its own
+console preparation failure separately.
+
 Runtime owns the cross-subsystem ordering: install current, publish foundation
 handlers, activate local sources, prepare IRQ-exit services, then enable CPU IRQ
 delivery. The AP runqueue-ready and service-ready rendezvous serve different

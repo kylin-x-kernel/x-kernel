@@ -23,6 +23,7 @@ arm-timer-resume-fixup = []
 
 
 [dependencies]
+kalloc-types.workspace = true
 kiface-time-api.workspace = true
 kcompletion.workspace = true
 kmutex.workspace = true

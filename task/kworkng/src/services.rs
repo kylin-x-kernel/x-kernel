@@ -276,6 +276,8 @@ pub enum InitError {
 /// scheduler, timer and softirq providers are initialized on every present CPU,
 /// and before starting work-producing drivers. Do not install legacy Tasklet or
 /// High softirq actions when selecting this provider. CPU hotplug is unsupported.
+/// Callers must hold no locks needed by reclaim, I/O or filesystem callbacks;
+/// manager entries are allocated with KERNEL permissions.
 ///
 /// `limit` bounds worker tasks per CPU. `idle_for` is the positive worker idle
 /// retirement interval. `budget` bounds BH source inspections per dispatch pass,
@@ -290,8 +292,9 @@ pub enum InitError {
 /// Returns [`InitError`] and emits a warning on invalid preparation, duplicate
 /// initialization or occupied BH actions. A failed candidate stops its own
 /// prepared workers without changing existing services/actions. Default access
-/// stays unready unless an earlier initialization succeeded. Allocation failures
-/// follow the kernel allocator policy rather than this error protocol.
+/// stays unready unless an earlier initialization succeeded. Manager entry
+/// allocation failure returns `InitError::Normal(NormalRuntimeError::NoMemory)`
+/// after joined rollback. Other allocations retain the kernel allocator policy.
 ///
 /// # Panics
 /// Panics if boot/provider invariants are violated, including inconsistent CPU

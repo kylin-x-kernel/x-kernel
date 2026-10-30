@@ -1,5 +1,17 @@
 # ksyscall security and reliability
 
+## Clone Entry Allocation Failure
+
+The entry allocation precedes both process and thread clone preparation. Its
+KERNEL policy requires sleepable syscall context without reclaim-dependent locks.
+Invalid flags, namespace permissions and exit signals are checked first.
+Later preparation failure drops the unused closure without running it; entry
+allocation failure cannot leave a child relation or thread registration.
+User-context tests inject NoMemory through a local preparation factory for fork
+and thread clone, checking unchanged relationships. A separate test checks that
+invalid exit signals bypass allocation. These tests do not emulate global OOM
+or make remaining Arc, Vec and stack allocations fallible.
+
 ## Overview
 
 `ksyscall` is the first adaptation boundary between the user-space syscall

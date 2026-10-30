@@ -10,12 +10,12 @@ extern crate log;
 extern crate alloc;
 
 use alloc::{
-    boxed::Box,
     sync::{Arc, Weak},
     vec::Vec,
 };
 
 use bitmaps::Bitmap;
+use kalloc_types::KBox;
 use kclass::{
     ClassDevice, Event, EventType, InputDevice, InputDeviceImpl, InputEventNotifier,
     input_devices as class_input_devices, subscribe_input_available,
@@ -33,7 +33,7 @@ const POLL_ROUNDS_PER_WORK: usize = 2;
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
 
-type InputPoller = WorkHandle<Box<dyn Fn() + Send + Sync>>;
+type InputPoller = WorkHandle<KBox<dyn Fn() + Send + Sync>>;
 type FrameDelivery = (Vec<TimedInputEvent>, Vec<Arc<dyn InputEventListener>>);
 
 /// An input event timestamped when the input layer receives it.
@@ -176,12 +176,14 @@ impl InputEndpoint {
             state: Mutex::new(EndpointState::new()),
         });
         let weak_endpoint = Arc::downgrade(&endpoint);
-        let poller = WorkHandle::new(Box::new(move || {
+        let callback: KBox<dyn Fn() + Send + Sync> = KBox::new_nowait(move || {
             if let Some(endpoint) = weak_endpoint.upgrade() {
                 endpoint.poll_background();
             }
-        }) as Box<dyn Fn() + Send + Sync>)
-        .map_err(|_| kclass::prelude::DriverError::BadState)?;
+        })
+        .map_err(|_| kclass::prelude::DriverError::NoMemory)?;
+        let poller =
+            WorkHandle::new(callback).map_err(|_| kclass::prelude::DriverError::BadState)?;
         endpoint.poller.init_once(poller);
         Ok(endpoint)
     }
@@ -341,6 +343,8 @@ impl InputEndpoint {
 static INPUT_ENDPOINTS: LazyInit<Mutex<Vec<Arc<InputEndpoint>>>> = LazyInit::new();
 
 /// Initialize input devices and subscribe to later class activation/removal.
+///
+/// Requires sleepable task context as described by [`input_endpoint`].
 pub fn init_input() {
     info!("Initialize input subsystem...");
     INPUT_ENDPOINTS.init_once(Mutex::new(Vec::new()));
@@ -376,10 +380,20 @@ fn remove_input_device(id: DeviceId) {
 /// Device-node publication can precede the class availability callback, so
 /// devfs also uses this function to create the endpoint on first sight.
 ///
+/// # Execution context
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU sections, for worker preparation and device operations.
+/// The callback owner uses NOWAIT while the endpoint registry mutex is held,
+/// avoiding synchronous reclaim that could re-enter endpoint discovery/removal.
+/// This does not make the whole function nonblocking or constrain nested Arc,
+/// Vec and worker allocations. Failed callback allocation publishes no endpoint
+/// or notifier; its captured Weak is released while the registry is locked.
+///
 /// # Errors
 ///
 /// Returns `BadState` for removed devices or unavailable worker queues, or
-/// propagates a driver notification-registration failure.
+/// propagates a driver notification-registration failure. Returns `NoMemory`
+/// if callback owner allocation fails, without replacing an existing endpoint.
 pub fn input_endpoint(
     device: ClassDevice<InputDeviceImpl>,
 ) -> Result<Arc<InputEndpoint>, kclass::prelude::DriverError> {

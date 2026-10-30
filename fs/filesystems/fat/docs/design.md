@@ -1,5 +1,13 @@
 # fat — 设计文档
 
+## Prepared VFS mount owner
+
+FAT fill_super allocates `KBox<Arc<FatFilesystem>>` with NOWAIT and transfers the
+prepared owner to KVFS without a second allocation. The canonical device claim
+and nascent identity already exist; avoiding new synchronous reclaim prevents
+introducing dependencies on that unfinished mount. The FAT mutex is not held
+at the owner allocation. Filling the filesystem remains a sleepable operation.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 Guest validation must enable `KFEAT_FS_FAT`; a crate filter alone does not

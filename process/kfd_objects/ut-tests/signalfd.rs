@@ -20,7 +20,7 @@ fn signal_access() -> SignalfdAccess {
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGUSR1);
     let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
-    let signal = ThreadSignalManager::new(1, process);
+    let signal = ThreadSignalManager::new(1, process).unwrap();
     signal.set_blocked(mask);
     SignalfdAccess {
         signalfd: Signalfd::new(mask),
@@ -105,7 +105,7 @@ impl alloc::task::Wake for WakeCount {
 #[def_test]
 fn signalfd_arrival_wakes_blocked_process_and_thread_readers() {
     let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
-    let signal = ThreadSignalManager::new(1, process.clone());
+    let signal = ThreadSignalManager::new(1, process.clone()).unwrap();
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGURG);
     signal.set_blocked(mask);
@@ -158,7 +158,7 @@ fn signalfd_shared_file_keeps_readiness_local_to_accessing_process() {
     let signalfd = Signalfd::new(mask);
     let make_access = || {
         let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
-        let signal = ThreadSignalManager::new(1, process);
+        let signal = ThreadSignalManager::new(1, process).unwrap();
         signal.set_blocked(mask);
         SignalfdAccess {
             signalfd: signalfd.clone(),
@@ -195,15 +195,15 @@ fn signalfd_mask_update_notifies_only_updaters_shared_source() {
     let signalfd = Signalfd::new(SignalSet::default());
     let first = SignalfdAccess {
         signalfd: signalfd.clone(),
-        signal: ThreadSignalManager::new(1, process),
+        signal: ThreadSignalManager::new(1, process).unwrap(),
     };
     let peer = SignalfdAccess {
         signalfd: signalfd.clone(),
-        signal: ThreadSignalManager::new(2, shared),
+        signal: ThreadSignalManager::new(2, shared).unwrap(),
     };
     let independent = SignalfdAccess {
         signalfd: signalfd.clone(),
-        signal: ThreadSignalManager::new(3, private),
+        signal: ThreadSignalManager::new(3, private).unwrap(),
     };
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGURG);
@@ -251,7 +251,7 @@ fn signalfd_mask_update_notifies_only_updaters_shared_source() {
 #[def_test]
 fn signalfd_child_exit_wakes_without_unblocked_delivery_target() {
     let process = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
-    let signal = ThreadSignalManager::new(1, process.clone());
+    let signal = ThreadSignalManager::new(1, process.clone()).unwrap();
     let mut mask = SignalSet::default();
     mask.add(Signo::SIGCHLD);
     signal.set_blocked(mask);

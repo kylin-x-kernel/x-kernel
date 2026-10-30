@@ -515,7 +515,8 @@ pub(in crate::task) fn executable_root(data: Vec<u8>) -> Path {
             Ok(lookup.file_from_inode(name, inode.clone()))
         });
         SimpleDir::new_maker(fs, Arc::new(entries))
-    });
+    })
+    .unwrap();
     Mount::new_root(&super_block).root_path()
 }
 
@@ -850,7 +851,7 @@ fn run_case_with_session(
     });
     let child_switch = switch.clone();
     let mut task = TaskInner::new_user(
-        move || {
+        ktask::PreparedTaskEntry::new_nowait(move || {
             run_child(
                 case,
                 sentinel_addr,
@@ -860,7 +861,7 @@ fn run_case_with_session(
                 #[cfg(feature = "tee")]
                 has_tee_session,
             )
-        },
+        }).expect("test entry preparation"),
         "exec-lifecycle-child".into(),
         task_number,
         thread,

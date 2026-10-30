@@ -1,5 +1,11 @@
 # devpts — Design
 
+Instance creation propagates the fallible SimpleFs private-owner allocation
+through get_tree_nodev. KERNEL allocation requires sleepable mount context with
+no reclaim-dependent locks held; it precedes root construction and publication.
+Per-mount PTY owner identity and mount options are unchanged. Nested Arc and
+container allocations retain their existing infallible behavior.
+
 ## Purpose
 
 `devpts` provides X-Kernel's devpts pseudo-terminal filesystem. Every mount

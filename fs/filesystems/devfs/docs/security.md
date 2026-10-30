@@ -1,5 +1,19 @@
 # devfs — Security and reliability
 
+Native console callback allocation failure aborts devtmpfs preparation before
+the root builder publishes devices. The console and DEVFS Once initializers
+remain retryable; this path neither panics on NoMemory nor silently omits
+`/dev/console`. Callback ownership uses NOWAIT to avoid reclaim re-entry, while
+worker preparation still requires sleepable task context.
+
+## Singleton allocation rollback
+
+Private-owner allocation failure returns NoMemory without publishing a root or
+internal mount. `try_call_once` resets failed initialization for retry rather
+than caching an error or poisoning the singleton. Previously captured firmware
+state is not rolled back; its capture remains idempotent. NOWAIT only covers the
+new KBox owner; existing nested allocations retain their prior behavior.
+
 ## Fallible directory iterators
 
 Directory iterator storage failure propagates as NoMemory instead of a fatal

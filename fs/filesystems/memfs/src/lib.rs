@@ -57,11 +57,7 @@ fn tmpfs_get_tree(
     let options = *context.private::<shmem::TmpfsContextOptions>()?;
     let mount_options = options.mount_options();
     get_tree_nodev(context, move |file_system_type, flags| {
-        Ok(shmem::new_tmpfs_with_type_and_mount_options(
-            file_system_type,
-            flags,
-            mount_options,
-        ))
+        shmem::new_tmpfs_with_type_and_mount_options(file_system_type, flags, mount_options)
     })
 }
 
@@ -99,9 +95,7 @@ fn mqueue_get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
-    get_tree_nodev(context, |file_system_type, flags| {
-        Ok(mqueue_tree_for_ipc_namespace(file_system_type, flags))
-    })
+    get_tree_nodev(context, mqueue_tree_for_ipc_namespace)
 }
 
 ksync::static_lock! {
@@ -127,27 +121,29 @@ static MQUEUE_TREES: Mutex<alloc::collections::BTreeMap<u64, alloc::sync::Arc<Su
 ///
 /// Without a resolvable current IPC namespace the mount gets an unrecorded
 /// private tree: functional, and never shared with other callers.
+/// Cached construction uses NOWAIT under MQUEUE_TREES; private construction
+/// uses KERNEL in reclaim-compatible task context. NoMemory leaves the cache
+/// unchanged and propagates before pinning or registering the namespace hook.
 fn mqueue_tree_for_ipc_namespace(
     file_system_type: &'static FileSystemType,
     flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     // Without a resolvable IPC namespace the mount gets its own private
     // tree that is NOT recorded in the shared table — a sentinel key would
     // glue unrelated callers onto one pseudo-namespace.
     let Some(namespace) = kprocess::Process::current_ipc_ns().ok() else {
-        return new_mqueue_with_type(file_system_type, flags);
+        return new_mqueue_with_type(file_system_type, flags, kalloc_types::AllocFlags::KERNEL);
     };
     let namespace_id = namespace.id();
-    // Pinned trees are always available, so a cache hit is unconditional;
-    // building a tree allocates and creates the root dentry, which should
-    // not happen under this module-level lock. The namespace is held alive
+    // The namespace is held alive
     // across the whole critical section, so its death hook cannot fire in
     // here.
     let mut trees = MQUEUE_TREES.lock();
     if let Some(cached) = trees.get(&namespace_id.as_u64()) {
-        return cached.clone();
+        return Ok(cached.clone());
     }
-    let super_block = new_mqueue_with_type(file_system_type, flags);
+    let super_block =
+        new_mqueue_with_type(file_system_type, flags, kalloc_types::AllocFlags::NOWAIT)?;
     // The first mount of a namespace pins the tree active for the
     // namespace's own lifetime (Linux `ns->mq_mnt`): queues survive an
     // umount, and the drop hook releases the pin — killing the tree — when
@@ -167,7 +163,7 @@ fn mqueue_tree_for_ipc_namespace(
         }),
     );
     trees.insert(namespace_id.as_u64(), super_block.clone());
-    super_block
+    Ok(super_block)
 }
 
 /// Creates one POSIX message-queue tree.
@@ -189,13 +185,17 @@ fn mqueue_tree_for_ipc_namespace(
 fn new_mqueue_with_type(
     file_system_type: &'static FileSystemType,
     flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
-    let super_block = MemoryFs::new_with_name_superblock_flags_and_root_mode(
+    allocation_flags: kalloc_types::AllocFlags,
+) -> VfsResult<Arc<SuperBlock>> {
+    let super_block = MemoryFs::new_with_name_superblock_flags_root_metadata_and_accounting(
         file_system_type,
         MQUEUE_MAGIC,
         flags - SuperBlockFlags::RDONLY,
         NodePermission::from_bits_truncate(0o1777),
-    );
+        (0, 0),
+        None,
+        allocation_flags,
+    )?;
     // Until queues exist the provider presents an empty read-only directory:
     // the sealed root rejects create/mkdir/mknod/symlink with `EPERM`, so the
     // generic memfs mutators never run on `/dev/mqueue`. Sealed before the
@@ -204,7 +204,7 @@ fn new_mqueue_with_type(
     if let Some(node) = root_inode.private_data_get::<MemoryNode>() {
         node.inode.seal();
     }
-    super_block
+    Ok(super_block)
 }
 
 static MQUEUE_CONTEXT_OPERATIONS: FsContextOperations = FsContextOperations::new(mqueue_get_tree);
@@ -292,17 +292,29 @@ static MEMFS_TYPE: FileSystemType = FileSystemType::internal("memfs");
 
 impl MemoryFs {
     /// Creates an in-memory superblock.
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled, outside
+    /// non-sleepable RCU and without locks required by reclaim, I/O or filesystem
+    /// callbacks. Returns `NoMemory` if the private owner cannot be allocated;
+    /// nested allocations retain their previous behavior.
     #[expect(
         clippy::new_ret_no_self,
         reason = "CG-024-lint-exceptions: clippy::new_ret_no_self: MemFs construction returns the \
                   mounted SuperBlock that owns the filesystem"
     )]
-    pub fn new() -> Arc<SuperBlock> {
+    pub fn new() -> VfsResult<Arc<SuperBlock>> {
         Self::new_with_superblock_flags(SuperBlockFlags::empty())
     }
 
     /// Creates an in-memory superblock with explicit VFS-wide flags.
-    pub fn new_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled, outside
+    /// non-sleepable RCU and without locks required by reclaim, I/O or filesystem
+    /// callbacks. Returns `NoMemory` if the private owner cannot be allocated;
+    /// nested allocations retain their previous behavior.
+    pub fn new_with_superblock_flags(
+        superblock_flags: SuperBlockFlags,
+    ) -> VfsResult<Arc<SuperBlock>> {
         Self::new_with_name_superblock_flags_and_root_mode(
             &MEMFS_TYPE,
             RAMFS_MAGIC,
@@ -316,15 +328,15 @@ impl MemoryFs {
         fs_type: u32,
         superblock_flags: SuperBlockFlags,
         root_mode: NodePermission,
-    ) -> Arc<SuperBlock> {
+    ) -> VfsResult<Arc<SuperBlock>> {
         Self::new_with_name_superblock_flags_root_metadata_and_accounting(
             file_system_type,
             fs_type,
             superblock_flags,
             root_mode,
-            0,
-            0,
+            (0, 0),
             None,
+            kalloc_types::AllocFlags::KERNEL,
         )
     }
 
@@ -333,19 +345,20 @@ impl MemoryFs {
         fs_type: u32,
         superblock_flags: SuperBlockFlags,
         root_mode: NodePermission,
-        root_uid: u32,
-        root_gid: u32,
+        root_owner: (u32, u32),
         accounting: Option<Arc<TmpfsAccounting>>,
-    ) -> Arc<SuperBlock> {
+        allocation_flags: kalloc_types::AllocFlags,
+    ) -> VfsResult<Arc<SuperBlock>> {
+        let (root_uid, root_gid) = root_owner;
         let fs = Arc::new(Self {
             fs_type,
             inode_numbers: Mutex::new(Slab::new()),
             accounting,
         });
-        SuperBlock::new_with_flags_and_private(
+        Ok(SuperBlock::new_with_flags_and_private(
             file_system_type,
             &MEMORY_SUPER_OPERATIONS,
-            fs.clone(),
+            kalloc_types::KBox::new_with_flags(fs.clone(), allocation_flags)?,
             superblock_flags,
             memaddr::PAGE_SIZE_4K as u64,
             kvfs::MAX_LFS_FILESIZE,
@@ -369,7 +382,7 @@ impl MemoryFs {
                 let root_inode = MemoryNode::vfs_inode_from_inode(super_block, root_ino);
                 Dentry::new_dir_from_inode(root_inode, None, String::new())
             },
-        )
+        ))
     }
 
     fn reserve_inode(&self) -> VfsResult<()> {

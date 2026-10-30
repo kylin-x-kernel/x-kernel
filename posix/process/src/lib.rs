@@ -12,20 +12,19 @@
 //!
 //! ```no_run
 //! # fn publish_prepared(
-//! #     context: khal::uspace::UserContext,
+//! #     entry: ktask::PreparedTaskEntry,
 //! #     prepared: kprocess::PreparedUserClone,
-//! #     dispatch: impl FnMut(&mut khal::uspace::UserContext)
-//! #         -> kprocess::UserThreadRuntimeAction + Send + 'static,
 //! # ) -> kerrno::KResult<ktask::KtaskRef> {
 //! let root = prepared.page_table_root();
 //! let (thread, identity) = prepared.into_parts();
-//! let mut task = posix_process::new_user_task("child", context, 0, identity, thread, dispatch);
+//! let mut task = posix_process::new_user_task("child", entry, identity, thread);
 //! task.ctx_mut().set_page_table_root(root);
 //! // Complete parent-side setup before the published child becomes runnable.
 //! kprocess::publish_user_task(task)?.commit(|_| Ok(()))
 //! # }
 //! ```
 //!
+//! Prepare the entry with `prepare_user_entry` before creating the clone result.
 //! The caller must first prepare the matching image and clone result in an
 //! initialized kernel task context; this example only compiles in that target.
 
@@ -45,7 +44,9 @@ extern crate klogger;
 mod init_process;
 mod runtime;
 pub use init_process::spawn_init_process;
-pub use runtime::{check_signals, do_exit, exec_de_thread, new_user_task, raise_signal_fatal};
+pub use runtime::{
+    check_signals, do_exit, exec_de_thread, new_user_task, prepare_user_entry, raise_signal_fatal,
+};
 #[cfg(unittest)]
 pub use runtime::{
     replay_user_return_restart_for_test, replay_user_return_restart_with_gap_for_test,

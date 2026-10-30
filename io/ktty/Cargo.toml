@@ -15,6 +15,7 @@ documentation.workspace = true
 ignored = ["kdevice"]
 
 [dependencies]
+kalloc-types.workspace = true
 intrusive-collections.workspace = true
 kcred.workspace = true
 kworkng.workspace = true

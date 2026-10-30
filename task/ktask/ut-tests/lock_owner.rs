@@ -2,8 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::boxed::Box;
-
+use kalloc_types::KBox;
 use unittest::{assert, assert_eq, assert_ne, def_test};
 
 use super::{LockOwner, LockOwnerState, holder_key};
@@ -20,10 +19,10 @@ impl crate::UserTaskRuntime for UnknownTokenRuntime {
 #[def_test]
 fn test_holder_key_is_never_zero() {
     let task = crate::TaskInner::new_user(
-        || {},
+        crate::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         "unknown-token".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
-        Box::new(UnknownTokenRuntime),
+        KBox::new(UnknownTokenRuntime).unwrap(),
     );
     assert_eq!(task.owner_key(), 0);
     assert_ne!(holder_key(&task), 0);

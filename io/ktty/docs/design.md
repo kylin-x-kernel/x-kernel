@@ -1,5 +1,34 @@
 # ktty — Design
 
+## Fallible Input Callback Ownership
+
+`TtyPort::new` returns `KResult` and prepares a `KBox<dyn Fn() + Send + Sync>`
+with the KERNEL policy. Callers must be in sleepable task context without locks
+needed by reclaim, I/O or filesystem callbacks. `new_with_flags` accepts an
+explicit callback-owner policy; NOWAIT does not make worker preparation IRQ-safe.
+Manual and None modes do not allocate a callback owner. Arc, ring-buffer and
+worker-internal allocations retain their existing infallible contracts.
+
+Input work is initially private with an empty handle slot. The callback retains
+only a weak work reference; preparation installs the handle before attaching
+the ingress waker. Allocation or work preparation failure drops local captures
+without replacing any ingress binding or submitting work.
+
+PTY allocation reserves a number under the registry lock, releases that lock,
+then prepares endpoints using KERNEL. The private pair starts without resources;
+successful construction installs resources before publication. Any preparation
+error releases the number and unpublished pair and propagates to PTMX open.
+
+The native terminal is obtained through fallible `native_tty()` rather than an
+infallible public lazy value. Its Once initializer uses NOWAIT to prevent reclaim
+re-entry, including calls from the VT output mutex and devtmpfs initializer.
+Failure leaves initialization retryable and does not attach serial notifications.
+Devtmpfs prepares this terminal before invoking its infallible root builder;
+failure aborts superblock creation. Runtime handoff failure logs a warning and
+retains the existing boot console. VT output propagates preparation failure.
+The former public VT lazy value is likewise replaced by `vt_console()`; its
+manual input mode does not allocate a callback owner.
+
 ## Guest Test Layout
 
 Guest tests live in crate-root `ut-tests/`, mounted with
@@ -9,17 +38,21 @@ the previously included port, connection and PTY fixtures.
 
 | Module | File under `ut-tests/` | Cases |
 | --- | --- | --- |
-| `port::tests` | `port.rs` | 20 |
+| `port::tests` | `port.rs` | 21 |
 | `terminal::terminal_tests` | `terminal.rs` | 3 |
 | `terminal::termios::termios_tests` | `terminal_termios.rs` | 7 |
 | `tty::tests` | `tty.rs` | 2 |
 | `tty::tests_pty` | `tty_pty.rs` | 7 |
 | `tty::ntty::tests` | `tty_ntty.rs` | 5 |
-| `tty::pty_pair::tests` | `pty_lifecycle.rs` | 7 |
+| `tty::pty_pair::tests` | `pty_lifecycle.rs` | 9 |
 | `tty::vt::tests` | `tty_vt.rs` | 5 |
 
-The eight modules contain 56 cases, with no additional architecture/feature
-gates. Nine cases retain `serial`, four retain `user`, and three carry both.
+The eight modules contain 59 cases, with no additional architecture/feature
+gates. Ten cases retain `serial`, four retain `user`, and three carry both.
+These totals count `#[def_test]` registrations in the eight listed source files,
+not successful executions in a particular guest run. The PTY lifecycle module
+includes both allocation-failure cleanup and per-filesystem owner isolation;
+the latter must remain included when reconciling counts after a main rebase.
 The two native-connection cases still return Ignored when runtime stdout is
 unavailable. Test-only production hooks stay at their original owners.
 Run through the configured kernel guest unittest workflow, not host Cargo

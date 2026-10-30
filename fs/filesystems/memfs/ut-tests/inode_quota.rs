@@ -11,7 +11,7 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 
 fn mount_tmpfs(data: &[u8]) -> VfsResult<(Arc<SuperBlock>, kvfs::Path)> {
-    let lookup_fs = MemoryFs::new();
+    let lookup_fs = MemoryFs::new().unwrap();
     let lookup_root = Mount::new_root(&lookup_fs).root_path();
     let cred = kcred::initial_cred();
     let mut context = FsContext::new(
@@ -312,8 +312,8 @@ fn unlimited_remount_cannot_be_retroactively_limited() {
 #[def_test]
 fn ramfs_and_anonymous_tmpfs_remain_unlimited() {
     for fs in [
-        MemoryFs::new(),
-        shmem::new_anonymous_tmpfs(SuperBlockFlags::empty()),
+        MemoryFs::new().unwrap(),
+        shmem::new_anonymous_tmpfs(SuperBlockFlags::empty(), kalloc_types::AllocFlags::KERNEL).unwrap(),
     ] {
         let root = Mount::new_root(&fs).root_path();
         open_file(&root, "file").unwrap();

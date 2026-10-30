@@ -139,8 +139,8 @@ fn vt_process_registration_keeps_identity_and_idle_ack_contract() {
 
 #[def_test]
 fn vt_permissions_follow_terminal_identity_and_current_credentials() {
-    let target: Arc<dyn ControllingTerminal> = new_console();
-    let other: Arc<dyn ControllingTerminal> = new_console();
+    let target: Arc<dyn ControllingTerminal> = new_console().unwrap();
+    let other: Arc<dyn ControllingTerminal> = new_console().unwrap();
     let unprivileged = kcred::Cred::new(1000, 1000);
     assert_eq!(
         configuration_permission(&unprivileged, &target, None),
@@ -158,8 +158,8 @@ fn vt_permissions_follow_terminal_identity_and_current_credentials() {
         configuration_permission(&kcred::Cred::root(), &target, None),
         Ok(())
     );
-    let first = new_console();
-    let second = new_console();
+    let first = new_console().unwrap();
+    let second = new_console().unwrap();
     assert!(!Arc::ptr_eq(&first.terminal, &second.terminal));
-    assert!(!Arc::ptr_eq(&first.terminal, &super::super::N_TTY.terminal));
+    assert!(!Arc::ptr_eq(&first.terminal, &super::super::native_tty().unwrap().terminal));
 }

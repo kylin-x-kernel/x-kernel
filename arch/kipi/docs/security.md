@@ -1,5 +1,34 @@
 # kipi — 安全与可靠性分析
 
+## Fallible callback boundary
+
+Single-use preparation stores a concrete FnOnce in an Option inside a KBox-backed
+FnMut adapter. Taking that Option transfers the concrete capture safely; the
+erased owner is dropped normally afterwards. No new unsafe operation, raw pointer
+conversion or custom Send/Sync implementation is introduced. Captures remain
+Send and the shared broadcast form remains Send + Sync through its Arc bound.
+
+Remote owner allocation uses NOWAIT outside the target queue lock. Failed
+preparation drops captures on the sender without invocation, publication or IPI
+notification. Invalid/unready destinations are checked before preparation.
+Prepared-owner rejection also destroys captures in sender context. Successful
+remote execution and final capture destruction retain IRQ/queue-lock restrictions;
+the caller must account for both success and rejection destruction paths.
+
+Broadcast events reuse the existing Arc without a new fallible owner allocation,
+so this migration introduces no allocation-error partial fanout. This is not
+whole-transport OOM safety: initial Arc allocation and VecDeque growth still use
+their old infallible allocator, and NoMemory specifically denotes the new
+single-use owner boundary. No reserve, latency, NMI or hotplug guarantee is added.
+
+Tests cover consuming-only captures, unused-owner cleanup, invalid flags,
+shared-owner identity/lifetime, local IRQ-masked execution without preparation,
+prepared-owner rejection, and injected remote preparation failure before
+publication. A real remote dispatch also checks hardirq context, target CPU and
+single destruction of a consuming-only capture. Injection replaces only the
+private preparation operation; it does
+not force global allocator OOM or queue-growth failure.
+
 ## 信任模型
 
 ### Fixed RCU Notification Boundary
@@ -238,10 +267,11 @@ allocates or sleeps.
 | 编号 | 故障模式 | 局部影响 | 系统影响 | 检测/缓解 |
 |------|----------|----------|----------|-----------|
 | F-01 | 目标 CPU IPI 队列未初始化 | `run_on_cpu` / 广播失败 | 相关跨核操作无法执行 | 返回 `KipiError::TargetCpuNotReady` |
-| F-02 | IPI 队列塞满 | 当前回调无法投递 | 局部控制流失败，上层需自行恢复 | 返回 `QueueFull` |
+| F-02 | Queue growth allocation fails | Event cannot be stored | Existing allocator OOM policy is fatal | VecDeque growth remains infallible; QueueFull is not currently emitted |
 | F-03 | 目标 CPU 长时间不 ack TLB request | 发起 CPU 自旋等待 | 页表修改路径停顿，可能表现为系统卡住 | 超时后记录 warning；等待中轮询 `handle_shootdown` 避免 IRQ-off 互等 |
 | F-04 | pending epoch 未同步更新 | 目标 CPU fast path 直接返回，不扫描 slots | 单测或协议调用错误时出现假阴性 / 卡住 | 正式路径由 `flush_remote()` 封装；单测通过 helper 同步更新 |
-| F-05 | callback panic | 当前回调失败 | 其它已排队回调仍继续处理 | `ipi_handler()` 继续消费队列，不让单个回调中断整个队列 |
+| F-05 | Callback panics | Dispatch does not complete normally | Kernel panic policy applies | No per-callback panic isolation or continuation guarantee |
+| F-06 | Single-use owner allocation fails | No event is published or notified | Caller decides whether to retry or fail | Return NoMemory and drop captures in sender context |
 
 ## 故障管理
 

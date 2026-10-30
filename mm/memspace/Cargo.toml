@@ -11,6 +11,7 @@ default = []
 smp = []
 
 [dependencies]
+kalloc-types.workspace = true
 kiface.workspace = true
 kiface-mm-api.workspace = true
 anon = { workspace = true }

@@ -1,5 +1,15 @@
 # kfd_objects — Security and reliability
 
+## Fallible work callbacks
+
+Refresh callback allocation failure returns NoMemory and drops the captured
+runtime reference before an observer or fd is published. Work preparation still
+maps invalid context to InvalidInput and absent services to OperationNotSupported;
+those failures drop the successfully allocated callback too. The runtime timer is
+inactive on these paths. Existing clock-change tests exercise the KBox callback;
+a new test checks early non-sleepable-context rejection. Global allocation failure
+at the timerfd boundary is not injected.
+
 ## Scope, trust and assets
 
 The entire crate is covered, including unit-test unsafe sites. Assets include

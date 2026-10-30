@@ -1,5 +1,12 @@
 # cgroup2fs — 安全与可靠性分析
 
+## Superblock-owner failure
+
+NoMemory from SimpleFs propagates through the mount context without publishing a
+root or cgroup node. The initial boot-only mount retains its fatal-boot boundary.
+This owner conversion does not make cgroup node, Arc or namespace allocations
+fallible. New callers must not wrap the constructor in hierarchy/reclaim locks.
+
 ## Fallible directory iterators
 
 Iterator allocation failure propagates NoMemory and drops the name snapshot

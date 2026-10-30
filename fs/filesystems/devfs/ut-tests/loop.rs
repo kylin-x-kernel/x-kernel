@@ -133,7 +133,8 @@ fn loop_passes_one_scatter_iterator_and_returns_short_io_memory() {
     impl kvfs::InodeOperations for InodeOps {}
     let super_block = kvfs::SimpleFs::new_with(&crate::FILE_SYSTEM_TYPE, 0, |fs| {
         kvfs::SimpleDir::new_maker(fs, Arc::new(kvfs::DirMapping::new()))
-    });
+    })
+    .unwrap();
     let operations = Arc::new(Backing {
         calls: AtomicUsize::new(0),
     });

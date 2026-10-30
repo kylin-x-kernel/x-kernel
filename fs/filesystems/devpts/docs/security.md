@@ -1,5 +1,10 @@
 # devpts — Security
 
+SimpleFs private-owner NoMemory propagates before any root is constructed or
+published, without creating a partially visible devpts instance. Preparation
+uses KERNEL in sleepable mount context without reclaim-dependent locks. This
+does not make nested allocations fallible or change PTY projection identity.
+
 ## Trust model
 
 `devpts` runs inside the kernel and trusts the KVFS core it builds on: mount

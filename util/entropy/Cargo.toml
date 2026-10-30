@@ -19,9 +19,11 @@ default = []
 entropy_arch_cpu = ["dep:karch"]
 entropy_smccc_trng = ["dep:kplat-aarch64"]
 entropy_jitter = []
-entropy_virtio_rng = ["dep:hwrng", "dep:kspin", "dep:kdevice", "dep:kclass", "dep:kworkng"]
+entropy_virtio_rng = ["dep:hwrng", "dep:kspin", "dep:kdevice", "dep:kclass", "dep:kworkng", "dep:kalloc-types", "dep:kerrno"]
 
 [dependencies]
+kalloc-types = { workspace = true, optional = true }
+kerrno = { workspace = true, optional = true }
 kworkng = { workspace = true, optional = true }
 hwrng = { workspace = true, optional = true }
 kdevice = { workspace = true, optional = true }

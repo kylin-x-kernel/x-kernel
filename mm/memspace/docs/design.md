@@ -1,4 +1,29 @@
 # memspace — 设计文档
+
+## Post-populate action ownership
+
+`PopulateHook` owns a fallibly allocated `KBox` callback. A concrete `Option<F>`
+adapter replaces the previous boxed callable alias; producers use the fallible
+constructors and consumers invoke the owned action through `call`. This
+adapter accepts consuming-only `FnOnce(&mut MmSpace)` closures without moving
+an erased unsized value. Calling consumes the hook; dropping an unused hook
+only drops its captures. `FaultCompletion` accepts an already prepared owner
+and transfers it at most once. Invocation is synchronous in the original fault
+context, not deferred to a worker, and outer MM locks remain held.
+
+Default construction uses KERNEL and requires sleepable, reclaim-compatible
+task context. A backend holding an MM lock must not assume KERNEL is safe:
+prepare before locking, or use NOWAIT while failure can still be handled.
+NOIO/NOFS also permit sleeping and do not remove every MM reclaim dependency.
+Explicit flags cover owner storage only, not capture construction or cleanup.
+Required hooks must be prepared before irreversible changes; returning an
+allocation error after committing an operation that needs its hook is invalid.
+
+All current production backends return `None`, so this migration introduces
+no allocation into existing fault paths. Future producers must propagate
+preparation errors through the backend result; NoMemory remains classified as
+`PageFaultOutcome::OutOfMemory`. No NOFAIL guarantee is implemented.
+
 ## 定位
 
 `memspace` 是 X-Kernel 的地址空间 owner。它维护 `MmSpace`、`VmAreaSet`、

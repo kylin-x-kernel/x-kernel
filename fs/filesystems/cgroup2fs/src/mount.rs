@@ -19,7 +19,7 @@ fn get_tree(
 ) -> VfsResult<Arc<SuperBlock>> {
     let root = kprocess::current_user_process().cgroup_ns()?.root();
     get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_with_type(file_system_type, root, flags))
+        new_with_type(file_system_type, root, flags)
     })
 }
 
@@ -62,16 +62,22 @@ fn init_fs() {
 }
 
 /// Creates a cgroup v2 superblock over `root`.
-pub fn new_cgroup2fs(root: Arc<Cgroup>, flags: SuperBlockFlags) -> Arc<SuperBlock> {
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
+pub fn new_cgroup2fs(root: Arc<Cgroup>, flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_with_type(&FILE_SYSTEM_TYPE, root, flags)
 }
 
 /// Creates a cgroup v2 superblock over the system's initial hierarchy.
 ///
-/// This constructor is valid during boot, before a current user process
+/// This constructor requires the reclaim-safe task context of `new_cgroup2fs`.
+/// It is valid during late boot, before a current user process
 /// exists. Ordinary user mounts use [`FILE_SYSTEM_TYPE`] and select the
 /// calling process's cgroup namespace view instead.
-pub fn new_initial_cgroup2fs(flags: SuperBlockFlags) -> Arc<SuperBlock> {
+pub fn new_initial_cgroup2fs(flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_cgroup2fs(CgroupNamespace::initial().root(), flags)
 }
 
@@ -79,7 +85,7 @@ fn new_with_type(
     file_system_type: &'static FileSystemType,
     root: Arc<Cgroup>,
     flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     SimpleFs::new_with_superblock_flags(file_system_type, CGROUP2_SUPER_MAGIC, flags, move |fs| {
         let state = crate::state::CgroupFsState::new(&fs, root.clone());
         fs.set_private(state.clone());

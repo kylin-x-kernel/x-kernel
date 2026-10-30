@@ -79,6 +79,9 @@ fn register_pty_ranges(master: DeviceId, slave: DeviceId) -> KResult<()> {
 /// must list this pair's slave has to pass that exact `Arc<SimpleFs>` — a
 /// different instance's filesystem sees an empty directory rather than an
 /// error.
+/// KERNEL callback allocation may enter reclaim: callers must hold no locks
+/// needed by reclaim, I/O or filesystem callbacks. NoMemory is returned before
+/// opening the master or publishing the slave.
 pub fn open_ptmx(
     owner: &Arc<SimpleFs>,
     inode: &VfsInode,
@@ -169,39 +172,48 @@ impl PtyPair {
     /// Reserves a number and constructs connected endpoints, initially hidden.
     /// Dropping an unopened pair rolls back the reservation and endpoint work.
     /// Returns `ENOSPC` when all numbers are allocated; it never waits for space.
+    /// Callback allocation uses KERNEL after releasing the registry lock and
+    /// before publishing the pair. Preparation errors release the number.
     fn allocate(owner: &Arc<SimpleFs>) -> KResult<Arc<Self>> {
+        Self::allocate_with(owner, create_endpoints)
+    }
+
+    fn allocate_with(
+        owner: &Arc<SimpleFs>,
+        prepare: impl FnOnce(Option<Weak<Self>>) -> KResult<(Arc<PtyDriver>, Arc<PtyDriver>)>,
+    ) -> KResult<Arc<Self>> {
         let number = PtyNumber::reserve()?;
-        Ok(Arc::new_cyclic(|weak| {
-            let (master, slave) = create_endpoints(Some(weak.clone()));
-            master.set_pty_number(number.0);
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: create_endpoints builds the slave \
-                          with ProcessMode::Work, which always has input work"
-            )]
-            let input_work = slave
-                .input
-                .lock()
-                .input_work()
-                .expect("PTY uses input work");
-            Self {
-                link: RBTreeAtomicLink::new(),
-                number: number.0,
-                owner: Arc::downgrade(owner),
-                state: Mutex::new(PairState {
-                    is_published: false,
-                    has_master: false,
-                    slave_opens: 0,
-                    resources: Some(PtyResources {
-                        master,
-                        slave,
-                        input_work,
-                        slave_inode: None,
-                        _number: number,
-                    }),
-                }),
-            }
-        }))
+        let pair = Arc::new(Self {
+            link: RBTreeAtomicLink::new(),
+            number: number.0,
+            owner: Arc::downgrade(owner),
+            state: Mutex::new(PairState {
+                is_published: false,
+                has_master: false,
+                slave_opens: 0,
+                resources: None,
+            }),
+        });
+        let (master, slave) = prepare(Some(Arc::downgrade(&pair)))?;
+        master.set_pty_number(number.0);
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: create_endpoints builds the slave \
+                      with ProcessMode::Work, which always has input work"
+        )]
+        let input_work = slave
+            .input
+            .lock()
+            .input_work()
+            .expect("PTY uses input work");
+        pair.state.lock().resources = Some(PtyResources {
+            master,
+            slave,
+            input_work,
+            slave_inode: None,
+            _number: number,
+        });
+        Ok(pair)
     }
 
     /// Returns the character-device identity to project into the slave inode.

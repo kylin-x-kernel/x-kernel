@@ -1,5 +1,13 @@
 # cgroup2fs — 设计文档
 
+## Fallible superblock preparation
+
+Cgroup2 constructors return VfsResult and use SimpleFs's KERNEL private-owner
+allocation before invoking the root-node builder. The namespace root has already
+been sampled and no cgroup hierarchy lock is retained across allocation. Boot
+construction means late-init sleepable task context, not early boot or IRQ
+context; reclaim, I/O and filesystem callbacks must be allowed.
+
 ## Fallible directory iterators
 
 CgroupDir child_names uses a KBox iterator with default KERNEL policy under

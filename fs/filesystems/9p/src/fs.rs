@@ -23,8 +23,11 @@ struct V9fsSession {
 
 /// Mounts a 9P2000.L filesystem over an already connected transport.
 ///
-/// Transport discovery remains outside v9fs. The returned superblock owns the
-/// negotiated client through its private session state, while inodes and open
+/// Transport discovery remains outside v9fs.
+/// Requires reclaim-safe sleepable task context without transport, reclaim,
+/// I/O or filesystem locks held, with IRQs/preemption enabled and outside
+/// non-sleepable RCU. Private-owner allocation uses KERNEL and may return NoMemory.
+/// The negotiated client is retained through private session state; inodes and open
 /// files retain only the fids needed for their own lifetimes.
 ///
 /// # Errors
@@ -49,7 +52,7 @@ pub fn mount(
     Ok(SuperBlock::new_with_flags_and_private(
         file_system_type,
         &V9FS_SUPER_OPERATIONS,
-        session,
+        kalloc_types::KBox::new(session)?,
         superblock_flags,
         block_size,
         kvfs::MAX_LFS_FILESIZE,

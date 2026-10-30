@@ -109,6 +109,29 @@ fn normal_services_roll_back_each_failed_startup_prefix() {
     unrelated.stop().unwrap();
 }
 
+#[def_test]
+fn normal_services_join_started_prefix_on_entry_no_memory() {
+    let present = cpus();
+    for failed in 0..present.len() {
+        let mut observed = Vec::new();
+        let mut attempted = 0;
+        let result = NormalServices::start_with(&present, |cpu| {
+            let index = attempted;
+            attempted += 1;
+            if index == failed {
+                return Err(RuntimeError::NoMemory);
+            }
+            let runtime = NormalRuntime::<Empty>::start(cpu, limit(), idle())?;
+            observed.push(Arc::downgrade(&runtime.service));
+            Ok(runtime)
+        });
+        assert!(matches!(result, Err(RuntimeError::NoMemory)));
+        assert_eq!(attempted, failed + 1);
+        assert_eq!(observed.len(), failed);
+        assert!(observed.iter().all(|service| service.upgrade().is_none()));
+    }
+}
+
 /// Invalid collection input/context cannot activate a partial CPU set.
 ///
 /// # Panics

@@ -325,6 +325,11 @@ static EXT4_SUPER_OPERATIONS: Ext4SuperOperations = Ext4SuperOperations;
 
 impl Ext4SuperOperations {
     /// Fills a newly reserved ext4 superblock from its canonical block device.
+    ///
+    /// Requires sleepable mount context. The prepared private owner uses NOWAIT
+    /// while holding the nascent device reservation, not an ext4 state lock.
+    /// Allocation failure returns NoMemory before root publication; nested
+    /// allocations and any prior on-disk recovery retain their existing behavior.
     pub(crate) fn fill_super(
         super_block: &Arc<SuperBlock>,
         options: Ext4MountOptions,
@@ -366,7 +371,7 @@ impl Ext4SuperOperations {
         let ext4 = Ext4Mount::new(state);
         super_block.initialize_with_private(
             &EXT4_SUPER_OPERATIONS,
-            ext4,
+            kalloc_types::KBox::new_nowait(ext4)?,
             block_size,
             max_file_size,
             |super_block| {

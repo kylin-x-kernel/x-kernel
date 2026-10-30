@@ -104,7 +104,8 @@ fn test_mount_source_uses_devname_when_set() {
     // Create a simple filesystem for testing.
     let fs = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
         SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
-    });
+    })
+    .unwrap();
 
     let mount =
         Mount::new_root_with_flags_and_devname(&fs, MountFlags::empty(), Some("virtio-blk-0"));
@@ -118,7 +119,8 @@ fn test_mount_source_falls_back_to_none_when_no_devname() {
     // Create a simple filesystem for testing.
     let fs = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
         SimpleDir::<DirMapping>::new_maker(fs, Arc::new(DirMapping::new()))
-    });
+    })
+    .unwrap();
 
     let mount = Mount::new_root_with_flags_and_devname(&fs, MountFlags::empty(), None);
 

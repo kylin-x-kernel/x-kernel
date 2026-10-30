@@ -276,7 +276,7 @@ fn get_tree(
             Some(false) => flags - SuperBlockFlags::RDONLY,
             None => flags,
         };
-        Ok(new_devpts_with_type(file_system_type, flags, options, cred))
+        new_devpts_with_type(file_system_type, flags, options, cred)
     })
 }
 
@@ -346,7 +346,7 @@ fn new_devpts_with_type(
     flags: SuperBlockFlags,
     options: MountOptions,
     cred: &kcred::Cred,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     SimpleFs::new_with_superblock_flags(file_system_type, DEVPTS_SUPER_MAGIC, flags, |fs| {
         root::builder(fs, options, cred)
     })

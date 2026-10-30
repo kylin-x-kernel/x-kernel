@@ -47,13 +47,19 @@ bitflags::bitflags! {
 /// The default is one half of the allocatable physical memory, with zero
 /// selecting unlimited. This is a per-superblock quota, not a reservation.
 #[cfg(unittest)]
-pub(crate) fn new_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+pub(crate) fn new_tmpfs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     let page_limit = default_tmpfs_page_limit(global_allocator().total_pages());
     new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, superblock_flags, page_limit)
 }
 
-pub(crate) fn new_anonymous_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
-    new_tmpfs_with_type_and_mount_options(
+/// Builds anonymous state before publication. The caller selects the owner
+/// policy: shared kernel shmem uses NOWAIT under KERNEL_SHM_FS; private memfds
+/// use KERNEL in reclaim-safe task context. Nested allocations are unchanged.
+pub(crate) fn new_anonymous_tmpfs(
+    superblock_flags: SuperBlockFlags,
+    allocation_flags: kalloc_types::AllocFlags,
+) -> VfsResult<Arc<SuperBlock>> {
+    new_tmpfs_with_allocation_flags(
         &TMPFS_TYPE,
         superblock_flags,
         TmpfsMountOptions {
@@ -63,6 +69,7 @@ pub(crate) fn new_anonymous_tmpfs(superblock_flags: SuperBlockFlags) -> Arc<Supe
             root_uid: 0,
             root_gid: 0,
         },
+        allocation_flags,
     )
 }
 
@@ -74,7 +81,7 @@ pub(crate) fn new_tmpfs_with_type_and_page_limit(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
     page_limit: usize,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     new_tmpfs_with_type_and_mount_options(
         file_system_type,
         superblock_flags,
@@ -93,18 +100,32 @@ pub(crate) fn new_tmpfs_with_type_and_mount_options(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
     mount_options: TmpfsMountOptions,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
+    new_tmpfs_with_allocation_flags(
+        file_system_type,
+        superblock_flags,
+        mount_options,
+        kalloc_types::AllocFlags::KERNEL,
+    )
+}
+
+fn new_tmpfs_with_allocation_flags(
+    file_system_type: &'static FileSystemType,
+    superblock_flags: SuperBlockFlags,
+    mount_options: TmpfsMountOptions,
+    allocation_flags: kalloc_types::AllocFlags,
+) -> VfsResult<Arc<SuperBlock>> {
     MemoryFs::new_with_name_superblock_flags_root_metadata_and_accounting(
         file_system_type,
         TMPFS_MAGIC,
         superblock_flags,
         mount_options.root_mode,
-        mount_options.root_uid,
-        mount_options.root_gid,
+        (mount_options.root_uid, mount_options.root_gid),
         Some(Arc::new(TmpfsAccounting::new(
             mount_options.page_limit,
             mount_options.inode_limit,
         ))),
+        allocation_flags,
     )
 }
 
@@ -544,17 +565,21 @@ fn create_anonymous_file(
     let root = match kind {
         ShmemObjectKind::Kernel => {
             let mut guard = KERNEL_SHM_FS.lock();
-            guard
-                .get_or_insert_with(|| {
-                    let fs = new_anonymous_tmpfs(SuperBlockFlags::empty());
-                    let root = Path::new(Mount::new_root(&fs), fs.root_dir());
-                    (fs, root)
-                })
-                .1
-                .clone()
+            if let Some((_, root)) = guard.as_ref() {
+                root.clone()
+            } else {
+                let fs = new_anonymous_tmpfs(
+                    SuperBlockFlags::empty(),
+                    kalloc_types::AllocFlags::NOWAIT,
+                )?;
+                let root = Path::new(Mount::new_root(&fs), fs.root_dir());
+                *guard = Some((fs, root.clone()));
+                root
+            }
         }
         ShmemObjectKind::Memfd => {
-            let fs = new_anonymous_tmpfs(SuperBlockFlags::empty());
+            let fs =
+                new_anonymous_tmpfs(SuperBlockFlags::empty(), kalloc_types::AllocFlags::KERNEL)?;
             Path::new(Mount::new_root(&fs), fs.root_dir())
         }
     };
@@ -578,6 +603,11 @@ fn create_anonymous_file(
 ///
 /// When sealing is not allowed, the object is initialized with the
 /// default `F_SEAL_SEAL`.
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
 pub fn create_memfd_file(
     name: &str,
     allow_sealing: bool,
@@ -604,6 +634,11 @@ pub fn create_memfd_file(
 }
 
 /// Creates a kernel-owned shmem file object for SysV shm-style users.
+///
+/// Requires sleepable task context for VFS operations. The shared filesystem's
+/// private-owner allocation uses NOWAIT while holding the singleton mutex;
+/// failure returns NoMemory without installing the singleton. Nested allocations
+/// retain their existing behavior.
 pub fn create_kernel_file(
     name: &str,
     permission: NodePermission,

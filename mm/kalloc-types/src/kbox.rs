@@ -5,6 +5,7 @@
 use core::{
     alloc::Layout,
     marker::PhantomData,
+    mem::ManuallyDrop,
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
@@ -56,6 +57,30 @@ pub struct KBox<T: ?Sized> {
 }
 
 impl<T> KBox<T> {
+    /// Moves a sized value out of its owner and releases the backing storage.
+    ///
+    /// Does not allocate, clone or run `T::drop`. The returned value owns its
+    /// resources and may move to a different address; this is not a pinning API.
+    /// Unsized values must remain behind an owner and cannot use this operation.
+    ///
+    /// # Execution context
+    /// Storage release does not enter reclaim or sleep. The caller must satisfy
+    /// the allocator's deallocation lock-order and reentrancy requirements;
+    /// NMI safety is not promised. Using or dropping the returned value retains
+    /// `T`'s own context requirements, independent of the allocation flags.
+    pub fn into_inner(owned: Self) -> T {
+        let owned = ManuallyDrop::new(owned);
+        let storage = Storage {
+            pointer: owned.pointer.cast(),
+            layout: Layout::new::<T>(),
+        };
+        // SAFETY: consuming the unique owner excludes live borrows. Its slot
+        // contains an aligned, initialized T, including aligned dangling ZSTs.
+        // ManuallyDrop prevents a second drop; Storage only frees the original
+        // allocation after this read transfers the value to the return place.
+        unsafe { storage.pointer.cast::<T>().as_ptr().read() }
+    }
+
     /// Allocates using the default [`AllocFlags::KERNEL`] policy.
     ///
     /// # Execution context
@@ -172,6 +197,29 @@ impl<T: Iterator + ?Sized> Iterator for KBox<T> {
 
     fn nth(&mut self, count: usize) -> Option<Self::Item> {
         (**self).nth(count)
+    }
+}
+
+/// Reusable callbacks delegate without allocation, retaining their own context
+/// requirements. Consuming this owner calls through a mutable borrow and then
+/// drops it; callbacks that implement only `FnOnce` are not supported.
+impl<Args: core::marker::Tuple, T: FnMut<Args> + ?Sized> FnOnce<Args> for KBox<T> {
+    type Output = T::Output;
+
+    extern "rust-call" fn call_once(mut self, args: Args) -> Self::Output {
+        (*self).call_mut(args)
+    }
+}
+
+impl<Args: core::marker::Tuple, T: FnMut<Args> + ?Sized> FnMut<Args> for KBox<T> {
+    extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output {
+        (**self).call_mut(args)
+    }
+}
+
+impl<Args: core::marker::Tuple, T: Fn<Args> + ?Sized> Fn<Args> for KBox<T> {
+    extern "rust-call" fn call(&self, args: Args) -> Self::Output {
+        (**self).call(args)
     }
 }
 

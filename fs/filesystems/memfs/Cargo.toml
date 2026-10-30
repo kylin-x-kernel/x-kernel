@@ -9,6 +9,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
+kalloc-types.workspace = true
 iov_iter.workspace = true
 kalloc.workspace = true
 kcred.workspace = true

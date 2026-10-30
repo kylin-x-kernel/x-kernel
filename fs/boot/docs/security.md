@@ -1,5 +1,13 @@
 # fs_boot — 安全与可靠性分析
 
+## Required-filesystem allocation failure
+
+Failure to allocate bootstrap-root or initial-cgroup private state is diagnosed
+at the existing fatal-boot boundary. No namespace attachment is attempted with
+an absent superblock. Other mount callers receive NoMemory through VfsResult.
+This does not provide boot-time OOM recovery or make nested filesystem allocations
+fallible; it separates explicit boot policy from the reusable constructor.
+
 ## 信任模型
 
 root block device 名称来自内核构建配置；设备枚举和磁盘内容来自驱动及外部介质。

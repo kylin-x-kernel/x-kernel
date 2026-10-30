@@ -59,6 +59,8 @@ pub enum KipiError {
     InvalidCpuId,
     /// Target CPU exists in the logical CPU map but has not initialized its local IPI queue yet.
     TargetCpuNotReady,
+    /// Callback-owner storage could not be allocated before remote publication.
+    NoMemory,
     /// Queue full (too many pending callbacks)
     QueueFull,
     /// Callback execution failed
@@ -70,6 +72,7 @@ impl core::fmt::Display for KipiError {
         match self {
             Self::InvalidCpuId => write!(f, "Invalid CPU ID"),
             Self::TargetCpuNotReady => write!(f, "Target CPU is not ready for IPI"),
+            Self::NoMemory => write!(f, "IPI callback allocation failed"),
             Self::QueueFull => write!(f, "IPI queue full"),
             Self::CallbackFailed => write!(f, "Callback execution failed"),
         }
@@ -128,9 +131,15 @@ pub fn init() {
 /// later runs from that CPU's shared IPI handler.
 ///
 /// Callbacks must therefore be valid for the target execution context. In
-/// particular, remotely executed callbacks must not rely on sleeping or other
-/// process-context-only behavior unless the caller has arranged for that to be
-/// safe in the target CPU's IPI handler.
+/// particular, remotely executed callback bodies and capture destruction must
+/// not sleep. Sending is permitted from task or IRQ context, but not NMI or an
+/// allocator-reentrant path. Remote owner allocation uses NOWAIT before taking
+/// the queue lock; failure drops captures in the caller's context without
+/// publishing an event. Local calls execute directly without owner allocation.
+/// Queue VecDeque growth retains its existing infallible allocation behavior.
+/// Remote execution retains the existing queue-lock scope: bodies and capture
+/// destruction must not acquire IPI queue locks or wait for queued callbacks.
+/// Use [`run_on_cpu_prepared`] to submit an owner prepared with an explicit policy.
 ///
 /// # Notes
 ///
@@ -141,13 +150,50 @@ pub fn init() {
 /// Returns `KipiError::InvalidCpuId` if `dest_cpu` is outside the configured
 /// range or does not belong to a present logical CPU.
 ///
-/// Returns `KipiError::TargetCpuNotReady` if the destination CPU exists but
+/// Returns `KipiError::TargetCpuNotReady` if the remote destination CPU exists but
 /// has not finished initializing its local IPI queue.
+/// Returns `KipiError::NoMemory` if remote callback-owner allocation fails.
 ///
 /// # Panics
 /// Panics if the destination CPU reports ready but its slot area or local IPI
 /// queue is not actually initialized.
-pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Result<()> {
+pub fn run_on_cpu<F: FnOnce() + Send + 'static>(dest_cpu: LogicalCpuId, callback: F) -> Result<()> {
+    run_on_cpu_with_prepare(dest_cpu, callback, Callback::new_nowait)
+}
+
+fn run_on_cpu_with_prepare<F: FnOnce() + Send + 'static>(
+    dest_cpu: LogicalCpuId,
+    callback: F,
+    prepare: impl FnOnce(F) -> kerrno::KResult<Callback>,
+) -> Result<()> {
+    validate_callback_target(dest_cpu)?;
+    if dest_cpu == this_cpu_id() {
+        callback();
+    } else {
+        let callback = prepare(callback).map_err(|_| KipiError::NoMemory)?;
+        enqueue_callback(dest_cpu, callback);
+    }
+    Ok(())
+}
+
+/// Submits an already prepared callback without allocating another owner.
+///
+/// Execution and sender-context requirements match [`run_on_cpu`]. Preparation
+/// may use `Callback::new`, `Callback::new_nowait` or explicit allocation flags.
+/// Invalid targets or unready remote targets return a validation error and drop
+/// the callback in caller context without invocation. Queue growth remains infallible.
+/// A ready target must retain its initialized CPU area and queue.
+pub fn run_on_cpu_prepared(dest_cpu: LogicalCpuId, callback: Callback) -> Result<()> {
+    validate_callback_target(dest_cpu)?;
+    if dest_cpu == this_cpu_id() {
+        callback.call();
+    } else {
+        enqueue_callback(dest_cpu, callback);
+    }
+    Ok(())
+}
+
+fn validate_callback_target(dest_cpu: LogicalCpuId) -> Result<()> {
     let cpu_num = kbuild_config::NR_CPUS;
     let dest_cpu_index = dest_cpu.as_usize();
 
@@ -165,34 +211,31 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
         return Err(KipiError::InvalidCpuId);
     }
 
-    debug!("Send IPI event to CPU {}", dest_cpu_index);
-
-    if dest_cpu == this_cpu_id() {
-        // Execute callback on current CPU immediately
-        callback.into().call();
-    } else {
-        if !is_ipi_queue_ready(dest_cpu) {
-            error!(
-                "CPU {} has not initialized its IPI queue yet",
-                dest_cpu_index
-            );
-            return Err(KipiError::TargetCpuNotReady);
-        }
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: IPI readiness is published only after \
-                      CPU-area and queue initialization; validated online CPUs retain both"
-        )]
-        ipi_queue(dest_cpu)
-            .expect("ready IPI CPU area must be published")
-            .get()
-            .expect("ready IPI queue must be initialized")
-            .lock()
-            .push(this_cpu_id(), callback.into());
-        kirq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu_index));
+    if dest_cpu != this_cpu_id() && !is_ipi_queue_ready(dest_cpu) {
+        error!(
+            "CPU {} has not initialized its IPI queue yet",
+            dest_cpu_index
+        );
+        return Err(KipiError::TargetCpuNotReady);
     }
 
     Ok(())
+}
+
+fn enqueue_callback(dest_cpu: LogicalCpuId, callback: Callback) {
+    debug!("Send IPI event to CPU {}", dest_cpu.as_usize());
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: IPI readiness is published only after \
+                  CPU-area and queue initialization; validated online CPUs retain both"
+    )]
+    ipi_queue(dest_cpu)
+        .expect("ready IPI CPU area must be published")
+        .get()
+        .expect("ready IPI queue must be initialized")
+        .lock()
+        .push(this_cpu_id(), callback);
+    kirq::notify_cpu(IPI_IRQ, IpiTarget::Specific(dest_cpu.as_usize()));
 }
 
 /// Executes a callback on all other CPUs via IPI.
@@ -202,6 +245,10 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: LogicalCpuId, callback: T) -> Res
 ///
 /// Use this variant when the current CPU may execute the callback in ordinary
 /// task context but the other CPUs may execute it in IPI interrupt context.
+/// Remote bodies and final capture destruction obey [`run_on_cpu`]'s IRQ and
+/// queue-lock constraints. Per-target dispatch shares the existing Arc without
+/// allocating a callback owner; initial Arc and queue growth remain infallible.
+/// Sending is not NMI-safe or allocator-reentrant.
 pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
     debug!("Send IPI event to all other CPUs");
     let current_cpu_id = this_cpu_id();
@@ -234,6 +281,10 @@ pub fn run_on_each_cpu<T: Into<MulticastCallback>>(callback: T) -> Result<()> {
 ///
 /// Use this variant when all CPUs, including the caller, must observe the same
 /// IPI-handler execution context.
+/// All callback bodies and capture destruction obey [`run_on_cpu`]'s IRQ and
+/// queue-lock constraints. Per-target callback conversion does not allocate;
+/// initial Arc and queue growth retain their existing infallible behavior.
+/// Sending is not NMI-safe or allocator-reentrant.
 ///
 /// # Errors
 /// Returns `KipiError::InvalidCpuId` when the broadcast target set is invalid
@@ -325,8 +376,9 @@ fn enqueue_broadcast_to_others(current_cpu_id: LogicalCpuId, callback: &Multicas
 
 /// The handler for IPI events. Retrieves events from the queue and executes callbacks.
 ///
-/// This function is called in interrupt context. If a callback panics or fails,
-/// the error is logged but other pending callbacks will still be processed.
+/// This function is called in interrupt context. Callback bodies and capture
+/// destruction run under the queue lock and must not sleep or re-enter IPI queues.
+/// Callback panics follow kernel panic policy; dispatch does not catch them.
 ///
 /// A system-wide stop request is processed before anything else: once a stop
 /// is in progress, every non-orchestrator CPU acknowledges and parks here and

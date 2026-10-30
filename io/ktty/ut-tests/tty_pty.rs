@@ -39,7 +39,8 @@ fn manual_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
             writer: PtyWriter::new(slave_input.clone()),
             process_mode: ProcessMode::None(master_input.readable()),
         },
-    );
+    )
+    .unwrap();
     let slave = Tty::new(
         terminal,
         TtyKind::Terminal,
@@ -48,7 +49,8 @@ fn manual_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
             writer: PtyWriter::new(master_input),
             process_mode: ProcessMode::Manual,
         },
-    );
+    )
+    .unwrap();
     (master, slave)
 }
 
@@ -87,7 +89,7 @@ fn read_bytes(tty: &PtyDriver, length: usize) -> Vec<u8> {
 
 #[def_test]
 fn pty_work_preserves_input_echo_and_output_space_resume() {
-    let (master, slave) = create_pty_pair();
+    let (master, slave) = create_pty_pair().unwrap();
     let mut input = alloc::vec![b'a'; 700];
     input.push(b'\n');
     master.output.lock().write(&input).unwrap();

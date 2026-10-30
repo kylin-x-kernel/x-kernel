@@ -29,7 +29,7 @@ fn get_tree(
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
     get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_procfs_with_type(file_system_type, flags))
+        new_procfs_with_type(file_system_type, flags)
     })
 }
 
@@ -54,14 +54,19 @@ fn init_proc_fs() {
 }
 
 /// Creates a procfs superblock for process information.
-pub fn new_procfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
+pub fn new_procfs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_procfs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
 }
 
 fn new_procfs_with_type(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, root::builder)
 }
 

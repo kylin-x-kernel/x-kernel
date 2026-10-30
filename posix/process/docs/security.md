@@ -12,6 +12,22 @@ executable formats or maintain process registries itself.
 
 ## External boundaries and validation
 
+The saved-context entry is prepared with KERNEL before ordinary clone creates
+child relationships. NoMemory returns to the syscall caller without adding a
+child or publishing a task. Dropping an unused prepared entry releases captures
+without running the user loop. Its capture destructors must be valid in the
+dropping context. The task builder only transfers this owner; it cannot fail on
+a second callback allocation after clone commitment. PID 1 retains an explicit
+fatal boot failure policy, not a NOFAIL promise. Other task allocations remain
+infallible, so this is not end-to-end OOM recovery.
+
+The thread owner is a `KBox` whose policy is chosen during kprocess preparation:
+KERNEL for sleepable initial construction, NOWAIT within the process cgroup
+clone transaction. Passing it to the trap-loop task builder adds no allocation
+or lifetime extension. Boot handles initial preparation failure explicitly;
+normal clone failures propagate without activating the child. Final runtime
+destruction continues through the scheduler's existing ownership protocol.
+
 `spawn_init_process(args, envs, ...)` passes path/argv/envp to `ExecRequest` and
 `prepare_user_app_request`; filesystem resolution and executable validation belong
 to those providers. `load_prepared_user_app` receives only an unpublished empty

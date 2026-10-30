@@ -2,6 +2,32 @@
 
 ## Purpose and ownership
 
+The per-thread TEE session slot also holds a preallocated `KBox` DST. Installing
+an owner or borrowing the slot does not allocate in kprocess. TEE's lazy initializer
+uses NOWAIT only for a missing slot under the mutex; existing-session access and
+cleanup do not allocate redundant owners. Session callbacks retain the slot lock.
+
+Thread and signal-slot ownership use `KBox`. Initial thread construction through
+`build_process_thread` returns `KResult<KBox<Thread>>` and uses KERNEL, requiring
+sleepable task context without reclaim-dependent locks, IRQ/preemption exclusion
+or non-sleepable RCU scopes. Fork and sibling-clone paths instead pass NOWAIT for
+both owners: they hold the process cgroup transaction mutex and must not add
+reclaim dependencies under that serialization lock. Slot allocation still
+precedes the signal lock. The thread owner is allocated after its fields have
+been prepared, outside the signal lock but still within the clone transaction.
+
+NoMemory propagates through preparation before runnable-task publication.
+The attached-child rollback guard now remains armed through final thread
+preparation, not only runtime construction. A signal-slot or outer owner
+failure therefore also removes the unpublished child relation from its parent.
+`PreparedUserClone::into_parts` transfers the same owner to the POSIX trap-loop
+builder and `TaskInner::new_user`; coercion to `KBox<dyn UserTaskRuntime>` does
+not allocate or move the pointee. PID 1's caller retains the existing fatal
+initialization boundary. Callers prepare a `PreparedTaskEntry` before starting
+clone preparation, so consuming the prepared clone adds no fallible callback
+allocation. Arc/Vec and kernel-stack allocations are
+not made fallible by this migration.
+
 `kprocess` owns the process domain: stable process/thread identity bindings,
 parent-child and group/session relations, task publication, exit/wait state,
 process-runtime capabilities, signal targeting and timer-delivery integration.

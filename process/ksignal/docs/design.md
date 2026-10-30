@@ -268,16 +268,25 @@ stay outside it: dispositions are `Arc`-shared with CLONE_SIGHAND peers and are
 not part of the deliverability predicate, so they keep their own locks and the
 ownership-before-content order.
 
-Slots hold their payload out of line (`Box<ThreadSlot>`): `PendingSignals` is
+Slots hold their payload out of line (`KBox<ThreadSlot>`): `PendingSignals` is
 about 1.3 KiB, so an inlined table would keep a thread-count peak resident for
 the process lifetime. `retire` clears the slot and pops trailing empty slots,
 so the table shrinks back after a thread-count peak. Registration allocates the
 boxed slot and its projection cell *before* taking the lock and only links the
-prepared slot inside the transaction, so no `Box`/`Arc` allocation or slab
+prepared slot inside the transaction, so no slot-owner/`Arc` allocation or slab
 refill runs in the critical section other threads' sends and slow-path dequeues
 spin on. The table is pre-sized at construction (before the manager is shared,
 so nothing spins on the lock yet); a process that exceeds that capacity pays an
 amortized doubling of 8-byte entries, never of the slot payload.
+
+`ThreadSignalManager::new` uses KERNEL and requires sleepable task context,
+with IRQs and preemption enabled and no reclaim-dependent locks or non-sleepable
+RCU section. `new_nowait` avoids introducing reclaim dependencies into process
+clone transactions; `new_with_flags` accepts an explicit policy under the same
+context contract as `KBox`. Registration now returns `KResult`: slot allocation
+failure leaves the table, generation counter and signal projections unchanged.
+The projection and manager Arcs and table growth remain infallible; this is not
+end-to-end OOM safety. Standard-signal payload ownership is not yet migrated.
 
 The one deliberate exception is the signal payload: `put_thread`/`put_shared`
 reach `PendingSignals::put_signal`, which boxes a standard signal only after the

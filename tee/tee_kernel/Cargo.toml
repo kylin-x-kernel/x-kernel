@@ -24,6 +24,7 @@ virtcca_huk_key = []
 ignored = ["zerocopy"]
 
 [dependencies]
+kalloc-types.workspace = true
 unittest.workspace = true
 unittest_support.workspace = true
 xdice = { workspace = true, optional = true, features = ["nostd"] }

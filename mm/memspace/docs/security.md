@@ -1,4 +1,26 @@
 # memspace — 安全与可靠性分析
+
+## Post-populate hook safety
+
+`PopulateHook` uses safe one-shot adaptation over `KBox<dyn FnMut(&mut MmSpace)>`;
+it adds no raw-pointer ownership or unsafe code. Taking a hook empties the
+completion slot, calling consumes its owner, and cancellation or construction
+failure drops captures without invoking the callback. Capture destructors run
+in the dropping caller's context, independently of allocation flags.
+
+Fault dispatch does not release an outer MM lock before invoking a hook.
+Callbacks must not reacquire that lock or assume reclaim-safe execution.
+NOWAIT permits allocation without reclaim but can fail; callers must allocate
+before committing any operation that cannot tolerate loss of its completion
+action. Default KERNEL construction requires sleepable, reclaim-compatible
+context and must not be used merely because the lock is a sleeping mutex.
+
+Tests cover consuming-only captures, one-shot extraction, capture cleanup on
+cancellation and invalid flags, synchronous dispatch, and NoMemory outcome
+classification. They do not force global allocator exhaustion or exercise
+reclaim, which the current backend does not implement. Existing production
+backends construct no post-populate hooks.
+
 ## 信任模型
 
 分析范围包含 `src/` 的生产实现和 `ut-tests/` 的内核测试夹具。

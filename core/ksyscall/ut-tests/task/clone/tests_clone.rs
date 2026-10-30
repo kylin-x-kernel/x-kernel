@@ -6,6 +6,42 @@ use unittest::def_test;
 
 use super::*;
 
+#[def_test(user, serial)]
+fn entry_allocation_failure_precedes_process_and_thread_preparation() {
+    let process = current_user_thread().process().clone();
+    let children: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+    let threads = process.threads();
+    let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    for flags in [CloneFlags::empty(), CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND] {
+        let called = core::cell::Cell::new(false);
+        let mut request = CloneRequest::new();
+        request.set_flags(flags);
+        let result = request.do_clone_with_entry(&context, |_, _| {
+            called.set(true);
+            Err(KError::NoMemory)
+        });
+        assert_eq!(result, Err(KError::NoMemory));
+        assert!(called.get());
+        let after: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+        assert_eq!(after, children);
+        assert_eq!(process.threads(), threads);
+    }
+}
+
+#[def_test(user, serial)]
+fn invalid_exit_signal_is_rejected_before_entry_allocation() {
+    let called = core::cell::Cell::new(false);
+    let mut request = CloneRequest::new();
+    request.set_exit_signal(u64::MAX);
+    let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
+    let result = request.do_clone_with_entry(&context, |_, _| {
+        called.set(true);
+        Err(KError::NoMemory)
+    });
+    assert_eq!(result, Err(KError::InvalidInput));
+    assert!(!called.get());
+}
+
 #[def_test]
 fn test_validate_rejects_newns_and_fs() {
     let mut req = CloneRequest::new();

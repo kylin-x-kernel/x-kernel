@@ -2,6 +2,15 @@
 
 ## Scope, assets, and boundaries
 
+Thread-slot owners use fallible `KBox` allocation before acquiring `SigLock`.
+Invalid policies or NoMemory return before slot publication; the temporary
+projection reference is released. Default construction requires sleepable,
+reclaim-compatible task context; explicit NOWAIT does not promise NMI safety,
+allocator reentrancy, reserves, or bounded latency. Existing Arc allocations
+and slot-table growth remain infallible. Tests reject an invalid policy,
+verify absent registration and successful retry, and check process-reference
+cleanup. They do not force global allocator exhaustion.
+
 All of `src/` is covered. Assets are signal state consistency (blocked sets,
 pending queues, actions), the integrity of the user handler frame, and the
 `siginfo` payloads consumed by user handlers. Trusted callers are `ksyscall`

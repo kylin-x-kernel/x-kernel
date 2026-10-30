@@ -179,12 +179,25 @@ impl CloneRequest {
     }
 
     /// Consume this request and execute the clone operation.
+    /// Requires a current user thread in sleepable task context, without locks
+    /// needed by reclaim, I/O or filesystem callbacks. Entry allocation happens
+    /// before preparing child process/thread state and may return NoMemory.
+    pub(crate) fn do_clone(self, uctx: &UserContext) -> KResult<isize> {
+        self.do_clone_with_entry(uctx, |context, child_tid| {
+            posix_process::prepare_user_entry(context, child_tid, crate::handle_syscall)
+        })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "CG-028-focused-functions: TODO(cg): legacy clone; split flag validation, \
                   resource sharing and task start"
     )]
-    pub(crate) fn do_clone(mut self, uctx: &UserContext) -> KResult<isize> {
+    fn do_clone_with_entry(
+        mut self,
+        uctx: &UserContext,
+        prepare_entry: impl FnOnce(UserContext, usize) -> KResult<ktask::PreparedTaskEntry>,
+    ) -> KResult<isize> {
         if self.flags.contains(CloneFlags::VFORK) {
             // TODO: Implement Linux vfork semantics: keep the mm shared, block
             // the parent until the child successfully execs or exits, and wake
@@ -277,11 +290,16 @@ impl CloneRequest {
             .for_fork()
             .map_err(super::sched::sched_errno)?;
         let current_thread = current_user_thread();
+        let exit_signal = if self.flags.contains(CloneFlags::THREAD) {
+            None
+        } else {
+            Self::parse_exit_signal(self.exit_signal)?
+        };
+        let entry = prepare_entry(new_uctx, set_child_tid)?;
         let prepared = if self.flags.contains(CloneFlags::THREAD) {
             current_thread
                 .prepare_thread_clone_with_files(self.flags.contains(CloneFlags::FILES))?
         } else {
-            let exit_signal = Self::parse_exit_signal(self.exit_signal)?;
             current_thread.prepare_process_fork(ProcessForkConfig {
                 parent: if self.flags.contains(CloneFlags::PARENT) {
                     ForkParent::CallerParent
@@ -339,14 +357,7 @@ impl CloneRequest {
             thr.set_clear_child_tid(self.child_tid);
         }
 
-        let mut new_task = new_user_task(
-            &curr.name(),
-            new_uctx,
-            set_child_tid,
-            task_number,
-            thr,
-            crate::handle_syscall,
-        );
+        let mut new_task = new_user_task(&curr.name(), entry, task_number, thr);
         // Linux copies the creator's CPU affinity into the child. schbench
         // relies on this: the message thread pins itself to the worker CPU set
         // before pthread_create, then re-pins itself to the message CPU.

@@ -6,6 +6,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+kalloc-types.workspace = true
 bitmaps = { version = "3.2.1", default-features = false }
 kclass = { workspace = true, features = ["input"] }
 kdevice = { workspace = true }

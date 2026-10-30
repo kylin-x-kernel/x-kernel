@@ -7,6 +7,16 @@ use unittest::def_test;
 
 use super::*;
 
+#[def_test]
+fn timerfd_preparation_rejects_non_sleepable_context() {
+    let results = {
+        let _guard = kspin::NoPreempt::new();
+        [TimerFdClock::Monotonic, TimerFdClock::Realtime, TimerFdClock::Boottime]
+            .map(|clock| TimerFd::new(clock).err())
+    };
+    assert_eq!(results, [Some(KError::InvalidInput); 3]);
+}
+
 fn monotonic(span: TimeSpan) -> TimerDeadline {
     TimerDeadline::Monotonic(MonotonicInstant::from_span_since_origin(span))
 }

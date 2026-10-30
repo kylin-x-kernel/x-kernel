@@ -3,9 +3,8 @@
 // See LICENSES for license details.
 
 //! Memory mapping backends.
-use alloc::boxed::Box;
-
 use kalloc::{UsageKind, global_allocator};
+use kalloc_types::{AllocFlags, KBox};
 use kerrno::{KError, KResult};
 use khal::{
     mem::{p2v, v2p},
@@ -124,7 +123,70 @@ pub trait BackendOps {
     }
 }
 
-type PopulateHook = Box<dyn FnOnce(&mut MmSpace)>;
+/// An owned, one-shot post-populate action.
+///
+/// Construction is fallible and must precede any state change whose completion
+/// requires this action and cannot be rolled back. Dropping an unused hook
+/// releases its captures without calling it. Existing in-tree backends return
+/// no hook; this type does not add an allocation to those fault paths.
+pub struct PopulateHook(KBox<dyn FnMut(&mut MmSpace)>);
+
+impl PopulateHook {
+    /// Prepares a hook with the default KERNEL allocation policy.
+    ///
+    /// Requires sleepable task context with IRQs and preemption enabled, outside
+    /// non-sleepable RCU sections and without locks needed by reclaim, IO or
+    /// filesystem callbacks. In particular, do not use this while holding an
+    /// address-space lock that reclaim may need; prepare before locking instead.
+    /// Returns NoMemory if owner allocation fails, dropping the captures.
+    pub fn new(callback: impl FnOnce(&mut MmSpace) + 'static) -> KResult<Self> {
+        Self::new_with_flags(callback, AllocFlags::KERNEL)
+    }
+
+    /// Prepares a hook without sleeping or entering reclaim for owner storage.
+    ///
+    /// Suitable for a backend that cannot release its MM lock, provided failure
+    /// can still be returned or rolled back. Allocator reentrancy and lock-order
+    /// constraints still apply; NMI safety, reserves and bounded latency are
+    /// not promised. Returns NoMemory and drops captures on allocation failure.
+    pub fn new_nowait(callback: impl FnOnce(&mut MmSpace) + 'static) -> KResult<Self> {
+        Self::new_with_flags(callback, AllocFlags::NOWAIT)
+    }
+
+    /// Prepares a hook with caller-selected owner allocation permissions.
+    ///
+    /// The context requirements of [`KBox::new_with_flags`] apply. NOIO/NOFS
+    /// still permit sleeping and do not exclude all MM reclaim dependencies.
+    /// Capture construction/drop has its own context requirements; flags cover
+    /// only owner storage. Returns NoMemory or InvalidInput for unknown flags,
+    /// releasing captures without invoking the callback in either case.
+    pub fn new_with_flags(
+        callback: impl FnOnce(&mut MmSpace) + 'static,
+        flags: AllocFlags,
+    ) -> KResult<Self> {
+        let mut callback = Some(callback);
+        let owner: KBox<dyn FnMut(&mut MmSpace)> = KBox::new_with_flags(
+            move |address_space: &mut MmSpace| {
+                if let Some(callback) = callback.take() {
+                    callback(address_space);
+                }
+            },
+            flags,
+        )?;
+        Ok(Self(owner))
+    }
+
+    /// Consumes and invokes the hook without allocating owner storage.
+    ///
+    /// Runs synchronously in the fault caller's context, retaining any outer
+    /// MM lock. The callback and capture destructors must respect those locks
+    /// and context constraints; this is not deferred work on a separate worker.
+    /// It must not reacquire the same MM lock or assume reclaim-safe execution.
+    pub fn call(mut self, address_space: &mut MmSpace) {
+        (self.0)(address_space);
+    }
+}
+
 pub(crate) type PopulateResult = KResult<(usize, Option<PopulateHook>)>;
 
 /// Fault-completion payload returned by backends.
@@ -136,6 +198,7 @@ pub struct FaultCompletion {
 
 impl FaultCompletion {
     /// Builds a fault-completion payload from a populate result.
+    /// Accepts an already prepared hook without allocation or invocation.
     pub fn from_populate((populated, post_action): (usize, Option<PopulateHook>)) -> Self {
         Self {
             populated,
@@ -165,6 +228,7 @@ impl FaultCompletion {
     }
 
     /// Takes the deferred post-fault action, if the backend produced one.
+    /// Taking the hook does not invoke it; dropping it cancels the action.
     pub fn take_post_action(&mut self) -> Option<PopulateHook> {
         self.post_action.take()
     }

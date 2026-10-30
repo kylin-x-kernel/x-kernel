@@ -21,6 +21,7 @@
               sites, too many to judge individually in this migration; new code remains reviewed"
 )]
 #![cfg_attr(not(test), no_std)]
+#![feature(arbitrary_self_types)]
 
 #[cfg(all(feature = "smp", not(feature = "ipi")))]
 compile_error!(

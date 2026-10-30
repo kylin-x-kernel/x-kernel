@@ -345,8 +345,9 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
         fs_context,
         signal_actions,
         initial_cred(),
-    );
-    let task = TaskInner::new_user(|| {}, String::from("test-user-thread"), task_number, thread);
+    )
+    .expect("test thread preparation");
+    let task = TaskInner::new_user(ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"), String::from("test-user-thread"), task_number, thread);
 
     task.set_name(format!("test-user-thread-{pid}").as_str());
     (process, task)
@@ -370,8 +371,9 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
         fs_context,
         signal_actions,
         credentials,
-    );
-    let task = TaskInner::new_user(|| {}, format!("test-thread-{tid}"), task_number, thread);
+    )
+    .expect("test thread preparation");
+    let task = TaskInner::new_user(ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"), format!("test-thread-{tid}"), task_number, thread);
 
     let task = prepare_task(task);
     process_publication().publish_task(&task).unwrap();
@@ -413,9 +415,10 @@ pub(crate) fn process_with_address_space(
         fs_context,
         signal_actions,
         initial_cred(),
-    );
+    )
+    .expect("test thread preparation");
     let task = TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         format!("test-user-thread-{pid}"),
         task_number,
         thread,
@@ -760,9 +763,10 @@ fn test_clone_parent_inherits_callers_exit_signal_contract() {
         fs_context,
         signal_actions,
         initial_cred(),
-    );
+    )
+    .expect("test thread preparation");
     let task = TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         String::from("clone-parent-test"),
         parent_task_number,
         thread,
@@ -815,9 +819,10 @@ fn test_clone_newnpid_allocates_child_in_fresh_pid_namespace() {
         fs_context,
         signal_actions,
         initial_cred(),
-    );
+    )
+    .expect("test thread preparation");
     let task = TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         String::from("newnpid-parent"),
         parent_task_number,
         thread,
@@ -895,9 +900,10 @@ fn test_child_exit_si_pid_projected_into_parent_namespace() {
         fs_context::copy_init_fs_struct(),
         ksignal::api::SignalActions::default(),
         initial_cred(),
-    );
+    )
+    .expect("test thread preparation");
     let task = TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         String::from("nsi-pid-parent"),
         parent_task_number,
         thread,
@@ -1289,6 +1295,64 @@ fn test_exit_cleanup_ignores_non_runtime_address_space_refs() {
 
     process_exit::finalize_process_exit(&proc);
     wait_reap::assert_reap_zombie_process(&proc);
+}
+
+#[def_test(serial)]
+fn test_final_thread_preparation_failure_rolls_back_child_relation() {
+    let (parent, parent_task) = build_prepared_test_user_task();
+    let mut observation = None;
+    let result: kerrno::KResult<()> = crate::fork_process_runtime(
+        &parent_task.as_thread().process_runtime(),
+        ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Shared,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Shared,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        },
+        |runtime, identity| {
+            observation = Some((
+                runtime.process().clone(),
+                Arc::downgrade(&runtime),
+                runtime.signal_manager().clone(),
+                Arc::downgrade(&identity),
+            ));
+            Err(kerrno::KError::NoMemory)
+        },
+    );
+    assert_eq!(result, Err(kerrno::KError::NoMemory));
+    let (child, runtime, signals, identity) = observation.unwrap();
+    assert!(
+        !parent
+            .children()
+            .iter()
+            .any(|candidate| Arc::ptr_eq(candidate, &child))
+    );
+    assert!(
+        !child
+            .group()
+            .processes()
+            .iter()
+            .any(|candidate| Arc::ptr_eq(candidate, &child))
+    );
+    assert!(runtime.upgrade().is_none());
+    assert!(matches!(
+        signals.signal_action(ksignal::Signo::SIGUSR1),
+        Err(kerrno::KError::NoSuchProcess)
+    ));
+    assert!(
+        parent_task
+            .as_thread()
+            .signal_manager()
+            .process()
+            .signal_action(ksignal::Signo::SIGUSR1)
+            .is_ok()
+    );
+    drop(child);
+    assert!(identity.upgrade().is_none());
+    parent.discard_unpublished();
 }
 
 #[def_test(serial)]
@@ -2120,7 +2184,9 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     );
 
     let (cloned, task_number) = prepared.into_parts();
-    let task = TaskInner::new_user(|| {}, String::from("prepared-thread"), task_number, cloned);
+    let thread_address = core::ptr::from_ref(&*cloned);
+    let task = TaskInner::new_user(ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"), String::from("prepared-thread"), task_number, cloned);
+    assert_eq!(core::ptr::from_ref(task.as_thread()), thread_address);
     let published = prepare_user_task(task).publish().unwrap();
     let sibling_task = published.task().clone();
 
@@ -2168,7 +2234,7 @@ fn test_process_migration_reconciles_a_prepared_sibling_at_publication() {
 
     let (cloned, task_number) = prepared.into_parts();
     let sibling = prepare_user_task(TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         String::from("cgroup-reconciled-sibling"),
         task_number,
         cloned,
@@ -2211,7 +2277,7 @@ fn test_cgroup_reconciliation_failure_does_not_publish_task() {
     let (cloned, task_number) = prepared.into_parts();
     let sibling_tid = task_number.root_nr();
     let sibling = prepare_user_task(TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         String::from("cgroup-reconciliation-failure"),
         task_number,
         cloned,
@@ -2249,7 +2315,7 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
 
     let (cloned, task_number) = prepared.into_parts();
     let sibling = prepare_user_task(TaskInner::new_user(
-        || {},
+        ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         String::from("affinity-sibling"),
         task_number,
         cloned,

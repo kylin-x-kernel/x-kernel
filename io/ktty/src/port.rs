@@ -5,12 +5,12 @@
 //! Backend input transport and task-context processing for terminal ports.
 
 use alloc::{
-    boxed::Box,
     collections::VecDeque,
     sync::{Arc, Weak},
 };
 use core::{ops::Range, task::Waker};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcpu_id_map::LogicalCpuId;
 use kerrno::{KError, KResult};
 use kpoll::{PollContext, PollRegisterError, PollSet};
@@ -238,7 +238,7 @@ pub trait TtyWrite: Send + Sync + 'static {
     }
 }
 
-type InputWorkHandle = WorkHandle<Box<dyn Fn() + Send + Sync>>;
+type InputWorkHandle = WorkHandle<KBox<dyn Fn() + Send + Sync>>;
 
 /// Owns the input submission gate independently of the sleeping reader lock.
 pub(crate) struct InputWork {
@@ -392,10 +392,27 @@ pub struct TtyPort<R, W> {
 impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
     /// Creates input processing state without starting Work-mode callbacks.
     ///
-    /// # Panics
-    /// Work mode requires sleepable context and initialized normal workers.
-    /// Allocation failure is fatal.
-    pub fn new(terminal: Arc<Terminal>, config: TtyConfig<R, W>) -> Self {
+    /// Requires sleepable task context with no locks needed by reclaim or I/O.
+    /// Work mode additionally requires initialized normal workers.
+    /// Returns callback allocation or worker preparation errors before attaching
+    /// input notifications. Nested buffer and Arc allocations remain infallible.
+    pub fn new(terminal: Arc<Terminal>, config: TtyConfig<R, W>) -> KResult<Self> {
+        Self::new_with_flags(terminal, config, AllocFlags::KERNEL)
+    }
+
+    /// Creates a port with an explicit callback-owner allocation policy.
+    ///
+    /// Reclaim-capable policies require the context and lock constraints of
+    /// [`Self::new`]. Flags affect only the callback owner, not nested allocations.
+    /// NOWAIT prevents callback allocation from entering reclaim, but does not
+    /// make WorkHandle preparation IRQ-safe: Work mode still requires sleepable
+    /// task context. Manual and None modes allocate no callback owner.
+    /// Failure leaves the ingress notification binding unchanged.
+    pub fn new_with_flags(
+        terminal: Arc<Terminal>,
+        config: TtyConfig<R, W>,
+        flags: AllocFlags,
+    ) -> KResult<Self> {
         let (buf_tx, buf_rx) = ReadBuf::default().split();
 
         let ingress = config
@@ -422,10 +439,13 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
                 let ready = poll_rx.clone();
                 let reader = Arc::new(ksync::Mutex::new(reader));
                 let worker_reader = reader.clone();
-                let work: Arc<InputWork> = Arc::new_cyclic(|weak: &Weak<InputWork>| {
-                    // Requeue must not keep the callback's owner alive forever.
-                    let weak = weak.clone();
-                    let callback_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                let work = Arc::new(InputWork {
+                    work: SpinNoIrq::new(None),
+                    cpu_id,
+                });
+                let weak = Arc::downgrade(&work);
+                let callback_fn: KBox<dyn Fn() + Send + Sync> = KBox::new_with_flags(
+                    move || {
                         let Some(work) = weak.upgrade() else { return };
                         if work.work.lock().is_none() {
                             return;
@@ -437,20 +457,11 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
                         if progress.stop == InputStop::BudgetExhausted {
                             work.queue();
                         }
-                    });
-                    #[expect(
-                        clippy::expect_used,
-                        reason = "CG-021-no-panic-on-reachable-failure: TTY work mode is \
-                                  constructed in sleepable task context after the permanent \
-                                  normal worker service is installed"
-                    )]
-                    let work =
-                        WorkHandle::new(callback_fn).expect("TTY input requires normal workers");
-                    InputWork {
-                        work: SpinNoIrq::new(Some(work)),
-                        cpu_id,
-                    }
-                });
+                    },
+                    flags,
+                )?;
+                let handle = WorkHandle::new(callback_fn).map_err(|_| KError::BadState)?;
+                *work.work.lock() = Some(handle);
                 Processor::Work {
                     input_waker: Waker::from(Arc::new(InputWake {
                         work: Arc::downgrade(&work),
@@ -465,13 +476,13 @@ impl<R: TtyRead, W: TtyWrite> TtyPort<R, W> {
         if let Processor::Work { input_waker, .. } = &processor {
             *ingress.input_waker.lock() = Some(input_waker.clone());
         }
-        Self {
+        Ok(Self {
             terminal,
             buf_rx,
             processor,
             ingress,
             output,
-        }
+        })
     }
 
     /// Discards port-owned ingress, prefetch, canonical and cooked input.

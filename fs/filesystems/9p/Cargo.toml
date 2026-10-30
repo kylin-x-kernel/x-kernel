@@ -13,6 +13,7 @@ documentation.workspace = true
 default = []
 
 [dependencies]
+kalloc-types.workspace = true
 p9.workspace = true
 kcred.workspace = true
 kerrno.workspace = true

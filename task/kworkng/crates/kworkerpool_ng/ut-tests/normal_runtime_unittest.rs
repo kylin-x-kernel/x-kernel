@@ -32,6 +32,26 @@ fn start() -> NormalRuntime<Empty> {
     .unwrap()
 }
 
+#[def_test]
+fn manager_entry_failure_releases_unpublished_service() {
+    let mut observed = None;
+    let result = NormalRuntime::<Empty>::start_with_entry(
+        khal::percpu::this_cpu_id(),
+        NonZeroUsize::new(1).unwrap(),
+        TimeSpan::from_millis(10),
+        |manager, _wake| {
+            assert!(!manager.service.is_ready());
+            assert_eq!(manager.service.workers.lock().pool.reserved_workers(), 0);
+            observed = Some(Arc::downgrade(&manager.service));
+            Err(RuntimeError::NoMemory)
+        },
+    );
+    assert!(matches!(result, Err(RuntimeError::NoMemory)));
+    assert!(observed.unwrap().upgrade().is_none());
+    let runtime = start();
+    runtime.stop().unwrap();
+}
+
 /// Startup returns with a usable worker; stop joins and removes runtime ownership.
 ///
 /// # Panics

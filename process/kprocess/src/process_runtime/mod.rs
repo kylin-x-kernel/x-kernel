@@ -483,11 +483,14 @@ impl Drop for ProcessRuntime {
 }
 
 /// Creates a child process runtime for fork/clone process creation paths.
+/// Runs the final thread-preparation stage before committing the attached child
+/// relation, so any error from that stage still rolls back the process tree.
 #[doc(hidden)]
-pub(crate) fn fork_process_runtime(
+pub(crate) fn fork_process_runtime<R>(
     parent: &Arc<ProcessRuntime>,
     config: ProcessForkConfig,
-) -> KResult<(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>)> {
+    finish_thread: impl FnOnce(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>) -> KResult<R>,
+) -> KResult<R> {
     let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
     // Children take their numbers in the parent's `pid_ns_for_children` —
     // the namespace `setns(CLONE_NEWPID)` retargets and a plain fork
@@ -530,9 +533,9 @@ pub(crate) fn fork_process_runtime(
         address_space,
         signal_manager,
     )?;
+    let prepared = finish_thread(process_runtime, leader_task_number)?;
     attached_process.commit();
-
-    Ok((process_runtime, leader_task_number))
+    Ok(prepared)
 }
 
 fn prepare_fork_fs_and_namespaces(

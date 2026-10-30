@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
+use kalloc_types::{AllocFlags, KBox};
 use kcgroup::{Cgroup, TaskCharge, TaskMembership};
 use kcred::Cred;
 use kerrno::KResult;
@@ -34,7 +35,7 @@ pub struct CurrentThread(pub(super) KtaskRef);
 /// thread object so higher layers can construct the target task without
 /// re-implementing PID namespace or identity-allocation policy.
 pub struct PreparedUserClone {
-    thread: Box<Thread>,
+    thread: KBox<Thread>,
     task_number: Arc<kidentity::PidHandle>,
 }
 
@@ -66,7 +67,7 @@ impl PreparedUserClone {
     }
 
     /// Splits the prepared clone into the thread object and its task identity.
-    pub fn into_parts(self) -> (Box<Thread>, Arc<kidentity::PidHandle>) {
+    pub fn into_parts(self) -> (KBox<Thread>, Arc<kidentity::PidHandle>) {
         (self.thread, self.task_number)
     }
 }
@@ -194,7 +195,7 @@ pub struct Thread {
     seccomp: super::SeccompContext,
     cgroup: TaskMembership,
     #[cfg(feature = "tee")]
-    tee_session_ctx: Mutex<Option<Box<dyn TeeSessionCtxTrait>>>,
+    tee_session_ctx: Mutex<Option<KBox<dyn TeeSessionCtxTrait>>>,
 }
 
 impl Thread {
@@ -217,20 +218,19 @@ impl Thread {
         self.process.apply_exec_update(update)
     }
 
-    /// Creates a new [`Thread`].
+    /// Creates a thread in sleepable, reclaim-compatible task context.
     pub(crate) fn new(
         process: Arc<Process>,
         runtime: Arc<ProcessRuntime>,
         task_number: Arc<kidentity::PidHandle>,
         cred: Arc<Cred>,
-    ) -> Box<Self> {
+    ) -> KResult<KBox<Self>> {
         let charge = runtime
             .nsproxy()
             .expect("initial process runtime must have a namespace owner")
             .cgroup_ns()
             .root()
-            .reserve_task()
-            .expect("initial process must fit in the root cgroup");
+            .reserve_task()?;
         Self::new_with_charge(
             process,
             runtime,
@@ -239,10 +239,15 @@ impl Thread {
             charge,
             false,
             kresources::TaskFiles::new_shared(),
+            AllocFlags::KERNEL,
         )
-        .expect("initial task identity must be unique")
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Thread construction binds \
+                  process identity, resource ownership and explicit allocation permissions"
+    )]
     fn new_with_charge(
         process: Arc<Process>,
         runtime: Arc<ProcessRuntime>,
@@ -251,36 +256,44 @@ impl Thread {
         charge: TaskCharge,
         no_new_privileges: bool,
         files: kresources::TaskFiles,
-    ) -> KResult<Box<Self>> {
+        flags: AllocFlags,
+    ) -> KResult<KBox<Self>> {
         let tid = task_number.root_nr();
         let identity_token = kidentity::TaskIdentityToken::allocate();
         let cgroup = charge.commit(identity_token)?;
-        Ok(Box::new(Thread {
-            identity_token,
-            task_number: SpinNoIrq::new(task_number),
-            tid: AtomicU32::new(tid),
-            signal: ThreadSignalManager::new(tid, runtime.signal_manager().clone()),
-            process,
-            runtime,
-            files,
-            exit_address_space: SpinNoIrq::new(None),
-            real_cred: RwLock::new(cred.clone()),
-            cred: RwLock::new(cred),
-            clear_child_tid: AtomicUsize::new(0),
-            robust_list_head: AtomicUsize::new(0),
-            time: SpinNoPreempt::new(CpuTimeStatistics::new()),
-            nice: AtomicI32::new(NiceValue::default().as_i32()),
-            scheduler: Mutex::new(SchedulerState::default()),
-            is_exiting: AtomicBool::new(false),
-            exec_sweep_target: AtomicBool::new(false),
-            accessing_user_memory: AtomicBool::new(false),
-            restart_block: Mutex::new(RestartSlot::empty()),
-            no_new_privileges: AtomicBool::new(no_new_privileges),
-            seccomp: super::SeccompContext::new(),
-            cgroup,
-            #[cfg(feature = "tee")]
-            tee_session_ctx: Mutex::new(None),
-        }))
+        KBox::new_with_flags(
+            Thread {
+                identity_token,
+                task_number: SpinNoIrq::new(task_number),
+                tid: AtomicU32::new(tid),
+                signal: ThreadSignalManager::new_with_flags(
+                    tid,
+                    runtime.signal_manager().clone(),
+                    flags,
+                )?,
+                process,
+                runtime,
+                files,
+                exit_address_space: SpinNoIrq::new(None),
+                real_cred: RwLock::new(cred.clone()),
+                cred: RwLock::new(cred),
+                clear_child_tid: AtomicUsize::new(0),
+                robust_list_head: AtomicUsize::new(0),
+                time: SpinNoPreempt::new(CpuTimeStatistics::new()),
+                nice: AtomicI32::new(NiceValue::default().as_i32()),
+                scheduler: Mutex::new(SchedulerState::default()),
+                is_exiting: AtomicBool::new(false),
+                exec_sweep_target: AtomicBool::new(false),
+                accessing_user_memory: AtomicBool::new(false),
+                restart_block: Mutex::new(RestartSlot::empty()),
+                no_new_privileges: AtomicBool::new(no_new_privileges),
+                seccomp: super::SeccompContext::new(),
+                cgroup,
+                #[cfg(feature = "tee")]
+                tee_session_ctx: Mutex::new(None),
+            },
+            flags,
+        )
     }
 
     /// Forks a child process from this thread's current process and returns the
@@ -289,7 +302,7 @@ impl Thread {
     /// # Errors
     ///
     /// Forwards `Thread::prepare_process_fork` errors; no task is activated.
-    pub fn fork_process_child(&self, config: ProcessForkConfig) -> KResult<Box<Self>> {
+    pub fn fork_process_child(&self, config: ProcessForkConfig) -> KResult<KBox<Self>> {
         self.prepare_process_fork(config)
             .map(|prepared| prepared.into_parts().0)
     }
@@ -304,29 +317,36 @@ impl Thread {
     /// fd-table preparation errors. Runtime fork returns NoSuchProcess for detached
     /// owners, WouldBlock for shared fs during exec, InvalidInput for invalid or
     /// changed parent/namespace contracts, and Unsupported for an unimplemented
-    /// namespace request. The prepared child is not activated.
+    /// namespace request. Thread and signal-slot allocation use NOWAIT under the cgroup
+    /// transaction mutex and may return NoMemory. The prepared child is not activated.
     pub fn prepare_process_fork(&self, config: ProcessForkConfig) -> KResult<PreparedUserClone> {
         let _transaction = self.process.cgroup_transaction();
         let charge = self.cgroup.reserve_child()?;
         let files = self
             .files
             .fork(matches!(config.fd_table, crate::ForkFdTable::Shared))?;
-        let (process_runtime, task_number) = fork_process_runtime(&self.process_runtime(), config)?;
-        let thread = Self::new_with_charge(
-            process_runtime.process().clone(),
-            process_runtime,
-            task_number.clone(),
-            self.subjective_cred(),
-            charge,
-            self.no_new_privileges(),
-            files,
-        )?;
-        thread.signal.set_blocked(self.signal.blocked());
-        thread.seccomp.inherit_from(&self.seccomp);
-        Ok(PreparedUserClone {
-            thread,
-            task_number,
-        })
+        fork_process_runtime(
+            &self.process_runtime(),
+            config,
+            |process_runtime, task_number| {
+                let thread = Self::new_with_charge(
+                    process_runtime.process().clone(),
+                    process_runtime,
+                    task_number.clone(),
+                    self.subjective_cred(),
+                    charge,
+                    self.no_new_privileges(),
+                    files,
+                    AllocFlags::NOWAIT,
+                )?;
+                thread.signal.set_blocked(self.signal.blocked());
+                thread.seccomp.inherit_from(&self.seccomp);
+                Ok(PreparedUserClone {
+                    thread,
+                    task_number,
+                })
+            },
+        )
     }
 
     /// Creates a sibling thread within the same process runtime.
@@ -334,7 +354,7 @@ impl Thread {
     /// # Errors
     ///
     /// Forwards `Thread::prepare_thread_clone` errors; no task is activated.
-    pub fn clone_thread_in_process(&self) -> KResult<Box<Self>> {
+    pub fn clone_thread_in_process(&self) -> KResult<KBox<Self>> {
         self.prepare_thread_clone()
             .map(|prepared| prepared.into_parts().0)
     }
@@ -346,7 +366,8 @@ impl Thread {
     /// # Errors
     ///
     /// Forwards cgroup reservation/commit and root thread-identity allocation
-    /// errors. The sibling shares its process runtime and is not activated.
+    /// errors, including NoMemory for NOWAIT thread or signal-slot allocation under the
+    /// cgroup transaction mutex. The sibling shares its runtime and is not activated.
     pub fn prepare_thread_clone(&self) -> KResult<PreparedUserClone> {
         self.prepare_thread_clone_with_files(true)
     }
@@ -367,6 +388,7 @@ impl Thread {
             charge,
             self.no_new_privileges(),
             self.files.fork(is_shared)?,
+            AllocFlags::NOWAIT,
         )?;
         thread.signal.set_blocked(self.signal.blocked());
         thread.seccomp.inherit_from(&self.seccomp);
@@ -562,8 +584,10 @@ impl Thread {
     }
 
     /// Installs a per-thread TEE session context if one is not present yet.
+    /// Accepts a preallocated owner without allocation. A redundant owner is
+    /// dropped after releasing the slot mutex; its destructor runs in caller context.
     #[cfg(feature = "tee")]
-    pub fn set_tee_session_ctx(&self, ctx: Box<dyn TeeSessionCtxTrait>) {
+    pub fn set_tee_session_ctx(&self, ctx: KBox<dyn TeeSessionCtxTrait>) {
         let mut guard = self.tee_session_ctx.lock();
         if guard.is_none() {
             *guard = Some(ctx);
@@ -571,19 +595,24 @@ impl Thread {
     }
 
     /// Executes `f` with mutable access to the optional per-thread TEE session context.
+    /// Holds the slot mutex across `f`: do not reenter it or use allocations
+    /// whose reclaim path may require this mutex. Returning an owner transfers
+    /// its destruction responsibility to the caller.
     #[cfg(feature = "tee")]
     pub fn with_tee_session_ctx_mut<R>(
         &self,
-        f: impl FnOnce(&mut Option<Box<dyn TeeSessionCtxTrait>>) -> R,
+        f: impl FnOnce(&mut Option<KBox<dyn TeeSessionCtxTrait>>) -> R,
     ) -> R {
         f(&mut self.tee_session_ctx.lock())
     }
 
     /// Executes `f` with shared access to the optional per-thread TEE session context.
+    /// Holds the slot mutex across `f`; the same context restrictions as
+    /// [`Self::with_tee_session_ctx_mut`] apply.
     #[cfg(feature = "tee")]
     pub fn with_tee_session_ctx<R>(
         &self,
-        f: impl FnOnce(&Option<Box<dyn TeeSessionCtxTrait>>) -> R,
+        f: impl FnOnce(&Option<KBox<dyn TeeSessionCtxTrait>>) -> R,
     ) -> R {
         f(&self.tee_session_ctx.lock())
     }

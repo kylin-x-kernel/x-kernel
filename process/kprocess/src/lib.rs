@@ -22,6 +22,7 @@
 //! #     config: kprocess::ProcessForkConfig,
 //! #     entry: impl FnOnce() + Send + 'static,
 //! # ) -> kerrno::KResult<ktask::KtaskRef> {
+//! let entry = ktask::PreparedTaskEntry::new(entry)?;
 //! let prepared = current.prepare_process_fork(config)?;
 //! let page_table_root = prepared.page_table_root();
 //! let (thread, identity) = prepared.into_parts();
@@ -224,6 +225,16 @@ pub fn publish_user_task_with(
 /// its runtime are constructed as one object.
 /// `signal_actions` is an owned initial configuration; use the thread clone
 /// preparation APIs to share an existing process's signal configuration.
+///
+/// # Execution context
+/// Thread and signal-slot owners use KERNEL. Requires sleepable task context,
+/// enabled IRQs/preemption, no non-sleepable RCU section, and no locks needed
+/// by reclaim, IO or filesystem callbacks. Nested Arc/Vec allocations retain
+/// their existing infallible behavior.
+///
+/// # Errors
+/// Returns cgroup reservation/commit errors or NoMemory for either owner.
+/// Failed preparation drops owned resources without publishing a runnable task.
 #[expect(
     clippy::too_many_arguments,
     reason = "CG-024-lint-exceptions: clippy::too_many_arguments: Thread construction binds \
@@ -238,7 +249,7 @@ pub fn build_process_thread(
     fs_context: alloc::sync::Arc<ksync::Mutex<fs_context::FsStruct>>,
     signal_actions: ksignal::api::SignalActions,
     credentials: alloc::sync::Arc<kcred::Cred>,
-) -> alloc::boxed::Box<Thread> {
+) -> kerrno::KResult<kalloc_types::KBox<Thread>> {
     build_process_thread_with_config(
         process,
         task_number,
@@ -267,7 +278,7 @@ pub(crate) fn build_process_thread_with_config(
     signal_actions: ksignal::api::SignalActions,
     credentials: alloc::sync::Arc<kcred::Cred>,
     config: process_runtime::ProcessRuntimeConfig,
-) -> alloc::boxed::Box<Thread> {
+) -> kerrno::KResult<kalloc_types::KBox<Thread>> {
     let runtime = ProcessRuntime::new(
         process.clone(),
         exe_path,

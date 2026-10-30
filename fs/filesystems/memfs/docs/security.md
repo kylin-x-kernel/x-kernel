@@ -1,5 +1,20 @@
 # memfs — 安全与可靠性分析
 
+## Mount-state allocation failure
+
+Mqueue owner allocation failure leaves the namespace cache unchanged, without
+an active pin or namespace drop hook. NOWAIT avoids adding reclaim dependencies
+under the cache mutex. Shared-tree identity, sealed-root behavior and per-mount
+read-only handling remain covered by the mqueue regressions.
+
+Failure to allocate the MemoryFs private owner returns NoMemory before creating
+the root inode. Kernel-shmem initialization installs the shared filesystem only
+after successful construction; an error leaves the slot empty for a later retry.
+No anonymous file or fd is published on this path. NOWAIT avoids adding reclaim
+under the singleton mutex but does not cover nested Arc/Slab allocations or
+promise reserve access. Rootfs startup retains its existing fatal-boot failure
+policy at the boot boundary; ordinary mounts and memfd propagate the error.
+
 ## 测试审计范围
 
 审计范围包含生产源码及 `ut-tests/lib.rs`、`ut-tests/shmem.rs`、

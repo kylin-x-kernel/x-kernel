@@ -1,5 +1,17 @@
 # kvfs - 安全与可靠性分析
 
+## Prepared mount-state ownership
+
+Private-owner allocation errors occur before the SimpleFs root factory runs and
+before a superblock is published. Once transferred, a prepared owner's address
+is stable; the superblock drops it exactly once, including after root initialization
+failure. Block-backed initialization still uses the registry's existing failure
+transition to wake waiters and release the device claim. Tests cover pointee
+address preservation, teardown, failed root initialization, and rejection of
+invalid owner flags before root construction; they do not force global OOM.
+Nested Arc/Vec/String allocations and root construction remain infallible where
+they were infallible before. This is not whole-mount OOM safety.
+
 ## Fallible directory iterators
 
 Iterator allocation errors propagate before directory entries are emitted, so

@@ -4,10 +4,11 @@
 
 //! User-thread runtime helpers used by process-related syscalls.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::ffi::c_long;
 
 use bytemuck::AnyBitPattern;
+use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
@@ -17,7 +18,7 @@ use kprocess::{
     process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
-use ktask::{TaskInner, current};
+use ktask::{PreparedTaskEntry, TaskInner, current};
 use kuaccess::{atomic_cmpxchg_u32, atomic_load_u32};
 use linux_raw_sys::general::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, ROBUST_LIST_LIMIT};
 use linux_sysno::Sysno;
@@ -25,32 +26,42 @@ use memspace::PageFaultOutcome;
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_ipc::SHM_MANAGER;
 
-/// Constructs an unpublished user task whose entry loop dispatches traps.
+/// Prepares a consuming user entry before process/thread creation starts.
 ///
-/// `task_number` must identify the supplied `thread`; `uctx` must describe its
-/// prepared image. `set_child_tid`, when nonzero, is a userspace TID writeback
-/// address consumed on first execution. Publish and activate the returned task
+/// Requires sleepable task context without locks needed by reclaim, I/O or
+/// filesystem callbacks. KERNEL callback allocation may return NoMemory; no
+/// child identity, parent link or thread slot has to be published by this API.
+/// Captures are dropped on error without running the user loop.
+pub fn prepare_user_entry(
+    uctx: UserContext,
+    set_child_tid: usize,
+    dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+) -> KResult<PreparedTaskEntry> {
+    PreparedTaskEntry::new(move || {
+        run_user_thread_loop(uctx, set_child_tid, dispatch_syscall);
+    })
+}
+
+/// Constructs an unpublished user task with an already prepared entry.
+///
+/// `task_number` must identify the supplied `thread`; `entry` must describe its
+/// prepared image. A nonzero child-TID writeback address stored in the entry
+/// is consumed on first execution. Publish and activate the returned task
 /// through `kprocess::publish_user_task` after completing parent-side setup.
-/// `dispatch_syscall` runs in the task's process context after each syscall trap.
+/// The entry's syscall dispatcher runs in the task's process context.
+/// Both the prepared entry and thread owner pass to the task without reallocation.
+/// Requires task context; runtime destruction must be valid on cancellation.
+/// Other task-construction allocations retain their existing infallible behavior.
 ///
 /// See the complete identity, runtime and publication sequence in
 /// [`spawn_init_process`](crate::spawn_init_process).
 pub fn new_user_task(
     name: &str,
-    uctx: UserContext,
-    set_child_tid: usize,
+    entry: PreparedTaskEntry,
     task_number: Arc<PidHandle>,
-    thread: Box<Thread>,
-    dispatch_syscall: impl FnMut(&mut UserContext) -> UserThreadRuntimeAction + Send + 'static,
+    thread: KBox<Thread>,
 ) -> TaskInner {
-    TaskInner::new_user(
-        move || {
-            run_user_thread_loop(uctx, set_child_tid, dispatch_syscall);
-        },
-        name.into(),
-        task_number,
-        thread,
-    )
+    TaskInner::new_user(entry, name.into(), task_number, thread)
 }
 
 /// Runs the current task as a user thread until the process exits.

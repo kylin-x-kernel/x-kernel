@@ -138,7 +138,13 @@ fn init_host_9p_fs() {
 /// types, or if bootstrap mounts, root device selection, root filesystem
 /// construction, or init `fs_struct` setup fails.
 pub fn prepare_namespace() {
-    let bootstrap = memfs::ramfs::new_rootfs(SuperBlockFlags::empty());
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: no bootstrap filesystem \
+                  exists and namespace preparation has no recovery or error return"
+    )]
+    let bootstrap = memfs::ramfs::new_rootfs(SuperBlockFlags::empty())
+        .expect("Failed to allocate bootstrap filesystem state");
     BootVfs::install_initial_root(bootstrap);
 
     let boot = BootVfs::initial();
@@ -345,7 +351,14 @@ impl BootVfs {
             let mountpoint = self
                 .lookup("/sys/fs/cgroup")
                 .expect("Failed to resolve /sys/fs/cgroup mountpoint");
-            let super_block = cgroup2fs::new_initial_cgroup2fs(SuperBlockFlags::empty());
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: required initial \
+                          cgroup filesystem cannot be created and boot has no recovery or error \
+                          return"
+            )]
+            let super_block = cgroup2fs::new_initial_cgroup2fs(SuperBlockFlags::empty())
+                .expect("Failed to allocate initial cgroup filesystem state");
             #[expect(
                 clippy::expect_used,
                 reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: failed to mount \

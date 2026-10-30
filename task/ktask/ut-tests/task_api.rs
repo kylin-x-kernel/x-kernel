@@ -8,12 +8,14 @@
 //! Run under an external QEMU timeout to diagnose stalled scheduler progress.
 //! Only migration requires SMP; blocking and exclusion also run on UP.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kalloc_types::KBox;
 use kcompletion::Completion;
-use super::Mutex;
 use unittest::{assert, assert_eq, assert_ne, def_test};
+
+use super::Mutex;
 
 #[def_test]
 fn current_task_presence_query_preserves_irq_exclusion() {
@@ -104,10 +106,10 @@ impl crate::UserTaskRuntime for UnknownTokenRuntime {
 #[def_test]
 fn unknown_token_task_uses_nonzero_owner_key() {
     let task = crate::TaskInner::new_user(
-        || {},
+        crate::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"),
         "task-api-unknown-token".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
-        Box::new(UnknownTokenRuntime),
+        KBox::new(UnknownTokenRuntime).unwrap(),
     );
     assert_eq!(task.owner_key(), 0);
     let key = super::owner_key_for_task(&task);

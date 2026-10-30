@@ -1,5 +1,22 @@
 # Prepared Work Execution Services
 
+## Fallible Manager Entry Preparation
+
+Normal runtime startup allocates the manager closure as `PreparedTaskEntry`
+with KERNEL, after validating context, CPU and idle interval. It holds no
+dispatch or worker lock and requires callers to hold no locks needed by reclaim,
+I/O or filesystem callbacks. The PID-less task constructor consumes this entry
+without reboxing. NoMemory returns before activation, notification installation
+or worker reservation; dropping the closure releases the empty manager and wake.
+`NormalServices::start` stops and joins previously started CPU runtimes before
+returning that error. No partial service collection is published.
+
+Dynamic worker creation remains unchanged: it reserves a Creating slot first
+and supplies the baseline worker needed to complete startup. Migrating it needs
+both reservation rollback and a progress/retry or startup-failure protocol;
+simply returning on allocation failure could strand retained demand or startup.
+Manager/service arrays, Arc, stack and task-wait allocations remain infallible.
+
 ## Purpose And Scope
 
 `kworkerpool_ng` supplies CPU-bound execution services for prepared work.

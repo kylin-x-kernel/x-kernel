@@ -21,7 +21,8 @@ fn make_mnt_namespace() -> Arc<MntNamespace> {
             SimpleDir::new_maker(fs.clone(), Arc::new(DirMapping::new())),
         );
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     MntNamespace::new_root(&root_fs, initial_user_namespace())
 }
 

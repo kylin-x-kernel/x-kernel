@@ -13,7 +13,7 @@ use ktime_types::TimeSpan;
 
 use super::{NormalService, PartitionWorkSource, WorkerState, manager::WorkerManager};
 
-/// Validation failures before starting or requesting termination of a service.
+/// Preparation failures before starting or requesting termination of a service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeError {
     /// The caller cannot block for startup or joined termination.
@@ -22,6 +22,8 @@ pub enum RuntimeError {
     CpuUnavailable,
     /// The idle interval is zero or its deadline exceeds the timer range.
     InvalidIdleInterval,
+    /// The manager entry owner could not be allocated before task activation.
+    NoMemory,
 }
 
 /// Rejects intervals whose first idle deadline cannot be represented by the timer.
@@ -50,12 +52,14 @@ pub(super) struct NormalRuntime<S> {
 impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
     /// Starts one CPU-bound service after boot CPU/task/timer initialization.
     /// Returns only after manager notification and a baseline worker wait exist.
-    /// All recoverable validation precedes service allocation/activation. Allocation and
-    /// platform preparation failures follow kernel policy, not rollback errors.
+    /// Requires sleepable context without locks needed by reclaim, I/O or
+    /// filesystem callbacks. Manager entry allocation uses KERNEL and can fail
+    /// before task activation; other allocations retain their existing policy.
     ///
     /// # Errors
     /// Rejects non-sleepable context, an unmapped CPU, a zero idle interval or
-    /// an idle deadline outside the timer's range at preparation time.
+    /// an idle deadline outside the timer's range at preparation time. Returns
+    /// NoMemory if manager entry preparation fails, without starting a task.
     ///
     /// # Panics
     /// Propagates task/timer preparation or initialized runtime invariant failures.
@@ -63,6 +67,21 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
         cpu: LogicalCpuId,
         limit: NonZeroUsize,
         idle_for: TimeSpan,
+    ) -> Result<Self, RuntimeError> {
+        Self::start_with_entry(cpu, limit, idle_for, |manager, wake| {
+            ktask::PreparedTaskEntry::new(move || manager.run_with_startup(Some(wake)))
+                .map_err(|_| RuntimeError::NoMemory)
+        })
+    }
+
+    fn start_with_entry(
+        cpu: LogicalCpuId,
+        limit: NonZeroUsize,
+        idle_for: TimeSpan,
+        prepare_entry: impl FnOnce(
+            WorkerManager<S>,
+            core::task::Waker,
+        ) -> Result<ktask::PreparedTaskEntry, RuntimeError>,
     ) -> Result<Self, RuntimeError> {
         let mut startup = PreparedTaskWait::prepare().map_err(|_| RuntimeError::InvalidContext)?;
         if kcpu_id_map::raw_cpu_id(cpu).is_none() {
@@ -72,8 +91,9 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalRuntime<S> {
         let manager = WorkerManager::new(cpu, limit, idle_for);
         let service = manager.service.clone();
         let wake = startup.waker();
-        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread(
-            move || manager.run_with_startup(Some(wake)),
+        let entry = prepare_entry(manager, wake)?;
+        let task = ktask::prepare_task(ktask::TaskInner::new_pidless_kthread_with_entry(
+            entry,
             "workng_manager".into(),
             kbuild_config::TASK_STACK_SIZE,
         ));

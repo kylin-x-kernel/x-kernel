@@ -118,6 +118,11 @@ pub fn spawn_init_process(
         process.is_init(),
         "spawned init process must register as INIT_PROC"
     );
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: PID 1 thread preparation \
+                  failed; init spawning has no error return or recovery"
+    )]
     let thread = build_process_thread(
         process.clone(),
         pid_handle.clone(),
@@ -127,7 +132,8 @@ pub fn spawn_init_process(
         fs_context,
         Default::default(),
         cred,
-    );
+    )
+    .unwrap_or_else(|error| panic!("Failed to prepare init thread: {error}"));
 
     {
         let fs_context_ref = process
@@ -148,6 +154,12 @@ pub fn spawn_init_process(
         after_init_exit();
         ktask::exit(0);
     };
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: PID 1 cannot start without \
+                  its entry owner; this bootstrap boundary has no recovery or error return"
+    )]
+    let entry = ktask::PreparedTaskEntry::new(entry).expect("Failed to prepare init entry");
     let mut task = ktask::TaskInner::new_user(entry, name, pid_handle, thread);
     // Seed the saved context with init's page-table root; the scheduler writes
     // it to the hardware register on first switch-in, same as fork does.

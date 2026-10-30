@@ -1,5 +1,22 @@
 # memfs — 设计文档
 
+## Fallible superblock state
+
+The per-IPC-namespace mqueue cache uses NOWAIT for private-owner allocation
+while holding `MQUEUE_TREES`; the uncached fallback uses KERNEL without that
+lock. Construction errors propagate through `get_tree_nodev` before active
+pinning, drop-hook registration or cache insertion. Cache hits allocate no
+owner. Nested Arc/Slab/BTreeMap allocations remain infallible.
+
+MemoryFs, ramfs/rootfs and tmpfs builders return `VfsResult` after preparing a
+`KBox<Arc<MemoryFs>>`. Ordinary mounts and private memfd creation use KERNEL in
+sleepable, reclaim-safe task context before root publication and before any
+fd-table installation. The kernel-shmem singleton instead passes NOWAIT while
+holding `KERNEL_SHM_FS`: its initialization lock must not be re-entered by future
+synchronous reclaim. Memfd does not take that lock and retains KERNEL. The
+caller chooses the policy explicitly; it is not inferred from current allocator
+behavior. Both paths still require task context for the surrounding VFS work.
+
 ## 测试布局
 
 guest 单元测试位于 crate 根目录 `ut-tests/`，通过 `unittest::path_mod_test!`

@@ -14,6 +14,7 @@ default = []
 times = []
 
 [dependencies]
+kalloc-types.workspace = true
 bitflags.workspace = true
 block = { workspace = true }
 iov_iter.workspace = true

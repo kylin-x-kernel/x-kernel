@@ -9,7 +9,7 @@ use super::*;
 
 #[def_test]
 fn memory_filesystems_report_page_sized_blocks() {
-    let fs = MemoryFs::new();
+    let fs = MemoryFs::new().unwrap();
 
     assert_eq!(fs.block_size(), memaddr::PAGE_SIZE_4K as u64);
     assert_eq!(fs.stat().unwrap().block_size, memaddr::PAGE_SIZE_4K as u32);
@@ -17,7 +17,7 @@ fn memory_filesystems_report_page_sized_blocks() {
 
 #[def_test]
 fn tmpfs_readonly_policy_can_be_reconfigured() {
-    let fs = shmem::new_tmpfs(SuperBlockFlags::RDONLY);
+    let fs = shmem::new_tmpfs(SuperBlockFlags::RDONLY).unwrap();
     let cred = kcred::initial_cred();
 
     assert!(fs.flags().contains(SuperBlockFlags::RDONLY));
@@ -51,7 +51,7 @@ fn tmpfs_page_quota_returns_enospc_and_truncate_releases() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         1,
-    );
+    ).unwrap();
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
         .open_with_flags_at(
@@ -79,7 +79,7 @@ fn tmpfs_page_quota_returns_enospc_and_truncate_releases() {
 #[def_test]
 fn tmpfs_unlimited_page_quota_preserves_default_inode_capacity() {
     let fs =
-        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), 0);
+        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), 0).unwrap();
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
     let file = kvfs::Filename::new("unlimited")
@@ -109,7 +109,7 @@ fn tmpfs_buffered_read_hole_does_not_consume_page_quota() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         1,
-    );
+    ).unwrap();
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
     let file = kvfs::Filename::new("hole")
@@ -149,7 +149,7 @@ fn tmpfs_batched_read_of_holes_preserves_remaining_quota() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         2,
-    );
+    ).unwrap();
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
     let file = kvfs::Filename::new("batched-hole")
@@ -182,7 +182,7 @@ fn tmpfs_statfs_reports_page_quota() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         2,
-    );
+    ).unwrap();
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
     let file = kvfs::Filename::new("quota")
@@ -211,7 +211,7 @@ fn tmpfs_page_limit_can_be_reconfigured() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         1,
-    );
+    ).unwrap();
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
         .open_with_flags_at(
@@ -248,7 +248,7 @@ fn tmpfs_page_limit_rejects_remount_below_current_use() {
         &TMPFS_TYPE,
         SuperBlockFlags::empty(),
         2,
-    );
+    ).unwrap();
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
         .open_with_flags_at(
@@ -290,7 +290,7 @@ fn tmpfs_page_limit_rejects_remount_below_current_use() {
 #[def_test]
 fn tmpfs_page_limit_rejects_retroactive_limit_after_unlimited() {
     let fs =
-        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), 0);
+        shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), 0).unwrap();
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("quota")
         .open_with_flags_at(
@@ -323,7 +323,7 @@ fn tmpfs_page_limit_rejects_retroactive_limit_after_unlimited() {
 
 #[def_test]
 fn tmpfs_write_end_updates_vfs_inode_size() {
-    let fs = shmem::new_tmpfs(SuperBlockFlags::empty());
+    let fs = shmem::new_tmpfs(SuperBlockFlags::empty()).unwrap();
     let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
     let file = kvfs::Filename::new("tmp")
         .open_with_flags_at(
@@ -344,7 +344,7 @@ fn tmpfs_write_end_updates_vfs_inode_size() {
 
 #[def_test]
 fn tmpfs_fsync_preserves_file_contents_and_accepts_directories() {
-    let fs = shmem::new_tmpfs(SuperBlockFlags::empty());
+    let fs = shmem::new_tmpfs(SuperBlockFlags::empty()).unwrap();
     let root = Mount::new_root(&fs).root_path();
     let file = kvfs::Filename::new("sync")
         .open_with_flags_at(
@@ -377,7 +377,7 @@ fn tmpfs_fsync_preserves_file_contents_and_accepts_directories() {
 
 #[def_test]
 fn created_inode_uses_fs_ids_and_inherits_setgid_directory() {
-    let fs = MemoryFs::new();
+    let fs = MemoryFs::new().unwrap();
     let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
     root.chmod(
         NodePermission::from_bits_truncate(0o777),
@@ -425,7 +425,7 @@ fn created_inode_uses_fs_ids_and_inherits_setgid_directory() {
 
 #[def_test]
 fn rename_rejects_nonempty_directory_after_child_handle_is_dropped() {
-    let fs = MemoryFs::new();
+    let fs = MemoryFs::new().unwrap();
     let root = kvfs::Path::new(kvfs::Mount::new_root(&fs), fs.root_dir());
     let permission = NodePermission::from_bits_truncate(0o755);
     let cred = kcred::initial_cred();
@@ -451,7 +451,7 @@ fn create_copy_test_file(root: &kvfs::Path, name: &str) -> Arc<VfsFile> {
 #[def_test]
 fn tmpfs_sparse_copy_reuses_destination_pages_without_charging_the_source() {
     for (page_limit, pages) in [(1, 1), (66, 65)] {
-        let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), page_limit);
+        let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), page_limit).unwrap();
         let mount = Mount::new_root(&fs);
         let root = mount.root_path();
         let input = create_copy_test_file(&root, "source");
@@ -484,7 +484,7 @@ fn tmpfs_sparse_copy_reuses_destination_pages_without_charging_the_source() {
 fn tmpfs_batched_mixed_read_preserves_eof_and_capacity() {
     let page = memaddr::PAGE_SIZE_4K;
     let pages = 2 * pagecache::FolioBatch::CAPACITY + 3;
-    let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), pages);
+    let fs = shmem::new_tmpfs_with_type_and_page_limit(&TMPFS_TYPE, SuperBlockFlags::empty(), pages).unwrap();
     let mount = Mount::new_root(&fs);
     let file = create_copy_test_file(&mount.root_path(), "mixed");
     for index in (0..pages).step_by(2) {
@@ -517,7 +517,7 @@ fn tmpfs_batched_mixed_read_preserves_eof_and_capacity() {
 /// lets any task create its own queues in a shared instance.
 #[def_test]
 fn mqueue_root_carries_linuxs_sticky_world_writable_mode() {
-    let fs = new_mqueue_with_type(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let fs = new_mqueue_with_type(&MQUEUE_TYPE, SuperBlockFlags::empty(), kalloc_types::AllocFlags::KERNEL).unwrap();
     let permission = Mount::new_root(&fs).root_path().metadata().mode.permission();
     assert_eq!(permission.bits(), 0o1777);
     // The sticky bit is what lets any task create its own queues here.
@@ -534,21 +534,21 @@ fn mqueue_tree_is_shared_and_rebuilt_per_ipc_namespace() {
     // flags. Exercised on a fresh unregistered tree so the assertion can
     // actually fail if the strip is removed — a cached tree would make it
     // tautological.
-    let direct = new_mqueue_with_type(&MQUEUE_TYPE, SuperBlockFlags::RDONLY);
+    let direct = new_mqueue_with_type(&MQUEUE_TYPE, SuperBlockFlags::RDONLY, kalloc_types::AllocFlags::KERNEL).unwrap();
     assert!(
         !direct.flags().contains(SuperBlockFlags::RDONLY),
         "the provider strips RDONLY from the shared tree's own flags"
     );
 
-    let shared = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
-    let again = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let shared = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty()).unwrap();
+    let again = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty()).unwrap();
     assert!(Arc::ptr_eq(&shared, &again), "one tree per IPC namespace");
     assert_eq!(shared.stat().unwrap().fs_type, MQUEUE_MAGIC);
     assert!(!shared.flags().contains(SuperBlockFlags::RDONLY));
 
     // A read-only mount reuses the tree: the namespace's tree keeps its own
     // write policy regardless of the requesting mount's flags.
-    let readonly = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::RDONLY);
+    let readonly = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::RDONLY).unwrap();
     assert!(Arc::ptr_eq(&shared, &readonly));
 
     // The tree is pinned for the IPC namespace's own lifetime (Linux
@@ -563,7 +563,7 @@ fn mqueue_tree_is_shared_and_rebuilt_per_ipc_namespace() {
         .upgrade()
         .expect("the shared tree outlives its mounts");
     assert!(surviving.is_available(), "the pinned tree stays usable");
-    let remounted = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let remounted = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty()).unwrap();
     assert!(
         Arc::ptr_eq(&surviving, &remounted),
         "re-mounts reuse the pinned tree"
@@ -575,7 +575,7 @@ fn mqueue_tree_is_shared_and_rebuilt_per_ipc_namespace() {
 /// mutators is refused with `EPERM`.
 #[def_test]
 fn mqueue_root_rejects_child_creation() {
-    let fs = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty());
+    let fs = mqueue_tree_for_ipc_namespace(&MQUEUE_TYPE, SuperBlockFlags::empty()).unwrap();
     let mount = Mount::new_root(&fs);
     let root = mount.root_path();
     let created = kvfs::Filename::new("queue").open_with_flags_at(

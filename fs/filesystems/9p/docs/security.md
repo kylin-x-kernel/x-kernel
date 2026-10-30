@@ -1,5 +1,12 @@
 # v9fs — 安全与可靠性分析
 
+## Session-owner allocation failure
+
+NoMemory from session-owner allocation drops the local session/client references
+and root fid through their existing cleanup paths. No root is published locally;
+remote negotiation has already happened and is not a transactional remote rollback.
+Client, Arc and protocol buffer allocations retain their prior failure behavior.
+
 ## 信任模型
 
 The analysis covers `src/` and the guest tests in `ut-tests/`. The extracted

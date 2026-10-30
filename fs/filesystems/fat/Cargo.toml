@@ -13,6 +13,7 @@ documentation.workspace = true
 default = []
 
 [dependencies]
+kalloc-types.workspace = true
 block.workspace = true
 chrono = { workspace = true }
 fatfs = { workspace = true, features = ["alloc", "lfn"] }

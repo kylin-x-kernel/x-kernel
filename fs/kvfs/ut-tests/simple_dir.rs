@@ -11,6 +11,23 @@ use crate::{FileSystemType, Mount, Path};
 
 static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::internal("simple-dir-test");
 
+#[def_test]
+fn simple_filesystem_rejects_owner_policy_before_building_root() {
+    let built = core::cell::Cell::new(false);
+    let result = SimpleFs::new_with_allocation_flags(
+        &TEST_FILE_SYSTEM_TYPE,
+        0,
+        crate::SuperBlockFlags::empty(),
+        kalloc_types::AllocFlags::from_bits_retain(1 << 31),
+        |fs| {
+            built.set(true);
+            SimpleDir::new_maker(fs, Arc::new(DirMapping::default()))
+        },
+    );
+    assert!(matches!(result, Err(VfsError::InvalidInput)));
+    assert!(!built.get());
+}
+
 struct NamesOps {
     drops: Arc<AtomicU64>,
     fail: bool,
@@ -112,7 +129,8 @@ impl SimpleDirOps for LinkCountOps {
 fn root_path<O: SimpleDirOps>(ops: Arc<O>) -> Path {
     let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, move |fs| {
         SimpleDir::new_maker(fs, ops)
-    });
+    })
+    .unwrap();
     Mount::new_root(&super_block).root_path()
 }
 

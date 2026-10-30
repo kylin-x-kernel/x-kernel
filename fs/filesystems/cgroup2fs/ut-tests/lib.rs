@@ -38,7 +38,7 @@ fn subtree_parser_rejects_empty_and_malformed_operations() {
 fn mount_state_reuses_nodes_and_distinguishes_recreated_cgroups() {
     let root = CgroupNamespace::new().root();
     let first_group = root.create_child("child").unwrap();
-    let super_block = crate::new_cgroup2fs(root.clone(), SuperBlockFlags::empty());
+    let super_block = crate::new_cgroup2fs(root.clone(), SuperBlockFlags::empty()).unwrap();
     let fs = super_block.private::<Arc<SimpleFs>>().unwrap();
     let state = fs.private::<crate::state::CgroupFsState>().unwrap();
 
@@ -66,8 +66,8 @@ fn mount_state_reuses_nodes_and_distinguishes_recreated_cgroups() {
 fn mount_owner_metadata_survives_other_mount_cache_removal() {
     let root = CgroupNamespace::new().root();
     let group = root.create_child("shared").unwrap();
-    let first_sb = crate::new_cgroup2fs(root.clone(), SuperBlockFlags::empty());
-    let second_sb = crate::new_cgroup2fs(root, SuperBlockFlags::empty());
+    let first_sb = crate::new_cgroup2fs(root.clone(), SuperBlockFlags::empty()).unwrap();
+    let second_sb = crate::new_cgroup2fs(root, SuperBlockFlags::empty()).unwrap();
     let first_fs = first_sb.private::<Arc<SimpleFs>>().unwrap();
     let second_fs = second_sb.private::<Arc<SimpleFs>>().unwrap();
     let first_state = first_fs.private::<crate::state::CgroupFsState>().unwrap();

@@ -7,6 +7,7 @@
 use alloc::{string::String, sync::Arc};
 use core::any::Any;
 
+use kalloc_types::{AllocFlags, KBox};
 use ksync::Mutex;
 use ktime_types::SystemTime;
 use slab::Slab;
@@ -26,37 +27,68 @@ pub struct SimpleFs {
 
 impl SimpleFs {
     /// Creates a superblock backed by a simple filesystem.
+    ///
+    /// Requires sleepable task context with IRQs/preemption enabled, outside
+    /// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+    /// callbacks. Returns `NoMemory` if the private owner cannot be
+    /// allocated; nested allocations retain their existing infallible behavior.
     pub fn new_with(
         file_system_type: &'static FileSystemType,
         fs_type: u32,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
-    ) -> Arc<SuperBlock> {
+    ) -> VfsResult<Arc<SuperBlock>> {
         Self::new_with_superblock_flags(file_system_type, fs_type, SuperBlockFlags::empty(), root)
     }
 
     /// Creates a superblock backed by a simple filesystem with explicit flags.
+    ///
+    /// Uses the allocation and execution-context contract of [`Self::new_with`].
     pub fn new_with_superblock_flags(
         file_system_type: &'static FileSystemType,
         fs_type: u32,
         superblock_flags: SuperBlockFlags,
         root: impl FnOnce(Arc<Self>) -> DirMaker,
-    ) -> Arc<SuperBlock> {
+    ) -> VfsResult<Arc<SuperBlock>> {
+        Self::new_with_allocation_flags(
+            file_system_type,
+            fs_type,
+            superblock_flags,
+            AllocFlags::KERNEL,
+            root,
+        )
+    }
+
+    /// Creates a superblock with an explicit private-owner allocation policy.
+    ///
+    /// `allocation_flags` govern only the `KBox` holding filesystem state.
+    /// `KERNEL` requires the context of [`Self::new_with`]; `NOWAIT` avoids
+    /// reclaim re-entry while singleton initialization is in progress. Neither
+    /// policy relaxes the root builder's own locking or sleepability requirements.
+    /// Returns allocation errors before constructing or publishing the root.
+    pub fn new_with_allocation_flags(
+        file_system_type: &'static FileSystemType,
+        fs_type: u32,
+        superblock_flags: SuperBlockFlags,
+        allocation_flags: AllocFlags,
+        root: impl FnOnce(Arc<Self>) -> DirMaker,
+    ) -> VfsResult<Arc<SuperBlock>> {
         let fs = Arc::new(Self {
             fs_type,
             inodes: Mutex::new(Slab::new()),
             private: Mutex::new(TypeMap::default()),
         });
+        let private = KBox::new_with_flags(fs.clone(), allocation_flags)?;
         let root = root(fs.clone());
         let root = Dentry::new_dir_from_inode(root(), None, String::new());
-        SuperBlock::new_with_flags_and_private(
+        Ok(SuperBlock::new_with_flags_and_private(
             file_system_type,
             &SIMPLE_SUPER_OPERATIONS,
-            fs.clone(),
+            private,
             superblock_flags,
             1,
             crate::MAX_LFS_FILESIZE,
             |_| root,
-        )
+        ))
     }
 
     fn alloc_inode(&self) -> u64 {

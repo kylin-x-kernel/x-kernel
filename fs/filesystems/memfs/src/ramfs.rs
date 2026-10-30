@@ -19,10 +19,7 @@ fn ramfs_get_tree(
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
     get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_ramfs_with_file_system_type_and_flags(
-            file_system_type,
-            flags,
-        ))
+        new_ramfs_with_file_system_type_and_flags(file_system_type, flags)
     })
 }
 
@@ -40,17 +37,34 @@ pub(crate) static RAMFS_TYPE: FileSystemType = FileSystemType::nodev("ramfs", in
 static ROOTFS_TYPE: FileSystemType = FileSystemType::internal("rootfs");
 
 /// Creates a ramfs superblock.
-pub fn new_ramfs() -> Arc<SuperBlock> {
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
+pub fn new_ramfs() -> VfsResult<Arc<SuperBlock>> {
     new_ramfs_with_superblock_flags(SuperBlockFlags::empty())
 }
 
 /// Creates a ramfs superblock with explicit VFS-wide flags.
-pub fn new_ramfs_with_superblock_flags(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
+pub fn new_ramfs_with_superblock_flags(
+    superblock_flags: SuperBlockFlags,
+) -> VfsResult<Arc<SuperBlock>> {
     new_ramfs_with_file_system_type_and_flags(&RAMFS_TYPE, superblock_flags)
 }
 
 /// Creates the mutable bootstrap root filesystem.
-pub fn new_rootfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
+pub fn new_rootfs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_ramfs_with_file_system_type_and_flags(&ROOTFS_TYPE, superblock_flags)
 }
 
@@ -62,7 +76,7 @@ pub fn new_rootfs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
 pub(crate) fn new_ramfs_with_file_system_type_and_flags(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     MemoryFs::new_with_name_superblock_flags_and_root_mode(
         file_system_type,
         RAMFS_MAGIC,

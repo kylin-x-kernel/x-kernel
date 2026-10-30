@@ -205,7 +205,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     let child_mm = observed.clone();
     let (thread, number) = prepared.into_parts();
     let mut task = TaskInner::new_user(
-        move || {
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let leader = kprocess::current_user_thread();
             let process = leader.process();
             let original_id = process.mm_id().unwrap();
@@ -255,7 +255,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
             let sibling_stages = child_stages.clone();
             let sibling_check_root = check_root.clone();
             let mut task = TaskInner::new_user(
-                move || {
+                ktask::PreparedTaskEntry::new_nowait(move || {
                     sibling_stages.wait_command(START);
                     posix_process::do_exit(0, false);
                     sibling_stages.acknowledge(FIRST_PARKED);
@@ -288,7 +288,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
                     sibling_stages.wait_finish();
                     sibling_check_root();
                     assert_eq!(khal::percpu::this_cpu_id().as_usize(), sibling_cpu);
-                },
+                }).expect("test entry preparation"),
                 "exit-tail-sibling".into(),
                 number,
                 thread,
@@ -357,7 +357,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
             });
             assert_eq!(sibling.join(), 0);
             drop(sibling);
-        },
+        }).expect("test entry preparation"),
         "exit-tail-leader".into(),
         number,
         thread,

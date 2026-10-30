@@ -1,5 +1,17 @@
 # entropy — Design
 
+## Fallible work callbacks
+
+The VirtIO collector uses `KBox<dyn Fn() + Send + Sync>` with default KERNEL
+allocation. Boot initialization runs from kruntime's late-init task; source::init_all
+iterates static sources without a lock. Class availability callbacks are dispatched
+after releasing the class registry and driver-core locks. note_device releases its
+SELECTED_SOURCE/collector-state checks before constructing a source and reacquires
+the selection mutex only for publication. Preparation requires sleepable,
+reclaim-safe task context and rejects non-sleepable callers before owner allocation.
+No NOWAIT restriction is needed at this lock-free construction point; callers must
+preserve the reclaim/IO/filesystem re-entry contract on future notification paths.
+
 ## Scope
 
 The crate owns the ChaCha20 entropy pool and source-selection policy. Sources

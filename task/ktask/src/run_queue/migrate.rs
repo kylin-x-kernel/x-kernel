@@ -47,8 +47,9 @@ pub(crate) fn migrate_entry(mut migrated_task: KtaskRef, kind: EnqueueKind) {
 
 pub(super) fn spawn_affinity_migration_task(migrated: KtaskRef) -> KtaskRef {
     const MIGRATION_TASK_STACK_SIZE: usize = 16384;
-    TaskInner::new_internal(
-        move || migrate_entry(migrated, EnqueueKind::MigrateIn),
+    TaskInner::new_internal_with_task(
+        |migrated| migrate_entry(migrated, EnqueueKind::MigrateIn),
+        migrated,
         "migration-task".into(),
         MIGRATION_TASK_STACK_SIZE,
     )

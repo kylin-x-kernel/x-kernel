@@ -209,7 +209,7 @@ fn second_resolution_super_block() -> Arc<SuperBlock> {
     SuperBlock::new_with_flags_and_private(
         &SECOND_RESOLUTION_FILE_SYSTEM_TYPE,
         &SECOND_RESOLUTION_SUPER_BLOCK_OPERATIONS,
-        (),
+        kalloc_types::KBox::new(()).unwrap(),
         SuperBlockFlags::empty(),
         1,
         crate::MAX_LFS_FILESIZE,

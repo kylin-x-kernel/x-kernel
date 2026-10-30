@@ -76,14 +76,15 @@ impl TtyWrite for PtyWriter {
 /// Requires sleepable context after normal workqueue initialization. Device-node
 /// publication and open-file lifetime are owned by the caller.
 ///
-/// # Panics
-/// Panics if work preparation is unavailable or allocation fails.
+/// Returns callback-owner allocation or work preparation errors before publication.
 #[cfg(unittest)]
-pub(super) fn create_pty_pair() -> (Arc<PtyDriver>, Arc<PtyDriver>) {
+pub(super) fn create_pty_pair() -> KResult<(Arc<PtyDriver>, Arc<PtyDriver>)> {
     create_endpoints(None)
 }
 
-pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, Arc<PtyDriver>) {
+pub(super) fn create_endpoints(
+    pair: Option<Weak<PtyPair>>,
+) -> KResult<(Arc<PtyDriver>, Arc<PtyDriver>)> {
     let master_to_slave = Arc::new(InputIngress::default());
     let slave_to_master = Arc::new(InputIngress::default());
     let poll_rx_master = slave_to_master.readable();
@@ -99,7 +100,7 @@ pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, 
             process_mode: ProcessMode::Work(khal::percpu::this_cpu_id()),
         },
         pair.clone(),
-    );
+    )?;
 
     #[expect(
         clippy::expect_used,
@@ -120,9 +121,9 @@ pub(super) fn create_endpoints(pair: Option<Weak<PtyPair>>) -> (Arc<PtyDriver>, 
             process_mode: ProcessMode::None(poll_rx_master),
         },
         pair,
-    );
+    )?;
 
     // Close the notification-attachment window even if input already arrived.
     input_waker.wake_by_ref();
-    (master, slave)
+    Ok((master, slave))
 }

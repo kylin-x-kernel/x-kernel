@@ -1,5 +1,34 @@
 # ktask — Security and reliability
 
+## Scheduler Entry Ownership
+
+Idle and SMP affinity helpers do not allocate an independent callback owner.
+The affinity helper retains one KtaskRef directly in a private entry variant,
+transfers it to the migration function on execution, or releases it when the
+unpublished helper is dropped. Entry consumption remains after switch completion
+and IRQ enablement. No new unsafe operation, retry loop, failure swallowing or
+NoMemory panic is introduced. This does not make complete helper construction
+fallible or allocation-free: existing stack and scheduler-owner allocations are
+outside this change. Ordinary kernel boxed entries still need separate caller-context
+and rollback audits before their KBox migration.
+
+## Prepared User Entry Ownership
+
+User entries are allocated before clone preparation so NoMemory cannot leave a
+new child link or thread registration. KERNEL preparation requires sleepable,
+reclaim-safe context. NOWAIT can still fail and does not make capture destruction
+safe in arbitrary contexts. Cancellation drops captures without invoking them;
+successful execution consumes them after switch cleanup and IRQ enablement.
+The private consuming trait dispatches to the existing `KBox::into_inner` API
+without introducing unsafe code. Send captures permit transfer to another CPU.
+The task's single-consumption protocol is unchanged. Tests inject factory errors
+locally, not allocator-wide OOM; stack and scheduler allocation remain infallible.
+
+Prepared PID-less kernel construction transfers the same owner into an Internal
+task without allocation or invocation of the callback. The caller must prepare
+it before committing startup state, and satisfy capture destruction constraints
+on cancellation. This does not change the legacy infallible spawning APIs.
+
 ## Scope and trust model
 
 `src/task_api.rs` implements `kiface_task_api::TaskExecutionIf` and
@@ -443,10 +472,18 @@ exclusion and does not add a mutable context escape.
 ### `task.rs`: immutable user-runtime slot
 
 `UserRuntimeSlot` stores the runtime in
-`UnsafeCell<Option<Box<dyn UserTaskRuntime>>>`. The runtime is written once
+`UnsafeCell<Option<KBox<dyn UserTaskRuntime>>>`. The runtime is written once
 in `TaskInner::new_user()` and never mutated again, so the slot no longer
 needs a publication state machine (the old `EMPTY -> INSTALLING -> READY`
 protocol and `install_user_runtime()` are gone).
+
+The owner is allocated by the caller before task construction. Unsizing into the
+runtime trait object preserves its address and does not allocate. Runtime hooks,
+publication synchronization and deferred finalization are unchanged. Dropping an
+unprepared `TaskInner` still destroys its runtime in the caller's context. Tests
+check pointee address preservation, direct unprepared destruction, and deferred
+destruction after last-owner release under IRQ exclusion. User entries are
+prepared fallibly before clone state; stack allocation remains infallible.
 
 Invariants:
 

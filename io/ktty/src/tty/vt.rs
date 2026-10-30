@@ -14,7 +14,7 @@ use alloc::{
 
 use bytemuck::AnyBitPattern;
 use kerrno::{KError, KResult};
-use klazy::{Once, lazy_static};
+use klazy::Once;
 use kprocess::{AsThread, ControllingTerminal, Process};
 use ksync::Mutex;
 use kvfs::{CharacterDeviceRegistration, DeviceId, cdev_add_named, cdev_del};
@@ -357,12 +357,12 @@ impl TtyWrite for VtOutput {
         } else {
             // Delay native-console initialization until actual text output.
             // Sharing this byte connection never borrows its terminal/session.
-            super::N_TTY.writer.write(buf)
+            super::native_tty()?.writer.write(buf)
         }
     }
 }
 
-fn new_console() -> Arc<VtConsole> {
+fn new_console() -> KResult<Arc<VtConsole>> {
     let ingress = Arc::new(InputIngress::default());
     ingress.close();
     Tty::new(
@@ -378,9 +378,14 @@ fn new_console() -> Arc<VtConsole> {
     )
 }
 
-lazy_static! {
-    /// Single fixed VT; its controlling-terminal identity is separate from N_TTY.
-    pub static ref VT_CONSOLE: Arc<VtConsole> = new_console();
+static VT_CONSOLE: Once<Arc<VtConsole>> = Once::new();
+
+/// Returns the independent fixed VT in task context.
+///
+/// Manual input processing allocates no callback owner. This shares the fallible
+/// TTY construction interface; nested Arc and buffer allocations remain infallible.
+pub fn vt_console() -> KResult<Arc<VtConsole>> {
+    VT_CONSOLE.try_call_once(new_console).cloned()
 }
 
 static VT_DEVICES: Once<KResult<[CharacterDeviceRegistration; 2]>> = Once::new();
@@ -396,17 +401,18 @@ static VT_DEVICES: Once<KResult<[CharacterDeviceRegistration; 2]>> = Once::new()
 pub fn register_fixed_vt_devices() -> KResult<[CharacterDeviceRegistration; 2]> {
     VT_DEVICES
         .call_once(|| {
+            let console = vt_console()?;
             let first = cdev_add_named(
                 DeviceId::new(4, 0),
                 String::from("tty0"),
                 String::from("tty"),
-                VT_CONSOLE.clone(),
+                console.clone(),
             )?;
             match cdev_add_named(
                 DeviceId::new(4, 1),
                 String::from("tty1"),
                 String::from("tty"),
-                VT_CONSOLE.clone(),
+                console.clone(),
             ) {
                 Ok(second) => Ok([first, second]),
                 Err(error) => {

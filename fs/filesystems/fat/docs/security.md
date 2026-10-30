@@ -1,5 +1,13 @@
 # fat — 安全与可靠性分析
 
+## VFS owner allocation failure
+
+Owner allocation failure propagates NoMemory before installing a root. Local
+Arc owners release the unpublished FAT state; KVFS unregisters failed initialization,
+wakes waiters and releases the device claim through its existing cleanup path.
+NOWAIT is limited to owner storage and does not change the third-party FAT
+allocator or guarantee rollback of earlier device effects.
+
 ## 信任模型
 
 FAT 介质内容和 block I/O 结果不可信。KVFS 可信地提供已解析的 canonical

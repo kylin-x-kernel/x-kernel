@@ -87,17 +87,19 @@ fn run_in_user_task(test: &TestDescriptor, init_thread: InitTestThreadHook) -> T
         fs_context::copy_init_fs_struct(),
         SignalActions::default(),
         initial_cred(),
-    );
+    )
+    .expect("test thread preparation");
     init_thread(&thread);
 
     let result = Arc::new(SpinNoIrq::new(None));
     let result_ref = result.clone();
     let test = *test;
     let mut task = TaskInner::new_user(
-        move || {
+        ktask::PreparedTaskEntry::new_nowait(move || {
             let outcome = (test.test_fn)();
             *result_ref.lock() = Some(outcome);
-        },
+        })
+        .expect("test entry preparation"),
         format!("unittest-user-{pid}"),
         task_number,
         thread,

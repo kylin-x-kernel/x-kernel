@@ -1,5 +1,13 @@
 # v9fs — 设计文档
 
+## Prepared session owner
+
+After negotiation and root metadata validation, mount prepares the session in a
+KERNEL-policy KBox before handing it to KVFS. Transport calls have returned and
+no transport guard is retained at this allocation. Callers must use sleepable,
+reclaim-safe task context with IRQs/preemption enabled and no non-sleepable RCU
+section. A failed owner allocation is returned before a local superblock is published.
+
 ## 定位
 
 `fs/filesystems/9p` 是具体的 9P 网络文件系统，对应 Linux `fs/9p`。它拥有 mount、superblock、

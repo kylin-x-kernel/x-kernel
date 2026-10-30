@@ -3,7 +3,9 @@
 // See LICENSES for license details.
 
 use alloc::sync::Arc;
+use core::sync::atomic::AtomicUsize;
 
+use kalloc_types::AllocFlags;
 use khal::{
     paging::{MappingFlags, PageSize, PagingError},
     trap::PageFaultFlags,
@@ -17,7 +19,95 @@ use vmobj::{
 };
 
 use super::*;
-use crate::{PageFaultOutcome, vma::VmRuntimeRef};
+use crate::{
+    PageFaultOutcome,
+    backend::{FaultCompletion, PopulateHook},
+    vma::VmRuntimeRef,
+};
+
+struct PopulateCapture(Arc<AtomicUsize>);
+
+impl Drop for PopulateCapture {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn populate_hook_consumes_capture_once_and_can_only_be_taken_once() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut address_space = new_test_aspace();
+    for flags in [AllocFlags::KERNEL, AllocFlags::NOWAIT] {
+        let capture = PopulateCapture(drops.clone());
+        let hits = calls.clone();
+        let hook = PopulateHook::new_with_flags(
+            move |space| {
+                assert_eq!(space.base(), VirtAddr::from_usize(0x1000));
+                hits.fetch_add(1, Ordering::Relaxed);
+                drop(capture);
+            },
+            flags,
+        )
+        .unwrap();
+        let mut completion = FaultCompletion::from_populate((1, Some(hook)));
+        let hook = completion.take_post_action().unwrap();
+        assert!(completion.take_post_action().is_none());
+        hook.call(&mut address_space);
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[def_test]
+fn cancelled_and_rejected_populate_hooks_release_captures_without_calling() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let capture = PopulateCapture(drops.clone());
+    let hits = calls.clone();
+    let hook = PopulateHook::new(move |_| {
+        hits.fetch_add(1, Ordering::Relaxed);
+        drop(capture);
+    })
+    .unwrap();
+    drop(FaultCompletion::from_populate((1, Some(hook))));
+    let capture = PopulateCapture(drops.clone());
+    let hits = calls.clone();
+    let rejected = PopulateHook::new_with_flags(
+        move |_| {
+            hits.fetch_add(1, Ordering::Relaxed);
+            drop(capture);
+        },
+        AllocFlags::from_bits_retain(1 << 31),
+    );
+    assert!(matches!(rejected, Err(KError::InvalidInput)));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[def_test]
+fn backend_fault_completion_runs_prepared_hook_and_preserves_oom_outcome() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hits = calls.clone();
+    let mut address_space = new_test_aspace();
+    let hook = PopulateHook::new_nowait(move |_| {
+        hits.fetch_add(1, Ordering::Relaxed);
+    })
+    .unwrap();
+    let start = address_space.base();
+    let result = address_space.finish_backend_fault(
+        start,
+        MappingFlags::READ,
+        Ok(FaultCompletion::from_populate((1, Some(hook)))),
+    );
+    assert_eq!(result, PageFaultOutcome::Resolved);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        address_space.finish_backend_fault(start, MappingFlags::READ, Err(KError::NoMemory)),
+        PageFaultOutcome::OutOfMemory
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
 
 fn new_test_aspace() -> AddrSpace {
     AddrSpace::new_empty_kernel(VirtAddr::from(0x1000usize), PAGE_SIZE_4K * 64)

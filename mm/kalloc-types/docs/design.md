@@ -1,5 +1,60 @@
 # kalloc-types 设计
 
+## Migration Batch Boundary
+
+Owner migration must preserve both failure cleanup and subsystem progress.
+An allocation that was previously infallible cannot be replaced by a fallible
+call until callers have an error, rollback or preallocated-resource protocol.
+NOWAIT does not guarantee success; KERNEL grants sleeping reclaim permissions
+but does not implement a progress guarantee. Adding expect, discarding accepted
+work, or retrying indefinitely is not a substitute for that protocol.
+
+The current runtime/callback migration batch can close with the following
+explicitly deferred production paths. They remain standard Box owners, not
+completed migrations or permanent exemptions:
+
+| Deferred path | Required separate design and validation |
+| --- | --- |
+| `ktask::TaskEntry::Closure` and the legacy kernel task factory | Audit all spawn callers, boot/IRQ-disabled contexts and publication boundaries. For dynamic workqueue workers, define Creating-slot rollback, baseline startup failure, retry wakeups and continued execution under memory pressure. Review whether reclaim-facing services need preallocated execution resources. Validate sustained allocation failure, pending demand, concurrent stop and partial startup. |
+| `ksignal::PendingSignals::info_std` and `put_signal` | Define allocation failure separately from standard-signal coalescing. Keep pending bits and payload publication consistent under the signal lock. Preserve fatal-signal behavior and POSIX timer dequeue identity/acknowledgement; do not silently discard metadata. Review preallocation or bounded storage and validate exhaustion, coalescing, dequeue and timer lifetime races. |
+
+These paths require separate design review, implementation and validation rather
+than expanding the ownership-replacement patch into an unreviewed subsystem
+redesign. Prepared user entries and workqueue manager entries already have
+explicit failure boundaries; they do not make legacy kernel spawning, dynamic
+worker growth or signal delivery fallible end to end. Other subsystems and
+test-only Box uses remain subsequent migration work. The system-Box lint stays
+deferred until the remaining migration and any reviewed exceptions are resolved.
+
+## Moving A Sized Value Out
+
+`KBox::into_inner(owner)` consumes a sized owner and returns its value without
+cloning or running the value's destructor. A ManuallyDrop owner prevents the
+ordinary KBox destructor from touching the moved value. The existing Storage
+guard releases the original allocation with `Layout::new::<T>()` after the
+pointer read; aligned zero-sized values require no storage release.
+
+Extraction does not allocate, sleep or enter reclaim, but still requires the
+allocator's deallocation lock order and reentrancy constraints. It does not
+transfer allocation flags to the returned value's use or destruction. This
+operation neither supports unsized extraction nor changes the existing callback
+forwarding bound: a sized consuming-only FnOnce can be extracted and invoked,
+but `KBox<dyn FnOnce()>` is not callable through this API. This supplies the
+move-out primitive needed for pending payloads and consuming entry ownership;
+it does not resolve their allocation failure or publication contracts.
+
+Guest tests cover non-Copy destructor ownership, mutated aligned values with
+owned arrays, aligned ZSTs, and a closure that consumes its captured resource.
+
+## Fallible work callbacks
+
+`KBox` forwards reusable `Fn` and `FnMut` callbacks, including erased trait
+objects and borrowed captures, using `fn_traits`, `unboxed_closures`, and
+`tuple_trait`. Arguments and return values are forwarded without allocation or
+new unsafe code. The required `FnOnce` implementation invokes `FnMut` through a
+mutable borrow and then drops the owner; consuming-only `FnOnce` closures are
+not supported. Allocation flags do not constrain callback execution or Drop.
+
 ## Fallible directory iterators
 
 KBox<T: Iterator + ?Sized> delegates next, size_hint and nth to T. This supports

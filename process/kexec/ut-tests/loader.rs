@@ -46,7 +46,8 @@ fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
             init,
         ));
         SimpleDir::new_maker(fs, Arc::new(DirMapping::new()))
-    });
+    })
+    .unwrap();
     let inode = inode.unwrap();
     let mount = Mount::new_root(&super_block);
     let dentry = Dentry::new_file_from_inode(inode, None, "app".into());

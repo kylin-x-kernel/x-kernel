@@ -1,6 +1,39 @@
 # kprocess — Security and reliability
 
+## Prepared Task Entry Ordering
+
+Callers prepare the user-task entry before process/thread clone preparation.
+`PreparedUserClone::into_parts` is therefore followed only by transferring the
+entry owner, not a new fallible callback allocation. This avoids adding an error
+path after the child-relation rollback guard has committed. The crate example
+documents this order; syscall tests inject entry allocation failure and verify
+unchanged child and thread relationships. They do not force global allocator OOM.
+
 ## Scope and trust model
+
+TEE session-slot access exposes an optional KBox under the existing mutex.
+The installing API accepts an already allocated owner; rejected redundant owners
+are dropped after unlocking. Mutable slot callbacks retain the lock and must
+respect its reclaim and non-reentrancy constraints. Taking an owner transfers
+cleanup responsibility to the caller; allocation flags do not constrain its drop.
+
+Signal-slot allocation failure unwinds thread preparation: the committed cgroup
+membership is dropped and detaches, and owned files, credentials, runtime and
+identity references are released. The slot itself is not registered on failure.
+If the outer thread-owner allocation fails after slot registration, dropping
+the supplied Thread retires the slot and releases its cgroup membership and
+other resource owners. These destructors run in the preparing caller's context;
+NOWAIT constrains owner allocation, not nested preparation or cleanup.
+NOWAIT avoids new reclaim dependencies while the process cgroup transaction
+mutex is held; it does not make nested Arc/Vec allocations fallible.
+The clone publication regression checks that transferring a prepared `KBox`
+into the task preserves the Thread address. Existing lifecycle tests cover
+unpublished rollback and deferred runtime destruction, but do not force global
+allocator OOM at the outer thread-owner allocation.
+The fork runtime's final-stage callback runs before its attached-child guard is
+committed. A deterministic NoMemory result from that stage tests process-tree
+rollback, runtime and identity release, and shared-handler ownership cleanup
+without requiring global allocator exhaustion. The parent remains usable.
 
 Task publication slots retain `WeakKtaskRef` (DeferredWeak), not a destructor
 completion token. Final strong release prevents resurrection immediately while

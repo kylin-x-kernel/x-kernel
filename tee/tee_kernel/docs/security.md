@@ -1,5 +1,21 @@
 # TEE Session Lifecycle Safety
 
+## Session-owner allocation boundary
+
+Session initialization uses a fallible KBox under the thread's session-slot
+mutex. NOWAIT prevents owner allocation from sleeping or entering reclaim,
+not from failing, and gives no NMI, reserve or bounded-latency guarantee.
+The initialized-slot path does not allocate a replacement owner. In particular,
+close-all helpers do not gain an avoidable owner-allocation failure when the
+session already exists. Their internal resource operations are not made OOM-safe
+by this change and retain their previous error contracts.
+
+The slot remains absent if initialization fails, and the supplied resource
+callback is not entered. A deterministic initializer failure test checks the
+empty slot, successful retry, and pointer-preserving reuse without executing
+the initializer for an existing context. This test does not exhaust the global
+allocator. Existing exec/exit fixtures continue exercising real session cleanup.
+
 ## Scope and Trust Boundaries
 
 This analysis covers session ownership and access in `src/tee/tee_session.rs`,

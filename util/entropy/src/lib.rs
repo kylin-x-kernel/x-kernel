@@ -141,6 +141,11 @@ fn bootstrap_seed() -> [u8; SEED_SIZE] {
 /// Must be called after driver probe so VirtIO RNG devices are visible.
 /// HRNG sources (CPU RNDR, SMCCC TRNG) are mixed immediately; VirtIO and any
 /// remaining sources are mixed on the first [`fill_random`] call.
+///
+/// With VirtIO RNG enabled, requires sleepable task context with IRQs and
+/// preemption enabled, outside non-sleepable RCU sections and locks needed by
+/// reclaim, IO or filesystem callbacks. Collector callback owners use KERNEL
+/// allocation before source publication; their failures leave the source absent.
 pub fn init() {
     if INIT_DONE.swap(true, Ordering::AcqRel) {
         return;

@@ -27,7 +27,7 @@ impl TtyWrite for EmptyIo {
 
 #[def_test(user, serial)]
 fn pty_master_cannot_become_controlling_terminal() {
-    let (master, _) = create_pty_pair();
+    let (master, _) = create_pty_pair().unwrap();
     let process = kprocess::current_user_process();
 
     assert_eq!(master.bind_to(&process), Err(KError::NotATty));
@@ -43,7 +43,8 @@ fn master_identity_does_not_depend_on_input_processing() {
             writer: EmptyIo,
             process_mode: ProcessMode::Manual,
         },
-    );
+    )
+    .unwrap();
     let process = kprocess::current_user_process();
     assert_eq!(master.bind_to(&process), Err(KError::NotATty));
 }

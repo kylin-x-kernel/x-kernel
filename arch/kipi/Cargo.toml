@@ -15,6 +15,7 @@ reschedule = []
 timer-reprogram = []
 
 [dependencies]
+kalloc-types.workspace = true
 kerrno.workspace = true
 kiface-cpu-api.workspace = true
 kiface-task-api.workspace = true

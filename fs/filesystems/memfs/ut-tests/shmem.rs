@@ -52,7 +52,7 @@ fn tmpfs_zero_default_page_limit_allows_writes() {
             &TMPFS_TYPE,
             SuperBlockFlags::empty(),
             options.mount_options(),
-        );
+        ).unwrap();
         let root = Mount::new_root(&fs).root_path();
         let file = kvfs::Filename::new("zero-default")
             .open_with_flags_at(
@@ -267,7 +267,7 @@ fn tmpfs_mount_options_apply_root_metadata() {
             root_uid: 1000,
             root_gid: 100,
         },
-    );
+    ).unwrap();
     let metadata = fs.root_dir().metadata();
 
     assert_eq!(metadata.mode.permission().bits(), 0o700);

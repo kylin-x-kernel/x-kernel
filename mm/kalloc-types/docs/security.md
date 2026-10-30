@@ -1,5 +1,26 @@
 # kalloc-types 安全与可靠性
 
+## Sized Ownership Extraction
+
+`KBox::into_inner` takes exclusive ownership, so no safe borrow can survive the
+move. Its pointer read transfers exactly one initialized, correctly aligned T;
+ManuallyDrop prevents KBox destruction from dropping that value again. The
+Storage guard only releases memory, using the same sized layout as construction,
+and never dereferences the moved-from slot. ZSTs skip deallocation. No raw
+pointer or allocator injection is exposed, and this is not a pinning operation.
+The returned value's destructor runs in its eventual owner's context, not during
+extraction. Tests cover single destruction and preserved payloads; they do not
+force global OOM or establish that future task/signal migration is failure-safe.
+
+## Fallible work callbacks
+
+Callback allocation failure drops captured values without invoking the callback.
+Consuming a reusable callback destroys its captures exactly once after invocation.
+Borrowed captures remain bounded by their original lifetime. Tests cover generic
+Fn/FnOnce bounds, erased FnMut state, and injected failure with KERNEL/NOWAIT.
+These are local allocator tests, not global OOM injection or proof that nested
+allocations inside callbacks are fallible.
+
 ## Fallible directory iterators
 
 Iterator forwarding preserves the underlying iterator's execution-context
@@ -33,6 +54,7 @@ NOIO/NOFS 只约束这次申请，不建立隐式的跨调用链回收作用域�
 | `KBox::new_with_allocator` | 后端提供有效对齐的布局存储，ZST 使用对齐 dangling；写入前不创建引用 |
 | `Deref` / `DerefMut` | 完整初始化后才能构造 KBox；引用生命周期受所有者借用限制，写访问要求独占借用 |
 | `KBox::drop` | Compute the dynamic layout while the value is valid; the stack-local Storage guard frees storage after destruction or unwinding, without accessing the destroyed value |
+| `KBox::into_inner` | A consumed sized owner supplies initialized aligned storage; ManuallyDrop prevents duplicate destruction, and Storage frees only the original allocation after the move |
 | `Send` / `Sync` | 仅允许符合对应 trait 的值跨线程移动或共享；内部指针不暴露 |
 
 ## 威胁分析

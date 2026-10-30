@@ -12,8 +12,8 @@ fn bootstrap_snapshot_is_readable_from_shared_devtmpfs() {
     let Some(expected) = khal::firmware::dtb_bytes() else {
         return unittest::TestResult::Ignored;
     };
-    let super_block = crate::new_devfs(SuperBlockFlags::empty());
-    let second_mount = crate::new_devfs(SuperBlockFlags::empty());
+    let super_block = crate::new_devfs(SuperBlockFlags::empty()).unwrap();
+    let second_mount = crate::new_devfs(SuperBlockFlags::empty()).unwrap();
     assert!(alloc::sync::Arc::ptr_eq(&super_block, &second_mount));
     let root = Path::new(Mount::new_root(&super_block), super_block.root_dir());
     let file = Filename::new("firmware-dtb")

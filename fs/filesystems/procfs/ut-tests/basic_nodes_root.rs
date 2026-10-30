@@ -20,7 +20,8 @@ fn pty_nodes_report_limits_and_reject_root_writes() {
         let mut root = DirMapping::new();
         add_root_entries(&mut root, fs.clone());
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     let root = Mount::new_root(&super_block).root_path();
     for (path, expected) in [
         ("/sys/kernel/pty/max", ktty::tty::pty_limit()),
@@ -59,7 +60,8 @@ fn printk_and_log_filter_nodes_read_and_write_the_console_filter() {
         let mut root = DirMapping::new();
         add_root_entries(&mut root, fs.clone());
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let open = |path: &str| {
         Filename::new(path)
@@ -162,7 +164,8 @@ fn proc_nodes_are_pollable_like_linux() {
         add_root_entries(&mut root, fs.clone());
         crate::mem_nodes::root::add_root_entries(&mut root, fs.clone());
         SimpleDir::new_maker(fs, Arc::new(root))
-    });
+    })
+    .unwrap();
     let root = Mount::new_root(&super_block).root_path();
 
     for path in ["/cmdline", "/meminfo"] {

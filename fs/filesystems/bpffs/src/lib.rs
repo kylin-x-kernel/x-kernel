@@ -7,6 +7,11 @@
 //! This crate currently supports pinning loaded BPF programs, reopening them
 //! through `BPF_OBJ_GET`, and holding anonymous map fds for the syscall layer.
 //! Links are intentionally left for later BPF subsystem work.
+//!
+//! Superblock construction uses SimpleFs's fallible KERNEL-policy private owner
+//! before building root nodes. Callers require reclaim-safe sleepable task
+//! context; NoMemory propagates through the mount context before publication.
+//! Nested inode, Arc and map allocations retain their existing behavior.
 
 #![no_std]
 
@@ -44,7 +49,7 @@ fn get_tree(
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
     get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_bpffs_with_type(file_system_type, flags))
+        new_bpffs_with_type(file_system_type, flags)
     })
 }
 
@@ -719,14 +724,19 @@ impl FileDirOperations for BpfFileOperations {
 }
 
 /// Creates a bpffs superblock.
-pub fn new_bpffs(superblock_flags: SuperBlockFlags) -> Arc<SuperBlock> {
+///
+/// Requires sleepable task context with IRQs/preemption enabled, outside
+/// non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+/// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
+/// allocations retain their existing behavior.
+pub fn new_bpffs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_bpffs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
 }
 
 fn new_bpffs_with_type(
     file_system_type: &'static kvfs::FileSystemType,
     superblock_flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     SimpleFs::new_with_superblock_flags(file_system_type, BPF_FS_MAGIC, superblock_flags, |fs| {
         let root = Inode::new_dir(fs.clone(), DIR_PERMISSION, 0, 0);
         Arc::new(move || {

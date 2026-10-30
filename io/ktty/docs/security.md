@@ -1,5 +1,25 @@
 # ktty — Security And Reliability
 
+## Callback Preparation Failure
+
+Input callback storage uses fallible KBox ownership, never a panic on NoMemory.
+PTY preparation occurs outside registry and pair locks and uses KERNEL; native
+console singleton initialization uses NOWAIT to prohibit reclaim re-entry.
+Both still require sleepable task context for normal worker preparation.
+No callback is queued and no ingress waker is replaced until preparation succeeds.
+Weak callback ownership prevents a permanent cycle. A failed PTY endpoint factory
+cannot publish a node or retain its reserved number. Native console failure is
+retryable; devtmpfs creation and VT writes propagate it, while runtime handoff
+keeps boot-console access available.
+
+Tests reject callback allocation policy to check unchanged ingress notification
+and capture cleanup, then retry successfully. An injected NoMemory endpoint
+factory checks unpublished pair destruction and number reuse. These are local
+failure-path tests, not forced global allocator exhaustion. Existing IRQ wake,
+work shutdown, PTY hangup and identifier-lifetime tests cover successful paths.
+Arc, buffer and workqueue-internal allocations remain infallible; this migration
+does not establish end-to-end OOM safety or a NOFAIL guarantee.
+
 ## Scope
 
 This analysis covers the entire `ktty` crate: `src/lib.rs`, `src/port.rs`,
@@ -165,8 +185,8 @@ Numeric-alias rejection is enforced by ktty's registered Unix98 operations.
 
 The fixed capacity is 16 pairs. Reservation rejects numbers beyond that limit;
 allocation and release update the bitmap under the registry lock. Read-only
-usage snapshots expose no reservation capability. Endpoint allocation retains
-the kernel's existing OOM policy.
+usage snapshots expose no reservation capability. Callback-owner allocation
+returns NoMemory; nested endpoint allocations retain their existing OOM policy.
 
 PTY numbers remain reserved from construction through final open-file-use
 release. The bitmap and published tree are protected by a short registry lock;

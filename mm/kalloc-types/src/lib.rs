@@ -10,6 +10,7 @@
 
 #![no_std]
 #![feature(derive_coerce_pointee)]
+#![feature(fn_traits, unboxed_closures, tuple_trait)]
 
 mod kbox;
 

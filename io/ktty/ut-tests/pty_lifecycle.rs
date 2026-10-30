@@ -16,6 +16,28 @@ use super::*;
 use crate::port::TtyWrite;
 
 struct Inode;
+
+#[def_test]
+fn pty_preparation_failure_releases_number_and_unpublished_owner() {
+    let before = pty_allocated_count();
+    let mut reserved = None;
+    let mut failed_owner = Weak::new();
+    let result = PtyPair::allocate_with(&test_owner_fs(), |pair| {
+        failed_owner = pair.unwrap();
+        let pair = failed_owner.upgrade().unwrap();
+        reserved = Some(pair.number);
+        assert!(pair.state.lock().resources.is_none());
+        assert!(pty_slave_inode(pair.number).is_none());
+        Err(KError::NoMemory)
+    });
+    assert_eq!(result.err(), Some(KError::NoMemory));
+    assert!(failed_owner.upgrade().is_none());
+    assert_eq!(pty_allocated_count(), before);
+    let retry = PtyPair::allocate(&test_owner_fs()).unwrap();
+    assert_eq!(Some(retry.number), reserved);
+    drop(retry);
+    assert_eq!(pty_allocated_count(), before);
+}
 impl InodeOperations for Inode {}
 
 #[derive(Default)]
@@ -72,7 +94,7 @@ fn test_owner_fs() -> Arc<SimpleFs> {
     SimpleFs::new_with(&FS_TYPE, 0, |fs| {
         captured = Some(fs.clone());
         SimpleDir::new_maker(fs, alloc::sync::Arc::new(DirMapping::new()))
-    });
+    }).unwrap();
     captured.expect("root builder runs with its filesystem")
 }
 

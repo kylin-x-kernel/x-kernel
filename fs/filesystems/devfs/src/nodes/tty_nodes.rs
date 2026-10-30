@@ -10,7 +10,11 @@ use kvfs::{DeviceId, DirMapping, SimpleDir, SimpleFs};
 use super::pts::{Ptmx, PtsDir};
 use crate::{DeviceFile, add_device_entry};
 
-pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+pub(crate) fn add_root_entries(
+    root: &mut DirMapping,
+    fs: Arc<SimpleFs>,
+    console: Arc<tty::NTtyDriver>,
+) {
     // Reserve both numeric ranges and enforce EIO for aliases before publishing PTMX.
     #[expect(
         clippy::expect_used,
@@ -42,7 +46,7 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     add_device_entry(
         root,
         "console",
-        DeviceFile::new_character(fs.clone(), DeviceId::new(5, 1), tty::N_TTY.clone()),
+        DeviceFile::new_character(fs.clone(), DeviceId::new(5, 1), console),
     );
     add_device_entry(
         root,

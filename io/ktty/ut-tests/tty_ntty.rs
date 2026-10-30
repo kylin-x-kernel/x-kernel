@@ -158,7 +158,8 @@ fn console_output_keeps_backend_owned_newline_processing() {
             writer: connection,
             process_mode: ProcessMode::Manual,
         },
-    );
+    )
+    .unwrap();
     assert_eq!(tty.output.lock().write(b"line\n"), Ok(5));
     // The test serial backend is raw; the TTY must pass LF through unchanged.
     assert_eq!(fixture.output(), b"line\n");
@@ -178,6 +179,7 @@ fn direct_boot_connection_and_manual_input_remain_usable() {
             writer: connection,
             process_mode: ProcessMode::Manual,
         },
-    );
+    )
+    .unwrap();
     assert!(tty.input.lock().input_waker().is_none());
 }

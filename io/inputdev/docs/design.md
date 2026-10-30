@@ -1,5 +1,17 @@
 # inputdev — Design
 
+## Fallible work callbacks
+
+`InputEndpoint::new` allocates its erased work callback with KBox NOWAIT, because
+`input_endpoint` holds INPUT_ENDPOINTS across creation/start to serialize endpoint
+identity. Merely being a sleepable mutex does not establish reclaim safety:
+endpoint discovery/removal also needs this registry. NOWAIT preserves the current
+no-reclaim owner allocation without introducing synchronous subsystem re-entry.
+NOFS/NOIO still allow reclaim and do not prove safety for this input registry;
+restructuring creation outside the lock would require duplicate-publication and
+notifier-lifetime handling and is not part of this migration. The whole API still
+requires sleepable task context for worker/device operations, not IRQ context.
+
 ## Purpose
 
 `inputdev` owns event progress and distribution after an input class device

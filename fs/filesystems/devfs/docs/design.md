@@ -1,5 +1,19 @@
 # devfs — Design
 
+Native console preparation now precedes the infallible static root builder.
+Its fallible `native_tty()` uses NOWAIT callback ownership inside the singleton
+initializer. Failure propagates from devtmpfs creation before dynamic-root or
+device-node publication and leaves DEVFS retryable. The prepared console owner
+is passed into the root builder rather than initialized by a lazy dereference.
+
+## Fallible singleton mount state
+
+The devtmpfs singleton uses `Once::try_call_once` and SimpleFs's explicit NOWAIT
+private-owner policy. Reclaim during Once initialization could re-enter the same
+singleton, so default KERNEL is not permitted here. The caller is still a
+sleepable task for firmware capture, root construction and internal mounting.
+Successful calls continue to share one superblock and internal mount.
+
 ## Fallible directory iterators
 
 Dynamic device and devpts child_names return KBox iterators using the default

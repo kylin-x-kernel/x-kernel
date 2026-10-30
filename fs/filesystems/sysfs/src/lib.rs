@@ -273,7 +273,7 @@ fn get_tree(
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
     get_tree_nodev(context, |file_system_type, flags| {
-        Ok(new_sysfs_with_type(file_system_type, flags))
+        new_sysfs_with_type(file_system_type, flags)
     })
 }
 
@@ -300,13 +300,14 @@ fn init_sysfs() {
 fn new_sysfs_with_type(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
-) -> Arc<SuperBlock> {
+) -> VfsResult<Arc<SuperBlock>> {
     init_device_projection();
-    let (super_block, _internal_mount) = SYSFS.call_once(|| {
-        let super_block = SimpleFs::new_with_superblock_flags(
+    let (super_block, _internal_mount) = SYSFS.try_call_once(|| {
+        let super_block = SimpleFs::new_with_allocation_flags(
             file_system_type,
             SYSFS_MAGIC,
             superblock_flags,
+            kalloc_types::AllocFlags::NOWAIT,
             |fs| {
                 SimpleDir::new_maker(
                     fs.clone(),
@@ -316,11 +317,11 @@ fn new_sysfs_with_type(
                     }),
                 )
             },
-        );
+        )?;
         let internal_mount = Mount::new_root(&super_block);
-        (super_block, internal_mount)
-    });
-    super_block.clone()
+        Ok::<_, kvfs::VfsError>((super_block, internal_mount))
+    })?;
+    Ok(super_block.clone())
 }
 
 fn add_directory(tree: &mut BTreeMap<String, TreeEntry>, path: &str) {

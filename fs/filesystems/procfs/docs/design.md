@@ -1,5 +1,12 @@
 # procfs - Design
 
+## Fallible superblock preparation
+
+Procfs constructors return VfsResult and use SimpleFs's KERNEL allocation for
+mount-private ownership before building root nodes. They require sleepable task
+context with IRQs/preemption enabled, outside non-sleepable RCU and without locks
+needed by reclaim, I/O or filesystem callbacks.
+
 `/proc/tracing/capture_stats` is a read-only per-open text snapshot of ktracing's
 retained, overwritten, oversized and uninitialized record counters. Reopening
 refreshes it without initializing tracing. Formatting takes place outside the

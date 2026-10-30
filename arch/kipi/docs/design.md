@@ -1,5 +1,39 @@
 # kipi — 设计文档
 
+## Fallible generic callback ownership
+
+`Callback` holds either a `KBox<dyn FnMut() + Send>` single-use adapter or an
+existing `MulticastCallback` Arc. The adapter owns `Option<F>` for an arbitrary
+`FnOnce`; invocation takes the concrete value before calling it. This needs no
+unsafe unsized move and does not claim that KBox supports consuming-only erased
+FnOnce directly. Consuming `Callback::call` invokes the body at most once;
+discarding a callback drops its captures without invocation.
+
+Preparation uses `new` (KERNEL), `new_nowait`, or `new_with_flags`. KERNEL
+requires reclaim-safe sleepable task context with IRQs/preemption enabled,
+outside non-sleepable RCU and without locks needed by reclaim, I/O or filesystem
+callbacks. NOWAIT does not promise reserve access, bounded latency or NMI safety.
+Capture construction/destruction obey their own context requirements.
+
+`run_on_cpu` accepts a closure and validates the target first. Local execution
+needs no owner allocation. Remote preparation uses NOWAIT before taking the
+destination queue lock: callers may have IRQs/preemption disabled, and a generic
+IPI sender cannot acquire a sleeping-reclaim requirement. NoMemory returns
+before queue publication or notification. `run_on_cpu_prepared` accepts an owner
+prepared earlier under the caller's chosen policy without boxing it again.
+The previous infallible From<closure> conversion is removed.
+
+Broadcast conversion retains the existing Arc directly instead of allocating
+one boxed wrapper per CPU. This avoids new partial-broadcast failure semantics;
+each event still owns one shared reference. The callback carrier now has an enum
+discriminant in addition to its pointer payload. Initial Arc allocation and
+VecDeque growth retain their existing infallible behavior.
+
+The existing handler queue-lock scope is unchanged. Remote callback bodies and
+capture destruction must not sleep, acquire IPI queue locks or wait for queued
+callbacks. This change does not affect fixed notifications, TLB shootdown or
+CPU-stop storage/protocols, and does not make the generic queue NMI-safe.
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 
@@ -452,7 +486,7 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 ## Drop / 资源释放
 
 - 通用回调的生命周期由 `Callback` / `MulticastCallback` 自然管理；
-- 广播回调通过 `Arc` 克隆，再在目标 CPU 上转换成一次性 `Callback`；
+- Broadcast senders clone the Arc and wrap it in a single-use Callback without allocation;
 - `IpiEventQueue` 中的事件在 `pop_one()` 后被消费；
 - `ActiveShootdownSlot` 通过 `Drop` 自动清除 active 状态，防止异常路径遗留 slot 占用；
 - `kipi` 本身不拥有跨 CPU 长生命周期的内存池或设备资源，主要资源都是

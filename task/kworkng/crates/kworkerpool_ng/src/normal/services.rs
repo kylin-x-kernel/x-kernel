@@ -43,10 +43,14 @@ impl<S: PartitionWorkSource + Send + Sync + 'static> NormalServices<S> {
     /// register the returned complete set, or stop it if a later setup step fails.
     /// `limit` bounds workers per CPU; `idle_for` is the positive idle-retirement
     /// interval. Idle retirement retains one baseline worker on every CPU.
+    /// Requires sleepable task context without locks needed by reclaim, I/O or
+    /// filesystem callbacks: manager entries are allocated with KERNEL.
     ///
     /// # Errors
     /// Invalid context or idle interval rejects before service allocation. Empty
     /// boot coverage or a per-CPU startup error returns only after joined rollback.
+    /// NoMemory reports manager entry allocation failure; other allocations
+    /// retain their existing infallible behavior.
     ///
     /// # Panics
     /// Propagates initialized task/timer invariants and fatal kernel allocation.

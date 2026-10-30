@@ -1,5 +1,16 @@
 # entropy — Security and reliability
 
+## Fallible work callbacks
+
+Collector construction returns KResult: owner OOM is NoMemory, invalid work context
+is InvalidInput, and unavailable worker services are OperationNotSupported. Failed
+preparation logs the distinct error without replacing the selected source. The
+unpublished collector and captured device reference are released without starting
+work. Arc and WorkHandle storage retain their existing allocation behavior. Existing
+mock-device tests exercise collector callbacks and cleanup; no global OOM injection
+is added. Callback execution and eventual worker-owned destruction retain their
+existing task-context requirements.
+
 ## Trust model and external boundaries
 
 The audit scope includes production code under `src/` and guest fixtures under

@@ -1,5 +1,21 @@
 # TEE Session Lifecycle
 
+## Fallible session ownership
+
+The thread slot owns `KBox<dyn TeeSessionCtxTrait>`. Session access ensures the
+slot is initialized while holding its mutex; an existing owner is reused without
+allocation. Only a missing slot constructs an empty `TeeSessionCtx` and allocates
+its owner with NOWAIT. This avoids adding reclaim dependencies under the session
+mutex and avoids introducing a new allocation failure into existing-session
+access or exit cleanup. The default context has empty Slabs; subsequent resource
+and Slab allocations retain their existing behavior.
+
+Owner allocation failure returns `TEE_ERROR_OUT_OF_MEMORY` before installing a
+context or invoking the resource callback; a later access may retry. Callback
+execution still holds the session mutex and must not reenter it or acquire new
+reclaim dependencies on it. The test-thread initialization helper now returns
+the same error; entry-side unittest setup requires that fixture to succeed.
+
 ## Test Layout
 
 Guest tests and the filesystem hash-tree fixture live in `ut-tests/`, mounted
