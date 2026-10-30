@@ -9,8 +9,7 @@ use ktime_types::{SystemTime, TimeSpan};
 use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
-    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OUT_OF_MEMORY, TEE_ERROR_OVERFLOW, TEE_ERROR_TIME_NOT_SET,
-    TEE_UUID, TeeTime,
+    TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_OVERFLOW, TEE_ERROR_TIME_NOT_SET, TEE_UUID, TeeTime,
 };
 
 use crate::tee::{
@@ -20,7 +19,6 @@ use crate::tee::{
 
 fn map_user_mem_error(err: MemError) -> u32 {
     match err {
-        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
         MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
         _ => tee_raw_sys::TEE_ERROR_GENERIC,
     }
@@ -69,14 +67,12 @@ pub(super) fn sys_tee_scn_get_time(cat: u64, teetime: *mut TeeTime) -> TeeResult
             .write_vm(time_value)
             .map_err(map_user_mem_error),
         Err(e) if e == TEE_ERROR_OVERFLOW => {
-            // Copy data even on overflow
-            let time_value = tee_time_get_sys_time();
-            let fallback_time = TeeTime {
-                seconds: time_value.unix_seconds() as u32,
-                millis: time_value.subsec_nanos() / 1_000_000,
-            };
+            // GP 允许在 `TEE_ERROR_OVERFLOW` 时回填时间；调用方（如
+            // `optee_test` 的 `test_time()`）会校验回填值是否为 32 位回绕后的
+            // 低 32 位，因此这里写回截断后的 TA 时间而不是 REE 时间。
+            let (wrapped_time, _) = tee_time_compute_ta_time(&uuid)?;
             UserPtr::<TeeTime>::from(teetime)
-                .write_vm(fallback_time)
+                .write_vm(wrapped_time)
                 .map_err(map_user_mem_error)?;
             Err(TEE_ERROR_OVERFLOW)
         }
@@ -179,8 +175,12 @@ fn tee_time_ta_set_offs(uuid: &TEE_UUID, offs: &TeeTime, positive: bool) -> TeeR
     Ok(())
 }
 
-// Get TA time
-pub(super) fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
+/// Compute the TA persistent time.
+///
+/// Returns the time together with an overflow flag: when the seconds value
+/// does not fit in `u32`, the returned time holds the wrapped low 32 bits and
+/// the flag is `true`.
+fn tee_time_compute_ta_time(uuid: &TEE_UUID) -> TeeResult<(TeeTime, bool)> {
     let (offs, positive) = tee_time_ta_get_offs(uuid)?;
     let t = tee_time_get_sys_time();
 
@@ -191,12 +191,29 @@ pub(super) fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
         t.checked_sub(offset)
     }
     .ok_or(TEE_ERROR_OVERFLOW)?;
-    let seconds = u32::try_from(t2.unix_seconds()).map_err(|_| TEE_ERROR_OVERFLOW)?;
+    let unix_seconds = t2.unix_seconds();
+    let millis = t2.subsec_nanos() / 1_000_000;
 
-    Ok(TeeTime {
-        seconds,
-        millis: t2.subsec_nanos() / 1_000_000,
-    })
+    match u32::try_from(unix_seconds) {
+        Ok(seconds) => Ok((TeeTime { seconds, millis }, false)),
+        Err(_) => Ok((
+            TeeTime {
+                seconds: unix_seconds as u32,
+                millis,
+            },
+            true,
+        )),
+    }
+}
+
+// Get TA time
+pub(super) fn tee_time_get_ta_time(uuid: &TEE_UUID) -> TeeResult<TeeTime> {
+    let (time, is_overflow) = tee_time_compute_ta_time(uuid)?;
+    if is_overflow {
+        Err(TEE_ERROR_OVERFLOW)
+    } else {
+        Ok(time)
+    }
 }
 
 // Set TA time
