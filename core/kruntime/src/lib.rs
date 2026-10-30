@@ -4,8 +4,8 @@
 
 //! Runtime orchestration for x-kernel: primary/secondary CPU bring-up, subsystem
 //! init ordering, and handoff to the system-init entry supplied by the `entry`
-//! crate. Single-CPU PM time transactions are exposed by [`pm`]; concrete
-//! platform quiescence/sleep providers remain external.
+//! crate. System power-management coordination belongs to the independent
+//! `kpm` crate.
 //!
 //! For architecture, boot flow, and security analysis, see `docs/design.md` and
 //! `docs/security.md` in the crate source directory.
@@ -30,7 +30,6 @@
 
 extern crate alloc;
 
-pub mod pm;
 mod rcu;
 
 #[cfg(all(feature = "rcu-torture", not(unittest)))]

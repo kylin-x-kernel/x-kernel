@@ -1416,6 +1416,7 @@ dependencies = [
  "khal",
  "kiface",
  "klogger",
+ "kpm",
  "kprocess",
  "kruntime",
  "ksyscall",
@@ -2986,6 +2987,21 @@ dependencies = [
  "timer-driver",
  "x86-apic",
  "x86_64",
+]
+
+[[package]]
+name = "kpm"
+version = "0.3.0-dev"
+dependencies = [
+ "kcpu_id_map",
+ "kerrno",
+ "khal",
+ "kiface-time-api",
+ "kspin",
+ "ktask",
+ "ktime",
+ "ktime_types",
+ "unittest",
 ]
 
 [[package]]

@@ -31,6 +31,7 @@ struct Probe {
     fault: Fault,
     irqs: bool,
     prepared: bool,
+    tasks_frozen: bool,
     accounting: bool,
     paused: bool,
     restored: bool,
@@ -45,6 +46,7 @@ impl Probe {
             fault,
             irqs: true,
             prepared: false,
+            tasks_frozen: false,
             accounting: false,
             paused: false,
             restored: false,
@@ -63,6 +65,8 @@ impl Drop for TaskGuard {
     fn drop(&mut self) {
         let mut p = self.0.borrow_mut();
         core::assert!(!p.prepared && p.irqs && !p.accounting && !p.paused && !p.frozen);
+        core::assert!(p.tasks_frozen);
+        p.tasks_frozen = false;
         p.log.push("tasks-thaw");
     }
 }
@@ -134,6 +138,7 @@ impl SuspendOps for Ops {
         if p.fault == Fault::Tasks {
             return Err(FreezeError::TimedOut);
         }
+        p.tasks_frozen = true;
         Ok(TaskGuard(self.0.clone()))
     }
 
@@ -228,7 +233,11 @@ impl SuspendOps for Ops {
 
 fn attempt(fault: Fault) -> (Result<TimeSpan, SuspendError>, Rc<RefCell<Probe>>) {
     let probe = Probe::new(fault);
-    let result = run(&mut Ops(probe.clone()), &mut Source(probe.clone()));
+    let result = run(
+        &mut Ops(probe.clone()),
+        &mut Source(probe.clone()),
+        &mut DeviceSet::new(&mut []),
+    );
     let p = probe.borrow();
     core::assert!(p.irqs && !p.frozen && !p.paused && !p.accounting && !p.prepared);
     core::assert_eq!(
@@ -453,7 +462,7 @@ struct RefusingPlatform(core::cell::Cell<usize>);
 // SAFETY: prepare always refuses without touching hardware or quiescing tasks,
 // so no successful preparation or frozen interval can reach the other hooks.
 // Those hooks are non-blocking and make no hardware/state changes either.
-unsafe impl SuspendPlatform for RefusingPlatform {
+unsafe impl PlatformSuspendOps for RefusingPlatform {
     fn prepare(&mut self) -> KResult<()> {
         self.0.set(self.0.get() + 1);
         Err(KError::OperationNotSupported)
@@ -520,4 +529,254 @@ fn failed_task_acknowledgment_finishes_without_sampling_or_freezing_time() {
         probe.borrow().log,
         vec!["prepare", "tasks-freeze", "finish"]
     );
+}
+
+struct DeviceProbe {
+    index: usize,
+    probe: Rc<RefCell<Probe>>,
+    fail_at: Rc<core::cell::Cell<Option<usize>>>,
+    is_suspended: bool,
+}
+
+// SAFETY: these fixtures only mutate test-owned state. They never quiesce live
+// hardware, wait for frozen tasks or change real IRQ/time state. Failed suspend
+// leaves the fixture active; resume is infallible and balances one success.
+unsafe impl DeviceSuspendOps for DeviceProbe {
+    fn suspend(&mut self) -> KResult<()> {
+        let mut p = self.probe.borrow_mut();
+        core::assert!(p.tasks_frozen && p.prepared && p.irqs);
+        core::assert!(!p.frozen && !p.paused && !p.accounting && !self.is_suspended);
+        p.log
+            .push(["device0-suspend", "device1-suspend", "device2-suspend"][self.index]);
+        if self.fail_at.get() == Some(self.index) {
+            return Err(KError::OperationNotSupported);
+        }
+        self.is_suspended = true;
+        Ok(())
+    }
+
+    fn resume(&mut self) {
+        let mut p = self.probe.borrow_mut();
+        core::assert!(p.tasks_frozen && p.prepared && p.irqs && p.hardware_ready);
+        core::assert!(!p.frozen && !p.paused && !p.accounting && self.is_suspended);
+        p.log
+            .push(["device0-resume", "device1-resume", "device2-resume"][self.index]);
+        self.is_suspended = false;
+    }
+}
+
+fn devices_attempt(
+    fault: Fault,
+    fail_at: Option<usize>,
+) -> (Result<TimeSpan, SuspendError>, Rc<RefCell<Probe>>) {
+    let probe = Probe::new(fault);
+    let failure = Rc::new(core::cell::Cell::new(fail_at));
+    let mut fixtures: [_; 3] = core::array::from_fn(|index| DeviceProbe {
+        index,
+        probe: probe.clone(),
+        fail_at: failure.clone(),
+        is_suspended: false,
+    });
+    let mut devices: [&mut dyn DeviceSuspendOps; 3] = fixtures.each_mut().map(|d| d as _);
+    let result = run(
+        &mut Ops(probe.clone()),
+        &mut Source(probe.clone()),
+        &mut DeviceSet::new(&mut devices),
+    );
+    core::assert!(fixtures.iter().all(|device| !device.is_suspended));
+    let p = probe.borrow();
+    core::assert!(p.irqs && !p.prepared && !p.tasks_frozen);
+    core::assert!(!p.frozen && !p.paused && !p.accounting);
+    drop(p);
+    (result, probe)
+}
+
+#[def_test]
+fn device_suspend_and_resume_bracket_the_time_transaction_and_preserve_dependencies() {
+    let (result, probe) = devices_attempt(Fault::None, None);
+    assert_eq!(result, Ok(TimeSpan::from_secs(7)));
+    assert_eq!(
+        probe.borrow().log,
+        vec![
+            "prepare",
+            "tasks-freeze",
+            "device0-suspend",
+            "device1-suspend",
+            "device2-suspend",
+            "rtc-begin",
+            "irq-off",
+            "pause",
+            "freeze",
+            "mark",
+            "enter",
+            "platform-restore",
+            "clock-resume",
+            "event-restore",
+            "irq-on",
+            "settle",
+            "event-resume",
+            "device2-resume",
+            "device1-resume",
+            "device0-resume",
+            "finish",
+            "tasks-thaw",
+        ]
+    );
+}
+
+#[def_test]
+fn device_failure_identifies_the_device_and_rolls_back_only_successful_predecessors() {
+    for index in 0..3 {
+        let (result, probe) = devices_attempt(Fault::None, Some(index));
+        assert_eq!(
+            result,
+            Err(SuspendError::DeviceSuspend(DeviceSuspendError {
+                index,
+                error: KError::OperationNotSupported,
+            }))
+        );
+        let mut expected = vec!["prepare", "tasks-freeze"];
+        expected.extend_from_slice(
+            &["device0-suspend", "device1-suspend", "device2-suspend"][..=index],
+        );
+        expected.extend(
+            ["device0-resume", "device1-resume", "device2-resume"][..index]
+                .iter()
+                .rev()
+                .copied(),
+        );
+        expected.extend_from_slice(&["finish", "tasks-thaw"]);
+        assert_eq!(probe.borrow().log, expected);
+    }
+}
+
+#[def_test]
+fn every_later_failure_restores_devices_before_platform_release_and_task_thaw() {
+    for fault in [
+        Fault::Begin,
+        Fault::Pause,
+        Fault::Freeze,
+        Fault::Mark,
+        Fault::Enter,
+        Fault::Settle,
+        Fault::EnterAndSettle,
+    ] {
+        let (result, probe) = devices_attempt(fault, None);
+        assert!(result.is_err());
+        let p = probe.borrow();
+        assert_eq!(
+            &p.log[..5],
+            &[
+                "prepare",
+                "tasks-freeze",
+                "device0-suspend",
+                "device1-suspend",
+                "device2-suspend"
+            ]
+        );
+        assert_eq!(
+            &p.log[p.log.len() - 5..],
+            &[
+                "device2-resume",
+                "device1-resume",
+                "device0-resume",
+                "finish",
+                "tasks-thaw"
+            ]
+        );
+        for label in ["device0-resume", "device1-resume", "device2-resume"] {
+            assert_eq!(p.log.iter().filter(|&&entry| entry == label).count(), 1);
+        }
+    }
+}
+
+#[def_test]
+fn platform_or_freezer_rejection_never_invokes_device_callbacks() {
+    for fault in [Fault::Prepare, Fault::Tasks] {
+        let (result, probe) = devices_attempt(fault, None);
+        assert!(result.is_err());
+        assert!(
+            !probe
+                .borrow()
+                .log
+                .iter()
+                .any(|entry| entry.starts_with("device"))
+        );
+    }
+}
+
+#[def_test]
+fn device_rollback_allows_retry_without_double_resume() {
+    let probe = Probe::new(Fault::None);
+    let failure = Rc::new(core::cell::Cell::new(Some(1)));
+    let mut fixtures: [_; 3] = core::array::from_fn(|index| DeviceProbe {
+        index,
+        probe: probe.clone(),
+        fail_at: failure.clone(),
+        is_suspended: false,
+    });
+    let mut devices: [&mut dyn DeviceSuspendOps; 3] = fixtures.each_mut().map(|d| d as _);
+    let mut set = DeviceSet::new(&mut devices);
+    assert!(
+        run(
+            &mut Ops(probe.clone()),
+            &mut Source(probe.clone()),
+            &mut set
+        )
+        .is_err()
+    );
+    failure.set(None);
+    probe.borrow_mut().log.clear();
+    assert_eq!(
+        run(
+            &mut Ops(probe.clone()),
+            &mut Source(probe.clone()),
+            &mut set
+        ),
+        Ok(TimeSpan::from_secs(7))
+    );
+    let log = probe.borrow().log.clone();
+    set.resume();
+    assert_eq!(probe.borrow().log, log);
+}
+
+#[def_test]
+fn public_device_entry_rejects_before_device_or_rtc_access() {
+    let reads = Rc::new(core::cell::Cell::new(0));
+    let mut source = RtcSleepAccounting::new(
+        UnreadClock(reads.clone()),
+        TimeSpan::from_secs(60),
+        TimeSpan::from_millis(10),
+    )
+    .unwrap();
+    let probe = Probe::new(Fault::None);
+    let mut device = DeviceProbe {
+        index: 0,
+        probe: probe.clone(),
+        fail_at: Rc::new(core::cell::Cell::new(None)),
+        is_suspended: false,
+    };
+    let mut platform = RefusingPlatform(core::cell::Cell::new(0));
+    let result = suspend_uniprocessor_with_devices(
+        &mut platform,
+        &mut source,
+        SuspendTasks {
+            targets: &[],
+            timeout: TimeSpan::from_secs(1),
+            cancellation: &FreezeCancellation::new(),
+        },
+        &mut [&mut device],
+    );
+    if kcpu_id_map::nr_cpus() == 1 {
+        assert_eq!(
+            result,
+            Err(SuspendError::Prepare(KError::OperationNotSupported))
+        );
+        assert_eq!(platform.0.get(), 1);
+    } else {
+        assert_eq!(result, Err(SuspendError::MultipleCpus));
+        assert_eq!(platform.0.get(), 0);
+    }
+    assert!(probe.borrow().log.is_empty());
+    assert_eq!(reads.get(), 0);
 }

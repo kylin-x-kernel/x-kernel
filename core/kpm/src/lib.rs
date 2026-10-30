@@ -2,15 +2,27 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Single-present-CPU PM time transaction, not a userspace suspend entry.
+//! System power-management coordination, independent of runtime bring-up.
+//!
+//! Currently provides a single-present-CPU PM time transaction, not a userspace
+//! suspend entry. See `docs/design.md` and `docs/security.md` for its boundaries.
 //!
 //! The coordinator freezes an explicit task set; a platform provider supplies
 //! creation/device/NMI exclusion and firmware entry. It orders RTC accounting, monotonic freeze and
-//! local clock events, and unwinds completed preparation on ordinary errors.
+//! local clock events and optional ordered device callbacks, and unwinds completed
+//! preparation on ordinary errors.
 //! SMP rendezvous and concrete platform implementations are separate work.
+
+#![no_std]
+
+extern crate alloc;
+
+mod device;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use device::DeviceSet;
+pub use device::{DeviceSuspendError, DeviceSuspendOps};
 use kerrno::{KError, KResult};
 use khal::time::{MonotonicSuspendError, MonotonicSuspendToken};
 use kiface_time_api::PersistentClock;
@@ -46,9 +58,12 @@ use ktime_types::TimeSpan;
 /// IRQs, clock-change observers or resumed timer callbacks must be usable, or
 /// their consumers must remain separately suppressed until ready. Event rearm
 /// precedes finish; finish cannot defer this interrupt-safety requirement.
+/// With ordered device participants, preparation must also exclude unlisted
+/// accesses; it must not duplicate their suspend/resume callbacks. Devices are
+/// resumed before finish, while platform exclusions and frozen tasks remain held.
 /// Prepare and finish must preserve the enabled local IRQ state. These
 /// obligations include any device mappings needed by the existing HAL.
-pub unsafe trait SuspendPlatform {
+pub unsafe trait PlatformSuspendOps {
     /// Stops task creation/producers and prepares device/clock quiescence with IRQs enabled.
     /// Listed tasks still run until their following cooperative freezer step.
     /// Keep task-accessible resources usable until enter, including after a
@@ -97,6 +112,8 @@ pub enum SuspendError {
     TaskFreeze(FreezeError),
     /// Initial RTC accounting failed; platform preparation was released.
     RtcPrepare(RtcSleepError),
+    /// Device preparation failed; successful predecessors were resumed in reverse order.
+    DeviceSuspend(DeviceSuspendError),
     /// Local events could not be paused; pending accounting was cancelled.
     TimerPause(TimerSuspendError),
     /// The clock could not be frozen; events were restored and re-arbitrated.
@@ -183,16 +200,53 @@ pub struct SuspendTasks<'a> {
 /// # Panics
 /// Invariant failure in owned HAL/event restoration is fatal: returning while
 /// time remains frozen or hardware inaccessible would release unsafe execution.
-/// Such failures imply violation of SuspendPlatform's unsafe contract or broken
+/// Such failures imply violation of PlatformSuspendOps's unsafe contract or broken
 /// internal credential ownership; ordinary entry/source errors do not panic.
-pub fn suspend_uniprocessor<P: SuspendPlatform, C: PersistentClock>(
+pub fn suspend_uniprocessor<P: PlatformSuspendOps, C: PersistentClock>(
     platform: &mut P,
     source: &mut RtcSleepAccounting<C>,
     tasks: SuspendTasks<'_>,
 ) -> Result<TimeSpan, SuspendError> {
+    suspend_uniprocessor_with_devices(platform, source, tasks, &mut [])
+}
+
+/// Coordinates a single-CPU suspend attempt with ordered device callbacks.
+///
+/// Devices suspend in supplied order after task freezing, with IRQs enabled.
+/// Every successfully suspended device resumes in reverse order on both abort
+/// and wake, after time/events recover and before platform finish and task thaw.
+/// The failing device must undo its own partial suspension. Supply consumers
+/// before providers; no topology discovery, sorting or allocation is performed.
+/// The mutable list borrows prevent caller-side mutation during the transaction.
+///
+/// PM-critical resources (including the selected RTC source and resources needed
+/// to restore time/events) must remain available; their platform protocol is
+/// separate. Device callbacks must suppress asynchronous consumers until their
+/// resources are usable, since IRQs/events resume before device callbacks do.
+/// All context, topology and platform requirements of [`suspend_uniprocessor`]
+/// apply. An empty list retains that function's behavior.
+///
+/// # Errors
+/// Returns [`SuspendError::DeviceSuspend`] after reversing completed device
+/// suspension and releasing platform preparation. Other errors follow
+/// [`suspend_uniprocessor`], with devices restored before frozen tasks are thawed.
+///
+/// # Panics
+/// Owned time/event restoration invariant failures are fatal, as documented by
+/// [`suspend_uniprocessor`]. Device and platform callbacks must not unwind.
+pub fn suspend_uniprocessor_with_devices<P: PlatformSuspendOps, C: PersistentClock>(
+    platform: &mut P,
+    source: &mut RtcSleepAccounting<C>,
+    tasks: SuspendTasks<'_>,
+    devices: &mut [&mut dyn DeviceSuspendOps],
+) -> Result<TimeSpan, SuspendError> {
     validate_context(ktask::is_sleepable_context(), kcpu_id_map::nr_cpus)?;
     let _admission = Admission::acquire(&TRANSACTION_ACTIVE)?;
-    run(&mut SystemOps { platform, tasks }, source)
+    run(
+        &mut SystemOps { platform, tasks },
+        source,
+        &mut DeviceSet::new(devices),
+    )
 }
 
 // Separate adapters let deterministic fixtures exercise the actual executor
@@ -249,20 +303,25 @@ trait SuspendOps {
 fn run<O: SuspendOps, S: SleepSource>(
     ops: &mut O,
     source: &mut S,
+    devices: &mut DeviceSet<'_, '_>,
 ) -> Result<TimeSpan, SuspendError> {
     ops.prepare().map_err(SuspendError::Prepare)?;
     // Keep the guard through finish: no listed task can race hardware recovery.
     let _tasks = match ops.freeze_tasks() {
         Ok(tasks) => tasks,
         Err(error) => {
-            ops.finish();
+            finish(ops, devices);
             return Err(SuspendError::TaskFreeze(error));
         }
     };
+    if let Err(error) = devices.suspend() {
+        finish(ops, devices);
+        return Err(SuspendError::DeviceSuspend(error));
+    }
     let mut accounting = match source.begin() {
         Ok(session) => session,
         Err(error) => {
-            ops.finish();
+            finish(ops, devices);
             return Err(SuspendError::RtcPrepare(error));
         }
     };
@@ -272,7 +331,7 @@ fn run<O: SuspendOps, S: SleepSource>(
         Err(error) => {
             drop(critical);
             drop(accounting);
-            ops.finish();
+            finish(ops, devices);
             return Err(SuspendError::TimerPause(error));
         }
     };
@@ -283,7 +342,7 @@ fn run<O: SuspendOps, S: SleepSource>(
             drop(critical);
             drop(accounting);
             ops.resume_events(&mut events);
-            ops.finish();
+            finish(ops, devices);
             return Err(SuspendError::ClockFreeze(error));
         }
     };
@@ -293,7 +352,7 @@ fn run<O: SuspendOps, S: SleepSource>(
         drop(critical);
         drop(accounting);
         ops.resume_events(&mut events);
-        ops.finish();
+        finish(ops, devices);
         return Err(SuspendError::MarkFrozen(error));
     }
     let entry = ops.enter();
@@ -306,7 +365,7 @@ fn run<O: SuspendOps, S: SleepSource>(
     // producers can run. On success the same Drop is inert.
     drop(accounting);
     ops.resume_events(&mut events);
-    ops.finish();
+    finish(ops, devices);
     match (entry, sleep_time) {
         (Ok(()), Ok(delta)) => Ok(delta),
         (entry, sleep_time) => Err(SuspendError::Resume {
@@ -316,11 +375,16 @@ fn run<O: SuspendOps, S: SleepSource>(
     }
 }
 
+fn finish<O: SuspendOps>(ops: &mut O, devices: &mut DeviceSet<'_, '_>) {
+    devices.resume();
+    ops.finish();
+}
+
 struct SystemOps<'a, P> {
     platform: &'a mut P,
     tasks: SuspendTasks<'a>,
 }
-impl<P: SuspendPlatform> SuspendOps for SystemOps<'_, P> {
+impl<P: PlatformSuspendOps> SuspendOps for SystemOps<'_, P> {
     type Clock = MonotonicSuspendToken;
     type Critical = NoPreemptIrqSave;
     type Events = LocalTimerSuspend;
@@ -398,4 +462,4 @@ impl<P: SuspendPlatform> SuspendOps for SystemOps<'_, P> {
 }
 
 #[cfg(unittest)]
-unittest::path_mod_test!(tests, "../../ut-tests/pm.rs");
+unittest::path_mod_test!(tests, "../ut-tests/suspend.rs");

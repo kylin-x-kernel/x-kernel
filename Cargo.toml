@@ -12,6 +12,7 @@ members = [
     "util/kiface/crates/irq-context-api",
     "util/kiface/crates/cpu-api",
     "util/kiface/crates/task-wait-api",
+    "core/kpm",
     # kernel entry
     "entry",
     # boot and loader
@@ -125,6 +126,7 @@ x86_boot_common = { path = "boot/x86-boot-common", package = "x86-boot-common" }
 # Internal: core runtime and services
 kcred = { path = "process/kcred" }
 kruntime = { path = "core/kruntime" }
+kpm = { path = "core/kpm" }
 klazy = { path = "util/klazy" }
 kxarray = { path = "util/kxarray" }
 kxarray-kernel-tests = { path = "util/kxarray/crates/kernel-tests" }

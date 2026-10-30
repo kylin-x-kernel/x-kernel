@@ -29,6 +29,7 @@ khal.workspace = true
 kiface.workspace = true
 klogger.workspace = true
 kruntime.workspace = true
+kpm.workspace = true
 ktask.workspace = true
 kprocess.workspace = true
 kuaccess.workspace = true

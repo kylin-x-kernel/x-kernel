@@ -1,0 +1,24 @@
+[package]
+name = "kpm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+description = "System power-management coordination for X-Kernel"
+
+[dependencies]
+kerrno.workspace = true
+khal.workspace = true
+kiface-time-api.workspace = true
+kspin.workspace = true
+ktask.workspace = true
+ktime.workspace = true
+ktime_types.workspace = true
+kcpu_id_map.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

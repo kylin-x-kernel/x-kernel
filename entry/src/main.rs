@@ -11,6 +11,7 @@ extern crate klogger;
 
 extern crate alloc;
 extern crate kfeat;
+extern crate kpm;
 extern crate kruntime;
 extern crate kuaccess;
 #[cfg(feature = "unittest")]
