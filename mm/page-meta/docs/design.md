@@ -6,17 +6,23 @@
 并扣除元数据后备区，返回 PageMetaTable。调用方发布统一查询后，把列表中剩余的
 非空区间交给 allocator。物理区间复用 memaddr::PhysAddrRange，不包装另一套库存类型。
 
-PageMeta 当前只记录本服务后备存储的永久预留标记，不记录分配状态、引用计数或
-页用途。lookup 不授予页内容访问、所有权或释放权；查不到也不代表机器上不存在该
-物理页，因为当前启动输入只覆盖 HAL 标为 FREE 的 RAM。
+PageMeta records the permanent reservation of this service's backing storage,
+an optional page-lifetime reference count, and the allocation round's UsageKind.
+The class preserves original allocation accounting, not actual page type, current
+users, content permissions or reclaimability. Metadata does not track allocator
+inventory. Lookup grants no ownership, content access or release authority.
+Current input covers only RAM marked FREE by HAL.
 
 ## 架构与职责
 
-- `src/lib.rs`：PageMeta 及其状态含义、错误、公开初始化/查询接口和全局发布。
+- `src/lib.rs`: errors, public initialization and identity queries, and global publication.
+- `src/page.rs`: PageMeta, the unique counter, accounting class and reference-state
+  transitions. It defines no RAII holder and does not return inventory.
 - `src/free_ranges.rs`：整理调用方的空闲物理区间，并从中划出后备内存。
 - `src/backend/mod.rs`：选择私有存储与 PFN 索引实现，导出 init 和 Table。
 - `src/backend/segments.rs`：当前紧凑分段索引、数组存储、查找和初始化写入。
-- `ut-tests/{free_ranges,segments}.rs`：交接语义、后备映射、索引和失败路径。
+- `ut-tests/{free_ranges,segments,page}.rs`: handoff, bidirectional page identity,
+  reference-state transitions and boundary cases.
 - `core/kruntime/ut-tests/page_metadata.rs`：既有 allocator 交接和全局查询。
 
 ```text
@@ -42,8 +48,11 @@ PageMeta 的初始状态和永久标记由共用方法定义。backend 负责计
    不重复排序、合并或输入范围校验。预留页自身也必须有 PageMeta，不能把余额误作覆盖。
 3. 共用 with_reserved_storage 按整页从最大可用区间尾部选取存储，backend 映射并初始化它。
    只有该次初始化成功才扣除库存；映射或初始化失败不扣除该次请求。
-4. covered_pages() 从最后一个段的首下标和长度推导覆盖页数；lookup(PFN) 返回
-   共享描述符借用。Table 不保存覆盖计数，PageMetaTable 不保存元数据占用计数。
+4. covered_pages() derives coverage from the final segment. lookup(PFN) and
+   pfn_of(metadata) provide bidirectional identity conversion. Reverse lookup
+   checks descriptor membership and uses a binary segment search; it needs no
+   page-content mapping. Table stores no coverage count, and PageMetaTable stores
+   no metadata-storage count.
 5. kruntime 串行 publish，再按 PA 升序以首个非空区间初始化 allocator，依次交接后续非空区间，
    保持 buddy 的低地址优先分配顺序，避免 DMA32 请求先命中高地址 RAM。
    空条目必须跳过；allocator 自行扣除其内部 metadata。启动日志的元数据开销由
@@ -75,5 +84,63 @@ fatal-boot 策略停止，不重试整个事务。
 借用销毁前保留后备区与映射；全局发布后须永久有效。局部测试先销毁元数据表、allocator
 和借用，再回收夹具。发布后的查询与当前任务或某个 allocator 实例无关。
 
-本阶段不接入释放前 PageMeta 检查，不同步 buddy bitmap 预留，不检测 double free。
+kalloc raw release relies on the original allocation ownership contract rather
+than checking every page's references or permanent flag. Callers must not return
+reference-owned or permanent pages as raw allocations. This service neither
+synchronizes buddy bitmap reservations nor detects raw-protocol double frees.
 永久标记为 false 不代表该页可分配或可释放。
+
+
+## Single-page references and allocation attributes
+
+This crate stores the unique counter and exposes four unsafe transitions:
+claim_reference establishes a new allocation's first hold; clone_reference adds
+a hold; release_reference consumes one and selects the sole last owner;
+finish_retirement returns the original class and resets the state to Unreferenced.
+Counter and class fields stay private. Lookup and snapshots do not establish the
+ownership required to call these operations.
+
+The state sequence is Unreferenced -> Initializing -> Referenced { references: 1 }
+-> Retiring -> Unreferenced. Claim atomically acquires Initializing, writes
+UsageKind, then publishes the first hold with Release. Clone does not change
+the class. The internal AtomicU8 uses Relaxed and is not an opaque public tag.
+A new allocation round can begin only after the old storage returns to inventory.
+
+The count limit excludes Initializing and Retiring sentinels; overflow returns
+ReferenceOverflow. Final release uses AcqRel to acquire earlier holders' releases.
+The last owner saves page identity, then finish_retirement snapshots the original
+class and resets the count with Release. The owner returns inventory afterwards
+and must never write the descriptor after publishing reusable storage. The
+permanent reservation is a separate bool written before publication and read-only
+thereafter; claim rejects it before changing the counter. Unreferenced is not a
+free-inventory state: heap, PCP, buddy bitmap and raw users may still own pages
+outside this reference protocol.
+
+## Holder and final reclaim boundary
+
+The thin RAII holder is kalloc::PageRef and stores only one &'static PageMeta.
+Its holds all use this crate's single counter. kalloc accepts exclusive new pages
+from global inventory and handles raw transfer, final accounting and inventory
+return. This crate stores no reclaim function, accepts no runtime provider
+registration, and depends on neither kalloc nor the direct map. Dependencies
+remain kalloc -> page-meta.
+
+PageRef calls the constrained operations during clone/drop; final Drop completes
+retirement and directly calls kalloc's local release path. Metadata initialization
+only publishes the global physical table; it installs no extra reclaim endpoint.
+The private backend resolves physical identity, while users manage content mappings.
+
+UsageKind's typed contract and per-round record live in the same page module.
+kalloc re-exports the type to preserve existing callers. Existing modules still
+own cumulative totals, RustHeap accounting exceptions and procfs output. Keeping
+the class preserves observable statistics without turning it into an MM decision.
+
+The current 64-bit metadata layout is 16 bytes, including the counter, class and
+independent permanent attribute. Boot reserves storage from the actual type size;
+the public API does not promise a field layout. Metadata, holders and allocator
+inventory have distinct lifetimes.
+
+is_permanent only says that this service's metadata backing never returns to
+ordinary inventory during the current kernel lifetime. It is not a complete
+machine RAM reservation policy and has no unreserve API. It is independent of
+the reference count.

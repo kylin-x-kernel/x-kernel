@@ -7,7 +7,7 @@
 //! A backend initializes from normalized physical ranges, reserving storage via
 //! free_ranges::with_reserved_storage and mapping only that storage. It captures coverage before any
 //! reservation, initializes PageMeta values and marks its own backing permanent.
-//! Its Table provides lookup and covered_pages; global publication belongs
+//! Its Table provides forward/reverse page identity lookup and covered_pages; global publication belongs
 //! to the common layer. Index geometry and storage planning stay backend-local.
 
 mod segments;

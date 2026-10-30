@@ -312,3 +312,38 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - [ ] tracking visitor 是否在持锁期间调用，是否存在递归 state lock 或敏感地址泄露？
 - [ ] 新增统计是否明确计量单位和层次，且没有被用作 allocator correctness/reclaim 条件？
 - [ ] 新增 cache 或 allocator 状态是否同步更新初始化、CPU hotplug、reclaim 和关机策略？
+
+## Single-page holders and raw release boundary
+
+PageRef in `src/page.rs` holds one global PageMeta pointer and has no second
+reference counter. Its private from_allocated accepts only an exclusive new page
+from global inventory, checks alignment and global metadata coverage, and calls
+unsafe claim_reference. Missing metadata returns NotCovered; the outer allocator
+rolls back inventory and accounting using existing rules. Referenced or permanent
+page admission remains an asserted allocator-invariant violation.
+
+Clone and Drop use page-meta's constrained unsafe counter operations. Final
+release enters Retiring. Drop saves the PA, then finish_retirement returns the
+original UsageKind and resets the count. The local release path records the
+free and returns storage without writing the descriptor again. A zero count
+does not prove inventory availability. There is no PageReclaimer, callback Once
+registry or additional boot initialization state.
+
+Raw restoration must consume the exact transfer from the same allocation
+incarnation. Alignment, coverage and live-state checks cannot prove ownership
+or the end of hardware use. Callers must end content access and required TLB or
+device completion before release. PageRef provides no mutable slice or kernel
+VA, so it establishes neither exclusive content access, COW nor device quiescence.
+The class preserves diagnostic accounting, not inventory selection, actual page
+type or a reclaim policy.
+
+Ordinary and DMA raw release do not scan descriptors. Callers must match the
+original base, page count and class and must not release pages still owned by
+PageRef or permanently reserved metadata. Violations can prematurely return
+live storage, double-free it or corrupt metadata; the API does not intercept
+these errors. Neither a bare address nor Unreferenced proves release authority.
+Boot handoff excludes permanent backing, and claim still rejects permanent pages.
+Global single-page tests exclude local IRQs/preemption and use the PCP slot made
+available by allocation to check final reuse without remote reuse races. Cloning,
+raw transfer, class replacement across rounds and last-only return verify the
+same counter protocol.

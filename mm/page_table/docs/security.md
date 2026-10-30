@@ -398,3 +398,14 @@ parent publication and the final `dsb ishst` before the mapping is used. Clearin
 an old mapping still queues invalidation even if the same virtual address is
 remapped in that batch. A fresh-map fence does not replace that invalidation or
 a caller's obligation to finish before reclaiming backing pages.
+
+
+## Handler storage references and retirement
+
+HAL allocation transfers a single lifetime hold to each table PA, and handler
+release consumes it exactly once. The caller must end hardware use and required
+translation retirement before destruction, including `copy_from()` when it
+replaces a target-owned subtree. Borrowed entries must not consume the source's
+transfer; source lifetime and alias synchronization remain caller obligations.
+The counter neither validates the active hardware root nor supplies a reference
+to data pages. No new unsafe operation is introduced in this generic crate.

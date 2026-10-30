@@ -28,7 +28,7 @@ use kaddr_layout::v2p;
 use kcpu_slot::{CpuId, CpuPin, cpu_slot_cell};
 use kspin::{NoPreempt, NoPreemptIrqSave, SpinNoIrq};
 use memaddr::PAGE_SIZE_4K;
-use strum::{IntoStaticStr, VariantArray};
+use strum::VariantArray;
 const MIN_HEAP_SIZE: usize = 0x8000; // 32 K
 
 /// Keep medium-sized buffers in the byte heap so they can reuse memory already
@@ -49,7 +49,8 @@ mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
-pub use page::GlobalPage;
+pub use page::{GlobalPage, PageRef, alloc_page_ref, alloc_zeroed_page_ref};
+pub use page_meta::UsageKind;
 
 #[cfg(feature = "tracking")]
 mod tracking;
@@ -98,24 +99,6 @@ cfg_if::cfg_if! {
         /// The default byte allocator.
         pub type DefaultByteAllocator = alloc_engine::TlsfByteAllocator;
     }
-}
-
-/// Kinds of memory usage for tracking.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, VariantArray, IntoStaticStr)]
-pub enum UsageKind {
-    /// Heap allocations made by kernel Rust code.
-    RustHeap,
-    /// Virtual memory, usually used for user space.
-    VirtMem,
-    /// Page cache for file systems.
-    PageCache,
-    /// Page tables.
-    PageTable,
-    /// DMA memory.
-    Dma,
-    /// Memory used by [`GlobalPage`].
-    Global,
 }
 
 /// Statistics of memory usage by category.
@@ -673,9 +656,11 @@ impl GlobalAllocator {
 
     /// Gives back the allocated pages starts from `va` to the page allocator.
     ///
-    /// The pages should be allocated by [`alloc_pages`], and `align_pow2`
-    /// should be the same as the one used in [`alloc_pages`]. Otherwise, the
-    /// behavior is undefined.
+    /// The base, page count and category must match a live raw allocation from
+    /// this allocator, with all software and hardware use ended. Transferring a
+    /// page into PageRef ends the caller's raw release right; consume that hold
+    /// through PageRef instead. A bare address does not establish ownership.
+    /// These preconditions are not verified by scanning page metadata.
     ///
     /// 1–4 page deallocations are cached per-CPU to reduce global lock
     /// contention.
@@ -683,7 +668,10 @@ impl GlobalAllocator {
     /// [`alloc_pages`]: GlobalAllocator::alloc_pages
     pub fn dealloc_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
+        self.release_pages_to_inventory(va, num_pages);
+    }
 
+    fn release_pages_to_inventory(&self, va: usize, num_pages: usize) {
         // Fast path: 1–4 pages -> try to cache them per-CPU.
         if (1..=pcp::PCP_MAX_PAGES).contains(&num_pages) {
             let mut local_owner = AllocLocalOwner::acquire();
@@ -706,6 +694,10 @@ impl GlobalAllocator {
     }
 
     /// Gives back the allocated DMA pages starts from `va` to the DMA page allocator.
+    ///
+    /// The base, count and category must match one live alloc_dma_pages allocation.
+    /// End device and CPU use before release. The caller must not release pages
+    /// owned by PageRef or permanent metadata; no metadata scan validates this.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);

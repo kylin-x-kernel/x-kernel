@@ -1,4 +1,8 @@
-# khal::irq - 安全与可靠性分析
+# khal — Security and reliability
+
+This document describes the IRQ adapter trust model and page-table storage
+reference boundary separately. Basic tests do not replace hardware retirement
+protocol verification.
 
 ## 信任模型
 
@@ -81,15 +85,23 @@ unknown IRQ/NMI warning 和 completion 管理。adapter 返回 `kirq` handler �
 
 ## 已知限制
 
-- 本模块文档只覆盖 adapter；IRQ core 威胁模型见 `arch/kirq/docs/security.md`。
+- The IRQ analysis covers `src/irq/`; the generic IRQ core threat model belongs
+  to `arch/kirq/docs/security.md`. This document also covers the page-table
+  storage adapter in `src/paging.rs` and the time boundaries listed below.
+  Those adapter contracts do not establish hardware quiescence or complete
+  system-wide retirement protocols.
 
 ## Crate-level test boundaries
 
 The original eight guest cases under ut-tests/{percpu,paging,mem,time}.rs retain
 their module registration. Nine new time cases use isolated epoch/deadline
-fixtures, giving 17 cases in total including ut-tests/time_epoch.rs. These tests
-contain no handwritten unsafe code and do not establish IRQ/NMI concurrency or
-real platform suspend safety. Test mounts remain gated by cfg(unittest).
+fixtures. Together with three page-storage reference cases, there are 20 cases
+including ut-tests/time_epoch.rs and ut-tests/paging_page_refs.rs. The time
+fixtures contain no handwritten unsafe code. The page-storage transfer test
+uses `unsafe { PageRef::from_raw(pa) }` for its exact outstanding transfer; the
+adjacent SAFETY comment documents ownership and the absence of hardware use.
+These tests do not establish IRQ/NMI concurrency or real platform suspend
+safety. Test mounts remain gated by cfg(unittest).
 
 ## 审计清单
 
@@ -129,3 +141,25 @@ controller/device mappings and routing, masked IRQs and PM-quiesced competing
 programming/repair. It adds no raw memory access or source calibration. The
 provider leaves the event stopped; final rearm requires restored timekeeping
 and separate software deadline arbitration. No production PM caller is added.
+
+## Page-table storage lifetime references
+
+`PagingHandlerImpl::alloc_frame` obtains kalloc's thin `PageRef` from the global
+single-page allocation API and transfers one hold to `page_table` as a PA.
+`dealloc_frame` restores and consumes that exact transfer with `PageRef::from_raw`.
+The original `UsageKind` records only allocation accounting; final `PageRef::drop`
+returns the page and records the release directly in kalloc. Borrowed root entries
+do not own their source table pages and do not restore or release those holds.
+
+The table owner must end hardware use and complete required translation
+retirement before destroying owned storage. The existing AArch64 user-ASID
+invalidation path in `PageTable64::drop` is unchanged. Reference counting retains
+storage; it does not replace address-space exit, remote-CPU coordination or TLB
+shootdown. This stage does not retain references for data PTEs.
+
+`ut-tests/paging_page_refs.rs` verifies table-page transfers, inactive tree
+destruction and borrowed root entries that do not release source storage. Raw
+restoration consumes only the handler's exact transfer. A live observer keeps
+the page unavailable to another allocation; after the last hold ends, the page
+is reused from the local PCP. IRQ and preemption exclusion makes this reuse
+check deterministic. The tests do not forge raw releases to inspect lifetimes.

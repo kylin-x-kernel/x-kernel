@@ -1,4 +1,7 @@
-# khal::irq - 设计文档
+# khal — Design
+
+This document covers the IRQ trap-entry adapter, crate test layout, and page-table
+storage adapter. Other HAL subsystems retain their own interface contracts.
 
 ## 定位
 
@@ -117,11 +120,12 @@ their original source modules using `unittest::path_mod_test!`:
 |---|---|---|---|
 | `src/percpu.rs` | `ut-tests/percpu.rs` | `tests_percpu` | 1 |
 | `src/paging.rs` | `ut-tests/paging.rs` | `tests_paging` | 2 |
+| `src/paging.rs` | `ut-tests/paging_page_refs.rs` | `tests_page_refs` | 3 |
 | `src/mem/mod.rs` | `ut-tests/mem.rs` | `tests_mem` | 3 |
 | `src/time/mod.rs` | `ut-tests/time.rs` | `tests_time` | 4 |
 | `src/time/epoch.rs` | `ut-tests/time_epoch.rs` | `tests` | 7 |
 
-These 17 cases require `cfg(unittest)` without additional feature, architecture,
+These 20 cases require `cfg(unittest)` without additional feature, architecture,
 serial or user gates. All four supported platform unittest builds select them.
 CPU identity tests require initialized CPU state. Independent epoch fixtures do
 not freeze the active kernel's global clock. Explicit cfg gates outside the
@@ -192,3 +196,26 @@ selected backend. It restores event configuration with a stopped countdown;
 clocksource state and software deadline arbitration are separate. The task
 timer service owns the pause gate and final arbitration. Platform PM must
 restore controller access/routing and quiesce competing programming first.
+
+
+## Page-table storage lifetime references
+
+`PagingHandlerImpl::alloc_frame` obtains kalloc's thin `PageRef` from the global
+single-page allocation API and transfers one hold to `page_table` as a PA.
+`dealloc_frame` restores and consumes that exact transfer with `PageRef::from_raw`.
+The original `UsageKind` records only allocation accounting; final `PageRef::drop`
+returns the page and records the release directly in kalloc. Borrowed root entries
+do not own their source table pages and do not restore or release those holds.
+
+The table owner must end hardware use and complete required translation
+retirement before destroying owned storage. The existing AArch64 user-ASID
+invalidation path in `PageTable64::drop` is unchanged. Reference counting retains
+storage; it does not replace address-space exit, remote-CPU coordination or TLB
+shootdown. This stage does not retain references for data PTEs.
+
+`paging_page_refs.rs` tests the allocator adapter: it checks the handler's raw
+reference transfer and uses the architecture's real `PageTable` to cover tree
+destruction and borrowed root entries. It uses the real `PagingHandlerImpl` and
+global `PageRef`; the generic page-table `TestHandler` has no such ownership or
+reclaim protocol. Test tables are never activated in hardware, so these cases do
+not validate generic page-table algorithms or TLB shootdown.

@@ -81,6 +81,7 @@ fn physical_directory_does_not_require_page_content_mappings() {
     ] {
         let meta = table.lookup(pfn).unwrap();
         assert!(!meta.is_permanent());
+        assert_eq!(table.pfn_of(meta), Some(pfn));
         assert_eq!(
             meta as *const PageMeta as usize,
             descriptors.as_ptr() as usize + index * size_of::<PageMeta>()
@@ -161,4 +162,24 @@ fn invalid_reservations_leave_the_whole_directory_unchanged() {
     table.mark_permanent_range(256, 8).unwrap();
     table.mark_permanent_range(256, 8).unwrap();
     assert!((256..264).all(|pfn| table.lookup(pfn).unwrap().is_permanent()));
+}
+
+
+#[def_test]
+fn reverse_identity_rejects_descriptors_outside_its_own_backing() {
+    let mut first_storage = Storage::new();
+    let mut second_storage = Storage::new();
+    let mut first_ranges = [range(512, 4)];
+    let mut second_ranges = [range(512, 4)];
+    // SAFETY: the two aligned buffers are disjoint and retained until both
+    // tables and their borrows end; their modeled physical identities may match.
+    let first = unsafe { initialize(&mut first_ranges, &mut first_storage) }.unwrap();
+    // SAFETY: second_storage is a distinct retained writable backing; neither
+    // table ever maps or accesses the modeled page contents.
+    let second = unsafe { initialize(&mut second_ranges, &mut second_storage) }.unwrap();
+    assert_eq!(first.pfn_of(first.lookup(512).unwrap()), Some(512));
+    assert_eq!(first.pfn_of(first.lookup(515).unwrap()), Some(515));
+    assert_eq!(first.pfn_of(second.lookup(512).unwrap()), None);
+    assert_eq!(second.pfn_of(first.lookup(512).unwrap()), None);
+    assert_eq!(first.pfn_of(&PageMeta::new()), None);
 }

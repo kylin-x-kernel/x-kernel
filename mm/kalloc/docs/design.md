@@ -52,7 +52,7 @@ mm/kalloc/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          # 全局 allocator、初始化、路由、统计和 GlobalAlloc
-│   ├── page.rs         # GlobalPage RAII 封装
+│   ├── page.rs         # GlobalPage, thin PageRef, allocation and final release
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
 │   └── tracking.rs     # 可选 allocation tracking
@@ -394,3 +394,63 @@ usage、`used_bytes()` 和 `used_pages()` 分别反映不同层次，且读取�
 - PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
   pressure flush。
 - 直接 page API 的 caller 必须显式成对 deallocate；`GlobalPage` 通过 `Drop` 自动完成。
+
+## Thin PageRef and inventory return
+
+`kalloc::PageRef` is a single-page RAII holder containing only one
+`&'static PageMeta`; a compile-time assertion keeps it pointer-sized. It stores
+no allocator, cached PA, second counter or accounting-class copy. The unique
+counter belongs to page-meta. The holder accepts allocations, clones holds,
+transfers raw ownership and performs final release. UsageKind and its per-round
+record remain in page-meta and are re-exported by kalloc to preserve existing
+callers and observations. The class describes original allocation accounting,
+not actual page type, current users, exclusive access or reclaimability.
+
+`alloc_page_ref` continues to obtain a single-page VA through the existing global
+`alloc_pages`. After checking direct-map consistency, its private
+`PageRef::from_allocated` looks up global metadata and calls `claim_reference`.
+Keeping admission private confines raw inventory takeover to the allocation
+entry point. Missing metadata returns NotCovered, which the outer API maps to
+AllocError::NotInitialized before returning unpublished inventory and reversing
+any existing charge. The RustHeap raw-backing accounting exception is unchanged;
+a standalone whole-page PageRef adds its charge after successful admission.
+`alloc_zeroed_page_ref` clears only a newly allocated, exclusive, unpublished page.
+
+Cloning calls `PageMeta::clone_reference`. Raw transfer uses ManuallyDrop to keep
+the count unchanged; `from_raw` consumes the exact outstanding transfer from the
+same allocation incarnation without accepting a replacement accounting class.
+Final Drop selects the sole retiring owner through `release_reference`, saves
+the PA, and obtains the original class while resetting the count through
+`finish_retirement`. It then calls kalloc's `dealloc_pages` to record the release
+and return the page. It never writes metadata after publishing reusable storage.
+There is no reclaim callback, function-pointer registry or global_init hook.
+
+page-meta provides counter transitions, while kalloc returns inventory directly;
+the dependency remains kalloc -> page-meta. HAL obtains PageRef from kalloc and
+has no direct page-meta dependency. Content users explicitly map `phys_addr`.
+Ordinary and DMA raw release use the existing inventory paths without querying
+every base-page descriptor, avoiding validation cost proportional to a large
+allocation's page count. Callers must own a raw allocation with matching base,
+count and class. Transferring it to PageRef ends their raw release right.
+Permanent metadata backing is excluded from inventory during boot and cannot
+be returned through a forged address. The APIs do not detect these misuses or
+every double free. This stage does not change private allocator slab/PCP routing,
+buddy/slab internals or the existing global allocator's responsibilities.
+
+## Staged migration of existing page APIs
+
+The goal is to move runtime page users onto one lifetime protocol. PageRef holds
+one base page; GlobalPage is the existing exclusive contiguous-page content
+interface. Both refer to the same physical base pages, not separate inventories.
+Raw alloc_pages remains the inventory entry point while migrated and legacy
+users temporarily follow reference and raw release protocols respectively.
+GlobalPage is not intended to bypass the shared lifetime protocol permanently.
+
+GlobalPage's alloc, alloc_zero, alloc_contiguous and byte views retain their
+existing purposes. Future contiguous-page ownership should change its backing
+directly rather than introduce a parallel GlobalFrame. That change must address
+buddy rounding slack, independently retained subpages and raw transfer together;
+replacing only the single-page fields would leave contiguous ownership undefined.
+Zero-filled pages are needed by page-cache and anonymous-memory migration.
+alloc_zeroed_page_ref shares the same count, class and reclaim path as
+uninitialized allocation.

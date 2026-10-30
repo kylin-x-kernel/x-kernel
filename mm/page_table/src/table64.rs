@@ -945,7 +945,10 @@ impl<'a, M: PagingMetaData, PTE: PageTableEntry, H: PagingHandler> PageTableMut<
     /// # Safety contract (caller responsibility)
     ///
     /// The source page table must outlive this page table. If the source is
-    /// dropped first, the borrowed entries will point to freed frames.
+    /// dropped first, the borrowed entries will point to freed frames. Before
+    /// overwriting any target-owned subtree, the caller must end its hardware
+    /// use and complete translation retirement; this operation reclaims that
+    /// subtree immediately. Fresh inactive target tables need no retirement.
     ///
     /// # Availability
     ///

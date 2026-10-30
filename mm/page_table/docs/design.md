@@ -457,3 +457,17 @@ traversal adapt to either layout.
   `TlbFlushReceipt`, providing an explicit flush-before-free ordering point.
 - **`PageTableMut::drop`** calls `finish()` automatically as a fallback when
   explicit finalization is omitted.
+
+
+## Storage ownership supplied by the handler
+
+The HAL handler now transfers one `kalloc::PageRef` for each table-storage
+allocation through the existing physical-address interface. Destruction consumes
+that transfer once; borrowed root entries acquire no additional storage hold.
+Generic `page_table` remains independent of kalloc and page-meta.
+
+`copy_from()` also immediately destroys a replaced target-owned subtree. Its
+caller must end hardware use and translation retirement for that subtree before
+copying. The current production path populates a fresh user tree from permanent
+kernel mappings. Reference counting does not perform TLB invalidation or retain
+data-page mappings in this stage.

@@ -2117,6 +2117,7 @@ dependencies = [
  "kspin",
  "log",
  "memaddr",
+ "page-meta",
  "strum",
  "unittest",
 ]
@@ -4103,6 +4104,7 @@ version = "0.3.0-dev"
 dependencies = [
  "klazy",
  "memaddr",
+ "strum",
  "unittest",
 ]
 

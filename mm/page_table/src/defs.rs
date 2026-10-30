@@ -413,7 +413,11 @@ pub trait PagingHandler: Sized {
     /// `Some(paddr)` on success, `None` if no frames are available.
     fn alloc_frame() -> Option<PhysAddr>;
 
-    /// Deallocates a previously allocated physical frame.
+    /// Consumes one storage ownership previously returned by alloc_frame.
+    ///
+    /// The caller must have ended hardware use and required translation
+    /// retirement before release. A copied/borrowed table entry does not own
+    /// another allocation and must not release its source table's frame.
     fn dealloc_frame(paddr: PhysAddr);
 
     /// Converts a physical address to a virtual address via the direct mapping.

@@ -99,7 +99,8 @@ pub(crate) unsafe fn init(
 /// Metadata table over physical-page identities in caller-owned storage.
 ///
 /// An exclusive table may mark reservations before publication. Shared
-/// lookups never mutate descriptors. Dropping the table does not reclaim
+/// lookups do not acquire page holds; live holders update counters atomically.
+/// Dropping the table does not reclaim
 /// its backing or the physical pages it describes; the caller owns that storage.
 pub(crate) struct Table {
     segments: [Segment; CAPACITY],
@@ -111,8 +112,9 @@ pub(crate) struct Table {
 // The supplied storage remains valid for its lifetime, and moving it transfers
 // that access without moving the descriptor backing.
 unsafe impl Send for Table {}
-// SAFETY: shared lookups expose immutable initialized descriptors. Reservation
-// requires &mut self before publication; shared borrows exclude those writes.
+// SAFETY: shared lookups expose initialized descriptors; post-publication
+// reference transitions use atomics. Permanent marking requires &mut self
+// before publication, and shared borrows exclude those non-atomic writes.
 unsafe impl Sync for Table {}
 
 impl Table {
@@ -183,8 +185,25 @@ impl Table {
         // supplied storage, whose lifetime covers this table borrow.
         let slot = unsafe { self.descriptors.as_ptr().add(index) };
         // SAFETY: initialization constructed this selected slot and the backing
-        // outlives the table borrow. The shared borrow excludes reservation.
+        // outlives the table borrow. Post-publication reference updates use atomics.
         Some(unsafe { &*slot })
+    }
+
+    /// Resolves descriptor identity without exposing compact storage indexes.
+    pub(crate) fn pfn_of(&self, meta: &PageMeta) -> Option<usize> {
+        let offset_bytes = core::ptr::from_ref(meta)
+            .addr()
+            .checked_sub(self.descriptors.as_ptr().addr())?;
+        let width = core::mem::size_of::<PageMeta>();
+        if !offset_bytes.is_multiple_of(width) {
+            return None;
+        }
+        let index = offset_bytes / width;
+        let segments = &self.segments[..self.segment_count];
+        let upper = segments.partition_point(|segment| segment.first_index <= index);
+        let segment = segments.get(upper.checked_sub(1)?)?;
+        let pfn = segment.start_pfn.checked_add(index - segment.first_index)?;
+        (pfn < segment.end_pfn).then_some(pfn)
     }
 
     /// Marks covered pages as permanently reserved using exclusive access.

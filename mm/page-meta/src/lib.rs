@@ -8,15 +8,20 @@
 //! range slice, leaving the remaining RAM for an allocator. PFN indexing and
 //! metadata storage geometry are private implementation choices. Neither page
 //! allocation nor page-content access is granted by descriptor lookup.
+//! [`PageMeta`] exposes the reference-state protocol to allocator-owned holders.
+//! This crate stores the unique counter and original accounting class; allocation,
+//! RAII ownership and final storage release belong to the owning allocator.
 #![no_std]
 
 mod backend;
 mod free_ranges;
+mod page;
 
 use core::ptr::NonNull;
 
 use klazy::Once;
 use memaddr::PhysAddrRange;
+pub use page::{PageMeta, ReferenceState, UsageKind};
 
 /// Failure to prepare or access physical-page metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,34 +42,10 @@ pub enum PageMetaError {
     NotCovered,
     /// A global metadata table has already been published.
     AlreadyPublished,
-}
-
-/// Metadata for a physical base-page identity.
-///
-/// Identity survives allocation and release of its page contents. The first
-/// stage records permanent metadata reservations, not allocation state or page
-/// references. Representation and storage geometry remain private.
-pub struct PageMeta {
-    is_permanent: bool,
-}
-
-impl PageMeta {
-    pub(crate) const fn new() -> Self {
-        Self {
-            is_permanent: false,
-        }
-    }
-
-    pub(crate) fn mark_permanent(&mut self) {
-        self.is_permanent = true;
-    }
-
-    /// Reports a permanent reservation installed before table publication.
-    /// False does not establish that the page is free, including allocator-owned
-    /// bitmap, heap or PCP pages whose ownership remains with that allocator.
-    pub fn is_permanent(&self) -> bool {
-        self.is_permanent
-    }
+    /// The page is not in the state required by a reference operation.
+    InvalidState,
+    /// Another lifetime hold would exceed the reference counter limit.
+    ReferenceOverflow,
 }
 
 /// Physical-page metadata table with a private lookup and storage backend.
@@ -86,6 +67,14 @@ impl PageMetaTable {
     /// The borrow grants no page ownership, content access or release right.
     pub fn lookup(&self, pfn: usize) -> Option<&PageMeta> {
         self.inner.lookup(pfn)
+    }
+
+    /// Returns the physical identity of a descriptor belonging to this table.
+    ///
+    /// Returns None for a descriptor from another table. This grants no page
+    /// ownership and does not expose backend indexes or storage geometry.
+    pub fn pfn_of(&self, meta: &PageMeta) -> Option<usize> {
+        self.inner.pfn_of(meta)
     }
 }
 
@@ -150,4 +139,11 @@ pub unsafe fn publish(table: PageMetaTable) -> Result<&'static PageMetaTable, Pa
 /// before publication and for PFNs outside its coverage.
 pub fn lookup(pfn: usize) -> Option<&'static PageMeta> {
     GLOBAL.get()?.lookup(pfn)
+}
+
+/// Returns the PFN of a descriptor in the boot-published global table.
+/// Returns None before publication or for a descriptor outside that table.
+/// Identity lookup grants no page ownership or content access.
+pub fn pfn_of(meta: &PageMeta) -> Option<usize> {
+    GLOBAL.get()?.pfn_of(meta)
 }
