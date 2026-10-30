@@ -9,6 +9,15 @@ everything is reachable from `LinuxFdt::new` / `LinuxFdt::from_ptr` and
 the iterators they produce.
 
 
+### `Chosen::x_kernel_log_level`
+
+`x_kernel_log_level()` forwards the string value of the vendor property
+`x-kernel,log-level` from the validated blob, with the same guarantees as every
+other `property_str` accessor: the value is bounds-checked against the blob, must
+be NUL-terminated, and a missing or non-string property yields `None`. The string
+is returned unvalidated on purpose — the logging subsystem owns the level
+vocabulary and rejects what it cannot parse.
+
 ## Trust Model
 
 The DTB blob is external, untrusted input until validated. This crate is

@@ -30,6 +30,37 @@ generic `kirq` API。
    `NoPreempt`，并依赖 PMU backend 的共享计数器访问与原子 enabled 状态来安全
    覆盖可能已经到达的 NMI 分发。
 
+3. **Firmware / device-tree handoff boundary** (`khal::firmware`)
+
+   `khal::firmware` re-exports the boot-loader handoff data: `cmdline`, the
+   validated device-tree blob (`dtb_bytes`) and `dt_log_level`. The last one
+   receives external firmware data directly — the value of
+   `/chosen/x-kernel,log-level`, read through `of::chosen_log_level()` — and
+   returns it unchanged:
+
+   - data direction: bootloader/board device tree -> `of` -> `khal::firmware` ->
+     `kruntime::resolve_boot_log_filter`;
+   - trust assumption: the device tree is supplied by the boot chain, so it is
+     semi-trusted; a wrong value must not be able to disable logging;
+   - validation responsibility: this layer deliberately does **not** parse the
+     value. `klogger::set_filter_spec` owns the level vocabulary and rejects a
+     malformed spec, and `kruntime` then falls through to the command line and
+     the Kconfig default after printing the rejection through `kprintln!` (the
+     unfiltered console path, since the level being installed is what would filter
+     a `warn!`), so a typo cannot silence the boot log;
+   - failure handling: the accessor returns `Option<&'static str>`, so a missing
+     property and a property whose bytes are not valid ASCII/UTF-8 both degrade
+     to "no board preference" instead of a partially applied level.
+
+   `khal::firmware` only carries that handoff data; apart from these values the
+   module still handles no user pointers, DMA buffers, device MMIO or
+   file/network data, and it performs no semantic validation of the log level.
+   The exposure is bounded by the consumer: the string is passed straight to
+   `klogger::set_filter_spec`, which validates the whole spec and keeps the
+   previous filter when it does not parse, so a hostile or truncated property can
+   change verbosity but cannot corrupt kernel state or silence logging
+   permanently.
+
 本模块不直接处理用户指针、DMA buffer、设备 MMIO 或文件/网络数据。
 
 `arch/khal/src/irq` 当前没有本地 `unsafe` 代码块。相关 unsafe 边界位于：

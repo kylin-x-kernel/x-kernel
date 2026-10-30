@@ -373,11 +373,14 @@ BootInfo*
     → early_driver_init
     → klogger + backtrace (链接符号 _stext/_etext)
         (Log filtering: `init_klogger(configured_log_level())` fixes the build
-         level — the console default and the floor of the log filter — and
-         `resolve_log_level(khal::cmdline())` then applies an explicit
-         `loglevel=` / `quiet` / `debug` request on top of it. A rejected request is
-         reported through `kprintln!` and the scan continues, so a later valid one
-         still applies.)
+         level — the console default and the floor of the log filter, which a
+         runtime request may raise but never lower. `resolve_boot_log_filter()`
+         then takes the first accepted source: an explicit `loglevel=` /
+         `quiet` / `debug` command line, then /chosen/x-kernel,log-level, then
+         Kconfig `LOG_FILTER`. A rejected source is reported on the console
+         through `kprintln!` and the resolver falls through to the next one; a
+         command-line scan continues past a rejected `loglevel=`, so a later valid
+         one on the same line still applies.)
     → prepare_interrupts
     → init_scheduler
     → init_interrupt (softirq runner, timer/IPI/PMU handlers,

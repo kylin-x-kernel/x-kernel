@@ -19,7 +19,7 @@ const MAX_MEMORY_RAM_REGIONS: usize = 128;
 const MAX_MEMORY_RESERVED_REGIONS: usize = 128;
 const FIRMWARE_RESERVED_NAME: &str = "firmware reserved";
 
-pub use state::{cmdline, dtb_bytes};
+pub use state::{cmdline, dt_log_level, dtb_bytes};
 
 #[cfg(target_os = "none")]
 pub fn init(boot_info: &boot_info::BootInfo) {

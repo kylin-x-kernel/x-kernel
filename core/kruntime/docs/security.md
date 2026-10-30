@@ -204,6 +204,7 @@ kernel-boot / 平台固件
 | SMP bring-up | DT/ACPI 发现的 present CPU、AP 栈、`boot_ap` | 从核使用错误栈、AP 未启动导致主核自旋 | 每个 AP 使用独立 boot stack；`SCHED_READY_CPUS` 串行握手（等 AP 注册 run queue）；全局完成由 `INITED_CPUS == nr_cpus()` 判断 |
 | IRQ and timer | Softirq runner and timer/IPI/PMU handlers | Interrupt delivery before handler readiness | The primary installs handlers before IRQ enable; APs enable local IRQs after ksoftirqd setup and before publishing service completion. Workqueue service publication follows the all-CPU barrier. PMU IRQ enable follows watchdog setup. |
 | NMI 机制 | GIC 版本 / FEAT_NMI 探测与每 CPU 使能（`khal::nmi::early_init` / `late_init`） | 机制误判导致无效寄存器访问，或 watchdog 误报 hardlockup | 平台 `detect_mode()` 门控；`NmiMode::None` 时 watchdog 启动期禁用硬锁检测；所有 NMI 寄存器访问均有 readiness 门控 |
+| Boot log filter (DT) | `/chosen/x-kernel,log-level` string, read by `khal::firmware::dt_log_level()` inside `resolve_boot_log_filter` | A malformed or hostile property could mute the boot log or install an unintended per-target filter | `klogger::set_filter_spec` validates the whole spec before applying it; a rejected value is reported on the console through `kprintln!` (the unfiltered path, because the level being installed is what would filter a `warn!`) and the resolver falls through to the command line and the Kconfig default, so logging is never left off by a typo |
 
 本 crate 不直接处理用户内存、用户提供指针、DMA buffer 内容或设备寄存器读写；相关 trust boundary 位于 `memspace`、`kdma`、`kdriver` 和具体 HAL/driver 中。它会注册 boot console 的固定 MMIO 映射元数据，但不直接访问该 MMIO。
 

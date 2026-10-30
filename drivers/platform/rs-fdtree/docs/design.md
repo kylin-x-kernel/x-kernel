@@ -27,10 +27,14 @@ which adds kernel-specific semantics.
   `mem_reservations` (memreserve block, `0,0`-terminated),
   `reserved_memory_regions` / `reserved_memory_nodes` (`/reserved-memory`).
 - Expose typed wrappers for well-known nodes: `Chosen` (`bootargs`,
-  `stdout_path`), `Dice` (`regions` under `/reserved-memory/dice` or
-  `google,open-dice` / `kylin,open-dice` compatibles), and
-  `InterruptController` (first node carrying an `interrupt-controller`
-  property).
+  `stdout_path`, `x_kernel_log_level`), `Dice` (`regions` under
+  `/reserved-memory/dice` or `google,open-dice` / `kylin,open-dice`
+  compatibles), and `InterruptController` (first node carrying an
+  `interrupt-controller` property). `x_kernel_log_level` reads the vendor
+  property `x-kernel,log-level` and returns it unchanged; the `of` crate
+  forwards it (`of::chosen_log_level`) to platform and logging callers, which
+  own the level vocabulary. A vendor property rather than `bootargs` keeps
+  verbosity out of the boot loader's command line.
 - Report failures as `FdtError` (`BadMagic`, `BadPtr`, `BufferTooSmall`, `ParseError`).
 
 ## Non-Responsibilities

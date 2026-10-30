@@ -55,6 +55,27 @@ watchdog / perf 消费者
             `-- khal::irq::configure_nmi # 每 CPU 提升中断线
 ```
 
+## Firmware and device-tree transport (`khal::firmware`)
+
+`khal::firmware` owns the handoff data the firmware leaves behind: the boot
+command line (`cmdline`), the validated device-tree blob (`dtb_bytes`) and the
+board's requested log level (`dt_log_level`).
+
+Role split, and why the level vocabulary does not leak into this layer:
+
+- `khal::firmware` **provides** the raw property value and nothing else: it knows
+  the firmware transport (`of::chosen_log_level`) but not what a level is;
+- `klogger` **owns** the level vocabulary and validates the string;
+- `kruntime` consumes both: `resolve_boot_log_filter` asks
+  `dt_log_level()` first and hands the value to `klogger::set_filter_spec`, so an
+  invalid property is reported and the resolver falls through to the command line
+  and the Kconfig default instead of silently muting the boot log.
+
+Data flow: `/chosen/x-kernel,log-level` → `of::chosen_log_level` →
+`khal::firmware::dt_log_level` → `kruntime::resolve_boot_log_filter` → `klogger`.
+Validating in `khal` would duplicate the vocabulary and split the single source
+of truth, which is why the accessor returns the unvalidated `&'static str`.
+
 ## 调用约束 / 执行上下文
 
 - `irq_handler()` 与 `nmi_handler()` 只能由架构 trap dispatch 调用。

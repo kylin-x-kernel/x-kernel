@@ -25,4 +25,19 @@ impl<'b, 'a: 'b> Chosen<'b, 'a> {
             .property_str("stdout-path")
             .or_else(|| self.node.property_str("linux,stdout-path"))
     }
+
+    /// Returns the kernel log level this board asks for:
+    ///
+    /// ```dts
+    /// chosen {
+    ///     x-kernel,log-level = "debug";
+    /// };
+    /// ```
+    ///
+    /// A vendor property rather than `bootargs` so verbosity can be changed
+    /// by editing the device tree alone — no kernel rebuild and no
+    /// interference with the boot loader's command line.
+    pub fn x_kernel_log_level(self) -> Option<&'a str> {
+        self.node.property_str("x-kernel,log-level")
+    }
 }

@@ -205,14 +205,36 @@ const fn configured_log_level() -> &'static str {
     }
 }
 
-/// Resolve the boot-time console filter from the kernel command line.
+/// Resolve the boot-time log filter from the live boot environment.
+fn resolve_boot_log_filter() -> &'static str {
+    resolve_log_filter(
+        khal::firmware::dt_log_level(),
+        khal::cmdline(),
+        kbuild_config::LOG_FILTER,
+    )
+}
+
+/// Resolve the boot-time log filter, first match wins:
 ///
-/// `loglevel=` takes a filter spec — a bare level here, since a multi-token spec
-/// has to stay inside one whitespace-free word — and `quiet`/`debug` are the
-/// `loglevel=2`/`loglevel=4` shorthands. A rejected `loglevel=` is reported and
-/// the scan continues, so a later valid one on the same command line still
-/// applies. Without a command-line request the build level is used.
-fn resolve_log_level(cmdline: Option<&'static str>) -> &'static str {
+/// 1. an explicit command-line request — `loglevel=` (a spec, which must stay
+///    inside one whitespace-free word) and the `quiet`/`debug` shorthands for
+///    `loglevel=2`/`loglevel=4`. An operator's boot arguments must be able to
+///    override what the board baked in;
+/// 2. `/chosen/x-kernel,log-level` in the device tree — the board's default,
+///    changeable without rebuilding the kernel or touching the boot loader;
+/// 3. `LOG_FILTER` from the build configuration;
+/// 4. the build level (`LOG_LEVEL_*`), applied by [`apply_build_log_level`] as
+///    both the console default and the logger's floor.
+///
+/// A rejected source is reported and the next one is tried; the reports use
+/// [`kprintln!`] rather than `warn!`, because the level this function is
+/// installing is exactly what would filter the warning. A command-line scan
+/// continues past a rejected `loglevel=`, so a later valid one still applies.
+fn resolve_log_filter(
+    dt_spec: Option<&'static str>,
+    cmdline: Option<&'static str>,
+    log_filter: &'static str,
+) -> &'static str {
     if let Some(cmdline) = cmdline {
         for token in cmdline.split_ascii_whitespace() {
             if let Some(spec) = token.strip_prefix("loglevel=")
@@ -221,8 +243,6 @@ fn resolve_log_level(cmdline: Option<&'static str>) -> &'static str {
                 if klogger::set_filter_spec(spec).is_ok() {
                     return spec;
                 }
-                // `kprintln!`, not `warn!`: the level this is installing is what
-                // would filter the warning.
                 kprintln!("ignoring invalid loglevel={spec} on the kernel command line");
                 continue;
             }
@@ -238,6 +258,27 @@ fn resolve_log_level(cmdline: Option<&'static str>) -> &'static str {
                 return level;
             }
         }
+    }
+    if let Some(spec) = dt_spec {
+        if klogger::set_filter_spec(spec).is_ok() {
+            return spec;
+        }
+        kprintln!(
+            "ignoring invalid /chosen/x-kernel,log-level=\"{spec}\"; expected a level 0..=5 or \
+             off/error/warn/info/debug/trace, optionally with target=level overrides"
+        );
+    }
+    let configured = log_filter.trim();
+    if !configured.is_empty() {
+        if klogger::set_filter_spec(configured).is_ok() {
+            return configured;
+        }
+        // A compiled-in spec cannot be fixed at runtime, so its rejection must be
+        // reported like the other sources'.
+        kprintln!(
+            "ignoring invalid LOG_FILTER=\"{configured}\"; expected a level 0..=5 or \
+             off/error/warn/info/debug/trace, optionally with target=level overrides"
+        );
     }
     apply_build_log_level()
 }
@@ -515,7 +556,7 @@ pub fn rust_main(arg: usize) -> ! {
     );
 
     klogger::init_klogger(configured_log_level());
-    klogger::set_log_level(resolve_log_level(khal::cmdline()));
+    klogger::set_log_level(resolve_boot_log_filter());
     info!("Logging is enabled.");
     info!(
         "Primary CPU {} started, boot_info = {arg:#x}.",

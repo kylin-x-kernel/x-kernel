@@ -10,6 +10,17 @@ are the only direct external-input boundaries; the DTB blob itself is
 validated by `rs_fdtree` (see its own security document).
 
 
+### `chosen_log_level`
+
+`chosen_log_level()` returns `/chosen/x-kernel,log-level` as `Option<&'static
+str>`: boot-provided, semi-trusted text handed to the logging subsystem, which
+validates it with `klogger::set_filter_spec` and falls back to the command line
+and the compiled-in level when it does not parse. `of` performs no validation
+beyond the property being a string, and its absence (or a non-string value) is a
+`None` rather than an error: a board without the property simply has no
+preference. The value never reaches memory allocation, indexing or pointer
+arithmetic here.
+
 ## Trust Model
 
 The device tree is external boot-provided data: structurally validated

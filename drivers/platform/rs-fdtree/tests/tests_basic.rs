@@ -249,8 +249,7 @@ fn build_chosen_memory_dtb() -> Vec<u8> {
         }
     }
 
-    let strings =
-        b"#address-cells\0#size-cells\0bootargs\0stdout-path\0device_type\0reg\0serial0\0";
+    let strings = b"#address-cells\0#size-cells\0bootargs\0stdout-path\0device_type\0reg\0serial0\0x-kernel,log-level\0";
     let off_addr_cells = 0u32;
     let off_size_cells = 15u32;
     let off_bootargs = 27u32;
@@ -258,6 +257,7 @@ fn build_chosen_memory_dtb() -> Vec<u8> {
     let off_device_type = 48u32;
     let off_reg = 60u32;
     let off_serial0 = 64u32;
+    let off_log_level = 72u32;
 
     let mut structs = Vec::new();
     push_be32(&mut structs, FDT_BEGIN_NODE);
@@ -269,6 +269,7 @@ fn build_chosen_memory_dtb() -> Vec<u8> {
     push_name(&mut structs, b"chosen");
     push_prop(&mut structs, off_bootargs, b"console=ttyS0\0");
     push_prop(&mut structs, off_stdout_path, b"serial0:115200n8\0");
+    push_prop(&mut structs, off_log_level, b"debug\0");
     push_be32(&mut structs, FDT_END_NODE);
 
     push_be32(&mut structs, FDT_BEGIN_NODE);
@@ -363,6 +364,12 @@ fn chosen_alias_and_memory_helpers() {
 
     assert_eq!(fdt.chosen_bootargs(), Some("console=ttyS0"));
     assert_eq!(fdt.chosen_stdout_path(), Some("serial0:115200n8"));
+    // The board-owned verbosity knob, independent of bootargs.
+    assert_eq!(
+        fdt.chosen().unwrap().x_kernel_log_level(),
+        Some("debug"),
+        "chosen.x-kernel,log-level"
+    );
     assert_eq!(fdt.root_compatible(), None);
 
     let uart = fdt.resolve_node("serial0").unwrap();

@@ -18,7 +18,7 @@ that no input it is fed can corrupt its state or its memory.
 
 | Boundary | Source | Entry point |
 |----------|--------|-------------|
-| Boot metadata | `loglevel=`/`quiet`/`debug` on the kernel command line | `set_filter_spec` (via `kruntime`) |
+| Boot metadata | `/chosen/x-kernel,log-level`, `loglevel=`/`quiet`/`debug`, Kconfig `LOG_FILTER` | `set_filter_spec` (via `kruntime`) |
 | Build configuration | Kconfig `LOG_LEVEL_*` | `init_klogger`, fixes the floor |
 | Privileged user input | `echo 4 > /proc/sys/kernel/printk` (level) | `set_console_default` (via `procfs`) |
 | Privileged user input | `echo 'warn ksyscall=debug' > /proc/sys/kernel/log_filter` (spec) | `set_filter_spec` (via `procfs`) |
@@ -54,7 +54,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 
 | ID | Threat | Severity | Trigger | Mitigation |
 |----|--------|----------|---------|------------|
-| T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the command line or a privileged write | The spec is validated as a whole before it is installed and a rejected one keeps the previous filter; the command line reports its rejection through the unfiltered `kprintln!` path, `procfs` returns `VfsError::InvalidInput`, and empty specs are rejected as well |
+| T-01 | An invalid filter spec destroys logging availability (silent kernel) | Medium | Malformed spec from the device tree, the command line, a privileged write, or the compiled-in `LOG_FILTER` | The spec is validated as a whole before it is installed and a rejected one keeps the previous filter; every boot source reports its rejection through the unfiltered `kprintln!` path, `procfs` returns `VfsError::InvalidInput`, and empty specs are rejected as well |
 | T-02 | A runtime spec raises the ceiling and makes hot-path sites pay | Low | `echo 'trace' > /proc/sys/kernel/log_filter`, or `loglevel=trace` on the command line | Raising is intentional — the sites are compiled in and the operator asked for them — but it is the only way the higher levels cost anything. The write is privilege-gated |
 | T-03 | A log call from NMI context spins on `FILTER` held by the interrupted context | High | An NMI claims a hwirq with no registered handler while the same CPU is inside a `FILTER` holder, and the dispatch path logs that fact | `Log::log` asks `LogContextIf::in_nmi()` before taking any lock and drops the record; NMI/panic paths that need output use the platform's atomic console path. The unhandled-NMI log call that triggers this predates the filter, but the filter is never added to that path |
 | T-05 | A privileged write is not the only path to the level | Medium | Non-privileged writes to the console nodes | `procfs` requires `cred().is_privileged()` on write; both nodes are owner-write, world-read |
@@ -63,7 +63,7 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity | Mitigation |
 |----|--------------|-------|--------------|---------------|----------|------------|
-| F-01 | The boot filter stays at the build default | The command line carries no `loglevel=`/`quiet`/`debug`, or the value it carries is invalid | The console follows `LOG_LEVEL_*` | None | 4 | An invalid `loglevel=` is reported through `kprintln!` and the scan continues, so a later valid one still applies; the outcome is the documented build default, never silence |
+| F-01 | The boot filter stays at the build default | DT, command line and Kconfig all invalid or missing | The console follows `LOG_LEVEL_*` | None | 4 | Every invalid source is reported through `kprintln!` and the resolver falls through to the next one — the command line keeps scanning past a rejected `loglevel=`, and a rejected DT or `LOG_FILTER` value lets the next layer apply — so the outcome is the documented build default, never silence |
 | F-04 | The filter lock waits on the logging hot path | Logging from inside a `FILTER` critical section | Interrupts stay off while spinning | Potential hang | 1 | Critical sections only touch fixed-size data |
 | F-07 | A configuration selects no log level | Kconfig choice left empty | `configured_log_level()` reports `error` | None | 4 | The choice has no `off` option, so an empty selection is a broken configuration: it resolves to `error` at the source, which makes the console default, the logger floor and the boot banner agree instead of leaving the console mute |
 
@@ -71,7 +71,8 @@ None. All state manipulation is safe Rust: fixed arrays, modular indexing and
 
 - An invalid filter spec returns `FilterSpecError` and the previous filter keeps
   working. `kruntime` reports the rejection with `kprintln!` (unfiltered, so a low
-  console level cannot hide the diagnostic) and keeps scanning the command line;
+  console level cannot hide the diagnostic), keeps scanning the command line past
+  a rejected `loglevel=`, and falls through to the next boot source;
   `procfs`'s write path returns `VfsError::InvalidInput` to the writer.
 - `init_klogger` panics if the global logger cannot be installed: that path has
   no error return and no recovery, so it is an explicit, documented exception.

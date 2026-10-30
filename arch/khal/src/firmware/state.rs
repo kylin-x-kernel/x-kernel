@@ -18,6 +18,14 @@ pub fn cmdline() -> Option<&'static str> {
     of::chosen_bootargs()
 }
 
+/// Log level requested by the device tree (`/chosen/x-kernel,log-level`).
+///
+/// Unvalidated on purpose: the logger owns the level vocabulary, and this
+/// layer only knows the firmware transport.
+pub fn dt_log_level() -> Option<&'static str> {
+    of::chosen_log_level()
+}
+
 /// Returns the validated device-tree blob.
 pub fn dtb_bytes() -> Option<&'static [u8]> {
     Some(of::fdt()?.as_bytes())

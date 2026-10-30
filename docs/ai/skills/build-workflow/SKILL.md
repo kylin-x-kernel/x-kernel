@@ -233,6 +233,52 @@ mirrored to `bundle/qemu.log` (alongside the live terminal output), and when
 the run ends with backtrace frames the addresses are resolved right away.
 Disable with `XKMAKE_ARGS='--no-symbolize'`.
 
+### Changing the log level without rebuilding
+
+The `log` crate here has no compile-time level cap (`log` is a plain `0.4`
+dependency, no `max_level_*` feature), so every level is compiled in and only
+filtered at runtime. Four layers, most specific first, all taking the same
+spec vocabulary — an optional default level plus `target=level` overrides,
+levels being `0`/`off`, `1`/`error`, `2`/`warn`, `3`/`info`, `4`/`debug`,
+`5`/`trace`:
+
+| # | Layer | Scope | Needs |
+| --- | --- | --- | --- |
+| 1 | `echo 'warn ksyscall=trace' > /proc/sys/kernel/log_filter` | live, until reboot | nothing — the node already exists |
+| 2 | `loglevel=5`, `loglevel=warn,ksyscall=5`, `quiet`, `debug` on the cmdline (`/chosen/bootargs`) | boot of that run | the boot loader |
+| 3 | `/chosen/x-kernel,log-level = "warn ksyscall=debug";` | boot of that board | editing the DTB |
+| 4 | `LOG_FILTER` (spec) / `LOG_LEVEL_*` (build maximum) Kconfig | build default | a rebuild |
+
+Layer 1 is the one to reach for while debugging on hardware: it changes
+verbosity mid-session (`cat /proc/sys/kernel/log_filter` reports the whole spec,
+while `/proc/sys/kernel/printk` reports just the console level)
+and leaves the flashed image and the documented behaviour identical. It cannot
+help with what the **serial console** shows during boot — the node only exists
+once userland runs — which is what layers 2-4 are for. It does not lose the
+boot-time records either: a later increase is what reveals them.
+
+A command-line request wins over the device-tree default, which wins over
+`LOG_FILTER` and the build level — an operator can always override what the board
+shipped. Invalid values are reported and ignored rather than silently applied; the
+value order is X-Kernel's (higher = more verbose) and *not* Linux
+`console_loglevel` compatible. On the command line the whole spec has to stay
+inside one whitespace-free word, so use the comma form
+(`loglevel=warn,ksyscall=debug`); a space-separated spec is cut at the first
+word because whitespace separates kernel parameters.
+
+`LOG_LEVEL_*` is the build-time **default and floor**, not a hard ceiling: the
+logger never runs below it, so layers 1-3 can quiet the serial console on their
+own; and a spec that asks for *more* raises the ceiling and reveals the
+higher-level sites compiled into the image (this is what `make run LOG=debug`
+does on a `warn` build). The extra cost of those sites is paid only while such a
+request is in force.
+
+Every layer takes a full spec, so logging can be *retargeted* rather than
+raised globally: `warn ksyscall=debug` keeps unrelated chatter off the console
+while one stack talks, and the spec's ceiling is also what the ring buffer
+captures, so one rule widens both the console and the capture ceiling for that
+target.
+
 ### Symbolizing logs from real hardware
 
 Board logs work the same way. The kernel runs at its link-time virtual

@@ -1,5 +1,37 @@
 mainmenu "X-kernel Configuration"
 
+config LOG_FILTER
+    string "Boot log filter (spec: \"<level> [target=level]...\")"
+    default ""
+    help
+      Boot-time console filter, applied at boot and changeable afterwards without
+      a rebuild. An explicit command-line `loglevel=` / `quiet` / `debug` and the
+      device-tree `x-kernel,log-level` property take precedence over this value:
+
+        LOG_FILTER="warn ksyscall=debug drv_uart=debug"
+
+      Levels are 0..=5 or off/error/warn/info/debug/trace; a target is matched
+      by prefix against the record's module path, longest match wins, and a
+      bare level sets the default for everything else. A spec with only
+      target=level rules keeps the level in force (at boot: the LOG_LEVEL_*
+      choice) as its default. Tokens may be separated by spaces or commas.
+      Empty means "use the LOG_LEVEL_* choice alone".
+
+      The spec configures the console and may raise the ceiling above the
+      LOG_LEVEL_* choice (the sites are compiled in either way); it can never take
+      the logger below it, so quietening the console does not empty the kernel log
+      buffer.
+
+      At runtime the same spec is written to /proc/sys/kernel/log_filter, so
+      bring-up sessions can retarget logging live:
+      `echo 'warn ksyscall=trace' > /proc/sys/kernel/log_filter`. The level on its
+      own (and nothing else) is readable and writable through
+      /proc/sys/kernel/printk, which keeps its historical single-value shape.
+
+      On the kernel command line the spec must be a single word, because
+      whitespace separates kernel parameters: use the comma form there,
+      `loglevel=warn,ksyscall=debug`.
+
 choice
     prompt "Build Type"
     default BUILD_TYPE_RELEASE
@@ -15,8 +47,9 @@ config BUILD_TYPE_DEBUG
 endchoice
 
 # This is the build-time level: the console default and the floor of the logger's
-# filter. A runtime filter spec may raise verbosity above it and reveal the sites
-# compiled into the image; the logger never runs below it.
+# filter. A runtime request (command line, device tree, /proc/sys/kernel/log_filter)
+# may raise verbosity above it and reveal the sites compiled into the image; the
+# logger never runs below it, so a quiet console still fills the log buffer.
 choice
     prompt "LOG Level"
     default LOG_LEVEL_WARN

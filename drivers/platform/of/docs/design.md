@@ -19,7 +19,12 @@ controller kind, generic PCI host bridge facts, the PMU IRQ, and the
   it back; `FirmwareInitError` reports a null pointer or a parse failure.
 - Expose tree queries: `find_node`, `find_compatible`, `resolve_node`
   (paths and aliases), `chosen`, `chosen_bootargs`, `chosen_stdout_path`,
-  `root_model`, `root_compatible`, `dtb_total_size`.
+  `chosen_log_level`, `root_model`, `root_compatible`, `dtb_total_size`.
+- Forward the board's log-level request: `chosen_log_level` returns
+  `/chosen/x-kernel,log-level` as the raw, unvalidated string, delegating to
+  `rs_fdtree::Chosen::x_kernel_log_level`. `of` provides the transport only;
+  `khal::firmware::dt_log_level` re-exports it and the logger owns the level
+  vocabulary that validates it.
 - Decode interrupts: `first_interrupt_desc` resolves `interrupts` /
   `interrupts-extended`, follows `interrupt-parent` phandles, and maps
   controller-specific cells to `InterruptInfo` (GIC SPI/PPI numbering,

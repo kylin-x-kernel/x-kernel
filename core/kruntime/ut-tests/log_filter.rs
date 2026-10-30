@@ -33,7 +33,7 @@ fn command_line_level_overrides_the_build_level() {
     let saved = active_spec();
     let build_level = super::apply_build_log_level();
 
-    let resolved = super::resolve_log_level(Some("console=ttyS0 loglevel=debug"));
+    let resolved = super::resolve_log_filter(None, Some("console=ttyS0 loglevel=debug"), "");
     assert_eq!(resolved, "debug");
     assert_eq!(
         current_log_level(),
@@ -41,17 +41,17 @@ fn command_line_level_overrides_the_build_level() {
     );
 
     // `quiet`/`debug` are the `loglevel=2`/`loglevel=4` shorthands.
-    let resolved = super::resolve_log_level(Some("quiet"));
+    let resolved = super::resolve_log_filter(None, Some("quiet"), "");
     assert_eq!(resolved, "2");
     assert_eq!(
         current_log_level(),
         parse_log_level("warn").expect("warn is valid")
     );
-    let resolved = super::resolve_log_level(Some("debug"));
+    let resolved = super::resolve_log_filter(None, Some("debug"), "");
     assert_eq!(resolved, "4");
 
     // Without a request the build level is what stays in force.
-    let resolved = super::resolve_log_level(None);
+    let resolved = super::resolve_log_filter(None, None, "");
     assert_eq!(resolved, build_level);
 
     assert!(restore(&saved), "the saved spec failed to re-apply");
@@ -63,7 +63,7 @@ fn command_line_level_overrides_the_build_level() {
 fn an_invalid_level_does_not_hide_a_later_one() {
     let saved = active_spec();
 
-    let resolved = super::resolve_log_level(Some("loglevel=verbos loglevel=info"));
+    let resolved = super::resolve_log_filter(None, Some("loglevel=verbos loglevel=info"), "");
     assert_eq!(resolved, "info");
     assert_eq!(
         current_log_level(),
@@ -72,7 +72,7 @@ fn an_invalid_level_does_not_hide_a_later_one() {
 
     // A command line with only invalid values falls back to the build level.
     let build_level = super::apply_build_log_level();
-    let resolved = super::resolve_log_level(Some("loglevel=6 loglevel="));
+    let resolved = super::resolve_log_filter(None, Some("loglevel=6 loglevel="), "");
     assert_eq!(resolved, build_level);
 
     assert!(restore(&saved), "the saved spec failed to re-apply");
@@ -84,7 +84,7 @@ fn an_invalid_level_does_not_hide_a_later_one() {
 fn command_line_accepts_a_full_spec() {
     let saved = active_spec();
 
-    let resolved = super::resolve_log_level(Some("loglevel=warn,ksyscall=debug"));
+    let resolved = super::resolve_log_filter(None, Some("loglevel=warn,ksyscall=debug"), "");
     assert_eq!(resolved, "warn,ksyscall=debug");
     assert_eq!(active_spec(), "warn ksyscall=debug");
     assert_eq!(
@@ -92,6 +92,44 @@ fn command_line_accepts_a_full_spec() {
         parse_log_level("warn").expect("warn is valid")
     );
     assert_eq!(level_name(current_log_level()), "warn");
+
+    assert!(restore(&saved), "the saved spec failed to re-apply");
+}
+
+/// The device tree is the board's default: it applies when the command line says
+/// nothing, and it loses to an explicit command-line request.
+#[def_test(serial)]
+fn device_tree_is_overridden_by_the_command_line() {
+    let saved = active_spec();
+
+    let resolved = super::resolve_log_filter(Some("info"), None, "");
+    assert_eq!(resolved, "info");
+    assert_eq!(
+        current_log_level(),
+        parse_log_level("info").expect("info is valid")
+    );
+
+    let resolved = super::resolve_log_filter(Some("info"), Some("loglevel=debug"), "");
+    assert_eq!(resolved, "debug");
+
+    assert!(restore(&saved), "the saved spec failed to re-apply");
+}
+
+/// `LOG_FILTER` sits below both boot sources and above the build level, and a
+/// rejected value falls through to that build level.
+#[def_test(serial)]
+fn build_filter_is_the_last_source_before_the_build_level() {
+    let saved = active_spec();
+
+    let resolved = super::resolve_log_filter(None, None, "warn drv_uart=debug");
+    assert_eq!(resolved, "warn drv_uart=debug");
+    assert_eq!(active_spec(), "warn drv_uart=debug");
+
+    // A rejected spec is skipped; the build level is what stays in force.
+    let build_level = super::apply_build_log_level();
+    let resolved =
+        super::resolve_log_filter(Some("bogus"), Some("loglevel=6"), "warn bogus=nonsense");
+    assert_eq!(resolved, build_level);
 
     assert!(restore(&saved), "the saved spec failed to re-apply");
 }

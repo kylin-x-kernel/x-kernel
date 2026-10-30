@@ -368,6 +368,12 @@ pub fn chosen() -> Option<Chosen<'static, 'static>> {
     fdt()?.chosen()
 }
 
+/// Returns the log level this board asks for (`/chosen/x-kernel,log-level`),
+/// unvalidated: the caller owns the level vocabulary.
+pub fn chosen_log_level() -> Option<&'static str> {
+    fdt()?.chosen()?.x_kernel_log_level()
+}
+
 /// Resolves a path or an `/aliases` alias to a node.
 pub fn resolve_node(path_or_alias: &str) -> Option<FdtNode<'static, 'static>> {
     fdt()?.resolve_node(path_or_alias)
