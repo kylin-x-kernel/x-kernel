@@ -28,13 +28,84 @@ pub const S_EXT: usize = INTC_IRQ_BASE + 9;
 /// Cookie sentinel: no PLIC completion needed (timer / IPI).
 /// PLIC interrupt numbers start at 1, so 0 is safe as a sentinel.
 const PLIC_COMPLETE_SKIP: usize = 0;
-static PLIC: LazyInit<SpinNoIrq<Plic>> = LazyInit::new();
+static PLIC: LazyInit<PlicController> = LazyInit::new();
+// riscv_plic 0.2.0 indexes a 1024-entry priority array; entry zero is reserved.
+const PLIC_MAX_SOURCE: u32 = 1023;
+
+struct PlicController {
+    sources: PlicSources,
+    registers: SpinNoIrq<Plic>,
+}
+
+impl PlicController {
+    fn source(&self, id: usize) -> Option<NonZeroU32> {
+        let source = self.sources.source(id);
+        if source.is_none() {
+            warn!("PLIC source {id} is outside the initialized source range");
+        }
+        source
+    }
+
+    fn set_enabled(&self, id: usize, enabled: bool) {
+        let Some(source) = self.source(id) else {
+            return;
+        };
+        trace!("PLIC set enable: {source} {enabled}");
+        let mut registers = self.registers.lock();
+        if enabled {
+            registers.set_priority(source, 6);
+            registers.enable(source, this_context());
+        } else {
+            registers.disable(source, this_context());
+        }
+    }
+
+    fn set_priority(&self, id: usize, priority: u8) {
+        let Some(source) = self.source(id) else {
+            return;
+        };
+        self.registers.lock().set_priority(source, priority.into());
+    }
+
+    fn complete(&self, id: usize) {
+        // Completion also reads the source enable bit; validate before indexing.
+        let Some(source) = self.source(id) else {
+            return;
+        };
+        let mut registers = self.registers.lock();
+        complete_plic_claim(&mut *registers, this_context(), source);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PlicSources {
+    last: u32,
+}
+
+impl PlicSources {
+    fn from_property(value: Option<&[u8]>) -> Result<Self, &'static str> {
+        let bytes: [u8; 4] = value
+            .ok_or("PLIC node is missing riscv,ndev")?
+            .try_into()
+            .map_err(|_| "PLIC riscv,ndev must contain exactly one u32")?;
+        let last = u32::from_be_bytes(bytes);
+        if last == 0 || last > PLIC_MAX_SOURCE {
+            return Err("PLIC riscv,ndev exceeds supported source range 1..=1023");
+        }
+        Ok(Self { last })
+    }
+
+    fn source(self, id: usize) -> Option<NonZeroU32> {
+        let id = u32::try_from(id).ok()?;
+        (id <= self.last).then(|| NonZeroU32::new(id)).flatten()
+    }
+}
 
 pub const fn plic_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::plic_irq_desc(hwirq)
 }
 
-fn plic() -> &'static SpinNoIrq<Plic> {
+fn plic() -> &'static PlicController {
     #[expect(
         clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Primary interrupt initialization installs \
@@ -43,25 +114,91 @@ fn plic() -> &'static SpinNoIrq<Plic> {
     PLIC.get().expect("PLIC is not initialized")
 }
 
-fn plic_region_from_device_tree() -> Option<(PhysAddr, usize)> {
+trait PlicCompletion {
+    fn is_enabled(&self, source: NonZeroU32, context: usize) -> bool;
+    fn set_enabled(&mut self, source: NonZeroU32, context: usize, enabled: bool);
+    fn complete(&mut self, context: usize, source: NonZeroU32);
+}
+
+impl PlicCompletion for Plic {
+    fn is_enabled(&self, source: NonZeroU32, context: usize) -> bool {
+        Plic::is_enabled(self, source, context)
+    }
+
+    fn set_enabled(&mut self, source: NonZeroU32, context: usize, enabled: bool) {
+        if enabled {
+            self.enable(source, context);
+        } else {
+            self.disable(source, context);
+        }
+    }
+
+    fn complete(&mut self, context: usize, source: NonZeroU32) {
+        Plic::complete(self, context, source);
+    }
+}
+
+// The caller holds the PLIC lock across this entire transaction, including
+// selection of the claiming hart's context.
+fn complete_plic_claim(plic: &mut impl PlicCompletion, context: usize, source: NonZeroU32) {
+    // PLIC specification, Interrupt Completion: a target ignores completion
+    // when this source is disabled. Match Linux plic_irq_eoi without changing
+    // KIRQ's logical disable state or the source priority.
+    let was_enabled = plic.is_enabled(source, context);
+    if !was_enabled {
+        plic.set_enabled(source, context, true);
+    }
+    plic.complete(context, source);
+    if !was_enabled {
+        plic.set_enabled(source, context, false);
+    }
+}
+
+// Match Linux's PLIC context preparation: firmware enable bits must not create
+// unowned routes when local delivery is activated. Source priority is global
+// and must not be reset while preparing another CPU's context.
+fn disable_plic_sources(plic: &mut impl PlicCompletion, context: usize, sources: PlicSources) {
+    for source in (1..=sources.last).filter_map(NonZeroU32::new) {
+        plic.set_enabled(source, context, false);
+    }
+}
+
+fn plic_region_from_device_tree() -> Result<Option<(PhysAddr, usize, PlicSources)>, &'static str> {
     for compatible in ["sifive,plic-1.0.0", "riscv,plic0"] {
         let Some(node) = of::find_compatible(compatible) else {
             continue;
         };
-        let Some(region) = node.reg().and_then(|mut regs| regs.next()) else {
-            continue;
-        };
-        return Some((
+        let sources = PlicSources::from_property(node.property("riscv,ndev").map(|p| p.value))?;
+        let region = node
+            .reg()
+            .and_then(|mut regs| regs.next())
+            .ok_or("PLIC node is missing its register region")?;
+        return Ok(Some((
             PhysAddr::from_usize(region.starting_address as usize),
             region.size.max(0x1000),
-        ));
+            sources,
+        )));
     }
-    None
+    Ok(None)
 }
 
 pub fn init_primary() {
-    let (paddr, size) = plic_region_from_device_tree()
-        .unwrap_or((PhysAddr::from_usize(PLIC_PADDR), PLIC_MMIO_SIZE));
+    #[expect(
+        clippy::panic,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: invalid PLIC firmware \
+                  metadata; interrupt initialization cannot safely continue"
+    )]
+    let (paddr, size, sources) = plic_region_from_device_tree()
+        .unwrap_or_else(|err| panic!("invalid PLIC configuration: {err}"))
+        // Preserve the legacy no-DT layout. This is a library capacity bound,
+        // not discovery of the number of physically implemented sources.
+        .unwrap_or((
+            PhysAddr::from_usize(PLIC_PADDR),
+            PLIC_MMIO_SIZE,
+            PlicSources {
+                last: PLIC_MAX_SOURCE,
+            },
+        ));
     #[expect(
         clippy::panic,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the PLIC register window \
@@ -79,7 +216,10 @@ pub fn init_primary() {
     // MMIO window, so the pointer is non-null and references the live register
     // block for the duration of the driver.
     let plic = unsafe { Plic::new(NonNull::new(plic_base.as_usize() as *mut _).unwrap()) };
-    PLIC.init_once(SpinNoIrq::new(plic));
+    PLIC.init_once(PlicController {
+        sources,
+        registers: SpinNoIrq::new(plic),
+    });
 }
 
 fn this_context() -> usize {
@@ -111,11 +251,17 @@ fn send_ipi_to_raw_hart(raw_hart_id: usize) {
     }
 }
 
-/// Prepare this hart's PLIC threshold without changing its interrupt-source enables.
+/// Prepare this hart's PLIC context with all supported external sources disabled.
 ///
-/// Called after global PLIC setup, with CPU IRQ delivery still masked.
+/// Called once per hart after global PLIC setup, with CPU IRQ delivery still
+/// masked and before any source is enabled on this context. This is not a
+/// runtime reset: invoking it after registration would disable live routes.
 pub fn init_current_cpu_context() {
-    plic().lock().init_by_context(this_context());
+    let controller = plic();
+    let mut registers = controller.registers.lock();
+    let context = this_context();
+    disable_plic_sources(&mut *registers, context, controller.sources);
+    registers.init_by_context(context);
 }
 
 /// Enable this hart's software, timer and external interrupt sources.
@@ -186,17 +332,7 @@ impl kirq::IntrManagerIf {
             @S_SOFT => {},
             @S_EXT => {},
             @EX_IRQ => {
-                let Some(irq) = NonZeroU32::new(irq as _) else {
-                    return;
-                };
-                trace!("PLIC set enable: {irq} {enabled}");
-                let mut plic = plic().lock();
-                if enabled {
-                    plic.set_priority(irq, 6);
-                    plic.enable(irq, this_context());
-                } else {
-                    plic.disable(irq, this_context());
-                }
+                plic().set_enabled(irq, enabled);
             }
         );
     }
@@ -222,7 +358,7 @@ impl kirq::IntrManagerIf {
                 ))
             },
             @S_EXT => {
-                let mut plic = plic().lock();
+                let mut plic = plic().registers.lock();
                 let Some(irq) = plic.claim(this_context()) else {
                     debug!("Spurious external IRQ");
                     return None;
@@ -247,14 +383,7 @@ impl kirq::IntrManagerIf {
         if completion_cookie == PLIC_COMPLETE_SKIP {
             return;
         }
-        // completion_cookie is a PLIC claim value (hwirq >= 1).
-        // A zero or otherwise invalid cookie here indicates a
-        // programming error in dispatch_irq.
-        let Some(irq) = NonZeroU32::new(completion_cookie as _) else {
-            warn!("PLIC complete_irq: bogus cookie {completion_cookie}");
-            return;
-        };
-        plic().lock().complete(this_context(), irq);
+        plic().complete(completion_cookie);
     }
 
     fn notify_cpu(_interrupt_id: usize, target: TargetCpu) {
@@ -309,10 +438,7 @@ impl kirq::IntrManagerIf {
             @S_SOFT => {},
             @S_EXT => {},
             @EX_IRQ => {
-                let Some(irq) = NonZeroU32::new(irq as _) else {
-                    return;
-                };
-                plic().lock().set_priority(irq, priority.into());
+                plic().set_priority(irq, priority);
             }
         );
     }

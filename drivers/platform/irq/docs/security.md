@@ -37,6 +37,11 @@ RISC-V source activation changes only the current hart's SIE source bits.
 Platform startup must retain the global SSTATUS.SIE mask across preparation
 and activation until runtime handlers are installed. PLIC context preparation
 does not itself provide that CPU-wide exclusion.
+Context preparation clears only the current context's supported source enable
+bits before lowering its threshold. It must precede source registration on that
+context and must not be reused to reset a running CPU. Global source priorities
+and other contexts are not changed. This establishes a disabled local baseline,
+not effective-affinity ownership or proof that the device has stopped producing.
 
 On x86, fixed LAPIC spurious/error vectors are consumed before ordinary
 claims are constructed. Spurious delivery must not acknowledge any ISR entry;
@@ -94,8 +99,14 @@ anywhere in this crate.
   handle and its trap operations, installed once.
 - `IRQ_WORK_HANDLER_REGISTERED`: one-time registration outcome for reserved
   SGI15. Its handler is never removed; the notifier does not read this state.
-- `PLIC` (`LazyInit<SpinNoIrq<Plic>>`): the PLIC handle; access before
-  init panics with a named `expect`.
+- `PLIC` (`LazyInit<PlicController>`): the source bound and PLIC register handle;
+  access before init panics with a named `expect`.
+  Its inner `SpinNoIrq<Plic>` lock excludes local IRQ delivery and migration while selecting the
+  claiming context and executing enable/check/complete/restore. A disabled
+  source is temporarily enabled only to satisfy the controller completion
+  contract, then restored before unlocking. Concurrent source-control updates
+  use the same lock, so restoration cannot overwrite a newer enable decision.
+  This does not imply device shutdown or hardware quiescence after software drain.
 
 ## Threat Analysis
 
@@ -155,3 +166,16 @@ anywhere in this crate.
   logging, and keep SGI15 out of the NMI priority/attribute classes.
 - Keep the SGI descriptor marked `PER_CPU` and use the force-enable path on
   every CPU; a globally enabled descriptor does not imply local SGI enablement.
+
+## PLIC Source Validation
+
+The RISC-V provider treats `riscv,ndev` as untrusted firmware input and checks
+its cell size and supported range before publishing the controller. External
+operations require completed primary initialization. The source bound and
+register lock belong to one published controller, not independently initialized
+globals. Source validation and rejection diagnostics precede the register lock.
+External enable, priority and completion ids must be nonzero, within the initialized
+bound and representable without truncation. Invalid ids return before indexed
+register access. The no-DT fallback enforces library capacity, not physical
+source discovery. Context-index and MMIO-mapping validity remain separate
+platform obligations; source validation does not establish either property.

@@ -107,8 +107,12 @@ Reproducible boot checks and their coverage limits are in [testing.md](testing.m
 
 ## RISC-V Local Preparation And Activation
 
-`init_current_cpu_context` sets the current hart's PLIC threshold to zero;
-it does not clear source enable bits. The primary prepares its context after
+`init_current_cpu_context` clears the supported source enable bits in the
+current hart's context, then sets its PLIC threshold to zero under the same
+IRQ-safe controller lock. Like Linux PLIC context setup, this removes inherited
+routes before activation. It leaves global priorities, pending state and claim
+completion unchanged. It runs once before any source is enabled on that context,
+not as a runtime reset. The primary prepares its context after
 global PLIC discovery, and each AP prepares its own context during local setup.
 `activate_local_interrupts` only sets SSIE/STIE/SEIE, without repeating PLIC
 preparation or opening the global SSTATUS.SIE gate. Runtime owns that final
@@ -178,12 +182,23 @@ is tested in the vendored x2apic host suite.
 
 ## Concurrency Model
 
-- Backend state (`GIC`, `PLIC`) lives in `LazyInit<SpinNoIrq<..>>`;
-  `init` is idempotent (a second call returns).
+- GIC backend state lives in `LazyInit<SpinNoIrq<Gic>>`; each backend's
+  global `init` returns if the GIC is already initialized.
+- PLIC state lives in `LazyInit<PlicController>`, which publishes the immutable
+  source bound together with its `registers: SpinNoIrq<Plic>` lock. Primary
+  initialization installs this controller before per-CPU context preparation.
 - `remember_config` asserts that a re-supplied GIC configuration is
   byte-identical to the initialized one, catching inconsistent platform
   init instead of silently reprogramming.
-- PLIC claim/complete pairs are guarded by the same lock as enablement.
+- PLIC claim and completion transactions use the same lock as enablement;
+  the lock is not held across handler execution. Completion selects the current
+  hart's context under that lock, checks the source enable bit, and temporarily
+  enables a disabled source before completing and restoring its disabled state.
+  This follows Linux `plic_irq_eoi`: the PLIC specification's Interrupt
+  Completion rule ignores completion for a source disabled on that target.
+  Logical KIRQ disable depth, priority and unrelated source bits are unchanged.
+  The private `PlicCompletion` adapter tests this transaction against a model
+  that rejects disabled completion; it does not emulate actual device delivery.
 
 ## Error And Panic Model
 
@@ -213,3 +228,20 @@ is tested in the vendored x2apic host suite.
   `S_EXT` offsets above the `INTC_IRQ_BASE` sentinel) and a skip
   sentinel for completion, since timer and IPI events need no PLIC
   claim/complete.
+## PLIC Source Bounds
+
+At primary initialization a discovered PLIC node must provide exactly one
+nonzero `riscv,ndev` cell, at most 1023 (the riscv_plic 0.2.0 register-array
+limit). Missing or malformed metadata on a discovered node stops boot rather
+than selecting the legacy address fallback. Only absence of a compatible node
+uses that fallback, with the library capacity as its source bound; this does
+not discover which sources physically exist. A private `PlicController` owns
+the immutable bound and the IRQ-safe register lock, published together through
+one `LazyInit`. Its methods own external-source enable, priority and completion
+transactions; CPU-local context selection remains inside the register lock.
+Enable, priority and completion paths validate source
+ids without truncation before accessing indexed registers. Completion cookie
+zero remains the local timer/IPI no-completion sentinel.
+
+This validation does not change the existing hart-to-context convention or
+prove MMIO aperture coverage. It introduces no flow suppression state.
