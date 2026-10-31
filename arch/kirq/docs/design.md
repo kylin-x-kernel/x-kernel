@@ -836,6 +836,24 @@ now survives handler return and is discharged only after the original controller
 claim completes. Empty registered Lines also retain admission through completion.
 An unresolved or missing Line still completes its claim, but acquires no Line
 obligation and must not attach cleanup to a subsequently published replacement.
+Both synchronous and asynchronous disable now use one retained-Line transaction.
+They acquire control, registry, then Line state exclusion, release the registry,
+and update disable depth plus the bounded controller mask operation while still
+holding Line state exclusion. Synchronous disable waits on that retained Line
+only after all short locks have been released. The legacy global control lock
+still serializes Line control with registration and teardown until those paths
+are migrated; this step does not yet provide independent-Line control progress.
+Normal and legacy enable follow the same registry-to-Line handoff: the selected
+Line remains owned while configuration and unmask run under its state lock,
+without registry exclusion. Normal enable remains lookup-only and requires an
+action; legacy enable may publish a preallocated candidate and force the
+hardware enable write at depth zero for per-CPU bring-up. Nested enable still
+decrements disable depth without unmasking until the depth reaches zero.
+Final enable admission checks teardown under the same Line guard as prepare
+and hardware apply. Legacy metadata resolution still uses the existing resolver:
+the global control lock protects its earlier teardown check through resolution.
+This step does not migrate registration, withdrawal or NMI publication locking,
+nor change the existing mutating prepare methods into hardware rollback.
 Synchronous disable captures this identity in the same transaction as its
 disable plan; it cannot mask one instance and then synchronize another.
 

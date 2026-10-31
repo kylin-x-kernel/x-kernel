@@ -162,61 +162,92 @@ pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
 
 fn try_enable_irq_inner(spec: IrqSpec, force_platform_enable: bool) -> Result<(), IrqDescError> {
     reject_nmi_management("enable IRQ")?;
+    enable_line(&IRQ_STATE, spec, force_platform_enable, apply_platform_plan)
+}
+
+fn enable_line(
+    registry: &SpinNoIrq<IrqState>,
+    spec: IrqSpec,
+    force_platform_enable: bool,
+    apply_plan: impl FnOnce(IrqPlatformPlan),
+) -> Result<(), IrqDescError> {
     let mut prepared = None;
     loop {
         if force_platform_enable && prepared.is_none() {
             let is_missing = {
-                let state = IRQ_STATE.lock();
+                let state = registry.lock();
                 lookup_line(&state, spec).is_none()
             };
             if is_missing {
                 prepared = Some(prepare_line(spec));
             }
         }
+        // Declare the retained owner before the guards so even error returns
+        // release short locks before a possible final Line destruction.
+        let line;
         let control_guard = IRQ_CONTROL_LOCK.lock();
-        let plan = {
-            let mut state = IRQ_STATE.lock();
-            if force_platform_enable {
-                if lookup_line(&state, spec).is_none() && prepared.is_none() {
-                    drop(state);
-                    drop(control_guard);
-                    continue;
-                }
-                if let Some((virq, line)) = lookup_line(&state, spec) {
-                    reject_teardown(Some(&line), virq, "enable IRQ")?;
-                }
-                let desc = try_resolve_and_publish(&mut state, spec, prepared.as_ref())?;
-                #[expect(
-                    clippy::unwrap_used,
-                    reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish \
-                              succeeded and assigned this descriptor a logical IRQ"
-                )]
-                let virq = desc.logical_irq().unwrap();
-                #[expect(
-                    clippy::expect_used,
-                    reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish \
-                              installed this descriptor in the same exclusively borrowed registry"
-                )]
-                let mut entry = state
-                    .descs
-                    .get(&virq)
-                    .expect("descriptor state must exist after try_resolve_desc")
-                    .lock();
-                entry.prepare_legacy_enable()
-            } else {
-                let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
-                let line = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
-                reject_teardown(Some(line), virq, "enable IRQ")?;
-                let mut entry = line.lock();
-                if !entry.has_actions() {
-                    warn!("enable IRQ {virq} failed because no IRQ action is registered");
-                    return Err(IrqDescError::NoIrqAction { virq });
-                }
-                entry.prepare_enable_irq()
+        let mut state = registry.lock();
+        let virq = if force_platform_enable {
+            if lookup_line(&state, spec).is_none() && prepared.is_none() {
+                drop(state);
+                drop(control_guard);
+                continue;
             }
+            if let Some((virq, line)) = lookup_line(&state, spec) {
+                reject_teardown(Some(&line), virq, "enable IRQ")?;
+            }
+            let desc = try_resolve_and_publish(&mut state, spec, prepared.as_ref())?;
+            #[expect(
+                clippy::unwrap_used,
+                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded \
+                          and assigned this descriptor a logical IRQ"
+            )]
+            let virq = desc.logical_irq().unwrap();
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed \
+                          this descriptor in the same exclusively borrowed registry"
+            )]
+            let selected = state
+                .descs
+                .get(&virq)
+                .expect("descriptor state must exist after try_resolve_desc")
+                .clone();
+            line = selected;
+            virq
+        } else {
+            let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
+            let existing = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
+            line = existing.clone();
+            virq
         };
-        apply_platform_plan(plan);
+        let mut entry = line.lock();
+        // Control is the outer IRQ-saving guard and outlives both inner guards.
+        drop(state);
+        let plan = prepare_enable_plan(&mut entry, virq, force_platform_enable)?;
+        apply_plan(plan);
         return Ok(());
+    }
+}
+
+// Final admission and prepare share the retained Line guard. Legacy resolution
+// still relies on global control exclusion across its earlier teardown check.
+fn prepare_enable_plan(
+    entry: &mut IrqStateDesc,
+    virq: Virq,
+    force_platform_enable: bool,
+) -> Result<IrqPlatformPlan, IrqDescError> {
+    if entry.is_teardown_in_progress() {
+        return Err(IrqDescError::TeardownInProgress { virq });
+    }
+    if force_platform_enable {
+        Ok(entry.prepare_legacy_enable())
+    } else {
+        if !entry.has_actions() {
+            warn!("enable IRQ {virq} failed because no IRQ action is registered");
+            return Err(IrqDescError::NoIrqAction { virq });
+        }
+        Ok(entry.prepare_enable_irq())
     }
 }
 
@@ -234,20 +265,31 @@ pub fn disable_irq_nosync(spec: impl Into<IrqSpec>) {
 /// [`IrqDescError::UnknownIrq`].
 pub fn try_disable_irq_nosync(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
     reject_nmi_management("disable IRQ")?;
-    let spec = spec.into();
+    disable_line(&IRQ_STATE, spec.into(), apply_platform_plan).map(|_| ())
+}
+
+// Backend updates are bounded and cannot call back into KIRQ management. Keep
+// the selected Line locked through the mask write, but release the directory
+// before entering the controller. The global control lock remains until the
+// other control paths adopt the same per-Line transaction boundary.
+fn disable_line(
+    registry: &SpinNoIrq<IrqState>,
+    spec: IrqSpec,
+    apply_plan: impl FnOnce(IrqPlatformPlan),
+) -> Result<IrqDrain, IrqDescError> {
     let _control_guard = IRQ_CONTROL_LOCK.lock();
-    let plan = {
-        let state = IRQ_STATE.lock();
-        let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
-        let mut entry = state
-            .descs
-            .get(&virq)
-            .ok_or(IrqDescError::UnknownIrq)?
-            .lock();
-        entry.prepare_disable_irq_nosync()
-    };
-    apply_platform_plan(plan);
-    Ok(())
+    let state = registry.lock();
+    let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
+    let line = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
+    let drain = IrqDrain::new(virq, line);
+    {
+        let mut entry = drain.line.lock();
+        // Control keeps IRQs masked across this non-LIFO guard handoff.
+        drop(state);
+        let plan = entry.prepare_disable_irq_nosync();
+        apply_plan(plan);
+    }
+    Ok(drain)
 }
 
 /// Disable an IRQ line and wait for currently running handlers to finish.
@@ -280,19 +322,7 @@ pub fn disable_irq(spec: impl Into<IrqSpec>) -> bool {
 pub fn try_disable_irq(spec: impl Into<IrqSpec>) -> Result<bool, IrqDescError> {
     let spec = spec.into();
     can_wait_for_irq_sync("disable_irq")?;
-    let drain = {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
-        let state = IRQ_STATE.lock();
-        let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
-        let line = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
-        let drain = IrqDrain::new(virq, line);
-        let mut entry = line.lock();
-        let plan = entry.prepare_disable_irq_nosync();
-        drop(entry);
-        drop(state);
-        apply_platform_plan(plan);
-        drain
-    };
+    let drain = disable_line(&IRQ_STATE, spec, apply_platform_plan)?;
     drain.wait();
     Ok(true)
 }

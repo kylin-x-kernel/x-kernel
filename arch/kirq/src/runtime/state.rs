@@ -456,6 +456,11 @@ impl IrqLine {
     pub(super) fn lock(&self) -> SpinNoIrqGuard<'_, IrqStateDesc> {
         self.state.lock()
     }
+
+    #[cfg(unittest)]
+    pub(super) fn is_state_locked_for_tests(&self) -> bool {
+        self.state.is_locked()
+    }
 }
 
 pub(super) struct IrqStateDesc {
@@ -696,7 +701,7 @@ pub(super) struct IrqState {
 }
 
 impl IrqState {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             descs: BTreeMap::new(),
             domain_states: BTreeMap::new(),

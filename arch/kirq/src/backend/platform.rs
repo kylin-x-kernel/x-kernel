@@ -161,6 +161,8 @@ pub trait IntrManagerIf {
     /// they understand, and ignore metadata that is not relevant to that
     /// controller. MSI descriptors are programmed through `MsiBackendIf` and do
     /// not use the normal line configure path.
+    /// Must obey the same bounded, non-sleeping and non-reentrant controller
+    /// contract as [`IntrManagerIf::enable`]; Line state may be locked here too.
     fn configure(desc: IrqDesc);
 
     /// Enables or disables a controller-local IRQ source.
@@ -170,6 +172,11 @@ pub trait IntrManagerIf {
     /// Disabling should mask or otherwise stop delivery of that local source.
     /// MSI enablement is represented by the device-visible MSI message and does
     /// not use this hook.
+    ///
+    /// Must be bounded and non-sleeping. KIRQ may hold the selected Line's
+    /// IRQ-safe state lock across this call. The provider may acquire its own
+    /// controller-register locks, but must not reenter KIRQ registry, control
+    /// or dispatch paths while holding those locks or servicing this call.
     fn enable(id: usize, on: bool);
 
     /// Claims, classifies, and dispatches an interrupt taken with IRQs enabled.

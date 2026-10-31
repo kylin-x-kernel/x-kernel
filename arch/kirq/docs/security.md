@@ -554,6 +554,21 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   ordering; it is not a type-level ban on dropping an admission early or a
   recovery guarantee after a kernel panic. Synthetic completion tests exercise
   software ordering and retained identity, not real controller delivery.
+- Disable releases registry exclusion before calling the controller, but keeps
+  the original Line state locked through the mask update. The backend must be
+  bounded, non-sleeping and must not reenter KIRQ registry/control/dispatch.
+  Controller-register locks are below Line state in this path; providers must
+  release those locks before calling a generic dispatch entry. Drain waiting
+  and the retained Line's final release happen outside all short locks.
+- Enable retains the selected Line before releasing registry exclusion and
+  keeps its state locked through configuration and unmask. Both controller
+  operations obey the same non-reentrancy and bounded-execution contract as
+  mask. Rejected normal enables do not publish a Line or change disable depth;
+  legacy candidate allocation and final owner release stay outside short locks.
+  The outer global control guard masks IRQs before registry and Line acquisition
+  and restores context only after both guards are gone. It protects the non-LIFO
+  registry-to-Line handoff; removing it requires an independent outer context
+  guard, not merely deleting the global lock.
 - `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
   delayed-work product API and timer adapter have been removed. Automatic delayed
   retry, full Linux concurrent-flusher handoff, CPU hotplug drain and rescuer

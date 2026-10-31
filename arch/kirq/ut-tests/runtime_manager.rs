@@ -1289,6 +1289,205 @@ fn test_disable_irq_nosync_rejects_unknown_virq_without_creating_descriptor() {
     assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
 }
 
+#[def_test]
+fn enable_final_admission_rechecks_teardown() {
+    let virq = 0x3163;
+    for force in [false, true] {
+        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+        entry.prepare_register_disabled();
+        assert!(!entry.is_teardown_in_progress());
+        // Model a stale observation without relying on another CPU's timing.
+        entry.begin_teardown();
+        let result = super::prepare_enable_plan(&mut entry, virq, force);
+        assert!(matches!(result, Err(IrqDescError::TeardownInProgress { virq: id }) if id == virq));
+        assert_eq!(entry.disable_depth_for_tests(), 1);
+        assert!(!entry.is_enabled_for_tests());
+        entry.finish_teardown();
+        assert_eq!(super::prepare_enable_plan(&mut entry, virq, force).unwrap().enable, Some(true));
+    }
+}
+
+#[def_test(serial)]
+fn control_transactions_preserve_already_masked_context() {
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let virq = 0x3164;
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+    let line = Arc::new(IrqLine::new(entry));
+    registry.lock().descs.insert(virq, line);
+    let irq_before = karch::local_irq_enabled();
+    {
+        let _context = kspin::NoPreemptIrqSave::new();
+        super::enable_line(&registry, virq.into(), false, |_| {}).unwrap();
+        assert!(!karch::local_irq_enabled());
+        let _drain = super::disable_line(&registry, virq.into(), |_| {}).unwrap();
+        assert!(!karch::local_irq_enabled());
+        let mut has_applied = false;
+        let result = super::enable_line(&registry, (virq + 1).into(), false, |_| has_applied = true);
+        assert!(matches!(result, Err(IrqDescError::UnknownIrq)));
+        assert!(!has_applied);
+        assert!(!karch::local_irq_enabled());
+    }
+    assert_eq!(karch::local_irq_enabled(), irq_before);
+}
+
+// UP spinlocks have no contended state to inspect; the lock-exclusion probe
+// requires SMP even though nested-enable semantics apply to both builds.
+#[def_test(serial)]
+fn enable_backend_holds_original_line_through_nested_and_forced_updates() -> unittest::TestResult {
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let has_atomic_exclusion = {
+        let _guard = registry.lock();
+        registry.is_locked()
+    };
+    if !has_atomic_exclusion {
+        return unittest::TestResult::Ignored;
+    }
+    let virq = 0x315b;
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+    entry.prepare_disable_irq_nosync();
+    entry.prepare_disable_irq_nosync();
+    let line = Arc::new(IrqLine::new(entry));
+    registry.lock().descs.insert(virq, line.clone());
+
+    for (force, expected_enable, configure, depth) in [
+        (false, None, false, 1),
+        (false, Some(true), true, 0),
+        (false, None, false, 0),
+        (true, Some(true), false, 0),
+    ] {
+        let irq_before = karch::local_irq_enabled();
+        let mut observed = None;
+        super::enable_line(&registry, virq.into(), force, |plan| {
+            // This registry is private; remote IRQs cannot affect the probe.
+            observed = Some((karch::local_irq_enabled(), registry.try_lock().is_some(),
+                line.is_state_locked_for_tests(), plan.desc.logical_irq(), plan.enable,
+                plan.configure));
+        }).unwrap();
+        assert_eq!(karch::local_irq_enabled(), irq_before);
+        assert_eq!(observed, Some((false, true, true, Some(virq), expected_enable, configure)));
+        assert!(!line.is_state_locked_for_tests());
+        assert_eq!(line.lock().disable_depth_for_tests(), depth);
+        assert_eq!(line.lock().is_enabled_for_tests(), depth == 0);
+        assert!(Arc::ptr_eq(registry.lock().descs.get(&virq).unwrap(), &line));
+    }
+    unittest::TestResult::Ok
+}
+
+#[def_test(serial)]
+fn enable_rejections_do_not_call_backend_or_change_line() {
+    let irq_before = karch::local_irq_enabled();
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let virq = 0x315c;
+    let mut has_called_backend = false;
+    let result = super::enable_line(&registry, virq.into(), false, |_| {
+        has_called_backend = true;
+    });
+    assert!(matches!(result, Err(IrqDescError::UnknownIrq)));
+    assert_eq!(karch::local_irq_enabled(), irq_before);
+    assert!(!has_called_backend);
+    assert!(registry.lock().descs.is_empty());
+
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    entry.prepare_disable_irq_nosync();
+    let line = Arc::new(IrqLine::new(entry));
+    registry.lock().descs.insert(virq, line.clone());
+    let result = super::enable_line(&registry, virq.into(), false, |_| {
+        has_called_backend = true;
+    });
+    assert!(matches!(result, Err(IrqDescError::NoIrqAction { virq: id }) if id == virq));
+    assert_eq!(karch::local_irq_enabled(), irq_before);
+    assert!(!has_called_backend);
+    assert_eq!(line.lock().disable_depth_for_tests(), 1);
+    assert!(!line.lock().is_enabled_for_tests());
+    line.lock().begin_teardown();
+    for force in [false, true] {
+        let result = super::enable_line(&registry, virq.into(), force, |_| {
+            has_called_backend = true;
+        });
+        assert!(matches!(result, Err(IrqDescError::TeardownInProgress { virq: id }) if id == virq));
+        assert_eq!(karch::local_irq_enabled(), irq_before);
+        assert!(!has_called_backend);
+        assert_eq!(line.lock().disable_depth_for_tests(), 1);
+        assert!(!line.lock().is_enabled_for_tests());
+    }
+    line.lock().finish_teardown();
+}
+
+#[def_test(serial)]
+fn legacy_enable_publishes_line_before_backend_update() {
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let virq = 0x315d;
+    let irq_before = karch::local_irq_enabled();
+    let mut retained = None;
+    let mut observed = None;
+    super::enable_line(&registry, virq.into(), true, |plan| {
+        observed = Some((plan.configure, plan.enable, plan.desc.logical_irq()));
+        retained = Some(registry.lock().descs.get(&virq).unwrap().clone());
+    }).unwrap();
+    assert_eq!(karch::local_irq_enabled(), irq_before);
+    assert_eq!(observed, Some((true, Some(true), Some(virq))));
+    let line = retained.unwrap();
+    assert!(Arc::ptr_eq(registry.lock().descs.get(&virq).unwrap(), &line));
+    assert_eq!(line.lock().disable_depth_for_tests(), 0);
+    assert!(line.lock().is_enabled_for_tests());
+}
+
+// UP spinlocks have no contended state to inspect; the lock-exclusion probe
+// requires SMP even though nested-disable semantics apply to both builds.
+#[def_test(serial)]
+fn disable_backend_holds_original_line_without_registry_lock() -> unittest::TestResult {
+    // Real IRQs on other CPUs may take IRQ_STATE even during serial tests.
+    // A private registry makes try_lock failure specific to this transaction.
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let has_atomic_exclusion = {
+        let _guard = registry.lock();
+        registry.is_locked()
+    };
+    if !has_atomic_exclusion {
+        return unittest::TestResult::Ignored;
+    }
+    let virq = 0x3159;
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+    assert_eq!(entry.prepare_enable_irq().enable, Some(true));
+    let line = Arc::new(IrqLine::new(entry));
+    registry.lock().descs.insert(virq, line.clone());
+
+    for expected_enable in [Some(false), None] {
+        let irq_before = karch::local_irq_enabled();
+        let mut observed = None;
+        let drain = super::disable_line(&registry, virq.into(), |plan| {
+            observed = Some((karch::local_irq_enabled(), registry.try_lock().is_some(),
+                line.is_state_locked_for_tests(), plan.desc.logical_irq(), plan.enable,
+                plan.configure));
+        }).unwrap();
+        assert_eq!(karch::local_irq_enabled(), irq_before);
+        assert_eq!(observed, Some((false, true, true, Some(virq), expected_enable, false)));
+        assert!(Arc::ptr_eq(&drain.line, &line));
+        assert!(!line.is_state_locked_for_tests());
+    }
+    assert_eq!(line.lock().disable_depth_for_tests(), 2);
+    assert!(!line.lock().is_enabled_for_tests());
+    unittest::TestResult::Ok
+}
+
+#[def_test(serial)]
+fn disable_missing_line_does_not_call_backend() {
+    let irq_before = karch::local_irq_enabled();
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let virq = 0x315a;
+    assert!(!registry.lock().descs.contains_key(&virq));
+    let mut has_called_backend = false;
+    let result = super::disable_line(&registry, virq.into(), |_| has_called_backend = true);
+    assert_eq!(karch::local_irq_enabled(), irq_before);
+    assert!(matches!(result, Err(IrqDescError::UnknownIrq)));
+    assert!(!has_called_backend);
+    assert!(!registry.lock().descs.contains_key(&virq));
+}
+
 #[def_test(serial)]
 fn test_dispatch_tracks_line_level_in_flight() {
     IRQ_IN_FLIGHT_OBSERVED.store(0, Ordering::Relaxed);
