@@ -66,6 +66,12 @@ kfd resources / kvfs / device and pipe implementations
 | `dir.rs::DirBuffer::write_entry` | `sys_getdents64 -> Directory::read_dir -> DirBuffer::write_entry` | 在临时 `Vec<u8>` 中按 `linux_dirent64` ABI 写目录项 | 写入前计算记录长度并检查 `remaining_space >= len`；`entry_ptr` 位于 `Vec` 已分配范围内；记录按 `align_of::<linux_dirent64>()` 对齐；文件名复制长度来自 `name.as_bytes().len()`；尾部写入 NUL；写完后只增加 `offset` 到已检查范围 |
 | `ioctl.rs::FiemapHeader` 的 `UserRead`/`UserWrite` 实现 | `sys_ioctl(FS_IOC_FIEMAP)` | 复制 Linux FIEMAP header | `repr(C)` 结构仅含整数，末尾显式 `reserved` 覆盖 ABI 对齐且任意 bit pattern 有效；每个字节都属于已初始化字段 |
 | `ioctl.rs::FiemapExtent` 的 `UserWrite` 实现 | FIEMAP writer 输出 | 复制 Linux FIEMAP extent | `repr(C)` 结构所有 ABI reserved 区域都由显式整数数组覆盖并在每次输出时清零，不存在未初始化 padding |
+| `notify.rs::entry_notify_wanted` (`transmute::<usize, WatchProbe>`) | `open`/`mkdir`/`mknod`/`symlink`/`link`/`unlink`/`rmdir`/`rename` entry, the "no watch anywhere" probe | Restores the installed `fn` pointer from its integer form | Only `set_watch_probe` writes the static, storing `probe as usize` -- the address of a `fn` item whose signature matches exactly -- so every non-zero value is such a code address; `0` is the "not installed" sentinel and is excluded before the cast; the `Release` store pairs with the `Acquire` load. Several syscall entries may install concurrently, but each stores the same typed value, so the invariant rests on the typed setter parameter, the sentinel and the ordering, not on a single writer. Failure consequence: if that invariant is broken the call jumps to a non-function address (UB), so no other path may write the static |
+| `notify.rs::notify_entry` (`transmute::<usize, EntryNotifier>`) | `notify_entry_of_path` / `notify_entry`, directory-entry events | Restores the entry notifier the same way | Same argument: the only writer is `set_entry_notifier`, the signature matches the cast type, the `0` sentinel is excluded first, and the store/load pair is `Release`/`Acquire` |
+| `notify.rs::notify_self_object` (`transmute::<usize, SelfNotifier>`) | `link`'s `IN_ATTRIB`, self-events of removal and rename | Restores the self-event notifier | Same argument: the only writer is `set_self_notifier` |
+| `notify.rs::retire_object` (`transmute::<usize, RetireNotifier>`) | retirement of an object's watches when it disappears | Restores the retirement notifier | Same argument: the only writer is `set_retire_notifier` |
+
+
 
 新增 `unsafe` 块必须同时满足：
 

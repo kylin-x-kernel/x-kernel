@@ -61,7 +61,9 @@ pub use kiocb::Kiocb;
 pub use ktime_types::TimestampLimits;
 pub use locks::{FileLock, FileLockOwner, FileLockType};
 pub use lookup::{LookupFlags, LookupIntent, MagicLinkOps, ResolvedObject};
-pub use mount::{MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path, RenderedPath};
+pub use mount::{
+    CreatedEntry, MntNamespace, Mount, MountFlags, MountIdmap, NamespaceClone, Path, RenderedPath,
+};
 pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     CharacterDeviceRegistration, Dentry, DentryOperations, DeviceAccess, DeviceAccessPolicy,
@@ -97,7 +99,7 @@ pub use transfer::{TransferPosition, copy_file_range, transfer_files};
 pub(crate) use type_map::TypeMap;
 pub use types::{
     DeviceId, FallocateFlags, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType,
-    SetattrTime, Umode,
+    RemovedEntry, RenameOutcome, SetattrTime, Umode,
 };
 pub use xattr::{XATTR_NAME_MAX, XattrName, XattrNameRef, XattrNameSink, XattrSetFlags};
 

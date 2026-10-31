@@ -92,6 +92,10 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
 
     trace!("Syscall {sysno:?}");
 
+    // One-time installation of the filesystem notification routing for
+    // inotify; afterwards this is one relaxed load per syscall.
+    crate::notify::install_fs_notifier();
+
     // seccomp filters run before dispatch (Linux evaluates seccomp before
     // the syscall handler). The current thread's mode/chain decides whether
     // the syscall is allowed, gets an errno, or kills the process/thread.

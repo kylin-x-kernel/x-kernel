@@ -141,6 +141,9 @@ namespace 状态前校验 name、mount relationship、类型、topology 和 oper
 
 ## unsafe 代码清单
 
+| Location | Call path | Purpose | Invariant / safety argument |
+|---|---|---|---|
+
 文件锁共享节点的 `unsafe` 封装在私有 `locks/node.rs`：区间访问依赖唯一所有权，
 等待关系与取消解链由全局等待锁保护。侵入式链表使用 `intrusive-collections` 的
 typed adapter 和安全的 `clone_pointer()`，不手工调整 Arc 引用计数。其余 namespace

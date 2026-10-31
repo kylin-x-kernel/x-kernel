@@ -117,9 +117,15 @@ pub fn sys_mkdirat(dirfd: i32, path: UserConstPtr<c_char>, mode: u32) -> KResult
     let filename = Filename::new(path.as_str());
 
     with_fs_at(dirfd, &filename, |fs| {
-        filename
-            .mkdir_at(fs.root(), fs.pwd(), mode, fs.node_umask(), &cred)
-            .map(|_| 0)
+        let created = filename.mkdir_at_entry(fs.root(), fs.pwd(), mode, fs.node_umask(), &cred)?;
+        // The new entry is a directory, so the creation carries IN_ISDIR; the
+        // parent identity and name come from the created entry's own record,
+        // captured under the create lock.
+        crate::notify::notify_created_entry(
+            &created,
+            crate::notify::IN_CREATE | crate::notify::IN_ISDIR,
+        );
+        Ok(0)
     })
 }
 
@@ -141,16 +147,16 @@ pub fn sys_mknodat(
     );
 
     with_fs_at(dirfd, &filename, |fs| {
-        filename
-            .mknod_at(
-                fs.root(),
-                fs.pwd(),
-                mode,
-                DeviceId(device as u64),
-                fs.node_umask(),
-                &cred,
-            )
-            .map(|_| 0)
+        let created = filename.mknod_at_entry(
+            fs.root(),
+            fs.pwd(),
+            mode,
+            DeviceId(device as u64),
+            fs.node_umask(),
+            &cred,
+        )?;
+        crate::notify::notify_created_entry(&created, crate::notify::IN_CREATE);
+        Ok(0)
     })
 }
 

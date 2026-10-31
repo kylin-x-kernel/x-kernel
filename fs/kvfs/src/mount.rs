@@ -26,9 +26,9 @@ pub struct MountIdmap;
 use crate::{
     Dentry, DentryKey, DeviceId, FMode, FileOperations, FsContext, GetattrQueryFlags,
     GetattrRequestMask, InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags,
-    NodePermission, NodeType, OpenFlags, Permission, RenameFlags, SetattrTime, StatFs, SuperBlock,
-    SuperBlockFlags, Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, nullfs,
-    path::PathBuf,
+    NodePermission, NodeType, OpenFlags, Permission, RemovedEntry, RenameFlags, RenameOutcome,
+    SetattrTime, StatFs, SuperBlock, SuperBlockFlags, Umode, VfsError, VfsFile, VfsFileBuilder,
+    VfsInode, VfsResult, nullfs, path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -831,6 +831,23 @@ impl Mount {
     }
 }
 
+/// A created entry together with the directory it was created in.
+///
+/// The parent identity and the entry name are captured inside the creating
+/// operation, from the parent the operation itself used, because the created
+/// dentry's own location is mutable afterwards: a concurrent rename could
+/// otherwise make a later `path.parent()`/`path.name()` describe a different
+/// directory and name than the creation touched.
+#[derive(Clone, Debug)]
+pub struct CreatedEntry {
+    /// The created entry.
+    pub path: Path,
+    /// The name the entry was created under.
+    pub name: alloc::string::String,
+    /// `(device, inode)` of the directory that received the entry.
+    pub parent: Metadata,
+}
+
 /// A resolved location within a mountpoint.
 #[derive(Debug, Clone)]
 pub struct Path {
@@ -1244,6 +1261,20 @@ impl Path {
         self.inode().getattr(self, request_mask, query_flags)
     }
 
+    /// Returns this path's `(device, inode)` identity without a filesystem
+    /// round-trip.
+    ///
+    /// Only the two fields a watch is keyed by are meaningful here: everything
+    /// else in the returned metadata is the inode's *cached* copy, which a
+    /// backend may leave stale until the next `getattr` (network filesystems
+    /// in particular). Callers that need an authoritative `nlink` -- the
+    /// retirement decision -- must use [`Mount::getattr`].
+    pub(crate) fn identity(&self) -> Metadata {
+        let mut metadata = self.dentry.vfs_inode().metadata();
+        metadata.device = self.mnt.synthetic_device_id();
+        metadata
+    }
+
     /// Returns VFS metadata for this path.
     pub fn getattr(&self) -> VfsResult<Metadata> {
         let mut metadata =
@@ -1455,17 +1486,48 @@ impl Path {
         flags: RenameFlags,
         cred: &Cred,
     ) -> VfsResult<()> {
+        self.rename_tracked(old_name, new_dir, new_name, flags, cred)
+            .map(|_| ())
+    }
+
+    /// Renames like `Mount::rename` and reports what moved and was replaced.
+    ///
+    /// The identities are captured under the namespace lock the rename holds,
+    /// from the very dentries it operates on, so they cannot describe a
+    /// different object than the one that moved.
+    pub fn rename_tracked(
+        &self,
+        old_name: &str,
+        new_dir: &Self,
+        new_name: &str,
+        flags: RenameFlags,
+        cred: &Cred,
+    ) -> VfsResult<RenameOutcome> {
         if !Arc::ptr_eq(&self.mnt, &new_dir.mnt) {
             return Err(VfsError::CrossesDevices);
         }
         self.check_writable_mount()?;
 
+        // The identities the event sources need are captured here, inside the
+        // callback the rename runs under its namespace lock, from the very
+        // dentries being moved and replaced. A path lookup afterwards could
+        // describe a different object entirely; a failed `getattr` only means
+        // the event is not reported, never that the rename fails.
+        let mut moved = false;
+        let mut source_meta = None;
+        let mut replaced_meta = None;
+        let mut replaced_nlink = None;
+        let mut replaced_dentry = None;
         self.dentry.as_dir()?.rename_with(
             old_name,
             new_dir.dentry.as_dir()?,
             new_name,
             flags,
             |source, target| {
+                // The callback only runs when the rename really moves an
+                // entry: kvfs returns early, without calling it, for a rename
+                // between two links of one inode.
+                moved = true;
                 self.may_modify_directory(cred)?;
                 if !self.ptr_eq(new_dir) {
                     new_dir.may_modify_directory(cred)?;
@@ -1474,14 +1536,32 @@ impl Path {
                 let old_path = self.with_dentry(source.clone());
                 self.check_sticky(&old_path, cred)?;
                 old_path.check_not_mountpoint()?;
+                // The source's type is all the move halves need, and the
+                // cached copy has it; the replaced target's `nlink` drives a
+                // retirement decision, so it is read authoritatively.
+                source_meta = Some(old_path.identity());
                 if target.is_really_positive() {
                     let new_path = new_dir.with_dentry(target.clone());
                     new_dir.check_sticky(&new_path, cred)?;
                     new_path.check_not_mountpoint()?;
+                    replaced_meta = Some(new_path.identity());
+                    replaced_nlink = Some(
+                        new_path
+                            .getattr()
+                            .map_or_else(|_| new_path.identity().nlink, |meta| meta.nlink),
+                    );
+                    replaced_dentry = Some(target.clone());
                 }
                 Ok(())
             },
-        )
+        )?;
+        Ok(RenameOutcome {
+            moved,
+            source: source_meta,
+            replaced: replaced_meta,
+            replaced_nlink,
+            replaced_dentry,
+        })
     }
 
     /// Remove a non-directory entry.
@@ -1495,7 +1575,22 @@ impl Path {
         has_trailing_slash: bool,
         cred: &Cred,
     ) -> VfsResult<()> {
+        self.unlink_with_pathname_tracked(name, has_trailing_slash, cred)
+            .map(|_| ())
+    }
+
+    /// Unlinks like `Mount::unlink_with_pathname` and reports the victim.
+    pub(crate) fn unlink_with_pathname_tracked(
+        &self,
+        name: &str,
+        has_trailing_slash: bool,
+        cred: &Cred,
+    ) -> VfsResult<Option<RemovedEntry>> {
         self.check_writable_mount()?;
+        // Captured under the namespace lock, from the dentry the removal
+        // actually unlinks -- the event identity must describe that object,
+        // not whatever a separate lookup saw before the lock was taken.
+        let mut removed = None;
         self.dentry.as_dir()?.unlink_with(name, |victim| {
             if has_trailing_slash {
                 return Err(VfsError::NotADirectory);
@@ -1503,19 +1598,66 @@ impl Path {
             self.may_modify_directory(cred)?;
             let victim_path = self.with_dentry(victim.clone());
             self.check_sticky(&victim_path, cred)?;
-            victim_path.check_not_mountpoint()
-        })
+            victim_path.check_not_mountpoint()?;
+            // Pre-unlink `nlink`: the FS decrements it when the unlink below
+            // runs, and the retired-or-survives decision is about that move.
+            // This one field must be authoritative, so it comes from `getattr`
+            // -- a backend (9p) may leave the cached copy stale -- and a
+            // failure means no retirement decision is taken at all rather than
+            // a wrong one. The parent identity is a key, so the cached
+            // `(device, inode)` suffices.
+            removed = Some(RemovedEntry {
+                parent: self.identity(),
+                name: alloc::string::String::from(name),
+                victim: victim_path.identity(),
+                // Authoritative when the backend answers, cached otherwise:
+                // a removal whose link count cannot be decided would leave the
+                // watch pinned to a dead object forever, which is worse than
+                // acting on a possibly stale count.
+                victim_nlink: Some(
+                    victim_path
+                        .getattr()
+                        .map_or_else(|_| victim_path.identity().nlink, |meta| meta.nlink),
+                ),
+                victim_dentry: victim.clone(),
+            });
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
     /// Remove a directory entry.
     pub fn rmdir(&self, name: &str, cred: &Cred) -> VfsResult<()> {
+        self.rmdir_tracked(name, cred).map(|_| ())
+    }
+
+    /// Removes a directory like `Mount::rmdir` and reports the victim.
+    pub fn rmdir_tracked(&self, name: &str, cred: &Cred) -> VfsResult<Option<RemovedEntry>> {
         self.check_writable_mount()?;
+        let mut removed = None;
         self.dentry.as_dir()?.rmdir_with(name, |victim| {
             self.may_modify_directory(cred)?;
             let victim_path = self.with_dentry(victim.clone());
             self.check_sticky(&victim_path, cred)?;
-            victim_path.check_not_mountpoint()
-        })
+            victim_path.check_not_mountpoint()?;
+            removed = Some(RemovedEntry {
+                parent: self.identity(),
+                name: alloc::string::String::from(name),
+                victim: victim_path.identity(),
+                // Authoritative when the backend answers, cached otherwise:
+                // a removal whose link count cannot be decided would leave the
+                // watch pinned to a dead object forever, which is worse than
+                // acting on a possibly stale count.
+                victim_nlink: Some(
+                    victim_path
+                        .getattr()
+                        .map_or_else(|_| victim_path.identity().nlink, |meta| meta.nlink),
+                ),
+                victim_dentry: victim.clone(),
+            });
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
     /// Mount a filesystem at this path.

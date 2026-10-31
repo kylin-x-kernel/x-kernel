@@ -12,11 +12,14 @@
 //! for a buffer that cannot hold the next whole event, and `FIONREAD` reporting
 //! the queued byte count.
 //!
-//! Events reach the queue only through [`Inotify::queue_event`]. This commit
-//! queues two kernel-generated kinds itself — `IN_IGNORED` when a watch is
-//! removed and `IN_Q_OVERFLOW` when the queue overruns — and nothing else yet:
-//! the filesystem event source is wired in a separate change, so a watch on a
-//! quiet filesystem simply never reports readiness instead of faking events.
+//! Events reach the queue through [`Inotify::queue_event`]. The object queues
+//! `IN_IGNORED` on watch removal and `IN_Q_OVERFLOW` on overrun itself;
+//! directory-entry events arrive from the VFS hooks through [`notify_path`],
+//! which routes by the registered path bytes: create and delete from the
+//! entry-creating and entry-removing syscalls, and a rename as the
+//! `IN_MOVED_FROM`/`IN_MOVED_TO` pair carrying one cookie. Attribute- and
+//! close-class events have no source yet, and a watch never reports what
+//! nothing reported.
 //!
 //! Two limits follow Linux defaults with one deliberate simplification: the
 //! 16384-event queue ceiling and the 8192-watch ceiling are enforced per
@@ -25,14 +28,19 @@
 //! follow-up; the per-instance limits still bound kernel memory so an
 //! undrained instance cannot grow without end.
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicI32, Ordering};
+use alloc::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 use anon_inodefs::AnonInodeFs;
 use hashbrown::HashMap;
 use iov_iter::IovIterDest;
 use kcred::Cred;
 use kerrno::{KError, KResult};
+use klazy::Lazy;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
 use kvfs::{FMode, FileOperations, Kiocb, OpenFlags, VfsFile, poll_file_io};
@@ -50,20 +58,20 @@ use linux_raw_sys::{
 pub const INOTIFY_PATH_MAX: usize = 4096;
 
 /// Watch descriptor numbers start at 1, as on Linux.
-pub const FIRST_WATCH_DESCRIPTOR: i32 = 1;
+pub(crate) const FIRST_WATCH_DESCRIPTOR: i32 = 1;
 
 /// Queued-event ceiling per instance, the Linux `max_queued_events` default.
 ///
 /// Linux accounts the queue per user across instances; that accounting is not
 /// modeled here (see the module docs). The limit exists so an instance nobody
 /// is draining cannot exhaust kernel memory.
-pub const MAX_QUEUED_EVENTS: usize = 16384;
+pub(crate) const MAX_QUEUED_EVENTS: usize = 16384;
 
 /// Watch ceiling per instance, the Linux `max_user_watches` default.
 ///
 /// Same per-instance simplification as [`MAX_QUEUED_EVENTS`]: Linux counts
 /// watches per user, this counts per instance.
-pub const MAX_WATCHES: usize = 8192;
+pub(crate) const MAX_WATCHES: usize = 8192;
 
 // The mask bits come from `linux_raw_sys`, the same source the syscall adapter
 // validates against: one definition of a bit means the two layers cannot drift
@@ -211,6 +219,9 @@ impl WatchTable {
 
 /// A kernel `inotify` instance.
 pub struct Inotify {
+    /// Identity used to tell this instance's registry entries from another
+    /// instance's entries for the same path and descriptor number.
+    id: usize,
     next_watch_descriptor: AtomicI32,
     watches: Mutex<WatchTable>,
     poll_rx: PollSet,
@@ -238,6 +249,10 @@ struct EventQueue {
 struct QueuedEvent {
     watch_descriptor: i32,
     mask: u32,
+    /// Rename pairing value: the two halves of one move share it, and every
+    /// other event reports 0, which is what Linux's `fsnotify_get_cookie()`
+    /// values look like to user space.
+    cookie: u32,
     name: Vec<u8>,
     /// Whether this is the overrun marker: it carries `wd = -1` and
     /// `IN_Q_OVERFLOW`, and consuming it re-arms overrun reporting. Tracked
@@ -286,15 +301,297 @@ fn name_field_len(name_len: usize) -> usize {
     }
 }
 
-/// Bytes one queued record occupies: the header plus its name field.
+/// A registered watch, as seen by the filesystem side.
+///
+/// The descriptor alone cannot identify an entry: watch descriptors are
+/// numbered per instance, so two instances watching the same path both hold
+/// `wd = 1`. The instance id makes removal target exactly one instance's
+/// entry.
+struct RegistryEntry {
+    instance: Weak<Inotify>,
+    instance_id: usize,
+    watch_descriptor: i32,
+    /// The watched object itself, kept alive for as long as any watch on it
+    /// exists.
+    ///
+    /// This is Linux's model: an fsnotify mark holds the inode, so an inode
+    /// cannot be freed -- and its number reused -- while a watch still names
+    /// it. Without the pin, releasing the last in-memory reference would end
+    /// an inode that is still linked on disk, and any retirement keyed on that
+    /// release would report a death that never happened.
+    _object: Pin,
+}
+
+/// An opaque strong reference to the watched object.
+///
+/// `kfd_objects` only needs to keep it alive, not to inspect it, so the
+/// registry stores it type-erased: the filesystem crate stays free to change
+/// its inode type, and this crate keeps no filesystem knowledge beyond the
+/// handle it was given.
+pub type Pin = Arc<dyn core::any::Any + Send + Sync>;
+
+/// Hands out the per-instance ids used to disambiguate registry entries.
+static NEXT_INSTANCE_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Object-to-watches index shared by every inotify instance.
+///
+/// Keyed by the watched object's `(device, inode)`, so a filesystem operation
+/// can find the watches interested in it without walking every instance, and so
+/// a watched directory keeps its watches when it is renamed -- Linux reaches the
+/// same marks by walking the changed entry's parent inode. A `Weak` reference is
+/// held deliberately: an instance user space has closed must not be kept alive
+/// by the registry, or its watch table would leak for the lifetime of the
+/// kernel.
+type WatchRegistry = HashMap<WatchIdentity, Vec<RegistryEntry>>;
+
+/// Lazily initialised: `ksync::Mutex::new` is not a `const fn` once lock
+/// statistics are compiled in, so a bare static initialiser would not build
+/// under that configuration. The named type keeps the static's own type
+/// readable (and below clippy's complexity threshold).
+static WATCH_REGISTRY: Lazy<Mutex<Option<WatchRegistry>>> = Lazy::new(|| Mutex::new(None));
+
+/// The shared registry.
+fn registry() -> &'static Mutex<Option<WatchRegistry>> {
+    Lazy::force(&WATCH_REGISTRY)
+}
+
+/// Whether any watch is registered anywhere.
+///
+/// The filesystem side reads this (through the installed probe) before doing
+/// work that only matters when a watch exists.
+pub fn any_watch_registered() -> bool {
+    REGISTRY_NON_EMPTY.load(Ordering::Acquire)
+}
+
+/// Whether any watch is registered anywhere, so the VFS hook can skip the
+/// registry lock on the common path where no watch exists at all.
+///
+/// Only set while holding the registry lock and only cleared while holding it
+/// with an empty map, so a stale `true` costs one lock acquisition and a stale
+/// `false` cannot occur and drop an event.
+static REGISTRY_NON_EMPTY: AtomicBool = AtomicBool::new(false);
+
+/// Delivers a filesystem event to every watch registered for an object.
+///
+/// `device` and `inode` identify the directory the changed entry lives in, which
+/// is the object a watch on that directory was registered for. Called from the
+/// VFS paths that change a directory entry. `mask` is the event bit to report;
+/// watches that did not subscribe to it are skipped, which is what the mask
+/// argument of `inotify_add_watch` is for. An unregistered object returns early:
+/// the hook fires for every creating open and removal in the system, so logging
+/// here would bury the one line that matters under per-file-open noise, and a
+/// missed delivery is indistinguishable from a quiet filesystem by design.
+pub fn notify_path(device: u64, inode: u64, mask: u32, name: &[u8], cookie: u32) {
+    // This hook runs for every creating open and every removal in the system,
+    // and a system with no inotify watch anywhere is the common case, so the
+    // lock is skipped entirely until a watch exists.
+    if !REGISTRY_NON_EMPTY.load(Ordering::Acquire) {
+        return;
+    }
+    // Collect the interested instances under the registry lock and deliver
+    // after releasing it. Delivery must not run inside the critical section:
+    // dropping the last strong reference here would run `Inotify::drop`, which
+    // unregisters from this same registry and would self-deadlock. Keeping the
+    // section to a lookup plus weak upgrades also keeps the lock off the
+    // per-instance work.
+    let mut interested = Vec::new();
+    {
+        let registry = registry().lock();
+        let Some(registry) = registry.as_ref() else {
+            // No inotify instance has ever registered a watch.
+            return;
+        };
+        let Some(entries) = registry.get(&WatchIdentity { device, inode }) else {
+            // No watch on this object.
+            return;
+        };
+        for entry in entries {
+            let Some(instance) = entry.instance.upgrade() else {
+                continue;
+            };
+            // Every upgraded reference leaves the critical section, even the
+            // ones this event does not interest: dropping the last strong
+            // reference here would run `Inotify::drop`, which unregisters from
+            // this same registry and would self-deadlock. Filtering happens
+            // after the lock is released.
+            interested.push((instance, entry.watch_descriptor));
+        }
+    }
+    for (instance, descriptor) in interested {
+        instance.deliver(descriptor, mask, name, cookie);
+    }
+}
+
+/// Reports a self-event (`IN_DELETE_SELF`, `IN_MOVE_SELF`) to every watch on
+/// `(device, inode)`, leaving those watches in place.
+///
+/// A rename moves the object rather than destroying it, so its watches survive
+/// and only hear about it.
+pub fn notify_self_object(device: u64, inode: u64, self_mask: u32, is_dir: bool) {
+    // Linux's `fsnotify_inode()` sets `FS_ISDIR` for every inode event whose
+    // inode is a directory, so a `IN_MOVE_SELF`/`IN_DELETE_SELF`/`IN_ATTRIB` on
+    // a directory carries it too.
+    let self_mask = if is_dir {
+        self_mask | IN_ISDIR
+    } else {
+        self_mask
+    };
+    for_each_watch(device, inode, |instance, descriptor| {
+        instance.report_self(descriptor, self_mask);
+    });
+}
+
+/// Retires every watch on the object `(device, inode)`, which the caller has
+/// established is going away: a removal, or a rename that replaces it.
+///
+/// `self_mask` is the self-event to report (`IN_DELETE_SELF` or
+/// `IN_MOVE_SELF`); every retiree also gets `IN_IGNORED`, as on Linux.
+pub fn retire_entry(device: u64, inode: u64, self_mask: u32, is_dir: bool) {
+    let self_mask = if is_dir {
+        self_mask | IN_ISDIR
+    } else {
+        self_mask
+    };
+    for_each_watch(device, inode, |instance, descriptor| {
+        instance.retire(descriptor, self_mask);
+    });
+}
+
+/// Hands every watch on `(device, inode)` to `f`, outside the registry lock.
+fn for_each_watch(device: u64, inode: u64, f: impl Fn(&Arc<Inotify>, i32)) {
+    if !REGISTRY_NON_EMPTY.load(Ordering::Acquire) {
+        return;
+    }
+    let identity = WatchIdentity { device, inode };
+    let mut interested = Vec::new();
+    {
+        let registry = registry().lock();
+        let Some(registry) = registry.as_ref() else {
+            return;
+        };
+        let Some(entries) = registry.get(&identity) else {
+            return;
+        };
+        for entry in entries {
+            let Some(instance) = entry.instance.upgrade() else {
+                continue;
+            };
+            interested.push((instance, entry.watch_descriptor));
+        }
+    }
+    for (instance, descriptor) in interested {
+        f(&instance, descriptor);
+    }
+}
+
+/// Number of registry entries for `identity`; the unit tests assert that
+/// removal and instance teardown leave no key behind.
+#[cfg(unittest)]
+pub(crate) fn registry_entry_count(identity: WatchIdentity) -> usize {
+    let registry = registry().lock();
+    registry
+        .as_ref()
+        .and_then(|map| map.get(&identity))
+        .map_or(0, |entries| entries.len())
+}
+
+/// Adds `identity` to the shared index for `instance`.
+fn register_watch(
+    identity: WatchIdentity,
+    object: Pin,
+    instance: &Arc<Inotify>,
+    watch_descriptor: i32,
+) {
+    let mut registry = registry().lock();
+    let map = registry.get_or_insert_with(Default::default);
+    let entries = map.entry(identity).or_default();
+    // Dead references are pruned so closed instances do not accumulate, but
+    // their removal is deferred until the lock is released: an entry owns a
+    // pin on the watched object, and dropping the last one runs the inode's
+    // eviction -- filesystem work that must never happen under this lock.
+    let mut dead = Vec::new();
+    let mut index = 0;
+    while index < entries.len() {
+        if entries[index].instance.strong_count() == 0 {
+            dead.push(entries.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    entries.push(RegistryEntry {
+        instance: Arc::downgrade(instance),
+        instance_id: instance.id,
+        watch_descriptor,
+        _object: object,
+    });
+    REGISTRY_NON_EMPTY.store(true, Ordering::Release);
+    drop(registry);
+    drop(dead);
+}
+
+/// Removes one watch from the shared index.
+///
+/// Matched on `(instance_id, watch_descriptor)`, not the descriptor alone:
+/// descriptors are per instance, so filtering by number would delete a
+/// different instance's watch on the same path and silence it permanently.
+fn unregister_watch(identity: WatchIdentity, watch_descriptor: i32, instance_id: usize) {
+    let mut registry = registry().lock();
+    let mut removed = Vec::new();
+    if let Some(map) = registry.as_mut()
+        && let Some(entries) = map.get_mut(&identity)
+    {
+        let mut index = 0;
+        while index < entries.len() {
+            if entries[index].watch_descriptor == watch_descriptor
+                && entries[index].instance_id == instance_id
+            {
+                removed.push(entries.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        if entries.is_empty() {
+            map.remove(&identity);
+        }
+        if map.is_empty() {
+            REGISTRY_NON_EMPTY.store(false, Ordering::Release);
+        }
+    }
+    // Released outside the lock: see `register_watch`.
+    drop(registry);
+    drop(removed);
+}
+
+/// Record size of one queued event: the fixed header plus the NUL-terminated
+/// name padded to the header boundary, which is what Linux's
+/// `round_event_name_len()` computes. A zero-length name contributes nothing —
+/// Linux's `IN_IGNORED`/`IN_Q_OVERFLOW` records are exactly the 16-byte header,
+/// with no name field and no padding.
 fn record_len(name_len: usize) -> usize {
     EVENT_HEADER_BYTES + name_field_len(name_len)
+}
+
+impl Drop for Inotify {
+    fn drop(&mut self) {
+        // A closed instance must not leave its keys behind: the registry is
+        // keyed by watch identity and nothing else prunes a key whose instance
+        // went away, so without this a process could grow kernel memory once
+        // per distinct object it ever watched. The table is taken under the lock
+        // and the registry is entered after releasing it, so `notify_path` --
+        // which takes the registry and then the watches lock -- cannot deadlock
+        // against this.
+        let watches = core::mem::take(&mut *self.watches.lock());
+        for (descriptor, watch) in watches.entries {
+            unregister_watch(watch.identity, descriptor, self.id);
+        }
+    }
 }
 
 impl Inotify {
     /// Creates an empty watch table.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             next_watch_descriptor: AtomicI32::new(FIRST_WATCH_DESCRIPTOR),
             watches: Mutex::new(WatchTable::default()),
             poll_rx: PollSet::new(),
@@ -364,7 +661,12 @@ impl Inotify {
     /// Returns `KError::InvalidInput` for an empty path or an out-of-range mask,
     /// `KError::AlreadyExists` when `IN_MASK_CREATE` names a watched path, and
     /// `KError::StorageFull` when the instance already holds [`MAX_WATCHES`] watches.
-    pub fn add_watch(self: &Arc<Self>, mask: u32, identity: WatchIdentity) -> KResult<i32> {
+    pub fn add_watch(
+        self: &Arc<Self>,
+        mask: u32,
+        identity: WatchIdentity,
+        object: Pin,
+    ) -> KResult<i32> {
         if mask & !IN_ACCEPTED != 0 {
             return Err(KError::InvalidInput);
         }
@@ -385,10 +687,10 @@ impl Inotify {
             return Err(KError::InvalidInput);
         }
 
-        let mut watches = self.watches.lock();
         // The watch is looked up by *identity*, so a second registration through
         // another spelling of the same object updates this watch instead of
         // adding one, which is what Linux returns for the same inode too.
+        let mut watches = self.watches.lock();
         if let Some(descriptor) = watches.descriptor_of(identity) {
             if mask & IN_MASK_CREATE != 0 {
                 return Err(KError::AlreadyExists);
@@ -413,17 +715,82 @@ impl Inotify {
             }
             return Ok(descriptor);
         }
-        // Only the event bits are stored for matching, and only the behavioural
-        // bits that outlive the call are kept beside them; Linux makes the same
-        // split (`inotify_arg_to_mask()` / `inotify_arg_to_flags()`).
-        watches
+        let descriptor = watches
             .insert(
                 identity,
                 stored_mask(mask),
                 mask & INOTIFY_MARK_FLAGS,
                 &self.next_watch_descriptor,
             )
-            .ok_or(KError::StorageFull)
+            .ok_or(KError::StorageFull)?;
+        // Publish to the shared registry inside the watches critical section,
+        // so a concurrent filesystem event cannot observe the gap where the
+        // watch table already has the entry but the registry cannot route to
+        // it yet. Nesting the registry lock under the watches lock cannot
+        // deadlock: the registry is always the *last* lock taken (no path
+        // holds it while acquiring a watches lock -- `notify_path` collects
+        // its references and releases it before delivering; `Inotify::drop`
+        // releases the watches lock before unregistering), and the dead
+        // references dropped while here are `Weak`s of already-gone
+        // instances, which run no `Inotify::drop`.
+        register_watch(identity, object, self, descriptor);
+        drop(watches);
+        Ok(descriptor)
+    }
+
+    /// Reports a self-event (`IN_DELETE_SELF`, `IN_MOVE_SELF`) to one watch,
+    /// leaving the watch in place.
+    ///
+    /// A rename moves the object rather than destroying it, so its watches must
+    /// survive and merely hear about it; only an object that is *replaced* or
+    /// removed is retired.
+    fn report_self(&self, descriptor: i32, self_mask: u32) -> bool {
+        // Same invariant as `deliver`: the subscription check and the enqueue
+        // share one critical section, so a concurrent removal cannot make this
+        // wd see `IN_IGNORED` first and a self-event after it.
+        let watches = self.watches.lock();
+        let subscribed = watches
+            .entries
+            .get(&descriptor)
+            .is_some_and(|watch| watch.mask & self_mask != 0);
+        if subscribed {
+            self.queue_event(descriptor, self_mask, &[], 0);
+        }
+        drop(watches);
+        subscribed
+    }
+
+    /// Retires one watch whose object is going away, reporting `self_mask`
+    /// (`IN_DELETE_SELF` or `IN_MOVE_SELF`) when the watch subscribes to it.
+    ///
+    /// Linux reports `IN_DELETE_SELF`/`IN_MOVE_SELF` and then `IN_IGNORED` when
+    /// the watched inode goes away, and the mark does not survive it. Doing the
+    /// same here is what keeps the `(device, inode)` key honest: numbers are
+    /// reused (`kext4` hands an unlinked inode's number back out), so a watch
+    /// that outlived its object would silently adopt the next object to receive
+    /// that number.
+    ///
+    /// # Errors
+    ///
+    /// Returns `false` when the descriptor is not registered.
+    fn retire(&self, descriptor: i32, self_mask: u32) -> bool {
+        let mut watches = self.watches.lock();
+        let Some(entry) = watches.entries.get(&descriptor) else {
+            return false;
+        };
+        let identity = entry.identity;
+        let subscribed = entry.mask & self_mask != 0;
+        watches.remove(descriptor);
+        drop(watches);
+
+        // Registry after watches, and only ever after the watches lock is
+        // released; `Drop` unregisters in the same order.
+        unregister_watch(identity, descriptor, self.id);
+        if subscribed {
+            self.queue_event(descriptor, self_mask, &[], 0);
+        }
+        self.queue_event(descriptor, IN_IGNORED, &[], 0);
+        true
     }
 
     /// Removes the watch registered under `descriptor` and queues `IN_IGNORED`.
@@ -438,12 +805,39 @@ impl Inotify {
     pub fn remove_watch(&self, descriptor: i32) -> KResult<()> {
         let removed = self.watches.lock().remove(descriptor);
         match removed {
-            Some(_) => {
-                self.queue_event(descriptor, IN_IGNORED, &[]);
+            Some(watch) => {
+                unregister_watch(watch.identity, descriptor, self.id);
+                self.queue_event(descriptor, IN_IGNORED, &[], 0);
                 Ok(())
             }
             None => Err(KError::InvalidInput),
         }
+    }
+
+    /// Delivers one event to `descriptor` if it is still subscribed to `mask`.
+    ///
+    /// The subscription is re-checked here, under the same lock that guards the
+    /// watch table, and the enqueue happens before that lock is released. A
+    /// check that released the lock first would let `remove_watch` run to
+    /// completion in between — descriptor gone, `IN_IGNORED` already queued —
+    /// and then let this event land behind it, or, once descriptors recycle,
+    /// land on a *different* watch that reused the number. Linux does not have
+    /// the second problem at all (an inode mark remembers its own `wd` and
+    /// reports `-1` once detached) and closes the first by holding its
+    /// `idr_lock` across the queue insert; this does the equivalent.
+    ///
+    /// Lock order is watches before queue, and nothing takes them in the other
+    /// order, so the nesting cannot deadlock.
+    fn deliver(&self, descriptor: i32, mask: u32, name: &[u8], cookie: u32) {
+        let watches = self.watches.lock();
+        let subscribed = watches
+            .entries
+            .get(&descriptor)
+            .is_some_and(|watch| watch.mask & mask != 0);
+        if subscribed {
+            self.queue_event(descriptor, mask, name, cookie);
+        }
+        drop(watches);
     }
 
     /// Appends an event and wakes anyone polling this instance.
@@ -456,13 +850,14 @@ impl Inotify {
     /// own, so an overrun is visible to a reader immediately — including one
     /// that never drains the queue, where a flag reported only on an empty queue
     /// would hide the loss forever.
-    fn queue_event(&self, watch_descriptor: i32, mask: u32, name: &[u8]) {
+    fn queue_event(&self, watch_descriptor: i32, mask: u32, name: &[u8], cookie: u32) {
         let mut queue = self.queue.lock();
         if queue.events.len() >= MAX_QUEUED_EVENTS {
             if !queue.overflow_queued {
                 queue.events.push_back(QueuedEvent {
                     watch_descriptor: -1,
                     mask: IN_Q_OVERFLOW,
+                    cookie: 0,
                     name: Vec::new(),
                     overflow: true,
                 });
@@ -475,6 +870,7 @@ impl Inotify {
         queue.events.push_back(QueuedEvent {
             watch_descriptor,
             mask,
+            cookie,
             name: name.to_vec(),
             overflow: false,
         });
@@ -503,16 +899,16 @@ impl Inotify {
             .sum()
     }
 
-    fn drain_events(&self, buf: &mut [u8]) -> KResult<usize> {
-        self.drain_events_batch(buf).map(|(written, _)| written)
-    }
-
     /// Drains whole records into `buf`, serialized and ready for user space,
     /// and also returns the drained events so the iterator path can put them
     /// back when the user-space copy fails. Linux dequeues each event right
     /// before copying it, so a failing copy costs one event; this batches for
     /// one wait, and [`Inotify::requeue_front`] keeps the failing batch
     /// intact instead of losing it.
+    fn drain_events(&self, buf: &mut [u8]) -> KResult<usize> {
+        self.drain_events_batch(buf).map(|(written, _)| written)
+    }
+
     fn drain_events_batch(&self, buf: &mut [u8]) -> KResult<(usize, Vec<QueuedEvent>)> {
         let mut queue = self.queue.lock();
         let mut written = 0usize;
@@ -528,6 +924,7 @@ impl Inotify {
                 &mut buf[written..written + total],
                 event.watch_descriptor,
                 event.mask,
+                event.cookie,
                 event.name.as_slice(),
             );
             // Consuming the overrun record re-arms overflow reporting, the way
@@ -582,6 +979,16 @@ impl Inotify {
         self.watches.lock().len()
     }
 
+    /// Reads back the mask registered for `descriptor`. Used by the unit tests.
+    #[cfg(unittest)]
+    pub(crate) fn watch_mask(&self, descriptor: i32) -> Option<u32> {
+        self.watches
+            .lock()
+            .entries
+            .get(&descriptor)
+            .map(|watch| watch.mask)
+    }
+
     /// Behavioural bits stored for `descriptor`. Used by the unit tests.
     #[cfg(unittest)]
     pub(crate) fn watch_flags(&self, descriptor: i32) -> Option<u32> {
@@ -601,30 +1008,21 @@ impl Inotify {
             .get(&descriptor)
             .map(|watch| watch.identity)
     }
-
-    /// Reads back the mask registered for `descriptor`. Used by the unit tests.
-    #[cfg(unittest)]
-    pub(crate) fn watch_mask(&self, descriptor: i32) -> Option<u32> {
-        self.watches
-            .lock()
-            .entries
-            .get(&descriptor)
-            .map(|watch| watch.mask)
-    }
 }
 
-/// Writes one `struct inotify_event` record: wd, mask, cookie(0), len, name,
+/// Writes one `struct inotify_event` record: wd, mask, cookie, len, name,
 /// NUL, and zero padding out to the name field's reported length.
 ///
 /// The name field is padded up to `sizeof(struct inotify_event)` — 16 bytes on
 /// every architecture Linux supports — because user space steps through the
 /// records by `header + len` and an unpadded short name would misalign the
 /// array. A nameless record has no field at all.
-fn write_record(out: &mut [u8], watch_descriptor: i32, mask: u32, name: &[u8]) {
+fn write_record(out: &mut [u8], watch_descriptor: i32, mask: u32, cookie: u32, name: &[u8]) {
     out[..4].copy_from_slice(&watch_descriptor.to_ne_bytes());
     out[4..8].copy_from_slice(&mask.to_ne_bytes());
-    // cookie is always 0: this implementation reports no rename pairing.
-    out[8..12].copy_from_slice(&0u32.to_ne_bytes());
+    // The rename pairing value: both halves of a move carry the same one, every
+    // other event carries 0.
+    out[8..12].copy_from_slice(&cookie.to_ne_bytes());
     // Linux stores the padded field length in `len` (`inotify_event.len =
     // round_event_name_len(...)`), so a reader stepping by `header + len`
     // reaches the next record, exactly as man 7 inotify describes.
@@ -748,7 +1146,11 @@ impl FileOperations for InotifyFops {
         Self::state(file).ok().map(|state| state.poll())
     }
 
-    /// Reports the queued byte count for `FIONREAD`, as Linux does for inotify.
+    /// Reports the queued byte count for `FIONREAD`, as Linux does for inotify:
+    /// `inotify_ioctl()` sums `sizeof(struct inotify_event) +
+    /// round_event_name_len()` over the whole queue (`inotify_user.c:328`–`:336`),
+    /// which is the same total this returns -- the size of a full drain, not the
+    /// length of the next record.
     ///
     /// Without this the descriptor rejects the query and a caller that sizes
     /// its buffer first — busybox `inotifyd` does — gives up before reading

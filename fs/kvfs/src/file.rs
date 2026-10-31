@@ -7,7 +7,7 @@
 //! `VfsFile` owns opened-file state: `f_path`, `f_inode`, `f_mapping`,
 //! `f_op`, `f_flags`, `f_pos`, `f_pipe`, and `private_data`.
 
-use alloc::sync::Arc;
+use alloc::{string::String, sync::Arc};
 use core::{
     any::Any,
     sync::atomic::{AtomicU32, Ordering},
@@ -22,8 +22,8 @@ use log::warn;
 use pagecache::{FolioGuard, PageIndex};
 
 use crate::{
-    AddressSpace, DirContext, FallocateFlags, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard,
-    NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
+    AddressSpace, DirContext, FallocateFlags, Kiocb, MagicLinkOps, Metadata, MmapMapper, Mutex,
+    MutexGuard, NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
 };
 
 /// A captured, event-filtered wait source independent of current file readiness.
@@ -527,6 +527,11 @@ pub struct VfsFileBuilder {
     position: u64,
     /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
+    /// Identity of the directory that received a newly created entry, plus the
+    /// name it was created under, captured inside the creation's namespace
+    /// lock. The created dentry's own location is mutable afterwards, so event
+    /// attribution must use this snapshot, not a later read.
+    created_under: Option<(Metadata, String)>,
 }
 
 impl VfsFileBuilder {
@@ -541,6 +546,7 @@ impl VfsFileBuilder {
             flags: open_flags,
             position: 0,
             pipe_generation: 0,
+            created_under: None,
         }
     }
 
@@ -596,6 +602,15 @@ impl VfsFileBuilder {
 
     pub(crate) fn mark_created(&mut self) {
         self.mode.insert(FMode::CREATED);
+    }
+
+    /// Records where and under what name this open created its entry.
+    ///
+    /// Called from the creation branch while the parent's namespace lock is
+    /// still held; the created dentry's own location is mutable afterwards, so
+    /// attribution uses this snapshot.
+    pub(crate) fn set_created_under(&mut self, parent: Metadata, name: &str) {
+        self.created_under = Some((parent, String::from(name)));
     }
 
     pub(crate) fn clear_created(&mut self) {
@@ -749,6 +764,7 @@ impl VfsFileBuilder {
             flags,
             position,
             pipe_generation,
+            created_under,
         } = self;
 
         let operations = operations.ok_or(VfsError::InvalidInput)?;
@@ -764,6 +780,7 @@ impl VfsFileBuilder {
             position: Mutex::new(position),
             readahead: Mutex::new(readahead),
             pipe_generation,
+            created_under,
         }))
     }
 }
@@ -780,6 +797,9 @@ pub struct VfsFile {
     pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
     /// FIFO writer-generation snapshot, corresponding to Linux `file::f_pipe`.
     pipe_generation: u64,
+    /// Where and under what name the open that produced this file created its
+    /// entry; `None` unless that open actually created it.
+    created_under: Option<(Metadata, String)>,
 }
 
 impl VfsFile {
@@ -935,6 +955,26 @@ impl VfsFile {
     /// Returns this file's access mode flags.
     pub fn mode(&self) -> FMode {
         FMode::from_bits_truncate(self.mode.load(Ordering::Acquire))
+    }
+
+    /// Returns whether the open that produced this file created the entry.
+    ///
+    /// `O_CREAT` on an existing path is an ordinary open; callers that report
+    /// or act on creations (for example the inotify directory-entry hook) use
+    /// this to tell the two apart.
+    pub fn was_created(&self) -> bool {
+        self.mode().contains(FMode::CREATED)
+    }
+
+    /// Returns the parent identity and the name this file's entry was created
+    /// with, when the open that produced this file created it.
+    ///
+    /// Both were captured inside the creation's namespace lock, so they stay
+    /// correct even if the entry is renamed before the caller reads them.
+    pub fn created_under(&self) -> Option<(&Metadata, &str)> {
+        self.created_under
+            .as_ref()
+            .map(|(parent, name)| (parent, name.as_str()))
     }
 
     /// Returns whether this file descriptor is path-only.

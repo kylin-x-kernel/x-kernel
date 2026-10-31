@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [dependencies]
 kalloc-types.workspace = true
+iov_iter.workspace = true
 anon_inodefs.workspace = true
 bitflags.workspace = true
 hashbrown.workspace = true
@@ -24,7 +25,7 @@ kio.workspace = true
 klogger.workspace = true
 kpoll.workspace = true
 kvfs.workspace = true
-iov_iter.workspace = true
+klazy.workspace = true
 ksignal.workspace = true
 kspin.workspace = true
 ksync.workspace = true

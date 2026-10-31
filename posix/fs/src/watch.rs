@@ -28,13 +28,23 @@ pub struct WatchTarget {
     /// superblock carry different ids, so they register as two watches where
     /// Linux has one; see the deviation note below.
     pub device: u64,
+    /// The resolved inode itself, held by the caller until the watch is
+    /// registered.
+    ///
+    /// This pins the object across the resolution→registration window: without
+    /// it the inode could be evicted in between, the eviction hook would find
+    /// no watch to retire, and the registration that follows would sit on an
+    /// identity that is already gone. Linux holds the same reference for the
+    /// same reason.
+    pub inode_ref: alloc::sync::Arc<kvfs::VfsInode>,
 }
 
 /// Resolves `path` for an inotify watch.
 ///
 /// Linux only accepts an existing path here, which is why resolution failure
 /// is surfaced instead of absorbed. `no_follow` carries the caller's
-/// `IN_DONT_FOLLOW`: the watch then targets the link itself.
+/// `IN_DONT_FOLLOW`: the watch then targets the link itself. The caller's
+/// credentials drive both the search and the read permission checks.
 ///
 /// Known deviations from Linux, both explicit rather than silent:
 ///
@@ -48,6 +58,8 @@ pub struct WatchTarget {
 ///   watches where Linux has one. This kernel's `SuperBlock` exposes no stable
 ///   identifier to key on, so rather than invent one the granularity is stated
 ///   here.
+/// - `IN_UNMOUNT`: Linux ORs `FS_UNMOUNT` into every mark, so a watch is always
+///   subscribed to it here as well; the bit has no delivery source yet.
 ///
 /// # Errors
 ///
@@ -73,10 +85,12 @@ pub fn resolve_watch_target(
     // (`inotify_find_inode` calls `path_permission(path, MAY_READ)`), which is
     // what stops an unprivileged watcher from enumerating the entries of a
     // directory it may search but not read.
-    // Order matters and follows Linux: `IN_ONLYDIR` is folded into the lookup
-    // (`LOOKUP_DIRECTORY`) and fails before the permission check, so
+    // Order matters and follows Linux: the directory requirement is decided
+    // right after resolution and *before* the permission check, so
     // `inotify_add_watch(fd, file, IN_ONLYDIR)` on an unreadable regular file
-    // is `ENOTDIR` there, not `EACCES`.
+    // is `ENOTDIR` there, not `EACCES`. (Linux folds `IN_ONLYDIR` into the
+    // lookup itself; this resolver has no directory flag, so the check happens
+    // on the resolved location instead.)
     if require_dir && !location.is_dir() {
         return Err(KError::NotADirectory);
     }
@@ -87,5 +101,6 @@ pub fn resolve_watch_target(
     Ok(WatchTarget {
         inode: metadata.inode,
         device: metadata.device,
+        inode_ref: location.inode(),
     })
 }

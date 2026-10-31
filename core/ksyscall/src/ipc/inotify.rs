@@ -134,15 +134,18 @@ pub(crate) fn sys_inotify_add_watch(
         path.len()
     );
 
-    inotify
-        .add_watch(
-            mask,
-            WatchIdentity {
-                device: target.device,
-                inode: target.inode,
-            },
-        )
-        .map(|wd| wd as isize)
+    let identity = WatchIdentity {
+        device: target.device,
+        inode: target.inode,
+    };
+    // The watch itself pins the object from here on, as an fsnotify mark does
+    // in Linux: the inode cannot be freed -- and its number reused -- while any
+    // watch names it, so no later revalidation is needed and none would be
+    // correct (a concurrent rename would make a second lookup fail while the
+    // object lives on).
+    let pin = alloc::sync::Arc::clone(&target.inode_ref) as kfd_objects::inotify::Pin;
+    let watch_descriptor = inotify.add_watch(mask, identity, pin)?;
+    Ok(watch_descriptor as isize)
 }
 
 /// Removes the watch registered under `wd`.

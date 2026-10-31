@@ -19,6 +19,7 @@ mod ioctl;
 mod metadata;
 mod mount;
 mod namei;
+pub mod notify;
 mod open;
 mod path;
 mod stat;

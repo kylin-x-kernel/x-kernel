@@ -53,6 +53,27 @@ pub fn sys_openat(
             fs.node_umask(),
             cred,
         )
+        .inspect(|file| {
+            // Report IN_CREATE only when this call created the entry: O_CREAT on
+            // an existing file is an ordinary open and must not report a
+            // creation the filesystem never performed. The watch probe gates
+            // the *reporting*; the creation identity itself is captured by the
+            // open path unconditionally (`VfsFile::created_under`), because a
+            // watch can be registered concurrently with this open and a
+            // capture that had been skipped then would never be recovered -- a
+            // removed or renamed object would keep a watch nothing retires.
+            if crate::notify::entry_notify_wanted()
+                && flags as u32 & O_CREAT != 0
+                && file.was_created()
+            {
+                // Attribution comes from the created entry itself, not from the caller's
+                // argument: when the last component is a symbolic link, creation
+                // happens where the link points, and `entry_parts_at` (which
+                // does not follow the final component) would report the event in
+                // the link's directory for a name that was never created.
+                crate::notify::notify_created(file, crate::notify::IN_CREATE);
+            }
+        })
     })
     .and_then(|it| add_to_fd(it, flags as _))
     .map(|fd| fd as isize)

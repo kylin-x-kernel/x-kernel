@@ -13,10 +13,10 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc, vec::Vec};
 use kcred::Cred;
 
 use crate::{
-    AccMode, DeviceId, FMode, Filename, LookupFlags, LookupIntent, MountFlags, NodePermission,
-    NodeType, OpenFlags, OpenHow, OpenParams, Path, ResolvedObject, Umode, VfsError, VfsFile,
-    VfsFileBuilder, VfsInode, VfsResult, d_inode, d_is_dir, d_is_negative, d_is_symlink,
-    node::LookupCreateResult, path::PathBuf,
+    AccMode, CreatedEntry, DeviceId, FMode, Filename, LookupFlags, LookupIntent, MountFlags,
+    NodePermission, NodeType, OpenFlags, OpenHow, OpenParams, Path, RemovedEntry, ResolvedObject,
+    Umode, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult, d_inode, d_is_dir,
+    d_is_negative, d_is_symlink, node::LookupCreateResult, path::PathBuf,
 };
 
 /// Deferred cleanup context used while resolving symbolic-link targets.
@@ -729,6 +729,11 @@ impl<'a> Nameidata<'a> {
             LookupCreateResult::Existing(entry) => Ok(self.path.with_dentry(entry)),
             LookupCreateResult::Created(entry) => {
                 file.mark_created();
+                // Captured here, under the parent's namespace lock: the created
+                // dentry's location is mutable afterwards, so the inotify
+                // create event must use this snapshot of where and under what
+                // name the entry was born.
+                file.set_created_under(self.path.identity(), name);
                 Ok(self.path.with_dentry(entry))
             }
         }
@@ -921,18 +926,37 @@ impl Filename {
         umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<Path> {
+        self.mkdir_at_entry(root, base, permission, umask, cred)
+            .map(|created| created.path)
+    }
+
+    /// Creates a directory like [`Filename::mkdir_at`] and reports the created
+    /// entry with the parent identity and name captured by the operation.
+    pub fn mkdir_at_entry(
+        &self,
+        root: &Path,
+        base: &Path,
+        permission: NodePermission,
+        umask: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<CreatedEntry> {
         let (parent, last, _) = self
             .parent_at(root, base, LookupIntent::Open, cred)?
             .into_create()?;
         let name = last.as_str();
 
-        parent
+        let path = parent
             .dentry()
             .as_dir()?
             .create_exclusive_with(name, |candidate| {
                 parent.vfs_mkdir(candidate, permission, umask, cred)
             })
-            .map(|entry| parent.with_dentry(entry))
+            .map(|entry| parent.with_dentry(entry))?;
+        Ok(CreatedEntry {
+            path,
+            name: String::from(name),
+            parent: parent.identity(),
+        })
     }
 
     /// Creates a node accepted by Linux `mknodat(2)` semantics.
@@ -960,6 +984,21 @@ impl Filename {
         umask: NodePermission,
         cred: &Cred,
     ) -> VfsResult<Path> {
+        self.mknod_at_entry(root, base, mode, device, umask, cred)
+            .map(|created| created.path)
+    }
+
+    /// Creates a node like [`Filename::mknod_at`] and reports the created
+    /// entry with the parent identity and name captured by the operation.
+    pub fn mknod_at_entry(
+        &self,
+        root: &Path,
+        base: &Path,
+        mode: Umode,
+        device: DeviceId,
+        umask: NodePermission,
+        cred: &Cred,
+    ) -> VfsResult<CreatedEntry> {
         let node_type = may_mknod(mode)?;
         let mode = mode.with_node_type(node_type);
         let (parent, last, has_trailing_slash) = self
@@ -972,7 +1011,7 @@ impl Filename {
             DeviceId::default()
         };
 
-        parent
+        let path = parent
             .dentry()
             .as_dir()?
             .create_exclusive_with(name, |candidate| {
@@ -985,7 +1024,12 @@ impl Filename {
                     parent.vfs_mknod(candidate, mode, device, umask, cred)
                 }
             })
-            .map(|entry| parent.with_dentry(entry))
+            .map(|entry| parent.with_dentry(entry))?;
+        Ok(CreatedEntry {
+            path,
+            name: String::from(name),
+            parent: parent.identity(),
+        })
     }
 
     /// Creates a symbolic link with a single locked final lookup.
@@ -1002,12 +1046,26 @@ impl Filename {
         target: &str,
         cred: &Cred,
     ) -> VfsResult<Path> {
+        self.symlink_at_entry(root, base, target, cred)
+            .map(|created| created.path)
+    }
+
+    /// Creates a symbolic link like [`Filename::symlink_at`] and reports the
+    /// created entry with the parent identity and name captured by the
+    /// operation.
+    pub fn symlink_at_entry(
+        &self,
+        root: &Path,
+        base: &Path,
+        target: &str,
+        cred: &Cred,
+    ) -> VfsResult<CreatedEntry> {
         let (parent, last, has_trailing_slash) = self
             .parent_at(root, base, LookupIntent::Open, cred)?
             .into_create()?;
         let name = last.as_str();
 
-        parent
+        let path = parent
             .dentry()
             .as_dir()?
             .create_exclusive_with(name, |candidate| {
@@ -1016,7 +1074,12 @@ impl Filename {
                 }
                 parent.vfs_symlink(candidate, target, cred)
             })
-            .map(|entry| parent.with_dentry(entry))
+            .map(|entry| parent.with_dentry(entry))?;
+        Ok(CreatedEntry {
+            path,
+            name: String::from(name),
+            parent: parent.identity(),
+        })
     }
 
     /// Creates a hard link with a single locked target lookup.
@@ -1027,12 +1090,25 @@ impl Filename {
     /// [`VfsError::CrossesDevices`] when source and destination mounts differ,
     /// or the pathname, authorization, mount, or filesystem error.
     pub fn link_at(&self, root: &Path, base: &Path, source: &Path, cred: &Cred) -> VfsResult<Path> {
+        self.link_at_entry(root, base, source, cred)
+            .map(|created| created.path)
+    }
+
+    /// Creates a hard link like [`Filename::link_at`] and reports the created
+    /// entry with the parent identity and name captured by the operation.
+    pub fn link_at_entry(
+        &self,
+        root: &Path,
+        base: &Path,
+        source: &Path,
+        cred: &Cred,
+    ) -> VfsResult<CreatedEntry> {
         let (parent, last, has_trailing_slash) = self
             .parent_at(root, base, LookupIntent::Open, cred)?
             .into_create()?;
         let name = last.as_str();
 
-        parent
+        let path = parent
             .dentry()
             .as_dir()?
             .create_exclusive_with(name, |candidate| {
@@ -1041,7 +1117,12 @@ impl Filename {
                 }
                 parent.vfs_link(candidate, source, cred)
             })
-            .map(|entry| parent.with_dentry(entry))
+            .map(|entry| parent.with_dentry(entry))?;
+        Ok(CreatedEntry {
+            path,
+            name: String::from(name),
+            parent: parent.identity(),
+        })
     }
 
     /// Unlinks a non-directory entry with a single locked final lookup.
@@ -1051,13 +1132,26 @@ impl Filename {
     /// Returns the pathname, target-type, authorization, mount, or filesystem
     /// error for the final entry protected by the parent namespace lock.
     pub fn unlink_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<()> {
+        self.unlink_at_tracked(root, base, cred).map(|_| ())
+    }
+
+    /// Unlinks like [`Filename::unlink_at`] and reports the removed entry's
+    /// metadata, captured under the removal's own namespace lock.
+    pub fn unlink_at_tracked(
+        &self,
+        root: &Path,
+        base: &Path,
+        cred: &Cred,
+    ) -> VfsResult<Option<RemovedEntry>> {
         let lookup = self.parent_at(root, base, LookupIntent::Open, cred)?;
         if lookup.last_type != LastType::Norm {
             return Err(VfsError::IsADirectory);
         }
-        lookup
-            .parent
-            .unlink_with_pathname(lookup.last.as_str(), lookup.has_trailing_slash, cred)
+        lookup.parent.unlink_with_pathname_tracked(
+            lookup.last.as_str(),
+            lookup.has_trailing_slash,
+            cred,
+        )
     }
 
     /// Removes a directory with a single locked final lookup.
@@ -1067,9 +1161,19 @@ impl Filename {
     /// Returns Linux-compatible errors for root, dot, and dotdot final
     /// components, or the pathname, authorization, mount, or filesystem error.
     pub fn rmdir_at(&self, root: &Path, base: &Path, cred: &Cred) -> VfsResult<()> {
+        self.rmdir_at_tracked(root, base, cred).map(|_| ())
+    }
+
+    /// Removes a directory like [`Filename::rmdir_at`] and reports the victim.
+    pub fn rmdir_at_tracked(
+        &self,
+        root: &Path,
+        base: &Path,
+        cred: &Cred,
+    ) -> VfsResult<Option<RemovedEntry>> {
         let lookup = self.parent_at(root, base, LookupIntent::Open, cred)?;
         match lookup.last_type {
-            LastType::Norm => lookup.parent.rmdir(lookup.last.as_str(), cred),
+            LastType::Norm => lookup.parent.rmdir_tracked(lookup.last.as_str(), cred),
             LastType::Dotdot => Err(VfsError::DirectoryNotEmpty),
             LastType::Dot => Err(VfsError::InvalidInput),
             LastType::Root => Err(VfsError::ResourceBusy),

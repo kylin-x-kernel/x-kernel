@@ -35,7 +35,7 @@ in object state. This crate does not own process descriptor-number allocation.
 | `TimerFd` | Owned `ktask::Timer<TimerFdHandler>` with embedded clock/count/poll state, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
 | `Signalfd` | `RwLock<SignalSet>` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. Signal configuration owns the shared notification source. |
 | `Epoll` | `Arc<EpollInner>`, interest table, ready queue and poll set | `add`/`modify` register watched file poll sources; callbacks enqueue weak interest references; `poll_events` returns ready ABI events and rearms interests. |
-| `Inotify` | Watch table (`Mutex<HashMap>`), event queue with overrun flag (`Mutex<EventQueue>`), poll set | `add_watch` keys watches by the caller's path bytes; `remove_watch` queues `IN_IGNORED`; `read` drains whole `struct inotify_event` records in order and reports `IN_Q_OVERFLOW` after a full queue; `FIONREAD` reports the drain size. |
+| `Inotify` | Watch table (`Mutex<HashMap>`), shared path registry, event queue (`Mutex<EventQueue>`), poll set | `add_watch` keys watches by the object identity the path resolved to (`(device, inode)`, the same pair the event side reaches through the changed entry's parent); `remove_watch` queues `IN_IGNORED`; `read` drains whole `struct inotify_event` records in order and reports `IN_Q_OVERFLOW` as a queued record the moment a push overruns the queue; `FIONREAD` reports the drain size. |
 
 `from_file` retrieves the typed private data and rejects an unrelated file.
 The anonymous file operations implement `kvfs::FileOperations`; eventfd/timerfd
@@ -122,22 +122,59 @@ reads of an empty counter return WouldBlock without copying data. Write rejects
 ### Inotify record ABI, queues and limits
 
 A record is the 16-byte `inotify_event` header plus the name NUL-terminated and
-padded to 8 bytes; a nameless record (`IN_IGNORED`, `IN_Q_OVERFLOW`) is exactly
-the header, matching the `len`-field arithmetic Linux readers apply. A buffer
-that cannot hold the next whole record fails with `EINVAL` rather than a
-partial record; an empty queue returns `WouldBlock`. Queued bytes are the
-records a full drain would return, including a pending overflow record.
+padded up to that header size (the same rounded length `len` reports);
+a nameless record (`IN_IGNORED`, `IN_Q_OVERFLOW`) is exactly
+the header, matching the `len`-field arithmetic Linux readers apply. The `len`
+field itself reports the padded name-field length -- the NUL-inclusive length
+rounded up to the header alignment, exactly the bytes the record occupies --
+and 0 for a nameless record, so a reader stepping `sizeof(header) + len` per
+record walks the array correctly. A buffer that cannot hold the next whole record fails with
+`EINVAL` rather than a partial record; an empty queue returns `WouldBlock`.
+Queued bytes are the
+records a full drain would return; the overrun record is one of them, because
+Linux appends its pre-allocated `FS_Q_OVERFLOW` event to the queue in place of
+the event it could not admit.
+
+### Inotify event sources
+
+Directory-entry events are reported by the VFS syscalls through the injectable
+notifier in `posix_fs::notify`, and delivered by object: the hook resolves the
+changed entry's parent to its `(device, inode)` pair -- what Linux reaches by
+walking the dentry's parent inode in `fsnotify_parent()` -- and `notify_path`
+looks that pair up in the shared registry, handing the event to every watch
+subscribed to its mask. The subscription is re-checked under the watch-table
+lock so a concurrent removal cannot queue an event for a watch that is gone, and
+because the key is the object, a watched directory keeps its watches when it is
+renamed and the same directory spelt two ways is one watch.
+Sources wired today: creating `open`, `mkdir`, `mknod` and `symlink`/`link`
+(`IN_CREATE`, plus `IN_ISDIR` for a created directory), `unlinkat`/`rmdir`
+(`IN_DELETE`, plus `IN_ISDIR` for a removed directory) and `renameat`
+(`IN_MOVED_FROM` and `IN_MOVED_TO`, one shared non-zero cookie, `IN_ISDIR` for a
+moved directory). Attribute- and close-class events have no source yet.
+
+A watch also ends the way Linux ends it: when the watched object is removed, the
+syscalls report its identity *before* the removal, and the watches on it are
+retired with `IN_DELETE_SELF` (when subscribed) and `IN_IGNORED`. An object that
+is merely *moved* keeps its watches and only hears `IN_MOVE_SELF`; the object
+replaced by a rename is retired. Retiring matters for more than reporting: inode
+numbers are reused, so a watch that outlived its object would silently adopt the
+next object to receive that number -- the same hazard a path-keyed table has with
+recreated names.
 
 The per-instance ceilings follow Linux defaults — 16384 queued events,
 8192 watches — with one documented simplification: Linux accounts both per
-*user* across instances, this per *instance*. An overflow push drops the event
-and raises the overrun flag under the queue lock; the read that finds the
-queue empty then emits `wd = -1, IN_Q_OVERFLOW` once, so the loss is observable.
-Watch exhaustion returns `ENOSPC`. Event sourcing is bounded on purpose: this
-object queues only kernel-generated records (`IN_IGNORED`, `IN_Q_OVERFLOW`);
-the filesystem event source and its path registry land in a separate change,
-and until then a quiet filesystem is indistinguishable from an absent source —
-readiness is never synthesized.
+*user* across instances, this per *instance*. An overflow push drops the
+arriving event and queues the preallocated `wd = -1, IN_Q_OVERFLOW` record
+right at the overflow point, under the queue lock, in place of it; only one
+overrun record is queued at a time, and reading it re-arms the marker, so the
+loss is observable without a special empty-queue read. Watch exhaustion
+returns `ENOSPC`. Event sourcing is the object-identity registry: the
+filesystem hooks (`open(O_CREAT)`, `mkdir`, `mknod`, `symlink`, `link`,
+`unlink`, `rmdir`, `rename`) report entries and self-events through the
+one-shot installer into the `(device, inode)`-keyed table above, and the
+kernel-generated records (`IN_IGNORED`, `IN_Q_OVERFLOW`) join the same queue;
+delivery skips every lookup once `REGISTRY_NON_EMPTY` says no watch is
+registered anywhere.
 
 Epoll `TriggerMode` has Level, Edge and OneShot `{ fired }` states. OneShot
 consumption sets `fired=true`; `modify` rearms by replacing configuration on the

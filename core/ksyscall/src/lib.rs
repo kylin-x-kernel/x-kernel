@@ -26,6 +26,7 @@ mod cpuset;
 mod dispatch;
 mod io_mpx;
 mod ipc;
+mod notify;
 mod sync;
 mod sys;
 mod task;
