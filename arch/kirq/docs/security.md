@@ -606,3 +606,19 @@ dispatch holds management exclusion, not control/registry/Line spinlocks.
 Caller-owned handler dependencies must not require the same management mutex
 while a removal waits for that handler; serialization cannot resolve such a
 dependency cycle.
+
+## Rejected Management Transactions
+
+Ordinary action admission is checked before merging caller-supplied descriptor
+metadata or publishing domain mappings. Preflight and installation reuse the
+same ownership, capacity and token predicates. The retained Line management
+mutex and global `IRQ_CONTROL_LOCK` serialize both phases; this does not replace
+the existing control/registry/Line lock order. Caller references keep rejected
+handlers alive until all management and short locks have been released. NMI
+context rejection does not invoke the locking logger.
+
+Resolution-error cleanup releases admission and management exclusion without
+retiring an existing idle Line. A free request that finds no owned action
+returns before changing enable/depth state, masking hardware or beginning
+teardown/drain. These guarantees cover software rejection and absence, not
+rollback of hardware writes, allocator identity reuse or device quiescence.

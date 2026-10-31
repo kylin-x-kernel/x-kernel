@@ -261,11 +261,12 @@ impl IrqDescRuntimeState {
         })
     }
 
+    fn can_install_regular_action(&self) -> bool {
+        self.teardown_depth == 0 && self.action_count == 0
+    }
+
     fn install_regular_action(&mut self, action: IrqAction) -> bool {
-        if self.teardown_depth != 0 {
-            return false;
-        }
-        if self.action_count != 0 {
+        if !self.can_install_regular_action() {
             return false;
         }
         self.actions[0] = Some(action);
@@ -308,22 +309,19 @@ impl IrqDescRuntimeState {
         Some(action)
     }
 
+    fn can_install_shared_action(&self) -> bool {
+        self.teardown_depth == 0
+            && self.action_count < MAX_IRQ_ACTIONS
+            && self.next_shared_action_token.checked_add(1).is_some()
+            && self.actions.iter().flatten().all(IrqAction::is_shared)
+            && self.actions.iter().any(Option::is_none)
+    }
+
     fn install_shared_action(
         &mut self,
         handler: crate::platform::Handler,
     ) -> Option<IrqActionToken> {
-        if self.teardown_depth != 0 {
-            return None;
-        }
-        if self.action_count >= MAX_IRQ_ACTIONS {
-            return None;
-        }
-        if self
-            .actions
-            .iter()
-            .flatten()
-            .any(|action| !action.is_shared())
-        {
+        if !self.can_install_shared_action() {
             return None;
         }
         let token = IrqActionToken::new(self.next_shared_action_token);
@@ -492,6 +490,14 @@ impl IrqStateDesc {
 
     pub(super) fn install_regular_action(&mut self, action: IrqAction) -> bool {
         self.runtime.install_regular_action(action)
+    }
+
+    pub(super) fn can_install_regular_action(&self) -> bool {
+        self.runtime.can_install_regular_action()
+    }
+
+    pub(super) fn can_install_shared_action(&self) -> bool {
+        self.runtime.can_install_shared_action()
     }
 
     pub(super) fn take_regular_action(&mut self) -> Option<IrqAction> {
@@ -925,6 +931,23 @@ impl IrqState {
 
     pub(super) fn remove_if_unused_with_desc(&mut self, virq: Virq) -> Option<IrqDesc> {
         self.remove_if_unused_inner(virq, false)
+    }
+
+    /// Removes a software-only fixture, including any unexpectedly published mapping.
+    /// The test owns the Line exclusively; no real source or dispatch may use it.
+    #[cfg(unittest)]
+    pub(super) fn remove_test_line(&mut self, virq: Virq) -> Option<Arc<IrqLine>> {
+        if let Some((domain, hwirq)) = self.virq_to_mapping.remove(&virq) {
+            if let Some(domain_state) = self.domain_states.get_mut(&domain) {
+                domain_state.remove_mapping(hwirq);
+                if domain_state.is_empty() {
+                    self.domain_states.remove(&domain);
+                }
+            }
+            crate::domain::publish_snapshot(domain, self.domain_mapping_entries(domain));
+        }
+        // Return ownership so final handler destruction occurs outside the lock.
+        self.descs.remove(&virq)
     }
 
     #[cfg(any(target_arch = "x86_64", unittest))]

@@ -1093,6 +1093,28 @@ registration errors after releasing management locks, except in NMI context,
 where logging itself is unsafe. Startup SGI and PMU callers likewise distinguish
 `Ok(false)` rejection from `Err` diagnostics without changing startup policy.
 
+Ordinary registration also checks action admission before descriptor merging
+or mapping publication. The preflight receives the retained `Arc<IrqLine>`
+under management, `IRQ_CONTROL_LOCK` and registry exclusion, and takes the
+Line lock to inspect the same predicates used by installation. Regular actions
+require an empty Line; shared actions require compatible ownership, capacity
+and an available token. The global control lock remains held through the body,
+so releasing the preflight's Line guard does not allow a competing control
+transaction to invalidate admission. Rejected richer descriptors leave existing
+metadata, generations, mappings and action owners unchanged. Diagnostics occur
+after helper locks are released and are suppressed in NMI context.
+
+Resolution errors release management admission and locks through the existing
+RAII cleanup, allowing a subsequent startup try-registration on the same Line.
+Fresh dynamic identity allocation may still advance the allocator. This is not
+hardware rollback: platform hooks remain infallible, prepare methods still
+mutate runtime control state, and NMI publication retains its separate contract.
+
+Freeing a missing action or unmatched token returns `Ok(None)` before preparing
+disable, beginning teardown or waiting for drain. An existing empty Line keeps
+its enable state, disable depth and directory identity; missing Lines remain
+absent. A successful removal keeps the existing mask-and-drain sequence.
+
 Admission is recorded under the registry/Line locks so dispatch cleanup and MSI
 cleanup cannot remove a Line while its management transaction is active. Free
 withdraws the action and masks the last action's source under short locks, then

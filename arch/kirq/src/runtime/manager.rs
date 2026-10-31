@@ -494,6 +494,7 @@ pub fn try_register_disabled(
 ///
 /// Requires sleepable task context even without contention. Management exclusion
 /// serializes with registration/removal on this Line and may block or migrate.
+/// Occupied Lines are rejected before descriptor metadata or mappings change.
 pub fn try_register_with_options(
     spec: impl Into<IrqSpec>,
     handler: Handler,
@@ -523,26 +524,34 @@ fn register_with_mode(
 ) -> Result<bool, IrqDescError> {
     // Keep a caller-owned reference until the scoped mutex has been released,
     // including rejection and installation failure.
-    let result = with_registration_line(spec, mode, |virq, line| {
-        let state = IRQ_STATE.lock();
-        let mut entry = line.lock();
-        if entry.has_actions() {
-            warn!("register handler for IRQ {virq} failed");
-            return Ok(false);
-        }
-        let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
-        debug_assert!(installed, "duplicate regular action was checked above");
-        let plan = if options.should_auto_enable() {
-            entry.prepare_auto_enable()
-        } else {
-            entry.prepare_register_disabled()
-        };
-        drop(entry);
-        drop(state);
-        apply_platform_plan(plan);
-        Ok(true)
-    });
+    let result = with_registration_line_checked(
+        spec,
+        mode,
+        |line| Ok(line.lock().can_install_regular_action()),
+        |virq, line| {
+            let state = IRQ_STATE.lock();
+            let mut entry = line.lock();
+            if entry.has_actions() {
+                warn!("register handler for IRQ {virq} failed");
+                return Ok(false);
+            }
+            let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
+            debug_assert!(installed, "duplicate regular action was checked above");
+            let plan = if options.should_auto_enable() {
+                entry.prepare_auto_enable()
+            } else {
+                entry.prepare_register_disabled()
+            };
+            drop(entry);
+            drop(state);
+            apply_platform_plan(plan);
+            Ok(true)
+        },
+    );
     drop(handler);
+    if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
+        warn!("register handler for IRQ {spec:?} failed");
+    }
     result.map(|registered| registered.unwrap_or(false))
 }
 
@@ -565,29 +574,40 @@ pub fn register_shared(spec: impl Into<IrqSpec>, handler: Handler) -> Option<Irq
 /// Try to register one shared IRQ action with default auto-enable behavior.
 ///
 /// Requires sleepable task context; waits for this Line's management mutex.
+/// Incompatible ownership, exhausted capacity or unavailable tokens return None
+/// before descriptor metadata or mappings change.
 pub fn try_register_shared(
     spec: impl Into<IrqSpec>,
     handler: Handler,
 ) -> Result<Option<IrqActionToken>, IrqDescError> {
-    let result = with_registration_line(spec.into(), ManagementMode::Task, |virq, line| {
-        let state = IRQ_STATE.lock();
-        let mut entry = line.lock();
-        let was_first_action = !entry.has_actions();
-        let Some(token) = entry.install_shared_action(handler.clone()) else {
-            warn!("register shared handler for IRQ {virq} failed");
-            return Ok(None);
-        };
-        let plan = if was_first_action {
-            entry.prepare_auto_enable()
-        } else {
-            entry.prepare_reconfigure_if_stale()
-        };
-        drop(entry);
-        drop(state);
-        apply_platform_plan(plan);
-        Ok(Some(token))
-    });
+    let spec = spec.into();
+    let result = with_registration_line_checked(
+        spec,
+        ManagementMode::Task,
+        |line| Ok(line.lock().can_install_shared_action()),
+        |virq, line| {
+            let state = IRQ_STATE.lock();
+            let mut entry = line.lock();
+            let was_first_action = !entry.has_actions();
+            let Some(token) = entry.install_shared_action(handler.clone()) else {
+                warn!("register shared handler for IRQ {virq} failed");
+                return Ok(None);
+            };
+            let plan = if was_first_action {
+                entry.prepare_auto_enable()
+            } else {
+                entry.prepare_reconfigure_if_stale()
+            };
+            drop(entry);
+            drop(state);
+            apply_platform_plan(plan);
+            Ok(Some(token))
+        },
+    );
     drop(handler);
+    if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
+        warn!("register shared handler for IRQ {spec:?} failed");
+    }
     result.map(Option::flatten)
 }
 
@@ -679,20 +699,6 @@ impl Drop for ManagementAdmission<'_> {
     }
 }
 
-/// Runs registration with an admitted Line, retrying stale directory identities.
-///
-/// The body runs under management and control exclusion, without registry or
-/// Line guards. It must not wait or reacquire the control lock. Return discarded
-/// handler owners rather than finally destroying them inside the transaction.
-/// None means startup contention or teardown rejection.
-pub(super) fn with_registration_line<T>(
-    spec: IrqSpec,
-    mode: ManagementMode,
-    body_fn: impl FnOnce(Virq, &Arc<IrqLine>) -> Result<T, IrqDescError>,
-) -> Result<Option<T>, IrqDescError> {
-    with_registration_line_checked(spec, mode, |_| Ok(true), body_fn)
-}
-
 /// Checks registration-specific rejection before merging or publishing metadata.
 ///
 /// The preflight runs under management, control and registry exclusion, but
@@ -702,6 +708,8 @@ pub(super) fn with_registration_line<T>(
 /// exclusion across publication, but runs without registry or Line guards. It
 /// must not wait or reacquire the control lock. This makes a shared-table check
 /// and publication atomic even when registrations select different Lines.
+/// None means startup contention, teardown or preflight rejection. Return
+/// discarded handler owners rather than destroying them inside the transaction.
 #[expect(
     clippy::expect_used,
     reason = "CG-021-no-panic-on-reachable-failure: successful resolution assigns a virq"
@@ -932,13 +940,14 @@ fn try_free_irq_inner(
                 }
                 removed_action
             };
+            let Some(removed_action) = removed_action else {
+                return Ok(None);
+            };
             // Removing the action first prevents new dispatch snapshots from seeing
             // it. If this was the last action, mask the platform line before waiting
             // for snapshots that already escaped under an `IrqDispatchGuard`.
             let disable_plan = entry.prepare_disable_if_no_actions();
-            if removed_action.is_some() {
-                entry.begin_teardown();
-            }
+            entry.begin_teardown();
 
             let drain = IrqDrain::new(virq, line);
             drop(entry);
@@ -948,11 +957,8 @@ fn try_free_irq_inner(
             }
             (drain, removed_action)
         };
-        if removed_action.is_none() {
-            return Ok(None);
-        }
         drain.wait();
-        Ok(removed_action.map(IrqAction::into_primary))
+        Ok(Some(removed_action.into_primary()))
     })
 }
 
