@@ -980,15 +980,20 @@ fn handle_nmi_with(vector: usize, dispatch_fn: impl FnOnce(usize)) -> bool {
 /// normal IRQ. It resolves the claim, runs regular action fanout, and completes
 /// the controller claim. Its return value is only the resolved normal `virq`
 /// metadata used by the outer IRQ-exit deferred hook.
+/// A resolved Line remains in flight through controller completion, even when
+/// it has no actions; drain completion is published only after that call returns.
 ///
 /// The caller must be the active [`IntrManagerIf::dispatch_irq`] invocation on
 /// the CPU that created `claim`, with local IRQs masked and generic hardirq
 /// context already entered.
 #[doc(hidden)]
 pub fn generic_handle_irq(claim: PendingIrq) -> Option<Virq> {
-    let resolved_irq = dispatch_actions(&claim);
-    claim.complete();
-    resolved_irq
+    dispatch_and_complete(claim, PendingIrq::complete)
+}
+
+fn dispatch_and_complete(claim: PendingIrq, complete_irq: impl FnOnce(PendingIrq)) -> Option<Virq> {
+    let dispatch = dispatch_actions(&claim);
+    dispatch.complete(|| complete_irq(claim))
 }
 
 /// Dispatches and completes a claimed NMI without touching normal IRQ state.
@@ -1077,8 +1082,7 @@ fn run_claimed_irq_tail(
     complete_irq: impl FnOnce(PendingIrq),
 ) {
     let hardirq_context_guard = HardIrqContextGuard::enter();
-    let resolved_irq = dispatch_actions(&pending_irq);
-    complete_irq(pending_irq);
+    let resolved_irq = dispatch_and_complete(pending_irq, complete_irq);
     run_irq_exit_tail_with_context(vector, resolved_irq, hardirq_context_guard);
 }
 

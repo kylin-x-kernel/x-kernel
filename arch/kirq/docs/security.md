@@ -232,9 +232,11 @@ per-CPU atomic pending mask。调用方在访问前 pin 当前 CPU；pending mas
   raise softirq 或创建 workerqueue work。
 - `PendingIrq` / `DispatchedIrq` 不能跨线程/跨 CPU 发送，completion 必须在 claim
   它的 CPU 上完成。
-- `IntrManagerIf::complete_irq(cookie)` 必须只消费本次 dispatch 返回的 completion
-  cookie。generic handler fanout 之前不能对 level-triggered line 做最终
-  EOI/deactivate。
+- `IntrManagerIf::complete_irq(cookie)` must consume only the original claim's
+  remaining host-owned completion obligation, on its claiming CPU. The backend
+  must obey the source's acknowledgement/deactivation protocol rather than infer
+  it from trigger type alone. A no-op tail or guest-owned deactivation is not a
+  hardware-quiescence certificate; forwarding shutdown needs a separate proof.
 - `IRQ_STATE` 中的 `virq -> IrqStateDesc` 和 `domain -> hwirq -> virq` 映射必须保持一致。
 - 带 domain 的 descriptor 只能使用 `domain/mod.rs` 静态 registry 中已注册的 domain；
   未知 domain 必须返回 `IrqDescError::UnknownDomain`，不能创建数据面不可解析的映射。
@@ -544,6 +546,14 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   retaining storage neither grants management admission nor establishes hardware
   quiescence. Lock ordering is control, registry, Line; wait/wake callbacks must
   run outside all three short locks.
+- The normal dispatch admission outlives the controller completion call, not
+  merely the handler snapshot. A registered Line with no actions is admitted
+  too, so unused-Line cleanup cannot run during completion. Lookup misses still
+  complete their original claim without acquiring a later Line by number.
+  The private consuming `IrqDispatch::complete` centralizes this normal-return
+  ordering; it is not a type-level ban on dropping an admission early or a
+  recovery guarantee after a kernel panic. Synthetic completion tests exercise
+  software ordering and retained identity, not real controller delivery.
 - `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
   delayed-work product API and timer adapter have been removed. Automatic delayed
   retry, full Linux concurrent-flusher handoff, CPU hotplug drain and rescuer

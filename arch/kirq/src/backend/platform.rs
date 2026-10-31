@@ -33,7 +33,7 @@ pub enum TargetCpu {
     AllButSelf { me: usize, total: usize },
 }
 
-/// An IRQ claimed by the platform and not yet completed.
+/// A platform IRQ whose host completion obligation has not yet been consumed.
 ///
 /// Completion must happen on the CPU that claimed the interrupt. The guard is
 /// not `Send`, and its `Drop` path completes the interrupt if the generic IRQ
@@ -68,10 +68,11 @@ impl DispatchedIrq {
 
     /// Completes the claimed interrupt exactly once.
     ///
-    /// Generic IRQ dispatch calls this after primary handler and wake
-    /// compatibility fanout. Edge-style backends may have already EOIed in
-    /// dispatch and use a no-op cookie, but level-triggered backends must delay
-    /// their final EOI or deactivate until this point.
+    /// The generic helper calls this after handler execution. The backend
+    /// performs the remaining host-owned operations for this claim; operations
+    /// already performed during acknowledgement must not be repeated. A
+    /// backend-specific forwarding protocol may leave deactivation to a guest.
+    /// Return does not by itself prove hardware inactivity or device shutdown.
     pub fn complete(mut self) {
         self.complete_inner();
     }
@@ -91,7 +92,11 @@ impl Drop for DispatchedIrq {
     }
 }
 
-/// A pending interrupt claimed by the platform, before action dispatch.
+/// A platform claim awaiting generic action dispatch and host completion.
+///
+/// This guard owns the remaining host completion obligation, not necessarily
+/// all hardware activity. The backend may already have acknowledged the source
+/// or may transfer deactivation through a separate forwarding protocol.
 #[derive(Debug)]
 pub struct PendingIrq {
     source: IrqRef,
@@ -124,7 +129,10 @@ impl PendingIrq {
         }
     }
 
-    /// Completes the claim; idempotent, also run by `Drop`.
+    /// Consumes the host completion obligation, also handled by `Drop`.
+    ///
+    /// The backend hook runs once for this guard on normal completion/drop.
+    /// Its return does not guarantee hardware inactivity or stop future arrivals.
     pub fn complete(mut self) {
         self.complete_inner();
     }
@@ -187,13 +195,20 @@ pub trait IntrManagerIf {
     /// window. It is only called where normal IRQs are already masked.
     fn dispatch_nmi(id: usize);
 
-    /// Completes a claimed interrupt with its opaque completion cookie.
+    /// Performs the remaining host-owned completion operations for a claim.
     ///
     /// `completion_cookie` must be the cookie returned by the matching dispatch
-    /// call and must be completed on the same CPU that claimed it. Backends may
-    /// treat cookie `0` as a no-op for interrupt classes that were completed
-    /// during dispatch, but level-triggered lines must use this hook for their
-    /// final EOI or deactivate after generic handler fanout.
+    /// call and must be completed on the same CPU that claimed it. The provider
+    /// owns the cookie encoding, including any no-op sentinel. It must not repeat
+    /// operations already performed before generic dispatch or omit operations
+    /// still required by its source/controller protocol, even when no action ran.
+    /// Trigger type alone does not determine EOI/deactivation timing.
+    ///
+    /// A supported forwarding protocol may delegate deactivation to another
+    /// owner. Its lifecycle must be established separately; returning here is
+    /// not a hardware-active query, a device shutdown or a forwarding drain.
+    /// The hook must not sleep or migrate. NMI-class providers must also obey
+    /// NMI-context restrictions; ordinary providers may use bounded chip locks.
     fn complete_irq(completion_cookie: usize);
 
     /// Sends an IPI to another CPU.

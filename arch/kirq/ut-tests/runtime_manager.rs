@@ -10,7 +10,7 @@ use unittest::def_test;
 
 use super::{
     DYNAMIC_VIRQ_BASE, IRQ_STATE, IrqDesc, IrqDescError, IrqDomainId, IrqStateDesc,
-    WAIT_FOR_IN_FLIGHT_HOOK, dispatch_actions, run_claimed_irq_tail,
+    WAIT_FOR_IN_FLIGHT_HOOK, run_claimed_irq_tail,
     run_irq_exit_tail_with_context, try_disable_irq, try_disable_irq_nosync, try_enable,
     try_enable_irq, try_free_irq, try_free_irq_action, try_map, try_register,
     try_register_disabled, try_register_shared, try_synchronize_irq, unregister,
@@ -763,7 +763,7 @@ fn test_duplicate_regular_handler_registration_is_rejected() {
     );
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
     assert!(unregister(virq).is_some());
@@ -783,7 +783,7 @@ fn test_shared_irq_fanout_runs_all_actions() {
         .expect("second shared action token");
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(SHARED_A_CALLS.load(Ordering::Relaxed), 1);
     assert_eq!(SHARED_B_CALLS.load(Ordering::Relaxed), 1);
@@ -820,7 +820,7 @@ fn test_tokenless_free_preserves_shared_action_after_first_slot_removal() {
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(SHARED_A_CALLS.load(Ordering::Relaxed), 0);
     assert_eq!(SHARED_B_CALLS.load(Ordering::Relaxed), 1);
@@ -857,7 +857,7 @@ fn test_shared_irq_action_limit_is_enforced() {
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
     assert_eq!(SHARED_A_CALLS.load(Ordering::Relaxed), MAX_IRQ_ACTIONS);
 
     for token in tokens {
@@ -1302,7 +1302,7 @@ fn test_dispatch_tracks_line_level_in_flight() {
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(IRQ_IN_FLIGHT_TEST_VIRQ), 0);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(IRQ_IN_FLIGHT_OBSERVED.load(Ordering::Relaxed), 1);
     {
@@ -1316,6 +1316,90 @@ fn test_dispatch_tracks_line_level_in_flight() {
     }
 
     assert!(unregister(IRQ_IN_FLIGHT_TEST_VIRQ).is_some());
+}
+
+fn check_claim_completion_retains_line(has_action: bool) {
+    let virq = 0x3158;
+    let action = has_action.then(|| IrqAction::regular(Arc::new(test_handler)));
+    let line = Arc::new(IrqLine::new(IrqStateDesc::test_with_runtime(
+        IrqDesc::from_virq(virq), action,
+    )));
+    assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
+    let completion = line.lock().in_flight_zero_completion();
+    let mut has_completed = false;
+    {
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
+        run_claimed_irq_tail(virq, PendingIrq::new(IrqRef::Virq(virq), virq), |claim| {
+            // This is a synthetic claim, not a controller ACK. The injected
+            // completion consumes it without sending a fabricated cookie to hardware.
+            core::mem::forget(claim);
+            assert_eq!(line.lock().in_flight(), 1);
+            assert!(!completion.is_completed());
+            assert!(IRQ_STATE.lock().remove_if_unused(virq).is_none());
+            // Admission remains live until this completion callback returns.
+            assert!(!completion.is_completed());
+            has_completed = true;
+        });
+    }
+    assert!(has_completed);
+    assert_eq!(line.lock().in_flight(), 0);
+    assert!(completion.is_completed());
+    if has_action {
+        // This fixture never configured hardware; retire its software owner
+        // directly rather than masking a fabricated source through unregister.
+        let removed = IRQ_STATE.lock().descs.remove(&virq);
+        assert!(removed.as_ref().is_some_and(|stored| Arc::ptr_eq(stored, &line)));
+    }
+    assert!(!IRQ_STATE.lock().descs.contains_key(&virq));
+}
+
+#[def_test(serial)]
+fn claim_completion_precedes_action_drain() {
+    check_claim_completion_retains_line(true);
+}
+
+#[def_test(serial)]
+fn empty_line_remains_admitted_through_claim_completion() {
+    check_claim_completion_retains_line(false);
+}
+
+#[def_test(serial)]
+fn claim_completion_keeps_original_admission_after_numeric_replacement() {
+    let virq = 0x315e;
+    let original = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let replacement = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let original_completion = original.lock().in_flight_zero_completion();
+    let replacement_completion = replacement.lock().in_flight_zero_completion();
+    assert!(IRQ_STATE.lock().descs.insert(virq, original.clone()).is_none());
+    let mut completions = 0;
+    let resolved = {
+        let _irq_guard = kspin::NoPreemptIrqSave::new();
+        super::dispatch_and_complete(PendingIrq::new(IrqRef::Virq(virq), virq), |claim| {
+            // Only the injected completion owns this synthetic claim; do not
+            // execute the real backend completion with its fabricated cookie.
+            core::mem::forget(claim);
+            completions += 1;
+            assert_eq!(original.lock().in_flight(), 1);
+            assert!(!original_completion.is_completed());
+            // Bypass production retirement solely to test retained identity.
+            // A normal removal cannot replace a Line with a live admission.
+            let removed = IRQ_STATE.lock().descs.insert(virq, replacement.clone());
+            assert!(removed.as_ref().is_some_and(|line| Arc::ptr_eq(line, &original)));
+            drop(removed);
+            assert_eq!(original.lock().in_flight(), 1);
+            assert!(!original_completion.is_completed());
+            assert_eq!(replacement.lock().in_flight(), 0);
+            assert!(replacement_completion.is_completed());
+        })
+    };
+    let stored = IRQ_STATE.lock().descs.remove(&virq);
+    assert!(stored.as_ref().is_some_and(|line| Arc::ptr_eq(line, &replacement)));
+    assert_eq!(resolved, Some(virq));
+    assert_eq!(completions, 1);
+    assert_eq!(original.lock().in_flight(), 0);
+    assert!(original_completion.is_completed());
+    assert_eq!(replacement.lock().in_flight(), 0);
+    assert!(replacement_completion.is_completed());
 }
 
 #[def_test(serial)]
@@ -1859,7 +1943,7 @@ fn test_single_regular_action_dispatch_remains_compatible() {
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 1);
     assert!(unregister(virq).is_some());
@@ -1872,7 +1956,7 @@ fn test_irq_handler_receives_resolved_virq() {
 
     assert!(try_register(virq, Arc::new(test_observe_irq_handler)).unwrap());
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(HANDLER_OBSERVED_IRQ.load(Ordering::Relaxed), virq);
     assert!(unregister(virq).is_some());
@@ -1898,7 +1982,7 @@ fn test_unsupported_threaded_action_does_not_run_primary() {
     }
 
     let pending = PendingIrq::new(IrqRef::Virq(virq), virq);
-    dispatch_actions(&pending);
+    super::generic_handle_irq(pending);
 
     assert_eq!(REGULAR_CALLS.load(Ordering::Relaxed), 0);
     assert!(

@@ -106,17 +106,6 @@ impl IrqDomainState {
 
 pub(super) struct IrqActionSnapshot {
     pub(super) actions: [Option<IrqAction>; MAX_IRQ_ACTIONS],
-    pub(super) action_count: usize,
-}
-
-impl IrqActionSnapshot {
-    /// Returns whether this snapshot contains hardirq-stage primary actions.
-    ///
-    /// Only primary actions leave `IRQ_STATE` and run later outside the lock, so
-    /// only they require an in-flight dispatch guard.
-    pub(super) fn has_primary_actions(&self) -> bool {
-        self.action_count != 0
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -534,10 +523,7 @@ impl IrqStateDesc {
 
     pub(super) fn snapshot_actions(&mut self) -> IrqActionSnapshot {
         let actions = self.runtime.actions.clone();
-        IrqActionSnapshot {
-            actions,
-            action_count: self.runtime.action_count,
-        }
+        IrqActionSnapshot { actions }
     }
 
     pub(super) fn prepare_auto_enable(&mut self) -> IrqPlatformPlan {

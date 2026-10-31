@@ -14,44 +14,58 @@ use crate::{
     state::{IRQ_STATE, IrqLine},
 };
 
-/// Dispatches regular IRQ actions and returns the resolved logical IRQ.
+/// Retains dispatch admission until the caller has completed the controller claim.
+#[must_use = "complete the original controller claim before releasing dispatch admission"]
+pub(super) struct IrqDispatch {
+    resolved_irq: Option<crate::Virq>,
+    _guard: Option<IrqDispatchGuard>,
+}
+
+impl IrqDispatch {
+    /// Completes the original claim before releasing this dispatch's admission.
+    ///
+    /// The caller supplies the original claim's completion, on the claiming CPU.
+    /// No Line or registry lock is held while invoking it in the current flow.
+    pub(super) fn complete(self, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
+        let resolved_irq = self.resolved_irq;
+        complete_claim();
+        drop(self);
+        resolved_irq
+    }
+}
+
+/// Dispatches regular IRQ actions and retains the resolved Line's admission.
 ///
-/// The return value is for IRQ-tail context only. It does not mean a descriptor
-/// existed or a handler serviced the interrupt; descriptor misses are still
-/// reported as unhandled and return the resolved `virq` so diagnostics and
-/// deferred hooks can identify the claimed line.
-pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
+/// Consume the returned admission through `IrqDispatch::complete`. Its
+/// resolved IRQ is only metadata for the tail: descriptor misses still return
+/// that number, without creating a Line or attaching to a later replacement.
+pub(super) fn dispatch_actions(pending: &PendingIrq) -> IrqDispatch {
     let (virq, snapshot, mut dispatch_guard) = {
-        let mut state = IRQ_STATE.lock();
+        let state = IRQ_STATE.lock();
         let Some(virq) = pending.resolve() else {
             warn!("Unhandled IRQ {:?}", pending.source());
-            return None;
+            return IrqDispatch {
+                resolved_irq: None,
+                _guard: None,
+            };
         };
         let Some(line) = state.descs.get(&virq) else {
             warn!("Unhandled IRQ {virq}");
             // The source resolved, but no descriptor is currently registered.
             // Return immediately after the single unhandled warning; the caller
             // still completes the platform claim and runs IRQ-tail deferred work.
-            return Some(virq);
+            return IrqDispatch {
+                resolved_irq: Some(virq),
+                _guard: None,
+            };
         };
         let mut entry = line.lock();
         let snapshot = entry.snapshot_actions();
-        let dispatch_guard = if snapshot.has_primary_actions() {
-            // The snapshot and in-flight mark must be committed under the same
-            // `IRQ_STATE` lock. Once an action is copied out, `free_irq*()` may
-            // remove it from the control plane but must still wait for this
-            // guard before releasing driver-owned state.
-            entry.begin_dispatch();
-            let guard = IrqDispatchGuard::new(virq, line.clone());
-            drop(entry);
-            Some(guard)
-        } else {
-            // Without a dispatch guard there is no escaped handler snapshot;
-            // this is the only hot-path case where cleanup can succeed here.
-            drop(entry);
-            state.remove_if_unused(virq);
-            None
-        };
+        // Empty Lines still own a controller claim. Keep admission until EOI,
+        // not merely until the last copied handler returns.
+        entry.begin_dispatch();
+        let dispatch_guard = IrqDispatchGuard::new(virq, line.clone());
+        drop(entry);
         (virq, snapshot, dispatch_guard)
     };
 
@@ -66,13 +80,11 @@ pub(super) fn dispatch_actions(pending: &PendingIrq) -> Option<crate::Virq> {
             warn!("IRQ {virq} action has unsupported threaded state");
         }
     }
-    if let Some(guard) = dispatch_guard.as_mut() {
-        guard.is_unhandled = !merged_event.handled();
-    } else if !merged_event.handled() {
-        warn!("Unhandled IRQ {virq}");
+    dispatch_guard.is_unhandled = !merged_event.handled();
+    IrqDispatch {
+        resolved_irq: Some(virq),
+        _guard: Some(dispatch_guard),
     }
-    drop(dispatch_guard);
-    Some(virq)
 }
 
 struct IrqDispatchGuard {
@@ -106,9 +118,8 @@ impl Drop for IrqDispatchGuard {
                 };
                 (entry.finish_dispatch(), report)
             };
-            // This is the matching cleanup point for the last in-flight snapshot:
-            // once the guard drops, a descriptor left empty by `free_irq*()` may now
-            // be removable. Platform masking is handled by the control path.
+            // The original controller claim has completed. An empty Line may
+            // now be removable; platform masking belongs to the control path.
             if state
                 .descs
                 .get(&self.virq)

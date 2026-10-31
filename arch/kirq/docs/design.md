@@ -325,9 +325,18 @@ handler fanout、上下文和 completion ordering；irqchip driver 负责具体�
   `DispatchedIrq::complete()`。
 - 两种 claim 都是 RAII guard；若 normal control flow 没有显式 complete，drop 会补发
   completion。guard 不是 `Send`，completion 必须发生在 claim 它的 CPU 上。
-- `complete_irq(cookie)` 只完成 dispatch 返回的 cookie。level-triggered line 必须在
-  handler fanout 后最终 EOI/deactivate，避免 handler 处理前重新触发。edge-triggered
-  line 可以使用 cookie `0` no-op。
+- `complete_irq(cookie)` consumes the remaining host-owned obligation of the
+  original claim. Cookie encoding and source-specific EOI/deactivation ordering
+  belong to the backend, not to a generic trigger-type rule. Already completed
+  operations must not be repeated. Supported guest forwarding may retain a
+  separate deactivation owner; hook return is not hardware inactivity or device
+  shutdown.
+- Normal dispatch consumes `IrqDispatch` through its private `complete` method:
+  invoke original-claim completion, release the retained Line admission, then
+  return resolved IRQ metadata. Empty Lines retain admission too; lookup misses
+  do not acquire a later same-number Line. No registry or Line lock spans the
+  completion callback. This orders software drain after host completion without
+  changing controller ACK/EOI/DIR policy or establishing hardware quiescence.
 
 ### notify_cpu publish-before-notify
 
@@ -822,8 +831,11 @@ retained across request/free transactions, including dispatch drain. Directory
 removal requires no admitted management transaction as well as zero in-flight
 dispatch. Candidate Line and completion storage is prepared outside
 short locks and retained by its preparer until those locks have been released.
-Global control serialization and the current software-dispatch drain boundary
-remain unchanged; extending drain through controller completion is separate.
+Global control serialization remains unchanged in this step. Dispatch admission
+now survives handler return and is discharged only after the original controller
+claim completes. Empty registered Lines also retain admission through completion.
+An unresolved or missing Line still completes its claim, but acquires no Line
+obligation and must not attach cleanup to a subsequently published replacement.
 Synchronous disable captures this identity in the same transaction as its
 disable plan; it cannot mask one instance and then synchronize another.
 
