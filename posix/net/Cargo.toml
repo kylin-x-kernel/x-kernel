@@ -19,6 +19,7 @@ ignored = ["unittest_support"]
 vsock = ["knet/vsock"]
 
 [dependencies]
+kalloc-types.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 kbuild_config.workspace = true
 kerrno.workspace = true

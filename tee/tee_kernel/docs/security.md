@@ -1,4 +1,25 @@
-# TEE Session Lifecycle Safety
+# TEE Ownership and Lifecycle Safety
+
+## REE metadata reservation boundary
+
+`new_fs_owner` reserves a typed uninitialized KBox with NOWAIT before invoking
+resource initialization. Failed reservation returns TEE_ERROR_OUT_OF_MEMORY and
+does not open a file, increment a directory reference or publish that owner.
+REE open/create reserve before directory-cache admission, rather than adding
+an owner failure inside the transaction's forced-cache-close rollback path.
+Initializer failure frees the reservation and preserves the initializer's error;
+existing resource-specific error paths remain responsible for explicit close.
+Successful initialization has no remaining owner allocation that could fail
+after opening resources. No raw ownership conversion or new unsafe code is used.
+
+NOWAIT is required because callers may hold filesystem serialization and object
+locks; it neither grants NMI safety nor makes the complete storage operation
+nonblocking. Nested allocation and existing explicit-close behavior are outside
+this boundary. A failed enumeration restart does not restore the old iterator.
+Tests inject reservation failure locally, verify NOWAIT and that initialization
+is skipped, preserve initializer errors and cleanup, and check successful pointer
+identity. Existing REE primitive and storage syscall tests exercise actual IO/close.
+The injection does not simulate global OOM, nested Box failure or disk failure.
 
 ## Session-owner allocation boundary
 
@@ -20,9 +41,11 @@ allocator. Existing exec/exit fixtures continue exercising real session cleanup.
 
 This analysis covers session ownership and access in `src/tee/tee_session.rs`,
 the close-all entry points in `tee_obj.rs`, `tee_svc_storage.rs` and
-`tee_svc_cryp2.rs` under `src/tee/`, and their exec/exit handoff.
-It does not audit those modules' other resource operations, storage backends,
-crypto algorithms, TA loading or syscall argument validation.
+`tee_svc_cryp2.rs` under `src/tee/`, and their exec/exit handoff. It also covers
+the REE metadata owner reservation and initialization boundary in `tee_ree_fs.rs`
+and `fs_dirfile.rs` under `src/tee/`. Other storage-backend operations, nested
+allocations, crypto algorithms, TA loading and syscall argument validation remain
+outside this analysis, as do resource operations unrelated to these boundaries.
 
 `kprocess::Thread` supplies the current-thread identity and session-slot mutex.
 `posix/process` owns exit ordering; `core/ksyscall` owns the exec commitment

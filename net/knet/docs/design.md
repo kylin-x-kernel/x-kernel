@@ -1,5 +1,27 @@
 # knet — Design
 
+## Fallible socket owners
+
+The seven `Socket` variants own `KBox<T>`; SocketOps and Configurable forwarding
+retain concrete protocol behavior. POSIX socket construction allocates owners
+with KERNEL permissions before fd publication, without holding the fd-table lock.
+Failure destroys the constructed socket using its existing transport cleanup.
+
+TCP, Unix and vsock accept reserve owner storage before entering transport
+accept or dequeuing a pending connection. TCP validates listening state and the
+bound endpoint first. Reservation failure returns NoMemory without consuming a
+connection; transport errors, interruption and WouldBlock release unused storage.
+Success writes into that storage without another owner allocation. No queue or
+socket-set lock spans reservation; Unix endpoint snapshots are taken afterwards.
+
+Even nonblocking accept requires sleepable, reclaim-safe task context without
+locks needed by reclaim: nonblocking controls connection waiting, not allocator
+permissions. NoMemory can precede empty-queue WouldBlock; Unix/vsock reservation
+can also fail before transport validation. Each blocked accept retains one
+reserved slot, avoiding connection loss without a queue rollback protocol.
+Device owners, boxed packet buffers, async-trait futures, nested Arc/Vec
+allocations and dynamic workers remain outside this migration.
+
 ## Test Layout
 
 Guest tests live in `ut-tests/`, mirroring the source module hierarchy, and

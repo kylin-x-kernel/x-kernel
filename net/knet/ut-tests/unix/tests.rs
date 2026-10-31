@@ -35,3 +35,31 @@ fn unix_abstract_lookup_releases_registry_before_callback() {
     ABSTRACT_BINDINGS.lock().remove(&name);
     assert_eq!(result, Ok(true));
 }
+
+#[def_test]
+fn accept_owner_failure_preserves_pending_connection() {
+    use kalloc_types::KBox;
+    use kpoll::{IoEvents, Pollable};
+    use super::{StreamTransport, UnixDomainSocket, UnixSocketType, UnixTransportOps};
+    use crate::{AcceptOptions, ConnectOptions, RecvOptions, SendOptions, SocketOps};
+
+    let entry = BindEntry::default();
+    let listener = StreamTransport::new(1);
+    listener.bind(&entry, &UnixAddr::Unbound).unwrap();
+    listener.listen(1).unwrap();
+    let client = StreamTransport::new(2);
+    client.connect(&entry, &UnixAddr::Unbound, ConnectOptions::default()).unwrap();
+    let listener = UnixDomainSocket::new(listener, UnixSocketType::Stream);
+    assert!(listener.poll().contains(IoEvents::IN));
+    let options = AcceptOptions { nonblocking: true };
+    assert!(matches!(listener.accept_with_storage(options, || Err(KError::NoMemory)),
+        Err(KError::NoMemory)));
+    assert!(listener.poll().contains(IoEvents::IN));
+    let accepted = listener.accept_with_storage(options, KBox::<UnixDomainSocket>::new_uninit).unwrap();
+    assert!(!listener.poll().contains(IoEvents::IN));
+    assert_eq!(client.send(&b"ok"[..], SendOptions::default()), Ok(2));
+    let mut bytes = [0; 2];
+    assert_eq!(accepted.recv(&mut bytes[..], RecvOptions::default()), Ok(2));
+    assert_eq!(&bytes, b"ok");
+    assert!(matches!(listener.accept(options), Err(KError::WouldBlock)));
+}

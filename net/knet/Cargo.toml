@@ -14,6 +14,7 @@ vsock = ["kclass/vsock"]
 vsock_tipc_bridge = ["vsock", "dep:tipc"]
 
 [dependencies]
+kalloc-types.workspace = true
 entropy.workspace = true
 anon_inodefs.workspace = true
 arrayvec.workspace = true

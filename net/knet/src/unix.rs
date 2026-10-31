@@ -11,6 +11,7 @@ use alloc::{boxed::Box, sync::Arc};
 use async_trait::async_trait;
 use enum_dispatch::enum_dispatch;
 use hashbrown::HashMap;
+use kalloc_types::KBox;
 use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
 use klazy::lazy_static;
@@ -289,6 +290,27 @@ pub struct UnixDomainSocket {
     peer_endpoint: Mutex<UnixAddr>,
 }
 impl UnixDomainSocket {
+    fn accept_with_storage(
+        &self,
+        options: AcceptOptions,
+        prepare: impl FnOnce() -> KResult<KBox<core::mem::MaybeUninit<Self>>>,
+    ) -> KResult<Socket> {
+        let storage = prepare()?;
+        let (transport, peer_endpoint) =
+            block_on(interruptible(self.transport.accept(options.nonblocking)))??;
+        Ok(Socket::Unix(KBox::write(
+            storage,
+            Self {
+                transport,
+                // The accepted socket keeps the listener's type, as Linux keeps the
+                // listening socket's `sk_type` for the connection it hands back.
+                socket_type: self.socket_type,
+                local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),
+                peer_endpoint: Mutex::new(peer_endpoint),
+            },
+        )))
+    }
+
     pub fn new(transport: impl Into<UnixTransport>, socket_type: UnixSocketType) -> Self {
         Self {
             transport: transport.into(),
@@ -375,16 +397,7 @@ impl SocketOps for UnixDomainSocket {
     }
 
     fn accept(&self, options: AcceptOptions) -> KResult<Socket> {
-        let (transport, peer_endpoint) =
-            block_on(interruptible(self.transport.accept(options.nonblocking)))??;
-        Ok(Socket::Unix(Box::new(Self {
-            transport,
-            // The accepted socket keeps the listener's type, as Linux keeps the
-            // listening socket's `sk_type` for the connection it hands back.
-            socket_type: self.socket_type,
-            local_endpoint: Mutex::new(self.local_endpoint.lock().clone()),
-            peer_endpoint: Mutex::new(peer_endpoint),
-        })))
+        self.accept_with_storage(options, KBox::<Self>::new_uninit)
     }
 
     fn send(&self, src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {

@@ -2,6 +2,59 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#[unittest::def_test]
+fn fs_owner_reservation_failure_skips_resource_initialization() {
+    let initialized = core::cell::Cell::new(false);
+    let permissions = core::cell::Cell::new(None);
+    let result = new_fs_owner_with(
+        || {
+            initialized.set(true);
+            Ok(17usize)
+        },
+        |flags| {
+            permissions.set(Some(flags));
+            Err(TEE_ERROR_OUT_OF_MEMORY)
+        },
+    );
+    assert_eq!(result.unwrap_err(), TEE_ERROR_OUT_OF_MEMORY);
+    assert_eq!(permissions.get(), Some(AllocFlags::NOWAIT));
+    assert!(!initialized.get());
+}
+
+#[unittest::def_test]
+fn fs_owner_initialization_error_preserves_error_and_cleans_resources() {
+    struct Resource<'a>(&'a core::cell::Cell<usize>);
+    impl Drop for Resource<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    let drops = core::cell::Cell::new(0);
+    let result: TeeResult<KBox<usize>> = new_fs_owner(|| {
+        let _resource = Resource(&drops);
+        Err(TEE_ERROR_CORRUPT_OBJECT)
+    });
+    assert_eq!(result.unwrap_err(), TEE_ERROR_CORRUPT_OBJECT);
+    assert_eq!(drops.get(), 1);
+}
+
+#[unittest::def_test]
+fn fs_owner_success_uses_reserved_storage_without_reboxing() {
+    let permissions = core::cell::Cell::new(None);
+    let storage = KBox::<usize>::new_uninit_with_flags(AllocFlags::NOWAIT).unwrap();
+    let address = core::ptr::from_ref(&*storage).cast::<()>();
+    let owner = new_fs_owner_with(
+        || Ok(29usize),
+        |flags| {
+            permissions.set(Some(flags));
+            Ok(storage)
+        },
+    ).unwrap();
+    assert_eq!(*owner, 29);
+    assert_eq!(permissions.get(), Some(AllocFlags::NOWAIT));
+    assert_eq!(core::ptr::from_ref(&*owner).cast::<()>(), address);
+}
+
 use unittest::{assert, assert_eq};
 
 use super::*;

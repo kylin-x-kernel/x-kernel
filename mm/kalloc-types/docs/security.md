@@ -72,3 +72,21 @@ NOIO/NOFS 只约束这次申请，不建立隐式的跨调用链回收作用域�
 | F-01 | 分配失败 | 内存不足 | 输入值释放，无 owner 返回 | 调用方决定传播或重试 | 3 | 错误返回；局部失败注入验证析构 |
 | F-02 | VFS 上下文初始化失败 | 内存不足 | 无上下文发布、无锁安装 | 当前 lock/flock 返回 ENOMEM | 3 | Once 重置，可重试；成功后复用 |
 | F-03 | 值构造或析构自身失败 | T 的外部逻辑 | 不由 KBox 转换成 KError | 仍可能内核 panic | 2 | 明确失败保证仅覆盖对象存储申请，不承诺完整 OOM 安全 |
+
+## Reserved storage initialization
+
+AsRef/AsMut delegation introduces no raw pointers or extended lifetimes. Debug
+borrows the pointee and may do whatever its formatter does; allocation flags do
+not make formatting safe under arbitrary locks. A slice regression verifies
+borrow identity, mutation and delegated debug output.
+
+The stored value before initialization is a valid `MaybeUninit<T>`, never an
+uninitialized `T`. Its size and alignment equal those of T, including aligned
+ZSTs. `KBox::write` first initializes the slot through exclusive safe access,
+then suppresses destruction of the old owner and transfers its pointer to the
+initialized owner. No reference to T is formed before initialization and the
+allocation is released exactly once using the unchanged layout. Overwriting an
+already written MaybeUninit slot does not drop its former value, matching the
+underlying type's contract. Tests cover address/alignment preservation, single
+destruction, abandoned sized/ZST reservations, invalid flags, and local allocator
+failure. These tests do not force global OOM.

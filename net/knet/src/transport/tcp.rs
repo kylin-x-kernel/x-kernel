@@ -3,13 +3,14 @@
 // See LICENSES for license details.
 
 //! TCP socket implementation.
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use hashbrown::HashMap;
+use kalloc_types::KBox;
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use klazy::lazy_static;
@@ -602,21 +603,25 @@ impl SocketOps for TcpSocket {
         }
 
         let bound_endpoint = self.bound_endpoint()?;
-        self.general
-            .recv_poller_with_nonblocking(self, options.nonblocking, || {
-                network_poller().assist_once();
-                let accepted = {
-                    let mut sockets = SOCKET_SET.inner.lock();
-                    LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
-                };
-                Ok({
-                    Socket::Tcp(Box::new(TcpSocket::new_connected(
-                        accepted.handle,
-                        accepted.local_endpoint,
-                        accepted.remote_endpoint,
-                    )))
-                })
-            })
+        let storage = KBox::<Self>::new_uninit()?;
+        let accepted =
+            self.general
+                .recv_poller_with_nonblocking(self, options.nonblocking, || {
+                    network_poller().assist_once();
+                    let accepted = {
+                        let mut sockets = SOCKET_SET.inner.lock();
+                        LISTEN_TABLE.accept(bound_endpoint, &mut sockets)?
+                    };
+                    Ok(accepted)
+                })?;
+        Ok(Socket::Tcp(KBox::write(
+            storage,
+            TcpSocket::new_connected(
+                accepted.handle,
+                accepted.local_endpoint,
+                accepted.remote_endpoint,
+            ),
+        )))
     }
 
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> KResult<usize> {

@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{default, ffi::c_ulong, fmt, fmt::Debug};
 
+use kalloc_types::KBox;
 use ksync::Mutex;
 use tee_raw_sys::{libc_compat::size_t, *};
 
@@ -35,7 +36,7 @@ pub(super) struct TeeObj {
     pub ds_pos: size_t,
     pub pobj: Option<Arc<TeePobj>>,
     /// file handle for the pobject
-    pub fh: Option<Box<TeeFsFd>>,
+    pub fh: Option<KBox<TeeFsFd>>,
 }
 
 impl Debug for TeeObj {

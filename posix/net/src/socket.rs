@@ -10,8 +10,9 @@
 //! - Socket binding and connection (bind, connect, listen, etc.)
 //! - Socket shutdown (shutdown, etc.)
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
+use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};
 #[cfg(feature = "vsock")]
 use knet::vsock::{VsockSocket, VsockStreamTransport};
@@ -48,7 +49,12 @@ fn inet_raw_protocol(proto: u32) -> KResult<IpProtocol> {
         .map_err(|_| KError::from(LinuxError::EINVAL))
 }
 
-/// Create a new socket of the specified domain, type, and protocol
+/// Create a new socket of the specified domain, type, and protocol.
+///
+/// Requires sleepable, reclaim-safe task context without locks needed by reclaim.
+/// The KERNEL-policy owner is allocated before fd publication; failure destroys
+/// the constructed socket and returns NoMemory. Nested transport and file
+/// allocations retain their existing behavior.
 pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     // Extract the type bits (lower 8 bits, ignoring flags like SOCK_CLOEXEC)
     let ty = raw_ty & 0xFF;
@@ -62,14 +68,14 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             if proto != 0 && proto != IPPROTO_TCP as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Tcp(Box::new(TcpSocket::new()))
+            knet::Socket::Tcp(KBox::new(TcpSocket::new())?)
         }
         (AF_INET, SOCK_DGRAM) => {
             // UDP socket - verify protocol if specified
             if proto != 0 && proto != IPPROTO_UDP as u32 {
                 return Err(KError::from(LinuxError::EPROTONOSUPPORT));
             }
-            knet::Socket::Udp(Box::new(UdpSocket::new()))
+            knet::Socket::Udp(KBox::new(UdpSocket::new())?)
         }
         (AF_INET, SOCK_RAW) => {
             // SOCK_RAW requires CAP_NET_RAW, matching Linux semantics.
@@ -77,24 +83,24 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
                 return Err(KError::from(LinuxError::EPERM));
             }
             let ip_proto = inet_raw_protocol(proto)?;
-            knet::Socket::Raw(Box::new(RawSocket::new(IpVersion::Ipv4, ip_proto)))
+            knet::Socket::Raw(KBox::new(RawSocket::new(IpVersion::Ipv4, ip_proto))?)
         }
         // IPv6 is not exposed yet because the address family lacks full support.
         // The previous raw ICMPv6-only path was removed with this policy.
         (AF_INET6, _) => return Err(KError::from(LinuxError::EAFNOSUPPORT)),
         (AF_UNIX, SOCK_STREAM) => {
             // Unix domain stream socket
-            knet::Socket::Unix(Box::new(UnixDomainSocket::new(
+            knet::Socket::Unix(KBox::new(UnixDomainSocket::new(
                 StreamTransport::new(pid),
                 UnixSocketType::Stream,
-            )))
+            ))?)
         }
         (AF_UNIX, SOCK_DGRAM) => {
             // Unix domain datagram socket
-            knet::Socket::Unix(Box::new(UnixDomainSocket::new(
+            knet::Socket::Unix(KBox::new(UnixDomainSocket::new(
                 DgramTransport::new(pid),
                 UnixSocketType::Datagram,
-            )))
+            ))?)
         }
         (AF_NETLINK, SOCK_RAW) | (AF_NETLINK, SOCK_DGRAM) => {
             if proto > i32::MAX as u32 {
@@ -105,7 +111,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             } else {
                 NetlinkSocketType::Datagram
             };
-            knet::Socket::Netlink(Box::new(NetlinkSocket::new(proto as i32, socket_type)))
+            knet::Socket::Netlink(KBox::new(NetlinkSocket::new(proto as i32, socket_type))?)
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
             if !cred.is_privileged() {
@@ -119,12 +125,12 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             } else {
                 PacketSocketKind::Datagram
             };
-            knet::Socket::Packet(Box::new(PacketSocket::new(kind, proto as u16)?))
+            knet::Socket::Packet(KBox::new(PacketSocket::new(kind, proto as u16)?)?)
         }
         #[cfg(feature = "vsock")]
         (AF_VSOCK, SOCK_STREAM) => {
             // Virtio socket (hypervisor communication)
-            knet::Socket::Vsock(Box::new(VsockSocket::new(VsockStreamTransport::new())))
+            knet::Socket::Vsock(KBox::new(VsockSocket::new(VsockStreamTransport::new()))?)
         }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) | (AF_NETLINK, _) | (AF_PACKET, _) => {
             // Socket type not supported for this domain
@@ -190,7 +196,12 @@ pub fn sys_accept(fd: i32, addr: UserPtr<sockaddr>, addrlen: UserPtr<socklen_t>)
     sys_accept4(fd, addr, addrlen, 0)
 }
 
-/// Accept an incoming connection with additional flags (CLOEXEC, NONBLOCK)
+/// Accept an incoming connection with additional flags (CLOEXEC, NONBLOCK).
+///
+/// Requires sleepable, reclaim-safe task context without locks needed by reclaim.
+/// No fd-table lock spans accept. Nonblocking mode does not prohibit the owner
+/// reservation from sleeping. Owner-reservation failure returns NoMemory without
+/// consuming a pending connection; later file/fd errors retain existing behavior.
 pub fn sys_accept4(
     fd: i32,
     addr: UserPtr<sockaddr>,
@@ -236,7 +247,11 @@ pub fn sys_shutdown(fd: i32, how: u32) -> KResult<isize> {
     socket.shutdown(how).map(|_| 0)
 }
 
-/// Create a pair of connected sockets (Unix domain only)
+/// Create a pair of connected sockets (Unix domain only).
+///
+/// Requires sleepable, reclaim-safe task context without locks needed by reclaim.
+/// Both KERNEL-policy owners are prepared before either fd is published. Failure
+/// of either owner allocation releases both endpoints and returns NoMemory.
 pub fn sys_socketpair(
     domain: u32,
     raw_ty: u32,
@@ -277,8 +292,8 @@ pub fn sys_socketpair(
             return Err(KError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
-    let sock1 = knet::Socket::Unix(Box::new(sock1));
-    let sock2 = knet::Socket::Unix(Box::new(sock2));
+    let sock1 = knet::Socket::Unix(KBox::new(sock1)?);
+    let sock2 = knet::Socket::Unix(KBox::new(sock2)?);
 
     let cloexec = raw_ty & O_CLOEXEC != 0;
     let cred = kprocess::current_cred();

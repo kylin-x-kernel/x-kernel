@@ -9,6 +9,7 @@ use core::{
 };
 
 use bytemuck::{Pod, Zeroable, bytes_of_mut};
+use kalloc_types::KBox;
 use klazy::Once;
 use ksync::Mutex;
 use osvm::MemError;
@@ -99,7 +100,7 @@ struct TeeSvcStorageHead {
 /// GP: `struct tee_storage_enum`
 pub(super) struct TeeStorageEnum {
     pub id: c_ulong,
-    pub dir: Option<Box<TeeFsDir>>,
+    pub dir: Option<KBox<TeeFsDir>>,
     pub fops: Option<&'static TeeFileOperations>,
 }
 

@@ -18,7 +18,7 @@ unittest::path_mod_test!(
     "../../ut-tests/socket/test_socket_identity.rs"
 );
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     any::Any,
     fmt::{self, Debug},
@@ -27,6 +27,7 @@ use core::{
 
 use bitflags::bitflags;
 use enum_dispatch::enum_dispatch;
+use kalloc_types::KBox;
 #[cfg(feature = "vsock")]
 use kclass::prelude::VsockAddr;
 use kcred::Cred;
@@ -313,6 +314,13 @@ pub trait SocketOps: Configurable {
         Err(KError::OperationNotSupported)
     }
     /// Accepts a connection on a listening socket, returning a new socket.
+    ///
+    /// Requires sleepable, reclaim-safe task context without locks needed by
+    /// reclaim, even for nonblocking calls. TCP, Unix and vsock reserve the
+    /// returned owner before consuming a pending connection. Owner allocation
+    /// failure returns `NoMemory` without dequeuing a connection; transport
+    /// errors release the reservation. Nested transport allocations remain
+    /// outside this fallible-owner contract.
     fn accept(&self, _options: AcceptOptions) -> KResult<Socket> {
         Err(KError::OperationNotSupported)
     }
@@ -355,7 +363,7 @@ pub trait SocketOps: Configurable {
     fn socket_protocol(&self) -> i32;
 }
 
-impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
+impl<T: SocketOps + ?Sized> SocketOps for KBox<T> {
     fn socket_type(&self) -> i32 {
         (**self).socket_type()
     }
@@ -408,14 +416,14 @@ impl<T: SocketOps + ?Sized> SocketOps for Box<T> {
 /// Network socket abstraction.
 #[enum_dispatch(Configurable, SocketOps)]
 pub enum Socket {
-    Udp(Box<UdpSocket>),
-    Tcp(Box<TcpSocket>),
-    Raw(Box<RawSocket>),
-    Unix(Box<UnixDomainSocket>),
-    Netlink(Box<NetlinkSocket>),
-    Packet(Box<PacketSocket>),
+    Udp(KBox<UdpSocket>),
+    Tcp(KBox<TcpSocket>),
+    Raw(KBox<RawSocket>),
+    Unix(KBox<UnixDomainSocket>),
+    Netlink(KBox<NetlinkSocket>),
+    Packet(KBox<PacketSocket>),
     #[cfg(feature = "vsock")]
-    Vsock(Box<VsockSocket>),
+    Vsock(KBox<VsockSocket>),
 }
 
 impl Socket {

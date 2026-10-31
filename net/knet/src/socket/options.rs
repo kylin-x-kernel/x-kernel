@@ -3,9 +3,10 @@
 // See LICENSES for license details.
 
 //! Socket option types and configuration helpers.
-use alloc::{boxed::Box, string::String};
+use alloc::string::String;
 
 use enum_dispatch::enum_dispatch;
+use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};
 use ktime_types::TimeSpan;
 
@@ -136,7 +137,7 @@ pub trait Configurable {
     }
 }
 
-impl<T: Configurable + ?Sized> Configurable for Box<T> {
+impl<T: Configurable + ?Sized> Configurable for KBox<T> {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         (**self).get_option_inner(opt)
     }

@@ -14,9 +14,8 @@ pub(crate) mod bridge_port_map;
 pub(crate) mod connection_manager;
 pub(crate) mod stream;
 
-use alloc::boxed::Box;
-
 use enum_dispatch::enum_dispatch;
+use kalloc_types::KBox;
 pub use kclass::prelude::{VsockAddr, VsockConnId};
 use kerrno::{KError, KResult};
 use kio::{IoBuf, IoBufMut, Read, Write};
@@ -125,11 +124,12 @@ impl SocketOps for VsockSocket {
     }
 
     fn accept(&self, options: AcceptOptions) -> KResult<Socket> {
+        let storage = KBox::<Self>::new_uninit()?;
         self.transport
             .accept(options.nonblocking)
             .map(|(transport, _addr)| {
                 let socket = VsockSocket::new(transport);
-                Socket::Vsock(Box::new(socket))
+                Socket::Vsock(KBox::write(storage, socket))
             })
     }
 

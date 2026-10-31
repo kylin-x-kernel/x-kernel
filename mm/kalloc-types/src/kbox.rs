@@ -4,8 +4,9 @@
 
 use core::{
     alloc::Layout,
+    fmt,
     marker::PhantomData,
-    mem::ManuallyDrop,
+    mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
@@ -57,6 +58,25 @@ pub struct KBox<T: ?Sized> {
 }
 
 impl<T> KBox<T> {
+    /// Reserves storage before constructing a value, using `KERNEL` permissions.
+    ///
+    /// The sleepable, reclaim-safe execution-context requirements of [`Self::new`]
+    /// apply. Dropping the returned owner releases storage without dropping `T`.
+    /// Use [`KBox::write`] to initialize it without another allocation.
+    /// Returns [`KError::NoMemory`] if storage cannot be allocated.
+    pub fn new_uninit() -> KResult<KBox<MaybeUninit<T>>> {
+        Self::new_uninit_with_flags(AllocFlags::KERNEL)
+    }
+
+    /// Reserves uninitialized storage with caller-selected allocation permissions.
+    ///
+    /// The execution-context and error contracts of [`Self::new_with_flags`]
+    /// apply, including validation for zero-sized values. These permissions
+    /// constrain only reservation, not subsequent initialization or destruction.
+    pub fn new_uninit_with_flags(flags: AllocFlags) -> KResult<KBox<MaybeUninit<T>>> {
+        KBox::new_with_flags(MaybeUninit::uninit(), flags)
+    }
+
     /// Moves a sized value out of its owner and releases the backing storage.
     ///
     /// Does not allocate, clone or run `T::drop`. The returned value owns its
@@ -165,6 +185,23 @@ impl<T> KBox<T> {
     }
 }
 
+impl<T> KBox<MaybeUninit<T>> {
+    /// Initializes reserved storage and transfers it to a typed owner.
+    ///
+    /// Does not allocate, sleep, or fail. Construction of `value` happens before
+    /// this call and retains its own context requirements. Any previously written
+    /// value in the slot is overwritten without being dropped, as with
+    /// `MaybeUninit::write`. The returned owner drops the newly written value once.
+    pub fn write(mut owned: Self, value: T) -> KBox<T> {
+        (*owned).write(value);
+        let owned = ManuallyDrop::new(owned);
+        KBox {
+            pointer: owned.pointer.cast(),
+            owner: PhantomData,
+        }
+    }
+}
+
 impl<T: ?Sized> Deref for KBox<T> {
     type Target = T;
 
@@ -180,6 +217,25 @@ impl<T: ?Sized> DerefMut for KBox<T> {
         // SAFETY: construction initialized the slot and the exclusive owner
         // borrow excludes any other references for the returned lifetime.
         unsafe { self.pointer.as_mut() }
+    }
+}
+
+impl<T: ?Sized> AsRef<T> for KBox<T> {
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
+impl<T: ?Sized> AsMut<T> for KBox<T> {
+    fn as_mut(&mut self) -> &mut T {
+        self
+    }
+}
+
+/// Formatting delegates to the value and retains its execution-context requirements.
+impl<T: fmt::Debug + ?Sized> fmt::Debug for KBox<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, formatter)
     }
 }
 

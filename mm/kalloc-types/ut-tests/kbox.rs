@@ -2,6 +2,18 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+#[def_test]
+fn borrowed_views_and_debug_forward_to_a_slice() {
+    extern crate alloc;
+
+    let mut owned: KBox<[u32]> = KBox::new_nowait([2, 4, 6]).unwrap();
+    let address = owned.as_ptr();
+    assert_eq!(AsRef::<[u32]>::as_ref(&owned).as_ptr(), address);
+    AsMut::<[u32]>::as_mut(&mut owned)[1] = 9;
+    assert_eq!(&*owned, &[2, 9, 6]);
+    assert_eq!(alloc::format!("{owned:?}"), "[2, 9, 6]");
+}
+
 use core::{
     cell::Cell,
     sync::atomic::{AtomicUsize, Ordering},
@@ -345,4 +357,49 @@ fn unknown_flags_fail_before_allocation_and_drop_input() {
         KBox::new_with_flags((), flags).err(),
         Some(KError::InvalidInput)
     );
+}
+
+#[def_test]
+fn reserved_storage_initializes_in_place_and_drops_once() {
+    #[repr(align(256))]
+    struct Aligned<'a>(DropProbe<'a>);
+    let drops = Cell::new(0);
+    let storage = KBox::<Aligned<'_>>::new_uninit().unwrap();
+    let address = core::ptr::from_ref(&*storage).cast::<()>();
+    assert_eq!(address.addr() % 256, 0);
+    let owned = KBox::write(storage, Aligned(DropProbe(&drops)));
+    assert_eq!(core::ptr::from_ref(&*owned).cast::<()>(), address);
+    assert_eq!(owned.0.0.get(), 0);
+    drop(owned);
+    assert_eq!(drops.get(), 1);
+}
+
+#[def_test]
+fn abandoned_reservation_does_not_drop_uninitialized_value() {
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    struct Probe;
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let before = DROPS.load(Ordering::Relaxed);
+    drop(KBox::<Probe>::new_uninit_with_flags(AllocFlags::NOWAIT).unwrap());
+    drop(KBox::<(Probe, usize)>::new_uninit_with_flags(AllocFlags::NOWAIT).unwrap());
+    assert_eq!(DROPS.load(Ordering::Relaxed), before);
+    drop(KBox::write(KBox::<Probe>::new_uninit().unwrap(), Probe));
+    assert_eq!(DROPS.load(Ordering::Relaxed), before + 1);
+}
+
+#[def_test]
+fn reservation_rejects_invalid_flags_and_propagates_allocation_failure() {
+    let flags = AllocFlags::from_bits_retain(u32::MAX);
+    assert!(matches!(KBox::<()>::new_uninit_with_flags(flags), Err(KError::InvalidInput)));
+    let result = KBox::new_with_allocator(MaybeUninit::<usize>::uninit(), AllocFlags::KERNEL,
+        |layout, flags| {
+            assert_eq!(layout, Layout::new::<usize>());
+            assert_eq!(flags, AllocFlags::KERNEL);
+            Err(KError::NoMemory)
+        });
+    assert!(matches!(result, Err(KError::NoMemory)));
 }

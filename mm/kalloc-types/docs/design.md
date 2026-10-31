@@ -188,3 +188,18 @@ is destroyed exactly once.
 
 - [Linux 内存分配指南](https://docs.kernel.org/core-api/memory-allocation.html)：GFP 许可、常用组合及 NOFS/NOIO 作用域建议。
 - [Linux Rust Box](https://rust.docs.kernel.org/kernel/alloc/kbox/struct.Box.html)：`new(value, flags)` 是可失败构造；本模块另外提供无 flags 的默认入口和 NOWAIT 快捷入口。
+
+## Reserved owner storage
+
+`AsRef<T>` and `AsMut<T>` expose the same lifetime-bounded pointee borrows as
+Deref/DerefMut, including for DSTs. Debug delegates directly to T's formatter,
+without adding allocation; the formatter retains its own context requirements.
+
+`KBox::new_uninit` reserves a sized `MaybeUninit<T>` owner with KERNEL
+permissions before a caller performs an irreversible operation.
+`new_uninit_with_flags` provides explicit permissions, including NOWAIT;
+reservation does not change the context requirements of later initialization.
+`KBox::write` consumes the reservation, writes a complete value and returns
+`KBox<T>` at the same address without allocating or failing. Abandoning a
+reservation only frees storage, without running a destructor for an unwritten T.
+This is not field-by-field initialization, pinning, or a runtime-sized allocator.

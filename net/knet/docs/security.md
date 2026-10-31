@@ -1,5 +1,20 @@
 # knet — Safety and Reliability Analysis
 
+## Socket owner allocation boundary
+
+TCP, Unix and vsock reserve KBox storage before consuming a pending connection.
+Owner allocation failure cannot silently close a dequeued connection. Transport
+errors free the uninitialized reservation without calling a socket destructor.
+Success initializes the owner once without new raw-pointer code in knet.
+Construction, destruction and nested allocations retain their own constraints;
+this is not end-to-end OOM safety.
+
+The Unix regression injects failure only into private owner preparation, verifies
+that readiness and the pending connection survive, then accepts and transfers
+data through that connection. It also exercises the empty-queue error path.
+Existing protocol/identity tests cover dispatch through KBox. No global OOM,
+transport-buffer OOM or vsock host-handshake failure is injected.
+
 ## Analysis Scope
 
 This analysis covers the entire `knet` crate: all source modules under `src/`,

@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, string::ToString, vec::Vec};
+use alloc::{format, string::ToString, vec::Vec};
 
 use bytemuck::{Pod, Zeroable, bytes_of, bytes_of_mut};
+use kalloc_types::KBox;
 use tee_raw_sys::{
     TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_ITEM_NOT_FOUND, TEE_ERROR_SHORT_BUFFER,
     TEE_OBJECT_ID_MAX_LEN, TEE_UUID,
@@ -15,7 +16,7 @@ use super::{
     bitstring::{BitStr, bit_clear, bit_ffc, bit_nclear, bit_set, bit_test, bitstr_size},
     fs_htree::TEE_FS_HTREE_HASH_SIZE,
     tee_fs::TeeFileHandle,
-    tee_ree_fs::{ReeDirfOps, TeeFsDirfileOperations},
+    tee_ree_fs::{ReeDirfOps, TeeFsDirfileOperations, new_fs_owner},
 };
 /// file handle for dirfile tee_fs_dirfile_fileh
 ///
@@ -228,66 +229,71 @@ pub(super) fn tee_fs_dirfile_open(
     create: bool,
     hash: Option<&mut [u8; TEE_FS_HTREE_HASH_SIZE]>,
     fops: &ReeDirfOps,
-) -> TeeResult<Box<TeeFsDirfileDirh>> {
-    let mut dirh = Box::new(TeeFsDirfileDirh::default());
-    dirh.fops = *fops;
+) -> TeeResult<KBox<TeeFsDirfileDirh>> {
+    new_fs_owner(|| {
+        let fd = fops.open(create, hash, None, None)?;
+        let mut dirh = TeeFsDirfileDirh {
+            fops: *fops,
+            fh: KBox::into_inner(fd),
+            nbits: 0,
+            files: Vec::new(),
+            ndents: 0,
+        };
 
-    let fd = fops.open(create, hash, None, None)?;
-    dirh.fh = *fd;
+        tee_debug!("tee_fs_dirfile_open: dirh.fh: {:?}", dirh.fh);
 
-    tee_debug!("tee_fs_dirfile_open: dirh.fh: {:?}", dirh.fh);
+        let mut n: usize = 0;
 
-    let mut n: usize = 0;
+        let res: TeeResult<()> = loop {
+            let mut dent = DirFileEntry::default();
 
-    let res: TeeResult<()> = loop {
-        let mut dent = DirFileEntry::default();
-
-        match read_dent(&mut dirh, n, &mut dent) {
-            Err(TEE_ERROR_ITEM_NOT_FOUND) => {
-                tee_debug!("read_dent: TEE_ERROR_ITEM_NOT_FOUND at idx {}", n);
-                break Ok(());
+            match read_dent(&mut dirh, n, &mut dent) {
+                Err(TEE_ERROR_ITEM_NOT_FOUND) => {
+                    tee_debug!("read_dent: TEE_ERROR_ITEM_NOT_FOUND at idx {}", n);
+                    break Ok(());
+                }
+                Err(e) => break Err(e),
+                Ok(()) => {}
             }
-            Err(e) => break Err(e),
-            Ok(()) => {}
-        }
 
-        // if (is_free(&dent))
-        if is_free(&dent) {
-            n += 1;
-            continue;
-        }
+            // if (is_free(&dent))
+            if is_free(&dent) {
+                n += 1;
+                continue;
+            }
 
-        // if (test_file(dirh, dent.file_number))
-        if test_file(&mut dirh, dent.file_number as usize) {
-            tee_debug!("clearing duplicate file number {}", dent.file_number);
-            let zero_dent = DirFileEntry::default();
-            if let Err(e) = write_dent(&mut dirh, n, &zero_dent) {
+            // if (test_file(dirh, dent.file_number))
+            if test_file(&mut dirh, dent.file_number as usize) {
+                tee_debug!("clearing duplicate file number {}", dent.file_number);
+                let zero_dent = DirFileEntry::default();
+                if let Err(e) = write_dent(&mut dirh, n, &zero_dent) {
+                    break Err(e);
+                }
+                n += 1;
+                continue;
+            }
+
+            // res = set_file(dirh, dent.file_number);
+            if let Err(e) = set_file(&mut dirh, dent.file_number as usize) {
                 break Err(e);
             }
+
             n += 1;
-            continue;
-        }
+        };
 
-        // res = set_file(dirh, dent.file_number);
-        if let Err(e) = set_file(&mut dirh, dent.file_number as usize) {
-            break Err(e);
+        match res {
+            Ok(()) => {
+                dirh.ndents = n;
+                tee_debug!("tee_fs_dirfile_open: dirh.ndents: {}", dirh.ndents);
+                Ok(dirh)
+            }
+            Err(e) => {
+                // cleanup path: best-effort close after open failure
+                let _ = tee_fs_dirfile_close(&mut dirh);
+                Err(e)
+            }
         }
-
-        n += 1;
-    };
-
-    match res {
-        Ok(()) => {
-            dirh.ndents = n;
-            tee_debug!("tee_fs_dirfile_open: dirh.ndents: {}", dirh.ndents);
-            Ok(dirh)
-        }
-        Err(e) => {
-            // cleanup path: best-effort close after open failure
-            let _ = tee_fs_dirfile_close(&mut dirh);
-            Err(e)
-        }
-    }
+    })
 }
 
 pub(super) fn tee_fs_dirfile_find(

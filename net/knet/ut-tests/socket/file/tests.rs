@@ -2,7 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec};
+use alloc::vec;
+use kalloc_types::KBox;
 
 use unittest::{assert, assert_eq, def_test};
 
@@ -14,10 +15,10 @@ fn unix_datagram_file_io_preserves_empty_and_large_messages() {
     let (sender, receiver) = DgramTransport::new_pair(7);
     let files = [sender, receiver].map(|transport| {
         sock_alloc_file(
-            Socket::Unix(Box::new(UnixDomainSocket::new(
+            Socket::Unix(KBox::new(UnixDomainSocket::new(
                 transport,
                 UnixSocketType::Datagram,
-            ))),
+            )).unwrap()),
             (OpenFlags::READ_WRITE | OpenFlags::NONBLOCK).bits(),
             kprocess::current_cred(),
         )

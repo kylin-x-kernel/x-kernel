@@ -2806,6 +2806,7 @@ dependencies = [
  "event-listener",
  "hashbrown 0.16.1",
  "iov_iter",
+ "kalloc-types",
  "kclass",
  "kcpu_id_map",
  "kcred",
@@ -4396,6 +4397,7 @@ name = "posix-net"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
+ "kalloc-types",
  "kbuild_config",
  "kcred",
  "kerrno",
