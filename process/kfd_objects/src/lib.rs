@@ -30,5 +30,6 @@ extern crate alloc;
 pub mod epoll;
 pub mod eventfd;
 pub mod inotify;
+pub mod inotify_limits;
 pub mod signalfd;
 pub mod timerfd;

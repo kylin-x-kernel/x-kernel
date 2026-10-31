@@ -4563,6 +4563,7 @@ dependencies = [
  "kcpu_id_map",
  "kcred",
  "kdevice",
+ "kfd_objects",
  "khal",
  "klockstat",
  "klogger",

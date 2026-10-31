@@ -7,10 +7,76 @@ use core::fmt::Write;
 
 use kbuild_config::ARCH;
 use kcpu_id_map::for_each_present_logical_cpu;
+use kfd_objects::inotify_limits::InotifyLimit;
 use kvfs::{
-    CommandFile, DirMapping, NodePermission, SimpleDir, SimpleFile, SimpleFileOperation, SimpleFs,
-    VfsError,
+    CommandFile, Dentry, DirMapping, GetattrQueryFlags, GetattrRequestMask, InodeOperations,
+    Metadata, MetadataUpdate, MountIdmap, NodeFlags, NodePermission, Path, Permission, SimpleDir,
+    SimpleDirLookup, SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsInode, VfsInodeInit,
+    VfsResult,
 };
+
+/// One `/proc/sys/fs/inotify/` control.
+///
+/// Linux checks `proc_sys_permission` on open and `sysctl_perm` on every write
+/// against the caller's *effective* uid, not the filesystem uid used by generic
+/// DAC. The generic simple-file permission check would therefore reject a root
+/// task that only changed `fsuid`, or admit an unprivileged task that changed
+/// `fsuid` to zero. The wrapper applies that gate at open, while the write
+/// closure repeats it because the descriptor may be inherited. Like Linux's
+/// `proc_sys_setattr`, it rejects mode and owner changes so the fixed table
+/// mode reported by `getattr` is also the mode access checks enforce.
+struct InotifySysctlFile {
+    file: Arc<SimpleFile>,
+}
+
+impl InodeOperations for InotifySysctlFile {
+    fn getattr(
+        &self,
+        idmap: &MountIdmap,
+        path: Option<&Path>,
+        request_mask: GetattrRequestMask,
+        query_flags: GetattrQueryFlags,
+    ) -> VfsResult<Metadata> {
+        self.file.getattr(idmap, path, request_mask, query_flags)
+    }
+
+    fn setattr(
+        &self,
+        idmap: &MountIdmap,
+        dentry: &Dentry,
+        update: MetadataUpdate,
+    ) -> VfsResult<MetadataUpdate> {
+        // Linux's `proc_sys_setattr` refuses `ATTR_MODE | ATTR_UID | ATTR_GID`
+        // with `EPERM`; timestamps and size still go through `setattr_copy`.
+        // Rejecting them keeps the table mode (0644) authoritative instead of
+        // letting a successful chmod make `getattr` advertise a mode that the
+        // euid-based permission hook does not enforce.
+        if update.mode.is_some() || update.owner.is_some() {
+            return Err(VfsError::OperationNotPermitted);
+        }
+        self.file.setattr(idmap, dentry, update)
+    }
+
+    fn permission(
+        &self,
+        _idmap: &MountIdmap,
+        _inode: &VfsInode,
+        permission: Permission,
+        cred: &kcred::Cred,
+    ) -> VfsResult<()> {
+        let access = permission
+            .intersection(Permission::MAY_READ | Permission::MAY_WRITE | Permission::MAY_EXEC);
+        // The node is a root-owned regular file with mode 0644: everyone may
+        // read it, only euid 0 may write it, and it is not executable. Linux
+        // derives those decisions from euid, unlike generic DAC's fsuid.
+        if access.contains(Permission::MAY_EXEC)
+            || (access.contains(Permission::MAY_WRITE) && cred.euid() != 0)
+        {
+            return Err(VfsError::PermissionDenied);
+        }
+        Ok(())
+    }
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -197,6 +263,57 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                 ),
             );
             SimpleDir::new_maker(fs.clone(), Arc::new(kernel))
+        });
+
+        // Linux publishes the inotify resource limits here. The numbers are
+        // the live limits the kernel enforces (kfd_objects owns the ledger),
+        // so what a reader sees cannot drift from what a reservation checks.
+        // Linux's `proc_sys_permission` checks the opener's euid and
+        // `proc_sys_call_handler` rechecks the writer's current euid on every
+        // write, so the inode wrapper applies the euid gate at open and the
+        // closure passes `current_cred()` rather than the file's open-time
+        // credential. The value domain is a base-0 count in `0..=i32::MAX`,
+        // and lowering a limit does not revoke existing instances, watches, or
+        // queued events.
+        sys.add("fs", {
+            let mut fs_dir = DirMapping::new();
+            fs_dir.add("inotify", {
+                let mut inotify = DirMapping::new();
+                for (name, limit) in [
+                    ("max_queued_events", InotifyLimit::QueuedEvents),
+                    ("max_user_instances", InotifyLimit::UserInstances),
+                    ("max_user_watches", InotifyLimit::UserWatches),
+                ] {
+                    let file = SimpleFile::new_regular_with_permission(
+                        fs.clone(),
+                        NodePermission::OWNER_READ
+                            | NodePermission::OWNER_WRITE
+                            | NodePermission::GROUP_READ
+                            | NodePermission::OTHER_READ,
+                        CommandFile::new(move |operation| match operation {
+                            SimpleFileOperation::Read => Ok(Some(format!("{}\n", limit.value()))),
+                            SimpleFileOperation::Write { file: _, data } => {
+                                limit.write(data, &kprocess::current_cred())?;
+                                Ok(None)
+                            }
+                        }),
+                    );
+                    let node = Arc::new(InotifySysctlFile { file });
+                    inotify.add_child(name, move |lookup: SimpleDirLookup<'_>, name| {
+                        let init: VfsInodeInit = node.file.inode_init();
+                        let inode = VfsInode::new_file_with_operations(
+                            node.clone(),
+                            node.clone(),
+                            node.file.clone(),
+                            NodeFlags::NON_CACHEABLE,
+                            init,
+                        );
+                        Ok(lookup.file_from_inode(name, inode))
+                    });
+                }
+                SimpleDir::new_maker(fs.clone(), Arc::new(inotify))
+            });
+            SimpleDir::new_maker(fs.clone(), Arc::new(fs_dir))
         });
 
         SimpleDir::new_maker(fs.clone(), Arc::new(sys))

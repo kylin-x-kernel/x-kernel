@@ -21,12 +21,12 @@
 //! close-class events have no source yet, and a watch never reports what
 //! nothing reported.
 //!
-//! Two limits follow Linux defaults with one deliberate simplification: the
-//! 16384-event queue ceiling and the 8192-watch ceiling are enforced per
-//! *instance*, while Linux accounts both per *user* across instances. The
-//! per-user accounting needs a credential-keyed global table and is left as a
-//! follow-up; the per-instance limits still bound kernel memory so an
-//! undrained instance cannot grow without end.
+//! Limits follow Linux's per-user accounting: instance count and watch count
+//! are charged to the creator's euid across instances (see
+//! [`crate::inotify_limits`], which also backs `/proc/sys/fs/inotify/`), and
+//! each instance snapshots the queued-event ceiling at creation — lowering the
+//! sysctl does not shrink a live queue, as on Linux. The defaults are the
+//! Linux ones: 128 instances, 8192 watches, 16384 queued events.
 
 use alloc::{
     collections::VecDeque,
@@ -38,7 +38,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use anon_inodefs::AnonInodeFs;
 use hashbrown::HashMap;
 use iov_iter::IovIterDest;
-use kcred::Cred;
+use kcred::{Cred, Uid};
 use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
@@ -48,6 +48,8 @@ use linux_raw_sys::{
     general::{IN_DONT_FOLLOW, IN_IGNORED, IN_ISDIR, IN_ONLYDIR, IN_Q_OVERFLOW, IN_UNMOUNT},
     ioctl::FIONREAD,
 };
+
+use crate::inotify_limits::{self, Reservation};
 
 /// Largest accepted watch path argument, **including** its terminator.
 ///
@@ -60,18 +62,17 @@ pub const INOTIFY_PATH_MAX: usize = 4096;
 /// Watch descriptor numbers start at 1, as on Linux.
 pub(crate) const FIRST_WATCH_DESCRIPTOR: i32 = 1;
 
-/// Queued-event ceiling per instance, the Linux `max_queued_events` default.
+/// Default queued-event ceiling, the Linux `max_queued_events` default.
 ///
-/// Linux accounts the queue per user across instances; that accounting is not
-/// modeled here (see the module docs). The limit exists so an instance nobody
-/// is draining cannot exhaust kernel memory.
-pub(crate) const MAX_QUEUED_EVENTS: usize = 16384;
+/// A new instance snapshots the live sysctl value, which starts here; the
+/// constant stays for tests and for readers who want the default without the
+/// live ledger.
+#[cfg(unittest)]
+pub(crate) const MAX_QUEUED_EVENTS: usize = inotify_limits::DEFAULT_MAX_QUEUED_EVENTS;
 
-/// Watch ceiling per instance, the Linux `max_user_watches` default.
-///
-/// Same per-instance simplification as [`MAX_QUEUED_EVENTS`]: Linux counts
-/// watches per user, this counts per instance.
-pub(crate) const MAX_WATCHES: usize = 8192;
+/// Default per-user watch ceiling, the Linux `max_user_watches` default.
+#[cfg(unittest)]
+pub(crate) const MAX_WATCHES: usize = inotify_limits::DEFAULT_MAX_USER_WATCHES;
 
 // The mask bits come from `linux_raw_sys`, the same source the syscall adapter
 // validates against: one definition of a bit means the two layers cannot drift
@@ -142,7 +143,10 @@ pub struct WatchIdentity {
 /// keeps only `arg & IN_ALL_EVENTS` in the mark's mask, and the behavioural bits
 /// become separate mark flags — and a caller that passes `IN_ISDIR` alone
 /// subscribes to no events at all.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// The reservation slot is held for the watch's lifetime, so removing the watch
+/// returns its membership to the per-user ledger by drop; it is also why the
+/// entry derives nothing -- a reservation must not be duplicated.
 struct WatchEntry {
     /// Event bits currently registered for the object.
     mask: u32,
@@ -150,6 +154,8 @@ struct WatchEntry {
     flags: u32,
     /// Identity recorded when the watch was added.
     identity: WatchIdentity,
+    /// Per-user watch membership held while this entry exists.
+    _slot: Reservation,
 }
 
 /// The watch table: descriptors to entries, plus the identity index that makes
@@ -170,17 +176,15 @@ impl WatchTable {
         self.descriptors.get(&identity).copied()
     }
 
-    /// Registers a watch, returning `None` when the table is full.
+    /// Registers a watch.
     fn insert(
         &mut self,
         identity: WatchIdentity,
         mask: u32,
         flags: u32,
         next: &AtomicI32,
-    ) -> Option<i32> {
-        if self.entries.len() >= MAX_WATCHES {
-            return None;
-        }
+        slot: Reservation,
+    ) -> i32 {
         // Numbers are handed out in ascending order and wrap to the first one at
         // `i32::MAX`, so a long-lived instance never reaches the negative range
         // (`-1` there is the overrun record's sentinel). Linux recycles numbers
@@ -197,10 +201,11 @@ impl WatchTable {
                 mask,
                 flags,
                 identity,
+                _slot: slot,
             },
         );
         self.descriptors.insert(identity, descriptor);
-        Some(descriptor)
+        descriptor
     }
 
     /// Removes the watch under `descriptor`, if there is one.
@@ -226,6 +231,12 @@ pub struct Inotify {
     watches: Mutex<WatchTable>,
     poll_rx: PollSet,
     queue: Mutex<EventQueue>,
+    /// euid whose per-user watch budget this instance charges.
+    owner: Uid,
+    /// Queued-event ceiling snapshotted at creation from the live sysctl.
+    max_queued_events: usize,
+    /// Per-user instance membership, returned on final drop.
+    _instance_slot: Reservation,
 }
 
 /// Queued events plus the overrun marker for one instance.
@@ -588,15 +599,27 @@ impl Drop for Inotify {
 }
 
 impl Inotify {
-    /// Creates an empty watch table.
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+    /// Creates an empty watch table charged to `owner`.
+    ///
+    /// The instance counts against the per-user `max_user_instances` budget
+    /// and snapshots the live `max_queued_events` value.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::TooManyOpenFiles` when the owner already holds the
+    /// per-user instance limit.
+    pub fn new(owner: Uid) -> KResult<Arc<Self>> {
+        let instance_slot = inotify_limits::reserve_instance(owner)?;
+        Ok(Arc::new(Self {
             id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             next_watch_descriptor: AtomicI32::new(FIRST_WATCH_DESCRIPTOR),
             watches: Mutex::new(WatchTable::default()),
             poll_rx: PollSet::new(),
             queue: Mutex::new(EventQueue::default()),
-        })
+            owner,
+            max_queued_events: inotify_limits::queued_events_limit(),
+            _instance_slot: instance_slot,
+        }))
     }
 
     /// Creates the anonymous-inode file used by `inotify_init1`.
@@ -614,7 +637,7 @@ impl Inotify {
         AnonInodeFs::global().get_file(
             "[inotify]",
             Arc::new(InotifyFops),
-            Self::new(),
+            Self::new(cred.euid())?,
             FMode::READ | FMode::STREAM,
             open_flags,
             cred,
@@ -660,7 +683,8 @@ impl Inotify {
     ///
     /// Returns `KError::InvalidInput` for an empty path or an out-of-range mask,
     /// `KError::AlreadyExists` when `IN_MASK_CREATE` names a watched path, and
-    /// `KError::StorageFull` when the instance already holds [`MAX_WATCHES`] watches.
+    /// `KError::StorageFull` when the owner's per-user watch budget is spent
+    /// (the ledger's live `/proc/sys/fs/inotify/max_user_watches`).
     pub fn add_watch(
         self: &Arc<Self>,
         mask: u32,
@@ -715,14 +739,16 @@ impl Inotify {
             }
             return Ok(descriptor);
         }
-        let descriptor = watches
-            .insert(
-                identity,
-                stored_mask(mask),
-                mask & INOTIFY_MARK_FLAGS,
-                &self.next_watch_descriptor,
-            )
-            .ok_or(KError::StorageFull)?;
+        // Reserve before inserting, so a rejected reservation leaves no watch
+        // behind; the slot drops with the entry.
+        let slot = inotify_limits::reserve_watch(self.owner)?;
+        let descriptor = watches.insert(
+            identity,
+            stored_mask(mask),
+            mask & INOTIFY_MARK_FLAGS,
+            &self.next_watch_descriptor,
+            slot,
+        );
         // Publish to the shared registry inside the watches critical section,
         // so a concurrent filesystem event cannot observe the gap where the
         // watch table already has the entry but the registry cannot route to
@@ -842,7 +868,9 @@ impl Inotify {
 
     /// Appends an event and wakes anyone polling this instance.
     ///
-    /// When the queue already holds [`MAX_QUEUED_EVENTS`] events the new one is
+    /// When the queue already holds the instance's snapshotted event ceiling
+    /// ([`MAX_QUEUED_EVENTS`] unless `/proc/sys/fs/inotify/max_queued_events`
+    /// moved it) the new one is
     /// dropped and the overrun record is queued in its place, which is what
     /// Linux does: `fsnotify_insert_event` finds `q_len >= max_events`, throws
     /// the event away and appends the group's pre-allocated `FS_Q_OVERFLOW`
@@ -852,7 +880,7 @@ impl Inotify {
     /// would hide the loss forever.
     fn queue_event(&self, watch_descriptor: i32, mask: u32, name: &[u8], cookie: u32) {
         let mut queue = self.queue.lock();
-        if queue.events.len() >= MAX_QUEUED_EVENTS {
+        if queue.events.len() >= self.max_queued_events {
             if !queue.overflow_queued {
                 queue.events.push_back(QueuedEvent {
                     watch_descriptor: -1,

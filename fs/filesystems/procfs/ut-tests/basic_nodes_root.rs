@@ -147,6 +147,74 @@ fn printk_and_log_filter_nodes_read_and_write_the_console_filter() {
     }
 }
 
+/// Linux's `proc_sys_permission` authorizes both opening and writing a sysctl
+/// node with the caller's effective uid. Generic DAC would instead use fsuid,
+/// so a root task that changed only fsuid must still open the node for write,
+/// while an unprivileged task that changed fsuid to zero must not.
+#[def_test(serial)]
+fn inotify_sysctl_open_uses_effective_uid() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut root = DirMapping::new();
+        add_root_entries(&mut root, fs.clone());
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let path = "/sys/fs/inotify/max_user_watches";
+    let open = |flags: OpenFlags, cred: kcred::Cred| {
+        Filename::new(path).open_with_flags_at(
+            &root,
+            &root,
+            flags.bits(),
+            NodePermission::empty(),
+            NodePermission::empty(),
+            Arc::new(cred),
+        )
+    };
+
+    let mut privileged = kcred::Cred::root();
+    privileged.set_fsuid(1000);
+    assert_eq!((privileged.euid(), privileged.fsuid()), (0, 1000));
+    let file = open(OpenFlags::WRITE_ONLY, privileged).unwrap();
+    assert_eq!(
+        file.path().getattr().unwrap().mode.permission().bits(),
+        0o644
+    );
+
+    // Linux's `proc_sys_setattr` rejects chmod/chown with EPERM. If they were
+    // accepted, `getattr` would report a mode that the fixed permission hook
+    // above does not enforce.
+    let root_cred = kcred::initial_cred();
+    assert_eq!(
+        file.path()
+            .chmod(NodePermission::from_bits_truncate(0o600), &root_cred),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        file.path().chown(Some(1000), Some(1000), &root_cred),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        file.path().getattr().unwrap().mode.permission().bits(),
+        0o644
+    );
+
+    let mut dac_root = kcred::Cred::root();
+    dac_root.set_reuid(None, Some(1000)).unwrap();
+    dac_root.set_fsuid(0);
+    assert_eq!((dac_root.euid(), dac_root.fsuid()), (1000, 0));
+    assert_eq!(
+        open(OpenFlags::WRITE_ONLY, dac_root).err(),
+        Some(VfsError::PermissionDenied)
+    );
+
+    // Read access is not gated on euid: mode 0644 grants it to everyone.
+    let mut dac_root = kcred::Cred::root();
+    dac_root.set_reuid(None, Some(1000)).unwrap();
+    dac_root.set_fsuid(0);
+    assert!(open(OpenFlags::empty(), dac_root).is_ok());
+}
+
 /// Linux installs `proc_reg_file_ops` (whose `proc_reg_poll` falls back to
 /// `DEFAULT_POLLMASK`) on the regular-file shape of a `/proc` entry, so those
 /// entries answer `file_can_poll` and `epoll_ctl` accepts them. `/cmdline` is

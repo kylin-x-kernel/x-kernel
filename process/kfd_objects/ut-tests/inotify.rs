@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use unittest::def_test;
 
 /// Every watch stores `IN_UNMOUNT` as well: Linux ORs `FS_UNMOUNT` into each
@@ -40,9 +42,20 @@ fn deliver(path: &[u8], mask: u32, name: &[u8], cookie: u32) {
     crate::inotify::notify_path(identity.device, identity.inode, mask, name, cookie);
 }
 
+/// A uid no other case in this file uses.
+///
+/// The per-user instance and watch budgets live in one global ledger, and the
+/// runner runs these cases concurrently: two cases sharing a uid would let the
+/// one that deliberately spends a whole ceiling (`..._at_the_ceiling`) starve
+/// a case that is asserting on its own successful reservations.
+fn test_uid() -> kcred::Uid {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 #[def_test]
 fn add_watch_returns_ascending_descriptors() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let first = inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
     let second = inotify.add_watch(IN_ALL_EVENTS, identity(b"/tmp"), pinned()).unwrap();
 
@@ -54,7 +67,7 @@ fn add_watch_returns_ascending_descriptors() {
 
 #[def_test]
 fn descriptors_wrap_and_skip_occupied_numbers() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     // The counter is private, which is what lets this test place it at the wrap
     // boundary directly: with the counter at `i32::MAX`, the next registration
     // wraps to the first number -- never `i32::MAX` itself, and never `-1`, the
@@ -84,7 +97,7 @@ fn descriptors_wrap_and_skip_occupied_numbers() {
 
 #[def_test]
 fn only_event_bits_are_stored_for_matching() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
 
     // `IN_ISDIR` names an event *bit*, not a subscription to directories: Linux
     // keeps only `arg & IN_ALL_EVENTS` in the mark, so this watch subscribes to
@@ -121,7 +134,7 @@ fn only_event_bits_are_stored_for_matching() {
 
 #[def_test]
 fn the_stored_mask_also_subscribes_to_unmount() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     // Linux ORs `FS_UNMOUNT` into every mark, so a watch that names only
     // event bits still matches it.
     let descriptor = inotify
@@ -135,7 +148,7 @@ fn the_stored_mask_also_subscribes_to_unmount() {
 
 #[def_test]
 fn retiring_an_object_removes_its_watch_and_reports_it() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let path = b"/inotify-ut/retire-marker";
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     deliver(path, 0x100, b"before", 0);
@@ -178,7 +191,7 @@ fn retiring_an_object_removes_its_watch_and_reports_it() {
 
 #[def_test]
 fn re_watching_an_identity_through_another_spelling_updates_one_watch() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let first = inotify.add_watch(0x2, identity(b"/etc"), pinned()).unwrap();
 
     // The same object under a different spelling: Linux finds the mark on the
@@ -197,7 +210,7 @@ fn re_watching_an_identity_through_another_spelling_updates_one_watch() {
 
 #[def_test]
 fn add_watch_replaces_mask_without_mask_add() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
     let again = inotify.add_watch(0x2, identity(b"/etc"), pinned()).unwrap();
 
@@ -208,7 +221,7 @@ fn add_watch_replaces_mask_without_mask_add() {
 
 #[def_test]
 fn add_watch_with_mask_add_merges_bits() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let descriptor = inotify.add_watch(0x2, identity(b"/etc"), pinned()).unwrap();
     let again = inotify.add_watch(IN_MASK_ADD | 0x4, identity(b"/etc"), pinned()).unwrap();
 
@@ -218,7 +231,7 @@ fn add_watch_with_mask_add_merges_bits() {
 
 #[def_test]
 fn add_watch_with_mask_create_rejects_duplicate() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
 
     assert_eq!(
@@ -229,7 +242,7 @@ fn add_watch_with_mask_create_rejects_duplicate() {
 
 #[def_test]
 fn add_watch_rejects_unknown_bits() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
 
     // The path argument is bounded by the adapter -- the same bytes Linux
     // bounds -- so the object itself checks only the mask domain.
@@ -242,7 +255,7 @@ fn add_watch_rejects_unknown_bits() {
 
 #[def_test]
 fn add_watch_masks_are_confined_to_event_bits() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
 
     assert_eq!(inotify.watch_mask(descriptor), Some(IN_ALL_EVENTS | UNMOUNT));
@@ -250,7 +263,7 @@ fn add_watch_masks_are_confined_to_event_bits() {
 
 #[def_test]
 fn add_watch_reports_storage_full_at_the_ceiling() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     for index in 0..MAX_WATCHES {
         let path = alloc::format!("/w{index}");
         inotify
@@ -267,7 +280,7 @@ fn add_watch_reports_storage_full_at_the_ceiling() {
 
 #[def_test]
 fn remove_watch_reports_missing_descriptor() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
 
     assert_eq!(inotify.remove_watch(descriptor), Ok(()));
@@ -277,7 +290,7 @@ fn remove_watch_reports_missing_descriptor() {
 
 #[def_test]
 fn remove_watch_queues_in_ignored() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
     inotify.remove_watch(descriptor).unwrap();
 
@@ -297,7 +310,7 @@ fn remove_watch_queues_in_ignored() {
 
 #[def_test]
 fn poll_reports_in_only_with_a_readable_record() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     inotify.add_watch(IN_ALL_EVENTS, identity(b"/etc"), pinned()).unwrap();
 
     assert!(!inotify.poll().contains(IoEvents::IN));
@@ -305,9 +318,62 @@ fn poll_reports_in_only_with_a_readable_record() {
     assert!(inotify.poll().contains(IoEvents::IN));
 }
 
+/// Restores the live queued-event ceiling when a serial test leaves, including
+/// on an assertion failure, so parallel cases still see the default.
+struct RestoreQueuedEvents(usize);
+
+impl Drop for RestoreQueuedEvents {
+    fn drop(&mut self) {
+        let value = alloc::format!("{}", self.0);
+        let _ = crate::inotify_limits::InotifyLimit::QueuedEvents
+            .write(value.as_bytes(), &kcred::initial_cred());
+    }
+}
+
+#[def_test(serial)]
+fn queued_events_limit_snapshots_for_new_instances() {
+    let original = crate::inotify_limits::InotifyLimit::QueuedEvents.value();
+    let restore = RestoreQueuedEvents(original);
+    assert_eq!(
+        crate::inotify_limits::InotifyLimit::QueuedEvents
+            .write(b"4", &kcred::initial_cred()),
+        Ok(())
+    );
+
+    // The instance snapshots the live value at creation, not the compiled-in
+    // default or a value read on every push.
+    let inotify = Inotify::new(50_000).unwrap();
+    assert_eq!(inotify.max_queued_events, 4);
+
+    // Raise the global ceiling after creation. A push that read the live
+    // global would now admit the fifth event instead of overflowing the
+    // snapshotted four-record ceiling.
+    assert_eq!(
+        crate::inotify_limits::InotifyLimit::QueuedEvents
+            .write(b"8", &kcred::initial_cred()),
+        Ok(())
+    );
+    assert_eq!(crate::inotify_limits::InotifyLimit::QueuedEvents.value(), 8);
+
+    // Four records fill the snapshotted ceiling; the fifth push queues only
+    // the overrun marker, proving the instance uses its creation-time value.
+    for _ in 0..4 {
+        inotify.queue_event(1, 0x2, &[], 0);
+    }
+    inotify.queue_event(1, 0x2, b"dropped", 0);
+    assert_eq!(inotify.queued_bytes(), 5 * EVENT_HEADER_BYTES);
+    drop(inotify);
+    drop(restore);
+
+    // A later instance snapshots the restored value, showing that the field
+    // is creation-time state rather than a live global read.
+    let fresh = Inotify::new(50_001).unwrap();
+    assert_eq!(fresh.max_queued_events, original);
+}
+
 #[def_test]
 fn queue_overflow_queues_the_overrun_record_immediately() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let fill = |inotify: &Arc<Inotify>| {
         for _ in 0..MAX_QUEUED_EVENTS {
             // Nameless records: each occupies exactly the 16-byte header.
@@ -355,7 +421,7 @@ fn queue_overflow_queues_the_overrun_record_immediately() {
 
 #[def_test]
 fn drain_returns_the_copied_bytes_when_the_next_record_does_not_fit() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     inotify.queue_event(1, 0x2, b"first", 0);
     inotify.queue_event(1, 0x2, b"second", 0);
 
@@ -372,7 +438,7 @@ fn drain_returns_the_copied_bytes_when_the_next_record_does_not_fit() {
 
 #[def_test]
 fn add_watch_rejects_both_add_directives_together() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
 
     // Linux: "IN_MASK_ADD and IN_MASK_CREATE don't make sense together".
     assert_eq!(
@@ -384,7 +450,7 @@ fn add_watch_rejects_both_add_directives_together() {
 
 #[def_test]
 fn drain_rejects_a_buffer_shorter_than_the_next_record() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     inotify.queue_event(1, 0x2, b"a-long-name", 0);
 
     let mut buf = [0u8; 16];
@@ -396,7 +462,7 @@ fn drain_rejects_a_buffer_shorter_than_the_next_record() {
 
 #[def_test]
 fn drain_pads_names_to_the_event_header_boundary() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     inotify.queue_event(1, 0x2, b"abc", 0);
 
     // "abc" + NUL is 4 bytes, rounded up to the 16-byte event header: the
@@ -445,7 +511,7 @@ fn watch_state_is_reachable_through_file_private_data() {
 
 #[def_test]
 fn linux_mask_flags_are_accepted_and_stored() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     // Linux accepts the behavioural flags; refusing them would fail calls
     // that work there. The stored mask keeps them, minus the add directives.
     let descriptor = inotify
@@ -474,7 +540,7 @@ fn linux_mask_flags_are_accepted_and_stored() {
 
 #[def_test]
 fn fs_event_reaches_the_registered_watch() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let path = b"/inotify-ut/fs-event-marker";
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
 
@@ -498,7 +564,7 @@ fn fs_event_reaches_the_registered_watch() {
 
 #[def_test]
 fn fs_event_reports_the_rename_cookie() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let path = b"/inotify-ut/cookie-marker";
     inotify.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
 
@@ -519,7 +585,7 @@ fn fs_event_reports_the_rename_cookie() {
 
 #[def_test]
 fn fs_event_after_removal_never_carries_the_descriptor() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let path = b"/inotify-ut/removed-marker";
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     inotify.remove_watch(descriptor).unwrap();
@@ -540,7 +606,7 @@ fn fs_event_after_removal_never_carries_the_descriptor() {
 
 #[def_test]
 fn fs_event_respects_the_watch_mask() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let path = b"/inotify-ut/fs-mask-marker";
     let descriptor = inotify.add_watch(0x100, identity(path), pinned()).unwrap();
 
@@ -563,7 +629,7 @@ fn fs_event_respects_the_watch_mask() {
 
 #[def_test]
 fn watch_removal_stops_fs_delivery() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     let path = b"/inotify-ut/fs-remove-marker";
     let descriptor = inotify.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     inotify.remove_watch(descriptor).unwrap();
@@ -588,13 +654,13 @@ fn watch_removal_stops_fs_delivery() {
 #[def_test]
 fn registry_does_not_pin_dead_instances() {
     let path = b"/inotify-ut/fs-dead-marker";
-    let dead = Inotify::new();
+    let dead = Inotify::new(test_uid()).unwrap();
     dead.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     drop(dead);
 
     // A fresh instance on the same path still delivers, and the dead entry
     // does not panic the upgrade.
-    let alive = Inotify::new();
+    let alive = Inotify::new(test_uid()).unwrap();
     let descriptor = alive.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     deliver(path, 0x100, b"live", 0);
 
@@ -609,7 +675,7 @@ fn registry_does_not_pin_dead_instances() {
 
 #[def_test]
 fn empty_mask_is_rejected_but_flags_alone_are_accepted() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     // Linux: "the given event mask contains no valid events" is EINVAL; a
     // watch that subscribes to nothing must not consume the budget.
     assert_eq!(
@@ -627,33 +693,47 @@ fn empty_mask_is_rejected_but_flags_alone_are_accepted() {
 
 #[def_test]
 fn two_instances_watching_one_path_keep_separate_entries() {
-    // Watch descriptors restart at 1 per instance, so both instances below
-    // hold wd 1 for the same path. Removing one must not silence the other.
     let path = b"/inotify-ut/shared-path-marker";
-    let first = Inotify::new();
-    let second = Inotify::new();
+    let first = Inotify::new(test_uid()).unwrap();
+    let second = Inotify::new(test_uid()).unwrap();
     let first_wd = first.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     let second_wd = second.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     assert_eq!(first_wd, second_wd);
     assert_eq!(crate::inotify::registry_entry_count(identity(path)), 2);
-
     first.remove_watch(first_wd).unwrap();
     assert_eq!(crate::inotify::registry_entry_count(identity(path)), 1);
-
-    // The second instance still receives filesystem events.
     deliver(path, 0x100, b"still-live", 0);
     let mut buf = [0u8; 32];
     assert_eq!(second.drain_events(&mut buf).unwrap(), 32);
-    assert_eq!(
-        i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]),
-        second_wd
-    );
+    assert_eq!(i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]), second_wd);
+}
+
+#[def_test]
+fn read_iter_returns_a_full_chunk_without_waiting_for_the_next_event() {
+    // A BLOCKING file: the hang the override fixes only happens there (the
+    // nonblocking variant would break the chunked default loop with WouldBlock
+    // and pass either way). A regression back to the default turns this read
+    // into a wait for a second event, which the test runner reports as a
+    // timeout.
+    let file = Inotify::new_file(0, kcred::initial_cred()).expect("inotify file opens");
+    let inotify = Inotify::from_file(&file).unwrap();
+    // 256 nameless 16-byte records sum to exactly one 4 KiB chunk: the
+    // page-chunked default read_iter looped into a second blocking wait right
+    // here, hanging the read until an unrelated event arrived. The override
+    // must return the copied bytes instead, and a nonblocking follow-up read
+    // must report the dry queue rather than wait.
+    for _ in 0..256 {
+        inotify.queue_event(1, linux_raw_sys::general::IN_IGNORED, b"", 0);
+    }
+    let mut buf = [0u8; 8192];
+    let mut pos = 0;
+    assert_eq!(file.read_from(&mut buf, &mut pos).unwrap(), 4096);
 }
 
 #[def_test]
 fn dropping_an_instance_clears_its_registry_entries() {
     let path = b"/inotify-ut/drop-marker";
-    let instance = Inotify::new();
+    let instance = Inotify::new(test_uid()).unwrap();
     instance.add_watch(IN_ALL_EVENTS, identity(path), pinned()).unwrap();
     assert_eq!(crate::inotify::registry_entry_count(identity(path)), 1);
 
@@ -666,7 +746,7 @@ fn dropping_an_instance_clears_its_registry_entries() {
 
 #[def_test]
 fn mask_add_and_mask_create_together_are_rejected() {
-    let inotify = Inotify::new();
+    let inotify = Inotify::new(test_uid()).unwrap();
     assert_eq!(
         inotify.add_watch(IN_MASK_ADD | IN_MASK_CREATE | 0x100, identity(b"/inotify-ut/mask-conflict-marker"), pinned()),
         Err(KError::InvalidInput)
@@ -692,26 +772,3 @@ fn read_iter_keeps_partially_copied_records() {
     assert_eq!(file.read_from(&mut buf, &mut pos).unwrap(), 32);
     assert_eq!(file.read_from(&mut buf, &mut pos).unwrap(), 32);
 }
-
-#[def_test]
-fn read_iter_returns_a_full_chunk_without_waiting_for_the_next_event() {
-    // A BLOCKING file: the hang the override fixes only happens there (the
-    // nonblocking variant would break the chunked default loop with WouldBlock
-    // and pass either way). A regression back to the default turns this read
-    // into a wait for a second event, which the test runner reports as a
-    // timeout.
-    let file = Inotify::new_file(0, kcred::initial_cred()).expect("inotify file opens");
-    let inotify = Inotify::from_file(&file).unwrap();
-    // 256 nameless 16-byte records sum to exactly one 4 KiB chunk: the
-    // page-chunked default read_iter looped into a second blocking wait right
-    // here, hanging the read until an unrelated event arrived. The override
-    // must return the copied bytes instead, and a nonblocking follow-up read
-    // must report the dry queue rather than wait.
-    for _ in 0..256 {
-        inotify.queue_event(1, linux_raw_sys::general::IN_IGNORED, b"", 0);
-    }
-    let mut buf = [0u8; 8192];
-    let mut pos = 0;
-    assert_eq!(file.read_from(&mut buf, &mut pos).unwrap(), 4096);
-}
-

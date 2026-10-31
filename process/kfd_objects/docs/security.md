@@ -14,8 +14,12 @@ at the timerfd boundary is not injected.
 
 The entire crate is covered, including unit-test unsafe sites. Assets include
 counter/timer readiness, signal payloads, watched-file identity, poll registrations
-and file-opening credentials; inotify adds queued event bytes, the watch table
-and the overrun flag. Syscall adapters supply resolved files, flags,
+and file-opening credentials; inotify adds queued event bytes, the watch table,
+the overrun flag, the per-euid `Ledger`/`Usage` counts and the owning euid kept in
+`Inotify.owner`. The ledger and owner are protected accounting assets: only the
+reservation API may change usage, a `Reservation` is non-cloneable and returns
+exactly one slot on drop, and later credential transitions do not rewrite the
+owner captured at instance creation. Syscall adapters supply resolved files, flags,
 masks, clock IDs, descriptor numbers and user data; those values can originate
 in userspace. `kvfs` supplies valid kernel byte slices to file operations and owns
 file flags/credentials; `ksignal` owns pending signals, `ktask::future` owns
@@ -40,12 +44,31 @@ mutating the old setting. Signalfd access checks the current task for a `Thread`
 and returns `OperationNotPermitted` if absent.
 
 Inotify rejects unknown mask bits, stores watch paths only up to
-`INOTIFY_PATH_MAX`, and enforces the 16384-event and 8192-watch ceilings with
-`ENOSPC`. A read whose buffer cannot hold the next whole record returns
-`InvalidInput` before any record is consumed; an empty queue returns
-`WouldBlock`. `FIONREAD` is answered from the same locked snapshot that owns
-the queue, so the report cannot be raced into an over-count; every other
-ioctl keeps the trait default `NotATty`.
+`INOTIFY_PATH_MAX`, charges instances and watches to the creator's euid across
+instances (128 instances, 8192 watches), and snapshots the 16384-event queue
+ceiling when each instance is created. Watch exhaustion returns `ENOSPC` and
+instance exhaustion returns `TooManyOpenFiles`; an overflowing queue drops the
+arriving event and queues one `IN_Q_OVERFLOW` marker instead of allocating. A
+read whose buffer cannot hold the next whole record returns `InvalidInput`
+before any record is consumed; an empty queue returns `WouldBlock`. `FIONREAD`
+is answered from the same locked snapshot that owns the queue, so the report
+cannot be raced into an over-count; every other ioctl keeps the trait default
+`NotATty`.
+
+`InotifyLimit::write` is the raw-byte boundary for the three
+`/proc/sys/fs/inotify/` nodes. The procfs closure supplies the user-written
+bytes and `kprocess::current_cred()`, the writing task's credential at the time
+of the write; the handler parses the first whitespace-terminated token with
+Linux's base-0 `proc_get_long` rules, rejects a value above `i32::MAX` with
+`InvalidInput` before mutation, and leaves bytes after the token to the
+following vector element. The nodes' inode permission hook applies the same
+`euid == 0` rule at open, so a split fsuid can neither bypass nor over-restrict
+the open that Linux's `proc_sys_permission` decides on euid. Linux's
+`proc_sys_call_handler` re-runs `sysctl_perm` with the writer's current euid on
+every write, so the handler requires `euid == 0` and returns
+`OperationNotPermitted` without mutation otherwise. A root-opened descriptor
+passed to an unprivileged task therefore cannot change the limit, matching
+Linux.
 
 Epoll control receives a resolved file and fd; duplicate ADD returns
 `AlreadyExists`, absent MOD/DEL returns `NotFound`, and source registration
@@ -116,7 +139,7 @@ mutex avoids unregister callbacks nesting under that lock.
 | T-08 | Timer IRQ recursively acquires an epoll lock held by the interrupted task | High | A source waker runs while task context owns the ready queue or config lock | Ready queue uses `SpinNoIrq`; IRQ-reachable wake and trace paths avoid the config lock. Keep IRQ-masked critical sections short. |
 | T-09 | User-controlled tiny intervals monopolize timer IRQ | Medium | Periodic timer expires repeatedly while unread | Mitigate: leave the core node idle after expiration; account elapsed periods arithmetically and rearm on read. Repeated userspace reads can still consume CPU. |
 | T-10 | Poll-before-IRQ accounting suppresses waiter notification | Medium | Poll observes and counts expiration before queued delivery | Mitigate: callback wakes whenever an unread count exists, not only when that callback changes zero to nonzero; wake is outside inner state. |
-| T-11 | Undrained inotify instance grows kernel memory without end | Medium | A process queues events nobody reads | Mitigate: per-instance 16384-event and 8192-watch ceilings; an overflowing push drops and raises the `IN_Q_OVERFLOW` flag instead of allocating. Residual: Linux bounds per *user* across instances; the per-user table is deferred and the weaker per-instance bound is documented. |
+| T-11 | Undrained inotify instance grows kernel memory without end | Medium | A process queues events nobody reads | Mitigate: Linux's per-user accounting — 128 instances and 8192 watches charged to the creator's euid across instances by the `inotify_limits` ledger (also the `/proc/sys/fs/inotify/` backend), each instance snapshotting the 16384-event queue ceiling at creation; an overflowing push drops the arriving event and queues the preallocated `IN_Q_OVERFLOW` record instead of allocating. |
 
 ## Failure modes and management
 
