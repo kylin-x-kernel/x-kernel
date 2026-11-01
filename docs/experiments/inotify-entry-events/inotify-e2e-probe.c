@@ -87,6 +87,7 @@ static void drain(int fd) {
 static void clean_scratch(void) {
     static const char *files[] = {
         "/root/inotify-e2e/file-abs",       "/root/inotify-e2e/file-rel",
+        "/root/inotify-e2e/file-dot-rel",   "/root/inotify-e2e/file-dot-abs",
         "/root/inotify-e2e/link-rel",       "/root/inotify-e2e/hard-rel",
         "/root/inotify-e2e/node-at",        "/root/inotify-e2e/file-renamed",
         "/root/inotify-e2e/moved-out",      "/root/inotify-e2e-elsewhere/moved-in",
@@ -158,6 +159,34 @@ int main(void) {
     check("relative_create_event", ev.present && ev.mask == IN_CREATE &&
                                        ev.wd == wd &&
                                        strcmp(ev.name, "file-rel") == 0);
+
+    /* A watch registered with a RELATIVE spelling must be the same watch: the
+     * registry key is the resolved path, so `"."` resolves to the directory the
+     * absolute call already registered, and Linux likewise returns one watch
+     * descriptor per inode rather than per spelling. */
+    int wd_dot = inotify_add_watch(fd, ".", watched);
+    check("relative_watch_is_the_same_watch", wd_dot == wd);
+
+    /* And it keeps receiving events, from either spelling of the trigger. */
+    f = open("file-dot-rel", O_CREAT | O_WRONLY, 0644);
+    check("create_after_relative_watch", f >= 0);
+    if (f >= 0)
+        close(f);
+    read_one(fd, &ev);
+    check("relative_watch_relative_trigger", ev.present && ev.mask == IN_CREATE &&
+                                                ev.wd == wd &&
+                                                strcmp(ev.name, "file-dot-rel") == 0);
+    f = open("/root/inotify-e2e/file-dot-abs", O_CREAT | O_WRONLY, 0644);
+    check("create_absolute_after_relative_watch", f >= 0);
+    if (f >= 0)
+        close(f);
+    read_one(fd, &ev);
+    check("relative_watch_absolute_trigger", ev.present && ev.mask == IN_CREATE &&
+                                                ev.wd == wd &&
+                                                strcmp(ev.name, "file-dot-abs") == 0);
+    unlink("file-dot-rel");
+    unlink("file-dot-abs");
+    drain(fd);
 
     /* Relative unlink: IN_DELETE, reported only after the removal succeeded. */
     check("unlink_relative", unlink("file-rel") == 0);

@@ -10,6 +10,7 @@ mod basic_nodes;
 mod device_nodes;
 mod irq_nodes;
 mod mem_nodes;
+mod name;
 mod root;
 #[cfg(feature = "sysrq")]
 mod sysrq_nodes;

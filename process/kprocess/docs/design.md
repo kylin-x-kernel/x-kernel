@@ -115,7 +115,13 @@ retains init identity; orphan reparenting reserves an init relation slot.
 - `migrate_cgroup_process` adapts a PID and filesystem authorization callback to
   process-wide migration; `scheduler` coordinates published task memberships.
   `CurrentThread` credential preparation/commit replaces only the calling
-  thread's pointers; `ptrace` checks cross-task read credentials.
+  thread's pointers; `ptrace::check_read_real_creds_access` checks cross-task
+  real-credential reads.
+- `ptrace::check_read_fs_creds_access` supplies the `/proc/<pid>/fdinfo/<fd>`
+  access decision (`PTRACE_MODE_READ_FSCREDS` semantics): provider kprocess,
+  consumer procfs, direction kprocess -> consumer. It passes same-thread-group
+  callers, otherwise compares the caller's filesystem UID/GID with all target
+  real/effective/saved IDs and allows the effective-UID-zero privilege override.
 - `timer_delivery` registers `ktimer` expiry and `ksignal` dequeue observers;
   CPU timers run on current-user-thread return and wall timers on the alarm task.
   `UserTaskRuntime for Thread` supplies CPU residency and AArch64 switch roots to

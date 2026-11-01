@@ -10,11 +10,12 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{ffi::CStr, fmt, iter, str};
+use core::{ffi::CStr, fmt, fmt::Write as _, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use kalloc_types::KBox;
 use kcred::Cred;
+use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
 use ktask::{KtaskRef, WeakKtaskRef, current};
@@ -76,7 +77,7 @@ impl SimpleDirOps for ProcessTaskDir {
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let process = self.process.upgrade().ok_or(VfsError::NotFound)?;
-        let tid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+        let tid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
         let task = procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?;
         if task.as_thread().process().pid() != process.pid() {
             return Err(VfsError::NotFound);
@@ -685,7 +686,7 @@ impl SimpleDirOps for ThreadFdDir {
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
         let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
-        let fd = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+        let fd = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
         task.as_thread()
             .files()
             .snapshot_fd(fd as _)
@@ -706,6 +707,136 @@ impl SimpleDirOps for ThreadFdDir {
     fn supports_dentry_cache(&self) -> bool {
         false
     }
+}
+struct ThreadFdInfoDir {
+    fs: Arc<SimpleFs>,
+    task: WeakKtaskRef,
+}
+
+impl SimpleDirOps for ThreadFdInfoDir {
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        let Some(task) = self.task.upgrade() else {
+            return Ok(KBox::new(iter::empty())?);
+        };
+        let Ok(fd_table) = task.as_thread().files().fd_table() else {
+            return Ok(KBox::new(iter::empty())?);
+        };
+        let ids = fd_table
+            .read()
+            .ids()
+            .map(|id| Cow::Owned(id.to_string()))
+            .collect::<Vec<_>>();
+        Ok(KBox::new(ids.into_iter())?)
+    }
+
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
+        let fs = self.fs.clone();
+        let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+        let fd = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
+        // Reject an unborn descriptor the way `/proc/<pid>/fd` does; the read
+        // side re-checks, because the descriptor can close in between.
+        task.as_thread()
+            .files()
+            .snapshot_fd(fd as _)
+            .map_err(|err| {
+                if err == VfsError::BadFileDescriptor {
+                    VfsError::NotFound
+                } else {
+                    err
+                }
+            })?;
+        let task = KtaskRef::downgrade(&task);
+        lookup.file(
+            name,
+            SimpleFile::new_regular_with_permission(
+                fs,
+                NodePermission::OTHER_READ
+                    | NodePermission::GROUP_READ
+                    | NodePermission::OWNER_READ,
+                move || {
+                    let task = task.upgrade().ok_or(VfsError::NotFound)?;
+                    // The descriptor may have closed since lookup. Linux
+                    // re-looks it up at read time and reports ENOENT, so use
+                    // the same translation as the lookup path rather than
+                    // leaking the fd-table's EBADF through this node.
+                    let snapshot =
+                        task.as_thread()
+                            .files()
+                            .snapshot_fd(fd as _)
+                            .map_err(|err| {
+                                if err == VfsError::BadFileDescriptor {
+                                    VfsError::NotFound
+                                } else {
+                                    err
+                                }
+                            })?;
+                    // The access gate, as on Linux's fdinfo permission hook:
+                    // `ptrace_may_access(PTRACE_MODE_READ_FSCREDS)` -- the
+                    // caller's filesystem credentials, not the real ones
+                    // `/proc/<pid>/exe` uses, so a setuid binary running as
+                    // the target's user is not barred from its own fdinfo.
+                    // A denied reader gets `PermissionDenied` (`EACCES`),
+                    // which is what Linux returns here.
+                    if let Some(caller) = ktask::current().try_as_thread() {
+                        kprocess::ptrace::check_read_fs_creds_access(caller, task.as_thread())
+                            .map_err(|_| VfsError::PermissionDenied)?;
+                    }
+                    Ok(render_fdinfo(snapshot.file(), snapshot.cloexec()))
+                },
+            ),
+        )
+    }
+
+    fn supports_dentry_cache(&self) -> bool {
+        false
+    }
+}
+
+/// Linux `O_CLOEXEC`, which `fs/proc/fd.c` folds into the flags it prints for
+/// a descriptor (`close_on_exec(fd, files)` -> `f_flags |= O_CLOEXEC`).
+///
+/// Declared here rather than pulled from a dependency: this crate needs the
+/// single value, and procfs is not on the raw-sys surface.
+const O_CLOEXEC: u32 = 0o2000000;
+
+/// Renders one `/proc/<pid>/fdinfo/<fd>` entry.
+///
+/// The generic lines are the ones this kernel can answer: the file offset,
+/// the open file description's flags, and the mount id of its location, in
+/// Linux's order. Type-specific lines are rendered for objects that have them;
+/// only inotify does so far, in man 5 proc_pid_fdinfo's field order and hex
+/// formatting (`wd`, `ino`, `sdev`, `mask`, `ignored_mask`). The trailing
+/// `fhandle-*` fields that page documents are absent because those exist only
+/// for file handles exported through an NFS file handle, which this kernel
+/// does not produce. `ignored_mask` is always 0: this object removes a watch
+/// immediately instead of parking it in an ignored state, so there is no
+/// interval to report. The inotify line keeps Linux's trailing space before
+/// those absent `fhandle-*` fields.
+fn render_fdinfo(file: &VfsFile, cloexec: bool) -> String {
+    let mut out = String::new();
+    // Linux prints these four lines for every descriptor, in this order and
+    // with these formats (`fs/proc/fd.c`): `flags:` carries a literal leading
+    // zero, is octal, and folds in the descriptor's close-on-exec bit.
+    let mut flags = file.flags().bits();
+    if cloexec {
+        flags |= O_CLOEXEC;
+    }
+    let _ = writeln!(out, "pos:\t{}", file.position());
+    let _ = writeln!(out, "flags:\t0{:o}", flags);
+    let _ = writeln!(out, "mnt_id:\t{}", file.path().mount().mount_id());
+    let _ = writeln!(out, "ino:\t{}", file.path().metadata().inode);
+    if let Ok(inotify) = Inotify::from_file(file) {
+        for watch in inotify.fdinfo_watches() {
+            let _ = writeln!(
+                out,
+                // Linux's prefix ends in a space before `show_mark_fhandle`;
+                // with no exported fhandle the line therefore ends in a space.
+                "inotify wd:{:x} ino:{:x} sdev:{:x} mask:{:x} ignored_mask:0 ",
+                watch.watch_descriptor, watch.inode, watch.device, watch.mask
+            );
+        }
+    }
+    out
 }
 
 struct ThreadDir {
@@ -1028,6 +1159,7 @@ impl SimpleDirOps for ThreadDir {
                 "comm",
                 "exe",
                 "fd",
+                "fdinfo",
             ]
             .into_iter()
             .map(Cow::Borrowed),
@@ -1266,6 +1398,30 @@ impl SimpleDirOps for ThreadDir {
                     ),
                 ))
             }
+            "fdinfo" => {
+                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
+                // Linux exposes fdinfo only to a reader that may inspect the
+                // task (`ptrace_may_access(PTRACE_MODE_READ_FSCREDS)`). The
+                // gate here is the per-reader credentials check in each file's
+                // read closure below -- the filesystem-credentials variant of
+                // the ptrace check -- not the file mode: the mode stays
+                // readable so that a reader which passes the check is not
+                // stopped one layer earlier, and a reader which fails it gets
+                // `EACCES` from the read, as Linux's fdinfo permission hook
+                // reports at open time. The directory itself
+                // keeps the default mode and only lists descriptor numbers,
+                // which `/proc/<pid>/fd` already names.
+                Ok(lookup.dir(
+                    name,
+                    SimpleDir::new_maker(
+                        fs.clone(),
+                        Arc::new(ThreadFdInfoDir {
+                            fs: fs.clone(),
+                            task: KtaskRef::downgrade(&task),
+                        }),
+                    ),
+                ))
+            }
             _ => Err(VfsError::NotFound),
         }
     }
@@ -1303,7 +1459,7 @@ impl SimpleDirOps for ProcFsHandler {
             );
         }
 
-        let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+        let pid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
         let task = procfs::process_task(pid).map_err(|_| VfsError::NotFound)?;
         Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
     }

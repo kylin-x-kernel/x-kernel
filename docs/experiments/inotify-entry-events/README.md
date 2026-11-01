@@ -34,6 +34,8 @@ first create into an ordinary open of an existing file.
 | `absolute_create_event` | Creating `/root/inotify-e2e/file-abs` yields `IN_CREATE` with the watch's wd and name |
 | `relative_create_event` | After `chdir`, creating `file-rel` yields `IN_CREATE` (this routes through the process pwd) |
 | `relative_delete_event` | `unlink("file-rel")` yields `IN_DELETE` |
+| `relative_watch_is_the_same_watch` | Re-registering with `"."` returns the descriptor the absolute call returned: one watch per directory, not per spelling |
+| `relative_watch_relative_trigger` / `relative_watch_absolute_trigger` | A watch registered as `"."` receives creates triggered by both spellings (the registry key is the resolved path) |
 | `no_unsubscribed_event` | `chmod` (IN_ATTRIB, not in the watch mask) queues nothing |
 | `mkdir_carries_isdir` | `mkdir("sub")` yields `IN_CREATE\|IN_ISDIR` |
 | `symlink_create_event` / `link_create_event` | `symlink` and `link` each yield `IN_CREATE` for the new entry |

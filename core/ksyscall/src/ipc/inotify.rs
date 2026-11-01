@@ -14,7 +14,7 @@
 //! it touches the descriptor, the pathname copy, and the resolution that turns
 //! the argument into the canonical identity the watch is registered under.
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::ffi::c_char;
 
 use bitflags::bitflags;
@@ -59,6 +59,12 @@ pub(crate) fn sys_inotify_init1(flags: u32) -> KResult<isize> {
 /// `PATH_MAX` counts the terminator, so a payload of that many bytes is already
 /// too long; Linux reports a pathname that exceeds the bound, or one with no
 /// terminator inside it, as `ENAMETOOLONG` rather than `ERANGE`.
+///
+/// The bytes are preserved up to resolution. Known deviation from Linux: the
+/// resolver takes `&str`, so a name that is not valid UTF-8 is rejected with
+/// `EINVAL` instead of being watched as an opaque byte string (Linux resolves
+/// byte-wise). Accepting it would need a byte-oriented resolver in the VFS
+/// layer; until then the rejection is explicit rather than silent.
 fn load_watch_path(path: UserConstPtr<c_char>) -> KResult<Vec<u8>> {
     path.load_bytes_with_max_len(INOTIFY_PATH_MAX - 1)
         .map_err(|err| {
@@ -78,7 +84,7 @@ fn load_watch_path(path: UserConstPtr<c_char>) -> KResult<Vec<u8>> {
 ///
 /// Linux reports a descriptor that is not an inotify instance as `EINVAL`, not
 /// `EBADF`: the number is a valid descriptor, it just names the wrong object.
-fn inotify_from_fd(fd: i32) -> KResult<alloc::sync::Arc<Inotify>> {
+fn inotify_from_fd(fd: i32) -> KResult<Arc<Inotify>> {
     let file = kprocess::current_files().get_file(fd)?;
     Inotify::from_file(&file).map_err(|err| {
         if err == KError::BadFileDescriptor {
@@ -105,11 +111,11 @@ pub(crate) fn sys_inotify_add_watch(
     if mask & !IN_ACCEPTED != 0 || mask == 0 {
         return Err(KError::InvalidInput);
     }
-    let inotify = inotify_from_fd(fd)?;
     // Linux decides the two add directives are mutually exclusive *after*
     // `fdget` and before it checks the file's type, which is why it sits here
     // rather than next to the domain check: the fd is already known good, and
     // both remaining failures are `EINVAL` either way.
+    let inotify = inotify_from_fd(fd)?;
     if mask & IN_MASK_ADD != 0 && mask & IN_MASK_CREATE != 0 {
         return Err(KError::InvalidInput);
     }

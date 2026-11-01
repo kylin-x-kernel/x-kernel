@@ -47,21 +47,31 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 | Source | Responsibility |
 | --- | --- |
 | `src/lib.rs`, `src/root.rs` | Registration, superblock construction, composition of static and dynamic entries |
-| `src/task_nodes/root.rs` | PID/TID directories, task metadata, maps, FD magic links, namespaces, process controls |
+| `src/name.rs` | Strict canonical-decimal parsing of numeric proc entry names (Linux `name_to_int()`) |
+| `src/task_nodes/root.rs` | PID/TID directories, task metadata, maps, FD magic links, fdinfo rendering (including inotify watches), namespaces, process controls |
 | `src/task_nodes/mounts.rs` | Mount-tree traversal and mounts/mountinfo/mountstats formatting |
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
-| `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings |
+| `src/basic_nodes/root.rs` | Boot command line, CPU/filesystem information, kernel settings and the `/proc/sys/fs/inotify` live limits |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
 | `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |
 | `src/trace_nodes/root.rs` | Trace records, event metadata and enable controls through `ktracing` |
 | `src/sysrq_nodes/root.rs` | Optional task-backtrace trigger |
 | `src/irq_nodes/root.rs` | Empty registration stub; no interrupts file yet |
 
+Numeric entry names (`<pid>`, `<tid>`, `fd`, and `fdinfo`) are parsed by
+`src/name.rs`, a port of Linux's `name_to_int()`. Only canonical decimal text is
+accepted: signs, whitespace, `0x`, multi-digit leading zeroes, and values above
+the `(u32::MAX - 9) / 10` guard do not resolve, so a path `ls` would not list
+cannot be opened through a lax spelling.
+
 `src/root.rs` also gates lock statistics, scheduler statistics, and VM diagnostics
 on Cargo features. `kvfs` owns dentries, inodes, permissions, open-file state,
 buffering, and offsets. `kprocess` owns process resources and live-MM capture;
-`memspace` owns VMA metadata and MM-user teardown rules. Procfs consumes these
-interfaces without introducing a separate MM lifecycle.
+`memspace` owns VMA metadata and MM-user teardown rules. `kfd_objects` owns
+inotify instances and the per-euid instance/watch ledger behind the
+`/proc/sys/fs/inotify/` limits, and supplies the watch snapshots rendered in
+fdinfo. Procfs consumes these interfaces without introducing a separate MM or
+file-object lifecycle.
 
 `sys/kernel/pty/max` and `sys/kernel/pty/nr` expose decimal values followed by
 a newline through read-only `SimpleFile` closures with mode `0444`. The `ktty`
@@ -70,6 +80,26 @@ unpublished reservations and pairs retained by surviving slave opens; it is not
 a count of visible pts entries. Each read samples the provider without retaining
 a PTY resource. Unlike Linux's writable `pty/max`, this interface reports a fixed
 limit of 16 pairs and does not support runtime resizing.
+
+### fdinfo and inotify controls
+
+`/proc/<pid>/fdinfo/<fd>` and `/proc/<pid>/task/<tid>/fdinfo/<fd>` render the
+generic `pos`, `flags`, `mnt_id` and `ino` lines in Linux's order. The read
+closure revalidates the descriptor before formatting it and reports a
+descriptor that disappeared after lookup as `ENOENT`, matching Linux's
+read-time `files_lookup_fd_locked()`. It then runs
+`kprocess::ptrace::check_read_fs_creds_access` for a user caller and fails with
+`EACCES` when the `PTRACE_MODE_READ_FSCREDS`-style check denies access. An
+inotify file appends one `inotify wd:... ino:... sdev:... mask:...
+ignored_mask:...` line per live watch, using the instance's watch snapshot.
+
+`/proc/sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches}`
+are `0644` nodes with a per-inode permission hook that authorizes an open for
+write on the opener's euid, matching Linux's `proc_sys_permission` rather than
+generic DAC's fsuid. Reads sample the `kfd_objects` ledger. Writes pass the
+writing task's current credential to the provider, which parses Linux's base-0
+number format (`0..=i32::MAX`), rechecks `euid == 0` on every write, and mutates
+the live limit only after validation succeeds.
 
 ## Calling Constraints and Execution Context
 

@@ -113,26 +113,26 @@ pub const IN_ACCEPTED: u32 = IN_ALL_EVENTS
     | IN_MASK_CREATE
     | IN_MASK_ADD
     | IN_ONESHOT;
-
-/// The identity of a watched object.
-///
-/// A watch is a statement about an *object*, not about a spelling: Linux hangs
-/// the mark on the inode (`inotify_update_existing_watch()` looks it up with
-/// `fsnotify_find_mark()` on the inode) and finds it again by walking the
-/// dentry's parent inode. This kernel stores the same pair — the device and
-/// inode the path resolved to at registration — so that a re-registration
-/// through another spelling (a relative argument, `..`, a symlink alias, or a
-/// renamed directory) is the *same* watch rather than a second one, and so a
-/// directory that is renamed keeps its watches.
-///
-/// `device` is first because the tuple form of this pair crosses the crate
-/// boundary to the filesystem hook, which cannot name this type.
+/// The resolved identity of a watched object, as `fdinfo` reports it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WatchIdentity {
-    /// Device number of the mount holding the object.
-    pub device: u64,
-    /// Inode number of the object.
+    /// Inode number of the watched path at registration time.
     pub inode: u64,
+    /// Device number of the mount that held the path at registration time.
+    pub device: u64,
+}
+
+/// One registered watch, as `fdinfo` reports it.
+#[derive(Clone, Copy, Debug)]
+pub struct FdinfoWatch {
+    /// Watch descriptor user space holds.
+    pub watch_descriptor: i32,
+    /// Inode number recorded at registration.
+    pub inode: u64,
+    /// Device number recorded at registration.
+    pub device: u64,
+    /// The mask currently registered for the path.
+    pub mask: u32,
 }
 
 /// One registered watch.
@@ -608,7 +608,7 @@ impl Inotify {
     ///
     /// Returns `KError::TooManyOpenFiles` when the owner already holds the
     /// per-user instance limit.
-    pub fn new(owner: Uid) -> KResult<Arc<Self>> {
+    pub(crate) fn new(owner: Uid) -> KResult<Arc<Self>> {
         let instance_slot = inotify_limits::reserve_instance(owner)?;
         Ok(Arc::new(Self {
             id: NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
@@ -988,10 +988,21 @@ impl Inotify {
             return;
         }
         let mut queue = self.queue.lock();
+        // Taking the overrun marker off the queue re-armed overrun reporting,
+        // so a producer may have queued a fresh marker while the batch was
+        // being copied out. Putting the stale one back on top of it would
+        // leave two, which the queue's own invariant forbids; the marker that
+        // is already queued describes the same loss, so the stale one is
+        // simply dropped. The reconciliation happens under the queue lock, so
+        // it cannot race a producer either.
+        let marked = queue.overflow_queued;
         for event in drained.iter().rev() {
+            if event.overflow && marked {
+                continue;
+            }
             queue.events.push_front(event.clone());
         }
-        if drained.iter().any(|event| event.overflow) {
+        if !marked && drained.iter().any(|event| event.overflow) {
             queue.overflow_queued = true;
         }
         // A reader that went to sleep while the queue was empty is still
@@ -1007,7 +1018,38 @@ impl Inotify {
         self.watches.lock().len()
     }
 
-    /// Reads back the mask registered for `descriptor`. Used by the unit tests.
+    /// Snapshot of the registered watches for `/proc/<pid>/fdinfo/<fd>`,
+    /// ordered by watch descriptor so the rendering is stable.
+    ///
+    /// `mask` is rendered the way Linux renders it: `inotify_mark_user_mask()`
+    /// intersects the mark's mask with `IN_ALL_EVENTS`, then ORs back the two
+    /// behavioural flags it tracks separately (`IN_EXCL_UNLINK`,
+    /// `IN_ONESHOT`). This object stores the same two things the same way --
+    /// event bits in `mask`, behavioural bits in `flags` -- so the rendering is
+    /// one OR; `IN_UNMOUNT` is subscribed for matching but not echoed, and the
+    /// add directives (`IN_MASK_ADD`, `IN_MASK_CREATE`) and resolution flags
+    /// (`IN_ONLYDIR`, `IN_DONT_FOLLOW`) are not part of the watch.
+    pub fn fdinfo_watches(&self) -> Vec<FdinfoWatch> {
+        let watches = self.watches.lock();
+        let mut snapshot: Vec<FdinfoWatch> = watches
+            .entries
+            .iter()
+            .map(|(&descriptor, watch)| FdinfoWatch {
+                watch_descriptor: descriptor,
+                inode: watch.identity.inode,
+                device: watch.identity.device,
+                // `inotify_mark_user_mask()`: the event bits, plus the two
+                // behavioural flags it tracks separately. `IN_UNMOUNT` is
+                // subscribed for matching but is not an event bit, so it is
+                // not echoed here.
+                mask: (watch.mask & IN_ALL_EVENTS) | watch.flags,
+            })
+            .collect();
+        snapshot.sort_unstable_by_key(|watch| watch.watch_descriptor);
+        snapshot
+    }
+
+    /// Path text registered for `descriptor`. Used by the unit tests.
     #[cfg(unittest)]
     pub(crate) fn watch_mask(&self, descriptor: i32) -> Option<u32> {
         self.watches
@@ -1076,10 +1118,10 @@ impl InotifyFops {
     /// lose a wakeup that arrived between the readiness check and the drain.
     async fn read_wait(file: &VfsFile, buf: &mut [u8]) -> KResult<usize> {
         let state = Self::state(file)?;
-        if buf.is_empty() {
-            // Linux reports short-buffer failures before touching the queue.
-            return Err(KError::InvalidInput);
-        }
+        // No empty-buffer shortcut: Linux's `inotify_read` always peeks the
+        // queue first (`get_one_event`), so an empty destination reports
+        // `EINVAL` when a record is queued and waits (or `EAGAIN`) when it is
+        // not.
         poll_file_io(state.as_ref(), IoEvents::IN, file.is_nonblocking(), || {
             state.drain_events(buf)
         })
@@ -1108,22 +1150,19 @@ impl FileOperations for InotifyFops {
     ) -> kvfs::VfsResult<usize> {
         let state = Self::state(iocb.file())?;
         let nonblocking = iocb.file().is_nonblocking();
-        // A destination that cannot hold even the record header is `EINVAL`,
-        // the answer the plain `read` path gives for the same buffer: Linux's
-        // `inotify_read()` rejects `count < sizeof(struct inotify_event)`
-        // before touching the queue, and a zero-length read is such a count.
-        if iter.count() < EVENT_HEADER_BYTES {
-            return Err(KError::InvalidInput);
-        }
+        // No size precheck here, on purpose: Linux's `get_one_event()` peeks
+        // the queue first and only answers `EINVAL` when a record that exists
+        // does not fit (`event_size > count`). An empty queue with a short
+        // destination therefore blocks (or returns `EAGAIN`), which is what
+        // `drain_events_batch` decides for us. A zero-length destination is
+        // passed through as an empty scratch for the same reason: a queued
+        // record makes it `EINVAL`, while an empty queue waits or `EAGAIN`s.
         // One record is at most the 16-byte header plus a PATH_MAX-sized name
         // field, so this scratch always holds at least one whole record.
         let mut chunk = alloc::vec![0u8; 8192];
         let mut total = 0usize;
         loop {
             let want = chunk.len().min(iter.count());
-            if want == 0 {
-                break;
-            }
             let (read, drained) = match state.drain_events_batch(&mut chunk[..want]) {
                 Ok(drain) => drain,
                 // An empty queue waits only before the first record; afterwards
@@ -1211,7 +1250,10 @@ impl FileOperations for InotifyFops {
 impl Pollable for Inotify {
     fn poll(&self) -> IoEvents {
         if self.has_readable_record() {
-            IoEvents::IN
+            // Linux reports `EPOLLIN | EPOLLRDNORM` for a readable inotify
+            // instance, so an epoll waiter that registered only `POLLRDNORM`
+            // also matches and wakes.
+            IoEvents::IN | IoEvents::RDNORM
         } else {
             IoEvents::empty()
         }
@@ -1222,7 +1264,9 @@ impl Pollable for Inotify {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
-        if events.contains(IoEvents::IN) {
+        // `RDNORM` is Linux's alias of `IN` for readability, so a waiter that
+        // asked for it alone subscribes to the same receive side.
+        if events.intersects(IoEvents::IN | IoEvents::RDNORM) {
             context.register(&self.poll_rx)?;
         }
         Ok(())

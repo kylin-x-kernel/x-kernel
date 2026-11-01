@@ -33,6 +33,39 @@ pub fn check_read_real_creds_access(caller: &Thread, target: &Thread) -> KResult
     check_cross_process_read_real_creds_access(&caller_cred, &target_cred)
 }
 
+/// `PTRACE_MODE_READ_FSCREDS` semantics -- what Linux's `/proc/<pid>/fdinfo`
+/// permission hook uses. Threads in the same thread group may inspect each
+/// other; for a different thread group the caller's filesystem UID/GID must
+/// match all of the target's real, effective, and saved IDs. Until capability
+/// sets are modeled, an effective UID of 0 stands in for `CAP_SYS_PTRACE`.
+///
+/// # Errors
+///
+/// Returns [`KError::OperationNotPermitted`] when neither the identity match
+/// nor the privileged override permits access.
+pub fn check_read_fs_creds_access(caller: &Thread, target: &Thread) -> KResult<()> {
+    if Arc::ptr_eq(caller.process(), target.process()) {
+        return Ok(());
+    }
+
+    let caller_cred = caller.real_cred();
+    let target_cred = target.real_cred();
+    if caller_cred.is_privileged() {
+        return Ok(());
+    }
+    let ids_match = target_cred.ruid() == caller_cred.fsuid()
+        && target_cred.euid() == caller_cred.fsuid()
+        && target_cred.suid() == caller_cred.fsuid()
+        && target_cred.rgid() == caller_cred.fsgid()
+        && target_cred.egid() == caller_cred.fsgid()
+        && target_cred.sgid() == caller_cred.fsgid();
+    if ids_match {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
+}
+
 fn check_cross_process_read_real_creds_access(caller: &Cred, target: &Cred) -> KResult<()> {
     if caller.is_privileged() || target.matches_real_credential_ids(caller) {
         Ok(())

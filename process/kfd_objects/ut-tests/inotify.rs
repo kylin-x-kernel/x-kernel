@@ -4,6 +4,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kvfs::VfsError;
 use unittest::def_test;
 
 /// Every watch stores `IN_UNMOUNT` as well: Linux ORs `FS_UNMOUNT` into each
@@ -475,14 +476,30 @@ fn drain_pads_names_to_the_event_header_boundary() {
 }
 
 #[def_test]
-fn empty_read_is_rejected() {
+fn empty_destination_read_consults_the_queue_first() {
     let file = Inotify::new_file(0, kcred::initial_cred()).expect("inotify file opens");
-    // `VfsFile::read_from` short-circuits an empty buffer in the VFS layer, so
-    // call the file operations directly to reach the inotify guard.
     let fops = InotifyFops;
-    let result = fops.read(&file, &mut [], 0);
+    let state = Inotify::from_file(&file).expect("inotify file");
+    state.queue_event(1, 0x2, b"", 0);
 
-    assert_eq!(result, Err(KError::InvalidInput));
+    // Linux's `get_one_event` compares the queued record size with `count`
+    // before copying, so a record that cannot fit makes even a zero-length
+    // read `EINVAL`. Exercise both the `read` hook used by the wait path and
+    // `read_from`, which reaches `read_iter` the way a user read does.
+    assert_eq!(fops.read(&file, &mut [], 0), Err(KError::InvalidInput));
+    assert_eq!(
+        file.read_from(&mut [], &mut 0),
+        Err(VfsError::InvalidInput)
+    );
+
+    // An empty queue instead waits (or, non-blocking, reports `EAGAIN`).
+    let empty = Inotify::new_file(0, kcred::initial_cred()).expect("inotify file opens");
+    empty.set_nonblocking(true);
+    assert_eq!(fops.read(&empty, &mut [], 0), Err(KError::WouldBlock));
+    assert_eq!(
+        empty.read_from(&mut [], &mut 0),
+        Err(VfsError::WouldBlock)
+    );
 }
 
 #[def_test]

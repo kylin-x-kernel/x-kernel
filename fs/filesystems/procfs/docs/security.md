@@ -50,14 +50,21 @@ count can change immediately after observation and grants no admission guarantee
   inputs. Numeric lookup components are parsed, task-directory membership is
   checked, and unsupported names fail lookup (`src/task_nodes/root.rs`).
 - Writable controls include `comm`, `oom_score_adj`, trace event enables,
-  `sys/kernel/printk`, `sys/kernel/log_filter`, and optional `sysrq-trigger`.
-  `log_filter` accepts one filter spec (`[<level>] [<target>=<level>]...`, at
-  most `MAX_FILTER_RULES` rules with `MAX_FILTER_TARGET`-byte targets); a write is
-  privilege-gated and either replaces the whole spec or fails with
-  `InvalidInput` and leaves the previous filter in place. `comm` truncates to 15 bytes
-  and validates C-string/UTF-8 conversion; OOM adjustment accepts only parsed
-  values in `[-1000, 1000]`. Tracing delegates validation to `ktracing`; SysRq
-  accepts the first non-whitespace byte only when it is `t`.
+  `sys/kernel/printk`, `sys/kernel/log_filter`, the three
+  `sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches}`
+  limits, and optional `sysrq-trigger`. `log_filter` accepts one filter spec
+  (`[<level>] [<target>=<level>]...`, at most `MAX_FILTER_RULES` rules with
+  `MAX_FILTER_TARGET`-byte targets); a write is privilege-gated and either
+  replaces the whole spec or fails with `InvalidInput` and leaves the previous
+  filter in place. The inotify limits are `0644`; their inode permission hook
+  requires `euid == 0` to open for write, and their write closure passes the
+  writing task's current credential (not the opener snapshot), requires
+  `euid == 0`, accepts Linux's base-0 integer syntax in `0..=i32::MAX`, and
+  leaves the previous value untouched on any parse or privilege failure. `comm`
+  truncates to 15 bytes and validates C-string/UTF-8 conversion; OOM adjustment
+  accepts only parsed values in `[-1000, 1000]`. Tracing delegates validation
+  to `ktracing`; SysRq accepts the first non-whitespace byte only when it is
+  `t`.
 - FD magic links expose resource-backed paths. `ProcFdLink::follow` rejects
   magic-link-disallowing flags or lack of final-component following before
   obtaining a descriptor snapshot. Descriptor reuse can change a later result.
@@ -131,7 +138,7 @@ different moments.
 | --- | --- | --- | --- | --- |
 | T-01 | Cross-image maps/heap mismatch | Medium | Binding changes after a reader captures its MM | Single-lock MM/heap capture and capability-local heap reads retain the pair. Contents remain live. |
 | T-02 | Stale task or torn-down MM access | High | Exit races with lookup, open, or read | Weak upgrades, fallible resource access, active MM-user retention, and locked VMA copies guard access. Retained views intentionally prolong mapping lifetime. |
-| T-03 | Information disclosure or unwanted controls | High | An insufficiently restricted caller reaches process/diagnostic nodes or writes controls | VFS permissions apply; `printk` and `log_filter` both check `file.cred().is_privileged()` on write. The other listed callbacks have no equivalent local privilege check, and task reads have no local ptrace-style policy. Deployment access policy and further credential checks require separate audit. |
+| T-03 | Information disclosure or unwanted controls | High | An insufficiently restricted caller reaches process/diagnostic nodes or writes controls | VFS permissions apply; `printk` and `log_filter` both check `file.cred().is_privileged()` on write. Task reads are partly covered: `/proc/<pid>/fdinfo/<fd>` gates every read on `kprocess::ptrace::check_read_fs_creds_access` (`PTRACE_MODE_READ_FSCREDS`: same-thread-group pass, otherwise the caller's fsuid/fsgid against the target's real/effective/saved ids, with an euid-0 override) and fails with `EACCES`; the remaining task callbacks still have no local privilege check and require separate audit. The fdinfo gate runs in the read closure because access depends on the target task and descriptor identified only after path parsing. |
 | T-04 | Resource pressure and lock contention | Medium | Many retained maps opens, large VMA lists, or repeated rewinds | Ownership cleanup releases buffers and MM users, but procfs imposes no local quota on retained views or scan work. |
 | T-05 | Ambiguous diagnostic text | Low | Names or paths contain separators/newlines | Mount sources are mangled; maps paths and several other strings are emitted verbatim. Consumers must not treat all output as escaped records. |
 | T-06 | Zombie `exe` link resolves after exit | Low | `/proc/<pid>/exe` read while the target is a zombie | Read/follow/readlink require the target thread to be live and its process not exited, so a zombie's link reports `ENOENT` like Linux; `getattr` still succeeds with size 0. |
