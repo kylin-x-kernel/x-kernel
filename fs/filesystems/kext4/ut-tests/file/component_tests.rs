@@ -16,7 +16,7 @@ use crate::{
     disk::features,
     extent::ExtentMappingState,
     file::RegularWriteMetadata,
-    inode::InodeInitialization,
+    inode::{InodeInitialization, allocation_test_inode},
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, allocate_checkpointed_regular_inode,
@@ -51,7 +51,7 @@ fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
     while filesystem.free_blocks_count() != 0 {
         spare = Some(
             filesystem
-                .allocate_block(None, &mut handle)
+                .allocate_block(&allocation_test_inode(12), None, &mut handle)
                 .unwrap()
                 .block(),
         );
@@ -100,7 +100,7 @@ fn unwritten_conversion_no_space_before_metadata_does_not_abort_journal() {
     // Free one unrelated block, then retry on the same mounted journal.
     let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
     filesystem
-        .release_allocated_block(spare.unwrap(), &mut handle)
+        .release_allocated_block(&allocation_test_inode(12), spare.unwrap(), &mut handle)
         .unwrap();
     filesystem
         .complete_metadata_mutation(handle, Ok(()))
@@ -1147,7 +1147,7 @@ fn writeback_settlement_re_reads_the_writer_gate_at_each_settlement() {
     let transaction = handle.id();
     for logical in [8u64, 10, 12, 14, 16] {
         let physical = filesystem
-            .allocate_block(None, &mut handle)
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
             .unwrap()
             .block();
         filesystem
@@ -1361,7 +1361,7 @@ fn writeback_without_growth_preserves_pending_frees(
     while filesystem.free_blocks_count() > reusable_blocks {
         spare = Some(
             filesystem
-                .allocate_block(None, &mut handle)
+                .allocate_block(&allocation_test_inode(12), None, &mut handle)
                 .unwrap()
                 .block(),
         );
@@ -1386,7 +1386,7 @@ fn writeback_without_growth_preserves_pending_frees(
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(spare.unwrap(), &mut handle)
+        .release_allocated_block(&allocation_test_inode(12), spare.unwrap(), &mut handle)
         .unwrap();
     let transaction = handle.id();
     handle.stop().unwrap();
@@ -1458,7 +1458,11 @@ fn readmission_failure_preserves_prefix(
     let setup = JournalTransactions::new(TransactionId::new(770));
     let mut handle = setup.begin(JournalCredits::new(1024)).unwrap();
     let physical = filesystem
-        .allocate_block(Some(crate::FilesystemBlock::new(6)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(crate::FilesystemBlock::new(6)),
+            &mut handle,
+        )
         .unwrap()
         .block();
     assert_eq!(physical, PhysicalBlock::new(6));
@@ -1473,14 +1477,22 @@ fn readmission_failure_preserves_prefix(
         )
         .unwrap();
     let spare = filesystem
-        .allocate_block(Some(crate::FilesystemBlock::new(7)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(crate::FilesystemBlock::new(7)),
+            &mut handle,
+        )
         .unwrap()
         .block();
     assert_eq!(spare, PhysicalBlock::new(7));
     if fill_space {
         while filesystem.free_blocks_count() > 4 {
             filesystem
-                .allocate_block(Some(crate::FilesystemBlock::new(12)), &mut handle)
+                .allocate_block(
+                    &allocation_test_inode(12),
+                    Some(crate::FilesystemBlock::new(12)),
+                    &mut handle,
+                )
                 .unwrap();
         }
     }
@@ -1504,7 +1516,7 @@ fn readmission_failure_preserves_prefix(
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(spare, &mut handle)
+        .release_allocated_block(&allocation_test_inode(12), spare, &mut handle)
         .unwrap();
     handle.stop().unwrap();
     filesystem

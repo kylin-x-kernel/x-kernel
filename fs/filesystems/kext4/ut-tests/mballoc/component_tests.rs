@@ -8,6 +8,7 @@ use unittest::def_test;
 
 use crate::{
     BlockCount, BlockGroupNumber, Ext4Error, FilesystemBlock, LogicalBlock, PhysicalBlock,
+    inode::allocation_test_inode,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
     superblock::test_fixtures::{
@@ -19,17 +20,18 @@ use crate::{
 
 #[def_test]
 fn mballoc_allocates_goal_aligned_contiguous_run() {
+    let allocation_inode = allocation_test_inode(12);
     let (filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let journal = JournalTransactions::new(TransactionId::new(111));
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
     let transaction = handle.id();
     let request = Ext4AllocationRequest::new(
+        &allocation_inode,
         LogicalBlock::new(7),
         Some(FilesystemBlock::new(8)),
         BlockCount::new(4),
         BlockCount::new(4),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
 
@@ -63,6 +65,7 @@ fn mballoc_allocates_goal_aligned_contiguous_run() {
 
 #[def_test]
 fn mballoc_returns_explicit_partial_run_when_fragmented() {
+    let allocation_inode = allocation_test_inode(12);
     let (filesystem, _device) = allocator_multigroup_test_filesystem(&[AllocatorGroupSpec {
         free_blocks: 2,
         free_inodes: TEST_FREE_INODES,
@@ -74,12 +77,12 @@ fn mballoc_returns_explicit_partial_run_when_fragmented() {
     let journal = JournalTransactions::new(TransactionId::new(112));
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     let request = Ext4AllocationRequest::new(
+        &allocation_inode,
         LogicalBlock::new(11),
         Some(FilesystemBlock::new(8)),
         BlockCount::new(4),
         BlockCount::new(2),
         Ext4AllocationFlags::ALLOW_PARTIAL,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
 
@@ -97,6 +100,7 @@ fn mballoc_returns_explicit_partial_run_when_fragmented() {
 
 #[def_test]
 fn mballoc_falls_back_when_group_cannot_satisfy_minimum_run() {
+    let allocation_inode = allocation_test_inode(12);
     let (filesystem, _device) = allocator_multigroup_test_filesystem(&[
         AllocatorGroupSpec {
             free_blocks: 1,
@@ -118,12 +122,12 @@ fn mballoc_falls_back_when_group_cannot_satisfy_minimum_run() {
     let journal = JournalTransactions::new(TransactionId::new(113));
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     let request = Ext4AllocationRequest::new(
+        &allocation_inode,
         LogicalBlock::new(12),
         None,
         BlockCount::new(2),
         BlockCount::new(2),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
 
@@ -140,21 +144,24 @@ fn mballoc_falls_back_when_group_cannot_satisfy_minimum_run() {
 
 #[def_test]
 fn mballoc_rejects_exact_request_with_smaller_minimum() {
+    let allocation_inode = allocation_test_inode(12);
     assert_eq!(
         Ext4AllocationRequest::new(
+            &allocation_inode,
             LogicalBlock::new(13),
             None,
             BlockCount::new(4),
             BlockCount::new(2),
-            Ext4AllocationFlags::EXACT,
-            BlockGroupNumber::new(0),
-        ),
-        Err(Ext4Error::OutOfBounds)
+            Ext4AllocationFlags::EXACT
+        )
+        .err(),
+        Some(Ext4Error::OutOfBounds)
     );
 }
 
 #[def_test]
 fn mballoc_run_allocation_lazy_initializes_nonzero_group_bitmap() {
+    let allocation_inode = allocation_test_inode(44);
     let (filesystem, device) = allocator_multigroup_test_filesystem(&[
         AllocatorGroupSpec {
             free_blocks: 0,
@@ -177,12 +184,12 @@ fn mballoc_run_allocation_lazy_initializes_nonzero_group_bitmap() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     let transaction = handle.id();
     let request = Ext4AllocationRequest::new(
+        &allocation_inode,
         LogicalBlock::new(20),
         Some(FilesystemBlock::new(38)),
         BlockCount::new(4),
         BlockCount::new(4),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(1),
     )
     .unwrap();
 
@@ -219,4 +226,41 @@ fn mballoc_run_allocation_lazy_initializes_nonzero_group_bitmap() {
         0b0000_0011
     );
     assert_eq!(le_u32(&bytes, 1024 + 0x0c), 22);
+}
+
+#[def_test]
+fn data_allocation_without_goal_starts_in_its_inode_group() {
+    let inode = allocation_test_inode(44);
+    let group = AllocatorGroupSpec {
+        free_blocks: TEST_FREE_BLOCKS,
+        free_inodes: TEST_FREE_INODES,
+        used_directories: 0,
+        flags: 0,
+        block_bitmap: [0b0011_1111, 0, 0, 0],
+        inode_bitmap: [0, 0, 0, 0],
+    };
+    let (filesystem, _device) = allocator_multigroup_test_filesystem(&[group, group]);
+    let request = Ext4AllocationRequest::new(
+        &inode,
+        LogicalBlock::new(0),
+        None,
+        BlockCount::new(1),
+        BlockCount::new(1),
+        Ext4AllocationFlags::EXACT,
+    )
+    .unwrap();
+    let journal = JournalTransactions::new(TransactionId::new(200));
+    let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
+
+    let allocation = filesystem
+        .allocate_blocks_for_write(request, &mut handle)
+        .unwrap();
+
+    assert_eq!(allocation.group(), BlockGroupNumber::new(1));
+    assert_eq!(allocation.physical_start(), PhysicalBlock::new(38));
+    assert_eq!(filesystem.groups()[0].free_blocks_count(), TEST_FREE_BLOCKS);
+    assert_eq!(
+        filesystem.groups()[1].free_blocks_count(),
+        TEST_FREE_BLOCKS - 1
+    );
 }

@@ -328,8 +328,10 @@ impl Ext4SuperOperations {
     ///
     /// Requires sleepable mount context. The prepared private owner uses NOWAIT
     /// while holding the nascent device reservation, not an ext4 state lock.
-    /// Allocation failure returns NoMemory before root publication; nested
-    /// allocations and any prior on-disk recovery retain their existing behavior.
+    /// Replay determines mount capabilities before private-owner installation.
+    /// Orphan cleanup then uses that owner before the root is published.
+    /// Owner allocation failure returns NoMemory before orphan cleanup; prior
+    /// replay and nested allocations retain their existing contracts.
     pub(crate) fn fill_super(
         super_block: &Arc<SuperBlock>,
         options: Ext4MountOptions,
@@ -345,27 +347,9 @@ impl Ext4SuperOperations {
             .clone();
         let statfs_mode = options.mount_statfs_mode();
         let is_read_only = super_block.flags().contains(SuperBlockFlags::RDONLY);
-        let mount_fn = |device| Ext4SbInfo::prepare_mount_with_statfs_mode(device, statfs_mode);
-        let state = match mount_fn(device.clone()) {
-            Ok(state) => state,
-            Err(Ext4Error::NeedsRecovery) => {
-                if let Err(error) = Ext4SbInfo::recover(device.clone()) {
-                    error!("KExt4 recovery failed: {error:?}");
-                    return Err(into_vfs_err(error));
-                }
-                match mount_fn(device) {
-                    Ok(state) => state,
-                    Err(error) => {
-                        error!("KExt4 mount after filesystem recovery failed: {error:?}");
-                        return Err(into_vfs_err(error));
-                    }
-                }
-            }
-            Err(error) => {
-                error!("KExt4 core mount failed: {error:?}");
-                return Err(into_vfs_err(error));
-            }
-        };
+        let mut state = Ext4SbInfo::open(device, true).map_err(into_vfs_err)?;
+        state.set_statfs_mode(statfs_mode);
+        let replay = state.prepare_recovery().map_err(into_vfs_err)?;
         let block_size = u64::from(state.layout().block_size());
         let max_file_size = state.extent_max_file_size().map_err(into_vfs_err)?;
         let ext4 = Ext4Mount::new(state);
@@ -375,6 +359,10 @@ impl Ext4SuperOperations {
             block_size,
             max_file_size,
             |super_block| {
+                ext4_private(super_block)?
+                    .write(super_block)
+                    .finish_recovery(replay)
+                    .map_err(into_vfs_err)?;
                 let root_inode = Self::iget(super_block, InodeNumber::new(EXT4_ROOT_INO))
                     .inspect_err(|error| {
                         error!("KExt4 root inode VFS initialization failed: {error:?}")

@@ -143,6 +143,10 @@ fn test_inode(metadata: Ext4InodeMetadata) -> Ext4Inode {
     Ext4Inode::new(InodeNumber::new(12), metadata)
 }
 
+pub(crate) fn allocation_test_inode(number: u32) -> Ext4Inode {
+    Ext4Inode::new(InodeNumber::new(number), regular_inode_metadata())
+}
+
 fn regular_inode_metadata() -> Ext4InodeMetadata {
     Ext4InodeMetadata {
         kind: InodeKind::RegularFile,

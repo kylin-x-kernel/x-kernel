@@ -19,10 +19,10 @@ use crate::{
         finish_journal_checkpoint_batch, mark_superblock_empty, persist_journal_commit,
     },
     superblock::{
-        Ext4Recovery, Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal,
-        JournalMarkedEmpty, lock,
+        Ext4RecoveryCleared, Ext4RecoveryReport, Ext4SbInfo, InternalJournal, JournalMarkedEmpty,
+        lock,
     },
-    types::FilesystemBlock,
+    types::{BlockCount, FilesystemBlock},
 };
 
 const JBD2_FEATURE_INCOMPAT_REVOKE: u32 = 0x0000_0001;
@@ -95,6 +95,15 @@ impl MountedJournal {
 
     pub(crate) fn superblock(&self) -> JournalSuperblock {
         lock(&self.state).storage.superblock.clone()
+    }
+
+    /// Visits physical journal extents while holding journal-state protection.
+    /// The visitor must not re-enter this journal.
+    pub(crate) fn for_each_physical_extent(
+        &self,
+        visit_fn: impl FnMut(FilesystemBlock, BlockCount) -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        lock(&self.state).storage.for_each_physical_extent(visit_fn)
     }
 
     fn supports_revoke(&self) -> bool {
@@ -1007,65 +1016,76 @@ fn mutation_error_requires_abort(error: Ext4Error) -> bool {
     )
 }
 
-impl Ext4Recovery {
-    pub(super) fn open(device: Arc<block::BlockDevice>) -> Ext4Result<Self> {
-        Ok(Self {
-            filesystem: Ext4SbInfo::open(device, true)?,
-        })
-    }
-
+impl Ext4SbInfo {
     /// Cleans orphan metadata left after a fully checkpointed transaction.
     ///
     /// Structurally valid inodes whose format KExt4 cannot yet mutate remain
-    /// hard recovery errors. The orphan entry and recovery feature are kept
-    /// so a later implementation or Linux can finish the cleanup; silently
-    /// skipping such an inode would report a filesystem with live orphaned
-    /// resources as recovered.
+    /// hard recovery errors. Keep their orphan entries and recovery features
+    /// intact so an unsuccessful cleanup cannot publish a recovered filesystem.
     fn recover_clean_orphans(&mut self) -> Ext4Result<()> {
-        self.filesystem.cleanup_orphans_preserving_recovery()?;
-        self.filesystem.ensure_journal_superblock_has_zero_start()?;
-        if !self.filesystem.orphan_file_empty()? {
+        self.cleanup_orphans_preserving_recovery()?;
+        self.ensure_journal_superblock_has_zero_start()?;
+        if !self.orphan_file_empty()? {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidOrphanFile));
         }
-        self.filesystem.clear_ext4_recovery_features_on_disk()
+        self.clear_ext4_recovery_features_on_disk()
     }
 
-    pub(super) fn replay(mut self) -> Ext4Result<Option<Ext4RecoveryReport>> {
-        if !self.filesystem.needs_recovery() {
-            if self.filesystem.orphan_head().is_some()
-                || !self.filesystem.orphan_file_empty()?
-                || self.filesystem.has_orphan_present()
-            {
-                self.recover_clean_orphans()?;
-            }
+    /// Replays metadata before mount capabilities and inode identities are fixed.
+    ///
+    /// Requires exclusive access to an unpublished mount. The returned replay
+    /// evidence belongs to this instance and must be passed to `finish_recovery`.
+    pub(crate) fn prepare_recovery(&mut self) -> Ext4Result<Option<JournalReplayApplied>> {
+        if !self.needs_recovery() {
             return Ok(None);
         }
-        let applied = self.filesystem.replay_internal_journal_updates()?;
-        self.filesystem.metadata_io.invalidate_all();
-        // The reload takes the allocator lock internally; replay paths must
-        // never be entered while holding it — ksync mutexes are not
-        // reentrant and reentry panics.
-        self.filesystem.reload_mutable_metadata_state()?;
-        self.filesystem.initialize_orphan_info()?;
-        self.filesystem
-            .stage_replayed_journal_clean_state(applied)?;
-        let cleaned_orphans =
-            if self.filesystem.orphan_head().is_some() || !self.filesystem.orphan_file_empty()? {
-                self.filesystem.cleanup_orphans_preserving_recovery()?
-            } else {
-                0
-            };
-        let marked = if cleaned_orphans == 0 {
-            self.filesystem.mark_journal_clean(applied)?
+        let applied = self.replay_internal_journal_updates()?;
+        self.refresh_recovered_superblock()?;
+        self.initialize_orphan_info()?;
+        self.stage_replayed_journal_clean_state(applied)?;
+        Ok(Some(applied))
+    }
+
+    /// Finishes orphan cleanup after mount-private state has been installed.
+    ///
+    /// Requires exclusive access before creating or publishing resident inodes.
+    pub(crate) fn finish_recovery(
+        &mut self,
+        applied: Option<JournalReplayApplied>,
+    ) -> Ext4Result<Option<Ext4RecoveryReport>> {
+        let Some(applied) = applied else {
+            if self.orphan_head().is_some()
+                || !self.orphan_file_empty()?
+                || self.has_orphan_present()
+            {
+                self.recover_clean_orphans()?;
+                self.refresh_recovered_superblock()?;
+            }
+            return Ok(None);
+        };
+        let cleaned_orphans = if self.orphan_head().is_some() || !self.orphan_file_empty()? {
+            self.cleanup_orphans_preserving_recovery()?
         } else {
-            self.filesystem.ensure_journal_superblock_has_zero_start()?;
+            0
+        };
+        let marked = if cleaned_orphans == 0 {
+            self.mark_journal_clean(applied)?
+        } else {
+            self.ensure_journal_superblock_has_zero_start()?;
             JournalMarkedEmpty {
                 report: applied.report(),
             }
         };
-        let cleared = self.filesystem.clear_ext4_recovery_features(marked)?;
+        let cleared = self.clear_ext4_recovery_features(marked)?;
         let report = cleared.into_report();
+        self.refresh_recovered_superblock()?;
         Ok(Some(report))
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn recover_in_place(&mut self) -> Ext4Result<Option<Ext4RecoveryReport>> {
+        let applied = self.prepare_recovery()?;
+        self.finish_recovery(applied)
     }
 }
 

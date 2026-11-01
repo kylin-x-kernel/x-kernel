@@ -5,11 +5,35 @@
 If the Ext4Mount owner cannot be allocated, fill_super returns NoMemory and drops
 the prepared state before installing operations, private data or a root. KVFS
 performs its existing failed-initialization transition and releases the reserved
-identity/claim. This does not undo prior on-disk recovery or make nested mount
-allocations fallible. NOFS still permits reclaim/I/O and is not used as a proof
+identity/claim. Orphan cleanup starts only after the owner is installed, so
+this allocation failure precedes orphan mutations. Prior journal replay is not
+undone, and nested mount allocations keep their existing contracts. NOFS still permits reclaim/I/O and is not used as a proof
 that canonical-device initialization can safely be re-entered.
 
 ## 信任模型
+
+Allocation requests borrow their actual ext4 inode. A physical goal selects the
+starting group; without a goal, data allocation uses the inode's group. Metadata
+allocation and block release also receive their owner, while group bitmap
+primitives do not own inode accounting. A preallocation group twin must retain a
+strong reference to the object borrowed by the request; an identity mismatch
+fails before the first bitmap mutation.
+
+Recovery requires exclusive access before root publication and retains the same
+`Ext4SbInfo` and journal owner. Replay refreshes the disk mirror and derived policy
+before mount capabilities are fixed and the private owner is installed. Orphan
+cleanup must succeed before the root inode is loaded. Failure follows nascent
+superblock teardown, releasing private state and the device claim without
+publishing an accessible root directory.
+
+Protected ranges are reconstructed from filesystem geometry and the mounted
+journal mapping, using the same checked insertion path at mount and recovery.
+The index must remain ordered and non-overlapping for binary-search queries;
+journal ownership permits only its inode to reference its blocks. A journal range
+that overlaps filesystem metadata is rejected before the new index is installed.
+Recovery reconstruction does not trust or copy the previous derived index. Changes to the
+loaded journal's backing identity are rejected before its mapping can be assigned
+to a different inode.
 
 KExt4 只把块设备视为 I/O 传输层，不信任其中的元数据天然有效。来自磁盘的
 superblock、group descriptor、directory block、extent tree、xattr block、bitmap 和

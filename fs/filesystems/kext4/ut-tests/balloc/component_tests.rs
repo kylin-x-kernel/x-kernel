@@ -8,6 +8,7 @@ use unittest::def_test;
 
 use crate::{
     BlockGroupNumber, CorruptKind, Ext4Error, FilesystemBlock, PhysicalBlock,
+    inode::allocation_test_inode,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::{
         ext4_bitmap_checksum_matches, ext4_mark_bitmap_end,
@@ -44,7 +45,11 @@ fn block_allocator_uses_goal_group_and_falls_back_across_groups() {
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
     let allocation = filesystem
-        .allocate_block(Some(FilesystemBlock::new(8)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(FilesystemBlock::new(8)),
+            &mut handle,
+        )
         .unwrap();
 
     assert_eq!(allocation.group(), BlockGroupNumber::new(1));
@@ -75,7 +80,11 @@ fn block_allocator_starts_scan_at_goal_inside_selected_group() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
     let allocation = filesystem
-        .allocate_block(Some(FilesystemBlock::new(40)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(FilesystemBlock::new(40)),
+            &mut handle,
+        )
         .unwrap();
 
     assert_eq!(allocation.group(), BlockGroupNumber::new(1));
@@ -133,7 +142,11 @@ fn block_allocator_releases_allocated_block_through_same_metadata_path() {
     let transaction = handle.id();
 
     let released = filesystem
-        .release_allocated_block(PhysicalBlock::new(6), &mut handle)
+        .release_allocated_block(
+            &allocation_test_inode(12),
+            PhysicalBlock::new(6),
+            &mut handle,
+        )
         .unwrap();
 
     assert_eq!(released.block(), PhysicalBlock::new(6));
@@ -163,7 +176,11 @@ fn block_allocator_releases_metadata_block_with_revoke_record() {
     let transaction = handle.id();
 
     let released = filesystem
-        .release_allocated_metadata_block(PhysicalBlock::new(6), &mut handle)
+        .release_allocated_metadata_block(
+            &allocation_test_inode(12),
+            PhysicalBlock::new(6),
+            &mut handle,
+        )
         .unwrap();
 
     assert_eq!(released.block(), PhysicalBlock::new(6));
@@ -204,7 +221,11 @@ fn block_allocator_rejects_releasing_system_zone_without_consuming_credits() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
     assert_eq!(
-        filesystem.release_allocated_block(PhysicalBlock::new(2), &mut handle),
+        filesystem.release_allocated_block(
+            &allocation_test_inode(12),
+            PhysicalBlock::new(2),
+            &mut handle
+        ),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))
     );
     assert_eq!(handle.remaining_credits(), 3);
@@ -217,7 +238,7 @@ fn block_allocator_rejects_insufficient_credits_before_metadata_access() {
     let mut handle = journal.begin(JournalCredits::new(2)).unwrap();
 
     assert_eq!(
-        filesystem.allocate_block(None, &mut handle),
+        filesystem.allocate_block(&allocation_test_inode(12), None, &mut handle),
         Err(Ext4Error::InsufficientJournalCredits)
     );
     assert_eq!(handle.remaining_credits(), 2);
@@ -299,7 +320,11 @@ fn block_allocator_lazy_initializes_nonzero_group_bitmap() {
     let transaction = handle.id();
 
     let allocation = filesystem
-        .allocate_block(Some(FilesystemBlock::new(38)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(FilesystemBlock::new(38)),
+            &mut handle,
+        )
         .unwrap();
 
     assert_eq!(allocation.group(), BlockGroupNumber::new(1));
@@ -340,7 +365,7 @@ fn block_allocator_rejects_initialized_bitmap_with_cleared_tail_bit() {
         Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))
     );
     assert_eq!(
-        filesystem.allocate_block(None, &mut handle),
+        filesystem.allocate_block(&allocation_test_inode(12), None, &mut handle),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))
     );
     assert_eq!(handle.remaining_credits(), 3);
@@ -406,7 +431,11 @@ fn block_allocator_release_rejects_initialized_bitmap_checksum_mismatch() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
 
     assert_eq!(
-        filesystem.release_allocated_block(PhysicalBlock::new(6), &mut handle),
+        filesystem.release_allocated_block(
+            &allocation_test_inode(12),
+            PhysicalBlock::new(6),
+            &mut handle
+        ),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))
     );
     assert_eq!(handle.remaining_credits(), 3);
@@ -432,13 +461,21 @@ fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
     let journal = JournalTransactions::new(TransactionId::new(991));
     let mut handle = journal.begin(JournalCredits::new(12)).unwrap();
     filesystem
-        .release_allocated_block(PhysicalBlock::new(6), &mut handle)
+        .release_allocated_block(
+            &allocation_test_inode(12),
+            PhysicalBlock::new(6),
+            &mut handle,
+        )
         .unwrap();
     // A cache rebuild sees the cleared authoritative bitmap; the transaction
     // must continue protecting the old on-disk owner's data independently.
     filesystem.reset_block_allocation_caches();
     let allocation = filesystem
-        .allocate_block(Some(FilesystemBlock::new(6)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(FilesystemBlock::new(6)),
+            &mut handle,
+        )
         .unwrap();
     assert_ne!(allocation.block(), PhysicalBlock::new(6));
     handle.stop().unwrap();
@@ -466,7 +503,11 @@ fn freed_block_is_unavailable_until_commit_even_after_cache_rebuild() {
         .pending_frees
         .complete(commit.id());
     let allocation = filesystem
-        .allocate_block(Some(FilesystemBlock::new(6)), &mut next)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(FilesystemBlock::new(6)),
+            &mut next,
+        )
         .unwrap();
     assert_eq!(allocation.block(), PhysicalBlock::new(6));
 }
@@ -478,6 +519,7 @@ fn range_release_rejects_already_free_bits_before_publication() {
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     assert_eq!(
         filesystem.release_allocated_block_range(
+            &allocation_test_inode(12),
             PhysicalBlock::new(6),
             crate::BlockCount::new(2),
             crate::balloc::BlockReleaseKind::Data,
@@ -494,7 +536,11 @@ fn range_release_rejects_already_free_bits_before_publication() {
         0
     );
     filesystem
-        .release_allocated_block(PhysicalBlock::new(6), &mut handle)
+        .release_allocated_block(
+            &allocation_test_inode(12),
+            PhysicalBlock::new(6),
+            &mut handle,
+        )
         .unwrap();
     assert_eq!(filesystem.free_blocks_count(), 26);
 }

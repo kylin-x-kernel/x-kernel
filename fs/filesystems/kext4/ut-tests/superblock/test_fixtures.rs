@@ -10,7 +10,7 @@ use super::*;
 use crate::{
     BlockCount, BlockGroupNumber, Ext4Inode, FilesystemBlock, LogicalBlock, PhysicalBlock,
     extent::ExtentMappingState,
-    inode::InodeInitialization,
+    inode::{InodeInitialization, allocation_test_inode},
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest},
     prealloc_space::{GroupPreallocSpace, PreallocSpace},
@@ -123,18 +123,6 @@ pub(crate) fn install_test_journal(
     let journal_blocks = journal_superblock.max_blocks();
     let journal_block = FilesystemBlock::new(16);
     assert!(journal_block.get() + u64::from(journal_blocks) <= filesystem.layout().block_count);
-    if !filesystem.is_system_zone_block(journal_block) {
-        let mut zones = filesystem.system_zones.clone();
-        add_system_zone_to(
-            &mut zones,
-            journal_block.get(),
-            u64::from(journal_blocks),
-            None,
-            filesystem.layout().block_count,
-        )
-        .unwrap();
-        filesystem.system_zones = zones;
-    }
     let (block, offset, len) = filesystem.primary_superblock_location().unwrap();
     let end = offset + len;
     let mut bytes = vec![0; filesystem.device.block_size()];
@@ -142,6 +130,7 @@ pub(crate) fn install_test_journal(
     let superblock_bytes = bytes.get_mut(offset..end).unwrap();
     let compat = le_u32(superblock_bytes, 0x5c) | features::CompatFeatures::HAS_JOURNAL.bits();
     put_u32(superblock_bytes, 0x5c, compat);
+    put_u32(superblock_bytes, 0xe0, 8);
     filesystem.superblock = Ext4DiskSuperblock::decode(superblock_bytes).unwrap();
     lock(&filesystem.allocator).has_orphan_present =
         filesystem.superblock.features().has_orphan_present();
@@ -170,6 +159,7 @@ pub(crate) fn install_test_journal(
         )
         .unwrap(),
     );
+    filesystem.system_zones = filesystem.build_system_zones().unwrap();
 }
 
 pub(crate) fn test_journal_superblock_bytes_with_blocks(
@@ -689,6 +679,7 @@ pub(crate) fn allocator_group_descriptor_for_group(
 }
 
 pub(crate) fn fragment_ordered_writeback_free_space(filesystem: &mut Ext4SbInfo) {
+    let allocation_inode = allocation_test_inode(12);
     let journal = JournalTransactions::new(TransactionId::new(713));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let transaction = handle.id();
@@ -696,6 +687,7 @@ pub(crate) fn fragment_ordered_writeback_free_space(filesystem: &mut Ext4SbInfo)
         7u64, 9, 11, 13, 15, 1041, 1043, 1045, 1047, 1049, 1051, 1053, 1054, 1055,
     ] {
         let request = Ext4AllocationRequest::for_metadata(
+            &allocation_inode,
             Some(FilesystemBlock::new(physical)),
             BlockCount::new(1),
             BlockCount::new(1),
@@ -864,7 +856,9 @@ pub(crate) fn allocate_contiguous_blocks(
 ) -> PhysicalBlock {
     let mut first = None;
     for index in 0..count {
-        let allocation = filesystem.allocate_block(None, handle).unwrap();
+        let allocation = filesystem
+            .allocate_block(&allocation_test_inode(12), None, handle)
+            .unwrap();
         if index == 0 {
             first = Some(allocation.block());
         } else {

@@ -72,6 +72,36 @@ fs/filesystems/kext4/
 
 ## 架构
 
+`Ext4AllocationRequest` borrows its owning `Ext4Inode` and carries the file-logical
+position into multiblock allocation. An explicit physical goal selects the starting
+group. Without a goal, data allocation starts in the inode's group and metadata
+allocation starts in group zero. The request does not cache a separate locality
+group. Directory, extent-tree and xattr allocation, and the corresponding release
+paths, receive their actual owner. Group bitmap primitives update physical
+allocation and free-space counts; inode entry points retain the ownership boundary.
+Preallocation indexes retain a strong inode reference beyond the call and check
+that it identifies the same object borrowed by the request before allocation.
+
+`fill_super` calls `prepare_recovery` on the sole `Ext4SbInfo`, replays the journal,
+and refreshes the disk mirror, directory hash policy, file-size limits and protected
+block ranges before fixing VFS mount capabilities and installing `Ext4Mount`.
+`finish_recovery` then cleans orphans through the installed owner before creating
+the root inode and publishing the root directory. Replay, orphan cleanup and normal
+operations retain the same mount and journal owner. The phases pass existing
+journal replay evidence without persistent phase fields. A clean filesystem does
+not perform recovery writes. The explicit device-recovery test entry uses these
+same algorithms.
+
+`build_system_zones` derives the complete protected-block index from filesystem
+geometry and the mounted journal's physical extents. Initial mount retains the
+metadata index used to validate the backing inode and completes it with journal
+ranges. Recovery builds a fresh replacement through the same checked insertion
+path. Ranges remain sorted and
+non-overlapping, and adjacent ranges merge only when they have the same owner.
+The previous derived index is not an input to recovery reconstruction. A refresh also
+rejects changes to the loaded journal's backing identity before assigning an owner
+to its existing physical mapping.
+
 ```text
 KVFS syscall / PageCache
     |

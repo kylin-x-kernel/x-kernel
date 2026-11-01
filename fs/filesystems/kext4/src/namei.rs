@@ -1087,7 +1087,7 @@ impl Ext4SbInfo {
         let result = (|| -> Ext4Result<()> {
             self.update_unlinked_inode_metadata(inode, None, timestamp, &mut jh)?;
             self.remove_orphan(inode, &mut jh)?;
-            self.release_allocated_inode(inode.number(), inode.kind(), &mut jh)?;
+            self.release_allocated_inode(inode, &mut jh)?;
             Ok(())
         })();
 
@@ -1108,7 +1108,7 @@ impl Ext4SbInfo {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
         let block_size_u64 = u64::try_from(block_size).map_err(|_| Ext4Error::Overflow)?;
-        let allocation = self.allocate_block(None, handle)?;
+        let allocation = self.allocate_block(directory, None, handle)?;
         let block = FilesystemBlock::new(allocation.block().get());
         let access = self.metadata_io.create_access(block, handle)?;
         let mut bytes = initial_directory_block_bytes(
@@ -1139,15 +1139,14 @@ impl Ext4SbInfo {
     ) -> Ext4Result<()> {
         let block_size =
             usize::try_from(self.layout().block_size()).map_err(|_| Ext4Error::Overflow)?;
-        let locality_group = self.block_group_for_inode(symlink.number())?;
         let allocation = self.allocate_blocks_for_write(
             Ext4AllocationRequest::new(
+                symlink,
                 LogicalBlock::new(0),
                 None,
                 BlockCount::new(1),
                 BlockCount::new(1),
                 Ext4AllocationFlags::EXACT,
-                locality_group,
             )?,
             handle,
         )?;
@@ -1304,7 +1303,7 @@ impl Ext4SbInfo {
         }
         self.update_unlinked_inode_metadata(inode, size, timestamp, handle)?;
         self.remove_orphan(inode, handle)?;
-        self.release_allocated_inode(inode.number(), inode.kind(), handle)?;
+        self.release_allocated_inode(inode, handle)?;
         Ok(())
     }
 
@@ -1723,7 +1722,7 @@ impl Ext4SbInfo {
         if new_logical != 1 {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryEntry));
         }
-        let allocation = self.allocate_block(None, handle)?;
+        let allocation = self.allocate_block(directory, None, handle)?;
         let new_physical = allocation.block();
 
         let mut root = indexed_root_block_bytes(
@@ -2369,7 +2368,7 @@ impl Ext4SbInfo {
         }
         self.update_directory_block_checksum(directory, &mut left_bytes)?;
         self.update_directory_block_checksum(directory, &mut right_bytes)?;
-        let allocation = self.allocate_block(None, handle)?;
+        let allocation = self.allocate_block(directory, None, handle)?;
         let new_physical = allocation.block();
 
         let old_access = self
@@ -2578,7 +2577,7 @@ impl Ext4SbInfo {
             .size()
             .checked_div(block_size_u64)
             .ok_or(Ext4Error::Overflow)?;
-        let allocation = self.allocate_block(None, handle)?;
+        let allocation = self.allocate_block(directory, None, handle)?;
         let block = FilesystemBlock::new(allocation.block().get());
         let access = self.metadata_io.create_access(block, handle)?;
         let mut bytes = vec![0; block_size];

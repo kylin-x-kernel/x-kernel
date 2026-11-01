@@ -9,6 +9,8 @@ use core::{
 };
 
 use ktime_types::TimestampLimits;
+#[cfg(unittest)]
+pub(crate) use unittests::allocation_test_inode;
 
 use crate::{
     BlockMapping, ChecksumTarget, CorruptKind, Ext4Error, Ext4Result, Ext4SbInfo, FilesystemBlock,

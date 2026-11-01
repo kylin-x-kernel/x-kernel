@@ -11,7 +11,7 @@ use unittest::def_test;
 use crate::{
     BlockCount, FilesystemBlock, LogicalBlock, PhysicalBlock,
     extent::ExtentMappingState,
-    inode::InodeInitialization,
+    inode::{InodeInitialization, allocation_test_inode},
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         AllocatorGroupSpec, TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, TEST_FREE_INODES,
@@ -26,7 +26,9 @@ fn inline_extent_mutation_journals_inode_table_update() {
     let journal = JournalTransactions::new(TransactionId::new(451));
     let mut handle = journal.begin(JournalCredits::new(8)).unwrap();
 
-    let block = filesystem.allocate_block(None, &mut handle).unwrap();
+    let block = filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     let inode_allocation = filesystem
         .allocate_inode(
             None,
@@ -79,7 +81,9 @@ fn extent_root_grow_without_revoke_journals_only_live_leaf_block() {
     let mut extents = Vec::new();
 
     for logical in [0, 2, 4, 6, 8, 10] {
-        let block = filesystem.allocate_block(None, &mut handle).unwrap();
+        let block = filesystem
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .unwrap();
         filesystem
             .insert_extent_mapping(
                 &inode,
@@ -156,7 +160,9 @@ fn extent_point_mutations_keep_existing_leaf_block() {
         .expect("read initialized inode");
 
     for logical in [0, 2, 4, 6, 8] {
-        let block = filesystem.allocate_block(None, &mut handle).unwrap();
+        let block = filesystem
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .unwrap();
         filesystem
             .insert_extent_mapping(
                 &inode,
@@ -172,7 +178,9 @@ fn extent_point_mutations_keep_existing_leaf_block() {
     let extent_block = u64::from(le_u32(&inode.raw_i_block(), index_offset + 0x04))
         | (u64::from(le_u16(&inode.raw_i_block(), index_offset + 0x08)) << 32);
 
-    let data = filesystem.allocate_block(None, &mut handle).unwrap();
+    let data = filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -240,7 +248,9 @@ fn extent_leaf_split_leaves_space_in_reused_leaf() {
         u64::from(crate::disk::extent::extent_block_capacity(TEST_BLOCK_SIZE).unwrap());
 
     for logical in 0..=leaf_capacity {
-        let block = filesystem.allocate_block(None, &mut handle).unwrap();
+        let block = filesystem
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .unwrap();
         filesystem
             .insert_extent_mapping(
                 &inode,
@@ -254,7 +264,9 @@ fn extent_leaf_split_leaves_space_in_reused_leaf() {
     }
     assert_eq!(le_u16(&inode.raw_i_block(), 0x02), 2);
 
-    let inserted = filesystem.allocate_block(None, &mut handle).unwrap();
+    let inserted = filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     filesystem
         .insert_extent_mapping(
             &inode,
@@ -456,7 +468,9 @@ fn extent_remove_range_splits_full_inline_leaf() {
         )
         .unwrap();
     for logical in [4, 6, 8] {
-        let block = filesystem.allocate_block(None, &mut handle).unwrap();
+        let block = filesystem
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .unwrap();
         filesystem
             .insert_extent_mapping(
                 &inode,
@@ -569,7 +583,9 @@ fn extent_mutation_splits_multiple_leaf_blocks() {
     let mut mappings = Vec::new();
 
     for logical in 0..350u64 {
-        let block = filesystem.allocate_block(None, &mut handle).unwrap();
+        let block = filesystem
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .unwrap();
         filesystem
             .insert_extent_mapping(
                 &inode,

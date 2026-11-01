@@ -9,7 +9,9 @@ use alloc::format;
 use unittest::def_test;
 
 use super::*;
-use crate::{journal::RecoveryFlagPolicy, superblock::test_fixtures::*};
+use crate::{
+    inode::allocation_test_inode, journal::RecoveryFlagPolicy, superblock::test_fixtures::*,
+};
 
 #[def_test]
 fn pointer_mapped_directory_keeps_in_place_insertion() {
@@ -273,7 +275,9 @@ fn indexed_leaf_split_covers_external_extent_rewrites() {
             .namei_metadata_journal_for_allocation(JournalCredits::new(4), 1, [])
             .unwrap();
         let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
-        filesystem.allocate_block(None, &mut handle).unwrap();
+        filesystem
+            .allocate_block(&allocation_test_inode(12), None, &mut handle)
+            .unwrap();
         filesystem
             .complete_metadata_mutation(handle, Ok(()))
             .unwrap();
@@ -349,6 +353,7 @@ fn fragmented_linear_directory_mutation(external_leaf: bool, rename: bool) {
         } else {
             let block = filesystem
                 .allocate_block(
+                    &allocation_test_inode(12),
                     Some(FilesystemBlock::new(1040 + logical as u64 * 2)),
                     &mut handle,
                 )

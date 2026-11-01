@@ -16,6 +16,7 @@ use crate::{
         update_group_block_bitmap_metadata,
     },
     error::{CorruptKind, Ext4Error, Ext4Result},
+    inode::Ext4Inode,
     mballoc::{Ext4AllocationFlags, Ext4AllocationRequest, ensure_block_group_free_cache_inner},
     prealloc_space::bit_in_ranges,
     superblock::{
@@ -43,10 +44,12 @@ impl Ext4SbInfo {
     #[allow(dead_code)]
     pub(crate) fn allocate_block(
         &self,
+        inode: &Ext4Inode,
         goal: Option<FilesystemBlock>,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
         let request = Ext4AllocationRequest::for_metadata(
+            inode,
             goal,
             BlockCount::new(1),
             BlockCount::new(1),
@@ -393,25 +396,31 @@ impl Ext4SbInfo {
 
     pub(crate) fn release_allocated_block(
         &self,
+        inode: &Ext4Inode,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
+        self.block_group_for_inode(inode.number())?;
         self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Data)
     }
 
     pub(crate) fn release_allocated_metadata_block(
         &self,
+        inode: &Ext4Inode,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
+        self.block_group_for_inode(inode.number())?;
         self.release_allocated_block_inner(block, 1, handle, BlockReleaseKind::Metadata)
     }
 
     pub(crate) fn release_allocated_metadata_block_without_revoke(
         &self,
+        inode: &Ext4Inode,
         block: PhysicalBlock,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<BlockAllocation> {
+        self.block_group_for_inode(inode.number())?;
         self.release_allocated_block_inner(
             block,
             1,
@@ -425,11 +434,13 @@ impl Ext4SbInfo {
     /// the caller's mutation completion, like every other partial metadata edit.
     pub(crate) fn release_allocated_block_range(
         &self,
+        inode: &Ext4Inode,
         first: PhysicalBlock,
         count: BlockCount,
         kind: BlockReleaseKind,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<()> {
+        self.block_group_for_inode(inode.number())?;
         let end = first
             .get()
             .checked_add(u64::from(count.get()))

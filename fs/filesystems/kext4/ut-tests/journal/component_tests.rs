@@ -11,6 +11,7 @@ use unittest::def_test;
 
 use crate::{
     BlockMapping, Ext4Error, Ext4SyncIntent, FilesystemBlock, LogicalBlock, PhysicalBlock,
+    inode::allocation_test_inode,
     jbd2::{JournalCredits, TransactionId},
     superblock::test_fixtures::{
         TEST_BLOCK_SIZE, TEST_FREE_BLOCKS, allocate_checkpointed_regular_inode,
@@ -54,7 +55,7 @@ fn expected_error_before_metadata_access_does_not_poison_mount_journal() {
     let transaction = handle.id();
 
     assert_eq!(
-        filesystem.allocate_block(None, &mut handle),
+        filesystem.allocate_block(&allocation_test_inode(12), None, &mut handle),
         Err(Ext4Error::NoSpace)
     );
     assert!(!handle.has_updates());
@@ -80,7 +81,9 @@ fn expected_error_on_empty_handle_does_not_abort_other_active_handle() {
 
     let mut first = journal.begin(JournalCredits::new(4)).unwrap();
     let transaction = first.id();
-    let allocation = filesystem.allocate_block(None, &mut first).unwrap();
+    let allocation = filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut first)
+        .unwrap();
     let second = journal.begin(JournalCredits::new(1)).unwrap();
     assert_eq!(
         filesystem.complete_metadata_mutation(second, Err::<(), _>(Ext4Error::NoSpace)),
@@ -110,7 +113,9 @@ fn successful_handle_can_finish_while_another_handle_remains_active() {
     let mut first = journal.begin(JournalCredits::new(4)).unwrap();
     let transaction = first.id();
     let second = journal.begin(JournalCredits::new(1)).unwrap();
-    filesystem.allocate_block(None, &mut first).unwrap();
+    filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut first)
+        .unwrap();
 
     filesystem
         .complete_metadata_mutation(first, Ok(()))
@@ -133,7 +138,9 @@ fn expected_error_after_metadata_access_aborts_without_rewinding_state() {
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
-    let allocation = filesystem.allocate_block(None, &mut handle).unwrap();
+    let allocation = filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     assert_eq!(allocation.block(), PhysicalBlock::new(6));
     assert_eq!(
         filesystem.groups()[0].free_blocks_count(),
@@ -169,7 +176,7 @@ fn credit_exhaustion_before_metadata_access_does_not_poison_mount_journal() {
     let transaction = handle.id();
 
     assert_eq!(
-        filesystem.allocate_block(None, &mut handle),
+        filesystem.allocate_block(&allocation_test_inode(12), None, &mut handle),
         Err(Ext4Error::InsufficientJournalCredits)
     );
     assert!(!handle.has_updates());
@@ -196,7 +203,9 @@ fn credit_exhaustion_after_metadata_access_aborts_the_journal() {
     install_test_internal_journal(&mut filesystem, 258);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
-    filesystem.allocate_block(None, &mut handle).unwrap();
+    filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     assert!(handle.has_updates());
 
     assert_eq!(
@@ -219,7 +228,9 @@ fn commit_failure_after_metadata_publication_aborts_mount_journal() {
     install_test_internal_journal(&mut filesystem, 254);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
-    filesystem.allocate_block(None, &mut handle).unwrap();
+    filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     device.fail_flush_at(device.flush_count() + 1);
 
     assert_eq!(
@@ -243,7 +254,9 @@ fn explicit_sync_commit_failure_aborts_mount_journal() {
     install_credit_limited_journal(&mut filesystem, 255, 341, true);
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
-    filesystem.allocate_block(None, &mut handle).unwrap();
+    filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     filesystem
         .complete_metadata_mutation(handle, Ok(()))
         .expect("leave successful metadata in the running transaction");
@@ -271,14 +284,18 @@ fn failed_handle_reusing_shared_metadata_aborts_mount_journal() {
 
     let mut first = journal.begin(JournalCredits::new(4)).unwrap();
     let transaction = first.id();
-    filesystem.allocate_block(None, &mut first).unwrap();
+    filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut first)
+        .unwrap();
     filesystem
         .complete_metadata_mutation(first, Ok(()))
         .expect("retain the first allocation in the running transaction");
 
     let mut second = journal.begin(JournalCredits::new(4)).unwrap();
     assert_eq!(second.id(), transaction);
-    filesystem.allocate_block(None, &mut second).unwrap();
+    filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut second)
+        .unwrap();
     assert!(second.has_updates());
     assert_eq!(
         filesystem.complete_metadata_mutation(second, Err::<(), _>(Ext4Error::NoSpace)),

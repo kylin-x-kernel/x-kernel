@@ -556,8 +556,8 @@ impl Ext4SbInfo {
     ///
     /// - `request`: the write run's allocation request; the requested run is
     ///   marked on the bitmap as usual.
-    /// - `inode`: surplus owner; the strong reference goes into the group
-    ///   twin (obtained e.g. via `VfsInode::downcast`).
+    /// - `inode`: the same object borrowed by `request`; the group twin
+    ///   retains this strong reference beyond the allocation call.
     /// - `surplus_budget`: max trailing blocks to set aside (normalized
     ///   window minus request, clamped by the caller's remaining budget);
     ///   0 disables registration.
@@ -565,19 +565,24 @@ impl Ext4SbInfo {
     ///
     /// Returns: the allocation plus how many trailing blocks were registered,
     /// so the caller only spends its budget on what landed. Registration is
-    /// best-effort like Linux's PA creation: blocked, too short or logically
+    /// best-effort: blocked, too short or logically
     /// overlapping surplus yields 0 and the write proceeds without it.
+    ///
+    /// Errors: a different owner returns `OutOfBounds` before allocation.
     ///
     /// Locking: takes the allocator mutex internally (through the allocation
     /// core); the map leaf lock is taken and released inside the same
     /// section, so the caller needs no lock precondition.
     pub(crate) fn allocate_blocks_for_write_with_prealloc(
         &self,
-        request: Ext4AllocationRequest,
+        request: Ext4AllocationRequest<'_>,
         inode: &Arc<Ext4Inode>,
         surplus_budget: u32,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<(Ext4AllocatedRun, u32)> {
+        if !core::ptr::eq(request.inode(), inode.as_ref()) {
+            return Err(Ext4Error::OutOfBounds);
+        }
         let mut registered = 0u32;
         let run = self.allocate_blocks_for_write_with(request, handle, |alloc, allocation| {
             let surplus_logical_start = LogicalBlock::new(

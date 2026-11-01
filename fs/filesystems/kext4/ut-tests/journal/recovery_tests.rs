@@ -16,6 +16,7 @@ use super::{
 use crate::{
     BlockMapping, DirectoryFileType, InodeKind, LogicalBlock,
     disk::{Ext4DiskSuperblock, features, superblock},
+    inode::allocation_test_inode,
     superblock::test_fixtures::*,
 };
 
@@ -89,7 +90,8 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
         Err(Ext4Error::NeedsRecovery)
     );
     let recovery_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
-    assert_eq!(Ext4SbInfo::recover(recovery_device), Ok(None));
+    let mut recovered = Ext4SbInfo::open(recovery_device, true).unwrap();
+    assert_eq!(recovered.recover_in_place(), Ok(None));
 
     {
         let bytes = device.bytes();
@@ -100,8 +102,7 @@ fn recovery_evicts_clean_zero_link_orphan_with_huge_file() {
         assert!(!persisted.features().needs_recovery());
     }
 
-    let recovered_device: Arc<block::BlockDevice> = crate::io::test_block_device(device.clone());
-    let recovered = open_test_filesystem(recovered_device).expect("mount orphan-cleaned image");
+    assert_eq!(recovered.superblock().last_orphan(), 0);
     assert_eq!(recovered.orphan_head(), None);
     assert!(!journal_status(&recovered).has_nonzero_log_start());
     assert_eq!(recovered.free_inodes_count(), free_inodes_before_create);
@@ -235,13 +236,15 @@ fn symlink_data_block_recovers_after_journal_replay() {
         open_test_filesystem(crate::io::test_block_device(device.clone())).map(|_| ()),
         Err(Ext4Error::NeedsRecovery)
     );
-    let report = Ext4SbInfo::recover(crate::io::test_block_device(device.clone()))
+    let mut filesystem = Ext4SbInfo::open(crate::io::test_block_device(device.clone()), true)
+        .expect("prepare recovery mount");
+    let report = filesystem
+        .recover_in_place()
         .expect("recover journaled symlink commit")
         .expect("expected replayed journal records");
     assert!(report.update_count() > 0);
 
-    let mut filesystem = open_test_filesystem(crate::io::test_block_device(device.clone()))
-        .expect("mount after journal replay");
+    assert!(!filesystem.superblock().features().needs_recovery());
     let root = filesystem
         .internal_iget(crate::InodeNumber::new(2))
         .expect("read root inode");
@@ -268,6 +271,16 @@ fn symlink_data_block_recovers_after_journal_replay() {
     assert_eq!(read, target.len());
     assert_eq!(&buffer[..read], target);
 
+    filesystem
+        .create_regular_file(
+            &root,
+            b"after-replay",
+            0o644,
+            0,
+            0,
+            crate::Ext4Timestamp::new(140, 0),
+        )
+        .expect("create using the recovered journal instance");
     filesystem.sync_filesystem().expect("sync replayed image");
     drop(filesystem);
 }
@@ -283,7 +296,7 @@ fn recovers_persisted_allocator_journal_commit_before_checkpoint() {
     let block_goal = FilesystemBlock::new(7);
 
     let allocation = filesystem
-        .allocate_block(Some(block_goal), &mut handle)
+        .allocate_block(&allocation_test_inode(12), Some(block_goal), &mut handle)
         .expect("allocate a block from synthetic journaled filesystem");
     let group_index = usize::try_from(crate::BlockGroupNumber::new(0).get()).unwrap();
     let expected_super_free = filesystem.free_blocks_count();
@@ -598,4 +611,40 @@ fn replay_barrier_failures_preserve_durable_blocks_and_recovery_evidence() {
             );
         }
     }
+}
+
+#[def_test]
+fn replay_refreshes_file_size_limits_before_mount_capabilities_are_fixed() {
+    let (mut filesystem, device) = recovery_test_filesystem();
+    assert!(!filesystem.superblock().features().has_metadata_checksum());
+    let extent_limit_before = filesystem.extent_max_file_size().unwrap();
+    let bitmap_limit_before = filesystem.bitmap_max_file_size();
+    let journal = filesystem.metadata_journal().unwrap();
+    let mut handle = journal.begin(JournalCredits::new(1)).unwrap();
+    let transaction = handle.id();
+    let (block, offset, _) = filesystem.primary_superblock_location().unwrap();
+    let access = filesystem
+        .metadata_io
+        .write_access(block, &mut handle)
+        .unwrap();
+    let mut bytes = crate::superblock::metadata_access_bytes(&access).unwrap();
+    let flags = le_u32(&bytes, offset + 0x64) | features::ReadOnlyCompatFeatures::HUGE_FILE.bits();
+    put_u32(&mut bytes, offset + 0x64, flags);
+    crate::superblock::replace_metadata_access_bytes(&access, bytes).unwrap();
+    drop(access);
+    drop(handle);
+    let commit = journal.transactions.force_commit(transaction).unwrap();
+    filesystem.persist_metadata_journal_commit(&commit).unwrap();
+    drop(filesystem);
+
+    let mut recovered =
+        Ext4SbInfo::open(crate::io::test_block_device(device.clone()), true).unwrap();
+    let applied = recovered.prepare_recovery().unwrap();
+
+    assert!(applied.is_some());
+    assert!(recovered.superblock().features().has_huge_file());
+    assert!(recovered.extent_max_file_size().unwrap() > extent_limit_before);
+    assert!(recovered.bitmap_max_file_size() > bitmap_limit_before);
+    assert!(recovered.finish_recovery(applied).unwrap().is_some());
+    assert!(!recovered.needs_recovery());
 }

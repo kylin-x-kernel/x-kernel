@@ -434,7 +434,7 @@ impl Ext4SbInfo {
                     self.write_external_xattr_block(block, &plan.storage.external, handle)?;
                     block
                 } else {
-                    self.create_external_xattr_block(&plan.storage.external, handle)?
+                    self.create_external_xattr_block(inode, &plan.storage.external, handle)?
                 };
                 Some(block)
             }
@@ -602,7 +602,7 @@ impl Ext4SbInfo {
         }
         let preallocated_external_block =
             if plan.external_block_action == ExternalXattrBlockAction::Allocate {
-                match self.allocate_block(None, handle) {
+                match self.allocate_block(inode, None, handle) {
                     Ok(allocation) => Some(FilesystemBlock::new(allocation.block().get())),
                     Err(Ext4Error::NoSpace) => {
                         inode.disable_extra_isize_expansion();
@@ -722,6 +722,7 @@ impl Ext4SbInfo {
 
     fn create_external_xattr_block(
         &mut self,
+        inode: &Ext4Inode,
         xattrs: &[Ext4Xattr],
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<FilesystemBlock> {
@@ -730,7 +731,7 @@ impl Ext4SbInfo {
         if external_xattr_encoded_len(xattrs)? > block_size {
             return Err(Ext4Error::Unsupported(UnsupportedKind::ExternalXattrBlock));
         }
-        let allocation = self.allocate_block(None, handle)?;
+        let allocation = self.allocate_block(inode, None, handle)?;
         let block = FilesystemBlock::new(allocation.block().get());
         self.write_external_xattr_block(block, xattrs, handle)?;
         Ok(block)
@@ -791,9 +792,9 @@ impl Ext4SbInfo {
 
         let physical = PhysicalBlock::new(block);
         if self.journal_supports_revoke() {
-            self.release_allocated_metadata_block(physical, handle)?;
+            self.release_allocated_metadata_block(inode, physical, handle)?;
         } else {
-            self.release_allocated_metadata_block_without_revoke(physical, handle)?;
+            self.release_allocated_metadata_block_without_revoke(inode, physical, handle)?;
         }
         Ok(())
     }

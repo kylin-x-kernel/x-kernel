@@ -540,7 +540,7 @@ impl Ext4SbInfo {
                 *new_metadata_blocks = new_metadata_blocks
                     .checked_add(1)
                     .ok_or(Ext4Error::Overflow)?;
-                self.allocate_extent_tree_block(None, handle)?
+                self.allocate_extent_tree_block(inode, None, handle)?
             };
             let access = if reused_block.is_some() {
                 self.metadata_io
@@ -588,7 +588,7 @@ impl Ext4SbInfo {
                     .first()
                     .copied()
                     .ok_or(Ext4Error::Corrupt(CorruptKind::InvalidExtent))?;
-                let block = self.allocate_extent_tree_block(None, handle)?;
+                let block = self.allocate_extent_tree_block(inode, None, handle)?;
                 *new_metadata_blocks = new_metadata_blocks
                     .checked_add(1)
                     .ok_or(Ext4Error::Overflow)?;
@@ -783,9 +783,9 @@ impl Ext4SbInfo {
         }
         for block in &released_blocks {
             if self.journal_supports_revoke() {
-                self.release_allocated_metadata_block(*block, handle)?;
+                self.release_allocated_metadata_block(inode, *block, handle)?;
             } else {
-                self.release_allocated_metadata_block_without_revoke(*block, handle)?;
+                self.release_allocated_metadata_block_without_revoke(inode, *block, handle)?;
             }
         }
         let released_blocks =
@@ -1041,12 +1041,12 @@ impl Ext4SbInfo {
         }
         for block in state.metadata_blocks {
             if self.journal_supports_revoke() {
-                self.release_allocated_metadata_block(block, handle)?;
+                self.release_allocated_metadata_block(inode, block, handle)?;
             } else {
                 // The transaction engine checkpoints every older transaction
                 // before opening this handle, so recovery has no older image
                 // to suppress for a reused block.
-                self.release_allocated_metadata_block_without_revoke(block, handle)?;
+                self.release_allocated_metadata_block_without_revoke(inode, block, handle)?;
             }
         }
         self.update_inode_extent_block_accounting(
@@ -1219,7 +1219,7 @@ impl Ext4SbInfo {
         let mut level = Vec::new();
         let mut metadata_blocks = 0u64;
         for chunk in extents.chunks(leaf_capacity) {
-            let block = self.allocate_extent_tree_block(chunk.first().copied(), handle)?;
+            let block = self.allocate_extent_tree_block(inode, chunk.first().copied(), handle)?;
             metadata_blocks = metadata_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
             let access = self
                 .metadata_io
@@ -1250,7 +1250,7 @@ impl Ext4SbInfo {
             }
             let mut next_level = Vec::new();
             for chunk in level.chunks(index_capacity) {
-                let block = self.allocate_extent_tree_block(None, handle)?;
+                let block = self.allocate_extent_tree_block(inode, None, handle)?;
                 metadata_blocks = metadata_blocks.checked_add(1).ok_or(Ext4Error::Overflow)?;
                 let access = self
                     .metadata_io
@@ -1312,11 +1312,12 @@ impl Ext4SbInfo {
 
     fn allocate_extent_tree_block(
         &mut self,
+        inode: &Ext4Inode,
         goal_extent: Option<MutableExtent>,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<PhysicalBlock> {
         let goal = goal_extent.map(|extent| FilesystemBlock::new(extent.physical.get()));
-        let block = self.allocate_block(goal, handle)?.block();
+        let block = self.allocate_block(inode, goal, handle)?.block();
         Ok(block)
     }
 
@@ -1354,6 +1355,7 @@ impl Ext4SbInfo {
             BlockReleaseKind::Data
         };
         self.release_allocated_block_range(
+            inode,
             extent.physical,
             BlockCount::new(extent.len),
             kind,
@@ -1957,7 +1959,7 @@ impl ExtentPath {
                 new_metadata_blocks = new_metadata_blocks
                     .checked_add(1)
                     .ok_or(Ext4Error::Overflow)?;
-                filesystem.allocate_extent_tree_block(Some(first), handle)?
+                filesystem.allocate_extent_tree_block(inode, Some(first), handle)?
             };
             let access = if reused_block.is_some() {
                 filesystem

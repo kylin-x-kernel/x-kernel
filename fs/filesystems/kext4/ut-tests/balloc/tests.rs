@@ -7,7 +7,7 @@ use unittest::def_test;
 use super::*;
 use crate::{
     InodeNumber,
-    inode::{InodeInitialization, InodeKind},
+    inode::{InodeInitialization, allocation_test_inode},
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::*,
 };
@@ -38,11 +38,15 @@ fn allocation_goals_in_second_group_round_trip_accounting() {
     let mut handle = journal.begin(JournalCredits::new(14)).unwrap();
     let transaction = handle.id();
     let block = filesystem
-        .allocate_block(Some(FilesystemBlock::new(42)), &mut handle)
+        .allocate_block(
+            &allocation_test_inode(12),
+            Some(FilesystemBlock::new(42)),
+            &mut handle,
+        )
         .unwrap();
     assert!((32..64).contains(&block.block().get()));
     filesystem
-        .release_allocated_block(block.block(), &mut handle)
+        .release_allocated_block(&allocation_test_inode(12), block.block(), &mut handle)
         .unwrap();
     let inode = filesystem
         .allocate_inode(
@@ -53,7 +57,7 @@ fn allocation_goals_in_second_group_round_trip_accounting() {
         .unwrap();
     assert!((33..=64).contains(&inode.inode().get()));
     filesystem
-        .release_allocated_inode(inode.inode(), InodeKind::RegularFile, &mut handle)
+        .release_allocated_inode(&allocation_test_inode(inode.inode().get()), &mut handle)
         .unwrap();
     drop(handle);
     let commit = journal.force_commit(transaction).unwrap();

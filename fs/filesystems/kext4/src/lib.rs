@@ -56,8 +56,11 @@
 //! `I_NEW`/`I_FREEING`-equivalent lookup and eviction; KExt4 owns no resident
 //! inode cache or lifecycle. Namespace mutation receives the already resident
 //! child/moved/replaced private state instead of reloading it by number.
-//! Recovery runs before VFS identity publication and uses temporary private
-//! state with the normal truncate/eviction algorithms. The R8 write strategy adds
+//! Recovery keeps one mount state through journal replay and private-owner
+//! installation. Orphan cleanup then uses unpublished inode components with the
+//! normal truncate/eviction algorithms before root publication.
+//! Allocation requests borrow their inode owner; bitmap updates remain separate
+//! physical primitives. The R8 write strategy adds
 //! per-group order-bucket free extent caches, interval-based delayed-allocation
 //! reservation with core-owned inode/mount accounting, writeback-time physical allocation,
 //! normalized unwritten preallocation, EOF preallocation discard after the

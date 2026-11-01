@@ -10,13 +10,14 @@ use super::*;
 use crate::{
     BlockCount, BlockGroupNumber, FilesystemBlock, LogicalBlock, PhysicalBlock,
     error::CorruptKind,
+    inode::allocation_test_inode,
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     mballoc::Ext4AllocationFlags,
     superblock::test_fixtures::{
         AllocatorGroupSpec, TEST_FREE_BLOCKS, TEST_FREE_INODES,
-        allocator_multigroup_checksum_test_filesystem, allocator_multigroup_test_filesystem,
-        allocator_test_filesystem, allocator_test_filesystem_with_options,
-        allocate_checkpointed_regular_inode, insert_prealloc_space, prealloc_count,
+        allocate_checkpointed_regular_inode, allocator_multigroup_checksum_test_filesystem,
+        allocator_multigroup_test_filesystem, allocator_test_filesystem,
+        allocator_test_filesystem_with_options, insert_prealloc_space, prealloc_count,
         prealloc_twin_count,
     },
 };
@@ -912,12 +913,12 @@ fn birth_entry(
     budget: u32,
 ) -> (Ext4AllocatedRun, u32) {
     let request = Ext4AllocationRequest::new(
+        inode,
         LogicalBlock::new(logical_start),
         Some(FilesystemBlock::new(6)),
         BlockCount::new(len),
         BlockCount::new(len),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
     let journal = JournalTransactions::new(TransactionId::new(200));
@@ -1086,14 +1087,14 @@ fn reserve_merged_books_only_the_new_length() {
 // both allocation entry points.
 
 /// Builds a file-data request for `len` blocks at goal block 6 of group 0.
-fn group0_request(logical_start: u64, len: u32) -> Ext4AllocationRequest {
+fn group0_request(inode: &Ext4Inode, logical_start: u64, len: u32) -> Ext4AllocationRequest<'_> {
     Ext4AllocationRequest::new(
+        inode,
         LogicalBlock::new(logical_start),
         Some(FilesystemBlock::new(6)),
         BlockCount::new(len),
         BlockCount::new(len),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap()
 }
@@ -1101,7 +1102,7 @@ fn group0_request(logical_start: u64, len: u32) -> Ext4AllocationRequest {
 /// Runs the mballoc scan entry with a no-op post-allocation hook.
 fn scan_without_birth(
     filesystem: &Ext4SbInfo,
-    request: Ext4AllocationRequest,
+    request: Ext4AllocationRequest<'_>,
 ) -> Ext4Result<Ext4AllocatedRun> {
     let journal = JournalTransactions::new(TransactionId::new(200));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
@@ -1119,7 +1120,7 @@ fn enospc_valve_discards_spaces_and_retries_scan() {
     insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
     assert_eq!(filesystem.free_blocks_count(), u64::from(TEST_FREE_BLOCKS));
 
-    let run = scan_without_birth(&filesystem, group0_request(0, 4)).unwrap();
+    let run = scan_without_birth(&filesystem, group0_request(&inode, 0, 4)).unwrap();
 
     assert_eq!(run.physical_start(), PhysicalBlock::new(6));
     assert_eq!(run.block_count(), BlockCount::new(4));
@@ -1131,6 +1132,7 @@ fn enospc_valve_discards_spaces_and_retries_scan() {
 
 #[def_test]
 fn enospc_valve_without_spaces_passes_nospace_through() {
+    let allocation_inode = allocation_test_inode(12);
     // No prealloc space exists, so the valve has nothing to discard: a
     // request the group cannot satisfy must fail with NoSpace, not spin.
     let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
@@ -1140,12 +1142,12 @@ fn enospc_valve_without_spaces_passes_nospace_through() {
     // 27 blocks exceed the group's 26 free blocks; the group is skipped
     // outright (expected_len clamps below min_len), leaving the scan empty.
     let request = Ext4AllocationRequest::new(
+        &allocation_inode,
         LogicalBlock::new(0),
         Some(FilesystemBlock::new(6)),
         BlockCount::new(TEST_FREE_BLOCKS + 1),
         BlockCount::new(TEST_FREE_BLOCKS + 1),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
     let result = scan_without_birth(&filesystem, request);
@@ -1157,6 +1159,7 @@ fn enospc_valve_without_spaces_passes_nospace_through() {
 
 #[def_test]
 fn enospc_valve_skips_retry_when_failure_is_geometric() {
+    let allocation_inode = allocation_test_inode(12);
     // The request exceeds the group's capacity, so geometry skips the
     // group entirely. No healthy group was attempted, so the valve has
     // nothing to retry — discard cannot change group sizes.
@@ -1165,12 +1168,12 @@ fn enospc_valve_skips_retry_when_failure_is_geometric() {
     insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
 
     let request = Ext4AllocationRequest::new(
+        &allocation_inode,
         LogicalBlock::new(0),
         Some(FilesystemBlock::new(6)),
         BlockCount::new(TEST_FREE_BLOCKS + 4),
         BlockCount::new(TEST_FREE_BLOCKS + 4),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
     let result = scan_without_birth(&filesystem, request);
@@ -1179,7 +1182,10 @@ fn enospc_valve_skips_retry_when_failure_is_geometric() {
     // No retry happened: geometry cannot be fixed by discarding.
     assert_eq!(prealloc_count(&inode), 1);
     assert_eq!(prealloc_twin_count(&filesystem), 1);
-    assert_eq!(preallocated_blocks(&filesystem), u64::from(TEST_FREE_BLOCKS));
+    assert_eq!(
+        preallocated_blocks(&filesystem),
+        u64::from(TEST_FREE_BLOCKS)
+    );
 }
 
 #[def_test]
@@ -1203,9 +1209,12 @@ fn enospc_valve_does_not_retry_corrupt_bitmap() {
     let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
     insert_prealloc_space(&filesystem, &inode, 0, 6, TEST_FREE_BLOCKS, 0);
 
-    let result = scan_without_birth(&filesystem, group0_request(0, 4));
+    let result = scan_without_birth(&filesystem, group0_request(&inode, 0, 4));
 
-    assert_eq!(result, Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap)));
+    assert_eq!(
+        result,
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockBitmap))
+    );
     // No discard happened: the corruption suppression held.
     assert_eq!(prealloc_count(&inode), 1);
     assert_eq!(prealloc_twin_count(&filesystem), 1);
@@ -1243,7 +1252,7 @@ fn enospc_valve_retries_healthy_group_despite_corrupt_sibling() {
     // Group 1 spans blocks 32..64, so its first free block (bit 6) is 38.
     insert_prealloc_space(&filesystem, &inode, 0, 38, TEST_FREE_BLOCKS, 1);
 
-    let run = scan_without_birth(&filesystem, group0_request(0, 4)).unwrap();
+    let run = scan_without_birth(&filesystem, group0_request(&inode, 0, 4)).unwrap();
 
     assert_eq!(run.group(), BlockGroupNumber::new(1));
     assert_eq!(run.physical_start(), PhysicalBlock::new(38));
@@ -1304,18 +1313,18 @@ fn birth_does_not_promise_uncommitted_freed_surplus() {
     let journal = JournalTransactions::new(TransactionId::new(300));
     let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
     let freed = filesystem
-        .allocate_block(Some(FilesystemBlock::new(10)), &mut handle)
+        .allocate_block(&inode, Some(FilesystemBlock::new(10)), &mut handle)
         .unwrap();
     filesystem
-        .release_allocated_block(freed.block(), &mut handle)
+        .release_allocated_block(&inode, freed.block(), &mut handle)
         .unwrap();
     let request = Ext4AllocationRequest::new(
+        &inode,
         LogicalBlock::new(0),
         Some(FilesystemBlock::new(6)),
         BlockCount::new(4),
         BlockCount::new(4),
         Ext4AllocationFlags::EXACT,
-        BlockGroupNumber::new(0),
     )
     .unwrap();
     let (run, registered) = filesystem
@@ -1323,6 +1332,26 @@ fn birth_does_not_promise_uncommitted_freed_surplus() {
         .unwrap();
     assert_eq!(run.physical_start(), PhysicalBlock::new(6));
     assert_eq!(registered, 0);
+    assert_eq!(prealloc_count(&inode), 0);
+    assert_eq!(prealloc_twin_count(&filesystem), 0);
+}
+
+#[def_test]
+fn allocation_rejects_a_different_preallocation_owner_before_mutation() {
+    let (mut filesystem, _device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let inode = Arc::new(allocate_checkpointed_regular_inode(&mut filesystem));
+    let other = allocation_test_inode(inode.number().get());
+    let request = group0_request(&other, 0, 4);
+    let journal = JournalTransactions::new(TransactionId::new(200));
+    let mut handle = journal.begin(JournalCredits::new(64)).unwrap();
+    let free_before = filesystem.free_blocks_count();
+
+    assert_eq!(
+        filesystem.allocate_blocks_for_write_with_prealloc(request, &inode, 4, &mut handle),
+        Err(Ext4Error::OutOfBounds)
+    );
+    assert!(!handle.has_updates());
+    assert_eq!(filesystem.free_blocks_count(), free_before);
     assert_eq!(prealloc_count(&inode), 0);
     assert_eq!(prealloc_twin_count(&filesystem), 0);
 }

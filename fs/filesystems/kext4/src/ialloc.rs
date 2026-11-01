@@ -16,7 +16,7 @@ use crate::{
         update_group_inode_bitmap_metadata,
     },
     error::{CorruptKind, Ext4Error, Ext4Result},
-    inode::{InodeInitialization, InodeKind},
+    inode::{Ext4Inode, InodeInitialization},
     superblock::{
         Ext4SbInfo, bitmap_bit_capacity, count_clear_ext4_bitmap_bits, ensure_metadata_credits,
         ext4_bitmap_checksum_matches, ext4_mark_bitmap_end, is_ext4_bitmap_bit_set, lock,
@@ -392,10 +392,11 @@ impl Ext4SbInfo {
     #[allow(dead_code)]
     pub(crate) fn release_allocated_inode(
         &self,
-        inode: InodeNumber,
-        kind: InodeKind,
+        inode: &Ext4Inode,
         handle: &mut crate::jbd2::JournalHandle<'_>,
     ) -> Ext4Result<InodeAllocation> {
+        let kind = inode.kind();
+        let inode = inode.number();
         if self.is_reserved_inode(inode) || self.is_special_inode_number(inode) {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap));
         }

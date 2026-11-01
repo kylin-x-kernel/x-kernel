@@ -10,7 +10,7 @@ use unittest::def_test;
 
 use crate::{
     BlockGroupNumber, CorruptKind, Ext4Error, FilesystemBlock, InodeKind, InodeNumber,
-    inode::InodeInitialization,
+    inode::{InodeInitialization, allocation_test_inode},
     jbd2::{JournalCredits, JournalTransactions, TransactionId},
     superblock::test_fixtures::{
         AllocatorGroupSpec, TEST_BLOCK_COUNT, TEST_BLOCK_SIZE, TEST_EXT4_BG_BLOCK_UNINIT,
@@ -68,7 +68,7 @@ fn concurrent_allocator_round_trip_keeps_accounting_invariant() {
     let transaction = handle.id();
     for inode in inodes {
         filesystem
-            .release_allocated_inode(inode, InodeKind::RegularFile, &mut handle)
+            .release_allocated_inode(&allocation_test_inode(inode.get()), &mut handle)
             .unwrap();
     }
     drop(handle);
@@ -369,11 +369,7 @@ fn inode_allocator_release_rejects_initialized_bitmap_checksum_mismatch() {
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
     assert_eq!(
-        filesystem.release_allocated_inode(
-            InodeNumber::new(11),
-            InodeKind::RegularFile,
-            &mut handle
-        ),
+        filesystem.release_allocated_inode(&allocation_test_inode(11), &mut handle),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap))
     );
     assert_eq!(handle.remaining_credits(), 4);
@@ -620,7 +616,10 @@ fn inode_allocator_updates_directory_count_and_release_reverses_it() {
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
     let release_transaction = handle.id();
     let released = filesystem
-        .release_allocated_inode(allocation.inode(), InodeKind::Directory, &mut handle)
+        .release_allocated_inode(
+            &filesystem.internal_iget(allocation.inode()).unwrap(),
+            &mut handle,
+        )
         .unwrap();
 
     assert_eq!(released.inode(), InodeNumber::new(11));
@@ -659,11 +658,7 @@ fn inode_allocator_rejects_releasing_reserved_inode_without_consuming_credits() 
     let mut handle = journal.begin(JournalCredits::new(4)).unwrap();
 
     assert_eq!(
-        filesystem.release_allocated_inode(
-            InodeNumber::new(2),
-            InodeKind::RegularFile,
-            &mut handle
-        ),
+        filesystem.release_allocated_inode(&allocation_test_inode(2), &mut handle),
         Err(Ext4Error::Corrupt(CorruptKind::InvalidInodeBitmap))
     );
     assert_eq!(handle.remaining_credits(), 4);

@@ -32,7 +32,7 @@ use crate::{
     mballoc::BlockGroupFreeExtentCache,
     orphan::OrphanInfo,
     prealloc_space::{GroupPreallocKey, GroupPreallocSpace},
-    types::{BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
+    types::{BlockCount, BlockGroupNumber, FilesystemBlock, InodeNumber, LogicalBlock},
 };
 
 /// Immutable geometry derived from a validated ext4 superblock.
@@ -346,6 +346,20 @@ impl JournalBlockMapper for InternalJournal {
 }
 
 impl InternalJournal {
+    /// Visits the physical journal mapping without allocating a snapshot.
+    pub(crate) fn for_each_physical_extent(
+        &self,
+        mut visit_fn: impl FnMut(FilesystemBlock, BlockCount) -> Ext4Result<()>,
+    ) -> Ext4Result<()> {
+        for extent in &self.extents {
+            visit_fn(
+                FilesystemBlock::new(extent.physical_start),
+                BlockCount::new(extent.len),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_physical_bounds(&self, filesystem_block_count: u64) -> Ext4Result<()> {
         let mut next_logical = 0u32;
         for extent in &self.extents {
@@ -519,10 +533,6 @@ pub(crate) struct Ext4SbInfo {
     system_zones: Vec<SystemZone>,
 }
 
-pub(crate) struct Ext4Recovery {
-    pub(crate) filesystem: Ext4SbInfo,
-}
-
 pub(crate) struct JournalMarkedEmpty {
     pub(crate) report: JournalReplayReport,
 }
@@ -554,6 +564,7 @@ impl Ext4SbInfo {
     }
 
     /// Prepares ext4 mount state without committing mount-success metadata.
+    #[cfg(unittest)]
     pub(crate) fn prepare_mount_with_statfs_mode(
         device: Arc<block::BlockDevice>,
         statfs_mode: Ext4StatFsMode,
@@ -561,6 +572,36 @@ impl Ext4SbInfo {
         let mut filesystem = Self::open(device, false)?;
         filesystem.statfs_mode = statfs_mode;
         Ok(filesystem)
+    }
+
+    /// Refreshes the mount-time mirror after recovery has stabilized storage.
+    pub(crate) fn refresh_recovered_superblock(&mut self) -> Ext4Result<()> {
+        self.metadata_io.invalidate_all();
+        self.reload_mutable_metadata_state()?;
+        let (block, offset, len) = self.primary_superblock_location()?;
+        let buffer = self.read_metadata_block(block)?;
+        let superblock = Ext4DiskSuperblock::decode(
+            buffer
+                .as_ref()
+                .get(offset..offset + len)
+                .ok_or(Ext4Error::OutOfBounds)?,
+        )?;
+        // The loaded journal mapping remains tied to its backing identity.
+        if self.journal.is_some()
+            && select_journal_location(
+                superblock.features().has_journal(),
+                superblock.journal().inode(),
+                superblock.journal().device(),
+                superblock.journal().uuid(),
+            )? != self.journal_location()?
+        {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
+        }
+        self.superblock = superblock;
+        self.initialize_directory_hash_policy()?;
+        self.bitmap_maxbytes = self.legacy_max_file_size()?;
+        self.system_zones = self.build_system_zones()?;
+        Ok(())
     }
 
     pub(crate) fn set_statfs_mode(&mut self, statfs_mode: Ext4StatFsMode) {
@@ -595,10 +636,11 @@ impl Ext4SbInfo {
     /// Returns [`Ext4Error::Unsupported`] before replay when the filesystem
     /// lacks extent-based block mapping, because recovery may need the same
     /// mutation and block-release support as a normal writable mount.
+    #[cfg(unittest)]
     pub(crate) fn recover(
         device: Arc<block::BlockDevice>,
     ) -> Ext4Result<Option<Ext4RecoveryReport>> {
-        Ext4Recovery::open(device)?.replay()
+        Self::open(device, true)?.recover_in_place()
     }
 
     pub(crate) fn open(device: Arc<block::BlockDevice>, allow_recovery: bool) -> Ext4Result<Self> {
@@ -728,7 +770,7 @@ impl Ext4SbInfo {
             system_zones: Vec::new(),
         };
         filesystem.initialize_directory_hash_policy()?;
-        let mut system_zones = filesystem.build_system_zones()?;
+        filesystem.system_zones = filesystem.build_system_zones()?;
         let journal_location = filesystem.journal_location()?;
         if filesystem.needs_recovery() && !allow_recovery {
             return Err(Ext4Error::NeedsRecovery);
@@ -736,7 +778,7 @@ impl Ext4SbInfo {
         filesystem.journal = match journal_location {
             JournalLocation::None => None,
             JournalLocation::Internal { inode } => Some(MountedJournal::new(
-                filesystem.load_internal_journal(inode, &mut system_zones)?,
+                filesystem.load_internal_journal(inode)?,
                 filesystem.layout().block_count,
             )?),
             JournalLocation::External { .. } => {
@@ -744,6 +786,9 @@ impl Ext4SbInfo {
             }
         };
         filesystem.bitmap_maxbytes = filesystem.legacy_max_file_size()?;
+        // Preserve the metadata index used to validate the backing inode.
+        let mut system_zones = core::mem::take(&mut filesystem.system_zones);
+        filesystem.add_journal_system_zones(&mut system_zones)?;
         filesystem.system_zones = system_zones;
         if !filesystem.needs_recovery() {
             filesystem.initialize_orphan_info()?;
@@ -1200,7 +1245,26 @@ impl Ext4SbInfo {
             )?;
         }
 
+        self.add_journal_system_zones(&mut zones)?;
         Ok(zones)
+    }
+
+    fn add_journal_system_zones(&self, zones: &mut Vec<SystemZone>) -> Ext4Result<()> {
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        let JournalLocation::Internal { inode } = self.journal_location()? else {
+            return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
+        };
+        journal.for_each_physical_extent(|start, count| {
+            add_system_zone_to(
+                zones,
+                start.get(),
+                u64::from(count.get()),
+                Some(inode),
+                self.layout.block_count,
+            )
+        })
     }
 
     fn journal_location(&self) -> Ext4Result<JournalLocation> {
@@ -1209,11 +1273,7 @@ impl Ext4SbInfo {
         select_journal_location(has_journal, fields.inode(), fields.device(), fields.uuid())
     }
 
-    fn load_internal_journal(
-        &mut self,
-        inode_number: InodeNumber,
-        system_zones: &mut Vec<SystemZone>,
-    ) -> Ext4Result<InternalJournal> {
+    fn load_internal_journal(&self, inode_number: InodeNumber) -> Ext4Result<InternalJournal> {
         let journal_inode = self.internal_iget(inode_number)?;
         if journal_inode.kind() != InodeKind::RegularFile {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
@@ -1231,16 +1291,6 @@ impl Ext4SbInfo {
         let extents = collect_journal_extents(journal_blocks, |logical| {
             self.map_blocks(&journal_inode, LogicalBlock::new(u64::from(logical)))
         })?;
-        for extent in &extents {
-            add_system_zone_to(
-                system_zones,
-                extent.physical_start,
-                u64::from(extent.len),
-                Some(inode_number),
-                self.layout.block_count,
-            )?;
-        }
-
         let superblock = JournalSuperblock::decode(
             self.read_metadata_block(FilesystemBlock::new(extents[0].physical_start))?
                 .as_ref(),

@@ -1114,7 +1114,6 @@ impl Ext4SbInfo {
                     )? {
                         Some(consumed) => consumed,
                         None => {
-                            let locality_group = self.block_group_for_inode(inode.number())?;
                             let goal =
                                 self.allocation_goal_after_previous_extent(inode, logical)?;
                             let normalized = normalize_write_allocation_len(
@@ -1134,12 +1133,12 @@ impl Ext4SbInfo {
                             // on disk, so the request asks for the dirty window
                             // only and the birth hook samples the rest.
                             let request = Ext4AllocationRequest::new(
+                                inode,
                                 logical,
                                 goal,
                                 BlockCount::new(requested),
                                 BlockCount::new(1),
                                 Ext4AllocationFlags::ALLOW_PARTIAL,
-                                locality_group,
                             )?;
                             let (allocation, registered) = self
                                 .allocate_blocks_for_write_with_prealloc(

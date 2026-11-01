@@ -6,7 +6,9 @@
 
 use unittest::def_test;
 
-use crate::superblock::test_fixtures::eviction_test_unlinked_inode;
+use crate::{
+    inode::allocation_test_inode, superblock::test_fixtures::eviction_test_unlinked_inode,
+};
 
 #[def_test]
 fn eviction_release_batch_partial_extent_split() {
@@ -125,12 +127,14 @@ fn in_place_namespace_updates_do_not_commit_pending_frees() {
         .unwrap();
     let journal = filesystem.metadata_journal().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
-    let block = filesystem.allocate_block(None, &mut handle).unwrap();
+    let block = filesystem
+        .allocate_block(&allocation_test_inode(12), None, &mut handle)
+        .unwrap();
     handle.stop().unwrap();
     filesystem.sync_filesystem().unwrap();
     let mut handle = journal.begin(JournalCredits::new(3)).unwrap();
     filesystem
-        .release_allocated_block(block.block(), &mut handle)
+        .release_allocated_block(&allocation_test_inode(12), block.block(), &mut handle)
         .unwrap();
     let transaction = handle.id();
     handle.stop().unwrap();

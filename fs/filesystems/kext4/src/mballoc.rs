@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Linux-style multiblock allocation request layer.
+//! Inode-owned multiblock allocation requests.
 //!
 //! This module owns ext4 allocation policy: logical range, physical goal,
 //! locality hint, minimum acceptable length, and partial-allocation reporting.
@@ -14,6 +14,7 @@ use alloc::{vec, vec::Vec};
 use crate::{
     bitmap_allocator::{BlockAllocation, BlockRunAllocation},
     error::{CorruptKind, Ext4Error, Ext4Result},
+    inode::Ext4Inode,
     jbd2::JournalHandle,
     prealloc_space::PREALLOC_DISCARD_SEARCH_LIMIT,
     superblock::{AllocatorState, Ext4SbInfo, is_ext4_bitmap_bit_set, lock},
@@ -41,45 +42,44 @@ impl Ext4AllocationFlags {
     }
 }
 
-/// A Linux `ext4_allocation_request`-style allocation input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Ext4AllocationRequest {
-    // Logical block number: block index within the file (0-based).
-    logical_start: LogicalBlock,
+/// A block allocation request borrowing its owning inode.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ext4AllocationRequest<'a> {
+    inode: &'a Ext4Inode,
+    // Metadata has no file-logical position or inode-local scan preference.
+    logical_start: Option<LogicalBlock>,
     // Recommended block number.
     goal: Option<FilesystemBlock>,
     expected_len: BlockCount,
     min_len: BlockCount,
     flags: Ext4AllocationFlags,
-    // Keep the contents of the same inode as contiguous as possible.
-    locality_group: BlockGroupNumber,
 }
 
-impl Ext4AllocationRequest {
+impl<'a> Ext4AllocationRequest<'a> {
     /// Builds a file-data allocation request.
     ///
-    /// Callers must pass the inode's locality group so the write path never
-    /// silently starts scanning from block group 0 when no physical goal exists.
+    /// Without a physical goal, the scan starts in the owning inode's group.
     pub(crate) fn new(
+        inode: &'a Ext4Inode,
         logical_start: LogicalBlock,
         goal: Option<FilesystemBlock>,
         expected_len: BlockCount,
         min_len: BlockCount,
         flags: Ext4AllocationFlags,
-        locality_group: BlockGroupNumber,
     ) -> Ext4Result<Self> {
         Self::validate_lengths(expected_len, min_len, flags)?;
         Ok(Self {
-            logical_start,
+            inode,
+            logical_start: Some(logical_start),
             goal,
             expected_len,
             min_len,
             flags,
-            locality_group,
         })
     }
 
     pub(crate) fn for_metadata(
+        inode: &'a Ext4Inode,
         goal: Option<FilesystemBlock>,
         expected_len: BlockCount,
         min_len: BlockCount,
@@ -87,12 +87,12 @@ impl Ext4AllocationRequest {
     ) -> Ext4Result<Self> {
         Self::validate_lengths(expected_len, min_len, flags)?;
         Ok(Self {
-            logical_start: LogicalBlock::new(0),
+            inode,
+            logical_start: None,
             goal,
             expected_len,
             min_len,
             flags,
-            locality_group: BlockGroupNumber::new(0),
         })
     }
 
@@ -110,13 +110,14 @@ impl Ext4AllocationRequest {
         Ok(())
     }
 
-    const fn locality_group(self) -> BlockGroupNumber {
-        self.locality_group
+    /// Returns the inode that owns the requested blocks.
+    pub(crate) const fn inode(self) -> &'a Ext4Inode {
+        self.inode
     }
 
     /// First file-logical block of the request.
-    pub(crate) const fn logical_start(self) -> LogicalBlock {
-        self.logical_start
+    pub(crate) fn logical_start(self) -> LogicalBlock {
+        self.logical_start.unwrap_or(LogicalBlock::new(0))
     }
 }
 
@@ -595,7 +596,7 @@ impl Ext4SbInfo {
     /// Locking: caller must not hold the allocator mutex. May sleep.
     pub(crate) fn allocate_blocks_for_write(
         &self,
-        request: Ext4AllocationRequest,
+        request: Ext4AllocationRequest<'_>,
         handle: &mut JournalHandle<'_>,
     ) -> Ext4Result<Ext4AllocatedRun> {
         self.allocate_blocks_for_write_with(request, handle, |_, _| {})
@@ -673,16 +674,18 @@ impl Ext4SbInfo {
     /// retry rounds takes it. Prefetch runs unlocked. May sleep.
     pub(crate) fn allocate_blocks_for_write_with(
         &self,
-        request: Ext4AllocationRequest,
+        request: Ext4AllocationRequest<'_>,
         handle: &mut JournalHandle<'_>,
         mut after_allocated: impl FnMut(&mut AllocatorState, &BlockRunAllocation),
     ) -> Ext4Result<Ext4AllocatedRun> {
+        let inode_group = self.block_group_for_inode(request.inode().number())?;
         if self.free_blocks_count() == 0 {
             return Err(Ext4Error::NoSpace);
         }
         let start = match request.goal {
             Some(goal) => self.block_allocation_start_group(Some(goal))?,
-            None => request.locality_group(),
+            None if request.logical_start.is_some() => inode_group,
+            None => BlockGroupNumber::new(0),
         };
         // First bitmap corruption met while scanning, latched so it outlives the
         // retry rounds and wins over the final NoSpace.
@@ -767,7 +770,7 @@ impl Ext4SbInfo {
                 match attempt {
                     Ok(Some(allocation)) => {
                         return Ok(Ext4AllocatedRun::new(
-                            request.logical_start,
+                            request.logical_start(),
                             request.expected_len,
                             allocation,
                         ));
