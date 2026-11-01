@@ -121,7 +121,7 @@ drivers/contracts/kdevice/
     │  ┌──────────────────────────────────────┐    │
     │  │   device_node::DeviceNodeRegistry     │    │
     │  │   DeviceId -> DeviceNode              │    │
-    │  │   eventN/cardN allocation + events    │    │
+    │  │   eventN/cardN/renderD + events       │    │
     │  └──────────────┬───────────────────────┘    │
     │                 │                             │
     │                 ├──────────► devfs projection │
@@ -182,6 +182,15 @@ Linux `DeviceNumber` and path below `/dev` from one class template:
 |------|-------|----------------|----------|
 | input | `input/eventN` | major 13, minor `64 + N` | 32 |
 | DRM primary | `dri/cardN` | major 226, minor `N` | 64 |
+| DRM render | `dri/renderD{128+N}` | major 226, minor `128 + N` | 64 (shares the card index) |
+
+A DRM node owns two identities derived from one class index: the primary
+`dri/cardN` (`226:N`) and the render `dri/renderD{128+N}` (`226:128+N`).
+`render_device_number()` and `render_devname()` are the only derivation sites;
+`DeviceNodeRegistry` still allocates the index and lifecycles both nodes
+together. The render identity exists even when the bound driver has no render
+backend, matching Linux, which registers the minor unconditionally and rejects
+unsupported commands per ioctl.
 
 Registration inserts the complete `DeviceNode` in Publishing state before
 delivering `Added` to subscribers. `subscribe_device_nodes` installs a

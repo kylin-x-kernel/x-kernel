@@ -1,0 +1,9 @@
+[package]
+name = "drm-render-node-regression"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "render_node.rs"

@@ -83,6 +83,16 @@ pub trait DisplayDevice: Device {
     fn present_scanout_resource(&self, _resource_id: u32, _rect: ScanoutRect) -> DriverResult {
         Err(DriverError::Unsupported)
     }
+
+    /// Transfer updated pixels to the host and flush them, without changing
+    /// which resource is bound to the scanout.
+    ///
+    /// This is the operation behind `DRM_IOCTL_MODE_DIRTYFB`: a client that
+    /// rendered into the framebuffer that is already on screen asks for the
+    /// pixels to be pushed, not for the scanout to be rebound.
+    fn flush_scanout_resource(&self, _resource_id: u32, _rect: ScanoutRect) -> DriverResult {
+        Err(DriverError::Unsupported)
+    }
 }
 
 #[path = "../ut-tests/display_contract.rs"]

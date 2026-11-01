@@ -2,11 +2,14 @@
 
 ## Analysis scope
 
-This analysis covers the entire crate: `src/lib.rs`, `src/card0.rs`,
-`src/drm.rs`, and `src/consts.rs`. No source module is excluded. KVFS typed
+This analysis covers the entire crate: `src/lib.rs`, `src/abi/`, `src/model/`,
+`src/kms.rs`, `src/gem.rs`, `src/framebuffer.rs`, `src/scanout.rs`,
+`src/blob.rs`, and `src/auth.rs`. No source module is excluded. KVFS typed
 user-copy and mmap primitives, `kclass` device-handle validity, and the display
-backend contract remain the responsibility of their provider crates. The crate
-has no separate test-only source modules.
+backend contract remain the responsibility of their provider crates:
+`model::backend::ClassBackend` is the only code here that calls the display
+contract, and `model::device::DrmMinor` is the only code that implements
+`DeviceFileOps` for devfs.
 
 ## Trust model and external boundaries
 
@@ -23,14 +26,49 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
 
 ## Invariants
 
-- A `DrmCard` operates only on the display handle supplied to its constructor.
+- One `DrmDevice` serves both minors of one card; a `DrmMinor` owns the device
+  (the character device is the last reference) and never selects a
+  process-global display.
 - Display-dependent I/O checks handle availability before use.
 - User ids are lookup keys and never kernel addresses.
 - Copy-out does not exceed the declared array capacity.
-- Kernel allocators assign handles, framebuffer ids, blob ids, and mmap
-  offsets.
+- Array-copy counts are bounded before the corresponding array is loaded: an
+  atomic request naming more than `MAX_ATOMIC_OBJECTS` objects, or whose
+  per-object property counts overflow or exceed `MAX_ATOMIC_PROPERTIES` in
+  total, is refused with `ENOMEM` before the property and value arrays are
+  fetched. The count arithmetic uses `checked_add`, so a hostile count cannot
+  wrap into a small allocation.
+- Blob copy-out always writes the required length back. Bytes are copied only
+  when the supplied length exactly matches the blob; a short or oversized buffer
+  is a successful size probe that copies nothing, while an unknown id is
+  `ENOENT`, matching Linux's `MODE_GETPROPBLOB`.
+- `mmap` derives the physical base and mapping size with checked arithmetic; an
+  offset that would underflow the physical address or overflow the size is
+  refused with `EINVAL` instead of wrapping into an unrelated range.
+- Kernel allocators assign framebuffer ids, blob ids, resource ids and mmap
+  offsets through one `IdRegistry` per class; dumb-buffer handles are allocated
+  per file and belong to the file that created them (`file_priv->object_idr`),
+  so a handle is only usable through the descriptor that created it and is
+  dropped when that file closes.
+- A GEM object is kept alive by `Arc` references from its handles, its
+  framebuffer and the scanout slot; the resource is destroyed exactly when the
+  last reference goes away. Unbinding a framebuffer (RMFB) clears the plane
+  binding but retains the scanned resource until the next successful present.
+- A framebuffer id is usable for `RMFB`/`CLOSEFB` only by the file that created
+  it; a foreign or unknown id is `ENOENT` and changes neither the registry nor
+  the committed scanout. `DIRTYFB` remains a device-wide lookup, as in Linux.
+- Mastership is asked of the device (`DrmDevice::is_master`); a per-file flag
+  only records which master object the file may reacquire and never grants
+  permissions.
+- A dirty flush (`DIRTYFB`) transfers pixels and never changes the scanout
+  binding; only a commit (`SETCRTC`, `ATOMIC`, property writes, page flips)
+  rebinds it.
+- Blobs created by the driver for a legacy modeset are owned by the driver and
+  retired by the next modeset or by disabling the CRTC.
 - Retained backing pages outlive user mappings that reference them.
-- The vblank event queue remains bounded by `MAX_EVENTS`.
+- The vblank event queue remains bounded by `MAX_EVENTS`.  A page flip
+  reserves its completion slot before presenting, so a full queue fails with
+  `ENOMEM` instead of reporting success after dropping the event.
 - DRM magic tokens are scoped to one master, consumed once, and removed when
   their file closes or changes master.
 - AUTH_MAGIC requires the active master and reads its argument without copying
@@ -51,7 +89,7 @@ handle's availability state and does not mutate another card's local tables.
 | T-01 | Malformed ioctl pointer or count | High — kernel memory corruption or disclosure | Hostile DRM UAPI payload | Typed user copies, bounds checks, and object-table lookup. |
 | T-02 | Arithmetic overflow in buffer geometry | Medium — undersized allocation or denial of service | Crafted dimensions or pitches | Creation handlers validate dimensions, formats, and sizes before allocation. |
 | T-03 | Mapped buffer freed too early | High — use-after-free and kernel memory corruption | Remove framebuffer while mmap survives | `retained_pages` keeps backing pages alive. |
-| T-04 | Open fd targets a newly registered display | High — operations affect the wrong display and corrupt visible device state | Hot-unplug followed by card-index reuse | Each `DrmCard` owns one concrete class handle and returns `ENODEV` after removal. |
+| T-04 | Open fd targets a newly registered display | High — operations affect the wrong display and corrupt visible device state | Hot-unplug followed by card-index reuse | Each `DrmDevice` owns one concrete class handle and returns `ENODEV` after removal; both minors of the card share it. |
 | T-05 | Event queue exhausts memory | Medium — unbounded kernel-memory growth and service denial | Repeated event-producing ioctls | Queue length is capped at `MAX_EVENTS`. |
 | T-06 | Reuse or cross-master use of a DRM magic token | Medium — unauthorized client authentication | Forged, replayed, or stale AUTH_MAGIC request | Tokens live in one master registry, require its active owner, are single-use, and are removed on file close or master change. |
 
@@ -66,10 +104,48 @@ handle's availability state and does not mutate another card's local tables.
 
 ## Known limitations
 
-- KMS-only: no render node, command submission, or complete DMA-BUF sharing.
-- Each card currently exposes one CRTC, connector, and plane.
+- No command submission (execbuf/virgl) and no DMA-BUF implementation: PRIME is
+  a handle round-trip stub and `DRM_CAP_PRIME` is reported as `0`.
+- The render node (`/dev/dri/renderD*`) is restricted to the commands marked
+  `DRM_RENDER_ALLOW` in the ioctl table; everything else is `EACCES`. It is
+  never master and gets a private master, so identity and authentication ioctls
+  cannot reach the card's.
+- `MASTER` commands are enforced from the same table; `DRM_AUTH` is not
+  enforced per command, so the magic handshake remains a compatibility
+  protocol rather than an authorization gate.
+- A failed present cannot prove the host stopped scanning the attempted
+  resource, so the previous and attempted resources are retained until the next
+  successful present. A master that keeps issuing failing modesets can therefore
+  retain one additional GEM object per failure; the memory is reclaimed at the
+  first successful present. This unbounded-until-success retention is accepted
+  because freeing a resource the host may still scan would corrupt the display.
+- Each card currently exposes one CRTC, connector, plane and encoder.
 - Connector hotplug within one display backend is not modeled separately from
   driver-core device removal.
+
+## Permission model
+
+The ioctl table is the complete, auditable list of command-level admission
+decisions:
+
+- a render file may issue only entries carrying `RENDER_ALLOW` (`VERSION`,
+  `GET_CAP`, `GEM_CLOSE`, the two PRIME translations);
+- entries carrying `MASTER` require the calling file to own the card;
+- everything else is available to any open file, as in Linux.
+
+`DESTROY_BLOB` additionally enforces object-level ownership that cannot be
+expressed as a table flag because it depends on the named id: the id must be
+present in the calling file's blob set. An id owned by another file, or a
+driver-owned system blob, is `EPERM`; an unknown id is `ENOENT`. The check runs
+after table admission and before the legacy slot or device registry is touched,
+so a refused destroy leaves the owner's registration intact. Release destroys
+only the snapshot of the closing file's own set.
+
+Command-level denials are `EACCES` and are logged at debug level with the
+command name. The matrix is covered by `ut-tests/`: every entry is checked
+against both node kinds and both ownership states, so adding a command without
+deciding its permission fails the test. Blob ownership is covered by
+`destroy_client_blob_requires_ownership_and_refuses_system_blobs`.
 
 ## Audit checklist
 

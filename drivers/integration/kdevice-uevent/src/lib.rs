@@ -20,7 +20,7 @@ use alloc::{
 };
 
 use kdevice::{
-    DeviceLocation, DeviceNode, DeviceNodeKind, DeviceNodeLifecycleEvent,
+    DRM_RENDER_MINOR_BASE, DeviceLocation, DeviceNode, DeviceNodeKind, DeviceNodeLifecycleEvent,
     install_device_node_lifecycle_publisher,
 };
 use klazy::Once;
@@ -36,6 +36,8 @@ pub enum UeventScope {
     Device,
     /// The Linux input parent object, such as `input0`.
     InputParent,
+    /// The render minor of a DRM card, such as `renderD128`.
+    Render,
 }
 
 /// Valid Linux kobject event action.
@@ -131,21 +133,27 @@ pub fn physical_device_path(location: DeviceLocation) -> String {
     }
 }
 
-fn uevent_path(node: &DeviceNode, scope: UeventScope) -> String {
+fn uevent_path(node: &DeviceNode, scope: UeventScope) -> Option<String> {
     let physical = physical_device_path(node.location());
     match (node.kind(), scope) {
-        (DeviceNodeKind::Input, UeventScope::Device) => {
-            format!("devices/{physical}/input/input{0}/event{0}", node.index())
-        }
+        (DeviceNodeKind::Input, UeventScope::Device) => Some(format!(
+            "devices/{physical}/input/input{0}/event{0}",
+            node.index()
+        )),
         (DeviceNodeKind::Input, UeventScope::InputParent) => {
-            format!("devices/{physical}/input/input{}", node.index())
+            Some(format!("devices/{physical}/input/input{}", node.index()))
         }
         (DeviceNodeKind::Drm, UeventScope::Device) => {
-            format!("devices/{physical}/drm/card{}", node.index())
+            Some(format!("devices/{physical}/drm/card{}", node.index()))
         }
-        (DeviceNodeKind::Drm, UeventScope::InputParent) => {
-            unreachable!("DRM nodes do not have input-parent uevents")
-        }
+        (DeviceNodeKind::Drm, UeventScope::Render) => Some(format!(
+            "devices/{physical}/drm/renderD{}",
+            DRM_RENDER_MINOR_BASE + node.index()
+        )),
+        // Input nodes have no render minor and DRM nodes have no input parent;
+        // both combinations are structurally impossible call sites.
+        (DeviceNodeKind::Input, UeventScope::Render)
+        | (DeviceNodeKind::Drm, UeventScope::InputParent) => None,
     }
 }
 
@@ -239,6 +247,10 @@ pub fn uevent_properties(node: &DeviceNode, scope: UeventScope) -> Vec<(String, 
         return properties;
     }
 
+    if node.kind() == DeviceNodeKind::Drm && scope == UeventScope::Render {
+        return render_uevent_properties(node).unwrap_or_default();
+    }
+
     let number = node.device_number();
     let mut properties = alloc::vec![
         ("MAJOR".to_string(), number.major().to_string()),
@@ -253,14 +265,44 @@ pub fn uevent_properties(node: &DeviceNode, scope: UeventScope) -> Vec<(String, 
 
 /// Renders the newline-delimited contents of a sysfs `uevent` attribute.
 pub fn uevent_file_contents(node: &DeviceNode, scope: UeventScope) -> Vec<u8> {
+    properties_to_uevent(&uevent_properties(node, scope))
+}
+
+fn properties_to_uevent(properties: &[(String, String)]) -> Vec<u8> {
     let mut contents = String::new();
-    for (key, value) in uevent_properties(node, scope) {
-        contents.push_str(&key);
+    for (key, value) in properties {
+        contents.push_str(key);
         contents.push('=');
-        contents.push_str(&value);
+        contents.push_str(value);
         contents.push('\n');
     }
     contents.into_bytes()
+}
+
+/// Returns the sysfs path of the render node belonging to a DRM node.
+///
+/// This is the same `128 + card index` projection devfs registers as
+/// `/dev/dri/renderD*`; both derive it from [`DeviceNode`] so the two views
+/// cannot disagree.
+pub fn render_uevent_path(node: &DeviceNode) -> Option<String> {
+    let devname = node.render_devname()?;
+    let physical = physical_device_path(node.location());
+    Some(format!(
+        "devices/{physical}/drm/{}",
+        devname.rsplit('/').next()?
+    ))
+}
+
+/// Returns the properties of a DRM render node's `uevent` attribute.
+pub fn render_uevent_properties(node: &DeviceNode) -> Option<Vec<(String, String)>> {
+    let number = node.render_device_number()?;
+    let devname = node.render_devname()?;
+    Some(alloc::vec![
+        ("MAJOR".to_string(), number.major().to_string()),
+        ("MINOR".to_string(), number.minor().to_string()),
+        ("DEVNAME".to_string(), devname),
+        ("DEVTYPE".to_string(), "drm_minor".to_string()),
+    ])
 }
 
 /// Publishes one action for a device object.
@@ -271,29 +313,56 @@ pub fn publish(action: UeventAction, node: &DeviceNode, scope: UeventScope) {
     if scope == UeventScope::InputParent && node.kind() != DeviceNodeKind::Input {
         return;
     }
+    let Some(path) = uevent_path(node, scope) else {
+        return;
+    };
+    publish_object(action, &path, node, &uevent_properties(node, scope));
+}
+
+fn publish_object(
+    action: UeventAction,
+    path: &str,
+    node: &DeviceNode,
+    properties: &[(String, String)],
+) {
     let action = action.as_str();
-    let devpath = format!("/{}", uevent_path(node, scope));
+    let devpath = format!("/{path}");
     let mut payload = format!("{action}@{devpath}\0ACTION={action}\0DEVPATH={devpath}\0");
     payload.push_str("SUBSYSTEM=");
     payload.push_str(subsystem_name(node));
     payload.push('\0');
-    for (key, value) in uevent_properties(node, scope) {
-        payload.push_str(&key);
+    for (key, value) in properties {
+        payload.push_str(key);
         payload.push('=');
-        payload.push_str(&value);
+        payload.push_str(value);
         payload.push('\0');
     }
     knet::netlink::publish_kobject_uevent(UEVENT_GROUP, payload.as_bytes());
 }
 
+/// Publishes the render minor of a DRM node when the node has one.
+fn publish_render(action: UeventAction, node: &DeviceNode) {
+    publish(action, node, UeventScope::Render);
+}
+
+/// Publishes the render minor's uevent on user request (a write to the sysfs
+/// `uevent` attribute).
+pub fn publish_render_uevent(action: UeventAction, node: &DeviceNode) {
+    publish_render(action, node);
+}
+
+/// Publishes the render minor's uevent on user request (a write to the sysfs
+/// `uevent` attribute).
 fn publish_add(node: &DeviceNode) {
     if node.kind() == DeviceNodeKind::Input {
         publish(UeventAction::Add, node, UeventScope::InputParent);
     }
     publish(UeventAction::Add, node, UeventScope::Device);
+    publish_render(UeventAction::Add, node);
 }
 
 fn publish_remove(node: &DeviceNode) {
+    publish_render(UeventAction::Remove, node);
     publish(UeventAction::Remove, node, UeventScope::Device);
     if node.kind() == DeviceNodeKind::Input {
         publish(UeventAction::Remove, node, UeventScope::InputParent);

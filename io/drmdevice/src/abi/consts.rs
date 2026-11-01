@@ -48,17 +48,24 @@ pub(crate) const DRIVER_VERSION_PATCHLEVEL: i32 = 0;
 
 pub(crate) const DRM_TYPE: u8 = b'd';
 
-pub(crate) const DRM_IOCTL_SET_MASTER: u32 = io(DRM_TYPE, 0x1e);
-pub(crate) const DRM_IOCTL_DROP_MASTER: u32 = io(DRM_TYPE, 0x1f);
-
 // ======== capability IDs ========
 
 pub(crate) const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
+pub(crate) const DRM_CAP_DUMB_PREFER_SHADOW: u64 = 0x4;
 pub(crate) const DRM_CAP_CURSOR_WIDTH: u64 = 0x8;
 pub(crate) const DRM_CAP_CURSOR_HEIGHT: u64 = 0x9;
 pub(crate) const DRM_CAP_TIMESTAMP_MONOTONIC: u64 = 0x6;
 pub(crate) const DRM_CAP_CRTC_IN_VBLANK_EVENT: u64 = 0x12;
 pub(crate) const DRM_CAP_ADDFB2_MODIFIERS: u64 = 0x10;
+
+// ======== MODE_DIRTYFB flags ========
+pub(crate) const DRM_MODE_FB_DIRTY_ANNOTATE_COPY: u32 = 0x01;
+pub(crate) const DRM_MODE_FB_DIRTY_ANNOTATE_FILL: u32 = 0x02;
+/// Every flag bit the ABI defines; unknown bits are masked off, not rejected.
+pub(crate) const DRM_MODE_FB_DIRTY_FLAGS: u32 =
+    DRM_MODE_FB_DIRTY_ANNOTATE_COPY | DRM_MODE_FB_DIRTY_ANNOTATE_FILL;
+/// Upper bound on clip rectangles, `DRM_MODE_FB_DIRTY_MAX_CLIPS` in `drm.h`.
+pub(crate) const DRM_MODE_FB_DIRTY_MAX_CLIPS: u32 = 256;
 
 /// Cursor size reported via GET_CAP. The driver exposes a single primary
 /// plane and no cursor commands, so this is a client-compatibility value,
@@ -118,6 +125,7 @@ pub(crate) const DRM_MODE_PROP_IMMUTABLE: u32 = 1 << 2;
 pub(crate) const DRM_MODE_PROP_ENUM: u32 = 1 << 3;
 pub(crate) const DRM_MODE_PROP_BLOB: u32 = 1 << 4;
 pub(crate) const DRM_MODE_PROP_OBJECT: u32 = 1 << 6;
+pub(crate) const DRM_MODE_PROP_SIGNED_RANGE: u32 = 1 << 7;
 pub(crate) const DRM_MODE_PROP_ATOMIC: u32 = 0x8000_0000;
 
 // ======== page flip / vblank / event flags ========
@@ -160,23 +168,6 @@ pub(crate) const PROP_CRTC_MODE_ID: u32 = 0x201;
 
 pub(crate) const PROP_CONN_CRTC_ID: u32 = 0x300;
 
-pub(crate) const PLANE_PROPS: &[u32] = &[
-    PROP_PLANE_TYPE,
-    PROP_PLANE_FB_ID,
-    PROP_PLANE_CRTC_ID,
-    PROP_PLANE_SRC_X,
-    PROP_PLANE_SRC_Y,
-    PROP_PLANE_SRC_W,
-    PROP_PLANE_SRC_H,
-    PROP_PLANE_CRTC_X,
-    PROP_PLANE_CRTC_Y,
-    PROP_PLANE_CRTC_W,
-    PROP_PLANE_CRTC_H,
-    PROP_PLANE_IN_FORMATS,
-];
-pub(crate) const CRTC_PROPS: &[u32] = &[PROP_CRTC_ACTIVE, PROP_CRTC_MODE_ID];
-pub(crate) const CONN_PROPS: &[u32] = &[PROP_CONN_CRTC_ID];
-
 // ======== buffer / blob limits ========
 
 pub(crate) const FIRST_DUMB_HANDLE: u32 = 1;
@@ -192,10 +183,6 @@ pub(crate) const MAX_BLOB_BYTES: usize = 64 * 1024;
 
 // ======== CVT-RBv1 mode timing ========
 
-pub(crate) const CVT_RB_HFRONT_PORCH: u16 = 48;
-pub(crate) const CVT_RB_HSYNC_WIDTH: u16 = 32;
-pub(crate) const CVT_RB_HBACK_PORCH: u16 = 80;
-pub(crate) const CVT_RB_VFRONT_PORCH: u16 = 3;
-pub(crate) const CVT_RB_VSYNC_WIDTH: u16 = 8;
-pub(crate) const CVT_RB_VBACK_PORCH: u16 = 6;
-pub(crate) const DEFAULT_VREFRESH: u32 = 60;
+// The IN_FORMATS blob encodes the format set as a single 64-bit mask, so the
+// table must never grow past the width it is shifted into.
+const _: () = assert!(SUPPORTED_FORMATS.len() <= 64);

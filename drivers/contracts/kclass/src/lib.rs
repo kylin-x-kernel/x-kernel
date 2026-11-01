@@ -438,6 +438,10 @@ impl DisplayDevice for ClassDevice<DisplayDeviceImpl> {
     ) -> DriverResult {
         self.with(|device| device.present_scanout_resource(resource_id, rect))
     }
+
+    fn flush_scanout_resource(&self, resource_id: u32, rect: display::ScanoutRect) -> DriverResult {
+        self.with(|device| device.flush_scanout_resource(resource_id, rect))
+    }
 }
 
 #[cfg(feature = "input")]

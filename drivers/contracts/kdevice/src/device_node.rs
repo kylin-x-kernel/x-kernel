@@ -25,6 +25,13 @@ const INPUT_EVENT_COUNT: u32 = 32;
 const DRM_MAJOR: u32 = 226;
 const DRM_PRIMARY_COUNT: u32 = 64;
 
+/// First Linux render-node minor; render nodes are numbered `base + card index`.
+///
+/// This is the only place that encodes the rule: devfs, sysfs and the uevent
+/// publisher all derive the render minor from [`DeviceNode`] helpers instead of
+/// repeating the offset.
+pub const DRM_RENDER_MINOR_BASE: u32 = 128;
+
 /// Device-node class projected by devtmpfs and sysfs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceNodeKind {
@@ -329,6 +336,28 @@ impl DeviceNode {
     /// Path below `/dev`.
     pub fn devname(&self) -> &str {
         &self.devname
+    }
+
+    /// Linux character-device number of the render node belonging to this node.
+    ///
+    /// Returns `None` for device classes that do not expose one. A DRM card
+    /// always does, whether or not the bound driver advertises a render backend:
+    /// Linux registers the minor unconditionally and decides per ioctl what the
+    /// node accepts.
+    pub const fn render_device_number(&self) -> Option<DeviceNumber> {
+        match self.kind {
+            DeviceNodeKind::Drm => Some(DeviceNumber::new(
+                DRM_MAJOR,
+                DRM_RENDER_MINOR_BASE + self.index,
+            )),
+            DeviceNodeKind::Input => None,
+        }
+    }
+
+    /// Path below `/dev` for the render node, e.g. `dri/renderD128`.
+    pub fn render_devname(&self) -> Option<String> {
+        (self.kind == DeviceNodeKind::Drm)
+            .then(|| format!("dri/renderD{}", DRM_RENDER_MINOR_BASE + self.index))
     }
 
     /// Runtime device name.

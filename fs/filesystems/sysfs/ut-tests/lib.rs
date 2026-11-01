@@ -121,3 +121,33 @@ fn symlink_targets_are_relative_to_the_link_parent() {
         "../.."
     );
 }
+
+#[def_test]
+fn drm_nodes_project_a_render_minor() {
+    let node = kdevice::register_device_node(
+        kdevice::DeviceId::new(9002),
+        kdevice::DeviceNodeClass::Drm,
+        String::from("display"),
+        String::from("test"),
+        kdevice::DeviceLocation::PlatformStatic { id: 9002 },
+    )
+    .expect("a DRM node must register");
+    let minor = kdevice::DRM_RENDER_MINOR_BASE + node.index();
+    let projected = Arc::new(ProjectedDevice::new(node.clone()));
+    let mut nodes = BTreeMap::new();
+    nodes.insert(node.core_id(), projected);
+    let tree = build_tree(&nodes, &[]);
+
+    let render = format!("devices/platform/static9002/drm/renderD{minor}");
+    assert!(tree.contains_key(&render));
+    assert!(tree.contains_key(&format!("class/drm/renderD{minor}")));
+    assert!(tree.contains_key(&format!("dev/char/226:{minor}")));
+    let uevent_path = format!("{render}/uevent");
+    let Some(TreeEntry::Uevent(_, UeventScope::Render)) = tree.get(&uevent_path) else {
+        panic!("render nodes must expose a writable uevent attribute");
+    };
+
+    assert!(tree.contains_key(&format!("dev/char/226:{}", node.index())));
+
+    kdevice::unregister_device_node(node.core_id());
+}

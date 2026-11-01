@@ -24,7 +24,11 @@ fails if discovery already published a node, which makes incorrect boot order
 visible instead of creating synthetic add events at first sysfs mount.
 
 Input devices publish the parent `inputN` add before the `eventN` add and use
-the reverse order for removal. Sysfs uses the exported formatter for explicit
+the reverse order for removal. A DRM node publishes two objects: the primary
+minor (`drm/cardN`) first and the render minor (`drm/renderD{128+N}`) second on
+add, in the reverse order on remove. The render path, `DEVNAME` and `uevent`
+contents are derived from `kdevice::DeviceNode`, so the published event and the
+sysfs attribute for the same node cannot disagree. Sysfs uses the exported formatter for explicit
 user-triggered events, so automatic and manual messages cannot disagree about
 paths or properties. The crate also exports the Linux capability-bitmap
 formatter so sysfs attributes and uevent properties share the same word order.

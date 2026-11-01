@@ -128,6 +128,13 @@ impl<H: Hal, T: Transport> DisplayDevice for VirtIoGpuDev<H, T> {
             .present_resource(resource_id, rect)
             .map_err(crate::as_driver_error)
     }
+
+    fn flush_scanout_resource(&self, resource_id: u32, rect: ScanoutRect) -> DriverResult {
+        self.inner
+            .lock()
+            .flush_resource(resource_id, rect)
+            .map_err(crate::as_driver_error)
+    }
 }
 
 // NOTE on protocol duplication: the command types below and the request/command
@@ -222,6 +229,19 @@ impl<H: Hal, T: Transport> VirtIoGpu2d<H, T> {
             self.active_scanout.clear_if_matches(resource_id);
         }
         result
+    }
+
+    fn flush_resource(&mut self, resource_id: u32, rect: ScanoutRect) -> virtio_drivers::Result {
+        // Transfer the updated pixels and flush them. Deliberately no
+        // SET_SCANOUT: a dirty flush must not change the scanout binding.
+        let rect = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        self.transfer_to_host_2d(rect, 0, resource_id)?;
+        self.resource_flush(rect, resource_id)
     }
 
     fn present_resource(&mut self, resource_id: u32, rect: ScanoutRect) -> virtio_drivers::Result {

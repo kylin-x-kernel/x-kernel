@@ -26,9 +26,19 @@ use crate::{DeviceFile, device_dentry};
 
 type DeviceRemovalCallback = Arc<dyn Fn() + Send + Sync>;
 
+/// Files projected for one device node: its primary node, the render minor of a
+/// DRM node when it has one, and the removal hook shared by both.
+type NodeFiles = (
+    Arc<DeviceFile>,
+    Option<Arc<DeviceFile>>,
+    DeviceRemovalCallback,
+);
+
 struct DeviceNodeRecord {
     node: DeviceNode,
     file: Arc<DeviceFile>,
+    /// Render minor of a DRM node. Both files drive the same card object.
+    render_file: Option<Arc<DeviceFile>>,
     on_remove: DeviceRemovalCallback,
 }
 
@@ -89,25 +99,45 @@ fn input_file(
     )))
 }
 
-fn display_file(
+fn display_files(
     fs: Arc<SimpleFs>,
     number: DeviceId,
+    render: Option<DeviceId>,
     id: CoreDeviceId,
-) -> VfsResult<Option<(Arc<DeviceFile>, DeviceRemovalCallback)>> {
+) -> VfsResult<Option<NodeFiles>> {
     let Some(device) = find_display_device(id) else {
         return Ok(None);
     };
-    let card = drmdevice::DrmCard::new(device);
+    let card = drmdevice::DrmDevice::new(device);
     let weak_card = Arc::downgrade(&card);
     let on_remove: DeviceRemovalCallback = Arc::new(move || {
         if let Some(card) = weak_card.upgrade() {
             card.notify_removed();
         }
     });
-    Ok(Some((
-        DeviceFile::new_character(fs, number, card)?,
-        on_remove,
-    )))
+    let file = DeviceFile::new_character(
+        fs.clone(),
+        number,
+        card.minor(drmdevice::MinorKind::Primary),
+    )?;
+    // The render node is a second minor over the same `DrmCard`: it shares the
+    // GEM/KMS objects and differs only in the per-open file state and in the
+    // ioctl allowlist enforced by the driver.
+    let render_file = match render {
+        Some(render) => {
+            match DeviceFile::new_character(fs, render, card.minor(drmdevice::MinorKind::Render)) {
+                Ok(file) => Some(file),
+                Err(error) => {
+                    // Do not leave the primary character device registered without
+                    // a projection record: that would make it unremovable.
+                    let _ = cdev_del(number, 1);
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
+    Ok(Some((file, render_file, on_remove)))
 }
 
 fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
@@ -116,12 +146,16 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
     }
     let number = node.device_number();
     let number = DeviceId::new(number.major(), number.minor());
+    let render = node
+        .render_device_number()
+        .map(|number| DeviceId::new(number.major(), number.minor()));
     let file = match node.kind() {
         #[cfg(feature = "input")]
-        DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.core_id()),
+        DeviceNodeKind::Input => input_file(projection.fs.clone(), number, node.core_id())
+            .map(|file| file.map(|(file, on_remove)| (file, None, on_remove))),
         #[cfg(not(feature = "input"))]
         DeviceNodeKind::Input => Ok(None),
-        DeviceNodeKind::Drm => display_file(projection.fs.clone(), number, node.core_id()),
+        DeviceNodeKind::Drm => display_files(projection.fs.clone(), number, render, node.core_id()),
     };
     let file = match file {
         Ok(file) => file,
@@ -133,7 +167,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
             return;
         }
     };
-    let Some((file, on_remove)) = file else {
+    let Some((file, render_file, on_remove)) = file else {
         warn!(
             "devtmpfs: class device for node {:?} is unavailable",
             node.core_id()
@@ -145,6 +179,7 @@ fn add_device(projection: &mut DeviceProjection, node: DeviceNode) {
         DeviceNodeRecord {
             node,
             file,
+            render_file,
             on_remove,
         },
     );
@@ -173,6 +208,14 @@ fn remove_device(node: &DeviceNode) {
     let number = node.device_number();
     if cdev_del(DeviceId::new(number.major(), number.minor()), 1).is_none() {
         warn!("devtmpfs: missing character device during removal: {number:?}");
+    }
+    if record.render_file.is_some()
+        && let Some(render) = node.render_device_number()
+    {
+        let render = DeviceId::new(render.major(), render.minor());
+        if cdev_del(render, 1).is_none() {
+            warn!("devtmpfs: missing DRM render device during removal: {render:?}");
+        }
     }
 }
 
@@ -221,6 +264,21 @@ impl DynamicDeviceDir {
         }
         node.devname().rsplit('/').next()
     }
+
+    /// Local name of the node's render minor (`renderD128`), when it has one.
+    ///
+    /// Derived from `DeviceNode::render_devname()` so the `128 + index` rule
+    /// lives in the device contract, not in three projections.
+    fn render_name(&self, node: &DeviceNode) -> Option<String> {
+        // The precondition the callers rely on: only the `/dev/dri` directory
+        // projects render minors. Without this check `/dev/input` would list
+        // `renderD*` names for every DRM record that has a render node.
+        if self.kind != DeviceNodeKind::Drm {
+            return None;
+        }
+        node.render_devname()
+            .and_then(|name| name.rsplit('/').next().map(String::from))
+    }
 }
 
 impl SimpleDirOps for DynamicDeviceDir {
@@ -229,8 +287,17 @@ impl SimpleDirOps for DynamicDeviceDir {
             .lock()
             .records
             .values()
-            .filter_map(|record| self.local_name(&record.node))
-            .map(|name| Cow::Owned(String::from(name)))
+            .flat_map(|record| {
+                let primary = self
+                    .local_name(&record.node)
+                    .map(|name| Cow::Owned(String::from(name)));
+                let render = record
+                    .render_file
+                    .as_ref()
+                    .and_then(|_| self.render_name(&record.node))
+                    .map(Cow::Owned);
+                primary.into_iter().chain(render)
+            })
             .collect();
         Ok(KBox::new(names.into_iter())?)
     }
@@ -240,8 +307,17 @@ impl SimpleDirOps for DynamicDeviceDir {
             .lock()
             .records
             .values()
-            .find(|record| self.local_name(&record.node) == Some(name))
-            .map(|record| record.file.clone())
+            .find_map(|record| {
+                if self.local_name(&record.node) == Some(name) {
+                    Some(record.file.clone())
+                } else if record.render_file.is_some()
+                    && self.render_name(&record.node).as_deref() == Some(name)
+                {
+                    record.render_file.clone()
+                } else {
+                    None
+                }
+            })
             .ok_or(VfsError::NotFound)?;
         Ok(device_dentry(lookup, name, file))
     }

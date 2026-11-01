@@ -25,6 +25,7 @@ log.workspace = true
 memaddr.workspace = true
 posix-types.workspace = true
 macros.workspace = true
+unittest.workspace = true
 
 [lints]
 workspace = true

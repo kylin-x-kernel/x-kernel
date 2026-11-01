@@ -31,8 +31,8 @@ adapts input and display class handles to VFS file operations.
 
 ## Responsibilities
 
-- Create `/dev/input/eventN` and `/dev/dri/cardN` from `kdevice::DeviceNode`
-  events.
+- Create `/dev/input/eventN`, `/dev/dri/cardN` and `/dev/dri/renderD{128+N}`
+  from `kdevice::DeviceNode` events.
 - Register and unregister the assigned character-device numbers with KVFS.
 - Resolve dynamic directory enumeration and lookup to the current file-object
   projection.
@@ -144,17 +144,20 @@ kclass input/display activation
        devfs DeviceProjection
        ├── DeviceId -> DeviceNodeRecord
        ├── /dev/input/eventN -> EventDev
-       └── /dev/dri/cardN -> DrmCard
+       ├── /dev/dri/cardN -> DrmMinor(Primary)
+       └── /dev/dri/renderD{128+N} -> DrmMinor(Render)
 ```
 
 `DeviceProjection` owns only filesystem-specific state: the `SimpleFs`
-instance, `DeviceFile`, removal callback, and the `DeviceNode` snapshot used
-for lookup. `DeviceNode` remains the identity authority and is shared directly
+instance, the projected files (the primary `DeviceFile` plus, for a DRM node,
+the render minor's file), the removal callback, and the `DeviceNode` snapshot
+used for lookup. Both `DeviceFile`s of a DRM node share one `DrmDevice`; the
+render file is removed with the primary one. `DeviceNode` remains the identity authority and is shared directly
 by other projections such as sysfs.
 
 `DynamicDeviceDir` is the non-caching `SimpleDirOps` implementation behind
 `/dev/input` and `/dev/dri`. It filters projection records by
-`DeviceNodeKind`, derives the final path component from `DeviceNode::devname`,
+`DeviceNodeKind`, derives the final path component from `DeviceNode::devname` (primary node) or `DeviceNode::render_devname` (render node, only while the directory kind is DRM),
 and clones the matching `DeviceFile` for lookup.
 
 ## Configuration and dependencies
@@ -176,19 +179,23 @@ through `kclass/display`, so DRM primary nodes remain available independently.
    and applying the snapshot. A concurrent callback waits and therefore cannot
    make an older snapshot overwrite a newer removal.
 4. An add event looks up the already-active class handle by `DeviceId`, creates
-   `EventDev` or `DrmCard`, and registers the exact `DeviceNumber` assigned by
-   `kdevice`.
+   `EventDev` or `DrmDevice`, and registers the exact `DeviceNumber` assigned by
+   `kdevice`. For a DRM node it registers the primary minor first, then the
+   render minor from `DeviceNode::render_device_number()` over the same
+   `DrmDevice`. If render registration fails, the primary character device is
+   deleted before returning, so no unremovable half-projection is recorded.
 5. Dynamic lookup reads the current projection, so add/remove is visible
    without rebuilding the directory or retaining cached dentries.
 6. A remove event deletes the projection record, detaches the file object,
-   unregisters the character-device number, and returns. `kdevice` releases
-   the class index only after all projection callbacks finish.
+   unregisters both DRM character-device numbers (primary and render), and
+   returns. `kdevice` releases the class index only after all projection
+   callbacks finish.
 
 Open files retain their concrete backend through KVFS dispatch after removal.
 Read and poll check class availability even before the removal callback detaches
 clients. Their
 `EventClient` objects enter a terminal detached state and report `ENODEV` plus
-`POLLERR|POLLHUP`. `DrmCard` observes that its bound class handle is no longer
+`POLLERR|POLLHUP`. `DrmDevice` observes that its bound class handle is no longer
 available and reports `ENODEV`. A later device that reuses the same index gets
 a new file object and cannot reconnect an old file descriptor.
 
@@ -263,7 +270,11 @@ waiters. Clients never read the VirtIO queue or register IRQ-line waiters.
 - The projection stores the `DeviceNode` snapshot that created each file, so a
   stale remove event cannot delete a different replacement record.
 - DRM instances bind one concrete display handle. Multiple display devices can
-  therefore receive independent `cardN` nodes and state.
+  therefore receive independent `cardN` nodes and state. The render node is a
+  second projection of that same handle, not a second display instance.
+- Primary and render registration form one transaction at projection level:
+  a render failure rolls the primary cdev back instead of publishing a record
+  that removal could never reach.
 
 Loop advances the owning `Gendisk::diskseq` after successful SET_FD/CLR_FD
 under the existing media-change locks; failed changes retain the sequence.

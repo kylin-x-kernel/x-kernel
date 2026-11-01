@@ -24,6 +24,16 @@ pub(crate) struct DrmAuth {
     pub magic: u32,
 }
 
+/// One damage rectangle of `MODE_DIRTYFB`.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
+pub(crate) struct DrmClipRect {
+    pub x1: i16,
+    pub y1: i16,
+    pub x2: i16,
+    pub y2: i16,
+}
+
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, AnyBitPattern, UserRead, UserWrite)]
 pub(crate) struct DrmModeDirtyFb {

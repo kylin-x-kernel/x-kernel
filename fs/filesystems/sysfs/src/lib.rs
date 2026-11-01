@@ -612,6 +612,72 @@ fn add_drm_entries(tree: &mut BTreeMap<String, TreeEntry>, projected: &Arc<Proje
         class_link.clone(),
         TreeEntry::Symlink(relative_symlink(&class_link, &card)),
     );
+
+    // The render node is a second minor of the same card, not a second device:
+    // its `dev`, `uevent`, char-device link and class link are projected from
+    // the primary node's identity.
+    let Some(render_minor) = node.render_device_number() else {
+        return;
+    };
+    let render = format!("devices/{physical}/drm/renderD{}", render_minor.minor());
+    add_drm_render_entries(tree, projected, &render, render_minor);
+    let render_device_link = format!("{render}/device");
+    add_entry(
+        tree,
+        render_device_link.clone(),
+        TreeEntry::Symlink(relative_symlink(&render_device_link, &physical_device)),
+    );
+    let render_class_link = format!("class/drm/renderD{}", render_minor.minor());
+    add_entry(
+        tree,
+        render_class_link.clone(),
+        TreeEntry::Symlink(relative_symlink(&render_class_link, &render)),
+    );
+}
+
+/// Projects one render-minor leaf: `dev`, `uevent`, `subsystem`, and `dev/char`.
+///
+/// `uevent` comes from `kdevice_uevent` so the sysfs attribute and the netlink
+/// ADD/REMOVE payload for the same node are generated from one description.
+fn add_drm_render_entries(
+    tree: &mut BTreeMap<String, TreeEntry>,
+    projected: &Arc<ProjectedDevice>,
+    leaf: &str,
+    number: kdevice::DeviceNumber,
+) {
+    let node = &projected.node;
+    add_directory(tree, leaf);
+    add_entry(
+        tree,
+        format!("{leaf}/dev"),
+        TreeEntry::Attribute(
+            projected.clone(),
+            append_line(&format!("{}:{}", number.major(), number.minor())),
+        ),
+    );
+    // `UeventScope::Render` makes the attribute writable (0644): a write
+    // publishes the render minor's uevent through the same pipeline the
+    // automatic events use.
+    add_entry(
+        tree,
+        format!("{leaf}/uevent"),
+        TreeEntry::Uevent(projected.clone(), UeventScope::Render),
+    );
+    let subsystem_link = format!("{leaf}/subsystem");
+    add_entry(
+        tree,
+        subsystem_link.clone(),
+        TreeEntry::Symlink(relative_symlink(
+            &subsystem_link,
+            &format!("class/{}", kdevice_uevent::subsystem_name(node)),
+        )),
+    );
+    let character_device_link = format!("dev/char/{}:{}", number.major(), number.minor());
+    add_entry(
+        tree,
+        character_device_link.clone(),
+        TreeEntry::Symlink(relative_symlink(&character_device_link, leaf)),
+    );
 }
 
 fn build_tree(

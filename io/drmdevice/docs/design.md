@@ -2,182 +2,168 @@
 
 ## Purpose
 
-`drmdevice` implements a minimal Linux DRM/KMS primary device over one
-`ClassDevice<DisplayDeviceImpl>`. Each `DrmCard` owns its KMS state and remains
-bound to the display handle supplied at construction.
+`drmdevice` implements a minimal Linux DRM/KMS card over one display backend,
+exposed as two minors: the modesetting node (`/dev/dri/cardN`) and the render
+node (`/dev/dri/renderD{128+N}`). Both nodes resolve to the same `DrmDevice`;
+they differ only in the per-open file state and in the ioctl permission bits.
 
-## Responsibilities
-
-- Dispatch the supported DRM ioctl ABI and validate user-provided object ids,
-  geometry, formats, arrays, and property values.
-- Own legacy and atomic KMS state for one primary card.
-- Allocate dumb buffers, framebuffer objects, property blobs, and the backing
-  display scanout resources associated with them.
-- Queue bounded vblank/page-flip events and implement read and poll readiness.
-- Translate KMS presentation requests into the bound `DisplayDevice` contract.
-
-## Scope
+## Layering
 
 ```text
-io/drmdevice/src/
-├── lib.rs      # public DrmCard export
-├── card0.rs    # device I/O, ioctl handlers, KMS and buffer state
-├── drm.rs      # Linux UAPI wire structures
-└── consts.rs   # ioctl, capability, property, and format constants
+model/            the object model: no VFS, no display driver
+├── device.rs     DrmDevice + DrmMinor (the only DeviceFileOps adapter)
+├── file.rs       DrmFile: per-open caps, handles, fb list, auth
+├── ioctl.rs      IOCTLS table + permission check + argument marshalling
+├── backend.rs    trait Backend — the only hardware boundary
+├── ids.rs        Id<T> / IdRegistry<T, Tag>
+├── event.rs      bounded vblank queue + poll
+├── error.rs      DrmError -> errno
+└── protocol.rs   VERSION / SET_VERSION / GET_UNIQUE / GET_CAP / SET_CLIENT_CAP
+
+gem.rs            GemObject: backing pages, scanout resource, destructor
+framebuffer.rs    Framebuffer objects and the fb ioctls
+scanout.rs        ScanoutSlot: what the host is scanning
+kms.rs            KmsState, the property table and every KMS ioctl
+blob.rs           property blobs
+auth.rs           master ownership and magic tokens
+abi/              the Linux UAPI: structures, numbers, constants
 ```
 
-Device-node discovery, card index allocation, and hotplug projection belong to
-`devfs`; this crate implements the operations behind one node.
+`model` depends on `abi` and on the `Backend` trait, never on `kvfs`, `devfs`
+or `kclass` internals. `device.rs` is the single adapter that converts
+`DrmError` to `VfsError` and implements `DeviceFileOps`; a subsystem handler
+cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
+`DrmDevice::minor(Primary)` on `/dev/dri/cardN` and
+`DrmDevice::minor(Render)` on `/dev/dri/renderD{128+N}`, and calls
+`DrmDevice::notify_removed` when the device goes away.
 
-## Architecture
+## The four single sources of truth
 
-```text
-/dev/dri/cardN (created by devfs)
-        │ ioctl/read/mmap/poll
-        ▼
-DrmCard
-├── bound display ClassDevice
-├── KMS + legacy CRTC state
-├── dumb buffers and framebuffer objects
-├── property blobs
-└── bounded vblank event queue + PollSet
-        │
-        ▼
-DisplayDevice scanout operations
-```
+1. **`model/ioctl.rs::IOCTLS`** — every command once: number, name, permission
+   bits and handler. Dispatch is a lookup, not a 37-arm match, and a command
+   without `RENDER_ALLOW` is unreachable from a render node by default.
+2. **`kms.rs::PROPS`** — every property once: id, wire metadata, reader and
+   optional writer. `OBJ_GETPROPERTIES`, `GETPROPERTY` and the write path all
+   consume this table, so metadata cannot disagree with a writer and a property
+   cannot be readable but unwritable.
+3. **`ids::IdRegistry`** — every object id comes from the one allocator of its
+   class, and the id carries its class (`FbId`, `BlobId`, `DumbHandle`, ...), so
+   ids of different tables cannot be mixed up.
+4. **`Arc<GemObject>`** — resource lifetime. A handle, a framebuffer and the
+   scanout slot each hold a reference; the last one to drop destroys the
+   resource. There is no reference counting bookkeeping in the driver.
 
-The implemented protocol covers legacy libdrm and atomic KMS paths used by
-compositors. It is KMS-only: there is no render node or command submission.
+## Device, minor, file
 
-The `display` contract crate provides the `DisplayDevice` interface, concrete
-display drivers publish implementations through `kclass`, and `kclass`
-forwards the contract through `ClassDevice<DisplayDeviceImpl>`. `DrmCard` is
-the consumer. The scanout call direction is therefore `DrmCard` -> bound
-`ClassDevice<DisplayDeviceImpl>` -> `DisplayDevice` for display information,
-resource creation and destruction, and presentation. devfs only selects the
-exact published class handle and passes it to `DrmCard::new`.
+- `DrmDevice` owns the backend, the object registries, the committed
+  `KmsState`, the scanout slot, master ownership and the event queue.
+- `DrmMinor` owns an `Arc<DrmDevice>` (the cdev is the last thing to go) and
+  remembers which node it is.
+- `DrmFile` is created on `open` and owns what Linux puts in `struct drm_file`:
+  the node kind, negotiated client capabilities, GEM handles, the framebuffers
+  and property blobs it created, and the authentication binding.
 
-The public `DeviceFileOps` entries interact with card state as follows:
+A render file is never master and gets a private master object, so `GET_UNIQUE`
+answers "no identity" and `SET_VERSION`/`AUTH_MAGIC` cannot touch the card's.
 
-- `ioctl` dispatches through `DrmIoctl::handle_raw`; typed handlers validate
-  user data and read or update the modeset, legacy CRTC, dumb-buffer,
-  framebuffer, and blob tables. Atomic property updates use `apply_prop`, and
-  successful scanout changes flow through `present_fb` to the bound display.
-- `read` removes complete `DrmEventVblank` records from the bounded `events`
-  queue and returns `EAGAIN` when no event is ready.
-- `mmap` resolves an offset in the `dumbs` table, retains the backing page in
-  `retained_pages`, and passes its physical range to `MmapMapper`.
-- `poll` reads display availability and event-queue state. `register_poll`
-  registers the caller with `poll_rx`; `queue_flip_event` and
-  `notify_removed` wake that `PollSet` after an event or removal transition.
+## Commits
+
+`KmsState` is plain data. `DrmDevice::commit_with` validates the requested
+state, presents the resulting scanout and only then publishes the state, all
+while holding the commit lock (a failed present leaves the state describing what
+is actually on screen); legacy `SETCRTC`, `MODE_ATOMIC`, `MODE_SETPROPERTY` and `PAGE_FLIP` all
+go through it. `RMFB`/`CLOSEFB` first establish that the id belongs to the
+calling file, then unbind the plane under the same lock; a foreign or unknown
+id changes nothing. A legacy modeset is therefore visible to atomic clients,
+and the state cannot disagree with the screen.
+
+`DIRTYFB` is not a commit: it looks the framebuffer up and goes to
+`DrmDevice::flush`, which asks the backend to transfer and flush that
+framebuffer's resource without touching the binding. There is no `fb_id == 0`
+case: zero and every other unknown id return `ENOENT`, as in Linux.
+
+The scanout slot keeps three separate facts: `bound` (the plane's logical
+framebuffer, zero when disabled), `retained` (the resource the host may still be
+scanning) and `uncertain` (resources whose present failed, so the host may have
+switched to them even though the call reported an error). Unbinding the plane clears `bound` and keeps `retained`, because
+this driver has no call that stops the host from scanning; the retained
+reference is dropped only after a *new* resource has been successfully
+presented. On a failed present the previous contents are restored, so a failure
+never frees pixels the host is still scanning.
+
+## Object lifecycle
+
+- `CREATE_DUMB` allocates contiguous zeroed pages, creates the scanout
+  resource, and records the object in the calling file's handle table.
+- Handles are per open file (`file_priv->object_idr`): `DESTROY_DUMB`,
+  `GEM_CLOSE`, `MAP_DUMB` and `mmap` only accept the file's own handles, and
+  `release()` drops whatever is left.
+- `ADDFB2` records the framebuffer in the calling file's set and adds a
+  reference to its GEM object. `RMFB`/`CLOSEFB` only accept an id in that set
+  (a foreign id is `ENOENT`, as in Linux); removal unbinds the plane under the
+  commit lock, while `CLOSEFB` refuses a framebuffer that is bound or on screen.
+  Closing the file destroys the framebuffers it created (`drm_fb_release()`)
+  instead of leaving them in the registry.
+- `mmap` resolves the offset through the file's handle table and retains the
+  backing pages, because the mapping interface has no unmap notification.
+- PRIME is a handle round-trip stub; `DRM_CAP_PRIME` stays `0` until a real
+  dma-buf implementation exists.
+- Client property blobs are owned by the creating file and the id registry.
+  `DESTROY_BLOB` accepts only an id in the calling file's set: an existing id
+  owned by another file, or a driver-owned system blob, is `EPERM`, while an
+  unknown id is `ENOENT`. `release()` removes the file's whole set under one
+  commit section; the `MODE_ID` blob a legacy `SETCRTC` creates is additionally
+  recorded on the device so the next modeset (or a CRTC disable) retires it
+  instead of leaking one blob per modeset. `GETPROPBLOB` always reports the
+  required length; it copies only when the caller's length is exactly the blob
+  length, and treats a short or oversized buffer as a successful size probe.
+  Writing an attached immutable property (`type`, `IN_FORMATS`) is `EINVAL`.
+  The atomic path keeps `ENOENT` for an unknown object, an unknown property or a
+  property attached to another object class; the single-property ioctls keep
+  Linux's `EINVAL` initializer for a property that is not attached to the
+  addressed object, while an unknown object is still `ENOENT`.
+
+## Concurrency
+
+Two locks with a fixed order: `commit` before the state/registry locks. The
+presenter holds the commit lock across "present, then publish", so a failed
+present never leaves the committed state describing something else.
+Per-file locks (handles, fbs, blobs, auth) never nest with each other. The
+per-file blob set is also taken under `commit` by `DESTROY_BLOB` and release
+(`destroy_client_blob_locked` / `destroy_file_blobs`); creation takes it without
+`commit`, after the device registry lock. The master lock is never taken while
+holding a file lock except in the documented order in `open`/`release`.
 
 ## Execution context
 
 All entry points run in process syscall context through `DeviceFileOps`. They
-may allocate, copy user memory, and acquire sleepable mutexes. They are not
-valid in interrupt context. No task or workqueue is created by this crate.
-
-## Device lifecycle
-
-`DrmCard::new` receives the exact display class handle represented by its
-`cardN` node. Every operation that needs scanout calls `display()`, which checks
-`ClassDevice::is_available` and returns `ENODEV` after driver-core removal. A
-card never falls back to another registered display, so an open fd cannot be
-silently redirected when card indices are reused.
-
-`DrmCard::notify_removed` is the public wakeup hook for this lifecycle. devfs
-installs it as the card's removal callback and invokes it after removing the
-registry record and before releasing the character-device number. The method
-wakes `poll_rx`, causing blocked poll waiters to reevaluate `DrmCard::poll`;
-the failed display availability check then reports `POLLERR|POLLHUP`.
-
-## Buffer and framebuffer lifecycle
-
-`DRM_IOCTL_MODE_CREATE_DUMB` validates geometry, allocates zeroed contiguous
-`GlobalPage` backing, creates the display scanout resource, then publishes a
-handle and mmap offset in the dumb-buffer table. `DRM_IOCTL_MODE_DESTROY_DUMB`
-removes that table entry and asks the bound display to destroy the associated
-scanout resource. A missing handle is already destroyed and succeeds.
-
-`DRM_IOCTL_MODE_ADDFB2` validates one dumb-buffer handle and creates a
-framebuffer id that refers to its scanout resource. `DRM_IOCTL_MODE_RMFB`
-removes the framebuffer record and clears matching legacy CRTC state. mmap
-clones the dumb buffer's `GlobalPage` into `retained_pages` before installing a
-physical mapping. Because the mapping interface has no unmap notification,
-those clones remain until the `DrmCard` is dropped, allowing a mapping to
-outlive later framebuffer or dumb-table removal.
-
-## Concurrency model
-
-Separate mutexes protect modeset state, legacy CRTC state, dumb buffers,
-framebuffers, user and system blobs, retained pages, and the event queue. Ids,
-offsets, and event sequence numbers use atomics. The IN-FORMATS blob uses an
-atomic fast path plus a mutex-protected build-once section. The event queue is
-bounded and integrated with `PollSet`.
+may allocate, copy user memory, and acquire sleepable mutexes. No task or
+workqueue is created by this crate.
 
 ## Error model
 
-Invalid user pointers, object ids, array capacities, dimensions, formats, and
-unsupported ioctls return VFS errors. A removed display returns `ENODEV`;
-`poll` reports `POLLERR|POLLHUP`. Dumb-buffer pages remain retained while a
-mapping can reference them.
+Handlers and the object model return `DrmError`; `device.rs` maps it to the
+errno the syscall layer expects (`EINVAL`, `EOPNOTSUPP`, `ENODEV`, `EBUSY`,
+`EACCES`, `EPERM`, `ENOENT`, `ENOMEM`, `EIO`, `EFAULT`, `EAGAIN`). Unknown
+command numbers are `EOPNOTSUPP`.
 
-## Design decisions
+## Known limitations
 
-- Bind every instance to one class handle, allowing independent state for
-  multiple `cardN` nodes.
-- Keep node naming and numbering in devfs, the shared device-lifecycle owner.
-- Use local Linux UAPI structures with `repr(C)` and typed user-copy helpers.
-- Share one state model between legacy and atomic paths.
-- Retain mapped pages independently of framebuffer table lifetime.
-
-## Identity ioctl buffer contracts
-
-`DRM_IOCTL_VERSION` supports length-only queries with null pointers or zero
-capacities, and reports complete lengths even when only a prefix fits.
-`DRM_IOCTL_GET_UNIQUE` reports the calling file's master identity and copies
-only when the complete identity fits. An unset identity reports length zero
-without touching its destination, preserving libdrm's open-by-driver-name
-discovery. Neither query establishes an identity.
-
-Each open file description has typed `DrmFile` private data. The first open
-creates and owns a master; subsequent opens share that master. Duplicated file
-descriptors share the same binding. `SET_MASTER` rejects another active owner
-with `EBUSY`; a former owner reuses its master, whereas a client becoming owner
-creates a new master with an unset identity. `DROP_MASTER` and final owner close
-release active ownership without clearing identities held by older files.
-Private-state destruction also rolls back ownership for an unpublished open.
-The ioctl dispatcher resolves `DrmFile` once and passes its shared reference to
-the typed handlers.
-All raw helpers assert their command direction at
-compile time, so selecting a helper inconsistent with the ioctl encoding fails
-the build. Input-only commands, including SET_CLIENT_CAP and GEM_CLOSE, never
-write their request structures back. Bidirectional commands retain the
-read-and-write helper.
-
-`SET_VERSION` requires the calling file to be the current active owner, including
-for query-only requests. Other files receive `EACCES` without changing the shared
-master identity. A former owner must reacquire ownership before calling it.
-`SET_VERSION` validates the requested interface against 1.4 and driver versions
-against the advertised constants, treating major `-1` as a query. A valid
-interface request for 1.1 through 1.4 establishes the calling master's identity;
-query-only and 1.0 requests do not. As in Linux, interface processing precedes
-driver-version validation. Responses report the highest supported interface and
-driver versions, including for lower-version requests and validation errors.
-The established string remains the synthetic driver label; real PCI bus-id
-matching, leases, and complete KMS master authorization are not implemented by
-this change.
-
-## Legacy DRM authentication
-
-DRM_IOCTL_GET_MAGIC allocates one nonzero token per open file description in
-its bound master's registry and returns it through an output-only user buffer.
-Repeated requests return the same token while it remains registered. The
-active master may consume a client's token once with input-only
-DRM_IOCTL_AUTH_MAGIC; a later GET_MAGIC allocates a fresh token. Unknown,
-expired, and reused tokens fail. Tokens are removed when their file closes,
-moves to a new master, or its master stops being active. GET_MAGIC rejects
-files whose bound master is no longer active. Authentication is master-scoped
-and is serialized with master ownership changes. This implements the legacy
-token handshake; it does not add per-ioctl DRM_AUTH permission checks or
-complete KMS authorization.
+- No command submission (execbuf/virgl) and no dma-buf: PRIME is a stub and
+  `DRM_CAP_PRIME` is `0`.
+- One CRTC, connector, plane and encoder.
+- `DRM_AUTH` is not enforced per command; `MASTER` and the render allowlist are,
+  and mastership is answered by the device, not by per-file state.
+- Page-flip events live in one card-wide queue, as this driver has always done;
+  Linux queues them per file. With one master per card this is not observable in
+  practice, but a second descriptor could read events it did not request.
+- A legacy `PAGE_FLIP` on a disabled CRTC is rejected with `EINVAL`; it only
+  replaces the framebuffer of an active CRTC and never enables a disabled pipe.
+- A failed present cannot prove whether the host switched scanout, so every
+  attempted resource is retained until a later present succeeds. A master that
+  keeps issuing failing modesets can therefore retain one object per failure
+  (including its pages); this is the memory cost of never freeing pixels the
+  host may still scan, and it ends at the first successful present.
+- The portable unit tests cover the permission matrix, the capability table, the
+  mode-blob encoding and the FakeBackend invariants; the rest is covered by the
+  on-target `abi-tests/`.

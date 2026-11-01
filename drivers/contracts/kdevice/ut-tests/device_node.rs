@@ -20,6 +20,66 @@ fn node_kind_assigns_linux_name_and_number() {
 }
 
 #[def_test]
+fn render_node_derives_from_the_primary_index() {
+    let drm = DeviceNodeKind::Drm;
+    assert_eq!(drm.devname(0), "dri/card0");
+
+    let mut registry = DeviceNodeRegistry::new();
+    // Occupy index 0 first, so the node under test has a non-zero index: with
+    // index 0 the assertion could not tell `base + index` from `base`.
+    let (_first, ..) = registry
+        .register(
+            DeviceId::new(6),
+            DeviceNodeClass::Drm,
+            String::from("first"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 6 },
+        )
+        .expect("the first DRM node must fit");
+    let (node, ..) = registry
+        .register(
+            DeviceId::new(7),
+            DeviceNodeClass::Drm,
+            String::from("display"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 7 },
+        )
+        .expect("a DRM node must fit");
+    assert_ne!(node.index(), 0, "the test needs a non-zero card index");
+    let render = node
+        .render_device_number()
+        .expect("DRM nodes have a render minor");
+    assert_eq!(render.major(), DRM_MAJOR);
+    assert_eq!(render.minor(), DRM_RENDER_MINOR_BASE + node.index());
+    assert_eq!(
+        node.render_devname(),
+        Some(format!(
+            "dri/renderD{}",
+            DRM_RENDER_MINOR_BASE + node.index()
+        ))
+    );
+
+    let (input, ..) = registry
+        .register(
+            DeviceId::new(8),
+            DeviceNodeClass::Input(InputDeviceNodeMetadata::new(
+                String::from("keyboard"),
+                String::new(),
+                String::new(),
+                InputDeviceNodeId::new(1, 1, 1, 1),
+                Vec::new(),
+                BTreeMap::new(),
+            )),
+            String::from("keyboard"),
+            String::from("test"),
+            DeviceLocation::PlatformStatic { id: 8 },
+        )
+        .expect("an input node must fit");
+    assert_eq!(input.render_device_number(), None);
+    assert_eq!(input.render_devname(), None);
+}
+
+#[def_test]
 fn class_index_is_reused_only_after_release() {
     let mut registry = DeviceNodeRegistry::new();
     assert_eq!(registry.allocate_index(DeviceNodeKind::Input), Ok(0));

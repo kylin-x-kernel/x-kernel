@@ -1281,6 +1281,7 @@ dependencies = [
  "macros",
  "memaddr",
  "posix-types",
+ "unittest",
 ]
 
 [[package]]
