@@ -7,15 +7,16 @@ use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec, vec::Vec};
 use bitmaps::Bitmap;
 use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
 use kclass::{
-    ClassDevice,
+    ABS_CNT, AbsInfo, ClassDevice, PROP_BITMAP_LEN,
     prelude::{Event, EventType, InputDevice, InputDeviceImpl},
 };
 use kerrno::{KError, KResult};
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
+use ktask::future::block_on;
 use kvfs::{
     DeviceFileOps, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder, VfsInode,
-    VfsResult,
+    VfsResult, poll_file_io,
 };
 use linux_raw_sys::{
     general::{
@@ -251,6 +252,61 @@ impl EventDev {
         self.endpoint.detach();
     }
 
+    /// Handles `EVIOCGPROP`, the `INPUT_PROP_*` capability bitmap.
+    ///
+    /// The reply is zero-padded to the full `usize`-rounded bitmap length, but
+    /// the returned length is clipped to the caller's buffer like Linux
+    /// `bits_to_user`.
+    fn get_prop_bits(&self, arg: usize, size: usize) -> KResult<usize> {
+        if size == 0 {
+            return Ok(0);
+        }
+        let mut bits = [0u8; PROP_BITMAP_LEN];
+        if let Err(err) = self.device.get_prop_bits(&mut bits) {
+            warn!("Failed to get prop bits: {err:?}");
+            return Err(KError::Io);
+        }
+        let len = bits.len().min(size);
+        UserPtr::<u8>::from(arg).write_vm_slice(&bits[..len])?;
+        Ok(len)
+    }
+
+    /// Handles `EVIOCGABS(code)` for `code` in `0..ABS_CNT`.
+    ///
+    /// Mirrors Linux `evdev_do_ioctl`: a device without `EV_ABS` capability
+    /// returns `EINVAL`, while an axis the device does not report succeeds with
+    /// the zero-filled `input_absinfo` that the input core would contain. The
+    /// live scalar value comes from inputdev, which observes `EV_ABS` events
+    /// even when no evdev file is open; MT payload axes stay outside the
+    /// scalar snapshot.
+    fn get_abs_info(&self, arg: usize, size: usize, code: u8) -> KResult<usize> {
+        // Check support before honoring a zero-length request: Linux rejects
+        // `EVIOCGABS` on devices without `EV_ABS` even if size is zero.
+        if !self.ev_bits.get(EventType::Absolute as usize) {
+            return Err(KError::InvalidInput);
+        }
+        if size == 0 {
+            return Ok(0);
+        }
+        let info = match self.device.abs_info(u16::from(code)) {
+            Ok(info) => info,
+            Err(err) => {
+                warn!("Failed to query abs info for axis {code}: {err:?}");
+                return Err(KError::Io);
+            }
+        };
+        let value = self
+            .endpoint
+            .abs_value(u16::from(code))
+            .ok_or(KError::InvalidInput)?;
+        let abs = abs_info_reply(info, value);
+        let bytes = abs.as_bytes();
+        let len = bytes.len().min(size);
+        UserPtr::<u8>::from(arg).write_vm_slice(&bytes[..len])?;
+        // Linux returns 0 for EVIOCGABS; the command encodes the copied size.
+        Ok(0)
+    }
+
     fn get_event_bits(&self, arg: usize, size: usize, ty: u8) -> KResult<usize> {
         let user_bits = UserPtr::<u8>::from(arg);
         if ty == 0 {
@@ -259,7 +315,11 @@ impl EventDev {
             Ok(len)
         } else {
             let ty = EventType::from_repr(ty).ok_or(KError::InvalidInput)?;
-            let mut bits = vec![0u8; size];
+            // Linux clips the bitmap to the event type's declared width before
+            // copying. Doing the same here bounds the kernel allocation by the
+            // ABI size instead of by a user-controlled ioctl length.
+            let len = size.min(ty.bits_count().div_ceil(8));
+            let mut bits = vec![0u8; len];
             match self.device.get_event_bits(ty, &mut bits) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -269,8 +329,7 @@ impl EventDev {
                     warn!("Failed to get event bits: {err:?}");
                 }
             }
-            let len = bits.len().min(ty.bits_count().div_ceil(8));
-            user_bits.write_vm_slice(&bits[..len])?;
+            user_bits.write_vm_slice(&bits)?;
             Ok(len)
         }
     }
@@ -317,6 +376,51 @@ struct InputEvent {
     value: i32,
 }
 
+/// Decodes the axis code from an `EVIOCGABS(code)` request number.
+///
+/// Linux encodes the axis directly in the low command byte starting at
+/// `ABS_CNT`; the generic `EVIOCGBIT` range ends immediately below it.
+fn decode_abs_request(nr: u8) -> Option<u8> {
+    let code = nr.checked_sub(ABS_CNT as u8)?;
+    (usize::from(code) < ABS_CNT).then_some(code)
+}
+
+/// Builds the exact reply Linux would send for one `EVIOCGABS` axis.
+///
+/// An axis the driver does not report is a success with a completely
+/// zero-filled descriptor. Linux copies that zeroed slot only for an
+/// unadvertised axis, so any core-tracked value is deliberately ignored.
+fn abs_info_reply(info: Option<AbsInfo>, value: i32) -> InputAbsInfo {
+    info.map_or_else(InputAbsInfo::default, |info| InputAbsInfo::new(info, value))
+}
+
+/// Linux `struct input_absinfo`, returned by `EVIOCGABS(code)`.
+///
+/// `value` is the most recent `EV_ABS` value observed by the input layer.
+#[repr(C)]
+#[derive(Default, FromBytes, IntoBytes, Immutable)]
+struct InputAbsInfo {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+}
+
+impl InputAbsInfo {
+    const fn new(info: AbsInfo, value: i32) -> Self {
+        Self {
+            value,
+            minimum: info.min,
+            maximum: info.max,
+            fuzz: info.fuzz,
+            flat: info.flat,
+            resolution: info.res,
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub(crate) extern "C" fn ongkey() {
@@ -353,7 +457,12 @@ impl DeviceFileOps for EventDev {
         let client = file
             .private_data_get::<EventClient>()
             .ok_or(KError::BadFileDescriptor)?;
-        client.read(buf)
+        block_on(poll_file_io(
+            client.as_ref(),
+            IoEvents::IN,
+            file.is_nonblocking(),
+            || client.read(buf),
+        ))
     }
 
     fn flags(&self) -> NodeFlags {
@@ -425,11 +534,7 @@ impl DeviceFileOps for EventDev {
                                 return return_str(arg, size, &value);
                             }
                             // EVIOCGPROP
-                            0x09 => {
-                                // For some reasons virtio does not provide prop
-                                // bits for now
-                                return Ok(0);
-                            }
+                            0x09 => return self.get_prop_bits(arg, size),
                             // EVIOCGKEY
                             0x18 => {
                                 let key_bits = self.endpoint.key_state();
@@ -454,10 +559,8 @@ impl DeviceFileOps for EventDev {
                         if nr & !EventType::MAX == EventType::COUNT {
                             return self.get_event_bits(arg, size, nr & EventType::MAX);
                         }
-                        const ABS_CNT: u8 = 0x40;
-                        if nr & !(ABS_CNT - 1) == ABS_CNT {
-                            // TODO: abs info
-                            return Ok(0);
+                        if let Some(code) = decode_abs_request(nr) {
+                            return self.get_abs_info(arg, size, code);
                         }
                         return Err(KError::InvalidInput);
                     }

@@ -24,7 +24,13 @@ or hardware registers directly and contains no unsafe code.
   happen in task context.
 - No endpoint lock is held while reading the driver or invoking a listener.
 - A partial input frame contains at most 256 events. Device-wide key state is
-  updated only for codes within the key bitmap.
+  updated only for valid key transitions, and scalar absolute-axis state only
+  for codes within `ABS_CNT`. Multi-touch payload axes are excluded because
+  Linux keeps them per slot; `ABS_MT_SLOT` records only a selector inside the
+  advertised slot range that is flushed by an MT payload, and drops selectors
+  outside that range.
+- Absolute-axis values are signed `i32` snapshots reconstructed from the
+  unsigned evdev wire value; no clamping is applied to hardware-origin data.
 - A detached endpoint cannot accept new listeners or distribute new frames.
 - Removal stops the notifier before waiting for the poller to finish.
 
@@ -43,12 +49,13 @@ pair, so resynchronization does not silently change clock domains.
 | T-03 | Device reports an out-of-range key code | Bitmap corruption | Hardware-origin `EV_KEY` code exceeds `KEY_COUNT` | Check the code before changing the bitmap. |
 | T-04 | Slow or absent file reader holds the hardware queue | Input stalls for every reader | Events remain in the VirtIO used ring | The endpoint drains the driver independently of file readers; each listener bounds its own queue. |
 | T-05 | Removal races a scheduled event read | Freed transport or stale callback | Device removal while work is pending | Detach removes the notifier, shuts down and drains the work handle, then detaches listeners. It runs on removal notification and does not ensure that the worker stops before driver-resource cleanup. |
+| T-06 | Device reports an out-of-range absolute-axis code | Stale or aliased axis position | Hardware-origin `EV_ABS` code exceeds `ABS_CNT` | Bounds-check the code before updating `abs_values`; out-of-range events are ignored while the rest of the frame is still delivered. Multi-touch payload codes are routed away from the scalar snapshot. |
 
 ## Failure handling and limitations
 
 Work-handle preparation or notifier attachment errors prevent endpoint publication and
 are logged. An event read error ends the current poll round; a later device
-notification may retry it. The input layer keeps key state after a client
-queue overflows so userspace can query current state during resynchronization.
-The input layer does not interpret unknown event categories or implement
-evdev grab policy.
+notification may retry it. The input layer keeps key and absolute-axis state
+after a client queue overflows so userspace can query current state during
+resynchronization. The input layer does not interpret unknown event categories
+or implement evdev grab policy.

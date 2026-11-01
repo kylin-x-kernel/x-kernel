@@ -239,3 +239,51 @@ fn clock_pending_state_preserves_read_size_and_detach_contracts() {
     client.receive_frame(&frame());
     assert!(client.state.lock().events.is_empty());
 }
+
+#[def_test]
+fn abs_info_matches_linux_input_absinfo_layout() {
+    assert_eq!(size_of::<InputAbsInfo>(), 6 * size_of::<i32>());
+
+    let info = InputAbsInfo::new(AbsInfo::new(0, 32_767, 1, 2, 3), -17);
+    assert_eq!(info.value, -17);
+    assert_eq!(info.minimum, 0);
+    assert_eq!(info.maximum, 32_767);
+    assert_eq!(info.fuzz, 1);
+    assert_eq!(info.flat, 2);
+    assert_eq!(info.resolution, 3);
+}
+
+#[def_test]
+fn abs_info_preserves_signed_axis_fields() {
+    let info = InputAbsInfo::new(AbsInfo::new(-1024, 1024, 0, 0, 0), 23);
+    assert_eq!(info.minimum, -1024);
+    assert_eq!(info.maximum, 1024);
+}
+
+#[def_test]
+fn abs_info_reply_combines_static_metadata_with_core_value() {
+    let present = abs_info_reply(Some(AbsInfo::new(-1024, 1024, 0, 0, 0)), 9);
+    assert_eq!(present.value, 9);
+    assert_eq!(present.minimum, -1024);
+    assert_eq!(present.maximum, 1024);
+
+    // Linux zeroes the whole slot for an unregistered axis, including `value`.
+    let absent = abs_info_reply(None, -5);
+    assert_eq!(absent.as_bytes(), &[0u8; 6 * size_of::<i32>()]);
+}
+
+#[def_test]
+fn abs_request_decoder_accepts_only_the_eviocgabs_range() {
+    assert_eq!(decode_abs_request(0x3f), None);
+    assert_eq!(decode_abs_request(0x40), Some(0));
+    assert_eq!(decode_abs_request(0x41), Some(1));
+    assert_eq!(decode_abs_request(0x7f), Some(ABS_CNT as u8 - 1));
+    assert_eq!(decode_abs_request(0x80), None);
+    assert_eq!(decode_abs_request(0xff), None);
+}
+
+#[def_test]
+fn prop_bitmap_rounds_up_to_a_full_usize_word() {
+    assert_eq!(PROP_BITMAP_LEN, size_of::<usize>());
+    assert!(PROP_BITMAP_LEN * 8 > 0x1f);
+}

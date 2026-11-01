@@ -225,7 +225,7 @@ impl Transport for GpuTestTransport {
 
 fn new_gpu() -> (super::VirtIoGpu2d<MockHal, GpuTestTransport>, Arc<SpinNoIrq<GpuQueue>>) {
     let base = MockTransport::new_with_type(DeviceType::GPU);
-    base.config_space.borrow_mut()[8..12].copy_from_slice(&1u32.to_le_bytes());
+    base.config_space.lock()[8..12].copy_from_slice(&1u32.to_le_bytes());
     let queue = Arc::new(SpinNoIrq::new(GpuQueue::default()));
     let transport = GpuTestTransport { base, queue: queue.clone() };
     let mut gpu = super::VirtIoGpu2d::new(transport).unwrap();

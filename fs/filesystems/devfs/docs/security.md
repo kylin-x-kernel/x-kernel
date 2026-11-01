@@ -76,6 +76,19 @@ The evdev path copies user buffers through `UserPtr`; device events and
 capability bitmaps originate from the backing input driver. The DRM user-memory
 boundary is documented in `io/drmdevice/docs/security.md`.
 
+`EVIOCGPROP` and `EVIOCGABS` write into a zeroed kernel scratch value and
+copy at most the caller's requested length through `UserPtr`. A driver that
+reports a short bitmap therefore exposes zeros, never stale kernel bytes.
+`EVIOCGBIT` clips the requested length to the event type's declared bitmap
+width before allocating its scratch buffer, so a user-controlled ioctl length
+cannot force an oversized kernel allocation.
+`EVIOCGPROP` returns the clipped copy length like Linux `bits_to_user`, so a
+caller with a shorter buffer can detect truncation from the return value.
+`EVIOCGABS` always returns 0 when it succeeds, matching Linux, even when the
+caller's buffer is shorter than `struct input_absinfo`. Its `value` field is a
+snapshot obtained from `inputdev`; static metadata comes from the driver and
+is never copied directly from device config space by devfs.
+
 For a live device, `EventDev::read` accepts an empty buffer as a successful
 zero-byte read. A nonempty buffer shorter than one `InputEvent` is rejected
 with `EINVAL`; larger buffers receive only complete event records. The exported
@@ -137,6 +150,8 @@ provider crates.
   at the time of lookup.
 - Each open evdev file has a bounded queue and its own `PollSet`. The caller
   rechecks readiness after registering a waiter with that set.
+- Evdev capability ioctls zero-fill their scratch buffer before the driver
+  writes and never copy more than the caller's buffer length.
 
 ## Thread safety
 
@@ -159,6 +174,7 @@ and wakes client-owned poll registrations.
 | T-05 | Removed device remains apparently readable | Medium — callers could mistake stale data or delayed errors for live hardware | An fd survives hot-unplug | evdev checks class availability before read/poll and returns `ENODEV` or poll error/hangup even before client detach; DRM checks `ClassDevice::is_available`. |
 | T-06 | An input event arrives between readiness check and waiter registration | Medium — a reader could sleep despite queued input | The queue changes while a task is preparing to sleep | Registration precedes the caller's second readiness check; either the client `PollSet` wake or the recheck observes the event. |
 | T-07 | One slow reader exhausts input buffers | Medium — another reader loses events or the VirtIO queue stalls | A process leaves its event file open without reading | Each file has a 256-event cap; overflow emits `SYN_DROPPED`; inputdev continues draining the hardware queue. |
+| T-08 | Short driver capability reply exposes stale kernel memory | High — kernel stack/heap disclosure | A driver reports fewer bitmap bytes than the ioctl buffer | The ioctl zero-fills its scratch bitmap and abs value before querying; the driver can only overwrite initialized bytes, and the user copy is clipped to the requested length. |
 
 Queued input records retain the clock selected when they were enqueued.
 The timekeeper supplies a correlated pair at event receipt, preventing delayed
@@ -178,6 +194,8 @@ limitation must not be presented as a complete suspend-aware clock.
 | F-03 | Active class handle cannot be found for an add event | The `/dev` node is absent | sysfs may still expose the identity | 3 | Log the inconsistent activation ordering; `kclass` publishes nodes only from the active transition. |
 | F-04 | Removal wins during initial snapshot insertion | The callback waits for initialization | No stale node survives | 4 | Initialization holds the projection mutex across subscription and snapshot insertion, then the queued remove callback deletes the record. |
 | F-05 | Client poll registration is rejected | The current poll operation fails | The task does not sleep without a wake source | 3 | Propagate `PollRegisterError`. |
+| F-06 | Driver fails an abs or property query | Both ioctls return `EIO` | Userspace cannot mistake a backend failure for an absent axis or property | 4 | Log the driver error; do not mask it as a zero-filled success. |
+| F-07 | Userspace supplies a shorter abs/property buffer | Copy is clipped; `EVIOCGPROP` reports the clipped length, `EVIOCGABS` returns 0 | Caller can detect truncation for the bitmap but not the fixed-size abs record | 4 | Bound the copy by the requested length; match Linux's per-ioctl return convention. |
 
 ## Known limitations
 
@@ -185,6 +203,15 @@ limitation must not be presented as a complete suspend-aware clock.
 - An input driver must provide event notification for inputdev to create an
   endpoint and devfs to publish its event file.
 - There are no DRM render nodes because the DRM implementation is KMS-only.
+- `EVIOCGABS` succeeds with a zero-filled record for an axis the device has
+  but does not report, and returns `EINVAL` only when the cached event bitmap
+  lacks `EV_ABS`, matching Linux. A driver query failure is surfaced as
+  `EIO` rather than Linux's per-device error code.
+- A scalar axis position is only as fresh as the last corresponding `EV_ABS`
+  event inputdev has drained; devfs does not poll hardware while serving the
+  ioctl. Multi-touch payload axes read as zero and `ABS_MT_SLOT` as the last
+  flushed slot, because Linux keeps per-slot values outside
+  `input_absinfo.value`.
 
 ## Audit checklist
 

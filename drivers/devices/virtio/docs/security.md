@@ -126,7 +126,10 @@ host 通过 `device_res` 注册和释放 handler；释放过程会等待正在�
 
 `inputdev` 的任务上下文 worker 在通知后调用 `pop_pending_event()`，即使没有文件读者
 也会回收完成的描述符。因此，不可信的事件内容不会在硬中断上下文中进入用户缓冲区；
-输入层负责帧界限和按键码范围检查，devfs 负责每个打开文件的有界队列。
+The input layer enforces frame boundaries and key/absolute-axis code ranges;
+devfs owns a bounded queue for each open file. Axis metadata is immutable after
+probing. `EVIOCGABS` reads that cache and combines it with the live value from
+`inputdev`; it never re-parses device-supplied config words on the ioctl path.
 
 ## unsafe 代码清单
 
@@ -297,8 +300,10 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | `VirtIo9pDev<H, T>` | `H: Hal, T: Transport`（手动 impl） | `H: Hal, T: Transport`（手动 impl） |
 
 **说明**：所有设备类型的手动 `Send`/`Sync` impl 依赖以下保证：
-- blk 和 input 使用内部 `SpinNoIrq` 状态；其他非 net 设备通过独占的 `&mut self`
-  访问，不使用内部可变性。
+- blk and input use internal `SpinNoIrq` state to protect queues and the
+  transport. Input capability bitmaps and axis metadata are immutable after
+  probing. Other non-net devices are accessed through exclusive `&mut self`
+  and do not use interior mutability.
 - net 设备通过 `SpinNoIrq` 保护共享的 `InnerDev`，中断回调和正常路径互斥。
 
 ## 威胁分析

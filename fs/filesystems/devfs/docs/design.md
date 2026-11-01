@@ -64,9 +64,9 @@ fs/filesystems/devfs/src/
 Guest tests live in `ut-tests/{cpu_dma_latency,dtb,event,loop,null_zero_full,pts,random,serial}.rs`.
 Each file is mounted by `unittest::path_mod_test!` as the original private
 `nodes::<name>::tests` module under `cfg(unittest)`, preserving access to
-node-local fixtures and implementation details. The 33 cases include 11 event
+node-local fixtures and implementation details. The 44 cases include 16 event
 tests gated by the `input` feature and one UART numbering test gated by
-`serial`; the other 21 cases have no additional feature gate.
+`serial`; the other 27 cases have no additional feature gate.
 
 `ut-tests/pts.rs` retains the two serial cases previously included from
 `src/tests/pts.rs` by `nodes::pts::tests`. They remain registered guest tests
@@ -234,6 +234,34 @@ pending-packet behavior without introducing a general packet-buffer rewrite.
 Variable-length evdev string ioctls follow Linux `str_to_user` behavior. The
 terminating NUL is copied when it fits; a shorter user buffer receives the
 requested string prefix without reserving one byte for a terminator.
+
+`EVIOCGPROP` returns the device's `INPUT_PROP_*` bitmap as a
+`usize`-rounded, zero-padded byte array (8 bytes on a 64-bit target), clipped
+to the caller's buffer. It returns the clipped copy length, matching Linux
+`bits_to_user`; a device that reports no property bitmap yields all zeros.
+`EVIOCGABS(code)` accepts request numbers `0x40..=0x7f` (axis codes
+`0..0x3f`) and reconstructs the Linux
+`struct input_absinfo` (`value`, `min`, `max`, `fuzz`, `flat`, `res`; six
+`__s32`, 24 bytes). The static `min`/`max`/`fuzz`/`flat`/`res` fields come
+from the driver's `AbsInfo`; `value` is the scalar axis position tracked by
+`inputdev`, so the reply does not depend on the driver caching event state.
+Multi-touch payload axes report zero because Linux keeps them per slot;
+`ABS_MT_SLOT` reports the last slot flushed by MT payload. All six fields are
+already signed and are copied without casts. The copy is clipped to 24 bytes
+and returns 0 like Linux `evdev_do_ioctl`.
+
+The `EV_ABS` capability is read from the event bitmap cached when the evdev
+node is created. A device without that capability returns `EINVAL`, matching
+Linux's unallocated `dev->absinfo`, even for a zero-length request. With
+`EV_ABS` present, a zero-length request succeeds with 0, an axis the device
+has but does not advertise succeeds with a fully zeroed descriptor (including
+`value`), and a failed driver query returns `EIO`.
+
+Reads honor the open-file blocking mode. In blocking mode an empty queue
+waits on the client's `PollSet` through `poll_file_io`; a signal that leaves
+the queue empty returns `EINTR` (`KError::IoWaitInterrupted`) instead of
+spinning, and `O_NONBLOCK` reports `EAGAIN`. Zero-length and undersized
+buffers keep their immediate results and never wait.
 
 For readable waits, `EventClient::register` attaches the waiter to the
 client's `PollSet`. Enqueue and detach both wake that set. The caller rechecks

@@ -91,11 +91,17 @@ unsafe impl Hal for MockHal {
     }
 }
 
+/// Selector-aware config-space responder used by multi-query probes.
+type ConfigHandler = dyn Fn(u8, u8, usize) -> u8 + Send + Sync;
+
 pub struct MockTransport {
     pub device_type: DeviceType,
+    /// Optional selector-aware config-space responder for multi-query probes.
+    pub config_handler: Option<Arc<ConfigHandler>>,
     pub status: RefCell<DeviceStatus>,
     pub features: u64,
-    pub config_space: RefCell<[u8; 256]>,
+    pub config_space: Arc<kspin::SpinNoIrq<[u8; 256]>>,
+    pub config_read_count: Arc<AtomicUsize>,
     pub interrupt_ack_count: Arc<AtomicUsize>,
     pub interrupt_status: Arc<AtomicUsize>,
     pub queue: Option<Arc<kspin::SpinNoIrq<MockQueue>>>,
@@ -118,9 +124,11 @@ impl MockTransport {
     pub fn new_with_type(device_type: DeviceType) -> Self {
         Self {
             device_type,
+            config_handler: None,
             status: RefCell::new(DeviceStatus::empty()),
             features: 0,
-            config_space: RefCell::new([0; 256]),
+            config_space: Arc::new(kspin::SpinNoIrq::new([0; 256])),
+            config_read_count: Arc::new(AtomicUsize::new(0)),
             interrupt_ack_count: Arc::new(AtomicUsize::new(0)),
             interrupt_status: Arc::new(AtomicUsize::new(0)),
             queue: None,
@@ -203,15 +211,30 @@ impl Transport for MockTransport {
     }
 
     fn read_config_space<T: FromBytes + IntoBytes>(&self, offset: usize) -> Result<T> {
+        self.config_read_count.fetch_add(1, Ordering::Relaxed);
         let size = core::mem::size_of::<T>();
-        let config = self.config_space.borrow();
-        if offset
-            .checked_add(size)
-            .is_none_or(|end| end > config.len())
-        {
-            return Err(Error::ConfigSpaceTooSmall);
+        // Capture the selector before invoking the handler: a handler may
+        // inspect the same config space, so the lock must not be held across
+        // the callback.
+        let (select, subsel) = {
+            let config = self.config_space.lock();
+            if offset
+                .checked_add(size)
+                .is_none_or(|end| end > config.len())
+            {
+                return Err(Error::ConfigSpaceTooSmall);
+            }
+            (config[0], config[1])
+        };
+
+        if let Some(handler) = self.config_handler.as_deref() {
+            let bytes: alloc::vec::Vec<u8> = (0..size)
+                .map(|index| handler(select, subsel, offset + index))
+                .collect();
+            return T::read_from_bytes(&bytes).map_err(|_| Error::ConfigSpaceTooSmall);
         }
 
+        let config = self.config_space.lock();
         T::read_from_bytes(&config[offset..offset + size]).map_err(|_| Error::ConfigSpaceTooSmall)
     }
 
@@ -221,7 +244,7 @@ impl Transport for MockTransport {
         value: T,
     ) -> Result<()> {
         let bytes = value.as_bytes();
-        let mut config = self.config_space.borrow_mut();
+        let mut config = self.config_space.lock();
         if offset
             .checked_add(bytes.len())
             .is_none_or(|end| end > config.len())

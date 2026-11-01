@@ -80,7 +80,7 @@ Feature flags 控制编译哪些设备适配器：
 | `lib.rs` | 设备探测（`probe_mmio_device` / `probe_pci_device`）、VirtIO 错误到 `DriverError` 的转换、公共类型 re-export |
 | `blk.rs` / `blk/requests.rs` | `VirtIoBlkDev` 实现 `BlockDeviceOperations`，管理准入、请求及 DMA 回收 |
 | `gpu.rs` | 将 `VirtIOGpu` 封装为实现 `DisplayDevice` 的 `VirtIoGpuDev` |
-| `input.rs` | 将 `VirtIOInput` 封装为实现 `InputDevice` 的 `VirtIoInputDev`，在 IRQ 中确认 ISR 并通知输入层延迟取事件 |
+| `input.rs` | Wraps `VirtIOInput` as `VirtIoInputDev`, which implements `InputDevice`; probes and caches static capability bitmaps and axis metadata, acknowledges the ISR in IRQ context, and asks the input layer to drain events in task context. |
 | `net.rs` | 将 `VirtIONetRaw` 封装为实现 `NetDevice` 的 `VirtIoNetDev`，管理收发缓冲区、IRQ ack 和网络 RX scheduler 调度 |
 | `socket.rs` | 将 `VirtIOSocket` 封装为实现 `VsockDevice` 的原始包收发适配器 `VirtIoVsockDev`；连接状态由 `net/knet` 的 `VSOCK_CONN_MANAGER` 持有 |
 | `virtio_9p.rs` | 将 `VirtIO9p` 封装为实现 `Virtio9pDevice` 的 `VirtIo9pDev`，提供 `mount_tag()` 和 `request()` |
@@ -353,6 +353,19 @@ passes; caller-side waits use the common block adapter only.
 1. 调用 `get_event_bits(ty, out)` → `inner.query_config_select(EvBits, ty, out)`
 2. 设备将事件位图写入 `out` 缓冲区
 3. 返回 `true`（有数据）或 `false`（无数据）
+4. `try_new` also probes `EvBits(EV_ABS)`, `AbsInfo`, and `PROP_BITS`. It
+   decodes the five `__s32` fields of every advertised axis into immutable
+   `AbsInfo` values and copies the property bitmap into a fixed-length cache.
+   Later `EVIOCGABS`/`EVIOCGPROP` calls do not touch config space.
+5. `abs_info(code)` returns only cached static axis metadata. `inputdev`
+   maintains the scalar axis position from the `EV_ABS` stream; the driver
+   does not duplicate event state.
+
+A failed config query is treated as "not advertised": probing still completes,
+`abs_info` returns `None`, and `inputdev` applies Linux zero-filled
+`input_absinfo` semantics for an unadvertised axis. `EV_ABS` support itself is
+decided by the event bitmap, so a device without absolute axes never enters
+the per-axis query path.
 
 ### 网络设备收发
 

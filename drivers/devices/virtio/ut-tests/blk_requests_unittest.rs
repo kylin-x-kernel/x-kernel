@@ -307,9 +307,9 @@ fn disk(features: u64, is_immediate: bool) -> (Arc<Disk>, Arc<SpinNoIrq<Hardware
 pub fn block_test_disk(features: u64, is_immediate: bool) -> (Arc<Disk>, Arc<SpinNoIrq<Hardware>>) {
     let mut base = MockTransport::new();
     base.features = features;
-    base.config_space.borrow_mut()[..8].copy_from_slice(&1024u64.to_le_bytes());
-    base.config_space.borrow_mut()[8..12].copy_from_slice(&1024u32.to_le_bytes());
-    base.config_space.borrow_mut()[12..16]
+    base.config_space.lock()[..8].copy_from_slice(&1024u64.to_le_bytes());
+    base.config_space.lock()[8..12].copy_from_slice(&1024u32.to_le_bytes());
+    base.config_space.lock()[12..16]
         .copy_from_slice(&(MAX_DATA_SEGMENTS as u32).to_le_bytes());
     let hardware = Arc::new(SpinNoIrq::new(Hardware {
         is_immediate,
@@ -333,9 +333,9 @@ struct Signals {
 fn polling_requests_reclaim_split_transfers_without_interrupts() {
     let mut base = MockTransport::new();
     base.features = (1 << 1) | (1 << 2); // SIZE_MAX and SEG_MAX.
-    base.config_space.borrow_mut()[..8].copy_from_slice(&1024u64.to_le_bytes());
-    base.config_space.borrow_mut()[8..12].copy_from_slice(&1024u32.to_le_bytes());
-    base.config_space.borrow_mut()[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    base.config_space.lock()[..8].copy_from_slice(&1024u64.to_le_bytes());
+    base.config_space.lock()[8..12].copy_from_slice(&1024u32.to_le_bytes());
+    base.config_space.lock()[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
     let hardware = Arc::new(SpinNoIrq::new(Hardware {
         is_immediate: true,
         ..Default::default()

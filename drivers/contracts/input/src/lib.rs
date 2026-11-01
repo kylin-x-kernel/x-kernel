@@ -120,25 +120,58 @@ impl InputDeviceId {
     }
 }
 
-/// Axis information for absolute input devices.
+/// Number of absolute-axis codes addressable by `EVIOCGABS`.
+pub const ABS_CNT: usize = 0x40;
+
+/// Length of an `EV_ABS` capability bitmap in bytes.
+pub const ABS_BITMAP_LEN: usize = ABS_CNT.div_ceil(u8::BITS as usize);
+
+/// Selects the multi-touch slot used by the following `ABS_MT_*` payload.
+pub const ABS_MT_SLOT: u16 = 0x2f;
+
+/// First multi-touch payload axis. Linux stores these values per slot.
+pub const ABS_MT_FIRST: u16 = 0x30;
+
+/// Last multi-touch payload axis (`ABS_MT_TOOL_Y`).
+///
+/// Codes above this value, up to `ABS_MAX`, are scalar axes in Linux.
+pub const ABS_MT_LAST: u16 = 0x3d;
+
+/// Highest `INPUT_PROP_*` code defined by Linux.
+pub const INPUT_PROP_MAX: usize = 0x1f;
+
+/// Full length of the `EVIOCGPROP` bitmap before clipping to the caller.
+///
+/// Linux rounds the `INPUT_PROP_MAX` bit range up to a full `usize` word.
+pub const PROP_BITMAP_LEN: usize =
+    INPUT_PROP_MAX.div_ceil(usize::BITS as usize) * core::mem::size_of::<usize>();
+
+/// Static metadata for one absolute axis.
+///
+/// This is the driver-owned half of Linux `struct input_absinfo`: the five
+/// calibration and resolution fields of an axis that exists. The live value is
+/// deliberately not part of the driver contract because the input core owns it,
+/// just as it owns key state. The metadata and the live value are signed Linux
+/// `__s32` values; [`Event::value`] carries the same bit pattern in an unsigned
+/// transport word.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct AbsInfo {
     /// The minimum value for the axis.
-    pub min: u32,
+    pub min: i32,
     /// The maximum value for the axis.
-    pub max: u32,
+    pub max: i32,
     /// The fuzz value used to filter noise from the event stream.
-    pub fuzz: u32,
-    /// The size of the dead zone; values less than this will be reported as 0.
-    pub flat: u32,
+    pub fuzz: i32,
+    /// The size of the dead zone; values less than this are reported as 0.
+    pub flat: i32,
     /// The resolution for values reported for the axis.
-    pub res: u32,
+    pub res: i32,
 }
 
 impl AbsInfo {
-    /// Creates an absolute-axis descriptor.
-    pub const fn new(min: u32, max: u32, fuzz: u32, flat: u32, res: u32) -> Self {
+    /// Creates absolute-axis metadata.
+    pub const fn new(min: i32, max: i32, fuzz: i32, flat: i32, res: i32) -> Self {
         Self {
             min,
             max,
@@ -174,7 +207,45 @@ pub trait InputDevice: Device {
     ///
     /// Returns true if the event type is supported and the bitmap is written to
     /// `out`.
+    ///
+    /// `out` may be empty when the caller only probes support. The return value
+    /// must reflect the device capability and must not depend on `out.len()`.
+    /// When supported, implementations write at most `out.len()` leading bitmap
+    /// bytes and leave the remainder untouched.
     fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool>;
+
+    /// Returns the static metadata of one absolute axis.
+    ///
+    /// `code` is an `ABS_*` event code. `Some` means the device advertises that
+    /// axis and returned its calibration metadata. `None` means the axis is not
+    /// advertised; this covers both a device without `EV_ABS` and an `EV_ABS`
+    /// device that does not expose this particular axis. Linux exposes a
+    /// zero-filled `input_absinfo` in the latter case.
+    ///
+    /// Whether the device supports `EV_ABS` at all is a capability question and
+    /// is answered by [`Self::get_event_bits`]; a device without `EV_ABS` never
+    /// reaches this method through evdev. Drivers must not include the live axis
+    /// position here: the input core tracks it from the `EV_ABS` event stream.
+    ///
+    /// Drivers that have no absolute axes may use the default implementation.
+    fn abs_info(&self, _code: u16) -> DriverResult<Option<AbsInfo>> {
+        Ok(None)
+    }
+
+    /// Fetches the `INPUT_PROP_*` capability bitmap.
+    ///
+    /// The bitmap is a little-endian bit array indexed by property code, using
+    /// the same layout as `get_event_bits`. Implementations fill the leading
+    /// bytes they report and leave the rest of `out` untouched. Returns true
+    /// when the device returned a property bitmap (which may be all zeros)
+    /// and false when it reports none.
+    /// Callers that return a fixed ABI bitmap length must zero `out` first;
+    /// implementations are not required to clear the bytes they do not fill.
+    ///
+    /// Drivers that report no properties may use the default implementation.
+    fn get_prop_bits(&self, _out: &mut [u8]) -> DriverResult<bool> {
+        Ok(false)
+    }
 
     /// Reads an input event from the device.
     ///

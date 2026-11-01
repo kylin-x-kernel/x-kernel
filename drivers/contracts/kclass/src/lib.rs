@@ -277,9 +277,12 @@ pub use display::{DisplayDevice, DisplayInfo};
 /// Re-export the hardware entropy source contract.
 #[cfg(feature = "hwrng")]
 pub use hwrng::HwrngDevice;
-/// Re-export input device trait, event types, and identity types.
+/// Re-export input device trait, event types, identity types, and axis info.
 #[cfg(feature = "input")]
-pub use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
+pub use input::{
+    ABS_BITMAP_LEN, ABS_CNT, ABS_MT_FIRST, ABS_MT_LAST, ABS_MT_SLOT, AbsInfo, Event, EventType,
+    InputDevice, InputDeviceId, InputEventNotifier, PROP_BITMAP_LEN,
+};
 /// Re-export network device trait, buffer handle, and RX scheduler capability.
 #[cfg(feature = "net")]
 pub use net::{NetBufHandle, NetDevice, NetRxScheduler};
@@ -460,6 +463,14 @@ impl InputDevice for ClassDevice<InputDeviceImpl> {
 
     fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
         self.with(|device| device.get_event_bits(ty, out))
+    }
+
+    fn abs_info(&self, code: u16) -> DriverResult<Option<AbsInfo>> {
+        self.with(|device| device.abs_info(code))
+    }
+
+    fn get_prop_bits(&self, out: &mut [u8]) -> DriverResult<bool> {
+        self.with(|device| device.get_prop_bits(out))
     }
 
     fn read_event(&self) -> DriverResult<Event> {

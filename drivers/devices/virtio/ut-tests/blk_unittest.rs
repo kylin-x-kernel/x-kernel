@@ -25,7 +25,7 @@ fn test_virtio_blk_init_failure_handling() {
 
     let mut transport = MockTransport::new();
     transport.features = 1 << 1; // SIZE_MAX.
-    transport.config_space.borrow_mut()[8..12]
+    transport.config_space.lock()[8..12]
         .copy_from_slice(&((SECTOR_SIZE - 1) as u32).to_le_bytes());
     assert!(matches!(
         VirtIoBlkDev::<MockHal, MockTransport>::try_new(transport),

@@ -4,10 +4,14 @@
 
 //! VirtIO input driver adapter.
 use alloc::{string::String, sync::Arc};
+use core::mem::size_of;
 
 use device_res::{IrqEvent, IrqHandler};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
-use input::{Event, EventType, InputDevice, InputDeviceId, InputEventNotifier};
+use input::{
+    ABS_BITMAP_LEN, ABS_CNT, AbsInfo, Event, EventType, InputDevice, InputDeviceId,
+    InputEventNotifier, PROP_BITMAP_LEN,
+};
 use kspin::SpinNoIrq;
 use virtio_drivers::{
     Hal,
@@ -46,6 +50,10 @@ pub struct VirtIoInputDev<H: Hal, T: Transport> {
 struct VirtIoInputState<H: Hal, T: Transport> {
     inner: SpinNoIrq<InnerDev<H, T>>,
     notifier: SpinNoIrq<Option<Arc<dyn InputEventNotifier>>>,
+    /// Immutable after probing; the input core owns live axis values.
+    abs_info: [Option<AbsInfo>; ABS_CNT],
+    prop_bits: [u8; PROP_BITMAP_LEN],
+    has_prop: bool,
 }
 
 // SAFETY: moving the state does not move its DMA allocations or MMIO regions,
@@ -81,6 +89,63 @@ impl<H: Hal + 'static, T: Transport + 'static> IrqHandler for VirtIoInputIrqHand
     }
 }
 
+fn parse_abs_info(raw: &[u8; 5 * size_of::<u32>()]) -> AbsInfo {
+    let mut fields = [0i32; 5];
+    for (field, word) in fields.iter_mut().zip(raw.chunks_exact(size_of::<i32>())) {
+        *field = i32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    }
+    let [min, max, fuzz, flat, res] = fields;
+    AbsInfo::new(min, max, fuzz, flat, res)
+}
+
+/// Probes the axes advertised by `EV_ABS` and caches their static metadata.
+///
+/// Config-space reads are best-effort: a device that does not answer a
+/// capability query still probes, and the evdev layer then exposes the Linux
+/// zero-filled view of that axis. The one-time cost also removes a config
+/// transaction from every subsequent `EVIOCGABS`.
+fn load_abs_info<H: Hal, T: Transport>(device: &mut InnerDev<H, T>) -> [Option<AbsInfo>; ABS_CNT] {
+    let mut abs_info = [None; ABS_CNT];
+    let mut bits = [0u8; ABS_BITMAP_LEN];
+    let Ok(written) = device.query_config_select(
+        InputConfigSelect::EvBits,
+        EventType::Absolute as u8,
+        &mut bits,
+    ) else {
+        return abs_info;
+    };
+    if written == 0 {
+        return abs_info;
+    }
+
+    for (code, info) in abs_info.iter_mut().enumerate() {
+        if bits[code / u8::BITS as usize] & (1 << (code % u8::BITS as usize)) == 0 {
+            continue;
+        }
+        let mut raw = [0u8; 5 * size_of::<i32>()];
+        let Ok(written) =
+            device.query_config_select(InputConfigSelect::AbsInfo, code as u8, &mut raw)
+        else {
+            continue;
+        };
+        if usize::from(written) == raw.len() {
+            *info = Some(parse_abs_info(&raw));
+        }
+    }
+    abs_info
+}
+
+/// Probes the `INPUT_PROP_*` bitmap once at device initialization.
+fn load_prop_bits<H: Hal, T: Transport>(
+    device: &mut InnerDev<H, T>,
+) -> Option<([u8; PROP_BITMAP_LEN], bool)> {
+    let mut bits = [0u8; PROP_BITMAP_LEN];
+    let written = device
+        .query_config_select(InputConfigSelect::PropBits, 0, &mut bits)
+        .ok()?;
+    Some((bits, written != 0))
+}
+
 impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
     /// Creates an IRQ-backed driver instance and reads its identity.
     ///
@@ -92,11 +157,17 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
         let name = device.name().unwrap_or_else(|_| String::from("<unknown>"));
         let name = String::from(name.trim_end_matches('\0'));
         let ids = device.ids().map_err(as_driver_error)?;
+        let abs_info = load_abs_info(&mut device);
+        let (prop_bits, has_prop) =
+            load_prop_bits(&mut device).unwrap_or(([0u8; PROP_BITMAP_LEN], false));
 
         Ok(Self {
             state: Arc::new(VirtIoInputState {
                 inner: SpinNoIrq::new(device),
                 notifier: SpinNoIrq::new(None),
+                abs_info,
+                prop_bits,
+                has_prop,
             }),
             device_id: InputDeviceId {
                 bus_type: ids.bustype,
@@ -164,6 +235,21 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
 
     fn get_event_bits(&self, ty: EventType, out: &mut [u8]) -> DriverResult<bool> {
         self.load_event_bits(ty, out)
+    }
+
+    fn abs_info(&self, code: u16) -> DriverResult<Option<AbsInfo>> {
+        Ok(self
+            .state
+            .abs_info
+            .get(usize::from(code))
+            .copied()
+            .flatten())
+    }
+
+    fn get_prop_bits(&self, out: &mut [u8]) -> DriverResult<bool> {
+        let len = out.len().min(PROP_BITMAP_LEN);
+        out[..len].copy_from_slice(&self.state.prop_bits[..len]);
+        Ok(self.state.has_prop)
     }
 
     fn read_event(&self) -> DriverResult<Event> {

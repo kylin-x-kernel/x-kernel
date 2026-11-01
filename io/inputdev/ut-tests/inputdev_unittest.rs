@@ -32,7 +32,7 @@ fn report() -> TimedInputEvent {
 
 #[def_test]
 fn input_frames_are_copied_to_each_listener() {
-    let mut state = EndpointState::new();
+    let mut state = EndpointState::new(None);
     let first = Arc::new(RecordingListener {
         frames: Mutex::new(Vec::new()),
     });
@@ -60,7 +60,7 @@ fn input_frames_are_copied_to_each_listener() {
 
 #[def_test]
 fn listener_added_mid_frame_starts_with_next_report() {
-    let mut state = EndpointState::new();
+    let mut state = EndpointState::new(None);
     let listener = Arc::new(RecordingListener {
         frames: Mutex::new(Vec::new()),
     });
@@ -86,7 +86,7 @@ fn listener_added_mid_frame_starts_with_next_report() {
 
 #[def_test]
 fn oversized_input_frame_reports_loss_at_next_sync() {
-    let mut state = EndpointState::new();
+    let mut state = EndpointState::new(None);
     let listener = Arc::new(RecordingListener {
         frames: Mutex::new(Vec::new()),
     });
@@ -108,4 +108,143 @@ fn oversized_input_frame_reports_loss_at_next_sync() {
     assert_eq!(frame[0].event.code, SYN_DROPPED);
     assert_eq!(frame[1].event.code, SYN_REPORT);
     assert!(state.key_state.get(30));
+}
+
+#[def_test]
+fn absolute_axis_values_are_signed_and_ignore_invalid_codes() {
+    let mut state = EndpointState::new(None);
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, 0, (-1024i32) as u32))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[0], -1024);
+
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, 0, 4096))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[0], 4096);
+
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_CNT as u16, 7))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[ABS_CNT - 1], 0);
+    assert_eq!(state.abs_values[0], 4096);
+}
+
+#[def_test]
+fn key_events_do_not_change_absolute_axis_values() {
+    let mut state = EndpointState::new(None);
+    assert!(
+        state
+            .accept(timed(EventType::Key as u16, 1, u32::MAX))
+            .is_none()
+    );
+    assert_eq!(state.abs_values, [0; ABS_CNT]);
+}
+
+#[def_test]
+fn multi_touch_payloads_do_not_replace_scalar_axis_values() {
+    let mut state = EndpointState::new(None);
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, 0, 4096))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[0], 4096);
+
+    for code in ABS_MT_FIRST..=ABS_MT_LAST {
+        assert!(
+            state
+                .accept(timed(EventType::Absolute as u16, code, 1234))
+                .is_none()
+        );
+        assert_eq!(state.abs_values[usize::from(code)], 0);
+    }
+    assert_eq!(state.abs_values[0], 4096);
+}
+
+#[def_test]
+fn multi_touch_slot_is_committed_only_with_payload() {
+    let mut state = EndpointState::new(Some(3));
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_SLOT, 3))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 0);
+
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_FIRST, 100))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 3);
+    assert_eq!(state.abs_values[usize::from(ABS_MT_FIRST)], 0);
+
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_SLOT, 1))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 3);
+
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_LAST, 7))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 1);
+    assert_eq!(state.abs_values[usize::from(ABS_MT_LAST)], 0);
+}
+
+#[def_test]
+fn multi_touch_slot_rejects_selectors_above_the_advertised_maximum() {
+    let mut state = EndpointState::new(Some(1));
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_SLOT, 2))
+            .is_none()
+    );
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_FIRST, 100))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 0);
+
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_SLOT, 1))
+            .is_none()
+    );
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_FIRST, 200))
+            .is_none()
+    );
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 1);
+}
+
+#[def_test]
+fn abs_codes_above_the_mt_payload_range_are_scalar() {
+    let mut state = EndpointState::new(Some(3));
+    assert!(
+        state
+            .accept(timed(EventType::Absolute as u16, ABS_MT_SLOT, 2))
+            .is_none()
+    );
+    for code in [ABS_MT_LAST + 1, ABS_MT_LAST + 2] {
+        assert!(
+            state
+                .accept(timed(EventType::Absolute as u16, code, 1234))
+                .is_none()
+        );
+        assert_eq!(state.abs_values[usize::from(code)], 1234);
+    }
+    assert_eq!(state.abs_values[usize::from(ABS_MT_SLOT)], 0);
 }

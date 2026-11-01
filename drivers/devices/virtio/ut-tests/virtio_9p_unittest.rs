@@ -22,7 +22,7 @@ fn test_virtio_9p_mount_tag() {
     let tag = b"hostshare";
     let len = tag.len() as u16;
     {
-        let mut config = transport.config_space.borrow_mut();
+        let mut config = transport.config_space.lock();
         config[0..2].copy_from_slice(&len.to_le_bytes());
         config[2..2 + tag.len()].copy_from_slice(tag);
     }
