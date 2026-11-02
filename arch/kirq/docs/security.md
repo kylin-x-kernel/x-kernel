@@ -569,6 +569,17 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   and restores context only after both guards are gone. It protects the non-LIFO
   registry-to-Line handoff; removing it requires an independent outer context
   guard, not merely deleting the global lock.
+- Regular/shared registration relies on management admission for membership
+  stability, not a directory lock around the controller call. The Line lock
+  covers installation and configuration/unmask together. The caller retains
+  the handler across the entire transaction so rejected or discarded cloned
+  owners cannot run final client destructors under Line or management locks.
+- Normal-action withdrawal retains the removed owner through the last-action
+  mask, releases Line/control exclusion before draining, and returns ownership
+  only after management admission cleanup. The Line lock prevents new dispatch
+  snapshots from observing withdrawal before mask completes. Old snapshots
+  remain accounted for until their original controller claims complete. Shared
+  ownership and NMI-fallback rejection rules are unchanged.
 - `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
   delayed-work product API and timer adapter have been removed. Automatic delayed
   retry, full Linux concurrent-flusher handoff, CPU hotplug drain and rescuer

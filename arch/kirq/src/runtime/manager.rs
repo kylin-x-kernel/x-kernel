@@ -559,23 +559,13 @@ fn register_with_mode(
         mode,
         |line| Ok(line.lock().can_install_regular_action()),
         |virq, line| {
-            let state = IRQ_STATE.lock();
-            let mut entry = line.lock();
-            if entry.has_actions() {
-                warn!("register handler for IRQ {virq} failed");
-                return Ok(false);
-            }
-            let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
-            debug_assert!(installed, "duplicate regular action was checked above");
-            let plan = if options.should_auto_enable() {
-                entry.prepare_auto_enable()
-            } else {
-                entry.prepare_register_disabled()
-            };
-            drop(entry);
-            drop(state);
-            apply_platform_plan(plan);
-            Ok(true)
+            Ok(register_on_line(
+                virq,
+                line,
+                &handler,
+                options,
+                apply_platform_plan,
+            ))
         },
     );
     drop(handler);
@@ -583,6 +573,32 @@ fn register_with_mode(
         warn!("register handler for IRQ {spec:?} failed");
     }
     result.map(|registered| registered.unwrap_or(false))
+}
+
+// Management admission pins this Line's membership. No registry lock is needed
+// while installing an action and applying its bounded controller update.
+// The caller retains handler ownership until management exclusion is released.
+fn register_on_line(
+    virq: Virq,
+    line: &Arc<IrqLine>,
+    handler: &Handler,
+    options: IrqRegisterOptions,
+    apply_plan: impl FnOnce(IrqPlatformPlan),
+) -> bool {
+    let mut entry = line.lock();
+    if entry.has_actions() {
+        warn!("register handler for IRQ {virq} failed");
+        return false;
+    }
+    let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
+    debug_assert!(installed, "duplicate regular action was checked above");
+    let plan = if options.should_auto_enable() {
+        entry.prepare_auto_enable()
+    } else {
+        entry.prepare_register_disabled()
+    };
+    apply_plan(plan);
+    true
 }
 
 /// Register one shared IRQ action and return its removal token.
@@ -616,22 +632,12 @@ pub fn try_register_shared(
         ManagementMode::Task,
         |line| Ok(line.lock().can_install_shared_action()),
         |virq, line| {
-            let state = IRQ_STATE.lock();
-            let mut entry = line.lock();
-            let was_first_action = !entry.has_actions();
-            let Some(token) = entry.install_shared_action(handler.clone()) else {
-                warn!("register shared handler for IRQ {virq} failed");
-                return Ok(None);
-            };
-            let plan = if was_first_action {
-                entry.prepare_auto_enable()
-            } else {
-                entry.prepare_reconfigure_if_stale()
-            };
-            drop(entry);
-            drop(state);
-            apply_platform_plan(plan);
-            Ok(Some(token))
+            Ok(register_shared_on_line(
+                virq,
+                line,
+                &handler,
+                apply_platform_plan,
+            ))
         },
     );
     drop(handler);
@@ -639,6 +645,27 @@ pub fn try_register_shared(
         warn!("register shared handler for IRQ {spec:?} failed");
     }
     result.map(Option::flatten)
+}
+
+fn register_shared_on_line(
+    virq: Virq,
+    line: &Arc<IrqLine>,
+    handler: &Handler,
+    apply_plan: impl FnOnce(IrqPlatformPlan),
+) -> Option<IrqActionToken> {
+    let mut entry = line.lock();
+    let was_first_action = !entry.has_actions();
+    let Some(token) = entry.install_shared_action(handler.clone()) else {
+        warn!("register shared handler for IRQ {virq} failed");
+        return None;
+    };
+    let plan = if was_first_action {
+        entry.prepare_auto_enable()
+    } else {
+        entry.prepare_reconfigure_if_stale()
+    };
+    apply_plan(plan);
+    Some(token)
 }
 
 /// Acquisition policy is explicit; atomic runtime callers never fall back to startup.
@@ -950,46 +977,53 @@ fn try_free_irq_inner(
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_irq")?;
     with_existing_line(spec, ManagementMode::Task, |virq, line| {
-        let (drain, removed_action) = {
+        let removed_action = {
             let _control_guard = IRQ_CONTROL_LOCK.lock();
-            let state = IRQ_STATE.lock();
-            let mut entry = line.lock();
-            let removed_action = if let Some(token) = token {
-                entry.take_action(token)
-            } else {
-                if entry.action_count() > 1 {
-                    warn!("free_irq for IRQ {virq} requires an action token");
-                    return Ok(None);
-                }
-                let removed_action = entry.take_regular_action();
-                if removed_action.is_none() && entry.action_count() == 1 {
-                    warn!(
-                        "free_irq for IRQ {virq} rejected: action belongs to shared or NMI \
-                         registration; use its owning removal API"
-                    );
-                }
-                removed_action
-            };
-            let Some(removed_action) = removed_action else {
-                return Ok(None);
-            };
-            // Removing the action first prevents new dispatch snapshots from seeing
-            // it. If this was the last action, mask the platform line before waiting
-            // for snapshots that already escaped under an `IrqDispatchGuard`.
-            let disable_plan = entry.prepare_disable_if_no_actions();
-            entry.begin_teardown();
-
-            let drain = IrqDrain::new(virq, line);
-            drop(entry);
-            drop(state);
-            if let Some(plan) = disable_plan {
-                apply_platform_plan(plan);
-            }
-            (drain, removed_action)
+            withdraw_on_line(virq, line, token, apply_platform_plan)
         };
-        drain.wait();
+        let Some(removed_action) = removed_action else {
+            return Ok(None);
+        };
+        IrqDrain::new(virq, line).wait();
         Ok(Some(removed_action.into_primary()))
     })
+}
+
+// Management admission pins membership through mask and the subsequent drain.
+// Return the removed owner: neither this short transaction nor its caller's
+// management-locked body may run the client's final destructor.
+fn withdraw_on_line(
+    virq: Virq,
+    line: &Arc<IrqLine>,
+    token: Option<IrqActionToken>,
+    apply_plan: impl FnOnce(IrqPlatformPlan),
+) -> Option<IrqAction> {
+    let mut entry = line.lock();
+    let removed_action = if let Some(token) = token {
+        entry.take_action(token)
+    } else {
+        if entry.action_count() > 1 {
+            warn!("free_irq for IRQ {virq} requires an action token");
+            return None;
+        }
+        let removed_action = entry.take_regular_action();
+        if removed_action.is_none() && entry.action_count() == 1 {
+            warn!(
+                "free_irq for IRQ {virq} rejected: action belongs to shared or NMI registration; \
+                 use its owning removal API"
+            );
+        }
+        removed_action
+    };
+    let removed_action = removed_action?;
+    let disable_plan = entry.prepare_disable_if_no_actions();
+    entry.begin_teardown();
+    // New snapshots cannot observe the withdrawal until the last-action mask
+    // has completed; old snapshots remain covered by the original Line drain.
+    if let Some(plan) = disable_plan {
+        apply_plan(plan);
+    }
+    Some(removed_action)
 }
 
 /// Handles a pseudo-NMI after an architecture trap adapter has disabled

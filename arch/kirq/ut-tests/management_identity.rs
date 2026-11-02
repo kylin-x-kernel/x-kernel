@@ -509,6 +509,29 @@ fn rejected_handler_destructor_runs_after_management_unlock() {
 }
 
 #[def_test(serial)]
+fn removed_handler_destructor_runs_after_management_cleanup() {
+    let virq = 0x5f59;
+    let cleanup = ScopedTestLine::for_vacant_slot(virq);
+    assert!(cleanup.is_some());
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let has_unlocked_drop = Arc::new(AtomicBool::new(false));
+    let handler: Handler = Arc::new(ReentrantDrop {
+        line: line.clone(),
+        has_unlocked_drop: has_unlocked_drop.clone(),
+    });
+    // A synthetic disabled Line avoids touching any real controller source.
+    assert!(line.lock().install_regular_action(crate::action::IrqAction::regular(handler)));
+    assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
+    let removed = crate::try_free_irq(virq).unwrap();
+    assert!(removed.is_some());
+    assert!(crate::descriptor(virq).is_none());
+    assert!(!line.lock().is_teardown_in_progress());
+    assert!(!has_unlocked_drop.load(Ordering::Acquire));
+    drop(removed);
+    assert!(has_unlocked_drop.load(Ordering::Acquire));
+}
+
+#[def_test(serial)]
 fn masked_registration_requires_explicit_startup_entry() {
     let virq = 0x5f55;
     let (normal, was_absent, startup, has_preserved_mask) = {

@@ -1332,6 +1332,174 @@ fn control_transactions_preserve_already_masked_context() {
     assert_eq!(karch::local_irq_enabled(), irq_before);
 }
 
+#[def_test]
+fn regular_registration_keeps_line_locked_through_backend_update() -> unittest::TestResult {
+    let virq = 0x315e;
+    let handler: crate::Handler = Arc::new(test_handler);
+    for auto_enable in [false, true] {
+        let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+        let has_atomic_exclusion = {
+            let _guard = line.lock();
+            line.is_state_locked_for_tests()
+        };
+        if !has_atomic_exclusion {
+            return unittest::TestResult::Ignored;
+        }
+        let options = if auto_enable {
+            super::IrqRegisterOptions::auto_enable()
+        } else {
+            super::IrqRegisterOptions::disabled()
+        };
+        let mut observed = None;
+        let installed = super::register_on_line(virq, &line, &handler, options, |plan| {
+            observed = Some((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
+                plan.desc.logical_irq(), plan.configure, plan.enable));
+        });
+        assert!(installed);
+        assert_eq!(observed, Some((false, true, Some(virq), auto_enable, auto_enable.then_some(true))));
+        assert!(!line.is_state_locked_for_tests());
+        assert_eq!(line.lock().action_count(), 1);
+        assert_eq!(line.lock().is_enabled_for_tests(), auto_enable);
+        assert_eq!(line.lock().disable_depth_for_tests(), usize::from(!auto_enable));
+    }
+    assert_eq!(Arc::strong_count(&handler), 1);
+    unittest::TestResult::Ok
+}
+
+#[def_test]
+fn shared_registration_keeps_line_locked_without_reenabling_later_actions() -> unittest::TestResult {
+    let virq = 0x315f;
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let has_atomic_exclusion = {
+        let _guard = line.lock();
+        line.is_state_locked_for_tests()
+    };
+    if !has_atomic_exclusion {
+        return unittest::TestResult::Ignored;
+    }
+    let handler: crate::Handler = Arc::new(test_handler);
+    let mut tokens = Vec::new();
+    for is_first in [true, false] {
+        let mut observed = None;
+        let token = super::register_shared_on_line(virq, &line, &handler, |plan| {
+            observed = Some((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
+                plan.configure, plan.enable));
+        }).unwrap();
+        assert_eq!(observed, Some((false, true, is_first, is_first.then_some(true))));
+        tokens.push(token);
+        assert!(!line.is_state_locked_for_tests());
+        // A later shared registration must not undo the owner's disable.
+        if is_first {
+            line.lock().prepare_disable_irq_nosync();
+        }
+    }
+    assert_ne!(tokens[0], tokens[1]);
+    assert_eq!(line.lock().action_count(), 2);
+    assert_eq!(line.lock().disable_depth_for_tests(), 1);
+    assert!(!line.lock().is_enabled_for_tests());
+    unittest::TestResult::Ok
+}
+
+#[def_test]
+fn registration_rejection_preserves_handler_ownership_and_skips_backend() {
+    let virq = 0x3160;
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let owner: crate::Handler = Arc::new(test_handler);
+    assert!(line.lock().install_regular_action(IrqAction::regular(owner.clone())));
+    let rejected: crate::Handler = Arc::new(test_handler);
+    let mut has_called_backend = false;
+    assert!(!super::register_on_line(
+        virq, &line, &rejected, super::IrqRegisterOptions::auto_enable(),
+        |_| has_called_backend = true,
+    ));
+    assert!(super::register_shared_on_line(
+        virq, &line, &rejected, |_| has_called_backend = true,
+    ).is_none());
+    assert!(!has_called_backend);
+    assert_eq!(Arc::strong_count(&rejected), 1);
+    assert_eq!(Arc::strong_count(&owner), 2);
+    assert_eq!(line.lock().action_count(), 1);
+    assert!(!line.lock().is_enabled_for_tests());
+}
+
+#[def_test]
+fn withdrawal_keeps_line_locked_through_mask_and_returns_the_owner() -> unittest::TestResult {
+    let virq = 0x3161;
+    let handler: crate::Handler = Arc::new(test_handler);
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    assert!(entry.install_regular_action(IrqAction::regular(handler.clone())));
+    entry.prepare_auto_enable();
+    entry.begin_dispatch();
+    let line = Arc::new(IrqLine::new(entry));
+    let has_atomic_exclusion = {
+        let _guard = line.lock();
+        line.is_state_locked_for_tests()
+    };
+    if !has_atomic_exclusion {
+        return unittest::TestResult::Ignored;
+    }
+    let mut observed = None;
+    let removed = super::withdraw_on_line(virq, &line, None, |plan| {
+        observed = Some((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
+            plan.enable, plan.configure, Arc::strong_count(&handler)));
+    }).unwrap();
+    assert_eq!(observed, Some((false, true, Some(false), false, 2)));
+    assert!(!line.is_state_locked_for_tests());
+    assert_eq!(line.lock().action_count(), 0);
+    assert_eq!(line.lock().teardown_depth_for_tests(), 1);
+    assert_eq!(line.lock().in_flight(), 1);
+    assert!(!line.lock().is_enabled_for_tests());
+    assert_eq!(Arc::strong_count(&handler), 2);
+    drop(removed);
+    assert_eq!(Arc::strong_count(&handler), 1);
+    let wake = line.lock().finish_dispatch();
+    drop(wake);
+    line.lock().finish_teardown();
+    unittest::TestResult::Ok
+}
+
+#[def_test]
+fn shared_withdrawal_masks_only_the_last_owned_action() {
+    let virq = 0x3162;
+    let handler: crate::Handler = Arc::new(test_handler);
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    let first = entry.install_shared_action(handler.clone()).unwrap();
+    let last = entry.install_shared_action(handler.clone()).unwrap();
+    entry.prepare_auto_enable();
+    let line = Arc::new(IrqLine::new(entry));
+    let mut has_applied_plan = false;
+    let removed = super::withdraw_on_line(virq, &line, Some(first), |_| {
+        has_applied_plan = true;
+    });
+    assert!(removed.is_some());
+    assert!(!has_applied_plan);
+    assert_eq!(line.lock().action_count(), 1);
+    assert!(line.lock().is_enabled_for_tests());
+    line.lock().finish_teardown();
+    drop(removed);
+
+    let rejected = super::withdraw_on_line(virq, &line, None, |_| {
+        has_applied_plan = true;
+    });
+    assert!(rejected.is_none());
+    assert!(!has_applied_plan);
+    assert_eq!(line.lock().action_count(), 1);
+    assert_eq!(line.lock().teardown_depth_for_tests(), 0);
+    let mut observed_enable = None;
+    let removed = super::withdraw_on_line(virq, &line, Some(last), |plan| {
+        observed_enable = Some(plan.enable);
+        has_applied_plan = true;
+    });
+    assert_eq!(observed_enable, Some(Some(false)));
+    assert!(removed.is_some());
+    assert!(has_applied_plan);
+    assert_eq!(line.lock().action_count(), 0);
+    assert!(!line.lock().is_enabled_for_tests());
+    line.lock().finish_teardown();
+    drop(removed);
+    assert_eq!(Arc::strong_count(&handler), 1);
+}
+
 // UP spinlocks have no contended state to inspect; the lock-exclusion probe
 // requires SMP even though nested-enable semantics apply to both builds.
 #[def_test(serial)]

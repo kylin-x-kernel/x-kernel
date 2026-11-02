@@ -852,8 +852,22 @@ decrements disable depth without unmasking until the depth reaches zero.
 Final enable admission checks teardown under the same Line guard as prepare
 and hardware apply. Legacy metadata resolution still uses the existing resolver:
 the global control lock protects its earlier teardown check through resolution.
-This step does not migrate registration, withdrawal or NMI publication locking,
-nor change the existing mutating prepare methods into hardware rollback.
+Regular and shared registration use their existing management admission to pin
+Line membership. Their installation bodies no longer reacquire the directory:
+action installation and the resulting configure/unmask plan run under the Line
+state lock. Disabled registration leaves the source disabled; later shared
+actions preserve disable depth and only reconfigure stale metadata. Caller-owned
+handler references outlive the management transaction, including rejection.
+The global control lock remains across registration publication and these
+updates; removing it requires migration of the remaining teardown/control paths.
+Regular/shared withdrawal likewise relies on management admission rather than
+reacquiring the directory in its body. Action removal, teardown marking and the
+last-action mask are one Line-locked transaction. The removed owner is returned
+out of that transaction; only then does the caller drain the original Line,
+with all short locks released. Admission cleanup retains its existing control
+and registry transaction, and releases management before returning the handler
+to the caller. Removing a non-last shared action does not mask the remaining
+actions. NMI-table withdrawal is unchanged by this normal-action path.
 Synchronous disable captures this identity in the same transaction as its
 disable plan; it cannot mask one instance and then synchronize another.
 
