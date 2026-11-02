@@ -229,6 +229,13 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
   outlive it. Verbs take their inputs from the guarded state — `take` derives
   the delivery mask from the thread's blocked set — instead of from a caller
   snapshot.
+- `ThreadSignalManager::masks()` uses one `SigLock::inspect` to copy the
+  thread-private pending set, the process-shared pending set and the thread's
+  blocked set into a `Copy` `SignalMasks` value. Its private fields keep a
+  caller from fabricating a partial snapshot, and the value carries no queue,
+  payload or lock handle. Dispositions live under `handlers`, so `SigIgn` and
+  `SigCgt` are necessarily a separate sample; consumers such as procfs must not
+  describe the combined output as one cross-lock atomic snapshot.
 - Transactions record the slots and queues they touched in an allocation-free
   dirty set: `republish` recomputes only those, so mask changes, enqueues and
   dequeues stay O(1) inside the lock, and read-only queries recompute nothing.

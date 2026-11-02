@@ -135,6 +135,8 @@ are simplified, and PI robust-futex cleanup is skipped.
 
 - `exec_de_thread` joins siblings before the address-space swap and undoes group-exit
   bookkeeping; changing the exec path must keep the group-kill flush ordering.
+  Once the group is un-resumable it commits `SIGCHLD` as the parent contract
+  before returning, so later fatal failures cannot restore the old signal.
 
 ## PM freezer boundary
 

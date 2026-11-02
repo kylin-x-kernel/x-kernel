@@ -12,6 +12,7 @@ use core::{
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
+use strum::IntoEnumIterator;
 
 use crate::{
     DefaultSignalAction, MAX_SIGNALS, SigLock, SigchldChildExitSignalInfo, SignalAction,
@@ -526,7 +527,35 @@ impl ProcessSignalManager {
         ((raw >> 32) as u32, raw as u32)
     }
 
-    /// Gets currently pending signals.
+    /// Returns the signal dispositions that are ignored and caught.
+    ///
+    /// The two masks are captured under one actions lock, so they describe the
+    /// same disposition snapshot. Returns empty masks after configuration
+    /// ownership is released, matching the `/proc` fields of a task that can no
+    /// longer install handlers.
+    pub fn disposition_masks(&self) -> (SignalSet, SignalSet) {
+        let owner = self.handlers.lock();
+        let Some(handlers) = owner.as_ref() else {
+            return (SignalSet::default(), SignalSet::default());
+        };
+        let actions = handlers.actions.lock();
+        let mut ignored = SignalSet::default();
+        let mut caught = SignalSet::default();
+        for signo in Signo::iter() {
+            match &actions[signo].disposition {
+                SignalDisposition::Ignore => {
+                    ignored.add(signo);
+                }
+                SignalDisposition::Handler(_) => {
+                    caught.add(signo);
+                }
+                SignalDisposition::Default => {}
+            }
+        }
+        (ignored, caught)
+    }
+
+    /// Gets process-directed (shared) pending signals.
     pub fn pending(&self) -> SignalSet {
         self.siglock.inspect(|view| view.shared_pending())
     }

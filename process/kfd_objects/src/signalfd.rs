@@ -195,8 +195,8 @@ impl SignalfdAccess {
             result => return result,
         }
         match poll_io(self, IoEvents::IN, false, &mut read_record_fn).await {
-            // poll_io checks interruption before readiness. Recheck records so
-            // a simultaneous arrival still wins, as on the initial attempt.
+            // A record may arrive after the failed readiness check but before
+            // the interrupt is consumed. Recheck so that arrival still wins.
             Err(KError::Interrupted) => read_record_fn().map_err(|error| match error {
                 // No record was consumed. Signal delivery decides whether the
                 // handler permits retry (SA_RESTART) or the caller gets EINTR.

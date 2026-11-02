@@ -137,3 +137,73 @@ fn block_on_repolls_after_early_wake() {
     assert_eq!(result, 42);
     assert_eq!(polls, 2);
 }
+
+#[def_test(serial)]
+fn interruptible_returns_ready_operation_without_consuming_signal() {
+    let curr = crate::current();
+    curr.clear_interrupt();
+    curr.interrupt();
+
+    let result = block_on(interruptible(core::future::ready(7u32)));
+
+    assert_eq!(result, Ok(7));
+    assert!(
+        curr.is_interrupted(),
+        "a ready operation must not consume a pending signal"
+    );
+    curr.clear_interrupt();
+}
+
+#[def_test(serial)]
+fn interruptible_observes_signal_only_after_operation_blocks() {
+    let curr = crate::current();
+    curr.clear_interrupt();
+    let polls = core::cell::Cell::new(0);
+    let mut future = core::pin::pin!(interruptible(poll_fn(|_| {
+        polls.set(polls.get() + 1);
+        Poll::<u8>::Pending
+    })));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(future.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(polls.get(), 1, "the operation must be polled first");
+    assert!(!curr.is_interrupted());
+
+    curr.interrupt();
+    let error = match future.as_mut().poll(&mut cx) {
+        Poll::Ready(Err(error)) => error,
+        _ => panic!("a pending operation must observe the signal"),
+    };
+    assert!(error.is_task_interrupt());
+    assert_eq!(polls.get(), 2, "the operation must be re-polled before the signal");
+    assert!(!curr.is_interrupted(), "the observed signal is consumed");
+}
+
+#[def_test(serial)]
+fn interruptible_keeps_signal_pending_when_blocked_operation_becomes_ready() {
+    let curr = crate::current();
+    curr.clear_interrupt();
+    let ready = core::cell::Cell::new(false);
+    let mut future = core::pin::pin!(interruptible(poll_fn(|_| {
+        if ready.get() {
+            Poll::Ready(9u8)
+        } else {
+            Poll::Pending
+        }
+    })));
+    let mut cx = Context::from_waker(Waker::noop());
+
+    assert!(future.as_mut().poll(&mut cx).is_pending());
+    ready.set(true);
+    curr.interrupt();
+
+    assert!(matches!(
+        future.as_mut().poll(&mut cx),
+        Poll::Ready(Ok(9))
+    ));
+    assert!(
+        curr.is_interrupted(),
+        "progress after a blocked round must not consume the signal"
+    );
+    curr.clear_interrupt();
+}

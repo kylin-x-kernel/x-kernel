@@ -140,6 +140,25 @@ retains init identity; orphan reparenting reserves an init relation slot.
   number, so `pid_identity_in_namespace` also matches a thread's root number
   when the observer namespace has no exact projection for it.
 
+`TaskStat::from_thread` samples the thread's private pending, shared pending and
+blocked masks through one `ThreadSignalManager::masks()` call, then builds the
+`stat` view. A caller that renders `status` uses
+`sample_thread()` together with the stat snapshot so `SigPnd`, `ShdPnd` and
+`SigBlk` are not independently sampled. `vsize` is `Some(sum of VMA lengths)`
+when a live address space is attached and `None` when it is absent (`mm == NULL`
+in Linux terms); `None` is not an error and is distinct from an empty address
+space. `num_threads` uses the unreleased membership count, so an
+exited-but-unreaped leader remains visible until reap. `exit_signal` is the
+group leader's process-wide wait contract; every non-leader thread renders `-1`
+because a `CLONE_THREAD` task does not notify a parent independently, matching
+Linux `do_task_stat`. A successful exec commits that contract as `SIGCHLD`:
+`exec_de_thread` commits it for a takeover, and `execve` commits it immediately
+after the address-space exchange for a single-threaded exec. A failure before
+that point leaves the contract unchanged; a failure after it is fatal and does
+not return to the old image. The `stat`
+signal fields are a compatibility view: they expose only the low 31 bits, as
+Linux's obsolete `do_task_stat` fields do.
+
 CPU accounting uses `Inactive`, `Kernel`, and `User` states, following Linux
 generic vtime. Switch-out settles the interval; switch-in starts kernel time.
 User transitions are marked at `UserContext::run` boundaries before IRQ dispatch.
@@ -292,6 +311,13 @@ changed, terminating with the racing signal so the parent observes
 the opened backing executable file (`with_exe_file`), replacing/inheriting the
 display path in `ExecMetadata` so `/proc/<pid>/exe` can follow to the real file
 across exec, fork, and the init process created via `fork` + `execve`.
+After `exec_de_thread` succeeds it commits the surviving leader's parent contract
+as `SIGCHLD` (`Process::commit_exec_parent_contract`), before `execve` replaces
+the executable file/table and image. A single-threaded exec does the same
+immediately after its address-space exchange. This mirrors Linux `de_thread()`,
+which establishes `SIGCHLD` before `unshare_files()` and `exec_mmap()`; a failure
+after that point is fatal, so the parent must see the new contract even though
+the old image cannot be resumed.
 
 ## Task identity and the number binding
 
@@ -312,10 +338,13 @@ A non-leader `exec` therefore performs an O(1) takeover in the sleepable
 `exec_de_thread` phase: the survivor retires the dead leader's directory link
 and republishes its own under the group number
 (`ProcessPublication::move_task_number`), adopts the group number
-(`Thread::adopt_task_number`), and re-keys its process signal registry entry
-(routing still selects threads by number). Membership and cgroup need no
-change, and the address-space exchange stays a pure pointer swap in
-`replace_current_address_space`, with no identity work in its callback.
+(`Thread::adopt_task_number`), re-keys its process signal registry entry
+(routing still selects threads by number), and drops the retired leader's
+`ExitedLeader` membership slot so the lifetime thread count describes the new
+identity rather than both the old placeholder and its survivor. Membership and
+cgroup still key on the stable token; the address-space exchange stays a pure
+pointer swap in `replace_current_address_space`, with no identity work in its
+callback.
 
 ## Concurrency model
 
@@ -458,17 +487,15 @@ owns no task, runtime or mm and cannot be scheduled. Wait consumption/autoreap
 clears it when the process identity is retired, even if other Arc<Process>
 observers remain. Failed publication uses Vacant and contributes no membership.
 
-This change does not implement exec thread-group identity takeover. In particular,
-a sole nonleader may currently exec after the original leader exits while retaining
-its original TID; kprocess has no unified de_thread transition that changes that
-identity and its global publication. The original ExitedLeader therefore remains
-until reap, and the task-directory count can include that retained member after
-nonleader exec. Linux-exact post-exec counts are not claimed for this path. A
-count-only leader alias would conceal the identity mismatch, so exec neither
-promotes a member for accounting nor removes the original leader slot here.
-A follow-up must coordinate canonical task identity, global/member publication,
-signal/cgroup bindings, old-leader release and the successful/fatal exec boundary
-before procfs can derive the corresponding Linux count from final membership.
+A successful non-leader `exec` takeover is a real identity transition, not an
+accounting-only alias. Once the survivor has moved the number directory, adopted
+the group number and re-keyed its signal registry entry, it releases the old
+leader's `ExitedLeader` slot. The lifetime count then remains one while the
+survivor owns the process identity, instead of retaining both the placeholder
+and its successor until reap. A failed precondition or publication move returns
+before release, so the original leader slot remains authoritative. Member
+enumeration and `/proc/<pid>/task` continue to list only published tasks and do
+not expose the retired leader.
 
 This retention scheme relies on the current runtime identity allocator, not on
 the probability of TID reuse. `Thread::prepare_thread_clone` calls
@@ -482,17 +509,25 @@ overwrite an `ExitedLeader` slot.
 
 Both queries scan stored slots under the existing membership/slot locks and
 allocate no list or maintained counter. Publication may interleave with a scan;
-neither result promises an atomic thread-group snapshot. Reap clears retained
-membership under process-domain -> membership -> slot order. Task exit releases
-membership locks before global TID removal and acquires no process-domain lock
-while holding them. There is no procfs max(1) or zombie-state compensation.
+neither result promises an atomic thread-group snapshot. `TaskStat::num_threads`
+and procfs `status` `Threads` consume the unreleased count, so a zombie leader
+counts as one until reap rather than being zeroed by task publication. Reap
+clears retained membership under process-domain -> membership -> slot order.
+Task exit releases membership locks before global TID removal and acquires no
+process-domain lock while holding them. There is no procfs max(1) or
+zombie-state compensation.
 
 Regression definitions extend the real exit/reap test to distinguish live count
 0 from lifetime count 1 before reap and 0 after reap with strong observers still
 held. Another test explicitly exits the leader before a sibling and checks that
-only the leader remains until reap. These definitions exercise real member exit
-and reap with never-run tasks; they do not execute an exec syscall or prove
-identity takeover. Their execution must be checked against this head's CI.
+only the leader remains until reap. A takeover test drives the transition
+directly through `Process::assume_leader_identity`: it starts from an exited
+leader plus one published survivor, verifies both the publication move and the
+post-takeover lifetime count of one, including the procfs accessors that consume
+it. These definitions exercise real member exit and reap with never-run tasks;
+the takeover fixture invokes the identity transition directly rather than a full
+`execve` syscall. The surrounding exec metadata and signal transitions have
+their own unit fixtures.
 
 ## Kernel unit-test layout
 

@@ -126,7 +126,7 @@ fn file_wait_rechecks_after_signal_and_releases_registrations() {
 }
 
 #[def_test]
-fn file_wait_marks_only_signal_interruption_and_keeps_old_poll_order() {
+fn file_wait_marks_only_signal_interruption_and_prefers_ready_io() {
     let _cleanup = InterruptCleanup;
     let input = Input::new();
     let mut cx = Context::from_waker(Waker::noop());
@@ -149,9 +149,10 @@ fn file_wait_marks_only_signal_interruption_and_keeps_old_poll_order() {
     input.value.set(9);
     assert_eq!(
         ktask::future::block_on(ktask::future::poll_io(&input, IoEvents::IN, true, || input.read())),
-        Err(KError::Interrupted)
+        Ok(9)
     );
-    assert_eq!(input.value.get(), 9);
+    assert_eq!(input.value.get(), 0);
+    assert!(ktask::current().is_interrupted());
 
     let result: KResult<usize> =
         ktask::future::block_on(poll_file_io(&input, IoEvents::IN, false, || {

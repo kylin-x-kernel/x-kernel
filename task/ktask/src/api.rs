@@ -872,7 +872,7 @@ pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
     assert_sleepable_context("interruptible_sleep_until");
     if let Err(error) = crate::future::block_on(crate::future::interruptible(
         crate::future::sleep_until(deadline),
-    )) && !error.is_signal()
+    )) && !error.is_task_interrupt()
     {
         log::error!(
             "interruptible_sleep_until failed to register interrupt wait: {}",

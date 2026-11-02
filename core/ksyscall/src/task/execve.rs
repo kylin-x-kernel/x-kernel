@@ -367,6 +367,13 @@ fn exec_request(
         }
         return Err(error);
     }
+    if !needs_takeover {
+        // A single-threaded exec keeps the old image on a precheck failure, but
+        // once the exchange succeeds the process is committed to the new one.
+        // Linux `de_thread()` has already established the new parent contract
+        // by this point; mirror that before any later operation can fail.
+        process.commit_exec_parent_contract();
+    }
     thread.reset_user_state_after_exec();
     // Keep every fallible post-exchange operation inside this fatal boundary.
     // The closure releases temporary MM owners and locks before do_exit.

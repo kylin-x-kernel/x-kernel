@@ -2,16 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
+
 use khal::paging::MappingFlags;
-use kprocess::AsThread;
+use kprocess::{AsThread, TaskStat};
+use ktask::KCpuMask;
 use kvfs::SeqIterator;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{
-    MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, ProcNsKind, format_oom_score_adj,
-    format_task_status, maps_permissions, namespace_identity, parse_oom_score_adj_input,
-    render_maps_line, special_mapping_name, task_namespace_inode,
+    MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, ProcNsKind, TaskStatus,
+    format_cpu_list, format_cpu_mask, format_oom_score_adj, format_task_status, maps_permissions,
+    namespace_identity, parse_oom_score_adj_input, render_maps_line, special_mapping_name,
+    task_namespace_inode,
 };
 
 fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::Path {
@@ -119,12 +122,157 @@ fn test_namespace_kind_names_cover_linux_set() {
 }
 
 #[def_test]
-fn test_task_status_includes_process_name() {
-    let status = format_task_status("test-bin", 12, 34, &kcred::Cred::root());
+fn test_task_status_includes_process_name_and_snapshot_fields() {
+    let mut cpumask = KCpuMask::new();
+    cpumask.set(0, true);
+    cpumask.set(2, true);
+    let status = TaskStatus {
+        stat: TaskStat {
+            comm: "test-bin".into(),
+            pid: 34,
+            ppid: 9,
+            state: 'S',
+            num_threads: 3,
+            vsize: Some(8 * 1024 * 1024),
+            signal: 0x100,
+            blocked: 0x200,
+            sigignore: 0x400,
+            sigcatch: 0x800,
+            ..Default::default()
+        },
+        tgid: 12,
+        cred: Arc::new(kcred::Cred::root()),
+        shared_pending: 0x2000,
+        cpumask,
+    };
+    let status = format_task_status(&status);
 
     assert!(status.contains("Name:\ttest-bin\n"));
+    assert!(status.contains("State:\tS (sleeping)\n"));
     assert!(status.contains("Tgid:\t12\n"));
     assert!(status.contains("Pid:\t34\n"));
+    assert!(status.contains("PPid:\t9\n"));
+    assert!(status.contains("Uid:\t0\t0\t0\t0\n"));
+    assert!(status.contains("Gid:\t0\t0\t0\t0\n"));
+    assert!(status.contains("VmSize:\t    8192 kB\n"));
+    assert!(status.contains("Threads:\t3\n"));
+    assert!(status.contains("SigPnd:\t0000000000000100\n"));
+    assert!(status.contains("ShdPnd:\t0000000000002000\n"));
+    assert!(status.contains("SigBlk:\t0000000000000200\n"));
+    assert!(status.contains("SigIgn:\t0000000000000400\n"));
+    assert!(status.contains("SigCgt:\t0000000000000800\n"));
+    // The fixture's two low bits are representable on any runtime CPU count;
+    // the high bit is only meaningful when at least three CPUs are online.
+    let nr_cpus = kcpu_id_map::nr_cpus();
+    let (mask, list) = if nr_cpus > 2 {
+        ("5", "0,2")
+    } else {
+        ("1", "0")
+    };
+    assert!(status.contains(&alloc::format!("Cpus_allowed:\t{mask}\n")));
+    assert!(status.contains(&alloc::format!("Cpus_allowed_list:\t{list}\n")));
+}
+
+#[def_test]
+fn test_cpu_mask_format_uses_runtime_width_and_list_trim() {
+    let mut mask = KCpuMask::new();
+    mask.set(0, true);
+    mask.set(2, true);
+
+    // Linux's `%*pb` derives its high-chunk width from `nr_cpu_ids`; bits
+    // outside that runtime set are not printed.
+    assert_eq!(format_cpu_mask(mask, 4), "5");
+    assert_eq!(format_cpu_list(mask, 4), "0,2");
+    assert_eq!(format_cpu_mask(mask, 2), "1");
+    assert_eq!(format_cpu_list(mask, 2), "0");
+
+    // An empty mask prints as `0` in the compact form and as an empty list,
+    // matching Linux's `bitmap_string`/`bitmap_list_string` pair.
+    assert_eq!(format_cpu_mask(KCpuMask::new(), 4), "0");
+    assert_eq!(format_cpu_list(KCpuMask::new(), 4), "");
+}
+
+#[def_test]
+fn test_task_status_escapes_name_like_linux() {
+    let status = format_task_status(&TaskStatus {
+        stat: TaskStat {
+            // Linux escapes only newline and backslash in `status`; tab and
+            // space remain literal.
+            comm: "a\tb\nc\\d e".into(),
+            pid: 34,
+            ..Default::default()
+        },
+        tgid: 12,
+        cred: Arc::new(kcred::Cred::root()),
+        shared_pending: 0,
+        cpumask: KCpuMask::new(),
+    });
+
+    assert_eq!(status.lines().next(), Some("Name:\ta\tb\\nc\\\\d e"));
+}
+
+#[def_test]
+fn test_task_status_omits_vm_size_without_address_space() {
+    let status = format_task_status(&TaskStatus {
+        stat: TaskStat {
+            comm: "zombie".into(),
+            pid: 34,
+            vsize: None,
+            ..Default::default()
+        },
+        tgid: 12,
+        cred: Arc::new(kcred::Cred::root()),
+        shared_pending: 0,
+        cpumask: KCpuMask::new(),
+    });
+
+    assert!(!status.contains("VmSize:"));
+    assert!(status.contains("Threads:\t0\n"));
+}
+
+#[def_test]
+fn test_task_status_uses_linux_subset_field_order() {
+    let status = format_task_status(&TaskStatus {
+        stat: TaskStat {
+            comm: "order".into(),
+            pid: 34,
+            // `Some(0)` exercises a live address space with no mapped bytes;
+            // this field must still be present.
+            vsize: Some(0),
+            ..Default::default()
+        },
+        tgid: 12,
+        cred: Arc::new(kcred::Cred::root()),
+        shared_pending: 0,
+        cpumask: KCpuMask::new(),
+    });
+    let keys: Vec<_> = status
+        .lines()
+        .map(|line| line.split(':').next().expect("status line has a key"))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "Name",
+            "State",
+            "Tgid",
+            "Pid",
+            "PPid",
+            "Uid",
+            "Gid",
+            "VmSize",
+            "Threads",
+            "SigPnd",
+            "ShdPnd",
+            "SigBlk",
+            "SigIgn",
+            "SigCgt",
+            "Cpus_allowed",
+            "Cpus_allowed_list",
+            "Mems_allowed",
+            "Mems_allowed_list",
+        ]
+    );
 }
 
 // These fixtures publish targets but never activate them. Reader credentials

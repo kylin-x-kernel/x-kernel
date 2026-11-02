@@ -241,7 +241,7 @@ pub unsafe fn replace_current_address_space(
     if thread.is_exiting() || process.is_exited() || process.is_group_exited() {
         return Err(KError::NoSuchProcess);
     }
-    if process.thread_count() != 1 || !process.contains_published_tid(thread.tid()) {
+    if !process.is_sole_published_tid(thread.tid()) {
         return Err(KError::InvalidInput);
     }
     let runtime = thread.process_runtime();

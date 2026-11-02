@@ -33,7 +33,7 @@ pub async fn poll_file_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
 
     match poll_io_with_cause(pollable, events, false, &mut operation_fn).await {
         Ok(result) => result,
-        Err(interrupted) if interrupted.is_signal() => match operation_fn() {
+        Err(interrupted) if interrupted.is_task_interrupt() => match operation_fn() {
             Err(KError::WouldBlock) => Err(KError::IoWaitInterrupted),
             result => result,
         },

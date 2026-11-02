@@ -92,7 +92,13 @@ expiry after capture is a successful registration with no waiter installed.
 the process-directed queue and each thread's private queue, blocked set and
 saved sigmask. The lock-free fast path reads only a per-thread projection, which
 may over-report but never under-report and is written solely by the lock's own
-commit step; query paths use a read-only capability that recomputes nothing. `SignalActions` is `Arc`-shared and locked per access. Its shared
+commit step; query paths use a read-only capability that recomputes nothing.
+`ThreadSignalManager::masks()` returns only the private/shared pending and
+blocked bitmaps from one such critical section; it exposes no `SignalInfo`
+payload, queue entry or retainable lock, and its private fields prevent callers
+from constructing a snapshot that never existed. Dispositions are read under
+`handlers` and can reflect a different instant. `SignalActions` is
+`Arc`-shared and locked per access. Its shared
 reference is internal to signal managers; external callers receive action
 values, not an independently retainable lock.
 Fork copies the whole action snapshot under its lock and releases the lock
@@ -122,7 +128,9 @@ panic contracts; no other intentional panics exist in this crate.
 ## Privacy analysis
 
 `SignalInfo` carries child exit status, PIDs, UIDs and CPU times — process
-metadata, not user file content. No other user data is processed or logged.
+metadata, not user file content. `SignalMasks` exposes only pending/blocked
+bitmaps; it neither reveals queued payloads nor permits mutation. No other user
+data is processed or logged.
 
 ## Known limitations
 

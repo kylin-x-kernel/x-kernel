@@ -81,6 +81,13 @@ impl ParentRelation {
         self.wait_contract.lock().exit_signal
     }
 
+    /// Replaces the parent-notification signal without changing the parent.
+    ///
+    /// The caller must hold the process-domain write lock.
+    pub(super) fn set_exit_signal_locked(&self, exit_signal: Option<Signo>) {
+        self.wait_contract.lock().exit_signal = exit_signal;
+    }
+
     pub(super) fn current_slot(&self) -> Option<Arc<ChildRelationSlot>> {
         self.current_child_slot.lock().clone()
     }

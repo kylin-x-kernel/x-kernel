@@ -376,7 +376,7 @@ impl Waiter {
     pub(super) fn wait_interruptible(&self) -> KResult<()> {
         block_on(interruptible(poll_fn(|cx| self.poll_wait(cx.waker())))).map_err(
             |error| -> KError {
-                if error.is_signal() {
+                if error.is_task_interrupt() {
                     LinuxError::ERESTARTSYS.into()
                 } else {
                     error.into()

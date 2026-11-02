@@ -114,3 +114,72 @@ fn test_unshared_exec_retains_table_after_prepared_child_drop() {
         Arc::as_ptr(manager.handlers.lock().as_ref().unwrap())
     );
 }
+#[cfg(unittest)]
+#[unittest::def_test]
+fn test_private_pending_excludes_shared_signals() {
+    let manager = Arc::new(ProcessSignalManager::new(SignalActions::default(), 0));
+    let thread = ThreadSignalManager::new(9_901, manager.clone()).unwrap();
+    manager.siglock().transact(|txn| {
+        txn.put_shared(SignalInfo::new_kernel(Signo::SIGUSR1));
+    });
+    thread.set_blocked({
+        let mut set = SignalSet::default();
+        set.add(Signo::SIGUSR2);
+        set
+    });
+    let _ = thread.send_signal(SignalInfo::new_kernel(Signo::SIGUSR2));
+
+    let masks = thread.masks();
+
+    // The reporting snapshot must expose the private/shared split while also
+    // carrying the blocked set from the same critical section.
+    unittest::assert!(!masks.private_pending().has(Signo::SIGUSR1));
+    unittest::assert!(masks.private_pending().has(Signo::SIGUSR2));
+    unittest::assert!(masks.shared_pending().has(Signo::SIGUSR1));
+    unittest::assert!(!masks.shared_pending().has(Signo::SIGUSR2));
+    unittest::assert!(masks.blocked().has(Signo::SIGUSR2));
+    unittest::assert!(!masks.blocked().has(Signo::SIGUSR1));
+    unittest::assert!(thread.pending().has(Signo::SIGUSR1));
+    unittest::assert!(thread.pending().has(Signo::SIGUSR2));
+    unittest::assert!(manager.pending().has(Signo::SIGUSR1));
+    unittest::assert!(!manager.pending().has(Signo::SIGUSR2));
+}
+
+/// Minimal handler used to populate `SigCgt`.
+///
+/// # Safety
+///
+/// The signal subsystem may call this from signal context. The handler ignores
+/// its argument, touches no shared state, and cannot unwind.
+unsafe extern "C" fn noop_signal_handler(_: i32) {}
+
+#[cfg(unittest)]
+#[unittest::def_test]
+fn test_disposition_masks_report_ignored_and_caught_signals() {
+    let manager = ProcessSignalManager::new(SignalActions::default(), 0);
+    manager
+        .replace_signal_action(
+            Signo::SIGUSR1,
+            Some(SignalAction {
+                disposition: SignalDisposition::Ignore,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    manager
+        .replace_signal_action(
+            Signo::SIGUSR2,
+            Some(SignalAction {
+                disposition: SignalDisposition::Handler(noop_signal_handler),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+    let (ignored, caught) = manager.disposition_masks();
+    unittest::assert!(ignored.has(Signo::SIGUSR1));
+    unittest::assert!(!ignored.has(Signo::SIGUSR2));
+    unittest::assert!(caught.has(Signo::SIGUSR2));
+    unittest::assert!(!caught.has(Signo::SIGUSR1));
+    unittest::assert!(!caught.has(Signo::SIGTERM));
+}

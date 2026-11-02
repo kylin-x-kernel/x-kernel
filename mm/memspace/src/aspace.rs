@@ -1781,6 +1781,15 @@ impl MmSpace {
     pub fn vmas(&self) -> impl Iterator<Item = &VmArea> {
         self.vmas.iter()
     }
+
+    /// Returns the total virtual size of all VMAs in bytes.
+    ///
+    /// This is the user-visible mapping footprint (the `/proc/[pid]/stat`
+    /// `vsize` metric), not [`Self::size`], which is the fixed span of the
+    /// address-space window.
+    pub fn mapped_size(&self) -> u64 {
+        self.vmas().map(|vma| vma.size() as u64).sum()
+    }
 }
 
 impl fmt::Debug for MmSpace {

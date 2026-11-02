@@ -810,9 +810,11 @@ is covered by the default scheduler capture's allocation-free guarantee.
 
 `poll_io_with_cause` preserves the outer task-interruption cause separately from
 operation and I/O registration errors. `poll_io` flattens this same implementation
-for existing callers. Both check task interruption before polling the operation
-and release their owned registrations on completion or cancellation; file-specific
-readiness precedence and Linux restart policy belong to their callers.
+for existing callers. Both poll the operation first and observe a task interrupt
+only when it cannot progress, so a ready operation is never turned into `EINTR`
+by a pending signal. They release their owned registrations on completion or
+cancellation; file-specific readiness precedence and Linux restart policy belong
+to their callers.
 
 - `future::PreparedTaskWait` checks sleepable context before wake registration and
   allocates a `KWaker` Arc. It keeps one strong task ref for

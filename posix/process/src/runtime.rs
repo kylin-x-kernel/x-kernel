@@ -450,6 +450,11 @@ pub fn exec_de_thread() -> bool {
         do_exit(Signo::SIGSEGV as i32, true);
         return true;
     }
+    // Linux `de_thread()` replaces the surviving leader's parent contract with
+    // SIGCHLD before `begin_new_exec()` goes on to unshare files and install the
+    // image. From here the old group cannot be resumed, so every later failure
+    // is fatal and must still report the new contract.
+    process.commit_exec_parent_contract();
     false
 }
 

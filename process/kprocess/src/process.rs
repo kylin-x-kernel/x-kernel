@@ -222,6 +222,19 @@ impl Process {
         self.parent_relation.exit_signal()
     }
 
+    /// Replaces this process's parent-notification signal on the exec commit path.
+    ///
+    /// Linux establishes `SIGCHLD` in `de_thread()`, before the new image and
+    /// file table are installed. Call this as soon as the old thread group has
+    /// become un-resumable: after `de_thread()` for a takeover, or after the
+    /// address-space exchange for a single-threaded exec. Failures after that
+    /// point must terminate the process and must not restore the old contract.
+    pub fn commit_exec_parent_contract(&self) {
+        let _domain = process_domain::write_lock();
+        self.parent_relation
+            .set_exit_signal_locked(Some(ksignal::Signo::SIGCHLD));
+    }
+
     /// Returns whether this thread group is a child subreaper.
     pub fn is_child_subreaper(&self) -> bool {
         self.child_subreaper.load(Ordering::Relaxed)

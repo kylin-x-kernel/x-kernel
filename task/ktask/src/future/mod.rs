@@ -158,14 +158,14 @@ pub struct Interrupted(InterruptCause);
 
 #[derive(Debug, PartialEq, Eq)]
 enum InterruptCause {
-    Signal,
+    Task,
     Registration(PollRegisterError),
 }
 
 impl fmt::Display for Interrupted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            InterruptCause::Signal => write!(f, "interrupted"),
+            InterruptCause::Task => write!(f, "interrupted"),
             InterruptCause::Registration(error) => write!(f, "{error}"),
         }
     }
@@ -173,8 +173,11 @@ impl fmt::Display for Interrupted {
 
 impl Interrupted {
     /// Returns true when the wait was interrupted by [`crate::interrupt_task`].
-    pub fn is_signal(&self) -> bool {
-        matches!(self.0, InterruptCause::Signal)
+    ///
+    /// The wakeup need not be a POSIX signal: virtual IRQ injection and other
+    /// asynchronous events use the same task-interrupt path.
+    pub fn is_task_interrupt(&self) -> bool {
+        matches!(self.0, InterruptCause::Task)
     }
 }
 
@@ -183,7 +186,7 @@ impl core::error::Error for Interrupted {}
 impl From<Interrupted> for KError {
     fn from(error: Interrupted) -> Self {
         match error.0 {
-            InterruptCause::Signal => KError::Interrupted,
+            InterruptCause::Task => KError::Interrupted,
             InterruptCause::Registration(
                 PollRegisterError::NoMemory | PollRegisterError::IdExhausted,
             ) => KError::NoMemory,
@@ -193,21 +196,34 @@ impl From<Interrupted> for KError {
 }
 
 /// Makes a future interruptible.
+///
+/// Operation progress has priority over signal delivery. The wrapped future is
+/// polled first, and its value is returned whenever it is ready; a pending
+/// interrupt is left pending so it can interrupt a later wait. The interrupt
+/// state is consumed only after the operation reports [`Poll::Pending`], at
+/// which point a signal makes the wait fail with [`Interrupted`].
+///
+/// Poll this future in task context without locks that prohibit blocking.
+/// Dropping it removes all wait registrations it retained.
 pub async fn interruptible<F: IntoFuture>(f: F) -> Result<F::Output, Interrupted> {
     let mut f = pin!(f.into_future());
     let curr = current();
     let mut registrations = PollRegistrations::new();
     poll_fn(|cx| {
+        if let Poll::Ready(value) = f.as_mut().poll(cx) {
+            return Poll::Ready(Ok(value));
+        }
+
+        // The operation cannot make progress in this round. Observe a pending
+        // task interrupt (normally a signal) now, and keep both its
+        // registration and the operation's registrations alive until the next
+        // poll.
         let mut context = registrations.context(cx);
         match curr.poll_interrupt(&mut context) {
-            Ok(Poll::Ready(())) => return Poll::Ready(Err(Interrupted(InterruptCause::Signal))),
-            Ok(Poll::Pending) => {}
-            Err(error) => {
-                return Poll::Ready(Err(Interrupted(InterruptCause::Registration(error))));
-            }
+            Ok(Poll::Ready(())) => Poll::Ready(Err(Interrupted(InterruptCause::Task))),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(error) => Poll::Ready(Err(Interrupted(InterruptCause::Registration(error)))),
         }
-        drop(context);
-        f.as_mut().poll(cx).map(Ok)
     })
     .await
 }

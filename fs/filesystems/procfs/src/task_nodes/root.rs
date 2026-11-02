@@ -14,11 +14,12 @@ use core::{ffi::CStr, fmt, fmt::Write as _, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use kalloc_types::KBox;
+use kcpu_id_map::nr_cpus;
 use kcred::Cred;
 use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
 use kprocess::{AsThread, LiveAddressSpace, Process, TaskStat, procfs};
-use ktask::{KtaskRef, WeakKtaskRef, current};
+use ktask::{KCpuMask, KtaskRef, WeakKtaskRef, current};
 use ktime_types::SystemTime;
 #[cfg(feature = "tee")]
 use kvfs::DirMapping;
@@ -121,34 +122,233 @@ impl SeqIterator for StatusIter {
     }
 }
 
-fn task_status(task: &KtaskRef) -> String {
-    let thread = task.as_thread();
-    // One objective snapshot belongs to the selected task, not the reader.
-    let cred = thread.real_cred();
-    format_task_status(
-        &task.name(),
-        thread.process().pid(),
-        thread.tid() as u64,
-        &cred,
-    )
+/// One `/proc/<pid>/status` sample for a single task.
+///
+/// The fields belong to the target task, never to the reader. They are sampled
+/// from the task, signal manager, credentials, MM, and CPU affinity one after
+/// another; like Linux's own `do_task_stat`/`proc_pid_status` paths, this is
+/// not a cross-subsystem atomic snapshot. Fields that share one lock are still
+/// sampled together: the pending/blocked masks come from a single `SigLock`
+/// critical section.
+struct TaskStatus {
+    stat: TaskStat,
+    tgid: u32,
+    cred: Arc<Cred>,
+    shared_pending: u64,
+    cpumask: KCpuMask,
 }
 
-fn format_task_status(name: &str, tgid: u32, pid: u64, cred: &Cred) -> String {
-    format!(
-        "Name:\t{}\nTgid:\t{}\nPid:\t{}\nUid:\t{} {} {} {}\nGid:\t{} {} {} \
-         {}\nCpus_allowed:\t1\nCpus_allowed_list:\t0\nMems_allowed:\t1\nMems_allowed_list:\t0\n",
-        name,
-        tgid,
-        pid,
-        cred.ruid(),
-        cred.euid(),
-        cred.suid(),
-        cred.fsuid(),
-        cred.rgid(),
-        cred.egid(),
-        cred.sgid(),
-        cred.fsgid()
-    )
+impl TaskStatus {
+    fn capture(task: &KtaskRef) -> Self {
+        let thread = task.as_thread();
+        let (stat, masks) = TaskStat::sample_thread(task);
+        let tgid = thread.process().pid();
+        let cred = thread.real_cred();
+        let shared_pending = masks.shared_pending().bits();
+        let cpumask = task.cpumask();
+        Self {
+            stat,
+            tgid,
+            cred,
+            shared_pending,
+            cpumask,
+        }
+    }
+}
+
+fn task_status(task: &KtaskRef) -> String {
+    format_task_status(&TaskStatus::capture(task))
+}
+
+fn format_task_status(status: &TaskStatus) -> String {
+    let stat = &status.stat;
+    // Linux prints "S (sleeping)": parsers key on the letter and the wording is
+    // for whoever reads the file, so both are emitted as in fs/proc/array.c.
+    let state_name = match stat.state {
+        'R' => "running",
+        'S' => "sleeping",
+        'Z' => "zombie",
+        _ => "unknown",
+    };
+
+    let mut out = String::new();
+    push_status_line(
+        &mut out,
+        format_args!("Name:\t{}", escape_status_name(&stat.comm)),
+    );
+    push_status_line(
+        &mut out,
+        format_args!("State:\t{} ({})", stat.state, state_name),
+    );
+    push_status_line(&mut out, format_args!("Tgid:\t{}", status.tgid));
+    push_status_line(&mut out, format_args!("Pid:\t{}", stat.pid));
+    push_status_line(&mut out, format_args!("PPid:\t{}", stat.ppid));
+    push_status_line(
+        &mut out,
+        format_args!(
+            "Uid:\t{}\t{}\t{}\t{}",
+            status.cred.ruid(),
+            status.cred.euid(),
+            status.cred.suid(),
+            status.cred.fsuid()
+        ),
+    );
+    push_status_line(
+        &mut out,
+        format_args!(
+            "Gid:\t{}\t{}\t{}\t{}",
+            status.cred.rgid(),
+            status.cred.egid(),
+            status.cred.sgid(),
+            status.cred.fsgid()
+        ),
+    );
+    // Linux's `proc_pid_status()` emits `VmSize` only when the task has an
+    // address space; do not turn an absent MM into a misleading `0 kB` line.
+    if let Some(vsize) = stat.vsize {
+        // Linux `task_mem()` uses `seq_put_decimal_ull_width(..., 8)`, i.e.
+        // a right-aligned decimal field followed by a literal " kB".
+        push_status_line(&mut out, format_args!("VmSize:\t{:>8} kB", vsize / 1024));
+    }
+    push_status_line(&mut out, format_args!("Threads:\t{}", stat.num_threads));
+    push_status_line(&mut out, format_args!("SigPnd:\t{:016x}", stat.signal));
+    push_status_line(
+        &mut out,
+        format_args!("ShdPnd:\t{:016x}", status.shared_pending),
+    );
+    push_status_line(&mut out, format_args!("SigBlk:\t{:016x}", stat.blocked));
+    push_status_line(&mut out, format_args!("SigIgn:\t{:016x}", stat.sigignore));
+    push_status_line(&mut out, format_args!("SigCgt:\t{:016x}", stat.sigcatch));
+    // Linux renders these with `%*pb` / `cpumask_pr_args` over the runtime
+    // `nr_cpu_ids`, not over the compile-time `NR_CPUS` capacity.
+    let nr_cpus = nr_cpus();
+    push_status_line(
+        &mut out,
+        format_args!(
+            "Cpus_allowed:\t{}",
+            format_cpu_mask(status.cpumask, nr_cpus)
+        ),
+    );
+    push_status_line(
+        &mut out,
+        format_args!(
+            "Cpus_allowed_list:\t{}",
+            format_cpu_list(status.cpumask, nr_cpus)
+        ),
+    );
+    // X-Kernel currently models a single memory node and has no mempolicy.
+    // Linux parsers expect the mask/list pair, so report that sole node rather
+    // than inventing per-task NUMA state.
+    push_status_line(&mut out, format_args!("Mems_allowed:\t1"));
+    push_status_line(&mut out, format_args!("Mems_allowed_list:\t0"));
+    out
+}
+
+/// Escapes a task name for `/proc/<pid>/status` like Linux.
+///
+/// Linux renders this field with `proc_task_name(..., true)`, whose escape
+/// dictionary is exactly `"\n\\"`: newline becomes the two characters `\n` and
+/// backslash becomes `\\`. Other bytes, including tabs and spaces, pass
+/// through unchanged. Keeping the record single-line prevents a task name from
+/// injecting additional status fields or records.
+fn escape_status_name(name: &str) -> Cow<'_, str> {
+    if !name
+        .as_bytes()
+        .iter()
+        .any(|&byte| byte == b'\n' || byte == b'\\')
+    {
+        return Cow::Borrowed(name);
+    }
+
+    let mut escaped = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '\n' => escaped.push_str("\\n"),
+            '\\' => escaped.push_str("\\\\"),
+            _ => escaped.push(ch),
+        }
+    }
+    Cow::Owned(escaped)
+}
+
+/// Formats a CPU mask the way Linux's `%*pb` does for procfs.
+///
+/// Words are printed from the highest 32-bit chunk down. The high chunk is
+/// limited to `ceil(word_bits / 4)` hex digits, exactly as Linux's
+/// `bitmap_string` derives its width from `nr_cpu_ids`; lower chunks always
+/// use eight digits. With four runtime CPUs this produces `5`, while a
+/// five-CPU machine produces `05` for the same low bits.
+fn format_cpu_mask(mask: KCpuMask, nr_cpus: usize) -> String {
+    const BITS_PER_WORD: usize = 32;
+    let word_count = nr_cpus.div_ceil(BITS_PER_WORD);
+    let mut out = String::new();
+
+    for word in (0..word_count).rev() {
+        let first_bit = word * BITS_PER_WORD;
+        let word_bits = (nr_cpus - first_bit).min(BITS_PER_WORD);
+        let mut value = 0u32;
+        for bit in 0..word_bits {
+            if mask.get(first_bit + bit) {
+                value |= 1 << bit;
+            }
+        }
+
+        if !out.is_empty() {
+            out.push(',');
+        }
+        let digits = if word + 1 == word_count {
+            word_bits.div_ceil(4)
+        } else {
+            BITS_PER_WORD / 4
+        };
+        let _ = write!(out, "{value:0digits$x}");
+    }
+
+    if out.is_empty() {
+        out.push('0');
+    }
+    out
+}
+
+/// Formats a CPU mask as Linux's compressed `Cpus_allowed_list`.
+fn format_cpu_list(mask: KCpuMask, nr_cpus: usize) -> String {
+    let mut out = String::new();
+    let mut range_start = None;
+
+    for cpu in 0..nr_cpus {
+        if mask.get(cpu) {
+            if range_start.is_none() {
+                range_start = Some(cpu);
+            }
+        } else if let Some(start) = range_start.take() {
+            push_cpu_range(&mut out, start, cpu - 1);
+        }
+    }
+    if let Some(start) = range_start {
+        push_cpu_range(&mut out, start, nr_cpus - 1);
+    }
+    out
+}
+
+fn push_cpu_range(out: &mut String, start: usize, end: usize) {
+    if !out.is_empty() {
+        out.push(',');
+    }
+    if start == end {
+        let _ = write!(out, "{start}");
+    } else {
+        let _ = write!(out, "{start}-{end}");
+    }
+}
+
+/// Appends one procfs status line.
+///
+/// Writing into a `String` is infallible, so the formatting result is
+/// intentionally discarded; this helper keeps the textual layout readable
+/// instead of forcing one large, fragile `format!` literal.
+fn push_status_line(out: &mut String, args: fmt::Arguments<'_>) {
+    let _ = out.write_fmt(args);
+    out.push('\n');
 }
 
 fn format_oom_score_adj(value: i32) -> Vec<u8> {
@@ -1186,7 +1386,7 @@ impl SimpleDirOps for ThreadDir {
                     let task_weak = task_weak.clone();
                     move || {
                         let task = upgrade_task(&task_weak)?;
-                        Ok(format!("{}", TaskStat::from_thread(&task)?).into_bytes())
+                        Ok(format!("{}", TaskStat::from_thread(&task)).into_bytes())
                     }
                 }),
             ),

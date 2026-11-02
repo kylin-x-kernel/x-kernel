@@ -121,6 +121,9 @@ for the next interruptible wait or trap.
 execing thread swaps the address space. Swept targets are marked so their fatal
 death does not mark the group exited or broadcast a group kill, and a genuine
 concurrent `exit_group()`/fatal signal aborts the exec instead of being undone.
+On success it commits the surviving leader's parent contract as `SIGCHLD`, as
+Linux does before `begin_new_exec()` proceeds to file and MM replacement; a
+single-threaded exec commits the same contract after its address-space exchange.
 Go runtimes always have helper threads alive at exec time, so without this
 every Go program that execs (runc init, containerd-shim) fails.
 

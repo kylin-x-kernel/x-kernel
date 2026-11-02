@@ -2,9 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{borrow::ToOwned, fmt, string::String};
+use alloc::{fmt, string::String};
 
-use kerrno::KResult;
+use ksignal::api::SignalMasks;
 use ktask::{TaskInner, TaskState};
 
 use crate::AsThread;
@@ -13,6 +13,11 @@ use crate::AsThread;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 /// User-visible clock-tick frequency used by `/proc/[pid]/stat` (USER_HZ).
 const USER_HZ: u64 = 100;
+/// Linux `TASK_COMM_LEN`, including the terminating NUL in the kernel buffer.
+const TASK_COMM_LEN: usize = 16;
+/// Linux's obsolete `/proc/[pid]/stat` signal fields expose only the low 31
+/// bits of the 64-bit masks, so signals 32-64 cannot leak into those columns.
+const STAT_SIGNAL_MASK: u64 = 0x7fff_ffff;
 
 /// Converts a monotonic nanoseconds-since-boot timestamp into the
 /// `/proc/[pid]/stat` `starttime` representation (clock ticks since boot).
@@ -23,9 +28,10 @@ fn starttime_ticks(start_time_ns: u64) -> u64 {
 /// Represents the `/proc/[pid]/stat` file.
 #[derive(Default)]
 pub struct TaskStat {
-    /// Process ID.
+    /// Thread ID (Linux `stat` field 1).
     pub pid: u32,
-    /// Filename of the executable (limited to 16 chars).
+    /// Task name (`comm`), not the executable path. It is truncated to Linux's
+    /// 16-byte `TASK_COMM_LEN` buffer (at most 15 visible bytes plus NUL).
     pub comm: String,
     /// Process state.
     pub state: char,
@@ -61,15 +67,25 @@ pub struct TaskStat {
     pub priority: i32,
     /// Nice value.
     pub nice: i32,
-    /// Number of threads in this process.
+    /// Number of unreleased threads in this process, including a group leader
+    /// that has exited but has not yet been reaped.
     pub num_threads: u32,
     /// Obsolete (always 0 in Linux).
     pub itrealvalue: u32,
     /// Start time since system boot (jiffies).
     pub starttime: u64,
-    /// Virtual memory size in bytes.
-    pub vsize: u64,
-    /// Resident set size.
+    /// Virtual memory size in bytes, or `None` when the task has no live
+    /// address space (for example, a zombie).
+    ///
+    /// `/proc/[pid]/stat` always prints this positional field as a number
+    /// (`None` becomes `0`), while `/proc/[pid]/status` omits `VmSize` when it
+    /// is `None`, matching Linux's `if (mm)` guard.
+    pub vsize: Option<u64>,
+    /// Resident set size in pages.
+    ///
+    /// X-Kernel has no resident-page accounting yet, so this positional field
+    /// remains zero. It is a placeholder, not a measured value; `status` omits
+    /// `VmRSS` for the same reason.
     pub rss: i64,
     /// Soft limit for RSS.
     pub rsslim: u64,
@@ -83,22 +99,26 @@ pub struct TaskStat {
     pub kstk_esp: u64,
     /// Current value of EIP (obsolete).
     pub kstk_eip: u64,
-    /// Pending signals.
-    pub signal: u32,
+    /// Pending signals private to this thread.
+    pub signal: u64,
     /// Blocked signals.
-    pub blocked: u32,
+    pub blocked: u64,
     /// Ignored signals.
-    pub sigignore: u32,
+    pub sigignore: u64,
     /// Caught signals.
-    pub sigcatch: u32,
+    pub sigcatch: u64,
     /// Channel in which the process is waiting.
     pub wchan: u64,
     /// Swapped-out memory (obsolete).
     pub nswap: u64,
     /// Swapped-out memory of children (obsolete).
     pub cnswap: u64,
-    /// Signal sent to parent when we die.
-    pub exit_signal: u8,
+    /// Signal sent to the parent when this thread dies.
+    ///
+    /// Linux reports `-1` for every non-leader thread: only the group leader
+    /// owns the parent notification contract. A leader created without one
+    /// (for example the initial task) reports `0`.
+    pub exit_signal: i32,
     /// Last CPU number executed on.
     pub processor: u32,
     /// Realtime scheduling priority.
@@ -132,22 +152,43 @@ pub struct TaskStat {
 impl TaskStat {
     /// Creates a new [`TaskStat`] from a [`TaskInner`].
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// The current implementation always returns `Ok` after constructing the
-    /// snapshot; this Result is retained for the public interface.
+    /// Panics when the task has no Thread runtime.
+    pub fn from_thread(task: &TaskInner) -> Self {
+        Self::sample_thread(task).0
+    }
+
+    /// Samples the stat view and the signal masks used to fill it.
+    ///
+    /// A caller that also renders `status` can use the returned
+    /// [`SignalMasks`] for `ShdPnd`, so `SigPnd`, `ShdPnd`, and `SigBlk` all
+    /// describe one `SigLock` critical section instead of three independent
+    /// samples. Keeping the masks tied to the stat snapshot avoids accepting
+    /// masks sampled from a different task.
     ///
     /// # Panics
     ///
-    /// Panics when the task has no Thread runtime, or when truncating a name at
-    /// byte 16 would split a UTF-8 character.
-    pub fn from_thread(task: &TaskInner) -> KResult<Self> {
+    /// Panics when the task has no Thread runtime.
+    #[must_use]
+    pub fn sample_thread(task: &TaskInner) -> (Self, SignalMasks) {
+        let masks = task.as_thread().signal_manager().masks();
+        (Self::from_thread_with_signal_masks(task, masks), masks)
+    }
+
+    fn from_thread_with_signal_masks(task: &TaskInner, masks: SignalMasks) -> Self {
         let thread = task.as_thread();
         let proc = thread.process();
 
-        let pid = proc.pid();
-        let comm = task.name();
-        let comm = comm[..comm.len().min(16)].to_owned();
+        let pid = thread.tid();
+        let mut name = [0; TASK_COMM_LEN];
+        // Linux reserves the final byte for the terminating NUL, so at most
+        // `TASK_COMM_LEN - 1` bytes of the task name are visible.
+        let name_len = task.copy_name(&mut name[..TASK_COMM_LEN - 1]);
+        // `copy_name` truncates on a UTF-8 boundary, so this cannot fail; keep
+        // the fallback empty rather than turning a name bug into a panic while
+        // rendering procfs.
+        let comm = String::from(core::str::from_utf8(&name[..name_len]).unwrap_or_default());
         let state = match task.state() {
             TaskState::Running | TaskState::Ready => 'R',
             TaskState::Blocked => 'S',
@@ -163,21 +204,42 @@ impl TaskStat {
         // one they spawned; tasks started inside the first tick still report 0,
         // matching Linux's own truncation.
         let starttime = starttime_ticks(task.start_time_ns());
-        Ok(Self {
+        let (sigignore, sigcatch) = thread.signal_manager().disposition_masks();
+        // Keep "no address space" distinct from a mapped size of zero so
+        // `status` can apply Linux's `if (mm)` rule; `stat` still renders the
+        // positional field as zero.
+        let vsize = proc.virtual_memory_size();
+        // `clone(CLONE_THREAD)` tasks do not notify a parent individually and
+        // Linux marks their `exit_signal` as -1. The group leader keeps the
+        // process-wide wait contract, including a custom clone signal.
+        let exit_signal = if pid == proc.pid() {
+            proc.exit_signal().map_or(0, |signo| signo as i32)
+        } else {
+            -1
+        };
+        Self {
             pid,
-            comm: comm.to_owned(),
+            comm,
             state,
             ppid,
             pgrp,
             session,
             priority: nice.proc_stat_priority(),
             nice: nice.as_i32(),
-            num_threads: proc.thread_count() as u32,
+            // Linux `get_nr_threads()` keeps counting the zombie leader until
+            // wait/autoreap removes the process identity, even though that
+            // leader is no longer a published/schedulable task.
+            num_threads: proc.unreleased_thread_count() as u32,
             starttime,
-            exit_signal: proc.exit_signal().map_or(0, |signo| signo as u8),
+            vsize,
+            signal: masks.private_pending().bits(),
+            blocked: masks.blocked().bits(),
+            sigignore: sigignore.bits(),
+            sigcatch: sigcatch.bits(),
+            exit_signal,
             exit_code: proc.exit_code(),
             ..Default::default()
-        })
+        }
     }
 }
 
@@ -237,6 +299,14 @@ impl fmt::Display for TaskStat {
             env_end,
             exit_code,
         } = self;
+        let vsize = vsize.unwrap_or_default();
+        // These four fields predate the 64-bit signal ABI. Linux still prints
+        // `sig[0] & 0x7fffffff` for them, so signals 32-64 (and bit 31) must not
+        // leak into the legacy decimal columns. `status` uses the full masks.
+        let signal = signal & STAT_SIGNAL_MASK;
+        let blocked = blocked & STAT_SIGNAL_MASK;
+        let sigignore = sigignore & STAT_SIGNAL_MASK;
+        let sigcatch = sigcatch & STAT_SIGNAL_MASK;
         writeln!(
             f,
             "{pid} ({comm}) {state} {ppid} {pgrp} {session} {tty_nr} {tpgid} {flags} {minflt} \

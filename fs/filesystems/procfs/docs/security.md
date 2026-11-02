@@ -70,6 +70,9 @@ count can change immediately after observation and grants no admission guarantee
   obtaining a descriptor snapshot. Descriptor reuse can change a later result.
 - Task names, command lines, executable/VMA paths, mount data, trace records,
   and optional TA metadata can carry sensitive or externally influenced text.
+  `status` escapes line feed and backslash in `Name` so a task cannot forge an
+  extra status line; `stat.comm` is raw, as in Linux, and parsers must split on
+  the final `)` rather than treating the line as delimiter-free.
 - Procfs operates on Rust slices and metadata, not raw user pointers or mapped
   user payload. It has no direct MMIO/PIO, DMA-buffer, FFI, assembly, or interrupt
   handler boundary. Boot command lines, device topology, and hardware statistics
@@ -173,8 +176,11 @@ The retained maps capability preserves MM/heap identity, not a frozen image or
 a transaction spanning procfs reads. Same-image changes remain observable on
 recollection. Retention can outlive task exit and delay last-user MM cleanup;
 Linux-exact lifetime compatibility is not promised. Exec replacement,
-hardware-root switching and shared-brk policy are outside procfs. Placeholder
-statistics and namespace identities are described in `design.md`.
+hardware-root switching and shared-brk policy are outside procfs. MM has no
+resident-page accounting, so `status` omits `VmRSS` and `stat.rss` is a fixed
+positional placeholder rather than a disclosure of resident pages. Placeholder
+statistics, single-node `Mems_allowed*`, and namespace identities are described
+in `design.md`.
 
 ## Audit Checklist
 
@@ -203,6 +209,9 @@ releases retained membership independently of remaining Arc observers, and a
 Weak-only directory cannot extend that identity's ownership. Publication can
 interleave with the slot scan; this remains an advisory metadata snapshot.
 
-Nonleader exec does not gain an accounting-only leader alias. Its current
-identity/publication gap also limits Linux-exact task-directory counts after
-exec; the advisory count cannot prove identity takeover or authorize a TID.
+A successful non-leader `exec` takeover drops the retained leader slot only
+after kprocess has moved canonical publication and signal routing onto the
+survivor; the procfs count observes that final membership and never creates an
+accounting-only leader alias. A failed takeover leaves the leader slot intact.
+The advisory count still cannot authorize a TID or prove that a concurrent
+exec transition has completed; it remains a metadata snapshot.

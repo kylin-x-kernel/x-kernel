@@ -22,7 +22,7 @@ use unittest::{assert, assert_eq, def_test};
 
 use crate::{
     AsThread, ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Process,
-    ProcessExitPublication, ProcessForkConfig, build_process_thread,
+    ProcessExecUpdate, ProcessExitPublication, ProcessForkConfig, TaskStat, build_process_thread,
     process::INIT_PROC,
     process_exit, process_signals, procfs,
     publication::{prepare_user_task, process_publication},
@@ -1211,6 +1211,11 @@ fn test_exit_cleanup_clears_exclusive_address_space() {
     assert!(
         proc.address_space().is_err(),
         "live address-space access must fail after the runtime mm user is released"
+    );
+    assert_eq!(
+        proc.virtual_memory_size(),
+        None,
+        "a released mm is a normal zombie state, not a vsize of zero"
     );
     let address_space = proc
         .pinned_address_space_for_teardown_observation()
@@ -2620,6 +2625,11 @@ fn test_exit_and_reap_unpublish_tid_and_pid() {
         process.exit_thread(&published, 0),
         "single-threaded process exit must report the last thread"
     );
+    let stat = TaskStat::from_thread(&published);
+    assert_eq!(
+        stat.num_threads, 1,
+        "a zombie leader remains one unreleased thread until reap"
+    );
     assert!(
         publication.task(tid).is_err(),
         "retired tid must stop resolving through the task directory"
@@ -2666,6 +2676,85 @@ fn test_exited_leader_membership_survives_sibling_exit_until_reap() {
     assert_eq!(procfs::thread_group_member_count(&process), 1);
     assert!(wait_reap::reap_zombie_process(&process));
     assert_eq!(procfs::thread_group_member_count(&process), 0);
+}
+
+#[def_test(user, serial)]
+fn test_taskstat_exit_signal_is_minus_one_for_non_leader_threads() {
+    let process = ensure_init().fork_with_exit_signal(1_175, Some(ksignal::Signo::SIGUSR1));
+    let leader = publish_test_thread(&process, 1_175);
+    let sibling = publish_test_thread(&process, 1_176);
+
+    assert_eq!(
+        TaskStat::from_thread(&leader).exit_signal,
+        ksignal::Signo::SIGUSR1 as i32,
+        "the group leader reports the process-wide wait contract"
+    );
+    assert_eq!(
+        TaskStat::from_thread(&sibling).exit_signal,
+        -1,
+        "a CLONE_THREAD sibling has no parent notification contract"
+    );
+
+    assert!(!process.exit_thread(&sibling, 0));
+    assert!(process.exit_thread(&leader, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+}
+
+#[def_test(user, serial)]
+fn test_process_exec_commits_parent_exit_signal_before_post_commit_work() {
+    let process = ensure_init().fork_with_exit_signal(1_177, Some(Signo::SIGUSR1));
+    let leader = publish_test_thread(&process, 1_177);
+
+    let failed_before_commit = ProcessExecUpdate::new(
+        String::from("/bin/failing-before-commit"),
+        Arc::new(vec![String::from("failing-before-commit")]),
+    )
+    .with_failure_probe(Arc::new(AtomicUsize::new(0)));
+    assert_eq!(
+        process.apply_exec_update(failed_before_commit).unwrap_err(),
+        kerrno::KError::NoMemory
+    );
+    assert_eq!(
+        process.exit_signal(),
+        Some(Signo::SIGUSR1),
+        "a failure before the parent-contract commit leaves it untouched"
+    );
+
+    process.commit_exec_parent_contract();
+    assert_eq!(
+        process.exit_signal(),
+        Some(Signo::SIGCHLD),
+        "committing the exec establishes SIGCHLD as the parent contract"
+    );
+
+    let failed_after_commit = ProcessExecUpdate::new(
+        String::from("/bin/failing-after-commit"),
+        Arc::new(vec![String::from("failing-after-commit")]),
+    )
+    .with_failure_probe(Arc::new(AtomicUsize::new(0)));
+    assert_eq!(
+        process.apply_exec_update(failed_after_commit).unwrap_err(),
+        kerrno::KError::NoMemory
+    );
+    assert_eq!(
+        process.exit_signal(),
+        Some(Signo::SIGCHLD),
+        "a post-commit failure must not roll the parent contract back"
+    );
+
+    let update = ProcessExecUpdate::new(
+        String::from("/bin/true"),
+        Arc::new(vec![String::from("true")]),
+    );
+    process.apply_exec_update(update).unwrap();
+    assert_eq!(
+        TaskStat::from_thread(&leader).exit_signal,
+        Signo::SIGCHLD as i32,
+        "procfs observes the post-exec wait contract"
+    );
+
+    assert!(process.exit_thread(&leader, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
 }
 
 #[def_test(user, serial)]
@@ -2734,6 +2823,16 @@ fn test_exec_leader_takeover_moves_number_onto_survivor() {
 
     assert!(process.assume_leader_identity(&survivor));
     assert_eq!(survivor.as_thread().tid(), pid);
+    assert_eq!(
+        procfs::thread_group_member_count(&process),
+        1,
+        "the adopted group identity replaces the retired leader slot"
+    );
+    assert_eq!(
+        TaskStat::from_thread(&survivor).num_threads,
+        1,
+        "procfs must not count the retired leader as a second member"
+    );
     assert!(
         process_publication()
             .task(pid)

@@ -85,6 +85,14 @@ impl ThreadMembership {
             .any(|task| task.as_thread().tid() == tid)
     }
 
+    fn is_sole_published_tid(&self, tid: Tid) -> bool {
+        let mut published = self.members.values().filter_map(|slot| slot.snapshot());
+        matches!(
+            (published.next(), published.next()),
+            (Some(task), None) if task.as_thread().tid() == tid
+        )
+    }
+
     fn representative_task(&self) -> KResult<KtaskRef> {
         self.members
             .values()
@@ -179,8 +187,10 @@ impl Process {
     /// Moves the thread-group identity onto `task` after a non-leader `exec`.
     ///
     /// `task` must be the process's sole surviving published thread. The number
-    /// directory entry moves once and the thread adopts the group number;
-    /// membership and cgroup key on the stable identity and need no change.
+    /// directory entry moves once and the thread adopts the group number.
+    /// Membership and cgroup key on the stable identity; only the old leader's
+    /// retained `ExitedLeader` slot is dropped, because that slot describes a
+    /// process identity the survivor now owns rather than an unreleased member.
     /// Signal routing still keys threads by number, so its registry entry is
     /// re-keyed here. Call in sleepable context, before the new image is
     /// installed; returns `false` when the precondition or directory move fails.
@@ -188,10 +198,11 @@ impl Process {
         let thread = task.as_thread();
         let old_tid = thread.tid();
         let pid = self.pid();
-        // Verify the sole-survivor invariant for the leader case too, so a
-        // sibling published during the sweep is refused instead of being left
-        // running against the old address space.
-        if self.thread_count() != 1 || !self.contains_published_tid(old_tid) {
+        // Sample the count and the surviving number under one membership lock,
+        // so a sibling published during the sweep is refused instead of being
+        // left running against the old address space. This also checks the
+        // leader case: the transition must not move an identity it already owns.
+        if !self.thread_membership.lock().is_sole_published_tid(old_tid) {
             return false;
         }
         if old_tid == pid {
@@ -202,6 +213,11 @@ impl Process {
         }
         thread.adopt_task_number(self.leader_task_number.clone());
         thread.signal_manager().rebind_after_exec(pid);
+        // The survivor now owns the group identity. If the old leader exited
+        // before this takeover, its `ExitedLeader` slot was retained only for
+        // `/proc` link and thread counts; keeping it would double-count the
+        // single surviving member until process reap.
+        self.thread_membership.lock().release_exited_leader();
         true
     }
 
@@ -303,6 +319,15 @@ impl Process {
     /// Returns whether `tid` still resolves to a published thread in this [`Process`].
     pub(crate) fn contains_published_tid(&self, tid: Tid) -> bool {
         self.thread_membership.lock().contains_published_tid(tid)
+    }
+
+    /// Returns whether `tid` is the only published thread in this [`Process`].
+    ///
+    /// Count and number are sampled under one membership lock. This is the
+    /// shared precondition for replacing the group image and for an exec
+    /// identity takeover; neither may proceed while a sibling is published.
+    pub(crate) fn is_sole_published_tid(&self, tid: Tid) -> bool {
+        self.thread_membership.lock().is_sole_published_tid(tid)
     }
 
     /// Returns the lowest-TID published task that currently represents this [`Process`].

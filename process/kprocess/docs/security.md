@@ -135,6 +135,10 @@ Signal delivery during sleepable old-MM teardown would violate this contract.
   task's number.
 - Parent link, child list, exit signal and reserved reparent slot form one
   relation. Mutate them under the domain write lock, never by independent updates.
+  An exec commits the exit signal to `SIGCHLD` only once the old thread group can
+  no longer be resumed (`exec_de_thread` for a takeover, the address-space
+  exchange for a single thread); failures before that point preserve the old
+  contract, while failures after it are fatal and cannot roll it back.
 - Running → Zombie/Dead and Zombie → Dead consumption are domain transactions.
   Acquire-load exited flags are advisory for compound decisions.
 - Publication may retain strong Process identity after runnable threads vanish.
@@ -299,17 +303,24 @@ atomic group snapshot or synchronization against clone/exit.
 ## Unreleased thread membership
 
 The procfs lifetime count uses member-slot state, not the schedulable-task count.
-ExitedLeader retains no strong task/runtime owner and grants no TID lookup or
-signal delivery capability. Exact Weak task identity gates the exit transition
-so an old task cannot retire a replacement binding. Reserved/rolled-back slots
-remain Vacant; nonleader exit is released; reap/autoreap clears the retained
-leader under the existing process-domain transaction. Exec does not change
-member accounting, canonical TID, or publication in this patch. The existing
-nonleader-exec identity gap and its post-exec count consequence are documented
-in design.md; metadata must not be presented as proof of Linux-exact takeover.
-Current runtime TIDs are checked monotonic allocations and are not recycled on
-drop; exhaustion fails rather than wrapping. Fixed-number test identities do not
-provide a production reuse path. Any future recycling policy must preserve leader
-retention separately from replacement publication before changing that invariant.
-The count is a slot scan, not a global counter or atomic snapshot. No new unsafe code or sleepable lock
-is introduced, and directory metadata locks are not held across the query.
+`TaskStat::num_threads` and the `status` `Threads` field consume that same
+unreleased count, so a zombie leader keeps the group at one thread until
+reap/autoreap clears the retained leader. ExitedLeader retains no strong
+task/runtime owner and grants no TID lookup or signal delivery capability.
+Exact Weak task identity gates the exit transition so an old task cannot retire
+a replacement binding. Reserved/rolled-back slots remain Vacant; nonleader exit
+is released; reap/autoreap clears the retained leader under the existing
+process-domain transaction. A successful non-leader `exec` takeover also clears
+the retained leader, but only after the survivor has moved the global number
+binding, adopted the group number and re-keyed signal routing. A failed
+precondition or move returns first, leaving the leader slot authoritative. This
+is an identity transition, not an accounting rewrite, and the procfs count never
+synthesizes a leader alias. A nonleader slot still retires at its own exit, so
+only a leader has Linux-style unreaped retention; the takeover case is the sole
+path that transfers that retained identity to a survivor. Current runtime TIDs
+are checked monotonic allocations and are not recycled on drop; exhaustion fails
+rather than wrapping. Fixed-number test identities do not provide a production
+reuse path. Any future recycling policy must preserve leader retention separately
+from replacement publication before changing that invariant. The count is a slot
+scan, not a global counter or atomic snapshot. No new unsafe code or sleepable
+lock is introduced, and directory metadata locks are not held across the query.

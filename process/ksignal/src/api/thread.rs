@@ -63,6 +63,38 @@ pub struct ThreadSignalManager {
     hint: Arc<AtomicBool>,
 }
 
+/// Coherent snapshot of the signal state owned by one `SigLock`.
+///
+/// Pending and blocked masks are only meaningful relative to one another:
+/// deliverability is `pending ∩ ¬blocked`. Sampling them through separate
+/// accessors can therefore produce a combination that never existed. This
+/// type is produced by [`ThreadSignalManager::masks`] from a single critical
+/// section so report-oriented callers can render all three fields from one
+/// instant.
+#[derive(Clone, Copy)]
+pub struct SignalMasks {
+    private_pending: SignalSet,
+    shared_pending: SignalSet,
+    blocked: SignalSet,
+}
+
+impl SignalMasks {
+    /// Returns the pending signals private to the thread.
+    pub const fn private_pending(self) -> SignalSet {
+        self.private_pending
+    }
+
+    /// Returns the process-directed (shared) pending signals.
+    pub const fn shared_pending(self) -> SignalSet {
+        self.shared_pending
+    }
+
+    /// Returns the thread's blocked signal set.
+    pub const fn blocked(self) -> SignalSet {
+        self.blocked
+    }
+}
+
 impl ThreadSignalManager {
     /// Creates a thread signal manager using the default KERNEL slot policy.
     ///
@@ -526,6 +558,31 @@ impl ThreadSignalManager {
     /// Replaces the signal handler stack configuration.
     pub fn set_stack(&self, stack: SignalStack) {
         *self.stack.lock() = stack;
+    }
+
+    /// Returns this thread's pending, shared-pending, and blocked masks from
+    /// one `SigLock` critical section.
+    ///
+    /// Use this instead of combining the individual accessors when reporting
+    /// several signal fields together; separate acquisitions can observe a
+    /// delivery or unblock between fields and yield an impossible combination.
+    /// Dispositions are not included: they live behind the process handler
+    /// lock, which has an independent ordering relationship with `SigLock`.
+    #[must_use]
+    pub fn masks(&self) -> SignalMasks {
+        self.proc.siglock().inspect(|view| SignalMasks {
+            private_pending: view.pending(self.slot),
+            shared_pending: view.shared_pending(),
+            blocked: view.blocked(self.slot),
+        })
+    }
+
+    /// Returns the ignored and caught signal masks configured for the process.
+    ///
+    /// The masks describe dispositions, not pending delivery; Linux exposes
+    /// them as `SigIgn` and `SigCgt` in `/proc/<pid>/status`.
+    pub fn disposition_masks(&self) -> (SignalSet, SignalSet) {
+        self.proc.disposition_masks()
     }
 
     /// Returns pending signals for this thread and its process.

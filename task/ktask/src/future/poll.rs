@@ -32,10 +32,12 @@ pub async fn poll_io<P: Pollable, F: FnMut() -> KResult<T>, T>(
 /// Waits for I/O while retaining the source of interruption.
 ///
 /// The outer error belongs to task interruption or its registration; operation
-/// and I/O registration errors remain in the inner result. Like [`poll_io`],
-/// task interruption is checked before each operation poll. Poll this future
-/// in task context without locks that prohibit blocking; dropping it removes
-/// its wait registrations. No Linux syscall restart policy is applied here.
+/// and I/O registration errors remain in the inner result. Operation progress
+/// wins over interruption: a ready or nonblocking immediate result is returned
+/// without consuming a pending signal. Task interruption is observed only
+/// after the operation reports [`Poll::Pending`]. Poll this future in task
+/// context without locks that prohibit blocking; dropping it removes its wait
+/// registrations. No Linux syscall restart policy is applied here.
 pub async fn poll_io_with_cause<P: Pollable, F: FnMut() -> KResult<T>, T>(
     pollable: &P,
     events: IoEvents,

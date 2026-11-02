@@ -1422,3 +1422,90 @@ fn unix_stream_blocking_send_registers_its_record_once() {
     assert_eq!(first_controls, Some(vec![7]));
     assert!(later_controls.is_empty());
 }
+
+#[def_test(serial)]
+fn unix_stream_nonblocking_ready_recv_wins_over_pending_signal() {
+    let (left, right) = StreamTransport::new_pair(1);
+    let curr = ktask::current();
+    curr.clear_interrupt();
+    assert_eq!(left.send(&b"x"[..], SendOptions::default()), Ok(1));
+    curr.interrupt();
+
+    let mut byte = [0_u8; 1];
+    let result = right.recv(
+        &mut byte[..],
+        RecvOptions {
+            flags: RecvFlags::DONT_WAIT,
+            ..RecvOptions::default()
+        },
+    );
+
+    assert_eq!(result, Ok(1));
+    assert_eq!(byte, [b'x']);
+    assert!(
+        curr.is_interrupted(),
+        "a ready nonblocking receive must leave the signal pending"
+    );
+    curr.clear_interrupt();
+}
+
+#[def_test(serial)]
+fn unix_stream_nonblocking_would_block_preserves_pending_signal() {
+    let (_left, right) = StreamTransport::new_pair(1);
+    let curr = ktask::current();
+    curr.clear_interrupt();
+    curr.interrupt();
+
+    let mut byte = [0_u8; 1];
+    let result = right.recv(
+        &mut byte[..],
+        RecvOptions {
+            flags: RecvFlags::DONT_WAIT,
+            ..RecvOptions::default()
+        },
+    );
+
+    assert_eq!(result, Err(KError::WouldBlock));
+    assert!(
+        curr.is_interrupted(),
+        "a nonblocking syscall has no interruptible wait to abort"
+    );
+    curr.clear_interrupt();
+}
+
+#[def_test(serial)]
+fn unix_stream_blocking_recv_reports_pending_signal_only_when_no_data() {
+    let (_left, right) = StreamTransport::new_pair(1);
+    let curr = ktask::current();
+    curr.clear_interrupt();
+    curr.interrupt();
+
+    let mut byte = [0_u8; 1];
+    let result = right.recv(&mut byte[..], RecvOptions::default());
+
+    assert_eq!(result, Err(KError::Interrupted));
+    assert!(
+        !curr.is_interrupted(),
+        "the signal that aborted the wait is consumed"
+    );
+}
+
+#[def_test(serial)]
+fn unix_stream_blocking_ready_recv_keeps_pending_signal() {
+    let (left, right) = StreamTransport::new_pair(1);
+    let curr = ktask::current();
+    curr.clear_interrupt();
+    assert_eq!(left.send(&b"y"[..], SendOptions::default()), Ok(1));
+    curr.interrupt();
+
+    let mut byte = [0_u8; 1];
+    let result = right.recv(&mut byte[..], RecvOptions::default());
+
+    assert_eq!(result, Ok(1));
+    assert_eq!(byte, [b'y']);
+    assert!(
+        curr.is_interrupted(),
+        "a blocking receive with ready data must not report EINTR"
+    );
+    curr.clear_interrupt();
+}

@@ -50,8 +50,8 @@ pub fn thread_ids(process: &Arc<Process>) -> alloc::vec::Vec<Tid> {
 /// Returns unreleased thread-group members for task-directory link counts.
 ///
 /// Includes an exited group leader until wait/autoreap consumes its process
-/// identity. Nonleader exec does not transfer canonical identity or membership
-/// here; its Linux-exact post-exec count requires a unified takeover transition.
+/// identity, or until a surviving thread takes over the group identity by a
+/// successful non-leader `exec`; that takeover drops the retired leader slot.
 /// Unlike `scheduler::process_task_count`, this is a lifetime query,
 /// not a count of schedulable or globally discoverable tasks. It allocates no
 /// list, but scans stored member slots under their existing spinlocks; slot

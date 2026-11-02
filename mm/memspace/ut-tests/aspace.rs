@@ -348,6 +348,29 @@ fn madvise_dontneed_requires_fully_mapped_range() {
 }
 
 #[def_test]
+fn mapped_size_sums_vma_lengths_not_address_space_span() {
+    let mut aspace = new_test_aspace();
+    assert_eq!(aspace.mapped_size(), 0);
+    assert_eq!(aspace.size(), PAGE_SIZE_4K * 64);
+
+    map_shared(
+        &mut aspace,
+        0x5000,
+        PAGE_SIZE_4K * 2,
+        MappingFlags::READ | MappingFlags::WRITE,
+    );
+    map_shared(
+        &mut aspace,
+        0x9000,
+        PAGE_SIZE_4K,
+        MappingFlags::READ | MappingFlags::WRITE,
+    );
+
+    assert_eq!(aspace.vmas().count(), 2);
+    assert_eq!(aspace.mapped_size(), PAGE_SIZE_4K as u64 * 3);
+}
+
+#[def_test]
 fn overlapping_lazy_mapping_preserves_existing_mapping() {
     let mut aspace = new_test_aspace();
     let start = VirtAddr::from(0x5000usize);

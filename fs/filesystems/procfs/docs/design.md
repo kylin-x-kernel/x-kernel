@@ -114,6 +114,22 @@ opening alone does not capture credentials. No procfs credential cache is added,
 and unrelated fields are not a globally atomic task snapshot. Current `kcred` IDs belong
 to the initial user namespace; reader-namespace ID translation is not implemented.
 
+`status` emits a Linux-compatible subset in Linux field order. `SigPnd`,
+`ShdPnd`, and `SigBlk` come from one `ThreadSignalManager::masks()` snapshot, so
+they describe one `SigLock` critical section; `SigIgn`/`SigCgt` need the separate
+handler lock and may reflect a different instant. `VmSize` is the sum of VMA
+lengths, not the fixed address-space window span; it is omitted when the task
+has no live MM, while the positional `stat` field remains numeric `0`.
+`Threads` uses the unreleased membership count, so an exited-but-unreaped group
+leader still counts. `Cpus_allowed` and `Cpus_allowed_list` use the runtime CPU
+count for the top-chunk width and list bounds; `Mems_allowed` and
+`Mems_allowed_list` are the documented single-node constants.
+
+`Name` escapes only line feed and backslash (`\n` and `\\`) so one task name
+cannot inject an extra status line; other bytes pass through. Raw `stat.comm`
+does not escape, matching Linux's `proc_task_name(..., false)` and allowing
+parsers to split on the final `)`.
+
 Regression fixtures publish inactive targets with distinct credentials, restore
 reader credentials with a scope guard, and abort their owned publications on
 drop. Tests cover root/non-root columns, all four ID roles, sibling isolation,
@@ -148,10 +164,12 @@ if a strong Process observer remains. Inherited fds never switch to the caller.
 Failed Weak upgrade also returns 2. No directory-layer exit-state adjustment,
 extra counter or ownership of the target is introduced.
 
-Nonleader exec after leader exit is outside the Linux-exact count claim. The
-provider currently retains the old leader without changing the survivor's TID;
-this patch does not compensate in procfs or add a count-only leader identity.
-See kprocess design.md for the required unified takeover boundary.
+An exited leader remains a member until wait/autoreap releases the identity, or
+until a non-leader `exec` takeover successfully moves the group identity onto
+the survivor. That transition drops the retained leader slot in kprocess, so
+the count stays one without any procfs compensation or count-only leader alias.
+A failed takeover leaves the original leader slot authoritative. See kprocess
+design.md for the identity-transition boundary.
 
 The query scans stored slots under membership/slot spinlocks, with no allocation.
 Publication can interleave; this is not an atomic group snapshot. Each getattr
@@ -231,9 +249,14 @@ open-file or post-exit lifetime semantics.
 
 Maps retains an O(VMA-count) copied list and clones path strings while holding
 the MM mutex. Addresses use a minimum width of 12 hex digits and device numbers
-are rendered as `00:00`. Several status/memory fields and non-cgroup namespace
-identities are placeholders. Mount reporting uses synthetic device identities
-and is not a globally frozen namespace snapshot. `printk` keeps its historical
+are rendered as `00:00`. Status is a subset rather than Linux's full field set.
+MM has no resident-page accounting, so `VmRSS` is omitted and `stat.rss` is a
+positional `0` placeholder, not a measurement. `Mems_allowed*` are fixed
+single-node values, not a rendering of Linux's `MAX_NUMNODES`-wide mask. Status
+samples each subsystem in sequence and does not promise a global atomic
+snapshot. Non-cgroup namespace identities remain placeholders. Mount reporting
+uses synthetic device identities and is not a globally frozen namespace
+snapshot. `printk` keeps its historical
 single-value contract: it reads the console default level as a number in
 X-Kernel's order (`0=off … 5=trace`) and a privileged write of a level name or
 number changes that level, leaving the module filter untouched — a target with a

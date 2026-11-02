@@ -261,6 +261,14 @@ impl SignalSet {
         self.0 == 0
     }
 
+    /// Returns the raw signal bit mask.
+    ///
+    /// Bit `n - 1` represents signal number `n`, matching the Linux
+    /// `sigset_t` layout used by `/proc` signal-mask fields.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
     /// Removes and returns the lowest-numbered signal that is both pending in
     /// this set and contained in `mask`, or `None` if no such signal exists.
     ///

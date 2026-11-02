@@ -433,6 +433,21 @@ impl Process {
             .and_then(|runtime| runtime.address_space().ok_or(KError::NoSuchProcess))
     }
 
+    /// Returns the total size of the process's mapped virtual memory in bytes.
+    ///
+    /// This is the sum of all VMA lengths, matching Linux `mm->total_vm`-based
+    /// `vsize`, not the span of the address-space window. The address space is
+    /// locked once and sampled atomically with respect to mapping changes.
+    ///
+    /// Returns `None` when the process no longer has a live address space, such
+    /// as a zombie awaiting reclamation. This intentionally models Linux's
+    /// `mm == NULL` state rather than treating the absent MM as an error.
+    pub fn virtual_memory_size(&self) -> Option<u64> {
+        self.address_space()
+            .ok()
+            .map(|aspace| aspace.lock().mapped_size())
+    }
+
     /// Returns the pinned address-space object for teardown-state observation.
     /// This unittest-only observer does not retain active user mappings. Use a
     /// weak reference when testing reclamation so the observer cannot mask it.
@@ -779,6 +794,10 @@ impl Process {
     /// Applies the process-shared post-exec state transition.
     /// The new MM binding already owns its initialized heap marker; this update
     /// does not reset or replace it.
+    ///
+    /// The caller commits the exec parent contract separately, immediately
+    /// after the old thread group becomes un-resumable, so a later failure here
+    /// cannot roll that contract back.
     ///
     /// # Errors
     ///
