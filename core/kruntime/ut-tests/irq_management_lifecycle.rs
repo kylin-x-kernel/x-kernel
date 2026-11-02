@@ -168,6 +168,10 @@ fn request_waits_for_free_to_drain_retained_inflight() {
 
     // A sleeping transaction excludes its own Line, not unrelated management.
     let other_registered = kirq::try_register_disabled(other_virq, Arc::new(|_| IrqEvent::HANDLED));
+    // Already disabled: exercise control and drain admission without issuing a
+    // controller write for this synthetic IRQ number.
+    let other_disabled = kirq::try_disable_irq_nosync(other_virq);
+    let other_synchronized = kirq::try_synchronize_irq(other_virq);
     let other_removed = kirq::try_free_irq(other_virq);
     let did_remove_other = matches!(&other_removed, Ok(Some(_)));
     drop(other_removed);
@@ -186,6 +190,8 @@ fn request_waits_for_free_to_drain_retained_inflight() {
     assert!(!did_free_early);
     assert!(!did_register_early);
     assert_eq!(other_registered, Ok(true));
+    assert_eq!(other_disabled, Ok(()));
+    assert_eq!(other_synchronized, Ok(true));
     assert!(did_remove_other);
     assert!(kirq::descriptor(other_virq).is_none());
     assert_eq!([old_drops_before_release, new_drops_before_release], [0, 0]);

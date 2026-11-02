@@ -6,11 +6,9 @@
 
 use alloc::collections::BTreeMap;
 
-use kspin::{SpinRaw, static_lock};
+use kspin::{NoPreemptIrqSave, SpinNoPreempt, SpinRaw, static_lock};
 
-use super::manager::{
-    IRQ_CONTROL_LOCK, ManagementMode, with_existing_line, with_registration_line_checked,
-};
+use super::manager::{ManagementMode, with_existing_line, with_registration_line_checked};
 use crate::{
     Hwirq, IrqDesc, IrqFlags, IrqSpec,
     action::IrqAction,
@@ -19,13 +17,20 @@ use crate::{
 };
 
 static_lock! {
+    /// Serializes NMI writers across Lines sharing the hwirq-keyed table.
+    /// Acquired after Line management and before registry/Line/table locks.
+    /// NMI dispatch never takes this lock; caller-owned NMI exclusion still applies.
+    static NMI_PUBLICATION_LOCK: SpinNoPreempt<()> = SpinNoPreempt::new(());
+}
+
+static_lock! {
     /// NMI handler table, keyed by hwirq.
     ///
     /// # Locking invariant
     ///
     /// - **WRITES**: source-quiesced management via [`register_nmi`],
     ///   [`register_nmi_startup`] and [`unregister_nmi`], serialized with the
-    ///   fallback action by the manager control lock after Line admission.
+    ///   fallback action by NMI_PUBLICATION_LOCK after Line management acquisition.
     ///   Management from NMI is rejected before any lock.
     /// - **READS**: NMI context only, via [`dispatch_nmi_handler`]. The lock is never
     ///   acquired from a normal IRQ handler, so an NMI that preempts a
@@ -39,8 +44,8 @@ static_lock! {
     ///   exclusion must survive management waits and migration, covering every
     ///   CPU on which the managing task can resume;
     /// - writers acquire the sleepable management mutex before this table lock.
-    ///   While holding the table lock they also hold control/registry/Line
-    ///   SpinNoIrq guards: they cannot sleep, be preempted or migrate. Local
+    ///   While holding the table lock they also hold publication and Line
+    ///   guards under an outer NoPreemptIrqSave: they cannot sleep, be preempted or migrate. Local
     ///   NMI exclusion is still required because those guards do not mask NMI;
     /// - a pseudo-NMI cannot preempt another pseudo-NMI on the same CPU (the NMI
     ///   path never lowers PMR below `NMI_ONLY`);
@@ -110,17 +115,16 @@ fn register_nmi_with_mode(
     let result = with_registration_line_checked(
         IrqSpec::Desc(desc.with_flags(IrqFlags::PER_CPU)),
         mode,
-        |line| {
-            // The helper already holds control/state exclusion. Reject before
+        Some(&NMI_PUBLICATION_LOCK),
+        |entry| {
+            // The helper already holds publication/state exclusion. Reject before
             // descriptor resolution can merge flags or publish a new mapping.
             let has_table_entry = { NMI_TABLE.lock().contains_key(&hwirq) };
-            Ok(!has_table_entry && !line.lock().has_actions())
+            Ok(!has_table_entry && !entry.has_actions())
         },
-        |_, line| {
-            // Registration keeps control exclusion from preflight through
+        |_, entry| {
+            // Registration keeps publication exclusion from preflight through
             // publication, including across different Lines sharing a hwirq.
-            let state = IRQ_STATE.lock();
-            let mut entry = line.lock();
             let mut table = NMI_TABLE.lock();
             debug_assert!(!table.contains_key(&hwirq) && !entry.has_actions());
             if !entry.install_regular_action(IrqAction::nmi_fallback(handler.clone())) {
@@ -129,7 +133,6 @@ fn register_nmi_with_mode(
             let stored_desc = entry.desc;
             table.insert(hwirq, handler.clone());
             drop(table);
-            drop(state);
             // Keep fallback state and controller configuration in one Line
             // transaction, without holding the shared NMI table in the backend.
             configure(stored_desc);
@@ -183,7 +186,10 @@ pub fn unregister_nmi(desc: IrqDesc) -> bool {
 
 fn unregister_nmi_with(desc: IrqDesc, mask: impl FnOnce(IrqDesc)) -> bool {
     let result = with_existing_line(IrqSpec::Desc(desc), ManagementMode::Task, |_, line| {
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
+        // Registry is released before Line; preserve the entry IRQ mask until
+        // both guards are gone independently of publication serialization.
+        let _context_guard = NoPreemptIrqSave::new();
+        let _publication_guard = NMI_PUBLICATION_LOCK.lock();
         let state = IRQ_STATE.lock();
         let mut entry = line.lock();
         let mut table = NMI_TABLE.lock();

@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 
 use kiface_task_api::TaskBlockingContextIf;
 use krcu_core::RcuContextIf;
-use kspin::{SpinNoIrq, static_lock};
+use kspin::{NoPreemptIrqSave, SpinNoIrq, SpinNoPreempt};
 
 use super::rcu::with_nmi_context;
 use crate::{
@@ -47,10 +47,6 @@ pub use crate::{
     },
     state::DYNAMIC_VIRQ_BASE,
 };
-
-static_lock! {
-    pub(super) static IRQ_CONTROL_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
-}
 
 /// Options for installing a regular IRQ handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +174,7 @@ fn enable_line(
         return enable_legacy_line(registry, spec, apply_plan);
     }
     let line;
-    let _control_guard = IRQ_CONTROL_LOCK.lock();
+    let _context_guard = NoPreemptIrqSave::new();
     let state = registry.lock();
     let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
     line = state
@@ -212,7 +208,7 @@ fn enable_legacy_line(
         // Declare the retained owner before the guards so even error returns
         // release short locks before a possible final Line destruction.
         let line;
-        let control_guard = IRQ_CONTROL_LOCK.lock();
+        let context_guard = NoPreemptIrqSave::new();
         let mut state = registry.lock();
         let existing_virq = if let Some((virq, existing)) = lookup_line(&state, spec) {
             line = existing.clone();
@@ -220,7 +216,7 @@ fn enable_legacy_line(
         } else {
             let Some(candidate) = prepared.as_ref() else {
                 drop(state);
-                drop(control_guard);
+                drop(context_guard);
                 continue;
             };
             line = candidate.clone();
@@ -283,14 +279,16 @@ pub fn try_disable_irq_nosync(spec: impl Into<IrqSpec>) -> Result<(), IrqDescErr
 
 // Backend updates are bounded and cannot call back into KIRQ management. Keep
 // the selected Line locked through the mask write, but release the directory
-// before entering the controller. The global control lock remains until the
-// other control paths adopt the same per-Line transaction boundary.
+// before entering the controller. The Line guard serializes mask with enable
+// and registration updates without taking global control exclusion.
 fn disable_line(
     registry: &SpinNoIrq<IrqState>,
     spec: IrqSpec,
     apply_plan: impl FnOnce(IrqPlatformPlan),
 ) -> Result<IrqDrain, IrqDescError> {
-    let _control_guard = IRQ_CONTROL_LOCK.lock();
+    // Registry-to-Line handoff releases nested IRQ-saving guards out of order.
+    // Preserve the entry context until both are gone, without a global lock.
+    let _context_guard = NoPreemptIrqSave::new();
     let state = registry.lock();
     let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
     let line = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
@@ -570,11 +568,12 @@ fn register_with_mode(
     let result = with_registration_line_checked(
         spec,
         mode,
-        |line| Ok(line.lock().can_install_regular_action()),
-        |virq, line| {
-            Ok(register_on_line(
+        None,
+        |entry| Ok(entry.can_install_regular_action()),
+        |virq, entry| {
+            Ok(register_locked(
                 virq,
-                line,
+                entry,
                 &handler,
                 options,
                 apply_platform_plan,
@@ -588,17 +587,16 @@ fn register_with_mode(
     result.map(|registered| registered.unwrap_or(false))
 }
 
-// Management admission pins this Line's membership. No registry lock is needed
-// while installing an action and applying its bounded controller update.
+// The caller retains Line exclusion from resolution through this update.
+// Management admission pins membership after registry exclusion is released.
 // The caller retains handler ownership until management exclusion is released.
-fn register_on_line(
+fn register_locked(
     virq: Virq,
-    line: &Arc<IrqLine>,
+    entry: &mut IrqStateDesc,
     handler: &Handler,
     options: IrqRegisterOptions,
     apply_plan: impl FnOnce(IrqPlatformPlan),
 ) -> bool {
-    let mut entry = line.lock();
     if entry.has_actions() {
         warn!("register handler for IRQ {virq} failed");
         return false;
@@ -643,11 +641,12 @@ pub fn try_register_shared(
     let result = with_registration_line_checked(
         spec,
         ManagementMode::Task,
-        |line| Ok(line.lock().can_install_shared_action()),
-        |virq, line| {
-            Ok(register_shared_on_line(
+        None,
+        |entry| Ok(entry.can_install_shared_action()),
+        |virq, entry| {
+            Ok(register_shared_locked(
                 virq,
-                line,
+                entry,
                 &handler,
                 apply_platform_plan,
             ))
@@ -660,13 +659,12 @@ pub fn try_register_shared(
     result.map(Option::flatten)
 }
 
-fn register_shared_on_line(
+fn register_shared_locked(
     virq: Virq,
-    line: &Arc<IrqLine>,
+    entry: &mut IrqStateDesc,
     handler: &Handler,
     apply_plan: impl FnOnce(IrqPlatformPlan),
 ) -> Option<IrqActionToken> {
-    let mut entry = line.lock();
     let was_first_action = !entry.has_actions();
     let Some(token) = entry.install_shared_action(handler.clone()) else {
         warn!("register shared handler for IRQ {virq} failed");
@@ -755,13 +753,14 @@ impl Drop for ManagementAdmission<'_> {
 
 /// Checks registration-specific rejection before merging or publishing metadata.
 ///
-/// The preflight runs under management, control and registry exclusion, but
-/// without a Line guard. It may lock the supplied Line or the NMI table, but
-/// must not reacquire the registry/control locks, allocate or wait. False
-/// rejects without resolution or publication. The ordinary body retains control
-/// exclusion across publication, but runs without registry or Line guards. It
-/// must not wait or reacquire the control lock. This makes a shared-table check
-/// and publication atomic even when registrations select different Lines.
+/// Preflight and resolution run under management, registry and Line
+/// exclusion. Preflight may lock the NMI table, but must not reacquire any outer
+/// lock, allocate or wait. False rejects without resolution or publication.
+/// The body borrows the same locked Line state after registry release; it must
+/// not reacquire registry/Line locks or wait. An optional publication lock is
+/// acquired after management and before registry exclusion, and held through
+/// the body. Shared-table owners must use the same lock on every writer to
+/// serialize preflight/publication across Lines; ordinary registration needs none.
 /// None means startup contention, teardown or preflight rejection. Return
 /// discarded handler owners rather than destroying them inside the transaction.
 #[expect(
@@ -771,8 +770,9 @@ impl Drop for ManagementAdmission<'_> {
 pub(super) fn with_registration_line_checked<T>(
     spec: IrqSpec,
     mode: ManagementMode,
-    mut preflight_fn: impl FnMut(&Arc<IrqLine>) -> Result<bool, IrqDescError>,
-    body_fn: impl FnOnce(Virq, &Arc<IrqLine>) -> Result<T, IrqDescError>,
+    publication_lock: Option<&SpinNoPreempt<()>>,
+    mut preflight_fn: impl FnMut(&IrqStateDesc) -> Result<bool, IrqDescError>,
+    body_fn: impl FnOnce(Virq, &mut IrqStateDesc) -> Result<T, IrqDescError>,
 ) -> Result<Option<T>, IrqDescError> {
     validate_management(mode)?;
     // Identity retries happen before publication or mutation. Retain only our
@@ -797,30 +797,28 @@ pub(super) fn with_registration_line_checked<T>(
             is_active: false,
             has_removed_action: false,
         };
-        // Release control before directory cleanup; keep management exclusion
-        // until admission cleanup finishes.
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
-        let virq = {
-            let mut state = IRQ_STATE.lock();
-            match lookup_line(&state, spec) {
-                Some((_, current)) if !is_candidate && Arc::ptr_eq(&current, &line) => {}
-                None if is_candidate => {}
-                _ => continue,
-            }
-            if line.lock().is_teardown_in_progress() {
-                return Ok(None);
-            }
-            if !preflight_fn(&line)? {
-                return Ok(None);
-            }
-            line.lock().begin_management();
-            admission.is_active = true;
-            let desc = try_resolve_and_publish(&mut state, spec, Some(&line))?;
-            let virq = desc.logical_irq().expect("resolved descriptor has a virq");
-            admission.virq = Some(virq);
-            virq
-        };
-        return body_fn(virq, &line).map(Some);
+        // Keep local context protection across the non-LIFO registry/Line
+        // handoff. Release publication exclusion before admission cleanup;
+        // management exclusion still outlives that cleanup.
+        let _context_guard = NoPreemptIrqSave::new();
+        let _publication_guard = publication_lock.map(|lock| lock.lock());
+        let mut state = IRQ_STATE.lock();
+        match lookup_line(&state, spec) {
+            Some((_, current)) if !is_candidate && Arc::ptr_eq(&current, &line) => {}
+            None if is_candidate => {}
+            _ => continue,
+        }
+        let mut entry = line.lock();
+        if entry.is_teardown_in_progress() || !preflight_fn(&entry)? {
+            return Ok(None);
+        }
+        entry.begin_management();
+        admission.is_active = true;
+        let desc = try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
+        let virq = desc.logical_irq().expect("resolved descriptor has a virq");
+        admission.virq = Some(virq);
+        drop(state);
+        return body_fn(virq, &mut entry).map(Some);
     }
 }
 
@@ -974,10 +972,7 @@ fn try_free_irq_inner(
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_irq")?;
     with_existing_line(spec, ManagementMode::Task, |virq, line| {
-        let removed_action = {
-            let _control_guard = IRQ_CONTROL_LOCK.lock();
-            withdraw_on_line(virq, line, token, apply_platform_plan)
-        };
+        let removed_action = withdraw_on_line(virq, line, token, apply_platform_plan);
         let Some(removed_action) = removed_action else {
             return Ok(None);
         };
@@ -987,6 +982,9 @@ fn try_free_irq_inner(
 }
 
 // Management admission pins membership through mask and the subsequent drain.
+// Same-Line registration/removal is excluded by management; enable/disable
+// serialize with withdrawal on the state lock, and teardown rejects re-enable.
+// No global control exclusion is needed for ordinary action withdrawal.
 // Return the removed owner: neither this short transaction nor its caller's
 // management-locked body may run the client's final destructor.
 fn withdraw_on_line(

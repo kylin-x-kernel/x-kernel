@@ -1,9 +1,76 @@
 # Line Management Validation
 
-Ticket01 validates stable Line identity and request/free serialization. It keeps
-the existing directory, action snapshots and short global control lock.
+This report records Ticket01's stable Line identity and request/free validation,
+which kept the existing directory, action snapshots and global control lock.
+Subsequent per-Line control work removes that global lock from ordinary IRQ
+operations; NMI shared-table publication retains its own writer lock. The
+historical validation results below do not measure that later change.
+
+## Per-Line Control Follow-Up
+
+`controller_update_excludes_only_its_original_line` uses a private registry
+and two Lines. During normal enable, legacy enable and disable backend callbacks,
+it checks that the original Line remains locked while the registry and the
+other Line can be acquired in directory-to-Line order. Both roles are tested,
+including entry IRQ-mask restoration. The probe skips UP builds, where spinlock
+exclusion has no observable atomic state. It does not invoke another management
+operation from a controller callback or claim to measure cross-CPU throughput.
+
+The runtime `request_waits_for_free_to_drain_retained_inflight` fixture also
+checks disable and synchronize on the unrelated Line while the first Line's
+free and registration tasks remain blocked. All test Lines stay masked, so
+synthetic IRQ numbers never reach hardware. This supplements the existing
+registration/removal handshake without a wall-clock success criterion.
+
+These checks do not prove that every unrelated operation can progress under
+all contention: a caller can still hold the old directory lock while waiting
+for a busy Line. Replacing that directory-to-Line handoff belongs to the planned
+RCU-readable registry migration. Controller-internal register locks may also
+serialize distinct Lines independently of KIRQ control locking.
+
+The NMI destructor probe checks local IRQ restoration before reentering the
+registry and NMI publication lock. It no longer treats a failed global try-lock
+under unrelated remote activity as proof that the caller retained a lock. A
+masked-context fixture verifies that the probe rejects unsafe reentry first.
+NMI readers remain subject to the existing caller-owned quiescence contract.
+
+Validation on 2026-10-27: AArch64 qemu_defconfig, SMP4, UNITTEST Clippy passed;
+the combined `kirq,kruntime` QEMU suite passed 226/226 with zero ignored tests
+and generated coverage reports. Logs:
+`/tmp/kirq-ticket02-independent-clippy.log` and
+`/tmp/kirq-ticket02-independent-ut.log`. This run is not pure-UP or
+cross-architecture validation.
+
+Independent extraction validation on 2026-11-02, based on main `1704b447f`:
+AArch64 qemu_defconfig SMP4 UNITTEST Clippy passed. The combined
+`kirq,irq_driver,kruntime` QEMU suites passed 240/240 on AArch64 and 246/246 on
+RISC-V SMP4, with no ignored tests and coverage exported on both. Each run used
+`--no-net --no-vsock` and an isolated worktree/disk. Logs:
+`/tmp/kirq-per-line-clippy.log`, `/tmp/kirq-per-line-arm.log`, and
+`/tmp/kirq-per-line-riscv.log`. These runs validate the extracted control-lock
+change without the later flow/resend implementation. No pure-UP, LOCK_STAT,
+physical-hardware or performance result is claimed for this extraction.
+
+After main advanced to `967ab4bd1` with the task owner-key/Mutex update, the
+extraction rebased without conflicts and repeated AArch64 UNITTEST Clippy and
+both combined QEMU suites: 240/240 on AArch64, 246/246 on RISC-V, with coverage
+exported again. This includes the real-task request/free drain handshake using
+the updated management mutex. Logs: `/tmp/kirq-per-line-final-clippy.log`,
+`/tmp/kirq-per-line-final-arm.log`, `/tmp/kirq-per-line-final-riscv.log`.
 
 ## Contract Coverage
+
+Review follow-up on main `2a08ae86e`: NMI publication uses SpinNoPreempt,
+with independent local NoPreemptIrqSave protection in registration/removal.
+The added publication-lock regression checks that both enabled and masked IRQ
+entry states are preserved. Existing removal probes check controller exclusion
+and client destruction after IRQ restoration and lock release.
+AArch64 SMP4 UNITTEST Clippy passed; combined `kirq,irq_driver,kruntime`
+QEMU passed 241/241 on AArch64 and 247/247 on RISC-V SMP4, with zero failures
+or ignored tests and coverage exported on both. Logs:
+`/tmp/kirq-pr1220-review-clippy.log`, `/tmp/kirq-pr1220-review-arm.log`,
+`/tmp/kirq-pr1220-review-riscv.log`. No additional hardware, performance,
+LOCK_STAT or pure-UP coverage is claimed.
 
 - Core fixtures cover original-Line retention through number reuse, stale
   acquisition retry/rejection, metadata revalidation, startup try-acquisition,

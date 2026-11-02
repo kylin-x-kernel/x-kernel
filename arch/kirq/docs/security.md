@@ -310,7 +310,7 @@ mapping；最终清理由 `free_msix()` 在确认 handler state 已撤销后完�
 - Sleepable task context alone does not establish NMI exclusion. Runtime
   writers need globally stopped NMI delivery or a caller-owned exclusion
   mechanism valid across migration. The management mutex is acquired before
-  the table lock; control/registry/Line short guards exclude preemption while
+  the table lock; NMI publication and Line short guards exclude preemption while
   the writer holds the table lock, and no wait occurs under that lock.
 - pseudo-NMI 不会在同一 CPU 上嵌套打断另一个 pseudo-NMI handler（PMR 保持 `NMI_ONLY`）；
 - hardware NMI 不会在同一 CPU 上嵌套另一个 NMI（NMI path 保持 `PSTATE.ALLINT`
@@ -417,7 +417,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | T-22 | oneshot runtime 字段被误当成已实现行为 | 后续代码只改 flag，没有安装 mask protocol | oneshot IRQ 无法屏蔽重入或误解除 mask | review 要求 oneshot mask 和 thread identity 在 `IrqDescRuntimeState` owner 内成组实现 |
 | T-23 | threaded slot 提前保存 task/worker 指针 | 未建立线程生命周期、取消、CPU 亲和和退出同步 | handler return 后唤醒已释放对象，或在 hardirq 中触发 sleepable 路径 | 当前 `IrqThreadSlot` 不携带目标，带 slot 的 action 不会被当前 dispatch 路径同步执行；后续 milestone 必须先定义所有权和 teardown ordering |
 | T-24 | action snapshot 与 cleanup 分离不完整 | dispatch 多次取锁并依赖跨锁状态 | unregister/free 与 dispatch 交错后调用 stale callback 或保留 stale mapping | `IrqActionSnapshot` 在一个 `IRQ_STATE` 临界区内形成完整快照，回调只使用快照 |
-| T-25 | stale 平台 enable/disable 操作乱序 | register/enable/disable/unregister 在不同 CPU 上交错，平台操作在 `IRQ_STATE` 锁外执行 | 已释放或已 disable 的 line 被迟到 enable 重新打开 | 控制路径通过 `IRQ_CONTROL_LOCK -> IRQ_STATE -> platform op` 串行化；hardirq dispatch 不获取控制锁 |
+| T-25 | Stale controller updates | Concurrent register/enable/disable/free after directory release | A late unmask reopens a disabled or retired Line | The original Line lock spans state changes and controller application; teardown rejects enable and management admission pins identity through drain |
 | T-26 | 驱动需要清 pending 后再开 IRQ，但 request 立即 enable | 复杂设备 request handler 后尚未初始化 DMA ring/MMIO 状态 | 中断 handler 观察未初始化设备状态 | `try_register_disabled()` 以 disable depth `1` 安装 handler，驱动完成初始化后显式 `try_enable_irq()` |
 | T-27 | handler teardown 后仍在运行 | free/unregister 只移除 `Arc`，不等待已经复制的 dispatch snapshot | 驱动释放 MMIO/DMA 后旧 handler 访问已释放状态 | dispatch guard 维护 `in_flight`，`free_irq()` 先 mask unused line，再通过 descriptor-local completion 等待计数归零；completion done state 在 `IRQ_STATE` 锁内发布、wake 在锁外执行 |
 | T-28 | 等待式 IRQ API 在 interrupt-like context 调用 | hardirq/softirq/BH-disabled 中调用 `disable_irq()`、`synchronize_irq()` 或 `free_irq()` | 当前 CPU 等待自己退出，导致死锁或长时间自旋 | `try_*` API 使用 `is_in_interrupt_context()` gating 并返回 `InvalidContext`；兼容 wrapper 记录 warning 后返回失败值 |
@@ -544,8 +544,10 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   redirect them to a replacement. Cleanup compares Line identity before removing
   a directory entry. Production removal still requires zero in-flight dispatch;
   retaining storage neither grants management admission nor establishes hardware
-  quiescence. Lock ordering is control, registry, Line; wait/wake callbacks must
-  run outside all three short locks.
+  quiescence. Management transactions acquire management exclusion before
+  registry and Line locks; NMI writers additionally take NMI_PUBLICATION_LOCK
+  before registry/Line and NMI_TABLE after Line. Wait/wake callbacks run outside
+  all short locks.
 - The normal dispatch admission outlives the controller completion call, not
   merely the handler snapshot. A registered Line with no actions is admitted
   too, so unused-Line cleanup cannot run during completion. Lookup misses still
@@ -555,8 +557,12 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   recovery guarantee after a kernel panic. Synthetic completion tests exercise
   software ordering and retained identity, not real controller delivery.
 - Disable releases registry exclusion before calling the controller, but keeps
-  the original Line state locked through the mask update. The backend must be
-  bounded, non-sleeping and must not reenter KIRQ registry/control/dispatch.
+  the original Line state locked through the mask update, without acquiring the
+  global control lock. The backend must be bounded, non-sleeping and must not
+  reenter KIRQ registry/control/dispatch.
+  An outer local IRQ/preemption guard preserves the entry mask across the
+  non-LIFO registry-to-Line handoff; removing global mutual exclusion must not
+  remove this local context protection.
   Controller-register locks are below Line state in this path; providers must
   release those locks before calling a generic dispatch entry. Drain waiting
   and the retained Line's final release happen outside all short locks.
@@ -565,10 +571,9 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   operations obey the same non-reentrancy and bounded-execution contract as
   mask. Rejected normal enables do not publish a Line or change disable depth;
   legacy candidate allocation and final owner release stay outside short locks.
-  The outer global control guard masks IRQs before registry and Line acquisition
+  The outer local NoPreemptIrqSave guard masks IRQs before registry and Line acquisition
   and restores context only after both guards are gone. It protects the non-LIFO
-  registry-to-Line handoff; removing it requires an independent outer context
-  guard, not merely deleting the global lock.
+  registry-to-Line handoff independently of cross-CPU mutual exclusion.
 - Final enable admission checks teardown under the same Line guard as disable
   depth changes and controller application. A stale earlier observation cannot
   authorize enabling a tearing-down Line. Legacy enable checks teardown before
@@ -577,20 +582,24 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   before mutation. Rejection does not publish metadata or mappings, although
   selecting a fresh dynamic identity may advance the allocator.
 - Regular/shared registration relies on management admission for membership
-  stability, not a directory lock around the controller call. The Line lock
-  covers installation and configuration/unmask together. The caller retains
+  stability, not a directory lock around the controller call. Registration
+  preflight, metadata resolution, installation and configuration/unmask share
+  one Line guard. Callbacks borrow the locked state and must not reacquire
+  registry/publication/Line locks or wait. The caller retains
   the handler across the entire transaction so rejected or discarded cloned
   owners cannot run final client destructors under Line or management locks.
 - Normal-action withdrawal retains the removed owner through the last-action
-  mask, releases Line/control exclusion before draining, and returns ownership
-  only after management admission cleanup. The Line lock prevents new dispatch
+  mask without global control exclusion, releases Line exclusion before draining,
+  and returns ownership only after management admission cleanup. The Line lock
+  prevents new dispatch
   snapshots from observing withdrawal before mask completes. Old snapshots
   remain accounted for until their original controller claims complete. Shared
   ownership and NMI-fallback rejection rules are unchanged.
 - NMI management releases the shared table and directory before controller
   configure/mask, but retains the original Line state lock through completion
-  of that bounded operation. Global control still serializes hwirq preflight
-  and publication across Lines. This does not establish NMI reader quiescence:
+  of that bounded operation. The NMI-owned publication lock serializes hwirq
+  preflight/publication/removal across Lines, after management acquisition.
+  Ordinary IRQ controls do not acquire it. This does not establish NMI reader quiescence:
   the existing caller exclusion obligations remain mandatory.
 - `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
   delayed-work product API and timer adapter have been removed. Automatic delayed
@@ -646,7 +655,7 @@ the registry lock, and retained dispatch counts protect outstanding claims.
 The caller retains the Line owner and management mutex until cleanup returns,
 so removing the directory reference cannot finally destroy the Line under locks.
 Registration may retry, but only after releasing the old mutex. Waiting for
-dispatch holds management exclusion, not control/registry/Line spinlocks.
+dispatch holds management exclusion, not publication/registry/Line spinlocks.
 Caller-owned handler dependencies must not require the same management mutex
 while a removal waits for that handler; serialization cannot resolve such a
 dependency cycle.
@@ -656,8 +665,8 @@ dependency cycle.
 Ordinary action admission is checked before merging caller-supplied descriptor
 metadata or publishing domain mappings. Preflight and installation reuse the
 same ownership, capacity and token predicates. The retained Line management
-mutex and global `IRQ_CONTROL_LOCK` serialize both phases; this does not replace
-the existing control/registry/Line lock order. Caller references keep rejected
+mutex and continuous Line state exclusion serialize both phases; registry
+exclusion covers identity revalidation and metadata publication. Caller references keep rejected
 handlers alive until all management and short locks have been released. NMI
 context rejection does not invoke the locking logger.
 

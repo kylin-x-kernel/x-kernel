@@ -41,6 +41,7 @@ fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult
     let has_registered = super::register_nmi_with_mode(
         desc, handler.clone(), super::ManagementMode::Task, |stored| {
             has_configured = !karch::local_irq_enabled()
+                && super::NMI_PUBLICATION_LOCK.is_locked()
                 && line.is_state_locked_for_tests()
                 && IRQ_STATE.try_lock().is_some()
                 && NMI_TABLE.try_lock().is_some()
@@ -53,6 +54,7 @@ fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult
     let mut has_masked = false;
     let has_unregistered = super::unregister_nmi_with(desc, |stored| {
         has_masked = !karch::local_irq_enabled()
+            && super::NMI_PUBLICATION_LOCK.is_locked()
             && line.is_state_locked_for_tests()
             && IRQ_STATE.try_lock().is_some()
             && NMI_TABLE.try_lock().is_some()
@@ -271,14 +273,53 @@ impl crate::IrqHandler for DropProbe {
 
 impl Drop for DropProbe {
     fn drop(&mut self) {
-        let has_state_access = IRQ_STATE.try_lock().is_some();
-        let has_table_access = NMI_TABLE.try_lock().is_some();
-        self.0.store(has_state_access && has_table_access, Ordering::Release);
+        // Withdrawal nests the raw table guard inside publication exclusion.
+        // Check local IRQ restoration before reentry, then tolerate remote
+        // contention. Probe the enclosing publication lock, not the raw table:
+        // NMI dispatch never takes publication exclusion.
+        let has_unlocked_access = if karch::local_irq_enabled() {
+            drop(IRQ_STATE.lock());
+            drop(super::NMI_PUBLICATION_LOCK.lock());
+            true
+        } else {
+            false
+        };
+        self.0.store(has_unlocked_access, Ordering::Release);
     }
 }
 
+#[def_test]
+fn publication_lock_preserves_the_callers_irq_mask() {
+    assert!(karch::local_irq_enabled());
+    {
+        let _publication = super::NMI_PUBLICATION_LOCK.lock();
+        assert!(karch::local_irq_enabled());
+    }
+    {
+        let _irq = kspin::IrqSave::new();
+        {
+            let _publication = super::NMI_PUBLICATION_LOCK.lock();
+            assert!(!karch::local_irq_enabled());
+        }
+        assert!(!karch::local_irq_enabled());
+    }
+    assert!(karch::local_irq_enabled());
+}
+
+#[def_test]
+fn nmi_drop_probe_rejects_masked_context_without_reentry() {
+    let has_unlocked_drop = Arc::new(AtomicBool::new(true));
+    let probe = DropProbe(has_unlocked_drop.clone());
+    {
+        let _irq = kspin::IrqSave::new();
+        drop(probe);
+    }
+    assert!(!has_unlocked_drop.load(Ordering::Acquire));
+}
+
 #[def_test(serial)]
-fn nmi_removal_drops_client_after_table_and_state_unlock() {
+fn nmi_removal_drops_client_after_publication_and_state_unlock() {
+    assert!(karch::local_irq_enabled());
     let virq = 0x5f43;
     let desc = IrqDesc::from_virq(virq);
     let has_unlocked_drop = Arc::new(AtomicBool::new(false));
