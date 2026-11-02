@@ -8,7 +8,7 @@ mod chain;
 pub(super) mod config;
 pub(super) mod counter;
 mod error;
-mod matcher;
+pub(super) mod matcher;
 mod packet;
 mod rule;
 mod table;

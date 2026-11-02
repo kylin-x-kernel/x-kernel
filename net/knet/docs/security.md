@@ -78,6 +78,13 @@ adapter locks, or wait for work needing exclusive access to the same
 configuration. This internal API relies on future management adapters for
 input-allocation limits and authorization.
 
+Legacy entry encoding requires an exactly sized kernel buffer and initializes
+every output byte, including padding, on success.
+It rejects sizes and offsets that exceed the 16-bit ABI fields, names that do not
+fit a NUL-terminated ABI field, and conditions whose meaning would change in the
+legacy format. The output buffer may be partially written on failure and must
+be discarded. The encoder receives kernel values and does not access user memory.
+
 The prepared poller Work and its private NormalQueue live for the kernel
 lifetime. Initialization prepares storage before NIC notification sources can
 call it, and queue startup follows network state initialization. An IRQ-safe

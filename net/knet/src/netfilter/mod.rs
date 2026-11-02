@@ -6,6 +6,12 @@
 
 #[expect(
     dead_code,
+    reason = "CG-024-lint-exceptions: dead_code: whole-table legacy export follows in IKIXDM"
+)]
+mod compat;
+
+#[expect(
+    dead_code,
     reason = "CG-024-lint-exceptions: dead_code: network-path and legacy iptables consumers of \
               the private filter evaluator follow in IKIXDM"
 )]

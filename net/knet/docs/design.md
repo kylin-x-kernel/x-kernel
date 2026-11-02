@@ -81,6 +81,12 @@ net/knet/
     │   └── wire.rs
     ├── netfilter/
     │   ├── mod.rs
+    │   ├── compat/
+    │   │   ├── mod.rs
+    │   │   ├── iptables_legacy.rs
+    │   │   └── iptables_legacy/
+    │   │       ├── abi.rs
+    │   │       └── encode.rs
     │   └── filter/
     │       ├── mod.rs
     │       ├── matcher.rs
@@ -376,6 +382,20 @@ Rejected updates preserve the current state. These operations require sleepable
 task context; table construction and counter collection allocate bounded storage.
 The shared store starts with empty ACCEPT chains and remains internal pending
 network-path and ABI integration.
+
+### Legacy IPv4 Entry Encoding
+
+`netfilter/compat/iptables_legacy` encodes individual entries in the native
+64-bit legacy IPv4 iptables format.
+`abi.rs` defines the fixed ABI layouts; `encode.rs` converts base conditions and
+TCP/UDP/ICMP matches into ABI records and assembles entries with standard targets
+or ERROR chain markers.
+The caller supplies an exactly sized output buffer and resolves verdicts or jump
+offsets for standard targets.
+Encoding checks ABI field widths, allocates no memory, and zeroes counters,
+reserved bytes, and padding.
+Conditions without an equivalent legacy representation return an error.
+Table layout and publication remain separate from entry encoding.
 
 ## Calling Constraints and Execution Context
 
