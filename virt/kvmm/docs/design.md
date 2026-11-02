@@ -2,6 +2,16 @@
 
 ## Overview
 
+MMIO devices are transferred as prepared `KBox<dyn MmioDevice>` owners.
+Registration takes no ownership allocation under the bus lock; the existing
+Vec may still grow infallibly. Runtime self-tests prepare NOWAIT owners before
+locking the bus and return false if preparation fails. GICD accepts caller-owned
+register storage and resets it without allocating. Control-plane callers reserve
+this storage and its distributor owner before creating host GICH mappings.
+World-switch hook owners remain Box: their factory/installation interfaces and
+secondary-vCPU startup have no recoverable allocation contract yet. They need a
+separate failure/lifecycle design, not an added expect or a blanket NOWAIT change.
+
 `kvmm` is x-kernel's lightweight type-1 hypervisor module, providing hardware-assisted
 virtualization across three architectures:
 
@@ -49,12 +59,14 @@ Guest unit tests live in `ut-tests/` and are mounted with
 
 | File | Module | Cases | Gate |
 |---|---|---|---|
-| `ut-tests/vdev.rs` | `vdev::unittest_tests` | 1 | `unittest` |
+| `ut-tests/vdev.rs` | `vdev::unittest_tests` | 3 common + 1 AArch64 | `unittest` |
 | `ut-tests/selftest.rs` | `selftest::tests` | 1 | `unittest`, AArch64 |
 | `ut-tests/arch/riscv64.rs` | `arch::riscv64::tests` | 1 | `unittest`, RISC-V |
 
-All three cases retain `serial` execution. AArch64 and RISC-V each register
-two cases; x86_64 registers only the common device-sequence case. These are
+The original three cases retain `serial` execution. Two additional device-owner
+tests cover dispatch, destruction and rejected preparation without hardware.
+AArch64 also checks caller-owned GICD storage initialization and registers five
+cases in total; RISC-V registers four and x86_64 registers three. These are
 kernel harness tests, not host Cargo tests. The runtime self-test entry points
 remain in `src/selftest.rs`. Assembly stays beside its architecture module,
 so the existing `include_str!` paths and guest symbols are unchanged.

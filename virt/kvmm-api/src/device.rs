@@ -252,9 +252,12 @@ fn build_and_start_rv64(
     dtb_path: &str,
     initrd_path: Option<&str>,
 ) -> VfsResult<Vm<CurrentArch>> {
-    use alloc::boxed::Box;
-
+    use kalloc_types::{AllocFlags, KBox};
     use kvmm::{VmConfig, arch::VmmArch};
+
+    let net_owner = KBox::<vdev_virtio_net::VirtioNet>::new_uninit_with_flags(AllocFlags::NOWAIT)?;
+    let block_owner =
+        KBox::<vdev_virtio_blk::bus::VirtioBlkDevice>::new_uninit_with_flags(AllocFlags::NOWAIT)?;
 
     /// Linux Image entry offset from RAM base.
     const LINUX_KERNEL_OFF: u64 = 0x0020_0000;
@@ -349,38 +352,39 @@ fn build_and_start_rv64(
     // Console UART + its RX/TX channels. Installing the TX channel switches
     // guest output from the host kernel log into the channel drained by this
     // device's `read`.
-    let uart = {
-        let (uart, rx, tx) = vdev_uart16550::Uart16550::new(vm_id);
-        vm.shared().devices().set_console_rx(rx);
-        vm.shared().devices().set_console_tx(tx);
-        vm.shared()
-            .devices()
-            .register_mmio(Box::new(vdev_uart16550::Uart16550Mmio::new(uart.clone())));
-        uart
-    };
+    let uart =
+        {
+            let (uart, rx, tx) = vdev_uart16550::Uart16550::new(vm_id);
+            vm.shared().devices().set_console_rx(rx);
+            vm.shared().devices().set_console_tx(tx);
+            vm.shared().devices().register_mmio(KBox::new_nowait(
+                vdev_uart16550::Uart16550Mmio::new(uart.clone()),
+            )?);
+            uart
+        };
 
     // Unmap emulated MMIO ranges so guest accesses trap into the VMM.
     unmap_rv64_mmio(&mut vm)?;
 
     // PLIC + timer validation devices, and the UART interrupt line.
-    setup_rv64_devices(&vm, &uart);
+    setup_rv64_devices(&vm, &uart)?;
 
     if let Some(irq_sender) = vm.shared().devices().irq_sender() {
         let dma = kvmm::vdev::dma::make_guest_dma(Arc::clone(vm.shared()));
-        vm.shared()
-            .devices()
-            .register_mmio(Box::new(vdev_virtio_net::VirtioNet::new(
-                vm_id,
-                irq_sender.clone(),
-                dma.clone(),
-            )));
-        vm.shared()
-            .devices()
-            .register_mmio(Box::new(vdev_virtio_blk::bus::VirtioBlkDevice::new(
+        let net_device = KBox::write(
+            net_owner,
+            vdev_virtio_net::VirtioNet::new(vm_id, irq_sender.clone(), dma.clone()),
+        );
+        vm.shared().devices().register_mmio(net_device);
+        let block_device = KBox::write(
+            block_owner,
+            vdev_virtio_blk::bus::VirtioBlkDevice::new(
                 irq_sender,
                 dma,
                 vdev_virtio_blk::bus::DEFAULT_CAPACITY_BYTES,
-            )));
+            ),
+        );
+        vm.shared().devices().register_mmio(block_device);
     }
 
     if !CurrentArch::percpu_hw_init() {
@@ -453,9 +457,11 @@ fn unmap_rv64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
 }
 
 #[cfg(target_arch = "riscv64")]
-fn setup_rv64_devices(vm: &Vm<CurrentArch>, console: &Arc<vdev_uart16550::Uart16550>) {
-    use alloc::boxed::Box;
-
+fn setup_rv64_devices(
+    vm: &Vm<CurrentArch>,
+    console: &Arc<vdev_uart16550::Uart16550>,
+) -> VfsResult<()> {
+    use kalloc_types::KBox;
     use kvmm::vdev::{
         IrqController, IrqSender, VcpuWaker,
         riscv64::{irq, timer},
@@ -465,7 +471,7 @@ fn setup_rv64_devices(vm: &Vm<CurrentArch>, console: &Arc<vdev_uart16550::Uart16
     let irqc = irq::RiscvIrq::new(vm.shared().nr_vcpus(), waker);
     vm.shared()
         .devices()
-        .register_mmio(Box::new(irq::RiscvPlicMmio::new(irqc.clone())));
+        .register_mmio(KBox::new_nowait(irq::RiscvPlicMmio::new(irqc.clone()))?);
     vm.shared()
         .devices()
         .set_irq_controller(irqc.clone() as Arc<dyn IrqController>);
@@ -485,6 +491,7 @@ fn setup_rv64_devices(vm: &Vm<CurrentArch>, console: &Arc<vdev_uart16550::Uart16
         .devices()
         .add_hook_factory(Arc::new(timer::RiscvTimerHookFactory));
     log::info!("[kvmm-api] RISC-V IRQ/timer devices wired");
+    Ok(())
 }
 
 /// Load an aarch64 Linux Image, DTB, and optional initrd, then start vCPU0.
@@ -505,9 +512,12 @@ fn build_and_start_aarch64(
     dtb_path: &str,
     initrd_path: Option<&str>,
 ) -> VfsResult<Vm<CurrentArch>> {
-    use alloc::boxed::Box;
-
+    use kalloc_types::{AllocFlags, KBox};
     use kvmm::{VmConfig, arch::VmmArch};
+
+    let net_owner = KBox::<vdev_virtio_net::VirtioNet>::new_uninit_with_flags(AllocFlags::NOWAIT)?;
+    let block_owner =
+        KBox::<vdev_virtio_blk::bus::VirtioBlkDevice>::new_uninit_with_flags(AllocFlags::NOWAIT)?;
 
     /// Linux Image entry offset from RAM base.
     const LINUX_KERNEL_OFF: u64 = 0x0008_0000;
@@ -607,7 +617,7 @@ fn build_and_start_aarch64(
         let (uart, rx, tx) = vdev_vpl011::Vpl011::new(vm_id);
         vm.shared().devices().set_console_rx(rx);
         vm.shared().devices().set_console_tx(tx);
-        vm.shared().devices().register_mmio(Box::new(uart));
+        vm.shared().devices().register_mmio(KBox::new_nowait(uart)?);
     }
 
     // Unmap emulated MMIO ranges so guest accesses trap into the VMM.
@@ -619,20 +629,20 @@ fn build_and_start_aarch64(
 
     if let Some(irq_sender) = vm.shared().devices().irq_sender() {
         let dma = kvmm::vdev::dma::make_guest_dma(Arc::clone(vm.shared()));
-        vm.shared()
-            .devices()
-            .register_mmio(Box::new(vdev_virtio_net::VirtioNet::new(
-                vm_id,
-                irq_sender.clone(),
-                dma.clone(),
-            )));
-        vm.shared()
-            .devices()
-            .register_mmio(Box::new(vdev_virtio_blk::bus::VirtioBlkDevice::new(
+        let net_device = KBox::write(
+            net_owner,
+            vdev_virtio_net::VirtioNet::new(vm_id, irq_sender.clone(), dma.clone()),
+        );
+        vm.shared().devices().register_mmio(net_device);
+        let block_device = KBox::write(
+            block_owner,
+            vdev_virtio_blk::bus::VirtioBlkDevice::new(
                 irq_sender,
                 dma,
                 vdev_virtio_blk::bus::DEFAULT_CAPACITY_BYTES,
-            )));
+            ),
+        );
+        vm.shared().devices().register_mmio(block_device);
     }
 
     if !CurrentArch::percpu_hw_init() {
@@ -694,8 +704,7 @@ fn unmap_aarch64_mmio(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
 /// create the vGIC (GICH list-register injector).
 #[cfg(target_arch = "aarch64")]
 fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
-    use alloc::boxed::Box;
-
+    use kalloc_types::{AllocFlags, KBox};
     use kvmm::{
         mm::{GuestMem, GuestPerm},
         vdev::{
@@ -703,6 +712,9 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
             aarch64::{vgic, vgicd, vtimer},
         },
     };
+
+    let distributor_owner = KBox::<vgicd::Vgicd>::new_uninit_with_flags(AllocFlags::NOWAIT)?;
+    let register_storage = KBox::new_nowait([0u8; vgicd::REG_SIZE])?;
 
     const GICC_BASE: u64 = 0x0801_0000;
     const GICH_BASE: u64 = 0x0803_0000;
@@ -737,8 +749,9 @@ fn setup_gic(vm: &mut Vm<CurrentArch>) -> VfsResult<()> {
 
     let waker = Arc::downgrade(&(vm.shared().clone() as Arc<dyn VcpuWaker>));
     let vgic = vgic::Vgic::new(vm.shared().nr_vcpus(), gich_va.as_usize(), waker);
-    let vgicd = vgicd::Vgicd::new(vgic.clone(), vm.shared().nr_vcpus());
-    vm.shared().devices().register_mmio(Box::new(vgicd));
+    let vgicd = vgicd::Vgicd::new(vgic.clone(), vm.shared().nr_vcpus(), register_storage);
+    let distributor = KBox::write(distributor_owner, vgicd);
+    vm.shared().devices().register_mmio(distributor);
     vm.shared()
         .devices()
         .set_irq_controller(vgic.clone() as Arc<dyn IrqController>);

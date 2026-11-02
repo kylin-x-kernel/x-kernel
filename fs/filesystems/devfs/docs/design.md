@@ -8,6 +8,13 @@ is passed into the root builder rather than initialized by a lazy dereference.
 
 ## Fallible singleton mount state
 
+Firmware capture owns an immutable `KBox<[u8]>` prepared with NOWAIT inside
+the DEVFS initializer, avoiding reclaim re-entry into that singleton. Copy
+failure propagates before root construction and leaves capture retryable;
+missing firmware is still a successful no-op. A completed snapshot survives
+later mount-preparation errors and is reused on retry. The temporary Vec used
+only to create the former boxed slice is no longer needed.
+
 The devtmpfs singleton uses `Once::try_call_once` and SimpleFs's explicit NOWAIT
 private-owner policy. Reclaim during Once initialization could re-enter the same
 singleton, so default KERNEL is not permitted here. The caller is still a
@@ -64,9 +71,9 @@ fs/filesystems/devfs/src/
 Guest tests live in `ut-tests/{cpu_dma_latency,dtb,event,loop,null_zero_full,pts,random,serial}.rs`.
 Each file is mounted by `unittest::path_mod_test!` as the original private
 `nodes::<name>::tests` module under `cfg(unittest)`, preserving access to
-node-local fixtures and implementation details. The 44 cases include 16 event
+node-local fixtures and implementation details. The 46 cases include 16 event
 tests gated by the `input` feature and one UART numbering test gated by
-`serial`; the other 27 cases have no additional feature gate.
+`serial`; the other 29 cases have no additional feature gate.
 
 `ut-tests/pts.rs` retains the two serial cases previously included from
 `src/tests/pts.rs` by `nodes::pts::tests`. They remain registered guest tests

@@ -12,6 +12,8 @@
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use kalloc_types::KBox;
+
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
 pub mod dma;
@@ -66,7 +68,9 @@ impl<A: VmmArch> VmDevices<A> {
         self.common.mmio_bus()
     }
 
-    pub fn register_mmio(&self, dev: Box<dyn MmioDevice>) {
+    /// Transfer an already prepared owner before taking the MMIO bus lock.
+    /// Bus Vec growth remains infallible; device execution has its own context.
+    pub fn register_mmio(&self, dev: KBox<dyn MmioDevice>) {
         self.common.register_mmio(dev);
     }
 

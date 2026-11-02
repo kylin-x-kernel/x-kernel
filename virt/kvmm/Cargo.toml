@@ -17,6 +17,7 @@ ignored = ["vdev-virtio-blk"]
 default = []
 
 [dependencies]
+kalloc-types.workspace = true
 log.workspace = true
 klogger.workspace = true
 kaddr_layout.workspace = true

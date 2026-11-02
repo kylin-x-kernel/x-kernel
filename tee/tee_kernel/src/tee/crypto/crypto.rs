@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use alloc::{format, sync::Arc, vec, vec::Vec};
 use core::{default::Default, fmt, fmt::Debug};
 
 use ksync::Mutex;
@@ -467,16 +467,21 @@ pub(crate) fn crypto_acipher_gen_ecc_key(
     key_size_bits: usize,
     object_type: u32,
 ) -> TeeResult {
-    let mut key: Box<dyn CryptoEccKeypairOpsGenerate> = match object_type {
+    match object_type {
         TEE_TYPE_ECDSA_KEYPAIR | TEE_TYPE_ECDH_KEYPAIR => {
-            Box::new(EccKeypairOpsCtx::<EccComKeyPair>::new(key))
+            EccKeypairOpsCtx::<EccComKeyPair>::new(key).generate(key_size_bits)
         }
-        TEE_TYPE_SM2_PKE_KEYPAIR => Box::new(EccKeypairOpsCtx::<Sm2PkeKeyPair>::new(key)),
-        TEE_TYPE_SM2_DSA_KEYPAIR => Box::new(EccKeypairOpsCtx::<Sm2DsaKeyPair>::new(key)),
-        TEE_TYPE_SM2_KEP_KEYPAIR => Box::new(EccKeypairOpsCtx::<Sm2KepKeyPair>::new(key)),
-        _ => return Err(TEE_ERROR_NOT_IMPLEMENTED),
-    };
-    key.generate(key_size_bits)
+        TEE_TYPE_SM2_PKE_KEYPAIR => {
+            EccKeypairOpsCtx::<Sm2PkeKeyPair>::new(key).generate(key_size_bits)
+        }
+        TEE_TYPE_SM2_DSA_KEYPAIR => {
+            EccKeypairOpsCtx::<Sm2DsaKeyPair>::new(key).generate(key_size_bits)
+        }
+        TEE_TYPE_SM2_KEP_KEYPAIR => {
+            EccKeypairOpsCtx::<Sm2KepKeyPair>::new(key).generate(key_size_bits)
+        }
+        _ => Err(TEE_ERROR_NOT_IMPLEMENTED),
+    }
 }
 
 /// Returns Ok for hash algorithms exposed through the GP TEE API.

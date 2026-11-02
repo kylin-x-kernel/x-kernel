@@ -1,5 +1,14 @@
 # TEE Ownership and Lifecycle Safety
 
+## ECC dispatch lifetime
+
+The key-generation dispatch wrapper contains only an exclusive key borrow and
+type metadata. Stack-local dispatch keeps that borrow within the call and
+removes the temporary heap owner without changing key storage or zeroization.
+Tests exercise all five supported object selectors, size rejection and an
+unsupported selector. Nested algorithm allocations remain outside this change;
+removing the wrapper does not make complete key generation allocation-free.
+
 ## Syscall buffer ownership boundary
 
 TEE uses common KBox slice constructors and `UserConstPtr::load_vm_kbox_with_flags`

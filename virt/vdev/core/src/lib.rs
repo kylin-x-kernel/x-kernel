@@ -8,11 +8,13 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+
+use kalloc_types::KBox;
 
 const CONSOLE_RX_CAP: usize = 64;
 /// Guest->host TX FIFO capacity. Large enough to absorb a boot-time console
@@ -46,7 +48,7 @@ pub trait MmioDevice: Send {
 
 /// MMIO bus that dispatches guest memory-mapped I/O to registered devices.
 pub struct MmioBus {
-    devices: Vec<Box<dyn MmioDevice>>,
+    devices: Vec<KBox<dyn MmioDevice>>,
 }
 
 impl MmioBus {
@@ -56,7 +58,9 @@ impl MmioBus {
         }
     }
 
-    pub fn register(&mut self, dev: Box<dyn MmioDevice>) {
+    /// Transfer a prepared device owner; no owner allocation occurs here.
+    /// The device Vec may still grow through the existing infallible allocator.
+    pub fn register(&mut self, dev: KBox<dyn MmioDevice>) {
         self.devices.push(dev);
     }
 
@@ -363,7 +367,9 @@ impl<Rx, Tx> VmDevices<Rx, Tx> {
         &self.mmio_bus
     }
 
-    pub fn register_mmio(&self, dev: Box<dyn MmioDevice>) {
+    /// Transfer an owner prepared before taking the bus lock. Vec growth and
+    /// device operations retain their existing allocation/context contracts.
+    pub fn register_mmio(&self, dev: KBox<dyn MmioDevice>) {
         self.mmio_bus.lock().register(dev);
     }
 

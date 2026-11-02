@@ -14,6 +14,22 @@ owner holds it.
 
 ## Devices
 
+### MMIO owner preparation
+
+The boot path holds the per-open instance state mutex. New KBox allocations
+therefore use NOWAIT rather than assuming reclaim can safely re-enter the
+control device. This policy constrains owner allocation only; image loading,
+device constructors and existing nested allocations retain their own contracts.
+VirtIO net and block owners are reserved before VM setup, including host GICH
+mapping. Their later constructors initialize those reservations without another
+owner allocation. UART and PLIC owners are prepared before bus registration.
+The GICD register buffer and distributor owner are both reserved before GICC/GICH
+mapping; GICD construction itself only consumes and clears the provided storage.
+Owner failure propagates as VfsError::NoMemory while the instance remains Idle,
+before registry publication, CPU-on marking or vCPU task creation. Earlier
+owner reservation may precede image-loading errors. Vec/Arc, guest pages and
+world-switch hook allocations remain outside this migration.
+
 ### `KvmmVmDevice` — fd-bound VM instance (`/dev/kvmm-vm`)
 
 The problem it solves: VM lifetime must be owned by a real userspace process,

@@ -10,6 +10,18 @@ VMM.
 
 ## Resource lifetime
 
+New MMIO owner failures occur before VM publication or vCPU spawn and propagate
+through the existing boot Result. The state mutex remains held and the instance
+does not transition from Idle on failure. NOWAIT excludes reclaim for these
+allocations; it does not promise bounded latency, NMI safety or nonblocking file
+IO. VirtIO owners are reserved before setup, and GICD storage plus its outer
+owner precede host MMIO mapping, so these new failures do not occur after GICH
+mapping or require a new unmap rollback protocol. Existing failures after host
+mapping, infallible nested allocations and hook/task creation are not repaired
+by this change. Device-side DMA uses Weak VM references; this migration does
+not change that ownership model. Unit tests cover prepared-owner dispatch and
+drop, not forced allocator OOM or complete Linux guest boot rollback.
+
 The central guarantee of this crate is that VM resources are released when the
 owning file description is closed:
 

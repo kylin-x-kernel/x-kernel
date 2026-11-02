@@ -17,8 +17,10 @@
 //!
 //! The real host distributor is never touched.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use kalloc_types::KBox;
 
 use super::vgic::Vgic;
 use crate::mm::mmio::MmioDevice;
@@ -28,7 +30,7 @@ pub const GICD_BASE: u64 = 0x0800_0000;
 pub const GICD_SIZE: u64 = 0x1_0000;
 
 /// Size of the backing store (covers CTLR .. ICFGR; guest never probes above).
-const REG_SIZE: usize = 0x1000;
+pub const REG_SIZE: usize = 0x1000;
 const ENABLE_WORDS: usize = 32; // 32 * 32 = 1024 IRQs
 
 const GICD_CTLR: u64 = 0x000;
@@ -58,16 +60,20 @@ fn word_index(off: u64, base: u64) -> Option<usize> {
 /// Emulated GIC distributor for one VM.
 pub struct Vgicd {
     /// Byte-addressable register backing store (read-back correctness).
-    regs: Box<[u8; REG_SIZE]>,
+    regs: KBox<[u8; REG_SIZE]>,
     /// Per-vCPU GICC/GICH state and pending injection backend.
     vgic: Arc<Vgic>,
     nr_vcpus: usize,
 }
 
 impl Vgicd {
-    pub fn new(vgic: Arc<Vgic>, nr_vcpus: usize) -> Self {
+    /// Bind caller-owned register storage and reset it to zero.
+    /// Prepare this storage before acquiring host MMIO mappings.
+    /// This constructor does not allocate; the caller retains the allocation policy.
+    pub fn new(vgic: Arc<Vgic>, nr_vcpus: usize, mut regs: KBox<[u8; REG_SIZE]>) -> Self {
+        regs.fill(0);
         Self {
-            regs: Box::new([0u8; REG_SIZE]),
+            regs,
             vgic,
             nr_vcpus,
         }

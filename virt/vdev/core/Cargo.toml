@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Virtual device interfaces for x-kernel VMMs"
 
 [dependencies]
+kalloc-types.workspace = true
 ksync.workspace = true
 
 [lints]

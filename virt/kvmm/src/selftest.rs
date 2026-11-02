@@ -8,8 +8,9 @@
 #[cfg(all(unittest, target_arch = "aarch64"))]
 unittest::path_mod_test!(tests, "../ut-tests/selftest.rs");
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
+use kalloc_types::KBox;
 use ksync::{Mutex, static_lock};
 use vdev_test_mmio::{TEST_MMIO_GPA, TEST_MMIO_SIZE, TestMmioDevice};
 
@@ -266,10 +267,10 @@ fn selftest_guest_mem_impl<A: VmmArch + 'static>() -> bool {
     };
 
     // Register test MMIO device and unmap the GPA range so guest access traps.
-    vm.shared()
-        .mmio_bus()
-        .lock()
-        .register(Box::new(TestMmioDevice));
+    let Ok(device) = KBox::new_nowait(TestMmioDevice) else {
+        return false;
+    };
+    vm.shared().devices().register_mmio(device);
     if let Some(gm) = vm.guest_mem_mut() {
         gm.unmap_range(TEST_MMIO_GPA, TEST_MMIO_SIZE);
     }
@@ -326,10 +327,10 @@ fn selftest_multi_vm_impl() -> bool {
             }
         };
 
-        vm.shared()
-            .mmio_bus()
-            .lock()
-            .register(Box::new(TestMmioDevice));
+        let Ok(device) = KBox::new_nowait(TestMmioDevice) else {
+            return false;
+        };
+        vm.shared().devices().register_mmio(device);
         if let Some(gm) = vm.guest_mem_mut() {
             gm.unmap_range(TEST_MMIO_GPA, TEST_MMIO_SIZE);
         }

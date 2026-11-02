@@ -12,6 +12,7 @@ description = "Lifecycle-oriented control-plane devices built on the kvmm mechan
 default = []
 
 [dependencies]
+kalloc-types.workspace = true
 log.workspace = true
 kaddr_layout.workspace = true
 kcred.workspace = true

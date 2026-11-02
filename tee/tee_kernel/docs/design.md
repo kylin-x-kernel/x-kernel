@@ -1,5 +1,13 @@
 # TEE Ownership and Lifecycle
 
+## Stack-local ECC dispatch
+
+ECC key generation dispatch constructs its borrowed `EccKeypairOpsCtx` on the
+stack and immediately invokes the selected implementation. No context escapes
+the call, so neither Box nor KBox ownership is needed. This removes an allocation
+without adding a reclaim point under the caller's object lock. Algorithm
+selection, error propagation and nested crypto-library allocations are unchanged.
+
 ## Fallible syscall and crypto buffers
 
 `tee_svc_storage`, `tee_svc_cryp` and `tee_svc_cryp2` use KBox byte slices

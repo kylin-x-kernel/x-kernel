@@ -2,29 +2,43 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 
+use kalloc_types::{AllocFlags, KBox};
 use kvfs::{DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsFile, VfsResult};
 use lazyinit::LazyInit;
 
 use crate::{DeviceFile, add_device_entry};
 
-static DTB_SNAPSHOT: LazyInit<Box<[u8]>> = LazyInit::new();
+static DTB_SNAPSHOT: LazyInit<KBox<[u8]>> = LazyInit::new();
 
-pub(crate) fn capture_snapshot() {
-    let Some(dtb) = khal::firmware::dtb_bytes() else {
-        return;
+/// Captures firmware under the serialized DEVFS initializer using NOWAIT.
+/// Failure leaves the snapshot unset; completed captures are reused on retry.
+pub(crate) fn capture_snapshot() -> VfsResult<()> {
+    capture_snapshot_with(&DTB_SNAPSHOT, khal::firmware::dtb_bytes(), |bytes| {
+        KBox::from_slice_with_flags(bytes, AllocFlags::NOWAIT)
+    })
+}
+
+fn capture_snapshot_with(
+    snapshot: &LazyInit<KBox<[u8]>>,
+    dtb: Option<&[u8]>,
+    prepare: impl FnOnce(&[u8]) -> VfsResult<KBox<[u8]>>,
+) -> VfsResult<()> {
+    let Some(dtb) = dtb else {
+        return Ok(());
     };
-    if DTB_SNAPSHOT.get().is_some() {
-        return;
+    if snapshot.get().is_some() {
+        return Ok(());
     }
 
-    DTB_SNAPSHOT.init_once(dtb.to_vec().into_boxed_slice());
+    snapshot.init_once(prepare(dtb)?);
     info!(
         "Captured DTB snapshot: vaddr={:#x} size={:#x}",
         dtb.as_ptr() as usize,
         dtb.len()
     );
+    Ok(())
 }
 
 pub(crate) fn snapshot_available() -> bool {

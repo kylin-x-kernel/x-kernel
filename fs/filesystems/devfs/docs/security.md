@@ -8,6 +8,13 @@ worker preparation still requires sleepable task context.
 
 ## Singleton allocation rollback
 
+DTB snapshot allocation uses NOWAIT and propagates NoMemory before publishing
+the static root, rather than silently omitting the firmware device. Capture is
+serialized by DEVFS initialization; no additional concurrent initializer is
+introduced. Local snapshot tests inject preparation failure, then verify retry,
+copy contents, idempotence and absent-firmware behavior. They do not force
+global allocator OOM; the existing guest test checks the published file bytes.
+
 Private-owner allocation failure returns NoMemory without publishing a root or
 internal mount. `try_call_once` resets failed initialization for retry rather
 than caching an error or poisoning the singleton. Previously captured firmware

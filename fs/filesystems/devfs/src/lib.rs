@@ -67,8 +67,9 @@ fn init_devfs_fs() {
 /// The singleton retains the internal root mount used for kernel device-node
 /// updates, corresponding to Linux's private devtmpfs mount.
 /// Requires sleepable task context for root and mount preparation. Private-owner
-/// allocation uses NOWAIT inside the Once initializer to avoid reclaim re-entry;
-/// failure returns NoMemory and leaves the singleton available for retry.
+/// and firmware-snapshot allocation use NOWAIT inside the Once initializer to
+/// avoid reclaim re-entry. Failure returns NoMemory and leaves the singleton
+/// available for retry.
 /// Nested allocations retain their existing behavior.
 pub fn new_devfs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
     new_devfs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
@@ -82,7 +83,7 @@ fn new_devfs_with_type(
         let console = ktty::tty::native_tty()?;
         // Static root entries are fixed on the first mount, so capture firmware
         // before root construction rather than after the bootstrap /dev mount.
-        nodes::dtb::capture_snapshot();
+        nodes::dtb::capture_snapshot()?;
         let super_block = SimpleFs::new_with_allocation_flags(
             file_system_type,
             DEVFS_MAGIC,

@@ -8,6 +8,35 @@ use kvfs::{Filename, Mount, NodePermission, Path, SuperBlockFlags};
 use unittest::def_test;
 
 #[def_test]
+fn snapshot_failure_leaves_storage_retryable() {
+    use super::*;
+
+    let snapshot = LazyInit::new();
+    let bytes = [1, 2, 3, 4];
+    assert_eq!(
+        capture_snapshot_with(&snapshot, Some(&bytes), |_| Err(kvfs::VfsError::NoMemory)),
+        Err(kvfs::VfsError::NoMemory)
+    );
+    assert!(snapshot.get().is_none());
+    capture_snapshot_with(&snapshot, Some(&bytes), |source| {
+        KBox::from_slice_with_flags(source, AllocFlags::NOWAIT)
+    })
+    .unwrap();
+    assert_eq!(&**snapshot.get().unwrap(), &bytes);
+    capture_snapshot_with(&snapshot, Some(&[9]), |_| Err(kvfs::VfsError::NoMemory))
+        .unwrap();
+    assert_eq!(&**snapshot.get().unwrap(), &bytes);
+}
+
+#[def_test]
+fn absent_firmware_does_not_prepare_snapshot() {
+    let snapshot = lazyinit::LazyInit::new();
+    super::capture_snapshot_with(&snapshot, None, |_| Err(kvfs::VfsError::NoMemory))
+        .unwrap();
+    assert!(snapshot.get().is_none());
+}
+
+#[def_test]
 fn bootstrap_snapshot_is_readable_from_shared_devtmpfs() {
     let Some(expected) = khal::firmware::dtb_bytes() else {
         return unittest::TestResult::Ignored;
