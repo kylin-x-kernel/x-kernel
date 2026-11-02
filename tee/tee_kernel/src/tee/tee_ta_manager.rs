@@ -14,7 +14,6 @@ use knet::{
     ConnectOptions, RecvOptions, SendOptions, SocketAddrEx, SocketOps,
     unix::{StreamTransport, UnixAddr, UnixDomainSocket, UnixSocketType},
 };
-use kprocess;
 use tee_raw_sys::{TEE_ERROR_GENERIC, TEE_ERROR_ITEM_NOT_FOUND, TEE_SUCCESS, utee_params};
 use tee_task_iface::SessionIdentity;
 
@@ -79,10 +78,7 @@ pub(super) fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
     let path = parsed.ta_unix_socket_path();
     let uuid = parsed.to_string();
     // Connect to dest TA via Unix socket
-    let socket = UnixDomainSocket::new(
-        StreamTransport::new(kprocess::current_user_thread().pid()),
-        UnixSocketType::Stream,
-    );
+    let socket = UnixDomainSocket::new(StreamTransport::new(), UnixSocketType::Stream);
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket
         .connect(remote_addr, ConnectOptions::default())
@@ -115,10 +111,7 @@ pub(super) fn tee_ta_init_session(uuid: String) -> TeeResult<u32> {
 
 pub(super) fn tee_ta_close_session(sess_id: SessionIdentity) -> TeeResult {
     // Connect to dest TA via Unix socket
-    let socket = UnixDomainSocket::new(
-        StreamTransport::new(kprocess::current_user_thread().pid()),
-        UnixSocketType::Stream,
-    );
+    let socket = UnixDomainSocket::new(StreamTransport::new(), UnixSocketType::Stream);
     let path = ta_unix_socket_path(&sess_id.uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket
@@ -141,10 +134,7 @@ pub(super) fn tee_ta_invoke_command(
     _usr_param: *mut utee_params,
 ) -> TeeResult {
     // Connect to dest TA via Unix socket
-    let socket = UnixDomainSocket::new(
-        StreamTransport::new(kprocess::current_user_thread().pid()),
-        UnixSocketType::Stream,
-    );
+    let socket = UnixDomainSocket::new(StreamTransport::new(), UnixSocketType::Stream);
     let path = ta_unix_socket_path(&sess_id.uuid)?;
     let remote_addr = SocketAddrEx::Unix(UnixAddr::Path(path.into()));
     socket

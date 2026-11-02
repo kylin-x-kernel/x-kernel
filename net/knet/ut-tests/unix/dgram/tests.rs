@@ -7,11 +7,40 @@ use alloc::vec::Vec;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::KernelAncillaryData;
+use crate::{
+    KernelAncillaryData,
+    options::{PeerCredentials, UnixCredentials},
+    unix::BindEntry,
+};
+
+fn test_peer_credentials() -> PeerCredentials {
+    PeerCredentials::new(kidentity::PidHandle::fixed_root(7), 1000, 1001)
+}
+
+fn peer_credentials_for(pid: u32, uid: u32, gid: u32) -> PeerCredentials {
+    PeerCredentials::new(kidentity::PidHandle::fixed_root(pid), uid, gid)
+}
+
+fn resolved_peer_credentials(socket: &DgramTransport) -> UnixCredentials {
+    let mut peer = PeerCredentials::none();
+    socket
+        .get_option(GetSocketOption::PeerCredentials(&mut peer))
+        .unwrap();
+    peer.resolve_in(kidentity::root_pid_namespace())
+}
+
+macro_rules! assert_peer_credentials {
+    ($socket:expr, $pid:expr, $uid:expr, $gid:expr) => {{
+        let peer = resolved_peer_credentials($socket);
+        assert_eq!(peer.pid, $pid);
+        assert_eq!(peer.uid, $uid);
+        assert_eq!(peer.gid, $gid);
+    }};
+}
 
 #[def_test]
 fn unix_datagram_receive_honors_per_call_nonblocking_after_empty_message() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     let mut data = [0; 1];
     let receive = |data: &mut [u8]| {
         receiver.recv(
@@ -69,7 +98,7 @@ fn recv_ancillary(receiver: &DgramTransport) -> Vec<AncillaryData> {
 
 #[def_test]
 fn unix_dgram_passcred_returns_current_sender_credentials() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
@@ -94,7 +123,7 @@ fn unix_dgram_passcred_returns_current_sender_credentials() {
 
 #[def_test]
 fn unix_dgram_without_passcred_omits_sender_credentials() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     send_credentials(&sender, test_credentials());
 
     assert!(recv_ancillary(&receiver).is_empty());
@@ -102,7 +131,7 @@ fn unix_dgram_without_passcred_omits_sender_credentials() {
 
 #[def_test]
 fn unix_dgram_passcred_without_sender_snapshot_omits_credentials() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
@@ -113,7 +142,7 @@ fn unix_dgram_passcred_without_sender_snapshot_omits_credentials() {
 
 #[def_test]
 fn unix_dgram_passcred_preserves_each_sender_snapshot() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
@@ -166,7 +195,7 @@ fn recv_without_control_buffer(receiver: &DgramTransport) -> (u8, bool) {
 
 #[def_test]
 fn unix_dgram_without_control_buffer_reports_discarded_passed_files() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     sender
         .send(
             &b"x"[..],
@@ -184,7 +213,7 @@ fn unix_dgram_without_control_buffer_reports_discarded_passed_files() {
 
 #[def_test]
 fn unix_dgram_without_control_buffer_reports_nothing_without_passed_files() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     sender.send(&b"x"[..], SendOptions::default()).unwrap();
 
     assert_eq!(recv_without_control_buffer(&receiver), (b'x', false));
@@ -192,7 +221,7 @@ fn unix_dgram_without_control_buffer_reports_nothing_without_passed_files() {
 
 #[def_test]
 fn unix_dgram_without_control_buffer_reports_credentials_as_ctrunc() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
@@ -206,7 +235,7 @@ fn unix_dgram_without_control_buffer_reports_credentials_as_ctrunc() {
 
 #[def_test]
 fn unix_dgram_without_control_buffer_ignores_unexposed_credentials() {
-    let (sender, receiver) = DgramTransport::new_pair(7);
+    let (sender, receiver) = DgramTransport::new_pair(test_peer_credentials());
     receiver
         .set_option(SetSocketOption::PassCredentials(&true))
         .unwrap();
@@ -215,4 +244,44 @@ fn unix_dgram_without_control_buffer_ignores_unexposed_credentials() {
     sender.send(&b"x"[..], SendOptions::default()).unwrap();
 
     assert_eq!(recv_without_control_buffer(&receiver), (b'x', false));
+}
+
+#[def_test]
+fn unix_dgram_peer_credentials_follow_only_socketpair_creation() {
+    let creator = peer_credentials_for(31, 3100, 3101);
+    let (left, right) = DgramTransport::new_pair(creator);
+    assert_peer_credentials!(&left, 31, 3100, 3101);
+    assert_peer_credentials!(&right, 31, 3100, 3101);
+
+    let independent = DgramTransport::new();
+    assert_peer_credentials!(&independent, 0, u32::MAX, u32::MAX);
+}
+
+#[def_test]
+fn unix_dgram_connect_does_not_create_peer_credentials() {
+    let sender = DgramTransport::new();
+    let receiver = DgramTransport::new();
+    let sender_entry = BindEntry::default();
+    let receiver_entry = BindEntry::default();
+
+    sender.bind(&sender_entry, &UnixAddr::Unbound).unwrap();
+    receiver.bind(&receiver_entry, &UnixAddr::Unbound).unwrap();
+    sender
+        .connect(
+            &receiver_entry,
+            &UnixAddr::Unbound,
+            ConnectOptions::default(),
+            &peer_credentials_for(32, 3200, 3201),
+        )
+        .unwrap();
+
+    // Linux datagram connect() installs a destination, not an SO_PEERCRED
+    // identity, for either endpoint.
+    assert_peer_credentials!(&sender, 0, u32::MAX, u32::MAX);
+    assert_peer_credentials!(&receiver, 0, u32::MAX, u32::MAX);
+
+    sender.send(&b"x"[..], SendOptions::default()).unwrap();
+    let mut data = [0_u8; 1];
+    assert_eq!(receiver.recv(&mut data[..], RecvOptions::default()), Ok(1));
+    assert_eq!(data, [b'x']);
 }

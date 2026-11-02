@@ -18,7 +18,10 @@ use ringbuf::{
     traits::{Observer, Split},
 };
 
-use crate::socket::AncillaryData;
+use crate::{
+    options::PeerCredentials,
+    socket::{AncillaryData, KernelAncillaryData, SenderCredentials},
+};
 
 pub(super) const STREAM_BUF_BYTES: usize = 64 * 1024;
 pub(super) const STREAM_WRITABLE_MAX_OCCUPIED_BYTES: usize = STREAM_BUF_BYTES / 4;
@@ -78,12 +81,38 @@ pub(super) struct StreamEndpoint {
     pub(super) rx_closed: AtomicBool,
     pub(super) tx_closed: AtomicBool,
     pub(super) socket_error: AtomicI32,
+    /// The `SO_PASSCRED` setting of the socket that owns this endpoint.
+    ///
+    /// Both channel directions share the endpoint, so a sender can observe
+    /// whether its peer enabled automatic credential capture. A queued server
+    /// endpoint copies this from the listener when `connect()` builds it.
+    pub(super) pass_credentials: AtomicBool,
+    /// Whether this endpoint belongs to a server-side connection that has not
+    /// been returned by `accept()` yet.
+    ///
+    /// Linux `unix_passcred_enabled` also requests credentials while the
+    /// receiving peer has no attached socket (`!other->sk_socket`), so data
+    /// sent before `accept()` must carry a snapshot even when the listener did
+    /// not enable `SO_PASSCRED`.
+    pub(super) awaiting_accept: AtomicBool,
+}
+
+impl StreamEndpoint {
+    /// Whether this endpoint requests automatic sender credentials.
+    ///
+    /// This combines the endpoint's own `SO_PASSCRED` selection with the
+    /// pre-accept capture rule for a queued server connection.
+    pub(super) fn pass_credentials_enabled(&self) -> bool {
+        self.pass_credentials.load(Ordering::Acquire)
+            || self.awaiting_accept.load(Ordering::Acquire)
+    }
 }
 
 pub(super) fn new_duplex_channel(
     client_endpoint: Arc<StreamEndpoint>,
     server_endpoint: Arc<StreamEndpoint>,
-    pid: u32,
+    client_peer: PeerCredentials,
+    server_peer: PeerCredentials,
 ) -> (Channel, Channel) {
     let (client_tx, server_rx) = new_ring_pair();
     let (server_tx, client_rx) = new_ring_pair();
@@ -97,7 +126,7 @@ pub(super) fn new_duplex_channel(
             rx_anc: server_to_client_anc.clone(),
             endpoint: client_endpoint.clone(),
             peer_endpoint: server_endpoint.clone(),
-            peer_pid: pid,
+            peer_credentials: client_peer,
         },
         Channel {
             tx: server_tx,
@@ -106,7 +135,7 @@ pub(super) fn new_duplex_channel(
             rx_anc: client_to_server_anc,
             endpoint: server_endpoint,
             peer_endpoint: client_endpoint,
-            peer_pid: pid,
+            peer_credentials: server_peer,
         },
     )
 }
@@ -141,16 +170,56 @@ pub(super) enum EnqueueError {
     QuotaExceeded,
 }
 
+/// Whether `payload` carries sender credentials, including a mixed record that
+/// also carries file descriptors.
+fn payload_contains_credentials(payload: &[AncillaryData]) -> bool {
+    payload.iter().any(|record| {
+        record
+            .downcast_ref::<KernelAncillaryData>()
+            .is_some_and(|data| matches!(data, KernelAncillaryData::Credentials(_)))
+    })
+}
+
+/// The single credential record carried by `payload`, if it is exactly that.
+///
+/// A control record that also carries file descriptors is an `SCM_RIGHTS`
+/// barrier and must not be merged or skipped as a credential-only record.
+fn sender_credentials(payload: &[AncillaryData]) -> Option<&SenderCredentials> {
+    let [record] = payload else {
+        return None;
+    };
+    match record.downcast_ref::<KernelAncillaryData>()? {
+        KernelAncillaryData::Credentials(credentials) => Some(credentials),
+        _ => None,
+    }
+}
+
+/// Linux compares the stored `struct pid` pointer, real UID and real GID when
+/// deciding whether two adjacent stream skbs can be read together. The same
+/// comparison lets us coalesce the corresponding credential records.
+fn same_sender_credentials(left: &SenderCredentials, right: &SenderCredentials) -> bool {
+    left.uid == right.uid
+        && left.gid == right.gid
+        && match (&left.pid, &right.pid) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+}
+
 pub(super) struct DirectionAncillary {
     /// Total bytes ever produced on this direction (monotonic).
     pub(super) sent_total: u64,
     /// Total bytes ever consumed on this direction (monotonic).
     pub(super) recv_total: u64,
     /// Undelivered records ordered by the stream position of their first
-    /// byte. Positions are in `sent_total`/`recv_total` units. `end` is the
-    /// stream position just past the sendmsg that carried the fds: reads
-    /// stop there (the SCM_RIGHTS barrier), even when later plain-data
-    /// sends leave no record boundary to infer it from.
+    /// byte. Positions are in `sent_total`/`recv_total` units. A record that
+    /// contains an `SCM_RIGHTS` payload is a read barrier: `end` is the
+    /// stream position just past the sendmsg that carried the fds, and reads
+    /// stop there even when later plain-data sends leave no record boundary
+    /// to infer it from. Adjacent credential-only sends with equal identities
+    /// share one record and are read together, like Linux coalesces skbs
+    /// whose `unix_skb_scm_eq` holds.
     pub(super) records: VecDeque<(u64, u64, Arc<Vec<AncillaryData>>)>,
     /// The entries live behind one `Arc` so a `MSG_PEEK` duplicates the
     /// record by cloning a single handle: no entry buffer is copied or
@@ -190,6 +259,10 @@ impl DirectionAncillary {
     /// together with the reason, so the payload can be dropped after the
     /// caller's spin guards are released (dropping the last file reference
     /// closes the file, which may take a sleepable mutex).
+    ///
+    /// A credential-only payload directly following another credential-only
+    /// record for the same sender is merged into that record. Dropping the
+    /// new payload here is safe because it cannot contain a file reference.
     pub(super) fn enqueue_record(
         &mut self,
         start: u64,
@@ -198,6 +271,15 @@ impl DirectionAncillary {
     ) -> Result<(), (EnqueueError, Arc<Vec<AncillaryData>>)> {
         if self.consumer_closed {
             return Err((EnqueueError::ConsumerClosed, payload));
+        }
+        if let Some((_, last_end, last_payload)) = self.records.back_mut()
+            && *last_end == start
+            && let Some(last_credentials) = sender_credentials(last_payload)
+            && let Some(credentials) = sender_credentials(&payload)
+            && same_sender_credentials(last_credentials, credentials)
+        {
+            *last_end = end;
+            return Ok(());
         }
         if self.records.len() >= MAX_PENDING_RECORDS
             || self.retained_ancillary + payload.len() > MAX_PENDING_ANCILLARY
@@ -213,30 +295,97 @@ impl DirectionAncillary {
         Ok(())
     }
 
-    /// Pops the oldest ancillary record whose first byte the receive cursor
-    /// has reached, or `None` when the cursor has not reached any record
-    /// yet. A record whose first byte sits exactly at the cursor is not
-    /// reached until the cursor moves past it.
-    pub(super) fn pop_reached(&mut self) -> Option<(u64, u64, Arc<Vec<AncillaryData>>)> {
-        if self.records.front()?.0 >= self.recv_total {
-            return None;
+    /// Returns the read boundary for a receive that may consume up to
+    /// `occupied` bytes.
+    ///
+    /// Without `SO_PASSCRED` every credential-only record is filtered from the
+    /// result, so it cannot shorten a read; the next `SCM_RIGHTS` record still
+    /// does. With `SO_PASSCRED`, a record carrying credentials is a boundary at
+    /// its merged end once its bytes are being consumed, matching Linux
+    /// coalescing of equal adjacent skbs. Before that point the boundary is the
+    /// record's start: earlier plain bytes have no matching credential record
+    /// and must not be merged with this skb (`unix_stream_read_generic` stops
+    /// before a skb whose credentials differ).
+    pub(super) fn read_cap(&self, occupied: u64, pass_credentials: bool) -> u64 {
+        for (start, end, payload) in &self.records {
+            if !pass_credentials && sender_credentials(payload).is_some() {
+                continue;
+            }
+            let boundary = if pass_credentials
+                && payload_contains_credentials(payload)
+                && self.recv_total < *start
+            {
+                *start
+            } else {
+                *end
+            };
+            return boundary.saturating_sub(self.recv_total).min(occupied);
         }
-        let (start, end, payload) = self.records.pop_front()?;
-        self.retained_ancillary -= payload.len();
-        Some((start, end, payload))
+        occupied
     }
 
-    /// Duplicates the oldest record whose first byte lies before
-    /// `cursor_end`, without touching the queue or the cursor: a `MSG_PEEK`
-    /// shares the sender's entry handles (`scm_fp_dup`) and keeps the record
-    /// for the later consuming receive. Cloning the shared handle bumps
-    /// reference counts and never allocates, so it stays inside the guard.
-    pub(super) fn peek_reached(&self, cursor_end: u64) -> Option<Arc<Vec<AncillaryData>>> {
-        let (start, _, payload) = self.records.front()?;
-        if *start >= cursor_end {
-            return None;
+    /// Pops the records reached by the receive cursor and returns at most one
+    /// payload to deliver.
+    ///
+    /// A credential-only record stays queued until all bytes it covers have
+    /// been consumed, so a short read does not lose credentials for the bytes
+    /// that remain. While the credential record is still partially unconsumed
+    /// its payload is cloned for delivery (no allocation) and the shared
+    /// record remains available for the next read or `MSG_PEEK`. Without
+    /// `SO_PASSCRED`, fully consumed credential records are discarded without
+    /// being returned; an `SCM_RIGHTS` record is returned even when it is the
+    /// only record the read reached.
+    pub(super) fn take_reached(
+        &mut self,
+        pass_credentials: bool,
+    ) -> Option<(u64, u64, Arc<Vec<AncillaryData>>)> {
+        loop {
+            let (start, end, payload) = self.records.front()?;
+            if *start >= self.recv_total {
+                return None;
+            }
+            if sender_credentials(payload).is_some() {
+                if self.recv_total < *end {
+                    return pass_credentials.then(|| {
+                        let start = *start;
+                        let end = *end;
+                        (start, end, Arc::clone(payload))
+                    });
+                }
+                let (start, end, payload) = self.records.pop_front()?;
+                self.retained_ancillary -= payload.len();
+                if pass_credentials {
+                    return Some((start, end, payload));
+                }
+                continue;
+            }
+            let (start, end, payload) = self.records.pop_front()?;
+            self.retained_ancillary -= payload.len();
+            return Some((start, end, payload));
         }
-        Some(Arc::clone(payload))
+    }
+
+    /// Duplicates the first record before `cursor_end` that this receiver
+    /// would deliver, without touching the queue or the cursor: a `MSG_PEEK`
+    /// shares the sender's entry handles (`scm_fp_dup`) and keeps the record
+    /// for the later consuming receive. Credential-only records are skipped
+    /// when the receiver did not enable `SO_PASSCRED`. Cloning the shared
+    /// handle bumps reference counts and never allocates, so it stays inside
+    /// the guard.
+    pub(super) fn peek_reached(
+        &self,
+        cursor_end: u64,
+        pass_credentials: bool,
+    ) -> Option<Arc<Vec<AncillaryData>>> {
+        for (start, _, payload) in &self.records {
+            if *start >= cursor_end {
+                return None;
+            }
+            if pass_credentials || sender_credentials(payload).is_none() {
+                return Some(Arc::clone(payload));
+            }
+        }
+        None
     }
 
     /// Closes this direction's consumer side: pending records can no longer
@@ -275,7 +424,7 @@ pub(super) struct Channel {
     pub(super) rx_anc: SharedAncillary,
     pub(super) endpoint: Arc<StreamEndpoint>,
     pub(super) peer_endpoint: Arc<StreamEndpoint>,
-    pub(super) peer_pid: u32,
+    pub(super) peer_credentials: PeerCredentials,
 }
 
 impl Drop for Channel {

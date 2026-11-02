@@ -8,42 +8,74 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
+
 use kerrno::KError;
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
-use crate::options::{Configurable, GetSocketOption, SetSocketOption, UnixCredentials};
+use crate::options::{
+    Configurable, GetSocketOption, PeerCredentials, SetSocketOption, UnixCredentials,
+};
 
 #[def_test]
-fn test_unix_credentials_construction() {
-    // Test default construction
+fn test_peer_credentials_pid_is_resolved_in_the_observers_namespace() {
+    let root = Arc::new(kidentity::PidNamespace::new_root());
+    let child = kidentity::PidNamespace::new_child(&root);
+    let sibling = kidentity::PidNamespace::new_child(&root);
+    let unrelated_root = Arc::new(kidentity::PidNamespace::new_root());
+    let handle = kidentity::PidHandle::allocate_in(&child).unwrap();
+    let peer = PeerCredentials::new(handle.clone(), 1000, 2001);
+
+    let in_child = peer.resolve_in(&child);
+    assert_eq!(in_child.pid, 1);
+    assert_eq!(in_child.uid, 1000);
+    assert_eq!(in_child.gid, 2001);
+
+    let in_parent = peer.resolve_in(&root);
+    assert_eq!(in_parent.pid, handle.root_nr());
+    assert_eq!(in_parent.uid, 1000);
+    assert_eq!(in_parent.gid, 2001);
+
+    // A sibling and an unrelated hierarchy cannot project the peer PID, but
+    // the peer still exists, so Linux reports PID 0 with the real credentials.
+    for observer in [&sibling, &unrelated_root] {
+        let resolved = peer.resolve_in(observer);
+        assert_eq!(resolved.pid, 0);
+        assert_eq!(resolved.uid, 1000);
+        assert_eq!(resolved.gid, 2001);
+    }
+}
+
+#[def_test]
+fn test_unix_credentials_construction_and_peer_resolution() {
     let default_cred = UnixCredentials::default();
     assert_eq!(default_cred.pid, 0);
-    assert_eq!(default_cred.uid, 0);
-    assert_eq!(default_cred.gid, 0);
+    assert_eq!(default_cred.uid, u32::MAX);
+    assert_eq!(default_cred.gid, u32::MAX);
 
-    // Test with specific PID
-    let cred = UnixCredentials::new(1234);
+    let cred = UnixCredentials::new(1234, 1000, 2000);
     assert_eq!(cred.pid, 1234);
-    assert_eq!(cred.uid, 0);
-    assert_eq!(cred.gid, 0);
+    assert_eq!(cred.uid, 1000);
+    assert_eq!(cred.gid, 2000);
 
-    // Test boundary values
-    let max_pid_cred = UnixCredentials::new(u32::MAX);
-    assert_eq!(max_pid_cred.pid, u32::MAX);
+    let root = kidentity::root_pid_namespace();
+    let peer = PeerCredentials::new(kidentity::PidHandle::fixed_root(4321), 1000, 2000);
+    let resolved = peer.resolve_in(root);
+    assert_eq!(resolved.pid, 4321);
+    assert_eq!(resolved.uid, 1000);
+    assert_eq!(resolved.gid, 2000);
 
-    let min_pid_cred = UnixCredentials::new(u32::MIN);
-    assert_eq!(min_pid_cred.pid, 0);
+    let no_peer = PeerCredentials::none().resolve_in(root);
+    assert_eq!(no_peer.pid, 0);
+    assert_eq!(no_peer.uid, u32::MAX);
+    assert_eq!(no_peer.gid, u32::MAX);
 }
 
 #[def_test]
 fn test_unix_credentials_clone() {
     // Test clone functionality
-    let original = UnixCredentials {
-        pid: 100,
-        uid: 1000,
-        gid: 2000,
-    };
+    let original = UnixCredentials::new(100, 1000, 2000);
 
     let cloned = original.clone();
     assert_eq!(original.pid, cloned.pid);
@@ -277,15 +309,11 @@ fn test_tcp_keepalive_options_defaults_and_ranges() {
     assert_eq!((idle, interval, count), (7200, 75, 9));
 
     // Lower and upper bounds are accepted and read back.
-    socket
-        .set_option(SetSocketOption::KeepIdle(&1))
-        .unwrap();
+    socket.set_option(SetSocketOption::KeepIdle(&1)).unwrap();
     socket
         .set_option(SetSocketOption::KeepInterval(&1))
         .unwrap();
-    socket
-        .set_option(SetSocketOption::KeepCount(&1))
-        .unwrap();
+    socket.set_option(SetSocketOption::KeepCount(&1)).unwrap();
     socket
         .get_option(GetSocketOption::KeepIdle(&mut idle))
         .unwrap();
@@ -303,9 +331,7 @@ fn test_tcp_keepalive_options_defaults_and_ranges() {
     socket
         .set_option(SetSocketOption::KeepInterval(&32767))
         .unwrap();
-    socket
-        .set_option(SetSocketOption::KeepCount(&127))
-        .unwrap();
+    socket.set_option(SetSocketOption::KeepCount(&127)).unwrap();
 
     // Values outside the Linux ranges fail with EINVAL and preserve the old
     // value.

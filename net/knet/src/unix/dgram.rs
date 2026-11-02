@@ -15,7 +15,7 @@ use ksync::{Mutex, RwLock};
 use crate::{
     AncillaryData, ConnectOptions, RecvFlags, RecvOptions, SendOptions, SocketAddrEx,
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
+    options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
     unix::{UnixAddr, UnixTransport, UnixTransportOps, lookup_bind_entry},
 };
 
@@ -29,6 +29,9 @@ struct Datagram {
 struct Channel {
     tx: async_channel::Sender<Datagram>,
     poll: Arc<PollSet>,
+    /// Established only for socketpair peers; datagram `bind` and `connect`
+    /// leave Linux `sk_peer_pid` unset.
+    peer_credentials: PeerCredentials,
 }
 
 pub(crate) struct Bind {
@@ -41,6 +44,7 @@ impl Bind {
         Channel {
             tx,
             poll: self.poll.clone(),
+            peer_credentials: PeerCredentials::none(),
         }
     }
 }
@@ -52,10 +56,15 @@ pub struct DgramTransport {
     bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     poll_state: Arc<PollSet>,
     options: GeneralOptions,
-    pid: u32,
 }
+impl Default for DgramTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DgramTransport {
-    pub fn new(pid: u32) -> Self {
+    pub fn new() -> Self {
         DgramTransport {
             rx: Mutex::new(None),
             peer: RwLock::new(None),
@@ -63,15 +72,10 @@ impl DgramTransport {
             bind_slot: Mutex::new(None),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
-            pid,
         }
     }
 
-    fn new_connected(
-        rx: (async_channel::Receiver<Datagram>, Arc<PollSet>),
-        peer: Channel,
-        pid: u32,
-    ) -> Self {
+    fn new_connected(rx: (async_channel::Receiver<Datagram>, Arc<PollSet>), peer: Channel) -> Self {
         DgramTransport {
             rx: Mutex::new(Some(rx)),
             peer: RwLock::new(Some(peer)),
@@ -79,11 +83,12 @@ impl DgramTransport {
             bind_slot: Mutex::new(None),
             poll_state: Arc::default(),
             options: GeneralOptions::default(),
-            pid,
         }
     }
 
-    pub fn new_pair(pid: u32) -> (Self, Self) {
+    /// Creates a connected datagram pair whose endpoints both report the
+    /// creator's peer credentials, matching Linux socketpair.
+    pub fn new_pair(credentials: PeerCredentials) -> (Self, Self) {
         let (tx1, rx1) = async_channel::unbounded();
         let (tx2, rx2) = async_channel::unbounded();
         let poll1 = Arc::new(PollSet::new());
@@ -93,16 +98,16 @@ impl DgramTransport {
             Channel {
                 tx: tx2,
                 poll: poll2.clone(),
+                peer_credentials: credentials.clone(),
             },
-            pid,
         );
         let transport2 = DgramTransport::new_connected(
             (rx2, poll2.clone()),
             Channel {
                 tx: tx1,
                 poll: poll1.clone(),
+                peer_credentials: credentials,
             },
-            pid,
         );
         (transport1, transport2)
     }
@@ -119,10 +124,12 @@ impl Configurable for DgramTransport {
         match opt {
             O::PassCredentials(_) => {}
             O::PeerCredentials(cred) => {
-                // Datagram sockets are stateless and do not have a peer, so we
-                // return the credentials of the process that created the
-                // socket.
-                **cred = UnixCredentials::new(self.pid);
+                **cred = self
+                    .peer
+                    .read()
+                    .as_ref()
+                    .map(|channel| channel.peer_credentials.clone())
+                    .unwrap_or_default();
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -174,6 +181,7 @@ impl UnixTransportOps for DgramTransport {
         slot: &super::BindEntry,
         _local_addr: &UnixAddr,
         _options: ConnectOptions,
+        _credentials: &PeerCredentials,
     ) -> KResult {
         let mut guard = self.peer.write();
         if guard.is_some() {

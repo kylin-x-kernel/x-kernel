@@ -5,6 +5,7 @@
 //! Unix stream listener queue and admission state.
 
 use alloc::{collections::VecDeque, sync::Arc};
+use core::sync::atomic::Ordering;
 
 use event_listener::{Event, listener};
 use kerrno::{KError, KResult};
@@ -14,12 +15,11 @@ use ktask::future::{block_on, interruptible, timeout_at};
 use ktime_types::TimeSpan;
 
 use super::channel::{Channel, StreamEndpoint};
-use crate::{consts::LISTEN_QUEUE_SIZE, unix::UnixAddr};
+use crate::{consts::LISTEN_QUEUE_SIZE, options::PeerCredentials, unix::UnixAddr};
 
 pub(super) struct ConnRequest {
     pub(super) channel: Channel,
     pub(super) addr: UnixAddr,
-    pub(super) pid: u32,
 }
 
 #[derive(Default)]
@@ -29,6 +29,8 @@ struct ListenerState {
     max_pending: usize,
     is_listening: bool,
     is_receive_shutdown: bool,
+    /// Listener identity captured by the most recent successful `listen`.
+    peer_credentials: PeerCredentials,
 }
 
 pub(super) struct ListenerQueue {
@@ -48,7 +50,19 @@ impl ListenerQueue {
         }
     }
 
-    pub(super) fn configure_listen(&self, backlog: usize) -> (bool, bool) {
+    /// The listener socket's current `SO_PASSCRED` setting.
+    ///
+    /// `connect()` snapshots this into the queued server endpoint. Later
+    /// changes on the listener must not affect an already queued connection.
+    pub(super) fn pass_credentials(&self) -> bool {
+        self.endpoint.pass_credentials.load(Ordering::Acquire)
+    }
+
+    pub(super) fn configure_listen(
+        &self,
+        backlog: usize,
+        credentials: PeerCredentials,
+    ) -> (bool, bool) {
         // Linux 6.8 `unix_recvq_full_lockless` tests whether the existing
         // receive queue is already greater than the configured backlog.
         let max_pending = backlog.saturating_add(1).clamp(1, LISTEN_QUEUE_SIZE);
@@ -58,8 +72,15 @@ impl ListenerQueue {
             let capacity_increased = max_pending > state.max_pending;
             state.is_listening = true;
             state.max_pending = max_pending;
+            // `unix_listen` calls `init_peercred` on every successful listen,
+            // so re-listening refreshes what future clients copy.
+            state.peer_credentials = credentials;
             (became_listening, capacity_increased)
         }
+    }
+
+    pub(super) fn peer_credentials(&self) -> PeerCredentials {
+        self.state.lock().peer_credentials.clone()
     }
 
     pub(super) fn notify_listen_change(&self, became_listening: bool, capacity_increased: bool) {
@@ -104,6 +125,7 @@ impl ListenerQueue {
                     state.reserved_slots += 1;
                     return Ok(ListenerReservation {
                         listener: self.clone(),
+                        peer_credentials: state.peer_credentials.clone(),
                         is_active: true,
                     });
                 }
@@ -184,10 +206,17 @@ impl ListenerQueue {
 
 pub(super) struct ListenerReservation {
     listener: Arc<ListenerQueue>,
+    /// Snapshot copied by the client that reserves this admission slot.
+    peer_credentials: PeerCredentials,
     is_active: bool,
 }
 
 impl ListenerReservation {
+    /// Returns the listener identity observed when the slot was reserved.
+    pub(super) fn peer_credentials(&self) -> &PeerCredentials {
+        &self.peer_credentials
+    }
+
     pub(super) fn commit(mut self, request: ConnRequest) -> KResult<()> {
         {
             let mut state = self.listener.state.lock();
@@ -216,5 +245,4 @@ impl Drop for ListenerReservation {
 #[derive(Clone)]
 pub(crate) struct Bind {
     pub(super) listener: Arc<ListenerQueue>,
-    pub(super) pid: u32,
 }

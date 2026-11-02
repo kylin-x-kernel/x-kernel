@@ -97,7 +97,7 @@ impl SocketFileOps {
                 let cred = kprocess::current_cred();
                 socket.send_with_cred(src, options, &cred)
             }
-            Socket::Unix(unix) if unix.is_datagram() => {
+            Socket::Unix(unix) if unix.should_attach_sender_credentials() => {
                 options.unix_sender_credentials = Some(current_sender_credentials());
                 socket.send(src, options)
             }

@@ -332,7 +332,9 @@ fn send_impl(
         send_flags |= SendFlags::DONT_WAIT;
     }
     let mut unix_sender_credentials = match socket.as_ref() {
-        Socket::Unix(unix) if unix.is_datagram() => Some(current_sender_credentials()),
+        Socket::Unix(unix) if unix.should_attach_sender_credentials() => {
+            Some(current_sender_credentials())
+        }
         _ => None,
     };
     // Linux consumes an explicit `SCM_CREDENTIALS` claim into `scm->creds`;

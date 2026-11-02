@@ -32,49 +32,49 @@ fn tag(record: &[AncillaryData]) -> u32 {
 }
 
 #[def_test]
-fn pop_reached_reached_requires_cursor_past_record_start() {
+fn take_reached_reached_requires_cursor_past_record_start() {
     let mut anc = ancillary_queue(&[(2, 3, 1)]);
     // cursor before the record start: not reached
-    assert!(anc.pop_reached().is_none());
+    assert!(anc.take_reached(false).is_none());
     // exactly at the record start: still not reached
     anc.recv_total = 2;
-    assert!(anc.pop_reached().is_none());
+    assert!(anc.take_reached(false).is_none());
     // past the start: reached, FIFO
     anc.recv_total = 3;
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 1);
-    assert!(anc.pop_reached().is_none());
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 1);
+    assert!(anc.take_reached(false).is_none());
 }
 
 #[def_test]
-fn pop_reached_pops_all_reached_records_in_order() {
+fn take_reached_pops_all_reached_records_in_order() {
     let mut anc = ancillary_queue(&[(1, 2, 1), (5, 6, 2), (9, 10, 3)]);
     anc.recv_total = 10;
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 1);
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 2);
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 3);
-    assert!(anc.pop_reached().is_none());
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 1);
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 2);
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 3);
+    assert!(anc.take_reached(false).is_none());
 }
 
 #[def_test]
-fn pop_reached_stops_at_unreached_records() {
+fn take_reached_stops_at_unreached_records() {
     let mut anc = ancillary_queue(&[(1, 2, 1), (5, 6, 2), (90, 91, 3)]);
     anc.recv_total = 10;
 
     // both reached records come out FIFO...
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 1);
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 2);
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 1);
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 2);
     // ...and the unreached one stays queued
     assert_eq!(anc.records.len(), 1);
     assert_eq!(anc.records.front().unwrap().0, 90);
 }
 
 #[def_test]
-fn pop_reached_drains_everything_when_all_is_reached() {
+fn take_reached_drains_everything_when_all_is_reached() {
     let mut anc = ancillary_queue(&[(1, 2, 1), (5, 6, 2)]);
     anc.recv_total = 10;
 
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 1);
-    assert_eq!(tag(&anc.pop_reached().unwrap().2), 2);
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 1);
+    assert_eq!(tag(&anc.take_reached(false).unwrap().2), 2);
     assert!(anc.records.is_empty());
 }
 

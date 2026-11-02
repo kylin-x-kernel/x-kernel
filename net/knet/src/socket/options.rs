@@ -3,11 +3,12 @@
 // See LICENSES for license details.
 
 //! Socket option types and configuration helpers.
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 
 use enum_dispatch::enum_dispatch;
 use kalloc_types::KBox;
 use kerrno::{KError, KResult, LinuxError};
+use kidentity::{PidHandle, PidNamespace};
 use ktime_types::TimeSpan;
 
 macro_rules! define_options {
@@ -35,21 +36,81 @@ macro_rules! define_options {
     };
 }
 
-/// Credentials delivered over Unix-domain sockets.
+/// Raw `SO_PEERCRED` result in the Linux `struct ucred` layout.
+///
+/// This is an ABI carrier only. A socket stores a [`PeerCredentials`] snapshot
+/// and resolves it at `getsockopt` time, because the peer PID must be
+/// projected into the observer's active PID namespace.
 #[repr(C)]
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct UnixCredentials {
     pub pid: u32,
     pub uid: u32,
     pub gid: u32,
 }
 
+impl Default for UnixCredentials {
+    fn default() -> Self {
+        // Linux `sock_get_peercred` reports no peer as a zero PID and `-1`
+        // (as `u32`) for both IDs.
+        Self {
+            pid: 0,
+            uid: u32::MAX,
+            gid: u32::MAX,
+        }
+    }
+}
+
 impl UnixCredentials {
-    pub fn new(pid: u32) -> Self {
-        UnixCredentials {
-            pid,
-            uid: 0,
-            gid: 0,
+    pub fn new(pid: u32, uid: u32, gid: u32) -> Self {
+        UnixCredentials { pid, uid, gid }
+    }
+}
+
+/// Snapshot of the credentials established for a Unix-domain peer.
+///
+/// The PID remains a process identity until [`Self::resolve_in`] so each
+/// observer can apply Linux's `pid_vnr` projection at `getsockopt` time.
+/// `SO_PEERCRED` records effective credentials, unlike per-message
+/// `SCM_CREDENTIALS`, which uses real credentials.
+#[derive(Default, Debug, Clone)]
+pub struct PeerCredentials {
+    identity: Option<PeerIdentity>,
+}
+
+#[derive(Debug, Clone)]
+struct PeerIdentity {
+    pid: Arc<PidHandle>,
+    uid: u32,
+    gid: u32,
+}
+
+impl PeerCredentials {
+    /// Creates a snapshot for a socket that has an established peer.
+    pub fn new(pid: Arc<PidHandle>, uid: u32, gid: u32) -> Self {
+        Self {
+            identity: Some(PeerIdentity { pid, uid, gid }),
+        }
+    }
+
+    /// Creates a snapshot for a socket without a peer.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Projects the snapshot through `namespace`, matching Linux
+    /// `sock_get_peercred`.
+    ///
+    /// A missing peer reports `(0, -1, -1)`. A peer invisible from `namespace`
+    /// keeps its UID/GID but reports PID 0, as `pid_vnr` does.
+    pub fn resolve_in(&self, namespace: &Arc<PidNamespace>) -> UnixCredentials {
+        match &self.identity {
+            Some(identity) => UnixCredentials {
+                pid: identity.pid.number_in(namespace).unwrap_or(0),
+                uid: identity.uid,
+                gid: identity.gid,
+            },
+            None => UnixCredentials::default(),
         }
     }
 }
@@ -81,7 +142,7 @@ define_options! {
     ReceiveTimeout(TimeSpan),
     SendBufferForce(usize),
     PassCredentials(bool),
-    PeerCredentials(UnixCredentials),
+    PeerCredentials(PeerCredentials),
 
     // ---- TCP options ----
     NoDelay(bool),

@@ -26,7 +26,7 @@ use crate::{
     AncillaryData, ConnectOptions, KernelAncillaryData, RecvFlags, RecvOptions, SendOptions,
     Shutdown,
     general::GeneralOptions,
-    options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption, UnixCredentials},
+    options::{Configurable, GetSocketOption, OptionHandled, PeerCredentials, SetSocketOption},
     unix::{UnixAddr, UnixTransport, UnixTransportOps},
 };
 
@@ -38,14 +38,19 @@ pub struct StreamTransport {
     bind_slot: Mutex<Option<Arc<Mutex<Option<Bind>>>>>,
     endpoint: Arc<StreamEndpoint>,
     options: GeneralOptions,
-    pid: u32,
 }
+impl Default for StreamTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamTransport {
-    pub fn new(pid: u32) -> Self {
-        StreamTransport::new_channel(None, pid)
+    pub fn new() -> Self {
+        StreamTransport::new_channel(None)
     }
 
-    fn new_channel(channel: Option<Channel>, pid: u32) -> Self {
+    fn new_channel(channel: Option<Channel>) -> Self {
         let endpoint = channel
             .as_ref()
             .map(|channel| channel.endpoint.clone())
@@ -56,17 +61,38 @@ impl StreamTransport {
             bind_slot: Mutex::new(None),
             endpoint,
             options: GeneralOptions::default(),
-            pid,
         }
     }
 
-    pub fn new_pair(pid: u32) -> (Self, Self) {
+    /// Creates a connected stream pair whose endpoints both report the
+    /// creator's peer credentials, matching Linux socketpair.
+    pub fn new_pair(credentials: PeerCredentials) -> (Self, Self) {
         let endpoint1 = Arc::new(StreamEndpoint::default());
         let endpoint2 = Arc::new(StreamEndpoint::default());
-        let (chan1, chan2) = channel::new_duplex_channel(endpoint1, endpoint2, pid);
-        let transport1 = StreamTransport::new_channel(Some(chan1), pid);
-        let transport2 = StreamTransport::new_channel(Some(chan2), pid);
+        let (chan1, chan2) =
+            channel::new_duplex_channel(endpoint1, endpoint2, credentials.clone(), credentials);
+        let transport1 = StreamTransport::new_channel(Some(chan1));
+        let transport2 = StreamTransport::new_channel(Some(chan2));
         (transport1, transport2)
+    }
+
+    pub(super) fn pass_credentials(&self) -> bool {
+        self.endpoint.pass_credentials_enabled()
+    }
+
+    /// Whether the connected peer requests automatic sender credentials.
+    ///
+    /// Linux attaches automatic stream credentials when the sender *or* the
+    /// receiver enabled the option (`unix_passcred_enabled`). The channel
+    /// keeps both endpoints for the life of the connection, so this reads the
+    /// peer's endpoint rather than this socket's own option state. A queued
+    /// server endpoint also requests credentials until `accept()` attaches a
+    /// socket to it.
+    pub(super) fn peer_pass_credentials(&self) -> bool {
+        self.channel
+            .lock()
+            .as_ref()
+            .is_some_and(|channel| channel.peer_endpoint.pass_credentials_enabled())
     }
 }
 
@@ -74,6 +100,13 @@ impl Configurable for StreamTransport {
     fn get_option_inner(&self, opt: &mut GetSocketOption) -> KResult<OptionHandled> {
         use GetSocketOption as O;
 
+        // The stream endpoint is shared with the peer so automatic capture can
+        // observe the receiver's setting; keep the option state there instead
+        // of in the transport-local `GeneralOptions`.
+        if let O::PassCredentials(enabled) = &mut *opt {
+            **enabled = self.pass_credentials();
+            return Ok(OptionHandled::Yes);
+        }
         if let O::Error(error) = opt {
             **error = self.endpoint.socket_error.swap(0, Ordering::AcqRel);
             return Ok(OptionHandled::Yes);
@@ -86,14 +119,19 @@ impl Configurable for StreamTransport {
             O::SendBuffer(size) => {
                 **size = channel::STREAM_BUF_BYTES;
             }
-            O::PassCredentials(_) => {}
             O::PeerCredentials(cred) => {
-                let peer_pid = self
+                **cred = self
                     .channel
                     .lock()
                     .as_ref()
-                    .map_or(self.pid, |chan| chan.peer_pid);
-                **cred = UnixCredentials::new(peer_pid);
+                    .map(|channel| channel.peer_credentials.clone())
+                    .or_else(|| {
+                        self.listener
+                            .lock()
+                            .as_ref()
+                            .map(|listener| listener.peer_credentials())
+                    })
+                    .unwrap_or_default();
             }
             _ => return Ok(OptionHandled::No),
         }
@@ -103,15 +141,17 @@ impl Configurable for StreamTransport {
     fn set_option_inner(&self, opt: SetSocketOption) -> KResult<OptionHandled> {
         use SetSocketOption as O;
 
+        if let O::PassCredentials(enabled) = &opt {
+            self.endpoint
+                .pass_credentials
+                .store(**enabled, Ordering::Release);
+            return Ok(OptionHandled::Yes);
+        }
         if self.options.set_option_inner(opt)?.is_yes() {
             return Ok(OptionHandled::Yes);
         }
 
-        match opt {
-            O::PassCredentials(_) => {}
-            _ => return Ok(OptionHandled::No),
-        }
-        Ok(OptionHandled::Yes)
+        Ok(OptionHandled::No)
     }
 }
 #[async_trait]
@@ -133,7 +173,6 @@ impl UnixTransportOps for StreamTransport {
         let listener = Arc::new(ListenerQueue::new(self.endpoint.clone()));
         *slot = Some(Bind {
             listener: listener.clone(),
-            pid: self.pid,
         });
         drop(slot);
         *listener_guard = Some(listener);
@@ -144,13 +183,14 @@ impl UnixTransportOps for StreamTransport {
         Ok(())
     }
 
-    fn listen(&self, backlog: usize) -> KResult<()> {
+    fn listen(&self, backlog: usize, credentials: &PeerCredentials) -> KResult<()> {
         let channel = self.channel.lock();
         if channel.is_some() {
             return Err(KError::InvalidInput);
         }
         let listener = self.listener.lock().clone().ok_or(KError::InvalidInput)?;
-        let (became_listening, capacity_increased) = listener.configure_listen(backlog);
+        let (became_listening, capacity_increased) =
+            listener.configure_listen(backlog, credentials.clone());
         drop(channel);
         listener.notify_listen_change(became_listening, capacity_increased);
         Ok(())
@@ -161,6 +201,7 @@ impl UnixTransportOps for StreamTransport {
         slot: &super::BindEntry,
         local_addr: &UnixAddr,
         options: ConnectOptions,
+        credentials: &PeerCredentials,
     ) -> KResult<()> {
         let bind = slot
             .stream
@@ -186,15 +227,28 @@ impl UnixTransportOps for StreamTransport {
             return Err(KError::InvalidInput);
         }
 
+        let inherited_pass_credentials = bind.listener.pass_credentials();
         let server_endpoint = Arc::new(StreamEndpoint::default());
-        let (mut client_channel, mut server_channel) =
-            channel::new_duplex_channel(self.endpoint.clone(), server_endpoint, 0);
-        client_channel.peer_pid = bind.pid;
-        server_channel.peer_pid = self.pid;
+        // Linux `unix_stream_connect` copies the listener's SCM receive flags
+        // into the new peer sock, and `unix_accept` only grafts that sock into
+        // a file. Keep the copied value on the server endpoint, and force
+        // credential capture while accept() has not attached the socket yet
+        // (`!other->sk_socket`).
+        server_endpoint
+            .pass_credentials
+            .store(inherited_pass_credentials, Ordering::Release);
+        server_endpoint
+            .awaiting_accept
+            .store(true, Ordering::Release);
+        let (client_channel, server_channel) = channel::new_duplex_channel(
+            self.endpoint.clone(),
+            server_endpoint,
+            reservation.peer_credentials().clone(),
+            credentials.clone(),
+        );
         let commit_result = reservation.commit(ConnRequest {
             channel: server_channel,
             addr: local_addr.clone(),
-            pid: self.pid,
         });
         if let Err(error) = commit_result {
             drop(channel);
@@ -214,12 +268,16 @@ impl UnixTransportOps for StreamTransport {
         let ConnRequest {
             channel,
             addr: peer_addr,
-            pid,
         } = request;
-        Ok((
-            UnixTransport::Stream(StreamTransport::new_channel(Some(channel), pid)),
-            peer_addr,
-        ))
+        let accepted = StreamTransport::new_channel(Some(channel));
+        // Linux `unix_accept` does not re-read the listener's SCM flags: the
+        // queued peer sock already captured them in `unix_stream_connect`.
+        // Clear only the pre-accept capture gate.
+        accepted
+            .endpoint
+            .awaiting_accept
+            .store(false, Ordering::Release);
+        Ok((UnixTransport::Stream(accepted), peer_addr))
     }
 
     fn send(&self, mut src: impl Read + IoBuf, mut options: SendOptions) -> KResult<usize> {
@@ -262,24 +320,26 @@ impl UnixTransportOps for StreamTransport {
                     }
                     count
                 };
-                // Take the record payload before taking any lock: `mem::take`
-                // is O(1) and the option doubles as the registration state, so
-                // a send replayed over several poll rounds registers its
-                // record exactly once. A zero-byte round keeps the payload for
-                // the round that actually publishes bytes; a send that never
-                // publishes drops it with `options`, as with Linux stream
-                // sendmsg (no skb is queued and the cmsg fds are released).
-                // A validated explicit `SCM_CREDENTIALS` claim rides with the
-                // segment that publishes bytes. Linux attaches the claim to
-                // the skb and gates delivery on the reader, so the record is
-                // stored unconditionally and only emitted by a receive whose
-                // socket set `SO_PASSCRED`.
+                // Take the file-description payload before taking any lock:
+                // `mem::take` is O(1) and the option doubles as the
+                // registration state, so a send replayed over several poll
+                // rounds registers its fds exactly once. A zero-byte round
+                // keeps the payload for the round that actually publishes
+                // bytes; a send that never publishes drops it with `options`,
+                // as with Linux stream sendmsg (no skb is queued and the cmsg
+                // fds are released).
+                //
+                // Linux calls `maybe_add_creds` for every skb it queues, and
+                // `unix_stream_sendmsg` can split one sendmsg over several
+                // skbs. Keep the credential snapshot for all rounds and clone
+                // it into each record; the `PidHandle` Arc stays
+                // pointer-equal, so adjacent equal records still coalesce.
                 let mut pending = if count > 0 {
                     let mut records = core::mem::take(&mut options.ancillary);
-                    if let Some(credentials) = options.unix_sender_credentials.take() {
+                    if let Some(credentials) = options.unix_sender_credentials.as_ref() {
                         records.insert(
                             0,
-                            Arc::new(KernelAncillaryData::Credentials(credentials))
+                            Arc::new(KernelAncillaryData::Credentials(credentials.clone()))
                                 as AncillaryData,
                         );
                     }
@@ -362,19 +422,14 @@ impl UnixTransportOps for StreamTransport {
                 // own committed range [start, end) — leaving anything
                 // beyond it (plain data and later records alike) for the
                 // next recvmsg. Without queued records the read is
-                // unbounded. Cap the read at that end: Linux ends the read
-                // after the fd-carrying sendmsg, so plain data following it
-                // must not be consumed here even when later sends leave no
-                // record boundary.
-                let read_cap = {
-                    let anc = chan.rx_anc.lock();
-                    match anc.records.front() {
-                        Some((_, end, _)) => (*end)
-                            .saturating_sub(anc.recv_total)
-                            .min(occupied_before as u64),
-                        _ => occupied_before as u64,
-                    }
-                };
+                // unbounded. Credential-only records are boundaries only
+                // when this receiver enabled SO_PASSCRED; otherwise they are
+                // filtered and must not shorten the read.
+                let pass_credentials = self.pass_credentials();
+                let read_cap = chan
+                    .rx_anc
+                    .lock()
+                    .read_cap(occupied_before as u64, pass_credentials);
                 let count = {
                     let (left, right) = chan.rx.as_slices();
                     let cap = (read_cap as usize).min(occupied_before);
@@ -410,18 +465,17 @@ impl UnixTransportOps for StreamTransport {
                         {
                             chan.peer_endpoint.polls.writable.wake();
                         }
-                        // Pop the (at most one, barrier-capped) reached record
-                        // under the spin guard — deque pops only. The barrier
-                        // capped the read at the first fd-bearing segment, so
-                        // at most one record is reached: its entries go to the
-                        // sink (or the record is disposed) together with the
-                        // segment this recvmsg consumed.
-                        let popped = {
+                        // Take the reached record under the spin guard. The
+                        // read cap allows at most one fd-bearing record; a
+                        // credential-only record may remain queued across
+                        // short reads, so its payload is cloned until its
+                        // last byte has been consumed.
+                        let taken = {
                             let mut anc = chan.rx_anc.lock();
                             anc.recv_total += count as u64;
-                            anc.pop_reached()
+                            anc.take_reached(pass_credentials)
                         };
-                        deliver_reached(popped, &mut options, self.options.pass_credentials());
+                        deliver_reached(taken, &mut options, pass_credentials);
                     } else {
                         // A peek duplicates the record it touched: the shared
                         // entry handles go to the sink (`scm_fp_dup`) and the
@@ -432,9 +486,9 @@ impl UnixTransportOps for StreamTransport {
                         let touched = {
                             let anc = chan.rx_anc.lock();
                             let cursor_end = anc.recv_total + count as u64;
-                            anc.peek_reached(cursor_end)
+                            anc.peek_reached(cursor_end, pass_credentials)
                         };
-                        deliver_peeked(touched, &mut options, self.options.pass_credentials());
+                        deliver_peeked(touched, &mut options, pass_credentials);
                     }
                     return Ok(count);
                 }

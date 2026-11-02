@@ -17,12 +17,12 @@ use alloc::{vec, vec::Vec};
 use kerrno::{KError, KResult, LinuxError};
 use knet::{
     SocketOps,
-    options::{Configurable, GetSocketOption, SetSocketOption},
+    options::{Configurable, GetSocketOption, PeerCredentials, SetSocketOption, UnixCredentials},
     sock_from_file,
 };
 use linux_raw_sys::net::{
-    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_DOMAIN, SO_PROTOCOL, SO_TYPE,
-    SOL_SOCKET, socklen_t,
+    SO_ATTACH_FILTER, SO_BINDTODEVICE, SO_DETACH_FILTER, SO_DOMAIN, SO_PEERCRED, SO_PROTOCOL,
+    SO_TYPE, SOL_SOCKET, socklen_t,
 };
 use osvm::{VirtPtr, write_vm_mem};
 use posix_types::{UserConstPtr, UserPtr, UserRead};
@@ -108,9 +108,9 @@ fn supports_kobject_filter_compat(socket: &knet::Socket) -> bool {
 
 mod conv {
     use kerrno::{KError, KResult};
-    use knet::options::{PacketMembership, PacketStatistics, UnixCredentials};
+    use knet::options::{PacketMembership, PacketStatistics};
     use ktime_types::{NANOS_PER_SEC, TimeSpan};
-    use linux_raw_sys::{general::timeval, net::ucred};
+    use linux_raw_sys::general::timeval;
     use posix_types::{TimeSpanLike, UserRead};
 
     pub(super) struct Int<T>(T);
@@ -158,26 +158,6 @@ mod conv {
 
         pub(super) fn rust_to_sys(val: TimeSpan) -> KResult<timeval> {
             Ok(timeval::from_time_span(val))
-        }
-    }
-
-    pub(super) struct Ucred;
-
-    impl Ucred {
-        pub(super) fn sys_to_rust(val: ucred) -> KResult<UnixCredentials> {
-            Ok(UnixCredentials {
-                pid: val.pid,
-                uid: val.uid,
-                gid: val.gid,
-            })
-        }
-
-        pub(super) fn rust_to_sys(val: UnixCredentials) -> KResult<ucred> {
-            Ok(ucred {
-                pid: val.pid,
-                uid: val.uid,
-                gid: val.gid,
-            })
         }
     }
 
@@ -261,7 +241,6 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as SocketTimeout,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as SocketTimeout,
             (SOL_SOCKET, SO_PASSCRED) => PassCredentials as IntBool,
-            (SOL_SOCKET, SO_PEERCRED) => PeerCredentials as Ucred,
 
             (PROTO_TCP, TCP_NODELAY) => NoDelay as IntBool,
             (PROTO_TCP, TCP_MAXSEG) => MaxSegment as Int<usize>,
@@ -349,13 +328,42 @@ pub fn sys_getsockopt(
     /// actually wrote, so a short buffer truncates instead of failing and a
     /// zero length leaves the buffer untouched (and may be a null pointer).
     fn put_truncated(dst: UserPtr<u8>, len: &mut socklen_t, value: i32) -> KResult<()> {
-        let bytes = value.to_ne_bytes();
+        put_truncated_bytes(dst, len, &value.to_ne_bytes())
+    }
+
+    /// The common short-buffer copy used by options whose Linux handler copies
+    /// `min(optlen, sizeof(result))` bytes and reports the copied length.
+    fn put_truncated_bytes(dst: UserPtr<u8>, len: &mut socklen_t, bytes: &[u8]) -> KResult<()> {
+        // `sk_getsockopt` reads the length as a signed `int`; a negative value
+        // is rejected before any copy, even when the buffer pointer is valid.
+        if (*len as i32) < 0 {
+            return Err(KError::InvalidInput);
+        }
         let written = (*len as usize).min(bytes.len());
         if written > 0 {
             osvm::write_vm_bytes(dst.as_ptr() as *mut u8, &bytes[..written])?;
         }
         *len = written as socklen_t;
         Ok(())
+    }
+
+    /// Copies a Linux `struct ucred` image with the same truncating rule as
+    /// `sock_getsockopt` for `SO_PEERCRED`.
+    ///
+    /// The ABI image is built field by field instead of casting
+    /// [`UnixCredentials`], so neither structure padding nor its Rust layout
+    /// can leak into userspace.
+    fn put_truncated_ucred(
+        dst: UserPtr<u8>,
+        len: &mut socklen_t,
+        value: &UnixCredentials,
+    ) -> KResult<()> {
+        let mut bytes = [0u8; 3 * size_of::<u32>()];
+        for (index, field) in [value.pid, value.uid, value.gid].into_iter().enumerate() {
+            let start = index * size_of::<u32>();
+            bytes[start..start + size_of::<u32>()].copy_from_slice(&field.to_ne_bytes());
+        }
+        put_truncated_bytes(dst, len, &bytes)
     }
 
     // Linux resolves the descriptor first: `__sys_getsockopt` reports `EBADF`
@@ -401,7 +409,18 @@ pub fn sys_getsockopt(
         (SOL_SOCKET, SO_PROTOCOL) => Some(socket.socket_protocol()),
         _ => None,
     };
-    if let Some(identity) = identity {
+    if level == SOL_SOCKET && optname == SO_PEERCRED {
+        let mut peer = PeerCredentials::default();
+        socket.get_option(GetSocketOption::PeerCredentials(&mut peer))?;
+        // `SO_PEERCRED` projects the stored peer PID into the caller's active
+        // PID namespace at read time, like Linux `pid_vnr`. A peer that is not
+        // visible there reports PID 0 while keeping its real UID and GID.
+        let namespace = kprocess::current_user_thread()
+            .process()
+            .active_pid_namespace();
+        let value = peer.resolve_in(&namespace);
+        put_truncated_ucred(optval, &mut optlen, &value)?;
+    } else if let Some(identity) = identity {
         put_truncated(optval, &mut optlen, identity)?;
     } else if level == SOL_SOCKET && optname == SO_BINDTODEVICE {
         let mut name: Option<alloc::string::String> = None;

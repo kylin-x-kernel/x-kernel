@@ -24,7 +24,9 @@ use knet::{
     sock_alloc_file, sock_from_file,
     tcp::TcpSocket,
     udp::UdpSocket,
-    unix::{DgramTransport, StreamTransport, UnixDomainSocket, UnixSocketType},
+    unix::{
+        DgramTransport, StreamTransport, UnixDomainSocket, UnixSocketType, current_peer_credentials,
+    },
 };
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK, O_RDWR},
@@ -59,7 +61,6 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
     // Extract the type bits (lower 8 bits, ignoring flags like SOCK_CLOEXEC)
     let ty = raw_ty & 0xFF;
 
-    let pid = kprocess::current_user_thread().pid();
     let cred = kprocess::current_cred();
     // Create the appropriate socket type based on domain and type
     let socket = match (domain, ty) {
@@ -91,14 +92,14 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
         (AF_UNIX, SOCK_STREAM) => {
             // Unix domain stream socket
             knet::Socket::Unix(KBox::new(UnixDomainSocket::new(
-                StreamTransport::new(pid),
+                StreamTransport::new(),
                 UnixSocketType::Stream,
             ))?)
         }
         (AF_UNIX, SOCK_DGRAM) => {
             // Unix domain datagram socket
             knet::Socket::Unix(KBox::new(UnixDomainSocket::new(
-                DgramTransport::new(pid),
+                DgramTransport::new(),
                 UnixSocketType::Datagram,
             ))?)
         }
@@ -264,10 +265,9 @@ pub fn sys_socketpair(
         return Err(KError::from(LinuxError::EAFNOSUPPORT));
     }
 
-    let pid = kprocess::current_user_thread().pid();
     let (sock1, sock2) = match ty {
         SOCK_STREAM => {
-            let (sock1, sock2) = StreamTransport::new_pair(pid);
+            let (sock1, sock2) = StreamTransport::new_pair(current_peer_credentials());
             (
                 UnixDomainSocket::new(sock1, UnixSocketType::Stream),
                 UnixDomainSocket::new(sock2, UnixSocketType::Stream),
@@ -281,7 +281,7 @@ pub fn sys_socketpair(
             } else {
                 UnixSocketType::Datagram
             };
-            let (sock1, sock2) = DgramTransport::new_pair(pid);
+            let (sock1, sock2) = DgramTransport::new_pair(current_peer_credentials());
             (
                 UnixDomainSocket::new(sock1, socket_type),
                 UnixDomainSocket::new(sock2, socket_type),

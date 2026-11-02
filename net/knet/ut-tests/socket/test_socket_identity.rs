@@ -15,7 +15,6 @@
 //! leave in `sk_protocol`.
 
 use kalloc_types::KBox;
-
 use linux_raw_sys::net::{
     AF_INET, AF_INET6, AF_NETLINK, AF_PACKET, AF_UNIX, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_TCP,
     IPPROTO_UDP, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET, SOCK_STREAM,
@@ -38,7 +37,12 @@ const PACKET_PROTOCOL: u16 = 0;
 #[def_test]
 fn socket_identity_reports_creation_family_type_and_protocol() {
     let cases = [
-        (Socket::Tcp(KBox::new(Default::default()).unwrap()), SOCK_STREAM as i32, AF_INET as i32, IPPROTO_TCP as i32),
+        (
+            Socket::Tcp(KBox::new(Default::default()).unwrap()),
+            SOCK_STREAM as i32,
+            AF_INET as i32,
+            IPPROTO_TCP as i32,
+        ),
         (
             Socket::Udp(KBox::new(UdpSocket::new()).unwrap()),
             SOCK_DGRAM as i32,
@@ -58,35 +62,43 @@ fn socket_identity_reports_creation_family_type_and_protocol() {
             IPPROTO_ICMPV6 as i32,
         ),
         (
-            Socket::Packet(KBox::new(
-                PacketSocket::new(PacketSocketKind::Raw, PACKET_PROTOCOL.to_be()).unwrap(),
-            ).unwrap()),
+            Socket::Packet(
+                KBox::new(
+                    PacketSocket::new(PacketSocketKind::Raw, PACKET_PROTOCOL.to_be()).unwrap(),
+                )
+                .unwrap(),
+            ),
             SOCK_RAW as i32,
             AF_PACKET as i32,
             0,
         ),
         (
-            Socket::Packet(KBox::new(
-                PacketSocket::new(PacketSocketKind::Datagram, PACKET_PROTOCOL.to_be()).unwrap(),
-            ).unwrap()),
+            Socket::Packet(
+                KBox::new(
+                    PacketSocket::new(PacketSocketKind::Datagram, PACKET_PROTOCOL.to_be()).unwrap(),
+                )
+                .unwrap(),
+            ),
             SOCK_DGRAM as i32,
             AF_PACKET as i32,
             0,
         ),
         (
-            Socket::Netlink(KBox::new(NetlinkSocket::new(
-                NETLINK_ROUTE,
-                NetlinkSocketType::Raw,
-            )).unwrap()),
+            Socket::Netlink(
+                KBox::new(NetlinkSocket::new(NETLINK_ROUTE, NetlinkSocketType::Raw)).unwrap(),
+            ),
             SOCK_RAW as i32,
             AF_NETLINK as i32,
             NETLINK_ROUTE,
         ),
         (
-            Socket::Netlink(KBox::new(NetlinkSocket::new(
-                NETLINK_ROUTE,
-                NetlinkSocketType::Datagram,
-            )).unwrap()),
+            Socket::Netlink(
+                KBox::new(NetlinkSocket::new(
+                    NETLINK_ROUTE,
+                    NetlinkSocketType::Datagram,
+                ))
+                .unwrap(),
+            ),
             SOCK_DGRAM as i32,
             AF_NETLINK as i32,
             NETLINK_ROUTE,
@@ -94,37 +106,49 @@ fn socket_identity_reports_creation_family_type_and_protocol() {
         // A non-zero protocol, so this case cannot also be satisfied by an
         // implementation that answers a constant zero: `NETLINK_ROUTE` is 0.
         (
-            Socket::Netlink(KBox::new(NetlinkSocket::new(
-                NETLINK_KOBJECT_UEVENT,
-                NetlinkSocketType::Raw,
-            )).unwrap()),
+            Socket::Netlink(
+                KBox::new(NetlinkSocket::new(
+                    NETLINK_KOBJECT_UEVENT,
+                    NetlinkSocketType::Raw,
+                ))
+                .unwrap(),
+            ),
             SOCK_RAW as i32,
             AF_NETLINK as i32,
             NETLINK_KOBJECT_UEVENT,
         ),
         (
-            Socket::Unix(KBox::new(UnixDomainSocket::new(
-                StreamTransport::new(1),
-                UnixSocketType::Stream,
-            )).unwrap()),
+            Socket::Unix(
+                KBox::new(UnixDomainSocket::new(
+                    StreamTransport::new(),
+                    UnixSocketType::Stream,
+                ))
+                .unwrap(),
+            ),
             SOCK_STREAM as i32,
             AF_UNIX as i32,
             0,
         ),
         (
-            Socket::Unix(KBox::new(UnixDomainSocket::new(
-                DgramTransport::new(1),
-                UnixSocketType::Datagram,
-            )).unwrap()),
+            Socket::Unix(
+                KBox::new(UnixDomainSocket::new(
+                    DgramTransport::new(),
+                    UnixSocketType::Datagram,
+                ))
+                .unwrap(),
+            ),
             SOCK_DGRAM as i32,
             AF_UNIX as i32,
             0,
         ),
         (
-            Socket::Unix(KBox::new(UnixDomainSocket::new(
-                DgramTransport::new(1),
-                UnixSocketType::Seqpacket,
-            )).unwrap()),
+            Socket::Unix(
+                KBox::new(UnixDomainSocket::new(
+                    DgramTransport::new(),
+                    UnixSocketType::Seqpacket,
+                ))
+                .unwrap(),
+            ),
             SOCK_SEQPACKET as i32,
             AF_UNIX as i32,
             0,

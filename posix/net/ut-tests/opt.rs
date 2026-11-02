@@ -2,24 +2,27 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::{vec, vec::Vec};
 use core::mem::size_of;
 
-use kerrno::KError;
+use kerrno::{KError, LinuxError};
 use ktime_types::{NANOS_PER_SEC, TimeSpan};
-use linux_raw_sys::general::timeval;
-use linux_raw_sys::net::{
-    AF_INET, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PROTOCOL, SO_TYPE, SOCK_DGRAM, SOCK_STREAM,
-    SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL, socklen_t,
+use linux_raw_sys::{
+    general::timeval,
+    net::{
+        AF_INET, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PEERCRED, SO_PROTOCOL, SO_TYPE, SOCK_DGRAM,
+        SOCK_STREAM, SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL, socklen_t,
+    },
 };
 use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
-use unittest_support::{TestUserBuffer, TestUserValue};
+use unittest_support::{TestUserArray, TestUserBuffer, TestUserValue};
 
 use super::{
     BPF_JA, BPF_JMP, BPF_RET, IFNAMSIZ, SockFilter, conv::SocketTimeout, encode_bound_device_name,
     sys_getsockopt, sys_setsockopt, validate_classic_filter_instructions,
 };
-use crate::socket::sys_socket;
+use crate::socket::{sys_socket, sys_socketpair};
 
 const NANOS_PER_TICK: u64 = NANOS_PER_SEC / kbuild_config::TICKS_PER_SECOND as u64;
 
@@ -327,4 +330,95 @@ fn tcp_keepalive_options_round_trip_through_syscalls() {
     assert_eq!(get(TCP_KEEPINTVL), 5);
 
     close_socket(fd);
+}
+
+/// `SO_PEERCRED` returns the Linux `struct ucred` image of the peer captured
+/// when the pair was created, with the same short-buffer rule as other
+/// `getsockopt` results. A negative length is invalid even with a writable
+/// buffer, and the option is read-only.
+#[def_test(user)]
+fn peer_credentials_report_the_socketpair_creator_and_truncate_short_buffers() {
+    const UCRED_LEN: usize = 3 * size_of::<u32>();
+
+    let fds = TestUserArray::<i32, 2>::new().unwrap();
+    assert_eq!(
+        sys_socketpair(
+            AF_UNIX,
+            SOCK_STREAM,
+            0,
+            UserPtr::from(fds.as_user_ptr().cast::<[i32; 2]>())
+        ),
+        Ok(0)
+    );
+    let [first, second] = fds.read();
+    let thread = kprocess::current_user_thread();
+    let cred = thread.cred();
+    let expected: Vec<u8> = [
+        thread.process().pid_identity().root_nr(),
+        cred.euid(),
+        cred.egid(),
+    ]
+    .into_iter()
+    .flat_map(u32::to_ne_bytes)
+    .collect();
+
+    let value = TestUserBuffer::new(UCRED_LEN).unwrap();
+    let value_ptr = UserPtr::from(value.as_user_ptr::<u8>());
+    let mut optlen = TestUserValue::from_value(UCRED_LEN as socklen_t).unwrap();
+    let optlen_ptr = UserPtr::from(optlen.as_user_ptr());
+    for fd in [first, second] {
+        optlen.write(UCRED_LEN as socklen_t);
+        assert_eq!(
+            sys_getsockopt(fd, SOL_SOCKET, SO_PEERCRED, value_ptr, optlen_ptr),
+            Ok(0)
+        );
+        assert_eq!(optlen.read(), UCRED_LEN as socklen_t);
+        assert_eq!(value.read_bytes(UCRED_LEN).unwrap(), expected);
+    }
+
+    // Every prefix length copies that many bytes and reports the count. A
+    // zero length succeeds without touching the buffer and accepts null.
+    for len in 0..UCRED_LEN {
+        value.write_bytes(&[0xaa; UCRED_LEN]).unwrap();
+        optlen.write(len as socklen_t);
+        let dst = if len == 0 {
+            UserPtr::default()
+        } else {
+            value_ptr
+        };
+        assert_eq!(
+            sys_getsockopt(first, SOL_SOCKET, SO_PEERCRED, dst, optlen_ptr),
+            Ok(0)
+        );
+        assert_eq!(optlen.read(), len as socklen_t);
+        if len > 0 {
+            assert_eq!(value.read_bytes(len).unwrap(), expected[..len].to_vec());
+        }
+    }
+
+    // A negative signed length is rejected before the copy even when the
+    // buffer is writable.
+    value.write_bytes(&[0xaa; UCRED_LEN]).unwrap();
+    optlen.write(u32::MAX);
+    assert_eq!(
+        sys_getsockopt(first, SOL_SOCKET, SO_PEERCRED, value_ptr, optlen_ptr),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(optlen.read(), u32::MAX);
+    assert_eq!(value.read_bytes(UCRED_LEN).unwrap(), vec![0xaa; UCRED_LEN]);
+
+    let input = TestUserValue::<[u8; UCRED_LEN]>::new().unwrap();
+    assert_eq!(
+        sys_setsockopt(
+            first,
+            SOL_SOCKET,
+            SO_PEERCRED,
+            UserPtr::from(input.as_user_ptr().cast::<u8>()).as_const(),
+            UCRED_LEN as socklen_t
+        ),
+        Err(KError::from(LinuxError::ENOPROTOOPT))
+    );
+
+    close_socket(first);
+    close_socket(second);
 }
