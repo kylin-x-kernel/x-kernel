@@ -11,6 +11,8 @@ documentation.workspace = true
 
 [dependencies]
 block.workspace = true
+kalloc-types.workspace = true
+kerrno.workspace = true
 
 [lints]
 workspace = true

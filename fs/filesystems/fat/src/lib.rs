@@ -57,8 +57,11 @@ fn init_fat_fs() {
 pub(crate) struct FatDisk(SeekableDisk);
 
 impl FatDisk {
-    pub(crate) fn new(dev: alloc::sync::Arc<BlockDevice>) -> Self {
-        Self(SeekableDisk::new(dev))
+    pub(crate) fn new(dev: alloc::sync::Arc<BlockDevice>) -> kvfs::VfsResult<Self> {
+        Ok(Self(SeekableDisk::new_with_flags(
+            dev,
+            kalloc_types::AllocFlags::NOWAIT,
+        )?))
     }
 }
 

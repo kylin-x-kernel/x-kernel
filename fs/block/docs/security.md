@@ -28,3 +28,14 @@ size 和 I/O 结果仍不可信；磁盘格式、feature 和 checksum 由具体�
 - 是否误把设备 registry 或 `dev_t` identity 放回本 crate？
 - 新 adapter 是否在 drop 中吞掉持久化错误？
 - 是否把 filesystem type 或 root mount policy 错放进本 crate？
+
+## Buffer allocation failure
+
+Layout overflow, invalid flags and allocator failure propagate from KBox without
+publishing a cursor or issuing device IO. Failure releases any first buffer and
+the constructor's device reference. This does not release other device owners.
+Allocation flags do not constrain later IO, imply NMI safety or guarantee success.
+
+Slice allocation failures are tested in kalloc-types with a local allocator
+seam. There is no injected second-buffer OOM or complete failed-mount test in
+this adapter; sequential local ownership provides cleanup on early return.

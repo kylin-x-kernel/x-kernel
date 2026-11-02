@@ -83,3 +83,12 @@ block subsystem 已就绪的可阻塞任务上下文运行，不能从 IRQ conte
 `Arc<SuperBlock>`/`Arc<FatFilesystem>` 管理 mount state 生命周期。文件和目录 wrapper 只在
 owner mutex 下访问内部 FAT handle；`SeekableDisk` 的持久化错误必须由显式 sync/flush 路径
 传播，不能依赖 drop 吞掉错误。
+
+## Fallible disk buffers
+
+FatDisk::new propagates SeekableDisk allocation errors before entering the FAT
+library constructor. It selects NOWAIT for both zero-filled buffers: fill_super
+runs without the superblock registry mutex, but the canonical device is claimed
+and its superblock is nascent. Reclaim must not acquire a dependency on completion
+of that mount. This matches the existing private-owner policy. NoMemory remains
+a VFS allocation error rather than passing through the FAT IO error adapter.

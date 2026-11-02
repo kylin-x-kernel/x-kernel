@@ -7,8 +7,10 @@
 #![cfg(unittest)]
 
 extern crate alloc;
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
 
+#[cfg(feature = "alloc")]
+use kalloc_types::KBox;
 use unittest::def_test;
 
 use crate::{
@@ -307,7 +309,7 @@ fn test_write_by_ref() {
 fn test_bufreader_basic() {
     let data = b"Hello, World! This is a test of buffered reading.";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(8, cursor);
+    let mut reader = BufReader::with_capacity(8, cursor).unwrap();
 
     let mut buf = [0u8; 5];
     let n = reader.read(&mut buf).unwrap();
@@ -319,7 +321,7 @@ fn test_bufreader_basic() {
 fn test_bufreader_fill_buf() {
     let data = b"ABCDEFGHIJKLMNOP";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(8, cursor);
+    let mut reader = BufReader::with_capacity(8, cursor).unwrap();
 
     let buf = reader.fill_buf().unwrap();
     assert_eq!(buf.len(), 8);
@@ -334,7 +336,7 @@ fn test_bufreader_fill_buf() {
 fn test_bufreader_read_to_end() {
     let data = b"Hello, World!";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(4, cursor);
+    let mut reader = BufReader::with_capacity(4, cursor).unwrap();
 
     let mut result = Vec::new();
     let n = reader.read_to_end(&mut result).unwrap();
@@ -346,7 +348,7 @@ fn test_bufreader_read_to_end() {
 fn test_bufreader_lines() {
     let data = b"line1\nline2\nline3";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(32, cursor);
+    let mut reader = BufReader::with_capacity(32, cursor).unwrap();
 
     let mut line = String::new();
     let n = reader.read_line(&mut line).unwrap();
@@ -368,7 +370,7 @@ fn test_bufreader_lines() {
 fn test_bufreader_seek() {
     let data = b"0123456789";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(4, cursor);
+    let mut reader = BufReader::with_capacity(4, cursor).unwrap();
 
     let mut buf = [0u8; 3];
     reader.read(&mut buf).unwrap();
@@ -383,7 +385,7 @@ fn test_bufreader_seek() {
 fn test_bufreader_capacity() {
     let data = b"test";
     let cursor = Cursor::new(data.as_slice());
-    let reader = BufReader::with_capacity(16, cursor);
+    let reader = BufReader::with_capacity(16, cursor).unwrap();
     assert_eq!(reader.capacity(), 16);
 }
 
@@ -391,7 +393,7 @@ fn test_bufreader_capacity() {
 fn test_bufreader_peek_and_buffer() {
     let data = b"abcdefgh";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(4, cursor);
+    let mut reader = BufReader::with_capacity(4, cursor).unwrap();
 
     assert_eq!(reader.buffer(), b"");
     assert_eq!(reader.peek(3).unwrap(), b"abc");
@@ -405,7 +407,7 @@ fn test_bufreader_peek_and_buffer() {
 fn test_bufreader_peek_eof_short() {
     let data = b"ab";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(8, cursor);
+    let mut reader = BufReader::with_capacity(8, cursor).unwrap();
 
     assert_eq!(reader.peek(4).unwrap(), b"ab");
 }
@@ -414,7 +416,7 @@ fn test_bufreader_peek_eof_short() {
 fn test_bufreader_read_to_string_append_path() {
     let data = b"world";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(4, cursor);
+    let mut reader = BufReader::with_capacity(4, cursor).unwrap();
     let mut s = String::from("hello ");
 
     let n = reader.read_to_string(&mut s).unwrap();
@@ -425,7 +427,7 @@ fn test_bufreader_read_to_string_append_path() {
 #[def_test]
 fn test_bufreader_getters_and_into_inner() {
     let cursor = Cursor::new(b"xyz".as_slice());
-    let mut reader = BufReader::new(cursor);
+    let mut reader = BufReader::new(cursor).unwrap();
 
     assert_eq!(reader.get_ref().position(), 0);
     reader.get_mut().set_position(1);
@@ -439,7 +441,7 @@ fn test_bufreader_getters_and_into_inner() {
 fn test_bufreader_seek_relative_in_buffer() {
     let data = b"0123456789";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(8, cursor);
+    let mut reader = BufReader::with_capacity(8, cursor).unwrap();
 
     assert_eq!(reader.peek(6).unwrap(), b"012345");
     reader.seek_relative(3).unwrap();
@@ -454,7 +456,7 @@ fn test_bufreader_remaining() {
 
     let data = b"0123456789";
     let cursor = Cursor::new(data.as_slice());
-    let mut reader = BufReader::with_capacity(4, cursor);
+    let mut reader = BufReader::with_capacity(4, cursor).unwrap();
 
     assert_eq!(reader.remaining(), 10);
     let _ = reader.peek(4).unwrap();
@@ -666,7 +668,7 @@ fn test_read_impls_for_mut_ref_and_box() {
     by_ref.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"he");
 
-    let mut boxed_reader = Box::new(Cursor::new(b"xyz".as_slice()));
+    let mut boxed_reader = KBox::new(Cursor::new(b"xyz".as_slice())).unwrap();
     let mut out = Vec::new();
     boxed_reader.read_to_end(&mut out).unwrap();
     assert_eq!(&out, b"xyz");
@@ -682,7 +684,7 @@ fn test_seek_impls_for_mut_ref_and_box() {
     by_ref.rewind().unwrap();
     assert_eq!(by_ref.stream_len().unwrap(), 6);
 
-    let mut boxed = Box::new(Cursor::new(b"xyz".as_slice()));
+    let mut boxed = KBox::new(Cursor::new(b"xyz".as_slice())).unwrap();
     assert_eq!(boxed.seek(SeekFrom::End(-1)).unwrap(), 2);
     assert_eq!(boxed.stream_position().unwrap(), 2);
 }
@@ -713,7 +715,7 @@ fn test_copy_specialized_paths() {
     assert_eq!(&out, b"abc");
 
     let cursor = Cursor::new(b"hello".as_slice());
-    let mut reader = BufReader::with_capacity(8, cursor);
+    let mut reader = BufReader::with_capacity(8, cursor).unwrap();
     let mut out2 = Vec::new();
     assert_eq!(crate::copy(&mut reader, &mut out2).unwrap(), 5);
     assert_eq!(&out2, b"hello");
@@ -735,7 +737,7 @@ fn test_iobuf_ext_specializations() {
     assert!(dst2.starts_with(b"x"));
 
     let cursor = Cursor::new(b"12".as_slice());
-    let mut reader = BufReader::with_capacity(8, cursor);
+    let mut reader = BufReader::with_capacity(8, cursor).unwrap();
     let mut dst3 = Vec::new();
     assert_eq!(reader.write_to(&mut dst3).unwrap(), 2);
     assert_eq!(&dst3, b"12");
@@ -864,12 +866,13 @@ fn test_slice_bufread_fill_and_consume() {
     assert_eq!(data, &[3, 4]);
 }
 
-// ============ BufRead for Box<B> ============
+// ============ BufRead for KBox<B> ============
 
 #[def_test]
 fn test_box_bufread_impls() {
     let inner = Cursor::new(b"line1\nline2".as_slice());
-    let mut boxed: Box<BufReader<Cursor<&[u8]>>> = Box::new(BufReader::new(inner));
+    let mut boxed: KBox<BufReader<Cursor<&[u8]>>> =
+        KBox::new(BufReader::new(inner).unwrap()).unwrap();
 
     let buf = boxed.fill_buf().unwrap();
     assert!(buf.starts_with(b"line1"));
@@ -887,17 +890,17 @@ fn test_box_bufread_impls() {
     assert_eq!(line, "line2");
 }
 
-// ============ Box<W> Write impls ============
+// ============ KBox<W> Write impls ============
 
 #[def_test]
 fn test_box_write_impls() {
     let inner = Cursor::new(vec![]);
-    let mut boxed: Box<Cursor<Vec<u8>>> = Box::new(inner);
+    let mut boxed: KBox<Cursor<Vec<u8>>> = KBox::new(inner).unwrap();
     boxed.write(b"hi").unwrap();
     boxed.write_all(b" there").unwrap();
     boxed.write_fmt(format_args!("!")).unwrap();
     boxed.flush().unwrap();
-    assert_eq!(boxed.into_inner(), b"hi there!");
+    assert_eq!(KBox::into_inner(boxed).into_inner(), b"hi there!");
 }
 
 // ============ Vec<u8> Write impl ============
@@ -947,7 +950,7 @@ fn test_copy_via_bufwriter_small_cap() {
 #[def_test]
 fn test_copy_bufreader_to_bufwriter() {
     let cursor = Cursor::new(b"reader to writer".as_slice());
-    let mut reader = BufReader::with_capacity(crate::DEFAULT_BUF_SIZE, cursor);
+    let mut reader = BufReader::with_capacity(crate::DEFAULT_BUF_SIZE, cursor).unwrap();
     let inner = Cursor::new(vec![]);
     let mut writer = BufWriter::with_capacity(crate::DEFAULT_BUF_SIZE, inner);
 
@@ -1025,11 +1028,11 @@ fn test_repeat_debug() {
     assert!(dbg.contains("Repeat"));
 }
 
-// ============ Seek impls for Box<S>: full coverage ============
+// ============ Seek impls for KBox<S>: full coverage ============
 
 #[def_test]
 fn test_box_seek_full() {
-    let mut boxed = Box::new(Cursor::new(b"abcdef".as_slice()));
+    let mut boxed = KBox::new(Cursor::new(b"abcdef".as_slice())).unwrap();
     assert_eq!(boxed.seek(SeekFrom::Start(3)).unwrap(), 3);
     assert_eq!(boxed.stream_position().unwrap(), 3);
     boxed.seek_relative(-1).unwrap();
@@ -1044,7 +1047,7 @@ fn test_box_seek_full() {
 #[def_test]
 fn test_mut_ref_bufread_impls() {
     let inner = Cursor::new(b"abcXdef".as_slice());
-    let mut reader = BufReader::new(inner);
+    let mut reader = BufReader::new(inner).unwrap();
     let by_ref: &mut BufReader<Cursor<&[u8]>> = &mut reader;
 
     assert!(by_ref.has_data_left().unwrap());
@@ -1065,11 +1068,11 @@ fn test_mut_ref_bufread_impls() {
     assert_eq!(n, 0);
 }
 
-// ============ Box<R> Read: more methods ============
+// ============ KBox<R> Read: more methods ============
 
 #[def_test]
 fn test_box_read_more_methods() {
-    let mut boxed: Box<&[u8]> = Box::new(b"hello world".as_slice());
+    let mut boxed: KBox<&[u8]> = KBox::new(b"hello world".as_slice()).unwrap();
     let mut buf = [0u8; 5];
     boxed.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"hello");
@@ -1078,7 +1081,7 @@ fn test_box_read_more_methods() {
     boxed.read_to_end(&mut out).unwrap();
     assert_eq!(&out, b" world");
 
-    let mut boxed2: Box<&[u8]> = Box::new(b"test".as_slice());
+    let mut boxed2: KBox<&[u8]> = KBox::new(b"test".as_slice()).unwrap();
     let mut s = String::new();
     boxed2.read_to_string(&mut s).unwrap();
     assert_eq!(s, "test");
@@ -1118,7 +1121,7 @@ fn test_iobufmut_ext_borrowed_cursor() {
 #[def_test]
 fn test_stack_buffer_copy_path() {
     let cursor = Cursor::new(b"non-special reader".as_slice());
-    let mut reader = BufReader::with_capacity(2, cursor);
+    let mut reader = BufReader::with_capacity(2, cursor).unwrap();
     let mut dst = Cursor::new(vec![]);
     let n = crate::copy(&mut reader, &mut dst).unwrap();
     assert_eq!(n, 18);
@@ -1249,7 +1252,7 @@ fn test_linewriter_write_all_buffered_then_newline() {
 #[def_test]
 fn test_bufreader_has_data_left() {
     let cursor = Cursor::new(b"abc".as_slice());
-    let mut reader = BufReader::new(cursor);
+    let mut reader = BufReader::new(cursor).unwrap();
     assert!(reader.has_data_left().unwrap());
 
     let mut buf = Vec::new();
@@ -1260,7 +1263,7 @@ fn test_bufreader_has_data_left() {
 #[def_test]
 fn test_bufreader_skip_until() {
     let cursor = Cursor::new(b"abcXdefYghi".as_slice());
-    let mut reader = BufReader::new(cursor);
+    let mut reader = BufReader::new(cursor).unwrap();
     let n = reader.skip_until(b'X').unwrap();
     assert_eq!(n, 4);
 
@@ -1271,7 +1274,7 @@ fn test_bufreader_skip_until() {
 #[def_test]
 fn test_bufreader_read_until() {
     let cursor = Cursor::new(b"hello;world;end".as_slice());
-    let mut reader = BufReader::new(cursor);
+    let mut reader = BufReader::new(cursor).unwrap();
     let mut out = Vec::new();
     let n = reader.read_until(b';', &mut out).unwrap();
     assert_eq!(n, 6);
@@ -1281,7 +1284,7 @@ fn test_bufreader_read_until() {
 #[def_test]
 fn test_bufreader_empty_read() {
     let cursor = Cursor::new(b"".as_slice());
-    let mut reader = BufReader::new(cursor);
+    let mut reader = BufReader::new(cursor).unwrap();
     assert!(!reader.has_data_left().unwrap());
     let mut buf = Vec::new();
     assert_eq!(reader.read_to_end(&mut buf).unwrap(), 0);
@@ -1290,7 +1293,7 @@ fn test_bufreader_empty_read() {
 #[def_test]
 fn test_bufreader_new_default_capacity() {
     let cursor = Cursor::new(b"test".as_slice());
-    let reader = BufReader::new(cursor);
+    let reader = BufReader::new(cursor).unwrap();
     assert!(reader.capacity() >= 1);
 }
 
@@ -1353,7 +1356,7 @@ fn test_default_read_to_string_path() {
 #[def_test]
 fn test_split_iterator() {
     let data = b"aXbXcX";
-    let reader = BufReader::new(data.as_slice());
+    let reader = BufReader::new(data.as_slice()).unwrap();
     let parts: Vec<Vec<u8>> = reader.split(b'X').map(|r| r.unwrap()).collect();
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0], b"a");
@@ -1364,7 +1367,7 @@ fn test_split_iterator() {
 #[def_test]
 fn test_split_no_trailing_delim() {
     let data = b"aXbXc";
-    let reader = BufReader::new(data.as_slice());
+    let reader = BufReader::new(data.as_slice()).unwrap();
     let parts: Vec<Vec<u8>> = reader.split(b'X').map(|r| r.unwrap()).collect();
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[2], b"c");
@@ -1373,7 +1376,7 @@ fn test_split_no_trailing_delim() {
 #[def_test]
 fn test_split_empty() {
     let data = b"";
-    let reader = BufReader::new(data.as_slice());
+    let reader = BufReader::new(data.as_slice()).unwrap();
     let parts: Vec<Vec<u8>> = reader.split(b'X').map(|r| r.unwrap()).collect();
     assert_eq!(parts.len(), 0);
 }
@@ -1381,7 +1384,7 @@ fn test_split_empty() {
 #[def_test]
 fn test_lines_iterator() {
     let data = b"line1\nline2\nline3\n";
-    let reader = BufReader::new(data.as_slice());
+    let reader = BufReader::new(data.as_slice()).unwrap();
     let lines: Vec<String> = reader.lines().map(|r| r.unwrap()).collect();
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "line1");
@@ -1392,7 +1395,7 @@ fn test_lines_iterator() {
 #[def_test]
 fn test_lines_crlf() {
     let data = b"hello\r\nworld\r\n";
-    let reader = BufReader::new(data.as_slice());
+    let reader = BufReader::new(data.as_slice()).unwrap();
     let lines: Vec<String> = reader.lines().map(|r| r.unwrap()).collect();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0], "hello");
@@ -1402,7 +1405,7 @@ fn test_lines_crlf() {
 #[def_test]
 fn test_lines_no_trailing_newline() {
     let data = b"first\nsecond";
-    let reader = BufReader::new(data.as_slice());
+    let reader = BufReader::new(data.as_slice()).unwrap();
     let lines: Vec<String> = reader.lines().map(|r| r.unwrap()).collect();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1], "second");
@@ -1411,7 +1414,7 @@ fn test_lines_no_trailing_newline() {
 #[def_test]
 fn test_read_line_basic() {
     let data = b"hello\nworld\n";
-    let mut reader = BufReader::new(data.as_slice());
+    let mut reader = BufReader::new(data.as_slice()).unwrap();
     let mut line = String::new();
     let n = reader.read_line(&mut line).unwrap();
     assert_eq!(n, 6);
@@ -1623,4 +1626,55 @@ fn test_read_exact_unexpected_eof() {
     let mut buf = [0u8; 10];
     let err = reader.read_exact(&mut buf).unwrap_err();
     assert_eq!(err, Error::UnexpectedEof);
+}
+
+#[def_test]
+fn reader_capacity_error_drops_inner_without_reading() {
+    use core::cell::Cell;
+    struct Probe<'a> {
+        reads: &'a Cell<usize>,
+        drops: &'a Cell<usize>,
+    }
+    impl Read for Probe<'_> {
+        fn read(&mut self, _: &mut [u8]) -> crate::Result<usize> {
+            self.reads.set(self.reads.get() + 1);
+            Ok(0)
+        }
+    }
+    impl Drop for Probe<'_> {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+    let reads = Cell::new(0);
+    let drops = Cell::new(0);
+    let result = BufReader::with_capacity(
+        usize::MAX,
+        Probe {
+            reads: &reads,
+            drops: &drops,
+        },
+    );
+    assert!(matches!(result, Err(Error::InvalidInput)));
+    assert_eq!(reads.get(), 0);
+    assert_eq!(drops.get(), 1);
+}
+
+#[cfg(feature = "alloc")]
+#[def_test]
+fn reader_explicit_policy_and_kbox_cursor() {
+    use kalloc_types::AllocFlags;
+    let invalid = AllocFlags::from_bits_retain(u32::MAX);
+    assert!(matches!(
+        BufReader::with_capacity_with_flags(0, Cursor::new(b""), invalid),
+        Err(Error::InvalidInput)
+    ));
+    let storage = KBox::new_slice_with_flags(0u8, 4, AllocFlags::NOWAIT).unwrap();
+    let mut cursor = Cursor::new(storage);
+    cursor.write_all(b"test").unwrap();
+    cursor.rewind().unwrap();
+    let mut reader = BufReader::with_capacity_with_flags(2, cursor, AllocFlags::NOWAIT).unwrap();
+    let mut output = [0u8; 4];
+    reader.read_exact(&mut output).unwrap();
+    assert_eq!(&output, b"test");
 }

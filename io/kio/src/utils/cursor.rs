@@ -11,8 +11,11 @@
 // License: MIT
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::{cmp, io::BorrowedCursor};
+
+#[cfg(feature = "alloc")]
+use kalloc_types::KBox;
 
 use crate::{BufRead, Error, IoBuf, IoBufMut, Read, Result, Seek, SeekFrom, Write};
 
@@ -357,7 +360,7 @@ impl Write for Cursor<Vec<u8>> {
 }
 
 #[cfg(feature = "alloc")]
-impl Write for Cursor<Box<[u8]>> {
+impl Write for Cursor<KBox<[u8]>> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         slice_write(&mut self.pos, &mut self.inner, buf)

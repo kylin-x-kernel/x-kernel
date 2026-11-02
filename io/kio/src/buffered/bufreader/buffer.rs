@@ -10,12 +10,12 @@
 // Source: https://github.com/rust-lang/rust/blob/main/library/std/src/io/buffered/bufreader/buffer.rs
 // License: MIT
 
-#[cfg(feature = "alloc")]
-use alloc::boxed::Box;
 use core::{cmp, io::BorrowedBuf, mem::MaybeUninit};
 
 #[cfg(not(feature = "alloc"))]
 use heapless::Vec;
+#[cfg(feature = "alloc")]
+use kalloc_types::{AllocFlags, KBox};
 
 #[cfg(not(feature = "alloc"))]
 use crate::DEFAULT_BUF_SIZE;
@@ -24,7 +24,7 @@ use crate::{Read, Result};
 pub(super) struct Buffer {
     // The buffer.
     #[cfg(feature = "alloc")]
-    buf: Box<[MaybeUninit<u8>]>,
+    buf: KBox<[MaybeUninit<u8>]>,
     // The buffer.
     #[cfg(not(feature = "alloc"))]
     buf: Vec<MaybeUninit<u8>, DEFAULT_BUF_SIZE, u16>,
@@ -46,31 +46,47 @@ pub(super) struct Buffer {
 impl Buffer {
     /// Creates an empty read buffer with `capacity` bytes of storage.
     ///
-    /// # Panics
-    ///
-    /// Without `alloc`, panics if `capacity` exceeds [`crate::DEFAULT_BUF_SIZE`].
-    /// With `alloc`, panics on allocation size overflow; allocation failure follows
-    /// the allocator's failure policy.
+    /// Requires reclaim-safe task context with `alloc`; returns allocation or
+    /// layout errors. Without `alloc`, rejects capacities above the fixed limit.
     #[inline]
-    pub(super) fn with_capacity(capacity: usize) -> Self {
+    pub(super) fn with_capacity(capacity: usize) -> Result<Self> {
         #[cfg(feature = "alloc")]
-        let buf = Box::new_uninit_slice(capacity);
+        {
+            Self::with_capacity_with_flags(capacity, AllocFlags::KERNEL)
+        }
+        #[cfg(not(feature = "alloc"))]
+        Self::with_capacity_inner(capacity)
+    }
+
+    #[cfg(feature = "alloc")]
+    pub(super) fn with_capacity_with_flags(capacity: usize, flags: AllocFlags) -> Result<Self> {
+        Self::with_capacity_inner(capacity, flags)
+    }
+
+    fn with_capacity_inner(
+        capacity: usize,
+        #[cfg(feature = "alloc")] flags: AllocFlags,
+    ) -> Result<Self> {
+        #[cfg(feature = "alloc")]
+        let buf = KBox::<[u8]>::new_uninit_slice_with_flags(capacity, flags)?;
         #[cfg(not(feature = "alloc"))]
         let buf = {
             let mut buf = Vec::new();
-            assert!(capacity <= buf.capacity());
+            if capacity > buf.capacity() {
+                return Err(crate::Error::InvalidInput);
+            }
             // SAFETY: capacity was checked against inline storage, and each new
             // element is MaybeUninit<u8>, which permits uninitialized contents.
             unsafe { buf.set_len(capacity) };
             buf
         };
-        Self {
+        Ok(Self {
             buf,
             pos: 0,
             filled: 0,
             #[cfg(borrowedbuf_init)]
             initialized: 0,
-        }
+        })
     }
 
     /// Returns the initialized, unread bytes without reading from the underlying source.

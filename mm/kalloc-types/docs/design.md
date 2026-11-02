@@ -67,8 +67,9 @@ The initial API provides `KBox` for exclusive ownership of a single object,
 fallible construction, `Deref`, `DerefMut`, and automatic destruction.
 `KBox<T: ?Sized>` allows sized owners to unsize into trait objects or slices
 without allocating, preserving pointer metadata and borrowed lifetimes.
-Constructors still accept sized values; runtime-length slice/string construction,
-raw pointer conversion, cloning, containers, and pinning are not provided.
+Runtime-length slices support uninitialized reservation and Copy-value filling.
+String construction, raw pointer conversion, cloning, growable containers, and
+pinning are not provided.
 Callers do not use the standard `Box` through this API.
 
 构造接口统一返回 `KResult<KBox<T>>`，不使用 `try_` 前缀：
@@ -203,3 +204,44 @@ reservation does not change the context requirements of later initialization.
 `KBox<T>` at the same address without allocating or failing. Abandoning a
 reservation only frees storage, without running a destructor for an unwritten T.
 This is not field-by-field initialization, pinning, or a runtime-sized allocator.
+
+## Runtime-length slice storage
+
+KBox<[T]> reserves Layout::array::<T>(len) directly, without a temporary Vec.
+Unknown flags and overflowing layouts return InvalidInput before allocation;
+backend failure returns NoMemory. Empty and ZST slices retain length and aligned
+non-null pointers without allocating. new_uninit_slice uses KERNEL; its explicit
+flags variant has the same context requirements as sized allocation.
+new_slice fills Copy values without intermediate ownership or a fallible loop.
+For Copy ZSTs it skips the fill loop entirely; the supplied valid value proves
+inhabitation and there are no bytes to write or element destructors to run.
+Unsafe assume_init transfers the original length and pointer and requires every
+element to be valid. No generic fallible element initializer is exposed.
+
+### Reference implementations and deliberate differences
+
+This comparison uses the local Linux v7.2 tree at
+`8d3ae59288f1e7d58d76558a6ee96d533bc5019f` and Rust 1.95.0 library sources
+from rustc commit `59807616e1fa2540724bfbac14d7976d7e4a3860`.
+
+- Rust `library/alloc/src/boxed.rs`, `try_new_uninit_slice_in`, uses an aligned
+  dangling pointer for empty/ZST slices and checks array layout for nonzero
+  storage. Its slice `assume_init` preserves the pointer and length. Our API
+  follows those ownership rules, but validates allocation flags even when no
+  allocation is needed and reports layout/flag errors as InvalidInput.
+- Linux `rust/kernel/alloc/kvec.rs`, `Vec::capacity`, uses usize::MAX for ZST
+  capacity. Neither this nor Rust's ZST reservation imposes an arbitrary element
+  limit. Byte-layout validity is not a work-budget guarantee.
+- Rust `library/alloc/src/vec/spec_from_elem.rs` specializes repeated unit values
+  by setting the length without cloning elements. Generic repetition must
+  preserve observable Clone behavior. Our new_slice explicitly copies T; it
+  never calls Clone, so skipping writes for every inhabited Copy ZST is valid.
+  This optimization must not be extended to a future Clone-based initializer.
+- Linux `rust/kernel/alloc/kbox.rs`, `Box::pin_slice`, initializes elements one
+  at a time and records the initialized prefix in a Vec for failure cleanup.
+  A future fallible initializer here would need equivalent prefix ownership;
+  the current unsafe assume_init API is not a substitute for that guard.
+- Linux Box drop computes the dynamic layout and explicitly destroys its value
+  before freeing storage. Our Storage guard additionally preserves freeing on
+  unwind. Rust's standard Box has compiler-assisted pointee destruction before
+  its handwritten Drop body; copying that body would omit destruction here.

@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 #[cfg(feature = "alloc")]
-use alloc::boxed::Box;
+use kalloc_types::KBox;
 
 use crate::{Result, Seek, SeekFrom};
 
@@ -35,7 +35,7 @@ impl<S: Seek + ?Sized> Seek for &mut S {
 }
 
 #[cfg(feature = "alloc")]
-impl<S: Seek + ?Sized> Seek for Box<S> {
+impl<S: Seek + ?Sized> Seek for KBox<S> {
     #[inline]
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         (**self).seek(pos)

@@ -9,11 +9,12 @@ homepage.workspace = true
 repository.workspace = true
 
 [features]
-alloc = []
+alloc = ["dep:kalloc-types"]
 default = []
 
 [dependencies]
 kerrno.workspace = true
+kalloc-types = { workspace = true, optional = true }
 heapless = "0.9"
 memchr = { version = "2", default-features = false }
 unittest = { workspace = true }

@@ -76,10 +76,10 @@ impl DerefMut for FatFilesystemGuard<'_> {
 impl FatFilesystem {
     /// Fills a newly reserved FAT superblock from its canonical block device.
     ///
-    /// Requires sleepable mount context. Private-owner allocation uses NOWAIT
+    /// Requires sleepable mount context. Disk buffers and private ownership use NOWAIT
     /// while the canonical device identity is nascent, avoiding new synchronous
     /// reclaim dependencies on mount completion. Returns NoMemory before root
-    /// publication if that allocation fails; nested allocations are unchanged.
+    /// publication if either allocation fails; other nested allocations are unchanged.
     pub(crate) fn fill_super(super_block: &Arc<SuperBlock>) -> VfsResult<()> {
         #[expect(
             clippy::expect_used,
@@ -91,7 +91,7 @@ impl FatFilesystem {
             .expect("get_tree_bdev must set s_bdev before fill_super")
             .clone();
         let mut inner = FatFilesystemInner {
-            inner: ff::FileSystem::new(FatDisk::new(dev), fatfs::FsOptions::new())
+            inner: ff::FileSystem::new(FatDisk::new(dev)?, fatfs::FsOptions::new())
                 .map_err(into_vfs_err)?,
             inode_allocator: Slab::new(),
             _pinned: PhantomPinned,

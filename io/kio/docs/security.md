@@ -44,7 +44,8 @@ cursor region and rejects an oversized callback count by panic (an explicit
 assert in the compatibility branch, a checked cursor advance otherwise).
 `Take::read` limits the supplied slice and asserts that the returned count does
 not exceed the remaining budget. `BufReader::peek` asserts that lookahead fits
-capacity. Fixed reader construction asserts capacity at most 2048 bytes.
+capacity. Fixed reader construction returns `Error::InvalidInput` when capacity
+exceeds the fixed limit of 2048 bytes, rather than asserting.
 These checks do not produce permission errors or sanitize protocol payloads.
 
 ## Unsafe inventory and invariants
@@ -163,3 +164,12 @@ buffer flushing.
 - Flush explicitly where output errors matter; do not claim durability from drop.
 - Validate wrapped-stream context before IRQ/early-boot use or drop under a lock.
 - Do not log or reuse sensitive buffers under an assumption of automatic erasure.
+
+## Fallible reader allocation
+
+KBox owns uninitialized reader storage; only the initialized prefix is exposed
+as bytes. Capacity overflow and allocation failure return before reading the
+inner stream. Its destructor may still run on failure and has independent
+execution-context requirements. Default constructors permit reclaim; explicit
+flags constrain storage reservation only. Fixed-storage builds reject oversized
+capacity without set_len. Existing fill/consume/seek invariants are unchanged.

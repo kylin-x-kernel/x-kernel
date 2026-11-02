@@ -69,7 +69,7 @@ and makes writer storage an allocation-backed vector. Without it, buffers use
 Interfaces are grouped by provider and caller direction:
 
 - Consumers call core traits on concrete streams; adapters call those same
-  traits on their inner values. `&mut T` and allocation-backed `Box<T>` forward
+  traits on their inner values. `&mut T` and allocation-backed `KBox<T>` forward
   supported operations. Slices, collections, borrowed cursors and `Cursor<T>`
   provide in-memory implementations.
 - Consumers call `read_fn`/`write_fn` to own a closure; subsequent stream calls
@@ -184,3 +184,14 @@ on error `IntoInnerError<W>` retains the writer and pending data for recovery.
 `into_parts` performs no I/O and suppresses normal drop to move the inner value
 exactly once. `WriterPanicked` marks buffered bytes whose delivery is uncertain.
 No buffer is securely erased on drop.
+
+## Fallible reader storage
+
+The alloc feature enables kalloc-types. BufReader::new/with_capacity now return
+Result; the default allocation policy requires sleepable, reclaim-safe task
+context, regardless of whether the underlying reader is nonblocking. Explicit
+with_capacity_with_flags permits callers to restrict reclaim. Failure drops the
+inner reader without reading it. Without alloc, the same Result API uses fixed
+storage and rejects oversized requests with InvalidInput. Reader construction
+does not publish partially initialized state. Trait forwarding and fixed byte
+Cursor storage use KBox. BufWriter/LineWriter and Vec growth remain unchanged.

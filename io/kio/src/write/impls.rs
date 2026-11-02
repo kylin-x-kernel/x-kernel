@@ -11,8 +11,11 @@
 // License: MIT
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{cmp, fmt, io::BorrowedCursor, mem};
+
+#[cfg(feature = "alloc")]
+use kalloc_types::KBox;
 
 use crate::{Error, Result, Write};
 
@@ -39,7 +42,7 @@ impl<W: Write + ?Sized> Write for &mut W {
 }
 
 #[cfg(feature = "alloc")]
-impl<W: Write + ?Sized> Write for Box<W> {
+impl<W: Write + ?Sized> Write for KBox<W> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         (**self).write(buf)

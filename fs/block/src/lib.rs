@@ -12,10 +12,12 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::sync::Arc;
 use core::mem;
 
 use block::{BlockDevice, DriverResult};
+use kalloc_types::{AllocFlags, KBox};
+use kerrno::KResult;
 
 /// Consume `cnt` bytes from the front of a slice.
 fn take<'a>(buf: &mut &'a [u8], cnt: usize) -> &'a [u8] {
@@ -38,8 +40,8 @@ pub struct SeekableDisk {
     block_id: u64,
     offset: usize,
     block_size_log2: u8,
-    read_buffer: Box<[u8]>,
-    write_buffer: Box<[u8]>,
+    read_buffer: KBox<[u8]>,
+    write_buffer: KBox<[u8]>,
     /// Whether the current write buffer contains uncommitted changes.
     ///
     /// When `offset == 0`, this is always false.
@@ -47,13 +49,21 @@ pub struct SeekableDisk {
 }
 
 impl SeekableDisk {
-    /// Creates a byte cursor over a block device.
-    pub fn new(dev: Arc<BlockDevice>) -> Self {
+    /// Creates a byte cursor in sleepable, reclaim-safe task context.
+    /// Returns an allocation error before any device IO if either buffer fails.
+    pub fn new(dev: Arc<BlockDevice>) -> KResult<Self> {
+        Self::new_with_flags(dev, AllocFlags::KERNEL)
+    }
+
+    /// Creates a cursor with explicit buffer allocation permissions.
+    /// Context constraints match KBox allocation; flags do not constrain later
+    /// device IO. On failure, previously allocated storage is released.
+    pub fn new_with_flags(dev: Arc<BlockDevice>, flags: AllocFlags) -> KResult<Self> {
         assert!(dev.block_size().is_power_of_two());
         let block_size_log2 = dev.block_size().trailing_zeros() as u8;
-        let read_buffer = vec![0u8; dev.block_size()].into_boxed_slice();
-        let write_buffer = vec![0u8; dev.block_size()].into_boxed_slice();
-        Self {
+        let read_buffer = KBox::new_slice_with_flags(0u8, dev.block_size(), flags)?;
+        let write_buffer = KBox::new_slice_with_flags(0u8, dev.block_size(), flags)?;
+        Ok(Self {
             dev,
             block_id: 0,
             offset: 0,
@@ -61,7 +71,7 @@ impl SeekableDisk {
             read_buffer,
             write_buffer,
             write_buffer_dirty: false,
-        }
+        })
     }
 
     /// Returns the disk size in bytes.

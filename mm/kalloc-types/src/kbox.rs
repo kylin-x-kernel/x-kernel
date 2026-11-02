@@ -42,8 +42,8 @@ impl Drop for Storage {
 /// Dropping the owner destroys the value and releases its storage. A zero-sized
 /// value needs no allocation, but its destructor still runs.
 /// Sized owners can coerce to trait objects or slices without allocating.
-/// Constructors still take sized values; dynamically sized slice/string
-/// construction and raw ownership conversion are not provided.
+/// Runtime-length slices support uninitialized storage and copied values.
+/// String construction and raw ownership conversion are not provided.
 ///
 /// # Execution context
 /// Borrowing through `Deref`/`DerefMut` neither allocates nor sleeps; operations
@@ -182,6 +182,90 @@ impl<T> KBox<T> {
         // or an aligned dangling pointer for a ZST. Writing initializes the slot.
         unsafe { owned.pointer.as_ptr().write(value) };
         Ok(owned)
+    }
+}
+
+impl<T> KBox<[T]> {
+    /// Reserves a runtime-length slice with the sleepable, reclaim-safe
+    /// `KERNEL` context required by [`KBox::new`]. No elements are initialized.
+    pub fn new_uninit_slice(len: usize) -> KResult<KBox<[MaybeUninit<T>]>> {
+        Self::new_uninit_slice_with_flags(len, AllocFlags::KERNEL)
+    }
+
+    /// Reserves slice storage under the context contract of
+    /// [`KBox::new_with_flags`]. Invalid flags or layout overflow return
+    /// `InvalidInput`; allocation failure returns `NoMemory`. Empty slices and
+    /// ZST elements require no allocation, but still validate flags and layout.
+    /// Layout validation does not bound ZST element counts. Callers must bound
+    /// untrusted lengths and any later per-element initialization or destruction.
+    pub fn new_uninit_slice_with_flags(
+        len: usize,
+        flags: AllocFlags,
+    ) -> KResult<KBox<[MaybeUninit<T>]>> {
+        Self::reserve_slice_with_allocator(len, flags, allocate)
+    }
+
+    fn reserve_slice_with_allocator(
+        len: usize,
+        flags: AllocFlags,
+        allocate: impl FnOnce(Layout, AllocFlags) -> KResult<NonNull<u8>>,
+    ) -> KResult<KBox<[MaybeUninit<T>]>> {
+        if flags.bits() & !AllocFlags::all().bits() != 0 {
+            return Err(KError::InvalidInput);
+        }
+        let layout = Layout::array::<T>(len).map_err(|_| KError::InvalidInput)?;
+        let pointer = if layout.size() == 0 {
+            NonNull::dangling()
+        } else {
+            allocate(layout, flags)?.cast::<MaybeUninit<T>>()
+        };
+        Ok(KBox {
+            pointer: NonNull::slice_from_raw_parts(pointer, len),
+            owner: PhantomData,
+        })
+    }
+}
+
+impl<T: Copy> KBox<[T]> {
+    /// Allocates and fills a slice using the default sleepable, reclaim-safe
+    /// `KERNEL` policy. Errors match [`Self::new_uninit_slice_with_flags`].
+    pub fn new_slice(value: T, len: usize) -> KResult<Self> {
+        Self::new_slice_with_flags(value, len, AllocFlags::KERNEL)
+    }
+
+    /// Allocates and fills a slice with a copied value. Flags and caller-context
+    /// requirements match [`KBox::new_with_flags`]; filling does not allocate.
+    /// Copy ZSTs require no per-element writes or destruction, even for large lengths.
+    /// Errors match [`Self::new_uninit_slice_with_flags`].
+    pub fn new_slice_with_flags(value: T, len: usize, flags: AllocFlags) -> KResult<Self> {
+        let mut storage = Self::new_uninit_slice_with_flags(len, flags)?;
+        if core::mem::size_of::<T>() != 0 {
+            for slot in storage.iter_mut() {
+                slot.write(value);
+            }
+        }
+        // SAFETY: non-ZST elements were initialized above. For a ZST, the supplied
+        // valid value proves T is inhabited and there are no bytes to initialize.
+        // T is Copy, so duplicating it neither transfers resources nor runs Drop.
+        Ok(unsafe { storage.assume_init() })
+    }
+}
+
+impl<T> KBox<[MaybeUninit<T>]> {
+    /// Transfers initialized slice storage without allocating or changing its
+    /// address or length. Dropping the returned owner drops every element.
+    /// ZSTs with destructors still require one destructor call per element;
+    /// zero allocation size does not imply bounded destruction time.
+    ///
+    /// # Safety
+    /// Every element must contain a valid, initialized T whose ownership can be
+    /// transferred to the returned slice. Partial initialization is insufficient.
+    pub unsafe fn assume_init(self) -> KBox<[T]> {
+        let owned = ManuallyDrop::new(self);
+        KBox {
+            pointer: NonNull::slice_from_raw_parts(owned.pointer.cast::<T>(), owned.len()),
+            owner: PhantomData,
+        }
     }
 }
 

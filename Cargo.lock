@@ -1618,6 +1618,8 @@ name = "fs_block"
 version = "0.3.0-dev"
 dependencies = [
  "block",
+ "kalloc-types",
+ "kerrno",
 ]
 
 [[package]]
@@ -2694,6 +2696,7 @@ version = "0.3.0-dev"
 dependencies = [
  "autocfg",
  "heapless",
+ "kalloc-types",
  "kerrno",
  "memchr",
  "unittest",

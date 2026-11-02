@@ -37,20 +37,36 @@ pub struct BufReader<R: ?Sized> {
 impl<R: Read> BufReader<R> {
     /// Creates a new `BufReader<R>` with the specified buffer capacity.
     ///
-    /// # Panics
-    ///
-    /// Without `alloc`, panics if `capacity` exceeds [`DEFAULT_BUF_SIZE`].
-    /// With `alloc`, capacity overflow can panic and allocation failure follows
-    /// the allocator policy. Zero capacity is allowed but cannot buffer input.
-    pub fn with_capacity(capacity: usize, inner: R) -> BufReader<R> {
-        BufReader {
-            buf: Buffer::with_capacity(capacity),
+    /// With `alloc`, requires sleepable, reclaim-safe task context and returns
+    /// NoMemory on allocation failure or InvalidInput on layout overflow.
+    /// Without `alloc`, oversized capacity returns InvalidInput without allocating.
+    /// Failure drops the inner reader without reading it; its destructor retains
+    /// its own context requirements. Zero capacity is allowed.
+    pub fn with_capacity(capacity: usize, inner: R) -> Result<BufReader<R>> {
+        Ok(BufReader {
+            buf: Buffer::with_capacity(capacity)?,
             inner,
-        }
+        })
     }
 
-    /// Creates a new `BufReader<R>` with a default buffer capacity.
-    pub fn new(inner: R) -> BufReader<R> {
+    /// Creates a reader with explicit storage allocation permissions.
+    /// Context requirements match `KBox::new_with_flags`. Failure drops `inner`
+    /// without reading it; its destructor retains its own context requirements.
+    #[cfg(feature = "alloc")]
+    pub fn with_capacity_with_flags(
+        capacity: usize,
+        inner: R,
+        flags: kalloc_types::AllocFlags,
+    ) -> Result<BufReader<R>> {
+        Ok(BufReader {
+            buf: Buffer::with_capacity_with_flags(capacity, flags)?,
+            inner,
+        })
+    }
+
+    /// Creates a reader with default capacity under the context and error
+    /// contract of [`Self::with_capacity`].
+    pub fn new(inner: R) -> Result<BufReader<R>> {
         BufReader::with_capacity(DEFAULT_BUF_SIZE, inner)
     }
 }

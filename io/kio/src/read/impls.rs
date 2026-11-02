@@ -11,8 +11,11 @@
 // License: MIT
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{cmp, io::BorrowedCursor};
+
+#[cfg(feature = "alloc")]
+use kalloc_types::KBox;
 
 use crate::{BufRead, Error, Read, Result};
 
@@ -85,7 +88,7 @@ impl<B: BufRead + ?Sized> BufRead for &mut B {
 }
 
 #[cfg(feature = "alloc")]
-impl<R: Read + ?Sized> Read for Box<R> {
+impl<R: Read + ?Sized> Read for KBox<R> {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         (**self).read(buf)
@@ -120,7 +123,7 @@ impl<R: Read + ?Sized> Read for Box<R> {
 }
 
 #[cfg(feature = "alloc")]
-impl<B: BufRead + ?Sized> BufRead for Box<B> {
+impl<B: BufRead + ?Sized> BufRead for KBox<B> {
     #[inline]
     fn fill_buf(&mut self) -> Result<&[u8]> {
         (**self).fill_buf()

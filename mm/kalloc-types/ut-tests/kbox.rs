@@ -23,7 +23,100 @@ use unittest::def_test;
 
 use super::*;
 
+#[def_test]
+fn runtime_slice_layout_and_element_lifecycle() {
+    #[repr(align(256))]
+    struct Aligned<'a>(DropProbe<'a>);
+    let drops = Cell::new(0);
+    let mut storage = KBox::<[Aligned<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    let address = storage.as_ptr().cast::<()>();
+    assert_eq!(address.addr() % 256, 0);
+    for slot in storage.iter_mut() {
+        slot.write(Aligned(DropProbe(&drops)));
+    }
+    // SAFETY: all three elements were initialized by the loop above.
+    let owned = unsafe { storage.assume_init() };
+    assert_eq!(owned.len(), 3);
+    assert_eq!(owned.as_ptr().cast::<()>(), address);
+    assert_eq!(owned[0].0.0.get(), 0);
+    drop(owned);
+    assert_eq!(drops.get(), 3);
+}
+
+#[def_test]
+fn runtime_slice_rejects_invalid_layout_before_allocator() {
+    let called = Cell::new(false);
+    let result = KBox::<[u64]>::reserve_slice_with_allocator(usize::MAX, AllocFlags::NOWAIT, |_, _| {
+        called.set(true);
+        Err(KError::NoMemory)
+    });
+    assert!(matches!(result, Err(KError::InvalidInput)));
+    assert!(!called.get());
+    let flags = AllocFlags::from_bits_retain(u32::MAX);
+    assert!(matches!(KBox::<[()]>::new_uninit_slice_with_flags(0, flags), Err(KError::InvalidInput)));
+    let result = KBox::<[u32]>::reserve_slice_with_allocator(5, AllocFlags::NOWAIT, |layout, flags| {
+        core::assert_eq!(layout, Layout::array::<u32>(5).unwrap());
+        core::assert_eq!(flags, AllocFlags::NOWAIT);
+        Err(KError::NoMemory)
+    });
+    assert!(matches!(result, Err(KError::NoMemory)));
+}
+
+#[def_test]
+fn runtime_slice_empty_zst_and_copied_contents() {
+    #[repr(align(256))]
+    struct AlignedZero;
+    let owned = KBox::<[AlignedZero]>::reserve_slice_with_allocator(7, AllocFlags::NOWAIT, |_, _| {
+        Err(KError::NoMemory)
+    }).unwrap();
+    assert_eq!(owned.len(), 7);
+    assert_eq!(owned.as_ptr().addr() % 256, 0);
+    let empty = KBox::<[u64]>::new_uninit_slice_with_flags(0, AllocFlags::NOWAIT).unwrap();
+    assert_eq!(empty.len(), 0);
+    let values = KBox::new_slice_with_flags(19u32, 4, AllocFlags::NOWAIT).unwrap();
+    assert_eq!(&*values, &[19, 19, 19, 19]);
+    let reservation = KBox::<[DropProbe<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    drop(reservation);
+}
+
 struct DropProbe<'a>(&'a Cell<usize>);
+
+#[def_test]
+fn copied_zst_slice_accepts_large_lengths_without_element_work() {
+    #[repr(align(256))]
+    #[derive(Clone, Copy)]
+    struct AlignedZero;
+    let owned = KBox::new_slice_with_flags(AlignedZero, usize::MAX, AllocFlags::NOWAIT).unwrap();
+    assert_eq!(owned.len(), usize::MAX);
+    assert_eq!(owned.as_ptr().addr() % 256, 0);
+    drop(owned);
+    let flags = AllocFlags::from_bits_retain(u32::MAX);
+    assert!(matches!(
+        KBox::new_slice_with_flags(AlignedZero, usize::MAX, flags),
+        Err(KError::InvalidInput)
+    ));
+}
+
+#[def_test]
+fn initialized_zst_slice_runs_each_destructor() {
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    #[repr(align(256))]
+    struct AlignedZero;
+    impl Drop for AlignedZero {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let before = DROPS.load(Ordering::Relaxed);
+    let mut storage = KBox::<[AlignedZero]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    for slot in storage.iter_mut() {
+        slot.write(AlignedZero);
+    }
+    // SAFETY: all three elements were initialized above.
+    let owned = unsafe { storage.assume_init() };
+    drop(owned);
+    assert_eq!(DROPS.load(Ordering::Relaxed), before + 3);
+}
 
 #[def_test]
 fn into_inner_transfers_noncopy_value_without_running_drop() {

@@ -39,3 +39,11 @@ block count 反算，因此末尾不足一个 logical block 的容量也不会�
 - `Gendisk`、`BlockDevice`、容量和设备移除生命周期属于 block core。
 - 本 crate 不定义 filesystem type、root provider 或 mount callback；root 与用户挂载都由
   KVFS canonical registry 分派。
+
+## Fallible cursor buffers
+
+SeekableDisk::new returns KResult and allocates two zero-filled KBox byte
+slices using KERNEL in reclaim-safe task context. new_with_flags permits explicit
+allocation policy. Both buffers are prepared before a cursor is returned and
+before device IO; second-buffer failure drops the first allocation. FAT selects
+NOWAIT while its claimed device and superblock are still being initialized.

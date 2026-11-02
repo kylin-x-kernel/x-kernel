@@ -10,8 +10,11 @@
 // external implementation.
 
 #[cfg(feature = "alloc")]
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, vec::Vec};
 use core::io::BorrowedCursor;
+
+#[cfg(feature = "alloc")]
+use kalloc_types::KBox;
 
 use crate::{IoBuf, IoBufMut};
 
@@ -44,7 +47,7 @@ impl<W: IoBufMut + ?Sized> IoBufMut for &mut W {
 }
 
 #[cfg(feature = "alloc")]
-impl<R: IoBuf + ?Sized> IoBuf for Box<R> {
+impl<R: IoBuf + ?Sized> IoBuf for KBox<R> {
     #[inline]
     fn remaining(&self) -> usize {
         (**self).remaining()
@@ -52,7 +55,7 @@ impl<R: IoBuf + ?Sized> IoBuf for Box<R> {
 }
 
 #[cfg(feature = "alloc")]
-impl<W: IoBufMut + ?Sized> IoBufMut for Box<W> {
+impl<W: IoBufMut + ?Sized> IoBufMut for KBox<W> {
     #[inline]
     fn remaining_mut(&self) -> usize {
         (**self).remaining_mut()

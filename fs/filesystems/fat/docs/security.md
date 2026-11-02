@@ -89,3 +89,11 @@ FAT `time_offset` mount option 或全局 kernel timezone，FAT local time 暂按
 - 新 unsafe lifetime extension 是否列出 owner、pinning、锁和 aliasing 不变量？
 - 格式或 I/O 错误是否返回而非 panic？
 - metadata callback 是否只返回真正写入 FAT 的时间字段和值？
+
+## Mount buffer reservation
+
+Buffer failure returns from fill_super before FAT parsing or root publication.
+The first buffer is freed if the second allocation fails. The existing KVFS
+initialization-failure path unregisters the nascent superblock and wakes waiters;
+this change does not add a separate cache or claim-release protocol. NOWAIT only
+constrains buffer allocation, not subsequent filesystem IO or nested allocations.

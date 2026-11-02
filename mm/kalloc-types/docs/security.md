@@ -90,3 +90,32 @@ already written MaybeUninit slot does not drop its former value, matching the
 underlying type's contract. Tests cover address/alignment preservation, single
 destruction, abandoned sized/ZST reservations, invalid flags, and local allocator
 failure. These tests do not force global OOM.
+
+## Runtime-length slice boundary
+
+Layout::array checks size overflow before allocator entry. Slice metadata is
+created from the validated element count and an aligned pointer; MaybeUninit<T>
+has the same size/alignment as T. The unsafe assume_init API requires every
+element to be initialized; partial writers must destroy their initialized prefix
+before abandoning the reservation. Dropping uninitialized storage never drops T.
+Copied initialization cannot panic or run user code. Dynamic drop computes the
+original layout before dropping elements and frees storage with that layout.
+Local tests cover overflow, flags, allocator failure, alignment, empty/ZST
+metadata, address preservation and element destruction; not global OOM.
+
+ZST layout validation cannot limit element counts through byte-size overflow.
+Copy ZST filling explicitly skips element iteration, and Copy types have no
+destructor. Tests cover an aligned Copy ZST with usize::MAX elements and verify
+that flags are still validated. Initialized non-Copy ZSTs may have observable
+destructors: those must run once per element, as a separate small-count test
+checks. Callers must bound untrusted counts and per-element work; the allocator
+does not promise bounded initialization or destruction latency. An arbitrary
+global length cap would not bound the cost of user-defined destructors.
+
+The reference comparison in design.md separates byte-layout safety from work
+limits. Linux Vec drop explicitly destroys its initialized slice, including ZST
+destructors; this must not be optimized away based on allocation size. Likewise,
+generic Clone or initializer callbacks may have side effects even for ZSTs.
+Only the current Copy-fill API can skip element writes without skipping user
+code. No generic all-zero constructor is provided: zero bytes are not valid for
+arbitrary T, unlike copying an already valid value.
