@@ -867,7 +867,15 @@ out of that transaction; only then does the caller drain the original Line,
 with all short locks released. Admission cleanup retains its existing control
 and registry transaction, and releases management before returning the handler
 to the caller. Removing a non-last shared action does not mask the remaining
-actions. NMI-table withdrawal is unchanged by this normal-action path.
+actions.
+NMI registration and withdrawal also retain the original Line state lock across
+their bounded controller configure/mask operations. They release the directory
+and NMI table before entering the backend. The shared NMI-table representation,
+caller-owned quiescence obligations and cross-Line hwirq publication exclusion
+remain unchanged; the global control lock still protects preflight through
+publication and is not yet removable.
+That outer IRQ-off guard outlives both directory and Line guards, so releasing
+the directory first cannot restore ordinary IRQ delivery inside this transaction.
 Synchronous disable captures this identity in the same transaction as its
 disable plan; it cannot mask one instance and then synchronize another.
 

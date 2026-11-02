@@ -22,6 +22,67 @@ fn is_invalid_context<T>(result: Result<T, IrqDescError>) -> bool {
 }
 
 #[def_test(serial)]
+fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult {
+    let virq = 0x5f49;
+    let desc = IrqDesc::from_virq(virq);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let has_atomic_exclusion = {
+        let _guard = line.lock();
+        line.is_state_locked_for_tests()
+    };
+    if !has_atomic_exclusion {
+        return unittest::TestResult::Ignored;
+    }
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
+    // This synthetic source is never enabled in hardware. Inject only the
+    // bounded controller operations, retaining the real management path.
+    let mut has_configured = false;
+    let has_registered = super::register_nmi_with_mode(
+        desc, handler.clone(), super::ManagementMode::Task, |stored| {
+            has_configured = !karch::local_irq_enabled()
+                && line.is_state_locked_for_tests()
+                && IRQ_STATE.try_lock().is_some()
+                && NMI_TABLE.try_lock().is_some()
+                && stored.logical_irq() == Some(virq)
+                && stored.flags.contains(crate::IrqFlags::PER_CPU);
+        },
+    );
+    let registered_action_count = line.lock().action_count();
+    let registered_owner_count = Arc::strong_count(&handler);
+    let mut has_masked = false;
+    let has_unregistered = super::unregister_nmi_with(desc, |stored| {
+        has_masked = !karch::local_irq_enabled()
+            && line.is_state_locked_for_tests()
+            && IRQ_STATE.try_lock().is_some()
+            && NMI_TABLE.try_lock().is_some()
+            && stored.logical_irq() == Some(virq)
+            && !stored.flags.contains(crate::IrqFlags::PER_CPU)
+            && Arc::strong_count(&handler) == 3;
+    });
+    let remaining_actions = line.lock().action_count();
+    let is_teardown_pending = line.lock().is_teardown_in_progress();
+    let has_descriptor = crate::descriptor(virq).is_some();
+    // Clean up synthetic ownership before reporting a failed observation.
+    let table_owner = NMI_TABLE.lock().remove(&desc.hwirq);
+    let remaining_line = IRQ_STATE.lock().descs.remove(&virq);
+    let has_table_owner = table_owner.is_some();
+    drop(table_owner);
+    drop(remaining_line);
+    drop(line);
+    assert!(has_registered && has_unregistered);
+    assert_eq!(registered_action_count, 1);
+    assert_eq!(registered_owner_count, 3);
+    assert!(has_configured);
+    assert!(has_masked);
+    assert_eq!(remaining_actions, 0);
+    assert!(!is_teardown_pending);
+    assert!(!has_descriptor && !has_table_owner);
+    assert_eq!(Arc::strong_count(&handler), 1);
+    unittest::TestResult::Ok
+}
+
+#[def_test(serial)]
 fn duplicate_nmi_on_another_line_does_not_publish_mapping() {
     let virq = 0x5f44;
     let other_virq = 0x5f45;

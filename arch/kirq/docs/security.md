@@ -580,6 +580,11 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   snapshots from observing withdrawal before mask completes. Old snapshots
   remain accounted for until their original controller claims complete. Shared
   ownership and NMI-fallback rejection rules are unchanged.
+- NMI management releases the shared table and directory before controller
+  configure/mask, but retains the original Line state lock through completion
+  of that bounded operation. Global control still serializes hwirq preflight
+  and publication across Lines. This does not establish NMI reader quiescence:
+  the existing caller exclusion obligations remain mandatory.
 - `flush_work()` / `cancel_work_sync()` cover ordinary work items. The legacy
   delayed-work product API and timer adapter have been removed. Automatic delayed
   retry, full Linux concurrent-flusher handoff, CPU hotplug drain and rescuer

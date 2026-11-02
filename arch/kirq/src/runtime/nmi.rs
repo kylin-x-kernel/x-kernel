@@ -80,7 +80,7 @@ static_lock! {
 ///   This API does not establish NMI quiescence or drain NMI handlers.
 /// - NMI-context calls are rejected before taking any lock.
 pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
-    register_nmi_with_mode(desc, handler, ManagementMode::Task)
+    register_nmi_with_mode(desc, handler, ManagementMode::Task, configure_platform_irq)
 }
 
 /// Registers an NMI handler during explicit, allocator-ready startup.
@@ -92,10 +92,20 @@ pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
 /// startup registration before allowing NMI delivery; this is not a runtime
 /// atomic-context registration API.
 pub fn register_nmi_startup(desc: IrqDesc, handler: Handler) -> bool {
-    register_nmi_with_mode(desc, handler, ManagementMode::Startup)
+    register_nmi_with_mode(
+        desc,
+        handler,
+        ManagementMode::Startup,
+        configure_platform_irq,
+    )
 }
 
-fn register_nmi_with_mode(desc: IrqDesc, handler: Handler, mode: ManagementMode) -> bool {
+fn register_nmi_with_mode(
+    desc: IrqDesc,
+    handler: Handler,
+    mode: ManagementMode,
+    configure: impl FnOnce(IrqDesc),
+) -> bool {
     let hwirq = desc.hwirq;
     let result = with_registration_line_checked(
         IrqSpec::Desc(desc.with_flags(IrqFlags::PER_CPU)),
@@ -119,9 +129,10 @@ fn register_nmi_with_mode(desc: IrqDesc, handler: Handler, mode: ManagementMode)
             let stored_desc = entry.desc;
             table.insert(hwirq, handler.clone());
             drop(table);
-            drop(entry);
             drop(state);
-            configure_platform_irq(stored_desc);
+            // Keep fallback state and controller configuration in one Line
+            // transaction, without holding the shared NMI table in the backend.
+            configure(stored_desc);
             Ok(true)
         },
     );
@@ -165,6 +176,12 @@ fn register_nmi_with_mode(desc: IrqDesc, handler: Handler, mode: ManagementMode)
 /// mutex before locking the table and never sleeps while holding the table lock.
 /// Calls from NMI context are rejected before taking any lock.
 pub fn unregister_nmi(desc: IrqDesc) -> bool {
+    unregister_nmi_with(desc, |stored_desc| {
+        set_platform_irq_enabled(stored_desc, false)
+    })
+}
+
+fn unregister_nmi_with(desc: IrqDesc, mask: impl FnOnce(IrqDesc)) -> bool {
     let result = with_existing_line(IrqSpec::Desc(desc), ManagementMode::Task, |_, line| {
         let _control_guard = IRQ_CONTROL_LOCK.lock();
         let state = IRQ_STATE.lock();
@@ -183,11 +200,11 @@ pub fn unregister_nmi(desc: IrqDesc) -> bool {
         entry.remove_flags(IrqFlags::PER_CPU);
         let stored_desc = entry.desc;
         drop(table);
-        drop(entry);
         drop(state);
         // NMI setup does not track platform enable state in the normal IRQ
         // runtime. Disable explicitly, even if old fallback dispatch is live.
-        set_platform_irq_enabled(stored_desc, false);
+        // Retain Line exclusion through mask, as for normal-action withdrawal.
+        mask(stored_desc);
         Ok(Some((removed_fallback, removed_handler)))
     });
     let was_removed = matches!(&result, Ok(Some(_)));
