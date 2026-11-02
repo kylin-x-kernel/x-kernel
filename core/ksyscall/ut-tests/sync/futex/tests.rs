@@ -7,8 +7,10 @@ use khal::{mem::VirtAddr, paging::MappingFlags};
 use kprocess::{current_user_process_address_space, current_user_thread};
 use ktime_types::{MonotonicInstant, TimeSpan};
 use linux_raw_sys::general::{
-    FUTEX_OP_ADD, FUTEX_OP_CMP_EQ, FUTEX_PRIVATE_FLAG, FUTEX_WAIT, FUTEX_WAIT_BITSET,
-    FUTEX_WAKE_OP, MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE, timespec,
+    FUTEX_CLOCK_REALTIME, FUTEX_CMP_REQUEUE_PI, FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_OP_ADD,
+    FUTEX_OP_CMP_EQ, FUTEX_PRIVATE_FLAG, FUTEX_TRYLOCK_PI, FUTEX_UNLOCK_PI, FUTEX_WAIT,
+    FUTEX_WAIT_BITSET, FUTEX_WAIT_REQUEUE_PI, FUTEX_WAKE_OP, MAP_ANONYMOUS, MAP_PRIVATE,
+    PROT_READ, PROT_WRITE, timespec,
 };
 use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
@@ -18,6 +20,16 @@ use super::{FutexWaitRestartBlock, arm_futex_wait_restart, sys_futex};
 use crate::task::sys_restart_syscall;
 
 const WAIT_BITSET_MASK: u32 = 0x1;
+
+const OTHER_PI_FUTEX_COMMANDS: [u32; 4] = [
+    FUTEX_TRYLOCK_PI,
+    FUTEX_WAIT_REQUEUE_PI,
+    FUTEX_CMP_REQUEUE_PI,
+    FUTEX_LOCK_PI2,
+];
+
+/// Command 14 is outside the defined futex operation range.
+const UNKNOWN_FUTEX_COMMAND: u32 = 14;
 
 fn reset_restart_state() {
     ktask::current().clear_interrupt();
@@ -328,6 +340,88 @@ fn test_wake_op_readonly_mapping_returns_efault() {
         kuaccess::atomic_load_u32(page).expect("word after EFAULT"),
         1
     );
+}
+
+#[def_test(user, serial)]
+fn test_lock_pi_returns_eopnotsupp_before_address_validation() {
+    // Address 0 is invalid. Answering the musl feature probe before key
+    // resolution is what lets PulseAudio see a clean "PI unavailable" result.
+    let err = sys_futex(
+        UserPtr::from(0usize),
+        FUTEX_LOCK_PI | FUTEX_PRIVATE_FLAG,
+        0,
+        0,
+        UserPtr::from(0usize),
+        0,
+    )
+    .expect_err("FUTEX_LOCK_PI must not be implemented");
+    assert_eq!(LinuxError::from(err), LinuxError::EOPNOTSUPP);
+}
+
+#[def_test(user, serial)]
+fn test_lock_pi_with_realtime_flag_still_returns_eopnotsupp() {
+    // The realtime gate would reject this unsupported flag combination. The
+    // PI probe check must run first so the fallback errno is stable.
+    let err = sys_futex(
+        UserPtr::from(0usize),
+        FUTEX_LOCK_PI | FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME,
+        0,
+        0,
+        UserPtr::from(0usize),
+        0,
+    )
+    .expect_err("FUTEX_LOCK_PI with realtime must not fall through");
+    assert_eq!(LinuxError::from(err), LinuxError::EOPNOTSUPP);
+}
+
+#[def_test(user, serial)]
+fn test_unlock_pi_stays_enosys_for_glibc_support_probe() {
+    // glibc's pthread_mutex_init probes FUTEX_UNLOCK_PI and treats only
+    // ENOSYS as missing PI support; it aborts on an unexpected errno.
+    let err = sys_futex(
+        UserPtr::from(0usize),
+        FUTEX_UNLOCK_PI,
+        0,
+        0,
+        UserPtr::from(0usize),
+        0,
+    )
+    .expect_err("FUTEX_UNLOCK_PI must remain unimplemented");
+    assert_eq!(LinuxError::from(err), LinuxError::ENOSYS);
+}
+
+#[def_test(user, serial)]
+fn test_other_pi_futex_commands_stay_enosys() {
+    for command in OTHER_PI_FUTEX_COMMANDS {
+        let err = sys_futex(
+            UserPtr::from(0usize),
+            command | FUTEX_PRIVATE_FLAG,
+            0,
+            0,
+            UserPtr::from(0usize),
+            0,
+        )
+        .expect_err("unsupported PI futex command must remain unimplemented");
+        assert_eq!(
+            LinuxError::from(err),
+            LinuxError::ENOSYS,
+            "PI command {command:#x} must keep Linux's ENOSYS"
+        );
+    }
+}
+
+#[def_test(user, serial)]
+fn test_unknown_non_pi_futex_command_stays_enosys() {
+    let err = sys_futex(
+        UserPtr::from(0usize),
+        UNKNOWN_FUTEX_COMMAND | FUTEX_PRIVATE_FLAG,
+        0,
+        0,
+        UserPtr::from(0usize),
+        0,
+    )
+    .expect_err("unknown non-PI futex command must remain unimplemented");
+    assert_eq!(LinuxError::from(err), LinuxError::ENOSYS);
 }
 
 // x86 publishes syscall-origin state through `set_sysno`. Other architectures

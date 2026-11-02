@@ -103,11 +103,16 @@ handle is a zero-sized `Copy` value.
 
 ## Privacy analysis
 
-No user data beyond 32-bit futex words is read; nothing is logged.
+No user data beyond 32-bit futex words is read. This crate logs nothing;
+`ksyscall` emits one diagnostic when it first rejects `FUTEX_LOCK_PI`.
 
 ## Known limitations
 
-- Non-PI futex only; PI commands return `ENOSYS` at the syscall layer.
+- Non-PI futex only; `FUTEX_LOCK_PI` returns `EOPNOTSUPP` and the other PI
+  commands return `ENOSYS` at the syscall layer, so no PI request reaches this
+  crate. The `LOCK_PI` errno is solely a musl/PulseAudio fallback compatibility
+  choice, not PI mutex support; glibc's `UNLOCK_PI` support probe requires
+  `ENOSYS`.
 - Realtime absolute waits are converted once at syscall entry to a
   monotonic-relative duration; wall-clock jumps during the wait do not
   re-adjust an already-queued deadline.

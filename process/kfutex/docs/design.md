@@ -12,7 +12,15 @@ resolution and wake primitives.
 
 PI futexes are out of scope for the current stage; until the scheduler
 provides real priorities and a donation graph, PI state must not be mixed
-into the non-PI buckets (PI commands return `ENOSYS` at the syscall layer).
+into the non-PI buckets. `ksyscall` rejects `FUTEX_LOCK_PI` with
+`EOPNOTSUPP` before resolving a key and leaves the other PI commands on
+Linux's `ENOSYS` path, so no PI request reaches this crate. The single-command
+exception is a musl/PulseAudio compatibility choice rather than PI support:
+musl's `pthread_mutexattr_setprotocol` returns the `LOCK_PI` probe errno to
+PulseAudio, which only accepts `EOPNOTSUPP` as "PI unavailable" and otherwise
+aborts instead of using a non-PI mutex. Only `LOCK_PI` may use that errno:
+glibc's `pthread_mutex_init` probes `UNLOCK_PI`, treats only `ENOSYS` as
+missing PI support, and aborts on an unexpected errno.
 
 ## Scope
 

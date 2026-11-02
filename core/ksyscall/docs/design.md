@@ -286,10 +286,19 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   only changes the mask when no CPU is occupied, and returns EBUSY when
   the task cannot migrate.
 - `sync/futex.rs`: `futex` / `get_robust_list` / `set_robust_list`;
-  compound operations (`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`) resolve both
-  keys under a single `address_space` lock before `WAKE_OP` decodes its
-  operation. Key resolution still reports a misaligned address as
-  `EINVAL` before that write fault. A non-private call then write-faults
+  only non-PI operations are implemented. `FUTEX_LOCK_PI` is rejected with
+  `EOPNOTSUPP` before the realtime gate and address resolution; the other PI
+  opcodes (`UNLOCK_PI`, `TRYLOCK_PI`, `WAIT_REQUEUE_PI`, `CMP_REQUEUE_PI`,
+  `LOCK_PI2`) remain `ENOSYS`. Linux's `CONFIG_FUTEX_PI=n` returns `ENOSYS`
+  for all of them. musl's `pthread_mutexattr_setprotocol` returns the
+  `LOCK_PI` probe errno to PulseAudio, which accepts only `EOPNOTSUPP` as
+  "PI unavailable" and otherwise aborts. Only `LOCK_PI` may carry that
+  errno: glibc probes `UNLOCK_PI` and treats only `ENOSYS` as missing PI
+  support, aborting on an unexpected errno. Unknown non-PI opcodes remain
+  `ENOSYS`. Compound operations (`REQUEUE` / `CMP_REQUEUE` / `WAKE_OP`)
+  resolve both keys under a single `address_space` lock before `WAKE_OP`
+  decodes its operation. Key resolution still reports a misaligned address
+  as `EINVAL` before that write fault. A non-private call then write-faults
   `uaddr2`, so an out-of-range address with an illegal encoding returns
   `EFAULT` or `ENOMEM`. After a
   nofault fault the syscall write-faults, honors a pending preemption, and

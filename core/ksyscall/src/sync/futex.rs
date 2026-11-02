@@ -4,7 +4,10 @@
 
 //! Futex and robust-list syscall adapters.
 
-use core::mem::size_of;
+use core::{
+    mem::size_of,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use kerrno::{KError, KResult, LinuxError};
 use kfutex::{FutexKey, FutexWakeOp, global_table};
@@ -13,9 +16,9 @@ use kprocess::{
 };
 use ktime_types::{MonotonicInstant, TimeSpan};
 use linux_raw_sys::general::{
-    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE,
-    FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, FUTEX_WAKE_OP, robust_list_head,
-    timespec,
+    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_LOCK_PI, FUTEX_PRIVATE_FLAG,
+    FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, FUTEX_WAKE_OP,
+    robust_list_head, timespec,
 };
 use osvm::VirtPtr;
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
@@ -41,6 +44,34 @@ fn validate_requeue_count(value: u32) -> KResult<usize> {
         n if n < 0 => Err(KError::InvalidInput),
         n => Ok(n as usize),
     }
+}
+
+/// Tracks whether the one-time `FUTEX_LOCK_PI` diagnostic has been emitted.
+static LOCK_PI_REFUSAL_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Rejects `FUTEX_LOCK_PI` with `EOPNOTSUPP` and lets every other command pass.
+///
+/// Linux built without `CONFIG_FUTEX_PI` returns `ENOSYS` for PI commands.
+/// musl's `pthread_mutexattr_setprotocol` probes `FUTEX_LOCK_PI` and returns
+/// the probe's errno: 95 (`EOPNOTSUPP`, also named `ENOTSUP`) tells PulseAudio
+/// that PI mutexes are unavailable, while 38 (`ENOSYS`) trips its
+/// `r == 0 || r == ENOTSUP` assertion. Only `FUTEX_LOCK_PI` may carry that
+/// errno: glibc probes `FUTEX_UNLOCK_PI`, treats only `ENOSYS` as missing PI
+/// support, and aborts on an errno outside its documented set. Keep every
+/// other PI command on Linux's `ENOSYS` path.
+///
+/// `Relaxed` is sufficient because the atomic only deduplicates logging; it
+/// publishes no data to another thread.
+fn reject_lock_pi_futex(command: u32) -> KResult<()> {
+    if command != FUTEX_LOCK_PI {
+        return Ok(());
+    }
+    if !LOCK_PI_REFUSAL_LOGGED.swap(true, Ordering::Relaxed) {
+        warn!(
+            "futex: FUTEX_LOCK_PI is not implemented; returning EOPNOTSUPP for the musl PI probe"
+        );
+    }
+    Err(KError::OperationNotSupported)
 }
 
 /// Observes the actual private syscall resolver for the current user image.
@@ -119,6 +150,14 @@ fn parse_timeout(
 ///
 /// Linux semantics follow `futex(2)`.
 ///
+/// `FUTEX_LOCK_PI` is not implemented and returns
+/// [`LinuxError::EOPNOTSUPP`] before validating its address, so musl's
+/// `pthread_mutexattr_setprotocol` probe reports PI mutexes as unavailable to
+/// PulseAudio instead of tripping its assertion. This is a deliberate
+/// userspace-fallback exception: Linux built with `CONFIG_FUTEX_PI=n` returns
+/// `ENOSYS`. Every other PI operation keeps `ENOSYS`, because glibc probes
+/// `FUTEX_UNLOCK_PI` and only treats `ENOSYS` as missing PI support.
+///
 /// A blocking `FUTEX_WAIT` / `FUTEX_WAIT_BITSET` interrupted by a signal
 /// returns a kernel restart code here, not a userspace `EINTR`:
 ///
@@ -151,6 +190,9 @@ pub(crate) fn sys_futex(
     );
 
     let command = futex_op & (FUTEX_CMD_MASK as u32);
+    // musl's PI feature probe is `FUTEX_LOCK_PI`; handle it before the
+    // realtime-flag gate and address resolution so the fallback errno is stable.
+    reject_lock_pi_futex(command)?;
     let is_private = futex_op & FUTEX_PRIVATE_FLAG != 0;
     let is_realtime = futex_op & FUTEX_CLOCK_REALTIME != 0;
     if is_realtime && !matches!(command, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
