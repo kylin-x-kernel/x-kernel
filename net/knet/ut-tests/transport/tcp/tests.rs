@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::vec;
-use core::net::Ipv4Addr;
+use alloc::{task::Wake, vec};
+use core::{net::Ipv4Addr, sync::atomic::AtomicUsize, task::Context};
 
+use kpoll::PollRegistrations;
 use smoltcp::{time::Instant, wire::Ipv4Address};
 use unittest::def_test;
 
@@ -12,6 +13,57 @@ use super::*;
 
 const PORT_START: u16 = 0xc000;
 const PORT_END: u16 = 0xffff;
+
+#[derive(Default)]
+struct WakeCounter(AtomicUsize);
+
+impl Wake for WakeCounter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[def_test]
+fn tcp_waiters_only_wake_for_their_socket() {
+    let socket = TcpSocket::new();
+    let other = TcpSocket::new();
+    socket.with_smol_socket(|socket| socket.listen(49152).unwrap());
+    other.with_smol_socket(|socket| socket.listen(49153).unwrap());
+
+    let counters: [_; 3] = core::array::from_fn(|_| Arc::new(WakeCounter::default()));
+    let mut registrations = Vec::new();
+    for (counter, events) in
+        counters
+            .iter()
+            .zip([IoEvents::IN | IoEvents::RDHUP, IoEvents::OUT, IoEvents::OUT])
+    {
+        let waker = Waker::from(counter.clone());
+        let context = Context::from_waker(&waker);
+        let mut owner = PollRegistrations::new();
+        socket
+            .register(&mut owner.context(&context), events)
+            .unwrap();
+        registrations.push(owner);
+    }
+    let mut other_registrations = PollRegistrations::new();
+    other
+        .register(
+            &mut other_registrations.context(&Context::from_waker(Waker::noop())),
+            IoEvents::OUT,
+        )
+        .unwrap();
+
+    other.with_smol_socket(|socket| socket.abort());
+    for counter in &counters {
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+    }
+
+    // Both send waiters must survive smoltcp's single send-waker slot.
+    socket.with_smol_socket(|socket| socket.abort());
+    for counter in &counters {
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    }
+}
 
 struct BoundRegistryReset;
 

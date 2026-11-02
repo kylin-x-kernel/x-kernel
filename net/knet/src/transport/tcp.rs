@@ -7,6 +7,7 @@ use alloc::{sync::Arc, vec, vec::Vec};
 use core::{
     net::{Ipv4Addr, SocketAddr},
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    task::Waker,
 };
 
 use hashbrown::HashMap;
@@ -97,7 +98,8 @@ pub struct TcpSocket {
     general: GeneralOptions,
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
-    poll_rx_closed: Arc<PollSet>,
+    poll_rx: Arc<PollSet>,
+    poll_tx: Arc<PollSet>,
     keep_alive: KeepAliveConfig,
     /// Whether a smoltcp keep-alive deadline may still be armed.
     ///
@@ -120,7 +122,8 @@ impl TcpSocket {
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            poll_rx_closed: Arc::new(PollSet::new()),
+            poll_rx: Arc::new(PollSet::new()),
+            poll_tx: Arc::new(PollSet::new()),
             keep_alive: KeepAliveConfig::default(),
             keep_alive_deadline_armed: AtomicBool::new(false),
         }
@@ -143,7 +146,8 @@ impl TcpSocket {
             general: GeneralOptions::new(),
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
-            poll_rx_closed: Arc::new(PollSet::new()),
+            poll_rx: Arc::new(PollSet::new()),
+            poll_tx: Arc::new(PollSet::new()),
             keep_alive: KeepAliveConfig::default(),
             keep_alive_deadline_armed: AtomicBool::new(false),
         };
@@ -236,7 +240,7 @@ impl TcpSocket {
     ) -> KResult {
         if how.has_read() {
             self.rx_closed.store(true, Ordering::Release);
-            self.poll_rx_closed.wake();
+            self.poll_rx.wake();
         }
 
         // stream
@@ -681,6 +685,9 @@ impl SocketOps for TcpSocket {
 
                 Ok(())
             })?;
+            // Existing interests must switch from stream to accept sources.
+            self.poll_rx.wake();
+            self.poll_tx.wake();
         } else {
             // ignore simultaneous `listen`s.
         }
@@ -827,21 +834,30 @@ impl Pollable for TcpSocket {
         context: &mut PollContext<'_>,
         events: IoEvents,
     ) -> Result<(), PollRegisterError> {
+        if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+            context.register(&self.poll_rx)?;
+        }
         if events.contains(IoEvents::OUT) {
-            let source_waker = self.general.register_tx_waker(context)?;
-            self.with_smol_socket(|socket| socket.register_send_waker(&source_waker));
-        } else if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
-            self.general.register_rx_waker(context)?;
+            context.register(&self.poll_tx)?;
         }
-        if self.is_listening()
-            && events.contains(IoEvents::IN)
-            && let Ok(endpoint) = self.bound_endpoint()
-        {
-            let sockets = SOCKET_SET.inner.lock();
-            LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
-        }
-        if events.contains(IoEvents::RDHUP) {
-            context.register(&self.poll_rx_closed)?;
+        if self.is_listening() {
+            if events.contains(IoEvents::IN)
+                && let Ok(endpoint) = self.bound_endpoint()
+            {
+                let sockets = SOCKET_SET.inner.lock();
+                LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
+            }
+        } else {
+            // smoltcp has one waker slot per direction. Aggregate all waiters
+            // for this socket without subscribing them to unrelated traffic.
+            self.with_smol_socket(|socket| {
+                if events.intersects(IoEvents::IN | IoEvents::RDHUP) {
+                    socket.register_recv_waker(&Waker::from(self.poll_rx.clone()));
+                }
+                if events.contains(IoEvents::OUT) {
+                    socket.register_send_waker(&Waker::from(self.poll_tx.clone()));
+                }
+            });
         }
         Ok(())
     }
