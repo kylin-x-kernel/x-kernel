@@ -1,0 +1,17 @@
+[package]
+name = "kquota"
+description = "Filesystem-independent disk quota accounting and v2 quota storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+kerrno.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

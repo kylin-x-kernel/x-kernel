@@ -3066,6 +3066,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kquota"
+version = "0.3.0-dev"
+dependencies = [
+ "bitflags 2.13.2",
+ "kerrno",
+ "unittest",
+]
+
+[[package]]
 name = "krcu"
 version = "0.3.0-dev"
 dependencies = [
@@ -3525,6 +3534,7 @@ dependencies = [
  "kerrno",
  "klazy",
  "kpoll",
+ "kquota",
  "ksignal",
  "ksync",
  "ktask",

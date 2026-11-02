@@ -142,6 +142,51 @@ fn reload_rejects_replayed_descriptor_address_changes() {
 }
 
 #[def_test]
+fn recovery_refresh_installs_hash_policy_from_the_validated_disk_mirror() {
+    let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    set_allocator_feature_bits(
+        &mut filesystem,
+        features::CompatFeatures::DIR_INDEX,
+        features::ReadOnlyCompatFeatures::empty(),
+    );
+    filesystem.initialize_directory_hash_policy().unwrap();
+    assert_eq!(filesystem.hash_unsigned, DX_HASH_UNSIGNED_OFFSET);
+    {
+        let mut bytes = device.bytes.lock();
+        put_u32(&mut bytes, 1024 + 0x160, EXT2_FLAGS_SIGNED_HASH);
+        bytes[1024 + 0xfc] = 1;
+    }
+    filesystem.metadata_io.invalidate_all();
+    filesystem.refresh_recovered_superblock().unwrap();
+    assert_eq!(filesystem.superblock().default_hash_version(), 1);
+    assert_eq!(filesystem.superblock().flags(), EXT2_FLAGS_SIGNED_HASH);
+    assert_eq!(filesystem.hash_unsigned, 0);
+}
+
+#[def_test]
+fn recovery_refresh_rejects_invalid_replayed_hash_policy_before_changing_state() {
+    let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
+    let old_hash_version = filesystem.superblock().default_hash_version();
+    let old_hash_unsigned = filesystem.hash_unsigned;
+    {
+        let mut bytes = device.bytes.lock();
+        bytes[1024 + 0xfc] = u8::MAX;
+        put_u32(&mut bytes, 1024 + 0x0c, TEST_FREE_BLOCKS - 1);
+    }
+    filesystem.metadata_io.invalidate_all();
+    assert_eq!(
+        filesystem.refresh_recovered_superblock(),
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidDirectoryHash))
+    );
+    assert_eq!(
+        filesystem.superblock().default_hash_version(),
+        old_hash_version
+    );
+    assert_eq!(filesystem.hash_unsigned, old_hash_unsigned);
+    assert_eq!(filesystem.free_blocks_count(), u64::from(TEST_FREE_BLOCKS));
+}
+
+#[def_test]
 fn mount_rejects_clean_legacy_orphan_head_without_recovery() {
     let (mut filesystem, device) = allocator_test_filesystem(TEST_FREE_BLOCKS, 0b0011_1111);
     let inode = allocate_checkpointed_regular_inode(&mut filesystem);

@@ -92,6 +92,12 @@ journal replay evidence without persistent phase fields. A clean filesystem does
 not perform recovery writes. The explicit device-recovery test entry uses these
 same algorithms.
 
+Recovery refresh reads and validates one superblock image, checks its journal
+backing identity and derives its directory hash policy before installing the
+mirror and allocator counters. It then rebuilds file-size limits and protected
+ranges. Ordinary checkpoint reload uses the same read/validation and allocator
+reload algorithms while preserving the existing mount mirror and hash policy.
+
 `build_system_zones` derives the complete protected-block index from filesystem
 geometry and the mounted journal's physical extents. Initial mount retains the
 metadata index used to validate the backing inode and completes it with journal
@@ -204,7 +210,9 @@ free-blocks/free-inodes/directory-inode 全局计数、orphan 头、`RECOVER` �
 由独立的 `delalloc_reserved_blocks: Mutex<u64>` 保护，对应 Linux
 `s_dirtyclusters_counter`（per-CPU 原子计数）的独立更新域——reserve/release 只与
 其他 delalloc 修改互相串行，不阻塞全局组分配。静态几何不受本锁变动：
-primary superblock 解出的 geometry/static feature 留在挂载时冻结的 `superblock` mirror，
+`layout` and `group_geometry` retain the validated mount geometry. Metadata
+reload checks a decoded superblock against that geometry before rebuilding
+mutable counters. Only recovery refresh replaces the mount mirror and hash policy.
 逐组地址（block/inode bitmap、inode table）只保存在挂载时冻结的 `group_geometry`
 一维表中——`AllocatorState` 的逐组条目（`GroupMutableState`）只镜像计数、flags 与
 bitmap checksum 等可变字段，刻意不含地址字段，地址因此只有一个读取源，对应 Linux

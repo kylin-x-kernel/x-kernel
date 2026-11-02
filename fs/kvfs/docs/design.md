@@ -1239,3 +1239,16 @@ protection. Filesystems may implement automatic `InodeOperations::update_time` w
 resident attribute publication and deferred persistence; explicit setattr remains
 a separate contract. The filesystem must retain metadata dirtiness through data-only
 writeback and cover full fsync, syncfs/unmount and inode eviction.
+## Generic quota ownership
+
+Each `SuperBlock` owns one sleepable `Mutex<kquota::QuotaInfo>`. The state is
+initially disabled for user, group and project quotas. `quota_info()` exposes
+the canonical owner to filesystem integration; no filesystem-private duplicate
+quota manager is needed. The core owns record caching, admission and quota
+formats, while the concrete filesystem supplies direct backing-file I/O and
+transactions. No concrete filesystem enables quotas in this change.
+
+Quota operations may sleep. Their backing-file I/O must bypass charging and
+must not reenter the same quota owner or reacquire a caller-held filesystem
+lock. Filesystem integration must establish one lock order and explicitly
+flush/disable quota before final owner destruction.

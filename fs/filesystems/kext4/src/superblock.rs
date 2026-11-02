@@ -577,15 +577,7 @@ impl Ext4SbInfo {
     /// Refreshes the mount-time mirror after recovery has stabilized storage.
     pub(crate) fn refresh_recovered_superblock(&mut self) -> Ext4Result<()> {
         self.metadata_io.invalidate_all();
-        self.reload_mutable_metadata_state()?;
-        let (block, offset, len) = self.primary_superblock_location()?;
-        let buffer = self.read_metadata_block(block)?;
-        let superblock = Ext4DiskSuperblock::decode(
-            buffer
-                .as_ref()
-                .get(offset..offset + len)
-                .ok_or(Ext4Error::OutOfBounds)?,
-        )?;
+        let superblock = self.read_primary_superblock()?;
         // The loaded journal mapping remains tied to its backing identity.
         if self.journal.is_some()
             && select_journal_location(
@@ -597,8 +589,14 @@ impl Ext4SbInfo {
         {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal));
         }
+        let hash_unsigned = Self::resolve_directory_hash_unsigned(
+            superblock.default_hash_version(),
+            superblock.features().has_dir_index(),
+            superblock.flags(),
+        )?;
+        self.reload_mutable_metadata_state_from(&superblock)?;
         self.superblock = superblock;
-        self.initialize_directory_hash_policy()?;
+        self.hash_unsigned = hash_unsigned;
         self.bitmap_maxbytes = self.legacy_max_file_size()?;
         self.system_zones = self.build_system_zones()?;
         Ok(())
@@ -1076,7 +1074,13 @@ impl Ext4SbInfo {
             .collect()
     }
 
+    /// Reloads allocator state while preserving the mount's static policy.
     pub(crate) fn reload_mutable_metadata_state(&mut self) -> Ext4Result<()> {
+        let superblock = self.read_primary_superblock()?;
+        self.reload_mutable_metadata_state_from(&superblock)
+    }
+
+    fn read_primary_superblock(&self) -> Ext4Result<Ext4DiskSuperblock> {
         let (superblock_block, superblock_offset, superblock_len) =
             self.primary_superblock_location()?;
         let superblock_buffer = self.read_metadata_block(superblock_block)?;
@@ -1086,12 +1090,18 @@ impl Ext4SbInfo {
             .ok_or(Ext4Error::OutOfBounds)?;
         let superblock = Ext4DiskSuperblock::decode(superblock_bytes)?;
         superblock.features().validate_mount()?;
-        let layout = FilesystemLayout::derive(&superblock)?;
+        Ok(superblock)
+    }
+
+    fn reload_mutable_metadata_state_from(
+        &mut self,
+        superblock: &Ext4DiskSuperblock,
+    ) -> Ext4Result<()> {
+        let layout = FilesystemLayout::derive(superblock)?;
         if layout != self.layout {
             return Err(Ext4Error::Corrupt(CorruptKind::InvalidBlockGroupGeometry));
         }
-        let groups = self.decode_group_descriptors(&superblock, layout)?;
-        self.initialize_directory_hash_policy()?;
+        let groups = self.decode_group_descriptors(superblock, layout)?;
 
         // The frozen geometry table is the mount's single address source.
         // No KExt4-supported operation journals address changes, so a

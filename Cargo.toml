@@ -196,6 +196,7 @@ posix-bpf = { path = "posix/bpf" }
 # Internal: memory and filesystem
 alloc-engine = { path = "mm/alloc-engine" }
 kvfs = { path = "fs/kvfs" }
+kquota = { path = "fs/quota" }
 anon_inodefs = { path = "fs/filesystems/anon_inodefs" }
 bpffs = { path = "fs/filesystems/bpffs" }
 memfs = { path = "fs/filesystems/memfs" }

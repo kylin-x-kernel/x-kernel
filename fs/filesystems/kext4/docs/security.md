@@ -26,6 +26,13 @@ cleanup must succeed before the root inode is loaded. Failure follows nascent
 superblock teardown, releasing private state and the device claim without
 publishing an accessible root directory.
 
+Metadata reload validates the decoded superblock's features and frozen
+geometry before changing allocator counters. Recovery refresh additionally
+checks journal backing identity and hash policy before installing that same
+image as the new mirror. It does not decode the superblock a second time or
+consult the previous mirror to initialize the new policy. Ordinary checkpoint
+reload preserves the existing mount mirror and static policy.
+
 Protected ranges are reconstructed from filesystem geometry and the mounted
 journal mapping, using the same checked insertion path at mount and recovery.
 The index must remain ordered and non-overlapping for binary-search queries;
