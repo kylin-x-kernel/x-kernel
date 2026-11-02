@@ -6,13 +6,14 @@ This analysis covers the entire crate: `src/lib.rs`, `src/mutex.rs` and
 ## Trust boundaries
 
 Trusted kernel callers supply protected data and spin configuration. The
-statically linked `kiface_task_api::TaskExecutionIf` provider supplies `NonZeroU64`
-task keys, waker-driven waiting and scheduling. The separate
+statically linked `kiface_task_api::TaskExecutionIf` provider supplies
+`ktask_types::OwnerKey` task keys, waker-driven waiting and scheduling. The separate
 `kiface_task_api::TaskLockDiagnosticsIf` provider supplies diagnostic bookkeeping.
 The execution provider must retain
 identity across migration and must not reuse a key while mutexes still record
-that owner. The return type mechanically excludes the unlocked zero sentinel;
-key uniqueness and stability remain provider obligations. No task pointer
+that owner. The `OwnerKey` return type mechanically excludes the unlocked zero
+sentinel and keeps the low flag bits clear; key uniqueness and stability remain
+provider obligations. No task pointer
 crosses the interface; hook addresses are opaque
 identities and must not be dereferenced by the provider.
 
@@ -38,7 +39,7 @@ No new manual Send/Sync implementations or raw future lifetime extensions exist.
 
 | Trigger | Effect | Existing control and residual risk |
 | --- | --- | --- |
-| Unstable or colliding provider keys | Broken exclusion or wrong-owner diagnostics | NonZeroU64 excludes zero; the trusted provider must ensure stability and uniqueness. |
+| Unstable or colliding provider keys | Broken exclusion or wrong-owner diagnostics | `OwnerKey` excludes zero and misaligned keys; the trusted provider must ensure stability and uniqueness so future flag packing cannot alias another task. |
 | Unlock racing waiter registration | Lost progress if admission were reordered | Listener registration precedes Acquire recheck; release notifies one. |
 | Recursive blocking acquisition | Deadlock | Owner comparison panics before waiting; use try-lock only where failure is handled. |
 | Cross-task guard transfer | Wrong-owner unlock | GuardNoSend rejects safe transfer; unsafe raw-lock users retain the obligation. |

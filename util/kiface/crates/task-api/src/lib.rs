@@ -10,6 +10,8 @@
 
 #![no_std]
 
+use ktask_types::OwnerKey;
+
 /// Current-task blocking admission, without preparing or performing a wait.
 #[kiface::interface]
 pub trait TaskBlockingContextIf {
@@ -100,10 +102,12 @@ pub trait TaskExecutionIf {
     ///
     /// Keys must survive yielding, waiting and CPU migration, must not be shared
     /// by distinct live tasks, and must not be reused while a consumer still
-    /// records that owner. Zero is reserved for an absent owner. The provider
-    /// must reject an absent current task rather than invent an identity.
-    /// This query must not block, unwind on valid input, or reenter its caller.
-    fn current_owner_key() -> core::num::NonZeroU64;
+    /// records that owner. Zero is reserved for an absent owner. The returned
+    /// [`OwnerKey`] keeps its low flag bits clear, so OR-ing lock-word flags
+    /// into them never aliases another task. The provider must reject an absent
+    /// current task rather than invent an identity. This query must not block,
+    /// unwind on valid input, or reenter its caller.
+    fn current_owner_key() -> OwnerKey;
 
     /// Yields in sleepable task context, resuming this same task, possibly on
     /// another CPU. Must not unwind on valid input.

@@ -4,7 +4,7 @@
 
 //! Providers for shared task execution, blocking admission and completion waits.
 
-use core::{future::Future, num::NonZeroU64, pin::Pin};
+use core::{future::Future, pin::Pin};
 
 #[cfg(unittest)]
 use kmutex::Mutex;
@@ -35,12 +35,12 @@ impl kiface_task_wait_api::TaskCompletionWaitIf {
 
 #[expect(
     clippy::expect_used,
-    reason = "CG-021-no-panic-on-reachable-failure: holder_key uses a nonzero identity token or \
-              the non-null address of the live task"
+    reason = "CG-021-no-panic-on-reachable-failure: holder_key is a live task's aligned key or \
+              non-null address"
 )]
-fn owner_key_for_task(task: &crate::TaskInner) -> NonZeroU64 {
-    NonZeroU64::new(crate::lock_owner::holder_key(task))
-        .expect("live task has a nonzero ownership key")
+fn owner_key_for_task(task: &crate::TaskInner) -> ktask_types::OwnerKey {
+    ktask_types::OwnerKey::from_aligned(crate::lock_owner::holder_key(task))
+        .expect("live task has a nonzero, aligned ownership key")
 }
 
 #[kiface::provide]
@@ -49,7 +49,7 @@ impl kiface_task_api::TaskExecutionIf {
         crate::current_may_uninit().is_some()
     }
 
-    fn current_owner_key() -> NonZeroU64 {
+    fn current_owner_key() -> ktask_types::OwnerKey {
         owner_key_for_task(&crate::current())
     }
 

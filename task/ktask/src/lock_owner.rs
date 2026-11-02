@@ -17,17 +17,17 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::{TaskInner, api::current_may_uninit};
 
-/// Non-zero identity of `task` in lock-owner records and running-task slots.
+/// Flag-reserved identity of `task` in lock-owner records and running-task slots.
 ///
-/// [`TaskInner::owner_key`] can be 0 for a user runtime whose identity token
-/// is unknown, and 0 means "no holder" here. Such a task falls back to its
-/// `TaskInner` address, which is what `owner_key` already is for kernel, idle,
-/// and internal tasks.
+/// Returns the raw aligned key from `TaskInner::owner_key_aligned`; a user
+/// runtime whose identity token is unknown reads `None` there and falls back to
+/// the `TaskInner` address, which is what the aligned projection already uses
+/// for kernel, idle, and internal tasks.
 #[inline]
 pub(crate) fn holder_key(task: &TaskInner) -> u64 {
-    match task.owner_key() {
-        0 => task as *const TaskInner as usize as u64,
-        key => key,
+    match task.owner_key_aligned() {
+        None => task as *const TaskInner as usize as u64,
+        Some(key) => key.as_raw(),
     }
 }
 

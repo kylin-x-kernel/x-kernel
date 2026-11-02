@@ -113,8 +113,8 @@ fn unknown_token_task_uses_nonzero_owner_key() {
     );
     assert_eq!(task.owner_key(), 0);
     let key = super::owner_key_for_task(&task);
-    assert_ne!(key.get(), 0);
-    assert_eq!(key.get(), &task as *const crate::TaskInner as usize as u64);
+    assert_ne!(key.as_raw(), 0);
+    assert_eq!(key.as_raw(), &task as *const crate::TaskInner as usize as u64);
     assert_eq!(super::owner_key_for_task(&task), key);
 }
 

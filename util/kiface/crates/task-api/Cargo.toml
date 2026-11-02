@@ -11,6 +11,7 @@ documentation.workspace = true
 
 [dependencies]
 kiface.workspace = true
+ktask-types.workspace = true
 
 [lints]
 workspace = true

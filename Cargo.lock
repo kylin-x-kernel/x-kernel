@@ -2670,6 +2670,7 @@ name = "kiface-task-api"
 version = "0.3.0-dev"
 dependencies = [
  "kiface",
+ "ktask-types",
 ]
 
 [[package]]
@@ -2793,6 +2794,7 @@ dependencies = [
  "event-listener",
  "kiface-task-api",
  "klockstat",
+ "ktask-types",
  "lock_api",
 ]
 
@@ -3353,12 +3355,20 @@ dependencies = [
  "krcu-core",
  "ksched",
  "kspin",
+ "ktask-types",
  "ktime",
  "ktime_types",
  "ktimer-core",
  "lazyinit",
  "log",
  "memaddr",
+ "unittest",
+]
+
+[[package]]
+name = "ktask-types"
+version = "0.3.0-dev"
+dependencies = [
  "unittest",
 ]
 

@@ -16,6 +16,7 @@ watchdog = []
 
 [dependencies]
 kiface-task-api.workspace = true
+ktask-types.workspace = true
 event-listener.workspace = true
 lock_api.workspace = true
 klockstat = { workspace = true, optional = true }

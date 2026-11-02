@@ -15,6 +15,7 @@ its separate rwlock spin helper, using the same configuration type.
 - `src/lib.rs`: mutex exports; task contracts are imported from `kiface-task-api`.
 - `kiface-task-api::TaskExecutionIf`: task identity, yielding and synchronous waiting.
 - `kiface-task-api::TaskLockDiagnosticsIf`: optional task diagnostic bookkeeping.
+- `ktask-types::OwnerKey`: the shared owner-key boundary type carried by the lock word.
 
 The host task provider supplies identity, scheduling, future execution and
 diagnostics. It owns timestamps and task bookkeeping. It does not own mutex
@@ -23,8 +24,9 @@ state, listener admission, wakeup policy, or lock-class accounting.
 ## Execution context
 
 Acquisition requires a current task with a stable unique owner key. The
-provider returns `core::num::NonZeroU64`, mechanically excluding the unlocked
-sentinel; `RawMutex` extracts its numeric value with `.get()`.
+provider returns `ktask_types::OwnerKey`, which mechanically excludes the
+unlocked sentinel and keeps its low flag bits clear; `RawMutex` extracts its
+numeric value with `.as_raw()`.
 Blocking acquisition requires sleepable context, with no IRQ/preemption or
 spinlock exclusion preventing scheduling. Early boot before task installation
 and interrupt contexts are unsupported. `try_lock` never yields or waits;
@@ -37,7 +39,11 @@ The provider must not reenter this mutex or unwind from diagnostic hooks.
 
 ## State and algorithm
 
-Zero in `owner_id` means unlocked; a nonzero key identifies the owner. A
+Zero in `owner_id` means unlocked; a nonzero owner word identifies the owner.
+The owner word is a `ktask_types::OwnerKey` whose low `FLAG_BITS` bits stay
+clear, reserving them for future lock-word flags; the `OwnerWord` wrapper masks
+the flag bits off before every ownership comparison, and this crate never sets
+them. A
 successful Acquire CAS grants exclusion and observes the previous owner's
 protected writes. The blocking path uses weak CAS retries; `try_lock` uses one
 strong CAS so spurious failure cannot report contention.

@@ -34,8 +34,13 @@ on cancellation. This does not change the legacy infallible spawning APIs.
 `src/task_api.rs` implements `kiface_task_api::TaskExecutionIf` and
 `kiface_task_api::TaskLockDiagnosticsIf`, not a consumer-specific lock factory.
 It uses the existing `lock_owner::holder_key` identity, including the live-task
-address fallback for an unknown identity token, and returns a nonzero key.
-Identity must remain stable across suspension and migration. The provider lends
+address fallback for an unknown identity token, and returns a nonzero
+`OwnerKey`. Identity must remain stable across suspension and migration. The
+aligned key invariant is enforced by `OwnerKey`'s constructors: token-derived
+keys are projected through `OwnerKey::from_token`, and the `TaskInner` address
+fallback is pinned by a compile-time alignment assertion. Lock-word consumers
+rely on this to pack flags into the owner word without aliasing another task.
+The provider lends
 the pinned waiter to synchronous `block_on`; it cannot retain that borrow.
 Callers must establish sleepable context for blocking acquisition. Startup
 try-lock requires a current task but does not yield. Diagnostic hooks only update

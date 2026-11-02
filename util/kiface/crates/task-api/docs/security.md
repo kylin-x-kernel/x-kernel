@@ -20,10 +20,15 @@ unchecked release. Checked release may schedule only when surrounding context
 permits it; consumers combining IRQ exclusion must restore masks first. These
 operations neither mask IRQs nor provide NMI mutual exclusion.
 
-NonZeroU64 excludes the unlocked sentinel, but key uniqueness and stability
+`OwnerKey` excludes the unlocked sentinel and encodes the flag-alignment
+invariant in its constructors, but key uniqueness and stability
 remain provider obligations. Keys must survive task migration and must not be
-reused while a consumer still records the owner. Absent current-task state
-must not fabricate an identity. Queries must not block or unwind on valid use.
+reused while a consumer still records the owner. Token-derived keys go through
+`OwnerKey::from_token`; a consumer must mask the flags off and decode with
+`OwnerKey::from_aligned` before treating the field as an identity, so a set
+flag bit never turns one task's key into another's.
+Absent current-task state must not fabricate an identity. Queries must not block
+or unwind on valid use.
 
 Yield and wait require sleepable task context. The pinned borrowed future must
 not escape the synchronous wait or move to another task; completion requires

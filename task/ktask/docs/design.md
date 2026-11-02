@@ -1320,15 +1320,20 @@ worker, not after an RCU grace period, so a spinner must not dereference the
 holder.
 
 `LockOwner` records the writer's `holder_key` and the CPU it acquired on.
-`holder_key` is `owner_key`, except that a user task whose identity token is
-unknown (`owner_key` 0) uses its `TaskInner` address, as kernel tasks already
-do; 0 stays reserved for "no holder". `switch_to` (and
+`holder_key` is `owner_key_aligned`: the identity token projected through
+`ktask_types::OwnerKey::from_token` so its low bits stay clear for
+lock-word flags, or the `TaskInner` address for kernel, idle, and internal
+tasks. A user task whose identity token is unknown (`owner_key_aligned`
+returns `None`) also uses its address; 0 stays reserved for "no holder". The
+dense `owner_key` (raw token or address) remains the identity for non-lock
+consumers such as workqueue callback affinity and logging; each form is only
+compared within its own domain. `switch_to` (and
 `CurrentTask::init_current` at bring-up) writes the incoming task's key to
 that CPU's `CPU_RUNNING_TASK` slot. A holder is `Running` while its CPU's slot
 holds its key. Only keys are compared, so a stale record misjudges whether
 spinning pays off. Re-entry detection compares the same key. A reused
 address can therefore panic a later task that does not hold the lock, which
-is the same address fallback as `RawMutex`'s `owner_key`. That panic also
+is the same address fallback as `RawMutex`'s `owner_id`. That panic also
 requires the write record to outlive the holder.
 
 Spinning stops on `needs_resched`, on a writer that is not running, or when a

@@ -10,6 +10,7 @@ use event_listener::{Event, listener};
 use kiface_task_api::TaskExecutionIf;
 #[cfg(feature = "watchdog")]
 use kiface_task_api::TaskLockDiagnosticsIf;
+use ktask_types::OwnerKey;
 
 use crate::{SpinConfig, spin::Spin};
 
@@ -21,10 +22,26 @@ use crate::{SpinConfig, spin::Spin};
 /// sleepable task context. Recursive blocking acquisition panics.
 pub struct RawMutex {
     event: Event,
+    /// Owner word: an aligned owner key, or `0` when unlocked. The low
+    /// `ktask_types::OwnerKey::FLAG_BITS` bits are reserved for lock-word flags.
     owner_id: AtomicU64,
     config: SpinConfig,
     #[cfg(feature = "stats")]
     stats: &'static klockstat::LockClassStats,
+}
+
+/// The raw owner word stored in the mutex owner slot: an aligned owner key
+/// with lock-word flags packed into its low bits. Zero is the unlocked word.
+struct OwnerWord(u64);
+
+impl OwnerWord {
+    /// Returns the owner key with the flag bits masked off.
+    ///
+    /// Returns: `Some(key)` for a locked word, `None` for the unlocked zero
+    /// word.
+    fn key(self) -> Option<OwnerKey> {
+        OwnerKey::from_aligned(self.0 & !OwnerKey::FLAG_MASK)
+    }
 }
 
 impl RawMutex {
@@ -52,7 +69,8 @@ impl RawMutex {
     /// Returns `true` if the current task owns this mutex.
     #[inline(always)]
     pub fn is_owned_by_current(&self) -> bool {
-        self.owner_id.load(Ordering::Relaxed) == TaskExecutionIf::current_owner_key().get()
+        OwnerWord(self.owner_id.load(Ordering::Relaxed)).key()
+            == Some(TaskExecutionIf::current_owner_key())
     }
 
     /// Asserts that the current task does not own this mutex.
@@ -64,7 +82,7 @@ impl RawMutex {
         assert!(
             !self.is_owned_by_current(),
             "{}: {}",
-            TaskExecutionIf::current_owner_key().get(),
+            TaskExecutionIf::current_owner_key().as_raw(),
             message
         );
     }
@@ -119,7 +137,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
     #[inline(always)]
     fn lock(&self) {
         // The owner key remains valid across blocking and CPU migration.
-        let current_id = TaskExecutionIf::current_owner_key().get();
+        let current_id = TaskExecutionIf::current_owner_key();
         let mut spin = Spin::new(self.config);
         let mut owner_id = self.owner_id.load(Ordering::Relaxed);
         #[cfg(feature = "stats")]
@@ -127,15 +145,16 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
         loop {
             assert_ne!(
-                owner_id, current_id,
+                OwnerWord(owner_id).key(),
+                Some(current_id),
                 "{} tried to acquire mutex it already owns.",
-                current_id
+                current_id.as_raw()
             );
 
-            if owner_id == 0 {
+            if OwnerWord(owner_id).key().is_none() {
                 match self.owner_id.compare_exchange_weak(
                     owner_id,
-                    current_id,
+                    current_id.as_raw(),
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
@@ -160,7 +179,7 @@ unsafe impl lock_api::RawMutex for RawMutex {
             listener!(self.event => listener);
 
             owner_id = self.owner_id.load(Ordering::Acquire);
-            if owner_id == 0 {
+            if OwnerWord(owner_id).key().is_none() {
                 continue;
             }
 
@@ -179,12 +198,12 @@ unsafe impl lock_api::RawMutex for RawMutex {
 
     #[inline(always)]
     fn try_lock(&self) -> bool {
-        let current_id = TaskExecutionIf::current_owner_key().get();
+        let current_id = TaskExecutionIf::current_owner_key();
         // The reason for using a strong compare_exchange is explained here:
         // https://github.com/Amanieu/parking_lot/pull/207#issuecomment-575869107
         let acquired = self
             .owner_id
-            .compare_exchange(0, current_id, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(0, current_id.as_raw(), Ordering::Acquire, Ordering::Relaxed)
             .is_ok();
         if acquired {
             #[cfg(feature = "stats")]
@@ -201,11 +220,12 @@ unsafe impl lock_api::RawMutex for RawMutex {
         // successfully locked by the current guard holder, so releasing the
         // owner slot and waking one waiter upholds the raw mutex protocol.
         let owner_id = self.owner_id.swap(0, Ordering::Release);
-        let current_id = TaskExecutionIf::current_owner_key().get();
+        let current_id = TaskExecutionIf::current_owner_key();
         assert_eq!(
-            owner_id, current_id,
+            OwnerWord(owner_id).key(),
+            Some(current_id),
             "{} tried to release mutex it doesn't own",
-            current_id
+            current_id.as_raw()
         );
         #[cfg(feature = "watchdog")]
         TaskLockDiagnosticsIf::lock_released(self as *const _ as usize);

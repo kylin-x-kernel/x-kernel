@@ -1,8 +1,9 @@
 # kiface-task-api design
 
 `kiface-task-api` owns low-level shared task capability contracts, not scheduling algorithms or
-consumer lock policy. Its only dependency is `kiface`, which supplies static
-exactly-one-provider wiring. Consumers do not depend on `ktask`; the runtime
+consumer lock policy. Its dependencies are `kiface`, which supplies static
+exactly-one-provider wiring, and `ktask-types`, which supplies the shared
+`OwnerKey` boundary type. Consumers do not depend on `ktask`; the runtime
 implements the contracts without exposing task handles or scheduler types.
 
 `TaskBlockingContextIf` supplies a nonallocating admission snapshot. It neither
@@ -12,7 +13,12 @@ kspin, which consumes this lower-level crate. RCU-specific admission remains RCU
 policy, not part of the scheduler's general blocking-context query.
 
 `TaskExecutionIf` supplies current-task presence, a nonzero stable owner key, voluntary yielding and
-synchronous execution of a borrowed pinned future. Identity queries do not
+synchronous execution of a borrowed pinned future. The owner key is the shared
+`ktask_types::OwnerKey` value type, whose low `FLAG_BITS` bits stay clear so
+lock consumers can OR lock-word flags into them without aliasing another task's
+identity. The ktask provider derives the key with `OwnerKey::from_token`; a
+consumer decodes an owner word back to `OwnerKey` with `OwnerKey::from_aligned`
+after masking the flags off. Identity queries do not
 schedule. Yield and wait require sleepable current-task context. Waiting does
 not transfer ownership of the future or require it to be Send; the provider
 must complete it on the calling task before returning.

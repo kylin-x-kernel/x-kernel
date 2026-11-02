@@ -416,6 +416,14 @@ unsafe impl Send for TaskInner {}
 // interior-mutability primitives that already enforce the task invariants.
 unsafe impl Sync for TaskInner {}
 
+// The owner-key address fallback is only valid because `TaskInner` keeps the
+// low flag bits clear; fail the build if a future layout shrinks that
+// alignment.
+const _: () = assert!(
+    core::mem::align_of::<TaskInner>() as u64 >= ktask_types::OwnerKey::ALIGN,
+    "the owner-key flag bits require TaskInner to keep its low address bits clear"
+);
+
 impl TaskInner {
     fn new_with_identity<F>(
         entry: F,
@@ -596,15 +604,33 @@ impl TaskInner {
         self.identity.trace_id()
     }
 
-    /// Returns the scheduler-internal owner key.
+    /// Returns the dense owner identity token.
     ///
-    /// The key is the task's never-reused identity token, so it survives an
-    /// `exec` number takeover and cannot alias a later task at a reused
-    /// address; kernel, idle, and internal tasks fall back to their address.
+    /// This is the raw identity, not the flag-aligned key stored in lock
+    /// owner words. The token is never-reused, so it survives an `exec`
+    /// number takeover and cannot alias a later task at a reused address;
+    /// kernel, idle, and internal tasks fall back to their address, and a user
+    /// runtime whose identity token is unknown reads `0`. Locking and scheduler
+    /// running-task slots use the flag-reserved [`ktask_types::OwnerKey`]
+    /// projection instead, and the two domains are never compared.
     pub fn owner_key(&self) -> u64 {
         self.identity
             .identity_token()
             .map_or(self as *const _ as usize as u64, |token| token.as_u64())
+    }
+
+    /// Returns the flag-reserved owner key for scheduling and locks.
+    ///
+    /// Projects the dense token through [`ktask_types::OwnerKey::from_token`];
+    /// kernel, idle, and internal tasks use their 8-aligned `TaskInner`
+    /// address, whose low flag bits are already clear. Returns `None` for a
+    /// user runtime whose identity token is unknown; callers fall back to the
+    /// task address.
+    pub(crate) fn owner_key_aligned(&self) -> Option<ktask_types::OwnerKey> {
+        self.identity.identity_token().map_or(
+            ktask_types::OwnerKey::from_aligned(self as *const _ as usize as u64),
+            |token| ktask_types::OwnerKey::from_token(token.as_u64()),
+        )
     }
 
     /// Gets the name of the task.
@@ -1523,3 +1549,6 @@ unittest::path_mod_test!(tests_rcu_reader, "../ut-tests/tests/rcu_reader.rs");
 
 #[cfg(all(feature = "smp", unittest))]
 unittest::path_mod_test!(tests_on_cpu_mask, "../ut-tests/task/tests_on_cpu_mask.rs");
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests_owner_key, "../ut-tests/owner_key.rs");
