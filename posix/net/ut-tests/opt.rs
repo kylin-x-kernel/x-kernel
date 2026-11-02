@@ -9,7 +9,7 @@ use ktime_types::{NANOS_PER_SEC, TimeSpan};
 use linux_raw_sys::general::timeval;
 use linux_raw_sys::net::{
     AF_INET, AF_UNIX, IPPROTO_TCP, SO_DOMAIN, SO_PROTOCOL, SO_TYPE, SOCK_DGRAM, SOCK_STREAM,
-    SOL_SOCKET, socklen_t,
+    SOL_SOCKET, TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL, socklen_t,
 };
 use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
@@ -17,7 +17,7 @@ use unittest_support::{TestUserBuffer, TestUserValue};
 
 use super::{
     BPF_JA, BPF_JMP, BPF_RET, IFNAMSIZ, SockFilter, conv::SocketTimeout, encode_bound_device_name,
-    sys_getsockopt, validate_classic_filter_instructions,
+    sys_getsockopt, sys_setsockopt, validate_classic_filter_instructions,
 };
 use crate::socket::sys_socket;
 
@@ -280,4 +280,51 @@ fn so_domain_and_protocol_report_the_creation_family_and_protocol() {
 
     close_socket(stream);
     close_socket(dgram);
+}
+
+/// The three Linux TCP keep-alive knobs are wired through the syscall
+/// dispatch; their defaults and range checks are covered by the socket-level
+/// tests.
+#[def_test(user)]
+fn tcp_keepalive_options_round_trip_through_syscalls() {
+    const VALUE_LEN: socklen_t = size_of::<u32>() as socklen_t;
+
+    let fd = sys_socket(AF_INET, SOCK_STREAM, 0).unwrap() as i32;
+    let value = TestUserValue::<u32>::new().unwrap();
+    let mut optlen = TestUserValue::from_value(VALUE_LEN).unwrap();
+    let optlen_ptr = UserPtr::from(optlen.as_user_ptr());
+    let optval = UserPtr::from(value.as_user_ptr().cast::<u8>());
+
+    let mut get = |optname: u32| {
+        optlen.write(VALUE_LEN);
+        sys_getsockopt(fd, IPPROTO_TCP as u32, optname, optval, optlen_ptr).unwrap();
+        value.read()
+    };
+    let set = |optname: u32, new_value: u32| {
+        let input = TestUserValue::<u32>::from_value(new_value).unwrap();
+        sys_setsockopt(
+            fd,
+            IPPROTO_TCP as u32,
+            optname,
+            UserPtr::from(input.as_user_ptr().cast::<u8>()).as_const(),
+            VALUE_LEN,
+        )
+    };
+
+    assert_eq!(get(TCP_KEEPIDLE), 7200);
+    assert_eq!(get(TCP_KEEPINTVL), 75);
+    assert_eq!(get(TCP_KEEPCNT), 9);
+
+    assert_eq!(set(TCP_KEEPIDLE, 30), Ok(0));
+    assert_eq!(set(TCP_KEEPINTVL, 5), Ok(0));
+    assert_eq!(set(TCP_KEEPCNT, 2), Ok(0));
+    assert_eq!(get(TCP_KEEPIDLE), 30);
+    assert_eq!(get(TCP_KEEPINTVL), 5);
+    assert_eq!(get(TCP_KEEPCNT), 2);
+
+    // An invalid value fails with EINVAL and does not clobber the old one.
+    assert_eq!(set(TCP_KEEPINTVL, 0), Err(KError::InvalidInput));
+    assert_eq!(get(TCP_KEEPINTVL), 5);
+
+    close_socket(fd);
 }

@@ -11,12 +11,13 @@ use kerrno::{KError, KResult, LinuxError};
 use ktime_types::TimeSpan;
 
 macro_rules! define_options {
-    ($($name:ident($value:ty),)*) => {
+    ($($(#[$meta:meta])* $name:ident($value:ty),)*) => {
         /// Operation to get a socket option.
         ///
         /// See [`Configurable::get_option`].
         pub enum GetSocketOption<'a> {
             $(
+                $(#[$meta])*
                 $name(&'a mut $value),
             )*
         }
@@ -27,6 +28,7 @@ macro_rules! define_options {
         #[derive(Clone, Copy)]
         pub enum SetSocketOption<'a> {
             $(
+                $(#[$meta])*
                 $name(&'a $value),
             )*
         }
@@ -85,7 +87,23 @@ define_options! {
     NoDelay(bool),
     MaxSegment(usize),
     TcpInfo(()),
+    /// Seconds an idle connection waits before the first keep-alive probe.
+    ///
+    /// This is applied to smoltcp's single keep-alive interval. Once keep-alive
+    /// has been enabled, updates are rejected with `EOPNOTSUPP`.
     KeepIdle(u32),
+    /// Seconds between keep-alive probes.
+    ///
+    /// Recorded and reported for Linux ABI compatibility. smoltcp has no
+    /// independent probe interval, so this does not alter transport timing.
+    /// This is an accepted ABI divergence: see `KeepAliveConfig`.
+    KeepInterval(u32),
+    /// Failed probes after which the connection is dropped.
+    ///
+    /// Recorded and reported for Linux ABI compatibility. smoltcp has no
+    /// probe-count control, so this does not alter transport timing. This is
+    /// an accepted ABI divergence: see `KeepAliveConfig`.
+    KeepCount(u32),
 
     // ---- IP options ----
     Ttl(u8),

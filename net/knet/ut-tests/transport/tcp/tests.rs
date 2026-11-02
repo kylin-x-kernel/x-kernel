@@ -235,8 +235,7 @@ fn keepalive_uses_keepidle_as_transport_interval() {
         .set_option(SetSocketOption::KeepAlive(&true))
         .unwrap();
 
-    // KEEPIDLE is enforced: enabling keep-alive installs the
-    // configured idle seconds as the transport's interval.
+    // KEEPIDLE is applied to smoltcp's single keep-alive interval.
     assert_eq!(
         socket.with_smol_socket(|s| s.keep_alive()),
         Some(Duration::from_secs(30))
@@ -260,6 +259,35 @@ fn keepalive_rejects_keepidle_change_after_enabling() {
         Err(KError::OperationNotSupported)
     );
 
+    let mut idle = 0_u32;
+    socket
+        .get_option(GetSocketOption::KeepIdle(&mut idle))
+        .unwrap();
+    assert_eq!(idle, TCP_KEEPIDLE_DEFAULT_SECS);
+}
+
+#[def_test]
+fn keepalive_rejects_keepidle_change_after_disabling() {
+    let socket = TcpSocket::new();
+    socket
+        .set_option(SetSocketOption::KeepAlive(&true))
+        .unwrap();
+    socket
+        .set_option(SetSocketOption::KeepAlive(&false))
+        .unwrap();
+
+    let mut enabled = true;
+    socket
+        .get_option(GetSocketOption::KeepAlive(&mut enabled))
+        .unwrap();
+    assert!(!enabled);
+
+    // smoltcp may still hold the deadline armed by the first enable, so a
+    // disable/re-enable cycle must not accept a new idle value.
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepIdle(&45)),
+        Err(KError::OperationNotSupported)
+    );
     let mut idle = 0_u32;
     socket
         .get_option(GetSocketOption::KeepIdle(&mut idle))
@@ -298,4 +326,43 @@ fn keepalive_options_reject_invalid_values() {
         .get_option(GetSocketOption::KeepIdle(&mut readback))
         .unwrap();
     assert_eq!(readback, TCP_KEEPIDLE_MAX_SECS);
+}
+
+#[def_test]
+fn keepalive_records_probe_interval_and_count_without_changing_transport() {
+    let socket = TcpSocket::new();
+    socket
+        .set_option(SetSocketOption::KeepInterval(&5))
+        .unwrap();
+    socket.set_option(SetSocketOption::KeepCount(&2)).unwrap();
+    socket.set_option(SetSocketOption::KeepIdle(&30)).unwrap();
+    socket
+        .set_option(SetSocketOption::KeepAlive(&true))
+        .unwrap();
+
+    assert_eq!(
+        socket.with_smol_socket(|s| s.keep_alive()),
+        Some(Duration::from_secs(30))
+    );
+
+    // Live INTVL/CNT updates are recorded, but smoltcp has no per-phase timing
+    // or probe-count control, so its KEEPIDLE-derived interval is unchanged.
+    socket
+        .set_option(SetSocketOption::KeepInterval(&10))
+        .unwrap();
+    socket.set_option(SetSocketOption::KeepCount(&4)).unwrap();
+    assert_eq!(
+        socket.with_smol_socket(|s| s.keep_alive()),
+        Some(Duration::from_secs(30))
+    );
+
+    let mut interval = 0_u32;
+    let mut count = 0_u32;
+    socket
+        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepCount(&mut count))
+        .unwrap();
+    assert_eq!((interval, count), (10, 4));
 }

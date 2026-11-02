@@ -267,6 +267,8 @@ macro_rules! call_dispatch {
             (PROTO_TCP, TCP_MAXSEG) => MaxSegment as Int<usize>,
             (PROTO_TCP, TCP_INFO) => TcpInfo,
             (PROTO_TCP, TCP_KEEPIDLE) => KeepIdle as Int<u32>,
+            (PROTO_TCP, TCP_KEEPINTVL) => KeepInterval as Int<u32>,
+            (PROTO_TCP, TCP_KEEPCNT) => KeepCount as Int<u32>,
 
             (PROTO_IP, IP_TTL) => Ttl as Int<u8>,
             (PROTO_IP, IP_RECVERR) => RecvErr as IntBool,
@@ -284,7 +286,13 @@ macro_rules! call_dispatch {
                     dispatch!($which $(as $conv)?);
                 }
             )*
-            _ => return Err(KError::from(LinuxError::ENOPROTOOPT)),
+            (other_level, other_optname) => {
+                // Probing unsupported options is normal user-space control
+                // flow. Keep it at trace: its frequency is caller-controlled,
+                // so even debug would drown useful diagnostics.
+                trace!("sockopt rejected: level={other_level}, optname={other_optname}");
+                return Err(KError::from(LinuxError::ENOPROTOOPT));
+            }
         }
     }
 }

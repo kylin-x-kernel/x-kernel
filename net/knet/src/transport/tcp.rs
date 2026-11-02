@@ -26,7 +26,10 @@ use smoltcp::{
 use crate::{
     AcceptOptions, ConnectOptions, LISTEN_TABLE, RecvFlags, RecvOptions, SERVICE, SOCKET_SET,
     SendOptions, Shutdown, Socket, SocketAddrEx, SocketOps,
-    consts::{TCP_KEEPIDLE_DEFAULT_SECS, TCP_KEEPIDLE_MAX_SECS, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN},
+    consts::{
+        TCP_KEEPCNT_DEFAULT, TCP_KEEPCNT_MAX, TCP_KEEPIDLE_DEFAULT_SECS, TCP_KEEPIDLE_MAX_SECS,
+        TCP_KEEPINTVL_DEFAULT_SECS, TCP_KEEPINTVL_MAX_SECS, TCP_RX_BUF_LEN, TCP_TX_BUF_LEN,
+    },
     general::GeneralOptions,
     options::{Configurable, GetSocketOption, OptionHandled, SetSocketOption},
     poller::{PollReason, network_poller},
@@ -38,6 +41,49 @@ pub(crate) fn new_tcp_socket() -> smol::Socket<'static> {
         smol::SocketBuffer::new(vec![0; TCP_RX_BUF_LEN]),
         smol::SocketBuffer::new(vec![0; TCP_TX_BUF_LEN]),
     )
+}
+
+/// TCP keep-alive parameters recorded per socket.
+///
+/// This is deliberately an ABI-only layer: Linux defaults and ranges are
+/// enforced, and every accepted value is reported verbatim by `getsockopt`.
+/// smoltcp exposes a single keep-alive interval and no probe-count control, so
+/// the transport applies the idle value as that interval. `interval_secs` and
+/// `probe_count` are recorded configuration, not transport timing.
+///
+/// # Accepted ABI divergence
+///
+/// Accepting `TCP_KEEPINTVL` / `TCP_KEEPCNT` while smoltcp keeps using
+/// `idle_secs` is an explicit trade-off, not an implementation of Linux probe
+/// timing. Callers get a successful `setsockopt`, verbatim `getsockopt`, and
+/// Linux defaults/ranges, but probe spacing and the probe-count limit remain
+/// those of smoltcp's single interval. This divergence is accepted so the A14
+/// ABI surface is complete; returning `ENOPROTOOPT` would instead reject
+/// options Linux accepts. Programs that depend on Linux probe timing must not
+/// rely on these values until smoltcp exposes separate probe controls.
+struct KeepAliveConfig {
+    idle_secs: AtomicU32,
+    interval_secs: AtomicU32,
+    probe_count: AtomicU32,
+}
+
+impl Default for KeepAliveConfig {
+    fn default() -> Self {
+        Self {
+            idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
+            interval_secs: AtomicU32::new(TCP_KEEPINTVL_DEFAULT_SECS),
+            probe_count: AtomicU32::new(TCP_KEEPCNT_DEFAULT),
+        }
+    }
+}
+
+/// Validates a Linux keep-alive knob; all three accept `1..=max` and reject
+/// other values with `EINVAL`.
+fn validate_keepalive_range(value: u32, max: u32) -> KResult<()> {
+    if value == 0 || value > max {
+        return Err(KError::InvalidInput);
+    }
+    Ok(())
 }
 
 /// A TCP socket that provides POSIX-like APIs.
@@ -52,11 +98,12 @@ pub struct TcpSocket {
     rx_closed: AtomicBool,
     tx_closed: AtomicBool,
     poll_rx_closed: Arc<PollSet>,
-    /// TCP_KEEPIDLE in seconds (Linux default: tcp_keepalive_time).
-    /// TCP_KEEPINTVL/TCP_KEEPCNT are rejected with ENOPROTOOPT: the
-    /// transport models a single keep-alive interval with no probe-count
-    /// knob, and silently accepting inert options would hide that gap.
-    keep_idle_secs: AtomicU32,
+    keep_alive: KeepAliveConfig,
+    /// Whether a smoltcp keep-alive deadline may still be armed.
+    ///
+    /// smoltcp does not clear an armed deadline when keep-alive is disabled, so
+    /// this stays set for the lifetime of the socket after the first enable.
+    keep_alive_deadline_armed: AtomicBool,
 }
 
 impl TcpSocket {
@@ -74,7 +121,8 @@ impl TcpSocket {
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
-            keep_idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
+            keep_alive: KeepAliveConfig::default(),
+            keep_alive_deadline_armed: AtomicBool::new(false),
         }
     }
 
@@ -96,7 +144,8 @@ impl TcpSocket {
             rx_closed: AtomicBool::new(false),
             tx_closed: AtomicBool::new(false),
             poll_rx_closed: Arc::new(PollSet::new()),
-            keep_idle_secs: AtomicU32::new(TCP_KEEPIDLE_DEFAULT_SECS),
+            keep_alive: KeepAliveConfig::default(),
+            keep_alive_deadline_armed: AtomicBool::new(false),
         };
         let bound_endpoint = endpoint_from_ip_endpoint(local_endpoint);
         *result.bound_endpoint.lock() = bound_endpoint;
@@ -122,31 +171,53 @@ impl TcpSocket {
         self.state() == State::Listening
     }
 
-    /// Applies SO_KEEPALIVE to the transport using the configured
-    /// TCP_KEEPIDLE interval. Disabling clears the timer.
+    /// Applies `SO_KEEPALIVE` using the recorded `TCP_KEEPIDLE`.
+    ///
+    /// smoltcp uses one interval for both the initial idle delay and probe
+    /// spacing, and cannot recalculate a deadline that is already pending.
+    /// Enabling keep-alive on an established socket also arms smoltcp's first
+    /// probe at `Instant::ZERO`, so that probe may be sent on the next poll
+    /// instead of after `TCP_KEEPIDLE`; later probes use the recorded idle
+    /// interval. Live `TCP_KEEPIDLE` updates are therefore rejected by
+    /// [`Self::set_keep_idle_secs`] instead of accepting a value that would not
+    /// take effect.
     fn apply_keep_alive(&self, enabled: bool) {
         self.with_smol_socket(|socket| {
             if enabled {
-                let idle_secs = u64::from(self.keep_idle_secs.load(Ordering::Relaxed));
-                // Enabling reads the stored interval. While keep-alive is
-                // enabled, smoltcp does not expose a safe deadline reset, so
-                // TCP_KEEPIDLE updates are rejected by the setter below.
+                self.keep_alive_deadline_armed
+                    .store(true, Ordering::Relaxed);
+                let idle_secs = u64::from(self.keep_alive.idle_secs.load(Ordering::Relaxed));
                 socket.set_keep_alive(Some(Duration::from_secs(idle_secs)));
             } else {
+                // smoltcp clears the option but leaves an already armed
+                // deadline in place, so one stale probe may still be sent.
+                // Re-enabling before that deadline fires reuses it instead of
+                // restarting the idle period.
                 socket.set_keep_alive(None);
             }
         });
     }
 
-    /// Stores TCP_KEEPIDLE before keep-alive is enabled. Once smoltcp has an
-    /// active idle deadline, changing the interval is not immediately
-    /// observable through its public API, so that update is rejected.
+    /// Stores `TCP_KEEPIDLE` before keep-alive is first enabled.
+    ///
+    /// smoltcp only arms its keep-alive deadline when none is pending and
+    /// exposes no way to recalculate an existing one. Accepting a live update
+    /// would therefore silently keep the old interval. The rejection also
+    /// covers a later disable, because smoltcp can keep the old deadline armed
+    /// and a subsequent enable would otherwise reuse it. Keeping the recorded
+    /// value unchanged is intentional: `getsockopt` then still describes the
+    /// interval that the pending deadline was armed with, instead of reporting
+    /// a new value that will not take effect.
     fn set_keep_idle_secs(&self, idle_secs: u32) -> KResult {
         self.with_smol_socket(|socket| {
-            if socket.keep_alive().is_some() {
+            if self.keep_alive_deadline_armed.load(Ordering::Relaxed)
+                || socket.keep_alive().is_some()
+            {
                 return Err(KError::OperationNotSupported);
             }
-            self.keep_idle_secs.store(idle_secs, Ordering::Relaxed);
+            self.keep_alive
+                .idle_secs
+                .store(idle_secs, Ordering::Relaxed);
             Ok(())
         })
     }
@@ -367,7 +438,13 @@ impl Configurable for TcpSocket {
                 **keep_alive = self.with_smol_socket(|socket| socket.keep_alive().is_some());
             }
             O::KeepIdle(secs) => {
-                **secs = self.keep_idle_secs.load(Ordering::Relaxed);
+                **secs = self.keep_alive.idle_secs.load(Ordering::Relaxed);
+            }
+            O::KeepInterval(secs) => {
+                **secs = self.keep_alive.interval_secs.load(Ordering::Relaxed);
+            }
+            O::KeepCount(count) => {
+                **count = self.keep_alive.probe_count.load(Ordering::Relaxed);
             }
             O::MaxSegment(max_segment) => {
                 // TODO(mivik): get actual MSS
@@ -402,22 +479,35 @@ impl Configurable for TcpSocket {
                 network_poller().notify(PollReason::Tx);
             }
             O::KeepAlive(keep_alive) => {
-                // TCP_KEEPIDLE is enforced, not merely recorded: enabling
-                // keep-alive installs the configured idle time as the
-                // transport's (single) keep-alive interval.
-                // TCP_KEEPINTVL/TCP_KEEPCNT are rejected with ENOPROTOOPT:
-                // the transport has no per-phase knobs, and silently
-                // accepting inert options would hide that gap.
+                // TCP_KEEPIDLE is applied to smoltcp's single keep-alive
+                // interval when keep-alive is enabled. TCP_KEEPINTVL and
+                // TCP_KEEPCNT are recorded for readback, but the transport has
+                // no per-phase timing or probe-count controls.
                 self.apply_keep_alive(*keep_alive);
                 network_poller().notify(PollReason::Timer);
             }
             O::KeepIdle(secs) => {
                 // Linux (net/ipv4/tcp.c) rejects TCP_KEEPIDLE outside
                 // 1..=TCP_KEEPIDLE_MAX_SECS with EINVAL.
-                if *secs == 0 || *secs > TCP_KEEPIDLE_MAX_SECS {
-                    return Err(KError::InvalidInput);
-                }
+                validate_keepalive_range(*secs, TCP_KEEPIDLE_MAX_SECS)?;
                 self.set_keep_idle_secs(*secs)?;
+            }
+            O::KeepInterval(secs) => {
+                // Linux rejects TCP_KEEPINTVL outside
+                // 1..=TCP_KEEPINTVL_MAX_SECS with EINVAL. Recording without
+                // changing smoltcp timing is the accepted ABI divergence
+                // documented on KeepAliveConfig.
+                validate_keepalive_range(*secs, TCP_KEEPINTVL_MAX_SECS)?;
+                self.keep_alive
+                    .interval_secs
+                    .store(*secs, Ordering::Relaxed);
+            }
+            O::KeepCount(count) => {
+                // Linux rejects TCP_KEEPCNT outside 1..=TCP_KEEPCNT_MAX with
+                // EINVAL. Recording without changing smoltcp timing is the
+                // accepted ABI divergence documented on KeepAliveConfig.
+                validate_keepalive_range(*count, TCP_KEEPCNT_MAX)?;
+                self.keep_alive.probe_count.store(*count, Ordering::Relaxed);
             }
             _ => return Ok(OptionHandled::No),
         }

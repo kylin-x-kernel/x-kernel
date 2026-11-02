@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use kerrno::KError;
 use ktime_types::TimeSpan;
 use unittest::def_test;
 
@@ -254,4 +255,92 @@ fn test_bindtodevice_unbind_uses_all_devices() {
         .unwrap();
     assert_eq!(opts.bound_dev_if(), 0);
     assert_eq!(opts.rx_device_selection(), RxDeviceSelection::All);
+}
+
+#[def_test]
+fn test_tcp_keepalive_options_defaults_and_ranges() {
+    use crate::transport::tcp::TcpSocket;
+
+    let socket = TcpSocket::new();
+    let mut idle = 0u32;
+    let mut interval = 0u32;
+    let mut count = 0u32;
+    socket
+        .get_option(GetSocketOption::KeepIdle(&mut idle))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepCount(&mut count))
+        .unwrap();
+    assert_eq!((idle, interval, count), (7200, 75, 9));
+
+    // Lower and upper bounds are accepted and read back.
+    socket
+        .set_option(SetSocketOption::KeepIdle(&1))
+        .unwrap();
+    socket
+        .set_option(SetSocketOption::KeepInterval(&1))
+        .unwrap();
+    socket
+        .set_option(SetSocketOption::KeepCount(&1))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepIdle(&mut idle))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepCount(&mut count))
+        .unwrap();
+    assert_eq!((idle, interval, count), (1, 1, 1));
+
+    socket
+        .set_option(SetSocketOption::KeepIdle(&32767))
+        .unwrap();
+    socket
+        .set_option(SetSocketOption::KeepInterval(&32767))
+        .unwrap();
+    socket
+        .set_option(SetSocketOption::KeepCount(&127))
+        .unwrap();
+
+    // Values outside the Linux ranges fail with EINVAL and preserve the old
+    // value.
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepIdle(&0)),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepIdle(&32768)),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepInterval(&0)),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepInterval(&32768)),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepCount(&0)),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        socket.set_option(SetSocketOption::KeepCount(&128)),
+        Err(KError::InvalidInput)
+    );
+    socket
+        .get_option(GetSocketOption::KeepIdle(&mut idle))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .unwrap();
+    socket
+        .get_option(GetSocketOption::KeepCount(&mut count))
+        .unwrap();
+    assert_eq!((idle, interval, count), (32767, 32767, 127));
 }
