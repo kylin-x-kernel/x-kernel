@@ -27,6 +27,15 @@ impl InodeOperations for TruncateOps {
     fn set_len(&self, inode: &crate::VfsInode, len: u64) -> VfsResult<()> {
         inode.truncate_setsize(len)
     }
+
+    fn setattr(
+        &self,
+        _idmap: &crate::MountIdmap,
+        _dentry: &crate::Dentry,
+        update: crate::MetadataUpdate,
+    ) -> VfsResult<crate::MetadataUpdate> {
+        Ok(update)
+    }
 }
 impl FileOperations for TruncateOps {}
 

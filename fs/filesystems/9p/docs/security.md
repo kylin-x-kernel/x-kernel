@@ -22,10 +22,30 @@ PDU length、tag、type 和字段边界由 `p9` client 验证。
 - mount 时的 negotiation、root qid 和 attributes；
 - lookup/readdir 返回的 object identity、type、name 和 offset；
 - read/write、setattr、statfs 和 namespace operation 的 server result；
+- the content and length a TREAD returns for a folio fault;
+- the size confirmed by a `TSETATTR` truncate and its local cache publication;
 - endpoint failure 与 synchronous fid Drop。
 
 本 crate 不直接访问 user pointer、DMA/MMIO、firmware、interrupt、FFI 或 architecture raw
 interface。transport 和 device safety 位于具体 provider/driver。
+
+## Folio read validation
+
+`read_folio` derives offset and length from the inode size and `folio.index()`
+and trusts neither the requested nor the returned length. The client shortens
+each TREAD to the negotiated msize/iounit, the loop advances only by the bytes
+the server returned, and a zero-length reply before the folio window is covered
+fails the fault with `EIO`. A failed folio stays non-uptodate, so a truncated or
+malicious reply cannot publish a partially filled page.
+
+## Truncate cache invalidation
+
+A successful `TSETATTR` truncate is a backing-store size change made outside
+the split `set_len` path. KVFS publishes the confirmed size with
+`update_size_after_backing_change()`, which updates `i_size`, resizes cached
+folios, and invalidates mappings past the new EOF. A failed or short remote
+operation publishes nothing, so cached data cannot outlive the size the server
+accepted.
 
 ## unsafe 代码清单
 
@@ -56,6 +76,7 @@ v9fs 只共享 `Arc<P9Client>`/`Arc<P9Fid>`，不增加与协议状态分离的 
 | type/qid spoofing | attributes 与 lookup fid 不一致 | 发布错误 inode 类型或身份 | qid path/type 与 mode type 交叉验证 |
 | directory offset manipulation | server 返回异常 `d_off` | 重复或遗漏 entry | 原样使用 server offset，不伪造 local index |
 | fid lifetime error | remove 后重复使用或 clunk | server handle misuse | `P9Fid` live state 与 `Arc` Drop |
+| stale cached folio after truncate | `TSETATTR` shrinks the file but only updates the size | read/mmap keeps returning pre-truncate data | invalidate cached folios and mappings through `update_size_after_backing_change()` after a confirmed size change |
 | broad fallback | server 返回真实 I/O/permission error | 错误被掩盖 | 只对 Linux 指定的 `ENOSYS`/`EOPNOTSUPP` fallback |
 
 ## 故障模式与影响分析（FMEA）
@@ -66,6 +87,7 @@ v9fs 只共享 `Arc<P9Client>`/`Arc<P9Fid>`，不增加与协议状态分离的 
 | lookup 不存在 | negative lookup | 单个 pathname 不存在 | 只把 `ENOENT` 转成 negative result |
 | create 成功、child walk 失败 | local inode 不发布 | remote object 可能已存在 | 返回 error，不伪造 local state |
 | statfs 不实现 | 无 remote statistics | mount 仍可用 | 仅 `ENOSYS` 回退 `simple_statfs` |
+| truncate succeeds but cache publication fails | local size stays stale | later reads diverge from the server | propagate the `update_size_after_backing_change()` error without publishing partial state |
 | final clunk 失败 | remote fid 暂时滞留 | 到 connection teardown 才回收 | `p9` warning |
 | endpoint 永久不响应 | caller task 阻塞 | 同 client operations 排队 | 当前无 timeout/cancel |
 
@@ -84,7 +106,7 @@ unlink/rename 只按 Linux dotl semantics 对 `EOPNOTSUPP` 使用 protocol fallb
 
 - 只实现 9P2000.L cacheless semantics；
 - KVFS 没有 dentry-private fid slot，lookup fid 因而放在 `V9fsInode`；
-- 尚无 atomic-open contract、page cache、xattr 或 remote lock 支持；
+- the page cache serves read faults only; no atomic-open contract, xattr or remote lock support;
 - synchronous operations 没有 timeout/cancel。
 
 ## 审计清单

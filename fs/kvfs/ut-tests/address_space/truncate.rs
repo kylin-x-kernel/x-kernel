@@ -6,6 +6,7 @@
 
 use pagecache::FolioGuard;
 use alloc::{
+    string::String,
     sync::{Arc, Weak},
     vec,
     vec::Vec,
@@ -23,8 +24,8 @@ use super::{
     TRUNCATE_OPERATIONS, TruncateOps,
 };
 use crate::{
-    FileOperations, InodeOperations, NodeFlags, NodePermission, NodeType, Umode, VfsInode,
-    VfsInodeInit, VfsResult,
+    Dentry, FileOperations, InodeOperations, MetadataUpdate, NodeFlags, NodePermission, NodeType,
+    Umode, VfsInode, VfsInodeInit, VfsResult,
 };
 
 struct CacheOnlyFileOps;
@@ -131,6 +132,40 @@ fn default_cached_file_inode_truncates_without_filesystem_set_len() {
             Ok(())
         })
         .expect("regrown bytes are zero");
+}
+
+/// Verifies that a size reported by `setattr` is published with the same
+/// cache invalidation as a backing-store truncate, even for `NON_CACHEABLE`
+/// inodes whose truncate bypasses `set_len`.
+#[def_test]
+fn setattr_size_invalidates_cached_folios() {
+    let old_len = PAGE_SIZE_4K as u64;
+    let inode = VfsInode::new_file_with_address_space_and_flags(
+        Arc::new(TruncateOps),
+        NodeFlags::NON_CACHEABLE,
+        &TRUNCATE_OPERATIONS,
+        VfsInodeInit::new(
+            5,
+            old_len,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let dentry = Dentry::new_file_from_inode(inode.clone(), None, String::from("cached"));
+    let address_space = inode.address_space();
+    address_space
+        .i_pages
+        .filemap_add_folio(super::folio_from_bytes(0, b"stale"))
+        .unwrap_or_else(|_| panic!("fixture index is absent"));
+
+    dentry
+        .update_metadata(MetadataUpdate {
+            size: Some(0),
+            ..Default::default()
+        })
+        .expect("setattr size update succeeds");
+
+    assert_eq!(inode.size(), 0);
+    assert_eq!(address_space.nrpages(), 0);
 }
 
 #[def_test]

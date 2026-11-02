@@ -5928,7 +5928,9 @@ dependencies = [
  "kerrno",
  "ktime_types",
  "kvfs",
+ "memaddr",
  "p9",
+ "pagecache",
  "unittest",
 ]
 

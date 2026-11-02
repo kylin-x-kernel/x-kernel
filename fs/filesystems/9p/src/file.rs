@@ -7,10 +7,12 @@
 use alloc::sync::Arc;
 
 use kvfs::{
-    FMode, FileDirOperations, FileOperations, NodeType, OpenFlags, VfsError, VfsFile,
-    VfsFileBuilder, VfsInode, VfsResult,
+    AddressSpace, AddressSpaceOperations, FMode, FileDirOperations, FileOperations, NodeType,
+    OpenFlags, VfsError, VfsFile, VfsFileBuilder, VfsInode, VfsResult,
 };
+use memaddr::PAGE_SIZE_4K;
 use p9::{P9Fid, P9OpenFlags, P9OpenMode};
+use pagecache::FolioGuard;
 
 use super::inode::V9fsInode;
 
@@ -108,6 +110,58 @@ impl FileOperations for V9fsInode {
 
     fn fsync(&self, file: &VfsFile, data_only: bool) -> VfsResult<()> {
         Self::file_fid(file)?.fsync(data_only)
+    }
+}
+
+/// Byte window of one folio inside a file of `file_size` bytes.
+///
+/// Returns the file offset the folio starts at and how many bytes the server
+/// must return to fill it. `None` means the folio index overflows the offset.
+fn folio_window(file_size: u64, folio_index: u64) -> Option<(u64, usize)> {
+    let offset = folio_index.checked_mul(PAGE_SIZE_4K as u64)?;
+    let expected = file_size.saturating_sub(offset).min(PAGE_SIZE_4K as u64);
+    Some((offset, expected as usize))
+}
+
+/// Serves page-cache folios for 9P regular files.
+///
+/// Executables and shared libraries mapped from a 9P mount fault in through
+/// this path; without it the mapping has no backing pages and the faulting
+/// task takes SIGBUS.
+pub(crate) struct V9fsAddressSpaceOperations;
+
+pub(crate) static V9FS_ADDRESS_SPACE_OPERATIONS: V9fsAddressSpaceOperations =
+    V9fsAddressSpaceOperations;
+
+impl AddressSpaceOperations for V9fsAddressSpaceOperations {
+    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+        let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+        let (offset, expected) =
+            folio_window(inode.size(), folio.index()).ok_or(VfsError::InvalidInput)?;
+        if expected == 0 {
+            folio.data().fill(0);
+            return Ok(());
+        }
+        // Faults are concurrent, so each folio reads through its own fid.
+        let fid = inode.private::<V9fsInode>()?.fid.walk(&[])?;
+        fid.open(P9OpenMode::Read, P9OpenFlags::empty())?;
+        // The client shortens a request to the negotiated msize/iounit, which
+        // can be smaller than a folio. Keep issuing TREADs until the window is
+        // covered; a zero-length reply is end of file and cannot fill it.
+        let buf = folio.data();
+        let mut filled = 0;
+        while filled < expected {
+            let want = u32::try_from(expected - filled).map_err(|_| VfsError::InvalidInput)?;
+            let data = fid.read(offset + filled as u64, want)?;
+            if data.is_empty() {
+                return Err(VfsError::Io);
+            }
+            let take = data.len().min(expected - filled);
+            buf[filled..filled + take].copy_from_slice(&data[..take]);
+            filled += take;
+        }
+        buf[expected..].fill(0);
+        Ok(())
     }
 }
 

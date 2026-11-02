@@ -19,6 +19,8 @@ kcred.workspace = true
 kerrno.workspace = true
 ktime_types.workspace = true
 kvfs.workspace = true
+memaddr.workspace = true
+pagecache.workspace = true
 unittest.workspace = true
 
 [lints]

@@ -1843,6 +1843,10 @@ impl VfsInode {
     }
 
     /// Updates the metadata of the node.
+    ///
+    /// An applied size is published through
+    /// [`Self::update_size_after_backing_change`], so cached folios and
+    /// mappings are resized or invalidated before this returns.
     pub fn update_metadata(&self, dentry: &Dentry, mut update: MetadataUpdate) -> VfsResult<()> {
         let changed = update.size.is_some()
             || update.mode.is_some()
@@ -1860,7 +1864,7 @@ impl VfsInode {
             .as_ref()
             .setattr(&MountIdmap, dentry, update)?;
         if let Some(size) = applied.size {
-            self.set_size(size);
+            self.update_size_after_backing_change(size)?;
         }
         if let Some(atime) = applied.atime {
             self.set_accessed_at(atime);

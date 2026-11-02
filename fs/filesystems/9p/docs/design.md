@@ -27,7 +27,7 @@ inode、namespace、open-file 和 directory-iteration 的 KVFS 适配；`net/9p`
 | --- | --- | --- |
 | `fs.rs` | `vfs_super.c`、`v9fs.c` | mount session 和 superblock operations |
 | `inode.rs` | `vfs_inode.c`、`vfs_inode_dotl.c` | inode、metadata 和 namespace operations |
-| `file.rs` | `vfs_file.c` | open、read/write 和 fsync |
+| `file.rs` | `vfs_file.c` | open, read/write, fsync and folio reads |
 | `dir.rs` | `vfs_dir.c` | opened directory iteration |
 | `util.rs` | dotl/VFS conversion helpers | device number 和 `d_type` 转换 |
 
@@ -97,6 +97,34 @@ write 根据服务端确认的写入字节数更新 inode size，使用 KVFS 的
 因此 rename/unlink 后，已打开文件不依赖旧路径，仍引用同一服务端对象。文件释放时 typed
 private data 释放最后一个 `Arc<P9Fid>`，由 `P9Fid::drop` clunk；v9fs 不实现重复的 release 状态机。
 
+### Page cache and mmap
+
+Regular-file inodes install v9fs's own `AddressSpaceOperations` through
+`new_file_with_address_space_and_flags()`, keeping `NodeFlags::NON_CACHEABLE` so
+plain I/O and truncate keep their existing fid/TSETATTR paths. Only `read_folio`
+is implemented: it derives the file offset from `folio.index()`, walks a
+zero-name clone of the inode's unopened fid to get a private fid, opens it with
+`TLOPEN` and reads the folio window, zero-filling the tail past end of file as
+the KVFS contract requires. A clone is mandatory because faults run concurrently
+and `P9Fid::read` only accepts an opened fid.
+
+The client shortens each TREAD to the negotiated msize or iounit, which may be
+smaller than a folio, so `read_folio` loops over the remaining window and treats
+a zero-length reply before the window is covered as `VfsError::Io`; the folio
+stays non-uptodate instead of caching a hole. This path lets executables and
+shared libraries on 9P demand-page like Linux `v9fs_vfs_read_folio()`.
+
+Plain `read()`/`write()` still use the opened fid's `TREAD`/`TWRITE` and bypass
+the page cache. Writable `MAP_SHARED` remains unsupported because there is no
+`write_begin`/`write_end`/`writepages` implementation.
+
+Truncate stays on the `TSETATTR` path because the inode is `NON_CACHEABLE`. A
+successful size change is therefore published through KVFS's
+`update_size_after_backing_change()`, which resizes or drops cached folios and
+invalidates mappings past the new EOF before the operation returns. Without
+that publication a folio cached by `read_folio` could keep serving
+pre-truncate bytes.
+
 directory iteration 把服务端 qid 转换为 inode number，并把服务端 `d_off` 作为下一次
 `DirContext` 位置，不使用本地数组下标模拟远端 offset。
 
@@ -121,7 +149,8 @@ v9fs 自身不增加全局或 session 级锁。一个 mount 的 inode/file fids 
 ## 设计决策
 
 - 只实现 9P2000.L cacheless filesystem 语义；
-- 尚无 KVFS dentry-private fid slot、atomic-open contract、page-cache、xattr 或远端锁支持；
+- No KVFS dentry-private fid slot, atomic-open contract, xattr, or remote-lock support yet;
+- the page cache only serves read faults; no writable shared mappings or writeback;
 - transport discovery 和 VirtIO/kclass glue 保持在现有 boot/driver 层，本次不重构它们。
 
 ## Drop / 资源释放

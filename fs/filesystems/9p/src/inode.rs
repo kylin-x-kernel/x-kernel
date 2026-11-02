@@ -75,7 +75,16 @@ impl V9fsInode {
             | NodeType::BlockDevice
             | NodeType::Fifo
             | NodeType::Socket => VfsInode::new_special(self, NodeFlags::empty(), init),
-            NodeType::RegularFile | NodeType::Symlink | NodeType::Unknown => {
+            // 9P is cacheless: plain read/write stay on the opened fid and
+            // truncate goes through TSETATTR, so keep the flag the default
+            // file constructor would have set.
+            NodeType::RegularFile => VfsInode::new_file_with_address_space_and_flags(
+                self,
+                NodeFlags::NON_CACHEABLE,
+                &super::file::V9FS_ADDRESS_SPACE_OPERATIONS,
+                init,
+            ),
+            NodeType::Symlink | NodeType::Unknown => {
                 VfsInode::new_file_with_flags(self, NodeFlags::empty(), init)
             }
         }
