@@ -26,7 +26,10 @@ use crate::{
         configure_platform_irq, platform_dispatch_irq, platform_dispatch_nmi,
         set_platform_irq_enabled,
     },
-    state::{IRQ_STATE, IrqLine, IrqPlatformPlan, IrqState, IrqStateDesc, try_resolve_and_publish},
+    state::{
+        IRQ_STATE, IrqLine, IrqPlatformPlan, IrqState, IrqStateDesc, try_resolve_and_publish,
+        try_resolve_and_publish_locked,
+    },
 };
 pub use crate::{
     action::IrqActionToken,
@@ -171,9 +174,33 @@ fn enable_line(
     force_platform_enable: bool,
     apply_plan: impl FnOnce(IrqPlatformPlan),
 ) -> Result<(), IrqDescError> {
+    if force_platform_enable {
+        return enable_legacy_line(registry, spec, apply_plan);
+    }
+    let line;
+    let _control_guard = IRQ_CONTROL_LOCK.lock();
+    let state = registry.lock();
+    let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
+    line = state
+        .descs
+        .get(&virq)
+        .ok_or(IrqDescError::UnknownIrq)?
+        .clone();
+    let mut entry = line.lock();
+    drop(state);
+    let plan = prepare_enable_plan(&mut entry, virq, false)?;
+    apply_plan(plan);
+    Ok(())
+}
+
+fn enable_legacy_line(
+    registry: &SpinNoIrq<IrqState>,
+    spec: IrqSpec,
+    apply_plan: impl FnOnce(IrqPlatformPlan),
+) -> Result<(), IrqDescError> {
     let mut prepared = None;
     loop {
-        if force_platform_enable && prepared.is_none() {
+        if prepared.is_none() {
             let is_missing = {
                 let state = registry.lock();
                 lookup_line(&state, spec).is_none()
@@ -187,51 +214,37 @@ fn enable_line(
         let line;
         let control_guard = IRQ_CONTROL_LOCK.lock();
         let mut state = registry.lock();
-        let virq = if force_platform_enable {
-            if lookup_line(&state, spec).is_none() && prepared.is_none() {
+        let existing_virq = if let Some((virq, existing)) = lookup_line(&state, spec) {
+            line = existing.clone();
+            Some(virq)
+        } else {
+            let Some(candidate) = prepared.as_ref() else {
                 drop(state);
                 drop(control_guard);
                 continue;
-            }
-            if let Some((virq, line)) = lookup_line(&state, spec) {
-                reject_teardown(Some(&line), virq, "enable IRQ")?;
-            }
-            let desc = try_resolve_and_publish(&mut state, spec, prepared.as_ref())?;
-            #[expect(
-                clippy::unwrap_used,
-                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish succeeded \
-                          and assigned this descriptor a logical IRQ"
-            )]
-            let virq = desc.logical_irq().unwrap();
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: try_resolve_and_publish installed \
-                          this descriptor in the same exclusively borrowed registry"
-            )]
-            let selected = state
-                .descs
-                .get(&virq)
-                .expect("descriptor state must exist after try_resolve_desc")
-                .clone();
-            line = selected;
-            virq
-        } else {
-            let virq = state.lookup_virq(spec).ok_or(IrqDescError::UnknownIrq)?;
-            let existing = state.descs.get(&virq).ok_or(IrqDescError::UnknownIrq)?;
-            line = existing.clone();
-            virq
+            };
+            line = candidate.clone();
+            None
         };
         let mut entry = line.lock();
-        // Control is the outer IRQ-saving guard and outlives both inner guards.
+        if let Some(virq) = existing_virq {
+            reject_teardown(&entry, virq, "enable IRQ")?;
+        }
+        let desc = try_resolve_and_publish_locked(&mut state, spec, &line, &mut entry)?;
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: successful resolution assigns a virq"
+        )]
+        let virq = desc.logical_irq().expect("resolved descriptor has a virq");
         drop(state);
-        let plan = prepare_enable_plan(&mut entry, virq, force_platform_enable)?;
+        let plan = prepare_enable_plan(&mut entry, virq, true)?;
         apply_plan(plan);
         return Ok(());
     }
 }
 
-// Final admission and prepare share the retained Line guard. Legacy resolution
-// still relies on global control exclusion across its earlier teardown check.
+// Admission, legacy metadata resolution, and the state change share the
+// caller-held Line guard through the controller update.
 fn prepare_enable_plan(
     entry: &mut IrqStateDesc,
     virq: Virq,
@@ -735,24 +748,8 @@ impl Drop for ManagementAdmission<'_> {
         if !self.is_active {
             return;
         }
-        let _control_guard = IRQ_CONTROL_LOCK.lock();
         let mut state = IRQ_STATE.lock();
-        {
-            let mut entry = self.line.lock();
-            if self.has_removed_action {
-                entry.finish_teardown();
-            }
-            entry.end_management();
-        }
-        if self.has_removed_action
-            && let Some(virq) = self.virq
-            && state
-                .descs
-                .get(&virq)
-                .is_some_and(|line| Arc::ptr_eq(line, self.line))
-        {
-            state.remove_if_unused_with_desc(virq);
-        }
+        state.finish_management(self.virq, self.line, self.has_removed_action);
     }
 }
 
@@ -800,8 +797,8 @@ pub(super) fn with_registration_line_checked<T>(
             is_active: false,
             has_removed_action: false,
         };
-        // Drop control before admission cleanup reacquires it, then release
-        // the management mutex only after that cleanup finishes.
+        // Release control before directory cleanup; keep management exclusion
+        // until admission cleanup finishes.
         let _control_guard = IRQ_CONTROL_LOCK.lock();
         let virq = {
             let mut state = IRQ_STATE.lock();
@@ -831,12 +828,12 @@ pub(super) fn with_registration_line_checked<T>(
 ///
 /// Missing/stale entries and startup contention return None without executing
 /// the body. Admission pins membership across drain. The body returns Some only
-/// after successful removal; only then may unused cleanup follow under control
+/// after successful removal; only then may unused cleanup follow under registry
 /// exclusion, while management exclusion is still held. None or an error leaves
 /// idle mappings intact. Return removed owners out of the body so their final
 /// destruction occurs after mutex release.
 /// A successful body must begin teardown before withdrawal and leave it set:
-/// completion, admission release and unused removal form one control transaction.
+/// completion, admission release and unused removal form one registry transaction.
 pub(super) fn with_existing_line<T>(
     spec: IrqSpec,
     mode: ManagementMode,
@@ -877,11 +874,11 @@ pub(super) fn with_existing_line<T>(
 }
 
 fn reject_teardown(
-    entry: Option<&Arc<IrqLine>>,
+    entry: &IrqStateDesc,
     virq: Virq,
     operation: &'static str,
 ) -> Result<(), IrqDescError> {
-    if entry.is_some_and(|line| line.lock().is_teardown_in_progress()) {
+    if entry.is_teardown_in_progress() {
         warn!("{operation} for IRQ {virq} failed while teardown is in progress");
         return Err(IrqDescError::TeardownInProgress { virq });
     }

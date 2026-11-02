@@ -62,6 +62,14 @@ impl ResolvedIrqDesc {
     }
 }
 
+// Planning selects an identity without acquiring a Line lock. All descriptor
+// and mapping checks precede mutation in commit_resolution under the caller's
+// continuous registry and Line exclusion.
+struct IrqResolution {
+    virq: Virq,
+    offered: Option<IrqDesc>,
+}
+
 /// Control-plane state owned by one IRQ domain.
 ///
 /// This table is the mutable build source for the immutable reverse-map
@@ -729,49 +737,102 @@ impl IrqState {
     /// entry ignores it; a missing entry requires an unpublished candidate.
     pub(super) fn try_resolve_desc(
         &mut self,
-        mut desc: IrqDesc,
+        desc: IrqDesc,
         prepared: Option<&Arc<IrqLine>>,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
-        let (virq, mapping_to_insert) = if let Some(virq) = desc.logical_irq() {
-            if let Some(existing) = self.descs.get(&virq) {
-                existing.lock().desc.try_merge(desc)?;
-            }
-            if let Some(domain) = desc.domain {
-                let existing_virq = self.domain_virq(domain, desc.hwirq);
-                if let Some(existing) = existing_virq
-                    && existing != virq
-                {
-                    return Err(IrqDescError::MappingConflict {
-                        domain,
-                        hwirq: desc.hwirq,
-                        existing,
-                        newer: virq,
-                    });
-                }
-                (
+        let resolution = self.plan_resolution(IrqSpec::Desc(desc))?;
+        self.resolve_planned(resolution, prepared)
+    }
+
+    fn plan_resolution(&mut self, spec: IrqSpec) -> Result<IrqResolution, IrqDescError> {
+        let desc = match spec {
+            IrqSpec::PlainVirq(virq) => {
+                return Ok(IrqResolution {
                     virq,
-                    existing_virq
-                        .is_none()
-                        .then_some((domain, desc.hwirq, virq)),
-                )
-            } else {
-                (virq, None)
+                    offered: None,
+                });
             }
-        } else if let Some(domain) = desc.domain {
-            if let Some(virq) = self.domain_virq(domain, desc.hwirq) {
-                (virq, None)
-            } else {
-                let virq = self.alloc_virq()?;
-                (virq, Some((domain, desc.hwirq, virq)))
-            }
-        } else {
-            (desc.hwirq, None)
+            IrqSpec::Desc(desc) => desc,
         };
-        desc = desc.with_virq(virq);
-        let stored_desc = if let Some(existing) = self.descs.get(&virq) {
-            existing.lock().desc.try_merge(desc)?
+        let virq = if let Some(virq) = desc.logical_irq() {
+            virq
+        } else if let Some(domain) = desc.domain {
+            match self.domain_virq(domain, desc.hwirq) {
+                Some(virq) => virq,
+                None => self.alloc_virq()?,
+            }
         } else {
-            desc
+            desc.hwirq
+        };
+        Ok(IrqResolution {
+            virq,
+            offered: Some(desc.with_virq(virq)),
+        })
+    }
+
+    fn resolve_planned(
+        &mut self,
+        resolution: IrqResolution,
+        prepared: Option<&Arc<IrqLine>>,
+    ) -> Result<ResolvedIrqDesc, IrqDescError> {
+        // Map and registration callers prepare absent Lines outside short
+        // locks and retain that owner until resolution has returned.
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: callers recheck registry identity and \
+                      supply a retained candidate before resolving an absent Line"
+        )]
+        let line = self
+            .descs
+            .get(&resolution.virq)
+            .or(prepared)
+            .expect("missing Line requires a prepared candidate")
+            .clone();
+        let mut entry = line.lock();
+        self.commit_resolution(resolution, &line, &mut entry)
+    }
+
+    // The supplied entry is locked from this Line. Registry exclusion must
+    // remain held from planning through commit, so identity cannot be replaced.
+    fn commit_resolution(
+        &mut self,
+        resolution: IrqResolution,
+        line: &Arc<IrqLine>,
+        entry: &mut IrqStateDesc,
+    ) -> Result<ResolvedIrqDesc, IrqDescError> {
+        let virq = resolution.virq;
+        let is_existing = if let Some(current) = self.descs.get(&virq) {
+            if !Arc::ptr_eq(current, line) {
+                return Err(IrqDescError::UnknownIrq);
+            }
+            true
+        } else {
+            false
+        };
+        let stored_desc = match (is_existing, resolution.offered) {
+            (true, Some(desc)) => entry.desc.try_merge(desc)?,
+            (true, None) => entry.desc,
+            (false, offered) => offered.unwrap_or_else(|| IrqDesc::from_virq(virq)),
+        };
+        let mapping_to_insert = if let Some(desc) = resolution.offered
+            && let Some(domain) = desc.domain
+        {
+            let existing_virq = self.domain_virq(domain, desc.hwirq);
+            if let Some(existing) = existing_virq
+                && existing != virq
+            {
+                return Err(IrqDescError::MappingConflict {
+                    domain,
+                    hwirq: desc.hwirq,
+                    existing,
+                    newer: virq,
+                });
+            }
+            existing_virq
+                .is_none()
+                .then_some((domain, desc.hwirq, virq))
+        } else {
+            None
         };
         let mut snapshot_domain_to_publish = None;
         if let Some((domain, hwirq, virq)) = mapping_to_insert {
@@ -792,10 +853,14 @@ impl IrqState {
                 snapshot_domain_to_publish = Some(domain);
             }
         }
-        if let Some(line) = self.descs.get(&virq) {
-            line.lock().update_desc(stored_desc);
+        if is_existing {
+            entry.update_desc(stored_desc);
         } else {
-            self.insert_prepared_line(virq, stored_desc, prepared);
+            // First publication preserves the candidate's initial generation
+            // and preallocated completion/management storage.
+            entry.desc = stored_desc;
+            entry.runtime.remember_desc(stored_desc);
+            self.descs.insert(virq, line.clone());
         }
         Ok(ResolvedIrqDesc::new(
             stored_desc,
@@ -809,10 +874,10 @@ impl IrqState {
         prepared: Option<&Arc<IrqLine>>,
     ) -> Result<ResolvedIrqDesc, IrqDescError> {
         match spec {
-            IrqSpec::PlainVirq(virq) => Ok(ResolvedIrqDesc::new(
-                self.resolve_plain_virq(virq, prepared),
-                None,
-            )),
+            IrqSpec::PlainVirq(_) => {
+                let resolution = self.plan_resolution(spec)?;
+                self.resolve_planned(resolution, prepared)
+            }
             IrqSpec::Desc(desc) => self.try_resolve_desc(desc, prepared),
         }
     }
@@ -844,38 +909,6 @@ impl IrqState {
 
     pub(super) fn stored_desc(&self, virq: Virq) -> Option<IrqDesc> {
         self.descs.get(&virq).map(|line| line.lock().desc)
-    }
-
-    fn resolve_plain_virq(&mut self, virq: Virq, prepared: Option<&Arc<IrqLine>>) -> IrqDesc {
-        if let Some(existing) = self.stored_desc(virq) {
-            return existing;
-        }
-        let desc = IrqDesc::from_virq(virq);
-        self.insert_prepared_line(virq, desc, prepared);
-        desc
-    }
-
-    fn insert_prepared_line(&mut self, virq: Virq, desc: IrqDesc, prepared: Option<&Arc<IrqLine>>) {
-        // Production admission is in manager::try_map,
-        // manager::try_enable_irq_inner (force-enable only), and
-        // manager::with_registration_line_checked. Each rechecks lookup_line
-        // under IRQ_STATE, including the domain-less hwirq fallback, and
-        // supplies a candidate before resolving a missing Line. The registry
-        // stays locked through this insertion, so that check cannot go stale.
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: caller rechecked that an existing \
-                      Line or supplied candidate is available under the registry lock"
-        )]
-        let line = prepared.expect("missing Line requires a prepared candidate");
-        {
-            let mut entry = line.lock();
-            // First publication resolves candidate metadata without changing its
-            // initial generation or replacing preallocated runtime storage.
-            entry.desc = desc;
-            entry.runtime.remember_desc(desc);
-        }
-        self.descs.insert(virq, line.clone());
     }
 
     fn domain_virq(&self, domain: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
@@ -934,8 +967,35 @@ impl IrqState {
         Some(desc)
     }
 
-    pub(super) fn remove_if_unused_with_desc(&mut self, virq: Virq) -> Option<IrqDesc> {
-        self.remove_if_unused_inner(virq, false)
+    /// Ends admission and retires only the admitted identity under registry exclusion.
+    ///
+    /// The caller retains the Line owner and management mutex until after this
+    /// transaction. Keeping registry exclusion across both Line-lock scopes
+    /// prevents enable from selecting the Line between teardown release and
+    /// removal. Already admitted users serialize on its state lock; dispatch
+    /// counts still prevent removal until controller completion.
+    pub(super) fn finish_management(
+        &mut self,
+        virq: Option<Virq>,
+        line: &Arc<IrqLine>,
+        has_removed_action: bool,
+    ) {
+        {
+            let mut entry = line.lock();
+            if has_removed_action {
+                entry.finish_teardown();
+            }
+            entry.end_management();
+        }
+        if has_removed_action
+            && let Some(virq) = virq
+            && self
+                .descs
+                .get(&virq)
+                .is_some_and(|current| Arc::ptr_eq(current, line))
+        {
+            self.remove_if_unused(virq);
+        }
     }
 
     /// Removes a software-only fixture, including any unexpectedly published mapping.
@@ -996,6 +1056,30 @@ pub(super) fn try_resolve_and_publish(
     spec: IrqSpec,
     prepared: Option<&Arc<IrqLine>>,
 ) -> Result<IrqDesc, IrqDescError> {
+    validate_resolution_domain(spec)?;
+    let resolved = state.try_resolve_spec(spec, prepared)?;
+    Ok(publish_resolution(state, resolved))
+}
+
+/// Resolves while the caller keeps the selected Line locked through its update.
+///
+/// The caller holds registry exclusion, selects the existing Line or an
+/// unpublished candidate, and passes that Line's locked state. This function
+/// never reacquires a Line lock. Rejected validation does not change metadata
+/// or mappings; allocating a fresh dynamic identity may advance the allocator.
+pub(super) fn try_resolve_and_publish_locked(
+    state: &mut IrqState,
+    spec: IrqSpec,
+    line: &Arc<IrqLine>,
+    entry: &mut IrqStateDesc,
+) -> Result<IrqDesc, IrqDescError> {
+    validate_resolution_domain(spec)?;
+    let resolution = state.plan_resolution(spec)?;
+    let resolved = state.commit_resolution(resolution, line, entry)?;
+    Ok(publish_resolution(state, resolved))
+}
+
+fn validate_resolution_domain(spec: IrqSpec) -> Result<(), IrqDescError> {
     let domain_id = match spec {
         IrqSpec::PlainVirq(_) => None,
         IrqSpec::Desc(desc) => desc.domain,
@@ -1005,13 +1089,16 @@ pub(super) fn try_resolve_and_publish(
     {
         return Err(IrqDescError::UnknownDomain { domain: domain_id });
     }
-    let resolved = state.try_resolve_spec(spec, prepared)?;
+    Ok(())
+}
+
+fn publish_resolution(state: &IrqState, resolved: ResolvedIrqDesc) -> IrqDesc {
     if let Some(domain_id) = resolved.snapshot_domain_to_publish() {
         let published =
             crate::domain::publish_snapshot(domain_id, state.domain_mapping_entries(domain_id));
         debug_assert!(published);
     }
-    Ok(resolved.into_desc())
+    resolved.into_desc()
 }
 
 #[cfg(target_arch = "x86_64")]

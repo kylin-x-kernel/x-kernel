@@ -569,6 +569,13 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   and restores context only after both guards are gone. It protects the non-LIFO
   registry-to-Line handoff; removing it requires an independent outer context
   guard, not merely deleting the global lock.
+- Final enable admission checks teardown under the same Line guard as disable
+  depth changes and controller application. A stale earlier observation cannot
+  authorize enabling a tearing-down Line. Legacy enable checks teardown before
+  merging metadata and retains that guard through resolution and application.
+  Resolution validates identity, descriptor compatibility and mapping conflicts
+  before mutation. Rejection does not publish metadata or mappings, although
+  selecting a fresh dynamic identity may advance the allocator.
 - Regular/shared registration relies on management admission for membership
   stability, not a directory lock around the controller call. The Line lock
   covers installation and configuration/unmask together. The caller retains
@@ -632,6 +639,12 @@ These checks do not validate IRQ directory membership, hardware quiescence or
 application dependency cycles. KIRQ revalidates retained Line identity after
 acquisition and records admission before releasing the registry lock; unused
 cleanup excludes admitted Lines. A stale remover cannot touch a replacement.
+Admission completion holds registry exclusion continuously while releasing
+teardown/admission under the original Line lock and checking identity for unused
+removal. It does not acquire global control exclusion: new enable lookups require
+the registry lock, and retained dispatch counts protect outstanding claims.
+The caller retains the Line owner and management mutex until cleanup returns,
+so removing the directory reference cannot finally destroy the Line under locks.
 Registration may retry, but only after releasing the old mutex. Waiting for
 dispatch holds management exclusion, not control/registry/Line spinlocks.
 Caller-owned handler dependencies must not require the same management mutex

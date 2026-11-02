@@ -849,9 +849,16 @@ without registry exclusion. Normal enable remains lookup-only and requires an
 action; legacy enable may publish a preallocated candidate and force the
 hardware enable write at depth zero for per-CPU bring-up. Nested enable still
 decrements disable depth without unmasking until the depth reaches zero.
-Final enable admission checks teardown under the same Line guard as prepare
-and hardware apply. Legacy metadata resolution still uses the existing resolver:
-the global control lock protects its earlier teardown check through resolution.
+The final enable admission checks teardown and prepares the enable plan under
+the same Line guard that covers controller application. Normal enable has no
+separate unlocked teardown observation. Legacy enable additionally prechecks
+before descriptor merging and passes the same guard to the locked resolver.
+Resolution selects an identity, validates descriptor and mapping compatibility,
+then commits metadata and publishes the reverse-map snapshot without reacquiring
+the Line lock. Ordinary map and registration reuse the same validation/commit
+implementation. Registry exclusion ends before controller application; Line
+exclusion remains continuous. Global control is still retained for the other
+management transactions, including cross-Line NMI duplicate publication.
 Regular and shared registration use their existing management admission to pin
 Line membership. Their installation bodies no longer reacquire the directory:
 action installation and the resulting configure/unmask plan run under the Line
@@ -864,8 +871,8 @@ Regular/shared withdrawal likewise relies on management admission rather than
 reacquiring the directory in its body. Action removal, teardown marking and the
 last-action mask are one Line-locked transaction. The removed owner is returned
 out of that transaction; only then does the caller drain the original Line,
-with all short locks released. Admission cleanup retains its existing control
-and registry transaction, and releases management before returning the handler
+with all short locks released. Admission cleanup uses a registry transaction
+without the global control lock, and releases management before returning the handler
 to the caller. Removing a non-last shared action does not mask the remaining
 actions.
 NMI registration and withdrawal also retain the original Line state lock across
@@ -1164,8 +1171,12 @@ an owner outside the transaction so their final destructors do not run under
 the management mutex or short locks.
 
 After drain, teardown completion, admission release and unused-Line withdrawal
-share one control/registry transaction. Clearing teardown earlier would let a
-legacy force-enable race with later withdrawal. NMI duplicate checking and
+share one registry transaction. The registry lock excludes new enable lookups
+between the Line-locked teardown release and identity-checked unused removal;
+already admitted users serialize through the Line lock. Retained dispatch counts
+still prevent removal before controller completion. No global control lock is
+needed for this cleanup. Clearing teardown outside the registry transaction
+would let legacy force-enable race with later withdrawal. NMI duplicate checking and
 paired table/fallback publication also retain control exclusion throughout,
 including when two descriptors name the same hwirq through different Lines.
 
