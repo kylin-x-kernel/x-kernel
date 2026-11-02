@@ -80,13 +80,41 @@ mod tee_svc_storage;
 mod tee_ta_manager;
 mod tee_time;
 mod types_ext;
-mod user_access;
 mod user_ta;
 mod utee_defines;
 mod utils;
 mod uuid;
 mod vm;
 pub type TeeResult<T = ()> = Result<T, u32>;
+
+/// Error adapter for common allocation and user-memory operations.
+/// Existing TEE entry points retain their `u32` ABI error representation.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct TeeError(u32);
+
+impl From<kerrno::KError> for TeeError {
+    fn from(error: kerrno::KError) -> Self {
+        Self(match error {
+            kerrno::KError::InvalidInput | kerrno::KError::BadAddress => {
+                tee_raw_sys::TEE_ERROR_BAD_PARAMETERS
+            }
+            kerrno::KError::NoMemory => tee_raw_sys::TEE_ERROR_OUT_OF_MEMORY,
+            _ => tee_raw_sys::TEE_ERROR_GENERIC,
+        })
+    }
+}
+
+impl From<osvm::MemError> for TeeError {
+    fn from(error: osvm::MemError) -> Self {
+        Self::from(kerrno::KError::from(error))
+    }
+}
+
+impl From<TeeError> for u32 {
+    fn from(error: TeeError) -> Self {
+        error.0
+    }
+}
 
 pub use tee_api_defines_extensions::*;
 #[cfg(unittest)]

@@ -27,6 +27,16 @@ after copying.
 
 ## Unsafe inventory and invariants
 
+`load_vm_kbox_with_flags` reserves exactly the requested number of elements
+before accessing user memory. Layout overflow and invalid flags return
+InvalidInput; allocation failure returns NoMemory without copying. Failed
+copies discard uninitialized storage. Successful conversion requires every
+byte to have been initialized by osvm and T: UserRead; empty and ZST payloads
+need no byte writes. This does not imply atomic snapshots or syscall limits.
+Tests inject reservation failure and length mismatch and cover empty payloads,
+overflow and invalid flags. TEE integration tests exercise actual user copying
+and fault translation through the public API.
+
 All unsafe sites carry inline `SAFETY:` justifications.
 
 | Site | Operation | Invariant |

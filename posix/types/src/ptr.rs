@@ -17,6 +17,7 @@ use core::{
     ptr, slice,
 };
 
+use kalloc_types::{AllocFlags, KBox};
 use kerrno::{KError, KResult};
 use osvm::{VirtMutPtr, VirtPtr, load_vec_until_null, read_vm_bytes, write_vm_bytes};
 
@@ -355,6 +356,57 @@ impl<T> UserConstPtr<T> {
         Ok(unsafe { value.assume_init() })
     }
 
+    /// Fallibly allocates and copies `len` values with `KERNEL` permissions.
+    /// See [`Self::load_vm_kbox_with_flags`] for context and error requirements.
+    pub fn load_vm_kbox(self, len: usize) -> KResult<KBox<[T]>>
+    where
+        T: UserRead,
+    {
+        self.load_vm_kbox_with_flags(len, AllocFlags::KERNEL)
+    }
+
+    /// Reserves an owner before copying `len` values from user memory.
+    ///
+    /// Callers must bound the element count and validate syscall-specific null
+    /// policies. Empty or zero-sized payloads do not access user memory.
+    /// `KERNEL` requires sleepable, reclaim-safe task context without locks
+    /// needed by reclaim. `NOWAIT` constrains only allocation: user copying can
+    /// still fault or sleep. This is not an atomic snapshot of user memory.
+    ///
+    /// # Errors
+    /// Invalid flags or layout overflow return `InvalidInput`; reservation
+    /// failure returns `NoMemory` before accessing user memory. Copy errors
+    /// use the standard `MemError` to `KError` conversion. Failed copies release
+    /// storage without exposing partial initialization.
+    pub fn load_vm_kbox_with_flags(self, len: usize, flags: AllocFlags) -> KResult<KBox<[T]>>
+    where
+        T: UserRead,
+    {
+        self.load_vm_kbox_with(len, flags, KBox::new_uninit_slice_with_flags)
+    }
+
+    fn load_vm_kbox_with(
+        self,
+        len: usize,
+        flags: AllocFlags,
+        reserve: impl FnOnce(usize, AllocFlags) -> KResult<KBox<[MaybeUninit<T>]>>,
+    ) -> KResult<KBox<[T]>>
+    where
+        T: UserRead,
+    {
+        let mut storage = reserve(len, flags)?;
+        if storage.len() != len {
+            return Err(KError::InvalidInput);
+        }
+        let bytes = spare_as_uninit_bytes(&mut storage);
+        if !bytes.is_empty() {
+            read_vm_bytes(self.0.cast::<u8>(), bytes)?;
+        }
+        // SAFETY: a successful copy initialized every byte and UserRead makes
+        // every bit pattern valid. Empty and ZST slices require no byte writes.
+        Ok(unsafe { storage.assume_init() })
+    }
+
     /// Allocates and copies `len` values from the current user address space.
     ///
     /// `len` is an element count. Callers must enforce a resource limit before
@@ -478,3 +530,5 @@ impl UserConstPtr<c_char> {
         Err(KError::OutOfRange)
     }
 }
+
+unittest::path_mod_test!(mod tests, "../ut-tests/ptr.rs");

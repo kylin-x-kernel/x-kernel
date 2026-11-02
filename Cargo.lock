@@ -4478,6 +4478,7 @@ name = "posix-types"
 version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
+ "kalloc-types",
  "kerrno",
  "kio",
  "ktime_types",

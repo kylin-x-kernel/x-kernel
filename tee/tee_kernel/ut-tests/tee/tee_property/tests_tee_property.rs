@@ -12,11 +12,30 @@ use tee_raw_sys::{
 };
 use unittest::assert_eq;
 
-use super::{sys_tee_scn_get_property, sys_tee_scn_get_property_name_to_index};
+use super::{
+    PropertySet, get_prop_struct, sys_tee_scn_get_property,
+    sys_tee_scn_get_property_name_to_index,
+};
 use crate::{TestUserBuffer, TestUserValue};
 
 fn impl_prop_set() -> c_ulong {
     TEE_PROPSET_TEE_IMPLEMENTATION as usize as c_ulong
+}
+
+#[unittest::def_test]
+fn test_property_owners_preserve_dynamic_dispatch() {
+    let identity = get_prop_struct(PropertySet::CurrentClient, 0).unwrap();
+    let identity_name = identity.name();
+    assert_eq!(identity_name.as_c_str(), c"gpd.client.identity");
+    let endian = get_prop_struct(PropertySet::CurrentClient, 1).unwrap();
+    let endian_name = endian.name();
+    assert_eq!(endian_name.as_c_str(), c"gpd.client.endian");
+    let app_id = get_prop_struct(PropertySet::CurrentTa, 0).unwrap();
+    let app_id_name = app_id.name();
+    assert_eq!(app_id_name.as_c_str(), c"gpd.ta.appID");
+    let description = get_prop_struct(PropertySet::TeeImplementation, 1).unwrap();
+    let description_name = description.name();
+    assert_eq!(description_name.as_c_str(), c"gpd.tee.description");
 }
 
 #[unittest::def_test]

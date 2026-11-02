@@ -68,6 +68,10 @@ fallible construction, `Deref`, `DerefMut`, and automatic destruction.
 `KBox<T: ?Sized>` allows sized owners to unsize into trait objects or slices
 without allocating, preserving pointer metadata and borrowed lifetimes.
 Runtime-length slices support uninitialized reservation and Copy-value filling.
+`from_slice` and `from_slice_with_flags` copy an existing kernel slice into
+fallible ownership, without intermediate Vec allocation or user-memory access.
+The default uses KERNEL; explicit flags retain the existing allocation context
+contract. Copy ZST slices require no per-element work.
 String construction, raw pointer conversion, cloning, growable containers, and
 pinning are not provided.
 Callers do not use the standard `Box` through this API.

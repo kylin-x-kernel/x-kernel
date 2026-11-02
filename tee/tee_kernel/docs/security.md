@@ -1,5 +1,49 @@
 # TEE Ownership and Lifecycle Safety
 
+## Syscall buffer ownership boundary
+
+TEE uses common KBox slice constructors and `UserConstPtr::load_vm_kbox_with_flags`
+rather than a private buffer/access module. The pointer helper allocates storage
+before copying through `osvm::read_vm_bytes`, backed by `kuaccess`. Its reservation
+must have exactly the requested length. `TeeError` conversions own TEE error
+mapping; unexpected errors map to GENERIC, not OUT_OF_MEMORY.
+Only a complete successful copy permits conversion to initialized bytes; all
+byte bit patterns are valid. Copy failure frees the reservation without exposing
+partially initialized data. Layout overflow is BAD_PARAMETERS and owner OOM is
+OUT_OF_MEMORY. Syscall-specific limits and null checks remain at the callers.
+
+Crypto syscall staging uses KERNEL before state changes; object-locked attribute
+export, secret creation, populate memrefs, and storage serialization/write staging
+use NOWAIT to avoid reclaim under their serialization locks. NOWAIT does not
+make user faults or filesystem calls nonblocking. Allocation policy applies only
+to these owners, not nested Vec, Arc or crypto-library allocations.
+
+Storage create stages data before pobj reference admission. Enumeration reserves
+its temporary object before readdir. Owner OOM therefore cannot leak that manual
+reference or consume an entry. Existing errors after backend effects are not
+rolled back by this migration. Read preparation precedes backend reads and
+position changes; export preparation precedes output length/value writes.
+
+Common pointer tests inject reservation failure before user access. TEE tests
+exercise the public copy path and error conversions, and inject failure in
+secret construction, enumeration readdir and the shared crypto update callback;
+the latter checks unchanged output bytes and length. Common pointer tests cover
+empty buffers, layout overflow and mismatched reservations. TEE tests cover
+byte and multi-byte user copies, user-copy failure, and existing crypto/storage
+behavior. They do not force global OOM,
+exhaust nested collections, or prove rollback after backend execution. Key
+buffers retain their existing destruction policy, without guaranteed erasure.
+
+## Property query owner boundary
+
+Property metadata ownership uses fallible KBox construction before any user
+output is written or session lock is acquired. Invalid indices are rejected
+before allocation; owner OOM leaves output values and lengths unchanged.
+This does not make CString name construction or user-memory access allocation
+fallible end to end. Property tests cover dynamic dispatch for zero-sized and
+nonzero-sized owners, invalid selectors, and short-buffer length reporting;
+they do not inject global allocator failure.
+
 ## REE metadata reservation boundary
 
 `new_fs_owner` reserves a typed uninitialized KBox with NOWAIT before invoking
@@ -43,7 +87,9 @@ This analysis covers session ownership and access in `src/tee/tee_session.rs`,
 the close-all entry points in `tee_obj.rs`, `tee_svc_storage.rs` and
 `tee_svc_cryp2.rs` under `src/tee/`, and their exec/exit handoff. It also covers
 the REE metadata owner reservation and initialization boundary in `tee_ree_fs.rs`
-and `fs_dirfile.rs` under `src/tee/`. Other storage-backend operations, nested
+and `fs_dirfile.rs` under `src/tee/`, and property-query owner preparation in
+`tee_property.rs`, and buffer preparation in the crypto/storage service modules
+and the `TeeError` conversions in `mod.rs`. Other storage-backend operations, nested
 allocations, crypto algorithms, TA loading and syscall argument validation remain
 outside this analysis, as do resource operations unrelated to these boundaries.
 

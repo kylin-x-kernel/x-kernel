@@ -7,6 +7,31 @@ use core::ffi::{c_uint, c_ulong};
 use unittest::{TestResult, assert, assert_eq, assert_ne};
 
 use super::*;
+
+#[unittest::def_test(user)]
+fn test_output_owner_failure_does_not_advance_crypto_or_publish_output() {
+    let output = crate::TestUserBuffer::new(8).unwrap();
+    output.write_bytes(b"original").unwrap();
+    let output_len = TestUserValue::from_value(8usize).unwrap();
+    let called = core::cell::Cell::new(false);
+    let result = syscall_cryp_inout_update_with(
+        1,
+        0,
+        0,
+        output.as_user_ptr::<u8>() as usize,
+        output_len.as_user_ptr() as usize,
+        |_, _, _| {
+            called.set(true);
+            Ok(0)
+        },
+        |_, _| Err(TEE_ERROR_OUT_OF_MEMORY),
+    );
+    assert_eq!(result, Err(TEE_ERROR_OUT_OF_MEMORY));
+    assert!(!called.get());
+    assert_eq!(output_len.read(), 8);
+    let bytes = output.read_bytes(8).unwrap();
+    assert_eq!(&bytes[..], b"original");
+}
 use crate::{
     TestUserValue,
     tee::{
@@ -1727,7 +1752,7 @@ fn test_cryp_hmac_sm3() {
     assert!(matches!(obj.attr[0], TeeCryptObj::ObjSecret(_)));
 
     let key = b"abcdefghabcdefgh";
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key as &[u8]).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -1918,7 +1943,7 @@ fn test_cryp_mac_copy_after_digest_extract_style_final_hmac_sm3() {
     for obj_id in [src_obj_id, dst_obj_id] {
         let obj = tee_obj_get(obj_id as TeeObjIdType).unwrap();
         let mut guard = obj.lock();
-        let mut secret = TeeCrypObjSecretWrapper::new(32);
+        let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
         secret.set_secret_data(KEY).unwrap();
         let _ = core::mem::replace(&mut guard.attr[0], TeeCryptObj::ObjSecret(secret));
     }
@@ -1983,7 +2008,7 @@ fn test_cryp_mac_copy_after_digest_extract_style_final_aes_cmac() {
     for obj_id in [src_obj_id, dst_obj_id] {
         let obj = tee_obj_get(obj_id as TeeObjIdType).unwrap();
         let mut guard = obj.lock();
-        let mut secret = TeeCrypObjSecretWrapper::new(32);
+        let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
         secret.set_secret_data(&KEY).unwrap();
         let _ = core::mem::replace(&mut guard.attr[0], TeeCryptObj::ObjSecret(secret));
     }
@@ -2043,7 +2068,7 @@ fn test_cryp_state_copy_hmac_sm3() {
     assert!(src_obj.is_ok());
     let src_obj = src_obj.unwrap();
     let mut src_obj_guard = src_obj.lock();
-    let mut src_secret = TeeCrypObjSecretWrapper::new(32);
+    let mut src_secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     src_secret.set_secret_data(key).unwrap();
     let _ = core::mem::replace(
         &mut src_obj_guard.attr[0],
@@ -2055,7 +2080,7 @@ fn test_cryp_state_copy_hmac_sm3() {
     assert!(dst_obj.is_ok());
     let dst_obj = dst_obj.unwrap();
     let mut dst_obj_guard = dst_obj.lock();
-    let mut dst_secret = TeeCrypObjSecretWrapper::new(32);
+    let mut dst_secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     dst_secret.set_secret_data(key).unwrap();
     let _ = core::mem::replace(
         &mut dst_obj_guard.attr[0],
@@ -2121,7 +2146,7 @@ fn test_cryp_state_copy_sm4_cbc_ctx() {
     assert!(src_obj.is_ok());
     let src_obj = src_obj.unwrap();
     let mut src_obj_guard = src_obj.lock();
-    let mut src_secret = TeeCrypObjSecretWrapper::new(32);
+    let mut src_secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     src_secret.set_secret_data(key).unwrap();
     let _ = core::mem::replace(
         &mut src_obj_guard.attr[0],
@@ -2133,7 +2158,7 @@ fn test_cryp_state_copy_sm4_cbc_ctx() {
     assert!(dst_obj.is_ok());
     let dst_obj = dst_obj.unwrap();
     let mut dst_obj_guard = dst_obj.lock();
-    let mut dst_secret = TeeCrypObjSecretWrapper::new(32);
+    let mut dst_secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     dst_secret.set_secret_data(key).unwrap();
     let _ = core::mem::replace(
         &mut dst_obj_guard.attr[0],
@@ -2206,7 +2231,7 @@ fn test_cryp_cmac_aes() {
     assert!(matches!(obj.attr[0], TeeCryptObj::ObjSecret(_)));
 
     let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f";
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key as &[u8]).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -2252,7 +2277,7 @@ fn alloc_aes_cmac_mac_state(key: &[u8], state: &mut u32) -> TestResult {
 
     let obj_arc = tee_obj_get(obj_id as TeeObjIdType).unwrap();
     let mut obj = obj_arc.lock();
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key).unwrap();
     let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::ObjSecret(secret));
     drop(obj);
@@ -2412,7 +2437,7 @@ fn test_cryp_sm4_ecb_encrypt() {
     assert!(matches!(obj.attr[0], TeeCryptObj::ObjSecret(_)));
 
     let key = b"abcdefghabcdefgh";
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key as &[u8]).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -2519,7 +2544,7 @@ fn test_cryp_sm4_ecb_decrypt() {
     assert!(matches!(obj.attr[0], TeeCryptObj::ObjSecret(_)));
 
     let key = b"abcdefgh12345678";
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key as &[u8]).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -2592,7 +2617,7 @@ fn test_cryp_sm4_cbc_encrypt() {
     assert!(matches!(obj.attr[0], TeeCryptObj::ObjSecret(_)));
 
     let key = b"abcdefghabcdefgh";
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key as &[u8]).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -2663,7 +2688,7 @@ fn test_cryp_sm4_cbc_decrypt() {
     assert!(matches!(obj.attr[0], TeeCryptObj::ObjSecret(_)));
 
     let key = b"abcdefghabcdefgh";
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(key as &[u8]).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -2735,7 +2760,7 @@ fn test_cryp_sm4_gcm_encrypt() {
         0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC,
         0xE4, 0x67,
     ];
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(&key).unwrap();
     assert_eq!(secret.key(), key);
 
@@ -2818,7 +2843,7 @@ fn test_cryp_sm4_gcm_split_aad_matches_one_shot() {
         0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC,
         0xE4, 0x67,
     ];
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(&key).unwrap();
     let _ = core::mem::replace(&mut obj_guard.attr[0], TeeCryptObj::ObjSecret(secret));
     drop(obj_guard);
@@ -3021,7 +3046,7 @@ fn des3_ecb_encrypt_test_setup(key: &[u8]) -> TeeResult<u32> {
 
     let obj_arc = tee_obj_get(obj_id as TeeObjIdType)?;
     let mut obj = obj_arc.lock();
-    let mut secret = TeeCrypObjSecretWrapper::new(24);
+    let mut secret = TeeCrypObjSecretWrapper::new(24).unwrap();
     secret.set_secret_data(key)?;
     let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::ObjSecret(secret));
     drop(obj);
@@ -3086,7 +3111,7 @@ fn aes_xts_test_setup_keys(key1: &[u8], key2: &[u8]) -> (TeeObjIdType, TeeObjIdT
     for (id, material) in [(obj1_id, key1), (obj2_id, key2)] {
         let obj_arc = tee_obj_get(id).unwrap();
         let mut obj = obj_arc.lock();
-        let mut secret = TeeCrypObjSecretWrapper::new(32);
+        let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
         secret.set_secret_data(material).unwrap();
         let _ = core::mem::replace(&mut obj.attr[0], TeeCryptObj::ObjSecret(secret));
     }
@@ -3495,7 +3520,7 @@ fn test_cryp_aes_ccm_encrypt_decrypt() {
     assert!(enc_obj.is_ok());
     let enc_obj = enc_obj.unwrap();
     let mut enc_obj_guard = enc_obj.lock();
-    let mut enc_secret = TeeCrypObjSecretWrapper::new(32);
+    let mut enc_secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     enc_secret.set_secret_data(&key).unwrap();
     let _ = core::mem::replace(
         &mut enc_obj_guard.attr[0],
@@ -3507,7 +3532,7 @@ fn test_cryp_aes_ccm_encrypt_decrypt() {
     assert!(dec_obj.is_ok());
     let dec_obj = dec_obj.unwrap();
     let mut dec_obj_guard = dec_obj.lock();
-    let mut dec_secret = TeeCrypObjSecretWrapper::new(32);
+    let mut dec_secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     dec_secret.set_secret_data(&key).unwrap();
     let _ = core::mem::replace(
         &mut dec_obj_guard.attr[0],
@@ -3616,7 +3641,7 @@ fn test_cryp_sm4_gcm_decrypt() {
         0x69, 0xEE, 0xDF, 0x37, 0x77, 0xE5, 0x94, 0xC3, 0x0E, 0x94, 0xE9, 0xC5, 0xE2, 0xBC,
         0xE4, 0x67,
     ];
-    let mut secret = TeeCrypObjSecretWrapper::new(32);
+    let mut secret = TeeCrypObjSecretWrapper::new(32).unwrap();
     secret.set_secret_data(&key).unwrap();
     assert_eq!(secret.key(), key);
 

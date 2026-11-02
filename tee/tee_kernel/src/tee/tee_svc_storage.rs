@@ -2,21 +2,21 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::{
     ffi::{c_uint, c_ulong, c_void},
     mem::{offset_of, size_of, size_of_val},
 };
 
 use bytemuck::{Pod, Zeroable, bytes_of_mut};
-use kalloc_types::KBox;
+use kalloc_types::{AllocFlags, KBox};
 use klazy::Once;
 use ksync::Mutex;
-use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::*;
 
 use super::{
+    TeeError,
     common::file_ops::FileVariant,
     fs_dirfile::{TeeFsDirfileFileh, tee_fs_dirfile_fileh_to_fname},
     tee_fs::TeeFsDirent,
@@ -34,25 +34,21 @@ use super::{
 };
 use crate::tee::TeeResult;
 
-fn map_user_mem_error(err: MemError) -> u32 {
-    match err {
-        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
-        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
-        _ => TEE_ERROR_GENERIC,
-    }
-}
-
-fn read_user_bytes_optional(addr: *const c_void, len: usize) -> TeeResult<Box<[u8]>> {
+fn read_user_bytes_optional(
+    addr: *const c_void,
+    len: usize,
+    flags: AllocFlags,
+) -> TeeResult<KBox<[u8]>> {
     if len == 0 {
-        return Ok(Box::new([]));
+        return KBox::new_slice_with_flags(0, 0, flags)
+            .map_err(|error| TeeError::from(error).into());
     }
     if addr.is_null() {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
-    Ok(UserConstPtr::<u8>::from(addr.cast::<u8>())
-        .load_vm_vec(len)
-        .map_err(map_user_mem_error)?
-        .into_boxed_slice())
+    UserConstPtr::<u8>::from(addr.cast::<u8>())
+        .load_vm_kbox_with_flags(len, flags)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 fn write_user_bytes(addr: *mut c_void, data: &[u8]) -> TeeResult {
@@ -64,15 +60,15 @@ fn write_user_bytes(addr: *mut c_void, data: &[u8]) -> TeeResult {
     }
     UserPtr::<u8>::from(addr.cast::<u8>())
         .write_vm_slice(data)
-        .map_err(map_user_mem_error)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 /// Copy object id from TA user memory. `object_id_len == 0` is valid (GP).
 fn bb_memdup_object_id_from_user(
     object_id: *const c_void,
     object_id_len: usize,
-) -> TeeResult<Box<[u8]>> {
-    read_user_bytes_optional(object_id, object_id_len)
+) -> TeeResult<KBox<[u8]>> {
+    read_user_bytes_optional(object_id, object_id_len, AllocFlags::KERNEL)
 }
 
 #[cfg(unittest)]
@@ -450,7 +446,7 @@ pub(super) fn syscall_storage_obj_open(
 
         UserPtr::<c_uint>::from(obj)
             .write_vm(tee_obj_id)
-            .map_err(map_user_mem_error)?;
+            .map_err(TeeError::from)?;
 
         Ok(())
     })();
@@ -480,7 +476,7 @@ fn tee_svc_storage_init_file(
     };
 
     let mut attr_size = 0;
-    let mut attr: Box<[u8]> = Vec::<u8>::new().into_boxed_slice();
+    let mut attr = KBox::new_slice_with_flags(0, 0, AllocFlags::NOWAIT).map_err(TeeError::from)?;
     if let Some(attr_o) = attr_o {
         if !src_is_dst {
             tee_obj_set_type(o, attr_o.info.objectType, attr_o.info.maxObjectSize as _)?;
@@ -499,7 +495,8 @@ fn tee_svc_storage_init_file(
         }
         tee_obj_attr_to_binary(o, &mut [], &mut attr_size)?;
         if attr_size > 0 {
-            attr = vec![0u8; attr_size].into_boxed_slice();
+            attr = KBox::new_slice_with_flags(0, attr_size, AllocFlags::NOWAIT)
+                .map_err(TeeError::from)?;
             tee_obj_attr_to_binary(o, &mut attr, &mut attr_size)?;
         }
     } else {
@@ -809,6 +806,8 @@ pub(super) fn syscall_storage_obj_create(
     tee_debug!("uuid: {:?}", uuid);
     let uuid = Uuid::parse_str(&uuid)?;
 
+    let data_buf = read_user_bytes_optional(data.cast_const(), len, AllocFlags::KERNEL)?;
+
     // === tee_pobj_get - need resource cleanup from here ===
     let po = tee_pobj_get(
         uuid.as_raw_ref(),
@@ -819,8 +818,6 @@ pub(super) fn syscall_storage_obj_create(
         fops,
     )?;
     tee_debug!("syscall_storage_obj_create: tee_pobj_get po: {:?}", po);
-
-    let data_buf = read_user_bytes_optional(data.cast_const(), len)?;
 
     // === call inner function ===
     let mut inner_ctx = CreateInnerCtx {
@@ -842,7 +839,7 @@ pub(super) fn syscall_storage_obj_create(
             if !obj.is_null()
                 && let Err(e) = UserPtr::<c_uint>::from(obj)
                     .write_vm(o_id)
-                    .map_err(map_user_mem_error)
+                    .map_err(|error| TeeError::from(error).into())
             {
                 // oclose 路径：C 逻辑中 oclose 不进行错误码转换
                 let _ = tee_obj_close(o_id);
@@ -1106,8 +1103,9 @@ pub(super) fn syscall_storage_obj_read(
     };
 
     let mut bytes = len;
+    let mut data_buf =
+        KBox::new_slice_with_flags(0, len, AllocFlags::KERNEL).map_err(TeeError::from)?;
     let mut o_guard = o.lock();
-    let mut data_buf = vec![0u8; len].into_boxed_slice();
     tee_debug!(
         "syscall_storage_obj_read: bytes: {:X?} dataPosition: 0x{:X?}",
         bytes,
@@ -1127,7 +1125,7 @@ pub(super) fn syscall_storage_obj_read(
     let u_count = bytes as u64;
     UserPtr::<u64>::from(count)
         .write_vm(u_count)
-        .map_err(map_user_mem_error)?;
+        .map_err(TeeError::from)?;
     write_user_bytes(data, &data_buf[..bytes])?;
 
     Ok(())
@@ -1185,7 +1183,7 @@ pub(super) fn syscall_storage_obj_write(obj: c_ulong, data: *mut c_void, len: us
         "syscall_storage_obj_write: dataPosition: {:X?}",
         o_guard.info.dataPosition
     );
-    let data_buf = read_user_bytes_optional(data.cast_const(), len)?;
+    let data_buf = read_user_bytes_optional(data.cast_const(), len, AllocFlags::NOWAIT)?;
     let fh = o_guard.fh.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
     (fops.write)(fh, pos_tmp, &[], &data_buf, len).inspect_err(|e| {
         error!("syscall_storage_obj_write: write failed: {:X?}", e);
@@ -1357,7 +1355,7 @@ pub(super) fn syscall_storage_alloc_enum(obj_enum: *mut c_uint) -> TeeResult {
     let id = tee_svc_storage_add_enum(obj)? as u32;
     UserPtr::<c_uint>::from(obj_enum)
         .write_vm(id)
-        .map_err(map_user_mem_error)?;
+        .map_err(TeeError::from)?;
     Ok(())
 }
 
@@ -1448,7 +1446,17 @@ pub(super) fn syscall_storage_next_enum(
     obj_id: *mut c_void,
     len: *mut u64,
 ) -> TeeResult {
-    let mut o: Option<Box<TeeObj>> = None;
+    syscall_storage_next_enum_with(obj_enum, info, obj_id, len, KBox::<TeeObj>::new_uninit)
+}
+
+fn syscall_storage_next_enum_with(
+    obj_enum: c_ulong,
+    info: *mut utee_object_info,
+    obj_id: *mut c_void,
+    len: *mut u64,
+    reserve: impl FnOnce() -> kerrno::KResult<KBox<core::mem::MaybeUninit<TeeObj>>>,
+) -> TeeResult {
+    let mut o: Option<KBox<TeeObj>> = None;
     // Hold the pobj from tee_pobj_get(USAGE_ENUM) so we can always release it,
     // even when the closure fails before storing it in o.pobj.
     let mut enum_pobj: Option<Arc<TeePobj>> = None;
@@ -1461,6 +1469,7 @@ pub(super) fn syscall_storage_next_enum(
             obj_guard.fops.ok_or(TEE_ERROR_ITEM_NOT_FOUND)?
         };
 
+        let prepared = reserve().map_err(TeeError::from)?;
         let mut obj_guard = e.lock();
         let dir = obj_guard.dir.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
         let mut d = TeeFsDirent::default();
@@ -1468,7 +1477,7 @@ pub(super) fn syscall_storage_next_enum(
             .inspect_err(|e| debug!("syscall_storage_next_enum: readdir: {:#010X?}", e))?;
         drop(obj_guard); // 释放 e 的锁，避免在 tee_pobj_get 中持有多个锁
 
-        o = Some(Box::new(TeeObj::default()));
+        o = Some(KBox::write(prepared, TeeObj::default()));
         let o = o.as_mut().ok_or(TEE_ERROR_BAD_STATE)?;
 
         let uuid = with_tee_ta_ctx(|ctx| Ok(ctx.uuid.clone()))?;
@@ -1511,7 +1520,7 @@ pub(super) fn syscall_storage_next_enum(
 
         UserPtr::<utee_object_info>::from(info)
             .write_vm(bbuf)
-            .map_err(map_user_mem_error)?;
+            .map_err(TeeError::from)?;
 
         let (obj_id_len, obj_id_vec, l) = {
             let objid = pobj.obj_id.lock();
@@ -1525,7 +1534,7 @@ pub(super) fn syscall_storage_next_enum(
 
         UserPtr::<u64>::from(len)
             .write_vm(l)
-            .map_err(map_user_mem_error)?;
+            .map_err(TeeError::from)?;
 
         Ok(())
     })();

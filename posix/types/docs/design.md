@@ -21,6 +21,14 @@ memory is accessed exclusively through `osvm`'s current-address-space provider.
 
 ## Architecture and interfaces
 
+`UserConstPtr::load_vm_kbox` and `load_vm_kbox_with_flags` reserve a fallible
+KBox slice before copying user values. They share the `UserRead` validity
+contract and `osvm` provider with existing pointer helpers. Allocation flags
+control reservation only: NOWAIT does not prevent user faults or sleeping.
+KERNEL requires reclaim-safe sleepable task context. Callers bound element
+counts and enforce syscall-specific null policies. Empty and zero-sized copies
+do not access user memory. Errors use KError; existing Vec APIs are unchanged.
+
 ```text
 syscall adapter ──UserPtr/UserConstPtr──> osvm checked copy ──> kernel value
         │                                                        │
@@ -111,6 +119,8 @@ The migration preserves module visibility, feature gates and execution modes.
 
 - `ut-tests/io_vector_buf.rs`: mounted by `src/io/vector_buf.rs` as `tests`.
 - `ut-tests/io_iovec.rs`: mounted by `src/io/iovec.rs` as `tests`.
+- `ut-tests/ptr.rs`: mounted by `src/ptr.rs` as `tests`; covers fallible owner
+  reservation, empty/overflow inputs, invalid flags and reservation mismatch.
 - `ut-tests/time_abi.rs`: mounted by `src/time/abi.rs` as `tests`.
 - `ut-tests/time_itimer.rs`: mounted by `src/time/itimer.rs` as `tests`.
 - `ut-tests/time_clock_ticks.rs`: mounted by `src/time/clock_ticks.rs` as `tests`.

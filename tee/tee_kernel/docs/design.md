@@ -1,5 +1,65 @@
 # TEE Ownership and Lifecycle
 
+## Fallible syscall and crypto buffers
+
+`tee_svc_storage`, `tee_svc_cryp` and `tee_svc_cryp2` use KBox byte slices
+for syscall staging, attribute memrefs, exported attributes and secret storage.
+There is no TEE buffer or user-access module. Kernel slices use the common
+`KBox::new_slice_with_flags` and `KBox::from_slice_with_flags` APIs directly.
+User payloads use `UserConstPtr::load_vm_kbox_with_flags` in `posix-types`, backed
+by the common `osvm`/`kuaccess` copy path. This public helper reserves storage
+before fault-checked user copying and assumes
+initialization only after the complete copy succeeds. Partial copies drop the
+uninitialized reservation. Empty buffers never read user memory. Layout overflow
+maps to BAD_PARAMETERS; owner allocation failure maps to OUT_OF_MEMORY.
+`TeeError` next to `TeeResult` implements `From<KError>` and `From<MemError>`;
+conversion back to `u32` preserves existing entry-point signatures. Unknown
+errors become GENERIC rather than being misclassified as allocation failure.
+Existing optional/required null-pointer conventions remain with their callers.
+Output staging still reads existing user bytes rather than substituting zeros.
+
+| Preparation boundary | Policy | Reason |
+| --- | --- | --- |
+| Crypto syscall input, output and OAEP label | KERNEL | Outside crypto-state locks and before state advancement |
+| Storage object IDs and create input | KERNEL | Outside object/session locks; before pobj admission |
+| Storage read buffer | KERNEL | After access validation, before reacquiring the object lock and backend read |
+| Enumeration temporary TeeObj owner | KERNEL | Before acquiring the enumeration lock and consuming readdir |
+| Storage write staging and attribute serialization | NOWAIT | Object or source-attribute lock is held |
+| Attribute export, secret storage and populate memrefs | NOWAIT | Shared helpers can run under object/usage locks |
+
+KERNEL requires IRQs and preemption enabled, sleepable reclaim-safe task context,
+no non-sleepable RCU section, and no locks needed by reclaim, IO or filesystem
+callbacks. NOWAIT prevents reclaim only for the owner allocation; existing user
+access, storage IO and nested allocations retain their own context requirements.
+It provides no reserve, bounded-latency or NMI guarantee.
+
+Create input is prepared before obtaining a manually counted pobj reference,
+so copy/owner failure cannot leak that reference. This moves input errors ahead
+of pobj conflict errors. Enumeration reserves its temporary object before
+readdir, so owner failure does not consume an entry; it can precede directory-state
+validation. Later backend/user-copy errors retain the existing behavior.
+Attribute serialization fails before backend create; existing create rollback
+releases pobj ownership and restores the converted object's flags. Secret
+construction finishes before attribute installation. The unused infallible
+secret Clone implementation is removed.
+
+`copy_in_attrs` returns its existing Vec directly instead of converting it to a
+boxed slice; partial failure drops already prepared memrefs. The Vec itself,
+crypto-library internals, CString names, persistent-object IDs and hash-tree
+growth remain outside this owner migration. No new zeroization guarantee is made.
+
+## Fallible property query owners
+
+Property queries prepare a `KBox<dyn TeeProps>` before accessing session state
+or writing user outputs. The syscall dispatch reaches this preparation without
+holding a session or object lock. Default KERNEL allocation requires sleepable,
+reclaim-safe task context with IRQs and preemption enabled, outside non-sleepable
+RCU sections and without locks needed by reclaim or IO. Invalid sets and indices
+retain ITEM_NOT_FOUND precedence over owner allocation. Owner failure returns
+OUT_OF_MEMORY before publishing any output. Client and TA property owners are
+zero-sized; implementation properties own static metadata, not session resources.
+Property names still use the existing CString allocation, outside this guarantee.
+
 ## Fallible REE filesystem metadata owners
 
 REE file handles (`TeeFsFd`), directory iterators (`TeeFsDir`) and cached
@@ -65,7 +125,10 @@ This document covers session ownership in `src/tee/tee_session.rs` and its
 interaction with resource cleanup and process exec/exit. It also covers REE
 filesystem metadata owner reservation and initialization in `tee_ree_fs.rs` and
 `fs_dirfile.rs` under `src/tee/`, including ownership held by `tee_obj.rs` and
-`tee_svc_storage.rs`. TEE dispatch, storage protocols, crypto algorithms and TA
+`tee_svc_storage.rs`, as well as property-query owner preparation in
+`tee_property.rs`, and byte-owner preparation in the three service modules and
+the shared pointer/ownership APIs, with TEE error conversion in `mod.rs`.
+TEE dispatch, storage protocols, crypto algorithms and TA
 loading are outside this lifecycle scope.
 
 `kprocess::Thread` owns an optional boxed `TeeSessionCtx` behind a sleepable

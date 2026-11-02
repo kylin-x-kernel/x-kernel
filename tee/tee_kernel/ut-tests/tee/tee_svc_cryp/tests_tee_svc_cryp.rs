@@ -65,7 +65,7 @@ fn test_tee_svc_find_type_props() {
 fn test_op_attr_secret_value_from_user() {
     // 测试基础数据
     let user_key = [0xAAu8; 16];
-    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32);
+    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32).unwrap();
 
     // 从用户空间导入密钥
     op_attr_secret_value_from_user(&mut secret_wrapper, &user_key).unwrap();
@@ -84,7 +84,7 @@ fn test_op_attr_secret_value_from_user() {
 #[unittest::def_test(user)]
 fn test_op_attr_secret_value_to_bytes() {
     // 准备测试数据
-    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32);
+    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32).unwrap();
     let key_data: [u8; 16] = [0xCC; 16];
     // 手动设置密钥数据和大小
     {
@@ -92,15 +92,28 @@ fn test_op_attr_secret_value_to_bytes() {
         data_slice[..16].copy_from_slice(&key_data);
         secret_wrapper.secret_mut().key_size = 16;
     }
-    let exported = op_attr_secret_value_to_bytes(&secret_wrapper);
+    let exported = op_attr_secret_value_to_bytes(&secret_wrapper).unwrap();
     assert_eq!(exported.len(), 16);
     assert_eq!(&*exported, &key_data);
 }
 
 #[unittest::def_test]
+fn test_secret_reservation_failure_uses_nowait() {
+    let attempted = core::cell::Cell::new(None);
+    let result = TeeCrypObjSecretWrapper::new_with(32, |len, flags| {
+        attempted.set(Some((len, flags)));
+        Err(TEE_ERROR_OUT_OF_MEMORY)
+    });
+    assert_eq!(attempted.get(), Some((32, AllocFlags::NOWAIT)));
+    assert_eq!(result.err().unwrap(), TEE_ERROR_OUT_OF_MEMORY);
+    let invalid = TeeCrypObjSecretWrapper::new(usize::MAX);
+    assert_eq!(invalid.err().unwrap(), TEE_ERROR_BAD_PARAMETERS);
+}
+
+#[unittest::def_test]
 fn test_op_attr_secret_value_to_binary() {
     // 准备测试数据
-    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32);
+    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(32).unwrap();
     let key_data: [u8; 16] = [0xDD; 16];
     // 手动设置密钥数据和大小
     {
@@ -122,7 +135,7 @@ fn test_op_attr_secret_value_to_binary() {
     assert_eq!(&buffer[4..20], &key_data);
 
     // test op_attr_secret_value_from_binary
-    let mut new_secret_wrapper = TeeCrypObjSecretWrapper::new(32);
+    let mut new_secret_wrapper = TeeCrypObjSecretWrapper::new(32).unwrap();
     let mut offs_from: size_t = 0;
     let result =
         op_attr_secret_value_from_binary(&mut new_secret_wrapper, &buffer, &mut offs_from);
@@ -137,7 +150,7 @@ fn test_op_attr_secret_value_to_binary() {
 
 #[unittest::def_test]
 fn test_op_attr_secret_value_from_binary_rejects_bad_inputs() {
-    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(8);
+    let mut secret_wrapper = TeeCrypObjSecretWrapper::new(8).unwrap();
     let mut offs: size_t = 0;
 
     let truncated = [0x00, 0x00, 0x00, 0x04, 0xAA, 0xBB];
@@ -350,7 +363,7 @@ fn test_cryptoattrref_bignum() {
 #[unittest::def_test(user)]
 fn test_secret_value() {
     // set secret value data to
-    let mut secret = TeeCrypObjSecretWrapper::new(16);
+    let mut secret = TeeCrypObjSecretWrapper::new(16).unwrap();
     secret.secret_mut().key_size = 16;
     secret.data_mut()[..16].copy_from_slice(&[0xaa; 16]);
 
@@ -360,7 +373,7 @@ fn test_secret_value() {
     assert_eq!(buffer.len(), 16);
     assert_eq!(&*buffer, &secret.data()[..16]);
     // - test import_from_bytes
-    let mut secret_dest = TeeCrypObjSecretWrapper::new(16);
+    let mut secret_dest = TeeCrypObjSecretWrapper::new(16).unwrap();
     let result = secret_dest.import_from_bytes(&buffer);
     assert!(result.is_ok());
     assert_eq!(secret_dest.secret().key_size, secret.secret().key_size);
@@ -380,7 +393,7 @@ fn test_secret_value() {
         &secret_dest.data()[..16]
     );
     //  - test update_from_binary
-    let mut secret_from = TeeCrypObjSecretWrapper::new(16);
+    let mut secret_from = TeeCrypObjSecretWrapper::new(16).unwrap();
     offs = 0;
     let result = secret_from.update_from_binary(&data, &mut offs);
     assert!(result.is_ok());
@@ -389,12 +402,12 @@ fn test_secret_value() {
     assert_eq!(&secret_from.data()[..16], &secret_dest.data()[..16]);
 
     // - test update_from_obj
-    let mut secret_dest = TeeCrypObjSecretWrapper::new(16);
-    let result =
-        secret_dest.update_from_obj(&TeeCryptObjAttr::SecretValue(secret_from.clone()));
+    let mut secret_dest = TeeCrypObjSecretWrapper::new(16).unwrap();
+    let source_attr = TeeCryptObjAttr::SecretValue(secret_from);
+    let result = secret_dest.update_from_obj(&source_attr);
     assert!(result.is_ok());
-    assert_eq!(secret_dest.secret().key_size, secret_from.secret().key_size);
-    assert_eq!(&secret_dest.data(), &secret_from.data());
+    assert_eq!(secret_dest.secret().key_size, 16);
+    assert_eq!(&secret_dest.data(), &secret.data());
 
     // 2. test CryptoAttrRef::SecretValue
     let attr_ref = CryptoAttrRef::SecretValue(&mut secret);
@@ -652,4 +665,35 @@ fn test_bignum_to_bytes() {
     let mut buf = [0u8; 4];
     crate::tee::crypto::bignum::crypto_bignum_bn2bin(&bn, &mut buf).unwrap();
     assert_eq!(bn.as_u32().unwrap(), 256);
+}
+
+#[unittest::def_test(user)]
+fn public_user_copy_preserves_bytes_and_maps_faults() {
+    let user = crate::TestUserBuffer::new(4).unwrap();
+    user.write_bytes(b"data").unwrap();
+    let owned = UserConstPtr::<u8>::from(user.as_user_ptr::<u8>().cast_const())
+        .load_vm_kbox(4)
+        .unwrap();
+    assert_eq!(&*owned, b"data");
+    let words = UserConstPtr::<u32>::from(user.as_user_ptr::<u32>().cast_const())
+        .load_vm_kbox(1)
+        .unwrap();
+    assert_eq!(&*words, &[u32::from_ne_bytes(*b"data")]);
+    let result = UserConstPtr::<u8>::from(0usize)
+        .load_vm_kbox(4)
+        .map_err(|error| u32::from(TeeError::from(error)));
+    assert_eq!(result.err(), Some(TEE_ERROR_BAD_PARAMETERS));
+    let copy = KBox::from_slice_with_flags(&owned, AllocFlags::NOWAIT).unwrap();
+    assert_eq!(&*copy, b"data");
+}
+
+#[unittest::def_test]
+fn common_errors_preserve_tee_error_categories() {
+    assert_eq!(u32::from(TeeError::from(kerrno::KError::NoMemory)), TEE_ERROR_OUT_OF_MEMORY);
+    assert_eq!(u32::from(TeeError::from(kerrno::KError::InvalidInput)), TEE_ERROR_BAD_PARAMETERS);
+    assert_eq!(u32::from(TeeError::from(kerrno::KError::BadAddress)), TEE_ERROR_BAD_PARAMETERS);
+    assert_eq!(u32::from(TeeError::from(kerrno::KError::NameTooLong)), TEE_ERROR_GENERIC);
+    assert_eq!(u32::from(TeeError::from(osvm::MemError::OutOfMemory)), TEE_ERROR_OUT_OF_MEMORY);
+    assert_eq!(u32::from(TeeError::from(osvm::MemError::InvalidAddr)), TEE_ERROR_BAD_PARAMETERS);
+    assert_eq!(u32::from(TeeError::from(osvm::MemError::NoAccess)), TEE_ERROR_BAD_PARAMETERS);
 }

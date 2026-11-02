@@ -227,6 +227,27 @@ impl<T> KBox<[T]> {
 }
 
 impl<T: Copy> KBox<[T]> {
+    /// Copies a kernel slice using the sleepable, reclaim-safe `KERNEL` policy.
+    /// Errors match [`Self::new_uninit_slice_with_flags`].
+    pub fn from_slice(source: &[T]) -> KResult<Self> {
+        Self::from_slice_with_flags(source, AllocFlags::KERNEL)
+    }
+
+    /// Copies a kernel slice with caller-selected allocation permissions.
+    /// Context and errors match [`Self::new_uninit_slice_with_flags`]. The source
+    /// remains unchanged on failure. Copy ZSTs require no per-element work.
+    pub fn from_slice_with_flags(source: &[T], flags: AllocFlags) -> KResult<Self> {
+        let mut storage = Self::new_uninit_slice_with_flags(source.len(), flags)?;
+        if core::mem::size_of::<T>() != 0 {
+            for (slot, value) in storage.iter_mut().zip(source) {
+                slot.write(*value);
+            }
+        }
+        // SAFETY: every non-ZST element was copied from a valid T. ZST elements
+        // contain no bytes and inherit validity from the source slice. T is Copy.
+        Ok(unsafe { storage.assume_init() })
+    }
+
     /// Allocates and fills a slice using the default sleepable, reclaim-safe
     /// `KERNEL` policy. Errors match [`Self::new_uninit_slice_with_flags`].
     pub fn new_slice(value: T, len: usize) -> KResult<Self> {

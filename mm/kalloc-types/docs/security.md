@@ -1,5 +1,13 @@
 # kalloc-types 安全与可靠性
 
+## Copied Slice Ownership
+
+`from_slice_with_flags` reserves the complete slice before copying valid Copy
+elements. The source remains unchanged on error, and assume_init runs only after
+all non-ZST elements have been written. ZST validity comes from the source slice;
+Copy excludes destructors and no per-element loop is needed. Tests cover aligned
+elements, independent ownership, empty slices, invalid flags and huge ZST slices.
+
 ## Sized Ownership Extraction
 
 `KBox::into_inner` takes exclusive ownership, so no safe borrow can survive the

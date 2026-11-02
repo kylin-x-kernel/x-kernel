@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::vec::Vec;
 use core::{
     ffi::{c_uint, c_ulong, c_void},
     fmt,
@@ -11,12 +11,12 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
-use osvm::MemError;
+use kalloc_types::{AllocFlags, KBox};
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{libc_compat::size_t, *};
 
 use super::{
-    TeeResult,
+    TeeError, TeeResult,
     config::{CFG_COMPAT_GP10_DES, CFG_CORE_BIGNUM_MAX_BITS, CFG_RSA_PUB_EXPONENT_3},
     crypto::{
         bignum::{
@@ -54,14 +54,6 @@ use crate::tee::{
     crypto::{bignum::BigNum, crypto::RsaPublicKey},
 };
 
-fn map_user_mem_error(err: MemError) -> u32 {
-    match err {
-        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
-        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
-        _ => TEE_ERROR_GENERIC,
-    }
-}
-
 pub(super) const TEE_TYPE_ATTR_REQUIRED: u32 = bit(1);
 pub(super) const TEE_TYPE_ATTR_OPTIONAL_GROUP: u32 = bit(2);
 pub(super) const TEE_TYPE_ATTR_SIZE_INDICATOR: u32 = bit(3);
@@ -96,7 +88,7 @@ pub(crate) enum KernelAttribute {
     },
     Memref {
         id: u32,
-        data: Box<[u8]>,
+        data: KBox<[u8]>,
     },
     /// Output memref: kernel writes derived data back to the user buffer after the operation.
     MemrefOut {
@@ -131,7 +123,10 @@ impl KernelAttribute {
 pub(super) trait TeeCryptObjAttrOps {
     fn import_from_bytes(&mut self, buffer: &[u8]) -> TeeResult;
 
-    fn export_to_bytes(&self) -> TeeResult<Box<[u8]>>;
+    /// Export with NOWAIT because callers may hold object or usage locks.
+    /// Allocation failure leaves the source unchanged; nested crypto allocations
+    /// retain their existing policies.
+    fn export_to_bytes(&self) -> TeeResult<KBox<[u8]>>;
 
     fn to_binary(&self, data: &mut [u8], offs: &mut usize) -> TeeResult;
 
@@ -211,7 +206,7 @@ impl AsMut<u32> for AttrValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub(super) enum TeeCryptObjAttr {
     /// GP: `secret_value`
@@ -257,7 +252,7 @@ impl TeeCryptObjAttrOps for CryptoAttrRef<'_> {
         }
     }
 
-    fn export_to_bytes(&self) -> TeeResult<Box<[u8]>> {
+    fn export_to_bytes(&self) -> TeeResult<KBox<[u8]>> {
         match self {
             CryptoAttrRef::BigNum(bn) => bn.export_to_bytes(),
             CryptoAttrRef::U32(val) => {
@@ -265,8 +260,10 @@ impl TeeCryptObjAttrOps for CryptoAttrRef<'_> {
                 attr.export_to_bytes()
             }
             CryptoAttrRef::SecretValue(attr) => attr.export_to_bytes(),
-            CryptoAttrRef::Key32(key) => Ok(key.to_vec().into_boxed_slice()),
-            CryptoAttrRef::Key56(key) => Ok(key.to_vec().into_boxed_slice()),
+            CryptoAttrRef::Key32(key) => KBox::from_slice_with_flags(&**key, AllocFlags::NOWAIT)
+                .map_err(|error| TeeError::from(error).into()),
+            CryptoAttrRef::Key56(key) => KBox::from_slice_with_flags(&**key, AllocFlags::NOWAIT)
+                .map_err(|error| TeeError::from(error).into()),
         }
     }
 
@@ -542,7 +539,7 @@ impl TeeCryptObjAttrOps for TeeCryptObjAttr {
         }
     }
 
-    fn export_to_bytes(&self) -> TeeResult<Box<[u8]>> {
+    fn export_to_bytes(&self) -> TeeResult<KBox<[u8]>> {
         match self {
             TeeCryptObjAttr::SecretValue(attr) => attr.export_to_bytes(),
             TeeCryptObjAttr::Bignum(attr) => attr.export_to_bytes(),
@@ -614,10 +611,10 @@ impl TeeCryptObjAttrOps for AttrValue {
         Ok(())
     }
 
-    fn export_to_bytes(&self) -> TeeResult<Box<[u8]>> {
+    fn export_to_bytes(&self) -> TeeResult<KBox<[u8]>> {
         let mut value_bytes = [0u8; size_of::<u32>() * 2];
         value_bytes[..size_of::<u32>()].copy_from_slice(&self.as_u32().to_ne_bytes());
-        Ok(Box::new(value_bytes))
+        Ok(KBox::new_nowait(value_bytes).map_err(TeeError::from)?)
     }
 
     fn update_from_obj(&mut self, src_obj: &TeeCryptObjAttr) -> TeeResult {
@@ -667,9 +664,10 @@ impl TeeCryptObjAttrOps for BigNum {
         Ok(())
     }
 
-    fn export_to_bytes(&self) -> TeeResult<Box<[u8]>> {
+    fn export_to_bytes(&self) -> TeeResult<KBox<[u8]>> {
         let req_size = crypto_bignum_num_bytes(self)?;
-        let mut kbuf: Box<[u8]> = vec![0u8; req_size as _].into_boxed_slice();
+        let mut kbuf: KBox<[u8]> = KBox::new_slice_with_flags(0, req_size as _, AllocFlags::NOWAIT)
+            .map_err(TeeError::from)?;
         crypto_bignum_bn2bin(self, kbuf.as_mut())?;
         Ok(kbuf)
     }
@@ -748,8 +746,9 @@ impl TeeCryptObjAttrOps for TeeCrypObjSecretWrapper {
         Ok(())
     }
 
-    fn export_to_bytes(&self) -> TeeResult<Box<[u8]>> {
-        Ok(self.key().to_vec().into_boxed_slice())
+    fn export_to_bytes(&self) -> TeeResult<KBox<[u8]>> {
+        KBox::from_slice_with_flags(self.key(), AllocFlags::NOWAIT)
+            .map_err(|error| TeeError::from(error).into())
     }
 
     fn update_from_obj(&mut self, src_obj: &TeeCryptObjAttr) -> TeeResult {
@@ -1070,7 +1069,7 @@ pub(crate) struct TeeCrypObjSecret {
 /// GP: `struct tee_cryp_obj_secret` (wrapper with key material buffer)
 pub(super) struct TeeCrypObjSecretWrapper {
     secret: TeeCrypObjSecret,
-    data: Box<[u8]>,
+    data: KBox<[u8]>,
 }
 
 impl Debug for TeeCrypObjSecretWrapper {
@@ -1085,14 +1084,26 @@ impl Debug for TeeCrypObjSecretWrapper {
 }
 
 impl TeeCrypObjSecretWrapper {
-    pub(super) fn new(alloc_size: usize) -> Self {
-        Self {
+    /// Prepare secret storage with NOWAIT for callers holding object or storage
+    /// locks. Failure occurs before the object receives this attribute.
+    pub(super) fn new(alloc_size: usize) -> TeeResult<Self> {
+        Self::new_with(alloc_size, |len, flags| {
+            KBox::new_slice_with_flags(0, len, flags).map_err(|error| TeeError::from(error).into())
+        })
+    }
+
+    fn new_with(
+        alloc_size: usize,
+        reserve: impl FnOnce(usize, AllocFlags) -> TeeResult<KBox<[u8]>>,
+    ) -> TeeResult<Self> {
+        let alloc_size_u32 = u32::try_from(alloc_size).map_err(|_| TEE_ERROR_BAD_PARAMETERS)?;
+        Ok(Self {
             secret: TeeCrypObjSecret {
                 key_size: 0,
-                alloc_size: alloc_size as u32,
+                alloc_size: alloc_size_u32,
             },
-            data: vec![0u8; alloc_size].into_boxed_slice(),
-        }
+            data: reserve(alloc_size, AllocFlags::NOWAIT)?,
+        })
     }
 
     pub(super) fn secret(&self) -> &TeeCrypObjSecret {
@@ -1145,28 +1156,9 @@ impl TeeCrypObjSecretWrapper {
     }
 }
 
-impl Clone for TeeCrypObjSecretWrapper {
-    fn clone(&self) -> Self {
-        let src_secret = self.secret();
-        let alloc_size = src_secret.alloc_size as usize;
-        let key_size = src_secret.key_size as usize;
-
-        let mut new_wrapper = Self::new(alloc_size);
-        new_wrapper.secret_mut().key_size = key_size as u32;
-
-        if key_size > 0 {
-            let src_data = self.data();
-            let dst_data = new_wrapper.data_mut();
-            dst_data[..key_size].copy_from_slice(&src_data[..key_size]);
-        }
-
-        new_wrapper
-    }
-}
-
 impl TeeCryptoOps for TeeCrypObjSecretWrapper {
     fn new(_key_type: u32, key_size_bits: usize) -> TeeResult<Self> {
-        Ok(Self::new(key_size_bits))
+        Self::new(key_size_bits)
     }
 
     fn get_attr_by_id(&mut self, _attr_id: c_ulong) -> TeeResult<CryptoAttrRef<'_>> {
@@ -1569,7 +1561,7 @@ pub(crate) fn syscall_cryp_obj_alloc(
 
     UserPtr::<c_uint>::from(obj)
         .write_vm(obj_id)
-        .map_err(map_user_mem_error)?;
+        .map_err(TeeError::from)?;
 
     Ok(())
 }
@@ -1671,8 +1663,9 @@ fn op_attr_secret_value_from_user(attr: &mut TeeCrypObjSecretWrapper, buffer: &[
 }
 
 #[cfg(unittest)]
-fn op_attr_secret_value_to_bytes(attr: &TeeCrypObjSecretWrapper) -> Box<[u8]> {
-    attr.key().to_vec().into_boxed_slice()
+fn op_attr_secret_value_to_bytes(attr: &TeeCrypObjSecretWrapper) -> TeeResult<KBox<[u8]>> {
+    KBox::from_slice_with_flags(attr.key(), AllocFlags::NOWAIT)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 fn op_u32_to_binary_helper(v: u32, data: &mut [u8], offs: &mut size_t) -> TeeResult {
@@ -2035,7 +2028,7 @@ pub(super) fn syscall_cryp_obj_get_info(obj_id: c_ulong, info: *mut utee_object_
 
     UserPtr::<utee_object_info>::from(info)
         .write_vm(o_info)
-        .map_err(map_user_mem_error)?;
+        .map_err(TeeError::from)?;
     Ok(())
 }
 
@@ -2110,7 +2103,7 @@ pub(super) fn syscall_cryp_obj_get_attr(
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
     let user_size = UserPtr::<c_ulong>::from(size);
-    let buffer_len = user_size.read_vm().map_err(map_user_mem_error)? as usize;
+    let buffer_len = user_size.read_vm().map_err(TeeError::from)? as usize;
 
     if o.info.handleFlags & TEE_HANDLE_FLAG_INITIALIZED == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
@@ -2154,13 +2147,13 @@ pub(super) fn syscall_cryp_obj_get_attr(
         let exported = attr_ref.export_to_bytes()?;
         user_size
             .write_vm(exported.len() as c_ulong)
-            .map_err(map_user_mem_error)?;
+            .map_err(TeeError::from)?;
         if buffer_len < exported.len() || (buffer.is_null() && !exported.is_empty()) {
             return Err(TEE_ERROR_SHORT_BUFFER);
         }
         UserPtr::<u8>::from(buffer.cast::<u8>())
             .write_vm_slice(&exported)
-            .map_err(map_user_mem_error)?;
+            .map_err(TeeError::from)?;
     }
 
     Ok(())
@@ -2224,14 +2217,19 @@ pub(super) fn load_user_attrs(
     }
     UserConstPtr::<utee_attribute>::from(usr_params)
         .load_vm_vec(count)
-        .map_err(map_user_mem_error)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 /// Copy user ABI attributes into kernel-owned semantic attributes.
+///
+/// Memref owners use NOWAIT because populate calls this under the object lock.
+/// User copying can still fault or sleep. The attribute Vec retains its existing
+/// allocation policy and is returned directly without a second boxed-slice owner.
+/// A failed memref copy drops all previously prepared attributes before mutation.
 pub(crate) fn copy_in_attrs(
     _uctx: &mut user_ta_ctx,
     usr_attrs: &[utee_attribute],
-) -> TeeResult<Box<[KernelAttribute]>> {
+) -> TeeResult<Vec<KernelAttribute>> {
     let mut attrs = Vec::with_capacity(usr_attrs.len());
     for usr_attr in usr_attrs {
         let id = usr_attr.attribute_id;
@@ -2252,17 +2250,15 @@ pub(crate) fn copy_in_attrs(
             let flags = TEE_MEMORY_ACCESS_READ | TEE_MEMORY_ACCESS_ANY_OWNER;
             vm_check_access_rights(flags, buf as usize, len as usize)?;
             let data = if len == 0 {
-                Box::new([])
+                KBox::new_slice_with_flags(0, 0, AllocFlags::NOWAIT).map_err(TeeError::from)?
             } else {
-                UserConstPtr::<u8>::from(buf as usize)
-                    .load_vm_vec(len as usize)
-                    .map_err(map_user_mem_error)?
-                    .into_boxed_slice()
+                UserConstPtr::<u8>::from(buf as *const u8)
+                    .load_vm_kbox_with_flags(len as usize, AllocFlags::NOWAIT)
+                    .map_err(TeeError::from)?
             };
             attrs.push(KernelAttribute::Memref { id, data });
         }
     }
-    let attrs = attrs.into_boxed_slice();
     tee_debug!(
         "copy_in_attrs: usr_attrs: {:#?}, attrs: {:#?}",
         usr_attrs,
@@ -2283,7 +2279,7 @@ pub(crate) fn write_user_memref_out(user_addr: usize, buf_len: usize, data: &[u8
     vm_check_access_rights(flags, user_addr, data.len())?;
     UserPtr::<u8>::from(user_addr)
         .write_vm_slice(data)
-        .map_err(map_user_mem_error)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 /// GP: `enum attr_usage`

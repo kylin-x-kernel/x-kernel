@@ -21,6 +21,32 @@ use crate::{
 
 const TEE_DIRNAME_BUFFER_REQUIRED_LEN: usize = tee_b2hs_hsbuf_size(TEE_UUID_HEX_LEN) + 1;
 
+#[unittest::def_test(user)]
+fn test_enum_owner_failure_precedes_readdir() {
+    let directory = KBox::new(TeeFsDir {
+        idx: 7,
+        ..TeeFsDir::default()
+    })
+    .unwrap();
+    let enum_id = tee_svc_storage_add_enum(TeeStorageEnum {
+        id: 0,
+        dir: Some(directory),
+        fops: Some(&crate::tee::tee_ree_fs::REE_FS_OPS),
+    })
+    .unwrap();
+    let result = syscall_storage_next_enum_with(
+        enum_id,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+        || Err(kerrno::KError::NoMemory),
+    );
+    let enumeration = tee_svc_storage_delete_enum(enum_id).unwrap();
+    let index = enumeration.lock().dir.as_ref().unwrap().idx;
+    assert_eq!(result, Err(TEE_ERROR_OUT_OF_MEMORY));
+    assert_eq!(index, 7);
+}
+
 #[unittest::def_test]
 fn test_size_of_val() {
     assert_eq!(

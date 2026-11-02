@@ -2,15 +2,15 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 
+use kalloc_types::{AllocFlags, KBox};
 use ksync::Mutex;
-use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::*;
 
 use super::{
-    TeeResult,
+    TeeError, TeeResult,
     crypto::crypto::{
         crypto_hash_alloc_ctx, crypto_hash_final, crypto_hash_init, crypto_hash_update,
         crypto_mac_alloc_ctx, crypto_mac_final, crypto_mac_init, crypto_mac_update,
@@ -166,42 +166,32 @@ impl Default for TeeCrypState {
     }
 }
 
-fn map_user_mem_error(err: MemError) -> u32 {
-    match err {
-        MemError::OutOfMemory => TEE_ERROR_OUT_OF_MEMORY,
-        MemError::InvalidAddr | MemError::NoAccess => TEE_ERROR_BAD_PARAMETERS,
-        _ => TEE_ERROR_GENERIC,
-    }
-}
-
-fn read_optional_user_bytes(addr: usize, len: usize) -> TeeResult<Box<[u8]>> {
+fn read_optional_user_bytes(addr: usize, len: usize) -> TeeResult<KBox<[u8]>> {
     if addr == 0 || len == 0 {
-        return Ok(Box::new([]));
+        return KBox::new_slice_with_flags(0, 0, AllocFlags::KERNEL)
+            .map_err(|error| TeeError::from(error).into());
     }
-    Ok(UserConstPtr::<u8>::from(addr)
-        .load_vm_vec(len)
-        .map_err(map_user_mem_error)?
-        .into_boxed_slice())
+    UserConstPtr::<u8>::from(addr as *const u8)
+        .load_vm_kbox_with_flags(len, AllocFlags::KERNEL)
+        .map_err(|error| TeeError::from(error).into())
 }
 
-fn read_required_user_bytes(addr: usize, len: usize) -> TeeResult<Box<[u8]>> {
+fn read_required_user_bytes(addr: usize, len: usize) -> TeeResult<KBox<[u8]>> {
     if addr == 0 || len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
-    Ok(UserConstPtr::<u8>::from(addr)
-        .load_vm_vec(len)
-        .map_err(map_user_mem_error)?
-        .into_boxed_slice())
+    UserConstPtr::<u8>::from(addr as *const u8)
+        .load_vm_kbox_with_flags(len, AllocFlags::KERNEL)
+        .map_err(|error| TeeError::from(error).into())
 }
 
-fn read_user_output(addr: usize, len: usize) -> TeeResult<Box<[u8]>> {
+fn read_user_output(addr: usize, len: usize) -> TeeResult<KBox<[u8]>> {
     if addr == 0 || len == 0 {
         return Err(TEE_ERROR_BAD_PARAMETERS);
     }
-    Ok(UserConstPtr::<u8>::from(addr)
-        .load_vm_vec(len)
-        .map_err(map_user_mem_error)?
-        .into_boxed_slice())
+    UserConstPtr::<u8>::from(addr as *const u8)
+        .load_vm_kbox_with_flags(len, AllocFlags::KERNEL)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 fn read_user_len(addr: usize) -> TeeResult<usize> {
@@ -210,7 +200,7 @@ fn read_user_len(addr: usize) -> TeeResult<usize> {
     }
     UserConstPtr::<usize>::from(addr)
         .read_vm()
-        .map_err(map_user_mem_error)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 fn write_user_len(addr: usize, value: usize) -> TeeResult {
@@ -219,7 +209,7 @@ fn write_user_len(addr: usize, value: usize) -> TeeResult {
     }
     UserPtr::<usize>::from(addr)
         .write_vm(value)
-        .map_err(map_user_mem_error)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 fn write_user_bytes(addr: usize, data: &[u8]) -> TeeResult {
@@ -231,7 +221,7 @@ fn write_user_bytes(addr: usize, data: &[u8]) -> TeeResult {
     }
     UserPtr::<u8>::from(addr)
         .write_vm_slice(data)
-        .map_err(map_user_mem_error)
+        .map_err(|error| TeeError::from(error).into())
 }
 
 /// Syscall wrapper for incremental crypt ops: optional input memref + sized output memref.
@@ -246,9 +236,21 @@ fn syscall_cryp_inout_update(
     arg4: usize,
     update: fn(u32, &[u8], &mut [u8]) -> TeeResult<usize>,
 ) -> TeeResult {
+    syscall_cryp_inout_update_with(arg0, arg1, arg2, arg3, arg4, update, read_user_output)
+}
+
+fn syscall_cryp_inout_update_with(
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    update: impl FnOnce(u32, &[u8], &mut [u8]) -> TeeResult<usize>,
+    prepare_output: impl FnOnce(usize, usize) -> TeeResult<KBox<[u8]>>,
+) -> TeeResult {
     let input = read_optional_user_bytes(arg1, arg2)?;
     let mut out_len = read_user_len(arg4)?;
-    let mut output = read_user_output(arg3, out_len)?;
+    let mut output = prepare_output(arg3, out_len)?;
     let id = arg0 as u32;
     out_len = update(id, &input, &mut output)?;
     write_user_len(arg4, out_len)?;
@@ -707,7 +709,7 @@ pub(super) fn syscall_cryp_state_alloc(
 ) -> TeeResult {
     let mut state = UserPtr::<u32>::from(arg4)
         .read_vm()
-        .map_err(map_user_mem_error)?;
+        .map_err(TeeError::from)?;
     let mode = match arg1 {
         0 => TEE_OperationMode::TEE_MODE_ENCRYPT,
         1 => TEE_OperationMode::TEE_MODE_DECRYPT,
@@ -724,7 +726,7 @@ pub(super) fn syscall_cryp_state_alloc(
     tee_cryp_state_alloc(arg0 as _, mode, key1, key2, &mut state)?;
     UserPtr::<u32>::from(arg4)
         .write_vm(state)
-        .map_err(map_user_mem_error)?;
+        .map_err(TeeError::from)?;
     Ok(())
 }
 
@@ -1572,7 +1574,7 @@ pub(super) fn syscall_asymm_operate(
         Some(copy_in_attrs(&mut user_ta_ctx::default(), usr_attrs_slice)?)
     };
 
-    let mut label_buf: Option<Box<[u8]>> = None;
+    let mut label_buf: Option<KBox<[u8]>> = None;
     let mut pss_salt_len: Option<usize> = None;
     if let Some(ref attrs) = params_attrs {
         for attr in attrs.iter() {
@@ -1583,7 +1585,10 @@ pub(super) fn syscall_asymm_operate(
                     if data.is_empty() {
                         return Err(TEE_ERROR_BAD_PARAMETERS);
                     }
-                    label_buf = Some(data.clone());
+                    label_buf = Some(
+                        KBox::from_slice_with_flags(data, AllocFlags::KERNEL)
+                            .map_err(TeeError::from)?,
+                    );
                 }
                 super::tee_svc_cryp::KernelAttribute::Value { id, a, .. }
                     if *id == TEE_ATTR_RSA_PSS_SALT_LENGTH =>
@@ -1599,10 +1604,10 @@ pub(super) fn syscall_asymm_operate(
     let mut dst_len = read_user_len(arg6)?;
     let src = read_required_user_bytes(arg3, src_len)?;
 
-    let mut dst_buf: Box<[u8]>;
+    let mut dst_buf: KBox<[u8]>;
     let has_dst_user = dst_len != 0;
     if dst_len == 0 {
-        dst_buf = Box::new([]);
+        dst_buf = KBox::new_slice_with_flags(0, 0, AllocFlags::KERNEL).map_err(TeeError::from)?;
     } else {
         dst_buf = read_user_output(arg5, dst_len)?;
     }

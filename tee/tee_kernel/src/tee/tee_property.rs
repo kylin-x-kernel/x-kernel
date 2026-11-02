@@ -2,9 +2,10 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, ffi::CString};
+use alloc::ffi::CString;
 use core::ffi::{CStr, c_uint, c_ulong, c_void};
 
+use kalloc_types::KBox;
 use osvm::MemError;
 use posix_types::{UserConstPtr, UserPtr};
 use tee_raw_sys::{
@@ -271,18 +272,20 @@ fn tee_impl_prop(index: c_ulong) -> TeeResult<ConstProp> {
     Ok(prop)
 }
 
-fn get_prop_struct(prop_set: PropertySet, index: c_ulong) -> TeeResult<Box<dyn TeeProps>> {
+fn get_prop_struct(prop_set: PropertySet, index: c_ulong) -> TeeResult<KBox<dyn TeeProps>> {
     match prop_set {
         PropertySet::CurrentClient => match index {
-            0 => Ok(Box::new(ClientIdentity)),
-            1 => Ok(Box::new(ClientEndian)),
+            0 => Ok(KBox::new(ClientIdentity).map_err(|_| TEE_ERROR_OUT_OF_MEMORY)?),
+            1 => Ok(KBox::new(ClientEndian).map_err(|_| TEE_ERROR_OUT_OF_MEMORY)?),
             _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
         },
         PropertySet::CurrentTa => match index {
-            0 => Ok(Box::new(TaAppId)),
+            0 => Ok(KBox::new(TaAppId).map_err(|_| TEE_ERROR_OUT_OF_MEMORY)?),
             _ => Err(TEE_ERROR_ITEM_NOT_FOUND),
         },
-        PropertySet::TeeImplementation => Ok(Box::new(tee_impl_prop(index)?)),
+        PropertySet::TeeImplementation => {
+            Ok(KBox::new(tee_impl_prop(index)?).map_err(|_| TEE_ERROR_OUT_OF_MEMORY)?)
+        }
     }
 }
 
@@ -316,6 +319,12 @@ fn get_prop_index(prop_set: PropertySet, name: &str) -> TeeResult<u32> {
 /// When both `buf` and `blen` are non-null and the value does not fit,
 /// `*blen` receives the required size and the result is [`TEE_ERROR_SHORT_BUFFER`].
 /// A failure while writing that length is returned ahead of the short-buffer error.
+///
+/// Requires a sleepable, reclaim-safe task context with IRQs and preemption enabled,
+/// outside non-sleepable RCU sections and without locks needed by reclaim or IO.
+/// The KERNEL-policy property owner is prepared before session access or user
+/// output writes. Owner allocation failure returns [`TEE_ERROR_OUT_OF_MEMORY`]
+/// without modifying any output; an unknown index is rejected before allocation.
 pub(super) fn sys_tee_scn_get_property(
     prop_set: c_ulong,
     index: c_ulong,

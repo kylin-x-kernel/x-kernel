@@ -24,6 +24,27 @@ use unittest::def_test;
 use super::*;
 
 #[def_test]
+fn copied_slice_preserves_source_and_alignment() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[repr(align(256))]
+    struct Aligned(u32);
+    let source = [Aligned(3), Aligned(7)];
+    let mut owned = KBox::from_slice_with_flags(&source, AllocFlags::NOWAIT).unwrap();
+    assert_eq!(&*owned, &source);
+    assert_eq!(owned.as_ptr().addr() % 256, 0);
+    owned[0].0 = 9;
+    assert_eq!(source[0].0, 3);
+    assert!(KBox::<[u8]>::from_slice(&[]).unwrap().is_empty());
+    let zsts = KBox::<[()]>::new_slice((), usize::MAX).unwrap();
+    let copied = KBox::from_slice(&zsts).unwrap();
+    assert_eq!(copied.len(), usize::MAX);
+    assert_eq!(
+        KBox::<[u8]>::from_slice_with_flags(&[], AllocFlags::from_bits_retain(u32::MAX)).err(),
+        Some(KError::InvalidInput),
+    );
+}
+
+#[def_test]
 fn runtime_slice_layout_and_element_lifecycle() {
     #[repr(align(256))]
     struct Aligned<'a>(DropProbe<'a>);
