@@ -174,6 +174,35 @@ impl Process {
         Ok(())
     }
 
+    /// Runs the command with stdout written to `path`. Unlike
+    /// [`Process::stdout_to_file`], the file is kept when the command fails:
+    /// machine-readable output describes a failed run too.
+    pub(crate) fn run_with_stdout(&mut self, path: &Path) -> Result<()> {
+        if self.verbosity > 0 || self.dry_run {
+            println!("{}", self.command_lines());
+            println!("  stdout -> {}", path.display());
+        }
+        if self.dry_run {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_path(parent)?;
+        }
+        let output = File::create(path).with_path(path)?;
+        self.command.stdout(Stdio::from(output));
+        let program = self.command.get_program().to_string_lossy().into_owned();
+        let status = self.command.status();
+        self.command.stdout(Stdio::inherit());
+        let status = status.map_err(|source| Error::Spawn {
+            program: program.clone(),
+            source,
+        })?;
+        if !status.success() {
+            return Err(Error::CommandFailed { program, status });
+        }
+        Ok(())
+    }
+
     pub(crate) fn run(&mut self) -> Result<()> {
         if self.verbosity > 0 || self.dry_run {
             // Show the command once, in shell form, so it can be copy-pasted.

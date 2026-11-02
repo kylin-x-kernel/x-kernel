@@ -17,6 +17,8 @@ src/
 ├── coverage.rs   unittest 覆盖率提取与报告生成
 ├── doc.rs        workspace rustdoc 编排
 ├── hygiene.rs    仓库卫生工具编排
+├── dylint.rs     Dylint lint library build and kernel scan
+├── facts.rs      packing of the code facts exported by the Dylint scan
 ├── image_metadata.rs  内嵌构建信息与 Build ID 的 ELF finalize
 ├── qemu.rs       平台启动策略
 ├── x86.rs        LinuxBoot/UEFI 启动介质
@@ -222,6 +224,41 @@ vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsoc
 避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、
 target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`。
 
+### Dylint Facts
+
+`make dylint FACTS_OUT=<dir>` (`xkmake dylint --facts-out <dir>`) exports
+code facts during the normal Dylint scan and packs them. The format and the
+records are described in `tools/lints/README.md`.
+
+1. Before anything else the run removes the previous artifact
+   (`<dir>/status.json`, `manifest.json` and `crates/`), so that a run that
+   fails while reading the kernel configuration leaves no status rather
+   than a stale one. Once the configuration is read, it writes
+   `status.json` (`running`); errors before the scan starts, such as a tool
+   probe or the lint library build, are written as `failed`/`build`.
+2. The scan process gets `XKERNEL_FACTS=1`, and Cargo gets
+   `--message-format=json-render-diagnostics`: diagnostics are still
+   rendered to stderr, and the JSON messages go to
+   `<target>/dylint/facts-messages.jsonl`. The file is kept when the scan
+   fails, so that the crates checked before the failure are packed.
+3. With `workspace_members` from `cargo metadata --no-deps` as the member
+   set, the metadata path of each unit is taken from the
+   `compiler-artifact` messages (including `fresh` units), which gives the
+   `<stem>.facts.jsonl` the lint writes next to it; build scripts are
+   skipped.
+4. Each file's header (schema, stem) and final `counts` line are
+   validated; the file is zstd-compressed into `crates/` with its sha256
+   and record count. Missing or invalid files are listed in `missing`.
+5. `manifest.json` is written (commit, merge base, target, platform,
+   profile, sha256 of `.config`, features, scan rustflags, toolchain, rustc
+   version, exporter source digest and Dylint version, crate list and
+   totals), and `status.json` last: `ready`, `partial` or `failed`, with
+   reason `build` or `exporter`.
+
+Without `--facts-out` the run leaves `XKERNEL_FACTS` unchanged: a caller
+that pins it to `1` (the whole CI dylint stage) keeps Cargo's cache in later
+scans and only writes extra facts files.
+
 ## 设计决策
 
 - Cargo 负责源码增量编译，bundle 只缓存镜像加工结果。
@@ -252,6 +289,13 @@ target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`�
   解析逻辑，也不把其大型依赖树链接进 XKMake。
 - Rust 源文件 header 由固定版本的外部 licensure 按仓库配置检查和修复；
   XKMake 只负责确定文件集合、分批调用和传播失败状态。
+- Code facts are exported by the lint library inside rustc; XKMake only
+  selects the units of this build, validates and compresses their files and
+  writes the manifest. Units are selected from Cargo's JSON messages rather
+  than by scanning directories, so facts files left by other configurations
+  in the same target directory are never mixed in. The export switch is an
+  environment variable with the fixed value `1`, so that a changing value
+  does not make Cargo re-check every crate.
 - guest IP 和 gateway 当前属于构建输入，因为现有网络栈通过
   `option_env!` 编译它们；后续应迁移为内核命令行参数。
 

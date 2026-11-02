@@ -11,6 +11,8 @@
 #     - UNITTEST            Build the unittest entry and run it under QEMU (y/n)
 #     - UNITTEST_CRATE      Limit unittest to crate(s), comma-separated
 #     - DYLINT_DRIVER_PATH  Directory for the Dylint driver cache
+#     - FACTS_OUT           `make dylint` also exports code facts and packs them
+#                           into this directory (see tools/lints/README.md)
 #
 # * QEMU / runtime — `make run`, `make justrun`, `make debug`:
 #     - DISK_IMG            virtio-blk backing disk image (see RAMDISK_IMG below)
@@ -222,7 +224,7 @@ clippy:
 
 dylint:
 	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints
-	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(XKMAKE_ARGS)
+	@$(XKMAKE) dylint $(XKMAKE_BUILD_ARGS) $(if $(strip $(FACTS_OUT)),--facts-out "$(FACTS_OUT)") $(XKMAKE_ARGS)
 
 dylint_test:
 	@$(MAKE) --no-print-directory check_test_layout check_deps check_header check_lints

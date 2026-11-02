@@ -25,6 +25,7 @@ syn = "2"
 thiserror = "1.0"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 toml = "1.1.2"
+zstd = { version = "0.13", default-features = false }
 xconfig = { path = "../xconfig" }
 
 [dev-dependencies]

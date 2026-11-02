@@ -12,6 +12,7 @@ mod doc;
 mod dwarf_embed;
 mod dylint;
 mod error;
+mod facts;
 mod hygiene;
 mod image_metadata;
 mod linker;

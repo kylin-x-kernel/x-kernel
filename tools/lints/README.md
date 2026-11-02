@@ -25,6 +25,7 @@ make install-tools
 make dylint          # scan the kernel selected by .config
 make dylint_test     # run every lint's UI test
 make dylint XKMAKE_ARGS="-- --message-format=json"
+make dylint FACTS_OUT=<dir>   # also export code facts (see below)
 ```
 
 A scan only sees code that the configuration compiles; CI scans the
@@ -34,6 +35,98 @@ kernel target to the toolchain before scanning another configuration.
 The first local run builds the Dylint driver into `$DYLINT_DRIVER_PATH`
 (default `~/.dylint_drivers`). The CI image sets `DYLINT_DRIVER_PATH` to a
 driver prebuilt for the pinned toolchain.
+
+## Code facts export
+
+`src/facts_export/` is a pass that reports nothing. It exports what the
+compiler knows about the scanned code (items, call edges, functions used as
+values, trait impls, link symbols, atomic orderings, `unsafe` blocks) for
+the review code index, which otherwise works from names only.
+
+```bash
+make dylint FACTS_OUT=target/facts/kplat-aarch64
+```
+
+`FACTS_OUT` runs the normal scan with the export on and packs the result
+into that directory:
+
+```text
+status.json              running | ready | partial | failed, with a reason
+manifest.json            commit, target, toolchain, config digest, crate list
+crates/<stem>.jsonl.zst  one zstd-compressed JSON-lines file per crate
+```
+
+- **Switch.** The pass writes only while `XKERNEL_FACTS=1`. rustc records
+  the variable as an environment dependency, so turning it on or off
+  re-checks every workspace crate once; keep it at `1` for every scan that
+  shares a target directory (CI does this for the whole dylint stage).
+  `FACTS_OUT` sets it for its own scan.
+- **Files.** Each checked crate writes `<stem>.facts.jsonl` next to its
+  metadata, where `<stem>` is the crate name plus Cargo's extra filename.
+  A crate that Cargo finds fresh keeps the file from the run that checked
+  it, so a warm scan exports only the crates it re-checks. The packer takes
+  the units from Cargo's `compiler-artifact` messages, which list fresh
+  units too, so files of other configurations in the same target directory
+  are never picked up.
+- **Scope.** Workspace members only (the Dylint driver does not check
+  dependencies or the vendored crates reached through `[patch]`), in the
+  configuration of the scan: the selected `.config`, its Cargo features and
+  `--cfg unittest`.
+- **Status.** `ready`: every unit has facts. `partial` with reason `build`:
+  the scan failed (build error or a lint error) and the units checked
+  before it stopped are packed. `partial` with reason `exporter`: the scan
+  passed but some units have no valid facts file (`missing` in the
+  manifest). `failed`: nothing packed. `running` in a finished CI build
+  means the stage was interrupted (timeout or abort).
+- **CI.** Both dylint stages pack the facts of their first (normal-graph)
+  scan; Jenkins archives them as `artifacts/facts/<platform>/` on every
+  outcome. See `docs/jenkins-pipeline.md`.
+- **Exporter identity.** `exporter.source_sha256` in the manifest is the
+  SHA-256 over the sorted `<path>\0<sha256 of content>\n` lines of this
+  directory's `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and `src/`.
+  A pull request can change the exporter and so its own facts; a consumer
+  that relies on them should accept only digests of a trusted tree (the
+  target branch) and treat the facts as review hints, never as a gate.
+
+### Records
+
+The record format version is `SCHEMA` in `src/facts_export/mod.rs`, and the
+manifest carries the same value. Within a major version fields are only
+added; a change of meaning bumps the version, and readers should reject a
+version they do not know. Each line is one JSON object; `t` is its kind.
+
+| `t` | Content |
+| --- | --- |
+| `crate` | first line: `schema`, `crate`, `crate_id`, `stem`, `package`, `version`, `kind` (`workspace`), `target`, `toolchain`, `rustc`, `crate_types`, `opt_level`, `cfg` (features, `unittest`, `test`, `debug_assertions`) |
+| `item` | a definition: `key`, `path`, `kind`, `name`, place, `end_line`, `vis`, `defined_by` (the macro that produced it), `gen` (its name is macro output), `parent`; impls add `self_ty`, `owner`, `trait`, `trait_name`, `negative`; fns add `unsafe`, `generic`, `symbol` (`export_name` / `no_mangle`), `owner`, `trait_name`; closures add `root` |
+| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined` |
+| `ref` | a function used as a value: `caller`, `caller_root`, place, `target`, `callee_file`, `callee_line` |
+| `site` | an `unsafe` block: `kind`, `owner`, place |
+| `counts` | last line: totals by kind, `export_us`, `bytes` |
+
+- *Place* fields are `file`, `line`, `col` of the call site in user source
+  (the outermost macro invocation for macro output), plus `macro`,
+  `inner_macro` and `desugar` (`?`, `for`, `await`, ...) when present.
+- *Keys* are the crate name plus the compiler's def path
+  (`kspin::{impl#0}::lock`). They are stable within a commit; across commits
+  match items by file, line and path.
+- *Call kinds*: `static`, `trait_static` (a trait call resolved to an impl,
+  in `resolved`), `trait_default`, `trait_generic` (depends on a generic
+  parameter of the caller), `trait_unresolved`, `dyn`, `fnptr`, `closure`,
+  `foreign`, `intrinsic`, `shim`, `drop` (a user `Drop` impl run by a drop).
+  Calls into `core::fmt::rt` (formatting plumbing) are counted in
+  `fmt_rt_calls_skipped`, not written. `recv` is the receiver type of a
+  `dyn` call or of an `Fn*` trait call on a fn pointer; a call through a
+  plain fn pointer has no receiver.
+- *Paths* are repository-relative. Dependencies are written as
+  `crates/<name>-<version>/…` (crates.io), `git/<checkout>/<rev>/…` (git) and
+  `rust/library/<crate>/…` (standard library).
+- *MIR* is taken after drop elaboration and before optimisation, so no call
+  is inlined away. For the few bodies whose MIR the compiler already
+  optimised during analysis, `const fn` bodies use their const-evaluation MIR
+  and others use optimised MIR with inlined calls recovered from the
+  inlining scopes (`inlined: true`); the totals count them as
+  `mir_ctfe_fn`, `mir_optimized_coroutine` and `mir_optimized_fn`.
 
 ## Adding a lint
 

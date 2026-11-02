@@ -65,7 +65,10 @@ repository Dylint lints (see `docs/code-guidelines/`). Lints only see code
 that the configuration compiles; CI scans the aarch64 and x86_64
 `qemu_defconfig` configurations. `make dylint_test`
 runs the lint's UI tests. The first run builds the Dylint driver and can take
-a few minutes; later runs are incremental. Install the pinned tools with
+a few minutes; later runs are incremental. `make dylint FACTS_OUT=<dir>` also
+exports the compiler's code facts (call graph, items, unsafe and atomic sites)
+for the review code index and packs them into `<dir>`; see
+`tools/lints/README.md`. Install the pinned tools with
 `make install-tools` after adding the nightly components and target above.
 
 ## Configuration

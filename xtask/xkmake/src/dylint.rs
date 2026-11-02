@@ -16,8 +16,11 @@ use xconfig::build_config::BuildProfile;
 use crate::{
     build::{apply_kernel_env, generate_build_configuration, kernel_feature_flags},
     cli::DylintArgs,
-    context::BuildContext,
+    context::{BuildContext, workspace_root},
     error::{Error, IoResultExt, Result},
+    facts::{
+        FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG, SCAN_RUSTFLAGS,
+    },
     hygiene::{DYLINT_VERSION, ensure_dylint_tools},
     process::Process,
 };
@@ -48,10 +51,68 @@ struct Toolchain {
 }
 
 pub(crate) fn run(args: &DylintArgs) -> Result<()> {
+    let facts_out = args
+        .facts_out
+        .as_deref()
+        .filter(|_| !args.build.workspace.dry_run);
+    // A facts run that fails before `FactsRun::begin` (configuration, tool
+    // probes) must not leave an earlier artifact behind.
+    if let Some(dir) = facts_out {
+        FactsRun::clear(&workspace_root()?.join(dir))?;
+    }
     let context = BuildContext::create(&args.build)?;
+    // From here on every failure of a facts run leaves a status behind.
+    let facts = match facts_out {
+        Some(dir) => Some(FactsRun::begin(
+            &context,
+            dir,
+            FactsIdentity {
+                commit: args.facts_commit.clone(),
+                base: args.facts_base.clone(),
+            },
+        )?),
+        None => None,
+    };
     let lint_dir = context.workspace_root.join(LINT_DIR);
-    let toolchain_path = lint_dir.join("rust-toolchain.toml");
-    let toolchain = read_toolchain(&toolchain_path)?;
+    let (toolchain, host) = match probe_tools(args, &context, &lint_dir) {
+        Ok(tools) => tools,
+        Err(error) => {
+            if let Some(facts) = &facts {
+                facts.fail(
+                    FailureReason::Build,
+                    &format!("scan did not start: {error}"),
+                )?;
+            }
+            return Err(error);
+        }
+    };
+    let result = build_and_scan(args, &context, &lint_dir, &toolchain, &host, facts.as_ref());
+    let Some(facts) = facts else {
+        return result.map_err(ScanError::into_inner);
+    };
+    match &result {
+        Err(ScanError::Setup(error)) => {
+            facts.fail(
+                FailureReason::Build,
+                &format!("scan did not start: {error}"),
+            )?;
+        }
+        Err(ScanError::Scan(_)) | Ok(()) => {
+            let config_path = context.workspace_root.join(&args.build.workspace.config);
+            facts.finish(&context, &config_path, &toolchain, result.is_ok())?;
+        }
+    }
+    result.map_err(ScanError::into_inner)
+}
+
+/// Reads the pinned lint toolchain and checks the tools the run needs;
+/// returns the toolchain and the host triple.
+fn probe_tools(
+    args: &DylintArgs,
+    context: &BuildContext,
+    lint_dir: &Path,
+) -> Result<(String, String)> {
+    let toolchain = read_toolchain(&lint_dir.join("rust-toolchain.toml"))?;
     let host = probe_host(context.dry_run, || {
         let host = rustc_host(&toolchain)?;
         ensure_dylint_tools()?;
@@ -61,12 +122,36 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
         }
         Ok(host)
     })?;
+    Ok((toolchain, host))
+}
 
-    let driver_path = prepare_driver_path(&context)?;
+/// Failure of a Dylint run: before the kernel scan started, or of the scan.
+enum ScanError {
+    Setup(Error),
+    Scan(Error),
+}
+
+impl ScanError {
+    fn into_inner(self) -> Error {
+        match self {
+            Self::Setup(error) | Self::Scan(error) => error,
+        }
+    }
+}
+
+fn build_and_scan(
+    args: &DylintArgs,
+    context: &BuildContext,
+    lint_dir: &Path,
+    toolchain: &str,
+    host: &str,
+    facts: Option<&FactsRun>,
+) -> std::result::Result<(), ScanError> {
+    let driver_path = prepare_driver_path(context).map_err(ScanError::Setup)?;
     let lint_manifest = lint_dir.join("Cargo.toml");
     let lint_target_dir = context.target_dir.join("tools/lints");
     let mut lint = Process::new("cargo", context.dry_run, context.verbosity);
-    lint.current_dir(&lint_dir)
+    lint.current_dir(lint_dir)
         .arg(format!("+{toolchain}"))
         .arg(if args.self_test { "test" } else { "build" })
         .arg("--locked");
@@ -78,26 +163,26 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
         .arg("--target-dir")
         .arg(&lint_target_dir);
     sanitize_env(&mut lint);
-    set_host_tools(&mut lint, &host);
+    set_host_tools(&mut lint, host);
     if let Some(path) = &driver_path {
         lint.env("DYLINT_DRIVER_PATH", path);
     }
-    lint.run()?;
+    lint.run().map_err(ScanError::Setup)?;
 
     if args.self_test {
         return Ok(());
     }
 
-    let library = lint_library_path(&lint_target_dir, &toolchain, &host);
+    let library = lint_library_path(&lint_target_dir, toolchain, host);
     if !context.dry_run && !library.is_file() {
-        return Err(Error::Message(format!(
+        return Err(ScanError::Setup(Error::Message(format!(
             "Dylint library not found at {}; ensure dylint-link {DYLINT_VERSION} is installed \
              (run make install-tools)",
             library.display()
-        )));
+        ))));
     }
 
-    generate_build_configuration(&context)?;
+    generate_build_configuration(context).map_err(ScanError::Setup)?;
 
     let mut scan = Process::new("cargo", context.dry_run, context.verbosity);
     scan.current_dir(&context.workspace_root)
@@ -112,9 +197,12 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
     if context.config.profile() == BuildProfile::Release {
         scan.arg("--release");
     }
-    let features = kernel_feature_flags(&context);
+    let features = kernel_feature_flags(context);
     if !features.is_empty() {
         scan.arg("--features").arg(features.join(","));
+    }
+    if args.facts_out.is_some() {
+        scan.arg(MESSAGE_FORMAT_ARG);
     }
     match context.verbosity {
         0 => {}
@@ -126,15 +214,24 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
         }
     }
     scan.args(args.cargo_args.iter());
-    apply_kernel_env(&mut scan, &context);
+    apply_kernel_env(&mut scan, context);
     sanitize_env(&mut scan);
-    set_host_tools(&mut scan, &host);
+    set_host_tools(&mut scan, host);
     scan.env("CARGO_TARGET_DIR", context.target_dir.join("dylint"))
-        .env("DYLINT_RUSTFLAGS", "--cfg unittest");
+        .env("DYLINT_RUSTFLAGS", SCAN_RUSTFLAGS.join(" "));
     if let Some(path) = &driver_path {
         scan.env("DYLINT_DRIVER_PATH", path);
     }
-    scan.run()
+    if args.facts_out.is_some() {
+        // Without `--facts-out` the variable passes through unchanged, so a
+        // caller that keeps it at `1` for every scan keeps Cargo's cache.
+        scan.env(FACTS_ENV, "1");
+    }
+    match facts {
+        Some(facts) => scan.run_with_stdout(facts.messages_path()),
+        None => scan.run(),
+    }
+    .map_err(ScanError::Scan)
 }
 
 /// Runs the host-triple and tool probes, which spawn `rustc`, `rustup` and

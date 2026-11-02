@@ -9,7 +9,9 @@
 //! `tools/lints/README.md`.
 #![feature(rustc_private)]
 
+extern crate rustc_abi;
 extern crate rustc_hir;
+extern crate rustc_interface;
 extern crate rustc_lint;
 extern crate rustc_middle;
 extern crate rustc_session;
@@ -17,6 +19,7 @@ extern crate rustc_span;
 
 dylint_linting::dylint_library!();
 
+mod facts_export;
 mod unregistered_static_spinlock;
 
 #[cfg(test)]
@@ -27,7 +30,12 @@ mod testing;
 #[unsafe(no_mangle)]
 pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint::LintStore) {
     dylint_linting::init_config(sess);
-    lint_store.register_lints(&[unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK]);
+    facts_export::track_env(sess);
+    lint_store.register_lints(&[
+        unregistered_static_spinlock::UNREGISTERED_STATIC_SPINLOCK,
+        facts_export::FACTS_EXPORT,
+    ]);
+    lint_store.register_late_pass(|_| Box::new(facts_export::FactsExport));
     lint_store
         .register_late_pass(|_| Box::new(unregistered_static_spinlock::UnregisteredStaticSpinlock));
 }

@@ -153,6 +153,19 @@ pub(crate) struct DylintArgs {
     #[arg(long)]
     pub(crate) self_test: bool,
 
+    /// Also export code facts and pack them into this directory (manifest,
+    /// status and one compressed file per crate; see `tools/lints/README.md`).
+    #[arg(long, value_name = "DIR", conflicts_with = "self_test")]
+    pub(crate) facts_out: Option<PathBuf>,
+
+    /// Commit recorded in the facts manifest (default: `git rev-parse HEAD`).
+    #[arg(long, value_name = "SHA", requires = "facts_out")]
+    pub(crate) facts_commit: Option<String>,
+
+    /// Merge base recorded in the facts manifest of a pull-request build.
+    #[arg(long, value_name = "SHA", requires = "facts_out")]
+    pub(crate) facts_base: Option<String>,
+
     /// Additional Cargo arguments passed after `cargo dylint --`.
     #[arg(last = true)]
     pub(crate) cargo_args: Vec<String>,

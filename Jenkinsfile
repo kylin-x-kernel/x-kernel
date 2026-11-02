@@ -353,6 +353,7 @@ def stashArchCiOutputs(String arch) {
         '.ci/work/**/unittest-output.log',
         '.ci/work/**/tee-test-output.log',
         '.ci/work/**/artifacts/**',
+        "${factsArtifactRoot()}/**",
     ]
     if (coverageEnabled()) {
         includes.addAll([
@@ -570,7 +571,9 @@ def archiveArtifactPatterns() {
     // Failed stages, timeout/abort, or Gitee post-meta issues keep diagnostic
     // logs. Do not call unstable() before this — giteeTestShouldPass still
     // needs SUCCESS at archive time. Coverage/docs only when toggles are on.
-    def patterns = ['ci-summary.md']
+    // Code facts are archived on every outcome: their status.json tells
+    // xreview whether they are ready, partial or failed, and why.
+    def patterns = ['ci-summary.md', "${factsArtifactRoot()}/**/*"]
     def failedStages = ciStageOrder().findAll { ciResults[it]?.status == 'failed' }
     def buildUnsuccessful = !(currentBuild.currentResult in [null, 'SUCCESS'])
     def hasMetaIssues = !ciMetaIssues.isEmpty()
@@ -936,9 +939,26 @@ stdbuf -oL -eL make build
     }
 }
 
+/** Code facts of the normal-graph Dylint scan, per platform, relative to the leg root. */
+def factsArtifactRoot() { return 'artifacts/facts' }
+
+/** xkmake option naming the commit the facts describe, when known. */
+def factsCommitArg() {
+    def head = resolveHeadSha()
+    return head ? "--facts-commit ${head}" : ''
+}
+
 def runDylintCheck(String stageName, String platform, String defconfigPath, boolean lockStat) {
     initStageLog(stageName)
     def dylintTargetDir = "/xkernel-target/dylint-${platform}"
+    def factsDir = "${rootWorkspace()}/${factsArtifactRoot()}/${platform}"
+    // A pull request records its merge base with the target branch, which the
+    // Source stage fetched into the snapshot.
+    def factsBaseRef = ''
+    if (env.giteePullRequestIid?.trim()) {
+        def remote = isForkPullRequest() ? 'upstream' : 'origin'
+        factsBaseRef = "${remote}/${env.giteeTargetBranch ?: env.DEFAULT_BRANCH}"
+    }
     // cfg(unittest) alone does not select optional test-only Cargo dependencies.
     // Keep the normal graph scan and cover the unittest graph on AArch64 too.
     def unittestScan = platform == 'kplat-aarch64' ? """
@@ -953,16 +973,38 @@ make olddefconfig
 grep -qx 'KFEAT_LOCK_STAT=y' .config
 make dylint
 """ : ''
+    // XKERNEL_FACTS stays 1 for every scan of the stage: rustc tracks it, so
+    // switching it between scans would re-check the workspace crates. Only the
+    // first scan packs the facts. A failure before that scan still leaves a
+    // status for xreview.
     withCleanSourceWorkspace("dylint-${platform}") {
-        withEnv(["TARGET_DIR=${dylintTargetDir}"]) {
+        withEnv([
+            "TARGET_DIR=${dylintTargetDir}",
+            'XKERNEL_FACTS=1',
+            "_CI_FACTS_DIR=${factsDir}",
+            "_CI_FACTS_BASE_REF=${factsBaseRef}",
+        ]) {
             sh label: "Dylint check ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
+facts_early_failure() {
+    if [ ! -f "\${_CI_FACTS_DIR}/status.json" ]; then
+        mkdir -p "\${_CI_FACTS_DIR}"
+        printf '{"schema":"xkernel-facts-status/1","status":"failed","reason":"build","detail":"the dylint stage failed before the facts scan"}\n' \
+            > "\${_CI_FACTS_DIR}/status.json"
+    fi
+}
+trap facts_early_failure EXIT
+facts_base=''
+if [ -n "\${_CI_FACTS_BASE_REF}" ]; then
+    facts_base=\$(git merge-base HEAD "\${_CI_FACTS_BASE_REF}" 2>/dev/null || true)
+fi
 scripts/ci/check_dylint_environment.sh
 cp ${defconfigPath} .config
 make defconfig
 make dylint_test
-make dylint
+make dylint FACTS_OUT="\${_CI_FACTS_DIR}" \
+    XKMAKE_ARGS="${factsCommitArg()}\${facts_base:+ --facts-base \${facts_base}}"
 ${unittestScan}${lockStatScan}"""
         }
     }
