@@ -224,6 +224,33 @@ vsock 采用能力探测：内核启用 virtio-socket 且用户未传 `--no-vsoc
 避免消费被修改或不完整的 bundle。`config` 子命令为 Makefile 工具目标提供只读的架构、
 target、平台和 bundle 路径查询，避免 Makefile 重新解析 `.config`。
 
+### Dylint
+
+1. `make dylint` builds the lint library (`tools/lints`) with its pinned
+   toolchain into `<target>/tools/lints`, then runs `cargo dylint
+   --lib-path` on the kernel with the configuration's features, target,
+   rustflags and environment; Dylint loads the prebuilt library and does
+   not build it. `make dylint_test` runs the library's tests in the same
+   target directory.
+2. The library build runs with an empty `CARGO_ENCODED_RUSTFLAGS` and
+   `CARGO_TARGET_DIR` set to that directory. Cargo in `tools/lints` still
+   reads the repository `.cargo/config.toml` and the generated
+   `.xconfig.toml` it includes, whose `[build] rustflags` change with the
+   configuration (`--cfg k_plat_name=...`, `--cfg unittest`). The library
+   uses none of them, but Dylint records it as a file dependency of every
+   crate it checks, so relinking it for another configuration would
+   re-check every crate. With the rustflags pinned, the library is rebuilt
+   only when its sources, `Cargo.lock` or the toolchain change.
+   `CARGO_TARGET_DIR` also reaches the library build that `dylint_testing`
+   runs from the tests, which otherwise lands in `tools/lints/target`.
+3. The cfgs the lints see (`k_plat_name`, `unittest`) belong to the
+   kernel crates and still come from the configuration. Scans of different
+   configurations share `<target>/dylint`; Cargo keeps separate artifacts
+   for different rustflags. A crate is still re-checked when an input it
+   shares between configurations changes, such as the generated
+   `<target>/kbuild/<platform>/config.rs` that `kbuild_config` includes
+   (it differs when, for example, lock statistics are on).
+
 ### Dylint Facts
 
 `make dylint FACTS_OUT=<dir>` (`xkmake dylint --facts-out <dir>`) exports
@@ -255,9 +282,31 @@ records are described in `tools/lints/README.md`.
    totals), and `status.json` last: `ready`, `partial` or `failed`, with
    reason `build` or `exporter`.
 
+During an export the scan process also gets
+`XKERNEL_FACTS_ROOT=<repository root>`: Cargo compiles crates.io and git
+dependencies in their own package directories and passes relative paths, so
+the exporter uses this root to write paths as repository-relative or as
+`crates/<name>-<version>/…`. The variable is not registered as an
+environment dependency and does not affect the cache.
+
 Without `--facts-out` the run leaves `XKERNEL_FACTS` unchanged: a caller
 that pins it to `1` (the whole CI dylint stage) keeps Cargo's cache in later
 scans and only writes extra facts files.
+
+`--facts-deps` (or `XKERNEL_FACTS_DEPS=1`) also exports dependency crates:
+the scan sets XKMake itself as Cargo's `RUSTC_WRAPPER`
+(`XKMAKE_FACTS_WRAPPER_TARGET` gives the kernel target). `main` recognizes
+this environment variable before parsing the command line and, when the
+first argument is a compiler (`rustc`, Cargo's `RUSTC` or Dylint's
+driver), runs as the wrapper: workspace members (whose first argument is Dylint's
+`RUSTC_WORKSPACE_WRAPPER`) and host crates are `exec`ed unchanged; a
+dependency compiled for the kernel target is compiled by the Dylint driver
+instead, with `--force-warn facts_export` appended and
+`XKERNEL_FACTS_KIND=dep` set. The `--cap-lints allow` that Cargo passes for
+dependencies still silences the other lints; only the export lint is forced
+on. When packing, non-member units whose paths lie under the kernel target
+directory are taken in as `dep` crates too; the manifest records
+`deps: true`, and their crate entries carry the dependency's features.
 
 ## 设计决策
 

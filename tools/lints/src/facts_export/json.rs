@@ -4,9 +4,9 @@
 
 //! Minimal JSON-lines writer for facts records.
 //!
-//! The lint library has no JSON dependency; records are flat objects of
-//! strings, integers, flags and pre-rendered arrays, so a small writer keeps
-//! the library's dependency set unchanged.
+//! The lint library has no JSON dependency; records are objects of strings,
+//! integers, flags, and arrays or objects rendered by the same writer, so a
+//! small writer keeps the library's dependency set unchanged.
 
 use std::fmt::Write as _;
 
@@ -43,21 +43,54 @@ pub(super) fn str_array<'a>(items: impl IntoIterator<Item = &'a str>) -> String 
     out
 }
 
-/// One record under construction; [`Record::end`] terminates the line.
+/// Renders already rendered JSON values as an array.
+pub(super) fn array(items: impl IntoIterator<Item = String>) -> String {
+    let mut out = String::from("[");
+    for (index, item) in items.into_iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&item);
+    }
+    out.push(']');
+    out
+}
+
+/// One JSON object under construction: a record line ([`Record::new`]) or a
+/// nested value ([`Record::object`]); [`Record::end`] closes it.
 pub(super) struct Record<'a> {
     out: &'a mut String,
+    first: bool,
+    line: bool,
 }
 
 impl<'a> Record<'a> {
-    /// Starts a record whose `t` field is `tag`.
+    /// Starts a record line whose `t` field is `tag`.
     pub(super) fn new(out: &'a mut String, tag: &str) -> Self {
-        out.push_str("{\"t\":");
-        push_str(out, tag);
-        Self { out }
+        out.push('{');
+        Self {
+            out,
+            first: true,
+            line: true,
+        }
+        .str("t", tag)
+    }
+
+    /// Starts a nested object, written without a line end.
+    pub(super) fn object(out: &'a mut String) -> Self {
+        out.push('{');
+        Self {
+            out,
+            first: true,
+            line: false,
+        }
     }
 
     fn key(&mut self, key: &str) {
-        self.out.push(',');
+        if !self.first {
+            self.out.push(',');
+        }
+        self.first = false;
         push_str(self.out, key);
         self.out.push(':');
     }
@@ -96,19 +129,32 @@ impl<'a> Record<'a> {
     }
 
     pub(super) fn end(self) {
-        self.out.push_str("}\n");
+        self.out.push('}');
+        if self.line {
+            self.out.push('\n');
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Record, push_str, str_array};
+    use super::{Record, array, push_str, str_array};
 
     #[test]
     fn escapes_json_strings() {
         let mut out = String::new();
         push_str(&mut out, "a\"b\\c\n\u{1}");
         assert_eq!(out, "\"a\\\"b\\\\c\\n\\u0001\"");
+    }
+
+    #[test]
+    fn nests_objects() {
+        let mut field = String::new();
+        Record::object(&mut field)
+            .str("name", "a")
+            .num("line", 2)
+            .end();
+        assert_eq!(array([field]), "[{\"name\":\"a\",\"line\":2}]");
     }
 
     #[test]

@@ -40,9 +40,10 @@ pub(super) fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Returns the facts form of `path`; `root` is the repository root.
-pub(super) fn display(path: &Path, root: &Path) -> String {
-    let path = normalize(path);
+/// Returns the facts form of `path`, which rustc reported relative to `cwd`
+/// when it is not absolute; `root` is the repository root.
+pub(super) fn display(path: &Path, cwd: &Path, root: &Path) -> String {
+    let path = normalize(&cwd.join(path));
     if let Ok(relative) = path.strip_prefix(root) {
         return relative.to_string_lossy().into_owned();
     }
@@ -89,12 +90,24 @@ mod tests {
     fn keeps_repository_paths_relative() {
         let root = Path::new("/w/x-kernel");
         assert_eq!(
-            display(Path::new("task/kspin/src/lib.rs"), root),
+            display(Path::new("task/kspin/src/lib.rs"), root, root),
             "task/kspin/src/lib.rs"
         );
         assert_eq!(
-            display(Path::new("/w/x-kernel/fs/kvfs/src/../src/a.rs"), root),
+            display(Path::new("/w/x-kernel/fs/kvfs/src/../src/a.rs"), root, root),
             "fs/kvfs/src/a.rs"
+        );
+    }
+
+    #[test]
+    fn resolves_dependency_paths_against_the_package() {
+        // Cargo compiles a registry dependency from its package directory and
+        // passes `src/lib.rs`.
+        let package =
+            Path::new("/home/u/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/log-0.4.28");
+        assert_eq!(
+            display(Path::new("src/lib.rs"), package, Path::new("/w/x-kernel")),
+            "crates/log-0.4.28/src/lib.rs"
         );
     }
 

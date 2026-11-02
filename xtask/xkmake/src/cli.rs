@@ -166,6 +166,11 @@ pub(crate) struct DylintArgs {
     #[arg(long, value_name = "SHA", requires = "facts_out")]
     pub(crate) facts_base: Option<String>,
 
+    /// Export the dependency crates built for the kernel target too (also
+    /// enabled by `XKERNEL_FACTS_DEPS=1`).
+    #[arg(long, requires = "facts_out")]
+    pub(crate) facts_deps: bool,
+
     /// Additional Cargo arguments passed after `cargo dylint --`.
     #[arg(last = true)]
     pub(crate) cargo_args: Vec<String>,

@@ -973,18 +973,21 @@ make olddefconfig
 grep -qx 'KFEAT_LOCK_STAT=y' .config
 make dylint
 """ : ''
-    // XKERNEL_FACTS stays 1 for every scan of the stage: rustc tracks it, so
-    // switching it between scans would re-check the workspace crates. Only the
-    // first scan packs the facts. A failure before that scan still leaves a
-    // status for xreview.
-    withCleanSourceWorkspace("dylint-${platform}") {
-        withEnv([
-            "TARGET_DIR=${dylintTargetDir}",
-            'XKERNEL_FACTS=1',
-            "_CI_FACTS_DIR=${factsDir}",
-            "_CI_FACTS_BASE_REF=${factsBaseRef}",
-        ]) {
-            sh label: "Dylint check ${platform}", script: """#!/bin/bash
+    // XKERNEL_FACTS and XKERNEL_FACTS_DEPS stay 1 for every scan of the stage:
+    // rustc tracks the first and Cargo fingerprints the rustc wrapper the
+    // second installs, so switching them between scans would re-check the
+    // crates. Only the first scan packs the facts, dependencies included. A
+    // failure before that scan still leaves a status for xreview.
+    try {
+        withCleanSourceWorkspace("dylint-${platform}") {
+            withEnv([
+                "TARGET_DIR=${dylintTargetDir}",
+                'XKERNEL_FACTS=1',
+                'XKERNEL_FACTS_DEPS=1',
+                "_CI_FACTS_DIR=${factsDir}",
+                "_CI_FACTS_BASE_REF=${factsBaseRef}",
+            ]) {
+                sh label: "Dylint check ${platform}", script: """#!/bin/bash
 set -euo pipefail
 ${stageLogTeeLine(stageName)}
 facts_early_failure() {
@@ -1006,6 +1009,20 @@ make dylint_test
 make dylint FACTS_OUT="\${_CI_FACTS_DIR}" \
     XKMAKE_ARGS="${factsCommitArg()}\${facts_base:+ --facts-base \${facts_base}}"
 ${unittestScan}${lockStatScan}"""
+            }
+        }
+    } finally {
+        // Export the facts as soon as the stage ends, on every outcome, so
+        // xreview can fetch them while the rest of the build runs. The files
+        // live under the root workspace; the Post archive stays as a safety
+        // net. An archive failure must never fail the stage.
+        try {
+            dir(rootWorkspace()) {
+                archiveArtifacts artifacts: "${factsArtifactRoot()}/${platform}/**/*",
+                    allowEmptyArchive: true, fingerprint: false
+            }
+        } catch (e) {
+            echo "Early facts archive for ${platform} failed: ${e.message}"
         }
     }
 }

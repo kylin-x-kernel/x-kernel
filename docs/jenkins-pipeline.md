@@ -171,13 +171,21 @@ aarch64 分支完成这两次扫描后，再向 `.config` 追加 `KFEAT_LOCK_STA
 并确认该选项生效后，在同一构建输出目录再运行一次 `make dylint`。只有打开锁统计时，
 `static_lock!` 才展开为注册锁类的过程宏，锁统计相关代码才参与编译；其他 CI 配置都
 不打开该选项。检查结果与其他并行阶段一起进入 Gitee Check Run。
+lint 库只在该构建输出目录的 `tools/lints` 下构建一次，构建时不带内核配置的
+rustflags，因此三次扫描不会因为配置不同而重新链接 lint 库、进而重查全部 crate；
+`make dylint_test` 也使用这个目录，不随每次清空的 workspace 冷编译。三次扫描之间
+仍要重查的，是依赖 `kbuild_config` 的 workspace crate：它包含生成的
+`kbuild/<platform>/config.rs`，三种配置共用这个文件，锁统计配置下内容不同。
 
 两个 Dylint 分支的第一次普通配置扫描同时导出代码事实，供 xreview 的代码索引
 使用（格式见 `tools/lints/README.md`）：该次扫描使用
 `make dylint FACTS_OUT=<leg 根目录>/artifacts/facts/<platform>`，并传入本次构建的
-commit，PR 构建另传与目标分支的 merge base。整个阶段固定 `XKERNEL_FACTS=1`，
-后续 unittest 与锁统计扫描不打包，但也不因开关变化重查 crate。
-`artifacts/facts/` 随 leg 输出 stash，并在 Post 阶段无论构建成败都归档，
+commit，PR 构建另传与目标分支的 merge base。整个阶段固定 `XKERNEL_FACTS=1`
+与 `XKERNEL_FACTS_DEPS=1`（同时导出为内核 target 构建的依赖 crate），后续
+unittest 与锁统计扫描不打包，但也不因开关变化重查 crate。
+每个 Dylint 阶段结束时（无论成败）立即归档该平台的 `artifacts/facts/<platform>/`，
+归档失败只记日志、不影响阶段结果，因此事实在构建其余部分运行期间即可下载。
+`artifacts/facts/` 仍随 leg 输出 stash，并在 Post 阶段无论构建成败再归档一次作为兜底，
 Jenkins 制品地址为 `artifact/artifacts/facts/<platform>/`（`status.json`、
 `manifest.json`、`crates/`）。`status.json` 区分 `ready`、`partial`、`failed`
 与原因；事实扫描之前阶段已失败时，脚本的退出钩子写入 `failed`/`build`；

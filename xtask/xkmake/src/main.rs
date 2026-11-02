@@ -31,6 +31,10 @@ use crate::{
 };
 
 fn main() {
+    // Cargo runs xkmake as its rustc wrapper in a dependency facts scan.
+    if let Some(code) = facts::rustc_wrapper() {
+        std::process::exit(code);
+    }
     // Initialize the logger before any work begins.
     //
     // The format is `warning:` / `error:` (lowercase, like `cargo`) with only

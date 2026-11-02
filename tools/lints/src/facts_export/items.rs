@@ -3,16 +3,17 @@
 // See LICENSES for license details.
 
 //! `item` records: every definition of the crate with its span, visibility
-//! and the macro that produced it.
+//! and the macro that produced it; structs, unions and enums carry their
+//! fields with resolved types, statics and consts their type.
 
 use rustc_hir::{
     def::DefKind,
-    def_id::{LOCAL_CRATE, LocalDefId},
+    def_id::{DefId, LOCAL_CRATE, LocalDefId},
 };
-use rustc_middle::ty;
+use rustc_middle::ty::{self, Ty};
 use rustc_span::ExpnKind;
 
-use super::{Exporter, json::Record};
+use super::{Exporter, json, json::Record};
 
 /// Record kind of a definition, or `None` for kinds the index ignores.
 fn item_label(kind: DefKind) -> Option<&'static str> {
@@ -109,15 +110,100 @@ impl<'tcx> Exporter<'tcx> {
             DefKind::Impl { of_trait } => self.impl_fields(record, def_id, of_trait),
             DefKind::Fn | DefKind::AssocFn => self.fn_fields(record, def_id, kind),
             DefKind::Closure => record.str("root", &self.key(tcx.typeck_root_def_id(def_id))),
+            DefKind::Struct | DefKind::Union => {
+                let adt = tcx.adt_def(def_id);
+                record.raw("fields", &self.fields(adt.non_enum_variant()))
+            }
+            DefKind::Enum => record.raw("variants", &self.variants(def_id)),
+            DefKind::Static { .. } | DefKind::Const { .. } | DefKind::AssocConst { .. } => {
+                let ty = tcx.type_of(def_id).instantiate_identity();
+                self.typed(record, "ty", "ty_adts", ty)
+            }
             _ => record,
         };
         record.end();
     }
 
+    /// Writes a type and the ADTs and `dyn` traits it mentions (by key), so
+    /// that "who holds a `T`" is a key lookup rather than a string search.
+    fn typed<'a>(
+        &self,
+        record: Record<'a>,
+        ty_key: &str,
+        adts_key: &str,
+        ty: Ty<'tcx>,
+    ) -> Record<'a> {
+        let mentioned = self.mentioned_types(ty);
+        record
+            .str(ty_key, &ty::print::with_no_trimmed_paths!(ty.to_string()))
+            .raw(
+                adts_key,
+                &json::str_array(mentioned.iter().map(String::as_str)),
+            )
+    }
+
+    /// Keys of the ADTs and `dyn` principal traits in `ty`, outermost first.
+    fn mentioned_types(&self, ty: Ty<'tcx>) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for arg in ty.walk() {
+            let Some(inner) = arg.as_type() else {
+                continue;
+            };
+            let def = match inner.kind() {
+                ty::Adt(adt, _) => Some(adt.did()),
+                ty::Dynamic(preds, ..) => preds.principal_def_id(),
+                ty::Foreign(def) => Some(*def),
+                _ => None,
+            };
+            if let Some(def) = def {
+                let key = self.key(def);
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        keys
+    }
+
+    /// `[{name, ty, adts, line}]` for the fields of one variant.
+    fn fields(&self, variant: &ty::VariantDef) -> String {
+        let tcx = self.tcx;
+        json::array(variant.fields.iter().map(|field| {
+            let ty = tcx.type_of(field.did).instantiate_identity();
+            let line = self.def_line(field.did);
+            let mut out = String::new();
+            let record = Record::object(&mut out)
+                .str("name", field.name.as_str())
+                .str("key", &self.key(field.did));
+            self.typed(record, "ty", "adts", ty).num("line", line).end();
+            out
+        }))
+    }
+
+    /// `[{name, key, line, fields}]` for the variants of an enum.
+    fn variants(&self, def_id: DefId) -> String {
+        let adt = self.tcx.adt_def(def_id);
+        json::array(adt.variants().iter().map(|variant| {
+            let mut out = String::new();
+            Record::object(&mut out)
+                .str("name", variant.name.as_str())
+                .str("key", &self.key(variant.def_id))
+                .num("line", self.def_line(variant.def_id))
+                .raw("fields", &self.fields(variant))
+                .end();
+            out
+        }))
+    }
+
+    fn def_line(&self, def_id: DefId) -> u64 {
+        let span = self.tcx.def_span(def_id).source_callsite();
+        self.tcx.sess.source_map().lookup_char_pos(span.lo()).line as u64
+    }
+
     fn impl_fields<'a>(
         &mut self,
         mut record: Record<'a>,
-        def_id: rustc_hir::def_id::DefId,
+        def_id: DefId,
         of_trait: bool,
     ) -> Record<'a> {
         let tcx = self.tcx;
@@ -143,12 +229,7 @@ impl<'tcx> Exporter<'tcx> {
             )
     }
 
-    fn fn_fields<'a>(
-        &self,
-        mut record: Record<'a>,
-        def_id: rustc_hir::def_id::DefId,
-        kind: DefKind,
-    ) -> Record<'a> {
+    fn fn_fields<'a>(&self, mut record: Record<'a>, def_id: DefId, kind: DefKind) -> Record<'a> {
         let tcx = self.tcx;
         let sig = tcx.fn_sig(def_id).skip_binder();
         record = record.flag("unsafe", sig.safety().is_unsafe()).flag(

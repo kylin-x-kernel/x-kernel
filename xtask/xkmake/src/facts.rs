@@ -12,6 +12,11 @@
 //! files of exactly those units form the artifact. Files of other
 //! configurations that share the target directory are never picked up.
 //!
+//! With `--facts-deps` (or `XKERNEL_FACTS_DEPS=1`) the scan also exports the
+//! dependency crates built for the kernel target: Cargo runs `xkmake` as
+//! `RUSTC_WRAPPER` ([`rustc_wrapper`]), which sends those crates through the
+//! Dylint driver with the export lint forced on despite `--cap-lints`.
+//!
 //! Output layout:
 //!
 //! ```text
@@ -22,7 +27,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    env,
+    ffi::{OsStr, OsString},
     fs,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
     time::Instant,
@@ -42,12 +50,24 @@ use crate::{
 
 /// Version of the manifest and of the per-crate records it lists. Must match
 /// `SCHEMA` in `tools/lints/src/facts_export/mod.rs`.
-pub(crate) const FACTS_SCHEMA: &str = "xkernel-facts/0.2";
+pub(crate) const FACTS_SCHEMA: &str = "xkernel-facts/0.3";
 /// Version of `status.json`.
 const STATUS_SCHEMA: &str = "xkernel-facts-status/1";
 /// Switches the exporter on. Its value is always `1`: rustc records it as an
 /// environment dependency, so any other value would re-check every crate.
 pub(crate) const FACTS_ENV: &str = "XKERNEL_FACTS";
+/// Exports dependency crates too when `1`; like [`FACTS_ENV`], keep it fixed
+/// for every scan that shares a target directory.
+pub(crate) const DEPS_ENV: &str = "XKERNEL_FACTS_DEPS";
+/// Repository root for the exporter, which writes paths under it relative
+/// to it (dependencies compile in their own package directories).
+pub(crate) const ROOT_ENV: &str = "XKERNEL_FACTS_ROOT";
+/// Kernel target triple; set for Cargo when `xkmake` is its rustc wrapper.
+pub(crate) const WRAPPER_TARGET_ENV: &str = "XKMAKE_FACTS_WRAPPER_TARGET";
+/// Read by the exporter: marks a crate as a dependency.
+const KIND_ENV: &str = "XKERNEL_FACTS_KIND";
+/// Name of the export pass's lint in `tools/lints`.
+const EXPORT_LINT: &str = "facts_export";
 /// Cargo message format of a facts scan: JSON messages on stdout for the
 /// packer, diagnostics still rendered on stderr for the log.
 pub(crate) const MESSAGE_FORMAT_ARG: &str = "--message-format=json-render-diagnostics";
@@ -109,6 +129,7 @@ pub(crate) struct FactsRun {
     base: Option<String>,
     target: String,
     platform: String,
+    deps: bool,
 }
 
 #[derive(Serialize)]
@@ -137,6 +158,8 @@ struct Manifest {
     features: Vec<String>,
     rustflags: Vec<String>,
     unittest: bool,
+    /// Dependency crates are exported too.
+    deps: bool,
     toolchain: String,
     rustc: Option<String>,
     exporter: ExporterInfo,
@@ -166,6 +189,10 @@ struct CrateEntry {
     package: Option<String>,
     version: Option<String>,
     kind: String,
+    /// Cargo features of a dependency crate (workspace crates use the
+    /// manifest's kernel features).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<Vec<String>>,
     stem: String,
     file: String,
     sha256: String,
@@ -216,6 +243,7 @@ struct FactsSummary {
     package: Option<String>,
     version: Option<String>,
     kind: String,
+    features: Vec<String>,
     rustc: Option<String>,
     records: u64,
     counts: BTreeMap<String, u64>,
@@ -233,10 +261,12 @@ impl FactsRun {
     }
 
     /// Prepares `dir`: removes the previous artifact and marks it running.
+    /// `deps` records that the scan exports dependency crates too.
     pub(crate) fn begin(
         context: &BuildContext,
         dir: &Path,
         identity: FactsIdentity,
+        deps: bool,
     ) -> Result<Self> {
         let dir = context.workspace_root.join(dir);
         Self::clear(&dir)?;
@@ -256,6 +286,7 @@ impl FactsRun {
             base: identity.base,
             target: context.config.target().to_owned(),
             platform: context.config.platform().to_owned(),
+            deps,
         };
         run.write_status(FactsState::Running, None, None, None)?;
         Ok(run)
@@ -300,7 +331,8 @@ impl FactsRun {
         let pack_started = Instant::now();
         let members = workspace_members(context, toolchain)?;
         let messages = fs::read_to_string(&self.messages).with_path(&self.messages)?;
-        let units = scan_units(&messages, &members);
+        let deps_target = self.deps.then_some(self.target.as_str());
+        let units = scan_units(&messages, &members, deps_target);
         let crates_dir = self.dir.join(CRATES_DIR);
         let mut crates = Vec::new();
         let mut missing = Vec::new();
@@ -346,6 +378,7 @@ impl FactsRun {
                 crate_id: summary.crate_id,
                 package: summary.package,
                 version: summary.version,
+                features: (summary.kind == "dep").then_some(summary.features),
                 kind: summary.kind,
                 stem: unit.stem,
                 file,
@@ -374,6 +407,7 @@ impl FactsRun {
                 .map(|flag| (*flag).to_owned())
                 .collect(),
             unittest: context.unittest,
+            deps: self.deps,
             toolchain: toolchain.to_owned(),
             rustc,
             exporter: ExporterInfo {
@@ -474,16 +508,18 @@ fn describe(manifest: &Manifest) -> Option<String> {
     }
 }
 
-/// Units of workspace members in Cargo's JSON messages, one per stem.
-/// Build scripts are host programs and are skipped.
-fn scan_units(messages: &str, members: &HashSet<String>) -> Vec<Unit> {
+/// Units of workspace members in Cargo's JSON messages, one per stem, plus
+/// with `deps_target` the other units built for that target (dependency
+/// crates; host crates such as proc macros are not exported). Build scripts
+/// are host programs and are skipped.
+fn scan_units(messages: &str, members: &HashSet<String>, deps_target: Option<&str>) -> Vec<Unit> {
     let mut seen = BTreeSet::new();
     let mut units = Vec::new();
     for line in messages.lines() {
         let Ok(message) = serde_json::from_str::<ArtifactMessage>(line) else {
             continue;
         };
-        if message.reason != "compiler-artifact" || !members.contains(&message.package_id) {
+        if message.reason != "compiler-artifact" {
             continue;
         }
         let Some(target) = message.target else {
@@ -495,6 +531,12 @@ fn scan_units(messages: &str, members: &HashSet<String>) -> Vec<Unit> {
         let Some((dir, stem)) = message.filenames.first().and_then(|path| unit_stem(path)) else {
             continue;
         };
+        let wanted = members.contains(&message.package_id)
+            || deps_target
+                .is_some_and(|triple| dir.components().any(|part| part.as_os_str() == triple));
+        if !wanted {
+            continue;
+        }
         if seen.insert(stem.clone()) {
             units.push(Unit {
                 package_id: message.package_id,
@@ -552,16 +594,117 @@ fn summarize(data: &[u8], stem: &str) -> std::result::Result<FactsSummary, Strin
                 .collect()
         })
         .unwrap_or_default();
+    let features = header
+        .get("cfg")
+        .and_then(Value::as_array)
+        .map(|cfgs| {
+            cfgs.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|cfg| cfg.strip_prefix("feature=\"")?.strip_suffix('"'))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(FactsSummary {
         crate_name: field("crate").unwrap_or_default(),
         crate_id: field("crate_id").unwrap_or_default(),
         package: field("package"),
         version: field("version"),
         kind: field("kind").unwrap_or_default(),
+        features,
         rustc: field("rustc"),
         records: text.lines().count() as u64,
         counts,
     })
+}
+
+/// Runs as Cargo's `RUSTC_WRAPPER` in a dependency scan; `None` otherwise.
+///
+/// Cargo calls the wrapper as `<wrapper> <rustc> <args>`, or for workspace
+/// members `<wrapper> <driver> <rustc> <args>` where the driver is Dylint's
+/// `RUSTC_WORKSPACE_WRAPPER`. Members and host crates run unchanged. A
+/// dependency compiled for the kernel target runs through the driver with
+/// the export lint forced to warn: Cargo caps a dependency's lints at
+/// `allow`, which would skip the pass, and `--force-warn` is the one level
+/// the cap does not lower. The other lints stay capped.
+///
+/// Every process the scan starts inherits [`WRAPPER_TARGET_ENV`], so the
+/// variable alone does not make a call a wrapper call: an `xkmake` run from
+/// inside the scan, such as from a build script, gets a subcommand as its
+/// first argument and is left to the normal command line.
+pub(crate) fn rustc_wrapper() -> Option<i32> {
+    let target = env::var_os(WRAPPER_TARGET_ENV)?;
+    let mut args = env::args_os().skip(1);
+    let program = args.next()?;
+    let driver = env::var_os("RUSTC_WORKSPACE_WRAPPER");
+    if !is_compiler(&program, driver.as_deref(), env::var_os("RUSTC").as_deref()) {
+        return None;
+    }
+    let rest: Vec<OsString> = args.collect();
+    let mut command = match driver {
+        Some(driver) if !same_program(&program, &driver) && compiles_for(&rest, &target) => {
+            let mut command = Command::new(driver);
+            command
+                .arg(&program)
+                .args(&rest)
+                .args(["--force-warn", EXPORT_LINT])
+                .env(KIND_ENV, "dep");
+            command
+        }
+        _ => {
+            let mut command = Command::new(&program);
+            command.args(&rest);
+            command
+        }
+    };
+    let error = command.exec();
+    eprintln!(
+        "xkmake: rustc wrapper cannot run {}: {error}",
+        command.get_program().to_string_lossy()
+    );
+    Some(101)
+}
+
+/// True when `program`, the first argument of a wrapper call, is the
+/// compiler Cargo hands to the wrapper: `rustc` (or Cargo's `RUSTC`) or the
+/// workspace wrapper `driver`.
+fn is_compiler(program: &OsStr, driver: Option<&OsStr>, rustc: Option<&OsStr>) -> bool {
+    Path::new(program).file_stem() == Some(OsStr::new("rustc"))
+        || [driver, rustc]
+            .into_iter()
+            .flatten()
+            .any(|compiler| same_program(program, compiler))
+}
+
+fn same_program(a: &OsStr, b: &OsStr) -> bool {
+    a == b
+        || (Path::new(a).file_name().is_some()
+            && Path::new(a).file_name() == Path::new(b).file_name())
+}
+
+/// True for a compilation for `target`: not a host crate, and not Cargo's
+/// target-information probe (`--crate-name ___`).
+fn compiles_for(args: &[OsString], target: &OsStr) -> bool {
+    let mut for_target = false;
+    let mut emits = false;
+    for (index, arg) in args.iter().enumerate() {
+        let next = args.get(index + 1).map(OsString::as_os_str);
+        let text = arg.to_string_lossy();
+        if (arg == "--target" && next == Some(target))
+            || text
+                .strip_prefix("--target=")
+                .is_some_and(|value| value == target.to_string_lossy())
+        {
+            for_target = true;
+        }
+        if arg == "--crate-name" && next.is_some_and(|name| name == "___") {
+            return false;
+        }
+        if text.starts_with("--emit") {
+            emits = true;
+        }
+    }
+    for_target && emits
 }
 
 /// Package ids of the kernel workspace members. Vendored crates reached
@@ -691,11 +834,15 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::Path};
+    use std::{
+        collections::HashSet,
+        ffi::{OsStr, OsString},
+        path::Path,
+    };
 
     use super::{
-        FACTS_SCHEMA, FactsRun, FactsState, FailureReason, artifact_state, exporter_digest,
-        scan_units, summarize, unit_stem,
+        FACTS_SCHEMA, FactsRun, FactsState, FailureReason, artifact_state, compiles_for,
+        exporter_digest, is_compiler, same_program, scan_units, summarize, unit_stem,
     };
 
     const MEMBER: &str = "path+file:///w/task/kspin#0.3.0-dev";
@@ -743,11 +890,82 @@ mod tests {
              \"filenames\":[\"/t/deps/libkspin-aa.rmeta\"]}}\n\
              {{\"reason\":\"build-finished\",\"success\":true}}\n"
         );
-        let units = scan_units(&messages, &members);
+        let units = scan_units(&messages, &members, None);
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].stem, "kspin-aa");
         assert_eq!(units[0].target, "kspin");
         assert_eq!(units[0].package_id, MEMBER);
+    }
+
+    #[test]
+    fn selects_dependency_units_for_the_kernel_target() {
+        let members: HashSet<String> = [MEMBER.to_owned()].into();
+        let messages = "\
+            {\"reason\":\"compiler-artifact\",\"package_id\":\"registry+https://x#log@0.4.28\",\
+            \"target\":{\"name\":\"log\",\"kind\":[\"lib\"]},\
+            \"filenames\":[\"/t/aarch64-unknown-none-softfloat/release/deps/liblog-cc.rmeta\"]}\n\
+            {\"reason\":\"compiler-artifact\",\"package_id\":\"registry+https://x#syn@2.0.0\",\
+            \"target\":{\"name\":\"syn\",\"kind\":[\"lib\"]},\
+            \"filenames\":[\"/t/release/deps/libsyn-dd.rmeta\"]}\n";
+        assert!(scan_units(messages, &members, None).is_empty());
+        let units = scan_units(messages, &members, Some("aarch64-unknown-none-softfloat"));
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].stem, "log-cc");
+    }
+
+    #[test]
+    fn wraps_only_kernel_target_compilations() {
+        let target = OsStr::new("aarch64-unknown-none-softfloat");
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(compiles_for(
+            &args(&[
+                "--crate-name",
+                "log",
+                "--emit=dep-info,metadata",
+                "--target",
+                "aarch64-unknown-none-softfloat"
+            ]),
+            target
+        ));
+        assert!(!compiles_for(
+            &args(&["--crate-name", "syn", "--emit=dep-info,metadata"]),
+            target
+        ));
+        assert!(!compiles_for(
+            &args(&[
+                "-",
+                "--crate-name",
+                "___",
+                "--print=file-names",
+                "--target",
+                "aarch64-unknown-none-softfloat"
+            ]),
+            target
+        ));
+        assert!(same_program(
+            OsStr::new("/d/dylint-driver"),
+            OsStr::new("/d/dylint-driver")
+        ));
+        assert!(!same_program(
+            OsStr::new("/r/bin/rustc"),
+            OsStr::new("/d/dylint-driver")
+        ));
+    }
+
+    #[test]
+    fn wrapper_runs_only_for_compiler_calls() {
+        let driver = Some(OsStr::new("/d/nightly/dylint-driver"));
+        assert!(is_compiler(OsStr::new("/r/bin/rustc"), driver, None));
+        assert!(is_compiler(OsStr::new("rustc"), None, None));
+        assert!(is_compiler(OsStr::new("/d/nightly/dylint-driver"), driver, None));
+        assert!(is_compiler(
+            OsStr::new("/opt/my-rustc"),
+            None,
+            Some(OsStr::new("/opt/my-rustc"))
+        ));
+        // An xkmake started inside the scan keeps its command line.
+        assert!(!is_compiler(OsStr::new("build"), driver, None));
+        assert!(!is_compiler(OsStr::new("--help"), driver, None));
     }
 
     #[test]

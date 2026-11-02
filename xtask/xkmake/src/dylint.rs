@@ -19,7 +19,8 @@ use crate::{
     context::{BuildContext, workspace_root},
     error::{Error, IoResultExt, Result},
     facts::{
-        FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG, SCAN_RUSTFLAGS,
+        DEPS_ENV, FACTS_ENV, FactsIdentity, FactsRun, FailureReason, MESSAGE_FORMAT_ARG, ROOT_ENV,
+        SCAN_RUSTFLAGS, WRAPPER_TARGET_ENV,
     },
     hygiene::{DYLINT_VERSION, ensure_dylint_tools},
     process::Process,
@@ -70,6 +71,7 @@ pub(crate) fn run(args: &DylintArgs) -> Result<()> {
                 commit: args.facts_commit.clone(),
                 base: args.facts_base.clone(),
             },
+            facts_deps(args),
         )?),
         None => None,
     };
@@ -125,6 +127,15 @@ fn probe_tools(
     Ok((toolchain, host))
 }
 
+/// Dependency crates are exported: `--facts-deps` or `XKERNEL_FACTS_DEPS=1`.
+fn facts_deps(args: &DylintArgs) -> bool {
+    args.facts_deps || env_is_one(DEPS_ENV)
+}
+
+fn env_is_one(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value == "1")
+}
+
 /// Failure of a Dylint run: before the kernel scan started, or of the scan.
 enum ScanError {
     Setup(Error),
@@ -163,6 +174,7 @@ fn build_and_scan(
         .arg("--target-dir")
         .arg(&lint_target_dir);
     sanitize_env(&mut lint);
+    pin_lint_build_env(&mut lint, &lint_target_dir);
     set_host_tools(&mut lint, host);
     if let Some(path) = &driver_path {
         lint.env("DYLINT_DRIVER_PATH", path);
@@ -226,6 +238,24 @@ fn build_and_scan(
         // Without `--facts-out` the variable passes through unchanged, so a
         // caller that keeps it at `1` for every scan keeps Cargo's cache.
         scan.env(FACTS_ENV, "1");
+    }
+    let exporting = args.facts_out.is_some() || env_is_one(FACTS_ENV);
+    if exporting {
+        // Dependencies are compiled from their own package directories;
+        // the exporter writes paths under the repository relative to it.
+        scan.env(ROOT_ENV, &context.workspace_root);
+    }
+    if exporting && facts_deps(args) && !context.dry_run {
+        // Cargo fingerprints the wrapper, so a caller that exports
+        // dependencies keeps doing so for every scan of a target directory.
+        let wrapper = std::env::current_exe().map_err(|source| {
+            ScanError::Setup(Error::Io {
+                path: PathBuf::from("xkmake"),
+                source,
+            })
+        })?;
+        scan.env("RUSTC_WRAPPER", wrapper)
+            .env(WRAPPER_TARGET_ENV, context.config.target());
     }
     match facts {
         Some(facts) => scan.run_with_stdout(facts.messages_path()),
@@ -366,6 +396,27 @@ fn sanitize_env(process: &mut Process) {
     for name in SANITIZED_ENV {
         process.env_remove(name);
     }
+}
+
+/// Builds the lint library in the same environment for every kernel
+/// configuration.
+///
+/// Cargo running in `tools/lints` still reads the repository's
+/// `.cargo/config.toml`, which includes the generated `.xconfig.toml` and
+/// its `[build] rustflags` (`--cfg k_plat_name=...`, `--cfg unittest`). The
+/// library is a host tool that uses none of them, but a different set
+/// would relink it, and Dylint records the library as a file dependency of
+/// every crate it checks, so every scan would re-check every crate. An
+/// empty `CARGO_ENCODED_RUSTFLAGS` takes precedence over all configured
+/// rustflags; the kernel crates still get theirs from the scan.
+///
+/// `CARGO_TARGET_DIR` also reaches the library build that `dylint_testing`
+/// runs inside `make dylint_test`, so that build lands in the same target
+/// directory instead of `tools/lints/target`.
+fn pin_lint_build_env(process: &mut Process, target_dir: &Path) {
+    process
+        .env("CARGO_ENCODED_RUSTFLAGS", "")
+        .env("CARGO_TARGET_DIR", target_dir);
 }
 
 fn set_host_tools(process: &mut Process, host: &str) {

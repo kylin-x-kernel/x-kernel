@@ -32,6 +32,15 @@ A scan only sees code that the configuration compiles; CI scans the
 aarch64 and x86_64 `qemu_defconfig` configurations. Add the platform's
 kernel target to the toolchain before scanning another configuration.
 
+`xkmake` builds this library once into `<target>/tools/lints` and passes
+it to `cargo dylint --lib-path`. The build ignores the rustflags of the
+kernel configuration (the generated `.cargo/.xconfig.toml`), so switching
+configurations, for example to `UNITTEST=y`, does not relink it; Dylint
+records the library as a file dependency of every checked crate, and a
+relink would re-check them all. It is rebuilt when its sources,
+`Cargo.lock` or the toolchain change. `make dylint_test` uses the same
+target directory.
+
 The first local run builds the Dylint driver into `$DYLINT_DRIVER_PATH`
 (default `~/.dylint_drivers`). The CI image sets `DYLINT_DRIVER_PATH` to a
 driver prebuilt for the pinned toolchain.
@@ -39,9 +48,10 @@ driver prebuilt for the pinned toolchain.
 ## Code facts export
 
 `src/facts_export/` is a pass that reports nothing. It exports what the
-compiler knows about the scanned code (items, call edges, functions used as
-values, trait impls, link symbols, atomic orderings, `unsafe` blocks) for
-the review code index, which otherwise works from names only.
+compiler knows about the scanned code (items with field types, call edges,
+functions used as values, uses of statics, consts, variants and fields,
+trait impls, link symbols, atomic orderings, `unsafe` blocks) for the review
+code index, which otherwise works from names only.
 
 ```bash
 make dylint FACTS_OUT=target/facts/kplat-aarch64
@@ -68,10 +78,15 @@ crates/<stem>.jsonl.zst  one zstd-compressed JSON-lines file per crate
   the units from Cargo's `compiler-artifact` messages, which list fresh
   units too, so files of other configurations in the same target directory
   are never picked up.
-- **Scope.** Workspace members only (the Dylint driver does not check
-  dependencies or the vendored crates reached through `[patch]`), in the
-  configuration of the scan: the selected `.config`, its Cargo features and
-  `--cfg unittest`.
+- **Scope.** Workspace members, in the configuration of the scan: the
+  selected `.config`, its Cargo features and `--cfg unittest`.
+- **Dependencies.** `FACTS_DEPS=y` (`--facts-deps`, or
+  `XKERNEL_FACTS_DEPS=1` for every scan of a target directory) also exports
+  the crates.io, git and vendored dependencies built for the kernel target,
+  with `kind: dep`, their version and features. Cargo then runs `xkmake` as
+  its rustc wrapper, which sends those crates through the Dylint driver with
+  only the export lint enabled; host crates (build scripts, proc macros) are
+  not exported. Turning it on or off rebuilds the dependencies once.
 - **Status.** `ready`: every unit has facts. `partial` with reason `build`:
   the scan failed (build error or a lint error) and the units checked
   before it stopped are packed. `partial` with reason `exporter`: the scan
@@ -98,9 +113,10 @@ version they do not know. Each line is one JSON object; `t` is its kind.
 | `t` | Content |
 | --- | --- |
 | `crate` | first line: `schema`, `crate`, `crate_id`, `stem`, `package`, `version`, `kind` (`workspace`), `target`, `toolchain`, `rustc`, `crate_types`, `opt_level`, `cfg` (features, `unittest`, `test`, `debug_assertions`) |
-| `item` | a definition: `key`, `path`, `kind`, `name`, place, `end_line`, `vis`, `defined_by` (the macro that produced it), `gen` (its name is macro output), `parent`; impls add `self_ty`, `owner`, `trait`, `trait_name`, `negative`; fns add `unsafe`, `generic`, `symbol` (`export_name` / `no_mangle`), `owner`, `trait_name`; closures add `root` |
-| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined` |
-| `ref` | a function used as a value: `caller`, `caller_root`, place, `target`, `callee_file`, `callee_line` |
+| `item` | a definition: `key`, `path`, `kind`, `name`, place, `end_line`, `vis`, `defined_by` (the macro that produced it), `gen` (its name is macro output), `parent`; impls add `self_ty`, `owner`, `trait`, `trait_name`, `negative`; fns add `unsafe`, `generic`, `symbol` (`export_name` / `no_mangle`), `owner`, `trait_name`; closures add `root`; structs and unions add `fields`, enums `variants` (`name`, `key`, `line`, `fields`); statics and consts add `ty`, `ty_adts` |
+| `call` | a MIR call or drop edge: `caller`, `caller_root` (enclosing fn of a closure), place, `kind`, `callee_name`, `callee`, `callee_file`, `callee_line`, `callee_owner`, `resolved`, `resolved_owner`, `trait`, `recv`, `generic`, `source` (operator overloading and other non-call syntax), `symbol` (foreign calls), `ty` (dropped type), `orderings` (atomic calls), `in_unsafe`, `inlined`, and for fn-pointer and `Fn*` calls `via_param`, `via_field`, `via_value` or, in a closure, `via_capture` (+ `via_outer`, `via_outer_param`) |
+| `ref` | a function or closure used as a value: `caller`, `caller_root`, place, `target`, `closure`, `callee_file`, `callee_line` (where `target` is defined), and where it goes: `passed_to` + `arg` (argument of a call) or `field` (stored into a field) |
+| `use` | a use of a static, const, enum variant, field or struct: `caller`, `caller_root`, place, `kind` (`static`, `const`, `variant`, `field`, `struct`), `target`, `access` (`read`, `mut`, `construct`, `match`, `ref`), `target_file`, `target_line` |
 | `site` | an `unsafe` block: `kind`, `owner`, place |
 | `counts` | last line: totals by kind, `export_us`, `bytes` |
 
@@ -118,7 +134,33 @@ version they do not know. Each line is one JSON object; `t` is its kind.
   `fmt_rt_calls_skipped`, not written. `recv` is the receiver type of a
   `dyn` call or of an `Fn*` trait call on a fn pointer; a call through a
   plain fn pointer has no receiver.
-- *Paths* are repository-relative. Dependencies are written as
+- *Fields* (`fields` of an item) are `name`, `key`, `ty` (the declared type),
+  `adts` (keys of the ADTs and `dyn` traits it mentions, outermost first) and
+  `line`, so "who holds a `T`" is a key lookup.
+- *Uses* come from MIR: place projections (field reads and writes, variant
+  downcasts), constants (statics by address, named consts), aggregates
+  (constructions) and switches on a discriminant (`match` on a variant).
+  Items of `core`, `alloc` and `std` are not recorded. One record per
+  target, kind, access and line.
+- *Fn values.* For a call through a fn pointer or a generic `Fn*` bound,
+  `via_param` is the caller's declared parameter (0-based; in a closure,
+  not counting the captured environment) the callee value comes from, `via_field` the field it is read from, `via_value` the function or
+  closure itself when the body names it. In a closure, a value read from the
+  captured environment gives `via_capture` (the variable's name) and where
+  that variable comes from in the enclosing body: `via_outer` +
+  `via_outer_param` (a parameter of the enclosing fn), `via_field` (a
+  precisely captured field) or `via_value` (a captured function or closure,
+  or a `let` initialised with one). The candidates of a `via_param`
+  call in `g`, or of a `via_outer` = `g` call with `via_outer_param` as the
+  index, are the `ref` records with `passed_to` = `g` and that `arg` (for a
+  method, `arg` counts the receiver); those of a `via_field` call are
+  the `ref` records with that `field`. Values are followed through locals
+  assigned once, references and casts. A body has one `ref` record per
+  target, line and destination (`passed_to` + `arg`, or `field`), and a
+  plain one only for a line without such a record.
+- *Paths* are repository-relative, for dependency crates too (`xkmake` passes
+  the repository root in `XKERNEL_FACTS_ROOT`, since Cargo compiles registry
+  and git crates from their own directories). Dependencies are written as
   `crates/<name>-<version>/…` (crates.io), `git/<checkout>/<rev>/…` (git) and
   `rust/library/<crate>/…` (standard library).
 - *MIR* is taken after drop elaboration and before optimisation, so no call

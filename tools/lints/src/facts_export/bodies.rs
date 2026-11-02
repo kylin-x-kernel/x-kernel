@@ -3,9 +3,8 @@
 // See LICENSES for license details.
 
 //! Records taken from bodies: `call` (MIR call and drop edges), `ref`
-//! (functions used as values) and `site` (unsafe blocks).
-
-use std::collections::HashSet;
+//! (functions and closures used as values), `use` (see `uses`) and `site`
+//! (unsafe blocks).
 
 use rustc_hir::{
     BlockCheckMode, Expr, ExprKind, UnsafeSource,
@@ -14,25 +13,31 @@ use rustc_hir::{
     intravisit::{self, Visitor},
 };
 use rustc_middle::{
-    mir::{self, Operand, TerminatorKind, visit::Visitor as MirVisitor},
+    mir::{self, AggregateKind, Operand, Rvalue, TerminatorKind, visit::Visitor as MirVisitor},
     ty::{self, Instance, InstanceKind, Ty, TypeVisitableExt, TypingEnv},
 };
 use rustc_span::{Span, source_map::Spanned, sym};
 
-use super::{Exporter, json, json::Record};
+use super::{
+    Exporter,
+    flow::{Captured, Flow, Origin},
+    json,
+    json::Record,
+};
 
 /// Callee module whose calls are formatting plumbing (`Argument::new_*`),
 /// one per formatted argument; they are counted, not written.
 const FMT_RT_PREFIX: &str = "core::fmt::rt::";
 
 /// The caller side of the records written from one MIR body.
-struct Caller<'b, 'tcx> {
-    body: &'b mir::Body<'tcx>,
+pub(super) struct Caller<'b, 'tcx> {
+    pub(super) body: &'b mir::Body<'tcx>,
     key: String,
     /// Key of the enclosing fn when the body is a closure.
     root_key: Option<String>,
     root: LocalDefId,
     typing_env: TypingEnv<'tcx>,
+    flow: Flow<'b, 'tcx>,
 }
 
 /// How a call terminator's callee was resolved.
@@ -44,6 +49,20 @@ struct Callee {
     trait_id: Option<DefId>,
     generic: bool,
     name: Option<String>,
+}
+
+/// How a function value reaches the place a `ref` record describes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(super) enum RefContext {
+    Plain,
+    /// Passed as argument `index` of a call to `callee` (the resolved impl
+    /// item for trait calls; absent for fn-pointer calls).
+    Arg {
+        callee: Option<String>,
+        index: usize,
+    },
+    /// Stored into this field.
+    Field(DefId),
 }
 
 impl Callee {
@@ -60,7 +79,7 @@ impl Callee {
 }
 
 /// True when `scope` belongs to a body that the MIR inliner copied in.
-fn is_inlined(body: &mir::Body<'_>, scope: mir::SourceScope) -> bool {
+pub(super) fn is_inlined(body: &mir::Body<'_>, scope: mir::SourceScope) -> bool {
     scope.inlined_instance(&body.source_scopes).is_some()
 }
 
@@ -162,7 +181,10 @@ impl<'tcx> Exporter<'tcx> {
             root_key: (root != def.to_def_id()).then(|| self.key(root)),
             root: root.expect_local(),
             typing_env: TypingEnv::post_analysis(tcx, def.to_def_id()),
+            flow: Flow::new(tcx, body, def),
         };
+        self.refs_seen.clear();
+        self.ref_lines.clear();
         for block in body.basic_blocks.iter() {
             let Some(term) = &block.terminator else {
                 continue;
@@ -201,10 +223,12 @@ impl<'tcx> Exporter<'tcx> {
             }
         }
         self.inlined_calls(&caller);
+        self.field_stores(&caller);
         self.refs(&caller);
+        self.uses(&caller);
     }
 
-    fn caller_record<'a>(
+    pub(super) fn caller_record<'a>(
         &self,
         out: &'a mut String,
         tag: &str,
@@ -285,20 +309,91 @@ impl<'tcx> Exporter<'tcx> {
         for (bb, data) in caller.body.basic_blocks.iter_enumerated() {
             finder.visit_basic_block_data(bb, data);
         }
-        let mut seen = HashSet::new();
         for (def_id, span) in finder.refs {
-            let place = self.place(span);
-            if !seen.insert((def_id, place.line)) {
-                continue;
-            }
-            self.bump("fn_refs");
-            let mut line = String::new();
-            let mut record = self.caller_record(&mut line, "ref", caller);
-            record = Self::put_place(record, &place).str("target", &self.key(def_id));
-            record = self.def_place(record, def_id);
-            record.end();
-            self.buf.push_str(&line);
+            self.fn_ref(caller, def_id, span, RefContext::Plain);
         }
+    }
+
+    /// Function and closure values stored into fields (`Ops { handler: f }`,
+    /// `ops.handler = f`): the candidates of fn-pointer calls through those
+    /// fields.
+    fn field_stores(&mut self, caller: &Caller<'_, 'tcx>) {
+        let tcx = self.tcx;
+        let mut stores = Vec::new();
+        for block in caller.body.basic_blocks.iter() {
+            for stmt in &block.statements {
+                if is_inlined(caller.body, stmt.source_info.scope) {
+                    continue;
+                }
+                let mir::StatementKind::Assign(assign) = &stmt.kind else {
+                    continue;
+                };
+                let (place, rvalue) = &**assign;
+                let span = stmt.source_info.span;
+                match rvalue {
+                    Rvalue::Aggregate(kind, operands) => {
+                        let AggregateKind::Adt(did, variant, _, _, active) = **kind else {
+                            continue;
+                        };
+                        let fields = &tcx.adt_def(did).variant(variant).fields;
+                        for (index, operand) in operands.iter_enumerated() {
+                            let field = fields[active.unwrap_or(index)].did;
+                            stores.push((caller.flow.operand(operand), field, span));
+                        }
+                    }
+                    Rvalue::Use(operand) | Rvalue::Cast(_, operand, _) => {
+                        if let Some(field) = caller.flow.field_of(place.as_ref()) {
+                            stores.push((caller.flow.operand(operand), field, span));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (origin, field, span) in stores {
+            if let Some(target) = origin.value() {
+                self.fn_ref(caller, target, span, RefContext::Field(field));
+            }
+        }
+    }
+
+    /// Writes one `ref` record per target, line and destination of the body.
+    /// A plain ref is skipped when that line already has a record for the
+    /// target: every argument or field store of it is also a plain use.
+    fn fn_ref(
+        &mut self,
+        caller: &Caller<'_, 'tcx>,
+        target: DefId,
+        span: Span,
+        context: RefContext,
+    ) {
+        let place = self.place(span);
+        let line = (target, place.line);
+        let first = match context {
+            RefContext::Plain => !self.ref_lines.contains(&line),
+            _ => self.refs_seen.insert((target, place.line, context.clone())),
+        };
+        if !first {
+            return;
+        }
+        self.ref_lines.insert(line);
+        let closure = self.tcx.is_closure_like(target);
+        self.bump(if closure { "closure_refs" } else { "fn_refs" });
+        let mut line = String::new();
+        let mut record = self.caller_record(&mut line, "ref", caller);
+        record = Self::put_place(record, &place)
+            .str("target", &self.key(target))
+            .flag("closure", closure);
+        record = self.def_place(record, target);
+        record = match context {
+            RefContext::Plain => record,
+            RefContext::Arg { callee, index } => record
+                .opt("passed_to", callee.as_deref())
+                .num("arg", index as u64),
+            RefContext::Field(field) => record.str("field", &self.key(field)),
+        };
+        record.end();
+        self.buf.push_str(&line);
     }
 
     /// Classifies the callee of a call terminator.
@@ -376,6 +471,29 @@ impl<'tcx> Exporter<'tcx> {
             self.bump("fmt_rt_calls_skipped");
             return;
         }
+        let is_fn_trait_call = callee
+            .trait_id
+            .is_some_and(|id| tcx.fn_trait_kind_from_def_id(id).is_some());
+        // Where the called value of an fn-pointer or `Fn*` call comes from.
+        let callable = if is_fn_trait_call {
+            args.first().map(|arg| caller.flow.operand(&arg.node))
+        } else if callee.kind == "fnptr" {
+            Some(caller.flow.operand(func))
+        } else {
+            None
+        };
+        if !is_fn_trait_call {
+            let passed_to = callee.resolved.or(callee.def).map(|def| self.key(def));
+            for (index, arg) in args.iter().enumerate() {
+                if let Some(target) = caller.flow.operand(&arg.node).value() {
+                    let context = RefContext::Arg {
+                        callee: passed_to.clone(),
+                        index,
+                    };
+                    self.fn_ref(caller, target, arg.span, context);
+                }
+            }
+        }
         // Prefer the span of the whole call for macro attribution: the
         // callee name may be an argument token while the call itself is
         // macro output.
@@ -440,6 +558,33 @@ impl<'tcx> Exporter<'tcx> {
             .flag("generic", callee.generic)
             .opt("source", source.as_deref())
             .flag("in_unsafe", self.in_unsafe(caller.root, site));
+        record = match callable {
+            Some(Origin::Param(index)) => {
+                self.bump("calls_via_param");
+                record.num("via_param", index as u64)
+            }
+            Some(Origin::Field(field)) => {
+                self.bump("calls_via_field");
+                record.str("via_field", &self.key(field))
+            }
+            Some(Origin::Fn(target) | Origin::Closure(target)) => {
+                self.bump("calls_via_value");
+                record.str("via_value", &self.key(target))
+            }
+            Some(Origin::Captured { name, source }) => {
+                self.bump("calls_via_capture");
+                record = record.str("via_capture", name.as_str());
+                match source {
+                    Captured::Param { owner, index } => record
+                        .str("via_outer", &self.key(owner))
+                        .num("via_outer_param", index as u64),
+                    Captured::Field(field) => record.str("via_field", &self.key(field)),
+                    Captured::Value(target) => record.str("via_value", &self.key(target)),
+                    Captured::Unknown => record,
+                }
+            }
+            Some(Origin::Unknown) | None => record,
+        };
         if let (Some(def), Some(key)) = (callee.def, &callee_key)
             && tcx.crate_name(def.krate) == sym::core
             && key.starts_with("core::sync::atomic::")
