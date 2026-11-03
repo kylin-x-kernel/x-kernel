@@ -25,15 +25,19 @@ impl PagingHandler for PagingHandlerImpl {
             "page-table allocation requested before page allocator initialization"
         );
         kalloc::alloc_page_ref(UsageKind::PageTable)
-            .map(PageRef::into_raw)
+            .map(|page| {
+                let (paddr, num_pages) = page.into_raw();
+                debug_assert_eq!(num_pages, 1);
+                paddr
+            })
             .ok()
     }
 
     fn dealloc_frame(paddr: PhysAddr) {
         // SAFETY: page_table consumes exactly one frame allocated by this
-        // handler, after its owner has ended hardware use and translation
+        // handler with range length one, after its owner ended hardware use and translation
         // retirement. Borrowed root entries do not release their source frames.
-        drop(unsafe { PageRef::from_raw(paddr) });
+        drop(unsafe { PageRef::from_raw(paddr, 1) });
     }
 
     #[inline]

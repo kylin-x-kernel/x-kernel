@@ -5,21 +5,21 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::ptr::NonNull;
 
-use kalloc::{GlobalAllocator, GlobalPage, UsageKind};
+use kalloc::{GlobalAllocator, UsageKind, alloc_page_ref, alloc_pages_exact_ref};
 use memaddr::{PAGE_SIZE_4K as PAGE, PhysAddr, PhysAddrRange};
 use unittest::def_test;
 
 #[def_test]
 fn prepared_inventory_works_with_existing_allocator_interfaces() {
-    let storage = GlobalPage::alloc_contiguous(256, PAGE).unwrap();
-    let va = storage.start_va();
-    let pa = khal::mem::v2p(va);
+    let storage = alloc_pages_exact_ref(256, PAGE, UsageKind::Global).unwrap();
+    let pa = storage.phys_addr();
+    let va = khal::mem::p2v(pa);
     let mut free = [
         PhysAddrRange::from_start_size(pa, 64 * PAGE),
         PhysAddrRange::from_start_size(pa + 128 * PAGE, 64 * PAGE),
     ];
-    // SAFETY: GlobalPage exclusively owns both disjoint mapped ranges. It is
-    // declared first and outlives the directory, allocator and allocations.
+    // SAFETY: this unpublished PageRef retains both exclusive mapped ranges.
+    // It is declared first and outlives the table, allocator and allocations.
     let table = unsafe {
         page_meta::init(&mut free, |backing| {
             NonNull::new(khal::mem::p2v(backing.start).as_mut_ptr())
@@ -64,8 +64,8 @@ fn prepared_inventory_works_with_existing_allocator_interfaces() {
 
 #[def_test]
 fn boot_publishes_page_metadata_independently_of_allocator_instances() {
-    let page = GlobalPage::alloc_contiguous(1, PAGE).unwrap();
-    let pa = khal::mem::v2p(page.start_va());
+    let page = alloc_page_ref(UsageKind::Global).unwrap();
+    let pa = page.phys_addr();
     let meta = page_meta::lookup(pa.as_usize() / PAGE).unwrap();
     assert!(!meta.is_permanent());
     let identity = meta as *const _;
@@ -74,4 +74,55 @@ fn boot_publishes_page_metadata_independently_of_allocator_instances() {
         page_meta::lookup(pa.as_usize() / PAGE).unwrap() as *const _,
         identity
     );
+}
+
+#[def_test(serial)]
+fn shared_exact_and_compound_ranges_survive_concurrent_clone_and_drop() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const WORKERS: usize = 4;
+    for compound in [false, true] {
+        let before = kalloc::global_allocator().usages().get(UsageKind::Global);
+        let owner = if compound {
+            kalloc::alloc_compound_pages_ref(8, PAGE, UsageKind::Global).unwrap()
+        } else {
+            alloc_pages_exact_ref(8, PAGE, UsageKind::Global).unwrap()
+        };
+        let ready = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(AtomicBool::new(false));
+        let mut workers = Vec::new();
+        for _ in 0..WORKERS {
+            let pages = owner.try_clone_range(2, 3).unwrap();
+            let ready = ready.clone();
+            let start = start.clone();
+            workers.push(ktask::spawn(move || {
+                ready.fetch_add(1, Ordering::Release);
+                while !start.load(Ordering::Acquire) {
+                    ktask::yield_now();
+                }
+                for _ in 0..256 {
+                    let copy = pages.try_clone_ref().unwrap();
+                    let last = copy.try_clone_page(2).unwrap();
+                    assert_eq!(last.phys_addr(), pages.phys_addr() + 2 * PAGE);
+                    drop(copy);
+                    drop(last);
+                }
+            }));
+        }
+        while ready.load(Ordering::Acquire) != WORKERS {
+            ktask::yield_now();
+        }
+        // Every worker has acknowledged its hold; the initial complete owner
+        // can end before any of those holds are cloned and released in parallel.
+        drop(owner);
+        start.store(true, Ordering::Release);
+        for worker in workers {
+            assert_eq!(worker.join(), 0);
+        }
+        assert_eq!(
+            kalloc::global_allocator().usages().get(UsageKind::Global),
+            before
+        );
+    }
 }

@@ -9,7 +9,7 @@
 //! metadata storage geometry are private implementation choices. Neither page
 //! allocation nor page-content access is granted by descriptor lookup.
 //! [`PageMeta`] exposes the reference-state protocol to allocator-owned holders.
-//! This crate stores the unique counter and original accounting class; allocation,
+//! This crate stores head/tail geometry, the head counter and original class; allocation,
 //! RAII ownership and final storage release belong to the owning allocator.
 #![no_std]
 
@@ -21,7 +21,7 @@ use core::ptr::NonNull;
 
 use klazy::Once;
 use memaddr::PhysAddrRange;
-pub use page::{PageMeta, ReferenceState, UsageKind};
+pub use page::{AllocationInfo, PageMeta, ReferenceState, UsageKind};
 
 /// Failure to prepare or access physical-page metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +46,8 @@ pub enum PageMetaError {
     InvalidState,
     /// Another lifetime hold would exceed the reference counter limit.
     ReferenceOverflow,
+    /// An allocation has other holds and cannot be split exclusively.
+    NotExclusive,
 }
 
 /// Physical-page metadata table with a private lookup and storage backend.
@@ -146,4 +148,10 @@ pub fn lookup(pfn: usize) -> Option<&'static PageMeta> {
 /// Identity lookup grants no page ownership or content access.
 pub fn pfn_of(meta: &PageMeta) -> Option<usize> {
     GLOBAL.get()?.pfn_of(meta)
+}
+
+/// Borrows the boot-published metadata table without acquiring page ownership.
+/// Returns None before publication. Its descriptors remain resident forever.
+pub fn global_table() -> Option<&'static PageMetaTable> {
+    GLOBAL.get()
 }

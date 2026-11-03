@@ -19,7 +19,7 @@ byte allocator、全局 page buddy 以及相应的 per-CPU cache。
 - Rust `alloc` 生态以及内核中使用 `Box`、`Vec`、`Arc` 等类型的代码；
 - 页表、用户虚拟内存、page cache 和通用连续页使用者；
 - `kdma` 等需要 DMA32 物理地址的子系统；
-- 使用 [`GlobalPage`](../src/page.rs) 管理连续页生命周期的内核组件；
+- Kernel components retaining single or contiguous allocations through `PageRef`;
 - 可选的 allocation tracking。
 
 ## 背景
@@ -52,7 +52,8 @@ mm/kalloc/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs          # 全局 allocator、初始化、路由、统计和 GlobalAlloc
-│   ├── page.rs         # GlobalPage, thin PageRef, allocation and final release
+│   ├── page.rs         # Unified PageRef, allocation, zeroing and final release
+│   ├── page/split.rs   # Cleanup iterator transferring independent split pages
 │   ├── pcp.rs          # 1–4 页 per-CPU page cache
 │   ├── slab_cache.rs   # slab 配置下的 per-CPU object cache
 │   └── tracking.rs     # 可选 allocation tracking
@@ -118,7 +119,7 @@ mm/kalloc/
 Other paths:
   large Rust allocation ---------------------------> page allocator
   DMA32 / alloc_pages_at --------------------------> page allocator directly
-  GlobalPage --------------------------------------> page APIs + Drop
+  PageRef -----------------------------------------> page APIs + metadata + Drop
   tracking ----------------------------------------> wraps Rust GlobalAlloc path
 ```
 
@@ -269,18 +270,26 @@ free 到 per-CPU cache 的对象。
 当前 page allocator 没有独立 DMA32 zone，因此它采用“先分配、后检查”，不能保证在
 存在低端空闲页时一定找到它们。
 
-### `GlobalPage`
+### Page allocation consumers
 
-`GlobalPage` 是连续 4 KiB 页的 RAII owner：
+Single-page helpers and alloc_pages_exact_ref return the same range PageRef.
+An exact request owns precisely the requested number of contiguous independent
+pages. alloc_compound_pages_ref is an explicit power-of-two allocation whose
+member views retain the whole compound. There is no separate buffer-owner type
+or safe byte-slice API. Initial zeroing is provided for single/exact allocation
+before the first holder escapes.
 
-- `alloc()`、`alloc_zero()` 和 `alloc_contiguous()` 通过全局 page API 申请；
-- `fill()`、`zero()`、`as_slice()` 和 `as_slice_mut()` 在 owner 范围内提供字节访问；
-- `Drop` 使用相同页数和 `UsageKind::Global` 自动归还；
-- `from_raw()` 用于从已知唯一 ownership 的 raw allocation 重建 owner，因此是 unsafe。
+A PageRef retains lifetime, not exclusive content access. Consumers perform their
+own address mapping and prove actual pointer reads/writes safe. VMM single-page
+PA storage deliberately omits the length-one part of the raw pair and restores
+with length one. Display consumers keep their requested byte bounds in business
+state. Existing multi-page VMM/display consumers select exact independent ranges;
+they do not acquire compound semantics merely by requesting contiguous memory.
 
 ### Usage accounting
 
-`UsageKind` 区分 Rust heap、虚拟内存、page cache、页表、DMA 和 `GlobalPage`。
+`UsageKind` distinguishes Rust heap, virtual memory, page cache, page tables,
+DMA and general kernel page allocation accounting.
 
 - 每个 CPU、每个种类分别累计 `allocated_bytes` 和 `freed_bytes`，热路径只修改当前
   CPU 的 atomic cache line；
@@ -393,64 +402,93 @@ usage、`used_bytes()` 和 `used_pages()` 分别反映不同层次，且读取�
 - byte allocator 从 page allocator 取得的 heap region 不会在 runtime 整体归还。
 - PCP 和 slab cache 在达到各自水位时批量归还，但没有 shutdown、CPU-offline 或全局
   pressure flush。
-- 直接 page API 的 caller 必须显式成对 deallocate；`GlobalPage` 通过 `Drop` 自动完成。
+- Raw page API callers explicitly pair deallocation; PageRef performs final
+  allocation release through Drop after the last hold ends.
 
-## Thin PageRef and inventory return
+## Range PageRef and reference units
 
-`kalloc::PageRef` is a single-page RAII holder containing only one
-`&'static PageMeta`; a compile-time assertion keeps it pointer-sized. It stores
-no allocator, cached PA, second counter or accounting-class copy. The unique
-counter belongs to page-meta. The holder accepts allocations, clones holds,
-transfers raw ownership and performs final release. UsageKind and its per-round
-record remain in page-meta and are re-exported by kalloc to preserve existing
-callers and observations. The class describes original allocation accounting,
-not actual page type, current users, exclusive access or reclaimability.
+PageRef in src/page.rs stores a first resident descriptor and a selected page
+count. A compile-time assertion requires two machine words. A single handle
+owns either one independent reference per selected base page, or one reference
+on a compound covering the entire selected view. Modes are identified by stable
+page-meta state, not a duplicate counter or per-handle mode tag. Mixed independent/
+compound units in one range are forbidden. Single pages are order-zero units.
+phys_addr plus page_count always describes this handle's selected range;
+retained_range describes the full backing kept alive by a compound view.
 
-`alloc_page_ref` continues to obtain a single-page VA through the existing global
-`alloc_pages`. After checking direct-map consistency, its private
-`PageRef::from_allocated` looks up global metadata and calls `claim_reference`.
-Keeping admission private confines raw inventory takeover to the allocation
-entry point. Missing metadata returns NotCovered, which the outer API maps to
-AllocError::NotInitialized before returning unpublished inventory and reversing
-any existing charge. The RustHeap raw-backing accounting exception is unchanged;
-a standalone whole-page PageRef adds its charge after successful admission.
-`alloc_zeroed_page_ref` clears only a newly allocated, exclusive, unpublished page.
+The length belongs to the handle: two exact owners can have the same first PA
+and different lengths. Per-page counts cannot recover those distinct release
+obligations. into_raw therefore transfers (selected PA, selected page count),
+and from_raw restores exactly that pair without acquiring references. No bare
+lookup can mint a hold. HAL/VMM single-page adapters preserve their existing PA
+interfaces under the fixed length-one contract; the generic page-table library
+is not changed.
 
-Cloning calls `PageMeta::clone_reference`. Raw transfer uses ManuallyDrop to keep
-the count unchanged; `from_raw` consumes the exact outstanding transfer from the
-same allocation incarnation without accepting a replacement accounting class.
-Final Drop selects the sole retiring owner through `release_reference`, saves
-the PA, and obtains the original class while resetting the count through
-`finish_retirement`. It then calls kalloc's `dealloc_pages` to record the release
-and return the page. It never writes metadata after publishing reusable storage.
-There is no reclaim callback, function-pointer registry or global_init hook.
+## Exact and compound allocation
 
-page-meta provides counter transitions, while kalloc returns inventory directly;
-the dependency remains kalloc -> page-meta. HAL obtains PageRef from kalloc and
-has no direct page-meta dependency. Content users explicitly map `phys_addr`.
-Ordinary and DMA raw release use the existing inventory paths without querying
-every base-page descriptor, avoiding validation cost proportional to a large
-allocation's page count. Callers must own a raw allocation with matching base,
-count and class. Transferring it to PageRef ends their raw release right.
-Permanent metadata backing is excluded from inventory during boot and cannot
-be returned through a forged address. The APIs do not detect these misuses or
-every double free. This stage does not change private allocator slab/PCP routing,
-buddy/slab internals or the existing global allocator's responsibilities.
+alloc_pages_exact_ref validates count, alignment and mapping, obtains complete
+power-of-two raw backing through existing PCP/buddy routing, then admits only
+the requested prefix through claim_reference_range. All prefix descriptors are
+validated before mutation. Remaining tail inventory is returned page by page
+before publication, avoiding a rounded arbitrary-tail free. Non-RustHeap raw
+charges are reversed for surplus; RustHeap typed ranges add only the retained
+byte charge. Failures return the complete raw allocation and undo its raw charge.
+No compound tail relationships are written for independent ranges.
 
-## Staged migration of existing page APIs
+alloc_compound_pages_ref explicitly requires a power-of-two count and uses group
+admission. Head metadata carries one shared count/order/class; tail offsets resolve
+that head. Any member view retains the whole backing. This is not Linux's ordinary
+noncompound high-order contract, whose allocation-owner and page-reference release
+obligations differ. All references here use independent or compound page units.
 
-The goal is to move runtime page users onto one lifetime protocol. PageRef holds
-one base page; GlobalPage is the existing exclusive contiguous-page content
-interface. Both refer to the same physical base pages, not separate inventories.
-Raw alloc_pages remains the inventory entry point while migrated and legacy
-users temporarily follow reference and raw release protocols respectively.
-GlobalPage is not intended to bypass the shared lifetime protocol permanently.
+alloc_page_ref and alloc_zeroed_page_ref are the one-page exact wrappers.
+alloc_zeroed_pages_exact_ref clears the entire selected independent range while
+new, exclusive and unpublished. Requested exact pages are fully initialized;
+returned spare inventory is outside the clear operation. No heap array/control
+block is allocated by these page helpers.
 
-GlobalPage's alloc, alloc_zero, alloc_contiguous and byte views retain their
-existing purposes. Future contiguous-page ownership should change its backing
-directly rather than introduce a parallel GlobalFrame. That change must address
-buddy rounding slack, independently retained subpages and raw transfer together;
-replacing only the single-page fields would leave contiguous ownership undefined.
-Zero-filled pages are needed by page-cache and anonymous-memory migration.
-alloc_zeroed_page_ref shares the same count, class and reclaim path as
-uninitialized allocation.
+## Clone, Drop and explicit transfer
+
+try_clone_ref clones the selected lifetime protection. For independent ranges it
+increments each page; if any increment fails, page-meta releases the successful
+prefix while originals remain held. For compounds it increments the head once.
+try_clone_range uses view-relative offset/count bounds; try_clone_page selects
+one page relative to the current view. Exact subviews keep only their selected
+pages; compound subviews keep the complete compound. Clone never repeats usage
+accounting. Independent clone is O(selected pages); compound clone does not walk
+the selected range.
+
+Drop releases the first unit once for a compound, or each selected independent
+page separately. Last release enters Retiring; metadata membership is cleared
+before reusable storage is returned. Compound final return uses complete head
+and order; independent final return uses one page and its original class. A
+freed earlier page may be reused while later pages remain held. The base PFN is
+saved before the first return, and no released descriptor is consulted afterward.
+Raw ordinary/DMA release remains unchanged, with no added descriptor scan.
+
+unsafe try_split consumes a range. Exact ranges already have independent holds,
+so it transfers them into SplitPages without count changes or exclusivity checks.
+A compound, including a subview, requires the sole head hold and quiescent whole
+backing. Success splits the whole compound and transfers all children, not just
+the selected view. Failure returns the same original owner and bounds. The caller
+must end compound contents/mappings/devices and required retirement; reference
+exclusivity alone cannot prove those conditions.
+
+SplitPages in src/page/split.rs is a transfer guard. next materializes a single-
+page PageRef without another count, and Drop releases every untaken hold. Existing
+exact sharing is preserved; compound split copies the original class without a
+new allocation charge. No physical merge or arbitrary shared compound splitting
+is implemented.
+
+Allocation/release needs initialized global metadata, direct mapping, inventory
+and per-CPU storage. Operations do not sleep and support ordinary/IRQ context,
+not NMI. Exact claim/clone/drop and compound claim/retirement/split are linear
+in their relevant page count. IRQ callers must bound work. Allocator lock order
+is unchanged; counts never establish content-access or hardware-retirement rights.
+
+Guest sources cover exact non-power-of-two counts and surplus accounting,
+independent same-start/different-length views, partial survival and shared transfer,
+compound tail raw restoration, exclusive split failure/success, early iterator
+cleanup, zeroing, invalid geometry and single-page table adapters. Local metadata
+tests additionally force a mid-range clone overflow and verify prefix rollback,
+and reject holes before any independent range admission changes descriptors.

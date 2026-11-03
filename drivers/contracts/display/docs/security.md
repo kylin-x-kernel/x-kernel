@@ -42,7 +42,7 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
-| T-01 | Guest memory described to the host while unmapped or reused | High — device writes into unrelated kernel memory | Caller frees/reuses the backing page while the resource lives | Contract: the caller keeps the backing alive for the resource lifetime (fbdevice holds its `GlobalPage` forever); enforcement by driver/caller review. Core residual risk of the scanout model. |
+| T-01 | Guest memory described to the host while unmapped or reused | High — device writes into unrelated kernel memory | Caller frees/reuses the backing page while the resource lives | Contract: the caller keeps the backing alive for the resource lifetime (fbdevice holds its `PageRef` forever); enforcement by driver/caller review. Core residual risk of the scanout model. |
 | T-02 | Driver programming hardware with an out-of-bounds rect | Medium — scanout reads outside the resource | Malformed `ScanoutRect` | Trait-level obligation: drivers must validate rects; the contract type cannot enforce it. |
 | T-03 | Host reads stale kernel data from the shared buffer | Medium — kernel data disclosure through the display | Buffer not zeroed before binding | Callers zero the shadow before publishing (fbdevice does); recorded as a caller obligation. |
 

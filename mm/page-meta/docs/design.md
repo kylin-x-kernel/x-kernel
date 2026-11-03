@@ -7,7 +7,8 @@
 非空区间交给 allocator。物理区间复用 memaddr::PhysAddrRange，不包装另一套库存类型。
 
 PageMeta records the permanent reservation of this service's backing storage,
-an optional page-lifetime reference count, and the allocation round's UsageKind.
+an optional allocation-head reference count, head/tail geometry, and the
+allocation round's UsageKind.
 The class preserves original allocation accounting, not actual page type, current
 users, content permissions or reclaimability. Metadata does not track allocator
 inventory. Lookup grants no ownership, content access or release authority.
@@ -16,12 +17,14 @@ Current input covers only RAM marked FREE by HAL.
 ## 架构与职责
 
 - `src/lib.rs`: errors, public initialization and identity queries, and global publication.
-- `src/page.rs`: PageMeta, the unique counter, accounting class and reference-state
+- `src/page.rs`: PageMeta, head counter, tail offset, allocation order and reference-state
   transitions. It defines no RAII holder and does not return inventory.
+- `src/page/group.rs`: independent-range admission/clone/validation and compound
+  group admission/resolution, retirement and exclusive split.
 - `src/free_ranges.rs`：整理调用方的空闲物理区间，并从中划出后备内存。
 - `src/backend/mod.rs`：选择私有存储与 PFN 索引实现，导出 init 和 Table。
 - `src/backend/segments.rs`：当前紧凑分段索引、数组存储、查找和初始化写入。
-- `ut-tests/{free_ranges,segments,page}.rs`: handoff, bidirectional page identity,
+- `ut-tests/{free_ranges,segments,page,group}.rs`: handoff, bidirectional page identity,
   reference-state transitions and boundary cases.
 - `core/kruntime/ut-tests/page_metadata.rs`：既有 allocator 交接和全局查询。
 
@@ -91,56 +94,102 @@ synchronizes buddy bitmap reservations nor detects raw-protocol double frees.
 永久标记为 false 不代表该页可分配或可释放。
 
 
-## Single-page references and allocation attributes
+## Allocation references and head/tail geometry
 
-This crate stores the unique counter and exposes four unsafe transitions:
-claim_reference establishes a new allocation's first hold; clone_reference adds
-a hold; release_reference consumes one and selects the sole last owner;
-finish_retirement returns the original class and resets the state to Unreferenced.
-Counter and class fields stay private. Lookup and snapshots do not establish the
-ownership required to call these operations.
+Each descriptor identifies one physical 4 KiB page. An independent page has
+order zero and a zero head offset. An explicitly compound allocation has one head carrying
+its order, original UsageKind and reference count. Each tail stores its distance
+in base pages to that head. Tail counters do not represent independent holds.
+The offset is a u32 page distance, not a truncated physical address or descriptor
+pointer; PFN resolution remains behind the table API. The head order and all
+member offsets are stable while any allocation hold exists.
 
-The state sequence is Unreferenced -> Initializing -> Referenced { references: 1 }
--> Retiring -> Unreferenced. Claim atomically acquires Initializing, writes
-UsageKind, then publishes the first hold with Release. Clone does not change
-the class. The internal AtomicU8 uses Relaxed and is not an opaque public tag.
-A new allocation round can begin only after the old storage returns to inventory.
+`PageMetaTable::claim_reference_group` validates the entire geometry, coverage,
+permanent status and unclaimed state before changing anything. It enters
+Initializing at the head, initializes order/class and tail offsets, and publishes
+the first head reference with Release after all links are established. Ordinary
+errors leave descriptors unchanged. The allocator supplies exclusive unpublished
+backing; metadata lookup by itself cannot prove that exclusivity.
 
-The count limit excludes Initializing and Retiring sentinels; overflow returns
-ReferenceOverflow. Final release uses AcqRel to acquire earlier holders' releases.
-The last owner saves page identity, then finish_retirement snapshots the original
-class and resets the count with Release. The owner returns inventory afterwards
-and must never write the descriptor after publishing reusable storage. The
-permanent reservation is a separate bool written before publication and read-only
-thereafter; claim rejects it before changing the counter. Unreferenced is not a
-free-inventory state: heap, PCP, buddy bitmap and raw users may still own pages
-outside this reference protocol.
+`reference_allocation` resolves any selected member to its head PFN and order.
+It is unsafe because the caller must retain an existing hold throughout the
+read; independent atomic field reads are not a coherent ownership snapshot.
+Clone and release operate on the resolved head's single counter. The count limit
+excludes Initializing, Splitting and Retiring. Overflow returns ReferenceOverflow.
+A subpage hold keeps the entire unsplit allocation alive.
 
-## Holder and final reclaim boundary
+The unique last release acquires earlier holders' releases and enters Retiring.
+The holder first snapshots allocation geometry. `finish_reference_retirement`
+clears every tail link while backing remains outside allocator inventory, resets
+the head order/count, and returns the original class. kalloc then returns the
+complete saved range without writing old metadata again. Admission and final
+retirement are O(backing pages); clone and member resolution do not visit the
+whole range. Raw allocator release does not gain a descriptor scan.
 
-The thin RAII holder is kalloc::PageRef and stores only one &'static PageMeta.
-Its holds all use this crate's single counter. kalloc accepts exclusive new pages
-from global inventory and handles raw transfer, final accounting and inventory
-return. This crate stores no reclaim function, accepts no runtime provider
-registration, and depends on neither kalloc nor the direct map. Dependencies
-remain kalloc -> page-meta.
+## Independent reference ranges
 
-PageRef calls the constrained operations during clone/drop; final Drop completes
-retirement and directly calls kalloc's local release path. Metadata initialization
-only publishes the global physical table; it installs no extra reclaim endpoint.
-The private backend resolves physical identity, while users manage content mappings.
+claim_reference_range validates every descriptor before claiming one independent
+reference per page. Each admitted page keeps order zero, offset zero and its
+original class. The caller owns all resulting holds; metadata does not store a
+range-owner length because several handles may overlap with different bounds.
+reference_range validates a transferred range: all pages must be independent or
+all selected pages must fit in the first member's single compound. It requires
+pre-existing lifetime protection rather than acquiring ownership from snapshots.
 
-UsageKind's typed contract and per-round record live in the same page module.
-kalloc re-exports the type to preserve existing callers. Existing modules still
-own cumulative totals, RustHeap accounting exceptions and procfs output. Keeping
-the class preserves observable statistics without turning it into an MM decision.
+clone_reference_range consumes no original holds. Independent mode increments
+each page, rolling back every successful prefix increment if a later counter
+fails. Originals make rollback retirement impossible. Compound mode increments
+only its head. All shape reads occur while caller-held references exclude geometry
+changes. Independent range final release is performed per page by the allocator
+holder, using existing order-zero retirement; there is no new range counter.
 
-The current 64-bit metadata layout is 16 bytes, including the counter, class and
-independent permanent attribute. Boot reserves storage from the actual type size;
-the public API does not promise a field layout. Metadata, holders and allocator
-inventory have distinct lifetimes.
+## Exclusive splitting
 
-is_permanent only says that this service's metadata backing never returns to
-ordinary inventory during the current kernel lifetime. It is not a complete
-machine RAM reservation policy and has no unreserve API. It is independent of
-the reference count.
+`split_reference` consumes one whole-allocation ownership obligation only on
+success. It resolves geometry, then atomically freezes a head count of exactly
+one into Splitting. Other holds, including raw transfers, yield NotExclusive
+with no change. Acquire joins prior holders' releases. There is no fallible
+operation after freezing: every tail becomes an independent order-zero page
+with count one and the original class, and the head is published last as another
+order-zero page. No content is moved and no allocator/accounting action occurs.
+
+The caller must end content, mapping and hardware use before the unsafe split.
+Reference exclusivity cannot prove hardware retirement. Success transfers one
+hold per page to the caller, which must consume the old owner without releasing
+it and retain/release every resulting page. kalloc's SplitPages transfer iterator
+implements that cleanup obligation without a heap array or second reference
+protocol. Splitting is O(backing pages) and does not support transferring arbitrary
+shared/mapped references to children.
+
+## Layout and holder boundary
+
+`PageMeta` keeps an AtomicUsize counter, AtomicU32 relative head offset,
+AtomicU8 class, AtomicU8 order and the independent immutable permanent bool.
+A compile-time assertion requires 16 bytes on 64-bit targets; the public API does
+not promise field offsets. Boot storage is still reserved from the actual type
+size. The offset range is validated before admission, and direct field encoding
+is not exposed as a public tag or allocator policy.
+
+kalloc::PageRef stores the first descriptor and selected page count. It uses
+one independent hold per selected page or one compound hold. Its range length
+is handle-specific; the selected PFN and compound head PFN can differ. RAII ownership, raw transfers,
+usage totals and returning inventory belong to kalloc. page-meta owns only
+identity, geometry and reference transitions; it has no reclaim callback, direct
+mapping dependency or allocator instance pointer. Dependencies remain
+kalloc -> page-meta. global_table borrows the immutable published directory and
+grants no ownership.
+
+ReferenceState is a best-effort diagnostic with Tail and Splitting states,
+not a coherent role/count snapshot. Unreferenced does not mean free: heap,
+PCP, bitmap and raw users can own storage outside the reference protocol.
+is_permanent remains a separate bool set before publication; it excludes this
+service's metadata backing for the kernel lifetime and has no unreserve API.
+UsageKind retains diagnostic allocation accounting, not actual page type or
+reclaim policy. Clone/split do not reclassify or repeat the allocation charge.
+
+The local group tests cover tail resolution, complete retirement and reuse,
+failed exclusivity, successful split through a tail, class preservation and
+coverage/permanent/geometry rejection before any claimed prefix. Range tests
+force a later reference overflow and verify complete prefix rollback, plus exact
+range coverage failure with unchanged descriptors. Existing
+counter-overflow and reservation tests continue to cover the low-level protocol.

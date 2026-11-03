@@ -72,34 +72,64 @@ backend 是否隐藏索引几何；发布是否晚于全部初始化写入；调
 跳过空条目并只交接剩余 RAM；局部测试是否按正确顺序销毁夹具。
 
 
-## Reference state, thin holders and unsafe callers
+## Allocation references, grouping and unsafe callers
 
-PageMeta's four public unsafe transitions require ownership evidence. Claim
-requires an exclusive unpublished allocation; clone retains an existing live
-hold; release consumes exactly one hold; finish_retirement may be called once
-only by the sole last owner selected by release. Fields are private. Safe lookup
-and snapshots do not provide this evidence. The RAII holder belongs to kalloc;
-this crate has no final reclaim pointer or boot registration protocol.
+PageMeta fields are private. PageMetaTable::claim_reference_range and
+claim_reference_group accept only
+exclusive unpublished inventory and validates every descriptor before acquiring
+any initial holds. Independent ranges keep order/offset zero on every member;
+explicit compounds publish their first head hold only after membership setup. A permanent page, physical hole, nonzero count or existing tail/order
+prevents admission. Ordinary error paths do not claim a prefix. The immutable
+published directory and caller-owned backing establish descriptor lifetime.
 
-Claim uses Initializing to protect attribute publication, then publishes the
-first hold with Release. Final release enters Retiring. finish_retirement saves
-the original UsageKind, resets the count with Release and returns the class.
-The caller then publishes inventory without further descriptor writes, avoiding
-races with the next allocation. All holds share one atomic counter. Permanent
-pages reject claim, and the count limit avoids sentinel collisions.
+Tail membership uses a checked u32 PFN distance. reference_allocation requires a
+live hold from the same allocation incarnation, resolves a head with a positive
+count, and checks the member fits its order. A live hold excludes retirement and
+exclusive split, making geometry stable. Safe lookup, global_table and
+ReferenceState cannot establish that hold; snapshots may mix concurrent phases.
+They must not be used as release authority or as a lockless acquire protocol.
 
-kalloc's single-pointer PageRef acquires holds under fresh-allocation and raw
-transfer contracts. It grants neither exclusive contents, COW nor evidence of
-hardware retirement. kalloc performs final release; its unsafe calls require
-all content accesses and required TLB/device completion to have ended. This
-crate checks state but cannot prove provenance, allocation incarnation or unique
-consumption; holders and their external raw-ownership contracts establish those.
+Clone and release operate only at heads. The counter limit excludes all three
+transition sentinels. Initializing protects attribute/link publication and Release
+publishes the first owner. Before calling release_reference, the caller must
+end all accesses authorized by the consumed hold and wait for any required
+TLB/device completion. Last release enters Retiring with AcqRel. The last
+holder snapshots geometry before release; finish_reference_retirement clears all
+tail membership, resets the head, and returns the original class before kalloc
+publishes reusable inventory. No old descriptor writes may follow that return.
+Per-field atomics alone do not replace this ownership and publication argument.
 
-Kernel failure, mem::forget or a lost raw transfer can leak a hold. The holder
-type does not guarantee that destruction will occur.
+split_reference freezes exactly one live head hold with AcqRel; any outstanding
+raw transfer still counts and blocks exclusivity. Errors preserve the original
+holder. After freezing, all metadata is already known covered, no allocation or
+fallible validation remains, and every child receives one independent hold.
+Class copies and child publication precede exposing outputs. The unsafe caller
+must end content access, mappings, devices and required retirement, consume the
+old holder without Drop, and release every resulting child once. These are
+ownership transfers, not reference acquisition from a diagnostic count of one.
 
-The internal AtomicU8 stores only valid UsageKind discriminants written by
-initialization or claim; arbitrary integers are not accepted. Final class reads
-occur under the unique retirement obligation and cannot race with the next
-allocation's class update. Admission and retirement use typed UsageKind values,
-with no opaque tag encoding or reclaim-callback decoding.
+kalloc's SplitPages iterator owns unconsumed children; its Drop prevents ordinary
+early iteration exit from leaking them. mem::forget, a lost raw transfer or a
+kernel failure can still leak ownership. Neither this crate nor a count check
+proves provenance, unique raw consumption, allocation incarnation or hardware
+retirement. Invalid unsafe callers can corrupt the allocator despite state checks.
+
+Metadata stays 16 bytes on 64-bit targets by a compile-time assertion. Offset,
+order, class and count use separate atomic fields; no tagged pointer or count/
+offset union is decoded. The permanent flag is immutable after publication.
+All UsageKind values come from typed admission; split preserves the original
+class and final accounting remains allocator-owned. Group admission, retirement
+and splitting touch every backing descriptor, so IRQ callers must bound their
+work. Ordinary raw release remains unchanged and performs no descriptor scan.
+
+## Independent ranges and clone rollback
+
+Reference-range shape is either all independent pages or one compound covering
+all selected pages. The caller retains an original hold for each relevant unit
+through validation/clone; range diagnostics cannot acquire those holds. Independent
+clone releases only its successfully acquired prefix on failure. Every original
+hold remains retained, so rollback cannot select last retirement. Compound clone
+changes one head count. Range length belongs to the external holder, not a shared
+metadata field; raw consumers must transfer that length without reconstruction
+from the first descriptor. Isolated fixture tests force mid-range overflow without
+exposing a production count-setting API and restore all modeled holds afterward.

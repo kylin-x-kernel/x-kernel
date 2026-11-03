@@ -221,9 +221,11 @@ restore controller access/routing and quiesce competing programming first.
 
 ## Page-table storage lifetime references
 
-`PagingHandlerImpl::alloc_frame` obtains kalloc's thin `PageRef` from the global
+`PagingHandlerImpl::alloc_frame` obtains kalloc's single-page `PageRef` range from the global
 single-page allocation API and transfers one hold to `page_table` as a PA.
-`dealloc_frame` restores and consumes that exact transfer with `PageRef::from_raw`.
+`dealloc_frame` restores and consumes that exact transfer with
+`PageRef::from_raw(pa, 1)`. The allocation adapter drops the length-one component
+of the generic (PA, page-count) raw pair; the page-table library remains PA-only.
 The original `UsageKind` records only allocation accounting; final `PageRef::drop`
 returns the page and records the release directly in kalloc. Borrowed root entries
 do not own their source table pages and do not restore or release those holds.

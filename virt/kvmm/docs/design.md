@@ -130,7 +130,7 @@ Uses a static 16 KB guest stack.
 physical CPU. Each vCPU thread:
 1. Pins itself to a target CPU via `ktask::set_current_affinity`
 2. Performs per-CPU hardware init (idempotent — safe when multiple vCPUs share a CPU)
-3. Allocates a private 4 KB stack page via `kalloc::GlobalPage::alloc_zero()`
+3. Allocates a private 4 KB stack page via `kalloc::alloc_zeroed_page_ref(UsageKind::Global)`
 4. Initializes vCPU state with `init_vcpu(entry, sp)`
 5. Runs the guest via `vmm_run_vcpu`
 
@@ -158,6 +158,23 @@ Key design decisions:
   it before the host trap vector, and restores `gp` before returning to Rust.
   The IRQ-off run window excludes migration during this exchange; it is not
   an NMI/RNMI entry protocol.
+
+### Host table-page ownership
+
+Host tables and per-vCPU hardware/code/stack pages are held directly as
+kalloc::PageRef. Constructors zero fresh exclusive allocations before returning
+their first holder. A table walker obtains its direct-map VA from the physical
+address; actual accesses retain their existing unsafe hardware/aliasing contract.
+The RISC-V root holds four exact independent pages in one PageRef range, with
+its required four-page alignment. All existing buffer paths select exact pages.
+
+Child-table builders use PageRef::into_raw and store its PA under the known
+length-one table-page contract; restoration supplies length one explicitly.
+mm::free_pt_page restores that exact transfer once with PageRef::from_raw after
+hardware use and required translation retirement. Roots and vCPU page vectors
+retain typed holders. This does not add references for mapped guest data pages.
+The per-CPU VMXON allocation intentionally retains an unreclaimed raw hold for
+its existing CPU lifetime. Allocation accounting keeps the prior Global class.
 
 ### vCPU Run-State Machine (`VcpuRunState`)
 

@@ -47,9 +47,8 @@ pub(crate) mod prelude {
 
     pub(crate) use bytemuck::bytes_of;
     pub(crate) use display::{DisplayInfo, ScanoutFormat};
-    pub(crate) use kalloc::GlobalPage;
+    pub(crate) use kalloc::{PageRef, UsageKind, alloc_zeroed_pages_exact_ref};
     pub(crate) use kclass::{ClassDevice, DisplayDeviceImpl};
-    pub(crate) use khal::mem::v2p;
     pub(crate) use kpoll::{IoEvents, PollContext, PollRegisterError};
     pub(crate) use ksync::Mutex;
     pub(crate) use kvfs::{

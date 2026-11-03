@@ -57,7 +57,7 @@ pub struct Vcpu<A: VmmArch> {
     pub vm: VmRef<A>,
     /// Hardware pages owned by this vCPU (e.g. x86 VMCS page).
     /// Placed after all assembly-visible fields so ABI offsets are stable.
-    pub hw_pages: alloc::vec::Vec<kalloc::GlobalPage>,
+    pub hw_pages: alloc::vec::Vec<kalloc::PageRef>,
     /// World-switch hooks (e.g. the vGIC) run inside the IRQ-masked window
     /// around guest entry/exit to load/read-back per-physical-CPU device state.
     pub hooks: alloc::vec::Vec<alloc::boxed::Box<dyn crate::vdev::VcpuHook<A>>>,

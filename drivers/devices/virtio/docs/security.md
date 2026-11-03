@@ -156,7 +156,8 @@ GPU 像素 backing 由 DRM dumb buffer（或 fbdev shadow buffer）分配，并�
 
 **不变量**：
 
-- backing 物理地址和长度由 DRM 层从 `GlobalPage::alloc_contiguous` 得到；
+- The DRM layer obtains backing PA from PageRef and keeps its requested byte
+  length separately from the rounded allocation size;
 - backing 生命周期覆盖 resource attach 到 destroy 的整个区间；
 - resource ID 由 DRM 层分配，destroy 时执行 detach/unref；
 - virtio-gpu control queue 访问由驱动内部锁串行化。
@@ -313,7 +314,7 @@ unsafe impl<H: Hal, T: Transport> Sync for VirtIoBlkDev<H, T> {}
 | T-01 | 传入无效 MMIO 地址导致 `probe_mmio_device` 访问非法内存 | 高 | 调用者传入未映射或错误的物理地址 | 调用者（平台初始化）负责验证地址；`MmioTransport::new` 内部验证魔数 |
 | T-02 | 网络设备缓冲区-令牌不匹配导致设备 DMA 到错误内存 | 高 | `rx_buffers`/`tx_buffers` 数组索引与 VirtIO 队列 token 不一致 | `try_new()` 中 `assert_eq!(token, i as u16)` 验证初始映射；`recycle_rx`/`recycle_tx` 从数组取缓冲区时检查 `is_some()` |
 | T-03 | `NetBuf::from_handle` 使用无效或重复 handle | 高 | 上层网络栈重复使用已消费的 handle | 由调用者保证 handle 唯一性；`from_handle` 为 unsafe，调用者承担证明责任 |
-| T-04 | scanout resource backing 悬空 | 高 | backing 在 `destroy_scanout_resource` 前被释放 | backing 由 `GlobalPage` 持有，生命周期覆盖 attach 到 destroy 全程，由 DRM/fbdev 层保证；destroy 失败会记录日志而非静默吞掉 |
+| T-04 | Dangling scanout resource backing | High | Backing is released before `destroy_scanout_resource` | DRM/fbdev retain the backing through `PageRef` for the entire interval from attachment to destruction; destruction failures are logged. |
 | T-05 | 中断上下文与正常路径并发访问 net 设备导致数据竞争 | 中 | IRQ 回调与 `send`/`recv` 同时执行 | `InnerDev` 被 `SpinNoIrq` 包裹，所有访问通过 `lock()` 互斥 |
 | T-06 | IRQ 注册失败后仍使用设备 | 中 | `register_virtio_net_irq` 返回 `ResourceBusy` | `try_new()` 传播错误，设备不会被创建 |
 | T-07 | 网络设备 `free_tx_bufs` 耗尽导致发送失败 | 低 | 所有 tx 缓冲区都在飞行中 | `alloc_tx_buf` 返回 `DriverError::NoMemory`，上层应等待 `recycle_tx` 后重试 |

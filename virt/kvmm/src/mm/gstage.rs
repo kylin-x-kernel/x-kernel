@@ -36,9 +36,9 @@ const HGATP_VMID_SHIFT: u64 = 44;
 ///
 /// Owns the root contiguous page (4 × 4 KiB = 16 KiB). On drop,
 /// walks root entries to free L1 pages, then the root page itself
-/// is freed by `GlobalPage::drop`.
+/// is freed by `PageRef::drop`.
 pub struct GStage {
-    root_page: kalloc::GlobalPage,
+    root_page: kalloc::PageRef,
     mem_base: u64,
     mem_size: u64,
     hpa_base: u64,
@@ -47,11 +47,11 @@ pub struct GStage {
 
 impl GStage {
     fn root_pa(&self) -> u64 {
-        kaddr_layout::v2p(self.root_page.as_ptr() as usize) as u64
+        self.root_page.phys_addr().as_usize() as u64
     }
 
     fn destroy(&mut self) {
-        let root_va = self.root_page.as_ptr() as *const u64;
+        let root_va = kaddr_layout::p2v(self.root_page.phys_addr().as_usize()) as *const u64;
         // Only first L2_ENTRIES (4) are populated, but scan all valid entries.
         for i in 0..L2_ENTRIES {
             // SAFETY: i < L2_ENTRIES (4), inside the owned 16 KiB root table.
@@ -79,22 +79,16 @@ impl GuestMem for GStage {
         let mem_end = mem_base.checked_add(mem_size)?;
 
         // Sv39x4 root: 4 contiguous 4KB pages (16KB, 16KB-aligned)
-        let mut root_page = kalloc::GlobalPage::alloc_contiguous(4, 4 * 4096).ok()?;
-        let root_va = root_page.as_mut_ptr() as *mut u64;
-        let root_pa = kaddr_layout::v2p(root_va as usize) as u64;
-
-        // Zero the full 16KB root
-        // SAFETY: root_va points to 16KB of owned memory.
-        unsafe {
-            core::ptr::write_bytes(root_va, 0, 2048);
-        }
+        let root_page =
+            kalloc::alloc_zeroed_pages_exact_ref(4, 4 * 4096, kalloc::UsageKind::Global).ok()?;
+        let root_va = kaddr_layout::p2v(root_page.phys_addr().as_usize()) as *mut u64;
+        let root_pa = root_page.phys_addr().as_usize() as u64;
 
         // Allocate 4 L1 tables and fill root entries
         for i in 0..L2_ENTRIES {
-            let mut l1_page = kalloc::GlobalPage::alloc_zero().ok()?;
-            let l1_va = l1_page.as_mut_ptr() as *mut u64;
-            let l1_pa = kaddr_layout::v2p(l1_va as usize) as u64;
-            core::mem::forget(l1_page);
+            let l1_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+            let l1_va = kaddr_layout::p2v(l1_page.phys_addr().as_usize()) as *mut u64;
+            let l1_pa = l1_page.into_raw().0.as_usize() as u64;
 
             // Root entry: non-leaf (V=1, R=W=X=0) pointing to L1
             let root_pte = ((l1_pa >> 12) << 10) | PTE_V;
@@ -169,7 +163,7 @@ impl GuestMem for GStage {
         let start = gpa & !(block_size - 1);
         let end = (gpa + size + block_size - 1) & !(block_size - 1);
 
-        let root_va = self.root_page.as_ptr() as *const u64;
+        let root_va = kaddr_layout::p2v(self.root_page.phys_addr().as_usize()) as *const u64;
 
         let mut addr = start;
         while addr < end {

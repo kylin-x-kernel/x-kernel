@@ -107,8 +107,11 @@ never frees pixels the host is still scanning.
 
 ## Object lifecycle
 
-- `CREATE_DUMB` allocates contiguous zeroed pages, creates the scanout
-  resource, and records the object in the calling file's handle table.
+- `CREATE_DUMB` allocates contiguous zeroed backing as a PageRef, creates the
+  scanout resource, and records the object in the calling file's handle table.
+  GemObject retains that holder through Arc<PageRef> and stores length_bytes for
+  its requested page-aligned pixel range. Exact allocation returns unused backing
+  before publication. mmap and host resource lengths keep using length_bytes.
 - Handles are per open file (`file_priv->object_idr`): `DESTROY_DUMB`,
   `GEM_CLOSE`, `MAP_DUMB` and `mmap` only accept the file's own handles, and
   `release()` drops whatever is left.

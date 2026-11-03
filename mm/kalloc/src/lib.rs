@@ -3,6 +3,11 @@
 // See LICENSES for license details.
 
 //! Kernel global allocator and page allocation helpers.
+//!
+//! `PageRef` owns contiguous reference ranges: independent exact pages or an
+//! explicitly compound lifetime unit, with counters in resident metadata. Initial zeroing happens before holders escape;
+//! explicit exclusive splitting creates independent pages. Content mappings and
+//! requested buffer lengths belong to callers.
 #![allow(
     clippy::expect_used,
     reason = "CG-021-no-panic-on-reachable-failure: case (b): legacy kalloc has 15 diagnostic \
@@ -49,7 +54,10 @@ mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
-pub use page::{GlobalPage, PageRef, alloc_page_ref, alloc_zeroed_page_ref};
+pub use page::{
+    PageRef, SplitPages, alloc_compound_pages_ref, alloc_page_ref, alloc_pages_exact_ref,
+    alloc_zeroed_page_ref, alloc_zeroed_pages_exact_ref,
+};
 pub use page_meta::UsageKind;
 
 #[cfg(feature = "tracking")]
@@ -658,8 +666,9 @@ impl GlobalAllocator {
     ///
     /// The base, page count and category must match a live raw allocation from
     /// this allocator, with all software and hardware use ended. Transferring a
-    /// page into PageRef ends the caller's raw release right; consume that hold
-    /// through PageRef instead. A bare address does not establish ownership.
+    /// page into PageRef ends the caller's raw release
+    /// right; consume the reference owner instead. A bare address does not
+    /// establish ownership.
     /// These preconditions are not verified by scanning page metadata.
     ///
     /// 1–4 page deallocations are cached per-CPU to reduce global lock
@@ -697,7 +706,8 @@ impl GlobalAllocator {
     ///
     /// The base, count and category must match one live alloc_dma_pages allocation.
     /// End device and CPU use before release. The caller must not release pages
-    /// owned by PageRef or permanent metadata; no metadata scan validates this.
+    /// owned by PageRef or permanent metadata; no descriptor
+    /// scan validates this.
     pub fn dealloc_dma_pages(&self, va: usize, num_pages: usize, kind: UsageKind) {
         self.record_usage_dealloc(kind, pages_to_bytes(num_pages));
         self.palloc.lock().deallocate_pages(va, num_pages);

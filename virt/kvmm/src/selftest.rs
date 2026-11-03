@@ -32,8 +32,8 @@ static_lock! {
 
 /// Pages owned by the guest loader, freed when dropped.
 struct GuestPages {
-    code_page: kalloc::GlobalPage,
-    stack_page: kalloc::GlobalPage,
+    code_page: kalloc::PageRef,
+    stack_page: kalloc::PageRef,
 }
 
 impl GuestPages {
@@ -57,17 +57,16 @@ fn load_guest<A: VmmArch>() -> (u64, u64, GuestPages) {
     let (code_src, code_size) = A::guest_test_code();
     let copy_len = if code_size > 0 { code_size } else { 4096 };
 
-    let code_page = kalloc::GlobalPage::alloc_zero().unwrap();
-    let code_dst = code_page.as_ptr() as *mut u8;
+    let code_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).unwrap();
+    let code_dst = kaddr_layout::p2v(code_page.phys_addr().as_usize()) as *mut u8;
     // SAFETY: code_src points to readable .text; code_dst is a fresh page.
     unsafe { core::ptr::copy_nonoverlapping(code_src, code_dst, copy_len) };
     let entry_va = code_dst as u64;
 
     log::info!("[vmm] loader: copied {} bytes to {:#x}", copy_len, entry_va);
 
-    let stack_page = kalloc::GlobalPage::alloc_zero().unwrap();
-    // SAFETY: adding PAGE_SIZE reaches the top of a valid 4 KiB page.
-    let stack_top = unsafe { stack_page.as_ptr().add(4096) } as u64;
+    let stack_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).unwrap();
+    let stack_top = (kaddr_layout::p2v(stack_page.phys_addr().as_usize()) + 4096) as u64;
 
     log::info!("[vmm] loader: entry={:#x} sp={:#x}", entry_va, stack_top);
     (
@@ -170,8 +169,8 @@ fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
     // Load guest code once — shared read-only by all vCPUs.
     let (code_src, code_size) = A::guest_test_code();
     let copy_len = if code_size > 0 { code_size } else { 4096 };
-    let code_page = kalloc::GlobalPage::alloc_zero().unwrap();
-    let code_dst = code_page.as_ptr() as *mut u8;
+    let code_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).unwrap();
+    let code_dst = kaddr_layout::p2v(code_page.phys_addr().as_usize()) as *mut u8;
     // SAFETY: code_src points to readable .text; code_dst is a fresh page.
     unsafe { core::ptr::copy_nonoverlapping(code_src, code_dst, copy_len) };
     let entry_va = code_dst as u64;
@@ -194,9 +193,10 @@ fn selftest_smp_impl<A: VmmArch + 'static>() -> bool {
                         ktask::exit(1);
                     }
 
-                    let stack_page = kalloc::GlobalPage::alloc_zero().unwrap();
-                    // SAFETY: adding PAGE_SIZE reaches the top of a valid 4 KiB page.
-                    let stack_top = unsafe { stack_page.as_ptr().add(4096) } as u64;
+                    let stack_page =
+                        kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).unwrap();
+                    let stack_top =
+                        (kaddr_layout::p2v(stack_page.phys_addr().as_usize()) + 4096) as u64;
 
                     let mut vcpu = Vcpu::<A>::new(vcpu_id, vm_ref);
                     if !A::init_vcpu(&mut vcpu, entry_va, stack_top) {

@@ -77,7 +77,7 @@ ownership protocol over host-visible 2D resources:
   read/write access to it for the resource lifetime.
 - **Use**: the caller must keep the backing memory alive and resident for
   as long as the resource exists — the host reads it as scanout backing
-  at any time. `fbdevice` satisfies this by holding its `GlobalPage`
+  at any time. `fbdevice` satisfies this by holding its `PageRef`
   shadow for the kernel lifetime. The buffer should be zeroed before
   `create_scanout_resource` so no stale kernel data is disclosed through
   the display.

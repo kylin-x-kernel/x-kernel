@@ -44,9 +44,9 @@ const L2_ENTRIES: usize = 512; // PD entries per PDPT entry (2 MiB each)
 /// x86_64 Extended Page Table.
 ///
 /// Owns the root PML4 page. On drop, walks PML4 → PDPT → PD and frees
-/// all sub-pages, then the PML4 page itself is freed by `GlobalPage::drop`.
+/// all sub-pages, then the PML4 page itself is freed by `PageRef::drop`.
 pub struct Ept {
-    pml4_page: kalloc::GlobalPage,
+    pml4_page: kalloc::PageRef,
     mem_base: u64,
     mem_size: u64,
     hpa_base: u64,
@@ -59,12 +59,12 @@ impl Ept {
     /// - page walk length = 4 (4-level), so field = 3
     /// - memory type = 6 (WB) for the EPT paging structures themselves
     pub fn eptp(&self) -> u64 {
-        let pml4_pa = kaddr_layout::v2p(self.pml4_page.as_ptr() as usize) as u64;
+        let pml4_pa = self.pml4_page.phys_addr().as_usize() as u64;
         pml4_pa | (3 << 3) | 6
     }
 
     fn destroy(&mut self) {
-        let pml4_va = self.pml4_page.as_ptr() as *const u64;
+        let pml4_va = kaddr_layout::p2v(self.pml4_page.phys_addr().as_usize()) as *const u64;
         // SAFETY: pml4_va points to a valid 4KB page.
         let pdpt_entry = unsafe { pml4_va.read() };
         if pdpt_entry & EPT_READ == 0 {
@@ -102,15 +102,14 @@ impl GuestMem for Ept {
         let mem_end = mem_base.checked_add(mem_size)?;
 
         // Allocate PML4 page
-        let mut pml4_page = kalloc::GlobalPage::alloc_zero().ok()?;
-        let pml4_va = pml4_page.as_mut_ptr() as *mut u64;
-        let pml4_pa = kaddr_layout::v2p(pml4_va as usize) as u64;
+        let pml4_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+        let pml4_va = kaddr_layout::p2v(pml4_page.phys_addr().as_usize()) as *mut u64;
+        let pml4_pa = pml4_page.phys_addr().as_usize() as u64;
 
         // Allocate PDPT page
-        let mut pdpt_page = kalloc::GlobalPage::alloc_zero().ok()?;
-        let pdpt_va = pdpt_page.as_mut_ptr() as *mut u64;
-        let pdpt_pa = kaddr_layout::v2p(pdpt_va as usize) as u64;
-        core::mem::forget(pdpt_page);
+        let pdpt_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+        let pdpt_va = kaddr_layout::p2v(pdpt_page.phys_addr().as_usize()) as *mut u64;
+        let pdpt_pa = pdpt_page.into_raw().0.as_usize() as u64;
 
         // PML4[0] → PDPT
         // SAFETY: pml4_va is a valid zeroed 4KB page.
@@ -120,10 +119,9 @@ impl GuestMem for Ept {
 
         // Allocate 4 PD pages (one per PDPT entry, covering 1 GiB each)
         for i in 0..L1_ENTRIES {
-            let mut pd_page = kalloc::GlobalPage::alloc_zero().ok()?;
-            let pd_va = pd_page.as_mut_ptr() as *mut u64;
-            let pd_pa = kaddr_layout::v2p(pd_va as usize) as u64;
-            core::mem::forget(pd_page);
+            let pd_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+            let pd_va = kaddr_layout::p2v(pd_page.phys_addr().as_usize()) as *mut u64;
+            let pd_pa = pd_page.into_raw().0.as_usize() as u64;
 
             // PDPT[i] → PD[i]
             // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
@@ -186,7 +184,7 @@ impl GuestMem for Ept {
         let start = gpa & !(block_size - 1);
         let end = (gpa + size + block_size - 1) & !(block_size - 1);
 
-        let pml4_va = self.pml4_page.as_ptr() as *const u64;
+        let pml4_va = kaddr_layout::p2v(self.pml4_page.phys_addr().as_usize()) as *const u64;
         // SAFETY: pml4_va is valid; entry 0 holds the PDPT pointer.
         let pdpt_entry = unsafe { pml4_va.read() };
         if pdpt_entry & EPT_READ == 0 {

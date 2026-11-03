@@ -90,8 +90,8 @@ vmm_run_vcpu 返回前:
 
 线程结束 → vcpu drop:
 │
-├─ vcpu.hw_pages: Vec<GlobalPage> drop
-│   ├─ VMCS page (x86) → GlobalPage::drop → dealloc_pages
+├─ vcpu.hw_pages: Vec<PageRef> drop
+│   ├─ VMCS page (x86) → PageRef::drop → dealloc_pages
 │   ├─ guest code page (arm/rv)
 │   └─ guest stack page
 │
@@ -105,7 +105,9 @@ vmm_run_vcpu 返回前:
 └─ 线程退出，ktask 回收
 
 关键点：
-- 所有页面通过 GlobalPage RAII 跟随 owner 生命周期释放
+- Typed PageRef holders follow their VMM owner lifetime; child-table PAs carry
+  into_raw transfers consumed by the table-tree destructor.
 - x86 VMCS 释放前必须 vmclear（teardown_vcpu 保证）
 - 页表树只存根页，Drop 时从根向下遍历 free 子页
-- 唯一的 mem::forget：VMXON region（CPU 级永久）
+- The VMXON region intentionally retains an unreclaimed raw PageRef hold for
+  its existing CPU lifetime.

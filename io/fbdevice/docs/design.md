@@ -13,7 +13,7 @@ shadow reaches the screen only when explicitly presented.
 
 - `fb_init`: pick the primary display device from the `kclass` display
   registry, validate its resolution, allocate a packed BGRA8888 shadow
-  (`GlobalPage::alloc_contiguous`, page-aligned, zeroed), and bind it via
+  (`alloc_zeroed_pages_exact_ref`, page-aligned), and bind it via
   `DisplayDevice::create_scanout_resource` (`FB_RESOURCE_ID`, physical
   address, length). Any failure leaves emulation unavailable with a
   warning — boot continues without `/dev/fb0`.
@@ -55,13 +55,19 @@ io/fbdevice/
 kclass display registry -> primary ClassDevice<DisplayDeviceImpl>
         | info()
         v
-GlobalPage shadow (BGRA8888, packed) --v2p--> create_scanout_resource
+PageRef shadow + requested length --phys_addr--> create_scanout_resource
         |                                            (host-visible resource)
         v
 FB: LazyInit<SpinNoIrq<Option<Arc<FbEmulation>>>>
         |
   fb_shadow_* queries (devfs mmap/read/write)   fb_present() -> scanout
 ```
+
+The zeroed exact allocator clears every selected page before host publication.
+FbEmulation keeps shadow_len_bytes for the requested page-aligned buffer length;
+queries and host resource descriptors use that length. Unused raw backing is
+returned before the page range escapes.
+PA comes from PageRef; only the VA query performs a direct-map conversion.
 
 ## Execution Context
 
@@ -98,7 +104,7 @@ FB: LazyInit<SpinNoIrq<Option<Arc<FbEmulation>>>>
 - The shadow buffer is guest memory described to the host (virtio-gpu
   style) by physical address: the host reads/writes it as scanout
   backing, and userspace maps it through `fb_shadow_paddr`. The backing
-  must stay resident — guaranteed by holding the `GlobalPage` forever.
+  must stay resident — guaranteed by holding the `PageRef` forever.
 - Trust assumption: the display driver honors the scanout resource
   contract; a misbehaving driver can show stale pixels but cannot
   corrupt kernel memory through this crate.

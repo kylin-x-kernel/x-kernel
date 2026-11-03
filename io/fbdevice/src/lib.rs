@@ -35,9 +35,9 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use display::{DisplayDevice, DisplayInfo, ScanoutFormat, ScanoutRect, ScanoutResource};
-use kalloc::GlobalPage;
+use kalloc::{PageRef, UsageKind, alloc_zeroed_pages_exact_ref};
 use kclass::{ClassDevice, DisplayDeviceImpl, display_devices as class_display_devices};
-use khal::mem::v2p;
+use khal::mem::p2v;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
@@ -61,7 +61,9 @@ struct FbEmulation {
     /// Guest-mapped shadow buffer; userspace reads/writes land here. Kept alive
     /// for the framebuffer lifetime, so the host scanout resource's backing
     /// memory stays valid.
-    shadow: GlobalPage,
+    shadow: PageRef,
+    /// Requested page-aligned buffer length, excluding allocation rounding slack.
+    shadow_len_bytes: usize,
 }
 
 static FB: LazyInit<SpinNoIrq<Option<Arc<FbEmulation>>>> = LazyInit::new();
@@ -103,16 +105,15 @@ fn try_setup() -> Result<(), ()> {
         .ok_or(())?;
     let pages = size.div_ceil(PAGE_SIZE_4K);
 
-    let mut shadow = GlobalPage::alloc_contiguous(pages, PAGE_SIZE_4K).map_err(|_| {
-        warn!("failed to allocate {}-page fbdev shadow buffer", pages);
-    })?;
-    shadow.zero();
+    let shadow =
+        alloc_zeroed_pages_exact_ref(pages, PAGE_SIZE_4K, UsageKind::Global).map_err(|_| {
+            warn!("failed to allocate {}-page fbdev shadow buffer", pages);
+        })?;
+    let shadow_len_bytes = pages * PAGE_SIZE_4K;
 
-    // Bind the shadow to the host as a scanout resource before moving it into
-    // the FbEmulation; the host then has a stable guest backing for the
-    // lifetime of fbdev. `shadow.start_va` stays valid because it is owned by
-    // the FbEmulation we install below.
-    let paddr = v2p(shadow.start_va()).as_usize() as u64;
+    // FbEmulation retains the page hold for the lifetime of the host resource.
+    // Publish only the requested byte range, excluding allocator rounding slack.
+    let paddr = shadow.phys_addr().as_usize() as u64;
     let resource = ScanoutResource {
         id: FB_RESOURCE_ID,
         width: info.width,
@@ -121,7 +122,7 @@ fn try_setup() -> Result<(), ()> {
         pitch: (info.width as usize * BYTES_PER_PIXEL) as u32,
         format: ScanoutFormat::Bgra8888,
     };
-    if let Err(e) = device.create_scanout_resource(resource, paddr, (pages * PAGE_SIZE_4K) as u32) {
+    if let Err(e) = device.create_scanout_resource(resource, paddr, shadow_len_bytes as u32) {
         warn!("create_scanout_resource failed on primary display: {:?}", e);
         return Err(());
     }
@@ -130,6 +131,7 @@ fn try_setup() -> Result<(), ()> {
         info,
         device,
         shadow,
+        shadow_len_bytes,
     }));
     info!(
         "fbdev emulation ready: {}x{} ({} bytes shadow)",
@@ -168,18 +170,17 @@ pub fn fb_info() -> DisplayInfo {
 /// valid for as long as fbdev emulation stays available (i.e. for kernel
 /// lifetime, since teardown is not supported).
 pub fn fb_shadow_vaddr() -> Option<VirtAddr> {
-    FB.lock().as_ref().map(|fb| fb.shadow.start_va())
+    FB.lock().as_ref().map(|fb| p2v(fb.shadow.phys_addr()))
 }
 
 /// Physical address of the emulated framebuffer's shadow buffer, for `mmap`.
 pub fn fb_shadow_paddr() -> Option<PhysAddr> {
-    let vaddr = fb_shadow_vaddr()?;
-    Some(v2p(vaddr))
+    FB.lock().as_ref().map(|fb| fb.shadow.phys_addr())
 }
 
 /// Size in bytes of the emulated framebuffer's shadow buffer.
 pub fn fb_shadow_size() -> Option<usize> {
-    FB.lock().as_ref().map(|fb| fb.shadow.size())
+    FB.lock().as_ref().map(|fb| fb.shadow_len_bytes)
 }
 
 /// Push the shadow buffer to the visible scanout.

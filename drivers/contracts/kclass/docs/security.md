@@ -88,7 +88,7 @@ with the directly-mapped framebuffer abstraction. `/dev/fb0` is now
 implemented by `fbdevice`'s fbdev emulation (shadow buffer + scanout
 resource), so the framebuffer raw-pointer unsafe boundary is gone and its
 safety responsibilities moved to `fbdevice` (the shadow buffer is managed
-by a `GlobalPage` RAII allocation that lives for the kernel lifetime).
+by a `PageRef` RAII allocation that lives for the kernel lifetime).
 
 ## Memory-Safety Invariants
 

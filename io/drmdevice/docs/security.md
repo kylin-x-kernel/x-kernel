@@ -44,7 +44,10 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
   `ENOENT`, matching Linux's `MODE_GETPROPBLOB`.
 - `mmap` derives the physical base and mapping size with checked arithmetic; an
   offset that would underflow the physical address or overflow the size is
-  refused with `EINVAL` instead of wrapping into an unrelated range.
+  refused with `EINVAL` instead of wrapping into an unrelated range. The mapping
+  length is the GEM object's requested page-aligned length; exact allocation
+  returns unused backing before publication; the PageRef supplies the physical base and retained lifetime.
+  alloc_zeroed_pages_exact_ref initializes all backing before any host/user publication.
 - Kernel allocators assign framebuffer ids, blob ids, resource ids and mmap
   offsets through one `IdRegistry` per class; dumb-buffer handles are allocated
   per file and belong to the file that created them (`file_priv->object_idr`),
@@ -214,3 +217,13 @@ credentials. The dispatcher does not yet enforce per-ioctl DRM_AUTH flags, and
 complete KMS authorization remains outside this change.
 The synthetic identity is not a validated hardware bus ID and does not provide
 real PCI bus-id matching.
+
+
+The `drm_mmap_retains_exact_backing_after_handle_and_object_destruction` unit test
+calls the production minor's `mmap` callback with an isolated pseudo file and a
+recording mapper. It holds only a weak reference to the backing while destroying
+the GEM handle and object, then checks that the mapping retained the exact
+three-page range. It also checks that destroying the remaining file/device
+owners releases that backing. The mapper records the physical range without
+installing hardware translations, so the test does not establish TLB retirement
+or real userspace unmap behavior.

@@ -25,7 +25,7 @@ kernel memory through this crate.
   resource (`create_scanout_resource` with physical address and length).
   The host can read/write the shadow for as long as the resource exists —
   which is forever, since teardown is unsupported and the backing
-  `GlobalPage` is retained for the kernel lifetime.
+  `PageRef` is retained for the kernel lifetime.
 - No ioctl payloads are parsed here; the devfs layer owns the syscall
   surface.
 
@@ -39,7 +39,7 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly
 - `FB: LazyInit<SpinNoIrq<Option<Arc<FbEmulation>>>>` — the single
   emulation state; the `Arc` keeps the shadow and device handle alive
   independent of the registry lock.
-- The shadow `GlobalPage` — kernel-lifetime contiguous allocation; kept
+- The shadow `PageRef` — kernel-lifetime contiguous allocation; kept
   resident so the host resource's backing cannot be reused after a
   failed present.
 
@@ -58,7 +58,7 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly
 |----|--------|--------|---------|------------------|
 | T-01 | User writes into the shadow and forces a present | Low — screen shows attacker-chosen pixels | Writing to `/dev/fb0` then `FBIOPAN_DISPLAY` | By design: that is the framebuffer interface. No kernel memory is reachable through the mapping. |
 | T-02 | Host reads stale kernel data from the shadow | Medium — kernel data disclosure via the display | Shadow not zeroed, or buffer reused | Shadow is allocated fresh and zeroed before `create_scanout_resource`; retained forever, never reused. |
-| T-03 | Display driver programs the host with a wrong address/length | Medium — device DMA outside the shadow | Driver bug in `create_scanout_resource` handling | Address and length come from the validated page allocation (`start_va`, `pages * PAGE_SIZE_4K`); driver conformance is the residual trust. |
+| T-03 | Display driver programs the host with a wrong address/length | Medium — device DMA outside the shadow | Driver bug in `create_scanout_resource` handling | Address and length come from the validated page allocation (`PageRef::phys_addr`, separately retained requested page-aligned length); driver conformance is the residual trust. |
 | T-04 | Present racing device removal | Low — error return or stale frame | Hot-removal of the display device | No teardown exists; the cached device handle outlives everything, so the race cannot produce UAF — worst case is a failed present (`false`). |
 
 ## Failure Modes
@@ -79,10 +79,10 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly
 
 ## Audit Checklist
 
-- The shadow is zeroed by `try_setup` (`shadow.zero()`, called from
-  `fb_init`) before `create_scanout_resource` publishes it, and the
-  `GlobalPage` returned by `GlobalPage::alloc_contiguous` is owned by
-  `FbEmulation` for the kernel lifetime — no free path exists.
+- The shadow returned by alloc_zeroed_pages_exact_ref is fully cleared before
+  create_scanout_resource publishes it. FbEmulation retains its PageRef for the
+  kernel lifetime; no free path exists. Exact allocation returns unused backing
+  before publication, and shadow_len_bytes keeps the requested mapping bounds.
 - New accessors keep the lock-free-after-clone pattern (no lock held
   across device calls).
 - Any new user-visible size/offset path clamps against

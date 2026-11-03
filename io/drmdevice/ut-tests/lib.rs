@@ -237,6 +237,7 @@ struct FakeBackend {
     presented: AtomicUsize,
     flushed: AtomicUsize,
     fail_next_present: core::sync::atomic::AtomicBool,
+    fail_next_create: core::sync::atomic::AtomicBool,
 }
 
 impl FakeBackend {
@@ -277,6 +278,9 @@ impl Backend for FakeBackend {
         _length: u32,
     ) -> DrmResult<()> {
         self.created.fetch_add(1, Ordering::Relaxed);
+        if self.fail_next_create.swap(false, Ordering::Relaxed) {
+            return Err(DrmError::Io);
+        }
         Ok(())
     }
 
@@ -766,7 +770,6 @@ fn oversized_atomic_object_count_is_refused_before_loading() {
     );
 }
 
-
 #[def_test]
 fn connector_without_physical_dimensions_reports_unknown_size() {
     for (width, height) in [(640, 480), (1280, 800), (3840, 2160)] {
@@ -877,4 +880,154 @@ fn getresources_empty_list_ignores_even_a_max_capacity_bad_pointer() {
 
     DrmModeCardRes::handle(&dev, &file, &mut request).expect("empty query");
     assert_eq!(request.count_fbs, 0);
+}
+
+#[def_test(serial)]
+fn gem_backing_holder_keeps_exact_pages_alive_after_the_object_is_destroyed() {
+    let (dev, backend) = fake_device();
+    // 65 * 33 * 4 bytes requires three pages and rounds raw inventory to four.
+    let object = GemObject::create(&dev, 65, 33).unwrap();
+    let mapped = object.pages();
+    assert_eq!(mapped.page_count(), 3);
+    assert_eq!(object.length_bytes(), 3 * PAGE_SIZE_4K);
+    assert_eq!(mapped.retained_range().size(), 3 * PAGE_SIZE_4K);
+    drop(object);
+    assert_eq!(backend.destroyed(), 1);
+    let retained = mapped.try_clone_page(2).unwrap();
+    let address: *const u8 = khal::mem::p2v(retained.phys_addr()).as_ptr();
+    // SAFETY: the mapping owner and retained child keep this initialized page
+    // live; the fake backend and this fixture never write to its contents.
+    let bytes = unsafe { core::slice::from_raw_parts(address, PAGE_SIZE_4K) };
+    assert!(bytes.iter().all(|byte| *byte == 0));
+    drop(mapped);
+    assert_eq!(retained.page_count(), 1);
+    assert_eq!(retained.retained_range().size(), PAGE_SIZE_4K);
+    drop(retained);
+    assert_eq!(backend.destroyed(), 1);
+}
+
+struct MmapTestFileOperations;
+
+impl kvfs::FileOperations for MmapTestFileOperations {}
+
+fn mmap_test_file(state: Arc<DrmFile>) -> Arc<VfsFile> {
+    static FS_TYPE: kvfs::FileSystemType = kvfs::FileSystemType::internal("drm-mmap-test");
+    let super_block = kvfs::SimpleFs::new_with(&FS_TYPE, 0, |fs| {
+        kvfs::SimpleDir::new_maker(fs, Arc::new(kvfs::DirMapping::new()))
+    })
+    .unwrap();
+    let mount = kvfs::Mount::new_root(&super_block);
+    let operations = Arc::new(MmapTestFileOperations);
+    let inode = VfsInode::new_file_with_operations(
+        Arc::new(()),
+        kvfs::empty_inode_operations(),
+        operations.clone(),
+        NodeFlags::PRIVATE,
+        kvfs::VfsInodeInit::new(
+            2,
+            0,
+            kvfs::Umode::new(kvfs::NodeType::RegularFile, kvfs::NodePermission::default()),
+        ),
+    );
+    let file = mount
+        .alloc_file_pseudo(
+            inode,
+            "drm-mmap",
+            kvfs::FMode::READ | kvfs::FMode::WRITE,
+            kvfs::OpenFlags::READ_WRITE,
+            operations,
+            kcred::initial_cred(),
+        )
+        .unwrap();
+    file.set_private_data(state);
+    file
+}
+
+struct RecordingMmapMapper {
+    offset_bytes: usize,
+    range: Option<PhysAddrRange>,
+}
+
+impl MmapMapper for RecordingMmapMapper {
+    fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()> {
+        self.range = Some(range);
+        Ok(())
+    }
+
+    fn map_file_backed(&mut self) -> VfsResult<()> {
+        Err(VfsError::InvalidInput)
+    }
+
+    fn map_anonymous_shared(&mut self) -> VfsResult<()> {
+        Err(VfsError::InvalidInput)
+    }
+
+    fn offset(&self) -> usize {
+        self.offset_bytes
+    }
+}
+
+#[def_test(serial)]
+fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
+    let before = kalloc::global_allocator().usages().get(UsageKind::Global);
+    let (dev, backend) = fake_device();
+    let state = dev.open_file(MinorKind::Render).unwrap();
+    let file = mmap_test_file(state.clone());
+    let minor = dev.minor(MinorKind::Render);
+    // Three requested pages distinguish the mapping length from four raw pages.
+    let object = GemObject::create(&dev, 65, 33).unwrap();
+    let paddr = object.pages().phys_addr();
+    let backing = Arc::downgrade(&object.pages());
+    let handle = object.handle();
+    let mut mapper = RecordingMmapMapper {
+        offset_bytes: object.offset_bytes() as usize,
+        range: None,
+    };
+    state.handles.lock().insert(handle, object.clone());
+    minor.mmap(&file, &mut mapper).unwrap();
+    let range = mapper.range.unwrap();
+    assert_eq!(range.start + mapper.offset_bytes, paddr);
+    assert_eq!(range.size(), mapper.offset_bytes + 3 * PAGE_SIZE_4K);
+
+    drop(state.take_handle(handle).unwrap());
+    drop(object);
+    assert_eq!(backend.destroyed(), 1);
+    // No test-owned strong page reference survives the object. Only the mmap
+    // path can retain this backing; removing retain_mapping makes upgrade fail.
+    let retained = backing.upgrade().expect("mmap must retain GEM backing");
+    assert_eq!(retained.page_count(), 3);
+    assert_eq!(retained.retained_range().size(), 3 * PAGE_SIZE_4K);
+    drop(retained);
+    drop(minor);
+    drop(file);
+    drop(state);
+    drop(dev);
+    assert!(backing.upgrade().is_none());
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::Global),
+        before
+    );
+}
+
+#[def_test(serial)]
+fn failed_scanout_creation_reclaims_all_exact_backing_pages() {
+    let (dev, backend) = fake_device();
+    backend.fail_next_create.store(true, Ordering::Relaxed);
+    let before = kalloc::global_allocator().usages().get(UsageKind::Global);
+    let result = GemObject::create(&dev, 65, 33);
+    assert!(matches!(result, Err(DrmError::Io)));
+    assert_eq!(backend.created.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.destroyed(), 0);
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::Global),
+        before
+    );
+    let retry = GemObject::create(&dev, 65, 33).unwrap();
+    assert_eq!(retry.pages().page_count(), 3);
+    drop(retry);
+    assert_eq!(backend.destroyed(), 1);
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::Global),
+        before
+    );
 }

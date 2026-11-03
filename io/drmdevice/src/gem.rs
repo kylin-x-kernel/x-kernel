@@ -16,7 +16,9 @@ use crate::prelude::*;
 pub(crate) struct GemObject {
     backend: BackendHandle,
     spec: ResourceSpec,
-    pages: Arc<GlobalPage>,
+    pages: Arc<PageRef>,
+    /// Page-aligned mapping length, excluding allocation rounding slack.
+    length_bytes: usize,
     /// Offset this object is mapped at, in bytes (page-aligned by construction).
     offset_bytes: u64,
     handle: DumbHandle,
@@ -38,10 +40,13 @@ impl GemObject {
             return Err(DrmError::NoMemory);
         }
         let length_bytes = (size_bytes as usize).next_multiple_of(PAGE_SIZE_4K);
-        let mut pages = GlobalPage::alloc_contiguous(length_bytes / PAGE_SIZE_4K, PAGE_SIZE_4K)
-            .map_err(|_| DrmError::NoMemory)?;
-        pages.zero();
-        let paddr = v2p(pages.start_va()).as_usize() as u64;
+        let pages = alloc_zeroed_pages_exact_ref(
+            length_bytes / PAGE_SIZE_4K,
+            PAGE_SIZE_4K,
+            UsageKind::Global,
+        )
+        .map_err(|_| DrmError::NoMemory)?;
+        let paddr = pages.phys_addr().as_usize() as u64;
         let spec = ResourceSpec {
             width,
             height,
@@ -55,6 +60,7 @@ impl GemObject {
             backend,
             spec,
             pages: Arc::new(pages),
+            length_bytes,
             offset_bytes: dev.next_mmap_offset_bytes(),
             handle: dev.next_dumb_handle(),
             resource: Mutex::new(Some(resource)),
@@ -87,8 +93,13 @@ impl GemObject {
     }
 
     /// Backing pages, for the mapping path.
-    pub(crate) fn pages(&self) -> Arc<GlobalPage> {
+    pub(crate) fn pages(&self) -> Arc<PageRef> {
         self.pages.clone()
+    }
+
+    /// Page-aligned mapping length requested for this object's pixels.
+    pub(crate) const fn length_bytes(&self) -> usize {
+        self.length_bytes
     }
 
     /// The scanout resource id.

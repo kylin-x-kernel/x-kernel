@@ -2,321 +2,444 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Global page owners and allocation helpers.
+//! Contiguous reference ranges and explicit exact/compound allocation helpers.
+
 use core::{fmt, mem::ManuallyDrop};
 
 use alloc_engine::{AllocError, AllocResult};
-use kerrno::KResult;
-use memaddr::{PAGE_SIZE_4K, PhysAddr, VirtAddr};
-use page_meta::{PageMeta, PageMetaError, ReferenceState};
+use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange};
+use page_meta::{AllocationInfo, PageMeta, PageMetaError, PageMetaTable};
 
 use crate::{UsageKind, global_allocator};
 
-/// A RAII wrapper for contiguous 4K-sized pages.
+mod split;
+pub use split::SplitPages;
+
+/// Owned lifetime protection for a nonempty contiguous range of physical pages.
 ///
-/// Automatically deallocates the pages when dropped.
-#[derive(Debug)]
-pub struct GlobalPage {
-    start_va: VirtAddr,
+/// Exact ranges hold one independent reference per base page. Compound views
+/// hold one reference on the whole compound, even when selecting a subrange.
+/// Every range is entirely independent or contained in a single compound;
+/// resident metadata selects the protocol, while this handle records its bounds.
+/// A one-page compound request is the same order-zero unit as an exact page.
+/// Clone allocates no array/control block. This grants no mapping, exclusive
+/// content access, PTE rights or hardware retirement. Holders must outlive all
+/// required content access and TLB/device completion.
+///
+/// Admission/release requires initialized global metadata, inventory, direct
+/// mapping and per-CPU storage. Operations do not sleep and support ordinary/IRQ
+/// context, never NMI. Independent clone/drop and compound admission/retirement
+/// visit each relevant descriptor; IRQ callers must bound the range size.
+pub struct PageRef {
+    first: &'static PageMeta,
     num_pages: usize,
 }
 
-impl GlobalPage {
-    /// Reconstruct a `GlobalPage` from a known VA and page count.
-    ///
-    /// # Safety
-    ///
-    /// `start_va` must have been returned by a prior `alloc_pages` with the
-    /// same `num_pages`, and no other `GlobalPage` currently owns it.
-    pub unsafe fn from_raw(start_va: VirtAddr, num_pages: usize) -> Self {
-        Self {
-            start_va,
-            num_pages,
-        }
-    }
-
-    /// Allocates one 4K-sized page.
-    pub fn alloc() -> KResult<Self> {
-        Self::alloc_pages(1)
-    }
-
-    /// Allocates one 4K-sized page and initializes it with zero.
-    pub fn alloc_zero() -> KResult<Self> {
-        let mut page = Self::alloc()?;
-        page.zero();
-        Ok(page)
-    }
-
-    /// Allocates contiguous 4K-sized pages.
-    pub fn alloc_contiguous(num_pages: usize, align_pow2: usize) -> KResult<Self> {
-        Self::alloc_pages_with_alignment(num_pages, align_pow2)
-    }
-
-    /// Get the start virtual address of the page.
-    pub fn start_va(&self) -> VirtAddr {
-        self.start_va
-    }
-
-    /// Get the start physical address by converting the virtual address.
-    pub fn start_pa<F>(&self, v2p: F) -> PhysAddr
-    where
-        F: FnOnce(VirtAddr) -> PhysAddr,
-    {
-        v2p(self.start_va)
-    }
-
-    /// Get the total size (in bytes) of these pages.
-    pub fn size(&self) -> usize {
-        self.num_pages * PAGE_SIZE_4K
-    }
-
-    /// Convert the start virtual address to a raw pointer.
-    pub fn as_ptr(&self) -> *const u8 {
-        self.start_va.as_ptr()
-    }
-
-    /// Convert the start virtual address to a mutable raw pointer.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.start_va.as_mut_ptr()
-    }
-
-    /// Fills the allocated pages with a specific byte value.
-    pub fn fill(&mut self, byte: u8) {
-        // SAFETY: `self` owns a contiguous allocation of `self.size()` bytes
-        // starting at `self.as_mut_ptr()`, so writing that full range is valid.
-        unsafe { core::ptr::write_bytes(self.as_mut_ptr(), byte, self.size()) }
-    }
-
-    /// Fills the allocated pages with zero.
-    pub fn zero(&mut self) {
-        self.fill(0)
-    }
-
-    // Note: The following conversions from raw pointers and sizes to slices
-    // utilize standard Rust `core::slice` idioms. These fundamental memory
-    // operations are universally identical across Rust projects and should
-    // not be interpreted as literal duplication.
-    /// Returns a slice for reading data.
-    pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: `self` owns a live allocation of `self.size()` bytes
-        // starting at `self.as_ptr()`, and this method returns a shared view.
-        unsafe { core::slice::from_raw_parts(self.as_ptr(), self.size()) }
-    }
-
-    /// Returns a mutable slice for writing data.
-    pub fn as_slice_mut(&mut self) -> &mut [u8] {
-        // SAFETY: `&mut self` guarantees exclusive access to the live
-        // allocation of `self.size()` bytes starting at `self.as_mut_ptr()`.
-        unsafe { core::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size()) }
-    }
-
-    /// Internal function to allocate pages.
-    fn alloc_pages(num_pages: usize) -> KResult<Self> {
-        let va = global_allocator()
-            .alloc_pages(num_pages, PAGE_SIZE_4K, UsageKind::Global)
-            .map_err(|e| match e {
-                alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
-                _ => kerrno::KError::InvalidInput,
-            })?;
-        Ok(Self {
-            start_va: va.into(),
-            num_pages,
-        })
-    }
-
-    /// Internal function to allocate pages with specific alignment.
-    fn alloc_pages_with_alignment(num_pages: usize, align_pow2: usize) -> KResult<Self> {
-        let va = global_allocator()
-            .alloc_pages(num_pages, align_pow2, UsageKind::Global)
-            .map_err(|e| match e {
-                alloc_engine::AllocError::NoMemory => kerrno::KError::NoMemory,
-                _ => kerrno::KError::InvalidInput,
-            })?;
-        Ok(Self {
-            start_va: va.into(),
-            num_pages,
-        })
-    }
-}
-
-impl Drop for GlobalPage {
-    fn drop(&mut self) {
-        global_allocator().dealloc_pages(self.start_va.into(), self.num_pages, UsageKind::Global);
-    }
-}
-
-/// One owned lifetime hold on a physical base page in the global metadata table.
-///
-/// Clone adds a hold to the existing metadata counter; final Drop returns the
-/// page to kalloc's global inventory. This grants no exclusive content access,
-/// kernel mapping, or authority to modify a PTE. Holders retain ownership through
-/// any required translation/device retirement. Final release may run in ordinary or
-/// IRQ context, never NMI, and does not sleep. Ordinary descriptor borrows cannot
-/// create this value. Moving it transfers one existing hold without counting.
-pub struct PageRef {
-    meta: &'static PageMeta,
-}
-
-const _: () = assert!(core::mem::size_of::<PageRef>() == core::mem::size_of::<&PageMeta>());
+const _: () = assert!(core::mem::size_of::<PageRef>() == 2 * core::mem::size_of::<usize>());
 
 impl PageRef {
-    /// Starts one hold for a newly allocated exclusive, unpublished base page.
+    /// Admits a complete new exclusive unpublished range from global inventory.
     ///
     /// # Errors
-    /// Returns InvalidRange for an unaligned address, or NotCovered before global
-    /// metadata publication and outside its physical coverage.
+    /// Returns geometry/coverage errors without acquiring any hold.
     ///
     /// # Panics
-    /// Panics if the allocator supplied a referenced or permanently reserved page.
+    /// Panics if the allocator supplied referenced or permanently reserved pages.
     ///
     /// # Safety
-    /// paddr must be an exclusive new one-page allocation from kalloc's global
-    /// inventory. No raw user or prior hold may access or release it. kind must
-    /// match its initial accounting class. On success ownership transfers here;
-    /// on error the caller retains the unclaimed page.
-    ///
-    /// kind is retained for final accounting and does not establish page type,
-    /// current users, content-access rights or reclaimability.
-    unsafe fn from_allocated(paddr: PhysAddr, kind: UsageKind) -> Result<Self, PageMetaError> {
+    /// The caller owns exactly num_pages exclusive physical base pages beginning
+    /// at paddr. No prior holder/raw user may access or release them. Compound
+    /// counts must be a power of two. The original kind follows raw accounting.
+    /// Success transfers every admitted hold; ordinary errors retain raw ownership.
+    unsafe fn from_allocated(
+        paddr: PhysAddr,
+        num_pages: usize,
+        kind: UsageKind,
+        is_compound: bool,
+    ) -> Result<Self, PageMetaError> {
         if !paddr.as_usize().is_multiple_of(PAGE_SIZE_4K) {
             return Err(PageMetaError::InvalidRange);
         }
-        let meta =
-            page_meta::lookup(paddr.as_usize() / PAGE_SIZE_4K).ok_or(PageMetaError::NotCovered)?;
-        // SAFETY: the caller supplies this page's exclusive unpublished inventory
-        // allocation; the global lookup selects its exact resident descriptor.
-        let claimed = unsafe { meta.claim_reference(kind) };
-        assert_eq!(
-            claimed,
-            Ok(()),
-            "allocator returned a referenced/reserved page"
+        let table = page_meta::global_table().ok_or(PageMetaError::NotCovered)?;
+        let first_pfn = paddr.as_usize() / PAGE_SIZE_4K;
+        let claimed = if is_compound {
+            if !num_pages.is_power_of_two() {
+                return Err(PageMetaError::InvalidRange);
+            }
+            // SAFETY: the caller supplied this complete exclusive unpublished
+            // power-of-two allocation, with no prior holders or raw users.
+            unsafe {
+                table.claim_reference_group(first_pfn, num_pages.trailing_zeros() as u8, kind)
+            }
+        } else {
+            // SAFETY: the caller supplied the exact exclusive unpublished range;
+            // admission transfers one independent hold for every requested page.
+            unsafe { table.claim_reference_range(first_pfn, num_pages, kind) }
+        };
+        assert!(
+            !matches!(claimed, Err(PageMetaError::InvalidState)),
+            "allocator returned referenced/reserved backing"
         );
-        Ok(Self { meta })
+        Ok(Self {
+            first: claimed?,
+            num_pages,
+        })
     }
 
-    /// Returns the physical base-page number of this live allocation.
+    /// Returns the first selected physical base-page number.
     #[expect(
         clippy::expect_used,
-        reason = "CG-021-no-panic-on-reachable-failure: constructors select a descriptor from the \
-                  immutable global table"
+        reason = "CG-021-no-panic-on-reachable-failure: admission and restoration select resident \
+                  descriptors from the immutable global table"
     )]
     pub fn pfn(&self) -> usize {
-        page_meta::pfn_of(self.meta).expect("live page descriptor must have a global PFN")
+        page_meta::pfn_of(self.first).expect("live range must have a global PFN")
     }
 
-    /// Returns the physical base address without granting content access.
+    /// Returns the beginning of this handle's selected range without content access.
     pub fn phys_addr(&self) -> PhysAddr {
         (self.pfn() * PAGE_SIZE_4K).into()
     }
 
-    /// Adds a separately owned hold without allocating another control block.
+    /// Returns this handle's selected page count, not its compound backing size.
+    pub fn page_count(&self) -> usize {
+        self.num_pages
+    }
+
+    /// Returns the complete physical range this hold keeps alive.
+    /// Independent holds retain exactly their selected range; compound views can
+    /// retain a larger allocation. The returned addresses grant no content access.
+    pub fn retained_range(&self) -> PhysAddrRange {
+        let unit = self.reference_unit();
+        if unit.order() == 0 {
+            PhysAddrRange::from_start_size(self.phys_addr(), self.num_pages * PAGE_SIZE_4K)
+        } else {
+            PhysAddrRange::from_start_size(
+                (unit.head_pfn() * PAGE_SIZE_4K).into(),
+                unit.page_count() * PAGE_SIZE_4K,
+            )
+        }
+    }
+
+    /// Clones the holds protecting the same selected range without a heap allocation.
+    /// Independent ranges increment every page; compound views increment one head.
     ///
     /// # Errors
-    /// Returns ReferenceOverflow if another hold would exceed the count limit.
+    /// Returns ReferenceOverflow at any count limit. Successfully cloned prefix
+    /// holds are released on failure, leaving all original holds unchanged.
     pub fn try_clone_ref(&self) -> Result<Self, PageMetaError> {
-        // SAFETY: self keeps an existing hold live throughout the increment;
-        // the new PageRef consumes the additional hold exactly once on Drop.
-        let result = unsafe { self.meta.clone_reference() };
+        // SAFETY: self retains every hold in an admitted/restored valid range.
+        // Metadata shape remains stable until final release or consuming split.
+        let result = unsafe { metadata_table().clone_reference_range(self.first, self.num_pages) };
         assert_ne!(
             result,
             Err(PageMetaError::InvalidState),
-            "live hold lost its reference state"
+            "live range lost its state"
         );
         result?;
-        Ok(Self { meta: self.meta })
+        Ok(Self {
+            first: self.first,
+            num_pages: self.num_pages,
+        })
     }
 
-    /// Transfers this hold to a raw PA owner without changing the count.
-    /// The recipient must eventually consume the transfer once with from_raw.
-    pub fn into_raw(self) -> PhysAddr {
-        let owner = ManuallyDrop::new(self);
-        owner.phys_addr()
+    /// Clones lifetime protection for a nonempty subrange of this selected range.
+    ///
+    /// Independent subranges retain only their own pages; compound subranges
+    /// still retain the whole backing. offset_pages is relative to this handle.
+    ///
+    /// # Errors
+    /// Returns InvalidRange for an empty/out-of-bounds view or ReferenceOverflow.
+    pub fn try_clone_range(
+        &self,
+        offset_pages: usize,
+        num_pages: usize,
+    ) -> Result<Self, PageMetaError> {
+        if num_pages == 0
+            || offset_pages
+                .checked_add(num_pages)
+                .is_none_or(|end| end > self.num_pages)
+        {
+            return Err(PageMetaError::InvalidRange);
+        }
+        // A non-dropping view borrows existing holds from self. Only the result
+        // of try_clone_ref owns new counts; the view never consumes our holds.
+        let view = ManuallyDrop::new(Self {
+            first: global_meta(self.pfn() + offset_pages),
+            num_pages,
+        });
+        view.try_clone_ref()
     }
 
-    /// Consumes one outstanding raw transfer without incrementing the counter.
-    /// The original accounting class stays in metadata and is not supplied again.
+    /// Clones a one-page view indexed from this handle's first page.
+    ///
+    /// # Errors
+    /// Returns InvalidRange for an out-of-bounds index or ReferenceOverflow.
+    pub fn try_clone_page(&self, index: usize) -> Result<Self, PageMetaError> {
+        self.try_clone_range(index, 1)
+    }
+
+    /// Consumes this range and yields independently held base pages.
+    ///
+    /// Exact ranges transfer existing holds without changing counts, including
+    /// when other independent holds exist. Multi-page compounds must be exclusive:
+    /// the whole backing is split and yielded, including pages outside the view.
+    /// No content is copied and no allocation charge is repeated. The iterator
+    /// releases every child not taken by the caller.
+    ///
+    /// # Errors
+    /// Returns (original_owner, NotExclusive) when a compound has other holds.
+    /// Any error returns the unchanged original owner and bounds.
     ///
     /// # Safety
-    /// paddr must identify exactly one unconsumed into_raw transfer from this
-    /// allocation incarnation. Retain the restored hold through all required
-    /// translation/device completion before releasing it. A lookup or bare
-    /// raw allocator result does not establish this transfer ownership.
+    /// Before physically splitting a compound, end all content accesses, mappings,
+    /// device use and required translation/device retirement for its full backing.
+    /// The count check cannot prove these facts. Keep every yielded child alive
+    /// through the uses it protects. Exact transfer alone changes no page geometry.
+    pub unsafe fn try_split(self) -> Result<SplitPages, (Self, PageMetaError)> {
+        let unit = self.reference_unit();
+        if unit.order() == 0 {
+            let split = SplitPages::new(self.pfn(), self.num_pages);
+            core::mem::forget(self);
+            return Ok(split);
+        }
+        // SAFETY: self retains the compound hold. The caller ended external use;
+        // success transfers all independent child holds into the output iterator.
+        let result = unsafe { metadata_table().split_reference(self.first) };
+        match result {
+            Ok(allocation) => {
+                core::mem::forget(self);
+                Ok(SplitPages::new(
+                    allocation.head_pfn(),
+                    allocation.page_count(),
+                ))
+            }
+            Err(error) => Err((self, error)),
+        }
+    }
+
+    /// Transfers all this handle's holds as its selected PA and page count.
+    /// No count changes occur. Restore the exact pair once with from_raw;
+    /// a bare PA cannot recover an independent range's length.
+    pub fn into_raw(self) -> (PhysAddr, usize) {
+        let owner = ManuallyDrop::new(self);
+        (owner.phys_addr(), owner.num_pages)
+    }
+
+    /// Restores one exact transferred reference range without changing counts.
+    /// Metadata selects independent or compound handling; num_pages preserves
+    /// the selected bounds, not necessarily the compound's complete size.
+    ///
+    /// # Safety
+    /// The pair must be one unconsumed into_raw transfer from the same allocation
+    /// incarnation. It owns one hold per independent page or one compound hold
+    /// covering that view. Keep these holds through all required access and
+    /// retirement. A descriptor lookup/fresh raw allocation cannot mint ownership.
     ///
     /// # Panics
-    /// Panics for an unaligned, uncovered or non-referenced address.
+    /// Panics for invalid geometry, missing metadata, mixed units or dead state.
     #[expect(
         clippy::expect_used,
-        reason = "CG-021-no-panic-on-reachable-failure: the exact raw-transfer contract requires \
-                  a live covered descriptor"
+        reason = "CG-021-no-panic-on-reachable-failure: the exact outstanding transfer supplies \
+                  its validated nonempty bounds and live, stable reference units"
     )]
-    pub unsafe fn from_raw(paddr: PhysAddr) -> Self {
+    pub unsafe fn from_raw(paddr: PhysAddr, num_pages: usize) -> Self {
         assert!(paddr.as_usize().is_multiple_of(PAGE_SIZE_4K));
-        let meta = page_meta::lookup(paddr.as_usize() / PAGE_SIZE_4K)
-            .expect("raw page transfer requires global metadata");
-        assert!(matches!(
-            meta.reference_state(),
-            ReferenceState::Referenced { .. }
-        ));
-        Self { meta }
+        assert_eq!(checked_page_count(num_pages), Ok(()));
+        let first = page_meta::lookup(paddr.as_usize() / PAGE_SIZE_4K)
+            .expect("raw range requires global metadata");
+        // SAFETY: the transferred holds retain all selected pages/compound and
+        // exclude physical retirement/splitting until this restoration finishes.
+        unsafe { metadata_table().reference_range(first, num_pages) }
+            .expect("raw transfer requires a valid live range");
+        Self { first, num_pages }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: this live range retains its first \
+                  reference unit and excludes retirement or consuming compound split"
+    )]
+    fn reference_unit(&self) -> AllocationInfo {
+        // SAFETY: self retains its admitted/restored first unit throughout this
+        // query. The independent/compound shape is immutable while held.
+        unsafe { metadata_table().reference_allocation(self.first) }
+            .expect("live range lost reference geometry")
     }
 }
 
 impl fmt::Debug for PageRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PageRef").field("pfn", &self.pfn()).finish()
+        f.debug_struct("PageRef")
+            .field("first_pfn", &self.pfn())
+            .field("num_pages", &self.num_pages)
+            .field("reference_unit", &self.reference_unit())
+            .finish()
     }
 }
 
 impl Drop for PageRef {
     fn drop(&mut self) {
-        // SAFETY: self owns one outstanding hold, consumed once by this Drop;
-        // its users must end content/hardware use before ending that hold.
-        if unsafe { self.meta.release_reference() } {
-            let paddr = self.phys_addr();
-            // SAFETY: the true result selected this unique retiring holder.
-            // Storage remains outside inventory until the direct release below.
-            let kind = unsafe { self.meta.finish_retirement() };
-            global_allocator().dealloc_pages(kaddr_layout::p2v(paddr.as_usize()), 1, kind);
+        let unit = self.reference_unit();
+        if unit.order() != 0 || self.num_pages == 1 {
+            release_unit(unit);
+            return;
+        }
+        // Capture the base before any release; the first page can be reused as
+        // soon as its hold ends. Later pages remain protected by our own holds.
+        let first_pfn = self.pfn();
+        for index in 0..self.num_pages {
+            drop(Self {
+                first: global_meta(first_pfn + index),
+                num_pages: 1,
+            });
         }
     }
 }
 
-/// Allocates one uninitialized, reference-owned base page from global inventory.
-///
-/// The category is charged once until the last hold ends. Clone does not add a
-/// control block or repeat the charge. No private allocator inventory is added.
+fn release_unit(unit: AllocationInfo) {
+    let head = global_meta(unit.head_pfn());
+    // SAFETY: the caller transfers one existing hold after all protected use.
+    // The unit geometry was saved before decrementing its sole head counter.
+    if unsafe { head.release_reference() } {
+        // SAFETY: true selected the unique retiring holder; all links are cleared
+        // before storage becomes reusable and no old metadata write follows.
+        let kind = unsafe { metadata_table().finish_reference_retirement(unit.head_pfn()) };
+        global_allocator().dealloc_pages(
+            kaddr_layout::p2v(unit.head_pfn() * PAGE_SIZE_4K),
+            unit.page_count(),
+            kind,
+        );
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: every range constructor requires the \
+              boot-published immutable table, whose backing is retained forever"
+)]
+fn metadata_table() -> &'static PageMetaTable {
+    page_meta::global_table().expect("live range requires global metadata")
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "CG-021-no-panic-on-reachable-failure: admission/restoration validates coverage and \
+              every live or transferred hold keeps its reference unit described"
+)]
+fn global_meta(pfn: usize) -> &'static PageMeta {
+    page_meta::lookup(pfn).expect("live range must remain fully described")
+}
+
+fn checked_page_count(num_pages: usize) -> AllocResult<()> {
+    let size_bytes = num_pages
+        .checked_mul(PAGE_SIZE_4K)
+        .ok_or(AllocError::InvalidInput)?;
+    if num_pages == 0 || size_bytes > isize::MAX as usize {
+        return Err(AllocError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Allocates an uninitialized independently referenced base page.
 ///
 /// # Errors
-/// Returns NotInitialized before allocator or metadata setup, or for a page with
-/// no metadata; NoMemory on inventory exhaustion; and InvalidInput for an invalid
-/// page or an allocation outside the kernel direct mapping.
+/// Returns the initialization, geometry or inventory errors of alloc_pages_exact_ref.
 pub fn alloc_page_ref(kind: UsageKind) -> AllocResult<PageRef> {
+    alloc_pages_exact_ref(1, PAGE_SIZE_4K, kind)
+}
+
+/// Allocates exactly num_pages contiguous, independently referenced base pages.
+///
+/// One PageRef owns the complete selected range without a heap array. Every page
+/// has its own counter. A subrange hold does not retain other pages. The complete
+/// rounded raw backing is obtained first, then unused tail pages are returned
+/// before publication; accounting charges only retained pages.
+///
+/// # Errors
+/// Returns InvalidInput for empty/overflowing counts, invalid alignment/mapping,
+/// NotInitialized for missing inventory/metadata, or the inventory allocation error.
+/// Admission errors return the complete unpublished raw backing.
+pub fn alloc_pages_exact_ref(
+    num_pages: usize,
+    align_pow2: usize,
+    kind: UsageKind,
+) -> AllocResult<PageRef> {
+    allocate_range(num_pages, align_pow2, kind, false)
+}
+
+/// Explicitly allocates one shared reference unit of contiguous physical pages.
+///
+/// num_pages must be a power of two. Cloning any subrange retains the whole
+/// compound; no per-page independent holds exist until an exclusive split.
+/// The returned handle initially selects the complete uninitialized backing.
+///
+/// # Errors
+/// Returns InvalidInput for non-power-of-two/overflowing counts or invalid
+/// alignment/mapping, NotInitialized for missing inventory/metadata, or the
+/// inventory allocation error. Admission failure returns all raw backing.
+pub fn alloc_compound_pages_ref(
+    num_pages: usize,
+    align_pow2: usize,
+    kind: UsageKind,
+) -> AllocResult<PageRef> {
+    if !num_pages.is_power_of_two() {
+        return Err(AllocError::InvalidInput);
+    }
+    allocate_range(num_pages, align_pow2, kind, true)
+}
+
+fn allocate_range(
+    num_pages: usize,
+    align_pow2: usize,
+    kind: UsageKind,
+    is_compound: bool,
+) -> AllocResult<PageRef> {
+    checked_page_count(num_pages)?;
+    if !align_pow2.is_power_of_two() {
+        return Err(AllocError::InvalidInput);
+    }
+    let backing_pages = num_pages
+        .checked_next_power_of_two()
+        .ok_or(AllocError::InvalidInput)?;
+    checked_page_count(backing_pages)?;
+    if is_compound {
+        u32::try_from(backing_pages - 1).map_err(|_| AllocError::InvalidInput)?;
+    }
     let allocator = global_allocator();
-    if !allocator.is_page_allocator_ready() {
+    if !allocator.is_page_allocator_ready() || page_meta::global_table().is_none() {
         return Err(AllocError::NotInitialized);
     }
-    let va = allocator.alloc_pages(1, PAGE_SIZE_4K, kind)?;
+    let va = allocator.alloc_pages(backing_pages, align_pow2.max(PAGE_SIZE_4K), kind)?;
     let paddr = PhysAddr::from(kaddr_layout::v2p(va));
     let result = if kaddr_layout::p2v(paddr.as_usize()) != va {
         Err(PageMetaError::InvalidRange)
     } else {
-        // SAFETY: alloc_pages supplied one exclusive unpublished page from the
-        // global inventory used by PageRef::drop. No other holder exists.
-        unsafe { PageRef::from_allocated(paddr, kind) }
+        // SAFETY: raw inventory supplied this complete exclusive unpublished
+        // backing. Requested pages are a prefix, under the raw accounting class.
+        unsafe { PageRef::from_allocated(paddr, num_pages, kind, is_compound) }
     };
     match result {
-        Ok(frame) => {
+        Ok(page) => {
+            let spare_pages = backing_pages - num_pages;
             if kind == UsageKind::RustHeap {
-                // Raw heap backing omits this charge; an owned whole page does not.
-                allocator.record_usage_alloc(kind, PAGE_SIZE_4K);
+                // Raw heap backing skips this charge; reference ranges do not.
+                allocator.record_usage_alloc(kind, num_pages * PAGE_SIZE_4K);
+            } else if spare_pages != 0 {
+                allocator.record_usage_dealloc(kind, spare_pages * PAGE_SIZE_4K);
             }
-            Ok(frame)
+            // Every spare page is unreferenced raw inventory. One-page returns
+            // avoid rounding an arbitrary tail length beyond the owned backing.
+            for index in num_pages..backing_pages {
+                allocator.release_pages_to_inventory(va + index * PAGE_SIZE_4K, 1);
+            }
+            Ok(page)
         }
         Err(error) => {
             if kind != UsageKind::RustHeap {
-                allocator.record_usage_dealloc(kind, PAGE_SIZE_4K);
+                allocator.record_usage_dealloc(kind, backing_pages * PAGE_SIZE_4K);
             }
-            allocator.release_pages_to_inventory(va, 1);
+            allocator.release_pages_to_inventory(va, backing_pages);
             Err(match error {
                 PageMetaError::NotCovered => AllocError::NotInitialized,
                 _ => AllocError::InvalidInput,
@@ -325,20 +448,33 @@ pub fn alloc_page_ref(kind: UsageKind) -> AllocResult<PageRef> {
     }
 }
 
-/// Allocates a zero-filled page with one lifetime hold from global inventory.
-///
-/// This uses the same allocation and lifetime protocol as alloc_page_ref.
-/// Zeroing occurs while the new page is still exclusive and unpublished.
+/// Allocates a zeroed independently referenced base page before publication.
 ///
 /// # Errors
-/// Returns the initialization, inventory or mapping errors of alloc_page_ref.
+/// Returns the errors of alloc_zeroed_pages_exact_ref.
 pub fn alloc_zeroed_page_ref(kind: UsageKind) -> AllocResult<PageRef> {
-    let page = alloc_page_ref(kind)?;
+    alloc_zeroed_pages_exact_ref(1, PAGE_SIZE_4K, kind)
+}
+
+/// Allocates exactly the requested contiguous pages and clears their contents.
+///
+/// Uses alloc_pages_exact_ref's independent lifecycle. Zeroing completes before
+/// the first range holder escapes; unused raw backing was already returned.
+///
+/// # Errors
+/// Returns the initialization, geometry and inventory errors of alloc_pages_exact_ref.
+pub fn alloc_zeroed_pages_exact_ref(
+    num_pages: usize,
+    align_pow2: usize,
+    kind: UsageKind,
+) -> AllocResult<PageRef> {
+    let page = alloc_pages_exact_ref(num_pages, align_pow2, kind)?;
     let address = kaddr_layout::p2v(page.phys_addr().as_usize());
-    // SAFETY: this newly allocated page has one unpublished hold and a full-page
-    // writable direct mapping with no content aliases. No clone has escaped.
-    unsafe { core::ptr::write_bytes(address as *mut u8, 0, PAGE_SIZE_4K) };
+    // SAFETY: the new selected range is exclusive, unpublished, fully writable
+    // direct-map RAM; no aliases or cloned holds escaped, and size was checked.
+    unsafe { core::ptr::write_bytes(address as *mut u8, 0, page.num_pages * PAGE_SIZE_4K) };
     Ok(page)
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/page_reference.rs");
+unittest::path_mod_test!(tests_allocation, "../ut-tests/page_allocation.rs");

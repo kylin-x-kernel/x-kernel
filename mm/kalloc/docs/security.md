@@ -20,8 +20,9 @@ Rust heap object、连续页和 DMA32 页，并通过 raw pointer、地址算术
 contract 和 per-CPU mutable state 维护这些资源。这里的不变量一旦破坏，影响通常不是
 局部 allocation 失败，而是 freelist 损坏、页重复分配、越界 DMA 或内核未定义行为。
 
-本文件分析整个 crate，包括中央 byte/page allocator、页级 PCP、slab object cache、
-`GlobalPage`、usage 和 tracking；per-CPU slab cache 只是其中一个安全边界。
+This document covers the entire crate: the central byte/page allocator,
+page-level PCP, slab object caches, `PageRef`, usage accounting and tracking.
+The per-CPU slab cache is one of these safety boundaries.
 
 ## 信任模型
 
@@ -121,17 +122,19 @@ canonical layout 调用中央 deallocation。
 allocator 使用相同 class layout 分配；current-CPU mutable reference 不发生同 CPU
 重入。违反这些条件可能把对象放进错误 freelist 或制造 mutable alias。
 
-### U-04：`GlobalPage` raw ownership 和 slice 构造
+### U-04: Fresh exact zeroing and reference-range transfer
 
-位置：`src/page.rs` 中 `GlobalPage::from_raw()`、`fill()`、`as_slice()`、
-`as_slice_mut()`。
+Locations: alloc_zeroed_pages_exact_ref and PageRef::from_raw in src/page.rs.
+Zeroing writes only the checked selected range while new, exclusive and unpublished.
+Exact surplus inventory is already returned and is never written by this clear.
+The single-page helper uses the same path. No safe slice API is exposed.
 
-主要操作：从 raw VA/page count 重建 RAII owner，使用 `write_bytes`，并从 raw pointer
-构造 slice。
-
-依赖不变量：`GlobalPage` 唯一拥有从 `start_va` 开始的 `num_pages * 4096` 字节 live
-allocation；该范围保持映射，且 `&mut self` 时不存在 aliasing access。safe constructors
-由 page allocator 建立这些条件；unsafe `from_raw()` 的 caller 必须自行建立。
+Raw transfer includes selected PA and count. Restoration requires the original
+pair and lifetime holds for every selected independent page or one encompassing
+compound. Metadata validates a homogeneous range but cannot prove provenance,
+unique consumption, initialization, access exclusivity or external retirement.
+A shared PageRef cannot grant an exclusive content reference. Single-page PA
+adapters may omit count only under their explicit length-one allocation contract.
 
 ### U-05：per-CPU usage shared references
 
@@ -161,7 +164,10 @@ allocation；该范围保持映射，且 `&mut self` 时不存在 aliasing acces
 6. slab cache 中每个 object 都属于对应 `SizeClass`，使用 canonical layout 分配，其首
    word 只在 caller 已经 relinquish ownership 后作为 next link。
 7. current-CPU cache mutation 不得与同 CPU interrupt/NMI 或 remote walker 并发。
-8. `GlobalPage` 始终唯一拥有其记录的范围，且 `Drop` 只执行一次。
+8. Each PageRef owns a nonempty homogeneous selected range: one hold per
+   independent page, or one compound hold covering the entire range. The count
+   stored in the handle is its selected length, not the retained compound size.
+   Content permissions and business byte lengths require separate contracts.
 9. usage slot 只通过 atomic shared access 更新；per-CPU area 不得在 accounting 运行时
    被重新初始化。
 11. usage/tracking metadata 只是诊断信息，不得用来替代 allocator provenance 或
@@ -197,7 +203,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 | 编号 | 威胁描述 | 影响等级 | 触发条件 | 应对措施 |
 |------|----------|----------|----------|----------|
 | T-01 | 无效、重叠或保留内存 region 被加入 allocator | 高 | boot memory 分类、`p2v` 或 caller 参数错误 | `kruntime` 只传递标记为 `FREE` 的 region；底层 buddy 检查页对齐、最小大小和内部 region 重叠。映射有效性、外部 ownership 和端点范围仍由启动边界保证 |
-| T-02 | wrong-layout、wrong-count、double free 或跨 allocator free 损坏 freelist | 高 | kernel caller 违反 allocation/deallocation 配对 | API rustdoc 和 RAII `GlobalPage` 限制正常路径，usage 汇总 underflow 可发现部分总量错误；没有即时或完整 provenance 检测，残余风险仍为高 |
+| T-02 | Wrong layout, page count, double free or cross-allocator free corrupts a freelist | High | A kernel caller violates the allocation/deallocation pairing | API rustdoc and RAII `PageRef` constrain normal paths; aggregate usage underflow detects some accounting errors. Immediate, complete provenance validation is absent, so the residual risk remains high. |
 | T-03 | slab intrusive link 被越界写、重复插入或并发修改 | 高 | stale alias、错误 size class、double free、NMI 重入 | canonical layout、compile-time link-size check、local IRQ guard 和中央锁保护正常路径；NMI 和伪造 pointer 明确不支持 |
 | T-04 | PCP 保存错误页地址或页数，随后重复分配/错误合并 | 高 | caller 用错误 `num_pages` free，或 CPU-local 并发约束被破坏 | 固定的 1–4 页 cache 类型和 `split_to_chunks` 保持内部 bookkeeping；输入 provenance 仍由 caller 保证 |
 | T-05 | DMA 地址超出设备可寻址范围或指向错误物理页 | 高 | `v2p` 错误、地址区间算术异常、caller/device 生命周期错误 | `alloc_dma_pages()` 检查结束地址低于 4 GiB 并在失败时归还；上层 `kdma` 管理页属性和平台 share/release，仍依赖正确设备授权 |
@@ -221,7 +227,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 | F-07 | cache full 触发 batch drain | 正常突发 free | 最多 32 次中央 deallocation 持有锁并保持 IRQ-off | IRQ latency 或跨 CPU allocation latency 尖峰 | 3 | 对象数和水位提供明确上界；仍需 workload 实测和调参 |
 | F-08 | 持锁 CPU 停滞 | panic、NMI、硬件问题或错误重入 | 其他 CPU 在中央 allocator 锁上自旋 | 系统级 allocation hang | 1 | 临界区不睡眠；普通 IRQ 被关闭；NMI allocation 禁止，新增路径必须遵守锁序 |
 | F-09 | tracking visitor 重入不兼容 API | visitor 调用 `current_generation()` 等再次获取 `STATE` | 自旋死锁或 `None.unwrap()` panic | 诊断接口挂起，可能影响系统 | 2 | allocation recursion 由 per-CPU flag 跳过；visitor 必须短小且不得递归进入 tracking state |
-| F-10 | `GlobalPage::from_raw()` ownership 错误 | 同一页已有 owner 或页数不匹配 | slice/fill/Drop 操作错误范围 | double free 或内存破坏 | 1 | API 为 unsafe，优先使用 safe constructors；caller 必须证明唯一 ownership |
+| F-10 | Invalid PageRef raw restoration | Forged, duplicated or stale transfer | Consumes a hold the caller does not own | Premature free or memory corruption | 1 | Unsafe API requires the exact outstanding transfer from the same incarnation; safe lookup cannot grant ownership |
 
 ## 故障管理
 
@@ -250,7 +256,7 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 普通 allocator 把 payload 视为不透明字节，不主动读取 caller 的 live 数据。但是：
 
 - 普通 allocation 不保证清零；之前 owner 的内容可能残留，处理敏感数据的 caller 必须
-  使用 `GlobalPage::alloc_zero()` 或显式清零；
+  use alloc_zeroed_page_ref/alloc_zeroed_pages_exact_ref before publishing contents;
 - slab cache 会在已经 free 的 object 首 word 写入 next link，其余内容不会自动擦除；
 - PCP 缓存页也不会擦除 payload；
 - tracking 保存 allocation 地址和 backtrace。上层若将其暴露给用户态，可能泄露内核
@@ -283,8 +289,9 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 9. **tracking 有全局锁和回调约束**：会改变 allocation latency；`allocations_in()` 要求
    tracking 已启用，visitor 在锁内运行且不得递归获取 tracking state。启停边界附近的
    allocation/free 记录不构成事务快照，停用期间的 free 不会清除既有记录。
-10. **默认不清零内存**：除 `alloc_zero()` 或 caller 显式清零外，重用内存可能保留前一
-    owner 的数据。
+10. **Memory is not zeroed by default**: Unless the caller uses
+    `alloc_zeroed_page_ref` / `alloc_zeroed_pages_exact_ref` or explicitly clears
+    the allocation, reused memory can retain a previous owner's data.
 11. **slab object cache 水位尚未实测调优**：batch 同时受 2 页 payload 和 32 对象限制，
     高水位不足两个 batch；需结合 X-Kernel workload 的 hit rate、lock-stat、内存保留和
     IRQ latency 调整。
@@ -304,7 +311,8 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
       relinquish 后改写？
 - [ ] 新增锁路径是否遵守 tracking → `balloc` → `palloc` 顺序，且不在锁内睡眠？
 - [ ] 所有 unsafe block 是否有可追溯 `SAFETY:` 说明，safe wrapper 是否真正建立其前提？
-- [ ] `GlobalPage` 新增构造或转换是否保持唯一 ownership、有效映射和精确 Drop 页数？
+- [ ] Do page holders preserve exact transfer ownership, and do content users
+      separately establish mapping, aliasing, initialization and byte bounds?
 - [ ] DMA 端点计算是否 checked，整段物理范围是否满足设备限制，失败是否完整回滚？
 - [ ] 是否新增了以 `#[no_mangle]` 定义 `memcpy`/`memmove`/`memset`/`memcmp` 的强符号？
       这类定义会静默替换全内核（含每次缺页的页清零与 COW 拷贝）的 mem 原语，必须按架构级
@@ -313,37 +321,46 @@ allocator 初始化由 boot CPU 串行完成。ready atomics 用于发布已完�
 - [ ] 新增统计是否明确计量单位和层次，且没有被用作 allocator correctness/reclaim 条件？
 - [ ] 新增 cache 或 allocator 状态是否同步更新初始化、CPU hotplug、reclaim 和关机策略？
 
-## Single-page holders and raw release boundary
+## Range-holder ownership and cleanup
 
-PageRef in `src/page.rs` holds one global PageMeta pointer and has no second
-reference counter. Its private from_allocated accepts only an exclusive new page
-from global inventory, checks alignment and global metadata coverage, and calls
-unsafe claim_reference. Missing metadata returns NotCovered; the outer allocator
-rolls back inventory and accounting using existing rules. Referenced or permanent
-page admission remains an asserted allocator-invariant violation.
+PageRef is two machine words: first descriptor and selected page count. Range
+mode resides in immutable-while-held page-meta geometry. No safe constructor
+accepts arbitrary descriptors or mixes independent pages with compound members.
+Subrange bounds are relative to the handle and preserve that shape. State/count
+snapshots are diagnostics, not authority to construct a holder.
 
-Clone and Drop use page-meta's constrained unsafe counter operations. Final
-release enters Retiring. Drop saves the PA, then finish_retirement returns the
-original UsageKind and resets the count. The local release path records the
-free and returns storage without writing the descriptor again. A zero count
-does not prove inventory availability. There is no PageReclaimer, callback Once
-registry or additional boot initialization state.
+Exact admission validates the full selected prefix before claiming one count
+per page. Inventory is obtained as a complete power-of-two block; unused pages
+have no typed holds and are returned with exact one-page operations before
+publication. On ordinary failure all raw backing and its charge are restored.
+Zeroing clears only selected live pages after surplus is returned. Compound
+admission is separately requested and validates its full group before publication.
 
-Raw restoration must consume the exact transfer from the same allocation
-incarnation. Alignment, coverage and live-state checks cannot prove ownership
-or the end of hardware use. Callers must end content access and required TLB or
-device completion before release. PageRef provides no mutable slice or kernel
-VA, so it establishes neither exclusive content access, COW nor device quiescence.
-The class preserves diagnostic accounting, not inventory selection, actual page
-type or a reclaim policy.
+Clone of an independent range retains the originals while incrementing every
+member. A failed increment releases exactly the acquired prefix, which cannot
+retire because its originals remain held. Compound clones increment one head.
+Drop snapshots the first unit: it releases that one compound hold, or creates
+one temporary single-page owner for each independent hold. Earlier returns may
+be reused, so no freed page is consulted to determine later range bounds.
+Last retirement clears all relevant group links before returning inventory and
+never writes old metadata after publication.
 
-Ordinary and DMA raw release do not scan descriptors. Callers must match the
-original base, page count and class and must not release pages still owned by
-PageRef or permanently reserved metadata. Violations can prematurely return
-live storage, double-free it or corrupt metadata; the API does not intercept
-these errors. Neither a bare address nor Unreferenced proves release authority.
-Boot handoff excludes permanent backing, and claim still rejects permanent pages.
-Global single-page tests exclude local IRQs/preemption and use the PCP slot made
-available by allocation to check final reuse without remote reuse races. Cloning,
-raw transfer, class replacement across rounds and last-only return verify the
-same counter protocol.
+Exact raw restoration requires the full transferred length; the first descriptor
+cannot distinguish simultaneous holders with different lengths. Compound raw
+views also preserve selected bounds. PA-only single-page adapters explicitly
+restore length one. Wrong lengths, duplicated/stale transfers or forged ownership
+can corrupt counters and remain unsafe caller violations despite validation.
+
+try_split of an independent range only transfers existing holds and permits
+other independent holders. Compound splitting freezes exactly one head hold and
+requires external quiescence. A failed split returns the original selected view;
+a successful split yields the whole compound, including pages outside a subview.
+The old owner is consumed without decrementation and SplitPages owns every child
+until transfer or Drop. Class/accounting is preserved. mem::forget and lost raw
+transfers can still leak ownership.
+
+Metadata remains resident. Raw ordinary/DMA free still has no descriptor scan,
+so its original provenance/bounds/class obligations remain caller-enforced.
+Independent claim/clone/drop and compound relation setup/cleanup/split visit their
+relevant ranges; IRQ callers must bound work. Lifetime protection does not establish
+initialization, exclusive contents, mapping permissions, COW or hardware retirement.

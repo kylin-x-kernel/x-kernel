@@ -100,17 +100,18 @@ pub mod mmio;
 ///
 /// # Safety
 ///
-/// `pa` must be the physical address of a page originally allocated by
-/// `GlobalPage::alloc*` and not currently owned by another `GlobalPage`.
+/// `pa` must identify one outstanding PageRef::into_raw transfer with length one
+/// from the same allocation. End the table's hardware use and required
+/// translation retirement before consuming this transfer.
 #[cfg(any(
     target_arch = "aarch64",
     target_arch = "x86_64",
     target_arch = "riscv64"
 ))]
 pub(crate) unsafe fn free_pt_page(pa: u64) {
-    let va = kaddr_layout::p2v(pa as usize);
-    // SAFETY: caller guarantees `pa` came from GlobalPage::alloc and is uniquely owned.
-    drop(unsafe { kalloc::GlobalPage::from_raw(va.into(), 1) });
+    // SAFETY: the caller consumes this exact outstanding table-page transfer
+    // once after ending hardware use and required translation retirement.
+    drop(unsafe { kalloc::PageRef::from_raw((pa as usize).into(), 1) });
 }
 
 /// Guest memory permission attributes.
@@ -154,3 +155,10 @@ pub trait GuestMem: Sized {
         false
     }
 }
+
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "riscv64"
+))]
+unittest::path_mod_test!(tests, "../../ut-tests/guest_memory.rs");

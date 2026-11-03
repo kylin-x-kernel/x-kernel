@@ -3,8 +3,8 @@
 // See LICENSES for license details.
 
 use kalloc::{PageRef, UsageKind, alloc_page_ref};
-use page_table::PagingHandler;
 use kspin::NoPreemptIrqSave;
+use page_table::PagingHandler;
 use unittest::def_test;
 
 use super::{MappingFlags, PageSize, PageTable, PagingHandlerImpl};
@@ -15,9 +15,9 @@ fn handler_keeps_the_transferred_reference_until_table_retirement() {
     let pa = PagingHandlerImpl::alloc_frame().unwrap();
     // SAFETY: consumes this handler's exact transfer before any table/hardware
     // use; after cloning we transfer its original hold back to the handler.
-    let owner = unsafe { PageRef::from_raw(pa) };
+    let owner = unsafe { PageRef::from_raw(pa, 1) };
     let observer = owner.try_clone_ref().unwrap();
-    assert_eq!(owner.into_raw(), pa);
+    assert_eq!(owner.into_raw(), (pa, 1));
     PagingHandlerImpl::dealloc_frame(pa);
 
     // A live observer keeps the page out of inventory after the handler drops
@@ -38,7 +38,13 @@ fn inactive_table_tree_can_be_destroyed_after_its_data_mapping_is_removed() {
     let backing = alloc_page_ref(UsageKind::VirtMem).unwrap();
     let address = 0x800000usize.into();
     let mut edit = table.modify();
-    edit.map(address, backing.phys_addr(), PageSize::Size4K, MappingFlags::READ).unwrap();
+    edit.map(
+        address,
+        backing.phys_addr(),
+        PageSize::Size4K,
+        MappingFlags::READ,
+    )
+    .unwrap();
     edit.finish();
     assert_eq!(edit.query(address).unwrap().0, backing.phys_addr());
     edit.unmap(address).unwrap();
@@ -51,7 +57,6 @@ fn inactive_table_tree_can_be_destroyed_after_its_data_mapping_is_removed() {
     assert_eq!(retained.phys_addr(), backing.phys_addr());
 }
 
-
 #[def_test]
 fn copied_root_entries_borrow_the_source_table_storage() {
     let mut source = PageTable::try_new().unwrap();
@@ -60,10 +65,18 @@ fn copied_root_entries_borrow_the_source_table_storage() {
     let address = 0x1000000usize.into();
     {
         let mut edit = source.modify();
-        edit.map(address, backing.phys_addr(), PageSize::Size4K, MappingFlags::READ).unwrap();
+        edit.map(
+            address,
+            backing.phys_addr(),
+            PageSize::Size4K,
+            MappingFlags::READ,
+        )
+        .unwrap();
         edit.finish();
     }
-    target.modify().copy_from(&source, address, memaddr::PAGE_SIZE_4K);
+    target
+        .modify()
+        .copy_from(&source, address, memaddr::PAGE_SIZE_4K);
     assert_eq!(target.query(address).unwrap().0, backing.phys_addr());
     // Both tables are inactive. The source outlives the target; dropping the
     // borrower must not consume the source's raw table-storage references.

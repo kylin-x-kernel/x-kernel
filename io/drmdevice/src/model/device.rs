@@ -48,7 +48,7 @@ pub struct DrmDevice {
     /// owns it. Keeping the slot is what lets the next modeset free the
     /// previous one; without it every SETCRTC leaked a blob.
     legacy_mode: Mutex<Option<(BlobId, Arc<Blob>)>>,
-    retained_pages: Mutex<BTreeMap<u64, Arc<GlobalPage>>>,
+    retained_pages: Mutex<BTreeMap<u64, Arc<PageRef>>>,
     next_dumb: AtomicU32,
     next_offset: AtomicU64,
     next_resource: AtomicU32,
@@ -657,7 +657,7 @@ impl DrmDevice {
 
     /// Keeps the pages of a mapped dumb buffer alive, keyed by its mmap offset
     /// in bytes (the key the mapping interface reports).
-    pub(crate) fn retain_mapping(&self, offset_bytes: u64, pages: Arc<GlobalPage>) {
+    pub(crate) fn retain_mapping(&self, offset_bytes: u64, pages: Arc<PageRef>) {
         self.retained_pages.lock().insert(offset_bytes, pages);
     }
 
@@ -747,8 +747,8 @@ impl DeviceFileOps for DrmMinor {
             .handle_by_offset_bytes(offset_bytes)
             .ok_or(VfsError::InvalidInput)?;
         let pages = object.pages();
-        let phys = v2p(pages.start_va());
-        let size_bytes = pages.size();
+        let phys = pages.phys_addr();
+        let size_bytes = object.length_bytes();
         // `FileMapper` re-adds the file offset to the physical base, so the
         // base passed here must be `phys - offset`.  A large allocation
         // counter can exceed the physical address; reject that instead of

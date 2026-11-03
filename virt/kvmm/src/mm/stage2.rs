@@ -50,9 +50,9 @@ const VTTBR_VMID_SHIFT: u64 = 48;
 /// AArch64 Stage-2 page table.
 ///
 /// Owns the root L1 page. On drop, walks L1 entries to free L2 pages,
-/// then the L1 page itself is freed by `GlobalPage::drop`.
+/// then the L1 page itself is freed by `PageRef::drop`.
 pub struct Stage2 {
-    l1_page: kalloc::GlobalPage,
+    l1_page: kalloc::PageRef,
     mem_base: u64,
     mem_size: u64,
     hpa_base: u64,
@@ -61,11 +61,11 @@ pub struct Stage2 {
 
 impl Stage2 {
     fn root_pa(&self) -> u64 {
-        kaddr_layout::v2p(self.l1_page.as_ptr() as usize) as u64
+        self.l1_page.phys_addr().as_usize() as u64
     }
 
     fn destroy(&mut self) {
-        let l1_va = self.l1_page.as_ptr() as *const u64;
+        let l1_va = kaddr_layout::p2v(self.l1_page.phys_addr().as_usize()) as *const u64;
         for i in 0..L1_ENTRIES {
             // SAFETY: i < L1_ENTRIES, so the offset stays inside the owned L1 page.
             let entry_ptr = unsafe { l1_va.add(i) };
@@ -100,7 +100,7 @@ impl Stage2 {
     /// splits it into 512 identity 4 KiB pages. If it is invalid, allocates a
     /// zeroed (all-invalid) L3 table. Returns null on allocation failure.
     fn ensure_l3_table(&mut self, l1_idx: usize, l2_idx: usize) -> *mut u64 {
-        let l1_va = self.l1_page.as_ptr() as *const u64;
+        let l1_va = kaddr_layout::p2v(self.l1_page.phys_addr().as_usize()) as *const u64;
         // SAFETY: the caller checked l1_idx < L1_ENTRIES, so the offset stays
         // inside the owned L1 page.
         let l1_entry_ptr = unsafe { l1_va.add(l1_idx) };
@@ -123,13 +123,12 @@ impl Stage2 {
             return kaddr_layout::p2v(l3_pa as usize) as *mut u64;
         }
 
-        let mut l3_page = match kalloc::GlobalPage::alloc_zero() {
+        let l3_page = match kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global) {
             Ok(p) => p,
             Err(_) => return core::ptr::null_mut(),
         };
-        let l3_va = l3_page.as_mut_ptr() as *mut u64;
-        let l3_pa = kaddr_layout::v2p(l3_va as usize) as u64;
-        core::mem::forget(l3_page);
+        let l3_va = kaddr_layout::p2v(l3_page.phys_addr().as_usize()) as *mut u64;
+        let l3_pa = l3_page.into_raw().0.as_usize() as u64;
 
         if l2_entry & LPAE_VALID != 0 {
             // 2 MiB block → populate the L3 with 512 identity 4 KiB pages so
@@ -173,17 +172,15 @@ impl GuestMem for Stage2 {
         let mem_end = mem_base.checked_add(mem_size)?;
 
         // Allocate L1 page (4 entries, but we need a full 4KB page)
-        let mut l1_page = kalloc::GlobalPage::alloc_zero().ok()?;
-        let l1_va = l1_page.as_mut_ptr() as *mut u64;
-        let l1_pa = kaddr_layout::v2p(l1_va as usize) as u64;
+        let l1_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+        let l1_va = kaddr_layout::p2v(l1_page.phys_addr().as_usize()) as *mut u64;
+        let l1_pa = l1_page.phys_addr().as_usize() as u64;
 
         // Allocate 4 L2 pages (one per L1 entry)
         let mut l2_pas = [0u64; L1_ENTRIES];
         for l2_pa in &mut l2_pas {
-            let mut page = kalloc::GlobalPage::alloc_zero().ok()?;
-            let va = page.as_mut_ptr() as usize;
-            *l2_pa = kaddr_layout::v2p(va) as u64;
-            core::mem::forget(page);
+            let page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+            *l2_pa = page.into_raw().0.as_usize() as u64;
         }
 
         // Fill L1 → L2 table entries
@@ -338,7 +335,7 @@ impl GuestMem for Stage2 {
         let start = gpa & !(block_size - 1);
         let end = (gpa + size + block_size - 1) & !(block_size - 1);
 
-        let l1_va = self.l1_page.as_ptr() as *const u64;
+        let l1_va = kaddr_layout::p2v(self.l1_page.phys_addr().as_usize()) as *const u64;
 
         let mut addr = start;
         while addr < end {
