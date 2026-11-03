@@ -152,7 +152,6 @@ impl ListenTable {
     pub(crate) fn register_accept_waker(
         &self,
         endpoint: IpListenEndpoint,
-        sockets: &SocketSet<'_>,
         context: &mut PollContext<'_>,
     ) -> Result<(), PollRegisterError> {
         let Some(entry) = self.get_entry(&endpoint) else {
@@ -161,21 +160,10 @@ impl ListenTable {
             return Err(PollRegisterError::InvalidState);
         };
 
-        // Clone outside `state`: accept_poll is not behind the queue mutex.
-        // Register first, then recheck readiness under the lock so a connection
-        // that arrives between the sample and register still wakes us.
-        context.register(&entry.accept_poll)?;
-        let should_wake = {
-            let state = entry.state.lock();
-            state
-                .accept_queue
-                .iter()
-                .any(|conn| is_acceptable_in_socket_set(conn.accepted.handle, sockets))
-        };
-        if should_wake {
-            entry.accept_poll.wake();
-        }
-        Ok(())
+        // Callers recheck readiness after subscribing. Waking here for an
+        // already-ready backlog would drain this one-shot subscription during
+        // edge rearm, leaving later arrivals without a live accept waiter.
+        context.register(&entry.accept_poll)
     }
 
     pub(crate) fn accept(

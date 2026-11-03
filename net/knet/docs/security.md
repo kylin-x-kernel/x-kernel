@@ -895,6 +895,7 @@ Changes to this module must verify the following:
   Only pending IPv4 expiration events participate in lock-contention retries, and TX processing continues after contention. Raw, admitted, and control-packet batches retain ownership before retrying.
   TCP listener preparation occurs only when the admitted-packet batch can immediately enter Router.
 - TCP listener progress changes verify that entries with nonempty SYN queues are refreshed after actual network polling. Waiters are awakened outside the entry lock only after child connections enter the accept queue, and SYN queues remain excluded from `PollProgress::has_more`.
+  Accept registration only subscribes to the listener source; callers recheck readiness afterwards, preserving the one-shot waiter for later arrivals even when the backlog is already ready.
 - Changes to poller execution boundaries verify that assisted processing makes one ownership check under the poller state lock and respects the single-round budget.
   Loopback UDP must reach the PCB within the send path's BH/`NetRx` window, independently of poller execution ownership.
 - Changes to `NET_RX_QUEUE` verify that `pending_udp` and `deferred` are preallocated at device creation and that `enqueue` counts both queued and in-flight packets toward capacity.

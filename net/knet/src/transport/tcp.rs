@@ -844,8 +844,7 @@ impl Pollable for TcpSocket {
             if events.contains(IoEvents::IN)
                 && let Ok(endpoint) = self.bound_endpoint()
             {
-                let sockets = SOCKET_SET.inner.lock();
-                LISTEN_TABLE.register_accept_waker(endpoint, &sockets, context)?;
+                LISTEN_TABLE.register_accept_waker(endpoint, context)?;
             }
         } else {
             // smoltcp has one waker slot per direction. Aggregate all waiters
