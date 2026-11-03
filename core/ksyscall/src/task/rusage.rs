@@ -54,6 +54,13 @@ impl From<Rusage> for rusage {
     }
 }
 
+/// Encodes CPU accounting using the same supported fields as `getrusage`.
+///
+/// Non-CPU resource counters are not tracked here and remain zero.
+pub(super) fn rusage_from_cpu_time(utime: TimeSpan, stime: TimeSpan) -> rusage {
+    Rusage { utime, stime }.into()
+}
+
 fn self_rusage() -> Rusage {
     let process = kprocess::current_user_process();
     let (utime, stime) = process.process_cpu_times();

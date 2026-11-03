@@ -179,6 +179,13 @@ registered wakeups rather than polling or a timer.
   the descriptor was created (pid reuse after close is not detected), and
   pidfd `O_NONBLOCK` is not honored as `WNOHANG`.
 
+- wait4's optional rusage is written through UserPtr<rusage> only after
+  a child is selected and status copy-out succeeds. A no-result WNOHANG
+  wait does not access either output. As on Linux, EFAULT during status or
+  usage copy-out does not restore an already consumed child. The encoded
+  structure initializes all fields; only user/system CPU times are tracked,
+  with other counters zero rather than uninitialized bytes.
+
 ## Audit checklist
 
 - After MM exchange, keep all fallible installation and process-update work

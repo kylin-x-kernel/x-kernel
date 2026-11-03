@@ -53,3 +53,25 @@ fn rusage_collate_normalizes_nanoseconds_into_seconds() {
     assert_eq!(c.utime, TimeSpan::new(1, 200_000_000));
     assert_eq!(c.stime, TimeSpan::new(0, 0));
 }
+
+#[def_test]
+fn waited_usage_encodes_cpu_time_and_zeros_untracked_counters() {
+    let usage = super::rusage_from_cpu_time(
+        TimeSpan::new(2, 123_456_789),
+        TimeSpan::new(1, 987_654_321),
+    );
+
+    assert_eq!(usage.ru_utime.tv_sec, 2);
+    assert_eq!(usage.ru_utime.tv_usec, 123_456);
+    assert_eq!(usage.ru_stime.tv_sec, 1);
+    assert_eq!(usage.ru_stime.tv_usec, 987_654);
+    assert_eq!(
+        [
+            usage.ru_maxrss, usage.ru_ixrss, usage.ru_idrss, usage.ru_isrss,
+            usage.ru_minflt, usage.ru_majflt, usage.ru_nswap, usage.ru_inblock,
+            usage.ru_oublock, usage.ru_msgsnd, usage.ru_msgrcv, usage.ru_nsignals,
+            usage.ru_nvcsw, usage.ru_nivcsw,
+        ],
+        [0; 14],
+    );
+}

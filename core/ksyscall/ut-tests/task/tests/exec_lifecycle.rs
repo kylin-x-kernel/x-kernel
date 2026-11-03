@@ -897,7 +897,7 @@ fn run_case_with_session(
     }
     bounded_wait(|| child.state() == ktask::TaskState::Exited);
     assert_eq!(
-        crate::task::wait::sys_waitpid(child_pid as i32, status.as_user_ptr(), 0),
+        crate::task::wait::sys_wait4(child_pid as i32, status.as_user_ptr(), 0, 0_usize.into()),
         Ok(child_pid as isize)
     );
     child.join();
@@ -912,7 +912,7 @@ fn run_case_with_session(
     // Join completes the child continuation before examining its independent marker.
     assert_eq!(has_live_success.load(Ordering::Relaxed), case.is_success());
     assert_eq!(
-        crate::task::wait::sys_waitpid(child_pid as i32, status.as_user_ptr(), 0),
+        crate::task::wait::sys_wait4(child_pid as i32, status.as_user_ptr(), 0, 0_usize.into()),
         Err(KError::from(LinuxError::ECHILD))
     );
     assert_eq!(parent.process().mm_id().unwrap(), parent_mm_id);

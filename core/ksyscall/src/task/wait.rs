@@ -21,10 +21,12 @@ use kprocess::{Pid, Process, wait_reap, wait_reap::WaitedChild};
 use ktask::{current, future::block_on};
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, P_ALL, P_PGID, P_PID, P_PIDFD, WCONTINUED, WEXITED, WNOHANG,
-    WNOWAIT, WUNTRACED, siginfo_t,
+    WNOWAIT, WUNTRACED, rusage, siginfo_t,
 };
 use osvm::{VirtMutPtr, VirtPtr};
 use posix_types::{UserConstPtr, UserPtr};
+
+use super::rusage::rusage_from_cpu_time;
 
 bitflags! {
     #[derive(Debug, Clone, Copy)]
@@ -239,10 +241,17 @@ fn wait_on_matching_children(
     selector: WaitPid,
     exit_code: *mut i32,
     options: WaitOptions,
+    usage: UserPtr<rusage>,
 ) -> KResult<isize> {
     wait_on_matching_children_with(proc, selector, options, |waited| {
         if let Some(exit_code) = exit_code.check_non_null() {
             exit_code.write_vm(waited.exit_code())?;
+        }
+        // Linux copies status before rusage, after consuming the child. A
+        // copy-out fault must not make that child waitable again.
+        if !usage.is_null() {
+            let (utime, stime) = waited.total_cpu_time();
+            usage.write_vm(rusage_from_cpu_time(utime, stime))?;
         }
         Ok(())
     })
@@ -356,7 +365,17 @@ pub(crate) fn sys_waitid(
     Ok(0)
 }
 
-pub(crate) fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResult<isize> {
+/// `wait4(2)`: reports child status and optional user/system CPU usage.
+///
+/// Usage comes from the waited child's stable accounting snapshot, including
+/// its reaped descendants. Other `rusage` counters remain zero, as in
+/// `getrusage`. No output is touched when `WNOHANG` finds no waitable child.
+pub(crate) fn sys_wait4(
+    pid: i32,
+    exit_code: *mut i32,
+    options: u32,
+    usage: UserPtr<rusage>,
+) -> KResult<isize> {
     let options = WaitOptions::from_bits_truncate(options);
 
     let current_thread = kprocess::current_user_thread();
@@ -372,7 +391,7 @@ pub(crate) fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> KResul
         WaitPid::Pgid(-pid as _)
     };
 
-    wait_on_matching_children(proc, selector, exit_code, options)
+    wait_on_matching_children(proc, selector, exit_code, options, usage)
 }
 
 unittest::path_mod_test!(tests_wait, "../../ut-tests/task/wait/tests_wait.rs");

@@ -12,6 +12,7 @@ use kprocess::{
 use kns::NamespaceFlags;
 use ksignal::{SignalAction, SignalActionFlags, SignalDisposition, Signo};
 use ktask::WaitQueue;
+use posix_types::UserPtr;
 use unittest::{assert_eq, def_test};
 
 use super::{
@@ -151,6 +152,7 @@ fn test_waitpid_prefers_ready_zombie_over_pending_interrupt() {
         WaitPid::Pid(child.pid()),
         core::ptr::null_mut(),
         WaitOptions::empty(),
+        UserPtr::from(0_usize),
     )
     .expect("wait must reap an already exited child before returning ERESTARTSYS");
 
@@ -174,6 +176,7 @@ fn test_wnowait_reports_without_reaping_child() {
         WaitPid::Pid(child.pid()),
         core::ptr::null_mut(),
         WaitOptions::WNOWAIT,
+        UserPtr::from(0_usize),
     )
     .expect("WNOWAIT must report a waitable zombie");
 
@@ -190,6 +193,7 @@ fn test_wnowait_reports_without_reaping_child() {
         WaitPid::Pid(child.pid()),
         core::ptr::null_mut(),
         WaitOptions::empty(),
+        UserPtr::from(0_usize),
     )
     .expect("a later wait must still be able to reap the child");
 
@@ -211,6 +215,7 @@ fn test_waitpid_reports_restartsys_when_only_interrupt_is_ready() {
         WaitPid::Pid(child.pid()),
         core::ptr::null_mut(),
         WaitOptions::empty(),
+        UserPtr::from(0_usize),
     )
     .expect_err("wait without a waitable child should still report interruption");
     ktask::current().clear_interrupt();
@@ -246,6 +251,7 @@ fn test_concurrent_waiters_must_rescan_after_register_before_reaping() {
                 WaitPid::Pid(child_pid),
                 core::ptr::null_mut(),
                 WaitOptions::empty(),
+                UserPtr::from(0_usize),
             )
             .map_err(LinuxError::from)
             {
@@ -343,6 +349,7 @@ fn test_sigchld_explicit_ignore_autoreap_wakes_waiter_with_echild() {
                 WaitPid::Pid(child_pid),
                 core::ptr::null_mut(),
                 WaitOptions::empty(),
+                UserPtr::from(0_usize),
             )
             .map_err(LinuxError::from)
             {
@@ -418,6 +425,7 @@ fn test_sigchld_nocldwait_autoreap_leaves_no_waitable_child() {
         WaitPid::Pid(child_pid),
         core::ptr::null_mut(),
         WaitOptions::WNOHANG,
+        UserPtr::from(0_usize),
     )
     .expect_err("autoreaped child must not remain waitable");
     signals

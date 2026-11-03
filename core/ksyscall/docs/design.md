@@ -387,7 +387,14 @@ process identity.
   `wait_reap::WaitChildSelector` built from `WaitPid`). `waitid` accepts
   `P_ALL`/`P_PID`/`P_PGID`/`P_PIDFD`; `P_PIDFD` resolves `id` as a pidfd
   file descriptor and waits on its target process. `WNOWAIT`/`WNOHANG`/
-  `WEXITED` are honored by the shared machinery.
+  WEXITED is honored by the shared machinery. wait4 copies its optional
+  rusage from the waited child's stable CPU-time snapshot, including reaped
+  descendants. Only ru_utime and ru_stime are supported; the remaining
+  counters are zero, matching the current getrusage implementation. Status
+  is copied before usage, after the shared scanner has consumed the child.
+  Copy-out failure therefore does not undo reaping. A WNOHANG result of
+  zero leaves both outputs untouched. The raw waitid usage output remains
+  unimplemented.
 - `task/execve.rs` implements `execve`/`execveat` through a single
   `run_exec`. `execveat` accepts `AT_EMPTY_PATH` (exec the file already
   open on `dirfd`, e.g. a memfd) and `AT_SYMLINK_NOFOLLOW` (currently

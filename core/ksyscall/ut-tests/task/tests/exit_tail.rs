@@ -370,7 +370,7 @@ fn run_case(is_remote: bool, does_exec: bool) -> TestResult {
     });
     assert_eq!(child.cpu_id().as_usize(), cpu);
     assert_eq!(
-        crate::task::wait::sys_waitpid(pid as i32, status.as_user_ptr(), 0),
+        crate::task::wait::sys_wait4(pid as i32, status.as_user_ptr(), 0, 0_usize.into()),
         Ok(pid as isize)
     );
     assert_eq!(status.read(), 0);
