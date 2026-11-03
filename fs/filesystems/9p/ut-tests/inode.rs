@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::boxed::Box;
+use kalloc_types::KBox;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use p9::{P9Client, P9Transport};
@@ -59,7 +59,7 @@ impl P9Transport for MetadataTransport {
 
 fn metadata_fixture() -> (MetadataTransport, Arc<V9fsInode>, Dentry) {
     let transport = MetadataTransport::default();
-    let client = P9Client::new(Box::new(transport.clone()));
+    let client = P9Client::new(KBox::new_nowait(transport.clone()).unwrap());
     let node = V9fsInode::new(client.negotiate().unwrap());
     let inode = node.clone().into_vfs_inode(VfsInodeInit::new(
         3,

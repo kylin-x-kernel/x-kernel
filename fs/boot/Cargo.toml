@@ -13,6 +13,7 @@ dev-log = ["devfs/dev-log"]
 ebpf = ["dep:bpffs"]
 cgroup2 = ["dep:cgroup2fs"]
 fs9p = [
+    "dep:kalloc-types",
     "dep:kclass",
     "dep:macros",
     "dep:p9",
@@ -23,6 +24,7 @@ rootfs-secondary-block = []
 smp = []
 
 [dependencies]
+kalloc-types = { workspace = true, optional = true }
 anon_inodefs.workspace = true
 block.workspace = true
 bpffs = { workspace = true, optional = true }

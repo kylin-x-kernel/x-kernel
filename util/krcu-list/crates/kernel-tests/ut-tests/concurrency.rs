@@ -36,10 +36,10 @@ fn old_reader_retains_entire_removed_chain_then_backlog_drains() {
     for number in 0..ENTRIES {
         // SAFETY: initialized task, allocation completed before writer locking.
         unsafe {
-            list.push_back(Entry::new(Value {
+            list.push_back(Entry::new_nowait(Value {
                 number,
                 drops: drops.clone(),
-            }))
+            }).unwrap())
         };
     }
     let has_entered = Arc::new(AtomicBool::new(false));

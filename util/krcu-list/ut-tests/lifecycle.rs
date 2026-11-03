@@ -17,10 +17,25 @@ impl Drop for Probe {
 }
 
 #[def_test]
+fn rejected_entry_preparation_drops_payload_without_publication() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let result = Entry::new_with_flags(
+        Probe(drops.clone()),
+        kalloc_types::AllocFlags::from_bits_retain(u32::MAX),
+    );
+    assert_eq!(result.err(), Some(kerrno::KError::InvalidInput));
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    let entry = Entry::new_nowait(Probe(drops.clone())).unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    drop(entry);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[def_test]
 fn ordered_action_iteration_and_removal() {
     let list = RcuList::new();
     for action in 0..4 {
-        let entry = Entry::new(action);
+        let entry = Entry::new_nowait(action).unwrap();
         // SAFETY: kernel UT runs in task context, with no reentrant mutation.
         unsafe { list.push_back(entry) };
     }
@@ -52,10 +67,10 @@ fn callback_outlives_list_and_releases_only_list_owner() {
     let action = Arc::new(Probe(drops.clone()));
     let list = RcuList::new();
     // SAFETY: initialized task context; entry allocation precedes writer locking.
-    unsafe { list.push_back(Entry::new(action.clone())) };
+    unsafe { list.push_back(Entry::new_nowait(action.clone()).unwrap()) };
     let observed = krcu::with_read(|scope| (list.iter(scope).count(), Arc::strong_count(&action)));
     assert_eq!(observed, (1, 2));
-    // SAFETY: Probe only updates an atomic; Arc/Box deallocation is nonblocking.
+    // SAFETY: Probe only updates an atomic; Arc/KBox deallocation is nonblocking.
     assert_eq!(unsafe { list.remove_first(|_| true) }, Ok(true));
     drop(list);
     // SAFETY: caller holds no read scope/lock; callbacks need no task progress.
@@ -70,7 +85,7 @@ fn callback_outlives_list_and_releases_only_list_owner() {
 fn rejected_context_does_not_invoke_predicate_or_unlink() {
     let list = RcuList::new();
     // SAFETY: normal task context with no reentrant mutation.
-    unsafe { list.push_back(Entry::new(3)) };
+    unsafe { list.push_back(Entry::new_nowait(3).unwrap()) };
     let calls = AtomicUsize::new(0);
     let result = {
         let _irq = kspin::IrqSave::new();

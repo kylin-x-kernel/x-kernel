@@ -1,5 +1,15 @@
 # Safety and Ownership
 
+## Entry allocation boundary
+
+Entry preparation precedes publication and writer locking. A rejected allocation
+cannot change list topology; dropping an unpublished entry releases its payload
+once. Flag-rejection tests check this ownership boundary without forcing global
+OOM. Existing host, delayed-reader and callback tests now exercise KBox nodes.
+The callback's nonblocking destructor requirement is unchanged and independent
+of the flags used to allocate the node.
+
+
 ## Trust Boundary
 
 This crate accepts kernel-owned Rust values, not user pointers, firmware tables
@@ -54,7 +64,7 @@ referenced by deferred callbacks outlive their execution.
 | `src/lib.rs`: push_back/withdraw | Same-list writer exclusion, atomic links, owned allocation | Task-origin mutation; nonblocking predicate |
 | `src/lib.rs`: Iter::next | Scope and list borrows, Acquire traversal | Obey krcu scope execution rules |
 | `src/lib.rs`: Drop | Exclusive list ownership; no submitted live node | Valid context for the entire payload release chain |
-| `src/node.rs`: retire/release | One embedded submission right, offset-based Box recovery | Nonblocking callback destruction; permanent service |
+| `src/node.rs`: retire/release | One embedded submission right, offset-based KBox recovery | Nonblocking callback destruction; permanent service |
 
 | Failure | Effect | Containment |
 | --- | --- | --- |

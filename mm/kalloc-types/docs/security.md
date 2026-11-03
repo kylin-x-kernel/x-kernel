@@ -1,5 +1,22 @@
 # kalloc-types 安全与可靠性
 
+## Raw ownership boundary
+
+A raw transfer suppresses owner destruction, not pointee initialization.
+Recovery requires exactly one outstanding ownership right and the original
+non-null, aligned pointer, allocation provenance, type and DST metadata.
+No conflicting references may remain. Repeated recovery, foreign pointers and
+premature recovery during RCU reads violate the unsafe contract.
+Dynamic drop still computes the layout while the value is valid, then destroys
+it once and frees with the matching backend. ZSTs never allocate or deallocate.
+Tests cover sized/DST address and metadata retention, single destruction,
+aligned ZSTs and empty slices; no malformed pointer is passed to the unsafe API.
+
+Hosted allocation returns NoMemory on null and frees through the same host
+allocator. Kernel allocation never takes that path. Host/Miri results establish
+ownership properties, not kernel allocator timing or execution-context safety.
+
+
 ## Copied Slice Ownership
 
 `from_slice_with_flags` reserves the complete slice before copying valid Copy
@@ -14,8 +31,8 @@ elements, independent ownership, empty slices, invalid flags and huge ZST slices
 move. Its pointer read transfers exactly one initialized, correctly aligned T;
 ManuallyDrop prevents KBox destruction from dropping that value again. The
 Storage guard only releases memory, using the same sized layout as construction,
-and never dereferences the moved-from slot. ZSTs skip deallocation. No raw
-pointer or allocator injection is exposed, and this is not a pinning operation.
+and never dereferences the moved-from slot. ZSTs skip deallocation. This extraction
+exposes no raw pointer or allocator injection and is not a pinning operation.
 The returned value's destructor runs in its eventual owner's context, not during
 extraction. Tests cover single destruction and preserved payloads; they do not
 force global OOM or establish that future task/signal migration is failure-safe.
@@ -51,9 +68,10 @@ NOIO/NOFS 只约束这次申请，不建立隐式的跨调用链回收作用域�
 失败会立即析构输入值；最终 Drop 在释放方上下文执行且不继承分配 flags。
 调用方必须分别保证这些析构路径允许在各自上下文运行。
 
-`src/kbox.rs` 的 `new_with_allocator` 是私有审计边界：生产仅传入 `allocate`，
-测试替身只返回失败。任何未来成功返回指针的替身都必须满足相同的布局、
-独占性和释放来源要求。没有公开的 allocator/raw pointer 注入接口。
+`src/kbox.rs::new_with_allocator` is a private audit boundary: production passes
+only `allocate`; test substitutes only return failure. Any successful substitute
+must satisfy the same layout, exclusivity and allocation-origin requirements. Allocator
+injection remains private; raw ownership recovery has its separate unsafe contract.
 
 ## Unsafe 清单
 

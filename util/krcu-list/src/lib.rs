@@ -22,7 +22,7 @@
 //!
 //! ```no_run
 //! let actions = krcu_list::RcuList::new();
-//! let entry = krcu_list::Entry::new(7_usize);
+//! let entry = krcu_list::Entry::new(7_usize).unwrap();
 //! // SAFETY: initialized task context, no reentrant writer operation.
 //! unsafe { actions.push_back(entry) };
 //! krcu::with_read(|scope| {
@@ -40,13 +40,13 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use core::{
     marker::PhantomData,
     ptr,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use kalloc_types::KBox;
 use kerrno::KResult;
 use krcu::ReadScope;
 use kspin::SpinNoPreempt;
@@ -62,18 +62,38 @@ use node::Node;
 ///
 /// ```compile_fail,E0382
 /// let list = krcu_list::RcuList::new();
-/// let entry = krcu_list::Entry::new(1_usize);
+/// let entry = krcu_list::Entry::new(1_usize).unwrap();
 /// // SAFETY: assume initialized non-reentrant task context.
 /// unsafe { list.push_back(entry) };
 /// // SAFETY: context cannot restore the consumed ownership.
 /// unsafe { list.push_back(entry) };
 /// ```
-pub struct Entry<T: Send + Sync + 'static>(Box<Node<T>>);
+pub struct Entry<T: Send + Sync + 'static>(KBox<Node<T>>);
 
 impl<T: Send + Sync + 'static> Entry<T> {
-    /// Allocates unpublished storage using the system's allocator policy.
-    pub fn new(value: T) -> Self {
-        Self(Box::new(Node::new(value)))
+    /// Prepares unpublished storage with KERNEL permissions before writer locking.
+    ///
+    /// Requires the sleepable, reclaim-safe context of [`KBox::new`]. Failure
+    /// drops the payload in the caller's context without publishing an entry.
+    pub fn new(value: T) -> KResult<Self> {
+        Self::new_with_flags(value, kalloc_types::AllocFlags::KERNEL)
+    }
+
+    /// Prepares unpublished storage without entering reclaim.
+    ///
+    /// The allocator and payload context constraints of [`KBox::new_nowait`]
+    /// apply. NOWAIT does not promise reserve access, NMI safety or bounded latency.
+    pub fn new_nowait(value: T) -> KResult<Self> {
+        Self::new_with_flags(value, kalloc_types::AllocFlags::NOWAIT)
+    }
+
+    /// Prepares an entry with caller-selected allocation permissions.
+    ///
+    /// Follows [`KBox::new_with_flags`]: unknown flags return InvalidInput,
+    /// allocation failure returns NoMemory, and either error drops the payload.
+    /// Permissions apply only to this owner, not payload construction/destruction.
+    pub fn new_with_flags(value: T, flags: kalloc_types::AllocFlags) -> KResult<Self> {
+        KBox::new_with_flags(Node::new(value), flags).map(Self)
     }
 }
 
@@ -92,7 +112,7 @@ unsafe impl<T: Send + Sync + 'static> Send for Writers<T> {}
 pub struct RcuList<T: Send + Sync + 'static> {
     head: AtomicPtr<Node<T>>,
     writers: SpinNoPreempt<Writers<T>>,
-    ownership: PhantomData<Box<Node<T>>>,
+    ownership: PhantomData<KBox<Node<T>>>,
 }
 
 impl<T: Send + Sync + 'static> RcuList<T> {
@@ -118,7 +138,7 @@ impl<T: Send + Sync + 'static> RcuList<T> {
     /// context: removal must independently meet its callback contract.
     pub unsafe fn push_back(&self, entry: Entry<T>) {
         let mut writers = self.writers.lock();
-        let raw = Box::into_raw(entry.0);
+        let raw = KBox::into_raw(entry.0);
         let predecessor = if writers.tail.is_null() {
             &self.head
         } else {
@@ -233,7 +253,7 @@ impl<T: Send + Sync + 'static> Drop for RcuList<T> {
         while !raw.is_null() {
             // SAFETY: exclusive list destruction excludes outstanding iterator
             // borrows and writers. Linked nodes have not been submitted to RCU.
-            let node = unsafe { Box::from_raw(raw) };
+            let node = unsafe { KBox::from_raw(raw) };
             raw = node.next.load(Ordering::Relaxed);
             drop(node);
         }

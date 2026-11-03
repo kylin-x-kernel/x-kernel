@@ -4,7 +4,7 @@
 
 //! 9P client and fid objects.
 
-use alloc::{boxed::Box, collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeSet, string::String, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kerrno::{KError, KResult, LinuxError};
@@ -196,7 +196,7 @@ struct P9ClientState {
     next_fid: u32,
     live_fids: BTreeSet<u32>,
     version: P9Version,
-    transport: Box<dyn P9Transport>,
+    transport: kalloc_types::KBox<dyn P9Transport>,
 }
 
 /// A connection to one 9P server.
@@ -230,7 +230,11 @@ impl P9Client {
     ///
     /// Protocol negotiation is intentionally separate so the caller can
     /// construct the filesystem only after [`Self::negotiate`] succeeds.
-    pub fn new(transport: Box<dyn P9Transport>) -> Arc<Self> {
+    /// The caller prepares the transport owner before taking protocol locks or
+    /// admitting remote resources. This constructor does not rebox it; the
+    /// existing Arc allocation is still infallible. Final transport destruction
+    /// runs in the context dropping the last client reference.
+    pub fn new(transport: kalloc_types::KBox<dyn P9Transport>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(P9ClientState {
                 msize: DEFAULT_MSIZE,

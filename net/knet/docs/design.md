@@ -22,6 +22,22 @@ reserved slot, avoiding connection loss without a queue rollback protocol.
 Device owners, boxed packet buffers, async-trait futures, nested Arc/Vec
 allocations and dynamic workers remain outside this migration.
 
+## Bridge receive buffers
+
+The vsock-TIPC bridge owns each fixed-size receive buffer as `KBox<[u8]>`.
+RX and TX tasks prepare it with KERNEL permissions outside port, channel,
+bridge and connection-manager locks, in sleepable, reclaim-safe context.
+Connection constructors consume the prepared buffer without allocating it again.
+The temporary Vec used solely to construct the old boxed slice is removed;
+ordinary message Vecs, connection lists and nested allocations are unchanged.
+
+For host-originated requests, preparation failure aborts the existing manager
+connection through `abort_bridge`, even if sending the reset fails, and publishes
+no bridge entry. Reverse TIPC accepts validate the peer first, then prepare the
+buffer before vsock admission. Failure closes the accepted channel and returns
+the allocation error; it does not restore that channel to the accept queue.
+The pre-connect hook remains infallible with respect to buffer ownership.
+
 ## Test Layout
 
 Guest tests live in `ut-tests/`, mirroring the source module hierarchy, and

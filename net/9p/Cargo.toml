@@ -10,6 +10,7 @@ repository.workspace = true
 documentation.workspace = true
 
 [dependencies]
+kalloc-types.workspace = true
 bitflags.workspace = true
 kerrno.workspace = true
 ksync.workspace = true

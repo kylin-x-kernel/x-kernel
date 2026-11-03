@@ -24,6 +24,66 @@ use unittest::def_test;
 use super::*;
 
 #[def_test]
+fn raw_owner_roundtrip_preserves_address_and_drops_once() {
+    let drops = Cell::new(0);
+    let owned = KBox::new_nowait(DropProbe(&drops)).unwrap();
+    let address = &*owned as *const DropProbe<'_>;
+    let raw = KBox::into_raw(owned);
+    assert_eq!(raw.cast_const(), address);
+    assert_eq!(drops.get(), 0);
+    // SAFETY: raw is the sole live owner from into_raw; no references remain.
+    let recovered = unsafe { KBox::from_raw(raw) };
+    assert_eq!(recovered.0.get(), 0);
+    drop(recovered);
+    assert_eq!(drops.get(), 1);
+}
+
+#[def_test]
+fn raw_dst_roundtrip_retains_slice_and_trait_metadata() {
+    let drops = Cell::new(0);
+    let owned: KBox<[DropProbe<'_>]> =
+        KBox::new_nowait([DropProbe(&drops), DropProbe(&drops)]).unwrap();
+    let raw = KBox::into_raw(owned);
+    assert_eq!(raw.len(), 2);
+    // SAFETY: the original slice pointer and metadata retain sole ownership.
+    drop(unsafe { KBox::from_raw(raw) });
+    assert_eq!(drops.get(), 2);
+
+    trait Value {
+        fn value(&self) -> usize;
+    }
+    impl Value for DropProbe<'_> {
+        fn value(&self) -> usize {
+            self.0.get()
+        }
+    }
+    let owned: KBox<dyn Value + '_> = KBox::new_nowait(DropProbe(&drops)).unwrap();
+    let raw = KBox::into_raw(owned);
+    // SAFETY: raw retains the original data pointer, vtable and sole ownership.
+    let recovered = unsafe { KBox::from_raw(raw) };
+    assert_eq!(recovered.value(), 2);
+    drop(recovered);
+    assert_eq!(drops.get(), 3);
+}
+
+#[def_test]
+fn raw_zst_and_empty_slice_preserve_alignment() {
+    #[repr(align(256))]
+    struct Aligned;
+    let raw = KBox::into_raw(KBox::new_nowait(Aligned).unwrap());
+    assert!(!raw.is_null());
+    assert_eq!(raw.addr() % 256, 0);
+    // SAFETY: raw is the untouched pointer from the consumed ZST owner.
+    drop(unsafe { KBox::from_raw(raw) });
+    let owned: KBox<[Aligned]> = KBox::new_nowait([]).unwrap();
+    let raw = KBox::into_raw(owned);
+    assert_eq!(raw.len(), 0);
+    assert_eq!(raw.cast::<Aligned>().addr() % 256, 0);
+    // SAFETY: the empty slice retains its original aligned pointer and metadata.
+    drop(unsafe { KBox::from_raw(raw) });
+}
+
+#[def_test]
 fn copied_slice_preserves_source_and_alignment() {
     #[derive(Clone, Copy, Debug, PartialEq)]
     #[repr(align(256))]
@@ -49,7 +109,8 @@ fn runtime_slice_layout_and_element_lifecycle() {
     #[repr(align(256))]
     struct Aligned<'a>(DropProbe<'a>);
     let drops = Cell::new(0);
-    let mut storage = KBox::<[Aligned<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    let mut storage =
+        KBox::<[Aligned<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
     let address = storage.as_ptr().cast::<()>();
     assert_eq!(address.addr() % 256, 0);
     for slot in storage.iter_mut() {
@@ -67,19 +128,24 @@ fn runtime_slice_layout_and_element_lifecycle() {
 #[def_test]
 fn runtime_slice_rejects_invalid_layout_before_allocator() {
     let called = Cell::new(false);
-    let result = KBox::<[u64]>::reserve_slice_with_allocator(usize::MAX, AllocFlags::NOWAIT, |_, _| {
-        called.set(true);
-        Err(KError::NoMemory)
-    });
+    let result =
+        KBox::<[u64]>::reserve_slice_with_allocator(usize::MAX, AllocFlags::NOWAIT, |_, _| {
+            called.set(true);
+            Err(KError::NoMemory)
+        });
     assert!(matches!(result, Err(KError::InvalidInput)));
     assert!(!called.get());
     let flags = AllocFlags::from_bits_retain(u32::MAX);
-    assert!(matches!(KBox::<[()]>::new_uninit_slice_with_flags(0, flags), Err(KError::InvalidInput)));
-    let result = KBox::<[u32]>::reserve_slice_with_allocator(5, AllocFlags::NOWAIT, |layout, flags| {
-        core::assert_eq!(layout, Layout::array::<u32>(5).unwrap());
-        core::assert_eq!(flags, AllocFlags::NOWAIT);
-        Err(KError::NoMemory)
-    });
+    assert!(matches!(
+        KBox::<[()]>::new_uninit_slice_with_flags(0, flags),
+        Err(KError::InvalidInput)
+    ));
+    let result =
+        KBox::<[u32]>::reserve_slice_with_allocator(5, AllocFlags::NOWAIT, |layout, flags| {
+            core::assert_eq!(layout, Layout::array::<u32>(5).unwrap());
+            core::assert_eq!(flags, AllocFlags::NOWAIT);
+            Err(KError::NoMemory)
+        });
     assert!(matches!(result, Err(KError::NoMemory)));
 }
 
@@ -87,16 +153,19 @@ fn runtime_slice_rejects_invalid_layout_before_allocator() {
 fn runtime_slice_empty_zst_and_copied_contents() {
     #[repr(align(256))]
     struct AlignedZero;
-    let owned = KBox::<[AlignedZero]>::reserve_slice_with_allocator(7, AllocFlags::NOWAIT, |_, _| {
-        Err(KError::NoMemory)
-    }).unwrap();
+    let owned =
+        KBox::<[AlignedZero]>::reserve_slice_with_allocator(7, AllocFlags::NOWAIT, |_, _| {
+            Err(KError::NoMemory)
+        })
+        .unwrap();
     assert_eq!(owned.len(), 7);
     assert_eq!(owned.as_ptr().addr() % 256, 0);
     let empty = KBox::<[u64]>::new_uninit_slice_with_flags(0, AllocFlags::NOWAIT).unwrap();
     assert_eq!(empty.len(), 0);
     let values = KBox::new_slice_with_flags(19u32, 4, AllocFlags::NOWAIT).unwrap();
     assert_eq!(&*values, &[19, 19, 19, 19]);
-    let reservation = KBox::<[DropProbe<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    let reservation =
+        KBox::<[DropProbe<'_>]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
     drop(reservation);
 }
 
@@ -129,7 +198,8 @@ fn initialized_zst_slice_runs_each_destructor() {
         }
     }
     let before = DROPS.load(Ordering::Relaxed);
-    let mut storage = KBox::<[AlignedZero]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
+    let mut storage =
+        KBox::<[AlignedZero]>::new_uninit_slice_with_flags(3, AllocFlags::NOWAIT).unwrap();
     for slot in storage.iter_mut() {
         slot.write(AlignedZero);
     }
@@ -161,7 +231,8 @@ fn into_inner_preserves_aligned_value_and_owned_array() {
     let mut owned = KBox::new_nowait(Aligned {
         value: 7,
         probes: core::array::from_fn(|_| DropProbe(&drops)),
-    }).unwrap();
+    })
+    .unwrap();
     owned.value = 19;
     let value = KBox::into_inner(owned);
     assert_eq!(value.value, 19);
@@ -185,7 +256,8 @@ fn into_inner_preserves_aligned_zero_sized_destructor() {
     let before = DROPS.load(Ordering::Relaxed);
     let owned = KBox::new_with_allocator(AlignedZero, AllocFlags::NOWAIT, |_, _| {
         Err(KError::NoMemory)
-    }).unwrap();
+    })
+    .unwrap();
     let value = KBox::into_inner(owned);
     assert_eq!(DROPS.load(Ordering::Relaxed), before);
     drop(value);
@@ -216,7 +288,8 @@ fn shared_callback_forwards_arguments_and_preserves_captures() {
     let callback = KBox::new(|left, right| {
         calls.set(calls.get() + 1);
         left + right + probe.drops()
-    }).unwrap();
+    })
+    .unwrap();
     let callback: KBox<dyn Fn(usize, usize) -> usize + '_> = callback;
     assert_eq!(invoke(&callback), 5);
     assert_eq!(invoke(callback), 5);
@@ -237,7 +310,8 @@ fn mutable_callback_consumption_drops_captures_once() {
     let callback = KBox::new(move |increment| {
         total += increment;
         total + probe.drops()
-    }).unwrap();
+    })
+    .unwrap();
     let mut callback: KBox<dyn FnMut(usize) -> usize + '_> = callback;
     assert_eq!(callback(2), 2);
     assert_eq!(consume(callback), 5);
@@ -319,12 +393,15 @@ fn trait_object_preserves_address_and_destroys_concrete_value() {
 #[def_test]
 fn slice_coercion_preserves_length_and_drops_every_element() {
     let drops = Cell::new(0);
-    let owned = KBox::new_nowait([DropProbe(&drops), DropProbe(&drops), DropProbe(&drops)])
-        .unwrap();
+    let owned =
+        KBox::new_nowait([DropProbe(&drops), DropProbe(&drops), DropProbe(&drops)]).unwrap();
     let mut slice: KBox<[DropProbe<'_>]> = owned;
     assert_eq!(slice.len(), 3);
     slice.swap(0, 2);
-    assert_eq!(Layout::for_value(&*slice), Layout::new::<[DropProbe<'_>; 3]>());
+    assert_eq!(
+        Layout::for_value(&*slice),
+        Layout::new::<[DropProbe<'_>; 3]>()
+    );
     drop(slice);
     assert_eq!(drops.get(), 3);
     let empty: KBox<[u64]> = KBox::new_nowait([]).unwrap();
@@ -358,8 +435,14 @@ fn aligned_zero_sized_trait_object_skips_storage_and_runs_drop() {
 fn unsized_owner_retains_pointer_layout_and_thread_bounds() {
     fn assert_send_sync<Value: Send + Sync>() {}
     assert_send_sync::<KBox<dyn core::any::Any + Send + Sync>>();
-    assert_eq!(core::mem::size_of::<KBox<u64>>(), core::mem::size_of::<*mut u64>());
-    assert_eq!(core::mem::size_of::<KBox<[u64]>>(), core::mem::size_of::<*mut [u64]>());
+    assert_eq!(
+        core::mem::size_of::<KBox<u64>>(),
+        core::mem::size_of::<*mut u64>()
+    );
+    assert_eq!(
+        core::mem::size_of::<KBox<[u64]>>(),
+        core::mem::size_of::<*mut [u64]>()
+    );
 }
 
 impl Drop for DropProbe<'_> {
@@ -508,12 +591,18 @@ fn abandoned_reservation_does_not_drop_uninitialized_value() {
 #[def_test]
 fn reservation_rejects_invalid_flags_and_propagates_allocation_failure() {
     let flags = AllocFlags::from_bits_retain(u32::MAX);
-    assert!(matches!(KBox::<()>::new_uninit_with_flags(flags), Err(KError::InvalidInput)));
-    let result = KBox::new_with_allocator(MaybeUninit::<usize>::uninit(), AllocFlags::KERNEL,
+    assert!(matches!(
+        KBox::<()>::new_uninit_with_flags(flags),
+        Err(KError::InvalidInput)
+    ));
+    let result = KBox::new_with_allocator(
+        MaybeUninit::<usize>::uninit(),
+        AllocFlags::KERNEL,
         |layout, flags| {
             assert_eq!(layout, Layout::new::<usize>());
             assert_eq!(flags, AllocFlags::KERNEL);
             Err(KError::NoMemory)
-        });
+        },
+    );
     assert!(matches!(result, Err(KError::NoMemory)));
 }

@@ -5,6 +5,14 @@ runtime retains boot-console access and logs a warning. The failed initializer
 does not attach an input notification or poison subsequent retries. This does
 not guarantee a working `/dev/console` until devtmpfs preparation succeeds.
 
+## RCU Ownership Validation
+
+RCU ownership fixtures use prepared KBox values. Runtime tests retain delayed
+readers across replacements and check each displaced allocation is released
+only after its grace period, including interrupt-reader cases. Optional RCU
+benchmarks require allocated fixtures and stop rather than report partial data
+on owner failure. Neither path changes production RCU service startup policy.
+
 ## Foundation IRQ Startup
 
 Controller preparation runs before scheduler installation with ordinary CPU

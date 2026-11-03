@@ -214,6 +214,11 @@ tasks, arrange load, collect timings and verify results using only public
 `krcu` APIs. They do not access RCU's internal state. Runtime powers off on
 successful return. See [runner instructions](../benches/rcu/README.md) for
 configuration and pass criteria.
+Owned RCU fixtures and the read/torture benchmarks prepare KBox payloads with
+NOWAIT before publication. Tests rejecting replacement inside a read scope
+therefore do not add a sleeping allocation to that scope. Opt-in benchmarks
+require every fixture to preserve their complete sample/release ledgers and
+stop on fixture allocation failure; this is not a production OOM policy.
 `KFEAT_RCU_BENCH` selects the independent callback/synchronous-wait runner through the
 same handoff. Kconfig excludes both stress runners while it is selected.
 

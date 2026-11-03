@@ -7,9 +7,11 @@ homepage.workspace = true
 
 [dependencies]
 bitflags.workspace = true
-kalloc.workspace = true
 kerrno.workspace = true
 unittest.workspace = true
+
+[target.'cfg(target_os = "none")'.dependencies]
+kalloc.workspace = true
 
 [lints]
 workspace = true

@@ -6,11 +6,16 @@
 //!
 //! Allocation policy describes what the caller permits, not a guarantee of
 //! success. The current backend never performs sleeping reclaim. Do not route
-//! these types through `GlobalAlloc`, whose kernel OOM path is fatal.
+//! kernel instances through `GlobalAlloc`, whose kernel OOM path is fatal.
+//! Hosted builds use the host allocator's nullable allocation interface for
+//! ownership tests; they do not model kernel reclaim or execution contexts.
 
 #![no_std]
 #![feature(derive_coerce_pointee)]
 #![feature(fn_traits, unboxed_closures, tuple_trait)]
+
+#[cfg(not(target_os = "none"))]
+extern crate alloc;
 
 mod kbox;
 

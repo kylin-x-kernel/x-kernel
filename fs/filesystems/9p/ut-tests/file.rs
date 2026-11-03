@@ -2,7 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
+
+use kalloc_types::KBox;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kvfs::{NodeFlags, NodePermission, Umode, VfsInodeInit};
@@ -110,7 +112,11 @@ impl P9Transport for FolioTransport {
 #[def_test]
 fn read_folio_fills_a_folio_across_msize_limited_reads() {
     let transport = FolioTransport::default();
-    let node = V9fsInode::new(P9Client::new(Box::new(transport.clone())).negotiate().unwrap());
+    let node = V9fsInode::new(
+        P9Client::new(KBox::new_nowait(transport.clone()).unwrap())
+            .negotiate()
+            .unwrap(),
+    );
     let inode = node.into_vfs_inode(VfsInodeInit::new(
         3,
         FILE_SIZE as u64,

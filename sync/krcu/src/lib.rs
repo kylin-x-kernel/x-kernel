@@ -77,13 +77,14 @@
 //!
 //! ```no_run
 //! extern crate alloc;
-//! use alloc::{boxed::Box, string::String};
+//! use alloc::string::String;
 //!
+//! use kalloc_types::KBox;
 //! use krcu::Rcu;
 //!
-//! let name = Rcu::new(Box::new(String::from("old")));
+//! let name = Rcu::new(KBox::new_nowait(String::from("old")).unwrap());
 //! let snapshot = name.with_read(|current| current.clone());
-//! match name.replace_sync(Box::new(String::from("new"))) {
+//! match name.replace_sync(KBox::new_nowait(String::from("new")).unwrap()) {
 //!     Ok(old) => drop(old),
 //!     Err((_error, unused)) => drop(unused), // Publication is unchanged.
 //! }
@@ -94,12 +95,11 @@
 //!
 //! ```no_run
 //! extern crate alloc;
-//! use alloc::boxed::Box;
-//!
+//! use kalloc_types::KBox;
 //! use krcu::{Rcu, with_read};
 //!
-//! let left = Rcu::new(Box::new(11));
-//! let right = Rcu::new(Box::new(22));
+//! let left = Rcu::new(KBox::new_nowait(11).unwrap());
+//! let right = Rcu::new(KBox::new_nowait(22).unwrap());
 //! let total = with_read(|scope| *left.read(scope) + *right.read(scope));
 //! assert_eq!(total, 33);
 //! ```

@@ -5,12 +5,11 @@
 //! Per-connection state for the Trusty-compatible vsock-TIPC bridge.
 
 use alloc::{
-    boxed::Box,
     string::{String, ToString},
     sync::Arc,
-    vec,
 };
 
+use kalloc_types::KBox;
 use kerrno::{KError, KResult};
 use tipc::{IPC_CHAN_MAX_BUF_SIZE, IpcChan};
 
@@ -68,15 +67,20 @@ pub(super) struct BridgeConnection {
     state: BridgeConnectionState,
     tipc_port_name: Option<String>,
     tipc_channel: Option<Arc<IpcChan>>,
-    rx_buffer: Box<[u8]>,
+    rx_buffer: KBox<[u8]>,
     rx_pending: usize,
     rx_bytes: usize,
     tx_bytes: usize,
 }
 
 impl BridgeConnection {
-    /// Creates a host-originated connection entry.
-    pub(super) fn new(token: usize, peer: VsockAddr, local_port: u32) -> Self {
+    /// Creates an entry with a prepared receive buffer, without allocating its owner.
+    pub(super) fn new(
+        token: usize,
+        peer: VsockAddr,
+        local_port: u32,
+        rx_buffer: KBox<[u8]>,
+    ) -> Self {
         Self {
             token,
             peer,
@@ -84,7 +88,7 @@ impl BridgeConnection {
             state: BridgeConnectionState::VsockOnly,
             tipc_port_name: None,
             tipc_channel: None,
-            rx_buffer: vec![0; BRIDGE_RX_BUFFER_SIZE].into_boxed_slice(),
+            rx_buffer,
             rx_pending: 0,
             rx_bytes: 0,
             tx_bytes: 0,
@@ -98,8 +102,9 @@ impl BridgeConnection {
         local_port: u32,
         tipc_port_name: &str,
         channel: Arc<IpcChan>,
+        rx_buffer: KBox<[u8]>,
     ) -> Self {
-        let mut conn = Self::new(token, peer, local_port);
+        let mut conn = Self::new(token, peer, local_port, rx_buffer);
         conn.set_state(BridgeConnectionState::TipcOnly);
         conn.set_tipc_channel(tipc_port_name, channel);
         conn

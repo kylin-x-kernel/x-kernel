@@ -24,6 +24,7 @@ use core::{
     task::Poll,
 };
 
+use kalloc_types::KBox;
 use kclass::prelude::DriverError;
 use kerrno::{KError, KResult};
 use klazy::Lazy;
@@ -39,7 +40,7 @@ use tipc::{
 
 use super::{
     VsockConnId,
-    bridge_connection::{BridgeConnection, BridgeConnectionState},
+    bridge_connection::{BRIDGE_RX_BUFFER_SIZE, BridgeConnection, BridgeConnectionState},
     bridge_port_map::{BRIDGE_PORT_MAP, TIPC_TO_VSOCK_MAP, TipcToVsockMapping, bridge_mapping},
     connection_manager::{
         VSOCK_CONN_MANAGER, VsockBridgeEvent, abort_bridge, create_bridge_connection,
@@ -249,12 +250,23 @@ impl VsockBridge {
         }
     }
 
+    /// Runs on the RX task without bridge or manager locks held. Buffer allocation
+    /// uses KERNEL permissions and requires sleepable, reclaim-safe context.
     fn on_connection_request(&self, conn_id: VsockConnId) {
         let Some(mapping) = bridge_mapping(conn_id.local_port) else {
             return;
         };
+        let rx_buffer = match KBox::new_slice(0u8, BRIDGE_RX_BUFFER_SIZE) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                warn!("vsock bridge receive buffer preparation failed: {err:?}");
+                let _ = abort_bridge(conn_id);
+                return;
+            }
+        };
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-        let mut conn = BridgeConnection::new(token, conn_id.peer_addr, conn_id.local_port);
+        let mut conn =
+            BridgeConnection::new(token, conn_id.peer_addr, conn_id.local_port, rx_buffer);
         if !mapping.tipc_service.is_empty()
             && let Err(err) = self.connect_tipc(
                 &mut conn,
@@ -511,6 +523,9 @@ impl VsockBridge {
         }
     }
 
+    /// Runs on the TX task in sleepable, reclaim-safe context. Buffer preparation
+    /// holds no port, channel, bridge or manager lock; failure closes the accepted
+    /// channel before any vsock connection is admitted.
     fn accept_reverse_tipc(&self, mapping: &TipcToVsockMapping) -> KResult {
         let port = {
             let ports = self.ports.lock();
@@ -528,6 +543,10 @@ impl VsockBridge {
             return Err(KError::PermissionDenied);
         }
 
+        let rx_buffer = KBox::new_slice(0u8, BRIDGE_RX_BUFFER_SIZE).inspect_err(|_| {
+            channel.close();
+        })?;
+
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
 
         // Create the connection in the manager and insert the BridgeConnection
@@ -542,6 +561,7 @@ impl VsockBridge {
                 conn_id.local_port,
                 mapping.tipc_service,
                 channel.clone(),
+                rx_buffer,
             );
             self.connections.lock().push(conn);
         })

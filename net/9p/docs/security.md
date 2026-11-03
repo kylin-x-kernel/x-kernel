@@ -1,5 +1,14 @@
 # p9 — 安全与可靠性分析
 
+## Transport owner admission
+
+Transport storage failure is handled by the caller before constructing a client
+or admitting remote fids. P9Client owns an already initialized KBox and does not
+introduce a second owner-allocation failure after admission. Existing tests use
+prepared transport fixtures and retain malformed-response and fid-cleanup
+coverage; they do not force global OOM or make nested buffers fallible.
+
+
 ## 信任模型
 
 transport peer 和所有响应 PDU 均不可信。qid、目录项、属性、字符串、errno 和文件内容只有

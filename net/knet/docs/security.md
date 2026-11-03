@@ -15,6 +15,21 @@ data through that connection. It also exercises the empty-queue error path.
 Existing protocol/identity tests cover dispatch through KBox. No global OOM,
 transport-buffer OOM or vsock host-handshake failure is injected.
 
+## Bridge buffer allocation boundary
+
+Bridge buffer preparation runs on sleepable RX/TX tasks with no bridge or
+connection-manager lock held. KERNEL permissions apply only to that allocation;
+they do not make nested String, Vec, Arc or transport allocations fallible.
+The fixed buffer length is not peer-controlled. Forward preparation failure
+uses the existing forced-abort path, which removes manager state even if the
+transport reset fails. Reverse failure closes the already accepted TIPC channel
+before allocating a vsock port or publishing a bridge entry. A prepared buffer
+is released automatically if connection creation fails before the pre-connect
+hook consumes it; later failures retain the existing bridge removal protocol.
+This boundary rejects a connection on allocation failure rather than promising
+lossless admission or retry. Live peer handshakes and global OOM injection are
+not covered by the existing socket-owner tests.
+
 ## Analysis Scope
 
 This analysis covers the entire `knet` crate: all source modules under `src/`,

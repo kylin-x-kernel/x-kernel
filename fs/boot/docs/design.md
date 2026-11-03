@@ -1,5 +1,15 @@
 # fs_boot — 设计文档
 
+## 9P transport preparation
+
+host_9p_get_tree allocates the Virtio9pTransport owner with KERNEL before
+get_tree_nodev and before any 9P request. Device discovery has returned an owned
+class handle; no registry or transport lock is retained at allocation.
+Like the mount path, this requires reclaim-safe sleepable task context with
+IRQs/preemption enabled, no non-sleepable RCU section and no reclaim/IO locks.
+NoMemory propagates through VfsResult, without creating a client or root.
+
+
 ## Fallible filesystem-owner preparation
 
 Bootstrap rootfs and the initial cgroup filesystem now return VfsResult for

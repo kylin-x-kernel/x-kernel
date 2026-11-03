@@ -1,5 +1,17 @@
 # krcu - Security And Reliability
 
+## KBox publication lifetime
+
+Only KBox-origin pointers enter the owning container. Acquire/release publication
+does not permit reconstructing an exclusive owner while old scoped readers
+remain: replace_sync calls KBox::from_raw only after its grace period.
+The unchanged container borrow contract excludes readers on final destruction.
+Context-rejection tests preserve both the installed and unused owners; runtime
+tests cover overlapping replacements, IRQ readers and delayed reader release.
+This migration does not make callback preparation or nested payload allocation
+fallible end to end.
+
+
 ## Trust Boundary And Assets
 
 Softirq installation must leave the existing action unchanged on conflict and
@@ -285,7 +297,7 @@ that isolated coordinator. A hardware-clock escape bounds its IRQ-off reader;
 stalled post-exit GP progress retains storage until the bounded QEMU runner
 terminates the test, rather than fabricating quiescence to release it.
 Only initialized pointers are published, and only the unique exchange owner
-reconstructs each removed Box after the GP. Shared containers require both
+reconstructs each removed KBox after the GP. Shared containers require both
 Send and Sync payloads: writers may recover values allocated by other tasks.
 It exposes neither an unguarded reference nor mutable access. Final Drop requires the
 exclusive container owner and performs ordinary caller-context destruction;

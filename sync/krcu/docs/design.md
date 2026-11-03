@@ -1,5 +1,16 @@
 # krcu - Design
 
+## Prepared KBox ownership
+
+`Rcu::new` and `replace_sync` consume caller-prepared KBox values. The caller
+selects allocation permissions before entering read scopes or publication.
+These operations do not allocate a payload owner. Replacement preparation
+failure returns the same unused owner without exchange; successful exchange
+retains the displaced raw KBox until its grace period completes, then recovers
+and returns it. Final exclusive destruction recovers only the current owner.
+The grace-period protocol and callback preparation policy are unchanged.
+
+
 ## Purpose And Ownership
 
 `krcu` owns kernel RCU instances and their execution-context integration.
@@ -361,13 +372,13 @@ completion observation, including completion before parking or migration. The ma
 never owns a retired payload, and potentially sleeping destruction remains with
 the caller after successful return. This waits for a GP, not callback drainage.
 
-The public `Rcu<T>` retains one Box behind
+The public `Rcu<T>` retains one KBox behind
 an atomic pointer; Acquire reads borrow both the container and the current task's
 read token. Its private raw read remains unsafe because an arbitrary standalone
 TaskReader token is not proof of host participation. Public `with_read` creates
 the genuine host scope internally. Synchronous replacement prepares the
 wait first, exchanges with AcqRel, waits without a writer lock, and reconstructs
-the old Box only after completion. Before then the old owner remains raw: an
+the old KBox only after completion. Before then the old owner remains raw: an
 abandoned operation can leak it but cannot run its destructor early. Concurrent
 exchanges retain separate old allocations. Final exclusive container destruction
 needs no extra GP because outstanding reads and replacements borrow it.

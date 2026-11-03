@@ -1,5 +1,16 @@
 # RCU List
 
+## Fallible entry preparation
+
+Entry owns a KBox node. `new` returns KResult with KERNEL permissions and
+requires sleepable reclaim-safe task context before taking writer locks.
+`new_nowait` and `new_with_flags` expose explicit preparation permissions;
+unknown flags and allocation failure drop the unpublished payload in the caller.
+NOWAIT does not promise NMI safety, bounded latency or reserved memory.
+Publication, unlink and embedded retirement do not allocate a second owner.
+The callback recovers the original KBox only after the protecting grace period.
+
+
 ## Responsibilities
 
 The list owns ordered publication, serialized topology updates and entry
@@ -71,7 +82,7 @@ than freeing it or pretending removal did not happen.
 Arbitrary T: Send + Sync does not make destruction callback-safe. remove_first is
 unsafe and explicitly requires a nonblocking, nonunwinding release chain. Sleeping
 destruction needs an appropriate existing finalization owner, not a new RCU mode.
-Box deallocation is currently nonblocking; changing the allocator must preserve
+KBox deallocation is currently nonblocking; changing the allocator must preserve
 an atomic-context release facility for this path.
 
 ## Test Dependency Selection

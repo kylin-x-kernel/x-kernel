@@ -1,5 +1,13 @@
 # v9fs — 安全与可靠性分析
 
+## Transport handoff boundary
+
+A prepared KBox transport is transferred exactly once to the client. Mount
+failure releases it through existing client/fid ownership. The caller must
+allocate it before negotiation; this does not provide rollback of remote
+operations already performed or change synchronous fid destruction requirements.
+
+
 ## Session-owner allocation failure
 
 NoMemory from session-owner allocation drops the local session/client references

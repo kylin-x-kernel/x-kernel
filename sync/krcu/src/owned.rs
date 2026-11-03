@@ -4,12 +4,12 @@
 
 //! Owning publication, scoped borrowing and task-context synchronous replacement.
 
-use alloc::boxed::Box;
 use core::{
     marker::PhantomData,
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+use kalloc_types::KBox;
 use kerrno::KError;
 
 use super::synchronize::with_prepared_grace_period;
@@ -25,7 +25,7 @@ use crate::ReadScope;
 /// directly in the dropping context, without another grace period.
 pub struct Rcu<T> {
     value: AtomicPtr<T>,
-    _owner: PhantomData<Box<T>>,
+    _owner: PhantomData<KBox<T>>,
 }
 
 // SAFETY: shared readers only receive &T, hence Sync. A replacement can return
@@ -35,9 +35,9 @@ unsafe impl<T: Send + Sync> Sync for Rcu<T> {}
 
 impl<T> Rcu<T> {
     /// Takes ownership of an initialized allocation without waiting or allocating.
-    pub fn new(value: Box<T>) -> Self {
+    pub fn new(value: KBox<T>) -> Self {
         Self {
-            value: AtomicPtr::new(Box::into_raw(value)),
+            value: AtomicPtr::new(KBox::into_raw(value)),
             _owner: PhantomData,
         }
     }
@@ -60,8 +60,8 @@ impl<T> Rcu<T> {
     ///
     /// ```compile_fail
     /// # extern crate alloc;
-    /// use alloc::boxed::Box;
-    /// let value = krcu::Rcu::new(Box::new(42_u64));
+    /// use kalloc_types::KBox;
+    /// let value = krcu::Rcu::new(KBox::new_nowait(42_u64).unwrap());
     /// let escaped = value.with_read(|current| current);
     /// let _ = *escaped;
     /// ```
@@ -79,7 +79,7 @@ impl<T> Rcu<T> {
     ///
     /// ```compile_fail
     /// # extern crate alloc;
-    /// let value = krcu::Rcu::new(alloc::boxed::Box::new(42));
+    /// let value = krcu::Rcu::new(kalloc_types::KBox::new_nowait(42).unwrap());
     /// let escaped = krcu::with_read(|scope| value.read(scope));
     /// let _ = *escaped;
     /// ```
@@ -109,20 +109,20 @@ impl<T> Rcu<T> {
         reason = "CG-021-no-panic-on-reachable-failure: preparation either rejects before \
                   invoking the body or invokes it exactly once without later failure"
     )]
-    pub fn replace_sync(&self, new_value: Box<T>) -> Result<Box<T>, (KError, Box<T>)> {
+    pub fn replace_sync(&self, new_value: KBox<T>) -> Result<KBox<T>, (KError, KBox<T>)> {
         // Retain the unused owner outside the body until all preparation succeeds.
         let mut new_value = Some(new_value);
         with_prepared_grace_period(|wait| {
             let new_value = new_value.take().expect("replacement body runs once");
-            let old = self.value.swap(Box::into_raw(new_value), Ordering::AcqRel);
-            // Do not reconstruct a Box yet: old readers may still hold shared
+            let old = self.value.swap(KBox::into_raw(new_value), Ordering::AcqRel);
+            // Do not reconstruct a KBox yet: old readers may still hold shared
             // borrows. A nonreturning wait leaks this raw owner instead of freeing
             // it early, including if unwinding is introduced in a host environment.
             wait.submit_and_wait();
             // SAFETY: the exchange gave this operation unique ownership, and its
             // subsequent GP ended all protected borrows of this removed allocation.
             // No independent publication or raw ownership API is exposed.
-            unsafe { Box::from_raw(old) }
+            unsafe { KBox::from_raw(old) }
         })
         .map_err(|error| {
             (
@@ -137,8 +137,8 @@ impl<T> Drop for Rcu<T> {
     fn drop(&mut self) {
         // SAFETY: exclusive final ownership excludes read references and pending
         // replacements, both of which borrow self. The current pointer still
-        // represents exactly one Box owner, distinct from every returned value.
-        drop(unsafe { Box::from_raw(*self.value.get_mut()) });
+        // represents exactly one KBox owner, distinct from every returned value.
+        drop(unsafe { KBox::from_raw(*self.value.get_mut()) });
     }
 }
 

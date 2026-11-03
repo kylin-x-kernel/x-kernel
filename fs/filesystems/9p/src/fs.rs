@@ -4,7 +4,7 @@
 
 //! 9P filesystem mount and superblock operations.
 
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{string::String, sync::Arc};
 
 use kvfs::{
     Dentry, FileSystemType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsError,
@@ -24,6 +24,8 @@ struct V9fsSession {
 /// Mounts a 9P2000.L filesystem over an already connected transport.
 ///
 /// Transport discovery remains outside v9fs.
+/// The caller supplies a prepared KBox transport; this function transfers it
+/// to the client without another transport-owner allocation.
 /// Requires reclaim-safe sleepable task context without transport, reclaim,
 /// I/O or filesystem locks held, with IRQs/preemption enabled and outside
 /// non-sleepable RCU. Private-owner allocation uses KERNEL and may return NoMemory.
@@ -37,7 +39,7 @@ struct V9fsSession {
 pub fn mount(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
-    transport: Box<dyn P9Transport>,
+    transport: kalloc_types::KBox<dyn P9Transport>,
 ) -> VfsResult<Arc<SuperBlock>> {
     let client = P9Client::new(transport);
     let root_fid = client.negotiate()?;

@@ -15,10 +15,17 @@ use kerrno::{KError, KResult};
 
 use crate::AllocFlags;
 
+#[cfg(target_os = "none")]
 fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
     kalloc::global_allocator()
         .alloc(layout)
         .map_err(|_| KError::NoMemory)
+}
+
+#[cfg(not(target_os = "none"))]
+fn allocate(layout: Layout, _flags: AllocFlags) -> KResult<NonNull<u8>> {
+    // SAFETY: callers supply a nonzero layout; null is returned as NoMemory.
+    NonNull::new(unsafe { alloc::alloc::alloc(layout) }).ok_or(KError::NoMemory)
 }
 
 struct Storage {
@@ -30,7 +37,14 @@ impl Drop for Storage {
     fn drop(&mut self) {
         let layout = self.layout;
         if layout.size() != 0 {
+            #[cfg(target_os = "none")]
             kalloc::global_allocator().dealloc(self.pointer.cast(), layout);
+            #[cfg(not(target_os = "none"))]
+            // SAFETY: Storage retains the unique host allocation and its original
+            // nonzero layout, and runs only after pointee access has ended.
+            unsafe {
+                alloc::alloc::dealloc(self.pointer.as_ptr(), layout);
+            }
         }
     }
 }
@@ -43,7 +57,8 @@ impl Drop for Storage {
 /// value needs no allocation, but its destructor still runs.
 /// Sized owners can coerce to trait objects or slices without allocating.
 /// Runtime-length slices support uninitialized storage and copied values.
-/// String construction and raw ownership conversion are not provided.
+/// String construction is not provided. Raw ownership can be transferred with
+/// [`Self::into_raw`] and recovered with [`Self::from_raw`].
 ///
 /// # Execution context
 /// Borrowing through `Deref`/`DerefMut` neither allocates nor sleeps; operations
@@ -55,6 +70,40 @@ impl Drop for Storage {
 pub struct KBox<T: ?Sized> {
     pointer: NonNull<T>,
     owner: PhantomData<T>,
+}
+
+impl<T: ?Sized> KBox<T> {
+    /// Transfers ownership to a raw pointer without allocating or dropping `T`.
+    ///
+    /// Preserves the address and DST metadata. The caller becomes responsible
+    /// for eventual destruction, normally through [`Self::from_raw`]. Merely
+    /// transferring the pointer neither sleeps nor accesses the pointee.
+    pub fn into_raw(owned: Self) -> *mut T {
+        ManuallyDrop::new(owned).pointer.as_ptr()
+    }
+
+    /// Recovers an owner previously transferred by [`Self::into_raw`].
+    ///
+    /// This operation does not allocate, sleep or access the pointee. Later
+    /// access and destruction retain `T`'s context requirements; the original
+    /// allocation flags do not constrain the destructor.
+    ///
+    /// # Safety
+    /// `pointer` must be the non-null, aligned pointer from `KBox::into_raw`,
+    /// with its original allocation provenance, type and DST metadata intact.
+    /// The value must remain initialized and its storage must not have been
+    /// freed. For ZSTs, the original aligned pointer is still required.
+    /// The caller must transfer the sole ownership right exactly once and
+    /// ensure no outstanding references conflict with this exclusive owner.
+    /// In particular, RCU readers must finish before recovering a retired owner.
+    /// Pointers from Box, foreign allocators or interior fields are not accepted.
+    pub unsafe fn from_raw(pointer: *mut T) -> Self {
+        Self {
+            // SAFETY: the caller supplies the non-null pointer of a live KBox.
+            pointer: unsafe { NonNull::new_unchecked(pointer) },
+            owner: PhantomData,
+        }
+    }
 }
 
 impl<T> KBox<T> {

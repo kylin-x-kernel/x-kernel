@@ -1632,6 +1632,7 @@ dependencies = [
  "cgroup2fs",
  "devfs",
  "fs_context",
+ "kalloc-types",
  "kbuild_config",
  "kclass",
  "kcred",
@@ -3078,6 +3079,7 @@ dependencies = [
 name = "krcu"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "karch",
  "kbuild_config",
  "kcompletion",
@@ -3111,6 +3113,7 @@ dependencies = [
 name = "krcu-list"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc-types",
  "kerrno",
  "krcu",
  "kspin",
@@ -3170,6 +3173,7 @@ dependencies = [
  "irq-driver",
  "kaddr_layout",
  "kalloc",
+ "kalloc-types",
  "karch",
  "kbuild_config",
  "kcompletion",
@@ -4120,6 +4124,7 @@ name = "p9"
 version = "0.3.0-dev"
 dependencies = [
  "bitflags 2.13.2",
+ "kalloc-types",
  "kerrno",
  "ksync",
  "log",

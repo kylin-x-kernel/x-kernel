@@ -15,7 +15,7 @@ use super::*;
 fn append<T: Send + Sync + 'static>(list: &RcuList<T>, value: T) {
     // SAFETY: host fixture uses normal threads and a real SMP spinlock; no IRQ
     // entry or reentrant list writer exists. Entry preparation is outside it.
-    unsafe { list.push_back(Entry::new(value)) };
+    unsafe { list.push_back(Entry::new_nowait(value).unwrap()) };
 }
 
 /// # Safety
@@ -39,7 +39,7 @@ fn withdraw<T: Send + Sync + 'static>(
 unsafe fn reclaim<T>(raw: *mut Node<T>) {
     assert!(!raw.is_null());
     // SAFETY: fixture certifies unique allocation ownership and no readers.
-    drop(unsafe { Box::from_raw(raw) });
+    drop(unsafe { KBox::from_raw(raw) });
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn prepared_live_and_retired_owners_release_once() {
         core::mem::size_of::<Node<Arc<usize>>>(),
     );
     let drops = Arc::new(AtomicUsize::new(0));
-    drop(Entry::new(CountDrop(drops.clone())));
+    drop(Entry::new_nowait(CountDrop(drops.clone())).unwrap());
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     let list = RcuList::new();
     append(&list, CountDrop(drops.clone()));

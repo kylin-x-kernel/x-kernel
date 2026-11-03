@@ -4,9 +4,10 @@
 
 //! Serial read-side batch costs without deliberate updater pressure.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::hint::black_box;
 
+use kalloc_types::KBox;
 use kcpu_id_map::LogicalCpuId;
 
 const OPERATIONS: usize = 1024;
@@ -25,8 +26,13 @@ fn measure_batch(mut operation_fn: impl FnMut() -> u64) -> u64 {
     end - begin
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "CG-021-no-panic-on-reachable-failure: test scenario: the opt-in RCU benchmark \
+              requires an allocated fixture to report complete read samples"
+)]
 pub(super) fn measure() -> Vec<[u64; 3]> {
-    let value = krcu::Rcu::new(Box::new(VALUE));
+    let value = krcu::Rcu::new(KBox::new_nowait(VALUE).unwrap());
     let mut samples = Vec::with_capacity(super::SAMPLES);
     for index in 0..super::SAMPLES {
         let mut elapsed_ns = [0; 3];

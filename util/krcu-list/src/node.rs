@@ -4,13 +4,13 @@
 
 //! Stable entry storage with a callback embedded in the same allocation.
 
-use alloc::boxed::Box;
 use core::{
     mem::offset_of,
     ptr::{self, NonNull},
     sync::atomic::AtomicPtr,
 };
 
+use kalloc_types::KBox;
 use krcu::{CallbackNode, PreparedCallback};
 
 pub(super) struct Node<T> {
@@ -55,7 +55,7 @@ impl<T: Send + Sync + 'static> Node<T> {
 unsafe fn retain_rejected(_callback: *mut CallbackNode) {}
 
 /// # Safety
-/// callback is a field projection from one original Node<T> Box allocation,
+/// callback is a field projection from one original Node<T> KBox allocation,
 /// detached and invoked exactly once after its GP. T's release is callback-safe.
 unsafe fn release<T>(callback: *mut CallbackNode) {
     // SAFETY: subtract this concrete field offset within the original allocation,
@@ -63,7 +63,7 @@ unsafe fn release<T>(callback: *mut CallbackNode) {
     let raw = unsafe { callback.byte_sub(offset_of!(Node<T>, callback)) }.cast::<Node<T>>();
     // SAFETY: GP ended every old borrow; this callback owns the allocation.
     // Node Drop is shallow and never follows the possibly stale next pointer.
-    drop(unsafe { Box::from_raw(raw) });
+    drop(unsafe { KBox::from_raw(raw) });
 }
 
 #[cfg(test)]

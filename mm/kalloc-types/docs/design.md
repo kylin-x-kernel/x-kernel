@@ -1,5 +1,18 @@
 # kalloc-types 设计
 
+## Raw ownership and hosted validation
+
+`KBox::into_raw` transfers the sole owner without touching its pointee;
+`unsafe KBox::from_raw` recovers that owner with the original type, provenance
+and DST metadata. Neither allocates or sleeps. Only pointers originating from
+KBox are accepted; this is not interoperability with standard Box or foreign
+allocators. RCU integrations retain raw ownership until old readers finish.
+
+Bare-metal builds continue using the fallible kalloc backend directly.
+Hosted builds use paired nullable host allocation and deallocation for host/Miri
+ownership tests. They do not model reclaim, IRQ context or kernel OOM behavior.
+
+
 ## Migration Batch Boundary
 
 Owner migration must preserve both failure cleanup and subsystem progress.
@@ -72,7 +85,7 @@ Runtime-length slices support uninitialized reservation and Copy-value filling.
 fallible ownership, without intermediate Vec allocation or user-memory access.
 The default uses KERNEL; explicit flags retain the existing allocation context
 contract. Copy ZST slices require no per-element work.
-String construction, raw pointer conversion, cloning, growable containers, and
+String construction, cloning, growable containers, and
 pinning are not provided.
 Callers do not use the standard `Box` through this API.
 

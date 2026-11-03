@@ -5,7 +5,7 @@
 //! Public RCU wait semantics against boot's permanent task and callback services.
 //! Tests do not replace the service or rely on another test to initialize it.
 
-use alloc::boxed::Box;
+use kalloc_types::KBox;
 
 use kerrno::KError;
 use krcu::{Rcu, synchronize_rcu};
@@ -13,8 +13,8 @@ use unittest::{assert, assert_eq, def_test};
 
 #[def_test]
 fn public_scope_rejects_wait_and_protects_multiple_containers() {
-    let left = Rcu::new(Box::new(11));
-    let right = Rcu::new(Box::new(22));
+    let left = Rcu::new(KBox::new_nowait(11).unwrap());
+    let right = Rcu::new(KBox::new_nowait(22).unwrap());
     let (sum, wait_result) = krcu::with_read(|scope| {
         let sum = *left.read(scope) + *right.read(scope);
         // SAFETY: no data is retired; this checks rejection before any marker

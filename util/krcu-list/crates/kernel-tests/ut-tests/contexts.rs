@@ -13,7 +13,7 @@ fn controlled_nmi_traverses_while_writer_is_locked() {
     let list = RcuList::new();
     for value in 0..4 {
         // SAFETY: initialized task with no reentrant writer.
-        unsafe { list.push_back(Entry::new(value)) };
+        unsafe { list.push_back(Entry::new_nowait(value).unwrap()) };
     }
     let mut is_valid = false;
     let mut predicate_fn = |value: &usize| {
@@ -49,7 +49,7 @@ fn controlled_nmi_traverses_while_writer_is_locked() {
 fn real_timer_irq_reads_published_then_removed_list() {
     let list = Arc::new(RcuList::new());
     // SAFETY: initialized task context.
-    unsafe { list.push_back(Entry::new(17)) };
+    unsafe { list.push_back(Entry::new_nowait(17).unwrap()) };
     for expected_count in [1, 0] {
         let completed = Arc::new(AtomicBool::new(false));
         let is_valid = Arc::new(AtomicBool::new(false));
@@ -114,19 +114,19 @@ fn real_retirement_callback_can_read_another_list() {
     let observed = Arc::new(RcuList::new());
     for value in [17, 23] {
         // SAFETY: initialized task context with no reentrant mutation.
-        unsafe { observed.push_back(Entry::new(value)) };
+        unsafe { observed.push_back(Entry::new_nowait(value).unwrap()) };
     }
     let is_valid = Arc::new(AtomicBool::new(false));
     let retired = RcuList::new();
     // SAFETY: task context; callback captures only independently owned state.
     unsafe {
-        retired.push_back(Entry::new(ReadOnDrop {
+        retired.push_back(Entry::new_nowait(ReadOnDrop {
             observed: observed.clone(),
             is_valid: is_valid.clone(),
-        }))
+        }).unwrap())
     };
     // SAFETY: destructor performs only watched interrupt reads, an atomic store
-    // and nonblocking Arc/Box release. It never waits for this test or service.
+    // and nonblocking Arc/KBox release. It never waits for this test or service.
     assert_eq!(unsafe { retired.remove_first(|_| true) }, Ok(true));
     drop(retired);
     // SAFETY: no scope/lock held; observed remains alive independently.

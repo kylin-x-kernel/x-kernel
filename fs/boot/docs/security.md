@@ -1,5 +1,14 @@
 # fs_boot — 安全与可靠性分析
 
+## 9P owner failure
+
+Failure to prepare the transport KBox drops the selected local class handle
+before client negotiation, remote attachment or local root publication.
+Device enumeration and transport internals retain existing allocation behavior.
+The mount callback returns NoMemory rather than choosing fatal-boot policy;
+the existing caller decides whether its particular mount failure is fatal.
+
+
 ## Required-filesystem allocation failure
 
 Failure to allocate bootstrap-root or initial-cgroup private state is diagnosed

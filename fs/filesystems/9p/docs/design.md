@@ -1,5 +1,13 @@
 # v9fs — 设计文档
 
+## Prepared transport handoff
+
+Mount consumes KBox<dyn P9Transport> supplied by its caller and hands it directly
+to P9Client before negotiation. No transport-owner allocation is performed after
+remote attach. Session-owner allocation and remote fid cleanup retain their
+existing contracts; client Arc and protocol buffers are not migrated here.
+
+
 ## Prepared session owner
 
 After negotiation and root metadata validation, mount prepares the session in a

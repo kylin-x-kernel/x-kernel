@@ -2,12 +2,52 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use kerrno::KResult;
+use kalloc_types::KBox;
+
 use unittest::{assert_eq, def_test};
 
 use super::*;
+
+#[def_test]
+fn prepared_transport_is_not_reboxed_or_used_before_negotiation() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Transport {
+        requests: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+    }
+    impl P9Transport for Transport {
+        fn request(&mut self, _request: &[u8], _response: &mut [u8]) -> KResult<usize> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            Err(kerrno::KError::Io)
+        }
+    }
+    impl Drop for Transport {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let requests = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let transport = KBox::new_nowait(Transport {
+        requests: requests.clone(),
+        drops: drops.clone(),
+    })
+    .unwrap();
+    let address = (&*transport as *const Transport).cast::<()>();
+    let client = P9Client::new(transport);
+    let observed = (&*client.state.lock().transport as *const dyn P9Transport).cast::<()>();
+    assert_eq!(observed, address);
+    assert_eq!(requests.load(Ordering::Relaxed), 0);
+    let retained = client.clone();
+    drop(client);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(retained);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
 
 struct FixedResponseTransport {
     response: Vec<u8>,
@@ -129,10 +169,10 @@ fn test_client(response: Vec<u8>, reported_size: usize) -> Arc<P9Client> {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::Unknown,
-            transport: Box::new(FixedResponseTransport {
+            transport: KBox::new_nowait(FixedResponseTransport {
                 response,
                 reported_size,
-            }),
+            }).unwrap(),
         }),
     })
 }
@@ -140,9 +180,9 @@ fn test_client(response: Vec<u8>, reported_size: usize) -> Arc<P9Client> {
 #[def_test]
 fn test_negotiate_uses_linux_default_attach_identity() {
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let client = P9Client::new(Box::new(NegotiationTransport {
+    let client = P9Client::new(KBox::new_nowait(NegotiationTransport {
         requests: requests.clone(),
-    }));
+    }).unwrap());
 
     let root = client.negotiate().unwrap();
 
@@ -197,10 +237,10 @@ fn test_final_fid_reference_clunks_and_releases_identifier() {
             next_fid: 42,
             live_fids,
             version: P9Version::P2000L,
-            transport: Box::new(RecordingEmptyResponseTransport {
+            transport: KBox::new_nowait(RecordingEmptyResponseTransport {
                 request: request.clone(),
                 response_type: RCLUNK,
-            }),
+            }).unwrap(),
         }),
     });
     let fid = P9Fid::new(
@@ -300,10 +340,10 @@ fn test_link_encodes_directory_fid_before_target_fid() {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::P2000L,
-            transport: Box::new(RecordingEmptyResponseTransport {
+            transport: KBox::new_nowait(RecordingEmptyResponseTransport {
                 request: request.clone(),
                 response_type: RLINK,
-            }),
+            }).unwrap(),
         }),
     });
     let qid = Qid {
@@ -334,9 +374,9 @@ fn test_open_encodes_linux_server_mode_mask() {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::P2000L,
-            transport: Box::new(RecordingOpenTransport {
+            transport: KBox::new_nowait(RecordingOpenTransport {
                 request: request.clone(),
-            }),
+            }).unwrap(),
         }),
     });
     let fid = P9Fid::new(
@@ -395,9 +435,9 @@ fn test_open_failure_can_retry_and_io_obeys_server_iounit() {
     {
         let mut state = client.state.lock();
         state.msize = 4096;
-        state.transport = Box::new(RecordingOpenTransport {
+        state.transport = KBox::new_nowait(RecordingOpenTransport {
             request: request.clone(),
-        });
+        }).unwrap();
     }
     fid.open(P9OpenMode::ReadWrite, P9OpenFlags::empty())
         .unwrap();
@@ -433,9 +473,9 @@ fn test_statfs_decodes_linux_dotl_fields() {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::P2000L,
-            transport: Box::new(RecordingStatFsTransport {
+            transport: KBox::new_nowait(RecordingStatFsTransport {
                 request: request.clone(),
-            }),
+            }).unwrap(),
         }),
     });
     let fid = P9Fid::new(
@@ -479,10 +519,10 @@ fn test_setattr_encodes_valid_bits_and_timestamps() {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::P2000L,
-            transport: Box::new(RecordingEmptyResponseTransport {
+            transport: KBox::new_nowait(RecordingEmptyResponseTransport {
                 request: request.clone(),
                 response_type: RSETATTR,
-            }),
+            }).unwrap(),
         }),
     });
     let fid = P9Fid::new(
@@ -543,10 +583,10 @@ fn test_renameat_encodes_directory_fids_and_names() {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::P2000L,
-            transport: Box::new(RecordingEmptyResponseTransport {
+            transport: KBox::new_nowait(RecordingEmptyResponseTransport {
                 request: request.clone(),
                 response_type: RRENAMEAT,
-            }),
+            }).unwrap(),
         }),
     });
     let qid = Qid {
@@ -579,10 +619,10 @@ fn test_unlinkat_encodes_remove_directory_flag() {
             next_fid: 1,
             live_fids: BTreeSet::new(),
             version: P9Version::P2000L,
-            transport: Box::new(RecordingEmptyResponseTransport {
+            transport: KBox::new_nowait(RecordingEmptyResponseTransport {
                 request: request.clone(),
                 response_type: RUNLINKAT,
-            }),
+            }).unwrap(),
         }),
     });
     let directory = P9Fid::new(

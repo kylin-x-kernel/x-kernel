@@ -19,14 +19,14 @@ use super::rcu_support;
 
 #[def_test]
 fn scoped_read_update_example_preserves_owned_results() {
-    let value = Rcu::new(Box::new(alloc::string::String::from("old")));
+    let value = Rcu::new(kalloc_types::KBox::new_nowait(alloc::string::String::from("old")).unwrap());
     let copied = value.with_read(|text| text.clone());
     let (is_same_value, nested_length) =
         value.with_read(|outer| value.with_read(|inner| (outer == inner, inner.len())));
     assert!(is_same_value);
     assert_eq!(nested_length, 3);
     let old = value
-        .replace_sync(Box::new(alloc::string::String::from("new")))
+        .replace_sync(kalloc_types::KBox::new_nowait(alloc::string::String::from("new")).unwrap())
         .unwrap();
     assert_eq!(*old, "old");
     drop(old);
@@ -36,8 +36,8 @@ fn scoped_read_update_example_preserves_owned_results() {
 
 #[def_test]
 fn failed_preparation_preserves_publication_and_new_owner() {
-    let value = Rcu::new(Box::new(11_u64));
-    let new_value = Box::new(22);
+    let value = Rcu::new(kalloc_types::KBox::new_nowait(11_u64).unwrap());
+    let new_value = kalloc_types::KBox::new_nowait(22).unwrap();
     let new_address = &*new_value as *const u64;
     let result = {
         let _irq = kspin::IrqSave::new();
@@ -53,9 +53,9 @@ fn failed_preparation_preserves_publication_and_new_owner() {
 
 #[def_test]
 fn replacement_inside_read_scope_leaves_both_owners_unchanged() {
-    let value = Rcu::new(Box::new(11_u64));
+    let value = Rcu::new(kalloc_types::KBox::new_nowait(11_u64).unwrap());
     let (result, observed) = krcu::with_read(|token| {
-        let result = value.replace_sync(Box::new(22));
+        let result = value.replace_sync(kalloc_types::KBox::new_nowait(22).unwrap());
         let observed = *value.read(token);
         (result, observed)
     });
@@ -92,11 +92,11 @@ impl Drop for Payload {
     }
 }
 
-fn payload(version: usize, probe: &Arc<OwnershipProbe>) -> Box<Payload> {
-    Box::new(Payload {
+fn payload(version: usize, probe: &Arc<OwnershipProbe>) -> kalloc_types::KBox<Payload> {
+    kalloc_types::KBox::new_nowait(Payload {
         version,
         probe: probe.clone(),
-    })
+    }).unwrap()
 }
 
 fn version(value: &Rcu<Payload>) -> usize {

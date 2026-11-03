@@ -4,9 +4,10 @@
 
 //! Explicit release ownership stress, not a latency benchmark or memory model.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use kalloc_types::KBox;
 use krcu::Rcu;
 
 #[path = "retirement.rs"]
@@ -35,12 +36,18 @@ struct Payload {
 }
 
 impl Payload {
-    fn new(id: usize, ledger: &Arc<Ledger>) -> Box<Self> {
-        Box::new(Self {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: test scenario: the opt-in RCU torture \
+                  workload requires every fixture for its exact release ledger"
+    )]
+    fn new(id: usize, ledger: &Arc<Ledger>) -> KBox<Self> {
+        KBox::new_nowait(Self {
             id,
             words: core::array::from_fn(|index| id.wrapping_mul(37) ^ index),
             ledger: ledger.clone(),
         })
+        .unwrap()
     }
 
     fn is_intact(&self) -> bool {

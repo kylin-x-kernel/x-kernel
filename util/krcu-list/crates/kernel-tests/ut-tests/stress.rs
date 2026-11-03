@@ -48,15 +48,15 @@ fn opt_in_concurrent_publish_unlink_and_reclaim() {
                 }
                 for index in 0..rounds {
                     let id = writer * rounds + index;
-                    let entry = Entry::new(Value {
+                    let entry = Entry::new_nowait(Value {
                         id,
                         inverse: !id,
                         drops: drops.clone(),
-                    });
+                    }).unwrap();
                     // SAFETY: task context, no reader/lock; prepare precedes mutation.
                     unsafe { list.push_back(entry) };
                     // SAFETY: watched sleepable task; Value's release is atomic-only
-                    // plus nonblocking Arc/Box free. Predicate cannot block/reenter.
+                    // plus nonblocking Arc/KBox free. Predicate cannot block/reenter.
                     if unsafe { list.remove_first(|value| value.id == id) } != Ok(true) {
                         is_invalid.store(true, Ordering::Release);
                     }

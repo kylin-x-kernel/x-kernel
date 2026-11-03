@@ -1,5 +1,14 @@
 # p9 — 设计文档
 
+## Prepared transport ownership
+
+P9Client consumes a caller-prepared KBox<dyn P9Transport> and transfers it into
+client state without reboxing. Preparation precedes protocol locking and
+negotiation. Client Arc creation, request buffers and live-fid collections retain
+their existing allocation behavior. Request serialization and final transport
+destruction remain unchanged.
+
+
 Kernel unit tests live in `ut-tests/` and are mounted from their original
 source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
 Enable `KFEAT_FS_9P=y` in the kernel configuration to include the `p9` tests.
@@ -37,7 +46,7 @@ Arc<P9Fid> ──owns──► Arc<P9Client>
     │ object methods     └── Mutex<P9ClientState>
     │                         ├── msize / dialect
     │                         ├── tag / live-fid allocator
-    │                         └── Box<dyn P9Transport>
+    │                         └── KBox<dyn P9Transport>
     └── fid / qid / open mode / iounit / live state
 ```
 

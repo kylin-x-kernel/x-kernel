@@ -16,10 +16,10 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
-#[cfg(feature = "fs9p")]
-use alloc::boxed::Box;
 use alloc::{format, sync::Arc, vec::Vec};
 
+#[cfg(feature = "fs9p")]
+use kalloc_types::KBox;
 #[cfg(feature = "fs9p")]
 use kclass::{
     ClassDevice, Virtio9pDevice as _, Virtio9pDeviceImpl, prelude::DriverError, virtio_9p_devices,
@@ -101,7 +101,7 @@ fn host_9p_get_tree(
     info!("  use virtio-9p device: {:?}", handle.name());
     info!("  mount tag: {:?}", handle.mount_tag());
 
-    let transport = Box::new(Virtio9pTransport(handle));
+    let transport = KBox::new(Virtio9pTransport(handle))?;
     kvfs::get_tree_nodev(context, move |file_system_type, superblock_flags| {
         v9fs::mount(file_system_type, superblock_flags, transport)
     })
