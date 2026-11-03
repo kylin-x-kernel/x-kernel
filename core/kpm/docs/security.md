@@ -15,8 +15,8 @@ power loss. Restore must make resources reachable by enabled IRQs, clock-change
 observers and due timer callbacks usable, or keep those consumers independently
 suppressed. Final event rearm precedes finish; interrupt safety cannot wait until
 that final release phase.
-prepare must stop creation, cover all ordinary tasks in SuspendTasks or independently
-exclude them, and quiesce producers, idle/fixup and NMI/watchdog reads
+The coordinator closes scheduler admission and obtains complete task coverage
+after prepare. Prepare must quiesce exempt infrastructure/producers, idle/fixup and NMI/watchdog reads
 without stranding the PM task or RTC; enter/restore run IRQ-off while logical
 time is frozen. They must not sleep, allocate, enable IRQs, unwind or use logical
 timeouts. Restore must unconditionally make counter/controller/mappings and
@@ -56,10 +56,13 @@ data is processed. No successful userspace suspend support is claimed.
 ## Cooperative task freeze boundary
 
 The coordinator now owns actual request/acknowledgment/thaw through a
-`FrozenTasks` guard. `SuspendTasks` is explicit coverage, not discovery: the
-unsafe provider must verify all non-exempt tasks are represented and exclude
-creation until finish. Omitting an active task or suspending a dependency needed
-by a checkpoint violates the provider contract. Prepare must keep all
+`SystemFrozenTasks` guard. `SuspendTasks` now supplies explicit kernel
+infrastructure exemptions, not an ordinary-task list. The authoritative ktask
+registry and activation gate prevent an ordinary task from escaping the snapshot;
+new activation is retained until recovery completes. Process-domain visibility
+is not suppressed. Exempt tasks remain a trust boundary: the unsafe platform
+must keep their accesses safe and cannot suspend a dependency needed by a
+checkpoint. Prepare must keep all
 task-accessible devices usable until enter, including after individual
 acknowledgments, because partial-freeze rollback thaws before finish. This remains unsuitable for a
 userspace PM entry without a concrete provider and device/wakeup integration.
@@ -85,8 +88,9 @@ access before resources become inaccessible. Suppression must survive platform
 restore, IRQ enable, RTC settlement notifications and event rearm until that
 device's resume has restored safe access. The RTC and PM infrastructure must
 not depend on suspended resources. Platform preparation still owns task
-creation exclusion, coverage of ordinary tasks, NMI exclusion and unlisted
-asynchronous access. No complete platform safety is inferred from this list.
+exempt infrastructure safety, NMI exclusion and asynchronous access. The
+system freezer owns ordinary task coverage and scheduler admission. No complete
+platform safety is inferred from the device list.
 
 On suspend failure, only the successful prefix is resumed in reverse order;
 the failing callback owns its partial rollback. Later time/platform failures

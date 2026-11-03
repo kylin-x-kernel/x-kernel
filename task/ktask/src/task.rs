@@ -350,6 +350,7 @@ pub struct TaskInner {
     state: AtomicU8,
     // Task-only access needs preemption exclusion; no IRQ handler reads this slot.
     pub(crate) freeze_request: SpinNoPreempt<Option<Arc<crate::freezer::Request>>>,
+    pub(crate) suspend_registration: klazy::Once<Arc<crate::freezer::system::Registration>>,
 
     /// CPU affinity mask.
     cpumask: SpinNoIrq<KCpuMask>,
@@ -926,6 +927,7 @@ impl TaskInner {
             entry: Cell::new(None),
             state: AtomicU8::new(TaskState::Ready as u8),
             freeze_request: SpinNoPreempt::new(None),
+            suspend_registration: klazy::Once::new(),
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinNoIrq::new(cpumask),
             cpu_id: AtomicU32::new(0),
@@ -1015,7 +1017,14 @@ impl TaskInner {
         // already allocate stacks and permit IRQ-safe allocator locking; the
         // check above excludes hardirq, serving softirq and NMI callers.
         match unsafe { kfinalize::service::new_integration(task) } {
-            Ok(owner) => owner,
+            Ok(owner) => {
+                if !owner.is_idle() {
+                    owner
+                        .suspend_registration
+                        .call_once(|| Arc::new(crate::freezer::system::Registration::new(&owner)));
+                }
+                owner
+            }
             #[expect(
                 clippy::panic,
                 reason = "CG-021-no-panic-on-reachable-failure: kruntime permanently installs the \
@@ -1214,6 +1223,7 @@ impl TaskInner {
     pub(crate) fn notify_exit(&self, exit_code: i32) {
         self.exit_code.store(exit_code, Ordering::Release);
         self.set_state(TaskState::Exited);
+        crate::freezer::system::retire(self);
         crate::freezer::notify_exit(self);
         self.wait_for_exit.complete_all();
     }
@@ -1409,6 +1419,7 @@ impl fmt::Debug for TaskInner {
 
 impl Drop for TaskInner {
     fn drop(&mut self) {
+        crate::freezer::system::retire(self);
         debug!("task drop: {}", self.id_name());
     }
 }

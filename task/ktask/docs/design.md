@@ -1493,7 +1493,7 @@ path. Requests and task references are allocated before publication; each task
 has one task-only request slot under `SpinNoPreempt`, also inspected by the
 scheduler's exit path. IRQ handlers never access it. Preemption exclusion keeps
 a target checkpoint from preempting the owner while it holds that target's slot.
-No task-list scan, scheduler state extension or dispatch veto is introduced.
+This low-level explicit-set API does not scan task lists or veto dispatch.
 
 A checkpoint prepares an allocation-free completion wait, publishes an
 acknowledgment and waits for the round's persistent release predicate. The
@@ -1514,7 +1514,52 @@ use release/acquire for confirmation, cancellation, thaw and attempt ownership.
 
 First entry and POSIX return-to-user are audited safe points. Kernel workers
 must call `checkpoint` explicitly after releasing dependencies needed by PM.
-A blocked syscall or worker without safe points causes timeout. The caller must
-provide complete target coverage and prevent creation/publication until thaw;
-there is no global task registry, automatic newborn enrollment, SMP rendezvous,
-device power control or firmware sleep in this module.
+A blocked syscall or worker without safe points causes timeout. Callers of the
+low-level explicit-set API must still provide complete coverage and exclude new
+execution themselves. System PM instead uses the preparation layer below.
+
+### System task preparation
+
+`freezer::freeze_system_tasks` closes first-activation admission and takes a
+complete snapshot of scheduler-admitted tasks, independent of the optional,
+bounded diagnostic registry. `TaskInner::prepare_owner` allocates one intrusive
+registration containing a weak task owner. The boot task is registered during
+bring-up; every public `activate_task` registers before scheduler enqueue.
+Permanent exit and final task destruction retire the registration in O(1).
+Detached tasks are not admitted and are not freeze targets. Private SMP
+migration trampolines are outside the supported single-present-CPU topology.
+
+The IRQ-safe registry lock covers activation admission, membership and closure.
+An activation racing closure is either registered before the snapshot, or kept
+on the deferred list with a strong task owner; it cannot enter ordinary execution
+unaccounted. The existing infallible construction/activation APIs are retained:
+construction and process-domain publication may complete, but new scheduler
+activation is deferred. Wakeup cannot enqueue a deferred task because it remains
+Ready without ever joining a run queue. Repeated activation is idempotent.
+No scheduler lock is taken while the registry lock is held. Snapshot capacity
+is reserved outside the lock after admission closes, when membership cannot grow.
+
+The coordinator and idle tasks are excluded automatically. Callers may explicitly
+exempt already admitted kernel infrastructure needed for RTC, PM and recovery;
+user tasks, duplicate/unregistered exemptions and the coordinator are rejected.
+No worker is exempted by name or assumed safe because it is Blocked. Existing
+workers must reach audited checkpoints, or the platform must explicitly exempt
+and separately quiesce their accesses. Workqueue draining is not implemented here.
+
+`SystemFrozenTasks` retains the complete `FrozenTasks` guard and publication gate
+through PM recovery. Timeout, cancellation and invalid exemptions release both.
+The frozen-task guard is declared before the publication gate so Rust's field
+drop order enforces thaw-before-admission without an optional guard or custom Drop.
+On successful cleanup it first removes freeze requests and thaws old tasks,
+then detaches the deferred activation list and reopens admission. Deferred tasks
+re-enter normal admission before enqueue, so a subsequent freeze can retain them
+again. No allocation or callback occurs while modifying list links; registration
+and list ownership use the project intrusive list. The pending strong owner is
+released on activation, including when callers dropped every external reference.
+
+This corresponds to the task preparation responsibilities of Linux v6.12
+`kernel/power/process.c` (`freeze_processes`, `freeze_kernel_threads`, thaw),
+using X-Kernel's cooperative checkpoints rather than Linux's freezer internals.
+It does not implement SMP rendezvous, wakeup sources, device control or firmware
+entry. Tests exercise actual scheduler admission, complete selection, deferred
+lifetime, timeout, cancellation and recovery without freezing hardware clocks.

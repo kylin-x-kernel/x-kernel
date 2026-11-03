@@ -303,6 +303,7 @@ pub(crate) fn init() {
 
     // Put the subsequent execution into the `main` task.
     let main_task = TaskInner::new_boot("main".into()).into_arc();
+    crate::freezer::system::admit(&main_task);
     main_task.set_state(TaskState::Running);
     #[cfg(feature = "smp")]
     RunQueue::set_owner_cpu(&main_task, cpu_id);

@@ -503,7 +503,7 @@ fn public_admission_or_refused_preparation_never_reads_source() {
         &mut platform,
         &mut source,
         SuspendTasks {
-            targets: &[],
+            exempt: &[],
             timeout: TimeSpan::from_secs(1),
             cancellation: &FreezeCancellation::new(),
         },
@@ -761,7 +761,7 @@ fn public_device_entry_rejects_before_device_or_rtc_access() {
         &mut platform,
         &mut source,
         SuspendTasks {
-            targets: &[],
+            exempt: &[],
             timeout: TimeSpan::from_secs(1),
             cancellation: &FreezeCancellation::new(),
         },

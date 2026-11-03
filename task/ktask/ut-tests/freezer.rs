@@ -12,9 +12,9 @@ use unittest::{assert, assert_eq, def_test};
 use super::*;
 use crate::WaitQueue;
 
-static SERIAL: klazy::Lazy<kmutex::Mutex<()>> = klazy::Lazy::new(|| kmutex::Mutex::new(()));
+pub(super) static SERIAL: klazy::Lazy<kmutex::Mutex<()>> = klazy::Lazy::new(|| kmutex::Mutex::new(()));
 
-fn wait_for_request(progress: &Progress, task: &KtaskRef) {
+pub(super) fn wait_for_request(progress: &Progress, task: &KtaskRef) {
     CompletionWait::prepare()
         .unwrap()
         .wait_until(&progress.changed, || task.freeze_request.lock().is_some());

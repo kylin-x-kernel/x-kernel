@@ -7,8 +7,9 @@
 //! Currently provides a single-present-CPU PM time transaction, not a userspace
 //! suspend entry. See `docs/design.md` and `docs/security.md` for its boundaries.
 //!
-//! The coordinator freezes an explicit task set; a platform provider supplies
-//! creation/device/NMI exclusion and firmware entry. It orders RTC accounting, monotonic freeze and
+//! The coordinator freezes all admitted tasks, deferring new scheduler activation;
+//! a platform provider supplies device/NMI exclusion and firmware entry.
+//! It orders RTC accounting, monotonic freeze and
 //! local clock events and optional ordered device callbacks, and unwinds completed
 //! preparation on ordinary errors.
 //! SMP rendezvous and concrete platform implementations are separate work.
@@ -28,7 +29,7 @@ use khal::time::{MonotonicSuspendError, MonotonicSuspendToken};
 use kiface_time_api::PersistentClock;
 use kspin::NoPreemptIrqSave;
 use ktask::{
-    freezer::{FreezeCancellation, FreezeError, FrozenTasks},
+    freezer::{FreezeCancellation, FreezeError, SystemFrozenTasks},
     timer_suspend::{LocalTimerSuspend, TimerSuspendError},
 };
 use ktime::{RtcSleepAccounting, RtcSleepError, RtcSleepSession};
@@ -40,10 +41,11 @@ use ktime_types::TimeSpan;
 /// `khal::power::suspend_to_ram` stub alone does not satisfy it.
 ///
 /// # Safety
-/// Successful preparation must stop ordinary task creation and identify all
-/// non-exempt tasks in SuspendTasks. Listed tasks are frozen by the coordinator;
-/// kernel workers must provide safe checkpoints. Exclude unlisted ordinary
-/// execution independently. Preparation must also exclude timer producers,
+/// The coordinator closes scheduler admission and freezes every non-exempt
+/// admitted task after preparation. SuspendTasks may exempt only explicitly
+/// identified kernel infrastructure needed for PM progress; the provider must
+/// keep those tasks' accesses safe. Kernel workers must provide safe checkpoints
+/// or have their producers/work drained before being exempted. Preparation must exclude timer producers,
 /// idle/fixup dispatch and NMI/watchdog clock reads until finish, while allowing
 /// the PM task and resources needed for RTC reads to progress. Counter, event
 /// and RTC access must remain valid until enter. No CPU may be brought online.
@@ -58,14 +60,15 @@ use ktime_types::TimeSpan;
 /// IRQs, clock-change observers or resumed timer callbacks must be usable, or
 /// their consumers must remain separately suppressed until ready. Event rearm
 /// precedes finish; finish cannot defer this interrupt-safety requirement.
-/// With ordered device participants, preparation must also exclude unlisted
+/// With ordered device participants, preparation must also exclude exempt
 /// accesses; it must not duplicate their suspend/resume callbacks. Devices are
 /// resumed before finish, while platform exclusions and frozen tasks remain held.
 /// Prepare and finish must preserve the enabled local IRQ state. These
 /// obligations include any device mappings needed by the existing HAL.
 pub unsafe trait PlatformSuspendOps {
-    /// Stops task creation/producers and prepares device/clock quiescence with IRQs enabled.
-    /// Listed tasks still run until their following cooperative freezer step.
+    /// Stops producers and prepares device/clock quiescence with IRQs enabled.
+    /// Ordinary tasks still run until the following system freezer step, which
+    /// closes scheduler admission and takes a complete task snapshot.
     /// Keep task-accessible resources usable until enter, including after a
     /// task reaches its checkpoint: failed freezing thaws partial acknowledgments
     /// before finish is called. Prepare may arrange exclusion, not power off
@@ -163,13 +166,13 @@ fn validate_context(
     Ok(())
 }
 
-/// Explicit task coverage and bounded cancellation policy for a PM attempt.
-/// The platform must stop creation before this stable snapshot is frozen and
-/// retain that exclusion through finish. Omitted tasks must be independently
-/// quiesced or necessary recovery infrastructure; this is not a global registry.
+/// Explicit kernel-infrastructure exemptions and cancellation policy for PM.
+/// ktask collects all admitted tasks and defers new activation until recovery
+/// completes. The platform must keep exempt infrastructure safe and available.
 pub struct SuspendTasks<'a> {
-    /// Every ordinary task that must acknowledge a safe point (exclude PM itself).
-    pub targets: &'a [ktask::KtaskRef],
+    /// Already admitted kernel infrastructure required for recovery progress.
+    /// User tasks cannot be exempted; PM itself and idle are excluded automatically.
+    pub exempt: &'a [ktask::KtaskRef],
     /// Maximum MONOTONIC duration to wait before clocks/events are paused.
     pub timeout: TimeSpan,
     /// One-shot cancellation notification, prepared before platform preparation.
@@ -388,11 +391,11 @@ impl<P: PlatformSuspendOps> SuspendOps for SystemOps<'_, P> {
     type Clock = MonotonicSuspendToken;
     type Critical = NoPreemptIrqSave;
     type Events = LocalTimerSuspend;
-    type Tasks = FrozenTasks;
+    type Tasks = SystemFrozenTasks;
 
     fn freeze_tasks(&mut self) -> Result<Self::Tasks, FreezeError> {
-        ktask::freezer::freeze_tasks(
-            self.tasks.targets,
+        ktask::freezer::freeze_system_tasks(
+            self.tasks.exempt,
             self.tasks.timeout,
             self.tasks.cancellation,
         )

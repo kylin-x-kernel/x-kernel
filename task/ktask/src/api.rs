@@ -560,8 +560,13 @@ pub fn prepare_task(task: TaskInner) -> KtaskRef {
 /// calling this function, because the task may start executing immediately
 /// after it is enqueued. A cpumask stored before publish is honored even if
 /// it no longer contains the CPU selected here.
+/// During system freezing, first activation is retained and deferred until
+/// admission reopens. Construction/visibility may complete, but the task cannot
+/// execute. Repeated activation of an already admitted task is ignored.
 pub fn activate_task(task: &KtaskRef) {
-    select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
+    if crate::freezer::system::admit(task) {
+        select_run_queue::<NoPreemptIrqSave>(task).add_task(task.clone());
+    }
 }
 
 /// Wakes a blocked task and optionally requests rescheduling on its run queue.

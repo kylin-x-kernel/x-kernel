@@ -814,10 +814,12 @@ The feature processes no user private data.
 
 ## Cooperative freezer
 
-The safe freezer API changes scheduler progress, not memory ownership or
-hardware state. Complete target coverage, stopped creation and dependency
-exemptions belong to its PM caller. An omitted task can continue executing;
-therefore the API must not be represented as a global process freeze.
+The freezer APIs change scheduler progress, not hardware state. The low-level
+`freeze_tasks` still requires caller-owned target coverage. System PM uses
+`freeze_system_tasks`: its lifecycle registry is authoritative for admitted
+ordinary tasks and admission defers new execution until cleanup. Kernel
+infrastructure exemptions remain an explicit caller/platform obligation; they
+cannot include user tasks or be inferred from scheduler Blocked state.
 
 Only explicit checkpoints and permanent exit confirm quiescence. Blocking or
 preemption while holding a mutex is not a safe point. Callers must release PM
@@ -838,3 +840,34 @@ and an allocation-free completion-only IRQ callback; the timer is drained before
 returning a freeze guard. There are no new Send/Sync impls.
 Single-present-CPU admission excludes concurrent target execution; SMP freezing
 requires a separate remote rendezvous and cannot reuse this guarantee.
+
+### Publication admission and registration lifetime
+
+The diagnostic registry is intentionally not a PM source: it is optional and may
+drop registrations at capacity. System preparation instead owns an unbounded
+intrusive list with a preallocated node per non-idle task. Registration carries
+a weak owner while admitted; permanent exit and destructor fallback unlink it
+under the same registry lock. Its sole unsafe list removal checks the Active
+phase under that lock, establishing that the node belongs to this exact list.
+Only this module mutates its links, and removal releases the list reference
+outside the registry guard. There are no new unsafe Send/Sync implementations.
+
+An activation before closure is represented in the snapshot even if enqueue is
+still pending; an activation after closure receives a strong deferred owner.
+The registry-to-registration lock order is fixed, and registry locks are dropped
+before scheduler enqueue or notifications. Exit may already own a run-queue
+lock; no registry path takes that lock in the opposite order. IRQ-safe locking
+also covers activation and retirement called under scheduler IRQ exclusion.
+
+Snapshot storage is reserved outside the IRQ-safe lock after admission closes.
+Only retirement can change active membership before the fill, so pushes cannot
+reallocate under the lock. Dropping a completed system guard thaws before
+reopening admission. Gate rollback drains deferred owners on all ordinary
+error paths. Forgetting a guard is not a supported PM cancellation mechanism.
+
+This is scheduler admission, not a ban on allocating detached task objects or
+updating process-domain visibility. Those objects cannot execute until admitted.
+Explicitly exempt kernel workers can still run, so platform preparation must
+drain/suppress their device accesses before resources disappear. Missing safe
+points refuse suspension by timeout rather than silently claiming global
+quiescence. No new production worker exemptions or real platform PM are enabled.

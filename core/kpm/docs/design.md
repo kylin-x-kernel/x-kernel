@@ -30,14 +30,15 @@ through preparation and final cleanup; its stack guard releases it on return.
 The function does not hold a spinlock across device I/O or the platform interval.
 
 The unsafe `PlatformSuspendOps` contract owns four substantive boundaries:
-prepare stops task creation/producers and NMI/repair readers while
+prepare stops producers and NMI/repair readers while
 retaining PM-task and RTC progress; enter attempts firmware sleep; restore
 unconditionally repairs counter/controller/device accessibility after either
 wake or entry error; finish releases preparation after the time transaction is
 closed. Preparation errors must undo their own partial work; prepare and finish preserve
 the enabled local IRQ state. No current
 platform implements the contract, and the existing unsupported power stub is
-not sufficient. The explicit task set is cooperatively frozen by ktask after preparation.
+not sufficient. After preparation, ktask closes scheduler admission, collects
+the complete admitted task set and cooperatively freezes non-exempt tasks.
 Device suspend, wake sources and CPU rendezvous remain concrete-provider work.
 
 The successful sequence is:
@@ -102,22 +103,29 @@ Linux's device lists, syscore or SMP orchestration.
 
 ### Cooperative task ownership
 
-`SuspendTasks` supplies an explicit stable task snapshot, a bounded MONOTONIC
-wait and a one-shot `FreezeCancellation`. The unsafe platform provider must
-verify complete coverage of non-exempt tasks, prevent creation/publication of
-new ordinary tasks, and retain those exclusions until finish. This is not a
-global task registry. PM itself and infrastructure required for RTC and recovery
-must remain outside the set. Preparation must keep task-accessible resources usable until platform enter,
+`SuspendTasks` supplies explicit kernel-infrastructure exemptions, a bounded
+MONOTONIC wait and a one-shot `FreezeCancellation`. After prepare,
+`ktask::freezer::freeze_system_tasks` closes first-activation admission and
+collects every admitted task from its lifecycle registry. It excludes PM/idle
+automatically and rejects user, duplicate and unregistered exemptions.
+The unsafe platform provider must keep exempt infrastructure safe and usable;
+it no longer constructs the ordinary task snapshot. Preparation must keep task-accessible resources usable until platform enter,
 including after individual checkpoints: failed freezing can thaw partial
 acknowledgments before finish. Device power-down cannot occur in prepare.
 
 After successful preparation, the real executor acquires `ktask::freezer`'s
-`FrozenTasks` guard before RTC sampling. Its lifetime covers accounting,
+`SystemFrozenTasks` guard before RTC sampling. Its lifetime covers accounting,
 clock/event recovery and platform finish on every ordinary return. A freezer
 error calls finish without sampling RTC or pausing time. Timeout/cancellation
 withdraw requests and thaw partial acknowledgments before returning from the
 freezer; preparation must therefore be reversible without inaccessible devices.
 A cancellation after the guard is returned cannot release tasks during recovery.
+New task objects and process-domain visibility may be prepared while admission
+is closed, but scheduler activation is retained until cleanup. System guard Drop
+thaws existing requests, then releases deferred activations through normal
+admission. This also handles callers that dropped their task references. The
+legacy `SuspendTasks::targets` field is replaced by `exempt`; PM callers now
+declare only required kernel infrastructure, never ordinary target coverage.
 
 The task subsystem confirms only audited checkpoints or permanent task exit.
 First task entry and the POSIX return-to-user boundary provide checkpoints;

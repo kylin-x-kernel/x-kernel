@@ -6,8 +6,9 @@
 //!
 //! A blocked task is not automatically safe. Only a checkpoint or task exit
 //! acknowledges a request. This module never interrupts a syscall or parks an
-//! arbitrary lock holder. Callers must separately prevent new ordinary tasks
-//! and account for tasks omitted from the supplied set.
+//! arbitrary lock holder. [`freeze_tasks`] retains its explicit-set contract;
+//! [`freeze_system_tasks`] closes scheduler admission and collects the complete
+//! admitted set, with explicit kernel-infrastructure exemptions.
 
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -19,6 +20,9 @@ use kerrno::KError;
 use ktime_types::TimeSpan;
 
 use crate::{KtaskRef, TaskState, completion::CompletionWait};
+
+pub(crate) mod system;
+pub use system::{SystemFrozenTasks, freeze_system_tasks};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -46,7 +50,7 @@ pub enum FreezeError {
     MultipleCpus,
     /// Another freeze attempt still owns its requests.
     Busy,
-    /// The supplied set contains the coordinator, an idle task or duplicates.
+    /// Invalid explicit targets, or user/idle/self/duplicate/unregistered exemptions.
     InvalidTaskSet,
     /// The caller cancelled this attempt before all acknowledgments arrived.
     Cancelled,
