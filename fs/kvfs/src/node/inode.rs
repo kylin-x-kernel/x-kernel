@@ -13,7 +13,7 @@ use core::{
     any::Any,
     fmt,
     hash::{Hash, Hasher},
-    sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bitflags::bitflags;
@@ -1192,6 +1192,7 @@ pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
     write_count: AtomicUsize,
+    notification_mask: AtomicU32,
     data_lock: RwLock<()>,
     namespace_lock: RwLock<()>,
     inode_operations: Arc<dyn InodeOperations>,
@@ -1358,6 +1359,21 @@ struct InodeParts {
 }
 
 impl VfsInode {
+    /// Publishes the event mask aggregated by the notification registry.
+    ///
+    /// The registry must serialize every update, including removal, under its
+    /// routing lock. Publish additions before making a subscription available,
+    /// and remove interest only after detaching it. Release/acquire orders the
+    /// hint; the registry and instance locks still validate each delivery.
+    pub fn set_notification_mask(&self, mask: u32) {
+        self.notification_mask.store(mask, Ordering::Release);
+    }
+
+    /// Whether any registered watch can receive one of these event bits.
+    pub fn watches_notifications(&self, mask: u32) -> bool {
+        self.notification_mask.load(Ordering::Acquire) & mask != 0
+    }
+
     /// Returns or initializes the advisory-lock context for task-context callers.
     ///
     /// Initialization uses NOWAIT because competing Once callers spin. The
@@ -1696,6 +1712,7 @@ impl VfsInode {
             identity: InodeIdentity::new(init.number),
             attributes,
             write_count: AtomicUsize::new(0),
+            notification_mask: AtomicU32::new(0),
             data_lock: RwLock::new(()),
             namespace_lock: RwLock::new(()),
             inode_operations,

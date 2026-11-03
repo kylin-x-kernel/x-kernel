@@ -156,12 +156,12 @@ impl Umode {
 /// What a completed unlink/rmdir removed, captured under the namespace lock
 /// the removal held.
 ///
-/// The parent identity, the entry name and the victim's metadata all come from
+/// The parent inode, the entry name and the victim dentry all come from
 /// the operation itself, so no later lookup can describe a different object.
 #[derive(Clone, Debug)]
 pub struct RemovedEntry {
-    /// Metadata of the parent directory, as the removal saw it.
-    pub parent: Metadata,
+    /// Pinned parent inode, as the removal saw it.
+    pub parent: alloc::sync::Arc<crate::VfsInode>,
     /// The removed entry's name.
     pub name: alloc::string::String,
     /// A reference to the dentry that was unlinked.
@@ -172,10 +172,6 @@ pub struct RemovedEntry {
     /// eviction-driven retirement would then report the object's own death
     /// first, inverting the order Linux produces.
     pub victim_dentry: Dentry,
-    /// The victim's `(device, inode)` and type, from the in-memory copy: enough
-    /// to address its watches and its `IN_ATTRIB`, and never a reason to drop
-    /// the parent's event.
-    pub victim: Metadata,
     /// The victim's authoritative pre-unlink link count, when the backend could
     /// report it. Retirement needs this; everything else does not, so a failed
     /// read costs only the retirement decision, not the events.
@@ -194,19 +190,13 @@ pub struct RenameOutcome {
     /// rename between two links of one inode without touching the namespace,
     /// and then this is `false` and both identities are `None`.
     pub moved: bool,
-    /// Metadata of the moved source entry, as it was when the move executed.
-    pub source: Option<Metadata>,
-    /// The replaced target entry's identity, when the rename replaced one.
-    pub replaced: Option<Metadata>,
+    /// Pinned source inode, captured when the move executed.
+    pub source: Option<alloc::sync::Arc<crate::VfsInode>>,
+    /// Pinned target inode, when the rename replaced one.
+    pub replaced: Option<alloc::sync::Arc<crate::VfsInode>>,
     /// The replaced target's authoritative pre-rename link count, when the
     /// backend could report it; retirement needs it, the events do not.
     pub replaced_nlink: Option<u64>,
-    /// The replaced target's dentry, held until the caller has reported the
-    /// move and dropped this value. Without it the replaced inode can be
-    /// evicted inside the rename -- before the caller queues the target's
-    /// `IN_ATTRIB` and retirement -- and the eviction hook would report that
-    /// death ahead of them, inverting the order Linux produces.
-    pub replaced_dentry: Option<Dentry>,
 }
 
 /// Filesystem node metadata.

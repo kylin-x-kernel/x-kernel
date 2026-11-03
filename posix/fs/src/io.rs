@@ -144,6 +144,7 @@ fn write_request_from_io(file: &VfsFile, src: impl Read + IoBuf + RewindBytes) -
         let mut pos = file.position_lock();
         write_file_from_io_with_pos(file, src, &mut pos)
     };
+    notify_write_result(file, &result);
     finish_restartable_io(result)
 }
 
@@ -156,7 +157,15 @@ fn write_file_at_from_io(
 
     let mut src = IoSourceAdapter(src);
     let mut iter = iov_iter_source(&mut src);
-    file.write_iter_from(&mut iter, &mut offset)
+    let result = file.write_iter_from(&mut iter, &mut offset);
+    notify_write_result(file, &result);
+    result
+}
+
+fn notify_write_result(file: &VfsFile, result: &KResult<usize>) {
+    if matches!(result, Ok(count) if *count > 0) {
+        crate::notify::notify_modified(file.path());
+    }
 }
 
 fn reject_positioned_stream_io(file: &VfsFile) -> KResult<()> {
@@ -266,6 +275,8 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> KResu
         &cred,
     )?;
     loc.truncate(length as _, &cred)?;
+    drop(fs);
+    crate::notify::notify_modified(&loc);
     Ok(0)
 }
 
@@ -278,6 +289,7 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
     }
     let f = kprocess::current_files().get_file(fd)?;
     f.truncate(length as _)?;
+    crate::notify::notify_modified(f.path());
     Ok(0)
 }
 
@@ -362,7 +374,9 @@ pub fn sys_fallocate(
     // apply; keep the hosting `max_file_size()` bound for regular files
     // only.
     if f.inode().node_type() == NodeType::BlockDevice {
-        return f.fallocate(flags, start, len_u).map(|_| 0);
+        f.fallocate(flags, start, len_u)?;
+        crate::notify::notify_modified(f.path());
+        return Ok(0);
     }
     // Overflow past the regular file's maximum is EFBIG (fs/open.c:321),
     // not EINVAL.
@@ -441,6 +455,7 @@ pub fn sys_fallocate(
         return Err(KError::OperationNotSupported);
     }
 
+    crate::notify::notify_modified(f.path());
     Ok(0)
 }
 
@@ -638,6 +653,7 @@ pub fn sys_sendfile(
         len,
         false,
     );
+    notify_write_result(&output, &result);
     // Linux sendfile copies back an explicit offset even after EOF or error.
     if let Some(position) = input_offset {
         offset.write_vm(position)?;
@@ -694,6 +710,7 @@ pub fn sys_copy_file_range(
     };
     let result =
         kvfs::copy_file_range(&input, input_position, &output, output_position, len, false);
+    notify_write_result(&output, &result);
     // Linux copy_file_range copies offsets out only after progress; both
     // write-backs are attempted before the first fault is reported.
     if matches!(result, Ok(count) if count > 0) {
@@ -771,6 +788,7 @@ pub fn sys_splice(
         len,
         flags & linux_raw_sys::general::SPLICE_F_NONBLOCK != 0,
     );
+    notify_write_result(&output, &result);
     // Linux splice copies out after any successful result, including EOF.
     // Destination copyout precedes source copyout, and the first fault wins.
     if result.is_ok() {

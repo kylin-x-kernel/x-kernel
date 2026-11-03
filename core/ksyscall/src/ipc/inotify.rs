@@ -149,7 +149,7 @@ pub(crate) fn sys_inotify_add_watch(
     // watch names it, so no later revalidation is needed and none would be
     // correct (a concurrent rename would make a second lookup fail while the
     // object lives on).
-    let pin = alloc::sync::Arc::clone(&target.inode_ref) as kfd_objects::inotify::Pin;
+    let pin = alloc::sync::Arc::clone(&target.inode_ref);
     let watch_descriptor = inotify.add_watch(mask, identity, pin)?;
     Ok(watch_descriptor as isize)
 }
@@ -161,3 +161,5 @@ pub(crate) fn sys_inotify_rm_watch(fd: i32, wd: i32) -> KResult<isize> {
 
     inotify.remove_watch(wd).map(|()| 0)
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/ipc/inotify.rs");

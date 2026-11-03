@@ -31,6 +31,17 @@ solution for initialization re-entry. Preparing outside an existing singleton
 gate would require a separate identity/publication redesign, not a mechanical
 owner conversion.
 
+## Static simple-directory entries
+
+`DirMapping` retains one inode for each statically declared directory, simple
+file, sequence file or supplied `Arc<VfsInode>`. Lookup materializes a dentry
+around that inode; disabling or invalidating the dentry cache does not change
+the object's identity. Inode-owned subscriptions and state therefore survive
+repeated lookups. The mapping releases its inode references on teardown, and
+inode aliases and superblock references remain weak to avoid ownership cycles.
+Dynamic `add_child` callbacks retain responsibility for their object lifetimes.
+File operations still generate or snapshot contents independently on each open.
+
 ## Fallible directory iterators
 
 SimpleDirOps::child_names returns a fallibly allocated KBox iterator. DirMapping
@@ -122,6 +133,19 @@ callbacks always execute outside the lock.
 
 
 ## 定位
+
+`Dentry::notification_context` captures linkage and an interested parent inode
+under one location read lock. It copies the name only when the parent subscribes
+to the requested event bits. Bind roots retain their actual dentry parent; no
+synthetic path across a mount root is constructed. Callbacks run after the lock
+is released. Unlink and replacement mark the removed dentry's location as
+unlinked without discarding its former parent/name; cache eviction does not.
+
+Each inode caches an atomic notification event mask. The notification registry
+serializes all aggregate updates, including subscription replacement and removal.
+The cache filters work; the notifier still validates each watch at delivery.
+Namespace event records retain inode references captured under the operation's
+namespace locks, keeping routing independent of mount IDs and name reuse.
 
 `kvfs` 提供 Linux 风格的 VFS 对象模型，包括 superblock、mount、dentry、inode、
 open file、路径解析和通用文件系统 helper。具体文件系统通过 inode/file operation

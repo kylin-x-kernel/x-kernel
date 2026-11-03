@@ -696,3 +696,22 @@ spin/IRQ-disable/preemption-disable guards. Providers must use direct quota
 I/O without recursive charging or caller-held lock reentry. Administrative
 authorization, ID mapping, backing-file protection and transaction recovery
 remain integration obligations; this change leaves production quota disabled.
+
+## Notification-interest lifetime
+
+Static `DirMapping` entries retain their inode independently of dentry-cache
+residency. Fresh lookups share its subscriptions and metadata; dynamic child
+providers must supply their own stable object identities. Mapping teardown
+releases these references without an inode-to-mapping ownership cycle.
+
+The notification registry pins watched inode objects until after routing removal.
+It publishes their aggregate event masks with release/acquire ordering and
+serializes recomputation with subscription changes. Hints never grant access or
+replace per-watch validation. Final inode references are released outside the
+registry lock because eviction can sleep and enter filesystem code.
+
+Dentry linkage, parent and name share the location lock. Successful unlink and
+rename replacement mark only the removed dentry; other hard links and renamed
+sources stay linked. A snapshot owns its parent reference and name, and releases
+the location guard before any notification callback. Cache membership alone is
+not evidence that an entry has been unlinked.

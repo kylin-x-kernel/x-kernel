@@ -11,8 +11,7 @@ use kfd_objects::inotify_limits::InotifyLimit;
 use kvfs::{
     CommandFile, Dentry, DirMapping, GetattrQueryFlags, GetattrRequestMask, InodeOperations,
     Metadata, MetadataUpdate, MountIdmap, NodeFlags, NodePermission, Path, Permission, SimpleDir,
-    SimpleDirLookup, SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsInode, VfsInodeInit,
-    VfsResult,
+    SimpleFile, SimpleFileOperation, SimpleFs, VfsError, VfsInode, VfsInodeInit, VfsResult,
 };
 
 /// One `/proc/sys/fs/inotify/` control.
@@ -299,17 +298,15 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
                         }),
                     );
                     let node = Arc::new(InotifySysctlFile { file });
-                    inotify.add_child(name, move |lookup: SimpleDirLookup<'_>, name| {
-                        let init: VfsInodeInit = node.file.inode_init();
-                        let inode = VfsInode::new_file_with_operations(
-                            node.clone(),
-                            node.clone(),
-                            node.file.clone(),
-                            NodeFlags::NON_CACHEABLE,
-                            init,
-                        );
-                        Ok(lookup.file_from_inode(name, inode))
-                    });
+                    let init: VfsInodeInit = node.file.inode_init();
+                    let inode = VfsInode::new_file_with_operations(
+                        node.clone(),
+                        node.clone(),
+                        node.file.clone(),
+                        NodeFlags::NON_CACHEABLE,
+                        init,
+                    );
+                    inotify.add(name, inode);
                 }
                 SimpleDir::new_maker(fs.clone(), Arc::new(inotify))
             });

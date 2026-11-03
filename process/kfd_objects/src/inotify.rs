@@ -15,11 +15,11 @@
 //! Events reach the queue through [`Inotify::queue_event`]. The object queues
 //! `IN_IGNORED` on watch removal and `IN_Q_OVERFLOW` on overrun itself;
 //! directory-entry events arrive from the VFS hooks through [`notify_path`],
-//! which routes by the registered path bytes: create and delete from the
+//! which routes by the registered inode objects: create and delete from the
 //! entry-creating and entry-removing syscalls, and a rename as the
-//! `IN_MOVED_FROM`/`IN_MOVED_TO` pair carrying one cookie. Attribute- and
-//! close-class events have no source yet, and a watch never reports what
-//! nothing reported.
+//! `IN_MOVED_FROM`/`IN_MOVED_TO` pair carrying one cookie. Content changes arrive
+//! through [`notify_content`], which applies the parent/object and unlink policies.
+//! General metadata updates and close-class events have no source yet.
 //!
 //! Limits follow Linux's per-user accounting: instance count and watch count
 //! are charged to the creator's euid across instances (see
@@ -43,7 +43,7 @@ use kerrno::{KError, KResult};
 use klazy::Lazy;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
-use kvfs::{FMode, FileOperations, Kiocb, OpenFlags, VfsFile, poll_file_io};
+use kvfs::{FMode, FileOperations, Kiocb, OpenFlags, VfsFile, VfsInode, poll_file_io};
 use linux_raw_sys::{
     general::{IN_DONT_FOLLOW, IN_IGNORED, IN_ISDIR, IN_ONLYDIR, IN_Q_OVERFLOW, IN_UNMOUNT},
     ioctl::FIONREAD,
@@ -154,6 +154,8 @@ struct WatchEntry {
     flags: u32,
     /// Identity recorded when the watch was added.
     identity: WatchIdentity,
+    /// Address of the pinned inode, used only as a routing key.
+    object_key: usize,
     /// Per-user watch membership held while this entry exists.
     _slot: Reservation,
 }
@@ -167,12 +169,12 @@ struct WatchEntry {
 struct WatchTable {
     entries: HashMap<i32, WatchEntry>,
     /// Identity of each registered watch, pointing at its descriptor.
-    descriptors: HashMap<WatchIdentity, i32>,
+    descriptors: HashMap<usize, i32>,
 }
 
 impl WatchTable {
     /// The descriptor already registered for `identity`, if any.
-    fn descriptor_of(&self, identity: WatchIdentity) -> Option<i32> {
+    fn descriptor_of(&self, identity: usize) -> Option<i32> {
         self.descriptors.get(&identity).copied()
     }
 
@@ -180,6 +182,7 @@ impl WatchTable {
     fn insert(
         &mut self,
         identity: WatchIdentity,
+        object_key: usize,
         mask: u32,
         flags: u32,
         next: &AtomicI32,
@@ -201,17 +204,18 @@ impl WatchTable {
                 mask,
                 flags,
                 identity,
+                object_key,
                 _slot: slot,
             },
         );
-        self.descriptors.insert(identity, descriptor);
+        self.descriptors.insert(object_key, descriptor);
         descriptor
     }
 
     /// Removes the watch under `descriptor`, if there is one.
     fn remove(&mut self, descriptor: i32) -> Option<WatchEntry> {
         let entry = self.entries.remove(&descriptor)?;
-        self.descriptors.remove(&entry.identity);
+        self.descriptors.remove(&entry.object_key);
         Some(entry)
     }
 
@@ -330,30 +334,36 @@ struct RegistryEntry {
     /// it. Without the pin, releasing the last in-memory reference would end
     /// an inode that is still linked on disk, and any retirement keyed on that
     /// release would report a death that never happened.
-    _object: Pin,
+    object: Pin,
+    /// Routing-mask cache, updated under watches -> registry lock order.
+    mask: u32,
 }
 
-/// An opaque strong reference to the watched object.
+/// Strong reference to the watched VFS inode.
 ///
-/// `kfd_objects` only needs to keep it alive, not to inspect it, so the
-/// registry stores it type-erased: the filesystem crate stays free to change
-/// its inode type, and this crate keeps no filesystem knowledge beyond the
-/// handle it was given.
-pub type Pin = Arc<dyn core::any::Any + Send + Sync>;
+/// The registry retains it through routing removal, preventing address reuse
+/// while the object remains a routing key.
+pub type Pin = Arc<VfsInode>;
 
 /// Hands out the per-instance ids used to disambiguate registry entries.
 static NEXT_INSTANCE_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Object-to-watches index shared by every inotify instance.
 ///
-/// Keyed by the watched object's `(device, inode)`, so a filesystem operation
+/// Keyed by the pinned VFS inode's address, so a filesystem operation
 /// can find the watches interested in it without walking every instance, and so
 /// a watched directory keeps its watches when it is renamed -- Linux reaches the
 /// same marks by walking the changed entry's parent inode. A `Weak` reference is
 /// held deliberately: an instance user space has closed must not be kept alive
 /// by the registry, or its watch table would leak for the lifetime of the
 /// kernel.
-type WatchRegistry = HashMap<WatchIdentity, Vec<RegistryEntry>>;
+type WatchRegistry = HashMap<usize, Vec<RegistryEntry>>;
+
+// Registry entries pin the inode until after removal, so this address cannot
+// be reused while it is a key. Never dereference the integer key.
+fn object_key(inode: &VfsInode) -> usize {
+    core::ptr::from_ref(inode) as usize
+}
 
 /// Lazily initialised: `ksync::Mutex::new` is not a `const fn` once lock
 /// statistics are compiled in, so a bare static initialiser would not build
@@ -384,61 +394,62 @@ static REGISTRY_NON_EMPTY: AtomicBool = AtomicBool::new(false);
 
 /// Delivers a filesystem event to every watch registered for an object.
 ///
-/// `device` and `inode` identify the directory the changed entry lives in, which
-/// is the object a watch on that directory was registered for. Called from the
-/// VFS paths that change a directory entry. `mask` is the event bit to report;
-/// watches that did not subscribe to it are skipped, which is what the mask
-/// argument of `inotify_add_watch` is for. An unregistered object returns early:
-/// the hook fires for every creating open and removal in the system, so logging
-/// here would bury the one line that matters under per-file-open noise, and a
-/// missed delivery is indistinguishable from a quiet filesystem by design.
-pub fn notify_path(device: u64, inode: u64, mask: u32, name: &[u8], cookie: u32) {
-    // This hook runs for every creating open and every removal in the system,
-    // and a system with no inotify watch anywhere is the common case, so the
-    // lock is skipped entirely until a watch exists.
-    if !REGISTRY_NON_EMPTY.load(Ordering::Acquire) {
+/// The parent is the inode captured by the completed namespace operation.
+/// The inode's aggregated mask rejects uninterested events before registry
+/// lookup; delivery revalidates each watch under the instance lock.
+pub fn notify_path(inode: &VfsInode, mask: u32, name: &[u8], cookie: u32) {
+    route_event(inode, mask, name, cookie, None);
+}
+
+fn route_event(inode: &VfsInode, mask: u32, name: &[u8], cookie: u32, is_unlinked: Option<bool>) {
+    if !inode.watches_notifications(mask) {
         return;
     }
-    // Collect the interested instances under the registry lock and deliver
-    // after releasing it. Delivery must not run inside the critical section:
-    // dropping the last strong reference here would run `Inotify::drop`, which
-    // unregisters from this same registry and would self-deadlock. Keeping the
-    // section to a lookup plus weak upgrades also keeps the lock off the
-    // per-instance work.
-    let mut interested = Vec::new();
-    {
-        let registry = registry().lock();
-        let Some(registry) = registry.as_ref() else {
-            // No inotify instance has ever registered a watch.
-            return;
-        };
-        let Some(entries) = registry.get(&WatchIdentity { device, inode }) else {
-            // No watch on this object.
-            return;
-        };
-        for entry in entries {
-            let Some(instance) = entry.instance.upgrade() else {
-                continue;
-            };
-            // Every upgraded reference leaves the critical section, even the
-            // ones this event does not interest: dropping the last strong
-            // reference here would run `Inotify::drop`, which unregisters from
-            // this same registry and would self-deadlock. Filtering happens
-            // after the lock is released.
-            interested.push((instance, entry.watch_descriptor));
-        }
+    for_each_watch(inode, mask, |instance, descriptor| {
+        instance.deliver(descriptor, mask, name, cookie, is_unlinked);
+    });
+}
+
+/// Routes a completed file-content event using dentry and inode semantics.
+///
+/// The caller has released file-position and backend locks. Special files
+/// suppress parent access/modify events, but retain their own subscriptions.
+/// Linux 6.8: __fsnotify_parent() and fsnotify_handle_inode_event().
+pub fn notify_content(dentry: &kvfs::Dentry, mask: u32) {
+    if !any_watch_registered() {
+        return;
     }
-    for (instance, descriptor) in interested {
-        instance.deliver(descriptor, mask, name, cookie);
+    let inode = dentry.inode_ref();
+    let parent_mask = if mask
+        & (linux_raw_sys::general::IN_ACCESS | linux_raw_sys::general::IN_MODIFY)
+        != 0
+        && matches!(
+            inode.node_type(),
+            kvfs::NodeType::CharacterDevice
+                | kvfs::NodeType::BlockDevice
+                | kvfs::NodeType::Fifo
+                | kvfs::NodeType::Socket
+        ) {
+        0
+    } else {
+        mask
+    };
+    if parent_mask == 0 && !inode.watches_notifications(mask) {
+        return;
     }
+    let context = dentry.notification_context(parent_mask);
+    if let Some((parent, name)) = context.parent {
+        route_event(&parent, mask, name.as_bytes(), 0, Some(context.is_unlinked));
+    }
+    route_event(&inode, mask, &[], 0, Some(context.is_unlinked));
 }
 
 /// Reports a self-event (`IN_DELETE_SELF`, `IN_MOVE_SELF`) to every watch on
-/// `(device, inode)`, leaving those watches in place.
+/// the given inode, leaving those watches in place.
 ///
 /// A rename moves the object rather than destroying it, so its watches survive
 /// and only hear about it.
-pub fn notify_self_object(device: u64, inode: u64, self_mask: u32, is_dir: bool) {
+pub fn notify_self_object(inode: &VfsInode, self_mask: u32, is_dir: bool) {
     // Linux's `fsnotify_inode()` sets `FS_ISDIR` for every inode event whose
     // inode is a directory, so a `IN_MOVE_SELF`/`IN_DELETE_SELF`/`IN_ATTRIB` on
     // a directory carries it too.
@@ -447,33 +458,35 @@ pub fn notify_self_object(device: u64, inode: u64, self_mask: u32, is_dir: bool)
     } else {
         self_mask
     };
-    for_each_watch(device, inode, |instance, descriptor| {
+    for_each_watch(inode, self_mask, |instance, descriptor| {
         instance.report_self(descriptor, self_mask);
     });
 }
 
-/// Retires every watch on the object `(device, inode)`, which the caller has
+/// Retires every watch on the inode, which the caller has
 /// established is going away: a removal, or a rename that replaces it.
 ///
 /// `self_mask` is the self-event to report (`IN_DELETE_SELF` or
 /// `IN_MOVE_SELF`); every retiree also gets `IN_IGNORED`, as on Linux.
-pub fn retire_entry(device: u64, inode: u64, self_mask: u32, is_dir: bool) {
+pub fn retire_entry(inode: &VfsInode, self_mask: u32, is_dir: bool) {
     let self_mask = if is_dir {
         self_mask | IN_ISDIR
     } else {
         self_mask
     };
-    for_each_watch(device, inode, |instance, descriptor| {
+    for_each_watch(inode, u32::MAX, |instance, descriptor| {
         instance.retire(descriptor, self_mask);
     });
 }
 
-/// Hands every watch on `(device, inode)` to `f`, outside the registry lock.
-fn for_each_watch(device: u64, inode: u64, f: impl Fn(&Arc<Inotify>, i32)) {
+/// Hands every watch on the pinned inode to `f`, outside the registry lock.
+fn for_each_watch(inode: &VfsInode, mask: u32, f: impl Fn(&Arc<Inotify>, i32)) {
     if !REGISTRY_NON_EMPTY.load(Ordering::Acquire) {
         return;
     }
-    let identity = WatchIdentity { device, inode };
+    let identity = object_key(inode);
+    // Every upgraded instance reference must leave the registry lock before
+    // dropping: its final release can run Inotify::drop and re-enter registry.
     let mut interested = Vec::new();
     {
         let registry = registry().lock();
@@ -484,6 +497,9 @@ fn for_each_watch(device: u64, inode: u64, f: impl Fn(&Arc<Inotify>, i32)) {
             return;
         };
         for entry in entries {
+            if entry.mask & mask == 0 {
+                continue;
+            }
             let Some(instance) = entry.instance.upgrade() else {
                 continue;
             };
@@ -498,7 +514,8 @@ fn for_each_watch(device: u64, inode: u64, f: impl Fn(&Arc<Inotify>, i32)) {
 /// Number of registry entries for `identity`; the unit tests assert that
 /// removal and instance teardown leave no key behind.
 #[cfg(unittest)]
-pub(crate) fn registry_entry_count(identity: WatchIdentity) -> usize {
+pub(crate) fn registry_entry_count(inode: &VfsInode) -> usize {
+    let identity = object_key(inode);
     let registry = registry().lock();
     registry
         .as_ref()
@@ -508,8 +525,9 @@ pub(crate) fn registry_entry_count(identity: WatchIdentity) -> usize {
 
 /// Adds `identity` to the shared index for `instance`.
 fn register_watch(
-    identity: WatchIdentity,
+    identity: usize,
     object: Pin,
+    mask: u32,
     instance: &Arc<Inotify>,
     watch_descriptor: i32,
 ) {
@@ -533,11 +551,33 @@ fn register_watch(
         instance: Arc::downgrade(instance),
         instance_id: instance.id,
         watch_descriptor,
-        _object: object,
+        object: object.clone(),
+        mask,
     });
+    object.set_notification_mask(entries.iter().fold(0, |mask, entry| mask | entry.mask));
     REGISTRY_NON_EMPTY.store(true, Ordering::Release);
     drop(registry);
     drop(dead);
+}
+
+// Called while the instance's watches lock is held. No delivery path takes
+// that lock under the registry lock. Recompute only this object's subscriptions
+// on watch changes, never on a write or other filesystem event.
+fn update_watch_mask(inode: &VfsInode, instance_id: usize, descriptor: i32, mask: u32) {
+    let mut registry = registry().lock();
+    let Some(entries) = registry
+        .as_mut()
+        .and_then(|map| map.get_mut(&object_key(inode)))
+    else {
+        return;
+    };
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry.instance_id == instance_id && entry.watch_descriptor == descriptor)
+    {
+        entry.mask = mask;
+    }
+    inode.set_notification_mask(entries.iter().fold(0, |mask, entry| mask | entry.mask));
 }
 
 /// Removes one watch from the shared index.
@@ -545,7 +585,7 @@ fn register_watch(
 /// Matched on `(instance_id, watch_descriptor)`, not the descriptor alone:
 /// descriptors are per instance, so filtering by number would delete a
 /// different instance's watch on the same path and silence it permanently.
-fn unregister_watch(identity: WatchIdentity, watch_descriptor: i32, instance_id: usize) {
+fn unregister_watch(identity: usize, watch_descriptor: i32, instance_id: usize) {
     let mut registry = registry().lock();
     let mut removed = Vec::new();
     if let Some(map) = registry.as_mut()
@@ -560,6 +600,10 @@ fn unregister_watch(identity: WatchIdentity, watch_descriptor: i32, instance_id:
             } else {
                 index += 1;
             }
+        }
+        let mask = entries.iter().fold(0, |mask, entry| mask | entry.mask);
+        if let Some(entry) = removed.first() {
+            entry.object.set_notification_mask(mask);
         }
         if entries.is_empty() {
             map.remove(&identity);
@@ -593,7 +637,7 @@ impl Drop for Inotify {
         // against this.
         let watches = core::mem::take(&mut *self.watches.lock());
         for (descriptor, watch) in watches.entries {
-            unregister_watch(watch.identity, descriptor, self.id);
+            unregister_watch(watch.object_key, descriptor, self.id);
         }
     }
 }
@@ -672,10 +716,9 @@ impl Inotify {
     /// `IN_MASK_CREATE`; a mask of behavioural flags alone is accepted, as on
     /// Linux. `IN_MASK_ADD` and
     /// `IN_MASK_CREATE` are commands and are not stored.
-    /// `IN_ONESHOT` and `IN_EXCL_UNLINK` are accepted (Linux accepts them) but
-    /// not honoured yet — a watch stays registered after it fires, and events
-    /// for unlinked entries are not suppressed; both are documented gaps, not
-    /// silent behaviour changes. `IN_ONLYDIR` is validated and
+    /// `IN_EXCL_UNLINK` suppresses content events from removed dentries for
+    /// this watch. `IN_ONESHOT` is accepted but not honoured yet: a watch stays
+    /// registered after it fires. `IN_ONLYDIR` is validated and
     /// `IN_DONT_FOLLOW` applied by the syscall adapter, the layer that resolves
     /// the path.
     ///
@@ -715,7 +758,8 @@ impl Inotify {
         // another spelling of the same object updates this watch instead of
         // adding one, which is what Linux returns for the same inode too.
         let mut watches = self.watches.lock();
-        if let Some(descriptor) = watches.descriptor_of(identity) {
+        let key = object_key(&object);
+        if let Some(descriptor) = watches.descriptor_of(key) {
             if mask & IN_MASK_CREATE != 0 {
                 return Err(KError::AlreadyExists);
             }
@@ -736,6 +780,7 @@ impl Inotify {
                     watch.mask = requested;
                     watch.flags = requested_flags;
                 }
+                update_watch_mask(&object, self.id, descriptor, watch.mask);
             }
             return Ok(descriptor);
         }
@@ -744,6 +789,7 @@ impl Inotify {
         let slot = inotify_limits::reserve_watch(self.owner)?;
         let descriptor = watches.insert(
             identity,
+            key,
             stored_mask(mask),
             mask & INOTIFY_MARK_FLAGS,
             &self.next_watch_descriptor,
@@ -759,7 +805,7 @@ impl Inotify {
         // releases the watches lock before unregistering), and the dead
         // references dropped while here are `Weak`s of already-gone
         // instances, which run no `Inotify::drop`.
-        register_watch(identity, object, self, descriptor);
+        register_watch(key, object, stored_mask(mask), self, descriptor);
         drop(watches);
         Ok(descriptor)
     }
@@ -791,10 +837,9 @@ impl Inotify {
     ///
     /// Linux reports `IN_DELETE_SELF`/`IN_MOVE_SELF` and then `IN_IGNORED` when
     /// the watched inode goes away, and the mark does not survive it. Doing the
-    /// same here is what keeps the `(device, inode)` key honest: numbers are
-    /// reused (`kext4` hands an unlinked inode's number back out), so a watch
-    /// that outlived its object would silently adopt the next object to receive
-    /// that number.
+    /// same here releases its object pin and subscription accounting after
+    /// reporting the final event. Routing keys cannot adopt a different inode:
+    /// the registry keeps the original object alive until it removes the key.
     ///
     /// # Errors
     ///
@@ -804,7 +849,7 @@ impl Inotify {
         let Some(entry) = watches.entries.get(&descriptor) else {
             return false;
         };
-        let identity = entry.identity;
+        let identity = entry.object_key;
         let subscribed = entry.mask & self_mask != 0;
         watches.remove(descriptor);
         drop(watches);
@@ -832,7 +877,7 @@ impl Inotify {
         let removed = self.watches.lock().remove(descriptor);
         match removed {
             Some(watch) => {
-                unregister_watch(watch.identity, descriptor, self.id);
+                unregister_watch(watch.object_key, descriptor, self.id);
                 self.queue_event(descriptor, IN_IGNORED, &[], 0);
                 Ok(())
             }
@@ -854,12 +899,19 @@ impl Inotify {
     ///
     /// Lock order is watches before queue, and nothing takes them in the other
     /// order, so the nesting cannot deadlock.
-    fn deliver(&self, descriptor: i32, mask: u32, name: &[u8], cookie: u32) {
+    fn deliver(
+        &self,
+        descriptor: i32,
+        mask: u32,
+        name: &[u8],
+        cookie: u32,
+        is_unlinked: Option<bool>,
+    ) {
         let watches = self.watches.lock();
-        let subscribed = watches
-            .entries
-            .get(&descriptor)
-            .is_some_and(|watch| watch.mask & mask != 0);
+        let subscribed = watches.entries.get(&descriptor).is_some_and(|watch| {
+            watch.mask & mask != 0
+                && !(is_unlinked == Some(true) && watch.flags & IN_EXCL_UNLINK != 0)
+        });
         if subscribed {
             self.queue_event(descriptor, mask, name, cookie);
         }

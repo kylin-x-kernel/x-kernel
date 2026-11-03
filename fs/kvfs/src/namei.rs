@@ -733,7 +733,7 @@ impl<'a> Nameidata<'a> {
                 // dentry's location is mutable afterwards, so the inotify
                 // create event must use this snapshot of where and under what
                 // name the entry was born.
-                file.set_created_under(self.path.identity(), name);
+                file.set_created_under(self.path.inode(), name);
                 Ok(self.path.with_dentry(entry))
             }
         }
@@ -955,7 +955,7 @@ impl Filename {
         Ok(CreatedEntry {
             path,
             name: String::from(name),
-            parent: parent.identity(),
+            parent: parent.inode(),
         })
     }
 
@@ -1028,7 +1028,7 @@ impl Filename {
         Ok(CreatedEntry {
             path,
             name: String::from(name),
-            parent: parent.identity(),
+            parent: parent.inode(),
         })
     }
 
@@ -1078,7 +1078,7 @@ impl Filename {
         Ok(CreatedEntry {
             path,
             name: String::from(name),
-            parent: parent.identity(),
+            parent: parent.inode(),
         })
     }
 
@@ -1121,7 +1121,7 @@ impl Filename {
         Ok(CreatedEntry {
             path,
             name: String::from(name),
-            parent: parent.identity(),
+            parent: parent.inode(),
         })
     }
 

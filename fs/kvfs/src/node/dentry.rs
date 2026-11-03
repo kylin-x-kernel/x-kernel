@@ -141,8 +141,18 @@ pub trait DentryOperations: Send + Sync + 'static {
 
 #[derive(Clone)]
 struct DentryLocation {
+    is_unlinked: bool,
     parent: Option<Dentry>,
     name: String,
+}
+
+/// Namespace context for a content event, captured under one location lock.
+/// The optional parent is an inode, independent of the mount used for access.
+pub struct DentryNotification {
+    /// Whether this particular directory entry has been removed.
+    pub is_unlinked: bool,
+    /// Interested parent and child name. Uninterested parents allocate nothing.
+    pub parent: Option<(Arc<VfsInode>, String)>,
 }
 
 struct DentryInner {
@@ -176,7 +186,11 @@ impl DentryInner {
             flags: Mutex::new(flags),
             lookup_mutex: Mutex::default(),
             inode: Mutex::new(inode),
-            location: RwLock::new(DentryLocation { parent, name }),
+            location: RwLock::new(DentryLocation {
+                parent,
+                name,
+                is_unlinked: false,
+            }),
             operations,
             super_block,
             children: Mutex::default(),
@@ -665,6 +679,33 @@ impl Dentry {
         self.0.location.read().name.clone()
     }
 
+    /// Snapshots linkage and an interested parent for a content event.
+    ///
+    /// Pass zero to suppress parent delivery. Bind roots retain their actual
+    /// dentry parent. The returned value owns its name, so notification runs
+    /// after releasing the location lock and cannot block a namespace writer.
+    pub fn notification_context(&self, parent_mask: u32) -> DentryNotification {
+        let location = self.0.location.read();
+        let parent = location
+            .parent
+            .as_ref()
+            .filter(|_| parent_mask != 0)
+            .and_then(|parent| {
+                let inode = parent.vfs_inode();
+                inode
+                    .watches_notifications(parent_mask)
+                    .then(|| (inode, location.name.clone()))
+            });
+        DentryNotification {
+            is_unlinked: location.is_unlinked,
+            parent,
+        }
+    }
+
+    fn mark_unlinked(&self) {
+        self.0.location.write().is_unlinked = true;
+    }
+
     pub(crate) fn lock_location(&self) -> LockedDentry<'_> {
         LockedDentry {
             dentry: self,
@@ -921,7 +962,11 @@ impl Dentry {
     }
 
     fn rebind(&self, parent: Option<Dentry>, name: String) {
-        *self.0.location.write() = DentryLocation { parent, name };
+        *self.0.location.write() = DentryLocation {
+            parent,
+            name,
+            is_unlinked: false,
+        };
     }
 
     fn d_move(
@@ -932,6 +977,7 @@ impl Dentry {
         destination_name: String,
         keys: (&DentryKey, &DentryKey),
     ) {
+        dst.mark_unlinked();
         if dst.is_really_positive()
             && let Ok(dir) = dst.as_dir()
         {
@@ -1189,6 +1235,7 @@ impl Dentry {
         }
         may_unlink_fn(&entry)?;
         dir_inode.unlink(&entry)?;
+        entry.mark_unlinked();
         self.forget_cache_entry(name);
         Ok(())
     }
@@ -1221,6 +1268,7 @@ impl Dentry {
         }
         may_rmdir_fn(&entry)?;
         dir_inode.rmdir(&entry)?;
+        entry.mark_unlinked();
         self.forget_cache_entry(name);
         Ok(())
     }

@@ -55,6 +55,15 @@ is answered from the same locked snapshot that owns the queue, so the report
 cannot be raced into an over-count; every other ioctl keeps the trait default
 `NotATty`.
 
+The registry retains a strong inode reference while using its address as a
+routing key, preventing reuse while registered. Removal and teardown recompute
+the aggregate event mask under the registry mutex and release inode references
+outside it. Subscription changes take watches before registry; routing releases
+registry before entering watches. Mask hints filter work but never authorize
+delivery. Per-watch unlink policy and the current subscription are validated
+under the same instance lock as enqueueing. The dentry location snapshot
+preserves the removed hard link's state even when other links remain live.
+
 `InotifyLimit::write` is the raw-byte boundary for the three
 `/proc/sys/fs/inotify/` nodes. The procfs closure supplies the user-written
 bytes and `kprocess::current_cred()`, the writing task's credential at the time

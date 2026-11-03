@@ -4,7 +4,7 @@
 
 //! Path-link and namespace mutation syscalls.
 
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
@@ -59,16 +59,7 @@ pub fn sys_linkat(
         // linked inode's own link count also changed (Linux:
         // `fsnotify_link()` reports `FS_ATTRIB` to the inode's marks before the
         // directory's create), so its watches hear `IN_ATTRIB`.
-        if crate::notify::entry_notify_wanted()
-            && let Ok(metadata) = created.path.getattr()
-        {
-            crate::notify::notify_self_object(
-                metadata.device,
-                metadata.inode,
-                crate::notify::IN_ATTRIB,
-                false,
-            );
-        }
+        crate::notify::notify_self_object(&created.path.inode(), crate::notify::IN_ATTRIB, false);
         crate::notify::notify_created_entry(&created, crate::notify::IN_CREATE);
         Ok(0)
     })
@@ -106,15 +97,15 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
         };
         let object = if crate::notify::entry_notify_wanted() {
             object_entry.as_ref().map(|removed| {
-                crate::notify::EntryObject::from_metadata(
-                    removed.victim.clone(),
+                crate::notify::EntryObject::new(
+                    removed.victim_dentry.inode_ref(),
                     removed.victim_nlink.unwrap_or(1),
                 )
             })
         } else {
             None
         };
-        if let Some(object) = object
+        if let Some(object) = &object
             && flags != AT_REMOVEDIR as usize
         {
             // Linux reports the link-count change to the inode's own watches
@@ -125,8 +116,7 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
             // however it is classified below -- is still registered and
             // receives this first.
             crate::notify::notify_self_object(
-                object.device,
-                object.inode,
+                &object.inode,
                 crate::notify::IN_ATTRIB,
                 object.is_dir,
             );
@@ -141,14 +131,13 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
         // the directory that really lost the entry.
         if let Some(removed) = &object_entry {
             crate::notify::notify_entry(
-                removed.parent.device,
-                removed.parent.inode,
+                &removed.parent,
                 crate::notify::IN_DELETE | is_directory,
                 removed.name.as_bytes(),
                 0,
             );
         }
-        if let Some(object) = object
+        if let Some(object) = &object
             && object.disappears(is_dir)
         {
             // Retire last, matching Linux's observable order: the directory's
@@ -158,8 +147,7 @@ pub fn sys_unlinkat(dirfd: i32, path: UserConstPtr<c_char>, flags: usize) -> KRe
             // the watch alive on every failure path (`ENOTEMPTY`, `EROFS`,
             // `EBUSY`, `rmdir(".")`), reporting a removal that never happened.
             crate::notify::retire_object(
-                object.device,
-                object.inode,
+                &object.inode,
                 crate::notify::IN_DELETE_SELF,
                 object.is_dir,
             );
@@ -259,8 +247,8 @@ pub fn sys_renameat(
     sys_renameat2(old_dirfd, old_path, new_dirfd, new_path, 0)
 }
 
-/// One half of a move: the parent's `(device, inode)` and the entry name.
-type MoveHalf = Option<((u64, u64), String)>;
+/// One half of a move: the pinned parent inode and the entry name.
+type MoveHalf = Option<(Arc<kvfs::VfsInode>, String)>;
 
 /// Reports one completed rename to the watches that name its objects.
 ///
@@ -281,10 +269,11 @@ fn report_rename(
         .clone()
         // The source never needs a link count: it only hears `IN_MOVE_SELF`
         // and supplies `IN_ISDIR`, so any value is inert here.
-        .map(|meta| crate::notify::EntryObject::from_metadata(meta, 1));
-    let to_object = outcome.replaced.clone().map(|meta| {
-        crate::notify::EntryObject::from_metadata(meta, outcome.replaced_nlink.unwrap_or(1))
-    });
+        .map(|meta| crate::notify::EntryObject::new(meta, 1));
+    let to_object = outcome
+        .replaced
+        .clone()
+        .map(|meta| crate::notify::EntryObject::new(meta, outcome.replaced_nlink.unwrap_or(1)));
 
     // Linux's order: the two move halves first (`fsnotify_move()` reports the
     // directories), then the moved object's own `IN_MOVE_SELF`.
@@ -301,20 +290,14 @@ fn report_rename(
     // `fsnotify_move()` reports the replaced target's `FS_ATTRIB`
     // (`fsnotify_link_count(target)`) *before* the moved source's
     // `FS_MOVE_SELF`; the target's event goes first here too.
-    if !exchange && let Some(object) = to_object {
-        crate::notify::notify_self_object(
-            object.device,
-            object.inode,
-            crate::notify::IN_ATTRIB,
-            object.is_dir,
-        );
+    if !exchange && let Some(object) = &to_object {
+        crate::notify::notify_self_object(&object.inode, crate::notify::IN_ATTRIB, object.is_dir);
     }
-    if let Some(object) = from_object {
+    if let Some(object) = &from_object {
         // The object moved; it still exists, so its watches stay and only hear
         // `IN_MOVE_SELF`.
         crate::notify::notify_self_object(
-            object.device,
-            object.inode,
+            &object.inode,
             crate::notify::IN_MOVE_SELF,
             object.is_dir,
         );
@@ -322,23 +305,21 @@ fn report_rename(
     if exchange {
         // An exchange is two moves: the object that was at the new name hears
         // its own `IN_MOVE_SELF` too.
-        if let Some(object) = to_object {
+        if let Some(object) = &to_object {
             crate::notify::notify_self_object(
-                object.device,
-                object.inode,
+                &object.inode,
                 crate::notify::IN_MOVE_SELF,
                 object.is_dir,
             );
         }
-    } else if let Some(object) = to_object {
+    } else if let Some(object) = &to_object {
         // The replaced object's watches are retired only if it really
         // disappears (a file with other links survives, as with unlink), and
         // retirement is last: Linux delivers `FS_DELETE_SELF` at inode
         // eviction, after everything `fsnotify_move()` reports.
         if object.disappears(false) {
             crate::notify::retire_object(
-                object.device,
-                object.inode,
+                &object.inode,
                 crate::notify::IN_DELETE_SELF,
                 object.is_dir,
             );
@@ -387,14 +368,8 @@ pub fn sys_renameat2(
             .and_then(|lookup| lookup.into_normal())
     })?;
     let parts = if watchable {
-        let from = old_dir
-            .getattr()
-            .ok()
-            .map(|meta| ((meta.device, meta.inode), old_name.clone()));
-        let to = new_dir
-            .getattr()
-            .ok()
-            .map(|meta| ((meta.device, meta.inode), new_name.clone()));
+        let from = Some((old_dir.inode(), old_name.clone()));
+        let to = Some((new_dir.inode(), new_name.clone()));
         Some((from, to))
     } else {
         None
@@ -415,14 +390,11 @@ pub fn sys_renameat2(
     if !outcome.moved {
         return Ok(0);
     }
-    let moved_is_directory = outcome
-        .source
-        .as_ref()
-        .is_some_and(|meta| meta.mode.node_type() == kvfs::NodeType::Directory);
+    let moved_is_directory = outcome.source.as_ref().is_some_and(|inode| inode.is_dir());
     let reverse_is_directory = outcome
         .replaced
         .as_ref()
-        .is_some_and(|meta| meta.mode.node_type() == kvfs::NodeType::Directory);
+        .is_some_and(|inode| inode.is_dir());
     report_rename(
         &outcome,
         parts,

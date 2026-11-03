@@ -73,6 +73,12 @@ inotify instances and the per-euid instance/watch ledger behind the
 fdinfo. Procfs consumes these interfaces without introducing a separate MM or
 file-object lifecycle.
 
+Static directory mappings retain the inodes of their declared entries,
+including the inotify sysctl nodes with custom permission operations. Repeated
+lookups reuse those objects even when the dentry cache is disabled, preserving
+file watches and content-event routing. Dynamic task and descriptor entries
+continue to be materialized by their lookup callbacks.
+
 `sys/kernel/pty/max` and `sys/kernel/pty/nr` expose decimal values followed by
 a newline through read-only `SimpleFile` closures with mode `0444`. The `ktty`
 provider owns both the fixed limit and reservation accounting. `nr` includes

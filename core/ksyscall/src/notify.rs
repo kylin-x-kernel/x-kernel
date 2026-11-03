@@ -36,6 +36,7 @@ pub(crate) fn install_fs_notifier() {
     // `INSTALLED` must already find the pointers in place, and re-storing the
     // same `fn` items is idempotent, so several installers racing here all
     // write the identical values.
+    posix_fs::notify::set_content_notifier(kfd_objects::inotify::notify_content);
     posix_fs::notify::set_entry_notifier(kfd_objects::inotify::notify_path);
     posix_fs::notify::set_watch_probe(kfd_objects::inotify::any_watch_registered);
     posix_fs::notify::set_retire_notifier(kfd_objects::inotify::retire_entry);

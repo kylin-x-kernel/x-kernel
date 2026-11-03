@@ -52,16 +52,25 @@ pub trait IntoDirMappingEntry {
 
 impl IntoDirMappingEntry for DirMaker {
     fn into_dir_mapping_entry(self) -> SimpleDirEntry {
-        SimpleDirEntry::new(Arc::new(move |parent, name| {
-            Ok(make_dir_child(parent, name, self.clone()))
-        }))
+        self().into_dir_mapping_entry()
     }
 }
 
 impl IntoDirMappingEntry for Arc<crate::SimpleFile> {
     fn into_dir_mapping_entry(self) -> SimpleDirEntry {
+        self.new_inode(NodeFlags::NON_CACHEABLE)
+            .into_dir_mapping_entry()
+    }
+}
+
+impl IntoDirMappingEntry for Arc<VfsInode> {
+    fn into_dir_mapping_entry(self) -> SimpleDirEntry {
         SimpleDirEntry::new(Arc::new(move |parent, name| {
-            Ok(make_file_child(parent, name, self.clone()))
+            Ok(if self.is_dir() {
+                Dentry::new_dir_from_inode(self.clone(), parent, name.to_owned())
+            } else {
+                Dentry::new_file_from_inode(self.clone(), parent, name.to_owned())
+            })
         }))
     }
 }
@@ -71,25 +80,13 @@ where
     I: crate::SeqIterator,
 {
     fn into_dir_mapping_entry(self) -> SimpleDirEntry {
-        SimpleDirEntry::new(Arc::new(move |parent, name| {
-            let init = self.inode_init();
-            let inode = VfsInode::new_file_with_flags(self.clone(), NodeFlags::NON_CACHEABLE, init);
-            Ok(Dentry::new_file_from_inode(inode, parent, name.to_owned()))
-        }))
+        let init = self.inode_init();
+        VfsInode::new_file_with_flags(self, NodeFlags::NON_CACHEABLE, init).into_dir_mapping_entry()
     }
 }
 
 fn make_dir_child(parent: Option<Dentry>, name: &str, maker: DirMaker) -> Dentry {
     Dentry::new_dir_from_inode(maker(), parent, name.to_owned())
-}
-
-fn simple_file_inode(node: Arc<crate::SimpleFile>, flags: NodeFlags) -> Arc<VfsInode> {
-    node.new_inode(flags)
-}
-
-fn make_file_child(parent: Option<Dentry>, name: &str, node: Arc<crate::SimpleFile>) -> Dentry {
-    let inode = simple_file_inode(node, NodeFlags::NON_CACHEABLE);
-    Dentry::new_file_from_inode(inode, parent, name.to_owned())
 }
 
 /// Parent context passed to simple directory lookup implementations.
@@ -244,6 +241,9 @@ impl SimpleDirOps for DirMapping {
 }
 
 /// A mapping of directory names to entries.
+///
+/// Static entries retain one inode independently of dentry-cache residency.
+/// Dynamic [`Self::add_child`] callbacks own their inode-lifetime policy.
 pub struct DirMapping {
     entries: Mutex<BTreeMap<String, DirEntryFactory>>,
 }
@@ -268,9 +268,8 @@ impl DirMapping {
 
     /// Add a simple child to the directory mapping.
     pub fn add(&mut self, name: impl Into<String>, entry: impl IntoDirMappingEntry) {
-        self.entries
-            .lock()
-            .insert(name.into(), entry.into_dir_mapping_entry().factory);
+        let entry = entry.into_dir_mapping_entry();
+        self.entries.lock().insert(name.into(), entry.factory);
     }
 
     /// Add a custom child factory to the directory mapping.

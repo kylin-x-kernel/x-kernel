@@ -68,6 +68,7 @@ kfd resources / kvfs / device and pipe implementations
 | `ioctl.rs::FiemapExtent` 的 `UserWrite` 实现 | FIEMAP writer 输出 | 复制 Linux FIEMAP extent | `repr(C)` 结构所有 ABI reserved 区域都由显式整数数组覆盖并在每次输出时清零，不存在未初始化 padding |
 | `notify.rs::entry_notify_wanted` (`transmute::<usize, WatchProbe>`) | `open`/`mkdir`/`mknod`/`symlink`/`link`/`unlink`/`rmdir`/`rename` entry, the "no watch anywhere" probe | Restores the installed `fn` pointer from its integer form | Only `set_watch_probe` writes the static, storing `probe as usize` -- the address of a `fn` item whose signature matches exactly -- so every non-zero value is such a code address; `0` is the "not installed" sentinel and is excluded before the cast; the `Release` store pairs with the `Acquire` load. Several syscall entries may install concurrently, but each stores the same typed value, so the invariant rests on the typed setter parameter, the sentinel and the ordering, not on a single writer. Failure consequence: if that invariant is broken the call jumps to a non-function address (UB), so no other path may write the static |
 | `notify.rs::notify_entry` (`transmute::<usize, EntryNotifier>`) | `notify_entry_of_path` / `notify_entry`, directory-entry events | Restores the entry notifier the same way | Same argument: the only writer is `set_entry_notifier`, the signature matches the cast type, the `0` sentinel is excluded first, and the store/load pair is `Release`/`Acquire` |
+| `notify.rs::notify_modified` (`transmute::<usize, ContentNotifier>`) | successful `write`/`writev`/positioned writes, `sendfile`/`copy_file_range`/`splice` with positive progress, `open(O_TRUNC)`, `truncate`/`ftruncate`, and `fallocate` -> `notify_modified` | Restores the installed content-event router | Only `set_content_notifier` writes `CONTENT`, storing a `ContentNotifier` function pointer as `usize`; the signature matches the cast type, `0` is the "not installed" sentinel and is excluded before the cast; the `Release` store pairs with the `Acquire` load. Concurrent installers store the same typed value. Failure consequence: if that invariant is broken the call jumps to a non-function address (UB), so no other path may write the static |
 | `notify.rs::notify_self_object` (`transmute::<usize, SelfNotifier>`) | `link`'s `IN_ATTRIB`, self-events of removal and rename | Restores the self-event notifier | Same argument: the only writer is `set_self_notifier` |
 | `notify.rs::retire_object` (`transmute::<usize, RetireNotifier>`) | retirement of an object's watches when it disappears | Restores the retirement notifier | Same argument: the only writer is `set_retire_notifier` |
 
@@ -338,3 +339,11 @@ The ioctl entry passes the current caller's credential snapshot through KVFS.
 The block dispatcher authorizes `BLKROSET` using that effective UID (zero
 stands in for CAP_SYS_ADMIN) before copying the argument, returning EACCES on
 failure. The opening credential does not authorize later ioctl callers.
+
+Content-change notification uses inode event masks only to avoid unnecessary
+routing work. Permissions remain checked at registration and the notifier
+revalidates subscriptions under its own lock. Parent/name/linkage snapshots use
+one location guard; callbacks run after it is released. The registry pins inode
+objects through routing removal, preventing address reuse. Bind aliases share
+object subscriptions. Special files do not report parent content events, and
+`IN_EXCL_UNLINK` is applied per watch using the particular dentry's unlink state.

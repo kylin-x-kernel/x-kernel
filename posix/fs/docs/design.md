@@ -94,6 +94,28 @@ core/ksyscall
 | `ioctl` | 处理 `FIONBIO`、inode FIEMAP，并把其它命令转交 `FileLike::ioctl`；未识别命令返回 `ENOTTY`，仅 `debug!` 记录 |
 | `sync` | 将同步请求转发到文件系统或打开对象所在文件系统 |
 
+## Content modification notifications
+
+`notify::notify_modified` reports content changes to the parent-directory watch
+with an entry name and to the file's own watches without a name. Writes and
+transfers report once after positive request progress; empty and failed writes
+do not report. Successful truncation, truncating opens of existing regular
+files and allocation requests also report `IN_MODIFY`. `O_PATH` opens do not
+truncate or report modifications, even with `O_TRUNC`.
+
+Position and backend locks are released before delivery. Transfer offset
+copyout follows notification, so a later user-memory fault does not retract
+an already completed mutation. The installed content router uses inode event
+masks to reject unrelated subscriptions before registry lookup. It snapshots the
+actual dentry parent, name and unlink state together, copying a name only for an
+interested parent. Unrelated writes can still inspect the local location lock.
+
+The router suppresses special-file parent access/modify events and applies
+`IN_EXCL_UNLINK` per watch to content events. Inode references identify watches
+across bind aliases; namespace event records use the same object identity.
+Concurrent registrations may or may not receive an event; registrations
+completed before the mutation are included.
+
 ## 调用约束 / 执行上下文
 
 `posix-fs` 是 syscall 层 crate，入口默认运行在当前用户进程线程上下文中。

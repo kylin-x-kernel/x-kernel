@@ -12,6 +12,37 @@ use crate::{FileSystemType, Mount, Path};
 static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::internal("simple-dir-test");
 
 #[def_test]
+fn static_entries_preserve_inode_identity_after_dentry_invalidation() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
+        let mut entries = DirMapping::new();
+        entries.add(
+            "file",
+            crate::SimpleFile::new_regular(fs.clone(), || Ok("content")),
+        );
+        entries.add(
+            "directory",
+            SimpleDir::new_maker(fs.clone(), Arc::new(DirMapping::new())),
+        );
+        SimpleDir::new_maker(fs, Arc::new(entries))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let mut inodes = Vec::new();
+    for name in ["file", "directory"] {
+        let first = root.dentry().lookup(name).unwrap();
+        root.dentry().invalidate_cached_child(name).unwrap();
+        let second = root.dentry().lookup(name).unwrap();
+        assert!(Arc::ptr_eq(&first.inode_ref(), &second.inode_ref()));
+        inodes.push(Arc::downgrade(&first.inode_ref()));
+    }
+    drop(root);
+    drop(super_block);
+    for inode in inodes {
+        assert!(inode.upgrade().is_none());
+    }
+}
+
+#[def_test]
 fn simple_filesystem_rejects_owner_policy_before_building_root() {
     let built = core::cell::Cell::new(false);
     let result = SimpleFs::new_with_allocation_flags(

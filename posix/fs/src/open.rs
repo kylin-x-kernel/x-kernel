@@ -73,6 +73,13 @@ pub fn sys_openat(
                 // the link's directory for a name that was never created.
                 crate::notify::notify_created(file, crate::notify::IN_CREATE);
             }
+            if flags as u32 & O_TRUNC != 0
+                && !file.is_path()
+                && !file.was_created()
+                && file.path().is_regular_file()
+            {
+                crate::notify::notify_modified(file.path());
+            }
         })
     })
     .and_then(|it| add_to_fd(it, flags as _))

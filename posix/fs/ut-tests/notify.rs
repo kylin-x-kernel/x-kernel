@@ -12,16 +12,15 @@ use super::*;
 /// One captured `(device, inode, mask, name, cookie)` record.
 type CapturedRecord = (u64, u64, u32, String, u32);
 
-/// Records every notification, so assertions can filter by unique marker names
-/// even though the tests run concurrently and each installs this same logger.
+/// Records notifications while this serial test owns the callback.
 static LOG: Lazy<Mutex<Option<Vec<CapturedRecord>>>> = Lazy::new(|| Mutex::new(None));
 
-fn capture_logger(device: u64, inode: u64, mask: u32, name: &[u8], cookie: u32) {
+fn capture_logger(inode: &VfsInode, mask: u32, name: &[u8], cookie: u32) {
     let mut log = LOG.lock();
     let log = log.get_or_insert_with(Default::default);
     log.push((
-        device,
-        inode,
+        8,
+        inode.inode(),
         mask,
         String::from_utf8_lossy(name).into_owned(),
         cookie,
@@ -43,15 +42,42 @@ fn count_records(identity: (u64, u64), mask: u32, name: &str) -> usize {
         .count()
 }
 
-#[def_test]
+fn test_inode(number: u64) -> Arc<VfsInode> {
+    VfsInode::new_file_with_inode_operations(
+        Arc::new(()),
+        kvfs::empty_inode_operations(),
+        kvfs::NodeFlags::empty(),
+        kvfs::VfsInodeInit::new(
+            number,
+            0,
+            kvfs::Umode::new(kvfs::NodeType::RegularFile, kvfs::NodePermission::empty()),
+        ),
+    )
+}
+
+#[def_test(serial)]
 fn notify_rename_parts_pairs_the_two_halves_with_one_cookie() {
-    set_entry_notifier(capture_logger);
+    struct RestoreNotifier(usize);
+    impl Drop for RestoreNotifier {
+        fn drop(&mut self) {
+            NOTIFIER.store(self.0, Ordering::Release);
+            *LOG.lock() = None;
+        }
+    }
+    let logger: EntryNotifier = capture_logger;
+    let _restore = RestoreNotifier(NOTIFIER.swap(logger as usize, Ordering::AcqRel));
 
     // The two halves name different objects (the entry's old and new parent)
     // and share one non-zero cookie.
     notify_rename_parts(
-        Some(((8, 1001), alloc::string::String::from("notify-move-marker.txt"))),
-        Some(((8, 1002), alloc::string::String::from("notify-move-marker.txt"))),
+        Some((
+            test_inode(1001),
+            alloc::string::String::from("notify-move-marker.txt"),
+        )),
+        Some((
+            test_inode(1002),
+            alloc::string::String::from("notify-move-marker.txt"),
+        )),
         false,
     );
     let captured: Vec<_> = records()
@@ -68,8 +94,14 @@ fn notify_rename_parts_pairs_the_two_halves_with_one_cookie() {
 
     // A second rename gets a different cookie.
     notify_rename_parts(
-        Some(((8, 1001), alloc::string::String::from("notify-move-a"))),
-        Some(((8, 1001), alloc::string::String::from("notify-move-b"))),
+        Some((
+            test_inode(1001),
+            alloc::string::String::from("notify-move-a"),
+        )),
+        Some((
+            test_inode(1001),
+            alloc::string::String::from("notify-move-b"),
+        )),
         false,
     );
     let second: Vec<_> = records()
@@ -81,8 +113,14 @@ fn notify_rename_parts_pairs_the_two_halves_with_one_cookie() {
 
     // A moved directory carries IN_ISDIR on both halves.
     notify_rename_parts(
-        Some(((8, 1001), alloc::string::String::from("notify-move-dir"))),
-        Some(((8, 1001), alloc::string::String::from("notify-move-dir2"))),
+        Some((
+            test_inode(1001),
+            alloc::string::String::from("notify-move-dir"),
+        )),
+        Some((
+            test_inode(1001),
+            alloc::string::String::from("notify-move-dir2"),
+        )),
         true,
     );
     let directory: Vec<_> = records()
@@ -96,5 +134,8 @@ fn notify_rename_parts_pairs_the_two_halves_with_one_cookie() {
     let before = records().len();
     notify_rename_parts(None, None, false);
     assert_eq!(records().len(), before);
-    let _ = count_records((8, 1001), IN_MOVED_FROM, "notify-move-dir");
+    assert_eq!(
+        count_records((8, 1001), IN_MOVED_FROM | IN_ISDIR, "notify-move-dir"),
+        1
+    );
 }

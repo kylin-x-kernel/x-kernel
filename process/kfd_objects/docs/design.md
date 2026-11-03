@@ -36,7 +36,7 @@ in object state. This crate does not own process descriptor-number allocation.
 | `TimerFd` | Owned `ktask::Timer<TimerFdHandler>` with embedded clock/count/poll state, programming `Mutex<()>` | `settime` validates and drains the old delivery before replacing state; callback/read/poll/gettime account elapsed periods. Read rearms the next periodic notification. |
 | `Signalfd` | `RwLock<SignalSet>` | Each file read/poll resolves the current `ThreadSignalManager`, selects pending signals by the mask and serializes one 128-byte record per read. Signal configuration owns the shared notification source. |
 | `Epoll` | `Arc<EpollInner>`, interest table, ready queue and poll set | `add`/`modify` register watched file poll sources; callbacks enqueue weak interest references; `poll_events` returns ready ABI events and rearms interests. |
-| `Inotify` | Watch table (`Mutex<WatchTable>`: descriptor→entry map plus identity index), shared path registry, event queue (`Mutex<EventQueue>`), poll set | `add_watch` keys watches by the object identity the path resolved to (`(device, inode)`, the same pair the event side reaches through the changed entry's parent); `remove_watch` queues `IN_IGNORED`; `read` drains whole `struct inotify_event` records in order and reports `IN_Q_OVERFLOW` as a queued record the moment a push overruns the queue; `FIONREAD` reports the drain size. |
+| `Inotify` | Watch table (`Mutex<WatchTable>`: descriptor→entry map plus identity index), shared object registry, event queue (`Mutex<EventQueue>`), poll set | `add_watch` keys watches by the object identity the path resolved to (the pinned VFS inode, also used by event producers); `remove_watch` queues `IN_IGNORED`; `read` drains whole `struct inotify_event` records in order and reports `IN_Q_OVERFLOW` as a queued record the moment a push overruns the queue; `FIONREAD` reports the drain size. |
 
 `from_file` retrieves the typed private data and rejects an unrelated file.
 The anonymous file operations implement `kvfs::FileOperations`; eventfd/timerfd
@@ -140,9 +140,9 @@ the event it could not admit.
 
 Directory-entry events are reported by the VFS syscalls through the injectable
 notifier in `posix_fs::notify`, and delivered by object: the hook resolves the
-changed entry's parent to its `(device, inode)` pair -- what Linux reaches by
+changed entry's parent to its pinned inode -- what Linux reaches by
 walking the dentry's parent inode in `fsnotify_parent()` -- and `notify_path`
-looks that pair up in the shared registry, handing the event to every watch
+looks that object up in the shared registry, handing the event to every watch
 subscribed to its mask. The subscription is re-checked under the watch-table
 lock so a concurrent removal cannot queue an event for a watch that is gone, and
 because the key is the object, a watched directory keeps its watches when it is
@@ -151,7 +151,28 @@ Sources wired today: creating `open`, `mkdir`, `mknod` and `symlink`/`link`
 (`IN_CREATE`, plus `IN_ISDIR` for a created directory), `unlinkat`/`rmdir`
 (`IN_DELETE`, plus `IN_ISDIR` for a removed directory) and `renameat`
 (`IN_MOVED_FROM` and `IN_MOVED_TO`, one shared non-zero cookie, `IN_ISDIR` for a
-moved directory). Attribute- and close-class events have no source yet.
+moved directory). Writes, vectored and positioned writes, file transfers,
+truncation, truncating opens and successful allocation requests report
+`IN_MODIFY`. Writes and transfers report only positive progress, once per
+request and before offset copyout; a later copyout fault cannot undo the
+completed change. Directory watches receive the entry name, and file watches
+receive a nameless event. `O_PATH | O_TRUNC` does not truncate or generate
+modification events. General metadata updates and close-class events have no
+source yet.
+
+Watch registration accepts an `Arc<kvfs::VfsInode>`. The registry and each
+instance's duplicate-registration index use the pinned object's address;
+`WatchIdentity` is only fdinfo display data. Bind aliases therefore share watches.
+Registry entries cache subscription masks and recompute the inode's aggregate
+mask on additions, mask changes and removals under the registry mutex. Updates
+take instance watches before registry; delivery releases registry before taking
+instance watches. Object references are dropped outside the registry lock.
+
+Content routing snapshots the dentry's actual parent, name and unlink state.
+Only parents interested in the event allocate names. Special-file access/modify
+events skip the parent, while object subscriptions remain eligible. Delivery
+rechecks the current mask and `IN_EXCL_UNLINK` under the instance lock; namespace
+events do not apply the content-event unlink filter.
 
 A watch also ends the way Linux ends it: when the watched object is removed, the
 syscalls report its identity *before* the removal, and the watches on it are
@@ -187,7 +208,7 @@ already held; the reduced ceiling applies to later reservations.
 Event sourcing is the object-identity registry: the
 filesystem hooks (`open(O_CREAT)`, `mkdir`, `mknod`, `symlink`, `link`,
 `unlink`, `rmdir`, `rename`) report entries and self-events through the
-one-shot installer into the `(device, inode)`-keyed table above, and the
+one-shot installer into the inode-object-keyed table above, and the
 kernel-generated records (`IN_IGNORED`, `IN_Q_OVERFLOW`) join the same queue;
 delivery skips every lookup once `REGISTRY_NON_EMPTY` says no watch is
 registered anywhere.

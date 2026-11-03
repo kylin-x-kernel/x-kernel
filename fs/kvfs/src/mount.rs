@@ -844,8 +844,8 @@ pub struct CreatedEntry {
     pub path: Path,
     /// The name the entry was created under.
     pub name: alloc::string::String,
-    /// `(device, inode)` of the directory that received the entry.
-    pub parent: Metadata,
+    /// Pinned inode of the directory that received the entry.
+    pub parent: Arc<VfsInode>,
 }
 
 /// A resolved location within a mountpoint.
@@ -958,7 +958,7 @@ impl Path {
     }
 
     /// Returns the underlying directory entry.
-    pub(crate) fn dentry(&self) -> &Dentry {
+    pub fn dentry(&self) -> &Dentry {
         &self.dentry
     }
 
@@ -1511,13 +1511,12 @@ impl Path {
         // The identities the event sources need are captured here, inside the
         // callback the rename runs under its namespace lock, from the very
         // dentries being moved and replaced. A path lookup afterwards could
-        // describe a different object entirely; a failed `getattr` only means
-        // the event is not reported, never that the rename fails.
+        // describe a different object entirely. Only the replacement link
+        // count needs a backend metadata query.
         let mut moved = false;
         let mut source_meta = None;
         let mut replaced_meta = None;
         let mut replaced_nlink = None;
-        let mut replaced_dentry = None;
         self.dentry.as_dir()?.rename_with(
             old_name,
             new_dir.dentry.as_dir()?,
@@ -1539,18 +1538,17 @@ impl Path {
                 // The source's type is all the move halves need, and the
                 // cached copy has it; the replaced target's `nlink` drives a
                 // retirement decision, so it is read authoritatively.
-                source_meta = Some(old_path.identity());
+                source_meta = Some(old_path.inode());
                 if target.is_really_positive() {
                     let new_path = new_dir.with_dentry(target.clone());
                     new_dir.check_sticky(&new_path, cred)?;
                     new_path.check_not_mountpoint()?;
-                    replaced_meta = Some(new_path.identity());
+                    replaced_meta = Some(new_path.inode());
                     replaced_nlink = Some(
                         new_path
                             .getattr()
                             .map_or_else(|_| new_path.identity().nlink, |meta| meta.nlink),
                     );
-                    replaced_dentry = Some(target.clone());
                 }
                 Ok(())
             },
@@ -1560,7 +1558,6 @@ impl Path {
             source: source_meta,
             replaced: replaced_meta,
             replaced_nlink,
-            replaced_dentry,
         })
     }
 
@@ -1604,12 +1601,11 @@ impl Path {
             // This one field must be authoritative, so it comes from `getattr`
             // -- a backend (9p) may leave the cached copy stale -- and a
             // failure means no retirement decision is taken at all rather than
-            // a wrong one. The parent identity is a key, so the cached
-            // `(device, inode)` suffices.
+            // a wrong one. Parent and victim references pin the event objects
+            // independently of the mount used to reach them.
             removed = Some(RemovedEntry {
-                parent: self.identity(),
+                parent: self.inode(),
                 name: alloc::string::String::from(name),
-                victim: victim_path.identity(),
                 // Authoritative when the backend answers, cached otherwise:
                 // a removal whose link count cannot be decided would leave the
                 // watch pinned to a dead object forever, which is worse than
@@ -1641,9 +1637,8 @@ impl Path {
             self.check_sticky(&victim_path, cred)?;
             victim_path.check_not_mountpoint()?;
             removed = Some(RemovedEntry {
-                parent: self.identity(),
+                parent: self.inode(),
                 name: alloc::string::String::from(name),
-                victim: victim_path.identity(),
                 // Authoritative when the backend answers, cached otherwise:
                 // a removal whose link count cannot be decided would leave the
                 // watch pinned to a dead object forever, which is worse than

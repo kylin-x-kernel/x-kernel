@@ -22,8 +22,8 @@ use log::warn;
 use pagecache::{FolioGuard, PageIndex};
 
 use crate::{
-    AddressSpace, DirContext, FallocateFlags, Kiocb, MagicLinkOps, Metadata, MmapMapper, Mutex,
-    MutexGuard, NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
+    AddressSpace, DirContext, FallocateFlags, Kiocb, MagicLinkOps, MmapMapper, Mutex, MutexGuard,
+    NodeFlags, NodeType, OpenFlags, Path, TypeMap, VfsError, VfsInode, VfsResult,
 };
 
 /// A captured, event-filtered wait source independent of current file readiness.
@@ -531,7 +531,7 @@ pub struct VfsFileBuilder {
     /// name it was created under, captured inside the creation's namespace
     /// lock. The created dentry's own location is mutable afterwards, so event
     /// attribution must use this snapshot, not a later read.
-    created_under: Option<(Metadata, String)>,
+    created_under: Option<(Arc<VfsInode>, String)>,
 }
 
 impl VfsFileBuilder {
@@ -609,7 +609,7 @@ impl VfsFileBuilder {
     /// Called from the creation branch while the parent's namespace lock is
     /// still held; the created dentry's own location is mutable afterwards, so
     /// attribution uses this snapshot.
-    pub(crate) fn set_created_under(&mut self, parent: Metadata, name: &str) {
+    pub(crate) fn set_created_under(&mut self, parent: Arc<VfsInode>, name: &str) {
         self.created_under = Some((parent, String::from(name)));
     }
 
@@ -799,7 +799,7 @@ pub struct VfsFile {
     pipe_generation: u64,
     /// Where and under what name the open that produced this file created its
     /// entry; `None` unless that open actually created it.
-    created_under: Option<(Metadata, String)>,
+    created_under: Option<(Arc<VfsInode>, String)>,
 }
 
 impl VfsFile {
@@ -971,7 +971,7 @@ impl VfsFile {
     ///
     /// Both were captured inside the creation's namespace lock, so they stay
     /// correct even if the entry is renamed before the caller reads them.
-    pub fn created_under(&self) -> Option<(&Metadata, &str)> {
+    pub fn created_under(&self) -> Option<(&Arc<VfsInode>, &str)> {
         self.created_under
             .as_ref()
             .map(|(parent, name)| (parent, name.as_str()))
