@@ -17,6 +17,8 @@ timer-reprogram = []
 [dependencies]
 kalloc-types.workspace = true
 kerrno.workspace = true
+kcompletion.workspace = true
+kiface-task-wait-api.workspace = true
 kiface-cpu-api.workspace = true
 kiface-task-api.workspace = true
 kiface-time-api.workspace = true

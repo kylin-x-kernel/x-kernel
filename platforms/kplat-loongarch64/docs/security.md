@@ -1,5 +1,11 @@
 # kplat-loongarch64 — Security And Reliability
 
+## Local Timer Admission
+
+Timer IRQ 11 uses KIRQ PerCpu enable/configuration state. The current CPU remains
+pinned through CSR programming and software commit. This does not implement
+remote CPU shutdown, IPI routing or completed cross-CPU quiescence.
+
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (module wiring and

@@ -36,6 +36,7 @@ mod notification;
 mod queue;
 #[cfg(feature = "smp")]
 mod stop;
+mod sync_call;
 #[cfg(feature = "smp")]
 pub mod tlb;
 
@@ -48,6 +49,7 @@ pub use notification::{
     enable_fixed_notifications, notify_bottom_half, notify_highpri_bottom_half, notify_rcu,
 };
 use queue::IpiEventQueue;
+pub use sync_call::run_on_cpu_sync;
 
 /// Result type for IPI operations
 pub type Result<T> = core::result::Result<T, KipiError>;

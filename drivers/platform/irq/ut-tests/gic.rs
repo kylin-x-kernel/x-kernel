@@ -24,7 +24,7 @@ fn explicit_gic_sources_require_discovered_standard_range() {
             IrqDesc::from_hwirq(hwirq).with_controller(IrqController::Gic),
             IrqDesc::from_hwirq(hwirq).with_domain(super::GIC_ROOT_DOMAIN),
         ] {
-            let expected = if hwirq < 32 { IrqFlow::Legacy }
+            let expected = if hwirq < 32 { IrqFlow::PerCpu }
                 else { IrqFlow::Fasteoi(&super::spi::CHIP) };
             assert_eq!(super::select_gic_flow(desc, Some(64)), Ok(expected));
             assert_eq!(super::select_gic_flow(desc, None),
@@ -85,7 +85,7 @@ fn explicit_gic_spis_reject_unsupported_trigger_polarity() {
     // policy on private sources or reinterpret undeclared legacy resources.
     for hwirq in [0, 15, 16, 31] {
         assert_eq!(super::select_gic_flow(
-            super::irq_desc(hwirq, IrqTrigger::LevelLow), Some(64)), Ok(IrqFlow::Legacy));
+            super::irq_desc(hwirq, IrqTrigger::LevelLow), Some(64)), Ok(IrqFlow::PerCpu));
     }
     assert_eq!(super::select_gic_flow(IrqDesc::new(32, IrqTrigger::EdgeFalling), None),
         Ok(IrqFlow::Legacy));
@@ -96,7 +96,7 @@ fn spi_flow_excludes_private_nmi_and_unsupported_routing() {
     use kirq::{IrqAffinity, IrqDescError, IrqFlags, IrqFlow, IrqPolarity};
     for hwirq in [0, 15, 16, 27, 31] {
         assert_eq!(super::select_gic_flow(super::edge_irq_desc(hwirq), Some(64)),
-            Ok(IrqFlow::Legacy));
+            Ok(if hwirq == 27 { IrqFlow::Legacy } else { IrqFlow::PerCpu }));
     }
     // register_nmi tags its fallback PER_CPU before flow selection, including
     // SPI metadata. This is not an ordinary-source hardware capability.

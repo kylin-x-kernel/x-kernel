@@ -319,6 +319,22 @@ pub fn set_irq_enabled(irq: usize, enabled: bool) {
     }
 }
 
+/// Changes only this prepared CPU's LAPIC timer LVT mask. The source owner must
+/// exclude competing timer programming; this does not disarm or drain a timer.
+pub fn set_local_timer_enabled(enabled: bool) {
+    with_local_apic(|lapic| {
+        if enabled {
+            // SAFETY: with_local_apic selects the prepared CPU-local controller
+            // and retains IRQ exclusion; only its timer LVT mask is modified.
+            unsafe { lapic.enable_timer() };
+        } else {
+            // SAFETY: with_local_apic selects this CPU's prepared, live LAPIC
+            // and retains IRQ exclusion, serializing the timer LVT mask write.
+            unsafe { lapic.disable_timer() };
+        }
+    });
+}
+
 /// Programs the trigger mode and polarity of one IO-APIC input line.
 pub fn configure_irq(irq: usize, trigger: IoApicTriggerMode, polarity: IoApicPolarity) {
     if irq >= MSIX_VECTOR_BASE as usize - IO_APIC_VECTOR_BASE {

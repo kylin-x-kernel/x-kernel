@@ -84,7 +84,7 @@ fn schedule_on(queue: &SpinNoIrq<ReplayQueue>, line: &Arc<IrqLine>) {
                 return;
             }
             crate::IrqFlow::Fasteoi(chip) => chip,
-            crate::IrqFlow::Legacy => return,
+            crate::IrqFlow::Legacy | crate::IrqFlow::PerCpu => return,
         };
         // Only an explicit level contract permits relying on hardware
         // reassertion. Unknown-trigger PLIC sources still need software service.

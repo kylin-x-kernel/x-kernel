@@ -189,7 +189,7 @@ fn source_flow_selection_separates_level_edge_msi_and_local() {
     ));
     assert_eq!(
         super::select_x86_flow(kirq::IrqDesc::from_virq(0xf0), |_| panic!("local vector")),
-        Ok(IrqFlow::Legacy)
+        Ok(IrqFlow::PerCpu)
     );
 }
 

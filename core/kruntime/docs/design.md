@@ -2,6 +2,11 @@
 
 ## IRQ Startup Ownership
 
+Timer and IPI actions are registered disabled. Each CPU enables its own generic
+timer slot before platform source activation; fixed IPI notification setup
+enables that CPU's IPI slot. Publishing one shared action does not mark other
+CPUs enabled. Source activation and CPU IRQ enable retain their existing order.
+
 Late-init native-console handoff now reports preparation errors. Runtime logs
 the error and keeps the existing boot-console route; it does not manufacture a
 NOFAIL allocation or publish a partially prepared TTY. A later native-terminal

@@ -1,5 +1,38 @@
 # kirq — 设计文档
 
+## CPU-local Ordinary Flow
+
+`IrqFlow::PerCpu` keeps enablement, nested disable depth, configuration generation
+and failed-configuration admission in one `LocalControl` per logical CPU inside
+the retained Line. These bounded slots are protected by the Line lock; they are
+not an online-CPU inventory. Action ownership and drain accounting remain shared.
+The outer IRQ/preemption guard keeps CPU selection, hardware apply and software
+commit on the same CPU. An enabled local slot blocks flow replacement and Line
+reclamation even without actions.
+
+Disabled registration of a PerCpu Line masks an already enabled calling CPU's
+source before committing disabled state and a depth of at least one. Existing
+nested disable depth is preserved; other CPU slots are unchanged. This handles
+the compatibility API's enable-before-registration sequence without leaving
+an enabled slot that later nested disables cannot mask. Linux separately
+implements `irq_percpu_disable` as hardware disable/mask followed by clearing
+the CPU's enabled bit (`kernel/irq/chip.c`); its NO_AUTOEN registration policy
+is not itself a general-purpose disable operation. KIRQ retains its existing
+registration API and enforces the hardware/software pairing in the local plan.
+
+Like Linux `handle_percpu_irq`, local handlers do not acquire a shared running
+owner or create pending/replay work: callbacks may overlap across CPUs. The short
+Line lock only snapshots admission/actions. A disabled local delivery skips the
+actions but still consumes its original claim exactly once. Provider completion
+timing remains unchanged. Synchronous drain is conservatively Line-wide, not a
+remote hardware stop acknowledgment. Action removal refuses a Line with any
+enabled local slot; the owner must disable every participating CPU first.
+Completed remote shutdown and CPU membership ownership remain separate work.
+
+`ut-tests/local_control.rs` checks independent depth, configuration and recovery;
+the runtime `local_flow_handlers_overlap_on_distinct_cpus` fixture checks parallel
+callbacks and disabled delivery using synthetic claims, not physical IRQ timing.
+
 ## Ordinary Level Flow
 
 `IrqFlow::Level` uses `LevelChip::mask_ack` under the retained Line lock before
@@ -15,7 +48,7 @@ The LoongArch provider acknowledges EIOINTC ISR before child dispatch; the PCH
 level hook masks the leaf and parent gates. Its leaf ack is empty for level
 sources, and unmask clears PCH cause before reopening parent and leaf. No GIC-like
 late deactivation is invented for this hierarchy. Local per-CPU sources remain
-Legacy pending their separate lifecycle integration. Tests in
+separate from this level flow; ordinary local sources use `PerCpu`. Tests in
 `ut-tests/level_dispatch.rs` cover overlapping and disabled claims, one completion
 per claim, no recursive action execution and no tail unmask after handler disable.
 
@@ -185,8 +218,10 @@ pending edges; Fasteoi completes after actions under the original Line lock.
 Legacy completion remains outside that lock. The outer IRQ/preemption guard
 spans the entire operation, including the directory-to-Line handoff. No helper
 releases and reacquires the Line merely to select or admit a flow.
+The PerCpu handler checks local admission under that same guard, then shares
+Legacy's unlocked action/completion path without an ordinary running gate.
 
-`IntrManagerIf::select_flow` returns Legacy or static Fasteoi, Edge or Level
+`IntrManagerIf::select_flow` returns Legacy, PerCpu or static Fasteoi, Edge or Level
 operations. Standard PLIC and ordinary GIC SPIs use Fasteoi: GIC uses hardware
 pending retrigger and PLIC software replay. x86 selects Edge or level Fasteoi;
 ordinary LoongArch PCH sources use Level mask/ack and conditional unmask.
@@ -331,14 +366,14 @@ executor to be bound and able to progress; startup must not wait for that backlo
 before reaching installation. This is not a blanket ban on pre-bind waits whose
 in-flight count is already zero, and wait APIs do not enforce executor readiness.
 
-This implementation is not general edge, per-CPU, NMI, threaded/oneshot or MSI
-flow support. It proves neither hardware quiescence nor physical redelivery.
+Fasteoi replay is not the policy for Edge, PerCpu, NMI or threaded/oneshot
+sources. It proves neither hardware quiescence nor physical redelivery.
 The [per-CPU source lifecycle](#per-cpu-source-lifecycle)
 records current timer/IPI/PPI consumers, the distinction between Line-wide
 disable depth and CPU-local enable state, and required shutdown acknowledgements.
 Legacy overlapping claims retain separate admissions; they do not share the
-Fasteoi running owner. This preserves existing delivery rather than supplying
-the missing per-CPU management protocol.
+Fasteoi running owner. PerCpu has independent local admission; completed remote
+shutdown and shared-action retirement still require their lifecycle owners.
 Validation results must be recorded separately; this description adds no claim
 of unperformed hardware tests or complete Linux IRQ-flow parity. The fixture
 `explicit_level_waits_for_final_enable_then_relies_on_hardware` checks pending
@@ -352,14 +387,14 @@ ordering, not a claim that every controller has equivalent EOI semantics.
 
 | Provider / source | Before generic fanout | Completion after fanout | Control and remaining boundary |
 | --- | --- | --- | --- |
-| GICv2: `drivers/platform/irq/src/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | Normally DIR using the claim cookie; VMM builds skip host DIR for the guest virtual timer INTID | Ordinary SPIs select Fasteoi; private/PER_CPU sources retain Legacy. The guest HW LR path owns the intended forwarded deactivation. This build/INTID exception is not a general forwarding-lifecycle guarantee. |
-| GICv3: `drivers/platform/irq/src/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. Private/PER_CPU sources remain Legacy; NMI-class claims enter generic NMI. |
+| GICv2: `drivers/platform/irq/src/gicv2.rs`, `claim_irq` | Ack, reject spurious, EOI priority drop | Normally DIR using the claim cookie; VMM builds skip host DIR for the guest virtual timer INTID | Ordinary SPIs select Fasteoi; ordinary private sources select PerCpu, except virtual timer PPI 27 and PER_CPU-tagged sources, which retain Legacy. The guest HW LR path owns the intended forwarded deactivation. This build/INTID exception is not a general forwarding-lifecycle guarantee. |
+| GICv3: `drivers/platform/irq/src/gicv3.rs`, `ack_irq` | Ack, classify NMI, EOI priority drop | `complete_irq` issues DIR | Ordinary SPIs select Fasteoi independently of claim classification. Ordinary private sources select PerCpu, except PPI 27 and PER_CPU-tagged sources, which retain Legacy. NMI-class claims enter generic NMI. |
 | x86 IO-APIC level: `drivers/platform/irq/src/x86.rs`, `dispatch_regular_irq` | Decode vector, retain nonzero completion cookie | LAPIC EOI under Line lock after Fasteoi handlers | Selected Fasteoi gates admission; validated hardware level reasserts after unmask. |
 | x86 IO-APIC edge and MSI-X: same provider | Transfer nonzero EOI cookie to generic Edge | LAPIC EOI under Line lock before handlers, or after masking a rejected arrival | Overlapping arrivals latch pending for the running owner. Re-enable retriggers using the recorded backend target/vector, not an arbitrary self-IPI. MSI device masking/release remains owner-controlled. |
-| x86 local timer/IPI vectors: same provider | LAPIC EOI before generic dispatch | Zero cookie: no further EOI | Legacy per-CPU behavior is preserved pending the separate per-CPU flow integration. |
+| x86 local timer/IPI vectors: same provider | LAPIC EOI before generic dispatch | Zero cookie: no further EOI | PerCpu controls local admission independently; remote producer shutdown remains an owner obligation. |
 | RISC-V PLIC: `drivers/platform/irq/src/riscv.rs`, `dispatch_irq` | Claim under PLIC lock; release before generic admission | Complete original claim on its claiming context under the retained Fasteoi Line lock | Validated standard PLIC uses Fasteoi with KIRQ pending/replay; fixed effective target and priority masking remain provider-owned. |
-| RISC-V local timer/software causes: same provider | Software cause clears SSIP; timer service handles its own deadline | Skip cookie: no PLIC completion | These need explicit per-CPU flow classification, not global handler serialization. |
-| LoongArch: `platforms/kplat-loongarch64/src/irq.rs`, `dispatch_irq` | Timer clears TICLR; EIOINTC ISR is consumed before child dispatch | No-op | Ordinary PCH sources use Level mask/ack and conditional unmask. Parent W1C and leaf CLR are separate; edge is rejected. Local timer remains Legacy. |
+| RISC-V local timer/software causes: same provider | Software cause clears SSIP; timer service handles its own deadline | Skip cookie: no PLIC completion | PerCpu classification permits concurrent handlers with independent local SIE gating. |
+| LoongArch: `platforms/kplat-loongarch64/src/irq.rs`, `dispatch_irq` | Timer clears TICLR; EIOINTC ISR is consumed before child dispatch | No-op | Ordinary PCH sources use Level mask/ack and conditional unmask. Parent W1C and leaf CLR are separate; edge is rejected. Local timer uses PerCpu. |
 
 ### GIC Configuration And Retrigger
 
@@ -401,11 +436,12 @@ software drain is not a hardware reclamation certificate.
 
 Local hardware control, software admission and shared handler retirement are
 different capabilities. `IrqFlags::PER_CPU` currently records metadata; it does
-not allocate a CPU enable mask or select a per-CPU flow. `IrqDescRuntimeState` still has
-one `is_enabled` and one `disable_depth` for the entire Line. The legacy boolean
-enable bridge deliberately forces a platform write at depth zero so AP startup
-can enable a local source even after the boot CPU enabled the same Line. That
-compatibility behavior is not independent per-CPU disable-depth accounting.
+not itself select a per-CPU flow. Explicit provider selection chooses `PerCpu`
+for supported ordinary local sources, with CPU-local enable/depth/configuration
+slots distinct from `IrqDescRuntimeState`'s ordinary Line-wide state. The legacy
+boolean enable bridge still forces a platform write at depth zero, but updates
+only the current slot for PerCpu flow. Kernel-lifetime timer/IPI services use
+this control without claiming a completed runtime retirement protocol.
 GIC descriptor constructors also do not infer `PER_CPU` from an SGI/PPI INTID.
 Therefore neither the flag nor its absence is a complete local-source classifier.
 
@@ -414,7 +450,7 @@ Therefore neither the flag nor its absence is a complete local-source classifier
 | Owner and source | Current lifecycle | Remaining migration obligation |
 | --- | --- | --- |
 | `core/kruntime/src/lib.rs::init_interrupt`, timer and IPI | Publishes shared handlers once before local activation; AP activation is in `core/kruntime/src/mp.rs`. | Kernel-lifetime startup is not a runtime unregister protocol. Preserve startup ordering while identifying each local source explicitly. |
-| `drivers/platform/timer/src/arm_generic.rs::rearm_local_timer_irq` | Programs the current CPU timer and calls the legacy `kirq::enable` bridge. | A future local disable must update only that CPU's state; timer stop/rearm ownership remains with the timer service. |
+| `drivers/platform/timer/src/arm_generic.rs::rearm_local_timer_irq` | Programs the current CPU timer and calls the legacy `kirq::enable` bridge, now updating its PerCpu slot. | Local disable updates only that CPU; timer stop/rearm exclusion remains with the timer service. |
 | `arch/kipi/src/notification.rs::enable_fixed_notifications` | Enables the local IPI line, publishes readiness and drains retained notification reasons during CPU-bound boot. | No shutdown/hotplug protocol exists here. Do not use an IPI callback to disable its own transport before pending shutdown work has completed. |
 | `platforms/kplat-aarch64/src/peripherals/pmu.rs::pmu_if_impl` | Registers overflow dispatch once and enables the local PMU line on each CPU; NMI mode has a separate table/fallback contract. | PMU-local counter shutdown and NMI reader exclusion cannot be replaced with ordinary Line drain. |
 | `virt/kvmm/src/vdev/aarch64/irq_route.rs::set_host_vtimer_irq_enabled` | Registers one route lazily, then controls the current CPU's timer PPI through the legacy bridge. Owner references are maintained separately. | Clearing task owners is not local hardware shutdown or guest deactivation completion; forwarded timer retirement remains a separate gate. |
@@ -431,8 +467,8 @@ while its affinity intersects the enabled CPU set. `free_percpu_irq` requires
 the caller to disable the source on each relevant CPU first; it does not hide
 a broadcast shutdown inside handler removal.
 
-The X-Kernel equivalent requires all of the following before local-source flow
-migration, not just a new flow enum variant:
+Complete runtime local-source retirement requires all of the following, not
+just the implemented flow and CPU-local control state:
 
 - Source classification and CPU-local enable state owned by KIRQ, separate
   from ordinary Line-wide disable depth.
@@ -445,12 +481,25 @@ migration, not just a new flow enum variant:
 - Shared handler removal only after local shutdown and the retained software
   admissions have completed. Hardware and guest activity remain separate.
 
-Existing `kipi::run_on_cpu` and broadcast callback APIs can transport work, but
-remote success reports submission, not callback completion. Local execution
-can run inline in the caller's context. They do not by themselves provide the
-shutdown acknowledgement or prevent source re-enable. These missing lifecycle
-guarantees are prerequisites; generic IRQ removal must not invent an implicit
-broadcast/wait protocol around them.
+`kipi::run_on_cpu` and broadcast callback APIs report submission, not callback
+completion. `kipi::run_on_cpu_sync` supplies the completed-call capability
+for boot-static CPUs with enabled IPI services. The source owner retains its
+management mutex across the stop transition, each relevant CPU's completed
+device stop/local mask, and final `try_free_irq`. All re-enable paths must use
+that same owner mutex and reject a stopping source. The callback itself must
+not acquire that mutex. Failed target validation or callback preparation keeps
+the owner in stopping state with the action retained; it is not permission to
+free a partially stopped source.
+
+KIRQ refuses withdrawal while any local slot is enabled, then drains retained
+admissions before returning the handler owner. It does not broadcast, choose
+CPU membership, or stop hardware producers.
+
+Boot CPU membership is stable after runtime service startup in the supported
+configuration; present CPUs must not be substituted before that rendezvous.
+Dynamic CPU hotplug still requires CPU-lifecycle exclusion, and terminal stop
+is excluded. Neither readiness nor callback completion supplies that missing
+lease. Forwarded vtimer and NMI retirement retain separate owner obligations.
 
 Linux also separates these guarantees: `kernel/smp.c` with `wait=true` waits
 for selected callbacks to return, while CPU-hotplug exclusion belongs to the
@@ -471,6 +520,7 @@ arch/kirq/src/
 │   ├── mod.rs
 │   ├── action.rs       # internal regular IRQ action and return classification
 │   ├── state.rs        # descriptor map, virq allocation, and action state
+│   ├── state_local.rs  # Line-locked CPU-local enable/configuration slots
 │   ├── dispatch.rs     # normal IRQ action fanout
 │   ├── resend.rs       # retained-Line pending replay queue and executor binding
 │   ├── nmi.rs          # NMI（pseudo/hardware）registration and lock-minimal dispatch table
@@ -1057,8 +1107,10 @@ on each occurrence. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 4. 把 `Arc<dyn IrqHandler>` 包装成内部 regular action；normal IRQ dispatch 会以
    resolved `virq` 调用 `handler.handle(virq)`。
 5. 释放 `IRQ_STATE`。
-6. 默认调用平台 `configure()` 和 `enable(hwirq, true)`；disabled registration 只安装
-   handler 并把 `disable_depth` 置为 `1`，等待后续显式 `enable_irq()`。
+6. Registration applies stale configuration before installing the handler.
+   Default registration then enables delivery. Disabled registration preserves
+   a disable depth of at least one and waits for explicit `enable_irq()`; for
+   PerCpu flow it first masks an already enabled calling CPU's source.
 
 ### `enable_irq(desc)`
 

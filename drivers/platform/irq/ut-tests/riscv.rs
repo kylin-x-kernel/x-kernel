@@ -400,8 +400,6 @@ fn plic_flow_selection_preserves_non_plic_legacy_contract() {
             .with_domain(kirq::MSI_DOMAIN)
             .with_flags(IrqFlags::MSI),
         IrqDesc::from_virq(kirq::DYNAMIC_VIRQ_BASE).with_flags(IrqFlags::MSI),
-        IrqDesc::from_hwirq(super::S_TIMER).with_flags(IrqFlags::PER_CPU),
-        IrqDesc::from_hwirq(super::S_SOFT).with_flags(IrqFlags::PER_CPU),
         IrqDesc::from_hwirq(super::S_EXT),
     ] {
         assert!(matches!(
@@ -411,6 +409,13 @@ fn plic_flow_selection_preserves_non_plic_legacy_contract() {
     }
     let local = IrqDesc::from_hwirq(super::S_TIMER).with_domain(super::PLIC_DOMAIN);
     assert!(super::select_plic_flow(local, None).is_err());
+    for cause in [super::S_TIMER, super::S_SOFT] {
+        for flags in [IrqFlags::empty(), IrqFlags::PER_CPU] {
+            assert!(matches!(super::select_plic_flow(
+                IrqDesc::from_hwirq(cause).with_flags(flags), None),
+                Ok(IrqFlow::PerCpu)));
+        }
+    }
 }
 
 #[def_test(serial)]

@@ -162,6 +162,7 @@ arch/kipi/
 │   ├── lib.rs
 │   ├── event.rs
 │   ├── queue.rs
+│   ├── sync_call.rs
 │   ├── notification.rs
 │   ├── icache.rs
 │   ├── stop.rs
@@ -174,6 +175,7 @@ arch/kipi/
 - `lib.rs`：对外 API、每 CPU 事件队列、IPI handler；
 - `event.rs`：单播/广播回调模型；
 - `queue.rs`：每 CPU FIFO 队列；
+- `sync_call.rs`: task-bound completed execution on an explicitly selected boot-static CPU;
 - `notification.rs`: allocation-free fixed reasons and their boot handshake;
 - `icache.rs`：I-cache 跨核 flush 的 crate interface 实现；
 - `stop.rs`：系统级 CPU 停机协议（电源终点前停靠其它 CPU）；
@@ -482,6 +484,31 @@ orchestrator 而永不 park，而真正的 orchestrator 却在等它 ack，直�
 后续任意 IPI 进入 `handle_stop_request` 时照样 park，因此缩小等待集只影响
 等待，不影响停机覆盖面，与 Linux `smp_send_stop()` 的 best-effort 语义
 一致。
+
+## Completed CPU Calls
+
+`run_on_cpu_sync` in `src/sync_call.rs` owns completed execution, not interrupt
+source retirement. It validates sleepable task context through
+`kiface_task_wait_api::TaskCompletionWaitIf`, validates the target's queue and
+fixed-notification readiness, and prepares a callback before publication.
+The local branch pins CPU selection and masks IRQs through invocation. The
+remote branch uses the existing IPI queue. A private completion is signaled
+after the body returns and its captures are destroyed; the task waits outside
+IRQ/preemption exclusion. No timeout is reported as completed execution.
+
+This is the completed-call role of Linux `smp_call_function_single(..., wait=1)`
+(`kernel/smp.c`, reference revision 8d3ae59288f1), not an implementation of
+Linux CPU-hotplug locking. Unlike Linux's CSD spin wait, this task-only adapter
+uses the existing prepared completion wait. Callback code must remain short,
+nonblocking, and must not acquire IPI queue locks or sender-held locks.
+Completion does not mean the surrounding IPI/controller has completed.
+
+CPU membership and source stop/re-enable exclusion belong to the caller.
+The supported lifecycle is boot-static CPUs with initialized, enabled IPI
+services and no concurrent terminal stop. Readiness rejects early targets; it
+is not an online lease. Hotplug requires a separate CPU-lifecycle capability
+before this API can be used for dynamic participant sets. Permanent timer/IPI
+services must not be dismantled using their own callback transport.
 
 ## Drop / 资源释放
 

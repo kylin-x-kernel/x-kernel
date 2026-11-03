@@ -173,6 +173,8 @@ pub fn enable_irq(spec: impl Into<IrqSpec>) {
 ///
 /// Configuration failure preserves enable/depth and suppresses standard-flow
 /// service until configuration succeeds. Hardware writes are not rolled back.
+/// For PerCpu flow, only the calling CPU's slot and source gate are changed;
+/// CPU selection remains pinned through the hardware transaction.
 pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
     try_enable_irq_inner(spec.into(), false)
 }
@@ -283,6 +285,7 @@ fn prepare_enable_plan(
 }
 
 /// Disable an IRQ line without waiting for an in-flight handler to finish.
+/// For PerCpu flow this masks only the calling CPU's source.
 pub fn disable_irq_nosync(spec: impl Into<IrqSpec>) {
     if let Err(err) = try_disable_irq_nosync(spec) {
         report_management_error("disable IRQ", &err);
@@ -345,6 +348,10 @@ pub fn disable_irq(spec: impl Into<IrqSpec>) -> bool {
 }
 
 /// Try to disable an IRQ line and wait for currently running handlers to finish.
+///
+/// PerCpu flow masks only the calling CPU. Drain accounting is shared across
+/// the Line, so other CPUs can extend this wait until their sources are stopped
+/// by the owner. Success is not a remote hardware shutdown acknowledgment.
 ///
 /// The drain includes queued software replay. Its BH executor must have been
 /// installed during boot and remain able to progress while the caller waits.
@@ -573,6 +580,9 @@ pub fn try_register_disabled(
 /// Stale controller configuration is applied before publishing the handler,
 /// including with disabled options. Those options suppress delivery activation,
 /// not request-time configuration.
+/// For PerCpu flow, disabled registration also masks an already enabled calling
+/// CPU's source and commits its disabled slot; other CPU slots are unchanged.
+/// This does not stop the device producer or drain previously admitted handlers.
 /// Configuration errors publish no new handler and leave control state
 /// uncommitted, but resolved descriptor/mapping metadata may remain. The
 /// controller may have masked or partially programmed the source; retry is
@@ -1018,7 +1028,12 @@ pub fn unregister(spec: impl Into<IrqSpec>) -> Option<Handler> {
 /// MMIO/DMA resources requires that separate owner-side shutdown.
 /// For local/per-CPU sources, callers must complete local shutdown on every
 /// relevant CPU and exclude re-enable before removal. This function neither
-/// performs broadcast shutdown nor maintains a per-CPU enabled set.
+/// performs broadcast shutdown nor tracks online CPU membership. PerCpu flow
+/// rejects removal while any recorded CPU slot is enabled, returning `None`
+/// without withdrawing the action. Other flows retain their own shutdown rules.
+/// A completed CPU call can establish local stop completion, but cannot own
+/// this source's re-enable gate or CPU membership. Keep that owner-side gate
+/// across stop and removal; if any stop fails, retain the handler and resources.
 ///
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
@@ -1128,6 +1143,10 @@ fn withdraw_on_line(
     apply_plan: impl FnOnce(IrqPlatformPlan),
 ) -> Option<IrqAction> {
     let mut entry = line.lock();
+    if entry.has_enabled_local_cpu() {
+        warn!("free_irq for IRQ {virq} rejected: disable the local source on every CPU first");
+        return None;
+    }
     let removed_action = if let Some(token) = token {
         entry.take_action(token)
     } else {

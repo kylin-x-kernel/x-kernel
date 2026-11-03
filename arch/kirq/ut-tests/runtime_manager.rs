@@ -82,6 +82,128 @@ const IRQ_MANAGEMENT_TEST_VIRQ: usize = 0x3153;
 const IRQ_MANAGEMENT_OTHER_VIRQ: usize = 0x3154;
 const IRQ_MANAGEMENT_TEST_HWIRQ: usize = 0x4353;
 
+#[def_test]
+fn local_action_withdrawal_requires_all_recorded_slots_disabled() {
+    let virq = 0x5f84;
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    {
+        let mut entry = line.lock();
+        entry.flow = crate::IrqFlow::PerCpu;
+        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(|_| IrqEvent::HANDLED))));
+        let plan = entry.prepare_auto_enable();
+        entry.commit_platform_plan(plan);
+    }
+    let rejected = super::withdraw_on_line(virq, &line, None, |_| {
+        panic!("rejected local removal must not program hardware");
+    });
+    assert!(rejected.is_none());
+    {
+        let mut entry = line.lock();
+        assert_eq!(entry.action_count(), 1);
+        assert!(!entry.is_teardown_in_progress());
+        let plan = entry.prepare_disable_irq_nosync();
+        entry.commit_platform_plan(plan);
+    }
+    let removed = super::withdraw_on_line(virq, &line, None, |plan| {
+        core::assert_eq!(plan.enable, None);
+    });
+    assert!(removed.is_some());
+    assert_eq!(line.lock().action_count(), 0);
+}
+
+#[def_test]
+fn enabled_local_source_can_register_disabled_then_disable_and_withdraw() {
+    let virq = 0x5f86;
+    let handler: crate::Handler = Arc::new(test_handler);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+    let mut writes = Vec::with_capacity(2);
+    {
+        // Keep the sequence on one CPU, as a source owner must. The recording
+        // backend exercises real registration plans without touching hardware.
+        let mut entry = line.lock();
+        entry.flow = crate::IrqFlow::PerCpu;
+        let enable = entry.prepare_legacy_enable();
+        assert_eq!(enable.enable, Some(true));
+        writes.push(true);
+        entry.commit_platform_plan(enable);
+        assert!(entry.has_enabled_local_cpu());
+        assert!(super::register_locked(
+            virq, &mut entry, &handler, super::IrqRegisterOptions::disabled(), |plan| {
+                assert!(!karch::local_irq_enabled());
+                if let Some(enabled) = plan.enable {
+                    writes.push(enabled);
+                }
+                Ok(())
+            },
+        ).unwrap());
+        assert_eq!(entry.action_count(), 1);
+        assert!(!entry.has_enabled_local_cpu());
+        assert!(!entry.can_run_local_actions());
+        let disable = entry.prepare_disable_irq_nosync();
+        assert_eq!(disable.enable, None);
+        entry.commit_platform_plan(disable);
+    }
+    assert_eq!(writes.as_slice(), &[true, false]);
+    let removed = super::withdraw_on_line(virq, &line, None, |plan| {
+        assert_eq!(plan.enable, None);
+    });
+    assert!(removed.is_some());
+    super::IrqDrain::new(virq, &line).wait();
+    assert_eq!(line.lock().action_count(), 0);
+    drop(removed);
+    assert_eq!(Arc::strong_count(&handler), 1);
+}
+
+/// Synthetic local flow fixture; never performs controller accesses.
+pub struct LocalFlowProbe {
+    virq: usize,
+    line: Arc<IrqLine>,
+}
+
+impl LocalFlowProbe {
+    /// Installs a synthetic Line owned exclusively by the test.
+    pub fn new(virq: usize, handler: Arc<dyn crate::IrqHandler>) -> Self {
+        let line = Arc::new(IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq))));
+        {
+            let mut state = IRQ_STATE.lock();
+            core::assert!(!state.descs.contains_key(&virq));
+            let mut entry = line.lock();
+            entry.flow = crate::IrqFlow::PerCpu;
+            core::assert!(entry.install_regular_action(IrqAction::regular(handler)));
+            state.descs.insert(virq, line.clone());
+        }
+        Self { virq, line }
+    }
+
+    /// Changes only this CPU's synthetic software control state.
+    pub fn set_enabled(&self, enabled: bool) {
+        let mut entry = self.line.lock();
+        let plan = if enabled {
+            entry.prepare_enable_irq()
+        } else {
+            entry.prepare_disable_irq_nosync()
+        };
+        entry.commit_platform_plan(plan);
+    }
+
+    /// Runs the real generic flow, substituting only claim completion.
+    pub fn dispatch(&self) -> bool {
+        let mut completed = false;
+        crate::dispatch::dispatch_claim(crate::IrqRef::Virq(self.virq), || completed = true);
+        completed
+    }
+}
+
+impl Drop for LocalFlowProbe {
+    fn drop(&mut self) {
+        let mut state = IRQ_STATE.lock();
+        let entry = self.line.lock();
+        core::assert_eq!(entry.in_flight(), 0);
+        core::assert!(!entry.has_enabled_local_cpu());
+        state.descs.remove(&self.virq);
+    }
+}
+
 /// One synthetic in-flight operation on a retained, disabled test Line.
 ///
 /// This unittest-only capability exercises drain accounting, not IRQ delivery.

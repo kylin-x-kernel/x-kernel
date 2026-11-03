@@ -172,7 +172,7 @@ vector delegates ESR capture and one EOI to `x86-apic`. Neither produces a
 `kirq::handle_irq` exit bookkeeping. This follows Linux's dedicated spurious
 and error handlers, not its separate unused-vector fallback.
 
-Timer/IPI vectors acknowledge early and retain their local Legacy flow. MSI-X
+Timer/IPI vectors acknowledge early and use the local PerCpu flow. MSI-X
 and IO-APIC claims transfer EOI to generic flow using a nonzero cookie. Edge flow
 acknowledges under the Line lock before handlers; IO-APIC level Fasteoi completes
 after handlers. Disabled and overlapping edge arrivals are masked where possible,
@@ -222,10 +222,10 @@ or root domain. It rejects conflicting controller/domain identity, unavailable
 initialization, special IDs and IDs beyond the discovered standard range before
 KIRQ publishes a mapping or installs an action. Checks precede narrowing from
 `usize`; extended IDs and LPIs are not supported by this provider path.
-Accepted resources remain `Legacy`, including private sources. This is not
-ordinary-flow activation, hardware trigger readback, masked configuration or RWP
-synchronization. Bare legacy numbers and other undeclared identities retain
-their old contract; direct low-level calls still require validated hardware IDs.
+Accepted ordinary SPIs use Fasteoi and ordinary SGI/PPI sources use PerCpu.
+Forwarded virtual timer PPI 27 and NMI-tagged sources retain Legacy. Range
+admission is separate from hardware trigger readback, masked configuration and
+RWP synchronization; direct low-level calls still require validated hardware IDs.
 
 The limit follows the standard-line distinction used by Linux's GIC drivers
 (`GIC_LINE_NR` versus `GIC_ID_NR` in `irq-gic-v3.c`, and the 1020 clamp in
@@ -307,7 +307,8 @@ cannot validate MMIO accessibility, physical delivery or write completion.
 
 Validated standard SPIs select the static `gic_spi::CHIP` Fasteoi capability.
 Shared and wakeup flags are accepted; MSI, unknown flags, explicit affinity and
-low polarity are rejected. Private INTIDs and PER_CPU descriptors retain Legacy.
+low polarity are rejected. Ordinary SGI/PPI INTIDs use PerCpu; the forwarded
+virtual timer PPI 27 and NMI-tagged PER_CPU descriptors retain Legacy.
 The publicly reachable chip callbacks revalidate this binding before MMIO:
 invalid mask/unmask inputs are ignored and invalid retrigger returns false.
 NMI registration adds PER_CPU before selection. The only current VMM HW-LR
@@ -456,7 +457,8 @@ or eliminate the generic pending/resend obligation.
 
 Only descriptors declaring PLIC through their domain or controller enter this
 validation. Conflicting or incomplete PLIC identity is rejected, never silently
-downgraded. On the RISC-V provider, non-PLIC descriptors retain Legacy, including local causes,
+downgraded. On the RISC-V provider, local timer/software causes use PerCpu;
+other non-PLIC descriptors retain Legacy, including
 synthetic descriptors and foreign-domain directory mappings. Legacy preserves
 the unmigrated contract; it does not certify hardware support. PLIC selection before controller publication
 returns an error rather than touching the boot-only `plic()` invariant. The

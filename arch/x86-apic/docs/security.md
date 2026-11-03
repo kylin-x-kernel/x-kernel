@@ -1,5 +1,12 @@
 # x86-apic — Security And Reliability
 
+## Local Timer Mask Boundary
+
+`set_local_timer_enabled` requires a prepared current-CPU LAPIC. The existing
+handle guard excludes migration and local interrupt reentry; the timer owner
+must serialize competing clockevent programming. Masking alone does not cancel
+a deadline, drain an admitted handler or stop remote IPI producers.
+
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (Local APIC bring-up,

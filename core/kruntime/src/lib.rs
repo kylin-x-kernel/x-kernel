@@ -867,6 +867,12 @@ fn activate_local_interrupts() {
     tests_irq_startup::record_activation_entry();
     #[expect(
         clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: the registered local timer \
+                  must be enabled before publishing this CPU's IRQ readiness"
+    )]
+    kirq::try_enable(khal::time::interrupt_id(), true).expect("local timer IRQ activation failed");
+    #[expect(
+        clippy::expect_used,
         reason = "CG-021-no-panic-on-reachable-failure: Fatal boot: mandatory local sources \
                   cannot be activated; runtime must not enable IRQs or publish readiness"
     )]
@@ -893,7 +899,7 @@ fn init_interrupt() {
             ktask::on_timer_fire();
             kirq::IrqEvent::HANDLED
         }),
-        kirq::IrqRegisterOptions::auto_enable(),
+        kirq::IrqRegisterOptions::disabled(),
     );
     #[expect(
         clippy::panic,
@@ -914,7 +920,7 @@ fn init_interrupt() {
             kipi::ipi_handler();
             kirq::IrqEvent::HANDLED
         }),
-        kirq::IrqRegisterOptions::auto_enable(),
+        kirq::IrqRegisterOptions::disabled(),
     );
     #[cfg(feature = "ipi")]
     #[expect(

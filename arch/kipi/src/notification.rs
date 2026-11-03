@@ -44,6 +44,13 @@ impl PendingWord {
             .fetch_or(NotificationFlags::ENABLED.bits(), Ordering::AcqRel);
     }
 
+    fn is_enabled(&self) -> bool {
+        // Acquire observes enable's AcqRel publication (also carried through
+        // request's RMWs), so completed-call senders see the destination's
+        // initialized services and local IPI admission before queueing work.
+        self.0.load(Ordering::Acquire) & NotificationFlags::ENABLED.bits() != 0
+    }
+
     fn take(&self) -> NotificationFlags {
         // An unrelated early IPI must not consume requests before boot drain.
         if !NotificationFlags::from_bits_retain(self.0.load(Ordering::Acquire))
@@ -61,6 +68,12 @@ impl PendingWord {
 
 static PENDING: [PendingWord; kbuild_config::NR_CPUS] =
     [const { PendingWord::new() }; kbuild_config::NR_CPUS];
+
+pub(crate) fn is_delivery_enabled(cpu: LogicalCpuId) -> bool {
+    PENDING
+        .get(cpu.as_usize())
+        .is_some_and(PendingWord::is_enabled)
+}
 
 /// Requests a scheduler CPU kick without allocating or queueing a callback.
 ///

@@ -207,6 +207,13 @@ fn select_plic_flow(
 ) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqAffinity, IrqController, IrqFlags, IrqFlow, IrqPolarity, IrqTrigger};
 
+    if desc.domain.is_none()
+        && desc.controller == IrqController::Unknown
+        && matches!(desc.hwirq, S_TIMER | S_SOFT)
+    {
+        return Ok(IrqFlow::PerCpu);
+    }
+
     // Only PLIC is migrated. Other domains and directory-only descriptors keep
     // their existing contract; either PLIC identity field requires validation.
     if desc.domain != Some(PLIC_DOMAIN) && desc.controller != IrqController::Plic {
@@ -485,7 +492,18 @@ impl kirq::IntrManagerIf {
                     unsafe { sie::clear_stimer() };
                 }
             },
-            @S_SOFT => {},
+            @S_SOFT => {
+                if enabled {
+                    // SAFETY: The caller pins this supervisor hart and retains
+                    // IRQ exclusion; only its software-interrupt gate changes.
+                    unsafe { sie::set_ssoft() };
+                } else {
+                    // SAFETY: The caller pins this supervisor hart with IRQs
+                    // excluded, preventing local interrupt writers while this
+                    // CSR operation clears only its S_SOFT enable bit.
+                    unsafe { sie::clear_ssoft() };
+                }
+            },
             @S_EXT => {},
             @EX_IRQ => {
                 plic().set_enabled(irq, enabled);

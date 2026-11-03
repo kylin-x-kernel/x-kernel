@@ -110,7 +110,7 @@ CpuStartIf / PlatformPowerIf (kiface)
 ### Ordinary External Flow
 
 Only external `LevelChip` sources enter PCH configuration. The CPU-local timer
-and EIOINTC parent retain Legacy flow; neither configures a PCH
+uses PerCpu flow and the EIOINTC parent uses Legacy; neither configures a PCH
 pin even though their numeric IDs overlap the external namespace. A recording
 configuration callback test verifies that exclusion and external failure
 propagation without touching live registers.
@@ -134,6 +134,8 @@ unknown polarity follows explicit LevelLow, otherwise defaults high.
 Edge requests, per-CPU external flags, explicit retargeting and external pins
 outside 0..64 are unsupported. The flat binding reserves 3 and 11 for local
 sources; explicitly external descriptors colliding with them are rejected.
+Local timer IRQ 11 uses PerCpu control state; enabling it changes only the
+current CPU's local gate. Parent IRQ 3 retains its separate Legacy handling.
 Non-platform domains/software Lines retain Legacy. HTVEC here is the PCH vector
 table, not a separate supported HTVEC parent-controller driver. Multi-node
 EIOINTC, dynamic routing and edge retrigger require separate mechanisms.

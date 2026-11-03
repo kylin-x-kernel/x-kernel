@@ -1,5 +1,9 @@
 # kruntime — 安全与可靠性分析
 
+Local timer activation must successfully enable the current CPU's KIRQ slot
+before the runtime publishes IRQ readiness. Failure is fatal at boot. Shared
+action installation alone cannot authorize delivery on an unprepared CPU.
+
 Native TTY callback allocation failure during late-init handoff is recoverable:
 runtime retains boot-console access and logs a warning. The failed initializer
 does not attach an input notification or poison subsequent retries. This does

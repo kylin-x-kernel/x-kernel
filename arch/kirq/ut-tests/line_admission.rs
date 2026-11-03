@@ -9,6 +9,36 @@ use unittest::{assert, assert_eq, def_test};
 use super::{IrqDesc, IrqFlags, IrqLine, IrqState, IrqStateDesc, try_resolve_and_publish_locked};
 use crate::{IrqDescError, IrqSpec};
 
+#[def_test]
+fn enabled_local_slot_retains_empty_line_and_flow_identity() {
+    let desc = IrqDesc::from_virq(0x5f83);
+    let line = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
+    let mut state = IrqState::new();
+    state.try_resolve_desc(desc, Some(&line)).unwrap();
+    {
+        let mut entry = line.lock();
+        entry.flow = crate::IrqFlow::PerCpu;
+        let plan = entry.prepare_auto_enable();
+        entry.commit_platform_plan(plan);
+        assert!(entry.has_enabled_local_cpu());
+        assert!(!entry.is_unused());
+    }
+    assert!(state.remove_if_unused(desc.hwirq).is_none());
+    assert!(matches!(
+        state.try_resolve_desc(desc, None),
+        Err(IrqDescError::UnsupportedFlow { .. })
+    ));
+    {
+        let mut entry = line.lock();
+        let plan = entry.prepare_disable_irq_nosync();
+        entry.commit_platform_plan(plan);
+        assert!(!entry.has_enabled_local_cpu());
+    }
+    state.try_resolve_desc(desc, None).unwrap();
+    assert_eq!(line.lock().flow, crate::IrqFlow::Legacy);
+    assert!(state.remove_if_unused(desc.hwirq).is_some());
+}
+
 #[cfg(target_arch = "aarch64")]
 #[def_test]
 fn gic_spi_cannot_change_flow_while_actions_or_original_claim_remain() {

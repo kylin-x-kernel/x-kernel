@@ -79,6 +79,7 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
         IrqFlow::Edge(chip) => handle_edge_irq(entry, guard, chip, complete_claim),
         IrqFlow::Fasteoi(chip) => handle_fasteoi_irq(entry, guard, chip, complete_claim),
         IrqFlow::Legacy => handle_legacy_irq(entry, guard, complete_claim),
+        IrqFlow::PerCpu => handle_percpu_irq(entry, guard, complete_claim),
     }
     Some(virq)
 }
@@ -198,6 +199,26 @@ fn handle_legacy_irq(
         owns_running: false,
     }
     .complete(complete_claim);
+}
+
+/// Runs the PerCpu flow in the IRQ dispatch path; sleeping is forbidden.
+/// `dispatch_claim` retains IRQ/preemption exclusion and passes the held Line
+/// SpinNoIrq guard after releasing the directory lock. Actions and controller
+/// completion run only after that Line guard is dropped; the outer context
+/// guard remains held throughout, keeping admission on the claiming CPU.
+fn handle_percpu_irq(
+    entry: SpinNoIrqGuard<'_, IrqStateDesc>,
+    guard: IrqDispatchGuard,
+    complete_claim: impl FnOnce(),
+) {
+    if !entry.can_run_local_actions() {
+        drop(entry);
+        complete_claim();
+        drop(guard);
+        return;
+    }
+    // Local admission has no shared running gate; completion remains unlocked.
+    handle_legacy_irq(entry, guard, complete_claim);
 }
 
 fn run_actions(virq: crate::Virq, snapshot: super::state::IrqActionSnapshot) -> bool {

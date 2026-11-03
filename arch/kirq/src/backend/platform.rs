@@ -106,12 +106,15 @@ pub enum IrqFlow {
     Edge(&'static EdgeChip),
     /// Mask/ack before actions and conditional unmask afterward; no replay IPI.
     Level(&'static LevelChip),
+    /// CPU-local enable/configuration state; callbacks may run on different CPUs
+    /// concurrently. The provider owns local acknowledgement/completion timing.
+    PerCpu,
 }
 
 impl IrqFlow {
     pub(crate) fn unmask(self) -> Option<fn(IrqDesc)> {
         match self {
-            Self::Legacy => None,
+            Self::Legacy | Self::PerCpu => None,
             Self::Fasteoi(chip) => Some(chip.unmask),
             Self::Edge(chip) => Some(chip.unmask),
             Self::Level(chip) => Some(chip.unmask),
@@ -123,6 +126,7 @@ impl PartialEq for IrqFlow {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Legacy, Self::Legacy) => true,
+            (Self::PerCpu, Self::PerCpu) => true,
             (Self::Fasteoi(left), Self::Fasteoi(right)) => core::ptr::eq(*left, *right),
             (Self::Edge(left), Self::Edge(right)) => core::ptr::eq(*left, *right),
             (Self::Level(left), Self::Level(right)) => core::ptr::eq(*left, *right),

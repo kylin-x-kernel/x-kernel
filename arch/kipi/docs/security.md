@@ -1,5 +1,27 @@
 # kipi — 安全与可靠性分析
 
+## Completed-call Boundary
+
+`src/sync_call.rs` validates task context before publishing work. Target
+validation checks both queue initialization and fixed-notification activation;
+firmware presence alone is insufficient. A heap-owned Send + 'static callback
+and Arc completion prevent a lost/stalled IPI from dangling borrowed task
+storage. Failed preparation never invokes the body. After publication, the
+task cannot return success until the callback signals completion after its
+body and captures finish. This has no timeout-to-success escape.
+
+The local branch retains IRQ/preemption exclusion across CPU selection and
+invocation, then releases it before waiting. Remote callbacks retain existing
+queue-lock restrictions. Captured destructors and bodies must not sleep,
+reenable IRQs, acquire an IPI queue lock, or depend on the waiting sender.
+No new unsafe operation is introduced. Callback-owner allocation is fallible;
+the completion Arc and queue growth retain existing fatal allocation policy.
+
+The caller owns a stable boot-static CPU participant set and excludes terminal
+stop and source re-enable. Readiness is not a hotplug exclusion mechanism.
+Completion proves software callback return, not hardware quiescence, IPI EOI,
+or IRQ action drain. Using it to stop its own transport is unsupported.
+
 ## Fallible callback boundary
 
 Single-use preparation stores a concrete FnOnce in an Option inside a KBox-backed

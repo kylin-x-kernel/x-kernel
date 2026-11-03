@@ -1,5 +1,14 @@
 # irq-driver — Security And Reliability
 
+## Local Source Control
+
+PerCpu selection is limited to ordinary GIC private sources (excluding forwarded
+PPI 27 and NMI-tagged sources), RISC-V timer/software causes, and x86 timer/IPI
+vectors. KIRQ pins the CPU across configure/enable/commit. RISC-V controls the
+local SIE bit, and x86 timer control changes only the LAPIC timer mask. An x86
+IPI vector has no independent hardware mask: disabled software admission is not
+producer shutdown or completed remote quiescence. Completion timing is unchanged.
+
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (architecture
@@ -219,7 +228,8 @@ The same gate rejects explicit GIC SPI `EdgeFalling`/`LevelLow` requests before
 new mapping publication or existing metadata updates. It does not validate bare
 legacy IDs, direct controller calls, private-source trigger support, unspecified
 trigger metadata, forwarding state or per-CPU shutdown. Eligible ordinary SPIs
-select Fasteoi; private and PER_CPU sources remain Legacy;
+select Fasteoi; ordinary private sources select PerCpu, except PPI 27 and
+PER_CPU-tagged sources, which retain Legacy;
 neither successful admission nor cached hardware capacity proves delivery,
 configuration success, register-write completion or hardware quiescence.
 

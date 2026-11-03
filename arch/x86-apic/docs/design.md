@@ -1,5 +1,12 @@
 # x86-apic — Design
 
+## Local Timer Mask
+
+`set_local_timer_enabled` changes the current LAPIC timer mask through the
+existing CPU-local handle guard. KIRQ uses it for PerCpu enable/disable; it does
+not change the timer mode, deadline or initial count. Clockevent programming
+remains with the timer driver. There is no per-vector hardware mask for IPIs.
+
 ## Purpose
 
 `x86-apic` is the x86_64 platform's interrupt-hardware adapter: it brings

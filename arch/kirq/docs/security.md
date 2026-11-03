@@ -1,5 +1,22 @@
 # kirq — 安全与可靠性分析
 
+## CPU-local Control Boundary
+
+`runtime/state_local.rs` is protected by the retained Line lock. CPU selection,
+controller programming and commit must retain IRQ/preemption exclusion; plans
+cannot move to another CPU. Configuration failure closes only that CPU's action
+admission. Local callbacks may overlap across CPUs, so handlers must synchronize
+shared data themselves. Disabled claims still complete before drain accounting
+is released. Aggregate drain does not stop remote producers or prove hardware
+quiescence. Enabled slots block removal and flow replacement; shutdown owners
+must first stop and disable each participating local source.
+
+Disabled PerCpu registration must mask an enabled calling CPU's source before
+committing nonzero disable depth and clearing its enabled record. Otherwise
+nested disables could skip the mask and permanently block action withdrawal.
+The Line lock and IRQ/preemption exclusion cover apply and commit; other CPU
+slots remain intact. This transition is neither producer shutdown nor a drain.
+
 ## Ordinary Level Admission
 
 `src/runtime/dispatch.rs` retains the original Line through mask/ack, actions

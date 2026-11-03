@@ -49,7 +49,8 @@ fn external_level_selection_rejects_unimplemented_edge_and_routing() {
         assert!(super::select_flow(desc).is_err());
     }
     for irq in [3, 11] {
-        assert_eq!(super::select_flow(IrqDesc::from_virq(irq)), Ok(IrqFlow::Legacy));
+        assert_eq!(super::select_flow(IrqDesc::from_virq(irq)),
+            Ok(if irq == 11 { IrqFlow::PerCpu } else { IrqFlow::Legacy }));
     }
     let desc = IrqDesc::new(17, IrqTrigger::LevelHigh);
     assert!(super::select_flow(desc.with_affinity(kirq::IrqAffinity::Cpu(1))).is_err());

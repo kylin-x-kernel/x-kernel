@@ -11,6 +11,9 @@ use alloc::{
 use core::array;
 
 use intrusive_collections::intrusive_adapter;
+#[path = "state_local.rs"]
+mod local;
+
 use kcompletion::{Completion, DeferredWake};
 use kspin::{SpinNoIrq, SpinNoIrqGuard, static_lock};
 
@@ -122,6 +125,7 @@ pub(super) struct IrqActionSnapshot {
 #[must_use = "preparing a plan has no effect; apply and commit it to change runtime state"]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct IrqPlatformPlan {
+    cpu: Option<usize>,
     pub(super) desc: IrqDesc,
     pub(super) configure: bool,
     pub(super) enable: Option<bool>,
@@ -132,6 +136,7 @@ pub(super) struct IrqPlatformPlan {
 impl IrqPlatformPlan {
     const fn none(desc: IrqDesc, disable_depth: usize) -> Self {
         Self {
+            cpu: None,
             desc,
             configure: false,
             enable: None,
@@ -210,6 +215,7 @@ impl IrqDescRuntimeState {
         force_platform_enable: bool,
     ) -> IrqPlatformPlan {
         IrqPlatformPlan {
+            cpu: None,
             desc,
             configure: self.is_configuration_failed
                 || self.configured_generation != Some(self.generation),
@@ -465,6 +471,7 @@ pub(super) struct IrqStateDesc {
     pub(super) is_replaying: bool,
     pub(super) is_pending: bool,
     pub(super) is_replay_queued: bool,
+    local: [local::LocalControl; kbuild_config::NR_CPUS],
 }
 
 impl IrqStateDesc {
@@ -478,6 +485,7 @@ impl IrqStateDesc {
             is_replaying: false,
             is_pending: false,
             is_replay_queued: false,
+            local: [local::LocalControl::new(); kbuild_config::NR_CPUS],
         }
     }
 
@@ -541,20 +549,36 @@ impl IrqStateDesc {
     }
 
     pub(super) fn prepare_auto_enable(&self) -> IrqPlatformPlan {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let cpu = local::current_cpu();
+            return self.local[cpu].enable(self.desc, self.runtime.generation, cpu, false, true);
+        }
         let plan = self.runtime.prepare_auto_enable(self.desc);
         self.with_flow_unmask(plan)
     }
 
     pub(super) fn prepare_register_disabled(&self) -> IrqPlatformPlan {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let cpu = local::current_cpu();
+            return self.local[cpu].register_disabled(self.desc, cpu);
+        }
         self.runtime.prepare_register_disabled(self.desc)
     }
 
     pub(super) fn prepare_enable_irq(&self) -> IrqPlatformPlan {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let cpu = local::current_cpu();
+            return self.local[cpu].enable(self.desc, self.runtime.generation, cpu, false, false);
+        }
         let plan = self.runtime.prepare_enable_irq(self.desc, false);
         self.with_flow_unmask(plan)
     }
 
     pub(super) fn prepare_legacy_enable(&self) -> IrqPlatformPlan {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let cpu = local::current_cpu();
+            return self.local[cpu].enable(self.desc, self.runtime.generation, cpu, true, false);
+        }
         let plan = self.runtime.prepare_enable_irq(self.desc, true);
         self.with_flow_unmask(plan)
     }
@@ -573,24 +597,43 @@ impl IrqStateDesc {
     }
 
     pub(super) fn prepare_reconfigure_if_stale(&self) -> IrqPlatformPlan {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let cpu = local::current_cpu();
+            return self.local[cpu].reconfigure(self.desc, self.runtime.generation, cpu);
+        }
         self.runtime.prepare_reconfigure_if_stale(self.desc)
     }
 
     pub(super) fn mark_configuration_failed(&mut self) {
+        if self.flow == crate::IrqFlow::PerCpu {
+            self.local[local::current_cpu()].has_failed_configuration = true;
+            return;
+        }
         self.runtime.is_configuration_failed = true;
     }
 
     pub(super) fn needs_configuration_restore(&self) -> bool {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let control = &self.local[local::current_cpu()];
+            return control.has_failed_configuration && control.is_enabled;
+        }
         self.runtime.is_configuration_failed
             && self.runtime.is_enabled
             && self.runtime.disable_depth == 0
     }
 
     pub(super) fn prepare_disable_irq_nosync(&self) -> IrqPlatformPlan {
+        if self.flow == crate::IrqFlow::PerCpu {
+            let cpu = local::current_cpu();
+            return self.local[cpu].disable(self.desc, cpu);
+        }
         self.runtime.prepare_disable_irq_nosync(self.desc)
     }
 
     pub(super) fn prepare_disable_if_no_actions(&self) -> Option<IrqPlatformPlan> {
+        if self.flow == crate::IrqFlow::PerCpu {
+            return (!self.has_actions()).then(|| self.prepare_disable_irq_nosync());
+        }
         self.runtime.prepare_disable_if_no_actions(self.desc)
     }
 
@@ -599,6 +642,11 @@ impl IrqStateDesc {
     /// depth must not change between prepare and commit. Action/teardown
     /// ownership changes are separate and are not rolled back.
     pub(super) fn commit_platform_plan(&mut self, plan: IrqPlatformPlan) {
+        if let Some(cpu) = plan.cpu {
+            debug_assert_eq!(cpu, local::current_cpu());
+            self.local[cpu].commit(plan, self.runtime.generation);
+            return;
+        }
         if plan.configure {
             self.runtime.configured_generation = Some(self.runtime.generation);
             self.runtime.is_configuration_failed = false;
@@ -621,8 +669,18 @@ impl IrqStateDesc {
             && !self.is_teardown_in_progress()
     }
 
+    pub(super) fn can_run_local_actions(&self) -> bool {
+        self.local[local::current_cpu()].can_run()
+            && self.has_actions()
+            && !self.is_teardown_in_progress()
+    }
+
+    pub(super) fn has_enabled_local_cpu(&self) -> bool {
+        self.flow == crate::IrqFlow::PerCpu && self.local.iter().any(|cpu| cpu.is_enabled)
+    }
+
     pub(super) fn needs_replay(&self) -> bool {
-        !matches!(self.flow, crate::IrqFlow::Legacy)
+        !matches!(self.flow, crate::IrqFlow::Legacy | crate::IrqFlow::PerCpu)
             && self.is_pending
             && !self.is_running
             && !self.is_replay_queued
@@ -678,7 +736,7 @@ impl IrqStateDesc {
     }
 
     pub(super) fn is_unused(&self) -> bool {
-        !self.is_managed && self.runtime.is_unused()
+        !self.is_managed && self.runtime.is_unused() && !self.has_enabled_local_cpu()
     }
 
     /// Pins directory membership for an admitted management transaction.
@@ -870,7 +928,7 @@ impl IrqState {
         // Flow operations and source identity must stay fixed while a handler
         // or queued service can still use this Line. Validate before mapping writes.
         if is_existing
-            && (entry.has_actions() || entry.in_flight() != 0)
+            && (entry.has_actions() || entry.in_flight() != 0 || entry.has_enabled_local_cpu())
             && (entry.flow != flow
                 || (!matches!(flow, crate::IrqFlow::Legacy) && entry.desc != stored_desc))
         {

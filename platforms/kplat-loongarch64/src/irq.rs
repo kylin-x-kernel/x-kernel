@@ -61,7 +61,11 @@ fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError>
         && desc.controller == IrqController::Unknown
         && matches!(desc.hwirq, TIMER_IRQ | EIOINTC_IRQ)
     {
-        return Ok(kirq::IrqFlow::Legacy);
+        return Ok(if desc.hwirq == TIMER_IRQ {
+            kirq::IrqFlow::PerCpu
+        } else {
+            kirq::IrqFlow::Legacy
+        });
     }
     if desc.domain.is_some()
         || desc.hwirq >= pch_pic::PCH_PIC_IRQ_COUNT

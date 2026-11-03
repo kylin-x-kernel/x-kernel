@@ -41,6 +41,15 @@ fn select_gic_flow(
 ) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqController, IrqDescError, IrqFlow, IrqTrigger};
 
+    if desc.domain.is_none()
+        && desc.controller == IrqController::Unknown
+        && desc.hwirq < 32
+        && desc.hwirq != 27
+        && !desc.flags.contains(kirq::IrqFlags::PER_CPU)
+    {
+        return Ok(IrqFlow::PerCpu);
+    }
+
     // Scope this admission to explicit GIC resources. Directory-only and
     // unmigrated legacy identities keep their existing provider contract.
     if desc.domain != Some(GIC_ROOT_DOMAIN) && desc.controller != IrqController::Gic {
@@ -61,8 +70,11 @@ fn select_gic_flow(
     // NMI registration tags its fallback PER_CPU. Private sources also include
     // the only current HW-LR forwarding route (virtual timer PPI 27); neither
     // participates in ordinary shared-source running/pending state.
-    if desc.hwirq < 32 || desc.flags.contains(kirq::IrqFlags::PER_CPU) {
+    if desc.hwirq == 27 || desc.flags.contains(kirq::IrqFlags::PER_CPU) {
         return Ok(IrqFlow::Legacy);
+    }
+    if desc.hwirq < 32 {
+        return Ok(IrqFlow::PerCpu);
     }
     let ordinary_flags = kirq::IrqFlags::SHARED | kirq::IrqFlags::WAKEUP_SOURCE;
     if !(desc.flags - ordinary_flags).is_empty()

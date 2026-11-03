@@ -9,11 +9,15 @@ use super::{NotificationFlags, PendingWord};
 #[def_test]
 fn fixed_early_request_survives_unrelated_ipi() {
     let pending = PendingWord::new();
+    assert!(!pending.is_enabled());
     assert!(!pending.request(NotificationFlags::RESCHEDULE));
     assert!(pending.take().is_empty());
+    assert!(!pending.is_enabled());
     pending.enable();
+    assert!(pending.is_enabled());
     assert_eq!(pending.take(), NotificationFlags::RESCHEDULE);
     assert!(pending.take().is_empty());
+    assert!(pending.is_enabled());
 }
 
 #[def_test]

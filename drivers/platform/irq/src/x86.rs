@@ -84,6 +84,13 @@ fn select_x86_flow(
 ) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
     use kirq::{IrqController, IrqFlags, IrqFlow, IrqTrigger};
     let unsupported = kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq };
+    if desc.domain.is_none()
+        && desc.controller == IrqController::Unknown
+        && (desc.hwirq == usize::from(x86_apic::APIC_TIMER_VECTOR)
+            || desc.hwirq == kbuild_config::IPI_IRQ)
+    {
+        return Ok(IrqFlow::PerCpu);
+    }
     if desc.domain == Some(kirq::MSI_DOMAIN) || desc.controller == IrqController::Msi {
         if !is_msi_source(desc)
             || desc.trigger != IrqTrigger::EdgeRising
@@ -138,6 +145,10 @@ fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
 }
 
 fn enable(irq: usize, enabled: bool) {
+    if irq == usize::from(x86_apic::APIC_TIMER_VECTOR) {
+        x86_apic::set_local_timer_enabled(enabled);
+        return;
+    }
     x86_apic::set_irq_enabled(irq, enabled);
 }
 
