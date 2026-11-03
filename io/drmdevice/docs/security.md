@@ -147,6 +147,20 @@ against both node kinds and both ownership states, so adding a command without
 deciding its permission fails the test. Blob ownership is covered by
 `destroy_client_blob_requires_ownership_and_refuses_system_blobs`.
 
+## GETRESOURCES framebuffer enumeration
+
+Framebuffer IDs come only from the caller's file-owned set. A global registry
+walk would expose other files' objects and must not replace this selection.
+The temporary vector is fallibly reserved for min(capacity, owned count);
+untrusted capacity cannot by itself cause an oversized allocation. Zero
+capacity, or an empty set, performs no ID-buffer access.
+
+User copies run after dropping the framebuffer-list lock, preventing a fault
+from retaining that object lock. Copy errors propagate as EFAULT and allocation
+failure as ENOMEM; neither path modifies the framebuffer set. Concurrent
+removal can invalidate a returned ID after the snapshot, as with other DRM
+resource discovery; the snapshot does not grant ownership of that object.
+
 ## Audit checklist
 
 - Check display availability on every new hardware-facing path.

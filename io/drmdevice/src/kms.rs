@@ -569,13 +569,26 @@ pub(crate) fn mode_from_bytes(bytes: &[u8]) -> Option<DrmModeModeInfo> {
 }
 
 impl Ioctl for DrmModeCardRes {
-    fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
+    fn handle(dev: &DrmDevice, file: &Arc<DrmFile>, r: &mut Self) -> DrmResult<usize> {
+        // Snapshot only this open file's IDs. Bound allocation by both the
+        // actual list and the caller's capacity; count-only queries allocate
+        // nothing. Drop the list lock before potentially faulting user copies.
+        let (fb_count, fb_ids) = {
+            let fbs = file.fbs.lock();
+            let copy = (r.count_fbs as usize).min(fbs.len());
+            let mut ids = alloc::vec::Vec::new();
+            ids.try_reserve_exact(copy)
+                .map_err(|_| DrmError::NoMemory)?;
+            ids.extend(fbs.iter().take(copy).map(|id| id.raw()));
+            (fbs.len() as u32, ids)
+        };
+        report_user_array(r.fb_id_ptr, r.count_fbs, &fb_ids)?;
+        r.count_fbs = fb_count;
         let (w, h) = display_resolution(dev);
         r.min_width = w;
         r.max_width = w;
         r.min_height = h;
         r.max_height = h;
-        r.count_fbs = 0;
         r.count_crtcs = report_user_array(r.crtc_id_ptr, r.count_crtcs, &[CRTC_ID])?;
         r.count_encoders = report_user_array(r.encoder_id_ptr, r.count_encoders, &[ENCODER_ID])?;
         r.count_connectors =

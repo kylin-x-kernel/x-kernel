@@ -66,6 +66,20 @@ cannot touch a VFS type. Its external caller is devfs: `dynamic.rs` publishes
 A render file is never master and gets a private master object, so `GET_UNIQUE`
 answers "no identity" and `SET_VERSION`/`AUTH_MAGIC` cannot touch the card's.
 
+## Framebuffer resource queries
+
+GETRESOURCES enumerates the calling open file description's framebuffer set,
+not the device-wide registry. A count-only request allocates no ID buffer.
+For a positive capacity, the handler snapshots at most that many IDs while
+holding the file-list lock, drops the lock, and copies the prefix through the
+checked user-array helper. It always reports the snapshot's full count, even
+when the caller's buffer is shorter. A concurrent add/remove can make that
+snapshot stale after the lock is released, so clients retain the usual
+count/fetch/retry protocol. Ordering is not part of the interface contract.
+
+Independent opens have separate lists; duplicated descriptors share the same
+file state. Querying does not change framebuffer ownership or lifetime.
+
 ## Commits
 
 `KmsState` is plain data. `DrmDevice::commit_with` validates the requested

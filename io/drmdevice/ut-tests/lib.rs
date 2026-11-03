@@ -764,3 +764,70 @@ fn oversized_atomic_object_count_is_refused_before_loading() {
         Err(DrmError::NoMemory)
     );
 }
+
+
+#[def_test]
+fn getresources_framebuffer_count_is_per_open_file() {
+    let (dev, _backend) = fake_device();
+    let owner = dev.open_file(MinorKind::Primary).expect("owner");
+    let other = dev.open_file(MinorKind::Primary).expect("other");
+    let object = GemObject::create(&dev, 64, 64).expect("dumb");
+    let first = dev.add_framebuffer(&owner, object.clone()).expect("fb");
+    let second = dev.add_framebuffer(&owner, object.clone()).expect("fb");
+    let foreign = dev.add_framebuffer(&other, object).expect("foreign");
+
+    let mut request = DrmModeCardRes::default();
+    DrmModeCardRes::handle(&dev, &owner, &mut request).expect("owner query");
+    assert_eq!(request.count_fbs, 2);
+    request = DrmModeCardRes::default();
+    DrmModeCardRes::handle(&dev, &other, &mut request).expect("other query");
+    assert_eq!(request.count_fbs, 1);
+
+    dev.remove_framebuffer(&owner, first).expect("rmfb");
+    request = DrmModeCardRes::default();
+    DrmModeCardRes::handle(&dev, &owner, &mut request).expect("after remove");
+    assert_eq!(request.count_fbs, 1);
+    dev.remove_framebuffer(&owner, second).expect("rmfb");
+    dev.remove_framebuffer(&other, foreign).expect("rmfb");
+}
+
+#[def_test]
+fn getresources_count_query_does_not_access_the_id_buffer() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    let object = GemObject::create(&dev, 64, 64).expect("dumb");
+    let fb = dev.add_framebuffer(&file, object).expect("fb");
+    let mut request = DrmModeCardRes {
+        fb_id_ptr: UserPtr::from(1_usize),
+        ..Default::default()
+    };
+
+    DrmModeCardRes::handle(&dev, &file, &mut request).expect("length query");
+    assert_eq!(request.count_fbs, 1);
+    // Reset output counts so an unrelated null array cannot cause EFAULT.
+    request = DrmModeCardRes {
+        fb_id_ptr: UserPtr::default(),
+        count_fbs: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        DrmModeCardRes::handle(&dev, &file, &mut request),
+        Err(DrmError::BadAddress),
+        "a nonzero capacity must access the nonempty output"
+    );
+    dev.remove_framebuffer(&file, fb).expect("rmfb");
+}
+
+#[def_test]
+fn getresources_empty_list_ignores_even_a_max_capacity_bad_pointer() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    let mut request = DrmModeCardRes {
+        fb_id_ptr: UserPtr::from(1_usize),
+        count_fbs: u32::MAX,
+        ..Default::default()
+    };
+
+    DrmModeCardRes::handle(&dev, &file, &mut request).expect("empty query");
+    assert_eq!(request.count_fbs, 0);
+}
