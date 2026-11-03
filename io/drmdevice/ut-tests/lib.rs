@@ -711,6 +711,51 @@ fn immutable_property_write_is_einval_not_enoent() {
 }
 
 #[def_test]
+fn object_properties_accept_the_wildcard_type() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+
+    // libdrm's drmModeObjectGetProperties() passes DRM_MODE_OBJECT_ANY (zero)
+    // and leaves the type to the id. wlroots reads connector properties this
+    // way while probing a DRM backend.
+    let mut request = DrmModeObjGetProperties {
+        obj_id: CONNECTOR_ID,
+        obj_type: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        DrmModeObjGetProperties::handle(&dev, &file, &mut request),
+        Ok(0)
+    );
+    assert!(
+        request.count_props > 0,
+        "the connector property list must be reported"
+    );
+
+    // A non-zero type still has to agree with the object the id names.
+    let mut wrong = DrmModeObjGetProperties {
+        obj_id: CONNECTOR_ID,
+        obj_type: DRM_MODE_OBJECT_PLANE,
+        ..Default::default()
+    };
+    assert_eq!(
+        DrmModeObjGetProperties::handle(&dev, &file, &mut wrong),
+        Err(DrmError::NotFound)
+    );
+
+    let mut unknown = DrmModeObjGetProperties {
+        obj_id: 0,
+        obj_type: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        DrmModeObjGetProperties::handle(&dev, &file, &mut unknown),
+        Err(DrmError::NotFound),
+        "the wildcard type must not invent an object for an unknown id"
+    );
+}
+
+#[def_test]
 fn get_blob_short_buffer_is_a_size_probe() {
     let (dev, _backend) = fake_device();
     let file = dev.open_file(MinorKind::Primary).expect("open");

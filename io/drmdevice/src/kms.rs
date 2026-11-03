@@ -825,23 +825,30 @@ fn set_one_property(
     Ok(0)
 }
 
+/// Resolve an object ID for `OBJ_GETPROPERTIES` / `OBJ_SETPROPERTY`.
+///
+/// Linux treats `DRM_MODE_OBJECT_ANY` (zero) as a wildcard: the ID alone picks
+/// the object. libdrm's `drmModeObjectGetProperties()` exposes that form, and
+/// generic users such as wlroots use it to read a property without first
+/// knowing the object type. A non-zero type must still agree with the ID.
+fn object_for(obj_id: u32, obj_type: u32) -> DrmResult<ObjectType> {
+    let object = ObjectType::of_id(obj_id).ok_or(DrmError::NotFound)?;
+    if obj_type != 0 && ObjectType::from_wire(obj_type) != Some(object) {
+        return Err(DrmError::NotFound);
+    }
+    Ok(object)
+}
+
 impl Ioctl for DrmModeObjSetProperty {
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, req: &mut Self) -> DrmResult<usize> {
-        let object = ObjectType::from_wire(req.obj_type).ok_or(DrmError::NotFound)?;
-        // The wire object type has to agree with the id it addresses.
-        if ObjectType::of_id(req.obj_id) != Some(object) {
-            return Err(DrmError::NotFound);
-        }
+        let object = object_for(req.obj_id, req.obj_type)?;
         set_one_property(dev, object, req.prop_id, req.value)
     }
 }
 
 impl Ioctl for DrmModeObjGetProperties {
     fn handle(dev: &DrmDevice, _file: &Arc<DrmFile>, q: &mut Self) -> DrmResult<usize> {
-        let object = ObjectType::from_wire(q.obj_type).ok_or(DrmError::NotFound)?;
-        if ObjectType::of_id(q.obj_id) != Some(object) {
-            return Err(DrmError::NotFound);
-        }
+        let object = object_for(q.obj_id, q.obj_type)?;
         let state = dev.kms_state();
         let ids: Vec<u32> = properties_of(object).map(|prop| prop.id.raw()).collect();
         let values: Vec<u64> = properties_of(object)

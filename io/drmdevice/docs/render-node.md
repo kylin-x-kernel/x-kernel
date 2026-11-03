@@ -70,17 +70,18 @@ the scanout resource when the last reference goes away. Consequences:
 ## Verification
 
 - `make build`, `make clippy` (header/lint/deps) pass.
-- Portable unit tests (`ut-tests/`, 27): permission matrix over the whole ioctl
+- Portable unit tests (`ut-tests/`, 37): permission matrix over the whole ioctl
   table for both node kinds and both ownership states, unique command numbers,
   the Linux render allowlist, the capability table, the mode-blob round trip,
-  atomic flag validation, signed plane-property metadata, the short-blob size
-  probe (success with the required length, no copy), immutable-property writes
-  returning `EINVAL` while an unattached property remains `ENOENT`, a null
-  array destination, legacy `SETCRTC` without a
-  framebuffer returning `ENOENT`, and — over a `FakeBackend` —
-  removed-framebuffer retention until the next present, `DROP_MASTER`
-  revoking master-only commands, dirty flush not rebinding, cross-file
-  `RMFB`/`CLOSEFB` refusal, blob ownership enforced for `DESTROY_BLOB`
+  atomic flag validation, signed plane-property metadata, the wildcard object
+  type accepted by `OBJ_GETPROPERTIES`, the short-blob size probe (success with
+  the required length, no copy), immutable-property writes returning `EINVAL`
+  while an unattached property remains `ENOENT`, a null array destination,
+  legacy `SETCRTC` without a framebuffer returning `ENOENT`, and — over a
+  `FakeBackend` — removed-framebuffer retention until the next present,
+  `DROP_MASTER` revoking master-only commands, dirty flush not rebinding,
+  cross-file `RMFB`/`CLOSEFB` refusal, blob ownership enforced for
+  `DESTROY_BLOB`
   (including a non-owner and a system blob), blob ownership removed by both
   `DESTROY_BLOB` and file release, atomic object-count bounds, and page-flip
   event-slot reservation.
