@@ -562,3 +562,38 @@ Full fsync, syncfs/unmount inode metadata writeback and linked-inode eviction st
 pending timestamps. Data-only mapped overwrite may omit a timestamp-only transaction;
 a later full fsync must still persist timestamps with no dirty folios remaining.
 This does not weaken the data or journal flush barriers or add a background worker.
+
+
+## Quota metadata I/O boundary
+
+Quota files use the canonical VFS inode retained by superblock quota state.
+The trusted caller must validate same-filesystem membership and protect the
+file against ordinary writes before activation. The storage adapter accepts
+an existing mount-state borrow and journal handle in sleepable task context;
+it introduces no unsafe code, persistent owner, atomics or recursive lock.
+Mount write exclusion precedes the quota mutex. It must not execute under
+spinlocks, IRQ/preemption-disable guards, in IRQ or during early boot.
+
+Quota payload reads use the metadata cache to avoid stale home-block reads
+before checkpoint. Writes reject filesystem-block crossings before mutation,
+check existing extent/inode credit bounds, initialize newly exposed blocks and
+journal payload with mapping/size changes. A format operation must remain in
+one admitted transaction; its caller must complete or abort the handle before
+releasing the filesystem state. Physical admission includes optional
+extra-isize external-xattr allocation through the existing inode bound; journal
+credit extension alone is insufficient. Native write failures are classified
+before errno conversion. A pre-publication nonfatal error leaves the journal
+usable; a failed operation with published metadata still requires abort.
+Inactive dirty dquots fail writeback without quota-file I/O and remain owned
+by the acquisition path. Structural failures cannot be recovered by
+retrying a partially modified tree. Filesystem sync uses the existing abort
+policy on write failure and still attempts journal drain; dirty record state
+is only cleared after its quota-file write succeeds. A later commit failure
+requires filesystem recovery even if in-memory dirty bits were cleared.
+
+Production mounts still leave quota disabled. Allocation charging, activation,
+final quota disable and administrative authorization remain integration work;
+the new storage path does not make writable quota-feature filesystems safe.
+Mount capability validation therefore rejects quota/project features before
+any recovery writes, including during read-only VFS mount preparation. Disk
+read-only decoding remains available for those feature bits.

@@ -21,6 +21,7 @@ iov_iter.workspace = true
 kcred.workspace = true
 kerrno.workspace = true
 klogger.workspace = true
+kquota.workspace = true
 macros.workspace = true
 ksync.workspace = true
 ktask.workspace = true

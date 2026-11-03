@@ -519,7 +519,7 @@ pub struct SuperBlock {
     timestamp_limits: Once<TimestampLimits>,
     rename_mutex: Mutex<()>,
     inodes: Mutex<Vec<Weak<VfsInode>>>,
-    quota_info: Mutex<kquota::QuotaInfo>,
+    quota_info: Mutex<kquota::QuotaInfo<Arc<VfsInode>>>,
 }
 
 impl SuperBlock {
@@ -528,7 +528,7 @@ impl SuperBlock {
     /// The guard may span quota-file I/O in task context. Callers must hold
     /// no spin/IRQ-disable/preemption-disable guard, and backing-file I/O must
     /// not reenter quota accounting or reacquire a caller-held filesystem lock.
-    pub fn quota_info(&self) -> MutexGuard<'_, kquota::QuotaInfo> {
+    pub fn quota_info(&self) -> MutexGuard<'_, kquota::QuotaInfo<Arc<VfsInode>>> {
         self.quota_info.lock()
     }
 

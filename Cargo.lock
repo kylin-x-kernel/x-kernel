@@ -2440,6 +2440,7 @@ dependencies = [
  "kcred",
  "kerrno",
  "klogger",
+ "kquota",
  "ksync",
  "ktask",
  "ktime_types",

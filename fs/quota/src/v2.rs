@@ -26,28 +26,30 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-pub(crate) fn read_info(
-    io: &dyn QuotaIo,
+pub(crate) fn read_info<F>(
+    io: &mut dyn QuotaIo<File = F>,
+    file: &F,
     kind: QuotaType,
     format: QuotaFormat,
 ) -> KResult<(u32, u32, QuotaTree)> {
     let mut header = [0; 32];
-    read_exact(io, kind, 0, &mut header)?;
+    read_exact(io, file, 0, &mut header)?;
     if u32_at(&header, 0) != kind.magic() || u32_at(&header, 4) != format.version() {
         return Err(LinuxError::EINVAL.into());
     }
     let tree = QuotaTree::new(
+        format,
         u32_at(&header, 20),
         u32_at(&header, 24),
         u32_at(&header, 28),
-        io.file_len(kind)?,
+        io.file_len(file)?,
     )?;
     Ok((u32_at(&header, 8), u32_at(&header, 12), tree))
 }
 
-pub(crate) fn write_info(
-    io: &dyn QuotaIo,
-    kind: QuotaType,
+pub(crate) fn write_info<F>(
+    io: &mut dyn QuotaIo<File = F>,
+    file: &F,
     space_grace_seconds: u32,
     inode_grace_seconds: u32,
     tree: &mut QuotaTree,
@@ -58,7 +60,7 @@ pub(crate) fn write_info(
     put_u32(&mut info, 12, tree.blocks);
     put_u32(&mut info, 16, tree.free_block);
     put_u32(&mut info, 20, tree.free_entry);
-    write_exact(io, kind, 8, &info)?;
+    write_exact(io, file, 8, &info)?;
     tree.is_dirty = false;
     Ok(())
 }

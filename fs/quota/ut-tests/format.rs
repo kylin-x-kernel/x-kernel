@@ -13,7 +13,7 @@ use crate::{
 #[def_test]
 fn both_v2_revisions_roundtrip_usage_limits_and_grace_deadlines() {
     for format in [QuotaFormat::VfsV0, QuotaFormat::VfsV1] {
-        let io = MemoryFiles::new(format);
+        let mut io = MemoryFiles::new(format);
         let mut quota = io.enable_all(format);
         for owner in ids(0x1234_5678) {
             let data = Dqblk {
@@ -28,11 +28,11 @@ fn both_v2_revisions_roundtrip_usage_limits_and_grace_deadlines() {
                 inode_expires_at: 500,
             };
             quota
-                .set(&io, owner, data, QuotaFields::all(), 100)
+                .set(&mut io, owner, data, QuotaFields::all(), 100)
                 .unwrap();
-            quota.sync(&io, owner.kind()).unwrap();
-            quota.release(&io, owner).unwrap();
-            let reopened = quota.get(&io, owner).unwrap();
+            quota.sync(&mut io, owner.kind()).unwrap();
+            quota.release(&mut io, owner).unwrap();
+            let reopened = quota.get(&mut io, owner).unwrap();
             assert_eq!(reopened.space_hard_limit_bytes, 9216);
             assert_eq!(reopened.space_soft_limit_bytes, 5120);
             assert_eq!(reopened.used_bytes, 6000);
@@ -47,14 +47,14 @@ fn both_v2_revisions_roundtrip_usage_limits_and_grace_deadlines() {
 #[def_test]
 fn zero_id_with_all_zero_values_uses_the_nonempty_slot_escape() {
     for format in [QuotaFormat::VfsV0, QuotaFormat::VfsV1] {
-        let io = MemoryFiles::new(format);
+        let mut io = MemoryFiles::new(format);
         let mut quota = io.enable_all(format);
         let owner = ids(0)[0];
-        assert_eq!(quota.get(&io, owner).unwrap(), Dqblk::default());
+        assert_eq!(quota.get(&mut io, owner).unwrap(), Dqblk::default());
         let mut reopened = io.enable_all(format);
-        assert_eq!(reopened.get(&io, owner).unwrap(), Dqblk::default());
+        assert_eq!(reopened.get(&mut io, owner).unwrap(), Dqblk::default());
         assert_eq!(
-            reopened.next_id(&io, QuotaType::User, 0).unwrap(),
+            reopened.next_id(&mut io, QuotaType::User, 0).unwrap(),
             Some(owner)
         );
         let files = io.files.borrow();
@@ -66,56 +66,58 @@ fn zero_id_with_all_zero_values_uses_the_nonempty_slot_escape() {
 #[def_test]
 fn full_partial_and_empty_data_blocks_reuse_their_free_lists() {
     for (format, capacity) in [(QuotaFormat::VfsV0, 21_u32), (QuotaFormat::VfsV1, 14)] {
-        let io = MemoryFiles::new(format);
+        let mut io = MemoryFiles::new(format);
         let mut quota = io.enable_all(format);
         for id in 0..capacity * 2 {
-            quota.alloc_inode(&io, &[ids(id)[0]], 1, false).unwrap();
+            quota.alloc_inode(&mut io, &[ids(id)[0]], 1, false).unwrap();
         }
-        quota.sync(&io, QuotaType::User).unwrap();
+        quota.sync(&mut io, QuotaType::User).unwrap();
         let file_size = io.files.borrow()[0].len();
         for id in 0..capacity * 2 {
             let owner = ids(id)[0];
-            quota.free_inode(&io, &[owner]).unwrap();
-            quota.release(&io, owner).unwrap();
+            quota.free_inode(&mut io, &[owner]).unwrap();
+            quota.release(&mut io, owner).unwrap();
         }
-        assert_eq!(quota.next_id(&io, QuotaType::User, 0).unwrap(), None);
+        assert_eq!(quota.next_id(&mut io, QuotaType::User, 0).unwrap(), None);
         for id in 0..capacity * 2 {
-            quota.alloc_inode(&io, &[ids(id)[0]], 1, false).unwrap();
+            quota.alloc_inode(&mut io, &[ids(id)[0]], 1, false).unwrap();
         }
-        quota.sync(&io, QuotaType::User).unwrap();
+        quota.sync(&mut io, QuotaType::User).unwrap();
         assert_eq!(io.files.borrow()[0].len(), file_size);
         let mut reopened = io.enable_all(format);
         for id in 0..capacity * 2 {
-            assert_eq!(reopened.get(&io, ids(id)[0]).unwrap().used_inodes, 1);
+            assert_eq!(reopened.get(&mut io, ids(id)[0]).unwrap().used_inodes, 1);
         }
     }
 }
 
 #[def_test]
 fn releasing_one_id_does_not_remove_other_entries_in_the_same_data_block() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let first = ids(1)[0];
     let second = ids(2)[0];
-    quota.get(&io, first).unwrap();
-    quota.alloc_inode(&io, &[second], 1, false).unwrap();
-    quota.release(&io, first).unwrap();
-    quota.sync(&io, QuotaType::User).unwrap();
+    quota.get(&mut io, first).unwrap();
+    quota.alloc_inode(&mut io, &[second], 1, false).unwrap();
+    quota.release(&mut io, first).unwrap();
+    quota.sync(&mut io, QuotaType::User).unwrap();
     assert_eq!(
-        quota.next_id(&io, QuotaType::User, 0).unwrap(),
+        quota.next_id(&mut io, QuotaType::User, 0).unwrap(),
         Some(second)
     );
     let mut reopened = io.enable_all(QuotaFormat::VfsV1);
-    assert_eq!(reopened.get(&io, second).unwrap().used_inodes, 1);
+    assert_eq!(reopened.get(&mut io, second).unwrap().used_inodes, 1);
 }
 
 #[def_test]
 fn iteration_is_inclusive_across_radix_boundaries_and_never_wraps() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let numbers = [0, 255, 256, 65536, 16777216, u32::MAX - 1];
     for number in numbers {
-        quota.alloc_inode(&io, &[ids(number)[0]], 1, false).unwrap();
+        quota
+            .alloc_inode(&mut io, &[ids(number)[0]], 1, false)
+            .unwrap();
     }
     for (minimum, expected) in [
         (0, Some(0)),
@@ -128,7 +130,7 @@ fn iteration_is_inclusive_across_radix_boundaries_and_never_wraps() {
     ] {
         assert_eq!(
             quota
-                .next_id(&io, QuotaType::User, minimum)
+                .next_id(&mut io, QuotaType::User, minimum)
                 .unwrap()
                 .map(QuotaId::id),
             expected
@@ -146,13 +148,14 @@ fn invalid_headers_fail_before_loading_or_writing_quota_state() {
         (24, 1, LinuxError::EUCLEAN),
         (28, 2, LinuxError::EUCLEAN),
     ] {
-        let io = MemoryFiles::new(QuotaFormat::VfsV1);
+        let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
         io.put_u32(QuotaType::User, offset, value);
         let mut quota = QuotaInfo::new();
         assert_eq!(
             quota.enable(
-                &io,
+                &mut io,
                 QuotaType::User,
+                &alloc::sync::Arc::new(QuotaType::User),
                 QuotaFormat::VfsV1,
                 QuotaState::USAGE_ENABLED
             ),
@@ -166,17 +169,17 @@ fn invalid_headers_fail_before_loading_or_writing_quota_state() {
 #[def_test]
 fn tree_cycles_are_rejected_by_lookup_and_iteration() {
     for depth in 0..4 {
-        let io = MemoryFiles::new(QuotaFormat::VfsV1);
+        let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
         let mut quota = io.enable_all(QuotaFormat::VfsV1);
-        quota.get(&io, ids(0)[0]).unwrap();
+        quota.get(&mut io, ids(0)[0]).unwrap();
         io.put_u32(QuotaType::User, (depth + 1) * 1024, 1);
         let mut reopened = io.enable_all(QuotaFormat::VfsV1);
         assert_eq!(
-            reopened.get(&io, ids(0)[0]),
+            reopened.get(&mut io, ids(0)[0]),
             Err(KError::from(LinuxError::EUCLEAN))
         );
         assert_eq!(
-            reopened.next_id(&io, QuotaType::User, 0),
+            reopened.next_id(&mut io, QuotaType::User, 0),
             Err(KError::from(LinuxError::EUCLEAN))
         );
     }
@@ -185,9 +188,9 @@ fn tree_cycles_are_rejected_by_lookup_and_iteration() {
 #[def_test]
 fn referenced_but_missing_and_miscounted_records_are_corruption() {
     for has_corrupt_count in [false, true] {
-        let io = MemoryFiles::new(QuotaFormat::VfsV1);
+        let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
         let mut quota = io.enable_all(QuotaFormat::VfsV1);
-        quota.get(&io, ids(1)[0]).unwrap();
+        quota.get(&mut io, ids(1)[0]).unwrap();
         if has_corrupt_count {
             io.files.borrow_mut()[0][5 * 1024 + 8] = 2;
         } else {
@@ -195,7 +198,7 @@ fn referenced_but_missing_and_miscounted_records_are_corruption() {
         }
         let mut reopened = io.enable_all(QuotaFormat::VfsV1);
         assert_eq!(
-            reopened.get(&io, ids(1)[0]),
+            reopened.get(&mut io, ids(1)[0]),
             Err(KError::from(LinuxError::EUCLEAN))
         );
     }
@@ -203,18 +206,18 @@ fn referenced_but_missing_and_miscounted_records_are_corruption() {
 
 #[def_test]
 fn free_block_self_cycles_are_rejected_before_the_next_allocation() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(0)[0];
-    quota.get(&io, owner).unwrap();
-    quota.release(&io, owner).unwrap();
+    quota.get(&mut io, owner).unwrap();
+    quota.release(&mut io, owner).unwrap();
     let head = io.u32_at(QuotaType::User, 24);
     assert!(head > 1);
     io.put_u32(QuotaType::User, head as usize * 1024, head);
     let mut reopened = io.enable_all(QuotaFormat::VfsV1);
     let writes = io.writes.get();
     assert_eq!(
-        reopened.get(&io, ids(1)[0]),
+        reopened.get(&mut io, ids(1)[0]),
         Err(KError::from(LinuxError::EUCLEAN))
     );
     assert_eq!(io.writes.get(), writes);
@@ -222,25 +225,25 @@ fn free_block_self_cycles_are_rejected_before_the_next_allocation() {
 
 #[def_test]
 fn short_record_reads_fail_without_replacing_an_existing_cached_record() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(1)[0];
-    quota.alloc_inode(&io, &[owner], 1, false).unwrap();
+    quota.alloc_inode(&mut io, &[owner], 1, false).unwrap();
     io.has_short_reads.set(true);
     assert_eq!(
-        quota.get(&io, ids(2)[0]),
+        quota.get(&mut io, ids(2)[0]),
         Err(KError::from(LinuxError::EIO))
     );
-    assert_eq!(quota.get(&io, owner).unwrap().used_inodes, 1);
+    assert_eq!(quota.get(&mut io, owner).unwrap().used_inodes, 1);
 }
 
 #[def_test]
 fn format_limit_ranges_are_validated_before_record_acquisition() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV0);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV0);
     let mut quota = io.enable_all(QuotaFormat::VfsV0);
     assert_eq!(
         quota.set(
-            &io,
+            &mut io,
             ids(1)[0],
             Dqblk {
                 inode_hard_limit: i64::from(u32::MAX) + 1,
@@ -256,12 +259,12 @@ fn format_limit_ranges_are_validated_before_record_acquisition() {
 
 #[def_test]
 fn the_largest_native_space_limit_survives_quota_block_rounding() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(1)[0];
     quota
         .set(
-            &io,
+            &mut io,
             owner,
             Dqblk {
                 space_hard_limit_bytes: i64::MAX,
@@ -271,20 +274,20 @@ fn the_largest_native_space_limit_survives_quota_block_rounding() {
             1,
         )
         .unwrap();
-    quota.release(&io, owner).unwrap();
+    quota.release(&mut io, owner).unwrap();
     assert_eq!(
-        quota.get(&io, owner).unwrap().space_hard_limit_bytes,
+        quota.get(&mut io, owner).unwrap().space_hard_limit_bytes,
         i64::MAX
     );
 }
 
 #[def_test]
 fn reads_and_updates_an_e2fsprogs_generated_v2_quota_file() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     io.files.borrow_mut()[0] = include_bytes!("fixtures/e2fsprogs-v2-user.bin").to_vec();
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(0)[0];
-    let data = quota.get(&io, owner).unwrap();
+    let data = quota.get(&mut io, owner).unwrap();
     assert_eq!(data.used_inodes, 2);
     assert_eq!(data.used_bytes, 13312);
     assert_eq!(
@@ -292,75 +295,83 @@ fn reads_and_updates_an_e2fsprogs_generated_v2_quota_file() {
         604800
     );
     quota
-        .alloc_space(&io, &[owner], 1024, 1, ChargeFlags::WARN)
+        .alloc_space(&mut io, &[owner], 1024, 1, ChargeFlags::WARN)
         .unwrap();
-    quota.sync(&io, QuotaType::User).unwrap();
+    quota.sync(&mut io, QuotaType::User).unwrap();
     let files = io.files.borrow();
     assert_eq!(&files[0][5136 + 48..5136 + 56], &14336_u64.to_le_bytes());
 }
 
 #[def_test]
 fn disable_releases_instantiated_but_unused_records() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
-    quota.get(&io, ids(0)[0]).unwrap();
-    quota.disable(&io, QuotaType::User).unwrap();
+    quota.get(&mut io, ids(0)[0]).unwrap();
+    quota.disable(&mut io, QuotaType::User).unwrap();
     quota
         .enable(
-            &io,
+            &mut io,
             QuotaType::User,
+            &alloc::sync::Arc::new(QuotaType::User),
             QuotaFormat::VfsV1,
             QuotaState::USAGE_ENABLED,
         )
         .unwrap();
-    assert_eq!(quota.next_id(&io, QuotaType::User, 0).unwrap(), None);
+    assert_eq!(quota.next_id(&mut io, QuotaType::User, 0).unwrap(), None);
 }
 
 #[def_test]
 fn releasing_a_record_can_retry_a_failed_file_info_write() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(0)[0];
-    quota.get(&io, owner).unwrap();
+    quota.get(&mut io, owner).unwrap();
     io.fail_write_at.set(Some(8));
     assert_eq!(
-        quota.release(&io, owner),
+        quota.release(&mut io, owner),
         Err(KError::from(LinuxError::EIO))
     );
     io.fail_write_at.set(None);
-    quota.release(&io, owner).unwrap();
+    quota.release(&mut io, owner).unwrap();
     let reopened = io.enable_all(QuotaFormat::VfsV1);
-    assert_eq!(reopened.next_id(&io, QuotaType::User, 0).unwrap(), None);
+    assert_eq!(reopened.next_id(&mut io, QuotaType::User, 0).unwrap(), None);
 }
 
 #[def_test]
 fn acquisition_does_not_publish_a_record_before_its_file_info_is_written() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(0)[0];
     io.fail_write_at.set(Some(8));
-    assert_eq!(quota.get(&io, owner), Err(KError::from(LinuxError::EIO)));
     assert_eq!(
-        quota.sync(&io, QuotaType::User),
+        quota.get(&mut io, owner),
         Err(KError::from(LinuxError::EIO))
     );
-    assert_eq!(quota.get(&io, owner), Err(KError::from(LinuxError::EIO)));
+    assert_eq!(
+        quota.sync(&mut io, QuotaType::User),
+        Err(KError::from(LinuxError::EIO))
+    );
+    assert_eq!(
+        quota.get(&mut io, owner),
+        Err(KError::from(LinuxError::EIO))
+    );
     io.fail_write_at.set(None);
-    assert_eq!(quota.get(&io, owner).unwrap(), Dqblk::default());
+    assert_eq!(quota.get(&mut io, owner).unwrap(), Dqblk::default());
     let mut reopened = io.enable_all(QuotaFormat::VfsV1);
-    assert_eq!(reopened.get(&io, owner).unwrap(), Dqblk::default());
+    assert_eq!(reopened.get(&mut io, owner).unwrap(), Dqblk::default());
 }
 
 #[def_test]
 fn free_block_and_partial_entry_heads_cannot_alias() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     io.files.borrow_mut()[0] = include_bytes!("fixtures/e2fsprogs-v2-user.bin").to_vec();
     io.put_u32(QuotaType::User, 24, 5);
     let mut quota = QuotaInfo::new();
     assert_eq!(
         quota.enable(
-            &io,
+            &mut io,
             QuotaType::User,
+            &alloc::sync::Arc::new(QuotaType::User),
             QuotaFormat::VfsV1,
             QuotaState::USAGE_ENABLED
         ),
@@ -371,10 +382,10 @@ fn free_block_and_partial_entry_heads_cannot_alias() {
 
 #[def_test]
 fn unlink_rejects_a_head_with_a_nonzero_previous_link_before_writing() {
-    let io = MemoryFiles::new(QuotaFormat::VfsV1);
+    let mut io = MemoryFiles::new(QuotaFormat::VfsV1);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     for id in 0..15 {
-        quota.get(&io, ids(id)[0]).unwrap();
+        quota.get(&mut io, ids(id)[0]).unwrap();
     }
     drop(quota);
     let head = io.u32_at(QuotaType::User, 28);
@@ -383,11 +394,11 @@ fn unlink_rejects_a_head_with_a_nonzero_previous_link_before_writing() {
     io.put_u32(QuotaType::User, 5 * 1024, head);
     let mut quota = io.enable_all(QuotaFormat::VfsV1);
     let owner = ids(14)[0];
-    quota.get(&io, owner).unwrap();
+    quota.get(&mut io, owner).unwrap();
     let before = io.files.borrow()[0].clone();
     let writes = io.writes.get();
     assert_eq!(
-        quota.release(&io, owner),
+        quota.release(&mut io, owner),
         Err(KError::from(LinuxError::EUCLEAN))
     );
     assert_eq!(io.writes.get(), writes);

@@ -1210,3 +1210,53 @@ credits; a block is never marked in the bitmap before it is consumed, so there i
 Recovery 不创建 resident inode 表。它在 mount/VFS identity 尚未发布时通过 orphan-aware decode
 取得临时 private state，复用正常 truncate 或 zero-link eviction。若 cleanup 失败，恢复证据
 保留并阻止该 filesystem 被当作成功挂载。
+
+
+## Quota-file storage and synchronization
+
+`src/quota.rs` implements `kquota::QuotaIo` with a borrowed `Ext4QuotaIo`
+containing the existing mutable `Ext4SbInfo` and current `JournalHandle`.
+This transient pair supplies explicit transaction context; it owns no mount,
+file registry or quota state. The superblock's `QuotaInfo<Arc<VfsInode>>`
+retains each backing inode, and I/O borrows that inode's `Ext4Inode` component.
+
+Quota reads map blocks directly and read the metadata cache, so pending
+journaled payloads are visible before checkpoint. Reads clamp to EOF, span
+filesystem blocks and zero holes/unwritten mappings. Writes must fit one
+filesystem block. New mappings allocate exactly one block without speculative
+preallocation; unwritten mappings are initialized to zero. Payload, extent,
+bitmap and inode size changes enter the caller's journal handle. Inode size
+metadata is dirtied only on growth; mapped overwrites need one payload credit. Ordinary
+PageCache/ordered-data writeback does not carry quota-file contents.
+The caller admits the transaction before quota I/O and completes or aborts it
+after the complete format operation. Shortage is checked before each payload
+mutation using existing extent/inode credit bounds plus its payload block.
+Physical admission must cover every payload/extent allocation and also
+`inode_extra_isize_allocation_blocks(inode)` whenever inode metadata may be
+dirtied. Extra-isize migration can allocate an external xattr block; extending
+a journal handle supplies credits but does not admit physical allocations.
+Callers use the existing `metadata_journal_for_allocation` boundary before
+opening the handle; the storage adapter never starts nested admission.
+
+`Ext4SuperOperations::sync_fs` takes mount write exclusion, locks the canonical
+quota state, writes each dirty acquired dquot in a bounded handle, writes dirty
+file information, then drains the filesystem journal and checkpoints. The
+ordered-cache cursor advances past failed records and retains the first error
+while attempting later items. An inactive dirty dquot reports `EIO` without
+quota-file I/O; acquisition owns initialization and its larger transaction.
+This adds no persistent dirty queue. Native write errors pass through
+`fail_metadata_mutation` before conversion to VFS errors. A format error
+without published updates stops the handle without aborting the journal;
+errors after publication use the existing abort boundary. Final filesystem
+synchronization is still attempted. Lock order is mount state then quota state;
+backing I/O uses the already borrowed state and cannot reacquire the mount.
+
+Mount-time quota activation, allocation charging and quota-control dispatch
+remain disabled until their integration is complete. The storage path alone
+does not advertise quota enforcement. `FeatureSet::validate_mount` rejects
+`QUOTA` and `PROJECT` before recovery can mutate storage. The disk decoder
+still accepts those read-only-compatible feature bits. Production mount
+preparation can replay and clean up orphans even for a read-only VFS mount,
+so that path also requires quota accounting and currently rejects these images. Guest tests exercise retained-file identity, cache visibility,
+cross-block rejection, sparse reads and quota record persistence through the
+real superblock synchronization hook.

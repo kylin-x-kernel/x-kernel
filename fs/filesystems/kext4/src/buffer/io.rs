@@ -16,7 +16,8 @@ use crate::{
 
 /// Ext4-local adapter for physical metadata I/O.
 ///
-/// Ordinary file contents do not pass through this object. They remain owned
+/// Journaled quota-file payloads use this metadata path. Ordinary file
+/// contents do not pass through this object. They remain owned
 /// by the KFS `FileMapping`/page-cache path once the VFS adapter is connected.
 pub(crate) struct Ext4MetadataIo {
     pub(super) cache: MetadataBlockCache,

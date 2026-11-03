@@ -3,8 +3,8 @@
 ## Purpose and scope
 
 `kquota` owns filesystem-independent disk quota accounting and the v2 quota
-file formats. `kvfs::SuperBlock` owns one `Mutex<QuotaInfo>`, initially disabled
-for all quota classes. Concrete filesystems supply quota-file I/O; quota
+file formats. `kvfs::SuperBlock` owns one
+`Mutex<QuotaInfo<Arc<VfsInode>>>`, initially disabled for all quota classes. Concrete filesystems supply quota-file I/O; quota
 control, credentials, namespace ID translation, journal transactions and inode
 block accounting remain outside this crate.
 
@@ -18,8 +18,8 @@ quota yet, and this change does not expose a quota syscall.
 
 ```text
 kvfs::SuperBlock
-  `-- Mutex<QuotaInfo>
-        |-- [Option<Dqinfo>; 3] -- format, state, grace durations, QuotaTree
+  `-- Mutex<QuotaInfo<Arc<VfsInode>>>
+        |-- [Option<Dqinfo<Arc<VfsInode>>>; 3] -- file, state, grace durations, QuotaTree
         `-- BTreeMap<QuotaId, Dquot> -- native usage, disk offset, flags
 
 filesystem's existing quota files -- QuotaIo --> v2 codec / radix tree
@@ -31,20 +31,25 @@ The reference semantic boundaries are `include/linux/quota.h`,
 
 | Object | Semantic state |
 | --- | --- |
-| `QuotaInfo` | Per-filesystem `quota_info` plus that filesystem's dquot cache |
-| `Dqinfo` | Per-class `mem_dqinfo` and its accounting/enforcement/suspension bits |
+| `QuotaInfo<F>` | Per-filesystem `quota_info` plus that filesystem's dquot cache |
+| `Dqinfo<F>` | Per-class file reference and `mem_dqinfo` with accounting/enforcement/suspension bits |
 | `Dquot` | `dquot` native data, stable disk offset, dirty and active bits |
 | `Dqblk` | `mem_dqblk`, including transient reserved space |
 | `QuotaId` | `kqid`; the cache key is the only stored record identity |
-| `QuotaTree` | `qtree_mem_dqinfo` block count and two on-disk free-list heads |
+| `QuotaTree` | Selected format, `qtree_mem_dqinfo` block count and two on-disk free-list heads |
 
 There are no independent managers, mount owners, staging objects or cached
 copies of inode ownership. Tree depth, block size and entry size are derived
 from the selected format, rather than retained as duplicate fields. The
 presence of loaded file information represents usage-enabled state; that bit
 is derived by the public state accessor rather than stored a second time. The
-filesystem passes its existing backing-file context through `QuotaIo` rather
-than placing another filesystem owner in every record.
+selected format is stored once in `QuotaTree`. Each loaded `Dqinfo<F>` owns
+one canonical file reference, folding file presence into the loaded-class
+invariant rather than maintaining a separate optional file array. KVFS uses
+`Arc<VfsInode>`; the core has no dependency on VFS inode implementation types.
+`QuotaIo::File` ties that retained reference type to the filesystem provider.
+The provider receives the retained file for every operation. Its write method
+borrows mutable transaction context, without owning another filesystem.
 
 ## Execution and concurrency
 
@@ -59,14 +64,17 @@ reenter accounting or reacquire any caller-held filesystem lock. The core
 does not obtain current credentials or a current clock. Callers pass real-time
 seconds and the result of resource-bypass authorization.
 
-The I/O context must identify the same filesystem and quota files until the
-corresponding class is disabled. Backing files must bypass quota charging.
+The I/O context must identify the same filesystem until the corresponding
+class is disabled. Loaded state retains the actual backing file. Backing files
+must bypass quota charging.
 This is an integration contract, not an extra identity registry in the core.
 
 ## Lifecycle
 
 `enable` validates a complete header and file geometry before publishing a
-loaded class. It accepts accounting alone or accounting with limits. Missing
+loaded class and retaining a clone of the supplied file reference. It borrows
+the supplied file, and failure retains no reference. It accepts accounting
+alone or accounting with limits. Missing
 dquots are read as zero-valued records and instantiated in the radix tree
 before acquisition succeeds. Cache entries retain active state so a failed
 initial record/header write cannot become a successful cached acquisition.
@@ -80,7 +88,14 @@ creation until a charge. The filesystem must account for this I/O when choosing
 a writable quota context and deciding when to release cached records.
 
 `sync` attempts every dirty record and then dirty file information, preserving
-the first error and retaining failed dirty state. An independent record can
+the first error and retaining failed dirty state. Filesystems with bounded
+transactions use `next_dirty_id`, `sync_dquot` and `sync_info` to perform the
+same writeback in separate handles. The cursor advances exclusively after the
+last ID, including failed IDs; it uses the existing ordered cache without an
+extra dirty list or copied record collection. Writeback accepts only active
+dquots. A dirty record left inactive by failed acquisition returns `EIO` without
+quota-file I/O; it retains dirty state until explicit acquisition completes.
+Writeback never retries tree insertion on an inactive record. An independent record can
 complete even when an earlier record repeatedly fails. It does not provide a device
 flush or transaction commit. `release` writes a retained nonempty record or
 deletes an unused one, then removes its cache entry. A later operation can
@@ -88,8 +103,11 @@ reacquire it; callers receive value snapshots, never references into the cache.
 
 Suspension flushes first and skips later accounting while keeping loaded
 state. Resume restores the same accounting/enforcement mode. Disable flushes,
-releases unused entries and drops the cache and file information for that
-class. Suspend, disable and release refuse outstanding reservations with
+releases unused entries, drops the cache and file information, and returns
+the retained file reference for that class. The filesystem must release the
+returned file after leaving its locks, so final inode eviction cannot
+recursively acquire mount or quota state.
+Suspend, disable and release refuse outstanding reservations with
 `EBUSY`, so the filesystem must first drain delayed allocation. Destruction
 does not perform implicit I/O; the filesystem owns successful final disable.
 

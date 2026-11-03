@@ -48,12 +48,16 @@ bitflags::bitflags! {
         const GDT_CSUM = 0x0010;
         /// The superblock records minimum and preferred inode extra sizes.
         const EXTRA_ISIZE = 0x0040;
+        /// Quota usage is maintained in filesystem-owned quota inodes.
+        const QUOTA = 0x0100;
         /// Allocation uses clusters larger than filesystem blocks.
         const BIGALLOC = 0x0200;
         /// Metadata structures carry CRC32C checksums.
         const METADATA_CSUM = 0x0400;
         /// Directories may exceed the legacy htree size limits.
         const LARGE_DIR = 0x4000;
+        /// Inodes carry project IDs used for project quota accounting.
+        const PROJECT = 0x2000;
         /// The orphan file contains entries pending cleanup.
         const ORPHAN_PRESENT = 0x0001_0000;
     }
@@ -196,6 +200,17 @@ impl FeatureSet {
 
     pub(crate) fn validate_mount(self) -> Ext4Result<()> {
         self.validate_read_only()?;
+        // Mount preparation can replay and clean up orphans before publication.
+        // Those mutations require accounting even for a read-only VFS mount.
+        let quota_features = self
+            .read_only_compat
+            .intersection(ReadOnlyCompatFeatures::QUOTA | ReadOnlyCompatFeatures::PROJECT);
+        if !quota_features.is_empty() {
+            return Err(Ext4Error::UnsupportedFeature {
+                class: FeatureClass::ReadOnlyCompatible,
+                bits: quota_features.bits(),
+            });
+        }
         if !self.has_extents() {
             return Err(Ext4Error::Unsupported(UnsupportedKind::NonExtentFilesystem));
         }

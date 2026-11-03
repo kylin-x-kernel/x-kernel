@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
 
 use kerrno::{KResult, LinuxError};
@@ -39,13 +39,14 @@ impl MemoryFiles {
         }
     }
 
-    pub(super) fn enable_all(&self, format: QuotaFormat) -> QuotaInfo {
+    pub(super) fn enable_all(&mut self, format: QuotaFormat) -> QuotaInfo<Arc<QuotaType>> {
         let mut quota = QuotaInfo::new();
         for kind in QuotaType::ALL {
             quota
                 .enable(
                     self,
                     kind,
+                    &Arc::new(kind),
                     format,
                     QuotaState::USAGE_ENABLED | QuotaState::LIMITS_ENABLED,
                 )
@@ -68,7 +69,9 @@ impl MemoryFiles {
 }
 
 impl QuotaIo for MemoryFiles {
-    fn read(&self, kind: QuotaType, offset: u64, buffer: &mut [u8]) -> KResult<usize> {
+    type File = Arc<QuotaType>;
+
+    fn read(&self, kind: &Self::File, offset: u64, buffer: &mut [u8]) -> KResult<usize> {
         if self.has_short_reads.get() {
             return Ok(0);
         }
@@ -82,7 +85,7 @@ impl QuotaIo for MemoryFiles {
         Ok(count)
     }
 
-    fn write(&self, kind: QuotaType, offset: u64, buffer: &[u8]) -> KResult<usize> {
+    fn write(&mut self, kind: &Self::File, offset: u64, buffer: &[u8]) -> KResult<usize> {
         self.writes.set(self.writes.get() + 1);
         if self.fail_write_at.get() == Some(offset) {
             return Err(LinuxError::EIO.into());
@@ -98,7 +101,7 @@ impl QuotaIo for MemoryFiles {
         Ok(buffer.len())
     }
 
-    fn file_len(&self, kind: QuotaType) -> KResult<u64> {
+    fn file_len(&self, kind: &Self::File) -> KResult<u64> {
         Ok(self.files.borrow()[kind.index()].len() as u64)
     }
 }

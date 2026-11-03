@@ -14,8 +14,8 @@
 //! Calls that receive quota I/O may allocate and sleep. They require a live
 //! task execution path, but no process identity, and must not run in IRQ or
 //! early-boot context or under spin/IRQ-disable/preemption-disable guards.
-//! The same filesystem and backing files must be supplied throughout an
-//! enabled quota type's lifetime. I/O must bypass quota accounting for those
+//! The filesystem context must remain stable throughout an enabled quota type's
+//! lifetime; the core retains its canonical backing-file reference. I/O must bypass quota accounting for those
 //! files and must not reenter the owning quota state. Filesystem transactions
 //! provide crash consistency for multi-write format updates.
 #![no_std]
@@ -31,21 +31,27 @@ pub use accounting::{Dqinfo, QuotaInfo};
 use kerrno::{KError, KResult, LinuxError};
 pub use types::{ChargeFlags, Dqblk, QuotaFields, QuotaFormat, QuotaId, QuotaState, QuotaType};
 
-/// Direct I/O to the existing quota files of one filesystem.
+/// Direct I/O using backing-file references owned by one filesystem's quota state.
 ///
 /// The caller serializes metadata access and supplies any transaction required
-/// by its filesystem. Short reads/writes are returned as counts; the format
+/// by its filesystem. The mutable write receiver permits borrowing an existing
+/// filesystem state and transaction without interior mutability or lock reentry.
+/// Each request receives the file retained by `enable`; the provider does not
+/// select a file from a second class-to-file registry. Short reads/writes are returned as counts; the format
 /// layer turns incomplete records or blocks into I/O errors. A successful
 /// write need not be durable until the filesystem commits and synchronizes it.
 pub trait QuotaIo {
-    /// Reads at a byte offset in the selected quota file.
-    fn read(&self, kind: QuotaType, offset: u64, buffer: &mut [u8]) -> KResult<usize>;
+    /// Canonical backing-file reference retained by the quota state.
+    type File;
 
-    /// Writes at a byte offset, extending the selected quota file if needed.
-    fn write(&self, kind: QuotaType, offset: u64, buffer: &[u8]) -> KResult<usize>;
+    /// Reads at a byte offset in the supplied quota file.
+    fn read(&self, file: &Self::File, offset: u64, buffer: &mut [u8]) -> KResult<usize>;
 
-    /// Returns the byte size of the selected quota file.
-    fn file_len(&self, kind: QuotaType) -> KResult<u64>;
+    /// Writes at a byte offset, extending the supplied quota file if needed.
+    fn write(&mut self, file: &Self::File, offset: u64, buffer: &[u8]) -> KResult<usize>;
+
+    /// Returns the byte size of the supplied quota file.
+    fn file_len(&self, file: &Self::File) -> KResult<u64>;
 }
 
 fn corrupt() -> KError {
@@ -56,15 +62,25 @@ fn overflow() -> KError {
     LinuxError::EOVERFLOW.into()
 }
 
-fn read_exact(io: &dyn QuotaIo, kind: QuotaType, offset: u64, buffer: &mut [u8]) -> KResult<()> {
-    if io.read(kind, offset, buffer)? != buffer.len() {
+fn read_exact<F>(
+    io: &mut dyn QuotaIo<File = F>,
+    file: &F,
+    offset: u64,
+    buffer: &mut [u8],
+) -> KResult<()> {
+    if io.read(file, offset, buffer)? != buffer.len() {
         return Err(LinuxError::EIO.into());
     }
     Ok(())
 }
 
-fn write_exact(io: &dyn QuotaIo, kind: QuotaType, offset: u64, buffer: &[u8]) -> KResult<()> {
-    if io.write(kind, offset, buffer)? != buffer.len() {
+fn write_exact<F>(
+    io: &mut dyn QuotaIo<File = F>,
+    file: &F,
+    offset: u64,
+    buffer: &[u8],
+) -> KResult<()> {
+    if io.write(file, offset, buffer)? != buffer.len() {
         return Err(LinuxError::EIO.into());
     }
     Ok(())

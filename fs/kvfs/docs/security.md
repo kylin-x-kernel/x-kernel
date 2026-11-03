@@ -691,7 +691,9 @@ eviction boundary; it must not acquire filesystem locks while holding a folio lo
 ## Quota state boundary
 
 The superblock's `quota_info()` guard serializes its single generic quota
-owner. It may span blocking quota-file I/O only in task context without
+owner and its canonical backing-file inode references. File selection comes
+from loaded quota state rather than from an independent provider registry.
+It may span blocking quota-file I/O only in task context without
 spin/IRQ-disable/preemption-disable guards. Providers must use direct quota
 I/O without recursive charging or caller-held lock reentry. Administrative
 authorization, ID mapping, backing-file protection and transaction recovery

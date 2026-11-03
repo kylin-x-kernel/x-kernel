@@ -1286,12 +1286,15 @@ a separate contract. The filesystem must retain metadata dirtiness through data-
 writeback and cover full fsync, syncfs/unmount and inode eviction.
 ## Generic quota ownership
 
-Each `SuperBlock` owns one sleepable `Mutex<kquota::QuotaInfo>`. The state is
+Each `SuperBlock` owns one sleepable `Mutex<kquota::QuotaInfo<Arc<VfsInode>>>`. The state is
 initially disabled for user, group and project quotas. `quota_info()` exposes
 the canonical owner to filesystem integration; no filesystem-private duplicate
 quota manager is needed. The core owns record caching, admission and quota
 formats, while the concrete filesystem supplies direct backing-file I/O and
-transactions. No concrete filesystem enables quotas in this change.
+transactions. Each loaded class retains the canonical VFS inode in that
+state, so filesystem integration needs no second class-to-inode array.
+Suspension and failed disable retain that reference; successful disable returns
+it for release after writeback and after leaving filesystem locks. No concrete filesystem enables quotas on mount yet.
 
 Quota operations may sleep. Their backing-file I/O must bypass charging and
 must not reenter the same quota owner or reacquire a caller-held filesystem

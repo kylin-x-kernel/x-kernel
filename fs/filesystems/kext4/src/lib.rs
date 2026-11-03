@@ -146,6 +146,7 @@ mod mballoc;
 mod namei;
 mod orphan;
 mod prealloc_space;
+mod quota;
 mod superblock;
 mod sync;
 mod truncate;

@@ -481,10 +481,10 @@ impl SuperBlockOperations for Ext4SuperOperations {
     }
 
     fn sync_fs(&self, super_block: &SuperBlock) -> VfsResult<()> {
-        ext4_private(super_block)?
-            .write(super_block)
-            .sync_filesystem()
-            .map_err(into_vfs_err)
+        let mut state = ext4_private(super_block)?.write(super_block);
+        let quota_result = state.sync_quotas(super_block);
+        let filesystem_result = state.sync_filesystem().map_err(into_vfs_err);
+        quota_result.and(filesystem_result)
     }
 
     fn write_inode(&self, inode: &VfsInode, _control: &mut WritebackControl) -> VfsResult<()> {
@@ -1705,3 +1705,6 @@ unittest::path_mod_test!(read_tests, "../ut-tests/vfs/read_tests.rs");
 unittest::path_mod_test!(tests, "../ut-tests/vfs/tests.rs");
 
 unittest::path_mod_test!(writeback_tests, "../ut-tests/vfs/writeback_tests.rs");
+
+#[cfg(unittest)]
+unittest::path_mod_test!(quota_tests, "../ut-tests/vfs/quota_tests.rs");

@@ -4,7 +4,8 @@
 
 Quota file bytes, sizes, counts, IDs and links are untrusted filesystem input.
 `QuotaIo` is a trusted filesystem provider for direct reads/writes and reported
-file sizes. The owner must keep its backing files stable, bypass charging for
+file sizes. Loaded state owns the canonical file reference. The provider must keep its
+filesystem context stable, bypass charging for
 those files and serialize all core operations. Namespace mapping, permission
 checks, resource-bypass authorization and user-memory copying belong to the
 VFS/syscall integration; this crate accepts native IDs and values only.
@@ -16,7 +17,11 @@ crate. No unsafe code or custom synchronization primitive is introduced.
 
 - One `QuotaInfo` is owned by one filesystem. Cache keys uniquely identify
   quota class and filesystem ID; the all-ones ID cannot be constructed.
-- Only a fully validated header can become loaded file information.
+- Only a fully validated header can become loaded file information. That
+  state retains its file through suspension and failed disable; successful
+  disable returns it for release outside filesystem locks. Owner destruction
+  drops any still-loaded file references. Failed enable borrows the
+  supplied file without retaining or publishing it.
 - Tree traversal is bounded to four levels. Nonzero child references must
   remain within the file's declared blocks and outside the ancestor path.
 - Data counts match occupied slots. A referenced ID must occur exactly once
@@ -31,7 +36,9 @@ crate. No unsafe code or custom synchronization primitive is introduced.
   Reclaim cannot transfer more than an active record's allocated usage.
 - Dirty state is cleared only after the corresponding write succeeds.
   An initial acquisition remains inactive until its record and file header
-  have both been written successfully.
+  have both been written successfully. Writeback rejects inactive dirty
+  records with `EIO` without doing I/O, so a bounded overwrite transaction
+  cannot accidentally resume failed structural initialization.
 
 ## Concurrency and execution context
 
@@ -41,7 +48,8 @@ allocate and block in I/O and therefore requires task execution with allocator
 and scheduler initialization complete. It must not execute under spinlocks,
 IRQ-disable or preemption-disable guards, or from IRQ/early-boot contexts.
 
-The provider must not reenter the same quota state. The filesystem must use
+The provider receives the retained backing file and may mutably borrow the
+current filesystem transaction. It must not reenter the same quota state. The filesystem must use
 one lock order for quota administration, inode operations and direct quota I/O.
 No second quota lock or atomic counter mirrors a field in the protected state.
 

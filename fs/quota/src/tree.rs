@@ -7,7 +7,7 @@
 use kerrno::KResult;
 
 use crate::{
-    Dqblk, QuotaFormat, QuotaId, QuotaIo, QuotaType, corrupt, overflow, read_exact,
+    Dqblk, QuotaFormat, QuotaIo, corrupt, overflow, read_exact,
     v2::{decode_record, encode_record, put_u32, u32_at},
     write_exact,
 };
@@ -20,6 +20,7 @@ type Block = [u8; BLOCK_BYTES];
 
 #[derive(Debug)]
 pub(crate) struct QuotaTree {
+    pub(crate) format: QuotaFormat,
     pub(crate) blocks: u32,
     pub(crate) free_block: u32,
     pub(crate) free_entry: u32,
@@ -28,6 +29,7 @@ pub(crate) struct QuotaTree {
 
 impl QuotaTree {
     pub(crate) fn new(
+        format: QuotaFormat,
         blocks: u32,
         free_block: u32,
         free_entry: u32,
@@ -40,6 +42,7 @@ impl QuotaTree {
             return Err(corrupt());
         }
         let tree = Self {
+            format,
             blocks,
             free_block,
             free_entry,
@@ -50,18 +53,17 @@ impl QuotaTree {
         Ok(tree)
     }
 
-    pub(crate) fn read(
+    pub(crate) fn read<F>(
         &self,
-        io: &dyn QuotaIo,
-        format: QuotaFormat,
-        id: QuotaId,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        id: u32,
     ) -> KResult<(u64, Dqblk)> {
-        let kind = id.kind();
         let mut block_number = ROOT_BLOCK;
         let mut path = [ROOT_BLOCK; TREE_DEPTH + 1];
         for depth in 0..TREE_DEPTH {
-            let block = self.read_block(io, kind, block_number)?;
-            let child = u32_at(&block, tree_index(id.id(), depth) * 4);
+            let block = self.read_block(io, file, block_number)?;
+            let child = u32_at(&block, tree_index(id, depth) * 4);
             if child == 0 {
                 return Ok((0, Dqblk::default()));
             }
@@ -69,70 +71,80 @@ impl QuotaTree {
             path[depth + 1] = child;
             block_number = child;
         }
-        let block = self.read_block(io, kind, block_number)?;
-        self.check_data_header(format, &block)?;
-        let entry_size = format.entry_size();
+        let block = self.read_block(io, file, block_number)?;
+        self.check_data_header(&block)?;
+        let entry_size = self.format.entry_size();
         let mut found = None;
-        for index in 0..entries_per_block(format) {
+        for index in 0..entries_per_block(self.format) {
             let start = DATA_HEADER_BYTES + index * entry_size;
             let entry = &block[start..start + entry_size];
-            if entry.iter().any(|&byte| byte != 0) && u32_at(entry, 0) == id.id() {
+            if entry.iter().any(|&byte| byte != 0) && u32_at(entry, 0) == id {
                 if found.is_some() {
                     return Err(corrupt());
                 }
                 found = Some((
                     block_offset(block_number) + start as u64,
-                    decode_record(format, entry)?,
+                    decode_record(self.format, entry)?,
                 ));
             }
         }
         found.ok_or_else(corrupt)
     }
 
-    pub(crate) fn write(
+    pub(crate) fn write<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        format: QuotaFormat,
-        id: QuotaId,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        id: u32,
         offset: &mut u64,
         data: Dqblk,
     ) -> KResult<()> {
-        let kind = id.kind();
         let mut entry = [0; 72];
-        encode_record(format, id.id(), data, &mut entry[..format.entry_size()])?;
+        encode_record(
+            self.format,
+            id,
+            data,
+            &mut entry[..self.format.entry_size()],
+        )?;
         if *offset != 0 {
-            return write_exact(io, kind, *offset, &entry[..format.entry_size()]);
+            return write_exact(io, file, *offset, &entry[..self.format.entry_size()]);
         }
         let mut path = [ROOT_BLOCK; TREE_DEPTH + 1];
-        let new_offset =
-            self.insert_tree(io, format, id, &entry[..format.entry_size()], &mut path, 0)?;
+        let new_offset = self.insert_tree(
+            io,
+            file,
+            id,
+            &entry[..self.format.entry_size()],
+            &mut path,
+            0,
+        )?;
         *offset = new_offset;
         Ok(())
     }
 
-    pub(crate) fn delete(
+    pub(crate) fn delete<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        format: QuotaFormat,
-        id: QuotaId,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        id: u32,
         offset: &mut u64,
     ) -> KResult<()> {
         if *offset == 0 {
             return Ok(());
         }
         let mut path = [ROOT_BLOCK; TREE_DEPTH + 1];
-        self.remove_tree(io, format, id, offset, &mut path, 0)?;
+        self.remove_tree(io, file, id, offset, &mut path, 0)?;
         Ok(())
     }
 
-    pub(crate) fn next_id(
+    pub(crate) fn next_id<F>(
         &self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         minimum: u32,
     ) -> KResult<Option<u32>> {
         let mut path = [ROOT_BLOCK; TREE_DEPTH + 1];
-        self.next_in_tree(io, kind, minimum, 0, &mut path, 0)
+        self.next_in_tree(io, file, minimum, 0, &mut path, 0)
     }
 
     fn check_optional_block(&self, block: u32) -> KResult<()> {
@@ -150,40 +162,50 @@ impl QuotaTree {
         Ok(())
     }
 
-    fn read_block(&self, io: &dyn QuotaIo, kind: QuotaType, block: u32) -> KResult<Block> {
+    fn read_block<F>(
+        &self,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        block: u32,
+    ) -> KResult<Block> {
         if block == 0 || block >= self.blocks {
             return Err(corrupt());
         }
         let mut bytes = [0; BLOCK_BYTES];
-        read_exact(io, kind, block_offset(block), &mut bytes)?;
+        read_exact(io, file, block_offset(block), &mut bytes)?;
         Ok(bytes)
     }
 
-    fn write_block(
+    fn write_block<F>(
         &self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         block: u32,
         bytes: &Block,
     ) -> KResult<()> {
-        write_exact(io, kind, block_offset(block), bytes)
+        write_exact(io, file, block_offset(block), bytes)
     }
 
-    fn check_data_header(&self, format: QuotaFormat, block: &Block) -> KResult<()> {
+    fn check_data_header(&self, block: &Block) -> KResult<()> {
         self.check_optional_block(u32_at(block, 0))?;
         self.check_optional_block(u32_at(block, 4))?;
         let entries = data_count(block);
         let actual = block[DATA_HEADER_BYTES..]
-            .chunks_exact(format.entry_size())
+            .chunks_exact(self.format.entry_size())
             .filter(|entry| entry.iter().any(|&byte| byte != 0))
             .count();
-        if usize::from(entries) > entries_per_block(format) || usize::from(entries) != actual {
+        if usize::from(entries) > entries_per_block(self.format) || usize::from(entries) != actual {
             return Err(corrupt());
         }
         Ok(())
     }
 
-    fn allocate_block(&mut self, io: &dyn QuotaIo, kind: QuotaType, path: &[u32]) -> KResult<u32> {
+    fn allocate_block<F>(
+        &mut self,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        path: &[u32],
+    ) -> KResult<u32> {
         let number = if self.free_block != 0 {
             self.free_block
         } else {
@@ -193,7 +215,7 @@ impl QuotaTree {
             return Err(corrupt());
         }
         if self.free_block != 0 {
-            let block = self.read_block(io, kind, number)?;
+            let block = self.read_block(io, file, number)?;
             let next = u32_at(&block, 0);
             self.check_optional_block(next)?;
             if next == number
@@ -203,31 +225,36 @@ impl QuotaTree {
             {
                 return Err(corrupt());
             }
-            self.write_block(io, kind, number, &[0; BLOCK_BYTES])?;
+            self.write_block(io, file, number, &[0; BLOCK_BYTES])?;
             self.free_block = next;
         } else {
             let blocks = self.blocks.checked_add(1).ok_or_else(overflow)?;
-            self.write_block(io, kind, number, &[0; BLOCK_BYTES])?;
+            self.write_block(io, file, number, &[0; BLOCK_BYTES])?;
             self.blocks = blocks;
         }
         self.is_dirty = true;
         Ok(number)
     }
 
-    fn free_block(&mut self, io: &dyn QuotaIo, kind: QuotaType, number: u32) -> KResult<()> {
+    fn free_block<F>(
+        &mut self,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        number: u32,
+    ) -> KResult<()> {
         self.check_child(number, &[ROOT_BLOCK, self.free_block])?;
         let mut block = [0; BLOCK_BYTES];
         put_u32(&mut block, 0, self.free_block);
-        self.write_block(io, kind, number, &block)?;
+        self.write_block(io, file, number, &block)?;
         self.free_block = number;
         self.is_dirty = true;
         Ok(())
     }
 
-    fn unlink_free_entry(
+    fn unlink_free_entry<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         number: u32,
         block: &mut Block,
     ) -> KResult<()> {
@@ -240,12 +267,12 @@ impl QuotaTree {
             return Err(corrupt());
         }
         let mut next_block = if next != 0 {
-            Some(self.read_block(io, kind, next)?)
+            Some(self.read_block(io, file, next)?)
         } else {
             None
         };
         let mut previous_block = if previous != 0 {
-            Some(self.read_block(io, kind, previous)?)
+            Some(self.read_block(io, file, previous)?)
         } else {
             None
         };
@@ -260,11 +287,11 @@ impl QuotaTree {
         }
         if let Some(bytes) = &mut next_block {
             put_u32(bytes, 4, previous);
-            self.write_block(io, kind, next, bytes)?;
+            self.write_block(io, file, next, bytes)?;
         }
         if let Some(bytes) = &mut previous_block {
             put_u32(bytes, 0, next);
-            self.write_block(io, kind, previous, bytes)?;
+            self.write_block(io, file, previous, bytes)?;
         } else {
             self.free_entry = next;
             self.is_dirty = true;
@@ -274,10 +301,10 @@ impl QuotaTree {
         Ok(())
     }
 
-    fn link_free_entry(
+    fn link_free_entry<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         number: u32,
         block: &mut Block,
     ) -> KResult<()> {
@@ -285,7 +312,7 @@ impl QuotaTree {
             return Err(corrupt());
         }
         let mut old_head = if self.free_entry != 0 {
-            let bytes = self.read_block(io, kind, self.free_entry)?;
+            let bytes = self.read_block(io, file, self.free_entry)?;
             if u32_at(&bytes, 4) != 0 {
                 return Err(corrupt());
             }
@@ -295,21 +322,20 @@ impl QuotaTree {
         };
         put_u32(block, 0, self.free_entry);
         put_u32(block, 4, 0);
-        self.write_block(io, kind, number, block)?;
+        self.write_block(io, file, number, block)?;
         if let Some(bytes) = &mut old_head {
             put_u32(bytes, 4, number);
-            self.write_block(io, kind, self.free_entry, bytes)?;
+            self.write_block(io, file, self.free_entry, bytes)?;
         }
         self.free_entry = number;
         self.is_dirty = true;
         Ok(())
     }
 
-    fn insert_entry(
+    fn insert_entry<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
-        format: QuotaFormat,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         entry: &[u8],
         path: &[u32],
     ) -> KResult<(u32, u64)> {
@@ -318,48 +344,47 @@ impl QuotaTree {
         if self.free_entry != 0 {
             number = self.free_entry;
             self.check_child(number, path)?;
-            block = self.read_block(io, kind, number)?;
-            self.check_data_header(format, &block)?;
+            block = self.read_block(io, file, number)?;
+            self.check_data_header(&block)?;
             if u32_at(&block, 4) != 0 {
                 return Err(corrupt());
             }
         } else {
-            number = self.allocate_block(io, kind, path)?;
+            number = self.allocate_block(io, file, path)?;
             block = [0; BLOCK_BYTES];
             self.free_entry = number;
             self.is_dirty = true;
         }
-        let slot = (0..entries_per_block(format))
+        let slot = (0..entries_per_block(self.format))
             .find(|&index| {
-                let start = DATA_HEADER_BYTES + index * format.entry_size();
-                block[start..start + format.entry_size()]
+                let start = DATA_HEADER_BYTES + index * self.format.entry_size();
+                block[start..start + self.format.entry_size()]
                     .iter()
                     .all(|&byte| byte == 0)
             })
             .ok_or_else(corrupt)?;
         let count = data_count(&block) + 1;
-        if usize::from(count) == entries_per_block(format) {
-            self.unlink_free_entry(io, kind, number, &mut block)?;
+        if usize::from(count) == entries_per_block(self.format) {
+            self.unlink_free_entry(io, file, number, &mut block)?;
         }
         set_data_count(&mut block, count);
-        let start = DATA_HEADER_BYTES + slot * format.entry_size();
+        let start = DATA_HEADER_BYTES + slot * self.format.entry_size();
         block[start..start + entry.len()].copy_from_slice(entry);
-        self.write_block(io, kind, number, &block)?;
+        self.write_block(io, file, number, &block)?;
         Ok((number, block_offset(number) + start as u64))
     }
 
-    fn insert_tree(
+    fn insert_tree<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        format: QuotaFormat,
-        id: QuotaId,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        id: u32,
         entry: &[u8],
         path: &mut [u32; TREE_DEPTH + 1],
         depth: usize,
     ) -> KResult<u64> {
-        let kind = id.kind();
-        let mut block = self.read_block(io, kind, path[depth])?;
-        let index = tree_index(id.id(), depth) * 4;
+        let mut block = self.read_block(io, file, path[depth])?;
+        let index = tree_index(id, depth) * 4;
         let existing = u32_at(&block, index);
         if existing != 0 {
             self.check_child(existing, &path[..=depth])?;
@@ -370,44 +395,43 @@ impl QuotaTree {
             if existing != 0 {
                 return Err(corrupt());
             }
-            (child, offset) = self.insert_entry(io, kind, format, entry, &path[..=depth])?;
+            (child, offset) = self.insert_entry(io, file, entry, &path[..=depth])?;
         } else {
             child = if existing == 0 {
-                self.allocate_block(io, kind, &path[..=depth])?
+                self.allocate_block(io, file, &path[..=depth])?
             } else {
                 existing
             };
             path[depth + 1] = child;
-            offset = self.insert_tree(io, format, id, entry, path, depth + 1)?;
+            offset = self.insert_tree(io, file, id, entry, path, depth + 1)?;
         }
         if existing == 0 {
             put_u32(&mut block, index, child);
-            self.write_block(io, kind, path[depth], &block)?;
+            self.write_block(io, file, path[depth], &block)?;
         }
         Ok(offset)
     }
 
-    fn free_entry(
+    fn free_entry<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
-        format: QuotaFormat,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         id: u32,
         number: u32,
         offset: u64,
     ) -> KResult<()> {
-        let mut block = self.read_block(io, kind, number)?;
-        self.check_data_header(format, &block)?;
+        let mut block = self.read_block(io, file, number)?;
+        self.check_data_header(&block)?;
         if offset / BLOCK_BYTES as u64 != u64::from(number) {
             return Err(corrupt());
         }
         let start = (offset % BLOCK_BYTES as u64) as usize;
         if start < DATA_HEADER_BYTES
-            || !(start - DATA_HEADER_BYTES).is_multiple_of(format.entry_size())
-            || start + format.entry_size() > BLOCK_BYTES
+            || !(start - DATA_HEADER_BYTES).is_multiple_of(self.format.entry_size())
+            || start + self.format.entry_size() > BLOCK_BYTES
             || data_count(&block) == 0
             || u32_at(&block, start) != id
-            || block[start..start + format.entry_size()]
+            || block[start..start + self.format.entry_size()]
                 .iter()
                 .all(|&byte| byte == 0)
         {
@@ -415,63 +439,62 @@ impl QuotaTree {
         }
         let previous_count = data_count(&block);
         set_data_count(&mut block, previous_count - 1);
-        block[start..start + format.entry_size()].fill(0);
+        block[start..start + self.format.entry_size()].fill(0);
         if previous_count == 1 {
-            self.unlink_free_entry(io, kind, number, &mut block)?;
-            self.free_block(io, kind, number)
-        } else if usize::from(previous_count) == entries_per_block(format) {
-            self.link_free_entry(io, kind, number, &mut block)
+            self.unlink_free_entry(io, file, number, &mut block)?;
+            self.free_block(io, file, number)
+        } else if usize::from(previous_count) == entries_per_block(self.format) {
+            self.link_free_entry(io, file, number, &mut block)
         } else {
-            self.write_block(io, kind, number, &block)
+            self.write_block(io, file, number, &block)
         }
     }
 
-    fn remove_tree(
+    fn remove_tree<F>(
         &mut self,
-        io: &dyn QuotaIo,
-        format: QuotaFormat,
-        id: QuotaId,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
+        id: u32,
         offset: &mut u64,
         path: &mut [u32; TREE_DEPTH + 1],
         depth: usize,
     ) -> KResult<bool> {
-        let kind = id.kind();
         let number = path[depth];
-        let mut block = self.read_block(io, kind, number)?;
-        let index = tree_index(id.id(), depth) * 4;
+        let mut block = self.read_block(io, file, number)?;
+        let index = tree_index(id, depth) * 4;
         let child = u32_at(&block, index);
         self.check_child(child, &path[..=depth])?;
         path[depth + 1] = child;
         let should_remove_child = if depth == TREE_DEPTH - 1 {
-            self.free_entry(io, kind, format, id.id(), child, *offset)?;
+            self.free_entry(io, file, id, child, *offset)?;
             *offset = 0;
             true
         } else {
-            self.remove_tree(io, format, id, offset, path, depth + 1)?
+            self.remove_tree(io, file, id, offset, path, depth + 1)?
         };
         if !should_remove_child {
             return Ok(false);
         }
         put_u32(&mut block, index, 0);
         if number != ROOT_BLOCK && block.iter().all(|&byte| byte == 0) {
-            self.free_block(io, kind, number)?;
+            self.free_block(io, file, number)?;
             Ok(true)
         } else {
-            self.write_block(io, kind, number, &block)?;
+            self.write_block(io, file, number, &block)?;
             Ok(false)
         }
     }
 
-    fn next_in_tree(
+    fn next_in_tree<F>(
         &self,
-        io: &dyn QuotaIo,
-        kind: QuotaType,
+        io: &mut dyn QuotaIo<File = F>,
+        file: &F,
         minimum: u32,
         prefix: u32,
         path: &mut [u32; TREE_DEPTH + 1],
         depth: usize,
     ) -> KResult<Option<u32>> {
-        let block = self.read_block(io, kind, path[depth])?;
+        let block = self.read_block(io, file, path[depth])?;
         let shift = (TREE_DEPTH - depth - 1) * 8;
         for index in 0..256 {
             let candidate = prefix | ((index as u32) << shift);
@@ -491,7 +514,7 @@ impl QuotaTree {
                 return Ok(Some(candidate));
             }
             path[depth + 1] = child;
-            if let Some(id) = self.next_in_tree(io, kind, minimum, candidate, path, depth + 1)? {
+            if let Some(id) = self.next_in_tree(io, file, minimum, candidate, path, depth + 1)? {
                 return Ok(Some(id));
             }
         }
