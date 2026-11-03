@@ -231,6 +231,7 @@ use crate::{
 /// Backend that records what the driver asked it to do.
 #[derive(Default)]
 struct FakeBackend {
+    resolution: Option<DisplayInfo>,
     created: AtomicUsize,
     destroyed: AtomicUsize,
     presented: AtomicUsize,
@@ -258,10 +259,10 @@ impl Backend for FakeBackend {
     }
 
     fn info(&self) -> DisplayInfo {
-        DisplayInfo {
+        self.resolution.unwrap_or(DisplayInfo {
             width: 1280,
             height: 800,
-        }
+        })
     }
 
     fn caps(&self) -> BackendCaps {
@@ -765,6 +766,52 @@ fn oversized_atomic_object_count_is_refused_before_loading() {
     );
 }
 
+
+#[def_test]
+fn connector_without_physical_dimensions_reports_unknown_size() {
+    for (width, height) in [(640, 480), (1280, 800), (3840, 2160)] {
+        let backend = Arc::new(FakeBackend {
+            resolution: Some(DisplayInfo { width, height }),
+            ..Default::default()
+        });
+        let dev = DrmDevice::new_with_backend(backend);
+        let file = dev.open_file(MinorKind::Primary).expect("open");
+        let mut connector = DrmModeGetConnector {
+            connector_id: CONNECTOR_ID,
+            mm_width: u32::MAX,
+            mm_height: u32::MAX,
+            ..Default::default()
+        };
+        DrmModeGetConnector::handle(&dev, &file, &mut connector).expect("connector");
+        assert_eq!((connector.mm_width, connector.mm_height), (0, 0));
+        assert_eq!(connector.count_modes, 1);
+        assert_eq!(connector.connection, DRM_MODE_CONNECTED);
+
+        let mut resources = DrmModeCardRes::default();
+        DrmModeCardRes::handle(&dev, &file, &mut resources).expect("resources");
+        assert_eq!((resources.min_width, resources.min_height), (width, height));
+        assert_eq!((resources.max_width, resources.max_height), (width, height));
+    }
+}
+
+#[def_test]
+fn connector_invalid_id_does_not_publish_physical_dimensions() {
+    let (dev, _backend) = fake_device();
+    let file = dev.open_file(MinorKind::Primary).expect("open");
+    for connector_id in [0, u32::MAX] {
+        let mut connector = DrmModeGetConnector {
+            connector_id,
+            mm_width: 123,
+            mm_height: 456,
+            ..Default::default()
+        };
+        assert_eq!(
+            DrmModeGetConnector::handle(&dev, &file, &mut connector),
+            Err(DrmError::NotFound)
+        );
+        assert_eq!((connector.mm_width, connector.mm_height), (123, 456));
+    }
+}
 
 #[def_test]
 fn getresources_framebuffer_count_is_per_open_file() {

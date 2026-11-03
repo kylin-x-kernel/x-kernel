@@ -137,6 +137,15 @@ never frees pixels the host is still scanning.
   Linux's `EINVAL` initializer for a property that is not attached to the
   addressed object, while an unknown object is still `ENOENT`.
 
+## Connector dimensions
+
+`GETCONNECTOR` reports `mm_width` and `mm_height` as zero (unknown). The
+display contract supplies only visible pixel dimensions, with no physical
+size or EDID. Those pixels still determine modes and resource limits, but
+cannot be reused as millimetres or converted using an assumed DPI. A future
+physical-size provider must pass measured dimensions through that contract
+before this query can report nonzero values.
+
 ## Concurrency
 
 Two locks with a fixed order: `commit` before the state/registry locks. The

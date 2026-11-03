@@ -76,6 +76,15 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
 - User-copy helpers enforce the matching ioctl direction bits
   at compile time, preventing a mismatched dispatcher arm from being built.
 
+## Connector size metadata
+
+The caller's incoming physical dimensions are overwritten on a successful
+`GETCONNECTOR`. Pixel dimensions from the display backend are never exposed
+as millimetres: without a physical-size source, both fields report unknown
+(zero). This avoids publishing fabricated DPI metadata and requires no
+geometry conversion or arithmetic on caller-supplied dimensions. Existing
+connector-id validation and typed user-copy failure paths are unchanged.
+
 ## Thread safety
 
 Mutable object groups have separate mutexes. Atomics allocate monotonic ids and

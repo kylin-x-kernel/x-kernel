@@ -719,9 +719,11 @@ impl Ioctl for DrmModeGetConnector {
         c.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
         c.connector_type_id = 1;
         c.connection = DRM_MODE_CONNECTED;
-        let (w, h) = display_resolution(dev);
-        c.mm_width = w;
-        c.mm_height = h;
+        // DisplayInfo supplies pixels, not physical dimensions or EDID.
+        // Zero denotes an unknown physical size; deriving millimetres from
+        // the visible mode would invent a DPI for userspace.
+        c.mm_width = 0;
+        c.mm_height = 0;
         c.subpixel = 0;
         c.count_encoders = report_user_array(c.encoders_ptr, c.count_encoders, &[ENCODER_ID])?;
         if !c.modes_ptr.is_null() && c.count_modes > 0 {
