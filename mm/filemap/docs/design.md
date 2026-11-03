@@ -214,7 +214,7 @@ Supported now:
 
 Not supported by the current filemap runtime:
 
-- readahead/fault-around;
+- shared-file readahead, adaptive/asynchronous readahead and fault-around;
 - hole-punch/collapse-range;
 - DAX, THP, reclaim, swap, memcg, NUMA.
 
@@ -250,3 +250,12 @@ MADV_DONTNEED 同样先清 PTE 并完成 TLB 刷新，再释放已完成页的 p
 
 `mprotect(PROT_NONE)` 清除现有 PTE 后也会在 TLB finalization 完成时通知
 filemap 释放对应 pin；恢复读权限后，缺页可重新安装只读缓存页。
+
+### Bounded private-fault prefetch
+
+Before the private demand copy, the file-backed runtime may synchronously
+prefetch at most 16 missing file-cache pages through
+`AddressSpace::readahead_for_fault`. The window is bounded by inode EOF and the
+optional ELF file prefix; in-memory objects are skipped. A returned error does
+not replace the demand read, and the helper installs no PTE and does not alter
+COW ownership.

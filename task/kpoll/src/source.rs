@@ -218,6 +218,15 @@ impl PollSet {
         Ok(PollRegistration::new(Arc::downgrade(&self.inner), token))
     }
 
+    /// Returns whether a registration is currently present, without waking it.
+    ///
+    /// The result is an advisory O(1) snapshot: a cancellation or registration
+    /// can race immediately after it. Producers that stop retrying on `false`
+    /// must let a concurrent/new registration restart the retry.
+    pub fn has_waiters(&self) -> bool {
+        self.inner.state.lock().active != 0
+    }
+
     /// Wakes every currently registered waiter.
     ///
     /// A registration concurrently cancelled after this method detaches its

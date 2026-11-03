@@ -588,3 +588,12 @@ its queue and buffer rather than freeing live DMA storage; normal idle/readable
 requests are released. Tests emulate ring completion and IRQ delivery to check
 reclaim-before-wake, short reads, spurious interrupts, malformed completions,
 wait failures, and retention of outstanding storage without real-device timing.
+
+## Conservative input readiness
+
+Virtio input keeps a sticky readiness hint in an atomic. The IRQ handler
+acknowledges this device's interrupt status and sets the hint; the timer-side
+readiness probe only reads that hint and never touches the ISR. Neither path
+pops or recycles descriptors. Event reads set the hint
+from the actual dequeue result, so an empty queue clears it only after a task
+observes it.

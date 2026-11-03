@@ -115,3 +115,12 @@ to `posix/mm`.
   登记；不能让已经消失的映射持续阻塞 shmem `F_SEAL_WRITE`。
 - fork 的文件页安装失败不提交匿名子引用；匿名 materialization 失败时，
   其 helper 回滚匿名 PTE 和引用，外层撤销已经安装的文件 PTE 后完成 TLB 刷新。
+
+### Bounded private-fault prefetch
+
+Prefetch holds the address-space invalidate shared lock across EOF selection and
+submission, while the calling `MmSpace` mutex remains held. It does not overwrite
+cached or dirty pages. Its exclusive `file_end` bounds selected pages, not the
+last page's file contents; the existing private-frame copy still confines ELF BSS
+zero-fill to the newly allocated frame. Returned prefetch errors are followed by
+the authoritative demand read; allocator aborts are not recoverable.

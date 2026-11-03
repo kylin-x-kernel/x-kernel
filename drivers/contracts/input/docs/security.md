@@ -102,3 +102,11 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly.
 - `bit_len_of` covers every variant exhaustively (compile-time enforced
   by the match).
 - New `repr(C)` structs are checked against their Linux counterparts.
+
+## Optional readiness hint
+
+Consumers may call the readiness hint from timer/IRQ context. Implementations
+must not sleep, allocate, copy user memory or consume events, and must release
+internal locks before returning. False negatives can stall input, so uncertain
+state must return `Some(true)` or `None`; false positives are harmless because
+the caller rechecks through the ordinary read/poll path.

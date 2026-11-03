@@ -54,6 +54,7 @@ mod page;
 mod pcp;
 #[cfg(feature = "slab")]
 mod slab_cache;
+mod zero;
 pub use page::{
     PageRef, SplitPages, alloc_compound_pages_ref, alloc_page_ref, alloc_pages_exact_ref,
     alloc_zeroed_page_ref, alloc_zeroed_pages_exact_ref,
@@ -794,6 +795,19 @@ impl GlobalAllocator {
 // SAFETY: `GlobalAllocator` routes all allocations through its internal locked
 // allocators and upholds the `GlobalAlloc` contract for returned pointers.
 unsafe impl GlobalAlloc for GlobalAllocator {
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        debug_assert!(layout.size() != 0, "GlobalAlloc layout must be nonzero");
+        // SAFETY: GlobalAlloc::alloc receives the same valid nonzero layout.
+        // Its fresh region is not published until initialization completes.
+        let allocation = unsafe { GlobalAlloc::alloc(self, layout) };
+        if !allocation.is_null() {
+            // SAFETY: this allocator only returns exclusive normal RAM, valid
+            // for layout.size() bytes; no reader or DMA owns the region yet.
+            unsafe { zero::zero_owned_memory(allocation, layout.size()) };
+        }
+        allocation
+    }
+
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let allocate_memory = || {
             if let Ok(ptr) = GlobalAllocator::alloc(self, layout) {

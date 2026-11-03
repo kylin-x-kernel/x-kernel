@@ -364,3 +364,11 @@ so its original provenance/bounds/class obligations remain caller-enforced.
 Independent claim/clone/drop and compound relation setup/cleanup/split visit their
 relevant ranges; IRQ callers must bound work. Lifetime protection does not establish
 initialization, exclusive contents, mapping permissions, COW or hardware retirement.
+
+## Owned normal-memory zeroing
+
+`DC ZVA` is used only for exclusive, unpublished, normal cacheable RAM owned by
+the allocator. MMIO, device memory, shared/DMA-visible buffers and arbitrary C
+buffers are outside the contract. The block size comes from `DCZID_EL0`; if the
+register forbids `DC ZVA` or no complete aligned block fits, the helper falls
+back to `write_bytes` over exactly the requested range.

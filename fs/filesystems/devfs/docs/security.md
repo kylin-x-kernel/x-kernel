@@ -114,8 +114,8 @@ actual synchronization report arrives. A peer open's queue is never cleared.
 
 ## Unsafe code and FFI inventory
 
-The crate contains two unsafe memory operations and two exported C ABI entry
-points:
+The crate contains two unsafe memory operations, one unsafe timer start, and
+two exported C ABI entry points:
 
 - `src/nodes/fb.rs::FrameBuffer::as_mut_slice` uses
   `slice::from_raw_parts_mut`. The constructor obtains `base` and `size` from
@@ -129,6 +129,12 @@ points:
   of a live, fully initialized POD `loop_info` value as
   `MaybeUninit<u8>`. `osvm::read_vm_bytes` initializes that exact destination
   range from userspace before the typed value is passed to `set_info`.
+- `src/nodes/event.rs::EventClient::register` calls
+  `unsafe { Timer::start(deadline) }`. The required invariants are that VFS poll
+  registration runs only after the scheduler and timer subsystems are
+  initialized, that the owned timer drains delivery on drop, and that the timer
+  handler uses only IRQ-safe readiness/poll operations and never sleeps or
+  reenters timer dispatch.
 - `src/nodes/event.rs::ongkey` is a crate-visible
   `#[unsafe(no_mangle)] extern "C"` function exported by its unmangled symbol
   name. Its stable C ABI takes no arguments, accesses no caller memory, and
@@ -260,3 +266,13 @@ the submitting task and does not depend on shared worker-pool availability.
 Loop passes borrowed request extents to one VFS iterator operation without a
 payload-sized staging allocation. The iterator owns only cursor/borrow metadata;
 completion returns the original memory even when backing I/O fails or is short.
+
+## Idle input retry filtering
+
+Poll registration, which calls the unsafe `Timer::start`, runs only after the
+scheduler and timer subsystems are initialized; the owned timer drains delivery
+on drop and its handler is IRQ-compatible. The retry callback uses only the
+bounded driver readiness contract and IRQ-safe poll operations; it never takes
+the sleepable input mutex or touches user pointers. A false hint suppresses task wakeups, not checks, and false positives
+are allowed. Cancellation or detach may leave one harmless late retry. Timer
+drop must remain outside the callback and the locks it acquires.

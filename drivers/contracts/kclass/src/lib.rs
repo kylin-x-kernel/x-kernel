@@ -477,6 +477,10 @@ impl InputDevice for ClassDevice<InputDeviceImpl> {
         self.with(|device| device.read_event())
     }
 
+    fn poll_event_ready(&self) -> Option<bool> {
+        self.with(|device| device.poll_event_ready())
+    }
+
     fn set_event_notifier(&self, notifier: Option<Arc<dyn InputEventNotifier>>) -> DriverResult {
         self.with(|device| device.set_event_notifier(notifier))
     }

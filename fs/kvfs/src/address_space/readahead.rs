@@ -10,6 +10,8 @@ use pagecache::{FolioRead, PageIndex};
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
 
+const MAX_FAULT_READAHEAD_PAGES: usize = 16;
+
 /// A readahead submission cursor over locked, resident, uninitialized folios.
 ///
 /// The address space lends this control to the filesystem while holding its
@@ -82,6 +84,41 @@ impl ReadaheadControl<'_> {
 }
 
 impl AddressSpace {
+    /// Prefetches a bounded window of missing file-cache pages for a private
+    /// read fault.
+    ///
+    /// At most 16 pages starting at the page containing `file_offset` are
+    /// selected below both the inode's visible length and the optional
+    /// exclusive `file_end` (used by loaders to bound a PT_LOAD file prefix).
+    /// A cached target performs no work. Only missing runs are submitted to the
+    /// backing `readahead` operation; cached pages are never overwritten and no
+    /// PTE is installed. This is an optional optimization: a returned error
+    /// must not replace the caller's ordinary demand read.
+    ///
+    /// The invalidate lock is held for reading across size selection and
+    /// submission. The page-cache index lock is not held across backend I/O.
+    pub fn readahead_for_fault(&self, file_offset: u64, file_end: Option<u64>) -> VfsResult<()> {
+        let start_index = file_offset / PAGE_SIZE_4K as u64;
+        if self
+            .i_pages
+            .next_miss_range(start_index..start_index.saturating_add(1))
+            .is_none()
+        {
+            return Ok(());
+        }
+
+        let _invalidate_guard = self.invalidate_lock.read();
+        let file_len = self.visible_len()?.min(file_end.unwrap_or(u64::MAX));
+        if file_offset >= file_len {
+            return Ok(());
+        }
+        let end_index = start_index
+            .saturating_add(MAX_FAULT_READAHEAD_PAGES as u64)
+            .min(file_len.div_ceil(PAGE_SIZE_4K as u64));
+        self.prepare_readahead(start_index..end_index, None, file_len);
+        Ok(())
+    }
+
     // Called with invalidate shared held through EOF sampling and submission.
     // Completion may follow later under the transferred folio lock. Missing
     // runs are resident before dispatch, so competing reads wait on those folios.

@@ -102,6 +102,11 @@ impl FilePrivateRuntime {
             .map_or(u64::MAX, |end| end.saturating_sub(file_start))
             .min((buf.len() - start) as u64) as usize;
         let address_space = self.file.mapping();
+        if max_read != 0 {
+            // Optional synchronous prefetch; the demand copy below remains the
+            // authority for whether this fault's file bytes can be supplied.
+            let _ = address_space.readahead_for_fault(file_start, self.file_end);
+        }
 
         let mut copied = 0usize;
         while copied < max_read {

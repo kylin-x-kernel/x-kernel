@@ -472,7 +472,7 @@ pub fn alloc_zeroed_pages_exact_ref(
     let address = kaddr_layout::p2v(page.phys_addr().as_usize());
     // SAFETY: the new selected range is exclusive, unpublished, fully writable
     // direct-map RAM; no aliases or cloned holds escaped, and size was checked.
-    unsafe { core::ptr::write_bytes(address as *mut u8, 0, page.num_pages * PAGE_SIZE_4K) };
+    unsafe { super::zero::zero_owned_memory(address as *mut u8, page.num_pages * PAGE_SIZE_4K) };
     Ok(page)
 }
 

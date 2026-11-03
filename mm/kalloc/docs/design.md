@@ -492,3 +492,11 @@ compound tail raw restoration, exclusive split failure/success, early iterator
 cleanup, zeroing, invalid geometry and single-page table adapters. Local metadata
 tests additionally force a mid-range clone overflow and verify prefix rollback,
 and reject holes before any independent range admission changes descriptors.
+
+## Owned normal-memory zeroing
+
+`zero::zero_owned_memory` initializes allocator-owned normal RAM used by the
+global `alloc_zeroed` path and exact zeroed page allocation. On AArch64 it may
+use `DC ZVA` when the requested range contains a complete aligned cache block;
+the unaligned prefix and tail use bounded byte stores. The helper never widens
+stores beyond the caller's allocation.

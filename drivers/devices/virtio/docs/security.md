@@ -413,3 +413,10 @@ There is no completion timeout and no reset/hotplug protocol. With X-Kernel HAL,
 reclaim competes for the global kdma lock, also used by other DMA operations and
 page-table changes. Lock-wait latency in hard IRQ context is an accepted,
 unbounded-by-this-driver limitation, not a verified latency guarantee.
+
+## Conservative input readiness
+
+Input notification probing never pops/requeues descriptors, because HAL
+streaming DMA mapping can allocate. The IRQ handler exclusively acknowledges the
+transport; the timer-side probe only reads the atomic readiness hint. Pending input is consumed only through normal `read_event`.
+False-positive wakes are harmless because callers drain and recheck.

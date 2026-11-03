@@ -832,3 +832,56 @@ fn open_file_readahead_shares_dup_history_but_not_reopened_history() {
     assert_eq!(inode.address_space().nrpages(), 18);
     assert_eq!(byte, [90]);
 }
+
+struct FaultReadaheadOps;
+
+impl AddressSpaceOperations for FaultReadaheadOps {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
+        folio.data().fill(0x42);
+        folio.complete(Ok(()))
+    }
+
+    fn readahead(&self, control: &mut crate::ReadaheadControl<'_>) -> VfsResult<()> {
+        while control.count() != 0 {
+            control.complete_folio(&vec![0x42; PAGE_SIZE_4K])?;
+        }
+        Ok(())
+    }
+}
+
+static FAULT_READAHEAD_OPS: FaultReadaheadOps = FaultReadaheadOps;
+
+#[def_test]
+fn private_fault_readahead_is_bounded_and_skips_cached_targets() {
+    let inode = read_inode(&FAULT_READAHEAD_OPS, 40 * PAGE_SIZE_4K);
+    let mapping = inode.address_space();
+    mapping
+        .readahead_for_fault(17, None)
+        .expect("prefetch first window");
+    assert_eq!(mapping.nrpages(), 16);
+
+    mapping
+        .readahead_for_fault(37, None)
+        .expect("cached target needs no work");
+    assert_eq!(mapping.nrpages(), 16);
+
+    mapping
+        .readahead_for_fault((16 * PAGE_SIZE_4K) as u64, None)
+        .expect("prefetch next window");
+    assert_eq!(mapping.nrpages(), 32);
+}
+
+#[def_test]
+fn private_fault_readahead_honours_exclusive_file_end() {
+    let inode = read_inode(&FAULT_READAHEAD_OPS, 4 * PAGE_SIZE_4K);
+    let mapping = inode.address_space();
+    mapping
+        .readahead_for_fault(0, Some((PAGE_SIZE_4K + 13) as u64))
+        .expect("ELF prefix selects two pages");
+    assert_eq!(mapping.nrpages(), 2);
+
+    mapping
+        .readahead_for_fault((2 * PAGE_SIZE_4K) as u64, Some((PAGE_SIZE_4K + 13) as u64))
+        .expect("BSS-only offset needs no work");
+    assert_eq!(mapping.nrpages(), 2);
+}

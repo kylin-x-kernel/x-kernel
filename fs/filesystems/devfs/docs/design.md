@@ -327,3 +327,12 @@ there is no separate late capture API. Additional mounts share the same root
 and immutable snapshot. Platforms without a firmware
 DTB omit the node. The node exports firmware data as supplied; it does not
 validate device functionality or prove clock accuracy.
+
+## Idle input retry filtering
+
+Each evdev client owns one bounded 10 ms retry timer. On expiry it checks its
+poll registration snapshot and the driver's optional IRQ-safe readiness hint.
+A definitely idle device rearms without waking a task; ready, detached or
+legacy devices wake the poll set for normal task-context polling. Unsupported
+drivers keep the previous wake fallback. The timer only runs while a waiter is
+registered.

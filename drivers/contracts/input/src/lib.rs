@@ -252,6 +252,18 @@ pub trait InputDevice: Device {
     /// If no events are available, `Err(DriverError::WouldBlock)` is returned.
     fn read_event(&self) -> DriverResult<Event>;
 
+    /// Returns a bounded, IRQ-safe snapshot of whether an event may be ready.
+    ///
+    /// This is an optimization hint for timer-driven poll fallbacks, not an
+    /// event source: it must not consume events, allocate, sleep or sleep on a
+    /// lock. `None` means unsupported and preserves the caller's ordinary retry
+    /// wake. `Some(false)` may suppress an idle wake; `Some(true)` still requires
+    /// the caller to recheck through normal polling/reading. False negatives are
+    /// not permitted: uncertain state must return `Some(true)` or `None`.
+    fn poll_event_ready(&self) -> Option<bool> {
+        None
+    }
+
     /// Attach or detach the input layer's event notification capability.
     ///
     /// Registration and removal run in task context, but an installed notifier

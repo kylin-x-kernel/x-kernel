@@ -182,3 +182,9 @@ predicate rechecks and never supply consumable tokens or synchronous waits.
 - `PollSetInner::Drop`：摘取全部 waiter 并锁外唤醒，避免析构后永久阻塞。
 - epoll interest Drop / DEL / ONESHOT：通过清空其 `PollRegistrations` 注销；MOD
   原地更新同一个 interest 的配置并重新安装 registration。
+
+## Advisory waiter snapshot
+
+`PollSet::has_waiters` reads the existing active count under its IRQ-safe lock.
+It neither allocates nor wakes, and returns an O(1) snapshot. Producers that
+stop retrying on `false` must let a racing/new registration restart the retry.

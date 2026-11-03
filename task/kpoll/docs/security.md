@@ -129,3 +129,10 @@ node lifetimes are outside this crate's boundary.
 - [ ] 外层锁顺序不会与 wake 回调反向。
 - [ ] epoll interest 在 DEL/ONESHOT/Drop 时清空 registration，MOD 原地更新配置并重装 registration。
 - [ ] 测试覆盖 >64 waiter、取消注销、token ABA、wake 重入。
+
+## Advisory waiter snapshot
+
+A waiter snapshot does not reserve registrations or synchronize a later stop
+decision. Users must close that registration/stop race explicitly; evdev
+publishes its inactive flag before taking the snapshot. Cancellation and wake
+still own registration removal.

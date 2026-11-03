@@ -407,3 +407,10 @@ path (device already freed).
   up in LIFO order.
 - The runtime trait object is dropped by its `Box<T>` when
   `ClassDeviceInner` drops.
+
+## Input readiness forwarding
+
+The input class adapter forwards the optional readiness hint without taking a
+class lock or allocating. The devfs consumer separately checks device
+availability before probing, and a retained class handle keeps the underlying
+driver storage alive.

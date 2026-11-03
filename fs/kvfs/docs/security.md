@@ -732,3 +732,13 @@ rename replacement mark only the removed dentry; other hard links and renamed
 sources stay linked. A snapshot owns its parent reference and name, and releases
 the location guard before any notification callback. Cache membership alone is
 not evidence that an entry has been unlinked.
+
+## Bounded private-fault readahead
+
+Private-fault readahead holds the invalidate lock for reading across EOF
+selection and submission, so truncate cannot change the bound before stale pages
+are inserted. The page-cache index lock is not held across backend I/O. The
+16-page bound limits one call, not global cache residency; sparse access may
+read adjacent pages and later concurrent inserts still win over prefetched data.
+Only returned I/O/allocation errors permit demand fallback; allocator aborts are
+not made recoverable.

@@ -4,7 +4,10 @@
 
 //! VirtIO input driver adapter.
 use alloc::{string::String, sync::Arc};
-use core::mem::size_of;
+use core::{
+    mem::size_of,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use device_res::{IrqEvent, IrqHandler};
 use driver_base::{Device, DeviceKind, DriverError, DriverResult};
@@ -49,6 +52,9 @@ pub struct VirtIoInputDev<H: Hal, T: Transport> {
 
 struct VirtIoInputState<H: Hal, T: Transport> {
     inner: SpinNoIrq<InnerDev<H, T>>,
+    /// Sticky conservative readiness hint. It starts true so events that
+    /// predate the first read cannot be hidden by an idle check.
+    is_readable: AtomicBool,
     notifier: SpinNoIrq<Option<Arc<dyn InputEventNotifier>>>,
     /// Immutable after probing; the input core owns live axis values.
     abs_info: [Option<AbsInfo>; ABS_CNT],
@@ -80,6 +86,9 @@ impl<H: Hal + 'static, T: Transport + 'static> IrqHandler for VirtIoInputIrqHand
             return IrqEvent::NOT_HANDLED;
         }
         if status.contains(InterruptStatus::QUEUE_INTERRUPT) {
+            // Advisory hint only: this publishes no queue data, and the queue
+            // itself is synchronized by the `inner` lock. Relaxed is sufficient.
+            self.state.is_readable.store(true, Ordering::Relaxed);
             let notifier = self.state.notifier.lock().clone();
             if let Some(notifier) = notifier {
                 notifier.notify_events();
@@ -164,6 +173,7 @@ impl<H: Hal, T: Transport> VirtIoInputDev<H, T> {
         Ok(Self {
             state: Arc::new(VirtIoInputState {
                 inner: SpinNoIrq::new(device),
+                is_readable: AtomicBool::new(true),
                 notifier: SpinNoIrq::new(None),
                 abs_info,
                 prop_bits,
@@ -253,7 +263,18 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
     }
 
     fn read_event(&self) -> DriverResult<Event> {
-        let Some(event) = self.state.inner.lock().pop_pending_event() else {
+        // Keep the queue lock across the hint update: otherwise an interrupt
+        // could enqueue an event and set the hint true between the pop and a
+        // stale false store, hiding the new event from the next poll.
+        let mut inner = self.state.inner.lock();
+        let event = inner.pop_pending_event();
+        // Advisory hint only; queue contents are synchronized by `inner`, so
+        // no data is published through this atomic ordering.
+        self.state
+            .is_readable
+            .store(event.is_some(), Ordering::Relaxed);
+        drop(inner);
+        let Some(event) = event else {
             return Err(DriverError::WouldBlock);
         };
         Ok(Event {
@@ -261,6 +282,14 @@ impl<H: Hal, T: Transport> InputDevice for VirtIoInputDev<H, T> {
             code: event.code,
             value: event.value,
         })
+    }
+
+    fn poll_event_ready(&self) -> Option<bool> {
+        // Never read/clear the transport ISR here. That read is destructive and
+        // would race the hard-IRQ handler, swallowing the notification that
+        // schedules the input endpoint drain. The IRQ handler owns that
+        // acknowledgement and updates the same advisory hint.
+        Some(self.state.is_readable.load(Ordering::Relaxed))
     }
 
     fn set_event_notifier(&self, notifier: Option<Arc<dyn InputEventNotifier>>) -> DriverResult {

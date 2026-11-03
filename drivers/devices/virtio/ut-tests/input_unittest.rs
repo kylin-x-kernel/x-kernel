@@ -267,3 +267,21 @@ fn test_virtio_input_irq_rejects_other_line_without_ack() {
     assert!(!handler.handle(12).handled());
     assert_eq!(ack_count.load(Ordering::Relaxed), 0);
 }
+
+#[def_test]
+fn test_virtio_input_readiness_hint_tracks_interrupt_and_drain() {
+    let transport = input_transport();
+    let interrupt_status = transport.interrupt_status.clone();
+    let device = VirtIoInputDev::<MockHal, MockTransport>::try_new(transport, 11).unwrap();
+
+    assert_eq!(device.poll_event_ready(), Some(true));
+    assert!(device.read_event().is_err());
+    assert_eq!(device.poll_event_ready(), Some(false));
+
+    interrupt_status.store(
+        InterruptStatus::QUEUE_INTERRUPT.bits() as usize,
+        Ordering::Release,
+    );
+    assert!(device.irq_handler().handle(11).handled());
+    assert_eq!(device.poll_event_ready(), Some(true));
+}

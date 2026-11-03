@@ -1331,3 +1331,14 @@ Quota operations may sleep. Their backing-file I/O must bypass charging and
 must not reenter the same quota owner or reacquire a caller-held filesystem
 lock. Filesystem integration must establish one lock order and explicitly
 flush/disable quota before final owner destruction.
+
+## Bounded private-fault readahead
+
+`AddressSpace::readahead_for_fault` prefetches at most 16 missing file-cache
+pages starting at a private mapping's fault offset. It is bounded by the inode's
+visible length and an optional exclusive `file_end` supplied by the ELF loader.
+A cached target does no work; only missing runs are submitted. The invalidate
+lock is held for reading across EOF selection and submission, so concurrent
+truncate cannot change the bound before stale pages are inserted. The helper
+fills cache entries, not PTEs, and is optional: a returned error lets the caller
+perform the original demand read.

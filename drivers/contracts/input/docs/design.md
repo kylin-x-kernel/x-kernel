@@ -183,3 +183,11 @@ All fallible operations return `driver_base::DriverResult`:
   contract and keeps host workerqueue policy in the input subsystem.
 - Re-export `driver_base` types: one vocabulary and one import root for
   implementers, matching the sibling contract crates.
+
+## Optional readiness hint
+
+`InputDevice::poll_event_ready` is a bounded, allocation-free, IRQ-safe
+readiness snapshot for timer-driven poll fallbacks. `None` preserves the
+ordinary retry wake, `Some(false)` may suppress an idle wake, and `Some(true)`
+still requires normal polling/reading to consume the event. It never
+subscribes to input and never consumes an event.

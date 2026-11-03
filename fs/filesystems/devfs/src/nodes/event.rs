@@ -3,6 +3,7 @@
 // See LICENSES for license details.
 
 use alloc::{collections::VecDeque, string::ToString, sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use bitmaps::Bitmap;
 use inputdev::{InputEndpoint, InputEventListener, TimedInputEvent};
@@ -11,9 +12,11 @@ use kclass::{
     prelude::{Event, EventType, InputDevice, InputDeviceImpl},
 };
 use kerrno::{KError, KResult};
+use khal::time::monotonic_time;
 use kpoll::{IoEvents, PollContext, PollRegisterError, PollSet, Pollable};
 use ksync::Mutex;
-use ktask::future::block_on;
+use ktask::{Expiration, Timer, TimerControl, TimerHandler, future::block_on};
+use ktime_types::TimeSpan;
 use kvfs::{
     DeviceFileOps, DirMapping, NodeFlags, SimpleDir, SimpleFs, VfsFile, VfsFileBuilder, VfsInode,
     VfsResult, poll_file_io,
@@ -86,6 +89,40 @@ struct ClientState {
 struct EventClient {
     state: Mutex<ClientState>,
     poll_set: PollSet,
+    repoll_timer: Option<Timer<InputRepoll>>,
+}
+
+struct InputRepoll {
+    poll_set: PollSet,
+    device: ClassDevice<InputDeviceImpl>,
+    is_armed: AtomicBool,
+}
+
+impl TimerHandler for InputRepoll {
+    fn on_expiration(&self, timer: TimerControl<'_>, _: Expiration) {
+        // Publish idle before inspecting waiters. A racing registration can
+        // start a successor; the CAS below prevents this callback replacing it.
+        self.is_armed.store(false, Ordering::Release);
+        if !self.poll_set.has_waiters() {
+            return;
+        }
+        if self.device.is_available() && self.device.poll_event_ready() == Some(false) {
+            if self
+                .is_armed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let deadline = monotonic_time() + TimeSpan::from_millis(10);
+                if timer.rearm(deadline).is_err() {
+                    self.is_armed.store(false, Ordering::Release);
+                    self.poll_set.wake();
+                }
+            }
+            return;
+        }
+        // Ready, detached, or a legacy driver: let the task do its normal poll.
+        self.poll_set.wake();
+    }
 }
 
 impl EventClient {
@@ -98,7 +135,19 @@ impl EventClient {
                 is_detached: false,
             }),
             poll_set: PollSet::new(),
+            repoll_timer: None,
         }
+    }
+
+    fn new_with_device(device: ClassDevice<InputDeviceImpl>) -> Self {
+        let mut client = Self::new();
+        let repoll_timer = Timer::new(InputRepoll {
+            poll_set: client.poll_set.clone(),
+            device,
+            is_armed: AtomicBool::new(false),
+        });
+        client.repoll_timer = Some(repoll_timer);
+        client
     }
 
     fn set_clock_id(&self, clock_id: i32) -> KResult<()> {
@@ -215,6 +264,23 @@ impl Pollable for EventClient {
     ) -> Result<(), PollRegisterError> {
         if !events.is_empty() {
             context.register(&self.poll_set)?;
+        }
+        if let Some(timer) = &self.repoll_timer {
+            let handler = timer.handler();
+            if handler
+                .is_armed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let deadline = monotonic_time() + TimeSpan::from_millis(10);
+                // SAFETY: VFS poll registration runs after scheduler/timer
+                // initialization. The owned timer drains delivery on drop; its
+                // handler only uses the IRQ-safe readiness hint and poll set.
+                if unsafe { timer.start(deadline) }.is_err() {
+                    handler.is_armed.store(false, Ordering::Release);
+                    return Err(PollRegisterError::InvalidState);
+                }
+            }
         }
         Ok(())
     }
@@ -429,7 +495,7 @@ pub(crate) extern "C" fn ongkey() {
 
 impl DeviceFileOps for EventDev {
     fn open(&self, _inode: &VfsInode, file: &mut VfsFileBuilder) -> VfsResult<()> {
-        let client = Arc::new(EventClient::new());
+        let client = Arc::new(EventClient::new_with_device(self.device.clone()));
         self.endpoint
             .subscribe(client.clone())
             .map_err(|_| KError::NoSuchDevice)?;

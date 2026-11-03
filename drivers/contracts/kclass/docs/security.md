@@ -235,3 +235,9 @@ When modifying this module, verify:
   callbacks; removal unregisters the node before class cleanup.
 - A node-allocation error must not suppress typed class availability callbacks.
 - Framebuffer changes respect the `Arc<DeviceObject>` lifetime guarantee.
+
+## Input readiness forwarding
+
+Readiness forwarding preserves the input trait's IRQ contract. Availability can
+race removal; retained ownership keeps the runtime storage valid, and consumers
+still recheck detach/wake state in task context.
