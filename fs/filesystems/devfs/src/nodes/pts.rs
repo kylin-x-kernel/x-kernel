@@ -20,6 +20,8 @@ use kvfs::{
     VfsFileBuilder, VfsInode, VfsResult,
 };
 
+use crate::DeviceFile;
+
 struct SlaveNode {
     node: SimpleFsNode,
     pair: Weak<PtyPair>,
@@ -71,18 +73,19 @@ impl FileOperations for SlaveNode {
     }
 }
 
-/// Master pseudo-terminal multiplexer (/dev/ptmx).
+/// Master pseudo-terminal multiplexer at `pts/ptmx` in devtmpfs.
 ///
-/// The carried filesystem is this mount's owner: pairs allocated through it
-/// are published here and projected by [`PtsDir`], and never leak into (or
-/// from) a container's per-mount devpts instance.
+/// devtmpfs exposes `/dev/ptmx` as a symlink to this path, the conventional
+/// userspace layout. When devpts is mounted at `/dev/pts`, that target
+/// resolves to the devpts instance's own `ptmx`; before such a mount, it
+/// resolves here.
 ///
-/// This is why a container's pty flow needs `/dev/ptmx` to resolve into its
-/// own devpts mount (the OCI default symlinks it to `pts/ptmx`): opening THIS
-/// node allocates a devfs-owned pair, which [`PtsDir`] then shows in the host
-/// `/dev/pts`. Linux instead resolves the target instance from the ptmx file's
-/// path (`ptmx_open()` → `devpts_acquire()`), so any `/dev/ptmx` node reaches
-/// the same devpts instance; see the devpts design notes.
+/// The carried filesystem is this mount's owner: pairs allocated through this
+/// fallback are published here and projected by [`PtsDir`], and never leak
+/// into (or from) a container's per-mount devpts instance. Linux selects the
+/// target instance from the ptmx file's path (`ptmx_open()` →
+/// `devpts_acquire()`), so the symlink gives the same path-based choice; see
+/// the devpts design notes.
 pub struct Ptmx(pub Arc<SimpleFs>);
 
 impl DeviceFileOps for Ptmx {
@@ -93,16 +96,17 @@ impl DeviceFileOps for Ptmx {
     }
 }
 
-/// /dev/pts directory containing only slaves with a live master **allocated
-/// through this filesystem's ptmx** — per-owner projection keeps a
-/// container's per-mount devpts pairs out of the host view.
+/// devtmpfs `/dev/pts` directory: its own fallback `ptmx` plus slaves with a
+/// live master **allocated through that fallback** — per-owner projection
+/// keeps a container's per-mount devpts pairs out of the host view.
 pub(crate) struct PtsDir {
     fs: Arc<SimpleFs>,
+    ptmx: Option<Arc<DeviceFile>>,
 }
 
 impl PtsDir {
-    pub(crate) fn new(fs: Arc<SimpleFs>) -> Self {
-        Self { fs }
+    pub(crate) fn new(fs: Arc<SimpleFs>, ptmx: Option<Arc<DeviceFile>>) -> Self {
+        Self { fs, ptmx }
     }
 }
 
@@ -114,14 +118,21 @@ impl SimpleDirOps for PtsDir {
     }
 
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        let ptmx = self.ptmx.iter().map(|_| Cow::Borrowed("ptmx"));
         Ok(KBox::new(
-            tty::pty_slave_numbers_for(&self.fs)
-                .into_iter()
-                .map(|id| Cow::Owned(id.to_string())),
+            ptmx.chain(
+                tty::pty_slave_numbers_for(&self.fs)
+                    .into_iter()
+                    .map(|id| Cow::Owned(id.to_string())),
+            ),
         )?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> KResult<Dentry> {
+        if name == "ptmx" {
+            let ptmx = self.ptmx.as_ref().ok_or(KError::NotFound)?;
+            return Ok(crate::device_dentry(lookup, name, ptmx.clone()));
+        }
         // Only the canonical decimal form (what readdir lists, Linux dcache
         // exact-match semantics): "007" must not alias "7". The devpts
         // directory enforces the same rule on the same names.

@@ -14,7 +14,8 @@ publishes the slave nodes of the pty pairs allocated **through that
 instance's `ptmx`** inside the same filesystem, so the
 `open("/dev/ptmx")` → `open("/dev/pts/<n>")` round trip completes within the
 mount — the shape runc's default OCI spec expects when it mounts `devpts`
-with `newinstance` at `<rootfs>/dev/pts`.
+with `newinstance` at `<rootfs>/dev/pts`. The conventional `/dev/ptmx` symlink
+to `pts/ptmx` selects this instance through the mounted path.
 
 ## Responsibilities
 
@@ -53,16 +54,16 @@ mutex makes a reconfigure atomic with respect to subsequent slave creation.
   range-checked exactly like Linux (accepted including `max=0`, `EINVAL` only
   when out of range) but cannot bound an instance's allocation.
 - **The `ptmx` that allocates a pty decides which view shows it.** A pair is
-  owned by the filesystem of the `ptmx` node that was opened, so
-  `open("/dev/ptmx")` → `open("/dev/pts/<n>")` closes only when that
-  `/dev/ptmx` resolves into this mount — the OCI default has `runc` symlink
-  `/dev/ptmx` to `pts/ptmx`, which does. Opening the devfs `/dev/ptmx` node
-  instead allocates a devfs-owned pty that appears in the host `/dev/pts`, not
-  in a container's instance. Linux has no such rule: `ptmx_open()` →
-  `devpts_acquire()`/`devpts_ptmx_path()` resolve the target instance from the
-  ptmx file's *path* (the sibling `pts` mount), so any `/dev/ptmx` node reaches
-  the same devpts instance. Implementing that needs path-based resolution,
-  which this instance-keyed model does not do yet.
+  owned by the filesystem of the `ptmx` node that was opened. devfs publishes
+  `/dev/ptmx` as a symlink to `pts/ptmx`, so when devpts is mounted at
+  `/dev/pts`, the path resolves into this instance and
+  `open("/dev/ptmx")` → `open("/dev/pts/<n>")` completes within it. Before
+  such a mount, the same symlink reaches devtmpfs's fallback `pts/ptmx`, whose
+  pairs appear in devtmpfs's `/dev/pts`. Linux resolves the target from the
+  ptmx file's *path* (`ptmx_open()` → `devpts_acquire()`/
+  `devpts_ptmx_path()`); the symlink gives that conventional layout the same
+  choice, while a character node placed at `/dev/ptmx` would still bind to the
+  filesystem that created it.
 - Mounts without `newinstance` still create a fresh instance: the host
   `/dev/pts` is devfs-owned, and this filesystem has no notion of a shared
   initial devpts instance.

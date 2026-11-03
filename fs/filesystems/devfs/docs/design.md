@@ -99,17 +99,24 @@ stdout UART remains omitted because it is already available as `/dev/console`.
 `DeviceFile` projects special-device identity and inode flags; it is not an
 open-file operations adapter. KVFS owns character-device dispatch, including
 capabilities, I/O, poll registration and open/release forwarding.
-The PTMX node delegates creation to `ktty::tty::open_ptmx`, supplying its own
-`SimpleFs` as the owner identity key (so pairs allocated through devfs's ptmx
-are owned by — and projected only in — devfs) plus a slave inode constructor. ktty controls allocation, opening, publication and
-rollback, and installs the master through `kvfs::open_character_device`,
-the same adapter used by registry-based opens. It opens the master once during
-the multiplexer callback; VFS does not reopen the replacement table. Final file
-drop releases the selected master, not the multiplexer. ktty owns PTY allocation
-and open-file lifetime; devfs does not keep an allocation table or per-pair cdev
-registrations. Slave lookup returns one persistent inode per original pair,
-preserving chmod/chown state. Its opener holds only a weak original-pair reference
-and uses the same KVFS adapter after successful admission.
+
+devfs publishes `/dev/ptmx` as a symlink to `pts/ptmx`, the conventional
+userspace layout. The target resolves to the devpts instance mounted at
+`/dev/pts` when present, and to devtmpfs's own `pts/ptmx` before such a mount.
+The symlink is published even when the fallback node cannot be registered, so
+a later devpts mount still provides `/dev/ptmx`. The fallback PTMX node
+delegates creation to `ktty::tty::open_ptmx`, supplying its own `SimpleFs` as
+the owner identity key (so pairs allocated through the fallback are owned by —
+and projected only in — devfs) plus a slave inode constructor. ktty controls
+allocation, opening, publication and rollback, and installs the master through
+`kvfs::open_character_device`, the same adapter used by registry-based opens.
+It opens the master once during the multiplexer callback; VFS does not reopen
+the replacement table. Final file drop releases the selected master, not the
+multiplexer. ktty owns PTY allocation and open-file lifetime; devfs does not
+keep an allocation table or per-pair cdev registrations. Slave lookup returns
+one persistent inode per original pair, preserving chmod/chown state. Its
+opener holds only a weak original-pair reference and uses the same KVFS adapter
+after successful admission.
 
 Device-node construction propagates character registration conflicts instead
 of replacing an existing driver. Static directory construction logs and omits

@@ -13,9 +13,9 @@ use ktime_types::SystemTime;
 use slab::Slab;
 
 use crate::{
-    Dentry, DeviceId, FileSystemType, InodeOperations, Metadata, MetadataUpdate, NodePermission,
-    NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsInodeInit, VfsResult,
-    libfs::simple_statfs, simple_dir::DirMaker, type_map::TypeMap,
+    Dentry, DeviceId, FileSystemType, InodeOperations, Metadata, MetadataUpdate, NodeFlags,
+    NodePermission, NodeType, StatFs, SuperBlock, SuperBlockFlags, SuperBlockOperations, VfsInode,
+    VfsInodeInit, VfsResult, libfs::simple_statfs, simple_dir::DirMaker, type_map::TypeMap,
 };
 
 /// A simple filesystem implementation that uses a slab allocator for inodes.
@@ -178,6 +178,28 @@ impl SimpleFsNode {
             ino,
             metadata: Mutex::new(metadata),
         }
+    }
+
+    /// Creates a cached symbolic-link inode owned by `fs`.
+    ///
+    /// The returned inode carries `target` as its link body and is suitable
+    /// for static directory entries whose target is fixed for the mount's
+    /// lifetime.
+    ///
+    /// This is the provider side used by `SimpleFs`-based filesystems such as
+    /// devfs: those filesystems create the node, while `kvfs` only stores the
+    /// cached link body. The dependency therefore points from devfs to kvfs,
+    /// not the other way around.
+    pub fn new_symlink_inode(fs: Arc<SimpleFs>, target: impl Into<String>) -> Arc<VfsInode> {
+        let target = target.into();
+        let node = Self::new(
+            fs,
+            NodeType::Symlink,
+            NodePermission::from_bits_truncate(0o777),
+        );
+        node.metadata.lock().size = target.len() as u64;
+        let init = node.inode_init();
+        VfsInode::new_cached_symlink(Arc::new(node), NodeFlags::empty(), init, target)
     }
 
     /// Updates the special-file `i_rdev` stored in this node's metadata.

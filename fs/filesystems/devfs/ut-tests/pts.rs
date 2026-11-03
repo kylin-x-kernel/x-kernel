@@ -8,7 +8,7 @@ use kvfs::{DeviceId, DirMapping, SimpleDir};
 use unittest::def_test;
 
 use super::*;
-use crate::DeviceFile;
+use crate::{DeviceFile, nodes::tty_nodes::add_ptmx_nodes};
 
 struct OccupiedDevice;
 impl DeviceFileOps for OccupiedDevice {}
@@ -109,4 +109,51 @@ fn device_node_conflict_does_not_publish_or_replace_registration() {
     let removed = kvfs::cdev_del(number, 1).unwrap();
     assert!(Arc::ptr_eq(&removed, &original));
     drop(registration);
+}
+
+#[def_test(serial)]
+fn devtmpfs_ptmx_is_a_link_into_pts() {
+    let device_id = DeviceId::new(242, 41);
+    let _registration = RegisteredDevice(device_id);
+    let super_block = SimpleFs::new_with(&crate::FILE_SYSTEM_TYPE, crate::DEVFS_MAGIC, |fs| {
+        let mut root = DirMapping::new();
+        let ptmx = DeviceFile::new_character(
+            fs.clone(),
+            device_id,
+            Arc::new(Ptmx(fs.clone())),
+        )
+        .unwrap();
+        add_ptmx_nodes(&mut root, fs.clone(), Some(ptmx));
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = super_block.root_dir();
+
+    let link = root.lookup("ptmx").expect("devtmpfs publishes /dev/ptmx");
+    assert_eq!(link.node_type(), NodeType::Symlink);
+    assert_eq!(link.read_link().unwrap(), "pts/ptmx");
+
+    let pts = root.lookup("pts").expect("devtmpfs publishes /dev/pts");
+    assert!(pts.is_dir());
+    let ptmx = pts.lookup("ptmx").expect("pts has a pre-devpts ptmx");
+    assert_eq!(ptmx.node_type(), NodeType::CharacterDevice);
+    assert_eq!(ptmx.inode_ref().rdev(), device_id);
+}
+
+#[def_test(serial)]
+fn devtmpfs_ptmx_link_does_not_depend_on_fallback() {
+    let super_block = SimpleFs::new_with(&crate::FILE_SYSTEM_TYPE, crate::DEVFS_MAGIC, |fs| {
+        let mut root = DirMapping::new();
+        add_ptmx_nodes(&mut root, fs.clone(), None);
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = super_block.root_dir();
+
+    let link = root.lookup("ptmx").expect("devtmpfs publishes /dev/ptmx");
+    assert_eq!(link.node_type(), NodeType::Symlink);
+    assert_eq!(link.read_link().unwrap(), "pts/ptmx");
+
+    let pts = root.lookup("pts").expect("devtmpfs publishes /dev/pts");
+    assert!(pts.lookup("ptmx").is_err());
 }

@@ -5,7 +5,7 @@
 use alloc::sync::Arc;
 
 use ktty::tty;
-use kvfs::{DeviceId, DirMapping, SimpleDir, SimpleFs};
+use kvfs::{DeviceId, DirMapping, SimpleDir, SimpleFs, SimpleFsNode};
 
 use super::pts::{Ptmx, PtsDir};
 use crate::{DeviceFile, add_device_entry};
@@ -48,17 +48,35 @@ pub(crate) fn add_root_entries(
         "console",
         DeviceFile::new_character(fs.clone(), DeviceId::new(5, 1), console),
     );
-    add_device_entry(
-        root,
-        "ptmx",
-        DeviceFile::new_character(
-            fs.clone(),
-            DeviceId::new(5, 2),
-            alloc::sync::Arc::new(Ptmx(fs.clone())),
-        ),
-    );
+    let ptmx = match DeviceFile::new_character(
+        fs.clone(),
+        DeviceId::new(5, 2),
+        alloc::sync::Arc::new(Ptmx(fs.clone())),
+    ) {
+        Ok(ptmx) => Some(ptmx),
+        Err(error) => {
+            warn!("devtmpfs: cannot publish /dev/ptmx: {error:?}");
+            None
+        }
+    };
+    add_ptmx_nodes(root, fs, ptmx);
+}
+
+pub(crate) fn add_ptmx_nodes(
+    root: &mut DirMapping,
+    fs: Arc<SimpleFs>,
+    ptmx: Option<Arc<DeviceFile>>,
+) {
+    // The conventional Linux userspace layout exposes `/dev/ptmx` as
+    // `pts/ptmx`, so the path resolves into the devpts instance currently
+    // mounted at `/dev/pts`. Publish the link even if the fallback character
+    // node could not be registered: a later devpts mount still supplies ptmx.
+    let ptmx_link = SimpleFsNode::new_symlink_inode(fs.clone(), "pts/ptmx");
+    root.add_child("ptmx", move |lookup, name| {
+        Ok(lookup.file_from_inode(name, ptmx_link.clone()))
+    });
     root.add(
         "pts",
-        SimpleDir::new_maker(fs.clone(), alloc::sync::Arc::new(PtsDir::new(fs))),
+        SimpleDir::new_maker(fs.clone(), alloc::sync::Arc::new(PtsDir::new(fs, ptmx))),
     );
 }

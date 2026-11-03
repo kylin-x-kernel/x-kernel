@@ -742,6 +742,28 @@ fn test_reconfigure_rw_rejects_backend_readonly_superblock() {
 }
 
 #[def_test]
+fn test_mounting_a_superblock_over_itself_preserves_child_mounts() {
+    let root_fs = mock_filesystem(StatFsFlags::empty());
+    let child_fs = mock_filesystem(StatFsFlags::empty());
+    let namespace = MntNamespace::new_root(&root_fs, kcred::initial_user_namespace());
+    let root = namespace.root_path();
+
+    let mnt_dir = lookup_child_in_mount(&root, "mnt").unwrap();
+    let mounted = namespace.attach(&mnt_dir, &root_fs).unwrap();
+    let child_dir = lookup_child_in_mount(&mounted.root_path(), "mnt").unwrap();
+    let child = namespace.attach(&child_dir, &child_fs).unwrap();
+    let mounted_root = lookup_no_follow(&root, "mnt").unwrap();
+
+    let same = namespace.attach(&mounted_root, &root_fs).unwrap();
+
+    assert!(Arc::ptr_eq(&same, &mounted));
+    assert!(Arc::ptr_eq(
+        lookup_no_follow(&mounted.root_path(), "mnt").unwrap().mount(),
+        &child
+    ));
+}
+
+#[def_test]
 fn test_mount_namespace_clone_copies_tree_and_retargets_paths() {
     let root_fs = mock_filesystem(StatFsFlags::empty());
     let child_fs = mock_filesystem(StatFsFlags::empty());

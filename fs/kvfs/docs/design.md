@@ -41,6 +41,19 @@ repeated lookups. The mapping releases its inode references on teardown, and
 inode aliases and superblock references remain weak to avoid ownership cycles.
 Dynamic `add_child` callbacks retain responsibility for their object lifetimes.
 File operations still generate or snapshot contents independently on each open.
+Symlink entries are cached by the same mapping. kvfs provides
+`SimpleFsNode::new_symlink_inode`; devfs consumes it for fixed links such as
+`/dev/ptmx -> pts/ptmx`, so the call direction is devfs -> kvfs. The target is
+stored in the inode and returned by `read_link` without being re-resolved.
+
+## Same-superblock mount reuse
+
+Mounting a filesystem over the root of its own superblock with no requested
+superblock flags (or an empty set) returns the existing `Mount` when its
+per-mount flags already contain the request. The mount is not stacked a second
+time, so child mounts such as `/dev/shm` and `/dev/pts` remain visible. The
+containment test is intentionally one-way: a request that would loosen a flag
+is not treated as a remount; callers must use `MS_REMOUNT` to change flags.
 
 ## Fallible directory iterators
 
