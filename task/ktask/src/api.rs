@@ -587,6 +587,33 @@ pub fn interrupt_task(task: &KtaskRef, resched: bool) {
     wake_task(task, resched);
 }
 
+/// Notifies a task after an unblocked signal has been queued.
+///
+/// The signal producer must publish pending state and release its signal locks
+/// first. Registered interruptible futures are notified through `interrupt`.
+/// A direct scheduler wake matches the task's sleeping state: ordinary signals
+/// wake interruptible waits, and pending SIGKILL also wakes killable waits.
+/// Uninterruptible waits need their event source. Running tasks receive the
+/// usual CPU kick. This does not consume signals or cancel an owned I/O.
+pub fn signal_task(task: &KtaskRef) {
+    task.interrupt();
+    let state = task.state();
+    let can_wake = match state {
+        TaskState::BlockedInterruptible => true,
+        TaskState::BlockedKillable => task
+            .user_runtime()
+            .is_some_and(|runtime| runtime.fatal_signal_pending()),
+        _ => false,
+    };
+    if can_wake {
+        select_wake_run_queue::<NoPreemptIrqSave>(task).unblock_task_in_state(
+            task.clone(),
+            state,
+            true,
+        );
+    }
+}
+
 /// Spawns a PID-less kernel worker thread with the given parameters.
 ///
 /// The new thread carries an `Internal` identity and therefore allocates no
@@ -870,9 +897,8 @@ pub fn sleep_until(deadline: ktime_types::MonotonicInstant) {
 /// Explicit RCU read scopes also forbid voluntary sleeping.
 pub fn interruptible_sleep_until(deadline: ktime_types::MonotonicInstant) {
     assert_sleepable_context("interruptible_sleep_until");
-    if let Err(error) = crate::future::block_on(crate::future::interruptible(
-        crate::future::sleep_until(deadline),
-    )) && !error.is_task_interrupt()
+    if let Err(error) = crate::future::block_on_interruptible(crate::future::sleep_until(deadline))
+        && !error.is_task_interrupt()
     {
         log::error!(
             "interruptible_sleep_until failed to register interrupt wait: {}",

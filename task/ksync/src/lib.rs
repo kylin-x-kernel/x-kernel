@@ -31,7 +31,8 @@
 //! ```
 //!
 //! With `stats` enabled, heap locks bind a per-init-site class in [`Mutex::new`];
-//! static locks use [`static_lock`].
+//! static locks use [`static_lock`]. The feature also enables statistics for
+//! the re-exported `kspin` primitives.
 //!
 //! ## Mutex with Custom Spin Configuration
 //! ```no_run

@@ -17,6 +17,12 @@ permission checks, and the teardown actions behind `SignalOsAction`.
 
 ## Scope
 
+`ThreadSignalManager::fatal_signal_pending` reads thread and shared pending
+SIGKILL under the existing signal-state lock without consuming either queue.
+It is safe for the scheduler's killable-wait recheck; senders publish pending
+state and release that lock before task wakeup. This query adds no pending flag
+and does not classify every default-fatal disposition as a queued SIGKILL.
+
 ```text
 process/ksignal/src/
 ├── lib.rs               crate root, CurrentThreadSignalIf provider contract

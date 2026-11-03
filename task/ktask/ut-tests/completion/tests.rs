@@ -230,3 +230,139 @@ fn counted_completion_wakes_one_task_per_token_and_publishes_data() {
         assert_eq!(value.load(Ordering::Relaxed), 0xc0ffee);
     }
 }
+
+#[def_test]
+fn killable_park_rechecks_pending_after_blocked_publication() {
+    use kalloc_types::KBox;
+
+    struct PendingAtPark {
+        #[cfg(feature = "smp")]
+        requested_resched: Arc<AtomicBool>,
+    }
+    impl crate::UserTaskRuntime for PendingAtPark {
+        fn fatal_signal_pending(&self) -> bool {
+            // Supply the notification at the boundary where an earlier wake
+            // could have seen Running. The pending recheck must see Blocked.
+            core::assert_eq!(crate::current().state(), crate::TaskState::BlockedKillable);
+            true
+        }
+
+        #[cfg(feature = "smp")]
+        fn on_leave(&self) {
+            let task = crate::current();
+            if let Some((is_wake_sync, resched)) = task.take_wake_enqueue() {
+                // Observe the real recheck's deferred wake before switch-out
+                // consumes it. Keep the fixture runnable even if the request
+                // was missing, so this regression fails instead of hanging.
+                task.arm_wake_enqueue(is_wake_sync, true);
+                self.requested_resched.store(resched, Ordering::Release);
+            }
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+    #[cfg(feature = "smp")]
+    let requested_resched = Arc::new(AtomicBool::new(false));
+    let task = crate::prepare_task(crate::TaskInner::new_user(
+        crate::PreparedTaskEntry::new(|| {
+            let wait = CompletionWait::prepare().unwrap();
+            core::assert!(wait.park_lock_killable(1, || {}));
+            core::assert_eq!(crate::current().state(), crate::TaskState::Running);
+            #[cfg(feature = "snapshot")]
+            core::assert!(crate::current().waiting_snapshot().is_none());
+        })
+        .unwrap(),
+        "killable-park-boundary".into(),
+        kidentity::allocate_root_pid_handle().unwrap(),
+        KBox::new(PendingAtPark {
+            #[cfg(feature = "smp")]
+            requested_resched: requested_resched.clone(),
+        })
+        .unwrap(),
+    ));
+    crate::activate_task(&task);
+    assert_eq!(task.join(), 0);
+    #[cfg(feature = "smp")]
+    assert!(requested_resched.load(Ordering::Acquire));
+}
+
+#[def_test(serial)]
+fn signals_select_wait_policy_and_events_wake_every_policy() {
+    use kalloc_types::KBox;
+
+    use crate::TaskState;
+
+    struct SignalRuntime {
+        killed: Arc<AtomicBool>,
+        parked: Arc<Completion>,
+    }
+    impl crate::UserTaskRuntime for SignalRuntime {
+        fn fatal_signal_pending(&self) -> bool {
+            self.killed.load(Ordering::Acquire)
+        }
+
+        fn on_leave(&self) {
+            if crate::current().state().is_blocked() {
+                // State publication precedes this event. The coordinator may
+                // race switch-out; the scheduler must finish any deferred wake.
+                self.parked.complete();
+            }
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    for (state, is_fatal, should_wake) in [
+        (TaskState::Blocked, false, false),
+        (TaskState::Blocked, true, false),
+        (TaskState::BlockedKillable, false, false),
+        (TaskState::BlockedKillable, true, true),
+        (TaskState::BlockedInterruptible, false, true),
+        (TaskState::BlockedInterruptible, true, true),
+    ] {
+        let killed = Arc::new(AtomicBool::new(false));
+        let parked = Arc::new(Completion::new());
+        let task = crate::prepare_task(crate::TaskInner::new_user(
+            crate::PreparedTaskEntry::new(move || {
+                let wait = CompletionWait::prepare().unwrap();
+                match state {
+                    TaskState::Blocked => {
+                        wait.park_lock(1, || {});
+                    }
+                    TaskState::BlockedKillable => {
+                        wait.park_lock_killable(1, || {});
+                    }
+                    TaskState::BlockedInterruptible => {
+                        let result =
+                            crate::future::block_on_interruptible(core::future::pending::<()>());
+                        core::assert!(result.unwrap_err().is_task_interrupt());
+                    }
+                    _ => unreachable!(),
+                }
+            })
+            .unwrap(),
+            "signal-wait-policy".into(),
+            kidentity::allocate_root_pid_handle().unwrap(),
+            KBox::new(SignalRuntime {
+                killed: killed.clone(),
+                parked: parked.clone(),
+            })
+            .unwrap(),
+        ));
+        crate::activate_task(&task);
+        CompletionWait::prepare().unwrap().wait(&parked);
+        killed.store(is_fatal, Ordering::Release);
+        crate::signal_task(&task);
+        let was_woken = task.state() != state;
+        // Always release and join before asserting, including a rejected
+        // signal wake. This event must wake all three sleeping states.
+        crate::wake_task(&task, true);
+        let exit_code = task.join();
+        assert_eq!(was_woken, should_wake);
+        assert_eq!(exit_code, 0);
+    }
+}

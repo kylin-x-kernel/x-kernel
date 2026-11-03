@@ -15,7 +15,7 @@ use core::{
 use kerrno::{KError, KResult};
 use kpoll::{PollContext, PollRegisterError, PollRegistrations};
 use kspin::SpinNoIrq;
-use ktask::future::{block_on, interruptible};
+use ktask::future::block_on_interruptible;
 use log::warn;
 use tipc_handle::HandleWaitState;
 
@@ -357,7 +357,7 @@ impl IpcChan {
                 _ => {
                     // Register through a short-lived poll future to avoid a
                     // separate wait primitive in the core object.
-                    let result: Result<(), KError> = block_on(interruptible(poll_fn(|cx| {
+                    let result: Result<(), KError> = block_on_interruptible(poll_fn(|cx| {
                         let mut context = registrations.context(cx);
                         if self
                             .register(&mut context, HandleEventMask::READY | HandleEventMask::HUP)
@@ -373,7 +373,7 @@ impl IpcChan {
                         } else {
                             core::task::Poll::Pending
                         }
-                    })))
+                    }))
                     .map_err(KError::from)?;
                     result?;
                 }

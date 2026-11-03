@@ -218,7 +218,7 @@ memfd seal 集合由 `ShmemSealSet` 原子管理，只允许添加。`create_mem
   superblock references on a resident access.
 - The generic cache serializes admission with winning identity publication,
   taking folio -> index -> quota limit locks. Final physical deallocation returns
-  the charge outside folio/index locks. Remount/statfs never acquire cache locks.
+  the charge outside folio/index locks through its non-sleeping atomic release. Remount/statfs never acquire cache locks.
 - `TmpfsAccounting` protects both limits and remaining inode space with
   `RwLock<TmpfsStats>`. Inode admission/release and remount take the write lock;
   statfs samples both capacities under the read lock. No per-inode charge object

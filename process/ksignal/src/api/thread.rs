@@ -96,6 +96,15 @@ impl SignalMasks {
 }
 
 impl ThreadSignalManager {
+    /// Reports a queued uncatchable kill, without consuming pending signals.
+    /// May run under scheduler exclusion; only the short signal-state lock is
+    /// acquired. Signal senders release that lock before waking a task.
+    pub fn fatal_signal_pending(&self) -> bool {
+        self.proc.siglock().inspect(|view| {
+            view.pending(self.slot).has(Signo::SIGKILL) || view.shared_pending().has(Signo::SIGKILL)
+        })
+    }
+
     /// Creates a thread signal manager using the default KERNEL slot policy.
     ///
     /// Requires sleepable task context, IRQs and preemption enabled, outside

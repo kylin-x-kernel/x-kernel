@@ -43,6 +43,12 @@ or other VFS allocations fallible.
 
 ## Test Fixture Scope
 
+Demand-read cancellation releases only the wait registration, leaving submitted
+initialization owned by `FolioRead`. Writes reject invalid sleeping context
+before `write_begin`, and truncation does so before publishing size. Filesystem
+callbacks must restore the admitted context before returning, allowing mandatory
+rollback and writeback cleanup to complete without a new admission failure.
+
 The audit scope includes guest fixtures under `ut-tests/` and the host-only
 path fixture under `tests/host/`. Guest modules remain private children of
 their original production parents and require `cfg(unittest)`; the host
@@ -235,8 +241,9 @@ model 由 safe Rust lock、`Arc` ownership 和 operation trait 约束维护内�
   filemap 或文件系统。entries 与派生 dirty marks 由同一 mutex 维护，Folio 的引用
   继续独立保活页数据；该调整不改变 invalidate lock 或 mapping identity 校验。
   Filesystem-owned `CacheResidency` is installed once during inode construction.
-  Admission runs under folio and mapping index mutexes; final physical-page
-  release returns capacity outside both locks. Callbacks must not reenter a
+  Admission runs under folio and mapping index locks; final physical-page
+  release returns capacity outside both locks and must not sleep, including
+  final provider destruction. Callbacks must not reenter a
   mapping, lock folios, perform I/O, or invert the folio-to-index-to-provider
   lock order. Detachment alone never releases a live allocation's charge.
 - `SuperBlock` 的 operation table 与 filesystem-private state 分离，对应 Linux `s_op` 与
@@ -610,8 +617,9 @@ this cost in access and resource policy.
   `MappedFolio` token. The mapping owner retains that token until its PTE is
   removed and the corresponding TLB invalidation completes. A deferred
   invalidation submission and cache detachment do not establish completion.
-- The stable `Folio` owns its page identity, allocation and content mutex.
-  Filesystem callbacks receive only restricted `FolioGuard` access; replacing
+- The stable `Folio` owns its page identity, allocation and content lock.
+  Ordinary access uses `FolioGuard`; initialization consumes `FolioRead`, which
+  retains the allocation and lock until completion; replacing
   an index cannot replace a published owner or its lock.
 - Copies deliberately remain available after detachment and are serialized
   with writers of the original object. They initialize all destination bytes,
@@ -623,12 +631,14 @@ this cost in access and resource policy.
 
 The filesystem owns capacity policy and supplies one `CacheResidency` provider
 when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under folio and index mutexes. Its stable folio retains one
+`try_add_folio()` under folio and index locks. Its stable folio retains one
 capacity charge until the physical allocation is freed. Cache detachment and
 mapping destruction leave charges intact while pins, tokens or batches remain.
 The last reference frees the allocation and returns capacity outside both locks;
 its charge also keeps the accounting provider alive until this release.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
+Release and final provider destruction must not sleep: the last reference can
+be released by I/O completion. Admission still requires task context.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
 folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
@@ -651,6 +661,13 @@ mapping, and must check EOF while guarded. Missing snapshot slots never allocate
 storage. Partial data before a later callback/initialization error remains visible
 to the filesystem caller, which decides its normal short-read completion.
 
+Read submission may return before initialization completes. The filesystem must
+retain its `FolioRead` and every backing resource until all I/O releases the
+page, then complete or drop the token. A waiting caller can hold inode data or
+invalidate locks; completion must not acquire those locks or the mapping index.
+Only completed whole-page initialization becomes uptodate. Truncate waits on
+the transferred folio lock before modifying/removing the page; unconsumed
+readahead reservations are still removed before unlocking.
 
 ## Unrecoverable filesystem write failure
 

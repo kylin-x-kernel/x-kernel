@@ -33,6 +33,11 @@ holding signal frames, and the return address of the handler trampoline.
 
 ## Unsafe inventory
 
+The non-consuming fatal-pending query takes only the existing IRQ-safe signal
+lock. Scheduler wakeup must remain outside that lock to avoid inversion with
+the waiter's post-Blocked recheck. Signal consumption and disposition handling
+remain owned by normal delivery, not by the wait predicate.
+
 All unsafe blocks are in `types.rs` plus one in `api/thread.rs`; each carries
 an inline `SAFETY:` justification.
 

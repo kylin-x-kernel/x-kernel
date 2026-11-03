@@ -24,7 +24,7 @@ use core::{
 use intrusive_collections::{LinkedList, LinkedListLink, intrusive_adapter};
 use kerrno::{KError, KResult, LinuxError};
 use ksync::{Mutex, MutexGuard, static_lock};
-use ktask::future::{block_on, interruptible};
+use ktask::future::block_on_interruptible;
 
 use super::{FileLock, FileLockOwner};
 
@@ -374,7 +374,7 @@ impl Waiter {
     }
 
     pub(super) fn wait_interruptible(&self) -> KResult<()> {
-        block_on(interruptible(poll_fn(|cx| self.poll_wait(cx.waker())))).map_err(
+        block_on_interruptible(poll_fn(|cx| self.poll_wait(cx.waker()))).map_err(
             |error| -> KError {
                 if error.is_task_interrupt() {
                     LinuxError::ERESTARTSYS.into()

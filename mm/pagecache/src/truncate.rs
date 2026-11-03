@@ -7,11 +7,11 @@
 use alloc::sync::Arc;
 
 use kerrno::KResult;
+use ktask::completion::CompletionWait;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{
     Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, mapping_pages::MappingPagesState,
-    writeback::wait_on_writeback,
 };
 
 impl MappingPages {
@@ -25,31 +25,42 @@ impl MappingPages {
     ///
     /// Task context only: waits hold neither the mapping state lock nor a folio
     /// lock. Growth dirties the retained tail without waiting for batch I/O.
-    pub fn resize_cached_folios(&self, old_len: u64, len: u64) {
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` before mutation outside sleepable task context.
+    pub fn resize_cached_folios(&self, old_len: u64, len: u64) -> KResult<()> {
+        let wait = CompletionWait::prepare()?;
         if len == old_len {
-            return;
+            return Ok(());
         }
         if len > old_len {
-            self.zero_growth_tail(old_len, len);
-            return;
+            self.zero_growth_tail(old_len, len, &wait);
+            return Ok(());
         }
 
         let first_truncated = len.div_ceil(PAGE_SIZE_4K as u64);
         self.remove_ready_folios_from(first_truncated);
         let tail_off = (len % PAGE_SIZE_4K as u64) as usize;
         if tail_off != 0 {
-            self.truncate_partial_folio(len / PAGE_SIZE_4K as u64, tail_off);
+            self.truncate_partial_folio(len / PAGE_SIZE_4K as u64, tail_off, &wait);
         }
-        self.remove_folios_from(first_truncated);
+        self.remove_folios_from(first_truncated, &wait);
+        Ok(())
     }
 
     /// Discards all cached folios during final mapping teardown.
     ///
     /// The owner must exclude new cache population and writes. Task context only:
     /// waits for outstanding writeback before discarding even dirty folios.
+    /// It also drains transferred initialization. This explicit drain differs
+    /// from final container Drop, which only detaches ownership.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` before mutation outside sleepable task context.
     pub fn truncate_final(&self) -> KResult<()> {
+        let wait = CompletionWait::prepare()?;
         self.remove_ready_folios_from(0);
-        self.remove_folios_from(0);
+        self.remove_folios_from(0, &wait);
         Ok(())
     }
 
@@ -88,7 +99,7 @@ impl MappingPages {
         }
     }
 
-    fn remove_folios_from(&self, first_index: PageIndex) {
+    fn remove_folios_from(&self, first_index: PageIndex, wait: &CompletionWait) {
         let mut batch = FolioBatch::new();
         loop {
             // Restart at the boundary to include replacements installed while
@@ -101,8 +112,8 @@ impl MappingPages {
             }
             for candidate in batch.iter() {
                 loop {
-                    wait_on_writeback(candidate);
-                    let mut folio = candidate.lock();
+                    candidate.wait_writeback(wait);
+                    let mut folio = candidate.lock_with(wait);
                     let mut state = self.state.lock();
                     if !state.is_current(folio.index(), candidate) {
                         break;
@@ -131,7 +142,7 @@ impl MappingPages {
         state.writeback_marks.remove(&index);
     }
 
-    fn zero_growth_tail(&self, old_len: u64, new_len: u64) {
+    fn zero_growth_tail(&self, old_len: u64, new_len: u64, wait: &CompletionWait) {
         let offset = (old_len % PAGE_SIZE_4K as u64) as usize;
         if offset == 0 {
             return;
@@ -143,7 +154,7 @@ impl MappingPages {
                 return;
             };
             // Growth retains the folio. Writeback already owns its snapshot.
-            let mut folio = candidate.lock();
+            let mut folio = candidate.lock_with(wait);
             let state = self.state.lock();
             if !state.is_current(index, &candidate) {
                 continue;
@@ -159,13 +170,13 @@ impl MappingPages {
         }
     }
 
-    fn truncate_partial_folio(&self, index: PageIndex, offset: usize) {
+    fn truncate_partial_folio(&self, index: PageIndex, offset: usize, wait: &CompletionWait) {
         loop {
             let Some(candidate) = self.state.lock().entries.get(&index).cloned() else {
                 return;
             };
-            wait_on_writeback(&candidate);
-            let mut folio = candidate.lock();
+            candidate.wait_writeback(wait);
+            let mut folio = candidate.lock_with(wait);
             let state = self.state.lock();
             if !state.is_current(index, &candidate) || folio.is_under_writeback() {
                 continue;
@@ -184,10 +195,11 @@ impl MappingPages {
 
 impl Drop for MappingPagesState {
     fn drop(&mut self) {
-        // Completion objects borrow the index through the last writeback. Final
-        // destruction therefore cannot race I/O and runs in task context.
-        for entry in self.entries.values() {
-            let mut folio = entry.lock();
+        // Active operations and writeback completions borrow this index.
+        // Read tokens retain their page and backing resources independently.
+        // Final storage destruction only detaches identities; owners needing
+        // an I/O drain call truncate_final() before releasing backing resources.
+        for folio in self.entries.values() {
             debug_assert!(!folio.is_under_writeback());
             folio.invalidate();
         }

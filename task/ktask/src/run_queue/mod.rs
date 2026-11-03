@@ -251,8 +251,19 @@ pub(crate) struct WakeRunQueueRef<G: BaseGuard> {
 impl<G: BaseGuard> WakeRunQueueRef<G> {
     /// Unblocks `task` on the selected queue with the placement's sync hint.
     #[inline]
-    pub(crate) fn unblock_task(mut self, task: KtaskRef, resched: bool) {
-        self.rq.unblock_task(task, resched, self.is_wake_sync);
+    pub(crate) fn unblock_task(self, task: KtaskRef, resched: bool) {
+        let state = task.state();
+        if state.is_blocked() {
+            self.unblock_task_in_state(task, state, resched);
+        }
+    }
+
+    // The CAS must match the state selected by the wake source: a signal must
+    // not wake a subsequent, uninterruptible wait after sampling another mode.
+    pub(crate) fn unblock_task_in_state(mut self, task: KtaskRef, state: TaskState, resched: bool) {
+        debug_assert!(state.is_blocked());
+        self.rq
+            .unblock_task(task, state, resched, self.is_wake_sync);
     }
 }
 

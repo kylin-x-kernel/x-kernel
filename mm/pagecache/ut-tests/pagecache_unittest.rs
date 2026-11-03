@@ -40,7 +40,7 @@ fn write_cached(cache: &MappingPages, offset: u64, src: &[u8]) -> KResult<()> {
         let step = (src.len() - written).min(PAGE_SIZE_4K - page_off);
         cache.with_folio_or_create(
             index,
-            |_| Ok(()),
+            |folio| folio.complete(Ok(())),
             |folio| {
                 folio.data()[page_off..page_off + step]
                     .copy_from_slice(&src[written..written + step]);
@@ -80,10 +80,10 @@ impl Drop for WritebackWaitObservation {
     }
 }
 
-pub(super) fn observe_writeback_wait(folio: &Arc<Folio>) {
+pub(super) fn observe_writeback_wait(folio: &Folio) {
     let signal = WRITEBACK_WAIT_SIGNAL.lock();
     if let Some((observed, entered, events)) = signal.as_ref()
-        && Arc::ptr_eq(observed, folio)
+        && core::ptr::eq(Arc::as_ptr(observed), folio)
     {
         entered.store(true, Ordering::Release);
         events.notify_all(false);
@@ -101,10 +101,10 @@ static_lock! {
     static READ_WAIT_SIGNAL: Mutex<Option<FolioWaitSignal>> = Mutex::new(None);
 }
 
-pub(super) fn observe_read_wait(folio: &Arc<Folio>) {
+pub(super) fn observe_read_wait(folio: &Folio) {
     let signal = READ_WAIT_SIGNAL.lock();
     if let Some((observed, entered, events)) = signal.as_ref()
-        && Arc::ptr_eq(observed, folio)
+        && core::ptr::eq(Arc::as_ptr(observed), folio)
     {
         entered.store(true, Ordering::Release);
         events.notify_all(false);

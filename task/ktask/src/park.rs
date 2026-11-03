@@ -6,7 +6,7 @@
 
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::current_run_queue;
+use crate::{TaskState, current_run_queue};
 
 /// Parks using a persistent wake latch; the caller retains a strong task ref.
 ///
@@ -16,11 +16,22 @@ use crate::current_run_queue;
 /// Blocked state is published before releasing the latch, so a racing wake
 /// either prevents parking or observes a task it can unblock.
 pub(crate) fn park_task(woke: &SpinNoIrq<bool>) {
+    park_task_unless(woke, TaskState::Blocked, || false, || {});
+}
+
+// Recheck cancellation after publishing Blocked: signal wakeup can select a
+// different run queue, so checking only before blocked_resched loses a wake.
+pub(crate) fn park_task_unless(
+    woke: &SpinNoIrq<bool>,
+    state: TaskState,
+    stop: impl FnOnce() -> bool,
+    on_block: impl FnOnce(),
+) -> bool {
     {
         let mut woke = woke.lock();
         if *woke {
             *woke = false;
-            return;
+            return false;
         }
     }
 
@@ -28,8 +39,9 @@ pub(crate) fn park_task(woke: &SpinNoIrq<bool>) {
     let mut woke = woke.lock();
     if *woke {
         *woke = false;
-        return;
+        return false;
     }
-
-    rq.blocked_resched(woke);
+    on_block();
+    rq.blocked_resched(woke, state, stop);
+    true
 }

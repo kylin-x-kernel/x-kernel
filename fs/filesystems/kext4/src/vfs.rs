@@ -19,7 +19,7 @@ use kvfs::{
     VfsResult, WriteBeginRequest, WriteEndRequest, WritebackControl, XattrName, XattrNameRef,
     XattrNameSink, XattrSetFlags, default_evict_inode, inode_init_owner,
 };
-use pagecache::FolioGuard;
+use pagecache::FolioRead;
 
 use crate::{
     BlockMapping, BlockMappingFlags, DirectoryFileType, Ext4DeviceId, Ext4DirEntryRef, Ext4DirPos,
@@ -1492,12 +1492,13 @@ fn read_backing_at(mapping: &AddressSpace, buf: &mut [u8], offset: u64) -> VfsRe
 }
 
 impl AddressSpaceOperations for Ext4AddressSpaceOperations {
-    fn read_folio(&self, mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         let offset = folio
             .index()
             .checked_mul(PAGE_SIZE_4K as u64)
             .ok_or(VfsError::InvalidInput)?;
-        read_backing_at(mapping, folio.data(), offset)
+        let result = read_backing_at(mapping, folio.data(), offset);
+        folio.complete(result)
     }
 
     fn write_begin(&self, mapping: &AddressSpace, request: WriteBeginRequest) -> VfsResult<()> {
@@ -1538,7 +1539,7 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         writeback::writepages(mapping, control)
     }
 
-    fn readahead(&self, control: &mut ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
+    fn readahead(&self, control: &mut ReadaheadControl<'_>) -> VfsResult<()> {
         if control.count() == 0 {
             return Ok(());
         }

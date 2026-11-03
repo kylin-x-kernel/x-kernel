@@ -9,7 +9,7 @@ use core::ops::Range;
 
 use kerrno::{KError, KResult};
 use ksync::Mutex;
-use ktask::WaitQueue;
+use ktask::completion::CompletionWait;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{
@@ -23,27 +23,6 @@ use crate::{
 /// pass. This protocol carries no pass budget or statistics.
 pub type WritebackRangeResult = Result<usize, (usize, KError)>;
 
-// Uses the same hashed wait-bucket pattern as Linux's folio_wait_table,
-// without a per-folio waiter field. Wakeups notify the entire bucket rather
-// than matching a folio/bit key; each waiter rechecks its own folio's state.
-static WRITEBACK_WAITERS: [WaitQueue; 256] = [const { WaitQueue::new() }; 256];
-
-fn writeback_waiters(folio: &Arc<Folio>) -> &'static WaitQueue {
-    let address = Arc::as_ptr(folio) as usize;
-    &WRITEBACK_WAITERS[((address >> 3) ^ (address >> 11)) % WRITEBACK_WAITERS.len()]
-}
-
-pub(super) fn wait_on_writeback(folio: &Arc<Folio>) {
-    writeback_waiters(folio).wait_until(|| {
-        let is_complete = !folio.lock().is_under_writeback();
-        #[cfg(unittest)]
-        if !is_complete {
-            crate::pagecache_unittest::observe_writeback_wait(folio);
-        }
-        is_complete
-    });
-}
-
 // Returns the covering half-open page range; empty byte ranges cover no pages.
 fn byte_range_to_page_range(range: Range<u64>) -> (PageIndex, PageIndex) {
     if range.is_empty() {
@@ -56,25 +35,29 @@ fn byte_range_to_page_range(range: Range<u64>) -> (PageIndex, PageIndex) {
 }
 
 fn finish_writeback(state: &Mutex<MappingPagesState>, folio: &Arc<Folio>, is_complete: bool) {
-    let mut locked = folio.lock();
+    // Completion owns the writeback bit, not the content lock. A reader or
+    // writer may retain that lock while I/O finishes on another task.
     let mut state = state.lock();
-    let index = locked.index();
+    let index = folio.index();
     let is_current = state.is_current(index, folio);
     if is_current && !is_complete {
-        locked.mark_dirty();
+        folio.set_dirty();
     }
-    locked.end_writeback();
     if is_current {
         state.writeback_marks.remove(&index);
-        if locked.is_dirty() {
+        if folio.is_dirty() {
             state.dirty_marks.insert(index);
         } else {
             state.dirty_marks.remove(&index);
         }
     }
+    // A tag scan must not observe the mark gone while the folio still carries
+    // the completed writeback bit. Publish both before releasing the index.
+    let has_waiters = folio.end_writeback();
     drop(state);
-    drop(locked);
-    writeback_waiters(folio).notify_all(false);
+    if has_waiters {
+        folio.wake_writeback();
+    }
 }
 
 /// An immutable data snapshot and the obligation to finish its folios.
@@ -139,6 +122,9 @@ impl<'a> WritebackBatch<'a> {
 /// folios are redirtied, while concurrent dirtying is preserved. Dropping this
 /// object performs zero-prefix completion, so callers must drain submitted I/O
 /// before dropping it, including on errors. All operations require task context.
+/// Completion updates atomic folio flags and index marks without acquiring the
+/// content lock. It may run on another task and carries no task-bound wait handle;
+/// the index mutex still requires sleepable context.
 pub struct WritebackCompletion<'a> {
     state: &'a Mutex<MappingPagesState>,
     folios: FolioBatch,
@@ -193,9 +179,13 @@ impl MappingPages {
     /// Holds bounded folio references but no mapping or folio lock while
     /// sleeping. Callers must recheck residency after a wake because a folio
     /// can be detached while writeback runs. Call only from sleepable task context.
-    pub fn wait_on_writeback_range(&self, range: Range<u64>) {
+    ///
+    /// # Errors
+    /// Returns [`KError::InvalidInput`] outside sleepable task context.
+    pub fn wait_on_writeback_range(&self, range: Range<u64>) -> KResult<()> {
+        let wait = CompletionWait::prepare()?;
         if range.is_empty() {
-            return;
+            return Ok(());
         }
         let (mut scan_index, end_index) = byte_range_to_page_range(range);
         let mut batch = FolioBatch::new();
@@ -208,9 +198,10 @@ impl MappingPages {
                 &mut batch,
             );
             for folio in batch.iter() {
-                wait_on_writeback(folio);
+                folio.wait_writeback(&wait);
             }
         }
+        Ok(())
     }
 
     // Like filemap_get_folios_tag, collect one bounded window of resident refs.
@@ -250,8 +241,9 @@ impl MappingPages {
         index: PageIndex,
         candidate: &'a Arc<Folio>,
         pages_skipped: &mut usize,
+        wait: &CompletionWait,
     ) -> Option<FolioGuard<'a>> {
-        let mut folio = candidate.lock();
+        let mut folio = candidate.lock_with(wait);
         let mut state = self.state.lock();
         if !state.is_current(index, candidate) {
             // Replacement and detach update their own marks under the index
@@ -294,6 +286,7 @@ impl MappingPages {
         pages_skipped: &mut usize,
         write_folio_fn: &mut impl FnMut(PageIndex, &[u8], usize) -> KResult<()>,
     ) -> KResult<()> {
+        let wait = CompletionWait::prepare()?;
         if *nr_to_write == 0 || range.is_empty() {
             return Ok(());
         }
@@ -311,7 +304,7 @@ impl MappingPages {
                 if *nr_to_write == 0 {
                     break 'scan;
                 }
-                let index = folio.lock().index();
+                let index = folio.index();
                 let page_start = index
                     .checked_mul(PAGE_SIZE_4K as u64)
                     .ok_or(KError::InvalidInput)?;
@@ -322,7 +315,7 @@ impl MappingPages {
                     continue;
                 }
                 let Some(mut locked) =
-                    self.start_writeback_for_candidate(index, folio, pages_skipped)
+                    self.start_writeback_for_candidate(index, folio, pages_skipped, &wait)
                 else {
                     continue;
                 };
@@ -423,6 +416,7 @@ impl MappingPages {
         max_bytes: usize,
         submit: &mut impl FnMut(WritebackBatch<'a>, &mut usize) -> KResult<()>,
     ) -> KResult<()> {
+        let wait = CompletionWait::prepare()?;
         if *nr_to_write == 0 || range.is_empty() {
             return Ok(());
         }
@@ -444,7 +438,7 @@ impl MappingPages {
                 if *nr_to_write == 0 {
                     break 'scan;
                 }
-                let index = folio.lock().index();
+                let index = folio.index();
                 let page_start = index
                     .checked_mul(PAGE_SIZE_4K as u64)
                     .ok_or(KError::InvalidInput)?;
@@ -471,7 +465,7 @@ impl MappingPages {
                 }
 
                 let Some(mut locked) =
-                    self.start_writeback_for_candidate(index, folio, pages_skipped)
+                    self.start_writeback_for_candidate(index, folio, pages_skipped, &wait)
                 else {
                     batch.submit(submit, nr_to_write)?;
                     if *nr_to_write == 0 {

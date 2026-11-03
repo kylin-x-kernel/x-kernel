@@ -17,7 +17,7 @@ ignored = ["linkme"]
 [features]
 default = []
 watchdog = ["kmutex/watchdog"]
-stats = ["dep:klockstat", "dep:linkme", "klockstat/stats", "kmutex/stats"]
+stats = ["dep:klockstat", "dep:linkme", "klockstat/stats", "kmutex/stats", "kspin/stats"]
 
 [dependencies]
 ktask.workspace = true

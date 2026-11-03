@@ -106,7 +106,7 @@ fn blocked_posix_lock_does_not_force_files_unshare() {
             // The held OFD lock prevents completion until this worker unlocks.
             // Bound failure and still release it so a regression cannot hang QEMU.
             for _ in 0..100000 {
-                if waiter.state() == TaskState::Blocked {
+                if waiter.state() == TaskState::BlockedInterruptible {
                     observed_wait.store(true, Ordering::Release);
                     break;
                 }
@@ -184,7 +184,7 @@ fn blocked_posix_lock_reinstalls_after_shared_files_unshare() {
         let observed_wait = observed_wait.clone();
         move || {
             for _ in 0..100000 {
-                if waiter.state() == TaskState::Blocked {
+                if waiter.state() == TaskState::BlockedInterruptible {
                     observed_wait.store(true, Ordering::Release);
                     break;
                 }

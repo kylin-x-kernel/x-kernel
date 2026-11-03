@@ -14,12 +14,14 @@ fn cached_folio_roundtrip() {
     let cache = new_cache();
     write_cached(&cache, 0, b"hello").unwrap();
 
-    let observed = cache.with_folio(0, |folio| {
-        let folio = folio.expect("cached folio");
-        let observed = folio.data()[..5].to_vec();
-        folio.clear_dirty();
-        observed
-    });
+    let observed = cache
+        .with_folio(0, |folio| {
+            let folio = folio.expect("cached folio");
+            let observed = folio.data()[..5].to_vec();
+            folio.clear_dirty();
+            observed
+        })
+        .unwrap();
     assert_eq!(observed.as_slice(), b"hello");
     assert!(dirty_indices(&cache).is_empty());
 }
@@ -30,7 +32,9 @@ fn cache_storage_does_not_own_visible_length() {
     write_cached(&cache, PAGE_SIZE_4K as u64, b"x").unwrap();
 
     assert_eq!(cache.nrpages(), 1);
-    cache.resize_cached_folios((PAGE_SIZE_4K * 2) as u64, 0);
+    cache
+        .resize_cached_folios((PAGE_SIZE_4K * 2) as u64, 0)
+        .unwrap();
     assert_eq!(cache.nrpages(), 0);
 }
 
@@ -39,7 +43,7 @@ fn failed_materialization_is_not_visible_and_can_be_retried() {
     let cache = new_cache();
     let result = cache.with_folio_or_create(
         7,
-        |folio| {
+        |mut folio| {
             folio.data().fill(0xff);
             Err(kerrno::KError::Io)
         },
@@ -47,16 +51,22 @@ fn failed_materialization_is_not_visible_and_can_be_retried() {
     );
     assert_eq!(result, Err::<(), _>(kerrno::KError::Io));
     assert_eq!(cache.nrpages(), 1);
-    cache.with_folio(7, |folio| assert!(folio.is_none()));
-    cache.resize_cached_folios(8 * PAGE_SIZE_4K as u64, 7 * PAGE_SIZE_4K as u64 + 17);
-    cache.resize_cached_folios(7 * PAGE_SIZE_4K as u64 + 17, 8 * PAGE_SIZE_4K as u64);
+    cache
+        .with_folio(7, |folio| assert!(folio.is_none()))
+        .unwrap();
+    cache
+        .resize_cached_folios(8 * PAGE_SIZE_4K as u64, 7 * PAGE_SIZE_4K as u64 + 17)
+        .unwrap();
+    cache
+        .resize_cached_folios(7 * PAGE_SIZE_4K as u64 + 17, 8 * PAGE_SIZE_4K as u64)
+        .unwrap();
     assert!(dirty_indices(&cache).is_empty());
     cache
         .with_folio_or_create(
             7,
-            |folio| {
+            |mut folio| {
                 folio.data().fill(0x5a);
-                Ok(())
+                folio.complete(Ok(()))
             },
             |folio| {
                 assert!(folio.is_uptodate());
@@ -74,18 +84,22 @@ fn folio_index_survives_detach_and_replacement() {
     let index = 7;
     write_cached(&cache, index * PAGE_SIZE_4K as u64, b"old").unwrap();
     let old = cache.state.lock().entries[&index].clone();
-    cache.resize_cached_folios((index + 1) * PAGE_SIZE_4K as u64, 0);
+    cache
+        .resize_cached_folios((index + 1) * PAGE_SIZE_4K as u64, 0)
+        .unwrap();
     cache
         .filemap_add_folio(super::folio_from_bytes(index, b"new"))
         .unwrap_or_else(|_| panic!("fixture index is absent"));
     let replacement = cache.state.lock().entries[&index].clone();
     assert!(!alloc::sync::Arc::ptr_eq(&old, &replacement));
-    assert_eq!(old.lock().index(), index);
-    assert!(!old.lock().is_dirty());
-    assert_eq!(replacement.lock().index(), index);
-    cache.with_folio(index, |folio| {
-        assert!(folio.unwrap().data()[..3] == *b"new")
-    });
+    assert_eq!(old.lock().unwrap().index(), index);
+    assert!(!old.lock().unwrap().is_dirty());
+    assert_eq!(replacement.lock().unwrap().index(), index);
+    cache
+        .with_folio(index, |folio| {
+            assert!(folio.unwrap().data()[..3] == *b"new")
+        })
+        .unwrap();
 }
 
 #[def_test]
@@ -99,16 +113,20 @@ fn publication_preserves_resident_data_and_missing_run_boundaries() {
     assert_eq!(rejected.paddr(), incoming_addr);
     assert!(rejected.is_dirty());
     core::assert_eq!(&rejected.data()[..5], b"stale");
-    rejected.lock().clear_dirty();
-    cache.with_folio(1, |folio| {
-        let folio = folio.unwrap();
-        core::assert_eq!(&folio.data()[..6], b"winner");
-        assert!(folio.is_dirty());
-    });
+    rejected.lock().unwrap().clear_dirty();
+    cache
+        .with_folio(1, |folio| {
+            let folio = folio.unwrap();
+            core::assert_eq!(&folio.data()[..6], b"winner");
+            assert!(folio.is_dirty());
+        })
+        .unwrap();
     assert_eq!(cache.next_miss_range(0..4), Some(0..1));
     assert_eq!(cache.next_miss_range(1..4), Some(2..4));
     assert_eq!(cache.next_miss_range(1..2), None);
-    cache.resize_cached_folios((PAGE_SIZE_4K * 4) as u64, 0);
+    cache
+        .resize_cached_folios((PAGE_SIZE_4K * 4) as u64, 0)
+        .unwrap();
 }
 
 #[def_test]
@@ -133,7 +151,7 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
         let first = ktask::spawn(move || {
             let result = first_cache.with_folio_or_create(
                 0,
-                |folio| {
+                |mut folio| {
                     first_reads.fetch_add(1, Ordering::Relaxed);
                     folio.data().fill(0xff);
                     first_entered.store(true, Ordering::Release);
@@ -143,7 +161,7 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
                         return Err(kerrno::KError::Io);
                     }
                     folio.data().fill(0x5a);
-                    Ok(())
+                    folio.complete(Ok(()))
                 },
                 |folio| {
                     assert!(folio.data().iter().all(|&byte| byte == 0x5a));
@@ -170,10 +188,10 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
             second_cache
                 .with_folio_or_create(
                     0,
-                    |folio| {
+                    |mut folio| {
                         second_reads.fetch_add(1, Ordering::Relaxed);
                         folio.data().fill(0x5a);
-                        Ok(())
+                        folio.complete(Ok(()))
                     },
                     |folio| {
                         assert!(folio.is_uptodate());
@@ -195,10 +213,7 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
             reads.load(Ordering::Relaxed),
             if fail_first { 2 } else { 1 }
         );
-        assert!(Arc::ptr_eq(
-            &cache.state.lock().entries[&0],
-            &resident
-        ));
+        assert!(Arc::ptr_eq(&cache.state.lock().entries[&0], &resident));
     }
 
     // Use the same observer sequentially: the waiter must see the old locked
@@ -214,9 +229,9 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
     let producer_events = events.clone();
     let producer = ktask::spawn(move || {
         let prepared = producer_cache.readahead_folios(0..2, |folios| {
-            let first = folios.next().unwrap();
+            let mut first = folios.next().unwrap();
             first.data().fill(0x11);
-            first.mark_uptodate();
+            first.complete(Ok(())).unwrap();
             producer_entered.store(true, Ordering::Release);
             producer_events.notify_all(false);
             producer_events.wait_until(|| producer_release.load(Ordering::Acquire));
@@ -231,9 +246,9 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
         reader_cache
             .with_folio_or_create(
                 1,
-                |folio| {
+                |mut folio| {
                     folio.data().fill(0x5a);
-                    Ok(())
+                    folio.complete(Ok(()))
                 },
                 |folio| {
                     folio.mark_dirty();
@@ -252,16 +267,15 @@ fn concurrent_materialization_waits_and_retries_failed_reads() {
     super::READ_WAIT_SIGNAL.lock().take();
     assert_eq!(pages_before_release, 2);
     assert_eq!(cache.nrpages(), 2);
-    assert!(!Arc::ptr_eq(
-        &cache.state.lock().entries[&1],
-        &reserved
-    ));
-    assert!(!reserved.lock().is_uptodate());
-    cache.with_folio(1, |folio| {
-        let folio = folio.unwrap();
-        core::assert!(folio.is_dirty());
-        core::assert!(folio.data().iter().all(|byte| *byte == 0x5a));
-    });
+    assert!(!Arc::ptr_eq(&cache.state.lock().entries[&1], &reserved));
+    assert!(!reserved.lock().unwrap().is_uptodate());
+    cache
+        .with_folio(1, |folio| {
+            let folio = folio.unwrap();
+            core::assert!(folio.is_dirty());
+            core::assert!(folio.data().iter().all(|byte| *byte == 0x5a));
+        })
+        .unwrap();
     assert_eq!(dirty_indices(&cache), alloc::vec![1]);
 }
 
@@ -274,25 +288,29 @@ fn readahead_releases_unconsumed_reservations_and_retains_attempted_reads() {
 
     assert_eq!(
         cache.readahead_folios(0..4, |folios| {
-            let complete = folios.next().unwrap();
+            let mut complete = folios.next().unwrap();
             complete.data().fill(0x11);
-            complete.mark_uptodate();
-            let failed = folios.next().unwrap();
+            complete.complete(Ok(())).unwrap();
+            let mut failed = folios.next().unwrap();
             failed.data()[0] = 0xff;
             // Returning here models a failed second read and an untouched suffix.
         }),
         Ok(4)
     );
     assert_eq!(cache.nrpages(), 2);
-    cache.with_folio(0, |folio| core::assert_eq!(folio.unwrap().data()[0], 0x11));
-    cache.with_folio(1, |folio| assert!(folio.is_none()));
+    cache
+        .with_folio(0, |folio| core::assert_eq!(folio.unwrap().data()[0], 0x11))
+        .unwrap();
+    cache
+        .with_folio(1, |folio| assert!(folio.is_none()))
+        .unwrap();
     assert_eq!(cache.next_miss_range(0..4), Some(2..4));
     cache
         .with_folio_or_create(
             1,
-            |folio| {
+            |mut folio| {
                 folio.data().fill(0x22);
-                Ok(())
+                folio.complete(Ok(()))
             },
             |folio| {
                 core::assert_eq!(folio.data()[0], 0x22);
@@ -301,6 +319,200 @@ fn readahead_releases_unconsumed_reservations_and_retains_attempted_reads() {
         )
         .unwrap();
     assert!(dirty_indices(&cache).is_empty());
+}
+
+#[def_test(serial)]
+fn transferred_read_completes_without_task_or_mapping_lock_ownership() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use ktask::WaitQueue;
+
+    // Successful completion, explicit I/O failure, and abandoned submission.
+    for outcome in 0..3 {
+        let cache = Arc::new(new_cache());
+        let mut pending = None;
+        assert_eq!(
+            cache.readahead_folios(0..2, |folios| pending = folios.next()),
+            Ok(2)
+        );
+        assert_eq!(
+            cache.nrpages(),
+            1,
+            "unconsumed suffix must already be removed"
+        );
+        let mut pending = pending.unwrap();
+        pending.data().fill(0xff);
+        let resident = cache.state.lock().entries[&0].clone();
+        let waiting = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(WaitQueue::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        *super::READ_WAIT_SIGNAL.lock() = Some((resident.clone(), waiting.clone(), events.clone()));
+
+        let reader_cache = cache.clone();
+        let reader_reads = reads.clone();
+        let reader = ktask::spawn(move || {
+            reader_cache
+                .with_folio_or_create(
+                    0,
+                    |mut folio| {
+                        reader_reads.fetch_add(1, Ordering::Relaxed);
+                        folio.data().fill(0x5a);
+                        folio.complete(Ok(()))
+                    },
+                    |folio| {
+                        assert!(folio.is_uptodate());
+                        assert!(folio.data().iter().all(|&byte| byte == 0x5a));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        });
+        events.wait_until(|| waiting.load(Ordering::Acquire));
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert!(resident.try_lock().is_none());
+
+        // The receiver enters hardirq context while the sender retains the
+        // index lock and a reader is enrolled. Completion may need neither
+        // sleepable context nor the mapping lock to publish and wake it.
+        let state = cache.state.lock();
+        let completion = ktask::spawn(move || {
+            let _irq = kirq::context::test_support::ScopedHardIrqContext::enter();
+            match outcome {
+                0 => {
+                    pending.data().fill(0x5a);
+                    pending.complete(Ok(())).unwrap();
+                }
+                1 => core::assert_eq!(
+                    pending.complete(Err(kerrno::KError::Io)),
+                    Err(kerrno::KError::Io)
+                ),
+                _ => drop(pending),
+            }
+        });
+        assert_eq!(completion.join(), 0);
+        drop(state);
+        assert_eq!(reader.join(), 0);
+        super::READ_WAIT_SIGNAL.lock().take();
+        assert_eq!(reads.load(Ordering::Relaxed), usize::from(outcome != 0));
+        assert!(Arc::ptr_eq(&resident, &cache.state.lock().entries[&0]));
+    }
+}
+
+#[def_test(serial)]
+fn demand_read_waits_for_owned_completion_and_reports_failure() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use ksync::Mutex;
+    use ktask::WaitQueue;
+
+    for succeeds in [false, true] {
+        let cache = Arc::new(new_cache());
+        let pending = Arc::new(Mutex::new(None));
+        let waiting = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(WaitQueue::new());
+        let reader_cache = cache.clone();
+        let reader_pending = pending.clone();
+        let reader_waiting = waiting.clone();
+        let reader_events = events.clone();
+        let reader = ktask::spawn(move || {
+            let result = reader_cache.with_folio_or_create(
+                0,
+                |folio| {
+                    let resident = reader_cache.state.lock().entries[&0].clone();
+                    *super::READ_WAIT_SIGNAL.lock() =
+                        Some((resident, reader_waiting.clone(), reader_events.clone()));
+                    *reader_pending.lock() = Some(folio);
+                    // Submission succeeds while the controller still owns completion.
+                    Ok(())
+                },
+                |folio| {
+                    assert!(succeeds);
+                    assert!(folio.data().iter().all(|&byte| byte == 0x5a));
+                    Ok(())
+                },
+            );
+            core::assert_eq!(
+                result,
+                if succeeds {
+                    Ok(())
+                } else {
+                    Err(kerrno::KError::Io)
+                }
+            );
+        });
+        events.wait_until(|| waiting.load(Ordering::Acquire));
+        let mut folio = pending.lock().take().unwrap();
+        folio.data().fill(0x5a);
+        let result = if succeeds {
+            Ok(())
+        } else {
+            Err(kerrno::KError::Io)
+        };
+        assert_eq!(folio.complete(result), result);
+        assert_eq!(reader.join(), 0);
+        super::READ_WAIT_SIGNAL.lock().take();
+        cache
+            .with_folio(0, |folio| core::assert_eq!(folio.is_some(), succeeds))
+            .unwrap();
+    }
+}
+
+#[def_test(serial)]
+fn explicit_truncate_waits_for_transferred_initialization() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use ktask::WaitQueue;
+
+    // Partial EOF and full removal explicitly drain initialization.
+    for action in 0..2 {
+        let cache = Arc::new(new_cache());
+        let mut pending = None;
+        cache
+            .readahead_folios(0..1, |folios| pending = folios.next())
+            .unwrap();
+        let mut pending = pending.unwrap();
+        let resident = cache.state.lock().entries[&0].clone();
+        let old = Arc::downgrade(&resident);
+        let waiting = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(WaitQueue::new());
+        *super::READ_WAIT_SIGNAL.lock() = Some((resident.clone(), waiting.clone(), events.clone()));
+        let retained = cache.clone();
+        let truncator = ktask::spawn(move || {
+            cache
+                .resize_cached_folios(PAGE_SIZE_4K as u64, if action == 0 { 17 } else { 0 })
+                .unwrap();
+            drop(cache);
+        });
+        events.wait_until(|| waiting.load(Ordering::Acquire));
+        assert!(resident.try_lock().is_none());
+        pending.data().fill(0x5a);
+        pending.complete(Ok(())).unwrap();
+        assert_eq!(truncator.join(), 0);
+        super::READ_WAIT_SIGNAL.lock().take();
+        {
+            let cache = &retained;
+            if action == 0 {
+                cache
+                    .with_folio(0, |folio| {
+                        let folio = folio.unwrap();
+                        assert!(folio.data()[..17].iter().all(|&byte| byte == 0x5a));
+                        assert!(folio.data()[17..].iter().all(|&byte| byte == 0));
+                    })
+                    .unwrap();
+            } else {
+                assert_eq!(cache.nrpages(), 0);
+                assert!(resident.lock().unwrap().is_invalidated());
+                write_cached(cache, 0, b"replacement").unwrap();
+                assert!(!Arc::ptr_eq(&resident, &cache.state.lock().entries[&0]));
+            }
+        }
+        drop(retained);
+        drop(resident);
+        assert!(old.upgrade().is_none());
+    }
 }
 
 #[def_test]
@@ -318,7 +530,10 @@ fn resident_batch_preserves_sparse_positions_and_bounds_the_snapshot() {
             crate::FolioBatch::CAPACITY + 5,
             |_| panic!("initialized resident hits must not reread storage"),
             |index, folio| {
-                assert!(cache.state.try_lock().is_some(), "copy must run outside the index lock");
+                assert!(
+                    cache.state.try_lock().is_some(),
+                    "copy must run outside the index lock"
+                );
                 core::assert_eq!(index, visited);
                 if index % 2 == 0 {
                     core::assert_eq!(folio.unwrap().data()[0], index as u8);
@@ -332,7 +547,10 @@ fn resident_batch_preserves_sparse_positions_and_bounds_the_snapshot() {
         Ok(crate::FolioBatch::CAPACITY)
     );
     core::assert_eq!(visited, crate::FolioBatch::CAPACITY as u64);
-    core::assert_eq!(cache.nrpages(), ((crate::FolioBatch::CAPACITY + 5).div_ceil(2)) as u64);
+    core::assert_eq!(
+        cache.nrpages(),
+        ((crate::FolioBatch::CAPACITY + 5).div_ceil(2)) as u64
+    );
 }
 
 #[def_test]
@@ -341,15 +559,21 @@ fn resident_batch_stops_before_initializing_the_next_page() {
 
     let cache = new_cache();
     write_cached(&cache, 0, b"first").unwrap();
-    core::assert_eq!(cache.with_folio_or_create(1, |_| Err(kerrno::KError::Io), |_| Ok(())), Err(kerrno::KError::Io));
     core::assert_eq!(
-        cache.visit_resident_folios(0, 2,
+        cache.with_folio_or_create(1, |_| Err(kerrno::KError::Io), |_| Ok(())),
+        Err(kerrno::KError::Io)
+    );
+    core::assert_eq!(
+        cache.visit_resident_folios(
+            0,
+            2,
             |_| panic!("a short read must not initialize the following reservation"),
             |index, folio| {
                 core::assert_eq!(index, 0);
                 core::assert_eq!(&folio.unwrap().data()[..5], b"first");
                 Ok(ControlFlow::Break(()))
-            }),
+            }
+        ),
         Ok(1)
     );
 }

@@ -9,14 +9,14 @@ use ksignal::{
     SigchldChildExitSignalInfo, SignalInfo,
     api::{PreparedChildExitSignal as PreparedKsignalChildExitSignal, ProcessSignalManager},
 };
-use ktask::{KtaskRef, TaskInner, current};
+use ktask::{KtaskRef, current};
 
 use crate::{AsThread, Pid, Process, Thread, Tid, lookup};
 
-fn send_signal_thread_inner(task: &TaskInner, thread: &Thread, sig: SignalInfo) {
+fn send_signal_thread_inner(task: &KtaskRef, thread: &Thread, sig: SignalInfo) {
     let signal = thread.signal_manager();
     if signal.send_signal(sig) {
-        task.interrupt();
+        ktask::signal_task(task);
     }
 }
 
@@ -45,7 +45,7 @@ impl PreparedChildExitSignal {
         if let Some(tid) = self.commit()
             && let Ok(task) = lookup::task(tid)
         {
-            task.interrupt();
+            ktask::signal_task(&task);
         }
     }
 }
@@ -96,7 +96,7 @@ pub fn send_to_process_ref(proc: &Arc<Process>, sig: Option<SignalInfo>) -> KRes
         if let Some(tid) = signal_manager.send_signal(sig)
             && let Ok(task) = lookup::task(tid)
         {
-            task.interrupt();
+            ktask::signal_task(&task);
         }
     }
 
@@ -175,19 +175,22 @@ pub fn send_to_thread(tgid: Option<Pid>, tid: Tid, sig: Option<SignalInfo>) -> K
 pub fn send_sweep_kill(task: &KtaskRef) -> KResult<()> {
     let thread = task.try_as_thread().ok_or(KError::OperationNotPermitted)?;
     if thread.signal_manager().deliver_sweep_kill() {
-        task.interrupt();
+        ktask::signal_task(task);
     }
     Ok(())
 }
 
-/// Interrupts the current task backing the target thread, if present.
+/// Notifies the target thread after pending signals become deliverable.
+///
+/// Interruptible waits may resume; killable waits require pending SIGKILL.
+/// Uninterruptible waits remain asleep until their event source wakes them.
 ///
 /// # Errors
 ///
 /// Returns `KError::NoSuchProcess` when a nonzero TID is not published.
 /// TID zero interrupts the current task.
 pub fn interrupt_thread(tid: Tid) -> KResult<()> {
-    lookup::task(tid)?.interrupt();
+    ktask::signal_task(&lookup::task(tid)?);
     Ok(())
 }
 

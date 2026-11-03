@@ -158,9 +158,11 @@ ext4 不保存设备对齐常量或驱动清单，也不为设备地址要求额
 
 部分首尾块继续用 staging buffer；hole 和 unwritten extent 仍只填零，返回长度仍受 inode
 EOF 限制。`read_at` 返回错误时目标缓冲可能已被后端修改，不能把其前缀当作成功读取。
-KVFS/PageCache 单页填充只有在 `read_folio` 成功后才能置 uptodate；ext4 批量 readahead
-只有在整段 backing read 成功后才调用 `complete_folio`。失败后的需求重试必须完整初始化
-目标页，才可供 buffered read 或文件映射使用。
+KExt4's `read_folio` receives a `FolioRead`, reads the whole page synchronously,
+then calls `complete` to publish the result and unlock. Batched readahead calls
+`complete_folio` only after the entire backing read succeeds. A demand retry after
+failure must fully initialize the target page before buffered reads or file
+mappings can use it.
 
 `file/read_tests.rs` 使用 1/2/4 KiB filesystem block 与 512 B/4 KiB device block 组合，覆盖
 对齐直读、非对齐切片回退、短缓冲、hole、unwritten 和非零 17 字节 EOF 尾块；mock 同样拒绝

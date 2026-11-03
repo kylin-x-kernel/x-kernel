@@ -4,10 +4,10 @@
 
 //! Shared address-space test fixtures.
 
-use pagecache::FolioGuard;
 use alloc::sync::Weak;
 
 use memaddr::PAGE_SIZE_4K;
+use pagecache::FolioRead;
 use unittest::def_test;
 
 use super::{AddressSpace, AddressSpaceOperations, empty_address_space_operations};
@@ -40,9 +40,9 @@ impl InodeOperations for TruncateOps {
 impl FileOperations for TruncateOps {}
 
 impl AddressSpaceOperations for TruncateOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         folio.data().fill(0);
-        Ok(())
+        folio.complete(Ok(()))
     }
 }
 

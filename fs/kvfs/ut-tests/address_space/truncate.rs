@@ -4,7 +4,6 @@
 
 //! Size publication, view invalidation and final teardown tests.
 
-use pagecache::FolioGuard;
 use alloc::{
     string::String,
     sync::{Arc, Weak},
@@ -14,6 +13,7 @@ use alloc::{
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
+use pagecache::FolioRead;
 use unittest::def_test;
 use vmobj::{
     MappingViewKind, MappingViewNotifier, MappingViewSpec, ObjectInvalidateWork, ObjectViewHit,
@@ -55,9 +55,9 @@ struct PanicWritebackOps;
 static PANIC_WRITEBACK_OPERATIONS: PanicWritebackOps = PanicWritebackOps;
 
 impl AddressSpaceOperations for PanicWritebackOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         folio.data().fill(0);
-        Ok(())
+        folio.complete(Ok(()))
     }
 
     // Ordinary writeback during final eviction is the regression this mock reports.
@@ -271,13 +271,15 @@ fn truncate_partial_page_growth_zeros_cached_old_eof() {
         .expect("partial-page growth succeeds");
 
     assert_eq!(inode.size(), new_len);
-    address_space.with_folio(0, |folio| {
-        let data = folio.expect("EOF folio remains cached").data();
-        assert!(data[..old_len as usize].iter().all(|byte| *byte == 0x5a));
-        assert!(
-            data[old_len as usize..new_len as usize]
-                .iter()
-                .all(|byte| *byte == 0)
-        );
-    });
+    address_space
+        .with_folio(0, |folio| {
+            let data = folio.expect("EOF folio remains cached").data();
+            assert!(data[..old_len as usize].iter().all(|byte| *byte == 0x5a));
+            assert!(
+                data[old_len as usize..new_len as usize]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+        })
+        .unwrap();
 }

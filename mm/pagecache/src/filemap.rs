@@ -9,7 +9,7 @@ use core::ops::ControlFlow;
 
 use kerrno::{KError, KResult};
 
-use crate::{Folio, FolioBatch, FolioGuard, MappingPages, PageIndex, PinnedFolio};
+use crate::{Folio, FolioBatch, FolioGuard, FolioRead, MappingPages, PageIndex, PinnedFolio};
 
 impl MappingPages {
     fn get_or_create_folio(&self, index: PageIndex) -> KResult<Arc<Folio>> {
@@ -35,7 +35,7 @@ impl MappingPages {
             };
             // This private object cannot block. Preserve folio -> index order
             // when attaching its allocation-lifetime capacity charge.
-            let mut locked = folio.lock();
+            let mut locked = folio.lock()?;
             state = self.state.lock();
             if state.entries.contains_key(&index) {
                 // Another allocator may have published this index while the
@@ -64,7 +64,7 @@ impl MappingPages {
     fn with_initialized_folio<R>(
         &self,
         index: PageIndex,
-        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        mut read: impl FnMut(FolioRead) -> KResult<()>,
         f: impl FnOnce(&Arc<Folio>, &mut FolioGuard<'_>) -> KResult<R>,
     ) -> KResult<R> {
         // This helper's lock order is folio -> mapping state. After waiting for
@@ -72,9 +72,7 @@ impl MappingPages {
         let mut folio = self.get_or_create_folio(index)?;
         loop {
             let Some(mut locked) = folio.try_lock() else {
-                #[cfg(unittest)]
-                crate::pagecache_unittest::observe_read_wait(&folio);
-                drop(folio.lock());
+                drop(folio.lock_killable()?);
                 folio = self.get_or_create_folio(index)?;
                 continue;
             };
@@ -88,12 +86,12 @@ impl MappingPages {
             }
             drop(state);
 
-            let was_dirty = locked.is_dirty();
             if !locked.is_uptodate() {
-                read(&mut locked)?;
-                locked.mark_uptodate();
-                if was_dirty != locked.is_dirty() {
-                    self.reconcile_dirty_folio(&folio, &locked);
+                locked = read_locked_folio(&folio, locked, &mut read)?;
+                if !self.state.lock().is_current(index, &folio) {
+                    drop(locked);
+                    folio = self.get_or_create_folio(index)?;
+                    continue;
                 }
             }
             let was_dirty = locked.is_dirty();
@@ -107,14 +105,17 @@ impl MappingPages {
 
     /// Initializes and pins one resident folio without exposing cache mutation.
     ///
-    /// `read` runs without the mapping index lock and is called only when the
-    /// folio is not up to date. The owner must exclude invalidation and validate
-    /// EOF around this operation. The returned reference keeps the allocation
-    /// alive if the cache entry is later evicted.
+    /// `read` receives initialization ownership without the mapping index lock
+    /// only when the folio is not up to date. It may transfer that ownership to
+    /// completion; this method waits for completion and checks residency again.
+    /// The owner must exclude invalidation and validate EOF around this operation.
+    /// The returned reference keeps the allocation alive after cache eviction.
+    /// Waiting is killable: `Interrupted` leaves any submitted read owned by
+    /// its completion token. Invalid waiting context returns `InvalidInput`.
     pub fn pin_folio_or_create(
         &self,
         index: PageIndex,
-        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        read: impl FnMut(FolioRead) -> KResult<()>,
     ) -> KResult<PinnedFolio> {
         self.with_initialized_folio(index, read, |folio, _locked| {
             Ok(PinnedFolio::new(folio.clone()))
@@ -164,22 +165,24 @@ impl MappingPages {
     /// non-uptodate folio is reported as `None`; partial read data is not exposed.
     /// Dirty-state changes made by `f` are reflected in the cache's writeback
     /// index before this method returns.
+    ///
+    /// # Errors
+    /// Waiting returns [`KError::InvalidInput`] outside sleepable task context
+    /// or [`KError::Interrupted`] for a pending uncatchable kill, before `f` runs.
     pub fn with_folio<R>(
         &self,
         index: PageIndex,
         f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> R,
-    ) -> R {
+    ) -> KResult<R> {
         loop {
             let state = self.state.lock();
             let Some(folio) = state.entries.get(&index).cloned() else {
                 drop(state);
-                return f(None);
+                return Ok(f(None));
             };
             let Some(mut locked) = folio.try_lock() else {
                 drop(state);
-                #[cfg(unittest)]
-                crate::pagecache_unittest::observe_read_wait(&folio);
-                drop(folio.lock());
+                drop(folio.lock_killable()?);
                 continue;
             };
             drop(state);
@@ -189,7 +192,7 @@ impl MappingPages {
             if needs_dirty_reconciliation {
                 self.reconcile_dirty_folio(&folio, &locked);
             }
-            return result;
+            return Ok(result);
         }
     }
 
@@ -216,7 +219,7 @@ impl MappingPages {
         &self,
         start: PageIndex,
         count: usize,
-        read: impl Fn(&mut FolioGuard<'_>) -> KResult<()>,
+        read: impl Fn(FolioRead) -> KResult<()>,
         mut visit: impl FnMut(PageIndex, Option<&mut FolioGuard<'_>>) -> KResult<ControlFlow<()>>,
     ) -> KResult<usize> {
         let count = count.min(FolioBatch::CAPACITY);
@@ -238,7 +241,7 @@ impl MappingPages {
         let mut slot = 0;
         for (offset, index) in (start..end).enumerate() {
             let result = if slot < batch.len() && indices[slot] == index {
-                let cached = batch.with_read_folio(slot, |folio| visit(index, Some(folio)));
+                let cached = batch.with_read_folio(slot, |folio| visit(index, Some(folio)))?;
                 slot += 1;
                 match cached {
                     Some(result) => result,
@@ -262,7 +265,7 @@ impl MappingPages {
     fn with_resident_folio<R>(
         &self,
         index: PageIndex,
-        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        mut read: impl FnMut(FolioRead) -> KResult<()>,
         f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> KResult<R>,
     ) -> KResult<R> {
         loop {
@@ -273,13 +276,15 @@ impl MappingPages {
             };
             let Some(mut locked) = folio.try_lock() else {
                 drop(state);
-                drop(folio.lock());
+                drop(folio.lock_killable()?);
                 continue;
             };
             drop(state);
             if !locked.is_uptodate() {
-                read(&mut locked)?;
-                locked.mark_uptodate();
+                locked = read_locked_folio(&folio, locked, &mut read)?;
+                if !self.state.lock().is_current(index, &folio) {
+                    continue;
+                }
             }
             let was_dirty = locked.is_dirty();
             let result = f(Some(&mut locked));
@@ -292,16 +297,20 @@ impl MappingPages {
 
     /// Runs `f` with an initialized resident folio, reading it if necessary.
     ///
-    /// An absent folio is installed before initialization. The folio mutex
+    /// An absent folio is installed before initialization. The folio lock
     /// serializes readers; the mapping index lock is released before `read`.
-    /// Failed reads leave a non-uptodate folio that a later reader can retry.
+    /// `read` owns initialization and must complete or drop its token, possibly
+    /// from another context. A successful submission is followed by a wait and
+    /// an uptodate check; failed completion returns [`KError::Io`]. Failed reads
+    /// leave a non-uptodate folio that a later reader can retry. After detach,
+    /// `read` can be invoked again for the replacement identity.
     /// The owner must exclude invalidation and recheck EOF around this operation.
     /// Neither callback may reenter the mapping; dirty changes made by `f`
     /// are reconciled before releasing the folio lock.
     pub fn with_folio_or_create<R>(
         &self,
         index: PageIndex,
-        read: impl FnOnce(&mut FolioGuard<'_>) -> KResult<()>,
+        read: impl FnMut(FolioRead) -> KResult<()>,
         f: impl FnOnce(&mut FolioGuard<'_>) -> KResult<R>,
     ) -> KResult<R> {
         self.with_initialized_folio(index, read, |_folio, locked| f(locked))
@@ -317,7 +326,9 @@ impl MappingPages {
     pub fn filemap_add_folio(&self, folio: Folio) -> Result<(), Folio> {
         let index = folio.index();
         // Preserve folio -> index lock order even for privately owned pages.
-        let mut locked = folio.lock();
+        let Some(mut locked) = folio.try_lock() else {
+            return Err(folio);
+        };
         let mut state = self.state.lock();
         if state.entries.contains_key(&index) {
             drop(locked);
@@ -335,6 +346,24 @@ impl MappingPages {
         state.entries.insert(index, Arc::new(folio));
         Ok(())
     }
+}
+
+// Read submission and completion are separate: only the initialization owner
+// publishes uptodate. The caller rechecks residency after acquiring this guard.
+fn read_locked_folio<'a>(
+    folio: &'a Arc<Folio>,
+    locked: FolioGuard<'a>,
+    read: &mut impl FnMut(FolioRead) -> KResult<()>,
+) -> KResult<FolioGuard<'a>> {
+    // Validate before handing initialization to the filesystem. Completion may
+    // outlive this call; a signal only cancels this reader's wait, not the I/O.
+    let wait = ktask::completion::CompletionWait::prepare()?;
+    read(locked.into_read(folio))?;
+    let locked = folio.lock_killable_with(&wait)?;
+    if !locked.is_uptodate() {
+        return Err(KError::Io);
+    }
+    Ok(locked)
 }
 
 unittest::path_mod_test!(filemap_unittest, "../ut-tests/filemap_unittest.rs");

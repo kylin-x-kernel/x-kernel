@@ -151,6 +151,8 @@ fn interruptible_returns_ready_operation_without_consuming_signal() {
         curr.is_interrupted(),
         "a ready operation must not consume a pending signal"
     );
+    assert_eq!(block_on_interruptible(core::future::ready(7u32)), Ok(7));
+    assert!(curr.is_interrupted());
     curr.clear_interrupt();
 }
 
@@ -175,7 +177,11 @@ fn interruptible_observes_signal_only_after_operation_blocks() {
         _ => panic!("a pending operation must observe the signal"),
     };
     assert!(error.is_task_interrupt());
-    assert_eq!(polls.get(), 2, "the operation must be re-polled before the signal");
+    assert_eq!(
+        polls.get(),
+        2,
+        "the operation must be re-polled before the signal"
+    );
     assert!(!curr.is_interrupted(), "the observed signal is consumed");
 }
 
@@ -197,10 +203,7 @@ fn interruptible_keeps_signal_pending_when_blocked_operation_becomes_ready() {
     ready.set(true);
     curr.interrupt();
 
-    assert!(matches!(
-        future.as_mut().poll(&mut cx),
-        Poll::Ready(Ok(9))
-    ));
+    assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(9))));
     assert!(
         curr.is_interrupted(),
         "progress after a blocked round must not consume the signal"

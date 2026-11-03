@@ -2543,6 +2543,7 @@ dependencies = [
  "linux_sysno",
  "memspace",
  "page_table",
+ "pagecache",
  "procfs",
  "tee_kernel",
  "tee_task_iface",
@@ -4172,11 +4173,17 @@ dependencies = [
 name = "pagecache"
 version = "0.3.0-dev"
 dependencies = [
+ "intrusive-collections",
  "kalloc",
+ "kalloc-types",
+ "kcompletion",
  "kerrno",
  "khal",
+ "kidentity",
+ "kirq",
  "ksync",
  "ktask",
+ "linkme",
  "log",
  "memaddr",
  "unittest",

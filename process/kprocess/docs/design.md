@@ -97,7 +97,11 @@ retains init identity; orphan reparenting reserves an init relation slot.
   resolve non-exited processes. Query/pidfd views may retain published zombies.
   `procfs` additionally requires a representative published task for listing.
 - `process_signals` resolves process/group/thread targets and calls `ksignal`,
-  interrupting a chosen task. Process-directed sends target published identities:
+  then calls `ktask::signal_task` after signal-state locks are released.
+  Direct wakeup selects interruptible waits, and also killable waits when
+  SIGKILL is pending. Registered Future notifications and running-task kicks
+  remain active. A wake grants no resource; each waiter rechecks its predicate.
+  Process-directed sends target published identities:
   a still-published zombie accepts no delivery but reports success, so `kill(2)`
   does not observe `ESRCH` before the parent reaps it. `None` probes a target
   without queuing a signal. These helpers do not perform all syscall permission
@@ -124,8 +128,9 @@ retains init identity; orphan reparenting reserves an init relation slot.
   real/effective/saved IDs and allows the effective-UID-zero privilege override.
 - `timer_delivery` registers `ktimer` expiry and `ksignal` dequeue observers;
   CPU timers run on current-user-thread return and wall timers on the alarm task.
-  `UserTaskRuntime for Thread` supplies CPU residency and AArch64 switch roots to
-  `ktask`; `CurrentThreadSignalIf` adapts current-task signal injection.
+  `UserTaskRuntime for Thread` supplies CPU residency, pending-fatal-signal
+  queries and AArch64 switch roots to `ktask`; `CurrentThreadSignalIf` adapts
+  current-task signal injection.
 - `TaskStat`, `system_view`, nice/scheduler and CPU-accounting APIs provide
   procfs/scheduler snapshots rather than owning hardware scheduling policy.
 - PID-namespace identity resolution is public for cross-crate consumers:

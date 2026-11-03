@@ -94,6 +94,13 @@ is complete.
 
 ## Unsafe inventory
 
+Signal delivery wakes the selected task only after releasing signal-state locks.
+`Thread` exposes the existing pending SIGKILL query through `UserTaskRuntime`;
+the scheduler callback cannot sleep or acquire scheduler locks. Direct signal
+wakeup respects the published sleep policy: ordinary signals select interruptible
+waits, SIGKILL also selects killable waits. Event-only waits still require a
+source notification. A signal wake never transfers a source resource or cancels I/O.
+
 Guest fixtures in `ut-tests/lib.rs` retain the raw-waker callbacks formerly
 in `src/tests.rs`. Their data pointers refer to leaked counters or observers;
 the vtables preserve that lifetime and never reclaim the pointed-to storage.

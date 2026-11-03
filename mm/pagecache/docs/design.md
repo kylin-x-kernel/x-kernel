@@ -31,7 +31,7 @@ runtime 不能直接引用它。
 - `folio.rs`：页分配、数据访问、uptodate/dirty/writeback 状态和释放；
 - `folio_batch.rs`：读取、写回与截断共用的有界引用集合，以及持页锁的读取访问接口；
 - `filemap.rs`：lookup、连续引用批量收集、materialize 和 insert-if-absent；
-- `readahead.rs`：有界缺页段查询、页保留和同步读入协调；
+- `readahead.rs`: bounded missing-range lookup, page reservation and transfer of read initialization ownership;
 - `truncate.rs`：尺寸变化时的页移除、尾页清零和 final teardown；
 - `writeback.rs`：dirty candidate、batch helper、开始/完成协议与结果类型；
 - `tests/`：resident storage、truncate 和 writeback 测试。
@@ -60,8 +60,8 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 
 ## 调用约束 / 执行上下文
 
-- 运行于普通 task context，可能分配内存并获取 sleepable mutex；
-- 不可在中断上下文调用；
+- Lookup, allocation, waiting and explicit truncation require sleepable task context; final container destruction does not wait for initialization;
+- `FolioRead::complete` and Drop may run in ordinary I/O completion context without acquiring sleepable locks;
 - 不依赖 current process；
 - owner 必须在调用 resize/writeback 算法时提供已串行化的 inode 状态。
 
@@ -71,7 +71,10 @@ writeback 候选，不提供写回许可，也不引入第二份 folio 状态。
 
 1. 查询 folio tree，缺失时在索引锁外分配，再持锁复核并插入非 uptodate folio；竞争失败的候选在锁外释放。
 2. 索引锁下仅尝试非阻塞取页锁；竞争时释放 state 锁等待，醒来后重新查找。
-3. 释放 state 锁；仅非 uptodate 页调用 owner 的读入闭包，成功后标记 uptodate。
+3. Release the state lock. For a non-uptodate page, transfer responsibility for
+   the held folio lock into `FolioRead` and call the owner's read closure.
+   The completer publishes uptodate before unlocking. The submitter waits,
+   rechecks uptodate and resident identity, then accesses the data.
 4. 初始化失败不暴露部分数据，后续读取可重试；持页锁更新 dirty index 后再解锁。
 
 ### Resize cached folios
@@ -134,20 +137,26 @@ reconciliation。dirty → dirty 和 clean → clean 不改变 tag，避免只�
 该入口按交给 callback 的页数扣预算，包括 callback 拒绝的批次；同步入口仍按
 完成页数扣预算。每批至多 31 页，文件系统必须另行限制在途批次数。
 
-索引 mutex 使用内部 Arc 保活，完成对象不会复制索引或获得 inode 操作权。
-最终索引销毁在全部完成引用释放后执行，届时失效仍驻留的 folio。文件系统还必须
-保留自己的 inode/映射寿命保护，索引保活不能代替物理块映射保护。
-完成按字节前缀结束完整页、重脏后缀并保留并发 redirty；非法前缀或未消费对象
-的 Drop 重脏整批。所有完成和 Drop 都在任务上下文执行，不能放在 BIO 的 IRQ/BH
-回调内，且必须先排空关联 I/O。异步错误记录、后台调度和 fsync 语义由上层负责。
+`WritebackCompletion` borrows the existing index and retains the original folios;
+there is no second index owner. Final index destruction cannot overlap those
+borrows. The filesystem separately retains inode and block-mapping protection
+until I/O is drained. Completion accounts a byte prefix, redirties incomplete
+folios, and preserves concurrent dirtying. An invalid prefix or abandoned batch
+completes with a zero prefix. This changes only atomic folio flags and index
+marks, without acquiring the content lock or carrying the submitter's task wait.
+The index mutex still requires sleepable task context: do not complete or drop
+batches in BIO IRQ/BH callbacks. Deferred error reporting, background scheduling
+and fsync policy remain with the owner.
 
 ## 并发模型
 
 - Folio 与 pin/token 共享同一稳定 `Arc<Folio>`，页的所有权、identity 和数据锁不分离；
-- 回调只得到 `FolioGuard`，不能替换或移出已发布 owner；缓存替换更新索引引用；
+- Ordinary access callbacks borrow `FolioGuard`; initialization callbacks own
+  `FolioRead` until completion. Neither can replace or move out the published
+  folio; cache replacement updates the index reference.
 - `copy_to_uninit` 在原页自己的锁内完整复制初始化页；摘除不禁止复制，EOF 由调用方校验；
 - 一个 mutex 保护 resident folio tree 和 dirty index；
-- 每个 folio 的 mutex 保护数据和 dirty/writeback 状态；
+- The folio lock protects bytes, readahead state and charge attachment. The existing atomic flags also hold dirty, uptodate and invalidation state, allowing final detachment without taking the content lock;
 - 同时核对 resident tree、dirty index 与 folio 状态时，锁顺序固定为
   folio lock → MappingPages state lock；索引锁下只允许非阻塞 try_lock，失败后释放索引锁再等待。
   folio access closure 持页锁完成 dirty index reconciliation；
@@ -203,9 +212,14 @@ folio 引用仍通过 `Arc` 保活页数据。
 dirty 状态。shrink 和 final teardown 会同时删除 resident folio 与对应 dirty index；
 surviving truncated tail 等待写回后清零并重新加入 dirty index；增长时保留尾页，在 folio 锁内清零并标脏，无需等待持数据副本的批量写回。
 
-MappingPages 的 Drop 不等待 I/O：最终所有权排除仍借用容器的写回操作；在任务上下文中
-清 dirty 后，由字段析构释放 entries/marks，外部持有的 folio 也完成清理。
-需要等待写回的清理通过显式 `truncate_final()` 完成。
+MappingPagesState Drop has exclusive access to the index and atomically invalidates
+each entry, clearing dirty without waiting for its content lock. Read tokens
+retain their page, capacity charge and backing resources independently; a later
+completion cannot reinsert a detached page. Writeback completion borrows
+the index and cannot overlap final destruction. Owners that must drain I/O
+before releasing backing resources call `truncate_final()` explicitly. That
+operation waits for initialization and writeback before removal. Admission to
+resize, final truncation and writeback validates sleepable context before mutation.
 
 ### 预读标记与缓存历史提示
 
@@ -220,8 +234,8 @@ dirty 或驻留状态，也不等待其他 folio。预读 I/O 在 callback 返�
 ## Stable page objects and long-lived pins
 
 Each resident entry stores `Arc<Folio>`. The object owns its allocation, immutable
-index and a mutex protecting content and mutable
-state. Callbacks receive only `FolioGuard`, which has no mutable projection to
+index and a task-independent lock protecting content and mutable
+state. Ordinary access callbacks receive `FolioGuard`, which has no mutable projection to
 `Folio`; safe callbacks cannot move out or replace the published page. Replacement
 updates the cache index reference. Existing pins retain exactly the old object,
 including its original synchronization, without retaining the replacement.
@@ -248,17 +262,19 @@ counter or registry. The physical address is derived from the stable allocation.
 ## Residency admission and initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
-reservation, synchronous initialization and truncate.
+reservation and read submission. Transferred folio locks serialize later completion with truncate.
 The filesystem owns capacity policy and supplies one `CacheResidency` provider
 when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under its folio and index mutexes. That successful admission
+`try_add_folio()` under its folio and index locks. That successful admission
 attaches one provider-owned capacity charge to the stable folio. Detaching the
 cache identity does not return it: pins, mapping tokens and read batches keep
 the physical allocation and its charge alive together. Cloning never charges
 again. After the last reference drops, Folio frees the physical allocation and
-returns its charge with neither the folio nor mapping index mutex held. The
+returns its charge with neither the folio nor mapping index lock held. The
 charge retains the provider even when the inode mapping has already gone away.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
+Release and final provider destruction must not sleep: the last reference can
+be released by I/O completion. Admission still requires task context.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
 folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.
@@ -274,3 +290,46 @@ are reported as None from that snapshot and never reserved or initialized. This
 allows a filesystem to own its sparse algorithm without a cache policy flag.
 Callbacks may stop before the next page; errors retain earlier callback progress.
 The fixed FolioBatch and index array allocate no additional heap storage.
+
+## Transferable initialization
+
+`FolioRead` owns one `Arc<Folio>` and the already acquired folio lock. It is the
+read responsibility, not a second page owner or a request registry. Consuming a
+readahead reservation transfers this token; unconsumed reservations stay locked
+until removal. Success publishes whole-page uptodate before releasing the lock;
+failure or abandonment unlocks without publishing partial data. Completion may
+outlive submission and move between CPUs. It cannot require inode data,
+invalidate or mapping index locks held by a waiting caller.
+
+The folio's atomic flags contain lock, writeback, waiters, dirty, uptodate and
+invalidation bits. Acquire/Release
+on the lock protects `UnsafeCell<FolioState>` and page bytes. Hashed IRQ-safe
+wait buckets match folio identity and bit: unlock wakes one lock waiter;
+writeback completion wakes all matching writeback waiters. Stack-pinned wait
+entries are unlinked before destruction, and task parking happens outside the
+bucket lock. Enrollment sets the waiters hint and rechecks the predicate under
+the bucket lock; uncontended completion takes no bucket lock. Only prepared,
+IRQ-safe notifiers borrowed from `CompletionWait` run under that lock, without
+allocating or sleeping. Registration, wake storage and progress stay on the
+waiting task's stack; no per-contention owned Waker is created.
+Lock waiters distinguish notification from granted ownership. After five lost
+acquisitions following notification, a waiter requests handoff: the waking side
+acquires the lock bit and publishes the grant before notifying it. A granted
+waiter accepts ownership without reacquiring. Scheduler-only wakeups do not
+consume this budget. Exclusive wake stops after one selected waiter and may
+leave the conservative waiters hint set until a later scan. Shared bit waits
+observe one completion; the writeback API rechecks the writeback bit afterwards.
+Writeback waits read its atomic bit without taking/releasing the folio lock,
+avoiding self-notification. References protect allocation lifetime separately
+from exclusion and current cache identity. No task-owned MutexGuard is transferred.
+
+Demand-read waits may return `Interrupted` for a pending uncatchable kill. A
+concurrent ownership grant wins over cancellation; otherwise the waiter unlinks
+under the bucket lock before releasing its notifier borrow. Cancellation does
+not cancel the read token or its I/O. Explicit truncation and writeback scans
+remain uninterruptible after successful context admission. Writeback completion
+requires no folio wait, even when another task holds the content lock. Completion
+clears the writeback bit and its index mark under the same index lock, then wakes
+waiters after releasing that lock. Lock statistics count one successful
+acquisition and one contention on the first actual block; task snapshots expose
+the waiting folio address until parking returns.

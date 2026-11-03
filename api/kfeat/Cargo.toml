@@ -12,7 +12,7 @@ description = "Top-level feature selection for x-kernel"
 [package.metadata.cargo-shear]
 # kfeat owns top-level feature forwarding. These optional crates are selected
 # through feature edges rather than direct code references.
-ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "krcu", "kspin", "ksync", "ktask", "ktracing", "memspace", "fs_boot", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno"]
+ignored = ["alloc-engine", "entropy", "fbdevice", "inputdev", "kalloc", "kbpf", "kipi", "kirq", "knet", "krcu", "kspin", "ksync", "ktask", "ktracing", "memspace", "fs_boot", "timer_driver", "procfs", "tee_kernel", "tee_task_iface", "backtrace", "devfs", "kdriver", "kexec", "khal", "kprocess", "kruntime", "ksyscall", "linux_sysno", "pagecache"]
 
 [features]
 default = []
@@ -175,6 +175,8 @@ watchdog_hardlockup = ["kruntime/watchdog_hardlockup"]
 irq_context_debug = ["irq_stat", "dep:kirq", "kirq/irq_context_debug"]
 irq_stat = ["dep:kirq", "kirq/irq_stat"]
 lock_stat = [
+    "dep:pagecache",
+    "pagecache/stats",
     "dep:procfs",
     "procfs/lock_stat",
     "dep:ksync",
@@ -214,6 +216,7 @@ tracepoint = ["ktracing/tracepoint"]
 ebpf = ["dep:kbpf", "ksyscall/ebpf", "dep:fs_boot", "kruntime/fs_ebpf"]
 
 [dependencies]
+pagecache = { workspace = true, optional = true }
 karch = { workspace = true, optional = true }
 kplat = { workspace = true, optional = true }
 ktimer_core = { workspace = true, optional = true }

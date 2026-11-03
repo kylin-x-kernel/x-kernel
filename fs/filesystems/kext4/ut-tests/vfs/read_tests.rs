@@ -70,7 +70,9 @@ fn ext4_failed_read_folio_stays_uninitialized_until_complete_retry() {
     );
     // The failed folio is resident, but with_folio hides non-uptodate data.
     assert_eq!(mapping.nrpages(), 1);
-    mapping.with_folio(0, |folio| assert!(folio.is_none()));
+    mapping
+        .with_folio(0, |folio| assert!(folio.is_none()))
+        .unwrap();
     assert_eq!(device.destinations.lock().len(), 1);
     *device.fail_reads.lock() = false;
     assert_eq!(
@@ -101,7 +103,9 @@ fn ext4_failed_readahead_does_not_publish_prefix_and_buffered_retry_is_complete(
     let reads = core::mem::take(&mut *device.destinations.lock());
     assert!(reads.iter().any(|&(_, _, len)| len >= 2 * PAGE_SIZE_4K));
     for index in 0..expected.len().div_ceil(PAGE_SIZE_4K) {
-        mapping.with_folio(index as u64, |folio| assert!(folio.is_none()));
+        mapping
+            .with_folio(index as u64, |folio| assert!(folio.is_none()))
+            .unwrap();
     }
     // Failed batch reservations are retired; demand retry retains one
     // non-uptodate resident. No modified prefix is readable through the cache.
@@ -115,13 +119,15 @@ fn ext4_failed_readahead_does_not_publish_prefix_and_buffered_retry_is_complete(
     assert!(output[expected.len()..].iter().all(|&byte| byte == 0xa5));
     assert_eq!(position, expected.len() as u64);
     let last_index = (expected.len() / PAGE_SIZE_4K) as u64;
-    mapping.with_folio(last_index, |folio| {
-        let folio = folio.unwrap();
-        assert!(folio.is_uptodate());
-        assert!(!folio.is_dirty());
-        assert_eq!(&folio.data()[..17], &[0x7a; 17]);
-        assert!(folio.data()[17..].iter().all(|&byte| byte == 0));
-    });
+    mapping
+        .with_folio(last_index, |folio| {
+            let folio = folio.unwrap();
+            assert!(folio.is_uptodate());
+            assert!(!folio.is_dirty());
+            assert_eq!(&folio.data()[..17], &[0x7a; 17]);
+            assert!(folio.data()[17..].iter().all(|&byte| byte == 0));
+        })
+        .unwrap();
 }
 
 #[def_test]
@@ -175,7 +181,9 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     let mut position = 64;
     assert_eq!(file.write_from(b"new", &mut position), Err(VfsError::Io));
     assert_eq!(position, 64);
-    mapping.with_folio(0, |folio| assert!(folio.is_none()));
+    mapping
+        .with_folio(0, |folio| assert!(folio.is_none()))
+        .unwrap();
 
     // A partial write must retry the backing read before copying its bytes;
     // otherwise the earlier 0xee prefix could become visible as dirty data.
@@ -193,12 +201,14 @@ fn ext4_failed_read_then_partial_write_reinitializes_before_readback() {
     assert_eq!(position, 67);
     assert_eq!(data_reads(), reads_before_retry + 1);
     expected[64..67].copy_from_slice(b"new");
-    mapping.with_folio(0, |folio| {
-        let folio = folio.unwrap();
-        assert!(folio.is_uptodate());
-        assert!(folio.is_dirty());
-        assert_eq!(folio.data(), expected.as_slice());
-    });
+    mapping
+        .with_folio(0, |folio| {
+            let folio = folio.unwrap();
+            assert!(folio.is_uptodate());
+            assert!(folio.is_dirty());
+            assert_eq!(folio.data(), expected.as_slice());
+        })
+        .unwrap();
     assert_eq!(file.read_from(&mut output, &mut 0), Ok(PAGE_SIZE_4K));
     assert_eq!(output, expected);
 }

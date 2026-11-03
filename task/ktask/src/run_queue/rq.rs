@@ -75,9 +75,9 @@ pub(super) fn request_remote_resched(cpu_id: LogicalCpuId) -> kipi::Result<()> {
 
 /// Kicks a running task off user mode or into a preempt check.
 ///
-/// Blocked waiters are handled by [`TaskInner::interrupt`]'s `PollSet` wake.
-/// A task that is `on_cpu` has no waiter, so NOHZ can leave it in user mode
-/// until the next syscall or timer IRQ. Signal delivery therefore needs a CPU
+/// Blocked waiters are handled by their event source or a state-selected signal wake.
+/// An `on_cpu` task may run in user mode without any wait registration, so NOHZ
+/// can leave it there until the next syscall or timer IRQ. Signal delivery needs a CPU
 /// kick: local `need_resched`, or a reschedule IPI.
 ///
 /// Matches Linux `kick_process`: sample `on_cpu` / `cpu_id` once. A userspace
@@ -155,12 +155,17 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
 
     /// Unblock one task by inserting it into the run queue.
     ///
-    /// This function does nothing if the task is not in [`TaskState::Blocked`],
-    /// which means the task is already unblocked by other cores.
-    pub(super) fn unblock_task(&mut self, task: KtaskRef, resched: bool, is_wake_sync: bool) {
+    /// The task must still be in the sleeping state selected by the wake source.
+    pub(super) fn unblock_task(
+        &mut self,
+        task: KtaskRef,
+        state: TaskState,
+        resched: bool,
+        is_wake_sync: bool,
+    ) {
         // Wakeups can originate in IRQ context; never allocate a task-name string.
         let task_id = task.trace_id();
-        // Try to change the state of the task from `Blocked` to `Ready`,
+        // Try to change the selected sleeping state to `Ready`,
         // if successful, the task will be put into this run queue,
         // otherwise, the task is already unblocked by other cores.
         // Note:
@@ -171,7 +176,7 @@ impl<G: BaseGuard> KRunQueueRef<'_, G> {
         // that chose this queue.
         let (wake_enqueue, decision) =
             self.inner
-                .put_task_with_state(task, TaskState::Blocked, is_wake_sync, resched);
+                .put_task_with_state(task, state, is_wake_sync, resched);
         if wake_enqueue != WakeEnqueue::Rejected {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
@@ -475,6 +480,9 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     ///    takes over. Do not drop the clone thinking the current slot counts
     ///    as the extra ref.
     /// 4. The wait-queue lock is released inside this function before rescheduling.
+    /// 5. `stop` runs after Blocked publication. It must not sleep, allocate,
+    ///    panic, or acquire scheduler/wake-latch locks. Its state writers release
+    ///    their predicate lock before task wakeup.
     ///
     /// # Panics
     ///
@@ -485,7 +493,12 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
     /// `block_on`-free template. `#[track_caller]` points the panic at the
     /// call site.
     #[track_caller]
-    pub(crate) fn blocked_resched(&mut self, mut woke: SpinNoIrqGuard<'_, bool>) {
+    pub(crate) fn blocked_resched(
+        &mut self,
+        mut woke: SpinNoIrqGuard<'_, bool>,
+        state: TaskState,
+        stop: impl FnOnce() -> bool,
+    ) {
         let now_ns = khal::time::monotonic_time_nanos();
         self.account_current_runtime(now_ns);
         let curr = &self.current_task;
@@ -511,7 +524,17 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
 
         // Mark the task as blocked, this has to be done before adding it to the wait queue
         // while holding the lock of the wait queue.
-        curr.set_state(TaskState::Blocked);
+        debug_assert!(state.is_blocked());
+        curr.set_state(state);
+        // Pending-signal inspection serializes with the signal-state writer,
+        // which releases that lock before signal_task(). Once sleep is visible,
+        // either that wake succeeds or this recheck supplies the wake. The
+        // existing on_cpu protocol defers enqueue until switch-out completes.
+        if stop() {
+            // Placement can select a remote idle CPU, so deferred enqueue
+            // must retain the reschedule request as well as the wake itself.
+            crate::wake_task(curr, true);
+        }
         *woke = false;
         drop(woke);
 
@@ -520,7 +543,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         // see `unblock_task()` for details.
 
         debug!("task block: trace_id={}", curr.trace_id());
-        self.inner.resched(pull_if_empty, TaskState::Blocked);
+        self.inner.resched(pull_if_empty, state);
     }
 
     pub(crate) fn set_current_priority(&mut self, prio: isize) -> bool {

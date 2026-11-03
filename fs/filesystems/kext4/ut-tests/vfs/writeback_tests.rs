@@ -168,11 +168,13 @@ fn mapped_writepages_releases_mount_protection_and_preserves_sync_barriers() {
         assert_eq!(file.mapping().writepages(data_only), Ok(()));
         assert_eq!(*device.writes.lock(), 1);
         assert_eq!(device.storage.flush_count(), flushes);
-        file.mapping().with_folio(0, |folio| {
-            let folio = folio.unwrap();
-            assert!(!folio.is_dirty());
-            assert!(!folio.is_under_writeback());
-        });
+        file.mapping()
+            .with_folio(0, |folio| {
+                let folio = folio.unwrap();
+                assert!(!folio.is_dirty());
+                assert!(!folio.is_under_writeback());
+            })
+            .unwrap();
         let private = file.inode().private::<Ext4Inode>().unwrap();
         let mut output = vec![0; input.len()];
         assert_eq!(
@@ -212,11 +214,13 @@ fn mapped_writepages_data_failure_preserves_dirty_folio_and_aborts_full_metadata
     );
     *device.fail_writes.lock() = true;
     assert_eq!(file.mapping().writepages(false), Err(VfsError::Io));
-    file.mapping().with_folio(0, |folio| {
-        let folio = folio.unwrap();
-        assert!(folio.is_dirty());
-        assert!(!folio.is_under_writeback());
-    });
+    file.mapping()
+        .with_folio(0, |folio| {
+            let folio = folio.unwrap();
+            assert!(folio.is_dirty());
+            assert!(!folio.is_under_writeback());
+        })
+        .unwrap();
     let ext4 = ext4_private(&mount).unwrap().read();
     assert!(ext4.journal.as_ref().unwrap().is_aborted());
     assert!(mount.flags().contains(SuperBlockFlags::RDONLY));
@@ -238,11 +242,13 @@ fn mapped_writepages_pipelines_owned_bios_and_drains_out_of_order_failure() {
     assert_eq!(*device.writes.lock(), 4);
     assert!(device.delayed.lock().is_empty());
     for page in [0, 2, 4, 6] {
-        file.mapping().with_folio(page, |folio| {
-            let folio = folio.unwrap();
-            assert!(!folio.is_under_writeback());
-            assert_eq!(folio.is_dirty(), page == 4);
-        });
+        file.mapping()
+            .with_folio(page, |folio| {
+                let folio = folio.unwrap();
+                assert!(!folio.is_under_writeback());
+                assert_eq!(folio.is_dirty(), page == 4);
+            })
+            .unwrap();
     }
     *device.delay_writes.lock() = false;
     assert_eq!(file.mapping().writepages(true), Ok(()));

@@ -15,10 +15,7 @@ use kerrno::{KError, KResult, k_bail};
 use klazy::Lazy;
 use kpoll::{PollContext, PollRegisterError, PollSet};
 use ksync::{Mutex, static_lock};
-use ktask::{
-    WaitQueue,
-    future::{block_on, interruptible},
-};
+use ktask::{WaitQueue, future::block_on_interruptible};
 use ktime_types::TimeSpan;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 
@@ -968,7 +965,7 @@ fn vsock_poll_task() {
         }
 
         // Interruption resumes the loop, which rechecks the stop flag.
-        let _ = block_on(interruptible(poll_vsock_adaptive()));
+        let _ = block_on_interruptible(poll_vsock_adaptive());
     }
 }
 

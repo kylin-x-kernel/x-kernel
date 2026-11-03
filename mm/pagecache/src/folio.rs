@@ -5,7 +5,12 @@
 //! Stable folio ownership and synchronized content access.
 
 use alloc::sync::Arc;
-use core::{fmt, mem::MaybeUninit};
+use core::{
+    cell::UnsafeCell,
+    fmt,
+    mem::MaybeUninit,
+    sync::atomic::{AtomicU8, Ordering},
+};
 
 use kalloc::{UsageKind, global_allocator};
 use kerrno::{KError, KResult};
@@ -13,11 +18,20 @@ use khal::{
     mem::{PhysAddr, VirtAddr, v2p},
     paging::{MappingFlags, PageSize, PageTableMut, PagingError},
 };
-use ksync::{Mutex, MutexGuard};
+use ktask::completion::CompletionWait;
 use log::warn;
 use memaddr::PAGE_SIZE_4K;
 
 use crate::{CacheResidency, PageIndex};
+
+mod wait;
+use wait::{FolioWaitBit, WaitMode};
+
+const LOCKED: u8 = 1;
+const WRITEBACK: u8 = 2;
+const DIRTY: u8 = 8;
+const INVALIDATED: u8 = 16;
+const UPTODATE: u8 = 32;
 
 struct FolioCharge(Arc<dyn CacheResidency>);
 
@@ -103,17 +117,21 @@ impl PinnedFolio {
 
     /// Copies the original page, including after its cache identity is removed.
     ///
-    /// The page's own mutex synchronizes the copy with all writers. Truncate
+    /// The page's own lock synchronizes the copy with all writers. Truncate
     /// may update a retained tail, so this is not an immutable snapshot. The
     /// caller must separately validate EOF when exposing bytes to a file mapping.
     /// Must run in sleepable task context without already holding this folio.
     ///
     /// The destination type requires exactly one page and expresses the full
     /// initialization guarantee without a runtime length check.
-    pub fn copy_to_uninit(&self, destination: &mut [MaybeUninit<u8>; PAGE_SIZE_4K]) {
-        let _guard = self.folio.lock();
+    ///
+    /// # Errors
+    /// Returns [`KError::InvalidInput`] if contention requires waiting outside
+    /// sleepable task context. Failure leaves the destination untouched.
+    pub fn copy_to_uninit(&self, destination: &mut [MaybeUninit<u8>; PAGE_SIZE_4K]) -> KResult<()> {
+        let _guard = self.folio.lock()?;
         // SAFETY: this object owns the initialized allocation for the pin's
-        // lifetime; its mutex serializes every safe access to these bytes.
+        // lifetime; its lock serializes every safe access to these bytes.
         // The destination is writable for one page; ptr::copy permits overlap.
         unsafe {
             core::ptr::copy(
@@ -122,6 +140,7 @@ impl PinnedFolio {
                 PAGE_SIZE_4K,
             );
         }
+        Ok(())
     }
 }
 
@@ -142,7 +161,7 @@ impl MappedFolio {
     }
 
     /// Copies the retained page under its content lock; see PinnedFolio::copy_to_uninit.
-    pub fn copy_to_uninit(&self, destination: &mut [MaybeUninit<u8>; PAGE_SIZE_4K]) {
+    pub fn copy_to_uninit(&self, destination: &mut [MaybeUninit<u8>; PAGE_SIZE_4K]) -> KResult<()> {
         self.pin.copy_to_uninit(destination)
     }
 
@@ -168,16 +187,18 @@ impl MappedFolio {
 pub struct Folio {
     index: PageIndex,
     addr: VirtAddr,
-    state: Mutex<FolioState>,
+    flags: AtomicU8,
+    state: UnsafeCell<FolioState>,
 }
+
+// SAFETY: bytes and non-atomic state require the unique folio lock token.
+// Acquire/Release transfers that access between tokens, independently of tasks.
+// Lock-free reads use immutable identity or atomic flags; final drop is exclusive.
+unsafe impl Sync for Folio {}
 
 #[derive(Debug, Default)]
 struct FolioState {
-    uptodate: bool,
     readahead: bool,
-    dirty: bool,
-    is_invalidated: bool,
-    writeback: bool,
     charge: Option<FolioCharge>,
 }
 
@@ -193,7 +214,8 @@ impl Folio {
         Ok(Self {
             index,
             addr,
-            state: Mutex::new(FolioState::default()),
+            flags: AtomicU8::new(0),
+            state: UnsafeCell::new(FolioState::default()),
         })
     }
 
@@ -207,17 +229,103 @@ impl Folio {
         v2p(self.addr)
     }
 
-    pub(crate) fn lock(&self) -> FolioGuard<'_> {
-        FolioGuard {
-            folio: self,
-            state: self.state.lock(),
+    pub(crate) fn lock(&self) -> KResult<FolioGuard<'_>> {
+        if let Some(guard) = self.try_lock() {
+            return Ok(guard);
         }
+        let wait = CompletionWait::prepare()?;
+        Ok(self.lock_with(&wait))
+    }
+
+    pub(crate) fn lock_killable(&self) -> KResult<FolioGuard<'_>> {
+        if let Some(guard) = self.try_lock() {
+            return Ok(guard);
+        }
+        let wait = CompletionWait::prepare()?;
+        self.lock_killable_with(&wait)
+    }
+
+    pub(super) fn lock_killable_with(&self, wait: &CompletionWait) -> KResult<FolioGuard<'_>> {
+        if !self.wait_for_bit(FolioWaitBit::Locked, wait, WaitMode::Killable) {
+            return Err(KError::Interrupted);
+        }
+        Ok(self.locked_guard())
+    }
+
+    // The operation validates sleepable context before any mutation requiring
+    // mandatory cleanup. Its callbacks restore that context before returning.
+    pub(super) fn lock_with(&self, wait: &CompletionWait) -> FolioGuard<'_> {
+        self.wait_for_bit(FolioWaitBit::Locked, wait, WaitMode::Uninterruptible);
+        self.locked_guard()
     }
 
     pub(crate) fn try_lock(&self) -> Option<FolioGuard<'_>> {
-        self.state
-            .try_lock()
-            .map(|state| FolioGuard { folio: self, state })
+        self.acquire_lock().then(|| self.locked_guard())
+    }
+
+    fn acquire_lock(&self) -> bool {
+        let acquired = self.flags.fetch_or(LOCKED, Ordering::Acquire) & LOCKED == 0;
+        #[cfg(feature = "stats")]
+        if acquired {
+            wait::FOLIO_STATS.record_acquisitions(1);
+        }
+        acquired
+    }
+
+    fn locked_guard(&self) -> FolioGuard<'_> {
+        // Both callers just acquired the unique lock token.
+        FolioGuard { folio: self }
+    }
+
+    fn unlock(&self) {
+        // Publish initialized bytes and state before another token acquires
+        // access. No task-owned mutex or mapping lock participates in completion.
+        self.clear_bit_and_wake(FolioWaitBit::Locked);
+    }
+
+    pub(super) fn is_under_writeback(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & WRITEBACK != 0
+    }
+
+    pub(super) fn wait_writeback(&self, wait: &CompletionWait) {
+        // A shared bit wait observes one completion. Without the folio lock,
+        // writeback may restart before this task runs, so recheck here.
+        while self.is_under_writeback() {
+            self.wait_for_bit(FolioWaitBit::Writeback, wait, WaitMode::Uninterruptible);
+        }
+    }
+
+    // Cache residency can end while a read token retains initialization. Flags
+    // keep detachment independent of that content lock; the token still owns
+    // the allocation, capacity charge and all resources needed by completion.
+    pub(super) fn invalidate(&self) {
+        let _previous = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+                Some((flags | INVALIDATED) & !DIRTY)
+            });
+    }
+
+    // Shared atomic state lets completion redirty without taking the content lock.
+    pub(super) fn set_dirty(&self) {
+        // Detached objects may still have pins, but cannot acquire new cache
+        // dirtiness after the mapping owner has discarded their identity.
+        let _previous = self
+            .flags
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |flags| {
+                (flags & INVALIDATED == 0).then_some(flags | DIRTY)
+            });
+    }
+
+    // Publish completion with the mapping's writeback mark under its index
+    // lock, then notify outside that lock when the returned hint is set.
+    #[must_use = "wake writeback waiters after releasing the index lock"]
+    pub(super) fn end_writeback(&self) -> bool {
+        self.clear_bit(FolioWaitBit::Writeback)
+    }
+
+    pub(super) fn wake_writeback(&self) {
+        self.wake_waiters(FolioWaitBit::Writeback);
     }
 
     /// Accesses a page before publication; published objects expose only guards.
@@ -229,36 +337,38 @@ impl Folio {
 
     /// Marks this privately owned page initialized before publication.
     pub fn mark_uptodate(&mut self) {
-        self.lock().mark_uptodate();
+        *self.flags.get_mut() |= UPTODATE;
     }
 
     /// Marks this privately owned page dirty before publication.
     pub fn mark_dirty(&mut self) {
-        self.lock().mark_dirty();
+        *self.flags.get_mut() |= DIRTY;
     }
 
     /// Returns whether this page is dirty.
     pub fn is_dirty(&self) -> bool {
-        self.lock().is_dirty()
+        self.flags.load(Ordering::Acquire) & DIRTY != 0
     }
 
     /// Returns whether this page is initialized.
     pub fn is_uptodate(&self) -> bool {
-        self.lock().is_uptodate()
+        self.flags.load(Ordering::Acquire) & UPTODATE != 0
     }
 }
 
 impl Drop for Folio {
     fn drop(&mut self) {
-        let mut state = self.state.lock();
-        if state.dirty || state.writeback {
+        debug_assert_eq!(*self.flags.get_mut() & LOCKED, 0);
+        let writeback = *self.flags.get_mut() & WRITEBACK != 0;
+        let state = self.state.get_mut();
+        let dirty = *self.flags.get_mut() & DIRTY != 0;
+        if dirty || writeback {
             warn!(
                 "dropping folio {} with dirty={} writeback={}",
-                self.index, state.dirty, state.writeback
+                self.index, dirty, writeback
             );
         }
         let charge = state.charge.take();
-        drop(state);
         global_allocator().dealloc_pages(self.addr.as_usize(), 1, UsageKind::PageCache);
         // Capacity becomes available only after the physical allocation is
         // gone. The provider callback holds neither the folio nor index lock.
@@ -266,50 +376,79 @@ impl Drop for Folio {
     }
 }
 
-/// Restricted mutable access to one stable folio while its mutex is held.
+/// Restricted mutable access while the folio's task-independent lock is held.
 ///
 /// It never exposes a mutable reference to the owning Folio, so callbacks
 /// cannot replace or move out a published allocation or its synchronization.
 pub struct FolioGuard<'a> {
     folio: &'a Folio,
-    state: MutexGuard<'a, FolioState>,
+}
+
+impl Drop for FolioGuard<'_> {
+    fn drop(&mut self) {
+        self.folio.unlock();
+    }
 }
 
 impl FolioGuard<'_> {
+    fn state(&self) -> &FolioState {
+        // SAFETY: constructing this guard acquired the folio lock. The state
+        // lives in the borrowed folio; no other owner can access it until drop.
+        unsafe { &*self.folio.state.get() }
+    }
+
+    fn state_mut(&mut self) -> &mut FolioState {
+        // SAFETY: the guard holds the unique folio lock token. This exclusive
+        // borrow cannot coexist with another state borrow or outlive the guard.
+        unsafe { &mut *self.folio.state.get() }
+    }
+
+    pub(super) fn into_read(self, folio: &Arc<Folio>) -> FolioRead {
+        debug_assert!(core::ptr::eq(self.folio, Arc::as_ptr(folio)));
+        debug_assert!(!self.is_uptodate());
+        let read = FolioRead {
+            folio: folio.clone(),
+        };
+        // Transfer the existing lock token; never unlock between publication
+        // and handing initialization to the filesystem.
+        core::mem::forget(self);
+        read
+    }
+
     pub(super) fn charge_residency(&mut self, residency: Arc<dyn CacheResidency>) -> KResult<()> {
-        debug_assert!(self.state.charge.is_none());
+        debug_assert!(self.state().charge.is_none());
         residency.try_add_folio()?;
-        self.state.charge = Some(FolioCharge(residency));
+        self.state_mut().charge = Some(FolioCharge(residency));
         Ok(())
     }
 
     /// Returns whether backing data has been initialized successfully.
     pub fn is_uptodate(&self) -> bool {
-        self.state.uptodate
+        self.folio.is_uptodate()
     }
 
     /// Makes a completely initialized folio available to cache readers.
-    pub fn mark_uptodate(&mut self) {
-        self.state.uptodate = true;
+    pub(crate) fn mark_uptodate(&mut self) {
+        self.folio.flags.fetch_or(UPTODATE, Ordering::Release);
     }
 
     /// Marks this newly reserved page as a trigger for the next read window.
     pub fn mark_readahead(&mut self) {
-        self.state.readahead = true;
+        self.state_mut().readahead = true;
     }
 
     /// Returns whether this folio carries a shared read-window trigger.
     pub fn is_readahead(&self) -> bool {
-        self.state.readahead
+        self.state().readahead
     }
 
     /// Consumes a window trigger while holding the folio lock.
     /// Writeback pages retain the marker for a later read.
     pub fn take_readahead(&mut self) -> bool {
-        if self.state.writeback {
+        if self.is_under_writeback() {
             return false;
         }
-        core::mem::take(&mut self.state.readahead)
+        core::mem::take(&mut self.state_mut().readahead)
     }
 
     /// Returns the immutable page index; this does not prove mapping residency.
@@ -319,12 +458,11 @@ impl FolioGuard<'_> {
 
     /// Marks a removed cache entry unusable by previously collected readers.
     pub(crate) fn invalidate(&mut self) {
-        self.state.is_invalidated = true;
-        self.clear_dirty();
+        self.folio.invalidate();
     }
 
     pub(crate) fn is_invalidated(&self) -> bool {
-        self.state.is_invalidated
+        self.folio.flags.load(Ordering::Acquire) & INVALIDATED != 0
     }
 
     /// Returns the physical address of this folio.
@@ -332,41 +470,97 @@ impl FolioGuard<'_> {
         self.folio.paddr()
     }
 
-    /// Marks the folio dirty.
+    /// Marks the folio dirty unless its cache identity has been invalidated.
     pub fn mark_dirty(&mut self) {
-        self.state.dirty = true;
+        self.folio.set_dirty();
     }
 
     /// Returns whether the folio is currently dirty.
     pub fn is_dirty(&self) -> bool {
-        self.state.dirty
+        self.folio.is_dirty()
     }
 
     /// Returns whether a writeback pass is writing this folio.
     pub fn is_under_writeback(&self) -> bool {
-        self.state.writeback
+        self.folio.is_under_writeback()
     }
 
     pub(super) fn start_writeback(&mut self) {
-        debug_assert!(!self.state.writeback);
-        self.state.writeback = true;
+        debug_assert!(!self.is_under_writeback());
+        self.folio.flags.fetch_or(WRITEBACK, Ordering::Relaxed);
     }
 
+    #[cfg(unittest)]
     pub(super) fn end_writeback(&mut self) {
-        debug_assert!(self.state.writeback);
-        self.state.writeback = false;
+        if self.folio.end_writeback() {
+            self.folio.wake_writeback();
+        }
     }
 
     /// Clears the dirty bit after successful writeback or truncation cleanup.
     pub fn clear_dirty(&mut self) {
-        self.state.dirty = false;
+        self.folio.flags.fetch_and(!DIRTY, Ordering::Release);
     }
 
     /// Returns the folio contents as a mutable 4 KiB slice.
     pub fn data(&mut self) -> &mut [u8] {
-        // SAFETY: the restricted guard holds this stable folio's mutex, so no
+        // SAFETY: the restricted guard holds this stable folio's lock, so no
         // other Folio access can read or mutate this allocation during the
         // returned borrow. The guard borrows the stable object that owns the allocation.
         unsafe { core::slice::from_raw_parts_mut(self.folio.addr.as_mut_ptr(), PAGE_SIZE_4K) }
+    }
+}
+
+/// Owns one locked folio until its read completes, possibly on another CPU.
+///
+/// This token retains the allocation and exclusive initialization access. It
+/// contains no mapping pointer or second read state. Complete it only after all
+/// I/O has relinquished the page; dropping it without completion leaves the
+/// folio non-uptodate and wakes waiters so a later demand read can retry.
+#[must_use = "complete the folio after I/O or drop it to abandon initialization"]
+pub struct FolioRead {
+    folio: Arc<Folio>,
+}
+
+impl FolioRead {
+    /// Returns this folio's immutable index.
+    pub fn index(&self) -> PageIndex {
+        self.folio.index()
+    }
+
+    /// Borrows the full page while the initialization token owns exclusive access.
+    pub fn data(&mut self) -> &mut [u8] {
+        // SAFETY: the token retains the stable allocation and the unique folio
+        // lock. The exclusive borrow prevents completion while this slice lives.
+        unsafe { core::slice::from_raw_parts_mut(self.folio.addr.as_mut_ptr(), PAGE_SIZE_4K) }
+    }
+
+    /// Marks this reserved page as a trigger for the next read window.
+    pub fn mark_readahead(&mut self) {
+        // SAFETY: initialization owns the unique folio lock token.
+        unsafe { (*self.folio.state.get()).readahead = true };
+    }
+
+    /// Publishes whole-page read success, unlocks and wakes waiting users.
+    ///
+    /// Success requires every byte initialized, including holes and the EOF
+    /// tail. Failure leaves the page non-uptodate. May run in task or ordinary
+    /// I/O completion context (not NMI); it never acquires a sleepable lock.
+    ///
+    /// # Errors
+    /// Returns the supplied read error unchanged after releasing the lock.
+    pub fn complete(self, result: KResult<()>) -> KResult<()> {
+        if result.is_ok() {
+            self.folio.flags.fetch_or(UPTODATE, Ordering::Release);
+        } else {
+            self.folio.flags.fetch_and(!UPTODATE, Ordering::Release);
+        }
+        result
+    }
+}
+
+impl Drop for FolioRead {
+    fn drop(&mut self) {
+        self.folio.unlock();
     }
 }

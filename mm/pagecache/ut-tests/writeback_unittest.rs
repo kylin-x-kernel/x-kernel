@@ -41,10 +41,12 @@ fn writeback_uses_owner_supplied_visible_length() {
     assert_eq!(writes, vec![(0, PAGE_SIZE_4K), (1, 123)]);
     assert!(dirty_indices(&cache).is_empty());
     for index in 0..2 {
-        let state = cache.with_folio(index, |folio| {
-            let folio = folio.expect("written folio");
-            (folio.is_dirty(), folio.is_under_writeback())
-        });
+        let state = cache
+            .with_folio(index, |folio| {
+                let folio = folio.expect("written folio");
+                (folio.is_dirty(), folio.is_under_writeback())
+            })
+            .unwrap();
         assert_eq!(state, (false, false));
     }
 }
@@ -68,12 +70,14 @@ fn failed_writeback_restores_dirty_state() {
         Err(KError::InvalidInput)
     );
     assert_eq!(dirty_indices(&cache), vec![0]);
-    let is_dirty = cache.with_folio(0, |folio| {
-        let folio = folio.expect("failed-writeback folio");
-        let is_dirty = folio.is_dirty();
-        folio.clear_dirty();
-        is_dirty
-    });
+    let is_dirty = cache
+        .with_folio(0, |folio| {
+            let folio = folio.expect("failed-writeback folio");
+            let is_dirty = folio.is_dirty();
+            folio.clear_dirty();
+            is_dirty
+        })
+        .unwrap();
     assert!(is_dirty);
     assert!(dirty_indices(&cache).is_empty());
 }
@@ -136,9 +140,11 @@ fn writeback_until_respects_dirty_index_and_page_budget() {
     assert_eq!(initial_budget - nr_to_write, 1);
     assert_eq!(writes, vec![(0, PAGE_SIZE_4K)]);
     assert_eq!(dirty_indices(&cache), vec![1]);
-    cache.with_folio(1, |folio| {
-        folio.expect("remaining dirty folio").clear_dirty();
-    });
+    cache
+        .with_folio(1, |folio| {
+            folio.expect("remaining dirty folio").clear_dirty();
+        })
+        .unwrap();
     assert!(dirty_indices(&cache).is_empty());
 }
 
@@ -171,7 +177,8 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
                         // Replacement owns the index transition and its marks;
                         // a previously collected candidate must not repair them.
                         cache_during_io
-                            .resize_cached_folios((PAGE_SIZE_4K * 2) as u64, PAGE_SIZE_4K as u64);
+                            .resize_cached_folios((PAGE_SIZE_4K * 2) as u64, PAGE_SIZE_4K as u64)
+                            .unwrap();
                         cache_during_io
                             .filemap_add_folio(replacement)
                             .unwrap_or_else(|_| panic!("vacant replacement index"));
@@ -186,10 +193,12 @@ fn stale_collected_folio_is_not_written_or_tagged_as_replacement() {
             dirty_indices(&cache),
             if replacement_dirty { vec![1] } else { vec![] }
         );
-        let replacement_state = cache.with_folio(1, |folio| {
-            let folio = folio.expect("replacement folio");
-            (folio.is_dirty(), folio.is_under_writeback())
-        });
+        let replacement_state = cache
+            .with_folio(1, |folio| {
+                let folio = folio.expect("replacement folio");
+                (folio.is_dirty(), folio.is_under_writeback())
+            })
+            .unwrap();
         assert_eq!(replacement_state, (replacement_dirty, false));
     }
 }
@@ -229,12 +238,14 @@ fn batched_writeback_failure_restores_dirty_index() {
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
     assert!(cache.state.lock().writeback_marks.is_empty());
     for index in 0..2 {
-        cache.with_folio(index, |folio| {
-            let folio = folio.expect("failed batch folio");
-            assert!(folio.is_dirty());
-            assert!(!folio.is_under_writeback());
-            folio.clear_dirty();
-        });
+        cache
+            .with_folio(index, |folio| {
+                let folio = folio.expect("failed batch folio");
+                assert!(folio.is_dirty());
+                assert!(!folio.is_under_writeback());
+                folio.clear_dirty();
+            })
+            .unwrap();
     }
     assert!(dirty_indices(&cache).is_empty());
 }
@@ -277,7 +288,7 @@ fn failed_writeback_does_not_redirty_detached_folio() {
     assert_eq!(outcome.err(), Some(KError::InvalidInput));
     assert!(dirty_indices(&cache).is_empty());
     let detached_state = {
-        let folio = detached.lock();
+        let folio = detached.lock().unwrap();
         (folio.is_dirty(), folio.is_under_writeback())
     };
     assert_eq!(detached_state, (false, false));
@@ -319,7 +330,9 @@ fn range_wait_wakes_after_batch_writeback() {
                 waiter = Some(ktask::spawn(move || {
                     waiting_entered.store(true, Ordering::Release);
                     waiting_ready.notify_all(false);
-                    waiting_cache.wait_on_writeback_range(0..PAGE_SIZE_4K as u64);
+                    waiting_cache
+                        .wait_on_writeback_range(0..PAGE_SIZE_4K as u64)
+                        .unwrap();
                     waiting_finished.store(true, Ordering::Release);
                 }));
                 ready.wait_until(|| entered.load(Ordering::Acquire));
@@ -358,12 +371,14 @@ fn batched_writeback_failure_cleans_only_complete_prefix_folios() {
     assert_eq!(initial_budget - nr_to_write, 1);
     assert_eq!(dirty_indices(&cache), vec![1, 2]);
     for (index, expected_dirty) in [(0, false), (1, true), (2, true)] {
-        let state = cache.with_folio(index, |folio| {
-            let folio = folio.expect("batched folio remains cached");
-            let state = (folio.is_dirty(), folio.is_under_writeback());
-            folio.clear_dirty();
-            state
-        });
+        let state = cache
+            .with_folio(index, |folio| {
+                let folio = folio.expect("batched folio remains cached");
+                let state = (folio.is_dirty(), folio.is_under_writeback());
+                folio.clear_dirty();
+                state
+            })
+            .unwrap();
         assert_eq!(state, (expected_dirty, false));
     }
     assert!(dirty_indices(&cache).is_empty());
@@ -391,10 +406,14 @@ fn batched_writeback_preserves_concurrent_redirty() {
             PAGE_SIZE_4K,
             &mut |_, data| {
                 dirty_indices_before_redirty = dirty_indices(cache_during_io);
-                state_during_io = Some(cache_during_io.with_folio(0, |folio| {
-                    let folio = folio.expect("folio under writeback");
-                    (folio.is_dirty(), folio.is_under_writeback())
-                }));
+                state_during_io = Some(
+                    cache_during_io
+                        .with_folio(0, |folio| {
+                            let folio = folio.expect("folio under writeback");
+                            (folio.is_dirty(), folio.is_under_writeback())
+                        })
+                        .unwrap(),
+                );
                 first_snapshot.extend_from_slice(&data[..3]);
                 write_cached(cache_during_io, 0, b"new").map_err(|error| (0, error))?;
                 dirty_indices_after_redirty = dirty_indices(cache_during_io);
@@ -408,14 +427,16 @@ fn batched_writeback_preserves_concurrent_redirty() {
     assert_eq!(dirty_indices_after_redirty, vec![0]);
     assert_eq!(first_snapshot, b"old");
     assert_eq!(dirty_indices(&cache), vec![0]);
-    let observed = cache.with_folio(0, |folio| {
-        let folio = folio.expect("redirtied folio");
-        (
-            folio.is_dirty(),
-            folio.data()[..3].to_vec(),
-            folio.is_under_writeback(),
-        )
-    });
+    let observed = cache
+        .with_folio(0, |folio| {
+            let folio = folio.expect("redirtied folio");
+            (
+                folio.is_dirty(),
+                folio.data()[..3].to_vec(),
+                folio.is_under_writeback(),
+            )
+        })
+        .unwrap();
     assert!(observed.0);
     assert_eq!(observed.1.as_slice(), b"new");
     assert!(!observed.2);
@@ -431,10 +452,12 @@ fn batched_writeback_preserves_concurrent_redirty() {
         )
         .unwrap();
     assert!(dirty_indices(&cache).is_empty());
-    let final_state = cache.with_folio(0, |folio| {
-        let folio = folio.expect("clean folio");
-        (folio.is_dirty(), folio.is_under_writeback())
-    });
+    let final_state = cache
+        .with_folio(0, |folio| {
+            let folio = folio.expect("clean folio");
+            (folio.is_dirty(), folio.is_under_writeback())
+        })
+        .unwrap();
     assert_eq!(final_state, (false, false));
 }
 
@@ -573,7 +596,9 @@ fn second_batch_error_finishes_prefix_and_leaves_unvisited_pages_dirty() {
         ((capacity + 1) as u64..count as u64).collect::<Vec<_>>()
     );
     for index in 0..count as u64 {
-        cache.with_folio(index, |folio| assert!(!folio.unwrap().is_under_writeback()));
+        cache
+            .with_folio(index, |folio| assert!(!folio.unwrap().is_under_writeback()))
+            .unwrap();
     }
     cache.truncate_final().unwrap();
 }
@@ -608,7 +633,9 @@ fn skipped_and_completed_pages_remain_accounted_after_error() {
     let cache = new_cache();
     write_cached(&cache, 0, &vec![1; PAGE_SIZE_4K * 3]).unwrap();
     // Model a folio redirtied while another writeback owns it.
-    cache.with_folio(0, |folio| folio.unwrap().start_writeback());
+    cache
+        .with_folio(0, |folio| folio.unwrap().start_writeback())
+        .unwrap();
     let mut nr_to_write = 3;
     let mut pages_skipped = 7;
     let result = cache.writeback_until(
@@ -628,7 +655,9 @@ fn skipped_and_completed_pages_remain_accounted_after_error() {
     assert_eq!(nr_to_write, 2);
     assert_eq!(pages_skipped, 8);
     assert_eq!(dirty_indices(&cache), vec![0, 2]);
-    cache.with_folio(0, |folio| folio.unwrap().end_writeback());
+    cache
+        .with_folio(0, |folio| folio.unwrap().end_writeback())
+        .unwrap();
     cache.truncate_final().unwrap();
 }
 
@@ -655,7 +684,9 @@ fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
         assert_eq!(result, expected_result);
         assert_eq!(nr_to_write, expected_remaining);
         for index in 0..2 {
-            cache.with_folio(index, |folio| assert!(!folio.unwrap().is_under_writeback()));
+            cache
+                .with_folio(index, |folio| assert!(!folio.unwrap().is_under_writeback()))
+                .unwrap();
         }
         cache.truncate_final().unwrap();
     }
@@ -664,7 +695,7 @@ fn batch_prefix_validation_preserves_progress_and_finishes_all_folios() {
 #[def_test]
 fn readahead_marker_survives_writeback() {
     let owner = Folio::new_zeroed(0).unwrap();
-    let mut folio = owner.lock();
+    let mut folio = owner.lock().unwrap();
     folio.mark_readahead();
     folio.start_writeback();
     assert!(!folio.take_readahead());
@@ -696,7 +727,9 @@ fn submitted_snapshot_outlives_scan_and_preserves_redirty_and_failed_tail() {
         .unwrap();
     assert_eq!(budget, 0);
     for page in 0..2 {
-        cache.with_folio(page, |folio| assert!(folio.unwrap().is_under_writeback()));
+        cache
+            .with_folio(page, |folio| assert!(folio.unwrap().is_under_writeback()))
+            .unwrap();
     }
     write_cached(&cache, 0, b"newer").unwrap();
     let (data, completion) = pending.pop().unwrap().into_parts();
@@ -704,7 +737,9 @@ fn submitted_snapshot_outlives_scan_and_preserves_redirty_and_failed_tail() {
     assert_eq!(completion.complete(PAGE_SIZE_4K), Ok(1));
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
     for page in 0..2 {
-        cache.with_folio(page, |folio| assert!(!folio.unwrap().is_under_writeback()));
+        cache
+            .with_folio(page, |folio| assert!(!folio.unwrap().is_under_writeback()))
+            .unwrap();
     }
 }
 
@@ -732,10 +767,12 @@ fn rejected_submission_redirties_its_batch_without_ending_prior_io() {
         Err(KError::Io)
     );
     assert_eq!(dirty_indices(&cache), vec![1]);
-    cache.with_folio(0, |folio| assert!(folio.unwrap().is_under_writeback()));
+    cache
+        .with_folio(0, |folio| assert!(folio.unwrap().is_under_writeback()))
+        .unwrap();
     drop(pending);
     assert_eq!(dirty_indices(&cache), vec![0, 1]);
-    cache.wait_on_writeback_range(0..u64::MAX);
+    cache.wait_on_writeback_range(0..u64::MAX).unwrap();
 }
 
 #[def_test]
@@ -750,13 +787,47 @@ fn completion_borrows_index_until_last_writeback_finishes() {
             Ok(())
         })
         .unwrap();
-    assert!(folio.lock().is_under_writeback());
-    assert!(!folio.lock().is_invalidated());
+    assert!(folio.lock().unwrap().is_under_writeback());
+    assert!(!folio.lock().unwrap().is_invalidated());
     let (_, completion) = pending.unwrap().into_parts();
     assert_eq!(completion.complete(9), Err(KError::InvalidInput));
-    assert!(!folio.lock().is_under_writeback());
-    assert!(folio.lock().is_dirty());
-    assert!(!folio.lock().is_invalidated());
+    assert!(!folio.lock().unwrap().is_under_writeback());
+    assert!(folio.lock().unwrap().is_dirty());
+    assert!(!folio.lock().unwrap().is_invalidated());
     drop(cache);
-    assert!(folio.lock().is_invalidated());
+    assert!(folio.lock().unwrap().is_invalidated());
+}
+
+#[def_test]
+fn writeback_completion_finishes_without_acquiring_the_content_lock() {
+    // Success, abandoned completion and invalid-prefix fallback all release
+    // writeback independently of a current content owner.
+    for outcome in 0..3 {
+        let cache = new_cache();
+        write_cached(&cache, 0, b"snapshot").unwrap();
+        let folio = cache.state.lock().entries[&0].clone();
+        let mut pending = None;
+        cache
+            .submit_cache_pages(8, 0..8, &mut 1, &mut 0, PAGE_SIZE_4K, &mut |batch| {
+                pending = Some(batch);
+                Ok(())
+            })
+            .unwrap();
+        let (_, completion) = pending.unwrap().into_parts();
+        let mut locked = folio.lock().unwrap();
+        if outcome == 0 {
+            locked.data()[0] = b'n';
+            locked.mark_dirty();
+            assert_eq!(completion.complete(8), Ok(1));
+        } else if outcome == 1 {
+            drop(completion);
+        } else {
+            assert_eq!(completion.complete(9), Err(KError::InvalidInput));
+        }
+        assert!(!locked.is_under_writeback());
+        assert!(locked.is_dirty());
+        assert_eq!(dirty_indices(&cache), vec![0]);
+        drop(locked);
+        cache.truncate_final().unwrap();
+    }
 }

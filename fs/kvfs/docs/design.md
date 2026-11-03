@@ -1059,21 +1059,39 @@ credential。`child_names()` 可传播生命周期或后端错误，使旧目录
 返回 EIO 时该打开实例的预算缩为四分之一，降为零后仅准备一个需求页。
 仅标记命中时在 folio 锁内获取策略锁，把预算检查、标记消费与窗口计算作为一次决策；
 普通命中不逐页获取策略锁。策略锁不覆盖 folio 等待、用户复制或文件系统 I/O。
-“提前触发”只描述窗口推进时机，底层初始化仍在当前任务同步完成，不引入后台任务。
+Early triggering describes when the window advances. Current backends still read
+synchronously, but the interface allows initialization ownership to be transferred
+without introducing a background task.
 
 窗口预算与批次容量独立；单页缺失段及分批后的单页尾段也在本轮初始化。
 分发时只有一个预留页则直接调用 `read_folio`，避免为单页 I/O 分配预读中转缓冲。
-窗口按连续缺页段提交，每批最多 31 页，锁外分配并锁住私有 folio，
-再在索引锁内复核并发布连续前缀，随后释放索引锁执行 I/O。`ReadaheadControl` 借用 AddressSpace 和锁定页的迭代器，不另建请求索引。
-默认预读逐页调用 `read_folio` 消费已有预留，成功标记 uptodate，失败后继续处理其余页。
+The window is submitted as contiguous missing ranges of at most 31 pages per
+batch. Private folios are allocated and locked outside the index lock, then a
+contiguous prefix is rechecked and published under that lock. I/O runs after the
+index lock is released. `ReadaheadControl` borrows the AddressSpace and reservation
+iterator; `next_folio()` transfers a `FolioRead` owning the page reference and
+responsibility for its held lock, without a separate request index.
+Default readahead consumes existing reservations through per-page `read_folio`
+calls and continues after submission failures. The completer publishes uptodate
+and unlocks the folio.
 首个候选被并发插入时，窗口游标只越过该位置，继续查询后面的缺页。
 游标在尝试初始化时消费当前页；文件系统提供含空洞及 EOF 尾部零填充的完整页，再标记 uptodate。
 已消费的失败页可保留供按需重试；回调未消费的后缀在退出时清理，避免空预读或提前返回
 留下无用驻留页。清理保持未消费页的锁，取得索引锁复核身份并摘除后再解锁；
 等待读取者醒来后重新查找 resident，不在已摘除的预留页上继续初始化。读取失败不暴露部分数据，已复制前缀优先返回。
 
-按需读取同样先保留未初始化 folio，再持页锁读入；竞争者等待页锁后重新查找 resident，
-成功页不重复 I/O，失败页可重新初始化。`read_folio` 成功返回表示整页已初始化；
+Demand reads also reserve an uninitialized folio before reading under its lock.
+Competing readers wait for the folio lock and repeat the resident lookup;
+successful pages need no duplicate I/O, while failed pages can be initialized
+again. A successful `read_folio` return indicates submission only.
+`FolioRead::complete` completes that read, publishing uptodate only on success;
+failure or abandonment leaves the page unreadable.
+Demand waits reject invalid sleeping context and may return `Interrupted` for
+an uncatchable kill without taking ownership back from submitted I/O. A read
+token describes one initialization attempt; a detached replacement may require
+another call for the same index. Buffered writes validate context before
+`write_begin`, and size changes do so before publishing EOF, keeping mandatory
+rollback/truncation waits inside an admitted operation.
 文件系统负责本次读取边界与尾部清零，通用层不以完成后的 EOF 重验返回字节数。
 缓冲缺页路径从 EOF 检查到初始化完成持 invalidate shared lock，缓存索引锁不覆盖 I/O。通用 buffered 复制期间不持 invalidate lock，锁定每页后重新读取
 inode EOF。单次读取的已准备末端只用于避免对失败预留重复发起预读，不保证缓存驻留。
@@ -1187,7 +1205,8 @@ MM may queue that submission. Only completed PTE removal and TLB invalidation
 permit releasing mapping tokens; cache removal alone does not.
 
 `PinnedFolio` and `MappedFolio` retain the same `Arc<Folio>` that owns its page
-and content mutex. All filesystem callbacks receive a restricted `FolioGuard`;
+and content lock. Ordinary access uses a restricted `FolioGuard`; initialization
+uses an owning `FolioRead` that can be transferred to completion;
 cache replacement changes an index reference, not a published object's identity.
 The original page remains copyable under its original lock after detachment,
 without retaining its replacement. Copies do not by themselves prove current EOF
@@ -1197,14 +1216,16 @@ physical-allocation quota charge without an additional statistics subsystem.
 ## tmpfs quota integration with resident initialization
 
 The inode address space retains the invalidate lock covering EOF, cache
-reservation, synchronous initialization and truncate. The filesystem owns capacity policy and supplies one `CacheResidency` provider
+reservation and read submission. Transferred folio locks serialize later completion with truncate. The filesystem owns capacity policy and supplies one `CacheResidency` provider
 when constructing an inode mapping. Only a winning new identity calls
-`try_add_folio()` under folio and index mutexes. Its single capacity charge stays
+`try_add_folio()` under folio and index locks. Its single capacity charge stays
 with the stable folio after cache detachment, while any pin, mapping token or
 batch retains the allocation. Clones do not charge again. Final release frees
-the physical page before returning capacity, outside both mutexes; the charge
+the physical page before returning capacity, outside both locks; the charge
 keeps its provider alive independently of mapping destruction.
 Providers must not reenter mappings, acquire folio locks, or perform I/O.
+Release and final provider destruction must not sleep: the last reference can
+be released by I/O completion. Admission still requires task context.
 For memfs, the provider is its filesystem-owned quota, so lock order is cache
 folio -> index -> quota limit; remount and statfs never acquire cache locks.
 Speculative physical storage remains outside the admission policy until insertion.

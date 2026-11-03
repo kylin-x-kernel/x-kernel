@@ -17,7 +17,7 @@ use kerrno::{KError, KResult};
 use kpoll::{PollRegisterError, PollRegistrations};
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{KtaskRef, WeakKtaskRef, current, park::park_task, select_wake_run_queue};
+use crate::{KtaskRef, TaskState, WeakKtaskRef, current, park::park_task, select_wake_run_queue};
 
 mod poll;
 pub use poll::*;
@@ -130,6 +130,26 @@ impl PreparedTaskWait {
 /// Note that this doesn't handle interruption and is not recommended for direct
 /// use in most cases.
 pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
+    block_on_with_state(f, TaskState::Blocked)
+}
+
+/// Runs a future with an interruptible task sleep state.
+///
+/// Like [`interruptible`], operation progress takes precedence over pending
+/// interruption. A signal wake can make the task runnable directly; the
+/// operation's poll result still decides whether to return a value or an error.
+/// The task's interrupt state is rechecked after publishing its sleeping state
+/// so an interrupt racing the transition cannot be lost.
+/// Call in sleepable task context without locks that prohibit blocking.
+///
+/// # Errors
+/// Returns [`Interrupted`] when an interrupt is consumed while the operation
+/// cannot progress, or when registering its interrupt notification fails.
+pub fn block_on_interruptible<F: IntoFuture>(f: F) -> Result<F::Output, Interrupted> {
+    block_on_with_state(interruptible(f), TaskState::BlockedInterruptible)
+}
+
+fn block_on_with_state<F: IntoFuture>(f: F, state: TaskState) -> F::Output {
     let mut fut = pin!(f.into_future());
 
     let curr = current();
@@ -143,7 +163,14 @@ pub fn block_on<F: IntoFuture>(f: F) -> F::Output {
 
     loop {
         match fut.as_mut().poll(&mut cx) {
-            Poll::Pending => kwaker.park(),
+            Poll::Pending => {
+                crate::park::park_task_unless(
+                    &kwaker.woke,
+                    state,
+                    || state == TaskState::BlockedInterruptible && task.is_interrupted(),
+                    || {},
+                );
+            }
             Poll::Ready(output) => break output,
         }
     }

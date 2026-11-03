@@ -301,7 +301,10 @@ impl FilePrivateRuntime {
                     .as_mut_ptr()
                     .cast::<[MaybeUninit<u8>; PAGE_SIZE_4K]>()
             };
-            source.copy_to_uninit(destination);
+            if let Err(error) = source.copy_to_uninit(destination) {
+                dealloc_frame(frame, self.size);
+                return Err(error);
+            }
             if let Err(err) = prepared.commit_after(frame, self.size, || {
                 pgtbl
                     .replace_if_same(addr, expected, frame, flags)

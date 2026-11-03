@@ -139,7 +139,8 @@ pub(crate) fn enforce_affinity_placement(task: &KtaskRef) -> bool {
         return true;
     }
 
-    if matches!(task.state(), TaskState::Blocked | TaskState::Exited) {
+    let state = task.state();
+    if state.is_blocked() || state == TaskState::Exited {
         return true;
     }
 

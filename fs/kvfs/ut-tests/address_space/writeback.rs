@@ -4,11 +4,11 @@
 
 //! Partial writeback completion and retry tests.
 
-use pagecache::FolioGuard;
 use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
 
 use ksync::Mutex;
 use memaddr::PAGE_SIZE_4K;
+use pagecache::FolioRead;
 use unittest::def_test;
 
 use super::{
@@ -30,9 +30,9 @@ struct PrefixRetryWritebackOps {
 }
 
 impl AddressSpaceOperations for PrefixRetryWritebackOps {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         folio.data().fill(0);
-        Ok(())
+        folio.complete(Ok(()))
     }
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
@@ -91,10 +91,13 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
     );
     assert_eq!(control.nr_to_write(), 1);
     for (index, expected_dirty) in [(0, false), (1, true)] {
-        let state = address_space.i_pages.with_folio(index, |folio| {
-            let folio = folio.expect("failed batch folio remains cached");
-            (folio.is_dirty(), folio.is_under_writeback())
-        });
+        let state = address_space
+            .i_pages
+            .with_folio(index, |folio| {
+                let folio = folio.expect("failed batch folio remains cached");
+                (folio.is_dirty(), folio.is_under_writeback())
+            })
+            .unwrap();
         assert_eq!(state, (expected_dirty, false));
     }
     {
@@ -109,10 +112,13 @@ fn failed_prefix_writeback_redirties_and_retry_converges() {
         .expect("redirtied batch converges on retry");
     assert_eq!(control.nr_to_write(), 0);
     for index in 0..2 {
-        let state = address_space.i_pages.with_folio(index, |folio| {
-            let folio = folio.expect("retried batch folio remains cached");
-            (folio.is_dirty(), folio.is_under_writeback())
-        });
+        let state = address_space
+            .i_pages
+            .with_folio(index, |folio| {
+                let folio = folio.expect("retried batch folio remains cached");
+                (folio.is_dirty(), folio.is_under_writeback())
+            })
+            .unwrap();
         assert_eq!(state, (false, false));
     }
     let state = operations.state.lock();
@@ -157,10 +163,13 @@ fn single_folio_failure_preserves_control_progress_for_retry() {
     assert_eq!(retried, vec![1, 2]);
     assert_eq!(control.nr_to_write(), 0);
     for index in 0..3 {
-        mapping.i_pages.with_folio(index, |folio| {
-            let folio = folio.unwrap();
-            assert!(!folio.is_dirty());
-            assert!(!folio.is_under_writeback());
-        });
+        mapping
+            .i_pages
+            .with_folio(index, |folio| {
+                let folio = folio.unwrap();
+                assert!(!folio.is_dirty());
+                assert!(!folio.is_under_writeback());
+            })
+            .unwrap();
     }
 }

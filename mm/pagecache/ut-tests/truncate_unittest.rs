@@ -17,18 +17,22 @@ fn shrink_drops_full_folios_and_zeros_surviving_tail() {
     write_cached(&cache, 0, &vec![0x5a; PAGE_SIZE_4K * 2]).unwrap();
 
     let new_len = (PAGE_SIZE_4K / 2) as u64;
-    cache.resize_cached_folios((PAGE_SIZE_4K * 2) as u64, new_len);
+    cache
+        .resize_cached_folios((PAGE_SIZE_4K * 2) as u64, new_len)
+        .unwrap();
 
     assert_eq!(cache.nrpages(), 1);
     assert_eq!(dirty_indices(&cache), vec![0]);
-    let tail_is_zero = cache.with_folio(0, |folio| {
-        let folio = folio.expect("surviving folio");
-        let tail_is_zero = folio.data()[PAGE_SIZE_4K / 2..]
-            .iter()
-            .all(|byte| *byte == 0);
-        folio.clear_dirty();
-        tail_is_zero
-    });
+    let tail_is_zero = cache
+        .with_folio(0, |folio| {
+            let folio = folio.expect("surviving folio");
+            let tail_is_zero = folio.data()[PAGE_SIZE_4K / 2..]
+                .iter()
+                .all(|byte| *byte == 0);
+            folio.clear_dirty();
+            tail_is_zero
+        })
+        .unwrap();
     assert!(tail_is_zero);
     assert!(dirty_indices(&cache).is_empty());
 }
@@ -43,20 +47,22 @@ fn growth_zeros_cached_tail_and_marks_it_dirty() {
     let new_len = (PAGE_SIZE_4K / 2) as u64;
     assert!(dirty_indices(&cache).is_empty());
 
-    cache.resize_cached_folios(old_len, new_len);
+    cache.resize_cached_folios(old_len, new_len).unwrap();
 
     assert_eq!(dirty_indices(&cache), vec![0]);
-    let (is_dirty, growth_range_is_zero) = cache.with_folio(0, |folio| {
-        let folio = folio.expect("grown tail folio");
-        let state = (
-            folio.is_dirty(),
-            folio.data()[old_len as usize..new_len as usize]
-                .iter()
-                .all(|byte| *byte == 0),
-        );
-        folio.clear_dirty();
-        state
-    });
+    let (is_dirty, growth_range_is_zero) = cache
+        .with_folio(0, |folio| {
+            let folio = folio.expect("grown tail folio");
+            let state = (
+                folio.is_dirty(),
+                folio.data()[old_len as usize..new_len as usize]
+                    .iter()
+                    .all(|byte| *byte == 0),
+            );
+            folio.clear_dirty();
+            state
+        })
+        .unwrap();
     assert!(is_dirty);
     assert!(growth_range_is_zero);
     assert!(dirty_indices(&cache).is_empty());
@@ -83,15 +89,18 @@ fn shrink_and_final_teardown_remove_multiple_sparse_batches() {
     cache
         .filemap_add_folio(super::folio_from_bytes(u64::MAX, b"last"))
         .unwrap_or_else(|_| panic!("fixture index is absent"));
-    let retained = cache.state.lock().entries[&((count - 1) as u64 * 2)]
-        .clone();
+    let retained = cache.state.lock().entries[&((count - 1) as u64 * 2)].clone();
     let new_len = (crate::FolioBatch::CAPACITY * 2 * PAGE_SIZE_4K + 1) as u64;
-    cache.resize_cached_folios((count * 2 * PAGE_SIZE_4K) as u64, new_len);
+    cache
+        .resize_cached_folios((count * 2 * PAGE_SIZE_4K) as u64, new_len)
+        .unwrap();
     assert_eq!(cache.nrpages(), (crate::FolioBatch::CAPACITY + 1) as u64);
-    assert!(!retained.lock().is_dirty());
-    cache.with_folio((crate::FolioBatch::CAPACITY * 2) as u64, |folio| {
-        assert!(folio.unwrap().data()[1..].iter().all(|byte| *byte == 0));
-    });
+    assert!(!retained.lock().unwrap().is_dirty());
+    cache
+        .with_folio((crate::FolioBatch::CAPACITY * 2) as u64, |folio| {
+            assert!(folio.unwrap().data()[1..].iter().all(|byte| *byte == 0));
+        })
+        .unwrap();
     cache.truncate_final().unwrap();
     assert_eq!(cache.nrpages(), 0);
     assert!(dirty_indices(&cache).is_empty());
@@ -103,12 +112,11 @@ fn mapping_drop_cleans_retained_folios_across_batches() {
         let cache = new_cache();
         let count = crate::FolioBatch::CAPACITY * 2 + 1;
         write_cached(&cache, 0, &vec![0x5a; count * PAGE_SIZE_4K]).unwrap();
-        let retained = cache.state.lock().entries[&(crate::FolioBatch::CAPACITY as u64)]
-            .clone();
-        assert!(retained.lock().is_dirty());
+        let retained = cache.state.lock().entries[&(crate::FolioBatch::CAPACITY as u64)].clone();
+        assert!(retained.lock().unwrap().is_dirty());
         retained
     };
-    let folio = retained.lock();
+    let folio = retained.lock().unwrap();
     assert_eq!(folio.index(), crate::FolioBatch::CAPACITY as u64);
     assert!(!folio.is_dirty());
     assert!(!folio.is_under_writeback());
@@ -168,14 +176,16 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
             if mode == 0 {
                 truncating_cache.truncate_final().unwrap();
             } else {
-                truncating_cache.resize_cached_folios(
-                    (PAGE_SIZE_4K * 2) as u64,
-                    if mode == 1 {
-                        0
-                    } else {
-                        (PAGE_SIZE_4K / 2) as u64
-                    },
-                );
+                truncating_cache
+                    .resize_cached_folios(
+                        (PAGE_SIZE_4K * 2) as u64,
+                        if mode == 1 {
+                            0
+                        } else {
+                            (PAGE_SIZE_4K / 2) as u64
+                        },
+                    )
+                    .unwrap();
             }
             truncating_finished.store(true, Ordering::Release);
             truncating_events.notify_all(false);
@@ -194,7 +204,12 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
             .expect("writeback waiter must release mapping state lock")
             .entries
             .contains_key(&1);
-        let tail_unchanged = old_folio.lock().data().iter().all(|byte| *byte == 0x5a);
+        let tail_unchanged = old_folio
+            .lock()
+            .unwrap()
+            .data()
+            .iter()
+            .all(|byte| *byte == 0x5a);
         if !entered_writeback_wait || !removed_ready_folio || finished_before_io || !tail_unchanged
         {
             // Unblock both workers before reporting a broken phase contract.
@@ -219,14 +234,13 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
             replacement.mark_uptodate();
             replacement.mark_dirty();
             let mut state = cache.state.lock();
-            state.entries.insert(
-                0,
-                Arc::new(replacement),
-            );
+            state.entries.insert(0, Arc::new(replacement));
             state.dirty_marks.insert(0);
             state.writeback_marks.remove(&0);
         } else {
-            cache.with_folio(0, |folio| folio.unwrap().mark_dirty());
+            cache
+                .with_folio(0, |folio| folio.unwrap().mark_dirty())
+                .unwrap();
         }
         release_io.store(true, Ordering::Release);
         events.notify_all(false);
@@ -236,21 +250,23 @@ fn truncate_waits_for_writeback_after_removing_ready_folios() {
         assert!(cache.state.lock().writeback_marks.is_empty());
         if mode < 2 {
             assert_eq!(cache.nrpages(), 0);
-            assert!(!old_folio.lock().is_dirty());
+            assert!(!old_folio.lock().unwrap().is_dirty());
         } else {
             assert_eq!(cache.nrpages(), 1);
-            cache.with_folio(0, |folio| {
-                let folio = folio.unwrap();
-                core::assert!(folio.is_dirty());
-                core::assert!(
-                    folio.data()[PAGE_SIZE_4K / 2..]
-                        .iter()
-                        .all(|byte| *byte == 0)
-                );
-                core::assert_eq!(folio.data()[0], if mode == 3 { 0x33 } else { 0x5a });
-            });
+            cache
+                .with_folio(0, |folio| {
+                    let folio = folio.unwrap();
+                    core::assert!(folio.is_dirty());
+                    core::assert!(
+                        folio.data()[PAGE_SIZE_4K / 2..]
+                            .iter()
+                            .all(|byte| *byte == 0)
+                    );
+                    core::assert_eq!(folio.data()[0], if mode == 3 { 0x33 } else { 0x5a });
+                })
+                .unwrap();
             if mode == 3 {
-                assert!(!old_folio.lock().is_dirty());
+                assert!(!old_folio.lock().unwrap().is_dirty());
             }
             cache.truncate_final().unwrap();
         }
@@ -275,22 +291,24 @@ fn growth_during_batch_writeback_keeps_new_bytes_dirty() {
             &mut |_, data| {
                 // Growth must finish while this batch still owns writeback. Its
                 // new dirty bytes must survive completion of the older snapshot.
-                cache.resize_cached_folios(old_len, new_len);
+                cache.resize_cached_folios(old_len, new_len).unwrap();
                 core::assert!(data.iter().all(|byte| *byte == 0x5a));
                 Ok(data.len())
             },
         )
         .unwrap();
-    cache.with_folio(0, |folio| {
-        let folio = folio.unwrap();
-        core::assert!(folio.is_dirty());
-        core::assert!(!folio.is_under_writeback());
-        core::assert!(
-            folio.data()[old_len as usize..new_len as usize]
-                .iter()
-                .all(|byte| *byte == 0)
-        );
-    });
+    cache
+        .with_folio(0, |folio| {
+            let folio = folio.unwrap();
+            core::assert!(folio.is_dirty());
+            core::assert!(!folio.is_under_writeback());
+            core::assert!(
+                folio.data()[old_len as usize..new_len as usize]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+        })
+        .unwrap();
     assert_eq!(dirty_indices(&cache), vec![0]);
     cache.truncate_final().unwrap();
 }

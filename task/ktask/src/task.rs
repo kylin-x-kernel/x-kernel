@@ -87,14 +87,27 @@ impl TaskIdentity {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TaskState {
     /// Task is running on some CPU.
-    Running = 1,
+    Running              = 1,
     /// Task is ready to run on some scheduler's ready queue.
-    Ready   = 2,
-    /// Task is blocked (in the wait queue or timer list),
-    /// and it has finished its scheduling process, it can be wake up by `notify()` on any run queue safely.
-    Blocked = 3,
+    Ready                = 2,
+    /// Task waits for an event-source wake, with no direct signal wake.
+    Blocked              = 3,
     /// Task is exited and waiting for being dropped.
-    Exited  = 4,
+    Exited               = 4,
+    /// Task waits for an event or an unblocked signal.
+    BlockedInterruptible = 5,
+    /// Task waits for an event or an uncatchable termination request.
+    BlockedKillable      = 6,
+}
+
+impl TaskState {
+    /// Returns whether the task is sleeping, regardless of its signal policy.
+    pub const fn is_blocked(self) -> bool {
+        matches!(
+            self,
+            Self::Blocked | Self::BlockedInterruptible | Self::BlockedKillable
+        )
+    }
 }
 
 /// Scheduler callbacks and type-erased access for a user-task runtime.
@@ -104,6 +117,13 @@ pub enum TaskState {
 /// or depend on ordinary current-process state. Shared state accessed by
 /// callbacks must be synchronized for concurrent scheduler activity.
 pub trait UserTaskRuntime: Send + Sync + Any {
+    /// Reports an unblockable termination request without consuming it.
+    /// Called under scheduler exclusion: must not sleep, allocate or acquire
+    /// scheduler locks. Signal-state locks must be released before task wakeup.
+    fn fatal_signal_pending(&self) -> bool {
+        false
+    }
+
     /// Called on the incoming task after switching stacks, including first entry.
     fn on_enter(&self) {}
     /// Called on the outgoing task before saving its context.
@@ -403,6 +423,8 @@ impl From<u8> for TaskState {
             2 => Self::Ready,
             3 => Self::Blocked,
             4 => Self::Exited,
+            5 => Self::BlockedInterruptible,
+            6 => Self::BlockedKillable,
             _ => unreachable!(),
         }
     }

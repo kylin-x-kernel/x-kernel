@@ -2,9 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use memaddr::PAGE_SIZE_4K;
 use khal::paging::{MappingFlags, PageTable};
-use memaddr::VirtAddr;
+use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use unittest::def_test;
 
 use super::*;
@@ -21,15 +20,18 @@ fn collected_folios_reject_removed_and_uninitialized_pages() {
     let (batch, run_len) = cache.get_folios_contig_with_run_len(0, count);
     assert_eq!(batch.len(), FolioBatch::CAPACITY);
     assert_eq!(run_len, count);
-    cache.resize_cached_folios((count * PAGE_SIZE_4K) as u64, 0);
+    cache
+        .resize_cached_folios((count * PAGE_SIZE_4K) as u64, 0)
+        .unwrap();
     let mut replacement = Folio::new_zeroed(0).unwrap();
     replacement.data()[..3].copy_from_slice(b"new");
     assert!(cache.filemap_add_folio(replacement).is_ok());
-    assert_eq!(batch.with_read_folio(0, |_| ()), None);
+    assert_eq!(batch.with_read_folio(0, |_| ()).unwrap(), None);
     assert_eq!(
         cache
             .get_folios_contig(0, 1)
-            .with_read_folio(0, |folio| folio.data()[..3].to_vec()),
+            .with_read_folio(0, |folio| folio.data()[..3].to_vec())
+            .unwrap(),
         Some(b"new".to_vec())
     );
     assert_eq!(
@@ -37,15 +39,18 @@ fn collected_folios_reject_removed_and_uninitialized_pages() {
         Err(kerrno::KError::Io)
     );
     assert_eq!(
-        cache.get_folios_contig(1, 1).with_read_folio(0, |_| ()),
+        cache
+            .get_folios_contig(1, 1)
+            .with_read_folio(0, |_| ())
+            .unwrap(),
         None
     );
     cache
         .with_folio_or_create(
             1,
-            |folio| {
+            |mut folio| {
                 folio.data().fill(0x55);
-                Ok(())
+                folio.complete(Ok(()))
             },
             |_| Ok(()),
         )
@@ -53,7 +58,8 @@ fn collected_folios_reject_removed_and_uninitialized_pages() {
     assert_eq!(
         cache
             .get_folios_contig(1, 1)
-            .with_read_folio(0, |folio| folio.data()[0]),
+            .with_read_folio(0, |folio| folio.data()[0])
+            .unwrap(),
         Some(0x55)
     );
 }
@@ -64,7 +70,7 @@ fn pinned_folio_keeps_evicted_page_alive_for_readonly_mappings() {
     cache
         .with_folio_or_create(
             0,
-            |_| Ok(()),
+            |folio| folio.complete(Ok(())),
             |folio| {
                 folio.data().fill(0x5a);
                 Ok(())
@@ -87,10 +93,10 @@ fn pinned_folio_keeps_evicted_page_alive_for_readonly_mappings() {
         )
     }
     .unwrap();
-    let (paddr, _, _) = page_table.query(vaddr).unwrap();
+    let (paddr, ..) = page_table.query(vaddr).unwrap();
     assert!(pin.matches_paddr(paddr));
 
-    cache.resize_cached_folios(PAGE_SIZE_4K as u64, 0);
+    cache.resize_cached_folios(PAGE_SIZE_4K as u64, 0).unwrap();
     assert_eq!(cache.nrpages(), 0);
 
     assert!(pin.matches_paddr(paddr));
@@ -98,13 +104,19 @@ fn pinned_folio_keeps_evicted_page_alive_for_readonly_mappings() {
     // SAFETY: this isolated table is never activated. The original pin and
     // both tokens retain the page for every operation on the table.
     let restored_mapping = unsafe {
-        mapping.map_readonly(&mut page_table, restored, MappingFlags::USER | MappingFlags::READ)
-    }.unwrap();
+        mapping.map_readonly(
+            &mut page_table,
+            restored,
+            MappingFlags::USER | MappingFlags::READ,
+        )
+    }
+    .unwrap();
     assert_eq!(page_table.query(restored).unwrap().0, paddr);
     assert!(restored_mapping.matches_paddr(paddr));
 
     let mut uninit = alloc::vec![core::mem::MaybeUninit::uninit(); PAGE_SIZE_4K];
-    pin.copy_to_uninit(uninit.as_mut_slice().try_into().unwrap());
+    pin.copy_to_uninit(uninit.as_mut_slice().try_into().unwrap())
+        .unwrap();
     // SAFETY: copy_to_uninit initializes the entire destination before return.
     let copied = unsafe { core::slice::from_raw_parts(uninit.as_ptr().cast::<u8>(), uninit.len()) };
     assert!(copied.iter().all(|byte| *byte == 0x5a));
@@ -113,24 +125,34 @@ fn pinned_folio_keeps_evicted_page_alive_for_readonly_mappings() {
 #[def_test]
 fn pinned_page_retains_its_object_without_retaining_the_replacement() {
     let cache = MappingPages::new();
-    let pin = cache.pin_folio_or_create(0, |folio| {
-        folio.data().fill(0x5a);
-        Ok(())
-    }).unwrap();
+    let pin = cache
+        .pin_folio_or_create(0, |mut folio| {
+            folio.data().fill(0x5a);
+            folio.complete(Ok(()))
+        })
+        .unwrap();
     let original = cache.state.lock().entries[&0].clone();
     cache.truncate_final().unwrap();
-    cache.with_folio_or_create(0, |folio| {
-        folio.data().fill(0xa5);
-        Ok(())
-    }, |_| Ok(())).unwrap();
+    cache
+        .with_folio_or_create(
+            0,
+            |mut folio| {
+                folio.data().fill(0xa5);
+                folio.complete(Ok(()))
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
     let replacement = Arc::downgrade(&cache.state.lock().entries[&0]);
     assert!(!Arc::ptr_eq(&original, &cache.state.lock().entries[&0]));
     let clone = pin.clone();
     drop(clone);
     let mut destination = alloc::vec![core::mem::MaybeUninit::uninit(); PAGE_SIZE_4K];
-    pin.copy_to_uninit(destination.as_mut_slice().try_into().unwrap());
+    pin.copy_to_uninit(destination.as_mut_slice().try_into().unwrap())
+        .unwrap();
     // SAFETY: a successful full-page copy initializes the whole destination.
-    let copied = unsafe { core::slice::from_raw_parts(destination.as_ptr().cast::<u8>(), PAGE_SIZE_4K) };
+    let copied =
+        unsafe { core::slice::from_raw_parts(destination.as_ptr().cast::<u8>(), PAGE_SIZE_4K) };
     assert!(copied.iter().all(|byte| *byte == 0x5a));
     cache.truncate_final().unwrap();
     assert!(replacement.upgrade().is_none());
@@ -140,7 +162,9 @@ fn pinned_page_retains_its_object_without_retaining_the_replacement() {
 #[def_test]
 fn pinned_folio_rejects_writable_page_table_publication() {
     let cache = MappingPages::new();
-    let pin = cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
+    let pin = cache
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     let mut page_table = PageTable::try_new().unwrap();
     let mut page_table = page_table.modify();
 
@@ -153,9 +177,7 @@ fn pinned_folio_rejects_writable_page_table_publication() {
         )
     };
     assert!(matches!(result, Err(kerrno::KError::PermissionDenied)));
-    assert!(page_table
-        .query(VirtAddr::from(0x1000usize))
-        .is_err());
+    assert!(page_table.query(VirtAddr::from(0x1000usize)).is_err());
 
     // SAFETY: This page table is isolated and never installed on a CPU. The
     // pin remains alive until the page table is dropped.
@@ -174,7 +196,9 @@ fn pinned_folio_rejects_writable_page_table_publication() {
 #[def_test]
 fn pinned_folio_rejects_unsupported_page_attributes() {
     let cache = MappingPages::new();
-    let pin = cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
+    let pin = cache
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     let mut page_table = PageTable::try_new().unwrap();
     let mut page_table = page_table.modify();
     let vaddr = VirtAddr::from(0x3000usize);
@@ -200,7 +224,9 @@ fn pinned_folio_rejects_unsupported_page_attributes() {
 #[def_test]
 fn pinned_folio_readonly_mapping_preserves_page_attributes() {
     let cache = MappingPages::new();
-    let pin = cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
+    let pin = cache
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     let mut page_table = PageTable::try_new().unwrap();
     let mut page_table = page_table.modify();
     let vaddr = VirtAddr::from(0x2000usize);
@@ -208,7 +234,11 @@ fn pinned_folio_readonly_mapping_preserves_page_attributes() {
 
     // SAFETY: This page table is isolated and never installed on a CPU. The
     // pin remains alive until the page table is dropped.
-    let _mapping = unsafe { pin.clone().map_readonly(&mut page_table, vaddr, requested_flags) }.unwrap();
+    let _mapping = unsafe {
+        pin.clone()
+            .map_readonly(&mut page_table, vaddr, requested_flags)
+    }
+    .unwrap();
     let (_, mapped_flags, _) = page_table.query(vaddr).unwrap();
     assert!(mapped_flags.contains(MappingFlags::USER));
     assert!(mapped_flags.contains(MappingFlags::READ));
@@ -219,14 +249,20 @@ fn pinned_folio_readonly_mapping_preserves_page_attributes() {
 #[def_test]
 fn pinned_folio_readonly_mapping_rejects_unaligned_address() {
     let cache = MappingPages::new();
-    let pin = cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
+    let pin = cache
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     let mut page_table = PageTable::try_new().unwrap();
     let mut page_table = page_table.modify();
     let vaddr = VirtAddr::from(0x3001usize);
 
     // SAFETY: The unaligned address is rejected before a PTE is published.
     let result = unsafe {
-        pin.clone().map_readonly(&mut page_table, vaddr, MappingFlags::USER | MappingFlags::READ)
+        pin.clone().map_readonly(
+            &mut page_table,
+            vaddr,
+            MappingFlags::USER | MappingFlags::READ,
+        )
     };
     assert!(matches!(result, Err(kerrno::KError::InvalidInput)));
     assert!(page_table.query(vaddr).is_err());
@@ -235,7 +271,9 @@ fn pinned_folio_readonly_mapping_rejects_unaligned_address() {
 #[def_test]
 fn pinned_folio_readonly_mapping_reports_existing_mapping() {
     let cache = MappingPages::new();
-    let pin = cache.pin_folio_or_create(0, |_| Ok(())).unwrap();
+    let pin = cache
+        .pin_folio_or_create(0, |folio| folio.complete(Ok(())))
+        .unwrap();
     let mut page_table = PageTable::try_new().unwrap();
     let mut page_table = page_table.modify();
     let vaddr = VirtAddr::from(0x4000usize);

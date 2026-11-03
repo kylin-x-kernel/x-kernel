@@ -34,7 +34,7 @@ use kvfs::{
     WriteEndRequest, get_tree_nodev, inode_init_owner,
     libfs::{simple_getattr, simple_rename, simple_statfs, simple_write_end},
 };
-use pagecache::{CacheResidency, FolioGuard};
+use pagecache::{CacheResidency, FolioRead};
 use quota::TmpfsAccounting;
 use slab::Slab;
 
@@ -1228,10 +1228,10 @@ struct MemoryAddressSpaceOperations;
 static MEMORY_ADDRESS_SPACE_OPERATIONS: MemoryAddressSpaceOperations = MemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for MemoryAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         let data = folio.data();
         data.fill(0);
-        Ok(())
+        folio.complete(Ok(()))
     }
 
     fn writepages(

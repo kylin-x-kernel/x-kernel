@@ -6,6 +6,8 @@
 
 use alloc::sync::Arc;
 
+use kerrno::KResult;
+
 use crate::{Folio, FolioGuard};
 
 /// A bounded, ascending collection of mapping folio references.
@@ -45,17 +47,23 @@ impl FolioBatch {
     /// modify data, dirty state or residency, or wait for another folio. Absent,
     /// non-uptodate or invalidated entries return `None` without calling `read`;
     /// callers must resolve them again.
+    ///
+    /// # Errors
+    /// Waiting returns `InvalidInput` outside sleepable task context or
+    /// `Interrupted` for a pending uncatchable kill. Neither calls `read`.
     pub fn with_read_folio<R>(
         &self,
         slot: usize,
         read: impl FnOnce(&mut FolioGuard<'_>) -> R,
-    ) -> Option<R> {
-        let folio = self.entries.get(slot)?.as_ref()?;
-        let mut locked = folio.lock();
+    ) -> KResult<Option<R>> {
+        let Some(folio) = self.entries.get(slot).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        let mut locked = folio.lock_killable()?;
         if locked.is_invalidated() || !locked.is_uptodate() {
-            return None;
+            return Ok(None);
         }
-        Some(read(&mut locked))
+        Ok(Some(read(&mut locked)))
     }
 
     pub(crate) fn is_full(&self) -> bool {
@@ -68,8 +76,15 @@ impl FolioBatch {
         self.len += 1;
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<Folio>> {
-        self.entries[..self.len].iter().flatten()
+    #[expect(
+        clippy::unwrap_used,
+        reason = "CG-021-no-panic-on-reachable-failure: push initializes each slot before \
+                  increasing len, and clear resets len after removing all entries"
+    )]
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = &Arc<Folio>> {
+        self.entries[..self.len]
+            .iter()
+            .map(|entry| entry.as_ref().unwrap())
     }
 
     /// Releases references only; folio flags remain owned by the algorithm.

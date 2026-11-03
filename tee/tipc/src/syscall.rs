@@ -162,8 +162,7 @@ pub(crate) fn wait_for_event(
         wait(&mut context)
     });
     let timed = ktask::future::timeout(timeout_duration(timeout_ms), poll_result);
-    let result =
-        ktask::future::block_on(ktask::future::interruptible(timed)).map_err(KError::from)?;
+    let result = ktask::future::block_on_interruptible(timed).map_err(KError::from)?;
     result?
 }
 

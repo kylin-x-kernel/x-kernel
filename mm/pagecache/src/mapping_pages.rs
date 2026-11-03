@@ -16,9 +16,10 @@ use crate::{Folio, FolioGuard, PageIndex};
 
 /// Filesystem-owned capacity accounting for cache-owned physical pages.
 ///
-/// Admission runs under the mapping's sleepable index and folio mutexes.
-/// Release runs after physical deallocation, with neither mutex held. Both
-/// callbacks require sleepable task context; a release may outlive the mapping.
+/// Admission runs in task context under the mapping index and folio locks.
+/// Release runs after physical deallocation, with neither lock held, and can
+/// outlive the mapping. Release and final provider destruction must not sleep:
+/// the last folio reference can be released from I/O completion context.
 /// They must not reenter a mapping, lock folios, perform I/O, or acquire locks
 /// whose holders wait for this mapping. Each folio contains one page. A charge
 /// belongs to the stable folio and survives cache detachment and all clones.

@@ -779,6 +779,26 @@ The public `wait_for_completion` convenience validates context even for an
 already-completed source. After preparation, waits have no registration-error
 path; the preparing task must still remain in sleepable context on entry.
 
+Sources with their own keyed queues borrow `CompletionWait::notifier()` for a
+scoped registration and call `park_lock` outside their source lock. The source
+owns selection, grant and unlink; ktask owns the wake latch and task lifetime.
+The existing atomic task state distinguishes `Blocked` (event-only),
+`BlockedInterruptible` and `BlockedKillable`; no separate signal-policy field
+is stored. `park_lock_killable` publishes `BlockedKillable`, then rechecks
+`UserTaskRuntime::fatal_signal_pending`. Signal writers release their
+pending-state lock before `signal_task`, so a concurrent kill either observes
+the sleeping state or is found by that recheck. The query must be nonblocking
+and must not take scheduler locks. Existing `on_cpu` handling defers enqueue
+until switch-out and retains the remote reschedule request.
+
+`signal_task` retains interrupt flags, registered Future notifications and
+running-task kicks. Its direct scheduler wake selects interruptible waits for
+ordinary signals and also killable waits for pending SIGKILL. The wake CAS
+matches the sampled state, so a stale selection cannot wake a subsequent
+event-only wait. Event sources and the generic `interrupt_task` API can wake
+all three sleeping states. Waiting-address snapshots are cleared by a scoped
+guard, and an `on_block` hook records contention before actual blocking.
+
 Both synchronous waits and `KWaker` reuse private `park::park_task`: consume an early
 latch hint, acquire the run-queue context guard, then recheck the latch before
 `blocked_resched`. The strong task reference remains alive across the switch.
@@ -834,6 +854,10 @@ to their callers.
   existing behavior.
 - `future::block_on` takes `blocked_resched()` on `Poll::Pending` and marks
   the current task `Blocked`.
+- `block_on_interruptible` preserves the operation-first `interruptible`
+  Future contract, but parks as `BlockedInterruptible` and rechecks the
+  interrupt flag after publishing that state. Composable interruptible
+  futures still retain their explicit registrations for event notification.
 - If the waker fires between `Poll::Pending` and the block commit, `block_on`
   clears the wake flag and immediately repolls. It must not yield first: on a
   fully loaded CPU that would turn a completed wake-before-block race into
@@ -1409,7 +1433,7 @@ trigger calls `dump_sched_stats()` for allocation-free base output.
 
 ## Scheduler trace state
 
-The optional switch callback receives the outgoing task state from the leave decision (`Running=1`, `Ready=2`, `Blocked=3`, `Exited=4`). Consumers can distinguish runnable delay from blocking when combined with wakeup events and embedded event timestamps. The leave path passes this state explicitly through reschedule and switch; a concurrent waker changing Blocked to Ready cannot overwrite the recorded block decision. The private local-helper switch also accepts an explicit leave-decision state. Its sole caller, `migrate_current`, transitions the outgoing task to Ready and passes Ready at that call site; the helper does not hardcode a migration-specific state. Callbacks run with interrupts disabled and must not block or schedule.
+The optional switch callback receives the outgoing task state from the leave decision (`Running=1`, `Ready=2`, `Blocked=3`, `Exited=4`, `BlockedInterruptible=5`, `BlockedKillable=6`). Consumers can distinguish runnable delay from blocking when combined with wakeup events and embedded event timestamps. The leave path passes this state explicitly through reschedule and switch; a concurrent waker changing a sleeping state to Ready cannot overwrite the recorded block decision. The private local-helper switch also accepts an explicit leave-decision state. Its sole caller, `migrate_current`, transitions the outgoing task to Ready and passes Ready at that call site; the helper does not hardcode a migration-specific state. Callbacks run with interrupts disabled and must not block or schedule.
 
 ### Adjustable-clock waits
 

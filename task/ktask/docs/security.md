@@ -307,7 +307,7 @@ and permission checks belong to those adapters, not to the scheduler.
 | `spawn_raw`, `spawn_with_name`, `spawn`, `prepare_task`, `activate_task`, `spawn_task`; `TaskInner::new_user`, `new_kthread`, `new_pidless_kthread`, `set_name` | Kernel task/process code supplies closures, names, stack sizes, identities, and runtime objects | Names may originate from users but arrive as Rust strings; task creation is not a user-buffer parser. Runtime and entry implementations remain trusted kernel code. |
 | `set_prio`, `set_task_prio`, `set_current_affinity`, `set_task_affinity`, `TaskInner::set_cpumask` | Scheduler/process adapters supply priorities and typed CPU masks, possibly from syscalls | Adapters enforce permissions. Callers must distinguish initial placement from migrating an already-active task. |
 | `sleep`, `sleep_until`, `interruptible_sleep_until`, `wait_for_poll_event_until`; `WaitQueue::wait_timeout`, `wait_timeout_until` | Wait clients supply durations, deadlines, wakers and predicates | User timeout decoding belongs upstream. Callers must obey sleepability and callback-context contracts. All timeout delivery uses owned timers; no raw waker registration API remains. |
-| `future::poll_io`; `WaitQueue` notify; `wake_task`, `interrupt_task`, `TaskInner::interrupt` | File, network, device, and signal adapters deliver readiness or wakeup | `poll_io` invokes a caller-supplied operation and forwards its typed result without interpreting payloads. Readiness is published by the owning subsystem, not generic IRQ subscriptions. Payload validation remains with the operation/provider. |
+| `future::poll_io`; `WaitQueue` notify; `wake_task`, `interrupt_task`, `signal_task`, `TaskInner::interrupt` | File, network, device, and signal adapters deliver readiness or wakeup | `poll_io` forwards the operation's typed result without interpreting payloads. `signal_task` requires pending state to be published and signal locks released before wakeup. Readiness and payload validation remain with the operation/provider. |
 | `on_timer_fire`, `register_timer_irq_note`, `register_sched_trace_hooks` | Runtime interrupt glue and kernel instrumentation provide timer events and function callbacks | IRQ routing is external. Callbacks must satisfy their documented execution-context constraints. |
 | `TaskInner::set_waiting_lock`, `push_held_lock`, `pop_held_lock`; `snapshot::trigger`, `dump_cpu_tasks`, `nmi_dump_all` | Kernel diagnostic callers supply lock-address identities, reason strings, and CPU selections | These are not user-pointer access capabilities. Diagnostic output can expose task metadata; access control belongs to the invoking diagnostic interface. |
 
@@ -522,9 +522,11 @@ Invariants:
 
 ## Memory and lifecycle invariants
 
-1. **One-way task state machine.** `Running` / `Ready` / `Blocked` /
-   `Exited` transitions go through run-queue entries.
-   `transition_state` rejects duplicate-wake reentry.
+1. **Task state transitions.** `Running` / `Ready` / sleeping / `Exited`
+   transitions go through run-queue entries. Sleeping states distinguish
+   event-only, interruptible and killable waits in the existing atomic state.
+   `transition_state` rejects duplicate-wake reentry. Signal wakeup matches
+   the sampled sleeping state, rather than waking a later wait of another kind.
 2. **Deferred preemption.** Schedule timer / wake only set `need_resched`.
    The real switch happens at the `enable_preempt` safe point so a critical
    section cannot switch mid-lock. If this CPU is still in an active
@@ -605,6 +607,16 @@ TaskInner is destroyed. A readiness predicate calling non-unwinding task exit
 leaks that reference and its stack, rather than freeing a linked node. This is
 a resource leak, not permission to cancel waits by exiting. Normal returns and
 unwinding unlink before releasing the handle.
+
+Keyed sources may borrow the same notifier, but must serialize unlink against
+notification before ending that borrow. Killable parking checks pending state
+after `BlockedKillable` publication; checking only before publication could lose a remote
+signal wake. The runtime query serializes with pending-state writers, which must
+release their state lock before scheduler wakeup. Returning from parking is only
+a hint: the source must recheck grants and cancellation, and cannot discard an
+already granted resource. Diagnostic hooks are nonblocking and may not reenter
+source or scheduler locks. Context preparation does not authorize later parking
+while holding a spinlock or after changing execution context.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1–4) | Controls |
 |---|---|---|---|---|---|---|

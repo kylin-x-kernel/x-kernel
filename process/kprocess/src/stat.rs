@@ -191,7 +191,9 @@ impl TaskStat {
         let comm = String::from(core::str::from_utf8(&name[..name_len]).unwrap_or_default());
         let state = match task.state() {
             TaskState::Running | TaskState::Ready => 'R',
-            TaskState::Blocked => 'S',
+            TaskState::Blocked | TaskState::BlockedInterruptible | TaskState::BlockedKillable => {
+                'S'
+            }
             TaskState::Exited => 'Z',
         };
         let ppid = proc.parent().map_or(0, |p| p.pid());

@@ -99,7 +99,7 @@ mod tests_blocked_resched {
             {
                 let mut rq = current_run_queue::<NoPreemptIrqSave>();
                 STARTED.store(1, Ordering::Release);
-                rq.blocked_resched(woke.lock());
+                rq.blocked_resched(woke.lock(), crate::TaskState::Blocked, || false);
             }
             drop(keep_alive);
             RESUMED.store(1, Ordering::Release);
@@ -405,6 +405,16 @@ mod tests_wake_affinity {
         let task = test_task_on(0);
         task.set_state(TaskState::Blocked);
         task.set_on_cpu(true);
+
+        // A signal sampled an earlier killable wait. It must not wake a later
+        // uninterruptible wait, even though both are sleeping states.
+        select_wake_run_queue::<NoPreemptIrqSave>(&task).unblock_task_in_state(
+            task.clone(),
+            TaskState::BlockedKillable,
+            true,
+        );
+        assert_eq!(task.state(), TaskState::Blocked);
+        assert_eq!(task.take_wake_enqueue(), None);
 
         let (result, decision) = select_wake_run_queue::<NoPreemptIrqSave>(&task)
             .rq

@@ -4,7 +4,7 @@
 
 //! Filesystem callbacks and default address-space operations.
 
-use pagecache::FolioGuard;
+use pagecache::{FolioGuard, FolioRead};
 
 use super::{AddressSpace, ReadaheadControl, WritebackControl};
 use crate::{NodeFlags, NodeType, VfsError, VfsResult};
@@ -78,23 +78,34 @@ impl WriteEndRequest {
 /// Implementations should be tied to the owning inode/superblock state, not to
 /// one open file instance.
 pub trait AddressSpaceOperations: Send + Sync + 'static {
-    /// Initializes a locked resident folio from backing storage synchronously.
+    /// Takes responsibility for initializing a locked resident folio.
     ///
     /// The folio may be newly allocated or retained after an earlier failed
     /// read. Initialize its entire contents on every successful attempt;
-    /// do not rely on contents left by a failed attempt.
+    /// do not rely on contents left by a failed attempt. The same index can
+    /// be submitted again after failure or replacement; each token is a distinct
+    /// initialization responsibility. Release attempt-local resources on every
+    /// completion, including failure, rather than deduplicating by index.
     ///
-    /// Success means the entire folio is initialized, including zeroes for
+    /// Returning success means the read was submitted or completed. Complete
+    /// the token only after the entire folio is initialized, including zeroes for
     /// holes, unwritten extents and the tail beyond EOF. The filesystem owns
     /// the read boundary and must report incomplete backing reads as errors;
     /// a later EOF sample must not reinterpret an already completed read.
-    /// The cache marks the folio uptodate only after success. On failure it
-    /// remains non-uptodate for retry, without exposing partial contents.
+    /// `FolioRead::complete` publishes uptodate on success; failure or dropping
+    /// the token leaves it non-uptodate for retry without exposing partial data.
+    /// Submission failure must release the token before returning the error.
+    /// Submission errors propagate unchanged. After accepted submission, a
+    /// failed completion is observed as `VfsError::Io`: the folio records
+    /// initialization success, not a second copy of the backing I/O result.
     ///
     /// Runs with the folio locked and the cache index lock released. Do not
     /// reenter the mapping or acquire inode data or invalidate exclusive locks:
-    /// callers may already hold them or the invalidate shared lock.
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    /// callers may already hold them or the invalidate shared lock. A deferred
+    /// completion must not require the mapping index, inode data or invalidate
+    /// locks: their holders can wait for this folio. It must own every backing
+    /// resource it needs after this callback returns.
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: FolioRead) -> VfsResult<()> {
         Err(VfsError::NoSuchDevice)
     }
 
@@ -117,18 +128,18 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
         Ok(!was_dirty)
     }
 
-    /// Initializes a locked resident run synchronously, completing folios in order.
+    /// Submits initialization for a locked resident run in cursor order.
     ///
-    /// The invalidate shared lock covers reservation and initialization.
+    /// The invalidate shared lock covers reservation and submission.
     /// Folios are already locked; do not reenter their mapping or acquire
     /// the inode data lock or invalidate exclusive lock here.
     /// Consumed failures remain non-uptodate for demand `read_folio` retry;
     /// unconsumed reservations are removed when the callback returns.
     ///
-    /// The default consumes all reservations through `read_folio`, marking
-    /// successful pages uptodate and continuing after errors. It returns the
-    /// first error after attempting the entire run.
-    fn readahead(&self, control: &mut ReadaheadControl<'_, '_, '_>) -> VfsResult<()> {
+    /// Consumed tokens follow `read_folio`'s completion and resource contracts.
+    /// The default submits every reservation through `read_folio`, continuing
+    /// after errors and returning the first submission error.
+    fn readahead(&self, control: &mut ReadaheadControl<'_>) -> VfsResult<()> {
         control.read_folios(|mapping, folio| self.read_folio(mapping, folio))
     }
 
@@ -194,10 +205,10 @@ static IN_MEMORY_ADDRESS_SPACE_OPERATIONS: InMemoryAddressSpaceOperations =
     InMemoryAddressSpaceOperations;
 
 impl AddressSpaceOperations for InMemoryAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, mut folio: FolioRead) -> VfsResult<()> {
         let page = folio.data();
         page.fill(0);
-        Ok(())
+        folio.complete(Ok(()))
     }
 
     fn writepages(&self, mapping: &AddressSpace, control: &mut WritebackControl) -> VfsResult<()> {
@@ -220,7 +231,7 @@ struct EmptyAddressSpaceOperations;
 static EMPTY_ADDRESS_SPACE_OPERATIONS: EmptyAddressSpaceOperations = EmptyAddressSpaceOperations;
 
 impl AddressSpaceOperations for EmptyAddressSpaceOperations {
-    fn read_folio(&self, _mapping: &AddressSpace, _folio: &mut FolioGuard<'_>) -> VfsResult<()> {
+    fn read_folio(&self, _mapping: &AddressSpace, _folio: FolioRead) -> VfsResult<()> {
         Err(VfsError::InvalidInput)
     }
 

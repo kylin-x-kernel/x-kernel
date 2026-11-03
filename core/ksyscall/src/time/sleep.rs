@@ -5,7 +5,7 @@
 //! Sleep-related time syscall adapters.
 
 use kerrno::{KError, KResult};
-use ktask::future::{block_on, interruptible, sleep};
+use ktask::future::{block_on_interruptible, sleep};
 use ktime_types::{ClockId, TimeSpan};
 use linux_raw_sys::general::{__kernel_clockid_t, TIMER_ABSTIME, timespec};
 use posix_types::{TimeSpanLike, UserConstPtr, UserPtr};
@@ -16,7 +16,7 @@ fn sleep_impl(duration: TimeSpan) -> (KResult<()>, TimeSpan) {
     debug!("sleep_impl <= {duration:?}");
 
     let start = khal::time::monotonic_time();
-    let result = block_on(interruptible(sleep(duration)));
+    let result = block_on_interruptible(sleep(duration));
     let elapsed = khal::time::monotonic_time().saturating_duration_since(start);
     (result.map_err(Into::into), elapsed)
 }
@@ -69,7 +69,7 @@ pub(crate) fn sys_clock_nanosleep(
     let raw_req = req.read_vm()?;
     if absolute && clock == ClockId::Realtime {
         let deadline = posix_types::try_into_realtime_deadline(raw_req)?;
-        block_on(interruptible(ktask::future::sleep_until_realtime(deadline)))
+        block_on_interruptible(ktask::future::sleep_until_realtime(deadline))
             .map_err(KError::from)??;
         return Ok(0);
     }
@@ -81,7 +81,7 @@ pub(crate) fn sys_clock_nanosleep(
         } else {
             start.checked_add(value).ok_or(KError::InvalidInput)?
         };
-        let result = block_on(interruptible(ktask::future::sleep_until_boottime(deadline)));
+        let result = block_on_interruptible(ktask::future::sleep_until_boottime(deadline));
         match result {
             Ok(result) => {
                 result?;

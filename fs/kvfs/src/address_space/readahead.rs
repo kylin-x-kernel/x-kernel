@@ -5,24 +5,26 @@
 //! Readahead requests, window selection and filesystem dispatch.
 
 use memaddr::PAGE_SIZE_4K;
-use pagecache::{FolioGuard, PageIndex};
+use pagecache::{FolioRead, PageIndex};
 
 use super::AddressSpace;
 use crate::{VfsError, VfsResult};
 
-/// A synchronous readahead cursor over locked, resident, uninitialized folios.
+/// A readahead submission cursor over locked, resident, uninitialized folios.
 ///
 /// The address space lends this control to the filesystem while holding its
-/// invalidate lock for reading. Completion cannot outlive that callback.
+/// invalidate lock for reading. Consumed tokens can outlive the callback;
+/// they retain their allocation and folio lock until completion. Truncation
+/// waits on that lock before modifying or removing a submitted page.
 /// A consumed folio that fails initialization remains non-uptodate for demand
 /// retry. Unconsumed reservations are released when the callback returns.
-pub struct ReadaheadControl<'a, 'folio, 'page> {
+pub struct ReadaheadControl<'a> {
     address_space: &'a AddressSpace,
     index: PageIndex,
-    folios: &'a mut dyn ExactSizeIterator<Item = &'folio mut FolioGuard<'page>>,
+    folios: &'a mut dyn ExactSizeIterator<Item = FolioRead>,
 }
 
-impl ReadaheadControl<'_, '_, '_> {
+impl ReadaheadControl<'_> {
     /// Returns the address space whose backing storage should be read.
     pub fn mapping(&self) -> &AddressSpace {
         self.address_space
@@ -41,19 +43,26 @@ impl ReadaheadControl<'_, '_, '_> {
     // Keep the default fallback on the same locked reservations as batch I/O.
     pub(super) fn read_folios(
         &mut self,
-        mut read: impl FnMut(&AddressSpace, &mut FolioGuard<'_>) -> VfsResult<()>,
+        mut read: impl FnMut(&AddressSpace, FolioRead) -> VfsResult<()>,
     ) -> VfsResult<()> {
         let mut result = Ok(());
-        for folio in &mut *self.folios {
-            self.index += 1;
+        while let Some(folio) = self.next_folio() {
             let attempt = read(self.address_space, folio);
-            if attempt.is_ok() {
-                folio.mark_uptodate();
-            }
             // Attempt every reserved page, preserving the first read error.
             result = result.and(attempt);
         }
         result
+    }
+
+    /// Transfers the next folio's initialization responsibility to the caller.
+    ///
+    /// The returned owner must be completed or dropped after I/O releases the
+    /// page. A deferred completion must not need the inode data lock, invalidate
+    /// lock or mapping index: truncation may hold those while waiting for it.
+    pub fn next_folio(&mut self) -> Option<FolioRead> {
+        let folio = self.folios.next()?;
+        self.index += 1;
+        Some(folio)
     }
 
     /// Consumes the next folio and attempts to initialize it.
@@ -63,21 +72,19 @@ impl ReadaheadControl<'_, '_, '_> {
     /// The cursor advances even if the supplied page is incomplete; that folio
     /// remains non-uptodate for demand retry. An exhausted cursor is unchanged.
     pub fn complete_folio(&mut self, src: &[u8]) -> VfsResult<()> {
-        let folio = self.folios.next().ok_or(VfsError::InvalidInput)?;
-        self.index += 1;
+        let mut folio = self.next_folio().ok_or(VfsError::InvalidInput)?;
         if src.len() != PAGE_SIZE_4K {
             return Err(VfsError::InvalidInput);
         }
         folio.data().copy_from_slice(src);
-        folio.mark_uptodate();
-        Ok(())
+        folio.complete(Ok(()))
     }
 }
 
 impl AddressSpace {
-    // Called with invalidate shared held, including EOF sampling, I/O and
-    // initialization. Missing runs are installed and locked before filesystem
-    // dispatch, so competing demand reads wait on the same resident folios.
+    // Called with invalidate shared held through EOF sampling and submission.
+    // Completion may follow later under the transferred folio lock. Missing
+    // runs are resident before dispatch, so competing reads wait on those folios.
     pub(super) fn prepare_readahead(
         &self,
         range: core::ops::Range<PageIndex>,
@@ -90,13 +97,7 @@ impl AddressSpace {
             #[cfg(unittest)]
             super::tests::observe_readahead_run(self, &run);
             match self.i_pages.readahead_folios(run.clone(), |folios| {
-                // `inspect` receives &&mut FolioGuard<'_> and cannot mutate the marker.
-                #[expect(
-                    clippy::manual_inspect,
-                    reason = "CG-024-lint-exceptions: manual_inspect: inspect only lends &&mut \
-                              FolioGuard; setting the marker requires mutable access"
-                )]
-                let mut marked = folios.map(|folio| {
+                let mut marked = folios.map(|mut folio| {
                     if Some(folio.index()) == marker {
                         folio.mark_readahead();
                     }

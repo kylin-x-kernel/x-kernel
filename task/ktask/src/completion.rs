@@ -10,7 +10,7 @@ use kcompletion::{Completion, SyncWake, WaitQueue};
 use kerrno::{KError, KResult};
 use kspin::{NoPreemptIrqSave, SpinNoIrq};
 
-use crate::{KtaskRef, current, select_wake_run_queue};
+use crate::{KtaskRef, TaskState, current, select_wake_run_queue};
 
 struct CompletionWake {
     task: KtaskRef,
@@ -27,7 +27,7 @@ unsafe impl SyncWake for CompletionWake {
     }
 }
 
-/// Task-bound resources for allocation-free, uninterruptible synchronous waits.
+/// Task-bound resources for allocation-free synchronous waits.
 ///
 /// Only the preparing task may use this handle; it is neither Send nor Sync.
 /// A strong current-task reference survives every context switch. Wait nodes
@@ -38,6 +38,70 @@ pub struct CompletionWait {
 }
 
 impl CompletionWait {
+    /// Borrows the IRQ-safe notifier for a scoped, pinned wait registration.
+    ///
+    /// The source must unlink its registration before this borrow ends. The
+    /// notifier cannot escape or own the task-bound parking handle.
+    pub fn notifier(&self) -> &impl SyncWake {
+        &self.wake
+    }
+
+    /// Returns whether this task has an unblockable termination request.
+    /// Kernel tasks without a user runtime return false.
+    pub fn is_killed(&self) -> bool {
+        self.wake
+            .task
+            .user_runtime()
+            .is_some_and(|runtime| runtime.fatal_signal_pending())
+    }
+
+    /// Parks an enrolled lock waiter, recording its address for diagnostics.
+    /// Returns whether the task actually blocked. Signals do not end the wait.
+    /// `on_block` runs once immediately before blocking, under IRQ/preemption
+    /// exclusion. It must only update nonblocking diagnostics, without acquiring
+    /// source or scheduler locks, allocating, panicking or changing context.
+    /// Requires the preparing task in sleepable context with source locks released.
+    ///
+    /// # Panics
+    /// Panics if called outside the preparing task or sleepable context.
+    pub fn park_lock(&self, address: usize, on_block: impl FnOnce()) -> bool {
+        self.park_lock_unless(address, TaskState::Blocked, || false, on_block)
+    }
+
+    /// Parks an enrolled lock waiter unless termination is pending.
+    /// The caller must recheck both its grant and `is_killed` after return.
+    /// A signal producer must publish pending state before `signal_task`.
+    /// Context requirements and the return value match `park_lock`.
+    ///
+    /// # Panics
+    /// Panics if called outside the preparing task or sleepable context.
+    pub fn park_lock_killable(&self, address: usize, on_block: impl FnOnce()) -> bool {
+        self.park_lock_unless(
+            address,
+            TaskState::BlockedKillable,
+            || self.is_killed(),
+            on_block,
+        )
+    }
+
+    fn park_lock_unless(
+        &self,
+        address: usize,
+        state: TaskState,
+        stop: impl FnOnce() -> bool,
+        on_block: impl FnOnce(),
+    ) -> bool {
+        self.validate_context();
+        #[cfg(feature = "snapshot")]
+        self.wake
+            .task
+            .set_waiting_lock(address, khal::time::now_ticks());
+        #[cfg(not(feature = "snapshot"))]
+        let _ = address;
+        let _diagnostic = WaitingLock(&self.wake.task);
+        crate::park::park_task_unless(&self.wake.woke, state, stop, on_block)
+    }
+
     /// Captures the current task without allocating.
     ///
     /// # Errors
@@ -108,6 +172,17 @@ impl CompletionWait {
             crate::is_sleepable_context(),
             "completion wait requires sleepable context"
         );
+    }
+}
+
+struct WaitingLock<'a>(&'a KtaskRef);
+
+impl Drop for WaitingLock<'_> {
+    fn drop(&mut self) {
+        #[cfg(feature = "snapshot")]
+        self.0.clear_waiting_lock();
+        #[cfg(not(feature = "snapshot"))]
+        let _ = self.0;
     }
 }
 

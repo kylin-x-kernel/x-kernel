@@ -17,7 +17,7 @@ use kio::{IoBuf, IoBufMut, Read, Write};
 use klazy::lazy_static;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use ksync::Mutex;
-use ktask::future::{block_on, interruptible};
+use ktask::future::block_on_interruptible;
 use kvfs::{
     DeviceId, Filename, LookupFlags, LookupIntent, NodePermission, NodeType, Path, Permission,
     WeakVfsInode,
@@ -347,7 +347,7 @@ impl UnixDomainSocket {
     ) -> KResult<Socket> {
         let storage = prepare()?;
         let (transport, peer_endpoint) =
-            block_on(interruptible(self.transport.accept(options.nonblocking)))??;
+            block_on_interruptible(self.transport.accept(options.nonblocking))??;
         Ok(Socket::Unix(KBox::write(
             storage,
             Self {

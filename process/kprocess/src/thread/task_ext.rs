@@ -25,6 +25,10 @@ pub trait AsThread {
 }
 
 impl UserTaskRuntime for Thread {
+    fn fatal_signal_pending(&self) -> bool {
+        self.signal_manager().fatal_signal_pending()
+    }
+
     fn task_number(&self) -> Arc<kidentity::PidHandle> {
         Thread::task_number(self)
     }

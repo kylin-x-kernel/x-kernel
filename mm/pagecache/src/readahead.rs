@@ -9,15 +9,16 @@ use core::ops::Range;
 
 use kerrno::KResult;
 
-use crate::{Folio, FolioBatch, FolioGuard, MappingPages, PageIndex};
+use crate::{Folio, FolioBatch, FolioGuard, FolioRead, MappingPages, PageIndex};
 
 impl MappingPages {
-    /// Installs and locks an absent prefix of `range` for synchronous readahead.
+    /// Installs and locks an absent prefix of `range` for readahead submission.
     ///
     /// Reserves at most one bounded folio batch. All folios are resident before
-    /// `read` runs, with the index lock released. The callback must mark complete
-    /// folios uptodate. Consuming the iterator transfers a folio to the read
-    /// attempt: failed attempts may remain resident for demand-read retry.
+    /// `read` runs, with the index lock released. Consuming the iterator transfers
+    /// initialization ownership; each token must be completed or dropped, even
+    /// when completion outlives the callback. Failed attempts remain resident
+    /// and non-uptodate for demand-read retry.
     /// Unconsumed reservations are removed while still locked, before waiting
     /// readers can initialize them. Those readers must look up residency again.
     /// The owner must exclude invalidation throughout this call. The callback
@@ -28,7 +29,7 @@ impl MappingPages {
     pub fn readahead_folios(
         &self,
         range: Range<PageIndex>,
-        read: impl FnOnce(&mut dyn ExactSizeIterator<Item = &mut FolioGuard<'_>>),
+        read: impl FnOnce(&mut dyn ExactSizeIterator<Item = FolioRead>),
     ) -> KResult<usize> {
         let mut batch = FolioBatch::new();
         for index in range {
@@ -58,7 +59,7 @@ impl MappingPages {
         let mut locked: [Option<FolioGuard<'_>>; FolioBatch::CAPACITY] =
             core::array::from_fn(|_| None);
         for (slot, folio) in locked.iter_mut().zip(batch.iter()) {
-            *slot = Some(folio.lock());
+            *slot = Some(folio.lock()?);
         }
         let mut state = self.state.lock();
         let mut count = 0;
@@ -88,17 +89,18 @@ impl MappingPages {
             )]
             let mut folios = locked[..count]
                 .iter_mut()
-                .map(|guard| guard.as_mut().unwrap());
+                .zip(batch.iter())
+                .map(|(guard, folio)| guard.take().unwrap().into_read(folio));
             read(&mut folios);
             count - folios.len()
         };
         // Unconsumed pages never leave our locked reservation lifecycle:
         // detach before unlocking, so waiters must find a fresh resident.
         let mut state = self.state.lock();
-        let guards = locked.iter_mut().flatten();
-        for (candidate, guard) in batch.iter().zip(guards).take(count).skip(consumed) {
-            let folio: &mut FolioGuard<'_> = guard;
-            if state.is_current(folio.index(), candidate) {
+        for (candidate, guard) in batch.iter().zip(&mut locked).take(count).skip(consumed) {
+            if let Some(folio) = guard
+                && state.is_current(folio.index(), candidate)
+            {
                 Self::discard_folio(&mut state, candidate, folio);
             }
         }

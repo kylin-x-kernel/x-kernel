@@ -58,7 +58,7 @@ impl AddressSpace {
         &self,
         index: PageIndex,
         f: impl FnOnce(Option<&mut FolioGuard<'_>>) -> R,
-    ) -> R {
+    ) -> VfsResult<R> {
         self.i_pages.with_folio(index, f)
     }
 
@@ -202,8 +202,9 @@ impl AddressSpace {
                     None => self.with_folio(offset / PAGE_SIZE_4K as u64, |folio| folio.map(copy)),
                 };
                 let result = match cached {
-                    Some(result) => result,
-                    None => {
+                    Ok(Some(result)) => result,
+                    Err(error) => Err(error),
+                    Ok(None) => {
                         match self.read_cache_folio(offset, iter.count(), &mut prepared_end, ra) {
                             Ok(true) => continue 'read,
                             Ok(false) => break 'read,
@@ -379,6 +380,9 @@ impl AddressSpace {
         iter: &mut IovIterSource<'_>,
         len: usize,
     ) -> VfsResult<usize> {
+        if !ktask::is_sleepable_context() {
+            return Err(VfsError::InvalidInput);
+        }
         let mut written = 0usize;
         let mut visible_len = self.visible_len()?;
         while written < len {
@@ -397,7 +401,8 @@ impl AddressSpace {
             }
             let grew_cache = prepared_end > visible_len;
             if grew_cache {
-                self.i_pages.resize_cached_folios(visible_len, prepared_end);
+                self.i_pages
+                    .resize_cached_folios(visible_len, prepared_end)?;
             }
             let mut copied = 0;
             let copy_result = self.with_folio_or_create(index, |folio| {
@@ -418,7 +423,8 @@ impl AddressSpace {
                     );
                 }
                 if grew_cache {
-                    self.i_pages.resize_cached_folios(prepared_end, visible_len);
+                    self.i_pages
+                        .resize_cached_folios(prepared_end, visible_len)?;
                 }
                 return write_prefix_or_error(written, error);
             }
@@ -430,7 +436,8 @@ impl AddressSpace {
                 Err(error) => {
                     iter.revert(copied)?;
                     if grew_cache {
-                        self.i_pages.resize_cached_folios(prepared_end, visible_len);
+                        self.i_pages
+                            .resize_cached_folios(prepared_end, visible_len)?;
                     }
                     return write_prefix_or_error(written, error);
                 }
@@ -449,7 +456,7 @@ impl AddressSpace {
                 .ok_or(VfsError::InvalidInput)?;
             if grew_cache && accepted_end < prepared_end {
                 self.i_pages
-                    .resize_cached_folios(prepared_end, accepted_end);
+                    .resize_cached_folios(prepared_end, accepted_end)?;
             }
             visible_len = visible_len.max(accepted_end);
             if accepted == 0 {

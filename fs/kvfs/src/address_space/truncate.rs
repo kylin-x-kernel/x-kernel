@@ -23,10 +23,13 @@ impl AddressSpace {
     /// then a second unmap so a concurrent private COW fault cannot survive
     /// beyond the new EOF.
     pub(crate) fn truncate_setsize(&self, len: u64) -> VfsResult<()> {
+        if !ktask::is_sleepable_context() {
+            return Err(VfsError::InvalidInput);
+        }
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         let old_len = inode.size();
         inode.set_size(len);
-        self.truncate_pagecache(old_len, len);
+        self.truncate_pagecache(old_len, len)?;
         Ok(())
     }
 
@@ -50,7 +53,7 @@ impl AddressSpace {
         Ok(())
     }
 
-    fn truncate_pagecache(&self, old_len: u64, len: u64) {
+    fn truncate_pagecache(&self, old_len: u64, len: u64) -> VfsResult<()> {
         let invalid_start = (len < old_len).then(|| {
             len.div_ceil(PAGE_SIZE_4K as u64)
                 .saturating_mul(PAGE_SIZE_4K as u64)
@@ -58,10 +61,11 @@ impl AddressSpace {
         if let Some(start) = invalid_start {
             self.invalidate_mappings_from(start);
         }
-        self.i_pages.resize_cached_folios(old_len, len);
+        self.i_pages.resize_cached_folios(old_len, len)?;
         if let Some(start) = invalid_start {
             self.invalidate_mappings_from(start);
         }
+        Ok(())
     }
 
     /// Drops cached pages during final inode teardown.
