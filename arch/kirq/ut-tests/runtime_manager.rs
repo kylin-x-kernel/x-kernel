@@ -281,7 +281,7 @@ fn unused_msi_test_mapping(state: &crate::runtime::state::IrqState) -> Option<(u
 }
 
 fn unused_msi_test_hwirq(state: &crate::runtime::state::IrqState, hwirq: usize) -> bool {
-    state.translated_hwirq(MSI_DOMAIN, hwirq).is_none()
+    state.translated_hwirq(crate::domain::TEST_DOMAIN, hwirq).is_none()
 }
 
 fn unused_msi_test_hwirq_except(
@@ -328,7 +328,7 @@ fn test_simulated_irq_tail_dispatches_regular_handler() {
 
 #[def_test(serial)]
 fn test_try_map_rejects_conflicting_domain_mapping() {
-    let domain = GIC_ROOT_DOMAIN;
+    let domain = crate::domain::TEST_DOMAIN;
     let hwirq = 0x2f11;
     let first = IrqDesc::new(hwirq, IrqTrigger::EdgeRising).with_domain(domain);
     let virq = try_map(first).expect("initial map should succeed");
@@ -357,7 +357,7 @@ fn test_try_map_rejects_conflicting_domain_mapping() {
 
 #[def_test(serial)]
 fn test_try_map_rolls_back_domain_mapping_on_desc_conflict() {
-    let domain = GIC_ROOT_DOMAIN;
+    let domain = crate::domain::TEST_DOMAIN;
     let hwirq = 0x2f21;
     let virq = 0x2f22;
     let line = Arc::new(IrqLine::new(IrqStateDesc::new(
@@ -380,7 +380,7 @@ fn test_try_map_rolls_back_domain_mapping_on_desc_conflict() {
 
 #[def_test(serial)]
 fn test_try_map_rejects_reusing_virq_for_another_domain_mapping() {
-    let domain = GIC_ROOT_DOMAIN;
+    let domain = crate::domain::TEST_DOMAIN;
     let existing_hwirq = 0x2f2a;
     let newer_hwirq = 0x2f2b;
     let virq = try_map(IrqDesc::new(existing_hwirq, IrqTrigger::EdgeRising).with_domain(domain))
@@ -413,7 +413,7 @@ fn test_try_map_rejects_reusing_virq_for_another_domain_mapping() {
 
 #[def_test(serial)]
 fn test_try_map_rejects_dynamic_virq_exhaustion_without_wrap() {
-    let domain = GIC_ROOT_DOMAIN;
+    let domain = crate::domain::TEST_DOMAIN;
     let hwirq = 0x2f25;
     {
         let mut state = IRQ_STATE.lock();
@@ -492,7 +492,8 @@ fn test_teardown_disable_plan_ignores_existing_teardown_waiter() {
     let token_b = state_desc
         .install_shared_action(Arc::new(test_shared_b_handler))
         .expect("second shared action");
-    let _ = state_desc.prepare_auto_enable();
+    let plan = state_desc.prepare_auto_enable();
+    state_desc.commit_platform_plan(plan);
 
     assert!(state_desc.take_action(token_a).is_some());
     assert!(state_desc.prepare_disable_if_no_actions().is_none());
@@ -503,6 +504,8 @@ fn test_teardown_disable_plan_ignores_existing_teardown_waiter() {
         .prepare_disable_if_no_actions()
         .expect("last action should mask line even during teardown wait");
     assert_eq!(plan.enable, Some(false));
+    assert!(state_desc.is_enabled_for_tests());
+    state_desc.commit_platform_plan(plan);
     assert!(!state_desc.is_enabled_for_tests());
     assert_eq!(state_desc.teardown_depth_for_tests(), 1);
 }
@@ -1071,7 +1074,7 @@ fn test_try_register_disabled_leaves_runtime_disabled() {
             .lock();
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
-        assert_eq!(entry.configured_generation_for_tests(), None);
+        assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
     }
 
     assert!(unregister(virq).is_some());
@@ -1109,9 +1112,12 @@ fn test_enable_irq_rejects_teardown_wait_window() {
     let desc = IrqDesc::from_virq(virq);
     let mut entry = IrqStateDesc::new(desc);
     assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-    let _ = entry.prepare_auto_enable();
+    let plan = entry.prepare_auto_enable();
+    entry.commit_platform_plan(plan);
     assert!(entry.take_regular_action().is_some());
-    let _ = entry.prepare_disable_if_no_actions();
+    if let Some(plan) = entry.prepare_disable_if_no_actions() {
+        entry.commit_platform_plan(plan);
+    }
     entry.begin_teardown();
     let line = Arc::new(IrqLine::new(entry));
     {
@@ -1295,16 +1301,17 @@ fn enable_final_admission_rechecks_teardown() {
     for force in [false, true] {
         let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
         assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-        entry.prepare_register_disabled();
+        let plan = entry.prepare_register_disabled();
+        entry.commit_platform_plan(plan);
         assert!(!entry.is_teardown_in_progress());
         // Model a stale observation without relying on another CPU's timing.
         entry.begin_teardown();
-        let result = super::prepare_enable_plan(&mut entry, virq, force);
+        let result = super::prepare_enable_plan(&entry, virq, force);
         assert!(matches!(result, Err(IrqDescError::TeardownInProgress { virq: id }) if id == virq));
         assert_eq!(entry.disable_depth_for_tests(), 1);
         assert!(!entry.is_enabled_for_tests());
         entry.finish_teardown();
-        assert_eq!(super::prepare_enable_plan(&mut entry, virq, force).unwrap().enable, Some(true));
+        assert_eq!(super::prepare_enable_plan(&entry, virq, force).unwrap().enable, Some(true));
     }
 }
 
@@ -1319,17 +1326,303 @@ fn control_transactions_preserve_already_masked_context() {
     let irq_before = karch::local_irq_enabled();
     {
         let _context = kspin::NoPreemptIrqSave::new();
-        super::enable_line(&registry, virq.into(), false, |_| {}).unwrap();
+        super::enable_line(&registry, virq.into(), false, |_| Ok(())).unwrap();
         assert!(!karch::local_irq_enabled());
         let _drain = super::disable_line(&registry, virq.into(), |_| {}).unwrap();
         assert!(!karch::local_irq_enabled());
         let mut has_applied = false;
-        let result = super::enable_line(&registry, (virq + 1).into(), false, |_| has_applied = true);
+        let result = super::enable_line(&registry, (virq + 1).into(), false, |_| {
+            has_applied = true;
+            Ok(())
+        });
         assert!(matches!(result, Err(IrqDescError::UnknownIrq)));
         assert!(!has_applied);
         assert!(!karch::local_irq_enabled());
     }
     assert_eq!(karch::local_irq_enabled(), irq_before);
+}
+
+#[def_test]
+fn disabled_registration_configures_before_ownership_and_enable_reuses_configuration() {
+    let virq = 0x315e;
+    let handler: crate::Handler = Arc::new(test_handler);
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    let mut observed = Vec::new();
+    assert!(super::register_locked(
+        virq, &mut entry, &handler, super::IrqRegisterOptions::disabled(),
+        |plan| {
+            observed.push((plan.configure, plan.enable, plan.flow_unmask.is_some(),
+                Arc::strong_count(&handler)));
+            Ok(())
+        },
+    ).unwrap());
+    assert_eq!(observed.as_slice(), &[(true, None, false, 1), (false, None, false, 2)]);
+    assert_eq!(entry.disable_depth_for_tests(), 1);
+    assert!(!entry.is_enabled_for_tests());
+    assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+
+    let enable = entry.prepare_enable_irq();
+    assert!(!enable.configure);
+    assert_eq!(enable.enable, Some(true));
+    entry.commit_platform_plan(enable);
+    assert_eq!(entry.disable_depth_for_tests(), 0);
+    assert!(entry.is_enabled_for_tests());
+    assert_eq!(entry.action_count(), 1);
+}
+
+#[def_test]
+fn configuration_failure_leaves_regular_and_disabled_registration_unowned() {
+    let virq = 0x3170;
+    let handler: crate::Handler = Arc::new(test_handler);
+    for is_masked in [false, true] {
+        let irq_before = karch::local_irq_enabled();
+        let irq_guard = is_masked.then(kspin::IrqSave::new);
+        let expected_irq = karch::local_irq_enabled();
+        for options in [super::IrqRegisterOptions::auto_enable(), super::IrqRegisterOptions::disabled()] {
+            let line = IrqLine::new(IrqStateDesc::new(IrqDesc::from_virq(virq)));
+            let mut observed = Vec::new();
+            let result = super::register_locked(virq, &mut line.lock(), &handler, options, |plan| {
+                observed.push((plan.configure, plan.enable, plan.flow_unmask.is_some(),
+                    Arc::strong_count(&handler), karch::local_irq_enabled()));
+                Err(IrqDescError::ConfigurationFailed { hwirq: plan.desc.hwirq })
+            });
+            assert_eq!(result, Err(IrqDescError::ConfigurationFailed { hwirq: virq }));
+            assert_eq!(observed.as_slice(), &[(true, None, false, 1, false)]);
+            assert_eq!(karch::local_irq_enabled(), expected_irq);
+            let entry = line.lock();
+            assert_eq!(entry.action_count(), 0);
+            assert_eq!(entry.configured_generation_for_tests(), None);
+            assert_eq!(entry.disable_depth_for_tests(), 0);
+            assert!(!entry.is_enabled_for_tests());
+            assert_eq!(Arc::strong_count(&handler), 1);
+        }
+        drop(irq_guard);
+        assert_eq!(karch::local_irq_enabled(), irq_before);
+    }
+}
+
+#[def_test]
+fn shared_configuration_failure_preserves_existing_owners_and_tokens() {
+    let virq = 0x3171;
+    let owner: crate::Handler = Arc::new(test_handler);
+    let offered: crate::Handler = Arc::new(test_handler);
+    for has_owner in [false, true] {
+        for is_disabled in [false, true] {
+            let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+            let token = if has_owner {
+                super::register_shared_locked(virq, &mut entry, &owner, |_| Ok(())).unwrap()
+            } else {
+                None
+            };
+            if is_disabled {
+                let plan = entry.prepare_disable_irq_nosync();
+                entry.commit_platform_plan(plan);
+            }
+            entry.update_desc(entry.desc.with_flags(IrqFlags::WAKEUP_SOURCE));
+            let configured_before = entry.configured_generation_for_tests();
+            let depth_before = entry.disable_depth_for_tests();
+            let enabled_before = entry.is_enabled_for_tests();
+            let generation = entry.generation_for_tests();
+            let line = IrqLine::new(entry);
+            let irq_before = karch::local_irq_enabled();
+            let mut observed = Vec::new();
+            let result = super::register_shared_locked(virq, &mut line.lock(), &offered, |plan| {
+                observed.push((plan.configure, plan.enable, plan.flow_unmask.is_some()));
+                Err(IrqDescError::ConfigurationFailed { hwirq: plan.desc.hwirq })
+            });
+            assert_eq!(result, Err(IrqDescError::ConfigurationFailed { hwirq: virq }));
+            assert_eq!(observed.as_slice(), &[(true, None, false)]);
+            assert_eq!(karch::local_irq_enabled(), irq_before);
+            let mut entry = line.lock();
+            assert_eq!(entry.action_count(), usize::from(has_owner));
+            assert_eq!(entry.configured_generation_for_tests(), configured_before);
+            assert_eq!(entry.generation_for_tests(), generation);
+            assert_eq!(entry.disable_depth_for_tests(), depth_before);
+            assert_eq!(entry.is_enabled_for_tests(), enabled_before);
+            assert_eq!(Arc::strong_count(&offered), 1);
+            assert_eq!(Arc::strong_count(&owner), 1 + usize::from(has_owner));
+            if let Some(token) = token {
+                assert!(entry.take_action(token).is_some());
+            }
+            assert_eq!(Arc::strong_count(&owner), 1);
+        }
+    }
+}
+
+#[def_test]
+fn enable_configuration_failure_preserves_depth_generation_pending_and_irq_mask() {
+    let virq = 0x3172;
+    let owner: crate::Handler = Arc::new(test_handler);
+    for force in [false, true] {
+        for is_masked in [false, true] {
+            let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+            assert!(super::register_locked(
+                virq, &mut entry, &owner, super::IrqRegisterOptions::disabled(), |_| Ok(()),
+            ).unwrap());
+            entry.update_desc(entry.desc.with_flags(IrqFlags::WAKEUP_SOURCE));
+            entry.is_pending = true;
+            let configured_before = entry.configured_generation_for_tests();
+            let generation = entry.generation_for_tests();
+            let line = Arc::new(IrqLine::new(entry));
+            let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+            registry.lock().descs.insert(virq, line.clone());
+            let irq_before = karch::local_irq_enabled();
+            let irq_guard = is_masked.then(kspin::IrqSave::new);
+            let expected_irq = karch::local_irq_enabled();
+            let mut observed = None;
+            let result = super::enable_line(&registry, virq.into(), force, |plan| {
+                observed = Some((plan.configure, plan.enable, karch::local_irq_enabled()));
+                Err(IrqDescError::ConfigurationFailed { hwirq: plan.desc.hwirq })
+            });
+            assert_eq!(result, Err(IrqDescError::ConfigurationFailed { hwirq: virq }));
+            assert_eq!(observed, Some((true, Some(true), false)));
+            assert_eq!(karch::local_irq_enabled(), expected_irq);
+            drop(irq_guard);
+            assert_eq!(karch::local_irq_enabled(), irq_before);
+            let entry = line.lock();
+            assert_eq!(entry.configured_generation_for_tests(), configured_before);
+            assert_eq!(entry.generation_for_tests(), generation);
+            assert_eq!(entry.disable_depth_for_tests(), 1);
+            assert!(!entry.is_enabled_for_tests());
+            assert!(entry.is_pending);
+            assert_eq!(entry.in_flight(), 0);
+            assert_eq!(entry.action_count(), 1);
+            assert_eq!(Arc::strong_count(&owner), 2);
+        }
+    }
+    assert_eq!(Arc::strong_count(&owner), 1);
+}
+
+#[def_test]
+fn failed_shared_configuration_blocks_survivor_unmask_until_successful_retry() {
+    static CHIP: crate::FasteoiChip = crate::FasteoiChip {
+        mask: |_| {},
+        unmask: |_| {},
+        resend: crate::FasteoiResend::Software,
+    };
+    let virq = 0x3173;
+    let owner: crate::Handler = Arc::new(test_handler);
+    let offered: crate::Handler = Arc::new(test_handler);
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    entry.flow = crate::IrqFlow::Fasteoi(&CHIP);
+    let survivor = super::register_shared_locked(virq, &mut entry, &owner, |_| Ok(())).unwrap().unwrap();
+    let withdrawn = super::register_shared_locked(virq, &mut entry, &owner, |_| Ok(())).unwrap().unwrap();
+    entry.update_desc(entry.desc.with_flags(IrqFlags::WAKEUP_SOURCE));
+    entry.is_pending = true;
+    let configured_before = entry.configured_generation_for_tests();
+    let result = super::register_shared_locked(virq, &mut entry, &offered, |plan| {
+        assert!(plan.configure);
+        Err(IrqDescError::ConfigurationFailed { hwirq: virq })
+    });
+    assert_eq!(result, Err(IrqDescError::ConfigurationFailed { hwirq: virq }));
+    assert!(!entry.can_run_actions());
+    assert!(!entry.needs_replay());
+    assert!(entry.needs_configuration_restore());
+    entry.begin_management();
+    let line = Arc::new(IrqLine::new(entry));
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    registry.lock().descs.insert(virq, line.clone());
+    let mut has_applied_delivery = false;
+    let removed = super::withdraw_on_line(virq, &line, Some(withdrawn), |_| {
+        has_applied_delivery = true;
+    });
+    assert!(removed.is_some());
+    assert!(!has_applied_delivery);
+    let mut has_unmasked = false;
+    super::finish_management_on_line(&registry, Some(virq), &line, true, |_, _| {
+        has_unmasked = true;
+    });
+    drop(removed);
+    assert!(!has_unmasked);
+    let mut entry = line.lock();
+    assert!(!entry.is_teardown_in_progress());
+    assert!(entry.is_enabled_for_tests());
+    assert_eq!(entry.disable_depth_for_tests(), 0);
+    assert_eq!(entry.action_count(), 1);
+    assert_eq!(entry.configured_generation_for_tests(), configured_before);
+    assert!(!entry.can_run_actions());
+    assert!(!entry.needs_replay());
+    assert!(entry.is_pending);
+    assert_eq!(Arc::strong_count(&owner), 2);
+    assert_eq!(Arc::strong_count(&offered), 1);
+    let mut observed = Vec::with_capacity(2);
+    let recovered = super::register_shared_locked(virq, &mut entry, &offered, |plan| {
+        observed.push((plan.configure, plan.enable, Arc::strong_count(&offered)));
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(observed.as_slice(), &[(true, None, 1), (false, Some(true), 2)]);
+    assert!(entry.can_run_actions());
+    assert!(entry.needs_replay());
+    assert!(!entry.needs_configuration_restore());
+    assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+    assert_eq!(entry.action_count(), 2);
+    assert!(entry.take_action(survivor).is_some());
+    assert!(entry.take_action(recovered).is_some());
+    assert_eq!(Arc::strong_count(&owner), 1);
+    assert_eq!(Arc::strong_count(&offered), 1);
+}
+
+#[def_test]
+fn regular_retry_restores_previously_enabled_delivery_only_for_auto_enable() {
+    let virq = 0x3174;
+    let handler: crate::Handler = Arc::new(test_handler);
+    for is_auto_enable in [false, true] {
+        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        let enabled = entry.prepare_legacy_enable();
+        entry.commit_platform_plan(enabled);
+        entry.update_desc(entry.desc.with_flags(IrqFlags::WAKEUP_SOURCE));
+        let options = if is_auto_enable {
+            super::IrqRegisterOptions::auto_enable()
+        } else {
+            super::IrqRegisterOptions::disabled()
+        };
+        let failed = super::register_locked(virq, &mut entry, &handler, options, |plan| {
+            assert!(plan.configure);
+            Err(IrqDescError::ConfigurationFailed { hwirq: virq })
+        });
+        assert_eq!(failed, Err(IrqDescError::ConfigurationFailed { hwirq: virq }));
+        assert!(entry.needs_configuration_restore());
+        assert_eq!(entry.action_count(), 0);
+        let mut observed = Vec::with_capacity(2);
+        assert!(super::register_locked(virq, &mut entry, &handler, options, |plan| {
+            observed.push((plan.configure, plan.enable, Arc::strong_count(&handler)));
+            Ok(())
+        }).unwrap());
+        assert_eq!(observed.as_slice(), &[(true, None, 1), (false, Some(is_auto_enable), 2)]);
+        assert_eq!(entry.can_run_actions(), is_auto_enable);
+        assert_eq!(entry.disable_depth_for_tests(), usize::from(!is_auto_enable));
+        assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+        assert!(!entry.prepare_reconfigure_if_stale().configure);
+        assert!(!entry.needs_configuration_restore());
+    }
+    assert_eq!(Arc::strong_count(&handler), 1);
+}
+
+#[def_test]
+fn disabled_recovery_clears_logical_enable_before_later_enable() {
+    let virq = 0x3175;
+    let handler: crate::Handler = Arc::new(test_handler);
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    let enabled = entry.prepare_legacy_enable();
+    entry.commit_platform_plan(enabled);
+    entry.mark_configuration_failed();
+    assert!(entry.is_enabled_for_tests());
+    assert_eq!(entry.action_count(), 0);
+    let mut observed = Vec::with_capacity(2);
+    assert!(super::register_locked(
+        virq, &mut entry, &handler, super::IrqRegisterOptions::disabled(), |plan| {
+            observed.push((plan.configure, plan.enable));
+            Ok(())
+        },
+    ).unwrap());
+    assert_eq!(observed.as_slice(), &[(true, None), (false, Some(false))]);
+    assert_eq!(entry.disable_depth_for_tests(), 1);
+    assert!(!entry.is_enabled_for_tests());
+    assert!(!entry.prepare_reconfigure_if_stale().configure);
+    assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+    let enable = entry.prepare_enable_irq();
+    assert_eq!(enable.enable, Some(true));
+    assert!(!enable.configure);
 }
 
 #[def_test]
@@ -1350,13 +1643,24 @@ fn regular_registration_keeps_line_locked_through_backend_update() -> unittest::
         } else {
             super::IrqRegisterOptions::disabled()
         };
-        let mut observed = None;
+        let mut observed = Vec::with_capacity(2);
         let installed = super::register_locked(virq, &mut line.lock(), &handler, options, |plan| {
-            observed = Some((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
-                plan.desc.logical_irq(), plan.configure, plan.enable));
+            observed.push((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
+                plan.desc.logical_irq(), plan.configure, plan.enable, Arc::strong_count(&handler)));
+            Ok(())
         });
-        assert!(installed);
-        assert_eq!(observed, Some((false, true, Some(virq), auto_enable, auto_enable.then_some(true))));
+        assert_eq!(installed, Ok(true));
+        if auto_enable {
+            assert_eq!(observed.as_slice(), &[
+                (false, true, Some(virq), true, None, 1),
+                (false, true, Some(virq), false, Some(true), 2),
+            ]);
+        } else {
+            assert_eq!(observed.as_slice(), &[
+                (false, true, Some(virq), true, None, 1),
+                (false, true, Some(virq), false, None, 2),
+            ]);
+        }
         assert!(!line.is_state_locked_for_tests());
         assert_eq!(line.lock().action_count(), 1);
         assert_eq!(line.lock().is_enabled_for_tests(), auto_enable);
@@ -1380,17 +1684,27 @@ fn shared_registration_keeps_line_locked_without_reenabling_later_actions() -> u
     let handler: crate::Handler = Arc::new(test_handler);
     let mut tokens = Vec::new();
     for is_first in [true, false] {
-        let mut observed = None;
+        let mut observed = Vec::with_capacity(2);
         let token = super::register_shared_locked(virq, &mut line.lock(), &handler, |plan| {
-            observed = Some((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
-                plan.configure, plan.enable));
-        }).unwrap();
-        assert_eq!(observed, Some((false, true, is_first, is_first.then_some(true))));
+            observed.push((karch::local_irq_enabled(), line.is_state_locked_for_tests(),
+                plan.configure, plan.enable, Arc::strong_count(&handler)));
+            Ok(())
+        }).unwrap().unwrap();
+        if is_first {
+            assert_eq!(observed.as_slice(), &[
+                (false, true, true, None, 1),
+                (false, true, false, Some(true), 2),
+            ]);
+        } else {
+            assert_eq!(observed.as_slice(), &[(false, true, false, None, 3)]);
+        }
         tokens.push(token);
         assert!(!line.is_state_locked_for_tests());
         // A later shared registration must not undo the owner's disable.
         if is_first {
-            line.lock().prepare_disable_irq_nosync();
+            let mut entry = line.lock();
+            let plan = entry.prepare_disable_irq_nosync();
+            entry.commit_platform_plan(plan);
         }
     }
     assert_ne!(tokens[0], tokens[1]);
@@ -1477,9 +1791,9 @@ fn registration_preflight_and_install_share_resolved_line_state() {
             assert_eq!(resolved_virq, virq);
             assert_eq!(entry.desc, richer);
             assert!(!has_atomic_exclusion || line.is_state_locked_for_tests());
-            Ok(super::register_locked(
-                virq, entry, &handler, super::IrqRegisterOptions::disabled(), |_| {},
-            ))
+            super::register_locked(
+                virq, entry, &handler, super::IrqRegisterOptions::disabled(), |_| Ok(()),
+            )
         },
     ).unwrap();
     assert_eq!(accepted, Some(true));
@@ -1501,11 +1815,11 @@ fn registration_rejection_preserves_handler_ownership_and_skips_backend() {
     let mut has_called_backend = false;
     assert!(!super::register_locked(
         virq, &mut line.lock(), &rejected, super::IrqRegisterOptions::auto_enable(),
-        |_| has_called_backend = true,
-    ));
+        |_| { has_called_backend = true; Ok(()) },
+    ).unwrap());
     assert!(super::register_shared_locked(
-        virq, &mut line.lock(), &rejected, |_| has_called_backend = true,
-    ).is_none());
+        virq, &mut line.lock(), &rejected, |_| { has_called_backend = true; Ok(()) },
+    ).unwrap().is_none());
     assert!(!has_called_backend);
     assert_eq!(Arc::strong_count(&rejected), 1);
     assert_eq!(Arc::strong_count(&owner), 2);
@@ -1514,12 +1828,45 @@ fn registration_rejection_preserves_handler_ownership_and_skips_backend() {
 }
 
 #[def_test]
+fn shared_reconfiguration_precedes_new_owner_without_restoring_disabled_delivery() {
+    let virq = 0x316e;
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    let first: crate::Handler = Arc::new(test_handler);
+    let next: crate::Handler = Arc::new(test_handler);
+    let first_token = super::register_shared_locked(virq, &mut entry, &first, |_| Ok(())).unwrap().unwrap();
+    let disable = entry.prepare_disable_irq_nosync();
+    entry.commit_platform_plan(disable);
+    entry.update_desc(entry.desc.with_flags(IrqFlags::WAKEUP_SOURCE));
+    let generation = entry.generation_for_tests();
+    let mut observed = Vec::with_capacity(2);
+    let next_token = super::register_shared_locked(virq, &mut entry, &next, |plan| {
+        observed.push((plan.configure, plan.enable, plan.flow_unmask.is_some(),
+            Arc::strong_count(&first), Arc::strong_count(&next)));
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(observed.as_slice(), &[
+        (true, None, false, 2, 1),
+        (false, None, false, 2, 2),
+    ]);
+    assert_ne!(first_token, next_token);
+    assert_eq!(entry.configured_generation_for_tests(), Some(generation));
+    assert_eq!(entry.action_count(), 2);
+    assert_eq!(entry.disable_depth_for_tests(), 1);
+    assert!(!entry.is_enabled_for_tests());
+    drop(entry.take_action(first_token));
+    drop(entry.take_action(next_token));
+    assert_eq!(Arc::strong_count(&first), 1);
+    assert_eq!(Arc::strong_count(&next), 1);
+}
+
+#[def_test]
 fn withdrawal_keeps_line_locked_through_mask_and_returns_the_owner() -> unittest::TestResult {
     let virq = 0x3161;
     let handler: crate::Handler = Arc::new(test_handler);
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
     assert!(entry.install_regular_action(IrqAction::regular(handler.clone())));
-    entry.prepare_auto_enable();
+    let plan = entry.prepare_auto_enable();
+    entry.commit_platform_plan(plan);
     entry.begin_dispatch();
     let line = Arc::new(IrqLine::new(entry));
     let has_atomic_exclusion = {
@@ -1556,7 +1903,8 @@ fn withdrawn_line_rejects_enable_while_disable_keeps_original_drain() {
     let handler: crate::Handler = Arc::new(test_handler);
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
     assert!(entry.install_regular_action(IrqAction::regular(handler.clone())));
-    entry.prepare_auto_enable();
+    let plan = entry.prepare_auto_enable();
+    entry.commit_platform_plan(plan);
     entry.begin_management();
     entry.begin_dispatch();
     let line = Arc::new(IrqLine::new(entry));
@@ -1569,7 +1917,10 @@ fn withdrawn_line_rejects_enable_while_disable_keeps_original_drain() {
     assert!(has_masked);
     for force in [false, true] {
         let mut has_enabled = false;
-        let result = super::enable_line(&registry, virq.into(), force, |_| has_enabled = true);
+        let result = super::enable_line(&registry, virq.into(), force, |_| {
+            has_enabled = true;
+            Ok(())
+        });
         assert!(matches!(result, Err(IrqDescError::TeardownInProgress { virq: id }) if id == virq));
         assert!(!has_enabled);
     }
@@ -1589,13 +1940,48 @@ fn withdrawn_line_rejects_enable_while_disable_keeps_original_drain() {
 }
 
 #[def_test]
+fn missing_action_withdrawal_preserves_empty_line_control_state() {
+    let virq = 0x3165;
+    for is_enabled in [false, true] {
+        for token in [None, Some(crate::IrqActionToken::new(1))] {
+            let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+            if is_enabled {
+                // Legacy startup can enable a Line before installing an action.
+                let plan = entry.prepare_legacy_enable();
+                entry.commit_platform_plan(plan);
+            }
+            let snapshot = |entry: &IrqStateDesc| {
+                (
+                    entry.is_enabled_for_tests(),
+                    entry.disable_depth_for_tests(),
+                    entry.teardown_depth_for_tests(),
+                    entry.action_count(),
+                    entry.generation_for_tests(),
+                    entry.configured_generation_for_tests(),
+                )
+            };
+            let before = snapshot(&entry);
+            let line = Arc::new(IrqLine::new(entry));
+            let mut has_applied_plan = false;
+            let removed = super::withdraw_on_line(virq, &line, token, |_| {
+                has_applied_plan = true;
+            });
+            assert!(removed.is_none());
+            assert!(!has_applied_plan);
+            assert_eq!(snapshot(&line.lock()), before);
+        }
+    }
+}
+
+#[def_test]
 fn shared_withdrawal_masks_only_the_last_owned_action() {
     let virq = 0x3162;
     let handler: crate::Handler = Arc::new(test_handler);
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
     let first = entry.install_shared_action(handler.clone()).unwrap();
     let last = entry.install_shared_action(handler.clone()).unwrap();
-    entry.prepare_auto_enable();
+    let plan = entry.prepare_auto_enable();
+    entry.commit_platform_plan(plan);
     let line = Arc::new(IrqLine::new(entry));
     let mut has_applied_plan = false;
     let removed = super::withdraw_on_line(virq, &line, Some(first), |_| {
@@ -1630,6 +2016,35 @@ fn shared_withdrawal_masks_only_the_last_owned_action() {
     assert_eq!(Arc::strong_count(&handler), 1);
 }
 
+#[def_test]
+fn enable_final_admission_rejects_teardown_after_earlier_observation() {
+    let virq = 0x3163;
+    for force in [false, true] {
+        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+        let plan = entry.prepare_register_disabled();
+        entry.commit_platform_plan(plan);
+        let line = Arc::new(IrqLine::new(entry));
+        assert!(!line.lock().is_teardown_in_progress());
+        // Model withdrawal after an earlier observation, without depending on
+        // another CPU's timing. Final admission must inspect the current state.
+        line.lock().begin_teardown();
+        let mut entry = line.lock();
+        let desc = entry.desc;
+        let result = super::prepare_enable_plan(&entry, virq, force);
+        assert!(matches!(result, Err(IrqDescError::TeardownInProgress { virq: id }) if id == virq));
+        assert_eq!(entry.desc, desc);
+        assert_eq!(entry.disable_depth_for_tests(), 1);
+        assert_eq!(entry.action_count(), 1);
+        assert!(!entry.is_enabled_for_tests());
+        entry.finish_teardown();
+        let plan = super::prepare_enable_plan(&entry, virq, force).unwrap();
+        assert_eq!(plan.enable, Some(true));
+        assert_eq!(entry.disable_depth_for_tests(), 1);
+        entry.commit_platform_plan(plan);
+        assert_eq!(entry.disable_depth_for_tests(), 0);
+    }
+}
 // UP spinlocks have no contended state to inspect; the lock-exclusion probe
 // requires SMP even though nested-enable semantics apply to both builds.
 #[def_test(serial)]
@@ -1645,8 +2060,10 @@ fn enable_backend_holds_original_line_through_nested_and_forced_updates() -> uni
     let virq = 0x315b;
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
     assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-    entry.prepare_disable_irq_nosync();
-    entry.prepare_disable_irq_nosync();
+    let plan = entry.prepare_disable_irq_nosync();
+    entry.commit_platform_plan(plan);
+    let plan = entry.prepare_disable_irq_nosync();
+    entry.commit_platform_plan(plan);
     let line = Arc::new(IrqLine::new(entry));
     registry.lock().descs.insert(virq, line.clone());
 
@@ -1663,6 +2080,7 @@ fn enable_backend_holds_original_line_through_nested_and_forced_updates() -> uni
             observed = Some((karch::local_irq_enabled(), registry.try_lock().is_some(),
                 line.is_state_locked_for_tests(), plan.desc.logical_irq(), plan.enable,
                 plan.configure));
+            Ok(())
         }).unwrap();
         assert_eq!(karch::local_irq_enabled(), irq_before);
         assert_eq!(observed, Some((false, true, true, Some(virq), expected_enable, configure)));
@@ -1674,9 +2092,70 @@ fn enable_backend_holds_original_line_through_nested_and_forced_updates() -> uni
     {
         let _guard = kspin::NoPreemptIrqSave::new();
         for force in [false, true] {
-            super::enable_line(&registry, virq.into(), force, |_| {}).unwrap();
+            super::enable_line(&registry, virq.into(), force, |_| Ok(())).unwrap();
             assert!(!karch::local_irq_enabled());
         }
+    }
+    unittest::TestResult::Ok
+}
+
+#[def_test(serial)]
+fn management_restore_releases_registry_but_retains_line() -> unittest::TestResult {
+    use unittest::{assert, assert_eq};
+
+    static CHIP: crate::FasteoiChip = crate::FasteoiChip {
+        mask: |_| {},
+        unmask: |_| {},
+        resend: crate::FasteoiResend::Software,
+    };
+    let registry = kspin::SpinNoIrq::new(super::IrqState::new());
+    let has_atomic_exclusion = {
+        let _guard = registry.lock();
+        registry.is_locked()
+    };
+    if !has_atomic_exclusion {
+        return unittest::TestResult::Ignored;
+    }
+    for (index, (has_action, is_enabled, has_removed)) in [
+        (true, true, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, false),
+    ].into_iter().enumerate() {
+        let virq = 0x3160 + index;
+        let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+        entry.flow = crate::IrqFlow::Fasteoi(&CHIP);
+        if has_action {
+            assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
+        }
+        if is_enabled {
+            let plan = entry.prepare_legacy_enable();
+            entry.commit_platform_plan(plan);
+        }
+        entry.begin_management();
+        if has_removed {
+            entry.begin_teardown();
+        }
+        let line = Arc::new(IrqLine::new(entry));
+        registry.lock().descs.insert(virq, line.clone());
+        let irq_before = karch::local_irq_enabled();
+        let mut observed = None;
+        super::finish_management_on_line(
+            &registry, Some(virq), &line, has_removed,
+            |_, desc| {
+                // A private registry makes failure specific to this path,
+                // not unrelated remote IRQ activity. Never block on the Line.
+                observed = Some((registry.try_lock().is_some(),
+                    line.is_state_locked_for_tests(), !karch::local_irq_enabled(),
+                    desc.logical_irq()));
+            },
+        );
+        assert_eq!(karch::local_irq_enabled(), irq_before);
+        let expected = (has_action && is_enabled && has_removed)
+            .then_some((true, true, true, Some(virq)));
+        assert_eq!(observed, expected);
+        assert!(!line.lock().is_teardown_in_progress());
+        assert_eq!(registry.lock().descs.contains_key(&virq), has_action);
     }
     unittest::TestResult::Ok
 }
@@ -1689,6 +2168,7 @@ fn enable_rejections_do_not_call_backend_or_change_line() {
     let mut has_called_backend = false;
     let result = super::enable_line(&registry, virq.into(), false, |_| {
         has_called_backend = true;
+        Ok(())
     });
     assert!(matches!(result, Err(IrqDescError::UnknownIrq)));
     assert_eq!(karch::local_irq_enabled(), irq_before);
@@ -1696,11 +2176,13 @@ fn enable_rejections_do_not_call_backend_or_change_line() {
     assert!(registry.lock().descs.is_empty());
 
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
-    entry.prepare_disable_irq_nosync();
+    let plan = entry.prepare_disable_irq_nosync();
+    entry.commit_platform_plan(plan);
     let line = Arc::new(IrqLine::new(entry));
     registry.lock().descs.insert(virq, line.clone());
     let result = super::enable_line(&registry, virq.into(), false, |_| {
         has_called_backend = true;
+        Ok(())
     });
     assert!(matches!(result, Err(IrqDescError::NoIrqAction { virq: id }) if id == virq));
     assert_eq!(karch::local_irq_enabled(), irq_before);
@@ -1711,6 +2193,7 @@ fn enable_rejections_do_not_call_backend_or_change_line() {
     for force in [false, true] {
         let result = super::enable_line(&registry, virq.into(), force, |_| {
             has_called_backend = true;
+            Ok(())
         });
         assert!(matches!(result, Err(IrqDescError::TeardownInProgress { virq: id }) if id == virq));
         assert_eq!(karch::local_irq_enabled(), irq_before);
@@ -1736,7 +2219,8 @@ fn controller_update_excludes_only_its_original_line() -> unittest::TestResult {
     let make_line = |virq| {
         let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
         assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-        entry.prepare_register_disabled();
+        let plan = entry.prepare_register_disabled();
+        entry.commit_platform_plan(plan);
         Arc::new(IrqLine::new(entry))
     };
     let first = make_line(first_virq);
@@ -1766,8 +2250,8 @@ fn controller_update_excludes_only_its_original_line() -> unittest::TestResult {
             assert_eq!(other_entry.disable_depth_for_tests(), 1);
             assert!(original.is_state_locked_for_tests());
         };
-        super::enable_line(&registry, virq.into(), false, observe).unwrap();
-        super::enable_line(&registry, virq.into(), true, observe).unwrap();
+        super::enable_line(&registry, virq.into(), false, |plan| { observe(plan); Ok(()) }).unwrap();
+        super::enable_line(&registry, virq.into(), true, |plan| { observe(plan); Ok(()) }).unwrap();
         let drain = super::disable_line(&registry, virq.into(), observe).unwrap();
         assert!(Arc::ptr_eq(&drain.line, original));
         assert_eq!(karch::local_irq_enabled(), were_irqs_enabled);
@@ -1787,6 +2271,7 @@ fn legacy_enable_publishes_line_before_backend_update() {
     super::enable_line(&registry, virq.into(), true, |plan| {
         observed = Some((plan.configure, plan.enable, plan.desc.logical_irq()));
         retained = Some(registry.lock().descs.get(&virq).unwrap().clone());
+        Ok(())
     }).unwrap();
     assert_eq!(karch::local_irq_enabled(), irq_before);
     assert_eq!(observed, Some((true, Some(true), Some(virq))));
@@ -1813,7 +2298,9 @@ fn disable_backend_holds_original_line_without_registry_lock() -> unittest::Test
     let virq = 0x3159;
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
     assert!(entry.install_regular_action(IrqAction::regular(Arc::new(test_handler))));
-    assert_eq!(entry.prepare_enable_irq().enable, Some(true));
+    let plan = entry.prepare_enable_irq();
+    assert_eq!(plan.enable, Some(true));
+    entry.commit_platform_plan(plan);
     let line = Arc::new(IrqLine::new(entry));
     registry.lock().descs.insert(virq, line.clone());
 
@@ -2455,12 +2942,96 @@ fn test_synchronize_irq_waits_for_in_flight_dispatch() {
 }
 
 #[def_test]
+fn platform_plan_discard_leaves_enable_and_configuration_retryable() {
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x3160));
+    {
+        let abandoned = entry.prepare_auto_enable();
+        assert!(abandoned.configure);
+        assert_eq!(abandoned.enable, Some(true));
+        assert_eq!(entry.configured_generation_for_tests(), None);
+        assert!(!entry.is_enabled_for_tests());
+        assert_eq!(entry.disable_depth_for_tests(), 0);
+    }
+    let retry = entry.prepare_auto_enable();
+    assert!(retry.configure);
+    assert_eq!(retry.enable, Some(true));
+    entry.commit_platform_plan(retry);
+    assert_eq!(entry.configured_generation_for_tests(), Some(0));
+    assert!(entry.is_enabled_for_tests());
+    let next = entry.prepare_enable_irq();
+    assert!(!next.configure);
+    assert_eq!(next.enable, None);
+}
+
+#[def_test]
+fn platform_plan_nested_depth_changes_only_at_commit() {
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(0x3161));
+    let initial = entry.prepare_auto_enable();
+    entry.commit_platform_plan(initial);
+    for depth in 0..2 {
+        let plan = entry.prepare_disable_irq_nosync();
+        assert_eq!(entry.disable_depth_for_tests(), depth);
+        assert_eq!(entry.is_enabled_for_tests(), depth == 0);
+        assert_eq!(plan.enable, (depth == 0).then_some(false));
+        let retry = entry.prepare_disable_irq_nosync();
+        assert_eq!(retry.enable, plan.enable);
+        entry.commit_platform_plan(retry);
+        assert_eq!(entry.disable_depth_for_tests(), depth + 1);
+        assert!(!entry.is_enabled_for_tests());
+    }
+    for depth in [2, 1] {
+        let plan = entry.prepare_enable_irq();
+        assert_eq!(entry.disable_depth_for_tests(), depth);
+        assert!(!entry.is_enabled_for_tests());
+        assert!(!plan.configure);
+        assert_eq!(plan.enable, (depth == 1).then_some(true));
+        let retry = entry.prepare_enable_irq();
+        assert_eq!(retry.enable, plan.enable);
+        entry.commit_platform_plan(retry);
+        assert_eq!(entry.disable_depth_for_tests(), depth - 1);
+        assert_eq!(entry.is_enabled_for_tests(), depth == 1);
+    }
+}
+
+#[def_test]
+fn register_disabled_and_reconfigure_plans_are_side_effect_free() {
+    let virq = 0x3162;
+    let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
+    let disabled = entry.prepare_register_disabled();
+    assert_eq!(entry.disable_depth_for_tests(), 0);
+    assert!(!disabled.configure);
+    assert_eq!(disabled.enable, None);
+    entry.commit_platform_plan(disabled);
+    assert_eq!(entry.disable_depth_for_tests(), 1);
+    let configure = entry.prepare_reconfigure_if_stale();
+    assert!(configure.configure);
+    assert_eq!(entry.configured_generation_for_tests(), None);
+    let retry = entry.prepare_reconfigure_if_stale();
+    assert!(retry.configure);
+    entry.commit_platform_plan(retry);
+    assert_eq!(entry.configured_generation_for_tests(), Some(0));
+    assert!(!entry.is_enabled_for_tests());
+    assert_eq!(entry.disable_depth_for_tests(), 1);
+    entry.update_desc(IrqDesc::from_virq(virq).with_controller(IrqController::Gic));
+    let stale = entry.prepare_reconfigure_if_stale();
+    assert!(stale.configure);
+    assert_eq!(entry.configured_generation_for_tests(), Some(0));
+    assert!(entry.prepare_reconfigure_if_stale().configure);
+    entry.commit_platform_plan(stale);
+    assert_eq!(entry.configured_generation_for_tests(), Some(1));
+    assert!(!entry.is_enabled_for_tests());
+    assert_eq!(entry.disable_depth_for_tests(), 1);
+}
+
+#[def_test]
 fn test_legacy_enable_forces_platform_enable_when_already_enabled() {
     let virq = 0x3114;
     let mut entry = IrqStateDesc::new(IrqDesc::from_virq(virq));
 
     let first = entry.prepare_auto_enable();
     assert_eq!(first.enable, Some(true));
+    assert!(!entry.is_enabled_for_tests());
+    entry.commit_platform_plan(first);
     assert!(entry.is_enabled_for_tests());
 
     let depth_aware = entry.prepare_enable_irq();
@@ -2478,6 +3049,9 @@ fn test_reconfigure_if_stale_does_not_toggle_enabled_state() {
     let first = entry.prepare_auto_enable();
     assert!(first.configure);
     assert_eq!(first.enable, Some(true));
+    assert_eq!(entry.configured_generation_for_tests(), None);
+    assert!(!entry.is_enabled_for_tests());
+    entry.commit_platform_plan(first);
     assert_eq!(entry.configured_generation_for_tests(), Some(0));
     assert!(entry.is_enabled_for_tests());
 
@@ -2490,6 +3064,8 @@ fn test_reconfigure_if_stale_does_not_toggle_enabled_state() {
     let stale = entry.prepare_reconfigure_if_stale();
     assert!(stale.configure);
     assert_eq!(stale.enable, None);
+    assert_eq!(entry.configured_generation_for_tests(), Some(0));
+    entry.commit_platform_plan(stale);
     assert_eq!(entry.configured_generation_for_tests(), Some(1));
     assert!(entry.is_enabled_for_tests());
 }
@@ -2565,10 +3141,12 @@ fn test_unsupported_threaded_action_does_not_run_primary() {
 
 #[def_test(serial)]
 fn test_unregister_keeps_msi_descriptor_for_free_msix() {
+    // Exercise MSI ownership bookkeeping without claiming a real APIC vector.
+    let domain = crate::domain::TEST_DOMAIN;
     let (hwirq, virq) =
         unused_msi_test_mapping(&IRQ_STATE.lock()).expect("MSI test mapping space exhausted");
     let desc = IrqDesc::new(hwirq, IrqTrigger::EdgeRising)
-        .with_domain(MSI_DOMAIN)
+        .with_domain(domain)
         .with_flags(IrqFlags::MSI)
         .with_virq(virq);
     let prepared = Arc::new(IrqLine::new(IrqStateDesc::new(desc)));
@@ -2598,12 +3176,12 @@ fn test_unregister_keeps_msi_descriptor_for_free_msix() {
             .expect("MSI descriptor must stay")
             .lock();
         assert!(entry.is_unused());
-        assert_eq!(state.translated_hwirq(MSI_DOMAIN, hwirq), Some(virq));
+        assert_eq!(state.translated_hwirq(domain, hwirq), Some(virq));
     }
     {
         let mut state = IRQ_STATE.lock();
         assert_eq!(state.remove_msi_if_unused(virq), Some(hwirq));
-        assert_eq!(state.translated_hwirq(MSI_DOMAIN, hwirq), None);
+        assert_eq!(state.translated_hwirq(domain, hwirq), None);
         assert!(!state.descs.contains_key(&virq));
     }
 
@@ -2613,7 +3191,7 @@ fn test_unregister_keeps_msi_descriptor_for_free_msix() {
     };
     let remapped_virq = try_map(
         IrqDesc::new(new_hwirq, IrqTrigger::EdgeRising)
-            .with_domain(MSI_DOMAIN)
+            .with_domain(domain)
             .with_flags(IrqFlags::MSI)
             .with_virq(virq),
     )
@@ -2622,6 +3200,6 @@ fn test_unregister_keeps_msi_descriptor_for_free_msix() {
     {
         let mut state = IRQ_STATE.lock();
         assert_eq!(state.remove_msi_if_unused(virq), Some(new_hwirq));
-        assert_eq!(state.translated_hwirq(MSI_DOMAIN, new_hwirq), None);
+        assert_eq!(state.translated_hwirq(domain, new_hwirq), None);
     }
 }

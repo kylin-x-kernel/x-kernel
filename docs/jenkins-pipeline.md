@@ -22,6 +22,12 @@ arm_pl011 和 uart_16550 的宿主寄存器
 回归测试。该步骤失败会阻止后续构建；只在原生 x86_64 节点执行，其他架构
 不运行此宿主二进制。它补充内核 unittest 的启动状态检查，不替代该检查。
 
+The native AArch64 `Build Artifact` stage also runs `make check_gic` between
+defconfig and Clippy. It executes the vendored arm-gic-driver register fixtures,
+including Distributor RWP timeout propagation and recovery. The pinned release
+does not compile GICv3 on x86_64, so x86 host tests cannot replace this gate.
+These tests model register values, not physical write propagation or IRQ drain.
+
 ## Agent 身份与目录
 
 宿主机 Jenkins 用户和 builder 容器统一使用数字身份 `1000:1000`。这是

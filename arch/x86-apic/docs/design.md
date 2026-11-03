@@ -13,8 +13,9 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
   selects x2APIC vs xAPIC from CPUID, programs timer/error/spurious
   vectors, maps the xAPIC MMIO page when needed) and `init_secondary`
   (application CPUs).
-- IO-APIC routing: `configure_irq` (trigger mode and polarity),
-  `set_irq_enabled` (mask/unmask), `irq_trigger_mode` (query).
+- IO-APIC routing: `configure_irq_checked` (masked trigger/polarity transaction
+  with readback), `set_irq_enabled` (mask/unmask), `irq_trigger_mode` (query),
+  and `retrigger_io_apic` (fixed physical-route delivery).
 - Inter-processor interrupts: `send_ipi_self`, `send_ipi_raw`,
   `send_ipi_all_but_self`.
 - MSI-X backend (`kirq::MsiBackendIf` provider): a bitmap allocator over
@@ -40,7 +41,8 @@ end-of-interrupt and raw-APIC-id helpers to the rest of the kernel.
 ```text
 arch/x86-apic/
 ├── src/
-│   └── lib.rs        # LAPIC bring-up, IPIs, IO-APIC routing, MSI-X backend
+│   ├── lib.rs        # LAPIC bring-up, IPIs, IO-APIC access, MSI-X backend
+│   └── io_apic.rs    # Checked configuration and fixed-route retrigger
 └── Cargo.toml
 ```
 
@@ -74,7 +76,7 @@ kirq::MsiBackendIf ──> MsixVectorAllocator (bitmap, 0x40..0xf0)
   subsystems (e.g. TLB shootdown, rescheduling); the interrupt id comes
   from the caller, the raw id from `kcpu_id_map` resolution, and the
   direction is this crate -> the target CPU's LAPIC.
-- `configure_irq` / `set_irq_enabled`: called by `kirq` (through
+- `configure_irq_checked` / `set_irq_enabled`: called by `kirq` (through
   `irq-driver`'s `IntrManagerIf`) with a hardware IRQ number; this
   crate translates it to an IO-APIC redirection entry.
 
@@ -128,8 +130,12 @@ MSI-X interrupt and returns a vector in `0x40..0xf0` or `None` on
 exhaustion; `compose_msi_message` uses the still-held vector for the
 device message. `free_msi_vector` is invoked by `kirq` when the
 registration is aborted or torn down: it validates `u8` convertibility,
-clears the bitmap bit only for in-window vectors, and returns `false`
-otherwise. There is no other creation or cleanup path.
+clears the bitmap bit and destination binding only for in-window vectors, and
+returns `false` otherwise. The same allocator lock protects both allocation bits
+and each vector's optional APIC destination. The first successful composition
+binds that destination; recomposition accepts only the same target until free.
+Route admission validates this binding, and retrigger uses it rather than the
+CPU performing the request. There is no other creation or cleanup path.
 
 ## Execution Context
 
@@ -137,10 +143,14 @@ otherwise. There is no other creation or cleanup path.
   before interrupts are routed through the APIC; `init_secondary` runs
   on each application CPU before it enables interrupts.
 - `set_irq_enabled` / `configure_irq` / `irq_trigger_mode` take the
-  IO-APIC spin lock and are called from task context through `kirq`.
+  IO-APIC spin lock and may be called from task or ordinary IRQ context through
+  `kirq`. They must not be used from NMI. Checked configuration and retrigger
+  have the same restriction.
 - `with_local_apic` masks local interrupts for the borrow duration, so
   LAPIC accesses cannot re-enter from an interrupt handler on the same
   CPU.
+- `msi_route_matches` takes the MSI allocator spin lock. It permits task and
+  ordinary IRQ context, but not NMI or callers already holding that lock.
 - IPI senders and `end_of_interrupt` may run in interrupt context; they
   touch only the current CPU's LAPIC registers.
 
@@ -154,8 +164,9 @@ otherwise. There is no other creation or cleanup path.
   borrowed, excluding overlapping borrows on the same CPU.
 - `IS_X2APIC` / `XAPIC_BASE`: set once at `init_primary`, read with
   `Relaxed` afterwards.
-- `MSIX_VECTOR_ALLOCATOR`: `SpinNoIrq` bitmap allocator
-  (`0x40..0xf0`, 176 vectors).
+- `MSIX_VECTOR_ALLOCATOR`: `SpinNoIrq` protects the allocation bitmap
+  (`0x40..0xf0`, 176 vectors) and the per-vector destination bindings together.
+  Free clears both; an allocated vector cannot be rebound to another target.
 
 ## Error And Panic Model
 
@@ -193,3 +204,37 @@ All unsafe blocks are volatile/port access with `SAFETY:` comments:
 - The Local APIC handle is leaked once per CPU and reused forever:
   LAPIC registers are never unmapped, so per-call allocation would be
   pure overhead on the IRQ path.
+
+## Checked Flow Operations
+
+`io_apic.rs` bounds pins against the physical table and the fixed IO-APIC vector
+window below 0x40. `configure_irq_checked` masks, reads back the mask, programs
+trigger/polarity, verifies those bits and restores prior delivery only on success.
+It preserves vector/destination and refuses changing an active remote-IRR route.
+A failed hardware readback is reported, not treated as a completed barrier;
+mask failure cannot guarantee physical suppression. Generic KIRQ admission
+provides an independent failed-configuration gate. The older `configure_irq`
+entry remains a low-level unchecked operation and is not used by KIRQ flow.
+
+`retrigger_io_apic` reads the fixed vector and physical destination under IO_APIC
+exclusion and issues the request before releasing that lock. Level, logical
+destination or mismatched-vector entries are rejected. No new vector is created.
+`MsixVectorAllocator` additionally retains the destination first committed by
+message composition; conflicting recomposition fails. `Any` is resolved once
+when producing the message, not again on the replaying CPU. `retrigger_msi`
+holds the allocation lock through IPI issuance and free clears both the bit and
+target. Admission uses `msi_route_matches`, which rejects explicit CPU affinity
+that disagrees with the message target. This is a snapshot, not a lease.
+KIRQ retains Line/control identity while invoking these operations.
+
+Lock ordering is KIRQ Line -> IO_APIC or MSIX_VECTOR_ALLOCATOR -> CPU-local
+LAPIC borrow. These operations never call back into KIRQ. Retrigger returns
+request acceptance, not remote completion. The existing MSI API still requires
+the owner to stop/drain the producer before release; target retention does not
+solve posted interrupts, vector reuse or CPU hotplug. Those lifetime protocols
+are deliberately not changed here.
+
+Private register-model tests cover masked programming/readback failure, route
+preservation and exact target/vector selection. Allocation tests cover unbound,
+released, conflicting and reused routes. QEMU boot tests complement, rather than
+replace, those tests; they do not constitute physical-controller timing proof.

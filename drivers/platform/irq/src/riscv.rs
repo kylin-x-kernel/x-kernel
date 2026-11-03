@@ -2,6 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+extern crate alloc;
+
+use alloc::{boxed::Box, vec};
 use core::{num::NonZeroU32, ptr::NonNull};
 
 use kcpu_id_map::{LogicalCpuId, raw_cpu_id};
@@ -34,7 +37,69 @@ const PLIC_MAX_SOURCE: u32 = 1023;
 
 struct PlicController {
     sources: PlicSources,
-    registers: SpinNoIrq<Plic>,
+    state: SpinNoIrq<PlicState>,
+}
+
+struct PlicState {
+    registers: Plic,
+    // Controller-lifetime bindings; disable does not imply affinity migration.
+    sources: Box<[PlicSourceState]>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PlicSourceState {
+    target_context: Option<usize>,
+    configured_priority: Option<u32>,
+    is_masked: bool,
+}
+
+impl PlicSourceState {
+    fn set_priority(
+        &mut self,
+        registers: &mut impl PlicPriorityRegisters,
+        source: NonZeroU32,
+        priority: u32,
+    ) {
+        self.configured_priority = Some(priority);
+        registers.write_priority(source, if self.is_masked { 0 } else { priority });
+    }
+
+    fn mask(&mut self, registers: &mut impl PlicPriorityRegisters, source: NonZeroU32) {
+        // Capture firmware policy only before the first policy write or mask.
+        self.configured_priority
+            .get_or_insert_with(|| registers.read_priority(source));
+        self.is_masked = true;
+        registers.write_priority(source, 0);
+    }
+
+    fn unmask(&mut self, registers: &mut impl PlicPriorityRegisters, source: NonZeroU32) {
+        if !self.is_masked {
+            return;
+        }
+        if let Some(priority) = self.configured_priority {
+            registers.write_priority(source, priority);
+        }
+        self.is_masked = false;
+    }
+
+    fn set_enabled(
+        &mut self,
+        registers: &mut (impl PlicCompletion + PlicPriorityRegisters),
+        context: usize,
+        source: NonZeroU32,
+        enabled: bool,
+    ) {
+        if enabled {
+            self.set_priority(registers, source, 6);
+        }
+        set_plic_route(
+            registers,
+            &mut self.target_context,
+            context,
+            source,
+            enabled,
+        );
+    }
 }
 
 impl PlicController {
@@ -51,20 +116,36 @@ impl PlicController {
             return;
         };
         trace!("PLIC set enable: {source} {enabled}");
-        let mut registers = self.registers.lock();
-        if enabled {
-            registers.set_priority(source, 6);
-            registers.enable(source, this_context());
-        } else {
-            registers.disable(source, this_context());
-        }
+        let mut state = self.state.lock();
+        let PlicState { registers, sources } = &mut *state;
+        sources[source.get() as usize].set_enabled(registers, this_context(), source, enabled);
     }
 
     fn set_priority(&self, id: usize, priority: u8) {
         let Some(source) = self.source(id) else {
             return;
         };
-        self.registers.lock().set_priority(source, priority.into());
+        let mut state = self.state.lock();
+        let PlicState { registers, sources } = &mut *state;
+        sources[source.get() as usize].set_priority(registers, source, priority.into());
+    }
+
+    fn mask(&self, id: usize) {
+        let Some(source) = self.source(id) else {
+            return;
+        };
+        let mut state = self.state.lock();
+        let PlicState { registers, sources } = &mut *state;
+        sources[source.get() as usize].mask(registers, source);
+    }
+
+    fn unmask(&self, id: usize) {
+        let Some(source) = self.source(id) else {
+            return;
+        };
+        let mut state = self.state.lock();
+        let PlicState { registers, sources } = &mut *state;
+        sources[source.get() as usize].unmask(registers, source);
     }
 
     fn complete(&self, id: usize) {
@@ -72,8 +153,8 @@ impl PlicController {
         let Some(source) = self.source(id) else {
             return;
         };
-        let mut registers = self.registers.lock();
-        complete_plic_claim(&mut *registers, this_context(), source);
+        let mut state = self.state.lock();
+        complete_plic_claim(&mut state.registers, this_context(), source);
     }
 }
 
@@ -114,10 +195,74 @@ fn plic() -> &'static PlicController {
     PLIC.get().expect("PLIC is not initialized")
 }
 
+static PLIC_FASTEOI: kirq::FasteoiChip = kirq::FasteoiChip {
+    resend: kirq::FasteoiResend::Software,
+    mask: |desc| plic().mask(desc.hwirq),
+    unmask: |desc| plic().unmask(desc.hwirq),
+};
+
+fn select_plic_flow(
+    desc: kirq::IrqDesc,
+    sources: Option<PlicSources>,
+) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+    use kirq::{IrqAffinity, IrqController, IrqFlags, IrqFlow, IrqPolarity, IrqTrigger};
+
+    // Only PLIC is migrated. Other domains and directory-only descriptors keep
+    // their existing contract; either PLIC identity field requires validation.
+    if desc.domain != Some(PLIC_DOMAIN) && desc.controller != IrqController::Plic {
+        return Ok(IrqFlow::Legacy);
+    }
+    if desc.domain != Some(PLIC_DOMAIN)
+        || desc.controller != IrqController::Plic
+        || !(desc.flags - (IrqFlags::SHARED | IrqFlags::WAKEUP_SOURCE)).is_empty()
+        || desc.affinity != IrqAffinity::Any
+        || !matches!(desc.trigger, IrqTrigger::Unknown(_) | IrqTrigger::LevelHigh)
+        || !matches!(desc.polarity, IrqPolarity::Unknown | IrqPolarity::High)
+        || sources
+            .and_then(|sources| sources.source(desc.hwirq))
+            .is_none()
+    {
+        return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    Ok(IrqFlow::Fasteoi(&PLIC_FASTEOI))
+}
+
+trait PlicPriorityRegisters {
+    fn read_priority(&self, source: NonZeroU32) -> u32;
+    fn write_priority(&mut self, source: NonZeroU32, priority: u32);
+}
+
+impl PlicPriorityRegisters for Plic {
+    fn read_priority(&self, source: NonZeroU32) -> u32 {
+        self.get_priority(source)
+    }
+
+    fn write_priority(&mut self, source: NonZeroU32, priority: u32) {
+        self.set_priority(source, priority);
+    }
+}
+
 trait PlicCompletion {
     fn is_enabled(&self, source: NonZeroU32, context: usize) -> bool;
     fn set_enabled(&mut self, source: NonZeroU32, context: usize, enabled: bool);
     fn complete(&mut self, context: usize, source: NonZeroU32);
+}
+
+// The controller lock serializes target selection and the enable-bit update.
+// Prepared contexts start disabled, so disable-before-first-enable has no route.
+fn set_plic_route(
+    plic: &mut impl PlicCompletion,
+    target: &mut Option<usize>,
+    current_context: usize,
+    source: NonZeroU32,
+    enabled: bool,
+) {
+    if enabled {
+        target.get_or_insert(current_context);
+    }
+    if let Some(context) = *target {
+        plic.set_enabled(source, context, enabled);
+    }
 }
 
 impl PlicCompletion for Plic {
@@ -218,7 +363,10 @@ pub fn init_primary() {
     let plic = unsafe { Plic::new(NonNull::new(plic_base.as_usize() as *mut _).unwrap()) };
     PLIC.init_once(PlicController {
         sources,
-        registers: SpinNoIrq::new(plic),
+        state: SpinNoIrq::new(PlicState {
+            registers: plic,
+            sources: vec![PlicSourceState::default(); sources.last as usize + 1].into_boxed_slice(),
+        }),
     });
 }
 
@@ -258,10 +406,10 @@ fn send_ipi_to_raw_hart(raw_hart_id: usize) {
 /// runtime reset: invoking it after registration would disable live routes.
 pub fn init_current_cpu_context() {
     let controller = plic();
-    let mut registers = controller.registers.lock();
+    let mut state = controller.state.lock();
     let context = this_context();
-    disable_plic_sources(&mut *registers, context, controller.sources);
-    registers.init_by_context(context);
+    disable_plic_sources(&mut state.registers, context, controller.sources);
+    state.registers.init_by_context(context);
 }
 
 /// Enable this hart's software, timer and external interrupt sources.
@@ -307,13 +455,21 @@ macro_rules! with_cause {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+        select_plic_flow(desc, PLIC.get().map(|controller| controller.sources))
+    }
+
     fn prepare_local_irq_work() -> Option<fn()> {
         None
     }
 
-    fn configure(_desc: kirq::IrqDesc) {}
+    fn configure(_desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
+        // PLIC trigger wiring is fixed; select_flow already validates its metadata.
+        Ok(())
+    }
 
-    fn enable(irq: usize, enabled: bool) {
+    fn enable(desc: kirq::IrqDesc, enabled: bool) {
+        let irq = desc.hwirq;
         with_cause!(
             irq,
             @S_TIMER => {
@@ -358,8 +514,8 @@ impl kirq::IntrManagerIf {
                 ))
             },
             @S_EXT => {
-                let mut plic = plic().registers.lock();
-                let Some(irq) = plic.claim(this_context()) else {
+                let mut state = plic().state.lock();
+                let Some(irq) = state.registers.claim(this_context()) else {
                     debug!("Spurious external IRQ");
                     return None;
                 };

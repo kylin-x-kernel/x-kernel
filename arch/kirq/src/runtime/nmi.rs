@@ -84,6 +84,9 @@ static_lock! {
 ///   is held only under short IRQ/preemption exclusion, never across a wait.
 ///   This API does not establish NMI quiescence or drain NMI handlers.
 /// - NMI-context calls are rejected before taking any lock.
+/// - Configuration failure returns false without publishing a table or fallback
+///   owner. Resolved metadata can remain and partial hardware writes are not
+///   rolled back. The caller retains its source-quiescence obligation.
 pub fn register_nmi(desc: IrqDesc, handler: Handler) -> bool {
     register_nmi_with_mode(desc, handler, ManagementMode::Task, configure_platform_irq)
 }
@@ -109,7 +112,7 @@ fn register_nmi_with_mode(
     desc: IrqDesc,
     handler: Handler,
     mode: ManagementMode,
-    configure: impl FnOnce(IrqDesc),
+    configure: impl FnOnce(IrqDesc) -> Result<(), crate::IrqDescError>,
 ) -> bool {
     let hwirq = desc.hwirq;
     let result = with_registration_line_checked(
@@ -125,17 +128,21 @@ fn register_nmi_with_mode(
         |_, entry| {
             // Registration keeps publication exclusion from preflight through
             // publication, including across different Lines sharing a hwirq.
+            // Configure before either handler publication. The caller excludes
+            // NMI readers; configuration does not itself activate the source.
+            let stored_desc = entry.desc;
+            if let Err(error) = configure(stored_desc) {
+                entry.mark_configuration_failed();
+                return Err(error);
+            }
+            let configured = entry.prepare_reconfigure_if_stale();
+            entry.commit_platform_plan(configured);
             let mut table = NMI_TABLE.lock();
             debug_assert!(!table.contains_key(&hwirq) && !entry.has_actions());
             if !entry.install_regular_action(IrqAction::nmi_fallback(handler.clone())) {
                 return Ok(false);
             }
-            let stored_desc = entry.desc;
             table.insert(hwirq, handler.clone());
-            drop(table);
-            // Keep fallback state and controller configuration in one Line
-            // transaction, without holding the shared NMI table in the backend.
-            configure(stored_desc);
             Ok(true)
         },
     );

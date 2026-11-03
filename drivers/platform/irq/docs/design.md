@@ -44,6 +44,7 @@ drivers/platform/irq/
 │   ├── gic.rs      # AArch64: discovery, mapping, IntrManagerIf, NMI
 │   ├── gicv2.rs    # GICv2 backend (arm_gic_driver)
 │   ├── gicv3.rs    # GICv3 backend (arm_gic_driver)
+│   ├── gic_spi.rs  # ordinary SPI flow operations and transaction adapters
 │   ├── riscv.rs    # RISC-V PLIC backend
 │   └── x86.rs      # x86_64 IO-APIC glue (x86-apic crate)
 └── Cargo.toml
@@ -171,14 +172,182 @@ vector delegates ESR capture and one EOI to `x86-apic`. Neither produces a
 `kirq::handle_irq` exit bookkeeping. This follows Linux's dedicated spurious
 and error handlers, not its separate unused-vector fallback.
 
-All other vector classification is unchanged: timer/IPI and MSI-X acknowledge
-early, IO-APIC edge sources acknowledge early, and level sources carry a
-completion cookie for acknowledgement after their handlers finish.
+Timer/IPI vectors acknowledge early and retain their local Legacy flow. MSI-X
+and IO-APIC claims transfer EOI to generic flow using a nonzero cookie. Edge flow
+acknowledges under the Line lock before handlers; IO-APIC level Fasteoi completes
+after handlers. Disabled and overlapping edge arrivals are masked where possible,
+acknowledged and recorded pending for the existing running owner or later enable.
 
-Tests inject the regular/error operations to verify classification without
-issuing a false physical EOI. A separate spurious test uses the real backend
+`prepare_regular_delivery` owns regular-vector classification and early EOI;
+its result transfers only the outstanding completion cookie into `PendingIrq`.
+Tests exercise that production decision path with injected trigger reads and
+EOI operations: both IO-APIC range boundaries, edge/level/unknown trigger,
+MSI/local boundaries and exception vectors. They verify the selected domain,
+exact trigger-query count and early EOI count without issuing a physical EOI.
+Each accepted model delivery also passes through `complete_delivery`, proving
+one EOI across preparation and completion, rather than only checking a cookie.
+The existing fixed-vector tests separately verify regular/error delegation.
+A separate spurious test uses the real backend
 through `kirq::handle_irq` to check return-context balance. Register sequencing
 is tested in the vendored x2apic host suite.
+
+`select_x86_flow` validates explicit IO-APIC/MSI domain and controller identity,
+flags, source range and supported targeting. IO-APIC selection reads the real
+trigger when firmware left it unspecified; a requested trigger is configured
+before action publication. Level uses `FasteoiResend::Level`, edge uses hardware
+retrigger. IO-APIC affinity changes and per-CPU flags are rejected. MSI requires
+an allocated, message-bound vector; its mask belongs to the PCI device owner.
+The public chip callbacks recheck source identity before hardware access.
+Checked IO-APIC configuration propagates mask/readback failure without publishing
+a new action. Invalid/changed retrigger routing is diagnosed and pending retained;
+retry requires later management progress after the fault is corrected.
+
+Linux references are `kernel/irq/chip.c::handle_edge_irq/handle_fasteoi_irq` and
+`arch/x86/kernel/apic/vector.c::apic_retrigger_irq`: retrigger targets the recorded
+CPU/vector under routing exclusion, not the CPU that happens to request replay.
+Local timer/IPI state and MSI shutdown/vector-release ownership remain separate
+work; request issuance is not proof that a remote handler has completed.
+
+## GIC Source Admission
+
+GICv2 and GICv3 initialization cache the exclusive standard INTID limit from
+`GICD_TYPER.ITLinesNumber`: `min(32 * (ITLinesNumber + 1), 1020)`. This includes
+the SGI/PPI prefix; it is not an SPI count to add to 32. GICv3's IDbits-based
+`max_intid()` describes a wider identifier space and is not used for this bound.
+Both backends read the existing driver's `typer_raw()` once during global setup;
+admission needs neither a controller lock nor another MMIO read.
+
+`select_gic_flow` validates resources that declare GIC through their controller
+or root domain. It rejects conflicting controller/domain identity, unavailable
+initialization, special IDs and IDs beyond the discovered standard range before
+KIRQ publishes a mapping or installs an action. Checks precede narrowing from
+`usize`; extended IDs and LPIs are not supported by this provider path.
+Accepted resources remain `Legacy`, including private sources. This is not
+ordinary-flow activation, hardware trigger readback, masked configuration or RWP
+synchronization. Bare legacy numbers and other undeclared identities retain
+their old contract; direct low-level calls still require validated hardware IDs.
+
+The limit follows the standard-line distinction used by Linux's GIC drivers
+(`GIC_LINE_NR` versus `GIC_ID_NR` in `irq-gic-v3.c`, and the 1020 clamp in
+`gic_init_bases` in `irq-gic.c`). It does not prove every private ID is wired or
+that firmware describes the right controller instance.
+
+Within that explicit GIC range, standard SPIs (INTID >= 32) reject
+`EdgeFalling` and `LevelLow` with `UnsupportedFlow` before resolution publishes
+or updates a Line. The old edge/level-only programming must not silently turn
+those requests into rising-edge or high-level configuration. This follows the
+SPI restriction in Linux `gic_set_type` in both `irq-gic.c` and `irq-gic-v3.c`.
+`EdgeRising`, `LevelHigh` and `Unknown(_)` select ordinary Fasteoi for eligible
+SPIs. `Unknown(_)` preserves its unspecified-metadata behavior; it is not proof of supported hardware
+configuration. Checked backend configuration adds the private-source rules
+below; direct legacy `set_trigger` callers retain their infallible interface.
+A private-registry regression checks that rejected SPI metadata
+neither publishes a new mapping nor changes an existing Line's state.
+
+### Checked GIC Configuration
+
+`gicv2::configure` and `gicv3::configure` call `select_gic_flow` before
+register access. They also bound undeclared legacy IDs before narrowing to the
+vendor `IntId`. Bounds checks precede the `Unknown` trigger no-op: a direct
+oversized descriptor is rejected even when its trigger is unspecified. Priority
+and NMI attributes remain caller policy; configuration changes neither.
+The old infallible `set_trigger` entry points remain available for legacy callers
+and do not acquire this checked contract.
+
+For GICv2, an already matching PPI/SPI trigger succeeds without writes. A
+change captures hardware enablement, temporarily masks an enabled source,
+checks mask readback, writes the trigger and checks trigger readback, then
+restores and checks enablement only on success. An initially disabled source
+stays disabled. One existing `GIC` lock covers the entire transaction, including
+readback and restoration. Failure requests disablement and returns
+`ConfigurationFailed { hwirq }`; neither earlier writes nor hardware trigger
+state are rolled back. Fixed rising-edge SGIs are accepted without programming;
+other known SGI trigger requests are rejected before access. PPI polarity is
+integration-defined; readback verifies edge/level only, not electrical polarity.
+
+GICv3 private configuration is intentionally read-only: matching current-CPU
+trigger readback succeeds, preserving fixed SGI/PPI and private NMI startup;
+a mismatch returns `UnsupportedFlow` before mutation. The vendor global
+`Gic::set_cfg` writes all redistributors for private IDs, and this adapter has
+no public GICR RWP completion primitive. Neither behavior can be hidden behind
+a local mask. Unknown triggers still make no readback guarantee.
+
+GICv3 SPI changes follow the same locked transaction but wait for the vendor's
+bounded `wait_for_distributor_rwp` before checking mask readback and programming
+the trigger. This wait also runs when the initial enable read is clear, since
+an earlier disable can still be pending. It covers distributor-tracked writes,
+not ICFGR completion, private registers, handlers or active interrupts. Timeout
+and readback failures return the single `ConfigurationFailed` variant. The
+failure-path disable request has no completion wait: hardware state can remain
+partial, and even successful trigger programming is not undone.
+
+These functions do not sleep or allocate. They require initialized hardware,
+must not run in NMI context or with `GIC` already held, and need no current
+process. Private sources address the executing CPU; callers select that CPU
+before entry, and the lock excludes local IRQs and migration during access.
+Caller lifecycle serialization and device/handler quiescence remain separate
+obligations. Restoring a hardware enable snapshot does not establish generic
+flow-suppression or disable-depth correctness by itself.
+
+Linux reference: `drivers/irqchip/irq-gic.c::gic_set_type`,
+`irq-gic-v3.c::gic_set_type`, and `irq-gic-common.c::gic_configure_irq`, inspected
+at local linux-stable commit `8d3ae59288f1e7d58d76558a6ee96d533bc5019f`.
+Both chips declare `IRQCHIP_SET_TYPE_MASKED`. Linux accepts fixed rising SGIs
+without writes and checks configuration readback, but tolerates PPI mismatch;
+the checked GICv2 provider reports that mismatch instead of claiming success.
+
+`ut-tests/gicv2_config.rs` and `ut-tests/gicv3_config.rs` use private fake
+register adapters to test the production transaction's access ordering, enabled
+and disabled success, ignored masks, trigger mismatch, restore failure and
+private-source behavior. GICv3 tests inject distributor-wait failure; actual
+poll-budget behavior belongs to the vendor driver's tests. Fake observations
+cannot validate MMIO accessibility, physical delivery or write completion.
+
+### Ordinary SPI Flow
+
+Validated standard SPIs select the static `gic_spi::CHIP` Fasteoi capability.
+Shared and wakeup flags are accepted; MSI, unknown flags, explicit affinity and
+low polarity are rejected. Private INTIDs and PER_CPU descriptors retain Legacy.
+The publicly reachable chip callbacks revalidate this binding before MMIO:
+invalid mask/unmask inputs are ignored and invalid retrigger returns false.
+NMI registration adds PER_CPU before selection. The only current VMM HW-LR
+route is virtual timer PPI 27 (`kvmm::vdev::aarch64::irq_route`); it is outside
+this scope. Adding SPI forwarding requires an explicit ownership contract and
+selection exclusion first, not merely skipping DIR for a guessed INTID.
+
+Mask/unmask use the source enable bit without changing priority or routing.
+GICv3 waits for Distributor RWP after every SPI disable, including management
+disable, under its existing GIC lock. Unmask does not wait. A bounded timeout
+is logged after releasing the controller lock, and the infallible mask hook
+returns, matching Linux `gic_mask_irq`/`gic_do_wait_for_rwp`. This is distinct
+from checked configuration, which returns an error and suppresses publication.
+Neither behavior proves hardware inactivity; KIRQ still suppresses ineligible
+actions and completes any claim arriving after a failed hardware mask. GICv2
+has no RWP wait. The maintained vendor accessor and its unresolved attribution
+record remain documented in `vendor/README.md`.
+
+The hardware-only retrigger writes ISPENDR through the vendor `set_pending` API
+under the GIC lock. Acceptance means issuance, not completed delivery. It does
+not read pending back (a remote CPU may already have acknowledged it), wait for
+RWP (which does not track ISPENDR), change enablement, or complete a claim.
+Explicit level sources rely on hardware reassertion; unknown-trigger and edge
+pending use this hardware path, never BH software replay. Linux's GIC drivers
+likewise require hardware IRQ-context service through `handle_enforce_irqctx`.
+
+ACK and early priority-drop EOI remain in each backend. Generic Fasteoi retains
+the original Line until the original claim's DIR completes, including rejected
+arrivals. DIR uses the claim cookie on the claiming CPU, without the GIC lock;
+software retrigger never creates or consumes that completion obligation.
+Configuration and final delivery restoration remain serialized by Line control,
+including the configuration-failure eligibility latch. An unchanged hardware
+trigger does not bypass logical disable depth or authorize flow unmasking.
+
+`ut-tests/gic_spi.rs` checks callback input rejection, the production helpers' disable/wait order, timeout
+without restoration, enable-only unmask and pending-only retrigger.
+`ut-tests/gic.rs` checks source/flag/polarity/routing selection, including private
+and NMI exclusion. Core dispatch/resend tests check completion exactly once,
+pending retention and configuration-failure suppression. These deterministic
+models are not physical delivery, MMIO fault or hardware-quiescence proofs.
 
 ## Concurrency Model
 
@@ -228,6 +397,7 @@ is tested in the vendored x2apic host suite.
   `S_EXT` offsets above the `INTC_IRQ_BASE` sentinel) and a skip
   sentinel for completion, since timer and IPI events need no PLIC
   claim/complete.
+
 ## PLIC Source Bounds
 
 At primary initialization a discovered PLIC node must provide exactly one
@@ -243,5 +413,71 @@ Enable, priority and completion paths validate source
 ids without truncation before accessing indexed registers. Completion cookie
 zero remains the local timer/IPI no-completion sentinel.
 
-This validation does not change the existing hart-to-context convention or
-prove MMIO aperture coverage. It introduces no flow suppression state.
+Source validation does not change the existing hart-to-context convention or
+prove MMIO aperture coverage. Flow suppression is described separately below.
+
+## Source Enable Identity
+
+The `IntrManagerIf::enable` provider receives a normalized `IrqDesc`, just as
+configuration does. GIC, PLIC and x86 providers currently select the same local
+source using `desc.hwirq`; this interface preserves metadata without changing
+register ordering, routing or priority policy. It does not add multi-controller
+instance routing or make logical enable equivalent to temporary flow unmask.
+
+## PLIC Effective Target
+
+The first external-source enable selects the current prepared context, preserving
+the previous initial placement policy. A bounded target table is allocated at
+primary initialization, before controller publication, and shares the controller
+lock with registers. Subsequent enable/disable uses that recorded context even
+when the management task has migrated. Disable before first enable has no route
+to clear and does not select a target. Completion still uses the claiming CPU's
+context, not the management target.
+
+This follows Linux's separation of effective routing from the CPU issuing a
+management operation, but does not implement Linux's affinity selection policy.
+Bindings last for the controller lifetime, including source disable/re-enable
+and action replacement. No dynamic retargeting, CPU-offline handling or explicit
+affinity support is added; a bound CPU must remain available. The table is indexed
+by validated hardware source, not reusable logical IRQ. There is no allocation
+on enable/disable or completion. Enable still sets configured priority to 6;
+flow masking controls when that policy becomes effective in hardware.
+
+## PLIC Fasteoi Capability And Priority
+
+`select_flow` is a pure metadata check: no allocation, register access, target
+selection or BH-service dependency. Standard PLIC selection requires the
+permanently initialized controller, its PLIC domain and controller family, an
+in-range source, and no per-CPU/MSI or unknown flags. Shared and wakeup-source
+metadata are accepted. Trigger unknown or level-high and polarity unknown or
+high are supported; explicit edge/low configurations and explicit affinity are
+rejected with `UnsupportedFlow`. This selection does not prove level persistence
+or eliminate the generic pending/resend obligation.
+
+Only descriptors declaring PLIC through their domain or controller enter this
+validation. Conflicting or incomplete PLIC identity is rejected, never silently
+downgraded. On the RISC-V provider, non-PLIC descriptors retain Legacy, including local causes,
+synthetic descriptors and foreign-domain directory mappings. Legacy preserves
+the unmigrated contract; it does not certify hardware support. PLIC selection before controller publication
+returns an error rather than touching the boot-only `plic()` invariant. The
+static `FasteoiChip` supplies real source mask/unmask functions; KIRQ must retain
+the validated original binding and serialize these calls with Line state.
+
+The bounded boot-allocated source table owns the effective target, optional
+configured priority and mask state under the register lock. The first mask
+captures hardware priority only when no policy has yet been recorded. Masking
+writes priority zero without changing routing; repeated mask never captures its
+own zero. `set_prio` updates configured priority but keeps hardware at zero while
+masked. Explicit priority zero is valid policy, not an initialization sentinel.
+Management enable retains the existing policy reset to 6 but does not clear a
+flow mask; disable leaves priority policy and flow masking unchanged. Only
+explicit unmask restores the latest configured policy. Completion changes
+neither configured priority nor mask state and still uses the claiming context.
+
+Generic flow owns the decision to release suppression, including final enable
+and action replacement; a normal non-oneshot tail must not unconditionally
+unmask. Replay eligibility, retention and withdrawal remain KIRQ obligations,
+not services provided by this capability. Model tests exercise the production
+selection and priority/route helpers, including masked updates, zero policy,
+enable-default writes and completion restoration; they do not validate physical
+delivery or the generic replay lifecycle.

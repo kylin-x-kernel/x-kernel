@@ -194,6 +194,12 @@ static IO_APIC_IRQ_DOMAIN: IrqDomain =
     IrqDomain::new(crate::desc::IO_APIC_DOMAIN, UnmappedPolicy::Strict);
 static MSI_IRQ_DOMAIN: IrqDomain = IrqDomain::new(crate::desc::MSI_DOMAIN, UnmappedPolicy::Strict);
 
+// Mapping fixtures must not pretend that synthetic IDs belong to real hardware.
+#[cfg(unittest)]
+pub(crate) const TEST_DOMAIN: IrqDomainId = IrqDomainId::new(u32::MAX);
+#[cfg(unittest)]
+static TEST_IRQ_DOMAIN: IrqDomain = IrqDomain::new(TEST_DOMAIN, UnmappedPolicy::Strict);
+
 /// Upper bound on the IO-APIC linear reverse-map size, indexed by hwirq.
 ///
 /// The linear table is sized `max(hwirq)+1`, so an unvalidated hwirq from a
@@ -210,6 +216,8 @@ pub(crate) fn domain(id: IrqDomainId) -> Option<&'static IrqDomain> {
         crate::desc::PLIC_ROOT_DOMAIN => Some(&PLIC_IRQ_DOMAIN),
         crate::desc::IO_APIC_DOMAIN => Some(&IO_APIC_IRQ_DOMAIN),
         crate::desc::MSI_DOMAIN => Some(&MSI_IRQ_DOMAIN),
+        #[cfg(unittest)]
+        TEST_DOMAIN => Some(&TEST_IRQ_DOMAIN),
         _ => None,
     }
 }

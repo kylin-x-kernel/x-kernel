@@ -2,8 +2,8 @@
 
 ## Scope
 
-This analysis covers the entire crate — the single `src/lib.rs` (Local
-APIC bring-up, IPIs, IO-APIC routing, MSI-X backend). No modules are
+This analysis covers the entire crate: `src/lib.rs` (Local APIC bring-up,
+IPIs, MSI-X backend) and `src/io_apic.rs` (checked IO-APIC flow operations). No modules are
 excluded; every unsafe access site is enumerated below. The vector and
 dispatch policy layer above this crate belongs to `kirq` and is audited
 there.
@@ -66,10 +66,13 @@ clock-event activation remains the timer driver's responsibility.
 - `IO_APIC` (`LazyInit<SpinNoIrq<IoApic>>`): the only IO-APIC handle;
   every redirection write goes through the lock.
 - `LOCAL_APIC_PTR` (per-CPU): the exclusive Local APIC handle slot.
-- `MSIX_VECTOR_ALLOCATOR` (`SpinNoIrq` bitmap): the MSI-X vector window
+- `MSIX_VECTOR_ALLOCATOR` (`SpinNoIrq` bitmap and destination bindings): the MSI-X vector window
   `0x40..0xf0`; double allocation is structurally impossible (bits are
   set under the lock), and `free` clears bits only for in-window
-  vectors.
+  vectors together with their APIC destination bindings. First composition binds
+  the live vector's target; conflicting rebinds are rejected without changing
+  the original binding. Route admission and retrigger read the same protected
+  target. This is not device shutdown or a hardware-delivery drain guarantee.
 - `IS_X2APIC` / `XAPIC_BASE`: bring-up-era mode selection, read-only
   afterwards.
 
@@ -108,3 +111,22 @@ clock-event activation remains the timer driver's responsibility.
 - New IO-APIC accesses keep the `max_table_entry()` bounds check.
 - MSI-X allocation stays under the spin lock and inside the
   `0x40..0xf0` window.
+
+## Flow Programming And Retrigger
+
+`src/io_apic.rs::Registers for IoApic` contains the new unsafe register accesses.
+The private adapter is used only with the permanent mapped handle under IO_APIC
+exclusion. Helpers validate pin against max_table_entry and the IO-APIC vector
+window before read/write. Configuration retains that exclusion across mask,
+readback, trigger/polarity writes and optional restore. Failure does not authorize
+unmask, but a hardware refusal to mask cannot be converted into a physical
+quiescence guarantee. Changing remote-IRR trigger/polarity is refused.
+
+Retrigger validates fixed physical edge routing and issues an IPI to the stored
+destination/vector while the route owner is locked. MSI composition retains its
+target in the same locked allocator that owns the vector bit; free clears both.
+Unbound/released vectors cannot retrigger, and a reused allocation does not
+inherit the previous destination. The notification is not an acknowledgement:
+an already issued interrupt may still be pending in a LAPIC after the lock is
+released. Device shutdown and safe vector reuse remain caller/system lifecycle
+obligations, not properties proven by a bitmap or by KIRQ software in-flight.

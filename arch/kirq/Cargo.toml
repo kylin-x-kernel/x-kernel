@@ -17,6 +17,7 @@ irq_stat = []
 [dependencies]
 kiface-irq-context-api.workspace = true
 kcompletion.workspace = true
+intrusive-collections.workspace = true
 kiface-task-api.workspace = true
 kiface-task-wait-api.workspace = true
 kmutex.workspace = true

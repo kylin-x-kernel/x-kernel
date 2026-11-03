@@ -21,6 +21,85 @@ fn is_invalid_context<T>(result: Result<T, IrqDescError>) -> bool {
     matches!(result, Err(IrqDescError::InvalidContext { .. }))
 }
 
+struct ScopedFailedNmi {
+    virq: usize,
+    hwirq: usize,
+}
+
+impl Drop for ScopedFailedNmi {
+    fn drop(&mut self) {
+        let table_owner = { NMI_TABLE.lock().remove(&self.hwirq) };
+        let line = { IRQ_STATE.lock().remove_test_line(self.virq) };
+        drop(table_owner);
+        drop(line);
+    }
+}
+
+#[def_test(serial)]
+fn failed_nmi_configuration_publishes_neither_owner_and_preserves_irq_mask() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x5f7a;
+    let hwirq = 0x5f7a;
+    let domain = crate::domain::TEST_DOMAIN;
+    let desc = IrqDesc::from_hwirq(hwirq).with_virq(virq).with_domain(domain);
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    for is_masked in [false, true] {
+        assert!(crate::descriptor(virq).is_none());
+        assert!(!NMI_TABLE.lock().contains_key(&hwirq));
+        assert!(IRQ_STATE.lock().translated_hwirq(domain, hwirq).is_none());
+        let cleanup = ScopedFailedNmi { virq, hwirq };
+        let irq_before = karch::local_irq_enabled();
+        let irq_guard = is_masked.then(kspin::IrqSave::new);
+        let expected_irq = karch::local_irq_enabled();
+        let mode = if is_masked {
+            super::ManagementMode::Startup
+        } else {
+            super::ManagementMode::Task
+        };
+        let mut observed = None;
+        let registered = super::register_nmi_with_mode(desc, handler.clone(), mode, |stored| {
+            observed = Some((stored, Arc::strong_count(&handler), karch::local_irq_enabled()));
+            Err(IrqDescError::ConfigurationFailed { hwirq })
+        });
+        assert!(!registered);
+        assert_eq!(observed, Some((desc.with_flags(crate::IrqFlags::PER_CPU), 2, false)));
+        assert_eq!(karch::local_irq_enabled(), expected_irq);
+        drop(irq_guard);
+        assert_eq!(karch::local_irq_enabled(), irq_before);
+        assert!(!NMI_TABLE.lock().contains_key(&hwirq));
+        assert_eq!(Arc::strong_count(&handler), 1);
+        assert_eq!(IRQ_STATE.lock().translated_hwirq(domain, hwirq), Some(virq));
+        {
+            let line = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+            let entry = line.lock();
+            assert_eq!(entry.desc, desc.with_flags(crate::IrqFlags::PER_CPU));
+            assert_eq!(entry.action_count(), 0);
+            assert_eq!(entry.configured_generation_for_tests(), None);
+            assert!(!entry.is_enabled_for_tests());
+            assert_eq!(entry.disable_depth_for_tests(), 0);
+        }
+        let mut has_reconfigured = false;
+        assert!(super::register_nmi_with_mode(
+            desc, handler.clone(), super::ManagementMode::Task, |_| {
+                has_reconfigured = true;
+                Ok(())
+            },
+        ));
+        assert!(has_reconfigured);
+        {
+            let line = IRQ_STATE.lock().descs.get(&virq).cloned().unwrap();
+            let entry = line.lock();
+            assert_eq!(entry.configured_generation_for_tests(), Some(entry.generation_for_tests()));
+            assert!(!entry.prepare_reconfigure_if_stale().configure);
+            assert_eq!(entry.action_count(), 1);
+        }
+        assert!(NMI_TABLE.lock().get(&hwirq).is_some_and(|owner| Arc::ptr_eq(owner, &handler)));
+        assert_eq!(Arc::strong_count(&handler), 3);
+        drop(cleanup);
+        assert_eq!(Arc::strong_count(&handler), 1);
+        assert!(IRQ_STATE.lock().translated_hwirq(domain, hwirq).is_none());
+    }
+}
+
 #[def_test(serial)]
 fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult {
     let virq = 0x5f49;
@@ -37,16 +116,20 @@ fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult
     assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
     // This synthetic source is never enabled in hardware. Inject only the
     // bounded controller operations, retaining the real management path.
+    // Do not probe global registry/table availability with try_lock here:
+    // unrelated remote IRQ/NMI readers may own either lock even though this
+    // transaction released it. Only the private Line's exclusion is observable
+    // deterministically; registration/removal ownership is checked separately.
     let mut has_configured = false;
     let has_registered = super::register_nmi_with_mode(
         desc, handler.clone(), super::ManagementMode::Task, |stored| {
             has_configured = !karch::local_irq_enabled()
                 && super::NMI_PUBLICATION_LOCK.is_locked()
                 && line.is_state_locked_for_tests()
-                && IRQ_STATE.try_lock().is_some()
-                && NMI_TABLE.try_lock().is_some()
+                && Arc::strong_count(&handler) == 2
                 && stored.logical_irq() == Some(virq)
                 && stored.flags.contains(crate::IrqFlags::PER_CPU);
+            Ok(())
         },
     );
     let registered_action_count = line.lock().action_count();
@@ -56,8 +139,6 @@ fn nmi_controller_updates_hold_original_line_exclusion() -> unittest::TestResult
         has_masked = !karch::local_irq_enabled()
             && super::NMI_PUBLICATION_LOCK.is_locked()
             && line.is_state_locked_for_tests()
-            && IRQ_STATE.try_lock().is_some()
-            && NMI_TABLE.try_lock().is_some()
             && stored.logical_irq() == Some(virq)
             && !stored.flags.contains(crate::IrqFlags::PER_CPU)
             && Arc::strong_count(&handler) == 3;

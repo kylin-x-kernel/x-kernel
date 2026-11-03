@@ -107,6 +107,39 @@ CpuStartIf / PlatformPowerIf (kiface)
 
 ## Execution Context
 
+### Ordinary External Flow
+
+Only external `LevelChip` sources enter PCH configuration. The CPU-local timer
+and EIOINTC parent retain Legacy flow; neither configures a PCH
+pin even though their numeric IDs overlap the external namespace. A recording
+configuration callback test verifies that exclusion and external failure
+propagation without touching live registers.
+
+The supported PCH level sources select KIRQ `LevelChip`, not Fasteoi. Linux
+`irq-loongson-eiointc.c::eiointc_irq_dispatch` clears parent ISR before child
+dispatch; `irq-loongson-pch-pic.c` selects `handle_level_irq` for level inputs.
+This backend preserves that split: `claim_external` completes the EIOINTC W1C
+once, including rejected leaves. KIRQ then masks the PCH leaf before the parent,
+runs actions unlocked, and conditionally unmasks. PCH level ack is empty.
+Unmask writes PCH CLR, opens EIOINTC, then installs HTVEC and opens PCH MASK.
+Hardware reassertion services pending levels; no synthetic IPI is issued.
+
+`configure_level` holds the PCH register lock across mask, trigger/polarity
+programming, readback and old-mask restoration. Failure returns
+`ConfigurationFailed` and does not intentionally unmask; failed mask readback
+cannot guarantee physical suppression. Other source bits remain unchanged.
+Unknown firmware trigger means the platform's established level default;
+unknown polarity follows explicit LevelLow, otherwise defaults high.
+
+Edge requests, per-CPU external flags, explicit retargeting and external pins
+outside 0..64 are unsupported. The flat binding reserves 3 and 11 for local
+sources; explicitly external descriptors colliding with them are rejected.
+Non-platform domains/software Lines retain Legacy. HTVEC here is the PCH vector
+table, not a separate supported HTVEC parent-controller driver. Multi-node
+EIOINTC, dynamic routing and edge retrigger require separate mechanisms.
+
+### Boot And Runtime Context
+
 The EIOINTC routes external vectors to CPU0 HWI1. Preparation first closes
 HWI1, clears all four EIOINTC enable banks before programming routing, and
 masks both PCH PIC banks before setting each bank's edge/polarity state.

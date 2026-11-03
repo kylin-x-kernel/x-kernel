@@ -393,6 +393,12 @@ check_uart:
 	@cargo test --manifest-path vendor/arm_pl011/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-uart-host --lib --locked
 	@cargo test --manifest-path vendor/uart_16550/Cargo.toml --target x86_64-unknown-linux-gnu --target-dir $(TARGET_DIR)/vendor-uart-host --lib --locked
 
+# GICv3 is compiled only on AArch64 in the pinned upstream release.
+GIC_TEST_TARGET ?= aarch64-unknown-linux-gnu
+.PHONY: check_gic
+check_gic:
+	@RUSTFLAGS='' CARGO_ENCODED_RUSTFLAGS='' cargo test --manifest-path vendor/arm-gic-driver/Cargo.toml --target $(GIC_TEST_TARGET) --target-dir $(TARGET_DIR)/vendor-gic-host --lib --locked
+
 fmt:
 	@cargo +nightly-2026-03-08 fmt --all
 

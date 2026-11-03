@@ -1,5 +1,30 @@
 # kirq — 安全与可靠性分析
 
+## Ordinary Level Admission
+
+`src/runtime/dispatch.rs` retains the original Line through mask/ack, actions
+and conditional unmask. Level hooks run under its short lock and must be bounded,
+non-sleeping, non-reentrant and ordinary-IRQ-safe; lock order is Line then chip.
+Actions run unlocked. A rejected overlapping claim cannot clear another owner's
+running state. Disable or teardown during a handler prevents tail unmask.
+`src/runtime/resend.rs` never queues level replay: the provider must guarantee
+that an asserted source can reassert on unmask. Neither pending nor in-flight
+proves device quiescence, posted-delivery drain or completed hardware shutdown.
+
+## Configuration Failure Boundary
+
+`src/backend/platform.rs` propagates the controller's configuration result.
+`src/runtime/manager.rs` publishes new regular/shared action ownership only
+after configuration succeeds, and commits enable/depth/configured generation
+only after successful application. `src/runtime/nmi.rs` similarly excludes
+both NMI table and fallback publication on configuration failure. Existing
+actions remain owned; failed configuration is not permission to destroy them.
+Resolved mapping/metadata and partial hardware writes are not rolled back.
+The provider must not restore delivery on failure, and a caller must treat
+the error as requiring recovery even when logical enable state is unchanged.
+This is not hardware-active drain or a guarantee that every legacy provider
+performs readback; those guarantees remain controller-specific.
+
 ## irq_work Ownership And NMI Boundary
 
 The trusted platform must return a permanent notification function that never
@@ -389,7 +414,7 @@ BH-disabled state 使用 `LocalBhGuard` RAII 管理，guard 持有 `NoPreempt` �
 | 编号 | 威胁 | 触发条件 | 影响 | 缓解 |
 |------|------|----------|------|------|
 | T-01 | IRQ metadata 配置错误 | 固件或平台提供错误 trigger/polarity/domain | 中断丢失、重复触发或无法 mask | `IrqDesc` 明确携带 metadata，平台 configure 只消费规范化描述 |
-| T-02 | handler 在全局 IRQ 锁内执行 | dispatch 未复制 action 就调用 | 回调重入注册/注销路径时死锁 | `dispatch_actions()` 先复制 action，再释放 `IRQ_STATE` |
+| T-02 | handler executes under registry/Line locks | Dispatch invokes an action before unlocking | Callback reentry deadlocks | `dispatch_claim` and `replay` snapshot eligible actions, then release short locks before `run_actions` |
 | T-03 | 数据面 mapping miss 被当作 identity virq | strict domain 未发布或缺失映射 | 错 handler 或错误确认中断 | `PendingIrq` 通过 domain snapshot 解析；strict miss 保持 unhandled |
 | T-04 | NMI path 获取 normal IRQ state | pseudo/hardware NMI 打断 normal IRQ 持锁区（hardware NMI 在 IRQ path 打开 ALLINT 窗口时抢占） | 同 CPU 自锁或 NMI 延迟 | NMI 使用独立 `NMI_TABLE`，dispatch 不触碰 `IRQ_STATE`；NMI path 保持 ALLINT/PMR 防止 NMI 嵌套 |
 | T-05 | claimed IRQ 未 complete | normal control flow 提前返回或忘记显式 complete | 控制器认为中断仍 active，后续中断异常 | claimed IRQ guard Drop 补偿 completion |
@@ -535,6 +560,13 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   `kworkng::DefaultQueue::Normal`.
 - `/proc/interrupts` 仍无 per-IRQ/per-CPU 统计输出。
 - Readiness wakeup belongs to the device subsystem, not generic IRQ dispatch.
+- `PER_CPU` is metadata, not a per-CPU enabled set or a teardown barrier. Legacy
+  local-source control still uses Line-wide enable/depth state. Before freeing
+  shared handler resources, callers need a separate proven local shutdown on
+  every relevant CPU, protected against re-enable. Remote IPI submission and
+  original-Line software drain do not supply that proof. The current boot-only
+  activation paths must not be interpreted as a runtime shutdown protocol; see
+  the [per-CPU lifecycle gate](design.md#per-cpu-source-lifecycle).
 - `synchronize_irq()` 通过 descriptor-local completion 和 `TaskCompletionWaitIf` provider
   等待 `in_flight` 归零；completion 只是 wake source，等待返回后仍必须重查
   descriptor predicate。后续 IRQ thread / workerqueue 引入后可以复用同一等待边界，
@@ -556,6 +588,10 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   ordering; it is not a type-level ban on dropping an admission early or a
   recovery guarantee after a kernel panic. Synthetic completion tests exercise
   software ordering and retained identity, not real controller delivery.
+  This is a software drain boundary, not hardware pending-state quiescence.
+  Selected Fasteoi Lines additionally count queued/running software replay.
+  Legacy providers and the outstanding flow
+  prerequisites are enumerated in [Controller Flow Contracts](design.md#controller-flow-contracts).
 - Disable releases registry exclusion before calling the controller, but keeps
   the original Line state locked through the mask update, without acquiring the
   global control lock. The backend must be bounded, non-sleeping and must not
@@ -595,6 +631,9 @@ handler 引用和 CPU targeting policy。日志可能暴露 IRQ 编号或 hwirq�
   snapshots from observing withdrawal before mask completes. Old snapshots
   remain accounted for until their original controller claims complete. Shared
   ownership and NMI-fallback rejection rules are unchanged.
+  An absent action or unmatched token cannot change the Line's enable state,
+  disable depth or teardown state, or invoke a controller plan. Successful
+  action removal is required before the last-action masking transaction.
 - NMI management releases the shared table and directory before controller
   configure/mask, but retains the original Line state lock through completion
   of that bounded operation. The NMI-owned publication lock serializes hwirq
@@ -675,3 +714,161 @@ retiring an existing idle Line. A free request that finds no owned action
 returns before changing enable/depth state, masking hardware or beginning
 teardown/drain. These guarantees cover software rejection and absence, not
 rollback of hardware writes, allocator identity reuse or device quiescence.
+
+## Normal Dispatch Tail Ownership
+
+The private `IrqDispatch::complete` consumes the dispatch admission only after
+the supplied original-claim completion returns. The manager moves that claim
+into a once-only closure on the claiming CPU. Missing Lines still complete their
+claim without attaching to a replacement. For selected Fasteoi Lines, only the
+dispatch with running ownership clears it, under the original Line lock held
+through completion. Rejected claims complete under Line exclusion without
+clearing another owner's running bit. Legacy retains unlocked completion.
+Registry exclusion is released before hardware operations; the Line guard must
+be released before admission cleanup reacquires registry then Line. Handlers
+never execute under these short locks. This does not establish hardware
+quiescence or type-level prevention of dropping an internal admission early.
+
+## Fasteoi Replay Ownership And Progress
+
+Resolution rejects flow changes while an action or in-flight admission remains.
+For Fasteoi, it also rejects source-description changes during that interval,
+even after the last action is withdrawn. These checks precede mapping and
+descriptor mutation, preserving the original operation table, generation and
+source for admitted completion/replay. Private-registry regressions cover both
+ownership gates; they do not prove hardware quiescence or affinity migration.
+
+Only an explicitly software-capable chip may use BH replay. A hardware-only
+retrigger executes under the original Line lock with local IRQs excluded and
+must be bounded, non-sleeping, allocation-free and non-reentrant into KIRQ.
+Success means the controller accepted a pending request, not that a handler
+ran or hardware became inactive. Failure leaves pending intact, without a
+software fallback or an automatic progress guarantee. Hardware acceptance
+does not retain a software queue owner or add an in-flight credit; a later
+real claim acquires its own admission and completion obligation. Callers still
+must stop hardware sources before releasing device resources. Ordinary GIC SPI
+providers select this capability and accept the pending write without readback;
+this is not proof of a subsequent delivery. GICv3 mask timeout is diagnosed but
+the infallible mask hook cannot establish hardware quiescence on timeout.
+
+Flow suppression must not be coupled to the presence of a new management enable
+write. `IrqPlatformPlan::flow_unmask` is selected independently using the plan's
+proposed enabled/depth state and current action/teardown ownership, and applied
+after configure and optional enable while Line state remains locked.
+Preparation changes no runtime control fields; only the post-apply commit
+updates configured generation, enabled state and disable depth. The same Line
+exclusion must cover preparation, hardware application and commit without an
+intervening descriptor/control-state change. Other CPUs may receive a source
+enabled by the backend, but their generic admission cannot observe this Line
+until the commit has completed and its lock is released. This does not cover
+NMI-table readers or establish hardware rollback on failure. This restores a
+previously enabled, action-less Line
+when its first action is installed even with `enable: None`, without reopening
+disabled or teardown-blocked Lines. Pending scheduling follows the transaction;
+source unmask and software replay remain separate obligations.
+The [configuration failure gate](design.md#ordinary-flow-and-replay)
+records the retained mapping mutation that precedes the fallible hook. Regular/shared
+configuration now precedes acquisition of the new action owner; NMI configuration
+precedes both fallback and table publication. Delivery restoration remains after
+action installation, under continuous Line exclusion. Existing shared owners
+and disable depth remain intact during the configuration-only stage.
+Disabled regular registration also configures before publishing its owner, but
+does not enable or flow-unmask the source. Configuration readiness does not
+grant delivery permission; the explicit enable transaction releases that gate.
+Configuration errors propagate before new action publication and prepared
+control-state commit. `runtime.is_configuration_failed` starts false and latches
+only configuration errors; metadata-only merges do not latch failure. Configured
+generation, enabled state and disable depth remain unchanged. The latch gates
+`can_run_actions`, so queued replay declines execution and drains its obligation
+without consuming pending, and withdrawal cleanup cannot unmask the source.
+Already running handlers are not cancelled by this gate.
+
+Recovery forces configuration even with a matching generation; successful
+configuration commit clears the latch. Enable recovery forces a hardware enable
+write despite an already true logical enabled state. Shared registration saves
+restoration eligibility before configuration and restores hardware enable after
+owner publication only when logically enabled with zero disable depth. NMI
+configuration errors latch failure and successful configuration commit clears
+it before table/fallback publication, without replacing NMI reader exclusion.
+The failure gate and recovery ordering are implemented; validation remains
+pending. Neither this software gate nor successful plan ordering proves hardware
+rollback or quiescence.
+
+The static chip capability supplies code lifetime, not permission to rebind a
+live Line. Selection validates PLIC and ordinary GIC SPI identity and capability;
+other source classes remain Legacy and gain no new hardware-validation guarantee.
+Binding changes
+are checked before publication while actions or in-flight work retain the Line.
+
+Replay insertion retains the original Arc, marks queue membership and increments
+in-flight under Line exclusion. Queue operations use Line then queue lock;
+consumers drop the queue lock before acquiring Line. Notification runs outside
+both. The queued Arc prevents numeric reuse from redirecting work and retains
+the completion storage used by drain. Queue membership deduplicates submissions;
+running ownership prevents overlapping action execution on the selected flow.
+
+`is_replaying` distinguishes software service from an outstanding hardware
+claim. A real claim overlapping software service retains pending before its
+completion, preventing loss after the replay handler's final device read.
+The owning replay clears both flags under the Line lock and schedules pending
+only when normal enable/teardown eligibility permits it.
+
+The executor takes a fresh action snapshot only after rechecking pending,
+enabled/depth, action presence, teardown and running state. Before enqueueing,
+those eligibility conditions must hold before explicit LevelHigh/LevelLow may
+clear pending in reliance on the declared hardware level contract. Unknown
+trigger never acquires that exemption merely from PLIC/Fasteoi classification.
+Incorrect level metadata can therefore lose software service; a state-only
+fixture is not evidence of physical reassertion. Withdrawal invalidates
+eligibility rather than physically unlinking queued nodes. Its drain still needs
+the executor to consume or finish that obligation. Deferred wakes and final
+handler/Line owner releases must remain outside short locks. Software replay
+does not construct PendingIrq or complete the old hardware cookie.
+
+Shared-action removal must not strand surviving actions behind a flow mask.
+After drain, management cleanup finishes teardown on the original Line, then
+acquires the Line lock before releasing registry exclusion. An outer
+IRQ/preemption guard preserves masking across the non-LIFO handoff. Fasteoi
+unmask checks `can_run_actions` and runs under the retained Line lock without
+the directory lock. Pending scheduling follows after releasing the short locks
+and context guard. Last-action
+removal, disable depth or outstanding teardown prevents unmask; pending recovery
+uses the current original-Line state, not a saved pre-withdrawal enable flag.
+
+`resend::install` is unsafe because its permanent notifier must be IRQ-safe,
+allocation-free, non-inline and capable of scheduling the BH runner without
+cancellation or shutdown. `run` requires softirq context and rejects NMI; replay
+itself excludes local IRQs/preemption. No sleepable management lock is acquired
+by replay. Client handlers must support non-sleeping BH replay and must not wait
+for management exclusion held by their own synchronous withdrawal.
+
+Before executor binding, queued Arcs and in-flight obligations remain live.
+Installation notifies the backlog, but a startup thread waiting for its drain
+before reaching installation can deadlock. This is a caller ordering requirement,
+not a wait-time rejection implemented by KIRQ. The precondition concerns waits
+covering queued replay: a zero-in-flight wait does not need executor progress.
+Bound execution must also remain able to run while the caller waits. Current
+runtime orders work
+services before external device/console IRQ setup; future early producers and
+rollback paths must preserve that constraint. Hardware-active queries, device
+shutdown, dynamic affinity and CPU hotplug remain separate proof obligations.
+Neither synthetic fixtures nor this documentation establish physical delivery.
+
+## Edge Delivery Boundary
+
+`backend/platform.rs::EdgeChip` is a trusted controller contract. Its callbacks
+run under the original Line lock with IRQ/preemption exclusion and must not
+sleep, allocate, reenter KIRQ or wait for remote handler completion. The lock
+order remains registry -> Line -> controller registers/allocation -> local APIC.
+`runtime/dispatch.rs::run_edge` retains admission across all coalesced action
+iterations; it never reuses an acknowledged claim or clears a concurrent owner's
+running state. Disabled/tearing-down/failed-configuration Lines retain pending
+without executing handlers. A failed retrigger retains pending without silently
+falling back to another CPU or a software callback.
+
+`FasteoiResend::Level` requires a provider-validated level source, not a guess
+from an unspecified firmware trigger. It relies on hardware reassertion after
+unmask and does not prove physical drain. MSI's device-owned mask and outstanding
+APIC delivery remain owner shutdown obligations. Neither in-flight == 0 nor a
+successful retrigger is a vector-reuse barrier; the existing MSI release API
+does not gain a new shutdown guarantee from retained target metadata.

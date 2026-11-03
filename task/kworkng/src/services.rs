@@ -310,6 +310,7 @@ pub fn init(
     let result = Services::prepare(limit, idle_for, budget).and_then(install);
     if result.is_ok() {
         crate::finalize::install();
+        crate::irq_resend::install();
     }
     if let Err(error) = result {
         log::warn!("[kworkng] service initialization failed: {error:?}");

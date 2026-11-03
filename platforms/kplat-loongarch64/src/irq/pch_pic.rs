@@ -23,6 +23,7 @@ const PIC_REG_COUNT: usize = 2;
 pub(crate) const PCH_PIC_IRQ_COUNT: usize = PIC_REG_COUNT * PIC_COUNT_PER_REG;
 const PCH_PIC_MASK: usize = 0x20;
 const PCH_PIC_EDGE: usize = 0x60;
+const PCH_PIC_CLR: usize = 0x80;
 const PCH_PIC_POL: usize = 0x3e0;
 const PCH_INT_HTVEC: usize = 0x200;
 const PCH_PIC_SIZE: usize = 0x1000;
@@ -71,6 +72,8 @@ impl PchPicRegs for MmioPchPic {
         // PCH PIC aperture established by `init()` via `memspace::iomap_device`.
         // Callers only pass offsets inside that aperture: `init_impl()` writes
         // both banks at MASK 0x20/0x24, EDGE 0x60/0x64 and POL 0x3e0/0x3e4.
+        // Checked level configuration uses those same banks; cause clearing
+        // uses CLR 0x80/0x84 after the same hwirq bounds check.
         // Enable/disable reach here only after
         // `check_hwirq` proved `irq < PCH_PIC_IRQ_COUNT`, so the MASK offset
         // is in [0x20, 0x24] and the HTVEC offset in [0x200, 0x240). The
@@ -169,6 +172,54 @@ pub(super) fn enable_irq(irq: usize) {
 
 pub(super) fn disable_irq(irq: usize) {
     disable_irq_impl(&mut MmioPchPic, irq);
+}
+
+/// Clear the leaf latch before reopening its parent and then the leaf mask,
+/// matching Linux pch_pic_unmask_irq. This is not EIOINTC ISR completion.
+pub(super) fn clear_cause(irq: usize) {
+    clear_cause_impl(&mut MmioPchPic, irq);
+}
+
+fn clear_cause_impl(regs: &mut impl PchPicRegs, irq: usize) {
+    if !check_hwirq(irq) {
+        return;
+    }
+    let _guard = REGISTER_LOCK.lock();
+    let (offset, bit) = split_bit(irq);
+    regs.reg_write(PCH_PIC_CLR + offset, bit);
+}
+
+/// Only level sources are admitted by the platform. Keep the source masked
+/// throughout trigger/polarity programming; failed readback never unmasks it.
+pub(super) fn configure_level(irq: usize, is_low: bool) -> bool {
+    configure_level_impl(&mut MmioPchPic, irq, is_low)
+}
+
+fn configure_level_impl(regs: &mut impl PchPicRegs, irq: usize, is_low: bool) -> bool {
+    if !check_hwirq(irq) {
+        return false;
+    }
+    let _guard = REGISTER_LOCK.lock();
+    let (offset, bit) = split_bit(irq);
+    let old_mask = regs.reg_read(PCH_PIC_MASK + offset);
+    regs.reg_write(PCH_PIC_MASK + offset, old_mask | bit);
+    if regs.reg_read(PCH_PIC_MASK + offset) & bit == 0 {
+        return false;
+    }
+    let edge = regs.reg_read(PCH_PIC_EDGE + offset);
+    regs.reg_write(PCH_PIC_EDGE + offset, edge & !bit);
+    let pol = regs.reg_read(PCH_PIC_POL + offset);
+    regs.reg_write(
+        PCH_PIC_POL + offset,
+        if is_low { pol | bit } else { pol & !bit },
+    );
+    if regs.reg_read(PCH_PIC_EDGE + offset) & bit != 0
+        || (regs.reg_read(PCH_PIC_POL + offset) & bit != 0) != is_low
+    {
+        return false;
+    }
+    regs.reg_write(PCH_PIC_MASK + offset, old_mask);
+    regs.reg_read(PCH_PIC_MASK + offset) == old_mask
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/irq_pch_pic.rs");

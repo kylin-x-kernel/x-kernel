@@ -194,9 +194,14 @@ pub struct IrqDesc {
     pub flags: IrqFlags,
 }
 
-/// Descriptor merge, mapping, or lifecycle error detected by the IRQ core.
+/// Descriptor, mapping, controller configuration, or IRQ lifecycle error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrqDescError {
+    /// Controller configuration did not complete or its readback did not match.
+    /// Hardware may have changed; this error does not imply rollback or drain.
+    ConfigurationFailed { hwirq: Hwirq },
+    /// The source configuration or a live binding change is not supported.
+    UnsupportedFlow { hwirq: Hwirq },
     /// Two descriptors for the same logical IRQ name different hardware IRQs.
     HwirqConflict { existing: Hwirq, newer: Hwirq },
     /// Two descriptors name incompatible IRQ domains.

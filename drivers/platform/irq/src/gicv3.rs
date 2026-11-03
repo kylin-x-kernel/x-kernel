@@ -20,6 +20,128 @@ static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 const IRQ_WORK_SGI: u32 = 15;
 static IRQ_WORK_HANDLER_REGISTERED: LazyInit<bool> = LazyInit::new();
 
+unittest::path_mod_test!(config_tests, "../ut-tests/gicv3_config.rs");
+
+/// Checks private startup configuration or configures an admitted standard SPI.
+///
+/// Does not sleep; task/IRQ context is allowed, NMI context and callers holding
+/// GIC are not. Private reads address the executing CPU, which the caller must
+/// select before entry. One GIC guard excludes IRQs and migration throughout
+/// register access. Priority and NMI attributes remain caller-owned.
+///
+/// # Errors
+/// Admission and unsupported private trigger changes return `UnsupportedFlow`
+/// before mutation. Missing initialization or SPI mask/RWP/configuration/enable
+/// restore failure returns `ConfigurationFailed`. SPI failure requests masking;
+/// it does not roll back writes, drain handlers or prove hardware quiescence.
+pub(super) fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
+    let config = checked_config(desc, super::STANDARD_INTID_LIMIT.get().copied())?;
+    let gic = GIC
+        .get()
+        .ok_or(kirq::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq })?;
+    if let Some((intid, trigger)) = config {
+        let mut gic = gic.lock();
+        configure_locked(&mut *gic, intid, trigger)?;
+    }
+    Ok(())
+}
+
+fn checked_config(
+    desc: kirq::IrqDesc,
+    limit: Option<usize>,
+) -> Result<Option<(IntId, Trigger)>, kirq::IrqDescError> {
+    super::select_gic_flow(desc, limit)?;
+    if limit.is_none_or(|limit| desc.hwirq >= limit.min(1020)) {
+        return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    let trigger = match desc.trigger {
+        kirq::IrqTrigger::Unknown(_) => return Ok(None),
+        kirq::IrqTrigger::EdgeRising => Trigger::Edge,
+        kirq::IrqTrigger::EdgeFalling if desc.hwirq >= 16 => Trigger::Edge,
+        kirq::IrqTrigger::LevelHigh | kirq::IrqTrigger::LevelLow if desc.hwirq >= 16 => {
+            Trigger::Level
+        }
+        _ => return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq }),
+    };
+    // SAFETY: the bound above restricts hwirq to implemented standard INTIDs
+    // below 1020, excluding special IDs and truncation before vendor indexing.
+    Ok(Some((unsafe { IntId::raw(desc.hwirq as u32) }, trigger)))
+}
+
+trait ConfigRegisters {
+    fn get_cfg(&mut self, intid: IntId) -> Trigger;
+    fn set_cfg(&mut self, intid: IntId, trigger: Trigger);
+    fn is_irq_enable(&mut self, intid: IntId) -> bool;
+    fn set_irq_enable(&mut self, intid: IntId, enabled: bool);
+    fn wait_for_distributor_rwp(&mut self) -> bool;
+}
+
+impl ConfigRegisters for Gic {
+    fn get_cfg(&mut self, intid: IntId) -> Trigger {
+        Gic::get_cfg(self, intid)
+    }
+
+    fn set_cfg(&mut self, intid: IntId, trigger: Trigger) {
+        Gic::set_cfg(self, intid, trigger);
+    }
+
+    fn is_irq_enable(&mut self, intid: IntId) -> bool {
+        Gic::is_irq_enable(self, intid)
+    }
+
+    fn set_irq_enable(&mut self, intid: IntId, enabled: bool) {
+        Gic::set_irq_enable(self, intid, enabled);
+    }
+
+    fn wait_for_distributor_rwp(&mut self) -> bool {
+        Gic::wait_for_distributor_rwp(self).is_ok()
+    }
+}
+
+/// Requires one GIC guard across all reads, writes and bounded polling.
+fn configure_locked(
+    registers: &mut impl ConfigRegisters,
+    intid: IntId,
+    trigger: Trigger,
+) -> Result<(), kirq::IrqDescError> {
+    if registers.get_cfg(intid) == trigger {
+        return Ok(());
+    }
+    // Keep fixed private/NMI startup usable, but do not mutate a private source
+    // without a Redistributor completion contract. Gic::set_cfg would also
+    // change every redistributor, which a local mask cannot protect.
+    if intid.is_private() {
+        return Err(kirq::IrqDescError::UnsupportedFlow {
+            hwirq: intid.to_u32() as usize,
+        });
+    }
+    let was_enabled = registers.is_irq_enable(intid);
+    if was_enabled {
+        registers.set_irq_enable(intid, false);
+    }
+    // Also wait when already disabled: a preceding disable can still be
+    // pending. RWP covers SPI disable, not ICFGR writes or handler completion.
+    if registers.wait_for_distributor_rwp() && !registers.is_irq_enable(intid) {
+        registers.set_cfg(intid, trigger);
+        if registers.get_cfg(intid) == trigger {
+            if !was_enabled {
+                return Ok(());
+            }
+            registers.set_irq_enable(intid, true);
+            if registers.is_irq_enable(intid) {
+                return Ok(());
+            }
+        }
+    }
+    // Do not restore on timeout or mismatch. This best-effort disable has no
+    // completion wait: failure can leave partial state, including pending mask
+    // writes. Returning an error makes no claim that hardware is masked.
+    registers.set_irq_enable(intid, false);
+    Err(kirq::IrqDescError::ConfigurationFailed {
+        hwirq: intid.to_u32() as usize,
+    })
+}
+
 /// Prepares SGI15 in allocator-ready, non-migrating startup context.
 ///
 /// Registration is global and permanent; configuration and enablement are
@@ -125,6 +247,7 @@ pub(super) fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     // discovery and point at the mapped GICv3 MMIO frames for this machine.
     let mut gic = unsafe { Gic::new(gicd_base, gicr_base) };
     gic.init();
+    super::remember_standard_intid_limit(gic.typer_raw());
     GIC.init_once(SpinNoIrq::new(gic));
     let cpu = GIC.lock().cpu_interface();
     TRAP_OP.init_once(cpu.trap_operations());
@@ -152,8 +275,42 @@ pub(super) fn enable(irq: usize, enabled: bool) {
     // SAFETY: callers pass a hardware IRQ number understood by this GIC
     // instance; `IntId::raw` only wraps that validated numeric identifier.
     let intid = unsafe { IntId::raw(irq as u32) };
-    let mut gic = GIC.lock();
-    gic.set_irq_enable(intid, enabled);
+    let is_complete = {
+        let mut gic = GIC.lock();
+        if intid.is_private() {
+            gic.set_irq_enable(intid, enabled);
+            true
+        } else {
+            super::spi::set_enabled(&mut *gic, intid, enabled)
+        }
+    };
+    if !is_complete {
+        // Like Linux's mask path, this infallible hook diagnoses a bounded RWP
+        // timeout and continues. Software admission remains disabled; neither
+        // this return nor synchronize_irq proves physical-source quiescence.
+        warn!("GICv3 SPI disable RWP timeout: hwirq={irq}");
+    }
+}
+
+impl super::spi::Registers for Gic {
+    fn set_enabled(&mut self, intid: IntId, enabled: bool) {
+        Gic::set_irq_enable(self, intid, enabled);
+    }
+
+    fn wait_for_disable(&mut self) -> bool {
+        Gic::wait_for_distributor_rwp(self).is_ok()
+    }
+
+    fn set_pending(&mut self, intid: IntId) {
+        Gic::set_pending(self, intid, true);
+    }
+}
+
+pub(super) fn retrigger_spi(hwirq: usize) {
+    // SAFETY: the retained ordinary SPI binding was checked against the
+    // discovered standard INTID limit before selection/publication.
+    let intid = unsafe { IntId::raw(hwirq as u32) };
+    super::spi::set_pending(&mut *GIC.lock(), intid);
 }
 
 pub(super) fn set_prio(irq: usize, priority: u8) {

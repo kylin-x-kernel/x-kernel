@@ -14,6 +14,99 @@ const EIOINTC_IRQ: usize = 3;
 mod eiointc;
 mod pch_pic;
 
+static EXTERNAL_LEVEL: kirq::LevelChip = kirq::LevelChip {
+    mask_ack: mask_external,
+    unmask: unmask_external,
+};
+
+fn mask_external(desc: kirq::IrqDesc) {
+    // Close the producer before its parent. Level PCH sources have no leaf
+    // ack; EIOINTC ISR was already consumed by the parent dispatch path.
+    pch_pic::disable_irq(desc.hwirq);
+    eiointc::disable_irq(desc.hwirq);
+}
+
+fn unmask_external(desc: kirq::IrqDesc) {
+    pch_pic::clear_cause(desc.hwirq);
+    eiointc::enable_irq(desc.hwirq);
+    pch_pic::enable_irq(desc.hwirq);
+}
+
+fn claim_external(
+    claim: impl FnOnce() -> Option<usize>,
+    complete: impl FnOnce(usize),
+) -> Option<usize> {
+    let irq = claim()?;
+    // Consume the parent ISR even for an unsupported leaf, before KIRQ lookup.
+    // This is not the leaf's mask/ack operation and has no tail obligation.
+    complete(irq);
+    if irq >= pch_pic::PCH_PIC_IRQ_COUNT || matches!(irq, TIMER_IRQ | EIOINTC_IRQ) {
+        warn!("loongarch: unsupported external vector {irq}");
+        return None;
+    }
+    Some(irq)
+}
+
+fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+    use kirq::{IrqAffinity, IrqController, IrqFlags, IrqTrigger};
+    if desc.controller != IrqController::LoongArchExtioi
+        && (desc.domain.is_some() || desc.hwirq >= pch_pic::PCH_PIC_IRQ_COUNT)
+    {
+        // Non-platform domains and software-only Lines retain their own flow.
+        return Ok(kirq::IrqFlow::Legacy);
+    }
+    // The current flat binding reserves these IDs for CPU-local sources.
+    // Distinct external IDs colliding with them need a domain, not guessing.
+    if desc.domain.is_none()
+        && desc.controller == IrqController::Unknown
+        && matches!(desc.hwirq, TIMER_IRQ | EIOINTC_IRQ)
+    {
+        return Ok(kirq::IrqFlow::Legacy);
+    }
+    if desc.domain.is_some()
+        || desc.hwirq >= pch_pic::PCH_PIC_IRQ_COUNT
+        || matches!(desc.hwirq, TIMER_IRQ | EIOINTC_IRQ)
+        || !matches!(
+            desc.controller,
+            IrqController::Unknown | IrqController::LoongArchExtioi
+        )
+        || desc.affinity != IrqAffinity::Any
+        || !(desc.flags - (IrqFlags::SHARED | IrqFlags::WAKEUP_SOURCE)).is_empty()
+        || !matches!(
+            desc.trigger,
+            IrqTrigger::LevelHigh | IrqTrigger::LevelLow | IrqTrigger::Unknown(_)
+        )
+    {
+        return Err(kirq::IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    Ok(kirq::IrqFlow::Level(&EXTERNAL_LEVEL))
+}
+
+fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
+    configure_with(desc, pch_pic::configure_level)
+}
+
+fn configure_with(
+    desc: kirq::IrqDesc,
+    configure_external: impl FnOnce(usize, bool) -> bool,
+) -> Result<(), kirq::IrqDescError> {
+    // Only external level sources own PCH registers. CPU-local timer IDs
+    // share this flat namespace but must never configure an external pin.
+    if !matches!(select_flow(desc)?, kirq::IrqFlow::Level(_)) {
+        return Ok(());
+    }
+    let is_low = match desc.polarity {
+        kirq::IrqPolarity::Low => true,
+        kirq::IrqPolarity::High => false,
+        kirq::IrqPolarity::Unknown => desc.trigger == kirq::IrqTrigger::LevelLow,
+    };
+    if configure_external(desc.hwirq, is_low) {
+        Ok(())
+    } else {
+        Err(kirq::IrqDescError::ConfigurationFailed { hwirq: desc.hwirq })
+    }
+}
+
 // External vectors target CPU0; an unpinned SMP test may run elsewhere.
 #[cfg(not(feature = "smp"))]
 unittest::path_mod_test!(tests, "../ut-tests/irq.rs");
@@ -52,10 +145,16 @@ impl IrqType {
 }
 #[kiface::provide]
 impl kirq::IntrManagerIf {
-    fn configure(_desc: kirq::IrqDesc) {}
+    fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+        select_flow(desc)
+    }
 
-    fn enable(irq: usize, enabled: bool) {
-        let irq = IrqType::new(irq);
+    fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
+        configure(desc)
+    }
+
+    fn enable(desc: kirq::IrqDesc, enabled: bool) {
+        let irq = IrqType::new(desc.hwirq);
         match irq {
             IrqType::Timer => {
                 let old_value = ecfg::read().lie();
@@ -82,11 +181,9 @@ impl kirq::IntrManagerIf {
                     return;
                 }
                 if enabled {
-                    eiointc::enable_irq(irq);
-                    pch_pic::enable_irq(irq);
+                    unmask_external(desc);
                 } else {
-                    eiointc::disable_irq(irq);
-                    pch_pic::disable_irq(irq);
+                    mask_external(desc);
                 }
             }
         }
@@ -95,7 +192,7 @@ impl kirq::IntrManagerIf {
     fn dispatch_irq(irq: usize) -> Option<kirq::Virq> {
         let mut irq = IrqType::new(irq);
         if matches!(irq, IrqType::Io) {
-            let Some(ex_irq) = eiointc::claim_irq() else {
+            let Some(ex_irq) = claim_external(eiointc::claim_irq, eiointc::complete_irq) else {
                 debug!("Spurious external IRQ");
                 return None;
             };
@@ -107,9 +204,7 @@ impl kirq::IntrManagerIf {
                 ticlr::clear_timer_interrupt();
             }
             IrqType::Io => {}
-            IrqType::Ex(irq) => {
-                eiointc::complete_irq(irq);
-            }
+            IrqType::Ex(_) => {}
         }
         kirq::generic_handle_irq(kirq::PendingIrq::new(kirq::IrqRef::Virq(irq.as_usize()), 0))
     }

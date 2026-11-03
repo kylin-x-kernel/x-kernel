@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the entire crate: `src/lib.rs` (architecture
-dispatch), `src/gic.rs`, `src/gicv2.rs`, `src/gicv3.rs` (AArch64 GIC),
+dispatch), `src/gic.rs`, `src/gic_spi.rs`, `src/gicv2.rs`, `src/gicv3.rs` (AArch64 GIC),
 `src/riscv.rs` (PLIC), and `src/x86.rs` (IO-APIC glue). No modules are
 excluded; the backend crates (`arm_gic_driver`, `riscv_plic`,
 `x86-apic`) encapsulate their own register access and are audited
@@ -47,6 +47,15 @@ On x86, fixed LAPIC spurious/error vectors are consumed before ordinary
 claims are constructed. Spurious delivery must not acknowledge any ISR entry;
 error delivery captures controller status and acknowledges once in x86-apic.
 Neither path may fall through to generic completion or Action dispatch.
+
+Ordinary x86 IO-APIC/MSI claims transfer a single EOI cookie into KIRQ. Edge flow
+consumes it before handlers under the Line lock; level Fasteoi consumes it after
+handlers. Local timer/IPI vectors keep early EOI and a no-op cookie. A failed
+mapping still consumes the original claim once. Explicit IO-APIC/MSI descriptors
+are range/identity checked; MSI admission also requires retained allocation
+routing. Callbacks do not derive an MSI target from the replay CPU. Device-owned
+MSI masking, posted deliveries and vector-reuse safety are not supplied by these
+flow operations. Generic disable suppresses handlers but cannot stop MSI traffic.
 
 GICv2 local preparation constructs only architected SGI/PPI IDs (0..32),
 clears their banked active state and requests disablement before CPU-interface
@@ -101,7 +110,8 @@ anywhere in this crate.
   SGI15. Its handler is never removed; the notifier does not read this state.
 - `PLIC` (`LazyInit<PlicController>`): the source bound and PLIC register handle;
   access before init panics with a named `expect`.
-  Its inner `SpinNoIrq<Plic>` lock excludes local IRQ delivery and migration while selecting the
+  Its inner `SpinNoIrq<PlicState>` lock protects registers and effective targets,
+  excluding local IRQ delivery and migration while selecting the
   claiming context and executing enable/check/complete/restore. A disabled
   source is temporarily enabled only to satisfy the controller completion
   contract, then restored before unlocking. Concurrent source-control updates
@@ -113,8 +123,8 @@ anywhere in this crate.
 | ID | Threat | Impact | Trigger | Existing control |
 |----|--------|--------|---------|------------------|
 | T-01 | DTB describing a wrong GIC version or truncated regions | Medium — wrong MMIO windows mapped, later accesses fault | Malformed or hostile device tree | Version/region requirements checked per version before any mapping; missing regions yield `None` (no mapping, no access). |
-| T-02 | Out-of-range hwirq reaching a backend | Medium — out-of-window register access | `kirq` or platform init passing a bad source number | PLIC and GIC backends bounds-check hwirq before register access; `x86.rs` translates but never invents numbers. |
-| T-03 | Interrupt storm from a misconfigured trigger mode | Medium — CPU starvation | Wrong edge/level programming | `configure` only accepts the four known `IrqTrigger` variants and ignores `Unknown`, leaving the line at its reset behavior. |
+| T-02 | Out-of-range hwirq reaching a backend | Medium — out-of-window register access | `kirq` or platform init passing a bad source number | PLIC validates source bounds. Explicit GIC resources are checked by `select_gic_flow` before publication; bare legacy IDs and direct platform calls still require caller validation. `x86.rs` translates but never invents numbers. |
+| T-03 | Interrupt storm from a misconfigured trigger mode | Medium — CPU starvation | Wrong edge/level programming | Explicit GIC SPIs reject falling-edge and low-level requests before publication. Checked backends verify known trigger configuration and request masking on transaction failure; GICv3 private changes are rejected before mutation. `Unknown` leaves hardware unchanged. Misleading register reads and direct legacy writes retain the limitations below. |
 | T-04 | Reinitialization resets live controller state | Medium — inconsistent controller state | Repeated configuration or local CPU initialization after source activation | `remember_config` asserts config equality. Global handle reuse does not make local GIC initialization idempotent; platform bring-up initializes the primary interface through discovery and each AP interface separately, without repeating primary local setup. |
 | T-05 | Spurious PLIC claim | Low — wasted IRQ cycle | Level noise on a PLIC line | Claim returns `None`/skip sentinel for timer and IPI events; completion only for genuine device lines. |
 | T-06 | NMI irq_work submission re-enters controller or logging locks | High — CPU deadlock | NMI interrupts a GIC/logging critical section | Prepared notifier uses only immutable MPIDR affinity, integer encoding, DSB, the public SGI1R write primitive and ISB; no generic IPI helper, CPU map, lazy state or logging. |
@@ -131,6 +141,11 @@ anywhere in this crate.
 | F-05 | Local irq_work preparation unsupported or fails | Returns `None`, no notifier published | Generic irq_work remains unavailable on this CPU | 3 | Reject invalid affinity/SGI, retain global registration failure, and propagate NMI-attribute or generic-enable failure. GICv3 logs the failed preparation step; runtime publishes ready only on success and rejects available NMI without a ready local handoff. |
 
 ## Known Limitations
+
+- Checked GIC configuration reports observable failures but does not prove
+  isolation. GICv3 failure-path masking has no completion wait; trigger writes
+  can remain applied. `ConfigurationFailed` combines RWP timeout and readback
+  mismatch. See the checked-backend boundary below for caller obligations.
 
 - GICv3 local preparation failure returns before EOI-mode configuration and PMR
   readiness publication. Partial hardware initialization is not undone; callers
@@ -179,3 +194,128 @@ bound and representable without truncation. Invalid ids return before indexed
 register access. The no-DT fallback enforces library capacity, not physical
 source discovery. Context-index and MMIO-mapping validity remain separate
 platform obligations; source validation does not establish either property.
+
+The effective-target table is allocated before publication with one slot per
+supported source plus reserved slot zero. Target selection and enable-bit writes
+are serialized by the same controller lock. Management-task migration cannot
+redirect a later disable to another context. Context preparation must precede
+first enable; bound CPUs must remain available for the controller lifetime.
+Hot-unplug and runtime retargeting are not supported by this fixed-target policy.
+Claim completion remains local to the claiming CPU and does not rewrite the
+recorded management target.
+
+## GIC Admission Boundary
+
+`src/gic.rs::select_gic_flow` checks explicit GIC controller/domain identity
+against `STANDARD_INTID_LIMIT`, initialized through the existing driver's
+`typer_raw()` in `src/gicv2.rs` and `src/gicv3.rs`. The limit uses ITLinesNumber,
+not IDbits, and excludes 1020..1023 plus extended/LPI identifiers. Comparison
+in `usize` rejects oversized values before they could truncate into a valid ID.
+Before controller setup, explicit GIC admission returns `UnsupportedFlow`.
+The KIRQ resolution path checks this result before metadata/mapping publication;
+registration therefore retains caller ownership of a rejected handler.
+
+The same gate rejects explicit GIC SPI `EdgeFalling`/`LevelLow` requests before
+new mapping publication or existing metadata updates. It does not validate bare
+legacy IDs, direct controller calls, private-source trigger support, unspecified
+trigger metadata, forwarding state or per-CPU shutdown. Eligible ordinary SPIs
+select Fasteoi; private and PER_CPU sources remain Legacy;
+neither successful admission nor cached hardware capacity proves delivery,
+configuration success, register-write completion or hardware quiescence.
+
+### Checked Backend Configuration
+
+Both checked backends reuse `select_gic_flow` before hardware access and
+independently bound register indices, including legacy IDs, to the initialized
+standard range below 1020, before handling unknown trigger metadata.
+Their new `IntId::raw` sites in `checked_config` therefore cannot truncate an
+oversized ID into a valid register index. The existing `GIC` lock serializes the
+complete transaction with other backend register writers and pins current-CPU
+private access. No new raw MMIO layout, allocation, priority write or
+NMI-attribute write is introduced.
+
+GICv2 checks enable, trigger and restored-enable observations; an observed
+failure requests disablement without restoring or rolling back. Fixed rising
+SGIs need no writes. A read-only PPI whose trigger already matches succeeds;
+a PPI write that fails readback returns `ConfigurationFailed`. Electrical PPI
+polarity remains an integration assumption, not a verified register property.
+
+GICv3 private sources are read-only in this checked path. Matching current-CPU
+readback preserves startup, including private NMI setup; a requested change
+returns `UnsupportedFlow` without modifying any redistributor. SPI changes
+wait for bounded distributor RWP completion before programming, and return
+`ConfigurationFailed` on timeout or mask/configuration/restore mismatch. That
+single error variant does not distinguish timeout from readback failure.
+
+The GICv3 failure path only issues a disable write, without an inline completion
+wait. A failed transaction can therefore leave mask writes pending and trigger
+state changed. Neither backend promises fail-safe isolation when registers
+are inaccessible, read-as-zero, read-as-one, write-ignored or faulting: the
+vendor accessors do not expose access errors, and matching readback can be
+misleading. The code reports observable mismatches; it cannot recover MMIO
+faults or infer physical delivery from register values. Callers must treat
+failure as partial hardware state and must not publish configuration success.
+
+The transaction does not clear pending or active state, synchronize handlers,
+stop device production, deactivate forwarded guest interrupts or prove drain.
+Normal task/IRQ callers must not hold `GIC`; NMI execution is forbidden because
+the lock cannot exclude it. Private sources require execution on the intended
+initialized CPU. Direct legacy `set_trigger` calls retain their existing
+caller-validation and infallible-write limitations.
+
+Ordinary SPI flow remains gated on the prerequisites in
+[the design](design.md#ordinary-spi-flow-prerequisites). In particular, exhausting
+a bounded RWP poll must not be treated as evidence that masking completed.
+Successful RWP observation also does not drain an already admitted handler or
+deactivate a forwarded guest interrupt. Configuration readback failure and RWP
+timeout are distinct hardware conditions, currently represented by the same
+checked error; neither implies that earlier hardware writes were rolled back.
+A checked result supports failure propagation, but the prepare/apply/commit
+split alone must not be used to claim hardware rollback or isolation.
+
+## Ordinary SPI Flow Boundary
+
+`src/gic_spi.rs` is a private controller-operation adapter, not a second IRQ
+state machine. KIRQ retains the original validated binding and serializes
+mask/unmask/retrigger with Line state. Each backend acquires its existing GIC
+lock below that Line lock; no operation reenters KIRQ. No such operation runs
+from NMI. Publicly reachable chip callbacks revalidate source identity/range and
+flow eligibility before invoking backend helpers. Invalid mask/unmask inputs
+do nothing; invalid retrigger returns false without MMIO. `retrigger_spi`
+constructs an `IntId` only from that admitted standard SPI range, preventing
+truncation and private-register access.
+
+SPI pending acceptance means a W1S write was issued, not that hardware became
+inactive or a handler ran. Readback cannot distinguish failure from consumption
+by a remote CPU. No software fallback is permitted. GICv3 disable waits for
+bounded RWP, releases the controller lock and diagnoses timeout; the void hook
+cannot promise completed masking on timeout. Generic eligibility still prevents
+disabled/tearing-down handlers from running and completes arriving claims.
+Physical shutdown remains caller-owned. Configuration errors use the separate
+fallible path; none of these operations clears active state to fabricate drain.
+
+Private and PER_CPU sources, including NMI fallbacks and the current forwarded
+virtual timer PPI, are not ordinary SPI flow. A future SPI forwarding consumer
+must establish exclusion and completion ownership before using this capability.
+The `gic_spi` model tests cover access order and timeout reporting, not physical
+hardware or firmware security ownership.
+
+## PLIC Flow Masking
+
+The permanent source table also owns configured priority and flow-mask state.
+All priority writers participate under the controller lock: neither `set_prio`
+nor the management enable default can reopen a masked source. First-mask capture
+uses `Option<u32>` so hardware priority zero is preserved as explicit policy;
+repeated masking cannot overwrite saved policy with the effective zero. Unmask
+restores the latest policy, not an entry-time snapshot. No hardirq allocation is
+needed. Masking changes source-wide priority, not effective-target ownership.
+
+For descriptors declaring PLIC by domain or controller, flow selection rejects
+incompatible domain/controller, bounds, trigger, polarity, flags and affinity
+before returning the static PLIC capability. Non-PLIC descriptors retain the
+unmigrated Legacy contract, not a new hardware-validation guarantee. Selection itself
+does not write registers or require the replay executor to be ready. KIRQ must
+retain and validate binding identity, serialize mask/unmask decisions, and supply
+pending/replay cancellation and drain before activating this flow. Static
+operation lifetime is not proof of descriptor or replay lifetime. Unknown trigger
+acceptance is not a claim that hardware will replay a completed notification.

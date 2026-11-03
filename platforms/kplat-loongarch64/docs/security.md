@@ -18,6 +18,19 @@ the move adds no unsafe code or production trust boundary.
 
 ## Trust Model
 
+External source admission supports ordinary PCH levels only. Edge, per-CPU,
+retargeted and explicitly external reserved-ID requests fail before MMIO. The
+existing flat local IDs 3/11 are not reinterpreted as device sources. Parent ISR
+completion is consumed even if leaf admission fails; PCH CLR is a separate W1C
+operation at 0x80/0x84 and never a read/modify/write or parent acknowledgement.
+
+Checked level programming stays under REGISTER_LOCK with a validated pin and
+preserves unrelated MASK/EDGE/POL bits. A readback failure reports
+ConfigurationFailed; software state is not proof of hardware rollback or drain.
+All accesses remain within the mapped 4 KiB aperture. Controller locks never
+nest and do not invoke KIRQ. Tests use model registers for failure injection;
+default-UP QEMU does not establish AP or multi-node routing correctness.
+
 Startup does not trust firmware's source masks: HWI1 is closed during
 controller preparation, all EIOINTC enable banks are cleared, and both PCH
 mask banks are set before the parent is reopened. Recording tests check the

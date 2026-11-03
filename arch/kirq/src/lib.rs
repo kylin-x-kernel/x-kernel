@@ -23,10 +23,13 @@ pub mod irq_work;
 mod model;
 mod runtime;
 
-pub use backend::msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix};
 #[doc(hidden)]
 pub use backend::msi::{MsiBackendIf, MsiBackendToken};
 pub(crate) use backend::platform;
+pub use backend::{
+    msi::{MsiAllocation, MsiKind, MsiMessage, alloc_msix, free_msix},
+    platform::{EdgeChip, FasteoiChip, FasteoiResend, IrqFlow, LevelChip},
+};
 pub use bottom_half::{context, deferred, lifecycle, softirq};
 pub use domain::IrqRef;
 pub(crate) use model::desc;
@@ -36,8 +39,8 @@ pub use model::desc::{
     IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq, gic_edge_irq_desc,
     gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
 };
-pub use runtime::manager::*;
 pub(crate) use runtime::{action, dispatch, nmi, state};
+pub use runtime::{manager::*, resend};
 
 #[kiface::provide]
 impl kiface_irq_context_api::InterruptContextIf {

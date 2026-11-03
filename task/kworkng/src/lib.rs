@@ -249,6 +249,7 @@ mod delayed_work_handle;
 pub use delayed_work_handle::DelayedWorkHandle;
 
 mod finalize;
+mod irq_resend;
 mod services;
 #[cfg(feature = "system")]
 unittest::path_mod_test!(finalize_unittest, "../ut-tests/finalize.rs");

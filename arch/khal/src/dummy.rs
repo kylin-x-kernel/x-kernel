@@ -126,13 +126,19 @@ impl PlatformPowerIf {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn select_flow(_desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+        Ok(kirq::IrqFlow::Legacy)
+    }
+
     fn prepare_local_irq_work() -> Option<fn()> {
         None
     }
 
-    fn configure(_desc: kirq::IrqDesc) {}
+    fn configure(_desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
+        Ok(())
+    }
 
-    fn enable(_irq: usize, _enabled: bool) {}
+    fn enable(_desc: kirq::IrqDesc, _enabled: bool) {}
 
     fn dispatch_irq(_irq: usize) -> Option<kirq::Virq> {
         None

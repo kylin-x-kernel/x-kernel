@@ -83,6 +83,8 @@ cpu_slot_cell! {
 static IS_X2APIC: AtomicBool = AtomicBool::new(false);
 static XAPIC_BASE: AtomicU64 = AtomicU64::new(0);
 static IO_APIC: LazyInit<SpinNoIrq<IoApic>> = LazyInit::new();
+mod io_apic;
+pub use io_apic::{configure_irq_checked, retrigger_io_apic};
 static_lock! {
     static MSIX_VECTOR_ALLOCATOR: SpinNoIrq<MsixVectorAllocator> =
         SpinNoIrq::new(MsixVectorAllocator::new());
@@ -90,12 +92,14 @@ static_lock! {
 
 struct MsixVectorAllocator {
     allocated: [u64; MSIX_VECTOR_WORDS],
+    destinations: [Option<u8>; MSIX_VECTOR_COUNT],
 }
 
 impl MsixVectorAllocator {
     const fn new() -> Self {
         Self {
             allocated: [0; MSIX_VECTOR_WORDS],
+            destinations: [None; MSIX_VECTOR_COUNT],
         }
     }
 
@@ -122,9 +126,95 @@ impl MsixVectorAllocator {
         let bit = 1u64 << (index % MSIX_VECTOR_WORD_BITS);
         let was_allocated = self.allocated[word] & bit != 0;
         self.allocated[word] &= !bit;
+        self.destinations[index] = None;
         was_allocated
     }
+
+    fn bind_destination(&mut self, vector: u8, destination: u8) -> bool {
+        if !(MSIX_VECTOR_BASE..APIC_TIMER_VECTOR).contains(&vector) {
+            return false;
+        }
+        let index = usize::from(vector - MSIX_VECTOR_BASE);
+        if self.allocated[index / MSIX_VECTOR_WORD_BITS] & (1 << (index % MSIX_VECTOR_WORD_BITS))
+            == 0
+        {
+            return false;
+        }
+        // A live allocation's message target is immutable. Recomposition must
+        // not silently redirect retrigger away from the message given to its owner.
+        match self.destinations[index] {
+            Some(old) => old == destination,
+            None => {
+                self.destinations[index] = Some(destination);
+                true
+            }
+        }
+    }
+
+    fn destination(&self, vector: u8) -> Option<u8> {
+        if !(MSIX_VECTOR_BASE..APIC_TIMER_VECTOR).contains(&vector) {
+            return None;
+        }
+        self.destinations[usize::from(vector - MSIX_VECTOR_BASE)]
+    }
+
+    fn matches_destination(&self, vector: u8, expected: Option<u8>) -> bool {
+        self.destination(vector)
+            .is_some_and(|actual| expected.is_none_or(|expected| actual == expected))
+    }
+
+    fn retrigger(&self, vector: u8, send: impl FnOnce(u8, u8)) -> bool {
+        let Some(destination) = self.destination(vector) else {
+            return false;
+        };
+        send(vector, destination);
+        true
+    }
 }
+
+/// Requests an MSI delivery using the immutable target of its live allocation.
+/// The allocation lock covers request issuance, not remote completion. The
+/// device owner must still stop and drain delivery before releasing a vector.
+/// Call in task/ordinary IRQ context after local APIC preparation, never NMI,
+/// retaining the source allocation across the call.
+pub fn retrigger_msi(vector: usize) -> bool {
+    let Ok(vector) = u8::try_from(vector) else {
+        return false;
+    };
+    MSIX_VECTOR_ALLOCATOR
+        .lock()
+        .retrigger(vector, |vector, destination| {
+            send_ipi_raw(usize::from(vector), RawCpuId::new(usize::from(destination)));
+        })
+}
+
+/// Checks a live MSI allocation against its retained message target. `Any`
+/// accepts that original target; a specific CPU must resolve to the same APIC id.
+/// This is an admission check, not an allocation lease or remote-delivery drain.
+/// Takes the MSI allocator spin lock; task/ordinary IRQ context is allowed,
+/// but NMI and callers already holding that lock are not.
+pub fn msi_route_matches(vector: usize, affinity: kirq::IrqAffinity) -> bool {
+    let Ok(vector) = u8::try_from(vector) else {
+        return false;
+    };
+    let expected = match affinity {
+        kirq::IrqAffinity::Any => None,
+        kirq::IrqAffinity::Cpu(cpu) => {
+            let Some(raw) = raw_cpu_id(LogicalCpuId::new(cpu)) else {
+                return false;
+            };
+            let Ok(destination) = u8::try_from(raw.as_usize()) else {
+                return false;
+            };
+            Some(destination)
+        }
+    };
+    MSIX_VECTOR_ALLOCATOR
+        .lock()
+        .matches_destination(vector, expected)
+}
+
+unittest::path_mod_test!(tests_routing, "../ut-tests/routing.rs");
 
 #[kiface::provide]
 impl kirq::MsiBackendIf {
@@ -158,6 +248,12 @@ impl kirq::MsiBackendIf {
         }
 
         let apic_id = apic_id_for_affinity(affinity)?;
+        if !MSIX_VECTOR_ALLOCATOR
+            .lock()
+            .bind_destination(vector, apic_id)
+        {
+            return None;
+        }
         let msg_addr = 0xFEE0_0000u64 | (u64::from(apic_id) << 12);
         let msg_data = u32::from(vector);
         Some(kirq::MsiMessage::new(msg_addr, msg_data))
@@ -194,12 +290,11 @@ fn apic_id_for_affinity(affinity: kirq::IrqAffinity) -> Option<u8> {
 
 /// Masks or unmasks one IO-APIC input line.
 ///
-/// Interrupts numbered at or above [`MSIX_VECTOR_BASE`] are MSI-X vectors,
-/// not IO-APIC lines, and are ignored here; the vector must land in the
-/// IO-APIC range below the local APIC timer vector and within the
-/// controller's table, otherwise the call is a no-op.
+/// `irq` is an input pin, not a CPU vector. Its fixed vector
+/// (`IO_APIC_VECTOR_BASE + irq`) must be below [`MSIX_VECTOR_BASE`] and the
+/// pin must be within the physical table; otherwise the call is a no-op.
 pub fn set_irq_enabled(irq: usize, enabled: bool) {
-    if irq >= MSIX_VECTOR_BASE as usize {
+    if irq >= MSIX_VECTOR_BASE as usize - IO_APIC_VECTOR_BASE {
         return;
     }
 
@@ -226,7 +321,7 @@ pub fn set_irq_enabled(irq: usize, enabled: bool) {
 
 /// Programs the trigger mode and polarity of one IO-APIC input line.
 pub fn configure_irq(irq: usize, trigger: IoApicTriggerMode, polarity: IoApicPolarity) {
-    if irq >= MSIX_VECTOR_BASE as usize {
+    if irq >= MSIX_VECTOR_BASE as usize - IO_APIC_VECTOR_BASE {
         return;
     }
 
@@ -259,10 +354,10 @@ pub fn configure_irq(irq: usize, trigger: IoApicTriggerMode, polarity: IoApicPol
     }
 }
 
-/// Returns the programmed trigger mode of one IO-APIC input line, or
-/// `None` when the line is out of the controller's table range.
+/// Returns the programmed trigger mode of one IO-APIC input line, or `None`
+/// outside the physical table or the fixed vector window below MSI vectors.
 pub fn irq_trigger_mode(irq: usize) -> Option<IoApicTriggerMode> {
-    if irq >= MSIX_VECTOR_BASE as usize {
+    if irq >= MSIX_VECTOR_BASE as usize - IO_APIC_VECTOR_BASE {
         return None;
     }
 

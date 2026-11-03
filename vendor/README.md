@@ -5,6 +5,58 @@ They are excluded from the kernel workspace, not treated as first-party
 workspace members. Kernel consumers still pass the normal build and lint gates.
 Do not apply kernel copyright headers or repository-wide refactors to them.
 
+## arm-gic-driver (Locally Maintained Dependency)
+
+- Published version: 0.17.13
+- Upstream: https://github.com/rcore-os/tgoskits
+- Package path: `drivers/intc/arm-gic-driver`
+- Source revision: `8fdfcc9e7b57002d4ec3c48ccceb5acc5f24ed83`
+- Archive SHA-256: `52210fc25fa222377dfabf2ffd2f07a751debe75d35c173ac14def04525541a5`
+
+The import preserves the published archive byte-for-byte. The manifest declares
+MIT, while its README declares Mulan PSL v2 and links a missing package LICENSE;
+the upstream repository root at that revision carries Apache-2.0. These
+inconsistent declarations are preserved, not resolved or relicensed here.
+This is the maintained kernel dependency, not a temporary prerequisite awaiting
+an upstream merge. Keep local patches separate from the recorded import, review
+updates against that baseline, and run the regression gate below on changes.
+An upstream release may replace a local patch only after equivalent behavior
+and tests have been verified; upstream merging is not an acceptance condition.
+
+License attribution remains unresolved independently of that maintenance policy.
+The conflicting declarations cannot be settled by choosing a license locally.
+Preserve them pending authoritative clarification; do not label distribution
+attribution as settled. The source evidence, rechecked on 2026-11-03, is:
+
+- [Package manifest (MIT)](https://github.com/rcore-os/tgoskits/blob/8fdfcc9e7b57002d4ec3c48ccceb5acc5f24ed83/drivers/intc/arm-gic-driver/Cargo.toml).
+- [Package README (Mulan PSL v2)](https://github.com/rcore-os/tgoskits/blob/8fdfcc9e7b57002d4ec3c48ccceb5acc5f24ed83/drivers/intc/arm-gic-driver/README.md).
+- [Repository-root license (Apache-2.0)](https://github.com/rcore-os/tgoskits/blob/8fdfcc9e7b57002d4ec3c48ccceb5acc5f24ed83/LICENSE).
+- The package-local `LICENSE` is absent from the imported archive; its raw
+  source URL at the same revision returns HTTP 404. The root license alone does
+  not resolve the contradictory package-specific statements.
+
+The upstream working clone is local-only and is not a nested Git submodule in
+the kernel repository.
+
+The local patch exposes `v3::Gic::wait_for_distributor_rwp()` and the typed
+`DistributorRwpTimeout` error. It reuses the existing 10,000-poll bounded wait
+without changing initialization or register-write policy. RWP only tracks
+architecturally specified Distributor writes; success is neither a general
+configuration barrier nor an active-interrupt/handler drain guarantee.
+
+Run `make check_gic` on a native AArch64 Linux host; the AArch64 Build Artifact
+CI leg runs this gate. On an x86_64 host with AArch64 musl Rust std, the cross
+linker and QEMU user emulator installed, use:
+
+```sh
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER=qemu-aarch64 \
+make check_gic GIC_TEST_TARGET=aarch64-unknown-linux-musl
+```
+
+The register fixture verifies stuck-RWP failure, recovery after clearing RWP,
+and preservation of CTLR. It does not emulate hardware write propagation.
+
 ## UART Dependencies
 
 The UART imports preserve the published archives byte-for-byte, separately

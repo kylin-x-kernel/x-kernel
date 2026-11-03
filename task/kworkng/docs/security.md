@@ -202,3 +202,36 @@ after cancellation; failed attempts thaw. Queue shutdown remains permanent acros
 thaw. Never retain a freeze guard while waiting for held work or closing that queue;
 indirect callback/destructor cycles remain possible despite safe storage ownership.
 The guard does not replace handle shutdown or borrowed Work's retention/drain rules.
+
+## Permanent IRQ Resend Adapter
+
+`irq_resend.rs` owns a kernel-lifetime Work and BH queue Arc in `Once`. Its
+unchecked Pin is justified by permanent static storage: the Work is never moved,
+canceled, disabled, rebound or freed after publication. Unsafe queue submission
+retains that storage and its callback for every queued/running execution. This
+adapter is distinct from the normal-context finalization executor.
+
+The unsafe KIRQ notifier binding occurs only after BH services and the private
+executor are published. Notification is IRQ-safe, non-inline and allocates no
+per-request Work. The same queue owns unfinished submissions; coalescing cannot
+replace KIRQ's retained-Line backlog. Submission errors other than AlreadyQueued
+are invariant failures, not silently successful replay. No queue shutdown or
+runtime unregister is supported. This does not authorize NMI submission.
+
+KIRQ retains Line identity, owns queue membership/in-flight accounting, checks
+withdrawal eligibility and releases drain obligations. Kworkng only schedules
+its non-sleeping BH callback, outside queue locks. The callback takes no sleeping
+IRQ management mutex and has no authority to fabricate a hardware claim. The
+existing Tasklet/High actions remain the service owners; a separate resend action
+must not overwrite either slot.
+
+Binding kicks KIRQ's pre-install backlog. Until then, queued IRQ obligations can
+keep synchronous drain incomplete indefinitely. Startup/rollback must not wait
+on that drain before reaching installation; there is no automatic pre-bind wait
+rejection or cancellation fallback. Successful service initialization precedes
+the current runtime's console input preparation and device setup. The requirement
+is executor progress for waits covering queued replay, not a blanket prohibition
+on pre-bind zero-in-flight waits. This ordering is not a
+general proof for future early producers. Physical IRQ delivery, controller
+quiescence and hotplug/affinity correctness are outside the adapter's guarantee;
+no unperformed hardware validation is claimed.

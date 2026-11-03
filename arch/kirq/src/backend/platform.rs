@@ -23,6 +23,116 @@ use crate::{
 /// counterpart of Linux's `dev_id` — with no side table or trampoline.
 pub type Handler = Arc<dyn IrqHandler>;
 
+/// Source operations required by ordinary, non-oneshot fasteoi handling.
+///
+/// The provider retains these functions and their controller for kernel life.
+/// All operations are bounded, non-sleeping and non-reentrant into KIRQ, and
+/// execute under the original Line lock. They control flow suppression and
+/// pending delivery, not logical disable depth, routing or configured priority.
+#[derive(Debug)]
+pub struct FasteoiChip {
+    /// Requests delivery suppression until explicit unmask. An infallible chip
+    /// may diagnose a bounded hardware timeout and return; this is not a
+    /// hardware-quiescence guarantee. KIRQ rejects ineligible arriving claims
+    /// independently of whether physical masking has completed.
+    pub mask: fn(IrqDesc),
+    /// Restores delivery using the latest configured source priority.
+    pub unmask: fn(IrqDesc),
+    /// Selects how eligible, non-level pending work is retriggered.
+    pub resend: FasteoiResend,
+}
+
+/// Operations for edge flow. Claims are acknowledged under the Line lock
+/// before handlers run; overlapping arrivals latch pending for the running owner.
+/// Operations obey the same bounded, non-reentrant contract as [`FasteoiChip`].
+#[derive(Debug)]
+pub struct EdgeChip {
+    /// Suppresses source delivery where supported. For device-owned MSI masking,
+    /// this may be a no-op: generic admission still rejects disabled arrivals,
+    /// but the device owner must stop the producer before teardown.
+    pub mask: fn(IrqDesc),
+    /// Restores flow-suppressed delivery without changing logical disable depth.
+    pub unmask: fn(IrqDesc),
+    /// Requests delivery to the retained source routing, under Line exclusion.
+    /// True consumes pending, false retains it for later management retry.
+    /// Acceptance is not delivery completion or a vector-reuse barrier.
+    pub retrigger: fn(IrqDesc) -> bool,
+}
+
+/// Ordinary level flow operations, under the original Line lock. The provider
+/// masks and acknowledges the leaf before actions; unmask permits hardware
+/// reassertion. Hooks obey the bounded, non-reentrant FasteoiChip contract.
+#[derive(Debug)]
+pub struct LevelChip {
+    /// Masks the source and acknowledges any leaf obligation.
+    pub mask_ack: fn(IrqDesc),
+    /// Reopens the source after actions if it is still eligible.
+    pub unmask: fn(IrqDesc),
+}
+
+/// Pending-service policy for an ordinary fasteoi source.
+#[derive(Clone, Copy, Debug)]
+pub enum FasteoiResend {
+    /// The provider validated level-triggered hardware, including when firmware
+    /// omitted the trigger. Unmask allows reassertion; never synthesize replay.
+    Level,
+    /// Allows software action service by the permanent BH executor.
+    Software,
+    /// Requests a real hardware delivery under the original Line lock with
+    /// local IRQs disabled. The callback must be bounded, non-sleeping and
+    /// non-reentrant into KIRQ, and remain valid for kernel life.
+    ///
+    /// True means the request was accepted and consumes pending; repeated
+    /// scheduling without new pending work does not request another delivery.
+    /// False must mean no request was accepted: pending is retained, with no
+    /// software fallback or automatic retry guarantee. Later management
+    /// progress may retry. No software queue or in-flight obligation is added.
+    /// Providers with reachable failures need a failure-reporting and recovery
+    /// policy before production integration; retaining pending is not recovery.
+    /// Explicit level sources instead clear pending and rely on hardware.
+    /// Ordinary GIC SPIs use a pending-bit write: acceptance means the write
+    /// was issued, not that delivery or handler execution has completed.
+    HardwareOnly(fn(IrqDesc) -> bool),
+}
+
+/// Validated source flow selected before descriptor publication.
+#[derive(Clone, Copy, Debug)]
+pub enum IrqFlow {
+    /// Existing platform dispatch behavior, not a claim of ordinary-flow parity.
+    Legacy,
+    /// Ordinary fasteoi with explicit resend policy; excludes per-CPU and NMI.
+    Fasteoi(&'static FasteoiChip),
+    /// Edge acknowledgement before handlers, with serialized pending service.
+    Edge(&'static EdgeChip),
+    /// Mask/ack before actions and conditional unmask afterward; no replay IPI.
+    Level(&'static LevelChip),
+}
+
+impl IrqFlow {
+    pub(crate) fn unmask(self) -> Option<fn(IrqDesc)> {
+        match self {
+            Self::Legacy => None,
+            Self::Fasteoi(chip) => Some(chip.unmask),
+            Self::Edge(chip) => Some(chip.unmask),
+            Self::Level(chip) => Some(chip.unmask),
+        }
+    }
+}
+
+impl PartialEq for IrqFlow {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Legacy, Self::Legacy) => true,
+            (Self::Fasteoi(left), Self::Fasteoi(right)) => core::ptr::eq(*left, *right),
+            (Self::Edge(left), Self::Edge(right)) => core::ptr::eq(*left, *right),
+            (Self::Level(left), Self::Level(right)) => core::ptr::eq(*left, *right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for IrqFlow {}
+
 /// Target CPU(s) for inter-processor interrupts.
 pub enum TargetCpu {
     /// Target the current CPU.
@@ -154,22 +264,43 @@ impl Drop for PendingIrq {
 
 #[kiface::interface]
 pub trait IntrManagerIf {
+    /// Selects supported flow operations without allocation or hardware writes.
+    ///
+    /// Called under registry and Line exclusion, before publishing merged
+    /// metadata. Validate controller identity, source range and flow eligibility.
+    /// Existing unmigrated controllers return Legacy. Unsupported combinations
+    /// for a migrated controller return UnsupportedFlow, never a silent fallback.
+    fn select_flow(desc: IrqDesc) -> Result<IrqFlow, crate::IrqDescError>;
+
     /// Configures a controller-local IRQ source from a normalized descriptor.
     ///
-    /// `kirq` calls this before enabling a non-MSI line. Backends should consume
+    /// `kirq` calls this before publishing a new action when configuration is
+    /// stale, including disabled registration, or before enabling a stale
+    /// non-MSI line. Configuration must not activate an initially disabled
+    /// source; a successful transaction may restore prior hardware enablement
+    /// after temporary masking. Logical activation remains a separate step.
+    /// Backends should consume
     /// trigger, polarity, controller, source, affinity, and flags metadata that
     /// they understand, and ignore metadata that is not relevant to that
     /// controller. MSI descriptors are programmed through `MsiBackendIf` and do
     /// not use the normal line configure path.
     /// Must obey the same bounded, non-sleeping and non-reentrant controller
     /// contract as [`IntrManagerIf::enable`]; Line state may be locked here too.
-    fn configure(desc: IrqDesc);
+    /// Returns an error if programming or required completion/readback fails.
+    /// On failure KIRQ does not publish a new action or commit configuration,
+    /// but retains resolved mappings and cannot undo partial hardware effects.
+    /// The provider must not restore delivery after a failed configuration.
+    fn configure(desc: IrqDesc) -> Result<(), crate::IrqDescError>;
 
     /// Enables or disables a controller-local IRQ source.
     ///
-    /// `id` is the backend hwirq or local source id, not a dynamic virq.
+    /// `desc` preserves the normalized domain and controller metadata of the
+    /// selected Line. Its `hwirq` is the backend-local source id, not a dynamic
+    /// virq. The descriptor is metadata, not a hardware-binding lifetime token.
     /// Enabling is normally called after [`IntrManagerIf::configure`].
     /// Disabling should mask or otherwise stop delivery of that local source.
+    /// Infallible providers must diagnose observed completion failures; return
+    /// alone is not proof of hardware quiescence or completed device shutdown.
     /// MSI enablement is represented by the device-visible MSI message and does
     /// not use this hook.
     ///
@@ -177,7 +308,7 @@ pub trait IntrManagerIf {
     /// IRQ-safe state lock across this call. The provider may acquire its own
     /// controller-register locks, but must not reenter KIRQ registry, control
     /// or dispatch paths while holding those locks or servicing this call.
-    fn enable(id: usize, on: bool);
+    fn enable(desc: IrqDesc, on: bool);
 
     /// Claims, classifies, and dispatches an interrupt taken with IRQs enabled.
     ///
@@ -216,6 +347,14 @@ pub trait IntrManagerIf {
     /// not a hardware-active query, a device shutdown or a forwarding drain.
     /// The hook must not sleep or migrate. NMI-class providers must also obey
     /// NMI-context restrictions; ordinary providers may use bounded chip locks.
+    /// For selected Fasteoi Lines, KIRQ invokes this hook under the original
+    /// Line state lock, after clearing its running ownership where applicable.
+    /// Edge Lines invoke it under that lock before action execution (or after
+    /// masking a rejected arrival), without clearing another running owner.
+    /// Level Lines invoke it after mask/ack and before actions; a backend that
+    /// consumed its parent acknowledgement already supplies no tail obligation.
+    /// It must not reenter KIRQ dispatch, management, or registry operations:
+    /// the permitted lock order is Line then bounded controller state.
     fn complete_irq(completion_cookie: usize);
 
     /// Sends an IPI to another CPU.
@@ -252,13 +391,13 @@ pub trait IntrManagerIf {
 }
 
 #[inline]
-fn platform_configure(desc: IrqDesc) {
+fn platform_configure(desc: IrqDesc) -> Result<(), crate::IrqDescError> {
     IntrManagerIf::configure(desc)
 }
 
 #[inline]
-fn platform_enable(id: usize, on: bool) {
-    IntrManagerIf::enable(id, on)
+fn platform_enable(desc: IrqDesc, on: bool) {
+    IntrManagerIf::enable(desc, on)
 }
 
 #[inline]
@@ -277,16 +416,17 @@ fn needs_platform_binding(desc: IrqDesc) -> bool {
 }
 
 #[inline]
-pub(crate) fn configure_platform_irq(desc: IrqDesc) {
+pub(crate) fn configure_platform_irq(desc: IrqDesc) -> Result<(), crate::IrqDescError> {
     if needs_platform_binding(desc) {
-        platform_configure(desc);
+        platform_configure(desc)?;
     }
+    Ok(())
 }
 
 #[inline]
 pub(crate) fn set_platform_irq_enabled(desc: IrqDesc, on: bool) {
     if needs_platform_binding(desc) {
-        platform_enable(desc.hwirq, on);
+        platform_enable(desc, on);
     }
 }
 

@@ -10,6 +10,8 @@ use core::{fmt, sync::atomic::Ordering};
 mod gicv2;
 #[path = "gicv3.rs"]
 mod gicv3;
+#[path = "gic_spi.rs"]
+mod spi;
 
 use kirq::TargetCpu;
 use lazyinit::LazyInit;
@@ -21,6 +23,56 @@ const GICC_NAME: &str = "gicc";
 const GICR_NAME: &str = "gicr";
 static GIC_INFO: LazyInit<GicConfig> = LazyInit::new();
 static ACTIVE_GIC: LazyInit<GicVersion> = LazyInit::new();
+static STANDARD_INTID_LIMIT: LazyInit<usize> = LazyInit::new();
+
+fn standard_intid_limit(typer: u32) -> usize {
+    // ITLinesNumber includes the private prefix. IDbits also covers other
+    // INTID classes and cannot bound the standard distributor register banks.
+    (((typer as usize & 0x1f) + 1) * 32).min(1020)
+}
+
+fn remember_standard_intid_limit(typer: u32) {
+    STANDARD_INTID_LIMIT.init_once(standard_intid_limit(typer));
+}
+
+fn select_gic_flow(
+    desc: kirq::IrqDesc,
+    limit: Option<usize>,
+) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+    use kirq::{IrqController, IrqDescError, IrqFlow, IrqTrigger};
+
+    // Scope this admission to explicit GIC resources. Directory-only and
+    // unmigrated legacy identities keep their existing provider contract.
+    if desc.domain != Some(GIC_ROOT_DOMAIN) && desc.controller != IrqController::Gic {
+        return Ok(IrqFlow::Legacy);
+    }
+    if desc.domain.is_some_and(|domain| domain != GIC_ROOT_DOMAIN)
+        || !matches!(desc.controller, IrqController::Unknown | IrqController::Gic)
+        || limit.is_none_or(|limit| desc.hwirq >= limit)
+    {
+        return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    // Linux gic_set_type rejects negative-polarity SPI requests rather than
+    // silently programming their positive counterpart. Private sources retain
+    // their separate contract; unspecified triggers do not program ICFGR.
+    if desc.hwirq >= 32 && matches!(desc.trigger, IrqTrigger::EdgeFalling | IrqTrigger::LevelLow) {
+        return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    // NMI registration tags its fallback PER_CPU. Private sources also include
+    // the only current HW-LR forwarding route (virtual timer PPI 27); neither
+    // participates in ordinary shared-source running/pending state.
+    if desc.hwirq < 32 || desc.flags.contains(kirq::IrqFlags::PER_CPU) {
+        return Ok(IrqFlow::Legacy);
+    }
+    let ordinary_flags = kirq::IrqFlags::SHARED | kirq::IrqFlags::WAKEUP_SOURCE;
+    if !(desc.flags - ordinary_flags).is_empty()
+        || desc.polarity == kirq::IrqPolarity::Low
+        || desc.affinity != kirq::IrqAffinity::Any
+    {
+        return Err(IrqDescError::UnsupportedFlow { hwirq: desc.hwirq });
+    }
+    Ok(IrqFlow::Fasteoi(&spi::CHIP))
+}
 
 kcpu_slot::cpu_slot! {
     static LOCAL_INIT_STARTED: core::sync::atomic::AtomicBool =
@@ -419,6 +471,10 @@ pub fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
 
 #[kiface::provide]
 impl kirq::IntrManagerIf {
+    fn select_flow(desc: kirq::IrqDesc) -> Result<kirq::IrqFlow, kirq::IrqDescError> {
+        select_gic_flow(desc, STANDARD_INTID_LIMIT.get().copied())
+    }
+
     fn prepare_local_irq_work() -> Option<fn()> {
         match active_version() {
             GicVersion::V2 => None,
@@ -426,20 +482,15 @@ impl kirq::IntrManagerIf {
         }
     }
 
-    fn configure(desc: kirq::IrqDesc) {
-        match desc.trigger {
-            kirq::IrqTrigger::EdgeRising | kirq::IrqTrigger::EdgeFalling => {
-                crate::gic::set_trigger(desc.hwirq, true);
-            }
-            kirq::IrqTrigger::LevelHigh | kirq::IrqTrigger::LevelLow => {
-                crate::gic::set_trigger(desc.hwirq, false);
-            }
-            kirq::IrqTrigger::Unknown(_) => {}
+    fn configure(desc: kirq::IrqDesc) -> Result<(), kirq::IrqDescError> {
+        match active_version() {
+            GicVersion::V2 => gicv2::configure(desc),
+            GicVersion::V3 => gicv3::configure(desc),
         }
     }
 
-    fn enable(irq: usize, enabled: bool) {
-        crate::gic::enable(irq, enabled);
+    fn enable(desc: kirq::IrqDesc, enabled: bool) {
+        crate::gic::enable(desc.hwirq, enabled);
     }
 
     /// IRQ path: IRQs were enabled → may be IRQ or NMI.

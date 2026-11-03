@@ -19,7 +19,7 @@ use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
     action::IrqAction,
     context::HardIrqContextGuard,
-    dispatch::dispatch_actions,
+    dispatch::dispatch_claim,
     lifecycle::IrqLifecycleGuard,
     nmi::dispatch_nmi_handler,
     platform::{
@@ -77,12 +77,22 @@ impl Default for IrqRegisterOptions {
     }
 }
 
-fn apply_platform_plan(plan: IrqPlatformPlan) {
+fn apply_platform_plan(plan: IrqPlatformPlan) -> Result<(), IrqDescError> {
     if plan.configure {
-        configure_platform_irq(plan.desc);
+        configure_platform_irq(plan.desc)?;
     }
+    apply_platform_delivery(plan);
+    Ok(())
+}
+
+// Disable and withdrawal plans cannot configure a source. Their delivery
+// operation retains the existing infallible mask contract.
+fn apply_platform_delivery(plan: IrqPlatformPlan) {
     if let Some(on) = plan.enable {
         set_platform_irq_enabled(plan.desc, on);
+    }
+    if let Some(unmask) = plan.flow_unmask {
+        unmask(plan.desc);
     }
 }
 /// Try to map a hardware IRQ resource into the OS-visible logical IRQ namespace.
@@ -138,6 +148,11 @@ pub fn enable(spec: impl Into<IrqSpec>, on: bool) {
 /// `on == true` preserves the legacy force-enable behavior for static and
 /// per-CPU bring-up sites. `on == false` follows [`try_disable_irq_nosync`], so
 /// it is valid from hardirq context and does not wait for in-flight handlers.
+/// Local sources still share Line-wide enable/depth accounting. Success does
+/// not certify that another CPU's local instance has been disabled.
+/// Configuration errors leave logical enable/depth uncommitted and may leave
+/// hardware masked. Resolved metadata is retained; successful retry restores
+/// eligible delivery. Neither error nor success proves hardware-active drain.
 #[inline]
 pub fn try_enable(spec: impl Into<IrqSpec>, on: bool) -> Result<(), IrqDescError> {
     if on {
@@ -155,6 +170,9 @@ pub fn enable_irq(spec: impl Into<IrqSpec>) {
 }
 
 /// Try to enable an IRQ line after a previous disable or disabled registration.
+///
+/// Configuration failure preserves enable/depth and suppresses standard-flow
+/// service until configuration succeeds. Hardware writes are not rolled back.
 pub fn try_enable_irq(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
     try_enable_irq_inner(spec.into(), false)
 }
@@ -168,7 +186,7 @@ fn enable_line(
     registry: &SpinNoIrq<IrqState>,
     spec: IrqSpec,
     force_platform_enable: bool,
-    apply_plan: impl FnOnce(IrqPlatformPlan),
+    apply_plan: impl FnOnce(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<(), IrqDescError> {
     if force_platform_enable {
         return enable_legacy_line(registry, spec, apply_plan);
@@ -184,15 +202,18 @@ fn enable_line(
         .clone();
     let mut entry = line.lock();
     drop(state);
-    let plan = prepare_enable_plan(&mut entry, virq, false)?;
-    apply_plan(plan);
+    let plan = prepare_enable_plan(&entry, virq, false)?;
+    apply_configuration_plan(&mut entry, plan, apply_plan)?;
+    entry.commit_platform_plan(plan);
+    drop(entry);
+    super::resend::schedule(&line);
     Ok(())
 }
 
 fn enable_legacy_line(
     registry: &SpinNoIrq<IrqState>,
     spec: IrqSpec,
-    apply_plan: impl FnOnce(IrqPlatformPlan),
+    apply_plan: impl FnOnce(IrqPlatformPlan) -> Result<(), IrqDescError>,
 ) -> Result<(), IrqDescError> {
     let mut prepared = None;
     loop {
@@ -233,8 +254,11 @@ fn enable_legacy_line(
         )]
         let virq = desc.logical_irq().expect("resolved descriptor has a virq");
         drop(state);
-        let plan = prepare_enable_plan(&mut entry, virq, true)?;
-        apply_plan(plan);
+        let plan = prepare_enable_plan(&entry, virq, true)?;
+        apply_configuration_plan(&mut entry, plan, apply_plan)?;
+        entry.commit_platform_plan(plan);
+        drop(entry);
+        super::resend::schedule(&line);
         return Ok(());
     }
 }
@@ -242,13 +266,11 @@ fn enable_legacy_line(
 // Admission, legacy metadata resolution, and the state change share the
 // caller-held Line guard through the controller update.
 fn prepare_enable_plan(
-    entry: &mut IrqStateDesc,
+    entry: &IrqStateDesc,
     virq: Virq,
     force_platform_enable: bool,
 ) -> Result<IrqPlatformPlan, IrqDescError> {
-    if entry.is_teardown_in_progress() {
-        return Err(IrqDescError::TeardownInProgress { virq });
-    }
+    reject_teardown(entry, virq, "enable IRQ")?;
     if force_platform_enable {
         Ok(entry.prepare_legacy_enable())
     } else {
@@ -274,7 +296,7 @@ pub fn disable_irq_nosync(spec: impl Into<IrqSpec>) {
 /// [`IrqDescError::UnknownIrq`].
 pub fn try_disable_irq_nosync(spec: impl Into<IrqSpec>) -> Result<(), IrqDescError> {
     reject_nmi_management("disable IRQ")?;
-    disable_line(&IRQ_STATE, spec.into(), apply_platform_plan).map(|_| ())
+    disable_line(&IRQ_STATE, spec.into(), apply_platform_delivery).map(|_| ())
 }
 
 // Backend updates are bounded and cannot call back into KIRQ management. Keep
@@ -295,10 +317,11 @@ fn disable_line(
     let drain = IrqDrain::new(virq, line);
     {
         let mut entry = drain.line.lock();
-        // Control keeps IRQs masked across this non-LIFO guard handoff.
+        // The outer context guard masks IRQs across this non-LIFO handoff.
         drop(state);
         let plan = entry.prepare_disable_irq_nosync();
         apply_plan(plan);
+        entry.commit_platform_plan(plan);
     }
     Ok(drain)
 }
@@ -323,6 +346,9 @@ pub fn disable_irq(spec: impl Into<IrqSpec>) -> bool {
 
 /// Try to disable an IRQ line and wait for currently running handlers to finish.
 ///
+/// The drain includes queued software replay. Its BH executor must have been
+/// installed during boot and remain able to progress while the caller waits.
+///
 /// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`]:
 /// a non-idle task, enabled IRQs, no interrupt/BH-disabled context, preemption
 /// protection or explicit RCU read scope. Validation precedes masking, even
@@ -333,15 +359,17 @@ pub fn disable_irq(spec: impl Into<IrqSpec>) -> bool {
 pub fn try_disable_irq(spec: impl Into<IrqSpec>) -> Result<bool, IrqDescError> {
     let spec = spec.into();
     can_wait_for_irq_sync("disable_irq")?;
-    let drain = disable_line(&IRQ_STATE, spec, apply_platform_plan)?;
+    let drain = disable_line(&IRQ_STATE, spec, apply_platform_delivery)?;
     drain.wait();
     Ok(true)
 }
 
 /// Wait until the current software hardirq dispatch for an IRQ line has finished.
 ///
-/// This API does not mask the line. Call [`disable_irq`] first when teardown
-/// must prevent new handler entries before waiting for existing dispatches.
+/// This API does not mask the line. For ordinary sources, call [`disable_irq`]
+/// first when teardown must prevent new handler entries before waiting for
+/// existing dispatches. Local/per-CPU sources require caller-owned shutdown
+/// on every relevant CPU; neither operation supplies a broadcast barrier.
 ///
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
@@ -356,6 +384,11 @@ pub fn synchronize_irq(spec: impl Into<IrqSpec>) -> bool {
 }
 
 /// Try to wait until the current software hardirq dispatch for an IRQ line has finished.
+///
+/// Queued software replay is also drained; its boot-installed BH executor must
+/// remain able to progress. Do not call before executor binding on such a Line.
+/// As with [`synchronize_irq`], this is software drain, not all-CPU local-source
+/// shutdown or proof of device/guest hardware quiescence.
 ///
 /// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. IRQ-off, preemption-protected, explicit
@@ -535,7 +568,15 @@ pub fn try_register_disabled(
 ///
 /// Requires sleepable task context even without contention. Management exclusion
 /// serializes with registration/removal on this Line and may block or migrate.
-/// Occupied Lines are rejected before descriptor metadata or mappings change.
+/// An occupied Line returns false before merging descriptor metadata or
+/// publishing mappings; the existing action and control state remain unchanged.
+/// Stale controller configuration is applied before publishing the handler,
+/// including with disabled options. Those options suppress delivery activation,
+/// not request-time configuration.
+/// Configuration errors publish no new handler and leave control state
+/// uncommitted, but resolved descriptor/mapping metadata may remain. The
+/// controller may have masked or partially programmed the source; retry is
+/// explicit and an error is not a hardware rollback or drain guarantee.
 pub fn try_register_with_options(
     spec: impl Into<IrqSpec>,
     handler: Handler,
@@ -549,6 +590,8 @@ pub fn try_register_with_options(
 /// Never waits for management exclusion. Returns false on contention or an
 /// occupied Line. IRQs may be masked, but interrupt/BH context is rejected.
 /// Call before source activation; this is not an atomic-context fallback.
+/// Configuration errors have the same retained-metadata and no-new-handler
+/// semantics as [`try_register_with_options`].
 pub fn try_register_startup(
     spec: impl Into<IrqSpec>,
     handler: Handler,
@@ -570,15 +613,7 @@ fn register_with_mode(
         mode,
         None,
         |entry| Ok(entry.can_install_regular_action()),
-        |virq, entry| {
-            Ok(register_locked(
-                virq,
-                entry,
-                &handler,
-                options,
-                apply_platform_plan,
-            ))
-        },
+        |virq, entry| register_locked(virq, entry, &handler, options, apply_platform_plan),
     );
     drop(handler);
     if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
@@ -595,21 +630,57 @@ fn register_locked(
     entry: &mut IrqStateDesc,
     handler: &Handler,
     options: IrqRegisterOptions,
-    apply_plan: impl FnOnce(IrqPlatformPlan),
-) -> bool {
-    if entry.has_actions() {
+    mut apply_plan: impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
+) -> Result<bool, IrqDescError> {
+    if !entry.can_install_regular_action() {
         warn!("register handler for IRQ {virq} failed");
-        return false;
+        return Ok(false);
     }
+    let needs_restore = configure_registration(entry, &mut apply_plan)?;
     let installed = entry.install_regular_action(IrqAction::regular(handler.clone()));
     debug_assert!(installed, "duplicate regular action was checked above");
-    let plan = if options.should_auto_enable() {
+    let mut plan = if options.should_auto_enable() {
         entry.prepare_auto_enable()
     } else {
         entry.prepare_register_disabled()
     };
-    apply_plan(plan);
-    true
+    if needs_restore {
+        // A disabled recovery must remember the hardware mask in logical
+        // state too, so its later explicit enable cannot omit the write.
+        plan.enable = Some(options.should_auto_enable());
+    }
+    apply_plan(plan)?;
+    entry.commit_platform_plan(plan);
+    Ok(true)
+}
+
+// Configuration must precede new action ownership, while delivery restoration
+// must use the installed action. Keep both stages under the caller's Line guard.
+fn configure_registration(
+    entry: &mut IrqStateDesc,
+    apply_plan: &mut impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
+) -> Result<bool, IrqDescError> {
+    let needs_restore = entry.needs_configuration_restore();
+    let plan = entry.prepare_reconfigure_if_stale();
+    if plan.configure {
+        apply_configuration_plan(entry, plan, apply_plan)?;
+        entry.commit_platform_plan(plan);
+    }
+    Ok(needs_restore)
+}
+
+fn apply_configuration_plan(
+    entry: &mut IrqStateDesc,
+    plan: IrqPlatformPlan,
+    apply_plan: impl FnOnce(IrqPlatformPlan) -> Result<(), IrqDescError>,
+) -> Result<(), IrqDescError> {
+    if let Err(error) = apply_plan(plan) {
+        if plan.configure {
+            entry.mark_configuration_failed();
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Register one shared IRQ action and return its removal token.
@@ -631,8 +702,11 @@ pub fn register_shared(spec: impl Into<IrqSpec>, handler: Handler) -> Option<Irq
 /// Try to register one shared IRQ action with default auto-enable behavior.
 ///
 /// Requires sleepable task context; waits for this Line's management mutex.
-/// Incompatible ownership, exhausted capacity or unavailable tokens return None
-/// before descriptor metadata or mappings change.
+/// Incompatible actions, exhausted capacity or unavailable action tokens return
+/// None before descriptor metadata or mappings are changed.
+/// Configuration errors preserve existing shared owners and publish no new
+/// token. Resolved metadata can remain and hardware may be masked; a successful
+/// retry restores delivery only when logical enablement and disable depth allow.
 pub fn try_register_shared(
     spec: impl Into<IrqSpec>,
     handler: Handler,
@@ -643,14 +717,7 @@ pub fn try_register_shared(
         ManagementMode::Task,
         None,
         |entry| Ok(entry.can_install_shared_action()),
-        |virq, entry| {
-            Ok(register_shared_locked(
-                virq,
-                entry,
-                &handler,
-                apply_platform_plan,
-            ))
-        },
+        |virq, entry| register_shared_locked(virq, entry, &handler, apply_platform_plan),
     );
     drop(handler);
     if matches!(&result, Ok(None)) && !crate::context::is_in_nmi() {
@@ -663,20 +730,29 @@ fn register_shared_locked(
     virq: Virq,
     entry: &mut IrqStateDesc,
     handler: &Handler,
-    apply_plan: impl FnOnce(IrqPlatformPlan),
-) -> Option<IrqActionToken> {
+    mut apply_plan: impl FnMut(IrqPlatformPlan) -> Result<(), IrqDescError>,
+) -> Result<Option<IrqActionToken>, IrqDescError> {
+    if !entry.can_install_shared_action() {
+        warn!("register shared handler for IRQ {virq} failed");
+        return Ok(None);
+    }
+    let needs_restore = configure_registration(entry, &mut apply_plan)?;
     let was_first_action = !entry.has_actions();
     let Some(token) = entry.install_shared_action(handler.clone()) else {
         warn!("register shared handler for IRQ {virq} failed");
-        return None;
+        return Ok(None);
     };
-    let plan = if was_first_action {
+    let mut plan = if was_first_action {
         entry.prepare_auto_enable()
     } else {
         entry.prepare_reconfigure_if_stale()
     };
-    apply_plan(plan);
-    Some(token)
+    if needs_restore {
+        plan.enable = Some(true);
+    }
+    apply_plan(plan)?;
+    entry.commit_platform_plan(plan);
+    Ok(Some(token))
 }
 
 /// Acquisition policy is explicit; atomic runtime callers never fall back to startup.
@@ -746,8 +822,42 @@ impl Drop for ManagementAdmission<'_> {
         if !self.is_active {
             return;
         }
-        let mut state = IRQ_STATE.lock();
-        state.finish_management(self.virq, self.line, self.has_removed_action);
+        finish_management_on_line(
+            &IRQ_STATE,
+            self.virq,
+            self.line,
+            self.has_removed_action,
+            |unmask, desc| unmask(desc),
+        );
+        if self.has_removed_action {
+            super::resend::schedule(self.line);
+        }
+    }
+}
+
+fn finish_management_on_line(
+    registry: &SpinNoIrq<IrqState>,
+    virq: Option<Virq>,
+    line: &Arc<IrqLine>,
+    has_removed_action: bool,
+    unmask: impl FnOnce(fn(IrqDesc), IrqDesc),
+) {
+    // Keep IRQ exclusion across the non-LIFO registry-to-Line handoff.
+    // The caller retains management exclusion and ownership through cleanup.
+    let _context_guard = NoPreemptIrqSave::new();
+    let mut state = registry.lock();
+    state.finish_management(virq, line, has_removed_action);
+    if !has_removed_action {
+        return;
+    }
+    let entry = line.lock();
+    drop(state);
+    // Withdrawal can suppress an arrival while other shared actions survive.
+    // Restore that still-enabled Line without retaining the directory lock.
+    if entry.can_run_actions()
+        && let Some(unmask_source) = entry.flow.unmask()
+    {
+        unmask(unmask_source, entry.desc);
     }
 }
 
@@ -761,8 +871,9 @@ impl Drop for ManagementAdmission<'_> {
 /// acquired after management and before registry exclusion, and held through
 /// the body. Shared-table owners must use the same lock on every writer to
 /// serialize preflight/publication across Lines; ordinary registration needs none.
-/// None means startup contention, teardown or preflight rejection. Return
-/// discarded handler owners rather than destroying them inside the transaction.
+/// Identity retries happen before publication. None means startup contention,
+/// teardown or preflight rejection. Return discarded handler owners instead of
+/// finally destroying them under management or short-lock exclusion.
 #[expect(
     clippy::expect_used,
     reason = "CG-021-no-panic-on-reachable-failure: successful resolution assigns a virq"
@@ -818,7 +929,12 @@ pub(super) fn with_registration_line_checked<T>(
         let virq = desc.logical_irq().expect("resolved descriptor has a virq");
         admission.virq = Some(virq);
         drop(state);
-        return body_fn(virq, &mut entry).map(Some);
+        let result = body_fn(virq, &mut entry).map(Some);
+        drop(entry);
+        if result.is_ok() {
+            super::resend::schedule(&line);
+        }
+        return result;
     }
 }
 
@@ -896,8 +1012,13 @@ pub fn unregister(spec: impl Into<IrqSpec>) -> Option<Handler> {
 /// here. Its owner must use [`unregister_nmi`] after quiescing the source.
 ///
 /// The line is masked once the last regular action is removed. The API
-/// returns after any handler snapshot that was already running has exited, so
-/// device teardown can safely release MMIO or DMA state owned by the handler.
+/// returns after previously admitted handler snapshots and their original host
+/// claim completions have finished. This is software drain, not proof that a
+/// device producer or guest-controlled deactivation has stopped. Reclaiming
+/// MMIO/DMA resources requires that separate owner-side shutdown.
+/// For local/per-CPU sources, callers must complete local shutdown on every
+/// relevant CPU and exclude re-enable before removal. This function neither
+/// performs broadcast shutdown nor maintains a per-CPU enabled set.
 ///
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
@@ -918,6 +1039,11 @@ pub fn free_irq(spec: impl Into<IrqSpec>) -> Option<Handler> {
 
 /// Try to remove the regular OS IRQ handler and synchronize dispatch teardown.
 ///
+/// The source-shutdown and resource-lifetime obligations of [`free_irq`] apply.
+///
+/// Queued replay must be able to drain through its boot-installed BH executor,
+/// as required by [`try_synchronize_irq`].
+///
 /// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. Context misuse is reported as
 /// [`IrqDescError::InvalidContext`] without removing the action.
@@ -931,6 +1057,9 @@ pub fn try_free_irq(spec: impl Into<IrqSpec>) -> Result<Option<Handler>, IrqDesc
 }
 
 /// Remove one shared IRQ action by token and synchronize dispatch teardown.
+///
+/// The source-shutdown and resource-lifetime obligations of [`free_irq`] apply.
+/// Removing one shared owner does not disable surviving actions.
 ///
 /// Callers must not hold locks or resources that the IRQ handler may acquire
 /// while waiting, otherwise the handler can block behind its own teardown.
@@ -950,6 +1079,11 @@ pub fn free_irq_action(spec: impl Into<IrqSpec>, token: IrqActionToken) -> Optio
 }
 
 /// Try to remove one shared IRQ action by token and synchronize dispatch teardown.
+///
+/// The source-shutdown and resource-lifetime obligations of [`free_irq_action`] apply.
+///
+/// Queued replay must be able to drain through its boot-installed BH executor,
+/// as required by [`try_synchronize_irq`].
 ///
 /// Requires sleepable task context accepted by [`TaskBlockingContextIf::is_sleepable_context`],
 /// even when no handler is in flight. Context misuse is reported as
@@ -972,7 +1106,7 @@ fn try_free_irq_inner(
 ) -> Result<Option<Handler>, IrqDescError> {
     can_wait_for_irq_sync("free_irq")?;
     with_existing_line(spec, ManagementMode::Task, |virq, line| {
-        let removed_action = withdraw_on_line(virq, line, token, apply_platform_plan);
+        let removed_action = withdraw_on_line(virq, line, token, apply_platform_delivery);
         let Some(removed_action) = removed_action else {
             return Ok(None);
         };
@@ -1010,6 +1144,8 @@ fn withdraw_on_line(
         }
         removed_action
     };
+    // Absence is not a disable request: a legacy-enabled empty Line must keep
+    // its control state when no action matched the caller's removal key.
     let removed_action = removed_action?;
     let disable_plan = entry.prepare_disable_if_no_actions();
     entry.begin_teardown();
@@ -1017,6 +1153,7 @@ fn withdraw_on_line(
     // has completed; old snapshots remain covered by the original Line drain.
     if let Some(plan) = disable_plan {
         apply_plan(plan);
+        entry.commit_platform_plan(plan);
     }
     Some(removed_action)
 }
@@ -1057,8 +1194,7 @@ pub fn generic_handle_irq(claim: PendingIrq) -> Option<Virq> {
 }
 
 fn dispatch_and_complete(claim: PendingIrq, complete_irq: impl FnOnce(PendingIrq)) -> Option<Virq> {
-    let dispatch = dispatch_actions(&claim);
-    dispatch.complete(|| complete_irq(claim))
+    dispatch_claim(claim.source(), || complete_irq(claim))
 }
 
 /// Dispatches and completes a claimed NMI without touching normal IRQ state.

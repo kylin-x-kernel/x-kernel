@@ -10,6 +10,7 @@ use alloc::{
 };
 use core::array;
 
+use intrusive_collections::intrusive_adapter;
 use kcompletion::{Completion, DeferredWake};
 use kspin::{SpinNoIrq, SpinNoIrqGuard, static_lock};
 
@@ -116,19 +117,26 @@ pub(super) struct IrqActionSnapshot {
     pub(super) actions: [Option<IrqAction>; MAX_IRQ_ACTIONS],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Hardware operations and the disable depth to publish after they complete.
+/// Preparing or discarding this plan does not change runtime state.
+#[must_use = "preparing a plan has no effect; apply and commit it to change runtime state"]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct IrqPlatformPlan {
     pub(super) desc: IrqDesc,
     pub(super) configure: bool,
     pub(super) enable: Option<bool>,
+    pub(super) flow_unmask: Option<fn(IrqDesc)>,
+    disable_depth: usize,
 }
 
 impl IrqPlatformPlan {
-    pub(super) const fn none(desc: IrqDesc) -> Self {
+    const fn none(desc: IrqDesc, disable_depth: usize) -> Self {
         Self {
             desc,
             configure: false,
             enable: None,
+            flow_unmask: None,
+            disable_depth,
         }
     }
 }
@@ -138,6 +146,7 @@ pub(super) struct IrqDescRuntimeState {
     action_count: usize,
     generation: u64,
     configured_generation: Option<u64>,
+    is_configuration_failed: bool,
     is_enabled: bool,
     disable_depth: usize,
     in_flight: usize,
@@ -158,6 +167,7 @@ impl IrqDescRuntimeState {
             action_count: 0,
             generation: 0,
             configured_generation: None,
+            is_configuration_failed: false,
             is_enabled: false,
             disable_depth: 0,
             in_flight: 0,
@@ -178,94 +188,62 @@ impl IrqDescRuntimeState {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    fn prepare_auto_enable(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
-        self.disable_depth = 0;
+    fn prepare_auto_enable(&self, desc: IrqDesc) -> IrqPlatformPlan {
         self.prepare_enable_at_depth_zero(desc, false)
     }
 
-    fn prepare_register_disabled(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
-        if self.disable_depth == 0 {
-            self.disable_depth = 1;
-        }
-        IrqPlatformPlan::none(desc)
+    fn prepare_register_disabled(&self, desc: IrqDesc) -> IrqPlatformPlan {
+        IrqPlatformPlan::none(desc, self.disable_depth.max(1))
     }
 
-    fn prepare_enable_irq(
-        &mut self,
-        desc: IrqDesc,
-        force_platform_enable: bool,
-    ) -> IrqPlatformPlan {
-        if self.disable_depth > 0 {
-            self.disable_depth -= 1;
-            if self.disable_depth > 0 {
-                return IrqPlatformPlan::none(desc);
-            }
+    fn prepare_enable_irq(&self, desc: IrqDesc, force_platform_enable: bool) -> IrqPlatformPlan {
+        let disable_depth = self.disable_depth.saturating_sub(1);
+        if disable_depth > 0 {
+            return IrqPlatformPlan::none(desc, disable_depth);
         }
         self.prepare_enable_at_depth_zero(desc, force_platform_enable)
     }
 
     fn prepare_enable_at_depth_zero(
-        &mut self,
+        &self,
         desc: IrqDesc,
         force_platform_enable: bool,
     ) -> IrqPlatformPlan {
-        let configure = self.configured_generation != Some(self.generation);
-        let enable = (force_platform_enable || !self.is_enabled).then_some(true);
-        if configure {
-            self.configured_generation = Some(self.generation);
-        }
-        if enable.is_some() {
-            self.is_enabled = true;
-        }
         IrqPlatformPlan {
             desc,
-            configure,
-            enable,
+            configure: self.is_configuration_failed
+                || self.configured_generation != Some(self.generation),
+            enable: (force_platform_enable || !self.is_enabled || self.is_configuration_failed)
+                .then_some(true),
+            flow_unmask: None,
+            disable_depth: 0,
         }
     }
 
-    fn prepare_reconfigure_if_stale(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
-        let configure = self.configured_generation != Some(self.generation);
-        if configure {
-            self.configured_generation = Some(self.generation);
-        }
+    fn prepare_reconfigure_if_stale(&self, desc: IrqDesc) -> IrqPlatformPlan {
         IrqPlatformPlan {
-            desc,
-            configure,
-            enable: None,
+            configure: self.is_configuration_failed
+                || self.configured_generation != Some(self.generation),
+            ..IrqPlatformPlan::none(desc, self.disable_depth)
         }
     }
 
-    fn prepare_disable_irq_nosync(&mut self, desc: IrqDesc) -> IrqPlatformPlan {
-        let was_enabled_depth = self.disable_depth == 0;
-        self.disable_depth = self.disable_depth.saturating_add(1);
-        let enable = (was_enabled_depth && self.is_enabled).then_some(false);
-        if enable.is_some() {
-            self.is_enabled = false;
-        }
+    fn prepare_disable_irq_nosync(&self, desc: IrqDesc) -> IrqPlatformPlan {
         IrqPlatformPlan {
-            desc,
-            configure: false,
-            enable,
+            enable: (self.disable_depth == 0 && self.is_enabled).then_some(false),
+            ..IrqPlatformPlan::none(desc, self.disable_depth.saturating_add(1))
         }
     }
 
-    fn prepare_disable_if_no_actions(&mut self, desc: IrqDesc) -> Option<IrqPlatformPlan> {
-        // Platform masking is based only on action ownership. Existing teardown
-        // waiters or old in-flight snapshots must not keep an action-less line
-        // enabled; they only delay descriptor cleanup.
+    fn prepare_disable_if_no_actions(&self, desc: IrqDesc) -> Option<IrqPlatformPlan> {
+        // Old snapshots remain covered by drain; only action ownership decides
+        // whether the final withdrawal must mask the source.
         if self.action_count != 0 {
             return None;
         }
-        self.disable_depth = self.disable_depth.max(1);
-        let enable = self.is_enabled.then_some(false);
-        if enable.is_some() {
-            self.is_enabled = false;
-        }
         Some(IrqPlatformPlan {
-            desc,
-            configure: false,
-            enable,
+            enable: self.is_enabled.then_some(false),
+            ..IrqPlatformPlan::none(desc, self.disable_depth.max(1))
         })
     }
 
@@ -451,6 +429,7 @@ impl IrqDescRuntimeState {
 pub(super) struct IrqLine {
     pub(super) management: kmutex::Mutex<()>,
     state: SpinNoIrq<IrqStateDesc>,
+    replay_links: intrusive_collections::LinkedListAtomicLink,
 }
 
 impl IrqLine {
@@ -458,6 +437,7 @@ impl IrqLine {
         Self {
             management: kmutex::Mutex::new(()),
             state: SpinNoIrq::new(state),
+            replay_links: intrusive_collections::LinkedListAtomicLink::new(),
         }
     }
 
@@ -471,10 +451,20 @@ impl IrqLine {
     }
 }
 
+intrusive_adapter!(pub(super) ReplayAdapter = Arc<IrqLine>: IrqLine {
+    replay_links => intrusive_collections::LinkedListAtomicLink
+});
+
 pub(super) struct IrqStateDesc {
     pub(super) desc: IrqDesc,
     runtime: IrqDescRuntimeState,
     is_managed: bool,
+    pub(super) flow: crate::IrqFlow,
+    pub(super) is_running: bool,
+    // Software service has no hardware claim keeping the gateway occupied.
+    pub(super) is_replaying: bool,
+    pub(super) is_pending: bool,
+    pub(super) is_replay_queued: bool,
 }
 
 impl IrqStateDesc {
@@ -483,6 +473,11 @@ impl IrqStateDesc {
             desc,
             runtime: IrqDescRuntimeState::new(desc),
             is_managed: false,
+            flow: crate::IrqFlow::Legacy,
+            is_running: false,
+            is_replaying: false,
+            is_pending: false,
+            is_replay_queued: false,
         }
     }
 
@@ -545,36 +540,93 @@ impl IrqStateDesc {
         IrqActionSnapshot { actions }
     }
 
-    pub(super) fn prepare_auto_enable(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_auto_enable(self.desc)
+    pub(super) fn prepare_auto_enable(&self) -> IrqPlatformPlan {
+        let plan = self.runtime.prepare_auto_enable(self.desc);
+        self.with_flow_unmask(plan)
     }
 
-    pub(super) fn prepare_register_disabled(&mut self) -> IrqPlatformPlan {
+    pub(super) fn prepare_register_disabled(&self) -> IrqPlatformPlan {
         self.runtime.prepare_register_disabled(self.desc)
     }
 
-    pub(super) fn prepare_enable_irq(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_enable_irq(self.desc, false)
+    pub(super) fn prepare_enable_irq(&self) -> IrqPlatformPlan {
+        let plan = self.runtime.prepare_enable_irq(self.desc, false);
+        self.with_flow_unmask(plan)
     }
 
-    pub(super) fn prepare_legacy_enable(&mut self) -> IrqPlatformPlan {
-        self.runtime.prepare_enable_irq(self.desc, true)
+    pub(super) fn prepare_legacy_enable(&self) -> IrqPlatformPlan {
+        let plan = self.runtime.prepare_enable_irq(self.desc, true);
+        self.with_flow_unmask(plan)
     }
 
-    pub(super) fn prepare_reconfigure_if_stale(&mut self) -> IrqPlatformPlan {
+    fn with_flow_unmask(&self, mut plan: IrqPlatformPlan) -> IrqPlatformPlan {
+        // Logical enable may already be set when a no-action arrival caused
+        // flow suppression. Eligibility, not a new enable write, restores it.
+        if plan.enable.unwrap_or(self.runtime.is_enabled)
+            && plan.disable_depth == 0
+            && self.has_actions()
+            && !self.is_teardown_in_progress()
+        {
+            plan.flow_unmask = self.flow.unmask();
+        }
+        plan
+    }
+
+    pub(super) fn prepare_reconfigure_if_stale(&self) -> IrqPlatformPlan {
         self.runtime.prepare_reconfigure_if_stale(self.desc)
     }
 
-    pub(super) fn prepare_disable_irq_nosync(&mut self) -> IrqPlatformPlan {
+    pub(super) fn mark_configuration_failed(&mut self) {
+        self.runtime.is_configuration_failed = true;
+    }
+
+    pub(super) fn needs_configuration_restore(&self) -> bool {
+        self.runtime.is_configuration_failed
+            && self.runtime.is_enabled
+            && self.runtime.disable_depth == 0
+    }
+
+    pub(super) fn prepare_disable_irq_nosync(&self) -> IrqPlatformPlan {
         self.runtime.prepare_disable_irq_nosync(self.desc)
     }
 
-    pub(super) fn prepare_disable_if_no_actions(&mut self) -> Option<IrqPlatformPlan> {
+    pub(super) fn prepare_disable_if_no_actions(&self) -> Option<IrqPlatformPlan> {
         self.runtime.prepare_disable_if_no_actions(self.desc)
+    }
+
+    /// Commits only after hardware apply returns, under the same Line guard
+    /// used to prepare the plan. Descriptor generation, enabled state and disable
+    /// depth must not change between prepare and commit. Action/teardown
+    /// ownership changes are separate and are not rolled back.
+    pub(super) fn commit_platform_plan(&mut self, plan: IrqPlatformPlan) {
+        if plan.configure {
+            self.runtime.configured_generation = Some(self.runtime.generation);
+            self.runtime.is_configuration_failed = false;
+        }
+        if let Some(enabled) = plan.enable {
+            self.runtime.is_enabled = enabled;
+        }
+        self.runtime.disable_depth = plan.disable_depth;
     }
 
     pub(super) fn begin_dispatch(&mut self) {
         self.runtime.begin_dispatch();
+    }
+
+    pub(super) fn can_run_actions(&self) -> bool {
+        !self.runtime.is_configuration_failed
+            && self.runtime.is_enabled
+            && self.runtime.disable_depth == 0
+            && self.has_actions()
+            && !self.is_teardown_in_progress()
+    }
+
+    pub(super) fn needs_replay(&self) -> bool {
+        !matches!(self.flow, crate::IrqFlow::Legacy)
+            && self.is_pending
+            && !self.is_running
+            && !self.is_replay_queued
+            && self.can_run_actions()
     }
 
     pub(super) fn finish_dispatch(&mut self) -> Option<DeferredWake> {
@@ -814,6 +866,18 @@ impl IrqState {
             (true, None) => entry.desc,
             (false, offered) => offered.unwrap_or_else(|| IrqDesc::from_virq(virq)),
         };
+        let flow = crate::IntrManagerIf::select_flow(stored_desc)?;
+        // Flow operations and source identity must stay fixed while a handler
+        // or queued service can still use this Line. Validate before mapping writes.
+        if is_existing
+            && (entry.has_actions() || entry.in_flight() != 0)
+            && (entry.flow != flow
+                || (!matches!(flow, crate::IrqFlow::Legacy) && entry.desc != stored_desc))
+        {
+            return Err(IrqDescError::UnsupportedFlow {
+                hwirq: stored_desc.hwirq,
+            });
+        }
         let mapping_to_insert = if let Some(desc) = resolution.offered
             && let Some(domain) = desc.domain
         {
@@ -853,6 +917,7 @@ impl IrqState {
                 snapshot_domain_to_publish = Some(domain);
             }
         }
+        entry.flow = flow;
         if is_existing {
             entry.update_desc(stored_desc);
         } else {
