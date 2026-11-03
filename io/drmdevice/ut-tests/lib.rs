@@ -946,10 +946,17 @@ fn mmap_test_file(state: Arc<DrmFile>) -> Arc<VfsFile> {
 struct RecordingMmapMapper {
     offset_bytes: usize,
     range: Option<PhysAddrRange>,
+    requested_length: Option<usize>,
 }
 
 impl MmapMapper for RecordingMmapMapper {
     fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()> {
+        if self
+            .requested_length
+            .is_some_and(|length| range.size() < length)
+        {
+            return Err(VfsError::InvalidInput);
+        }
         self.range = Some(range);
         Ok(())
     }
@@ -982,12 +989,13 @@ fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
     let mut mapper = RecordingMmapMapper {
         offset_bytes: object.offset_bytes() as usize,
         range: None,
+        requested_length: None,
     };
     state.handles.lock().insert(handle, object.clone());
     minor.mmap(&file, &mut mapper).unwrap();
     let range = mapper.range.unwrap();
-    assert_eq!(range.start + mapper.offset_bytes, paddr);
-    assert_eq!(range.size(), mapper.offset_bytes + 3 * PAGE_SIZE_4K);
+    assert_eq!(range.start, paddr);
+    assert_eq!(range.size(), 3 * PAGE_SIZE_4K);
 
     drop(state.take_handle(handle).unwrap());
     drop(object);
@@ -1003,6 +1011,46 @@ fn drm_mmap_retains_exact_backing_after_handle_and_object_destruction() {
     drop(state);
     drop(dev);
     assert!(backing.upgrade().is_none());
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::Global),
+        before
+    );
+}
+
+#[def_test(serial)]
+fn oversized_drm_mmap_does_not_retain_gem_backing() {
+    let before = kalloc::global_allocator().usages().get(UsageKind::Global);
+    let (dev, backend) = fake_device();
+    let state = dev.open_file(MinorKind::Render).unwrap();
+    let file = mmap_test_file(state.clone());
+    let minor = dev.minor(MinorKind::Render);
+    let object = GemObject::create(&dev, 65, 33).unwrap();
+    let backing = Arc::downgrade(&object.pages());
+    let handle = object.handle();
+    let mut mapper = RecordingMmapMapper {
+        offset_bytes: object.offset_bytes() as usize,
+        range: None,
+        // The GEM object backs three pages; ask the mapper for four.
+        requested_length: Some(4 * PAGE_SIZE_4K),
+    };
+    state.handles.lock().insert(handle, object.clone());
+    assert!(matches!(
+        minor.mmap(&file, &mut mapper),
+        Err(VfsError::InvalidInput)
+    ));
+    assert!(mapper.range.is_none());
+
+    drop(state.take_handle(handle).unwrap());
+    drop(object);
+    assert_eq!(backend.destroyed(), 1);
+    assert!(
+        backing.upgrade().is_none(),
+        "a failed mmap must not retain GEM backing for the device lifetime"
+    );
+    drop(minor);
+    drop(file);
+    drop(state);
+    drop(dev);
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::Global),
         before

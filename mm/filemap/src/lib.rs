@@ -15,6 +15,7 @@ mod runtime;
 mod shared;
 
 unittest::path_mod_test!(test_support, "../ut-tests/test_support.rs");
+unittest::path_mod_test!(mmap_tests, "../ut-tests/mmap.rs");
 
 /// File-backed mapping mode.
 ///

@@ -749,20 +749,13 @@ impl DeviceFileOps for DrmMinor {
         let pages = object.pages();
         let phys = pages.phys_addr();
         let size_bytes = object.length_bytes();
-        // `FileMapper` re-adds the file offset to the physical base, so the
-        // base passed here must be `phys - offset`.  A large allocation
-        // counter can exceed the physical address; reject that instead of
-        // wrapping and handing the mapper a bogus range.
-        let base = phys
-            .as_usize()
-            .checked_sub(offset_bytes as usize)
-            .ok_or(VfsError::InvalidInput)?;
-        let map_size = size_bytes
-            .checked_add(offset_bytes as usize)
-            .ok_or(VfsError::InvalidInput)?;
+        let range = PhysAddrRange::from_start_size(phys, size_bytes);
+        // Retain only after the mapper accepts the range: the retention table
+        // lives for the device's lifetime, so retaining before a failed mmap
+        // (for example an over-long request) would pin the GEM backing forever.
+        mapper.map_physical(range)?;
         device.retain_mapping(offset_bytes, pages);
-        let range = PhysAddrRange::from_start_size(memaddr::PhysAddr::from(base), map_size);
-        mapper.map_physical(range)
+        Ok(())
     }
 
     fn flags(&self) -> NodeFlags {

@@ -699,7 +699,13 @@ pub(crate) fn block_device_file_operations() -> Arc<dyn FileOperations> {
 /// establishment without depending on the memory subsystem.
 /// Implemented by the mmap syscall layer (posix-mm).
 pub trait MmapMapper {
-    /// Map a physical address range (device memory, framebuffer, etc.)
+    /// Map an absolute physical address range (device memory, framebuffer,
+    /// etc.).
+    ///
+    /// The range is the exact backing that the device wants mapped. The
+    /// implementation does not apply [`Self::offset`] to it: devices that
+    /// multiplex buffers behind one fd resolve the offset to a backing object
+    /// first, and framebuffer nodes add a within-buffer offset themselves.
     fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()>;
 
     /// Request a file-backed mapping (regular file or cached file).

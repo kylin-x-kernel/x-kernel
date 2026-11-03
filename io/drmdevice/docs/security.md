@@ -42,12 +42,15 @@ through `UserRead`, `UserWrite`, and `UserPtr` abstractions.
   when the supplied length exactly matches the blob; a short or oversized buffer
   is a successful size probe that copies nothing, while an unknown id is
   `ENOENT`, matching Linux's `MODE_GETPROPBLOB`.
-- `mmap` derives the physical base and mapping size with checked arithmetic; an
-  offset that would underflow the physical address or overflow the size is
-  refused with `EINVAL` instead of wrapping into an unrelated range. The mapping
-  length is the GEM object's requested page-aligned length; exact allocation
-  returns unused backing before publication; the PageRef supplies the physical base and retained lifetime.
-  alloc_zeroed_pages_exact_ref initializes all backing before any host/user publication.
+- `mmap` resolves the file offset through the per-file handle table. An offset
+  that no live handle owns is `EINVAL`, so it cannot select another file's
+  object or an unrelated physical range. The resolved GEM object supplies the
+  physical base and page-aligned backing length directly; the file offset is
+  never added to or subtracted from that address, so there is no offset
+  arithmetic to underflow or overflow. A request longer than the backing is
+  refused with `EINVAL` rather than shortened. The PageRef supplies the
+  physical base and retained lifetime; `alloc_zeroed_pages_exact_ref`
+  initializes all backing before any host/user publication.
 - Kernel allocators assign framebuffer ids, blob ids, resource ids and mmap
   offsets through one `IdRegistry` per class; dumb-buffer handles are allocated
   per file and belong to the file that created them (`file_priv->object_idr`),

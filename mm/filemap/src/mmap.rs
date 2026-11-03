@@ -17,7 +17,7 @@ use crate::{
     runtime::{FileRuntimeContext, FileVmaSpec, build_file_runtime, build_file_vma},
 };
 
-struct FileMapper {
+pub(crate) struct FileMapper {
     req: FileMmapRequest,
     mode: FileMappingMode,
     runtime: Option<VmRuntimeRef>,
@@ -26,6 +26,20 @@ struct FileMapper {
 impl FileMapper {
     fn into_runtime(self) -> KResult<VmRuntimeRef> {
         self.runtime.ok_or(kerrno::KError::NoSuchDevice)
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn new_for_test(req: FileMmapRequest, mode: FileMappingMode) -> Self {
+        Self {
+            req,
+            mode,
+            runtime: None,
+        }
+    }
+
+    #[cfg(unittest)]
+    pub(crate) fn into_runtime_for_test(self) -> KResult<VmRuntimeRef> {
+        self.into_runtime()
     }
 }
 
@@ -47,15 +61,10 @@ impl MmapMapper for FileMapper {
         self.req.offset
     }
 
-    fn map_physical(&mut self, mut range: PhysAddrRange) -> kvfs::VfsResult<()> {
-        range.start += self.req.offset;
-        if range.is_empty() {
+    fn map_physical(&mut self, range: PhysAddrRange) -> kvfs::VfsResult<()> {
+        if range.is_empty() || range.size().align_down(self.req.page_size) < self.req.length {
             return Err(kvfs::VfsError::InvalidInput);
         }
-        self.req.length = self
-            .req
-            .length
-            .min(range.size().align_down(self.req.page_size));
         self.runtime = Some(VmRuntimeRef::new_linear(
             self.req.start.as_usize() as isize - range.start.as_usize() as isize,
         ));

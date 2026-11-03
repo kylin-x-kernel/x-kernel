@@ -11,7 +11,7 @@ use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, MmapMapper, NodeFlags, SimpleFs, VfsError, VfsFile,
     VfsResult,
 };
-use memaddr::{PhysAddrRange, VirtAddr};
+use memaddr::{AddrOps, PhysAddrRange, VirtAddr};
 use osvm::VirtMutPtr;
 
 use crate::{DeviceFile, add_device_entry};
@@ -274,7 +274,17 @@ impl DeviceFileOps for FrameBuffer {
 
     fn mmap(&self, _file: &VfsFile, mapper: &mut dyn MmapMapper) -> VfsResult<()> {
         let paddr = fbdevice::fb_shadow_paddr().ok_or(VfsError::NoSuchDevice)?;
-        mapper.map_physical(PhysAddrRange::from_start_size(paddr, self.size))
+        // `/dev/fb0` is one contiguous buffer, so userspace's mmap offset
+        // selects a byte range within it. The mapper expects an absolute
+        // physical range and must not apply the offset a second time.
+        let offset = mapper.offset();
+        let size = self
+            .size
+            .checked_sub(offset)
+            .filter(|size| *size > 0)
+            .ok_or(VfsError::InvalidInput)?;
+        let start = paddr.add_checked(offset).ok_or(VfsError::InvalidInput)?;
+        mapper.map_physical(PhysAddrRange::from_start_size(start, size))
     }
 
     fn flags(&self) -> NodeFlags {
