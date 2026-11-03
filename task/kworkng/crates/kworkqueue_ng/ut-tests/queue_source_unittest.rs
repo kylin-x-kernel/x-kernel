@@ -28,6 +28,33 @@ mod bottom_half;
 #[path = "queue_source_normal_unittest.rs"]
 mod normal;
 
+/// Thaw republishes ready demand even after a provider consumed its stale hint.
+#[def_test]
+fn thaw_republishes_previously_ready_source() {
+    let (queue, dispatch, _) = setup(1);
+    let calls = AtomicUsize::new(0);
+    let work = pin!(Work::with_callback(|| {
+        calls.fetch_add(1, Ordering::Relaxed);
+    }));
+    // SAFETY: pinned storage/captures survive dispatch completion and queue drain.
+    unsafe { queue.submit(&work, Some(0.into()), || unreachable!()) }.unwrap();
+    let guard = queue
+        .freeze(
+            ktime_types::TimeSpan::ZERO,
+            &crate::QueueFreezeCancellation::new(),
+        )
+        .unwrap();
+    // A turn reports a source inspection, including an empty frozen source.
+    assert!(dispatch.run_one_turn());
+    assert!(!dispatch.run_one_turn());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    drop(guard);
+    assert!(dispatch.run_one_turn());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(!dispatch.run_one_turn());
+    queue.close_and_drain().unwrap();
+}
+
 /// Shutdown removes stale canceled demand and completes its shared source receipt.
 ///
 /// # Panics

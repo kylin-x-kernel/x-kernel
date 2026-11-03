@@ -274,3 +274,39 @@ delayed-flush allocation counts are listed in design.md.
 Sequential waits use permanent complete_all receipts, so earlier
 completion cannot be lost. Waits and terminal notifications run outside management
 locks; receipt ownership does not retain Work or Queue storage.
+
+## Reversible Dispatch Exclusion
+
+The freeze boundary trusts boot-initialized sleepable context and live timer IRQs.
+It owns dispatch exclusion only for its queue, not devices, IRQ producers, physical
+timer delivery, task freezing, other queues or provider terminal retirement hooks.
+A successful guard confirms that every earlier claim has ended its callback and
+occurrence resource cleanup. External Work storage/captures still require their
+existing unsafe publication and final cancellation/drain lifetime protocol.
+
+Claim/install/count changes share the partition lock. `running` is bounded by
+reserved `active` allowance; a queued or delayed successor is never counted as a
+running callback. Completion releases Work resources and clears the running slot
+before decrementing the partition count. Notifications occur unlocked and carry
+only independent progress state. Freeze adds no raw pointer or intrusive-list
+operation. Its sole new unsafe operation starts an owned timer after context
+validation; the handler only notifies an allocation-free completion wait queue,
+and timer Drop drains delivery before the caller may stop clocks.
+
+Threat: cancellation or timeout reopens execution during device recovery.
+Mitigation: only failed attempts roll back; a returned task-bound FrozenQueue owns
+all partition pauses until Drop. Later cancellation cannot thaw it. Callers must
+retain it until callbacks' dependencies are restored. Guard leakage is a denial of
+service, not permission to reclaim borrowed Work.
+
+Threat: thaw loses old ready demand or reopens permanent shutdown.
+Mitigation: thaw republishes both existing-ready and newly-released demand under
+partition protection, kicks unlocked and leaves the independent closed bit alone.
+Concurrent shutdown can wait until the guard is released. Flush/drain or same-queue
+work waits while owning a guard can deadlock; release first. Self-wait diagnostics
+are optional and do not establish arbitrary callback dependency safety.
+
+Intentional freezing suppresses stall backlog reports and resets their interval
+on thaw; monitoring should not treat this as proof that hardware is suspended.
+Timeout/cancel, IRQ admission, delayed expiry, self-requeue and shared-service tests
+exercise the boundary without freezing live devices, worker tasks or clocks.

@@ -286,3 +286,19 @@ notifies itself. Duplicate notifications coalesce; ownership never moves during
 binding. If initialization fails, services::init does not bind, and obligations
 remain in permanent storage for a later successful attempt. Startup/rollback
 must never wait for that physical reclamation.
+
+## Private Queue PM Participation
+
+`NormalQueue::freeze(timeout, &QueueFreezeCancellation)` explicitly pauses a private
+normal queue and returns a task-bound `FrozenQueue` guard. The implementation is
+owned by kworkqueue_ng; this facade adds no second dispatch state. No default queue
+is automatically selected or frozen. Shared workers and peer queues keep running.
+Pending work, callback requeues and delayed timer transfers are retained until thaw;
+claimed callbacks and occurrence payload cleanup finish before success. Cancel or
+timeout rolls back, while cancellation after success cannot release the guard.
+
+Drop the guard in task context after callback resources are usable. Release it
+before queue flush/close, handle flush/shutdown, or waits on held work. Existing
+ownership wrappers still retain Work/timers; this queue guard is not a storage
+release barrier, a physical timer drain or a full system PM transaction. Quiesce
+IRQ producers and nonparticipating queues separately before suspending devices.

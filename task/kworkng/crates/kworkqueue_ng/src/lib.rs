@@ -55,7 +55,10 @@ mod diagnostics;
 mod queue;
 mod work;
 
-pub use queue::{CpuPolicy, QueueConfig, QueueConfigError, SubmitError};
+pub use queue::{
+    CpuPolicy, FrozenQueue, QueueConfig, QueueConfigError, QueueFreezeCancellation,
+    QueueFreezeError, SubmitError,
+};
 pub use work::{
     delayed::{ArmError, DelayedWork, FlushError as DelayedFlushError},
     wait::WaitError,

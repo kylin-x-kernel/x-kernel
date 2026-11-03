@@ -18,7 +18,7 @@ use kcpu_id_map::LogicalCpuId;
 use kspin::SpinNoIrq;
 use pending::{PendingList, PendingNode};
 
-use super::source::QueueSource;
+use super::{freeze::FreezeProgress, source::QueueSource};
 use crate::{
     queue::{Queue, submission::SubmitError},
     work::{
@@ -61,12 +61,15 @@ struct PartitionState {
     waiting: PendingList,
     ready: PendingList,
     active: usize,
+    // Active also includes reserved ready work; only running blocks PM freezing.
+    running: usize,
+    freeze: Option<Arc<FreezeProgress>>,
 }
 
 #[cfg(feature = "stall-check")]
 impl PartitionState {
     fn has_backlog(&self) -> bool {
-        !self.waiting.is_empty() || !self.ready.is_empty()
+        self.freeze.is_none() && (!self.waiting.is_empty() || !self.ready.is_empty())
     }
 
     /// Queue membership, not allowance or running callbacks, defines backlog.
@@ -104,6 +107,8 @@ impl QueuePartition {
                 waiting: PendingList::new(),
                 ready: PendingList::new(),
                 active: 0,
+                running: 0,
+                freeze: None,
             }),
             in_flight: QueueInFlight::new(),
             max_active,
@@ -289,6 +294,9 @@ impl QueuePartition {
 
     /// Charges allowance when waiting work becomes ready, not when it is claimed.
     fn release_waiting(self: &Arc<Self>, partition: &mut PartitionState) -> Option<Arc<Waker>> {
+        if partition.freeze.is_some() {
+            return None;
+        }
         let remaining = self
             .max_active
             .get()
@@ -409,6 +417,9 @@ impl QueuePartition {
         work: &'a Work<T, H>,
     ) -> Option<crate::work::execution::BorrowedExecution<'a>> {
         let mut partition = self.state.lock();
+        if partition.freeze.is_some() {
+            return None;
+        }
         let mut state = work.state.lock();
         if !state.pending_on(self) || !state.claim() {
             return None;
@@ -416,6 +427,7 @@ impl QueuePartition {
         // SAFETY: pending belonged to this partition before the protected claim;
         // both guards remain held and Work storage is borrowed for execution.
         assert!(unsafe { partition.ready.remove(work.pending_node()) });
+        partition.running += 1;
         drop(state);
         #[cfg(feature = "stall-check")]
         partition.publish_backlog(true, true);
@@ -447,6 +459,9 @@ impl QueuePartition {
     /// Panics if a linked Work's protected owner differs from this partition.
     pub(super) fn claim_with_demand(self: &Arc<Self>) -> (Option<Execution>, bool) {
         let mut partition = self.state.lock();
+        if partition.freeze.is_some() {
+            return (None, false);
+        }
         let Some(node) = partition.ready.pop_front() else {
             return (None, false);
         };
@@ -454,6 +469,7 @@ impl QueuePartition {
         // protects this ready occurrence until claim; allowance was charged at release.
         let execution = unsafe { PendingNode::claim(node, self) }
             .expect("released Work remains claimable under its partition lock");
+        partition.running += 1;
         let has_demand = !partition.ready.is_empty();
         #[cfg(feature = "stall-check")]
         partition.publish_backlog(true, true);
@@ -490,7 +506,48 @@ impl QueuePartition {
             .checked_sub(1)
             .expect("claimed execution holds partition allowance");
         let kick = self.release_waiting(&mut partition);
+        partition.running -= 1;
+        let progress = partition.freeze.clone();
+        drop(partition);
+        if let Some(progress) = progress {
+            progress.changed.notify_all();
+        }
         (finished, kick)
+    }
+
+    pub(super) fn begin_freeze(&self, progress: &Arc<FreezeProgress>) {
+        let mut partition = self.state.lock();
+        #[cfg(feature = "stall-check")]
+        let had_backlog = partition.has_backlog();
+        assert!(partition.freeze.is_none(), "queue owns one freeze attempt");
+        partition.freeze = Some(progress.clone());
+        #[cfg(feature = "stall-check")]
+        partition.publish_backlog(had_backlog, false);
+    }
+
+    pub(super) fn is_quiescent(&self) -> bool {
+        self.state.lock().running == 0
+    }
+
+    pub(super) fn thaw(self: &Arc<Self>) {
+        let mut partition = self.state.lock();
+        #[cfg(feature = "stall-check")]
+        let had_backlog = partition.has_backlog();
+        let progress = partition.freeze.take();
+        let kick = self.release_waiting(&mut partition).or_else(|| {
+            if partition.ready.is_empty() {
+                None
+            } else {
+                self.source.as_ref().map(QueueSource::publish)
+            }
+        });
+        #[cfg(feature = "stall-check")]
+        partition.publish_backlog(had_backlog, false);
+        drop(partition);
+        drop(progress);
+        if let Some(kick) = kick {
+            kick.wake_by_ref();
+        }
     }
 }
 

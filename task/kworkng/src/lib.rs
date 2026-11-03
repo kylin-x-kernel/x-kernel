@@ -274,6 +274,6 @@ pub mod runtime {
 }
 
 pub use kworkqueue_ng::{
-    ArmError, CpuPolicy, DelayedFlushError, DelayedWork, DisableGuard, QueueConfig,
-    QueueConfigError, SubmitError, WaitError, Work,
+    ArmError, CpuPolicy, DelayedFlushError, DelayedWork, DisableGuard, FrozenQueue, QueueConfig,
+    QueueConfigError, QueueFreezeCancellation, QueueFreezeError, SubmitError, WaitError, Work,
 };

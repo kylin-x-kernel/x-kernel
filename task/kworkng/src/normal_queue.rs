@@ -8,9 +8,11 @@ use alloc::sync::Arc;
 use core::pin::Pin;
 
 use kcpu_id_map::LogicalCpuId;
+use ktime_types::TimeSpan;
 
 use crate::{
-    ExecutionKind, QueueConfig, QueueCreateError, SubmitError, WaitError, Work, WorkQueue,
+    ExecutionKind, FrozenQueue, QueueConfig, QueueCreateError, QueueFreezeCancellation,
+    QueueFreezeError, SubmitError, WaitError, Work, WorkQueue,
 };
 
 /// An independently controlled queue bound exclusively to normal worker tasks.
@@ -85,6 +87,29 @@ impl NormalQueue {
     /// Propagates broken completion/accounting invariants and fatal allocation.
     pub fn flush(&self) -> Result<(), WaitError> {
         self.0.flush()
+    }
+
+    /// Opts this private queue into a reversible PM dispatch pause.
+    ///
+    /// Waits for claimed callbacks and occurrence cleanup, preserving pending
+    /// and delayed work. Shared workers and other queues keep progressing.
+    /// Retain the guard until callback resources are usable again, then drop
+    /// in task context. Do not flush, drain, or wait for held work while owning
+    /// it. This does not stop producers, timer delivery or whole worker tasks.
+    /// Requires sleepable context with initialized timers and advancing time.
+    ///
+    /// # Errors
+    /// Returns context, timer/deadline, closed, busy, cancellation, timeout or
+    /// optional self-wait errors. Failed attempts release their dispatch pauses.
+    ///
+    /// # Panics
+    /// Propagates fatal allocation and initialized timer/provider invariant failures.
+    pub fn freeze(
+        &self,
+        timeout: TimeSpan,
+        cancellation: &QueueFreezeCancellation,
+    ) -> Result<FrozenQueue, QueueFreezeError> {
+        self.0.freeze(timeout, cancellation)
     }
 
     /// Permanently closes admission and drains accepted work in sleepable context.

@@ -181,3 +181,15 @@ make arbitrary Work/WorkHandle submission NMI-safe. No RCU grace-period handling
 guaranteed latency or global deadlock
 detection. Previously recorded host fault/Miri evidence for the per-object Work
 backend must not be attributed to this revised backend.
+
+## Explicit Queue Freezing
+
+NormalQueue exposes the core's reversible dispatch guard for selected private
+queues. It joins previously claimed callbacks and their occurrence payload cleanup,
+without stopping shared worker tasks, physical timer callbacks, IRQ producers or
+other queues. No implicit global selection or kpm integration is added. Guard Drop
+must follow restoration of callback dependencies. Successful guards remain paused
+after cancellation; failed attempts thaw. Queue shutdown remains permanent across
+thaw. Never retain a freeze guard while waiting for held work or closing that queue;
+indirect callback/destructor cycles remain possible despite safe storage ownership.
+The guard does not replace handle shutdown or borrowed Work's retention/drain rules.

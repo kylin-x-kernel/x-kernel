@@ -87,6 +87,26 @@ fn snapshot(directory: &Directory, name: &str) -> Option<MonotonicInstant> {
     record(directory, name).interval_start()
 }
 
+/// Intentional dispatch pauses suppress backlog age and thaw starts a fresh interval.
+#[def_test]
+fn freeze_suppresses_stall_interval_until_thaw() {
+    let directory = Directory::new();
+    let queue = queue(&directory);
+    let work = pin!(Work::with_callback(|| {}));
+    // SAFETY: pinned work survives manual completion and the final queue drain.
+    unsafe { queue.submit(&work, Some(0.into()), || unreachable!()) }.unwrap();
+    let previous = snapshot(&directory, "cpu0").unwrap();
+    let guard = queue
+        .freeze(TimeSpan::ZERO, &crate::QueueFreezeCancellation::new())
+        .unwrap();
+    assert!(snapshot(&directory, "cpu0").is_none());
+    drop(guard);
+    assert!(snapshot(&directory, "cpu0").unwrap() >= previous);
+    queue.claim_with_demand(0.into()).0.unwrap().run();
+    assert!(snapshot(&directory, "cpu0").is_none());
+    queue.close_and_drain().unwrap();
+}
+
 /// Extra enqueues, rejected admission and intermediate cancellation preserve age.
 ///
 /// # Panics

@@ -21,6 +21,7 @@ mod control;
 mod delayed;
 mod execution;
 mod flush;
+mod freeze;
 pub(crate) mod partition;
 mod routing;
 mod shutdown;
@@ -30,6 +31,7 @@ mod submission;
 use color::ColorCompletion;
 pub use config::{CpuPolicy, QueueConfig, QueueConfigError};
 use control::COLOR_COUNT;
+pub use freeze::{FrozenQueue, QueueFreezeCancellation, QueueFreezeError};
 use partition::QueuePartition;
 pub use source::QueuePartitionSource;
 use source::QueueSource;
@@ -53,6 +55,8 @@ pub struct Queue {
     // Serializes cutoff/setup, never admission, completion or shutdown.
     sealed_colors: Mutex<[Option<Arc<ColorCompletion>>; COLOR_COUNT]>,
     color_progress: Arc<kcompletion::WaitQueue>,
+    // Owns a reversible partition-dispatch pause, independently of admission.
+    is_freezing: kspin::SpinNoIrq<bool>,
 }
 
 impl Queue {
@@ -161,6 +165,7 @@ impl Queue {
             next_cpu_index: AtomicUsize::new(0),
             sealed_colors: Mutex::new(core::array::from_fn(|_| None)),
             color_progress: Arc::new(kcompletion::WaitQueue::new()),
+            is_freezing: kspin::SpinNoIrq::new(false),
         })
     }
 

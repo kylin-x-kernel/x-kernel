@@ -25,6 +25,63 @@ fn with_normal_service<R>(
     result
 }
 
+/// An opted-in queue pauses independently while its shared normal service runs peers.
+#[def_test]
+fn frozen_queue_preserves_shared_worker_progress() {
+    let cpu = khal::percpu::this_cpu_id();
+    with_normal_service(cpu, NonZeroUsize::new(1).unwrap(), |dispatch, kick| {
+        let frozen_queue = queue(cpu, 1, &dispatch, &kick);
+        let peer_queue = queue(cpu, 1, &dispatch, &kick);
+        let calls = AtomicUsize::new(0);
+        let held = pin!(Work::with_callback(|| {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }));
+        let peer = pin!(Work::with_callback(|| {
+            calls.fetch_add(10, Ordering::Relaxed);
+        }));
+        let cancellation = crate::QueueFreezeCancellation::new();
+        let guard = frozen_queue
+            .freeze(ktime_types::TimeSpan::ZERO, &cancellation)
+            .unwrap();
+        // SAFETY: both pinned fixtures survive synchronous drains before provider stop.
+        unsafe { frozen_queue.submit(&held, Some(cpu), || unreachable!()) }.unwrap();
+        // SAFETY: peer storage/captures survive this queue's synchronous drain.
+        unsafe { peer_queue.submit(&peer, Some(cpu), || unreachable!()) }.unwrap();
+        peer_queue.flush().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 10);
+        cancellation.cancel();
+        assert_eq!(calls.load(Ordering::Relaxed), 10);
+        drop(guard);
+        frozen_queue.close_and_drain().unwrap();
+        peer_queue.close_and_drain().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 11);
+    });
+}
+
+/// Optional identity diagnostics reject a callback trying to freeze its own queue.
+#[cfg(feature = "self-wait-check")]
+#[def_test]
+fn callback_cannot_freeze_own_queue() {
+    let cpu = khal::percpu::this_cpu_id();
+    with_normal_service(cpu, NonZeroUsize::new(1).unwrap(), |dispatch, kick| {
+        let queue = queue(cpu, 1, &dispatch, &kick);
+        let work = pin!(Work::with_callback(|| {
+            assert_eq!(
+                queue
+                    .freeze(
+                        ktime_types::TimeSpan::ZERO,
+                        &crate::QueueFreezeCancellation::new()
+                    )
+                    .err(),
+                Some(crate::QueueFreezeError::SelfWait)
+            );
+        }));
+        // SAFETY: pinned Work and its borrowed queue survive the final drain.
+        unsafe { queue.submit(&work, Some(cpu), || unreachable!()) }.unwrap();
+        queue.close_and_drain().unwrap();
+    });
+}
+
 /// Remote execution may complete before the submitting call returns, never inline.
 ///
 /// # Panics

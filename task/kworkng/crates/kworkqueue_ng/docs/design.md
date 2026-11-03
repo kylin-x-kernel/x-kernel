@@ -426,3 +426,49 @@ it does not stop execution providers or join diagnostic references. Callers must
 stop producers and synchronously cancel delayed work before closing its queue.
 Queue shutdown does not discover or drain timer-only arrangements. Production
 worker/BH activation remains an integration responsibility.
+
+## Reversible Queue Dispatch Freezing
+
+`Queue::freeze(timeout, cancellation)` is explicit participation by an owned queue,
+not automatic system registration. `kworkng::NormalQueue::freeze` exposes it for
+private normal queues. The kernel default selectors retain submission authority
+only. PM integration, task checkpoints, worker exemptions, device quiescence and
+system-wide queue selection remain outside this mechanism.
+
+One queue-local `is_freezing` lock reserves a single owner through rollback or
+`FrozenQueue::Drop`. Each partition then installs shared progress under its existing
+state lock. Claim and installation use that same lock: earlier claims, including
+provider capabilities not yet run, contribute to `running`; later claims return
+empty demand. `active` still counts ready reservations plus running occurrences;
+it cannot substitute for `running`. Pending lists, allowance, original colors,
+routing and submission admission survive unchanged. New ordinary and expired
+DelayedWork occurrences wait without becoming executable. Physical timer delivery
+continues; freezing is not timer cancellation or producer exclusion.
+
+A completion waiter and owned deadline timer are prepared before installing any
+pause. Successful return joins callbacks and occurrence payload cleanup. It does
+not join completion notifications or provider terminal retirement hooks, matching
+the existing distinction between occurrence completion and retirement. Timer
+setup/deadline failures precede dispatch effects. Timeout and one-shot cancellation
+drop the attempt's guard and thaw every partition. Cancellation after success
+only notifies progress; it cannot release the owner's guard.
+
+Thaw clears each partition's pause, releases eligible waiting work and republishes
+already-ready demand even if a provider consumed the old hint while frozen. Kicks,
+wakes and final progress destruction happen outside partition locks. Only after
+all partitions thaw does the queue release freeze ownership. Other queues sharing
+a service remain runnable; worker tasks themselves are never frozen here.
+Intentional pauses suppress stall backlog intervals; thaw starts a fresh interval.
+
+Closure and dispatch exclusion are independent. A concurrent close permanently
+rejects admission and may wait for held pending work until thaw. Guard Drop never
+reopens a closed queue. A guard owner must release it before flushing, draining or
+waiting on held work. Callback dependency cycles and destructor-originated waits
+remain caller obligations; optional self-wait diagnostics reject a direct callback
+freeze. The task-bound guard retains Queue but grants no external Work lifetime.
+Forgetting it leaves dispatch paused.
+
+Tests cover ready/waiting/IRQ admission, callback requeue, claimed-before-entry
+waiting, cancellation and timer expiry, cross-partition timeout rollback, closure,
+ready-demand republication and independent autonomous shared-worker progress.
+These are queue-level tests, not evidence of full system or hardware suspend.
