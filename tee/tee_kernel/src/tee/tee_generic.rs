@@ -15,10 +15,7 @@ use tee_raw_sys::{
 
 use crate::{
     mm::{VM_STRING_MAX_LEN, vm_load_string_with_len},
-    tee::{
-        TeeResult, protocal, protocal::TeeRequest, tee_session::with_tee_ta_ctx,
-        tee_ta_manager::send_framed_message, uuid::ta_unix_socket_path,
-    },
+    tee::{TeeResult, protocal, tee_session::with_tee_ta_ctx, uuid::ta_unix_socket_path},
 };
 
 /// Return from a TEE syscall with a return code
@@ -69,9 +66,11 @@ pub(super) fn sys_tee_scn_panic(panic_code: u32) -> TeeResult {
         .map_err(|_| TEE_ERROR_GENERIC)?;
 
     // Send panic command request to current TA
-    let req = TeeRequest::Panic { panic_code };
-    let encoded = protocal::encode_message(&req).map_err(|_| TEE_ERROR_GENERIC)?;
-    send_framed_message(&socket, &encoded)?;
+    // legacy wire:字节兼容旧 TeeRequest::Panic(golden 测试钉死布局)。
+    let encoded = protocal::LegacyPanicFrame::new(panic_code)
+        .encode()
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    protocal::send_framed_message(&socket, &encoded)?;
     Ok(())
 }
 

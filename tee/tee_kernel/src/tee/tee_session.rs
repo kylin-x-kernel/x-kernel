@@ -32,7 +32,7 @@ pub(super) struct TeeSessionCtx {
     pub clnt_id: TEE_Identity,
     pub cancel: bool,
     pub cancel_mask: bool,
-    pub cancel_time: TeeTime,
+    pub cancel_deadline: Option<ktime_types::MonotonicInstant>,
     pub objects: Slab<Arc<Mutex<TeeObj>>>,
     pub storage_enums: Slab<Arc<Mutex<TeeStorageEnum>>>,
     pub cryp_state: Slab<Arc<Mutex<TeeCrypState>>>,
@@ -61,13 +61,11 @@ impl Default for TeeSessionCtx {
                 },
             },
             cancel: false,
-            // GP / OP-TEE：会话创建时取消是屏蔽的，且没有取消截止时间。
-            // `cancel_time.seconds == u32::MAX` 表示没有超时；0 会被当成已经到期。
+            // GP / OP-TEE: a new session starts with cancellation masked and
+            // without an Invoke deadline. A finite deadline is installed only
+            // for the current timed Invoke and cleared when it returns.
             cancel_mask: true,
-            cancel_time: TeeTime {
-                seconds: u32::MAX,
-                millis: u32::MAX,
-            },
+            cancel_deadline: None,
             objects: Slab::new(),
             storage_enums: Slab::new(),
             cryp_state: Slab::new(),

@@ -6,9 +6,10 @@
 
 use core::ffi::c_uint;
 
+use ktime_types::{MonotonicInstant, TimeSpan};
 use osvm::MemError;
 use posix_types::UserPtr;
-use tee_raw_sys::TeeTime;
+use tee_raw_sys::{TEE_ERROR_BAD_PARAMETERS, TEE_ERROR_CANCEL};
 
 use crate::tee::{
     TeeResult,
@@ -38,8 +39,6 @@ pub(super) fn sys_tee_scn_get_cancellation_flag(cancel: *mut c_uint) -> TeeResul
 
 /// TEE_UnmaskCancellation
 /// Unmasks cancellation at session level; returns previous masked state (1 if masked before).
-/// If unmasking reveals a pending cancellation, interrupt the current task so cancellable
-/// functions can detect the flag.
 /// Unmask cancellation for the current session
 /// Returns previous masked state
 pub(super) fn sys_tee_scn_unmask_cancellation(old_mask: *mut c_uint) -> TeeResult {
@@ -72,37 +71,47 @@ pub(super) fn sys_tee_scn_mask_cancellation(old_mask: *mut c_uint) -> TeeResult 
     Ok(())
 }
 
-fn tee_ta_session_is_cancelled(ctx: &TeeSessionCtx, curr_time: Option<&TeeTime>) -> bool {
-    if ctx.cancel_mask {
-        return false;
-    }
-
-    if ctx.cancel {
-        return true;
-    }
-
-    if ctx.cancel_time.seconds == u32::MAX {
-        return false;
-    }
-
-    let current_time = match curr_time {
-        Some(time) => *time,
-        None => tee_time_get_sys_time(),
+/// Private TA runtime ABI (572). Only the current thread's cancellation fields
+/// change: operation 0 installs an absolute guest CLOCK_MONOTONIC ns deadline,
+/// 1 ends the request, and 2 starts an unlimited request. Session mask and all
+/// crypto/storage objects are preserved. A TA can only weaken its own cooperative
+/// cancellation; this interface is not an authorization boundary for TA actions.
+pub(super) fn sys_tee_scn_invoke_scope(operation: u32, deadline_ns: u64) -> TeeResult {
+    let deadline = match operation {
+        0 => Some(MonotonicInstant::from_span_since_origin(
+            TimeSpan::from_nanos(deadline_ns),
+        )),
+        1 | 2 if deadline_ns == 0 => None,
+        _ => return Err(TEE_ERROR_BAD_PARAMETERS),
     };
-
-    if current_time.seconds > ctx.cancel_time.seconds
-        || (current_time.seconds == ctx.cancel_time.seconds
-            && current_time.millis >= ctx.cancel_time.millis)
-    {
-        return true;
-    }
-    false
+    with_tee_session_ctx_mut(|ctx| {
+        ctx.cancel = false;
+        ctx.cancel_deadline = deadline;
+        Ok(())
+    })
 }
 
-fn tee_time_get_sys_time() -> TeeTime {
-    let systiem = ktime::realtime();
-    TeeTime {
-        seconds: systiem.unix_seconds() as u32,
-        millis: systiem.subsec_nanos() / 1_000_000,
-    }
+fn tee_ta_session_is_cancelled(ctx: &TeeSessionCtx, current: Option<MonotonicInstant>) -> bool {
+    !ctx.cancel_mask
+        && (ctx.cancel
+            || ctx
+                .cancel_deadline
+                .is_some_and(|deadline| current.unwrap_or_else(ktask::monotonic_time) >= deadline))
 }
+
+/// Check cancellation and return the next deadline without holding thread state
+/// across a sleep. Masked cancellation must not shorten an ordinary Wait.
+pub(super) fn cancellation_wait_deadline() -> TeeResult<Option<MonotonicInstant>> {
+    with_tee_session_ctx(|ctx| {
+        if tee_ta_session_is_cancelled(ctx, None) {
+            return Err(TEE_ERROR_CANCEL);
+        }
+        Ok(if ctx.cancel_mask {
+            None
+        } else {
+            ctx.cancel_deadline
+        })
+    })
+}
+
+unittest::path_mod_test!(tests, "../../ut-tests/tee/tee_cancel/tests.rs");

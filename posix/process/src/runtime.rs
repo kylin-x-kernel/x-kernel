@@ -483,6 +483,17 @@ pub(crate) fn do_exit_from_signal(exit_code: i32) {
     do_exit_inner(exit_code, true, true);
 }
 
+/// Releases process-owned TEE sessions while the runtime and filesystem remain.
+///
+/// Runs in the last exiting user thread's sleepable context after TID retirement,
+/// with no membership lock held. It uses no user memory or process descriptors.
+#[cfg(feature = "tee")]
+fn exit_tee() {
+    if let Err(err) = tee_kernel::tee::tee_ta_release_sessions() {
+        warn!("tee_ta_release_sessions on last-thread exit failed: {err:#010X?}");
+    }
+}
+
 fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     let curr = current();
     let thr = current_user_thread();
@@ -518,19 +529,20 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // publish process completion while a sibling still owns descriptors.
     thr.files().exit_files();
     thr.detach_cgroup();
-    let is_last_thread = process_exit::finish_thread_exit(process, &current(), exit_code);
+    let is_last_thread = process_exit::finish_thread_exit(process, &curr, exit_code);
 
-    // `finish_thread_exit()` removes the current task from the process membership
-    // table and the global TID directory. External TID lookup/signal delivery
-    // already observes NoSuchProcess for this tid, but `thr` still holds the
-    // current thread object for local teardown. Close its CPU-accounting
-    // interval before any parent waiter can observe and reap the zombie.
+    // Membership removal reserves the sole last-thread continuation and retires
+    // the global TID. Close its accounting interval before process cleanup and
+    // parent-visible completion; the current runtime remains installed.
     thr.set_exit();
     thr.set_cpu_state(CpuTimeState::Inactive);
     let (thread_utime, thread_stime) = thr.sample_cpu_time();
     process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
+        #[cfg(feature = "tee")]
+        exit_tee();
+
         if let Err(err) = process.exit_signal_handlers() {
             error!("exit_signal_handlers on process exit failed: {err:?}");
         }

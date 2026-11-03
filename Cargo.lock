@@ -5572,6 +5572,7 @@ dependencies = [
  "knet",
  "kprocess",
  "ksync",
+ "ktask",
  "ktime",
  "ktime_types",
  "kvfs",
@@ -5603,6 +5604,7 @@ version = "0.3.0-dev"
 dependencies = [
  "bytemuck",
  "posix-types",
+ "unittest",
 ]
 
 [[package]]

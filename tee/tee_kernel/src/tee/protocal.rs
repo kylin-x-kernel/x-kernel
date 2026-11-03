@@ -2,187 +2,96 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-//! Inter-TA Unix socket wire protocol (`TeeRequest` / `TeeResponse`).
+//! legacy Panic 通知 wire(ticket 06:inter-TA 会话已迁至控制面)。
 //!
-//! **Canonical NOTE/TODO** for the inter-TA wire format and `teec-protocol`
-//! migration. Other call sites link here instead of duplicating:
+//! inter-TA 的 Open/Invoke/Close 不再使用本模块:vsock-manager 控制面
+//! ([`control_protocol`](crate::tee::control_protocol)) 是唯一会话通道。
+//! 这里只剩 TA Panic 通知:内核直接向 `/tmp/{uuid}.sock` 发送一帧
+//! legacy `TeeRequest::Panic` 等价字节,TA runtime 侧镜像仍按旧 wire
+//! 解码。
 //!
-//! - [`tee_ta_manager`](crate::tee::tee_ta_manager)
-//! - [`tee_generic`](crate::tee::tee_generic)
-//! - `optee_utils/tee_apps/vsock-manager/src/protocol.rs`
-//! - `optee_utils/tee_apps/vsock-manager/src/vsock_server.rs`
+//! # 字节兼容契约
 //!
-//! # NOTE: kernel direct path and vsock forward path share this wire format
+//! 旧 `TeeRequest::Panic { panic_code }` 的 postcard 编码是
+//! `[varint(变体序号=4), varint(panic_code)]`;[`LegacyPanicFrame`]
+//! 两个字段各写一个 varint,与之一一对应。golden 测试钉死该布局,
+//! 改动此处必须与 TA runtime 镜像(`optee_utils/tee_apps/…` 与
+//! `xtee-utee`)同步。
 //!
-//! Two entry points reach the same TA listener at `/tmp/{uuid}.sock`:
+//! 帧布局: `[4 字节本机字节序 u32 长度][postcard payload]`
+//! (`send_framed_message`)。
 //!
-//! 1. **Kernel direct** — [`tee_ta_manager`](crate::tee::tee_ta_manager) and
-//!    [`tee_generic`](crate::tee::tee_generic) serialize messages here and send
-//!    them over a kernel Unix socket.
-//! 2. **Vsock forward** — `optee_utils/tee_apps/vsock-manager` decodes an
-//!    incoming vsock payload with postcard, then forwards the **same postcard
-//!    bytes** to `/tmp/{uuid}.sock` without re-encoding.
+//! # TODO: 统一到 teec-protocol
 //!
-//! Both paths MUST use identical postcard + serde type definitions and the frame
-//! layout below. Keep this module and
-//! `optee_utils/tee_apps/vsock-manager/src/protocol.rs` in sync when changing
-//! variants or fields.
-//!
-//! Frame layout: `[4-byte native-endian u32 length][postcard payload]`.
-//!
-//! # TODO: unify on `teec-protocol`
-//!
-//! Replace this module with a shared dependency on `teec-protocol` from
-//! `xtee-rust-sdk` (`crates/rust-libteec/teec-protocol`) so kernel, vsock-manager,
-//! and TA runtime (`xtee-utee`) speak one schema. Until then, the local types here
-//! are only kept in sync with `optee_utils/tee_apps/vsock-manager/src/protocol.rs`,
-//! **not** with production `TEE_Request` / `TEE_Response`. Known gaps include
-//! field names (`raw`/`value` vs `param`/`values`), missing
-//! `OpenSession::ca_auth_info`, `ParamType` encoding, socket path
-//! (`/tmp/{uuid}.sock` vs `/tmp/{uuid}.{instance_id}.sock`), and the kernel-only
-//! [`TeeRequest::Panic`] variant.
+//! Panic 通知最终也应并入 `xtee-rust-sdk` 的 `teec-protocol` 共享
+//! schema;在此之前仅维持字节兼容,不再扩展本模块。
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use knet::{SendOptions, SocketOps, unix::UnixDomainSocket};
+use serde::{Deserialize, Serialize};
+use tee_raw_sys::TEE_ERROR_GENERIC;
 
-#[allow(dead_code)]
-#[derive(Serialize, Deserialize)]
-pub(super) enum TaRequest {
-    Register { uuid: String },
+use crate::tee::TeeResult;
+
+/// legacy `TeeRequest::Panic` 的 wire 变体序号(plan 004 §4.1:Panic = 4)。
+///
+/// 与控制面无任何关系:控制面 `ControlRequest` 没有 Panic 变体。固定值
+/// 保持对 TA runtime 镜像的字节兼容。
+pub(super) const LEGACY_PANIC_VARIANT_TAG: u32 = 4;
+
+/// legacy Panic 通知帧(旧 `TeeRequest::Panic` 的单变体兼容替身)。
+///
+/// 序列化结果与旧枚举变体逐字节一致:postcard 把枚举变体写成变体序号
+/// varint(这里是 4)再写字段 varint;本结构体两个字段同样各写一个
+/// varint。golden 测试钉死这一布局。
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LegacyPanicFrame {
+    /// 恒为 [`LEGACY_PANIC_VARIANT_TAG`];字段名强调 wire 语义。
+    pub variant_tag: u32,
+    /// GP `TEE_Panic` 错误码。
+    pub panic_code: u32,
 }
 
-#[derive(Serialize, Deserialize)]
-pub(super) enum TeeRequest {
-    OpenSession {
-        uuid: String,
-        connection_method: u32,
-        params: Parameters,
-    },
-    CloseSession {
-        session_id: u32,
-    },
-    InvokeCommand {
-        session_id: u32,
-        cmd_id: u32,
-        params: Parameters,
-    },
-    RequestCancellation {
-        session_id: u32,
-    },
-    Panic {
-        panic_code: u32,
-    },
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) enum TeeResponse {
-    OpenSession { session_id: u32, result: u32 },
-    CloseSession { result: u32 },
-    InvokeCommand { params: Parameters, result: u32 },
-    RequestCancellation { result: u32 },
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct Parameters(pub Parameter, pub Parameter, pub Parameter, pub Parameter);
-
-impl Parameters {
-    pub(super) fn default() -> Self {
-        Parameters(
-            Parameter::default(),
-            Parameter::default(),
-            Parameter::default(),
-            Parameter::default(),
-        )
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct Parameter {
-    pub raw: TeeParam,
-    pub param_type: ParamType,
-}
-
-impl Parameter {
-    pub(super) fn default() -> Self {
-        Parameter {
-            raw: TeeParam {
-                data: Vec::new(),
-                value: Value { a: 0, b: 0 },
-            },
-            param_type: ParamType::None,
+impl LegacyPanicFrame {
+    /// 按 `panic_code` 构造合法帧。
+    pub(super) fn new(panic_code: u32) -> Self {
+        LegacyPanicFrame {
+            variant_tag: LEGACY_PANIC_VARIANT_TAG,
+            panic_code,
         }
     }
-}
 
-#[derive(Serialize, Deserialize)]
-pub(super) struct TeeParam {
-    pub data: Vec<u8>,
-    pub value: Value,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy)]
-pub(super) struct Value {
-    pub a: u32,
-    pub b: u32,
-}
-
-/// GP TEE parameter type values (serialized as the GP constant, not variant index).
-#[derive(Clone, Copy)]
-pub(super) enum ParamType {
-    None         = 0,
-    ValueInput   = 1,
-    ValueOutput  = 2,
-    ValueInout   = 3,
-    MemrefInput  = 5,
-    MemrefOutput = 6,
-    MemrefInout  = 7,
-}
-
-impl Serialize for ParamType {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u32(*self as u32)
+    /// 序列化为 postcard 字节(legacy 帧的 payload)。
+    pub(super) fn encode(self) -> Result<Vec<u8>, postcard::Error> {
+        postcard::to_allocvec(&self)
     }
 }
 
-impl<'de> Deserialize<'de> for ParamType {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match u32::deserialize(deserializer)? {
-            0 => Ok(ParamType::None),
-            1 => Ok(ParamType::ValueInput),
-            2 => Ok(ParamType::ValueOutput),
-            3 => Ok(ParamType::ValueInout),
-            5 => Ok(ParamType::MemrefInput),
-            6 => Ok(ParamType::MemrefOutput),
-            7 => Ok(ParamType::MemrefInout),
-            _ => Ok(ParamType::None),
-        }
+/// legacy 帧的 payload 上限(与旧 wire 一致,防止长度前缀滥用)。
+const LEGACY_FRAME_PAYLOAD_LIMIT: usize = 64 * 1024;
+
+fn validated_payload_len(len: usize) -> TeeResult<usize> {
+    if len > LEGACY_FRAME_PAYLOAD_LIMIT {
+        Err(TEE_ERROR_GENERIC)
+    } else {
+        Ok(len)
     }
 }
 
-impl From<u32> for ParamType {
-    fn from(value: u32) -> Self {
-        match value {
-            0 => ParamType::None,
-            1 => ParamType::ValueInput,
-            2 => ParamType::ValueOutput,
-            3 => ParamType::ValueInout,
-            5 => ParamType::MemrefInput,
-            6 => ParamType::MemrefOutput,
-            7 => ParamType::MemrefInout,
-            _ => ParamType::None,
-        }
-    }
-}
-
-/// Serialize a protocol message to postcard bytes.
-pub(crate) fn encode_message<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(value)
-}
-
-/// Deserialize a protocol message from postcard bytes.
-pub(crate) fn decode_message<T: DeserializeOwned>(payload: &[u8]) -> Result<T, postcard::Error> {
-    postcard::from_bytes(payload)
+/// legacy wire 发送:本机字节序长度前缀 + payload。
+///
+/// 单次 send 即返回:短写时由对端把不完整帧当作 EOF 处理,Panic 通知
+/// 是 fire-and-forget,不重试(与旧实现一致,保持行为)。
+pub(super) fn send_framed_message(socket: &UnixDomainSocket, encoded: &[u8]) -> TeeResult<()> {
+    validated_payload_len(encoded.len())?;
+    let mut message = Vec::with_capacity(4 + encoded.len());
+    message.extend_from_slice(&(encoded.len() as u32).to_ne_bytes());
+    message.extend_from_slice(encoded);
+    socket
+        .send(message.as_slice(), SendOptions::default())
+        .map_err(|_| TEE_ERROR_GENERIC)?;
+    Ok(())
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/tee/protocal/tests.rs");

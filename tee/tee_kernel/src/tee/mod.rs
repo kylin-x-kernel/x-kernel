@@ -10,7 +10,7 @@ use tee_raw_sys::TEE_ERROR_NOT_SUPPORTED;
 
 use crate::tee::{
     tee_cancel::{
-        sys_tee_scn_get_cancellation_flag, sys_tee_scn_mask_cancellation,
+        sys_tee_scn_get_cancellation_flag, sys_tee_scn_invoke_scope, sys_tee_scn_mask_cancellation,
         sys_tee_scn_unmask_cancellation,
     },
     tee_generic::{sys_tee_scn_log, sys_tee_scn_panic, sys_tee_scn_return},
@@ -48,6 +48,7 @@ mod arch;
 mod bitstring;
 mod common;
 mod config;
+mod control_protocol;
 mod crypto;
 mod curve25519_key;
 mod fs_dirfile;
@@ -122,6 +123,8 @@ pub use tee_session::ExecSessionFixture;
 #[cfg(unittest)]
 pub use tee_session::set_tee_session_ctx;
 pub use tee_session::tee_session_release_state;
+/// 进程退出清理入口(plan 004 §8.2):ticket 07 的最后线程退出 hook 调用。
+pub use tee_ta_manager::tee_ta_release_sessions;
 
 /// 7th syscall register argument (see NOTE TODO in `handle_tee_syscall`).
 fn tee_syscall_arg6(uctx: &UserContext) -> usize {
@@ -194,6 +197,7 @@ pub fn handle_tee_syscall(sysno: Sysno, uctx: &mut UserContext) -> TeeResult {
         Sysno::tee_scn_check_access_rights => {
             vm::sys_tee_scn_check_access_rights(uctx.arg0(), uctx.arg1(), uctx.arg2())
         }
+        Sysno::tee_scn_invoke_scope => sys_tee_scn_invoke_scope(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::tee_scn_get_cancellation_flag => sys_tee_scn_get_cancellation_flag(uctx.arg0() as _),
         Sysno::tee_scn_unmask_cancellation => sys_tee_scn_unmask_cancellation(uctx.arg0() as _),
         Sysno::tee_scn_mask_cancellation => sys_tee_scn_mask_cancellation(uctx.arg0() as _),

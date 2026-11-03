@@ -131,16 +131,30 @@ every Go program that execs (runc init, containerd-shim) fails.
 
 1. Traverse the registered robust-futex list, then clear `clear_child_tid` and
    wake its futex if the write and key resolution succeed.
-2. Release optional per-thread TEE state and detach cgroup membership.
-3. Capture the thread's exit MM pin and scheduling context in `kprocess` before
-   removing membership/publication. Mark the thread exiting, close its
-   CPU-accounting interval and accumulate final thread CPU time.
-4. For the last thread, detach the mm owner, clear SysV shm accounting, release
-   optional TEE private state, then detach files, filesystem context and namespaces.
-   With TIPC enabled, close process-local handles before publishing process exit.
-5. Complete process exit/parent notification. If group exit was requested and
-   not already marked, mark it and send SIGKILL to surviving sibling threads.
-6. Return to the kernel continuation; the trap loop stops before user reentry.
+2. Release optional per-thread TEE state, close this thread's files and detach
+   cgroup membership.
+3. Call `finish_thread_exit`. `kprocess` removes membership and reserves the
+   unique last-thread qualification under its membership lock only if this call
+   actually removes the final published member. It releases the lock and retires
+   the global TID publication before returning. Repeated exits cannot qualify
+   again, and later task publication into the reserved process is rejected.
+4. Mark the thread exiting, close its CPU-accounting interval and accumulate
+   final thread CPU time.
+5. For the last thread, run the optional named `exit_tee` stage. It calls
+   `tee_ta_release_sessions` after TID retirement, with the current user runtime
+   still installed and the filesystem context available for the manager path.
+   It may sleep without holding the membership lock, touches no user memory or
+   process descriptors, and shares a one-second exchange deadline. Failure is
+   logged and exit continues. Only this side effect is feature-gated; TEE and
+   non-TEE builds use the same membership and reservation algorithm.
+6. For the last thread, detach signal handlers and the mm owner, clear SysV shm
+   accounting and optional TEE runtime-private state, then detach the filesystem
+   context and namespaces. With TIPC enabled, close process-local handles before
+   publishing process exit.
+7. Complete process exit/parent notification only after the last-thread cleanup
+   and resource detach. If group exit was requested and not already marked,
+   mark it and send SIGKILL to surviving sibling threads.
+8. Return to the kernel continuation; the trap loop stops before user reentry.
    `check_signals` rejects an already exiting thread before touching its signal
    queue or constructing a user frame, including the next signal-loop iteration
    after a fatal signal itself called `do_exit`.
@@ -150,6 +164,12 @@ every Go program that execs (runc init, containerd-shim) fails.
 This crate creates no global process registry or additional lifecycle lock.
 `kprocess` serializes membership, parent notification and runtime owner slots.
 Objects taken out of owner slots are destroyed outside the slot locks.
+Last-thread qualification blocks later task publication before TID retirement.
+`do_exit` explicitly runs `exit_tee` and the remaining cleanup stages after
+retirement, with no membership lock held. The current user runtime keeps the
+exiting continuation usable even though global TID lookup no longer finds it.
+`complete_process_exit` remains after every cleanup stage and process-resource
+detach, so a parent cannot reap the process while TEE cleanup is still running.
 The exiting task's structural MM pin survives through task destruction; it is
 not an active MM user and does not keep old user mappings accessible. Scheduler
 residency and AArch64 ASID selection follow its captured MM, not a survivor's

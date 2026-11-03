@@ -183,13 +183,7 @@ impl ThreadPublicationBinding {
         }
     }
 
-    fn publish(
-        &self,
-        domain: &process_domain::ProcessDomainWriteGuard<'_>,
-        proc: &Process,
-        task: &KtaskRef,
-    ) {
-        proc.publish_thread_task_locked(domain, &self.member_slot, task);
+    fn publish_task_slot(&self, task: &KtaskRef) {
         self.task_slot.publish(KtaskRef::downgrade(task));
     }
 
@@ -579,18 +573,18 @@ impl ProcessPublication {
             *cgroup_target = Some(task_cgroup);
         }
         let mut tables = self.tables.write();
+        let domain = process_domain::write_lock();
+        let member_slot =
+            proc.publish_thread_task_locked(&domain, thread.identity_token(), task)?;
         let task_slot = tables
             .task_table
             .entry(tid)
             .or_insert_with(|| Arc::new(PublicationSlot::new()))
             .clone();
-        let member_slot = proc.reserve_thread_member_slot(thread.identity_token());
-        let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
         let thread_binding =
             ThreadPublicationBinding::reserve(tid, task_slot, member_slot, thread.identity_token());
-
-        let domain = process_domain::write_lock();
-        thread_binding.publish(&domain, proc, task);
+        let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
+        thread_binding.publish_task_slot(task);
         Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
         drop(domain);
         // Register the stable identity so token-indexed registries (cgroup

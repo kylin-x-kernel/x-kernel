@@ -4,7 +4,7 @@
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     task::{Context, RawWaker, RawWakerVTable, Waker},
 };
 
@@ -354,6 +354,12 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
 }
 
 fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskRef {
+    let task = prepare_test_thread(process, tid);
+    process_publication().publish_task(&task).unwrap();
+    task
+}
+
+fn prepare_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskRef {
     let task_number = kidentity::PidHandle::fixed_root(tid);
     let mut aspace = memspace::MmSpace::new_user_empty().expect("user mmspace should allocate");
     ksignal::map_signal_trampoline(&mut aspace).expect("signal trampoline should map");
@@ -375,9 +381,7 @@ fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskR
     .expect("test thread preparation");
     let task = TaskInner::new_user(ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"), format!("test-thread-{tid}"), task_number, thread);
 
-    let task = prepare_task(task);
-    process_publication().publish_task(&task).unwrap();
-    task
+    prepare_task(task)
 }
 
 fn mapped_test_address_space() -> Arc<ksync::Mutex<memspace::MmSpace>> {
@@ -493,6 +497,156 @@ fn test_process_lifecycle() {
     // After free, it should be removed from parent
     let children_after = init.children();
     assert!(!children_after.iter().any(|c| c.pid() == child_pid));
+}
+
+#[def_test(user, serial)]
+fn test_finish_thread_exit_reports_last_thread_only_once() {
+    let (process, task) = build_prepared_test_user_task();
+    let task = prepare_user_task(task).publish().unwrap().activate();
+    let is_last = process_exit::finish_thread_exit(&process, &task, 0);
+    let is_last_again = process_exit::finish_thread_exit(&process, &task, 0);
+
+    assert!(!process_exit::complete_process_exit(&process));
+    assert!(wait_reap::reap_zombie_process(&process));
+    assert!(
+        is_last,
+        "removing the sole member must reserve last-thread exit"
+    );
+    assert!(
+        !is_last_again,
+        "repeated exit must not qualify for cleanup again"
+    );
+}
+
+#[def_test(user, serial)]
+fn test_last_thread_exit_reservation_is_unique_and_rejects_late_publication() {
+    let (process, leader_task) = build_prepared_test_user_task();
+    let leader_task = prepare_user_task(leader_task).publish().unwrap().activate();
+    let sibling_tid = kidentity::allocate_root_pid_handle()
+        .expect("sibling identity should allocate")
+        .root_nr();
+    let sibling_task = publish_test_thread(&process, sibling_tid);
+
+    let start = Arc::new(AtomicBool::new(false));
+    let start_gate = Arc::new(ktask::WaitQueue::new());
+    let cleanup_entered = Arc::new(AtomicBool::new(false));
+    let cleanup_release = Arc::new(AtomicBool::new(false));
+    let cleanup_gate = Arc::new(ktask::WaitQueue::new());
+    let cleanup_calls = Arc::new(AtomicUsize::new(0));
+    let last_tid = Arc::new(AtomicU32::new(0));
+
+    let exits = [leader_task, sibling_task].map(|task| {
+        let process = process.clone();
+        let start = start.clone();
+        let start_gate = start_gate.clone();
+        let cleanup_entered = cleanup_entered.clone();
+        let cleanup_release = cleanup_release.clone();
+        let cleanup_gate = cleanup_gate.clone();
+        let cleanup_calls = cleanup_calls.clone();
+        let last_tid = last_tid.clone();
+        ktask::spawn(move || {
+            start_gate.wait_until(|| start.load(Ordering::Acquire));
+            if process_exit::finish_thread_exit(&process, &task, 0) {
+                cleanup_calls.fetch_add(1, Ordering::SeqCst);
+                last_tid.store(task.as_thread().tid(), Ordering::Release);
+                cleanup_entered.store(true, Ordering::Release);
+                cleanup_gate.notify_all(false);
+                cleanup_gate.wait_until(|| cleanup_release.load(Ordering::Acquire));
+            }
+        })
+    });
+
+    start.store(true, Ordering::Release);
+    start_gate.notify_all(false);
+    cleanup_gate.wait_until(|| cleanup_entered.load(Ordering::Acquire));
+
+    let published_threads = process.thread_count();
+    let last_tid_is_unpublished = crate::lookup::task(last_tid.load(Ordering::Acquire)).is_err();
+    let is_process_exited = process.is_exited();
+    let is_process_published = process_publication()
+        .published_process(process.pid())
+        .is_ok();
+    let late_tid = kidentity::allocate_root_pid_handle()
+        .expect("late thread identity should allocate")
+        .root_nr();
+    let late_task = prepare_test_thread(&process, late_tid);
+    let late_publication_error = process_publication().publish_task(&late_task).err();
+
+    // Release and join both workers before asserting so a regression cannot
+    // leave a test-owned cleanup continuation asleep.
+    cleanup_release.store(true, Ordering::Release);
+    cleanup_gate.notify_all(false);
+    for exit in exits {
+        assert_eq!(exit.join(), 0);
+    }
+    if late_publication_error.is_none() {
+        process_exit::finish_thread_exit(&process, &late_task, 0);
+    }
+    assert!(!process_exit::complete_process_exit(&process));
+    assert!(wait_reap::reap_zombie_process(&process));
+
+    assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        published_threads, 0,
+        "cleanup must not hold the membership lock"
+    );
+    assert!(
+        last_tid_is_unpublished,
+        "the last TID must retire before cleanup"
+    );
+    assert!(
+        !is_process_exited,
+        "process completion must wait for cleanup"
+    );
+    assert!(
+        is_process_published,
+        "process identity must survive cleanup"
+    );
+    assert_eq!(
+        late_publication_error,
+        Some(kerrno::KError::NoSuchProcess),
+        "last-thread reservation must reject publication throughout cleanup"
+    );
+}
+
+#[cfg(feature = "tee")]
+#[def_test(serial)]
+fn test_fork_child_does_not_inherit_tee_session_handles() {
+    let (parent, parent_task) =
+        process_with_address_space(8_161, mapped_test_address_space());
+    let parent_handle = parent
+        .with_tee_ta_ctx_mut(|ctx| {
+            ctx.insert_session(alloc::string::String::from("target"), 17)
+        })
+        .expect("parent process runtime must be attached")
+        .expect("parent test session must get a handle");
+
+    let prepared = parent_task
+        .as_thread()
+        .prepare_process_fork(ProcessForkConfig {
+            parent: ForkParent::Caller,
+            address_space: ForkAddressSpace::Private,
+            fs: ForkFs::Private,
+            signal_actions: ForkSignalActions::Private,
+            fd_table: ForkFdTable::Private,
+            namespace_flags: kns::NamespaceFlags::empty(),
+            exit_signal: Some(ksignal::Signo::SIGCHLD),
+        })
+        .expect("fork should prepare a child runtime");
+    let child = prepared.process().clone();
+
+    assert!(parent
+        .with_tee_ta_ctx(|ctx| ctx.session(parent_handle).is_some())
+        .expect("parent process runtime must remain attached"));
+    assert!(!child
+        .with_tee_ta_ctx(|ctx| ctx.session(parent_handle).is_some())
+        .expect("fork child runtime must be attached"));
+
+    child.discard_unpublished();
+    drop(prepared);
+    parent.exit_mm().expect("parent runtime must be attached");
+    process_exit::finalize_process_exit(&parent);
+    wait_reap::assert_reap_zombie_process(&parent);
 }
 
 #[def_test(serial)]

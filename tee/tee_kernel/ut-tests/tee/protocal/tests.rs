@@ -2,40 +2,37 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use super::*;
+use alloc::vec;
+
+use super::{
+    LEGACY_FRAME_PAYLOAD_LIMIT, LEGACY_PANIC_VARIANT_TAG, LegacyPanicFrame,
+    validated_payload_len,
+};
 
 #[unittest::def_test]
-fn tee_request_open_session_roundtrip() {
-    let req = TeeRequest::OpenSession {
-        uuid: String::from("936da01f-9abd-4d9d-80c7-02af85c822a8"),
-        connection_method: 0,
-        params: Parameters::default(),
-    };
-    let encoded = encode_message(&req).unwrap();
-    let decoded: TeeRequest = decode_message(&encoded).unwrap();
-    match decoded {
-        TeeRequest::OpenSession {
-            uuid,
-            connection_method,
-            ..
-        } => {
-            assert_eq!(uuid, "936da01f-9abd-4d9d-80c7-02af85c822a8");
-            assert_eq!(connection_method, 0);
-        }
-        _ => panic!("unexpected variant"),
-    }
+fn legacy_panic_frame_golden_bytes() {
+    // postcard:u32 varint = LEB128(无 zigzag);0x80 起多字节。
+    assert_eq!(LegacyPanicFrame::new(0).encode().unwrap(), vec![0x04, 0x00]);
+    assert_eq!(LegacyPanicFrame::new(1).encode().unwrap(), vec![0x04, 0x01]);
+    assert_eq!(
+        LegacyPanicFrame::new(300).encode().unwrap(),
+        vec![0x04, 0xAC, 0x02]
+    );
+    assert_eq!(
+        LegacyPanicFrame::new(0xFFFF_FFFF).encode().unwrap(),
+        vec![0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F]
+    );
+    let decoded: LegacyPanicFrame =
+        postcard::from_bytes(&LegacyPanicFrame::new(77).encode().unwrap()).unwrap();
+    assert_eq!(decoded.variant_tag, LEGACY_PANIC_VARIANT_TAG);
+    assert_eq!(decoded.panic_code, 77);
 }
 
 #[unittest::def_test]
-fn param_type_serializes_gp_values() {
-    let param = Parameter {
-        raw: TeeParam {
-            data: Vec::new(),
-            value: Value { a: 0, b: 0 },
-        },
-        param_type: ParamType::MemrefInput,
-    };
-    let encoded = encode_message(&param).unwrap();
-    let decoded: Parameter = decode_message(&encoded).unwrap();
-    assert!(matches!(decoded.param_type, ParamType::MemrefInput));
+fn legacy_frame_payload_limit_enforced() {
+    assert_eq!(
+        validated_payload_len(LEGACY_FRAME_PAYLOAD_LIMIT).unwrap(),
+        LEGACY_FRAME_PAYLOAD_LIMIT
+    );
+    assert!(validated_payload_len(LEGACY_FRAME_PAYLOAD_LIMIT + 1).is_err());
 }

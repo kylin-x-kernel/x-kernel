@@ -96,7 +96,10 @@ fn exit_thread_snapshot_stays_on_old_binding_until_task_drop() {
             &mut replacement,
         );
         drop(replacement);
-        assert!(process.exit_thread(&task, 0));
+        assert!(
+            !process.exit_thread(&task, 0),
+            "repeated retirement preserves the snapshot without reserving cleanup again"
+        );
         thread.set_process_mm_resident_cpu(cpu);
         assert!(old_residency.snapshot().get(cpu.as_usize()));
         assert!(!new_residency.snapshot().get(cpu.as_usize()));

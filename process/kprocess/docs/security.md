@@ -147,6 +147,14 @@ Signal delivery during sleepable old-MM teardown would violate this contract.
 - `LiveAddressSpace` owns an active mm user. Pins/observers only retain metadata;
   final-user release clears user mappings. Runtime resource/fs/ns slots are
   detached before parent-visible exit by the lifecycle caller.
+- `finish_thread_exit` reserves last-thread cleanup atomically with successful
+  removal of the final published member. Repeated exits cannot qualify again,
+  and the reservation rejects all later task publication. The entry releases
+  the membership lock and retires the global TID before returning; it accepts
+  no subsystem callback. POSIX performs named cleanup stages after retirement
+  and publishes process completion only after those stages and resource detach.
+  User-memory cleanup must finish before retirement; current runtime access
+  remains distinct from external TID lookup during the exit continuation.
 - Group and session publication must track installed group membership; rollback
   must retire only transaction-owned identities and not reused slots.
 - Credential values are immutable snapshots. Per-thread commit takes real then
@@ -218,6 +226,7 @@ missing targets are ignored by delivery glue rather than reviving retired tasks.
 | T-09 | Exec failure leaves partially updated runtime | Medium | Close-on-exec cleanup returns error | Error propagates before metadata pair publication; earlier timer/heap/signal changes are not rolled back. Caller must handle exec failure state appropriately. |
 | T-10 | `de_thread` sweep kills sibling threads while another executor also sends signals | Medium | Exec races a second `kill`/`tgkill` | Concurrent `exec` serializes on the process `exec` gate, so only one thread sweeps; a spurious non-fatal wake cannot be mistaken for the winner's kill. The sweep owns each sibling and joins it before the address-space swap. Swept targets skip the group-exit marking and never record the process exit code, but a delivered fatal signal bumps the process fatal-signal epoch (the sweep's own kill bypasses it) and a concurrent `exit_group()` marks the group exited, so either aborts the exec with the racing signal instead of being absorbed or undone. |
 | T-11 | `/proc/<pid>/exe` follows to a backing file that outlives the process | Medium | Magic-link open races final exit | The backing `Arc<VfsFile>` is read from a snapshot; a concurrent teardown may detach owners, so the follow returns NotFound when the backing file is gone, never a stale path string alone. |
+| T-12 | Last-thread cleanup runs twice or completion becomes visible before cleanup | Medium | Concurrent exits or thread publication race the final membership removal | Reserve cleanup only on actual final-member removal, reject later publication, retire the TID after unlocking, and let POSIX publish completion only after its explicit cleanup stages. |
 
 ## Failure modes and handling
 

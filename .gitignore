@@ -61,3 +61,6 @@ target/kbuild/
 CLAUDE.md
 
 /uapps/memfd-test/out/
+
+# Local validation and scratch data; keep on disk but never track.
+/.scratch/

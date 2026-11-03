@@ -70,6 +70,17 @@ and userspace access contracts remain in their providers. The task's PID handle
 and installed `Thread` must agree before publication. Last-thread runtime owners
 must be detached before parent-visible completion so zombie identity cannot keep
 files, mounts or active mm ownership alive.
+After robust-list and `clear_child_tid` access, `finish_thread_exit` atomically
+reserves the sole last-thread cleanup role and retires the TID. Only a successful
+final-member removal returns true; a repeat cannot run process cleanup again.
+The named `exit_tee` stage then runs after the exit mark and CPU accounting,
+outside the membership lock and before mm, TEE runtime, fs and namespace detach.
+It may sleep while exchanging `ReleaseOwner`, using the current user runtime
+and filesystem context without global TID lookup, user memory or process file
+descriptors. Transport failure is logged, local TEE handles are cleared, and
+teardown continues within the shared one-second deadline. Parent-visible exit
+remains after this stage and all resource detach. TEE configuration gates only
+this side effect, not the core retirement and reservation state machine.
 An exiting Thread retains only the structural MM pin and coherent scheduling
 metadata captured before unpublication. This protects its saved/installed root,
 not user mappings. `check_signals` therefore returns immediately for an exiting
@@ -97,6 +108,7 @@ must retain the ordering described in the design document.
 | T-05 | Bootstrap input prevents system startup. | Medium | Empty argv or resolution/loading/publication failure. | Fail-stop panic with context; bootstrap recovery is intentionally not provided. |
 | T-06 | A pending termination signal leaves a thread blocked indefinitely. | Medium | A sender queues a signal between the signal check and a later interrupt-flag clear. | Clear old interrupt state before checking pending signals; retain later notifications through timer polling, preemption and userspace reentry. Recheck newly raised interrupts before reentry; CPU kick behavior is provided by the task layer. |
 | T-07 | `exec_de_thread` kills siblings while another executor also signals them. | Medium | Exec races a second `kill`/`tgkill`, or a sibling is in uninterruptible work. | The sweep is owned by the execing thread and joins every sibling before the address-space swap; a racing signal to an already-dying sibling is harmless. A sibling stuck in uninterruptible work delays the execing thread until it exits (Linux has the same property). |
+| T-08 | A failed or stalled ReleaseOwner leaves stale manager sessions. | Medium | The manager is unreachable or exceeds the exit cleanup deadline. | The client uses one absolute 1-second deadline, clears local handles and continues exit without retry; manager-side sessions may remain and their numeric-PID risk is documented in `tee_kernel/docs/security.md`. |
 
 ## Failure-mode analysis
 

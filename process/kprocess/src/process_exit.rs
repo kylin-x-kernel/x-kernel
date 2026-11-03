@@ -12,16 +12,26 @@ use crate::{
     Process, ProcessExitPublication, process::exit::ReparentedZombie, process_signals, wait_reap,
 };
 
-/// Removes an exiting thread from its process and publishes the exit code when needed.
+/// Removes an exiting thread and reserves process cleanup for the last member.
+///
+/// Returns `true` only when this call removes the last published task. Membership
+/// removal and the last-thread reservation are atomic under the membership lock;
+/// the reservation rejects all later task publication into this process. Repeated
+/// exit calls for an already removed task return `false`.
 ///
 /// `task` must be the exiting published task so TID directory unpublish can
-/// identity-check against the live publication slot before retiring it. See
-/// the visibility contract below: the global TID entry
-/// is removed before later teardown steps such as fd/mm cleanup complete.
+/// identity-check against the live publication slot before retiring it. Its
+/// global TID publication is retired before this function returns, while the
+/// process identity remains available until later process completion and reap.
+/// The caller that receives `true` performs explicit process cleanup stages and
+/// calls [`complete_process_exit`] only after those stages have finished.
+///
 /// The thread captures its structural MM pin and scheduling metadata before
 /// retirement. Finish all user-memory cleanup before this call; after it returns,
 /// the exiting continuation must not access user memory or return to user mode.
 /// The pin preserves the root until task destruction, not live user mappings.
+/// Requires schedulable task context without spinlock, IRQ-disable or
+/// preemption-disable guards. No caller-supplied callback runs during retirement.
 pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
     process.exit_thread(task, exit_code)
 }

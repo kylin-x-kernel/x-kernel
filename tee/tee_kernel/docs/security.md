@@ -156,3 +156,139 @@ The `ExecSessionFixture` regressions in
 `core/ksyscall/ut-tests/task/tests/exec_lifecycle.rs` verify these lifecycle
 distinctions with transient objects, enumerators and a keyless crypto operation.
 They do not validate persistent backends or secret erasure.
+
+## Control-Plane Wire Mirror Safety
+
+`src/tee/control_protocol.rs` parses bytes that cross a trust boundary: the
+control-plane socket carries data originating outside the kernel, so every
+input must be size-bounded before allocation and fully validated before use.
+
+- `control_frame_payload_len` rejects a length prefix above 65,536 before any
+  buffer is allocated, so a hostile peer cannot request an oversized
+  allocation through the prefix alone; the same cap bounds `encode` output.
+- `decode_control_frame` requires the prefix to match the remaining buffer
+  length exactly, and deserialization failures are returned as typed errors
+  (`Oversize`, `Truncated`, `Deserialize`) rather than panics.
+- The module contains no `unsafe` code; the future client (ticket 06) is
+  responsible for mapping these errors to `TEE_ERROR_COMMUNICATION` with
+  `TEE_ORIGIN_COMMS` per plan 004 §6.7.
+- Version mismatches and request/response variant mismatches are detected by
+  the client, which owns the one-request-per-connection rule and the 5-second
+  budget; the mirror intentionally stays decision-free.
+
+The golden tests only prove encoding stability between the two mirrors, not
+end-to-end security; socket-level behavior belongs to the client below and the
+manager side.
+
+## Control-Plane Client Safety
+
+`src/tee/tee_ta_manager.rs` and `src/tee/tee_inter_ta.rs` operate on the same
+trust boundary from the kernel side: the manager socket peer is outside the
+kernel, so every response byte is untrusted input and every request carries
+kernel-copied user data toward that peer.
+
+- The client bounds its own exposure before any allocation: the response
+  length prefix is validated against the 65,536-byte payload cap by the mirror
+  helper, partial reads are looped to the exact frame length, and an
+  early-close peer yields `Eof` rather than a short-buffer misparse.
+- The response version and the request/response variant pairing are checked
+  before any syscall consumes the payload; a mismatched, oversized, or
+  malformed response degrades to `TEE_ERROR_COMMUNICATION` +
+  `TEE_ORIGIN_COMMS` and never reaches user memory.
+- Response parameters are validated as a whole before any user write: type
+  mismatches are `BAD_FORMAT + COMMS`, the 60 KiB response-data budget is
+  enforced, kernel-detected capacity overflow copies no data, and a
+  TA-initiated SHORT_BUFFER length must lie between the response data length
+  and the budget. A bad response therefore cannot turn into a partial
+  write-back.
+- User memory is only touched through the checked `osvm` accessors;
+  `b == 0` memrefs skip the user address entirely, and writes of output data
+  precede the `utee_params` commit so a failed user write leaves the caller's
+  lengths untouched.
+- The kernel never trusts manager session ids: they live behind
+  process-local handles, session id 0 in an OpenSession success response is
+  rejected as a communication error, and handle allocation failure triggers a
+  CloseSession rollback so no orphaned manager session survives a failed
+  syscall.
+- Session invalidation uses both result and origin: `ITEM_NOT_FOUND/TEE`
+  denotes a missing manager session; `ITEM_NOT_FOUND/TRUSTED_APP` is an
+  ordinary TA command error and must not destroy the local handle. Close
+  communication failures invalidate the handle whether they arrive as a
+  decoded operation response or a transport failure, preventing replay of
+  an operation already claimed by manager cleanup.
+- The client sets both socket timeouts before `connect`, keeps no locks
+  across socket I/O (the session table lock covers table mutations only),
+  never replays a request, and caps every exchange at 5 seconds (1 second
+  for `ReleaseOwner`). EINTR continues only the interrupted read/write at its
+  existing byte offset; every attempt consumes the same absolute deadline.
+  Repeated interruptions therefore cannot extend the exchange, and terminal
+  errors such as BrokenPipe still fail without retrying. A hostile or wedged
+  manager cannot hold a syscall thread indefinitely.
+- The fixed socket path is the only production target; the test seam takes
+  its path as a parameter but production call sites always pass
+  `CONTROL_SOCKET_PATH`.
+
+The manager remains responsible for peer authentication on its side
+(SO_PEERCRED-style checks live in the manager implementation); the kernel
+treats the manager as the trusted policy authority for session routing and
+never forwards raw manager-controlled bytes into user memory without the
+validation above.
+
+The manager obtains a positive peer PID from `SO_PEERCRED` and stores that
+numeric PID as the control-plane session owner. Unix stream connect snapshots
+the current process identity and effective UID/GID; readers resolve that
+identity in their PID namespace. Retiring the current TID does not remove its
+process runtime or credential snapshot, so POSIX can run the named `exit_tee`
+stage after `finish_thread_exit` without consulting the global TID directory.
+The stage runs before runtime/fs/namespace detach and before parent-visible
+completion, while later thread publication is blocked by the last-thread
+reservation. The socket path and root trust model still do not distinguish two
+root processes that use the same numeric PID at different times.
+
+### Residual sessions after a failed ReleaseOwner
+
+`tee_ta_release_sessions` is best-effort by design (plan 004 §3/§9.3): when
+the manager is unreachable or the 1-second budget expires during process
+exit, the kernel clears its own table but manager-side `SessionEntry`
+records for the dying PID until a manager-side cleanup path or restart removes
+them. The protocol has no PID generation or process-liveness token. If the PID
+is reused first, a new root process can present the same `SO_PEERCRED` PID and
+match the stale `owner_pid`; the manager's numeric owner check cannot distinguish
+it from the original process. This is a residual access risk as well as a
+resource leak, accepted by the design's best-effort exit cleanup. The 1-second
+absolute deadline, no-request-replay policy and unconditional local table clear keep
+kernel exit bounded, but do not guarantee manager-side reclamation. The
+x-kernel's process-local table still prevents stale handles from surviving in
+the kernel after exit.
+
+### Cooperative Invoke cancellation scope
+
+Syscall 572 accepts scalar operation/deadline values and updates only the current
+thread's cancellation state. It cannot address another thread or session, and it
+preserves the cancellation mask and object ownership. A TA may install or clear
+its own deadline; cancellation is cooperative behavior rather than an authority
+boundary. The manager still authenticates the caller and checks session ownership
+before forwarding the timed request. Deadline expiry cannot authorize a request,
+release its in-flight permit early or synthesize target success/CANCEL.
+
+The absolute guest monotonic deadline includes queueing and avoids realtime
+clock changes. The mask can hide an expired deadline until unmasked. Scope
+cleanup prevents cancellation leaking to a later Invoke on the same worker.
+`TEE_Wait` releases the context borrow before sleeping. CPU loops and unrelated
+blocking calls remain uninterruptible by this mechanism; the control transport
+budget bounds the caller's wait but does not prove the target has stopped.
+
+### Uncertain Close and owner cleanup
+
+A Close transport/protocol failure invalidates the local handle immediately, but
+cannot prove that the manager claimed cleanup. The process context retains an
+owner release obligation independent of live handles. Process exit sends one
+bounded ReleaseOwner even if the failed Close removed its last handle, then clears
+both the session table and this obligation. Decoded Close responses retain the
+existing handle invalidation rules and do not create a retryable handle.
+
+If Open publishes a handle successfully but writing returnOrigin subsequently
+fails, the local entry remains owned by that process. The caller may already
+have received the handle; the kernel does not silently replay or roll back that
+successful Open. Exit ReleaseOwner remains its best-effort cleanup boundary,
+with the existing unavailable-manager and PID-reuse residual risks.

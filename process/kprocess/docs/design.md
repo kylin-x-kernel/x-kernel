@@ -266,11 +266,26 @@ state to tolerate numeric ID reuse.
 
 Every exiting thread detaches its files before retiring thread membership, so
 last-thread completion cannot overtake a sibling's descriptor cleanup.
-Last-thread cleanup is orchestrated by `posix-process`: remove thread visibility,
-record final CPU time, detach mm/fs/ns and optional resources, then call
-`complete_process_exit`. SIGCHLD preparation occurs outside the domain lock;
-parent/exit-signal changes cause retry. The domain transaction commits exit,
-autoreap and reparent; only then are signal queueing and parent wakeup performed.
+Last-thread cleanup is orchestrated by `posix-process`. The single
+`finish_thread_exit` entry removes membership and reserves the last-thread
+qualification under the membership lock only when this call actually removes
+the final published task. Repeated exits return false; every later task
+publication into the reserved process is rejected. After releasing the lock,
+this entry retires the exiting task's global TID publication and returns whether
+it reserved cleanup. It accepts no callback and performs no subsystem cleanup.
+The caller marks the thread exiting, records final CPU time, then performs
+explicit last-thread stages: optional `exit_tee`, signal-handler and mm teardown,
+optional runtime cleanup, fs/ns detach, and finally `complete_process_exit`.
+The TID is no longer an external lookup or signal target during those stages;
+current-thread runtime access and the process identity remain available until
+their respective detach/completion boundaries. `exit_tee` runs while the current
+user thread can still sleep and before its filesystem context is detached.
+The retirement API requires schedulable task context without spinlock or
+IRQ/preemption-disable guards. The last-thread state machine is identical with
+and without TEE; only the named TEE stage is feature-gated.
+SIGCHLD preparation occurs outside the domain lock; parent/exit-signal changes
+cause retry. The domain transaction commits exit, autoreap and reparent; only
+then are signal queueing and parent wakeup performed.
 Default SIGCHLD, explicit ignore and no-child-wait policy come from `ksignal`.
 Child-exit payloads contain wait status, PID/UID and CPU time. If no published
 thread credential snapshot exists at payload construction, the current code

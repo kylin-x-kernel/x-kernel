@@ -854,6 +854,7 @@ syscall_enum! {
             tee_scn_se_channel_close_deprecated = 569,
             tee_scn_cache_operation = 570,
             tee_scn_test = 571,
+            tee_scn_invoke_scope = 572,
         }
 
         #[cfg(feature = "tipc")]

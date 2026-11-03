@@ -48,6 +48,7 @@ linux-raw-sys = { workspace = true, features = ["ioctl", "loop_device"] }
 osvm.workspace = true
 posix-types.workspace = true
 kprocess = { workspace = true, features = ["tee"] }
+ktask = { workspace = true }
 linux_sysno.workspace = true
 zerocopy = { version = "0.8.26", features = ["derive"] }
 zeroize.workspace = true

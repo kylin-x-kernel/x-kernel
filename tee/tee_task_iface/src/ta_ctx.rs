@@ -81,18 +81,28 @@ pub fn looks_like_ta(path: &str) -> bool {
     is_valid_ta_basename(basename)
 }
 
-/// Identity of a TA session, stored in `TeeTaCtx.open_sessions`.
+/// Identity of a manager-owned inter-TA session, stored in `TeeTaCtx.open_sessions`.
+///
+/// The map key is the **process-local session handle** returned to the caller
+/// (plan 004 §6.2): the manager's global session id never crosses the kernel
+/// boundary, so a caller cannot guess or probe another process's sessions.
 #[derive(Debug, Clone)]
 pub struct SessionIdentity {
-    pub uuid: String,
-    pub session_id: u32,
+    /// Target TA UUID (hyphenated lowercase form, as routed on the wire).
+    pub target_uuid: String,
+    /// Manager-side global session id; opaque to user space.
+    pub manager_session_id: u32,
 }
 
 /// Global TA context shared across all sessions of one TA instance.
 #[derive(Debug)]
 pub struct TeeTaCtx {
-    pub session_handle: u32,
+    /// Next candidate for local session-handle allocation (plan 004 §6.2).
+    /// Starts at 1, skips 0 forever, wraps at `u32::MAX` back to 1.
+    pub next_session_handle: u32,
     pub open_sessions: HashMap<u32, SessionIdentity>,
+    /// A Close transport failure invalidated a handle without confirming remote cleanup.
+    owner_release_required: bool,
     pub uuid: String,
     pub ta_head: ta_head,
 }
@@ -100,8 +110,9 @@ pub struct TeeTaCtx {
 impl Default for TeeTaCtx {
     fn default() -> Self {
         TeeTaCtx {
-            session_handle: 0,
+            next_session_handle: 1,
             open_sessions: HashMap::new(),
+            owner_release_required: false,
             uuid: uuid_crate::Uuid::default().to_string(),
             ta_head: ta_head::default(),
         }
@@ -163,7 +174,99 @@ pub fn bytes_to_ta_head(data: &[u8]) -> KResult<ta_head> {
     Ok(bytemuck::pod_read_unaligned(data))
 }
 
+/// Returns the next handle candidate after `handle` per §6.2: 0 is skipped
+/// forever and `u32::MAX` wraps to 1.
+fn advance_handle_candidate(handle: u32) -> u32 {
+    match handle.checked_add(1) {
+        // 0 is never a legal handle, and the overflow past u32::MAX wraps.
+        Some(0) | None => 1,
+        Some(next) => next,
+    }
+}
+
+/// Scans for a free local session handle starting at `start` (§6.2).
+///
+/// `occupied` is the number of live entries; the probe budget is
+/// `occupied + 1` so a full table returns `None` without scanning the whole
+/// `u32` space. Probes treat 0 as occupied regardless of the map.
+fn next_free_handle(start: u32, occupied: u32, is_occupied: impl Fn(u32) -> bool) -> Option<u32> {
+    let mut candidate = start;
+    for _ in 0..occupied.saturating_add(1) {
+        let probed = candidate;
+        candidate = advance_handle_candidate(candidate);
+        if probed != 0 && !is_occupied(probed) {
+            return Some(probed);
+        }
+    }
+    None
+}
+
 impl TeeTaCtx {
+    /// Inserts a session and returns its new process-local handle.
+    ///
+    /// Plan 004 §6.2 handle rules: never 0, scan from `next_session_handle`
+    /// for a free slot, wrap at `u32::MAX` to 1, and return `None` (caller
+    /// maps to `TEE_ERROR_OUT_OF_MEMORY`) only when no slot is free. The
+    /// pigeonhole bound keeps the scan at `entries + 1` probes: with N
+    /// occupied slots, N+1 distinct candidates must contain a free one.
+    pub fn insert_session(&mut self, target_uuid: String, manager_session_id: u32) -> Option<u32> {
+        let handle = next_free_handle(
+            self.next_session_handle,
+            self.open_sessions.len() as u32,
+            |h| self.open_sessions.contains_key(&h),
+        )?;
+        self.next_session_handle = advance_handle_candidate(handle);
+        self.open_sessions.insert(
+            handle,
+            SessionIdentity {
+                target_uuid,
+                manager_session_id,
+            },
+        );
+        Some(handle)
+    }
+
+    /// Looks up a session by process-local handle.
+    pub fn session(&self, handle: u32) -> Option<&SessionIdentity> {
+        self.open_sessions.get(&handle)
+    }
+
+    /// Removes a session by process-local handle, returning it.
+    pub fn remove_session(&mut self, handle: u32) -> Option<SessionIdentity> {
+        self.open_sessions.remove(&handle)
+    }
+
+    /// True when at least one inter-TA session is open.
+    ///
+    /// The process-exit release path uses this to skip control-plane I/O for
+    /// processes with nothing to release (plan 004 §8.2).
+    pub fn has_open_sessions(&self) -> bool {
+        !self.open_sessions.is_empty()
+    }
+
+    /// Remembers uncertain remote state after invalidating a local handle.
+    ///
+    /// ReleaseOwner addresses the process, so retaining individual remote IDs is
+    /// unnecessary. This flag never makes an invalid handle usable again.
+    pub fn require_owner_release(&mut self) {
+        self.owner_release_required = true;
+    }
+
+    /// Whether process exit must contact the manager, including uncertain Close results.
+    pub fn needs_owner_release(&self) -> bool {
+        self.has_open_sessions() || self.owner_release_required
+    }
+
+    /// Drops all inter-TA sessions and resets handle allocation.
+    ///
+    /// Process-exit cleanup (plan 004 §8.2): manager-side close is best
+    /// effort, and no local state may survive the process.
+    pub fn clear_sessions(&mut self) {
+        self.open_sessions.clear();
+        self.owner_release_required = false;
+        self.next_session_handle = 1;
+    }
+
     pub fn set_uuid(&mut self, path: &str) {
         let Some(normalized) = canonical_ta_install_path(path) else {
             log::debug!("set_uuid: rejected non-canonical TA path: {path}");
@@ -220,5 +323,5 @@ impl TeeTaCtx {
     }
 }
 
-// Guest coverage for TA identity and header parsing, enabled by cfg(unittest).
+// Guest coverage for TA identity, header parsing, and session lifecycle.
 unittest::path_mod_test!(pub mod tests_ta_ctx, "../ut-tests/ta_ctx/tests_ta_ctx.rs");

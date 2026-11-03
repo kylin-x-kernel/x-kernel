@@ -21,6 +21,7 @@ use crate::{AsThread, Tid, process_domain, publication::process_publication};
 #[derive(Default)]
 pub(super) struct ThreadMembership {
     members: BTreeMap<TaskIdentityToken, Arc<ThreadMemberSlot>>,
+    is_last_thread_exit_reserved: bool,
 }
 
 impl ThreadMembership {
@@ -34,11 +35,13 @@ impl ThreadMembership {
             .clone()
     }
 
-    fn exit_task(&mut self, task: &KtaskRef, is_leader: bool) {
-        if let Some(slot) = self.members.get(&task.as_thread().identity_token()) {
-            slot.exit_task(task, is_leader);
-        }
+    fn exit_task(&mut self, task: &KtaskRef, is_leader: bool) -> bool {
+        let did_exit = self
+            .members
+            .get(&task.as_thread().identity_token())
+            .is_some_and(|slot| slot.exit_task(task, is_leader));
         self.prune_stale();
+        did_exit
     }
 
     fn has_no_published_tasks(&self) -> bool {
@@ -139,21 +142,22 @@ impl ThreadMemberSlot {
         *self.state.lock() = ThreadMemberState::Vacant;
     }
 
-    fn exit_task(&self, task: &KtaskRef, is_leader: bool) {
+    fn exit_task(&self, task: &KtaskRef, is_leader: bool) -> bool {
         let mut state = self.state.lock();
         let published = match &*state {
             ThreadMemberState::Published(published) => published,
-            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader => return,
+            ThreadMemberState::Vacant | ThreadMemberState::ExitedLeader => return false,
         };
         // Do not retire a replacement task that reused this numeric TID.
         if !WeakKtaskRef::ptr_eq(published, &KtaskRef::downgrade(task)) {
-            return;
+            return false;
         }
         *state = if is_leader {
             ThreadMemberState::ExitedLeader
         } else {
             ThreadMemberState::Vacant
         };
+        true
     }
 
     fn is_unreleased(&self) -> bool {
@@ -177,13 +181,6 @@ impl ThreadMemberSlot {
 }
 
 impl Process {
-    pub(crate) fn reserve_thread_member_slot(
-        &self,
-        token: TaskIdentityToken,
-    ) -> Arc<ThreadMemberSlot> {
-        self.thread_membership.lock().reserve_slot(token)
-    }
-
     /// Moves the thread-group identity onto `task` after a non-leader `exec`.
     ///
     /// `task` must be the process's sole surviving published thread. The number
@@ -225,10 +222,16 @@ impl Process {
     pub(crate) fn publish_thread_task_locked(
         &self,
         _domain: &process_domain::ProcessDomainWriteGuard<'_>,
-        slot: &Arc<ThreadMemberSlot>,
+        token: TaskIdentityToken,
         task: &KtaskRef,
-    ) {
+    ) -> KResult<Arc<ThreadMemberSlot>> {
+        let mut membership = self.thread_membership.lock();
+        if membership.is_last_thread_exit_reserved {
+            return Err(KError::NoSuchProcess);
+        }
+        let slot = membership.reserve_slot(token);
         slot.publish(task);
+        Ok(slot)
     }
 
     /// Removes a task from the live view of this [`Process`], retires its global
@@ -254,7 +257,8 @@ impl Process {
     /// or scheduling
     /// of the exited leader.
     ///
-    /// Returns `true` if no published tasks remain in the process.
+    /// Returns `true` only when this call removes the last published task and
+    /// reserves process cleanup. The reservation rejects later task publication.
     /// Captures structural MM ownership before retirement; callers must finish
     /// user-memory cleanup first and perform no subsequent user access.
     pub(crate) fn exit_thread(self: &Arc<Self>, task: &KtaskRef, exit_code: i32) -> bool {
@@ -278,8 +282,12 @@ impl Process {
             // Signal eligibility ends with live membership, not with the last
             // external reference to the exiting task or a later sibling exec.
             task.as_thread().signal_manager().exit();
-            thread_membership.exit_task(task, tid == self.pid());
-            thread_membership.has_no_published_tasks()
+            let did_exit = thread_membership.exit_task(task, tid == self.pid());
+            let is_last = did_exit && thread_membership.has_no_published_tasks();
+            if is_last {
+                thread_membership.is_last_thread_exit_reserved = true;
+            }
+            is_last
         };
         // Drop the global TID directory entry with the member-slot retire so
         // fork-heavy workloads do not retain Published(dead Weak) slots until a

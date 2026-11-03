@@ -2,20 +2,22 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use super::*;
+use crate::tee::control_protocol::{
+    control_frame_payload_len, ControlFrameError, MAX_CONTROL_PAYLOAD,
+};
 
 #[unittest::def_test]
-fn validated_payload_len_accepts_within_limit() {
+fn control_frame_payload_len_accepts_within_limit() {
     assert_eq!(
-        validated_payload_len(TEE_TA_MAX_FRAME_PAYLOAD_LEN).unwrap(),
-        TEE_TA_MAX_FRAME_PAYLOAD_LEN
+        control_frame_payload_len((MAX_CONTROL_PAYLOAD as u32).to_le_bytes()),
+        Ok(MAX_CONTROL_PAYLOAD)
     );
 }
 
 #[unittest::def_test]
-fn validated_payload_len_rejects_oversized_frames() {
+fn control_frame_payload_len_rejects_oversized_frames() {
     assert_eq!(
-        validated_payload_len(TEE_TA_MAX_FRAME_PAYLOAD_LEN + 1),
-        Err(TEE_ERROR_GENERIC)
+        control_frame_payload_len((MAX_CONTROL_PAYLOAD as u32 + 1).to_le_bytes()),
+        Err(ControlFrameError::Oversize(MAX_CONTROL_PAYLOAD + 1))
     );
 }

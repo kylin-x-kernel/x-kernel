@@ -247,22 +247,18 @@ pub(super) fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult
     tee_time_ta_set_offs(uuid, &offs, positive)
 }
 
-// Busy wait function
-pub(super) fn tee_time_busy_wait(milliseconds_delay: u32) -> TeeResult {
-    let start_time = monotonic_time();
-    let delay = TimeSpan::from_millis(milliseconds_delay as u64);
-    let end_time = start_time.checked_add(delay).ok_or(TEE_ERROR_OVERFLOW)?;
-
-    loop {
-        if monotonic_time() >= end_time {
-            break Ok(());
-        }
-        // Can add brief CPU yield here to avoid excessive CPU usage
-        core::hint::spin_loop();
-    }
-}
-
-/// Wait for a specified number of milliseconds
+/// Sleep until the delay completes or this thread observes unmasked cancellation.
+/// No session state borrow remains live across the scheduler sleep.
 pub(super) fn sys_tee_scn_wait(milliseconds_delay: u32) -> TeeResult {
-    tee_time_busy_wait(milliseconds_delay)
+    let end = monotonic_time()
+        .checked_add(TimeSpan::from_millis(milliseconds_delay as u64))
+        .ok_or(TEE_ERROR_OVERFLOW)?;
+    loop {
+        let cancellation = super::tee_cancel::cancellation_wait_deadline()?;
+        if monotonic_time() >= end {
+            return Ok(());
+        }
+        let wake = cancellation.map_or(end, |deadline| deadline.min(end));
+        ktask::sleep_until(wake);
+    }
 }

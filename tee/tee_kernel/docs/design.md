@@ -180,3 +180,167 @@ The unittest-only `ExecSessionFixture` in `src/tee/tee_session.rs` supports
 until fatal cleanup, success-only slot removal and eventual resource release.
 These tests use transient resources and do not cover persistent storage,
 signed-TA loading or execution of user TA instructions.
+
+## Control-Plane Wire Mirror
+
+`src/tee/control_protocol.rs` mirrors the x-kernel ↔ vsock-manager control
+plane defined by plan 004 §4. The two ends do not share a crate: the kernel
+workspace does not depend on `teec-protocol`, so consistency is enforced only
+by the F1–F9 fixed golden byte sequences committed on both sides. Any field or
+variant order change requires a design change first, then synchronized golden
+updates; one side's test turning red is protocol drift and must not be fixed
+unilaterally.
+
+The module keeps three responsibilities and nothing else:
+
+- wire types (`ControlRequest`/`ControlResponse` families) with the external
+  `TEE_*` names retained verbatim so both mirrors can be compared field by
+  field;
+- little-endian framing helpers: `control_frame_payload_len` validates the
+  4-byte length prefix against the 65,536-byte payload cap before any
+  allocation, `encode_control_frame` serializes a whole frame, and
+  `decode_control_frame` rejects truncated or malformed input;
+- the version constant pinned to 1.
+
+Postcard is the payload codec; `TEE_ParamType` travels as its declaration-order
+variant index, not its GlobalPlatform value, and the module forbids custom
+serializers that would change that. The existing internal protocol in
+`src/tee/protocal.rs` uses a native-endian length prefix and remains separate;
+the two framings must not be mixed on one connection.
+
+Socket I/O, per-stage timeouts, and TEE error/origin mapping belong to the
+control-plane client in `src/tee/tee_ta_manager.rs` (ticket 06); the golden
+tests run in the QEMU unittest image.
+
+## Control-Plane Client
+
+`src/tee/tee_ta_manager.rs` owns the kernel half of the manager control plane.
+Every operation opens a fresh connection to the fixed manager socket
+`/tmp/tee-manager-control.sock`, writes one request frame, reads one response
+frame, and drops the connection: no connection reuse, hence no cross-thread
+response interleaving and no socket state inside `TeeTaCtx`. Both the send and
+receive timeouts are configured before `connect` — the Unix stream backlog
+also honors the send timeout — and one monotonic absolute deadline covers
+connect, all partial sends, and all partial receives: 5 seconds per ordinary
+operation and 1 second for `ReleaseOwner`. Each blocking operation receives
+only the remaining budget. The 4-byte length prefix is validated against the
+65,536-byte cap before any allocation, the response version must equal
+`CONTROL_PROTOCOL_VERSION`, and the response variant must match the request
+operation (the generic `Error` response is always accepted). There is no
+request replay. A read or write interrupted with EINTR continues at the
+current byte offset and refreshes the remaining part of that same deadline.
+This includes a pending task interruption at last-thread exit; it does not
+reconnect or resend an Open, Invoke, Close or ReleaseOwner. Every terminal
+transport or codec failure maps to `TEE_ERROR_COMMUNICATION` + `TEE_ORIGIN_COMMS`.
+
+`tee_ta_release_sessions` is the process-exit cleanup entry point exported for
+the named `posix/process::exit_tee` stage. Processes without open sessions or an
+uncertain Close do not touch the socket. The `ReleaseOwner` exchange shares the single 1-second
+budget; per-close failures from the manager are logged and ignored, the local
+table is cleared regardless of the manager outcome, and an unreachable manager
+returns `TEE_ERROR_COMMUNICATION` to the caller without retrying or blocking
+exit.
+
+`posix/process` invokes this entry only from the thread that reserved the
+last-thread qualification through `kprocess::process_exit::finish_thread_exit`.
+The explicit `exit_tee` stage runs after TID unpublication, the thread's exit mark
+and final CPU accounting, with the membership lock released. The current user
+thread remains schedulable and retains its process runtime and filesystem
+context; neither session lookup nor connection credential capture depends on
+the global TID directory. The stage completes before `exit_mm`,
+`clear_tee_runtime_private`, `exit_fs`, namespace detach and parent-visible
+process completion. It may sleep for the bounded socket exchange, but must not
+touch user memory or process descriptors. Path lookup uses the still-installed
+filesystem context. Fork creates a fresh
+`ProcessRuntime` and `TeeTaCtx`, so child processes do not inherit session
+handles; successful exec preserves the existing `TeeTaCtx`, so sessions remain
+owned by that process across exec.
+
+## Inter-TA Syscalls over the Control Plane
+
+`src/tee/tee_inter_ta.rs` implements the three syscalls (plan 004 §6.4–§6.6).
+`TEE_OpenTASession` performs the checked reads, converts the parameters,
+exchanges one `OpenSession` request, writes back the process-local handle from
+`TeeTaCtx::insert_session` (handles start at 1, skip 0, and the table-full
+failure is `TEE_ERROR_OUT_OF_MEMORY`), and rolls the manager session back when
+handle allocation or the `ta_sees` write fails. `TEE_InvokeTACommand` looks up
+the local handle before any network traffic, applies the response parameters
+per §7.4, and deletes the local entry when the manager reports the session
+dead (`ITEM_NOT_FOUND/TEE`, `TARGET_DEAD`, owner mismatch). A TA command's
+`ITEM_NOT_FOUND/TRUSTED_APP` preserves the handle for subsequent Invoke and
+Close. `TEE_CloseTASession` deletes the entry on success, `ITEM_NOT_FOUND`,
+`TARGET_DEAD`, and communication failure, including a normally decoded
+`CloseSession { COMMUNICATION/COMMS }` response. It keeps the entry on
+`ACCESS_DENIED` so a retry stays possible.
+
+Parameter conversion is two-pass: all four type nibbles and the 60 KiB
+input/capacity/response budgets are validated before any user memory is
+touched; VALUE parameters carry the low 32 bits of both slots and MEMREF
+capacities ride in the wire `values.a` slot, per the teec-protocol
+conventions. Zero-length memrefs skip user-memory access entirely (`b == 0`
+allows a NULL buffer). The SHORT_BUFFER contract differs by producer:
+kernel-detected capacity overflow writes each param's required length without
+copying data and returns `TEE_ORIGIN_API`; a TA-initiated
+`TEE_ERROR_SHORT_BUFFER` takes the required length from the response
+`values.a`, validates it against the response data length and the 60 KiB
+budget, and passes the TA origin through. Output data is written to user
+memory before the `utee_params` lengths commit, so a failed user write leaves
+no partially-committed logical state.
+
+Failures carry an origin alongside the result (`TeeFailure`): local failures
+are `TEE_ORIGIN_API`, transport failures `TEE_ORIGIN_COMMS`, and wire failures
+pass through the manager/TA origin verbatim — never guessed from the error
+code. `returnOrigin` is a checked user write: on success it records
+`TEE_ORIGIN_TEE`; on failure it records the actual origin and a failed origin
+write cannot mask the primary error.
+
+## Limited cooperative Invoke timeout
+
+A finite `cancellationRequestTimeout`, including zero, becomes an absolute guest
+CLOCK_MONOTONIC nanosecond deadline at the Invoke syscall entry. The appended
+control variant `InvokeCommandWithTimeout` and the private manager-to-TA variant
+4 carry that deadline without restarting it during transport or queueing.
+Infinite Invoke uses the existing wire variant. Existing v1 variants are stable;
+fixed golden bytes pin the extension in both endpoints.
+
+The SDK session worker brackets only `invoke_command` with private syscall 572:
+operation 0 installs the deadline, 1 ends the scope, 2 starts an unlimited scope.
+The syscall changes the current thread's cancellation fields only. Begin/end
+clear the cancel flag and deadline while retaining the mask and object tables.
+The default deadline is `None` and cancellation starts masked. `TEE_Wait` sleeps
+until its delay or an unmasked deadline, rechecks state after waking and returns
+CANCEL when expired. `TEE_GetCancellationFlag` uses the same evaluator. No state
+borrow or lock remains live across sleep.
+
+The manager retains the ordinary owner checks and in-flight permit. Only the
+target decides CANCEL, which keeps TRUSTED_APP origin. Close and ReleaseOwner
+follow their existing lifecycle. RAII clears the scope before the worker replies,
+so later requests and other session threads cannot inherit the deadline.
+
+This phase requires coordinated kernel, manager and target SDK deployment.
+Legacy SDK requests remain wire compatible. A timed request on an old kernel
+returns NOT_SUPPORTED; an old target rejects the new request as a communication
+failure. There is no fallback to unlimited execution. Arbitrary blocking calls,
+CPU loops, Open timeout and external RequestCancellation remain outside this
+phase. The existing 5-second control transport budget can expire before a masked
+or noncooperative target finishes. Full cancellation needs a separate design.
+
+## Legacy Panic Wire
+
+`src/tee/protocal.rs` is reduced to the TA panic notification: the kernel
+sends a `LegacyPanicFrame` — byte-identical to the old `TeeRequest::Panic`
+postcard encoding (variant index 4 plus the panic-code varint) — with the
+native-endian `send_framed_message` framing to `/tmp/{uuid}.sock`. The golden
+tests pin the byte layout against the TA runtime mirror. The session variants
+of the old wire have no kernel producer any more; extending this module is
+forbidden, and the panic path will move to the shared `teec-protocol` schema
+when that migration happens.
+
+## Uncertain Close and owner cleanup
+
+A Close transport/protocol failure invalidates the local handle immediately, but
+cannot prove that the manager claimed cleanup. The process context retains an
+owner release obligation independent of live handles. Process exit sends one
+bounded ReleaseOwner even if the failed Close removed its last handle, then clears
+both the session table and this obligation. Decoded Close responses retain the
+existing handle invalidation rules and do not create a retryable handle.
